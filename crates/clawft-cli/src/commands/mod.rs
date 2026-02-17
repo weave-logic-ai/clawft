@@ -1,0 +1,158 @@
+//! CLI command implementations for `weft`.
+//!
+//! Each subcommand is implemented in its own module:
+//!
+//! - [`agent`] -- Interactive agent session or single-message mode.
+//! - [`gateway`] -- Channel gateway (Telegram, Slack, etc.) + agent loop.
+//! - [`status`] -- Configuration diagnostics.
+
+pub mod agent;
+pub mod channels;
+pub mod config_cmd;
+pub mod cron;
+pub mod gateway;
+pub mod memory_cmd;
+pub mod sessions;
+pub mod status;
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use clawft_platform::Platform;
+use clawft_types::config::Config;
+
+/// Load configuration from the given path override or via auto-discovery.
+///
+/// If `config_override` is provided, loads from that path. Otherwise,
+/// uses the platform's config discovery chain:
+/// 1. `CLAWFT_CONFIG` env var
+/// 2. `~/.clawft/config.json`
+/// 3. `~/.nanobot/config.json`
+///
+/// Returns a default `Config` if no config file is found.
+pub async fn load_config<P: Platform>(
+    platform: &P,
+    config_override: Option<&str>,
+) -> anyhow::Result<Config> {
+    let raw = if let Some(path_str) = config_override {
+        let path = Path::new(path_str);
+        if !platform.fs().exists(path).await {
+            anyhow::bail!("config file not found: {path_str}");
+        }
+        let contents = platform
+            .fs()
+            .read_to_string(path)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to read config: {e}"))?;
+        let value: serde_json::Value = serde_json::from_str(&contents)
+            .map_err(|e| anyhow::anyhow!("failed to parse config: {e}"))?;
+        clawft_platform::config_loader::normalize_keys(value)
+    } else {
+        clawft_platform::config_loader::load_config_raw(platform.fs(), platform.env()).await
+            .map_err(|e| anyhow::anyhow!("failed to load config: {e}"))?
+    };
+
+    let config: Config = serde_json::from_value(raw)?;
+    Ok(config)
+}
+
+/// Expand `~/` prefixes in workspace paths to the user's home directory.
+pub fn expand_workspace(raw: &str) -> PathBuf {
+    if let Some(rest) = raw.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    PathBuf::from(raw)
+}
+
+/// Discover the config file path (for display in `weft status`).
+pub fn discover_config_path<P: Platform>(platform: &P) -> Option<PathBuf> {
+    let home = platform.fs().home_dir();
+    clawft_platform::config_loader::discover_config_path(platform.env(), home)
+}
+
+/// Build an `Arc<ChannelHost>` implementation that bridges the channel
+/// system to a `MessageBus` inbound sender.
+///
+/// This is the glue between `clawft-channels::PluginHost` (which expects
+/// an `Arc<dyn ChannelHost>`) and `clawft-core::bus::MessageBus`.
+pub fn make_channel_host(
+    bus: Arc<clawft_core::bus::MessageBus>,
+) -> Arc<dyn clawft_channels::ChannelHost> {
+    Arc::new(BusChannelHost { bus })
+}
+
+/// A [`ChannelHost`] implementation backed by a [`MessageBus`].
+///
+/// Routes inbound messages from channel plugins into the message bus
+/// for consumption by the agent loop.
+struct BusChannelHost {
+    bus: Arc<clawft_core::bus::MessageBus>,
+}
+
+#[async_trait::async_trait]
+impl clawft_channels::ChannelHost for BusChannelHost {
+    async fn deliver_inbound(
+        &self,
+        msg: clawft_types::event::InboundMessage,
+    ) -> Result<(), clawft_types::error::ChannelError> {
+        self.bus
+            .publish_inbound(msg)
+            .map_err(|e| clawft_types::error::ChannelError::Other(e.to_string()))
+    }
+
+    async fn register_command(
+        &self,
+        _cmd: clawft_channels::Command,
+    ) -> Result<(), clawft_types::error::ChannelError> {
+        // Command registration is a no-op for now; the agent does not
+        // expose channel commands yet.
+        Ok(())
+    }
+
+    async fn publish_inbound(
+        &self,
+        channel: &str,
+        sender_id: &str,
+        chat_id: &str,
+        content: &str,
+        media: Vec<String>,
+        metadata: std::collections::HashMap<String, serde_json::Value>,
+    ) -> Result<(), clawft_types::error::ChannelError> {
+        let msg = clawft_types::event::InboundMessage {
+            channel: channel.to_owned(),
+            sender_id: sender_id.to_owned(),
+            chat_id: chat_id.to_owned(),
+            content: content.to_owned(),
+            timestamp: chrono::Utc::now(),
+            media,
+            metadata,
+        };
+        self.deliver_inbound(msg).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expand_workspace_tilde() {
+        let expanded = expand_workspace("~/.clawft/workspace");
+        assert!(!expanded.to_string_lossy().starts_with('~'));
+        assert!(expanded.to_string_lossy().contains(".clawft"));
+    }
+
+    #[test]
+    fn expand_workspace_absolute() {
+        let expanded = expand_workspace("/opt/workspace");
+        assert_eq!(expanded, PathBuf::from("/opt/workspace"));
+    }
+
+    #[test]
+    fn expand_workspace_relative() {
+        let expanded = expand_workspace("workspace");
+        assert_eq!(expanded, PathBuf::from("workspace"));
+    }
+}

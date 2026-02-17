@@ -1,0 +1,584 @@
+//! Application bootstrap and dependency wiring.
+//!
+//! Provides [`AppContext`], a convenience struct that initializes all
+//! core components from a [`Config`] and a [`Platform`], then produces
+//! an [`AgentLoop`] ready to run.
+//!
+//! # Usage
+//!
+//! ```rust,ignore
+//! use clawft_core::bootstrap::AppContext;
+//! use clawft_platform::NativePlatform;
+//! use clawft_types::config::Config;
+//!
+//! let config = Config::default();
+//! let platform = Arc::new(NativePlatform::new());
+//! let ctx = AppContext::new(config, platform).await?;
+//! let agent_loop = ctx.into_agent_loop();
+//! agent_loop.run().await?;
+//! ```
+
+use std::sync::Arc;
+
+use tracing::{debug, info};
+
+use clawft_platform::Platform;
+use clawft_types::config::Config;
+
+use crate::agent::context::ContextBuilder;
+use crate::agent::loop_core::AgentLoop;
+use crate::agent::memory::MemoryStore;
+use crate::agent::skills::SkillsLoader;
+use crate::bus::MessageBus;
+use crate::pipeline::assembler::TokenBudgetAssembler;
+use crate::pipeline::classifier::KeywordClassifier;
+use crate::pipeline::learner::NoopLearner;
+use crate::pipeline::router::StaticRouter;
+use crate::pipeline::scorer::NoopScorer;
+use crate::pipeline::traits::{Pipeline, PipelineRegistry};
+use crate::pipeline::transport::OpenAiCompatTransport;
+use crate::session::SessionManager;
+use crate::tools::registry::ToolRegistry;
+
+/// Fully initialized application context.
+///
+/// Holds all dependencies needed to run the agent loop. Created via
+/// [`AppContext::new`] and consumed via [`AppContext::into_agent_loop`].
+///
+/// The generic parameter `P` is the platform implementation (e.g.
+/// [`NativePlatform`](clawft_platform::NativePlatform) for native,
+/// a WASM platform for browser environments).
+pub struct AppContext<P: Platform> {
+    /// Root configuration.
+    config: Config,
+
+    /// Platform abstraction.
+    platform: Arc<P>,
+
+    /// Message bus for inbound/outbound message routing.
+    bus: Arc<MessageBus>,
+
+    /// Session manager for conversation persistence.
+    sessions: SessionManager<P>,
+
+    /// Tool registry with registered tools.
+    tools: ToolRegistry,
+
+    /// Pipeline registry with all 6 stages wired.
+    pipeline: PipelineRegistry,
+
+    /// Context builder for assembling LLM prompts.
+    context: ContextBuilder<P>,
+
+    /// Shared memory store reference (for external access).
+    memory: Arc<MemoryStore<P>>,
+
+    /// Shared skills loader reference (for external access).
+    skills: Arc<SkillsLoader<P>>,
+}
+
+impl<P: Platform> AppContext<P> {
+    /// Initialize all components from configuration and platform.
+    ///
+    /// This is the primary constructor. It:
+    /// 1. Creates the [`MessageBus`]
+    /// 2. Initializes the [`SessionManager`] (discovers/creates sessions dir)
+    /// 3. Initializes the [`MemoryStore`] (discovers memory dir)
+    /// 4. Initializes the [`SkillsLoader`] (discovers skills dir)
+    /// 5. Creates the [`ContextBuilder`]
+    /// 6. Creates an empty [`ToolRegistry`] (caller registers tools after)
+    /// 7. Wires the default Level 0 pipeline (keyword classifier, static
+    ///    router, token budget assembler, stub transport, noop scorer,
+    ///    noop learner)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClawftError`] if the home directory cannot be determined
+    /// or the sessions directory cannot be created.
+    pub async fn new(config: Config, platform: Arc<P>) -> clawft_types::Result<Self> {
+        info!("bootstrapping application context");
+
+        // 1. Message bus
+        let bus = Arc::new(MessageBus::new());
+        debug!("message bus created");
+
+        // 2. Session manager
+        let sessions = SessionManager::new(platform.clone()).await?;
+        debug!("session manager initialized");
+
+        // 3. Memory store
+        let memory = Arc::new(MemoryStore::new(platform.clone())?);
+        debug!(
+            memory_path = %memory.memory_path().display(),
+            "memory store initialized"
+        );
+
+        // 4. Skills loader
+        let skills = Arc::new(SkillsLoader::new(platform.clone())?);
+        debug!(
+            skills_dir = %skills.skills_dir().display(),
+            "skills loader initialized"
+        );
+
+        // 5. Context builder
+        let context = ContextBuilder::new(
+            config.agents.clone(),
+            memory.clone(),
+            skills.clone(),
+            platform.clone(),
+        );
+        debug!("context builder created");
+
+        // 6. Tool registry (empty -- caller adds tools)
+        let tools = ToolRegistry::new();
+
+        // 7. Default Level 0 pipeline
+        let pipeline = build_default_pipeline(&config);
+        debug!("default pipeline wired");
+
+        info!("bootstrap complete");
+
+        Ok(Self {
+            config,
+            platform,
+            bus,
+            sessions,
+            tools,
+            pipeline,
+            context,
+            memory,
+            skills,
+        })
+    }
+
+    /// Consume the context and produce a running [`AgentLoop`].
+    ///
+    /// All dependencies are moved into the agent loop. After this call,
+    /// the `AppContext` is consumed and cannot be reused.
+    pub fn into_agent_loop(self) -> AgentLoop<P> {
+        AgentLoop::new(
+            self.config.agents,
+            self.platform,
+            self.bus,
+            self.pipeline,
+            self.tools,
+            self.context,
+            self.sessions,
+        )
+    }
+
+    /// Get a reference to the root configuration.
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// Get a reference to the platform.
+    pub fn platform(&self) -> &Arc<P> {
+        &self.platform
+    }
+
+    /// Get a reference to the message bus.
+    ///
+    /// Channel adapters should clone the inbound sender from here
+    /// before the context is consumed by [`into_agent_loop`].
+    pub fn bus(&self) -> &Arc<MessageBus> {
+        &self.bus
+    }
+
+    /// Get a mutable reference to the tool registry.
+    ///
+    /// Call this to register tools before converting to an agent loop.
+    pub fn tools_mut(&mut self) -> &mut ToolRegistry {
+        &mut self.tools
+    }
+
+    /// Get a reference to the tool registry.
+    pub fn tools(&self) -> &ToolRegistry {
+        &self.tools
+    }
+
+    /// Get a reference to the shared memory store.
+    pub fn memory(&self) -> &Arc<MemoryStore<P>> {
+        &self.memory
+    }
+
+    /// Get a reference to the shared skills loader.
+    pub fn skills(&self) -> &Arc<SkillsLoader<P>> {
+        &self.skills
+    }
+
+    /// Replace the pipeline registry with a custom one.
+    ///
+    /// Use this to inject a transport backed by a real LLM provider
+    /// or to register specialized pipelines for specific task types.
+    pub fn set_pipeline(&mut self, pipeline: PipelineRegistry) {
+        self.pipeline = pipeline;
+    }
+
+    /// Replace the pipeline with a live LLM-backed pipeline.
+    ///
+    /// Convenience method that calls [`build_live_pipeline`] and sets it
+    /// as the active pipeline, enabling real LLM calls through the
+    /// `clawft-llm` provider resolved from configuration.
+    pub fn enable_live_llm(&mut self) {
+        let pipeline = build_live_pipeline(&self.config);
+        self.set_pipeline(pipeline);
+    }
+}
+
+/// Build a live pipeline with a real LLM provider from configuration.
+///
+/// Uses [`ClawftLlmAdapter`](crate::pipeline::llm_adapter::ClawftLlmAdapter)
+/// to bridge `clawft-llm` providers into the pipeline's transport layer,
+/// enabling real LLM calls.
+///
+/// This is the production counterpart of [`build_default_pipeline`], which
+/// uses a stub transport. All other pipeline stages are identical.
+pub fn build_live_pipeline(config: &Config) -> PipelineRegistry {
+    crate::pipeline::llm_adapter::build_live_pipeline(config)
+}
+
+/// Build the default Level 0 pipeline from configuration.
+///
+/// Uses:
+/// - [`KeywordClassifier`] for task classification
+/// - [`StaticRouter`] for model routing (from config defaults)
+/// - [`TokenBudgetAssembler`] with max_tokens from config
+/// - [`OpenAiCompatTransport`] in stub mode (no LLM provider)
+/// - [`NoopScorer`] for quality scoring
+/// - [`NoopLearner`] for learning
+fn build_default_pipeline(config: &Config) -> PipelineRegistry {
+    let classifier = Arc::new(KeywordClassifier::new());
+    let router = Arc::new(StaticRouter::from_config(&config.agents));
+    let assembler = Arc::new(TokenBudgetAssembler::new(
+        config.agents.defaults.max_tokens.max(1) as usize,
+    ));
+    let transport = Arc::new(OpenAiCompatTransport::new());
+    let scorer = Arc::new(NoopScorer::new());
+    let learner = Arc::new(NoopLearner::new());
+
+    let pipeline = Pipeline {
+        classifier,
+        router,
+        assembler,
+        transport,
+        scorer,
+        learner,
+    };
+
+    PipelineRegistry::new(pipeline)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clawft_platform::NativePlatform;
+    use clawft_types::config::{AgentDefaults, AgentsConfig};
+    use std::sync::Arc;
+
+    fn test_config() -> Config {
+        Config {
+            agents: AgentsConfig {
+                defaults: AgentDefaults {
+                    workspace: "~/.clawft/workspace".into(),
+                    model: "anthropic/claude-opus-4-5".into(),
+                    max_tokens: 4096,
+                    temperature: 0.7,
+                    max_tool_iterations: 10,
+                    memory_window: 50,
+                },
+            },
+            ..Config::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn new_creates_app_context() {
+        let platform = Arc::new(NativePlatform::new());
+        let ctx = AppContext::new(test_config(), platform).await;
+        assert!(ctx.is_ok());
+    }
+
+    #[tokio::test]
+    async fn config_accessor() {
+        let platform = Arc::new(NativePlatform::new());
+        let ctx = AppContext::new(test_config(), platform).await.unwrap();
+        assert_eq!(
+            ctx.config().agents.defaults.model,
+            "anthropic/claude-opus-4-5"
+        );
+        assert_eq!(ctx.config().agents.defaults.max_tokens, 4096);
+    }
+
+    #[tokio::test]
+    async fn platform_accessor() {
+        let platform = Arc::new(NativePlatform::new());
+        let ctx = AppContext::new(test_config(), platform).await.unwrap();
+        let _p = ctx.platform();
+    }
+
+    #[tokio::test]
+    async fn bus_accessor() {
+        let platform = Arc::new(NativePlatform::new());
+        let ctx = AppContext::new(test_config(), platform).await.unwrap();
+        let bus = ctx.bus();
+        // Should be able to get an inbound sender
+        let _tx = bus.inbound_sender();
+    }
+
+    #[tokio::test]
+    async fn tools_starts_empty() {
+        let platform = Arc::new(NativePlatform::new());
+        let ctx = AppContext::new(test_config(), platform).await.unwrap();
+        assert!(ctx.tools().is_empty());
+    }
+
+    #[tokio::test]
+    async fn tools_mut_allows_registration() {
+        let platform = Arc::new(NativePlatform::new());
+        let mut ctx = AppContext::new(test_config(), platform).await.unwrap();
+
+        use crate::tools::registry::Tool;
+        use async_trait::async_trait;
+
+        struct DummyTool;
+
+        #[async_trait]
+        impl Tool for DummyTool {
+            fn name(&self) -> &str {
+                "dummy"
+            }
+            fn description(&self) -> &str {
+                "A dummy tool"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object", "properties": {}})
+            }
+            async fn execute(
+                &self,
+                _args: serde_json::Value,
+            ) -> Result<serde_json::Value, crate::tools::registry::ToolError> {
+                Ok(serde_json::json!({}))
+            }
+        }
+
+        ctx.tools_mut().register(Arc::new(DummyTool));
+        assert_eq!(ctx.tools().len(), 1);
+        assert_eq!(ctx.tools().list(), vec!["dummy"]);
+    }
+
+    #[tokio::test]
+    async fn memory_accessor() {
+        let platform = Arc::new(NativePlatform::new());
+        let ctx = AppContext::new(test_config(), platform).await.unwrap();
+        let memory = ctx.memory();
+        assert!(memory.memory_path().is_absolute());
+    }
+
+    #[tokio::test]
+    async fn skills_accessor() {
+        let platform = Arc::new(NativePlatform::new());
+        let ctx = AppContext::new(test_config(), platform).await.unwrap();
+        let skills = ctx.skills();
+        assert!(skills.skills_dir().is_absolute());
+    }
+
+    #[tokio::test]
+    async fn into_agent_loop_produces_valid_loop() {
+        let platform = Arc::new(NativePlatform::new());
+        let ctx = AppContext::new(test_config(), platform).await.unwrap();
+        let agent = ctx.into_agent_loop();
+        assert_eq!(
+            agent.config().defaults.model,
+            "anthropic/claude-opus-4-5"
+        );
+        assert_eq!(agent.config().defaults.max_tokens, 4096);
+    }
+
+    #[tokio::test]
+    async fn set_pipeline_replaces_default() {
+        let platform = Arc::new(NativePlatform::new());
+        let mut ctx = AppContext::new(test_config(), platform).await.unwrap();
+
+        // Build a custom pipeline with a different router
+        let custom_pipeline = build_default_pipeline(&test_config());
+        ctx.set_pipeline(custom_pipeline);
+
+        // Should still produce a valid agent loop
+        let agent = ctx.into_agent_loop();
+        assert_eq!(
+            agent.config().defaults.model,
+            "anthropic/claude-opus-4-5"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_config_bootstrap() {
+        let platform = Arc::new(NativePlatform::new());
+        let ctx = AppContext::new(Config::default(), platform).await;
+        assert!(ctx.is_ok());
+    }
+
+    #[test]
+    fn build_default_pipeline_creates_registry() {
+        let config = test_config();
+        let _registry = build_default_pipeline(&config);
+        // Should not panic.
+    }
+
+    #[test]
+    fn build_default_pipeline_with_defaults() {
+        let config = Config::default();
+        let _registry = build_default_pipeline(&config);
+    }
+
+    #[tokio::test]
+    async fn bus_clone_survives_into_agent_loop() {
+        let platform = Arc::new(NativePlatform::new());
+        let ctx = AppContext::new(test_config(), platform).await.unwrap();
+
+        // Clone the bus sender before consuming the context
+        let tx = ctx.bus().inbound_sender();
+        let _agent = ctx.into_agent_loop();
+
+        // The sender should still be usable
+        use chrono::Utc;
+        use clawft_types::event::InboundMessage;
+        use std::collections::HashMap;
+
+        let msg = InboundMessage {
+            channel: "test".into(),
+            sender_id: "user1".into(),
+            chat_id: "chat1".into(),
+            content: "hello".into(),
+            timestamp: Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        assert!(tx.send(msg).is_ok());
+    }
+
+    #[tokio::test]
+    async fn app_context_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<AppContext<NativePlatform>>();
+    }
+
+    // ── Integration: build_live_pipeline transport is configured ─────
+
+    #[tokio::test]
+    async fn build_live_pipeline_transport_is_configured() {
+        // The live pipeline should have a configured (non-stub) transport.
+        // When we call complete() on the stub transport, it returns an error
+        // containing "transport not configured". The live pipeline should
+        // NOT produce that error -- it should attempt a real HTTP call
+        // (which will fail differently without an API key).
+        use crate::pipeline::traits::{ChatRequest, LlmMessage, TaskType, TransportRequest};
+
+        let config = test_config();
+        let registry = build_live_pipeline(&config);
+
+        // Access the default pipeline's transport via get() with an unregistered type.
+        let pipeline = registry.get(&TaskType::Unknown);
+
+        let transport_req = TransportRequest {
+            provider: "anthropic".into(),
+            model: "claude-opus-4-5".into(),
+            messages: vec![LlmMessage {
+                role: "user".into(),
+                content: "test".into(),
+                tool_call_id: None,
+            }],
+            tools: vec![],
+            max_tokens: Some(10),
+            temperature: Some(0.0),
+        };
+
+        let result = pipeline.transport.complete(&transport_req).await;
+
+        // The live transport IS configured (has a provider), so it should
+        // NOT fail with "transport not configured". It will fail with an
+        // HTTP/auth error instead because there's no real API key.
+        match result {
+            Ok(_) => {} // unlikely without API key, but acceptable
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    !msg.contains("transport not configured"),
+                    "live pipeline should not use stub transport, but got: {msg}"
+                );
+            }
+        }
+    }
+
+    // ── Integration: enable_live_llm replaces the pipeline ──────────
+
+    #[tokio::test]
+    async fn app_context_enable_live_llm() {
+        use crate::pipeline::traits::{ChatRequest, LlmMessage, TaskType, TransportRequest};
+
+        let platform = Arc::new(NativePlatform::new());
+        let mut ctx = AppContext::new(test_config(), platform).await.unwrap();
+
+        // Before enable_live_llm, the default pipeline uses a stub transport.
+        // We cannot directly access ctx.pipeline, but we can verify behavior
+        // indirectly: enable_live_llm should not panic and should replace
+        // the pipeline such that transport errors no longer say "not configured".
+
+        ctx.enable_live_llm();
+
+        // Convert to agent loop and verify it's still valid.
+        let agent = ctx.into_agent_loop();
+        assert_eq!(
+            agent.config().defaults.model,
+            "anthropic/claude-opus-4-5"
+        );
+    }
+
+    // ── Integration: default pipeline uses stub (negative test) ─────
+
+    #[tokio::test]
+    async fn default_pipeline_transport_is_stub() {
+        // Verify the default pipeline's transport IS the stub, confirming
+        // that enable_live_llm / build_live_pipeline changes something.
+        use crate::pipeline::traits::{LlmMessage, TaskType, TransportRequest};
+
+        let config = test_config();
+        let registry = build_default_pipeline(&config);
+        let pipeline = registry.get(&TaskType::Unknown);
+
+        let transport_req = TransportRequest {
+            provider: "test".into(),
+            model: "test".into(),
+            messages: vec![LlmMessage {
+                role: "user".into(),
+                content: "hello".into(),
+                tool_call_id: None,
+            }],
+            tools: vec![],
+            max_tokens: None,
+            temperature: None,
+        };
+
+        let result = pipeline.transport.complete(&transport_req).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("transport not configured"),
+            "default pipeline should use stub transport, got: {err_msg}"
+        );
+    }
+
+    // ── Integration: build_live_pipeline creates a valid registry ────
+
+    #[test]
+    fn build_live_pipeline_creates_registry() {
+        let config = test_config();
+        let registry = build_live_pipeline(&config);
+        // Registry should be usable for any task type (falls back to default).
+        use crate::pipeline::traits::TaskType;
+        let _pipeline = registry.get(&TaskType::Chat);
+        let _pipeline = registry.get(&TaskType::CodeGeneration);
+        let _pipeline = registry.get(&TaskType::Unknown);
+    }
+}

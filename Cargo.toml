@@ -1,0 +1,99 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/clawft-types",
+    "crates/clawft-platform",
+    "crates/clawft-core",
+    "crates/clawft-llm",
+    "crates/clawft-tools",
+    "crates/clawft-channels",
+    "crates/clawft-services",
+    "crates/clawft-cli",
+    "crates/clawft-wasm",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/clawft/clawft"
+
+[workspace.dependencies]
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Async traits
+async-trait = "0.1"
+
+# Async utilities
+tokio-util = "0.7"
+
+# UUID
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Path handling
+dirs = "6"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# WebSocket
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+
+# Crypto
+hmac = "0.12"
+sha2 = "0.10"
+
+# Scheduling
+cron = "0.15"
+
+# Markdown
+pulldown-cmark = "0.12"
+
+# Table display
+comfy-table = "7"
+
+# Browser open
+open = "5"
+
+# Random (testing)
+rand = "0.8"
+
+# Internal crates
+clawft-types = { path = "crates/clawft-types" }
+clawft-platform = { path = "crates/clawft-platform" }
+clawft-core = { path = "crates/clawft-core" }
+clawft-tools = { path = "crates/clawft-tools" }
+clawft-channels = { path = "crates/clawft-channels" }
+clawft-llm = { path = "crates/clawft-llm" }
+clawft-services = { path = "crates/clawft-services" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"
+
+[profile.release-wasm]
+inherits = "release"
+opt-level = "z"

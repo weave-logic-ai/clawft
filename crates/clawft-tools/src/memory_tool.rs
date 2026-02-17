@@ -1,0 +1,435 @@
+//! Memory read/write tools.
+//!
+//! Two tools that read from and write to a workspace-level MEMORY.md file.
+//! The memory file lives at `~/.clawft/workspace/memory/MEMORY.md` (with
+//! fallback to `~/.nanobot/workspace/memory/MEMORY.md`).
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use clawft_core::tools::registry::{Tool, ToolError};
+use clawft_platform::Platform;
+use serde_json::json;
+use tracing::debug;
+
+/// Relative path from home dir to the memory file.
+const MEMORY_REL_PATH: &str = ".clawft/workspace/memory/MEMORY.md";
+
+/// Fallback relative path (nanobot compatibility).
+const MEMORY_FALLBACK_REL_PATH: &str = ".nanobot/workspace/memory/MEMORY.md";
+
+/// Resolve the memory file path using the platform's home directory.
+///
+/// Tries `~/.clawft/workspace/memory/MEMORY.md` first, then falls back
+/// to `~/.nanobot/workspace/memory/MEMORY.md`.
+async fn resolve_memory_path<P: Platform>(platform: &P) -> Result<PathBuf, ToolError> {
+    let home = platform
+        .fs()
+        .home_dir()
+        .ok_or_else(|| ToolError::ExecutionFailed("unable to determine home directory".into()))?;
+
+    let primary = home.join(MEMORY_REL_PATH);
+    if platform.fs().exists(&primary).await {
+        return Ok(primary);
+    }
+
+    let fallback = home.join(MEMORY_FALLBACK_REL_PATH);
+    if platform.fs().exists(&fallback).await {
+        return Ok(fallback);
+    }
+
+    // Default to primary path (will be created on write).
+    Ok(primary)
+}
+
+/// Simple paragraph-level search within memory content.
+///
+/// Splits the content into paragraphs (separated by blank lines) and returns
+/// those that contain the query string (case-insensitive).
+fn search_paragraphs(content: &str, query: &str) -> Vec<String> {
+    let query_lower = query.to_lowercase();
+    content
+        .split("\n\n")
+        .filter(|paragraph| paragraph.to_lowercase().contains(&query_lower))
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// MemoryReadTool
+// ---------------------------------------------------------------------------
+
+/// Read from the workspace memory file.
+///
+/// If a `query` is provided, returns matching paragraphs. Otherwise returns
+/// the full content of `MEMORY.md`.
+pub struct MemoryReadTool<P: Platform> {
+    platform: Arc<P>,
+}
+
+impl<P: Platform> MemoryReadTool<P> {
+    /// Create a new `MemoryReadTool`.
+    pub fn new(platform: Arc<P>) -> Self {
+        Self { platform }
+    }
+}
+
+#[async_trait]
+impl<P: Platform + 'static> Tool for MemoryReadTool<P> {
+    fn name(&self) -> &str {
+        "memory_read"
+    }
+
+    fn description(&self) -> &str {
+        "Read from the workspace memory file. Optionally filter by a search query."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Optional search query to filter memory content"
+                }
+            },
+            "required": []
+        })
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let memory_path = resolve_memory_path(self.platform.as_ref()).await?;
+
+        debug!(path = %memory_path.display(), "reading memory");
+
+        if !self.platform.fs().exists(&memory_path).await {
+            return Ok(json!({
+                "content": "",
+                "message": "No memory file found"
+            }));
+        }
+
+        let content = self
+            .platform
+            .fs()
+            .read_to_string(&memory_path)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("failed to read memory: {}", e)))?;
+
+        let query = args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if query.is_empty() {
+            Ok(json!({ "content": content }))
+        } else {
+            let matches = search_paragraphs(&content, query);
+            Ok(json!({
+                "query": query,
+                "matches": matches,
+                "count": matches.len(),
+            }))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MemoryWriteTool
+// ---------------------------------------------------------------------------
+
+/// Write to the workspace memory file.
+///
+/// Supports `append` (default) and `overwrite` modes. Creates the file
+/// and parent directories if they do not exist.
+pub struct MemoryWriteTool<P: Platform> {
+    platform: Arc<P>,
+}
+
+impl<P: Platform> MemoryWriteTool<P> {
+    /// Create a new `MemoryWriteTool`.
+    pub fn new(platform: Arc<P>) -> Self {
+        Self { platform }
+    }
+}
+
+#[async_trait]
+impl<P: Platform + 'static> Tool for MemoryWriteTool<P> {
+    fn name(&self) -> &str {
+        "memory_write"
+    }
+
+    fn description(&self) -> &str {
+        "Write to the workspace memory file. Supports append and overwrite modes."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "The content to write to memory"
+                },
+                "mode": {
+                    "type": "string",
+                    "description": "Write mode: 'append' (default) or 'overwrite'",
+                    "enum": ["append", "overwrite"]
+                }
+            },
+            "required": ["content"]
+        })
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let content = args
+            .get("content")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                ToolError::InvalidArgs("missing required field: content".to_string())
+            })?;
+
+        let mode = args
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("append");
+
+        let memory_path = resolve_memory_path(self.platform.as_ref()).await?;
+
+        debug!(path = %memory_path.display(), mode, "writing memory");
+
+        match mode {
+            "overwrite" => {
+                self.platform
+                    .fs()
+                    .write_string(&memory_path, content)
+                    .await
+                    .map_err(|e| {
+                        ToolError::ExecutionFailed(format!("failed to write memory: {}", e))
+                    })?;
+            }
+            _ => {
+                // Prepend a newline separator if the file already has content.
+                let separator = if self.platform.fs().exists(&memory_path).await {
+                    "\n\n"
+                } else {
+                    ""
+                };
+
+                let to_write = format!("{}{}", separator, content);
+                self.platform
+                    .fs()
+                    .append_string(&memory_path, &to_write)
+                    .await
+                    .map_err(|e| {
+                        ToolError::ExecutionFailed(format!("failed to append memory: {}", e))
+                    })?;
+            }
+        }
+
+        Ok(json!({
+            "message": format!("Successfully wrote {} bytes to memory (mode: {})", content.len(), mode),
+            "path": memory_path.to_string_lossy(),
+        }))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clawft_platform::NativePlatform;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_memory_path() -> PathBuf {
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        std::env::temp_dir().join(format!(
+            "clawft_memory_test_{pid}_{id}/workspace/memory/MEMORY.md"
+        ))
+    }
+
+    // -- search_paragraphs unit tests --------------------------------------
+
+    #[test]
+    fn test_search_paragraphs_basic() {
+        let content = "First paragraph about Rust.\n\nSecond paragraph about Python.\n\nThird paragraph about Rust and Go.";
+        let matches = search_paragraphs(content, "rust");
+        assert_eq!(matches.len(), 2);
+        assert!(matches[0].contains("Rust"));
+        assert!(matches[1].contains("Rust"));
+    }
+
+    #[test]
+    fn test_search_paragraphs_case_insensitive() {
+        let content = "Hello World\n\nGoodbye World";
+        let matches = search_paragraphs(content, "HELLO");
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].contains("Hello"));
+    }
+
+    #[test]
+    fn test_search_paragraphs_no_match() {
+        let content = "Some text here\n\nMore text there";
+        let matches = search_paragraphs(content, "nonexistent");
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_search_paragraphs_empty_content() {
+        let matches = search_paragraphs("", "anything");
+        assert!(matches.is_empty());
+    }
+
+    // -- MemoryReadTool tests (with custom path) ---------------------------
+
+    // These tests write directly to a temporary path and then read using
+    // the platform. Since resolve_memory_path uses home_dir, we test the
+    // search_paragraphs function directly and the Tool trait integration
+    // via a path that exists.
+
+    #[tokio::test]
+    async fn test_memory_read_no_file() {
+        let platform = Arc::new(NativePlatform::new());
+        let tool = MemoryReadTool::new(platform);
+
+        // This tests the real resolve path + file existence check.
+        // If no memory file exists, it should return empty content.
+        let result = tool.execute(json!({})).await.unwrap();
+        // It's either empty content or actual memory content (if running on
+        // a dev machine with ~/.clawft). Either way it shouldn't error.
+        assert!(result.get("content").is_some() || result.get("message").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_memory_write_and_read_roundtrip() {
+        let platform = Arc::new(NativePlatform::new());
+        let memory_path = temp_memory_path();
+
+        // Create parent dirs and write a file
+        if let Some(parent) = memory_path.parent() {
+            tokio::fs::create_dir_all(parent).await.unwrap();
+        }
+        tokio::fs::write(&memory_path, "# Test Memory\n\nKey decision: use Rust")
+            .await
+            .unwrap();
+
+        // Read back directly (bypassing resolve_memory_path)
+        let content = platform
+            .fs()
+            .read_to_string(&memory_path)
+            .await
+            .unwrap();
+        assert!(content.contains("Key decision"));
+
+        // Test paragraph search
+        let matches = search_paragraphs(&content, "decision");
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].contains("use Rust"));
+
+        // Cleanup
+        if let Some(root) = memory_path.parent().and_then(Path::parent).and_then(Path::parent) {
+            let _ = tokio::fs::remove_dir_all(root).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_memory_write_overwrite_mode() {
+        let platform = Arc::new(NativePlatform::new());
+        let memory_path = temp_memory_path();
+
+        if let Some(parent) = memory_path.parent() {
+            tokio::fs::create_dir_all(parent).await.unwrap();
+        }
+
+        // Write initial content
+        platform
+            .fs()
+            .write_string(&memory_path, "original content")
+            .await
+            .unwrap();
+
+        // Overwrite
+        platform
+            .fs()
+            .write_string(&memory_path, "new content")
+            .await
+            .unwrap();
+
+        let content = platform
+            .fs()
+            .read_to_string(&memory_path)
+            .await
+            .unwrap();
+        assert_eq!(content, "new content");
+        assert!(!content.contains("original"));
+
+        // Cleanup
+        if let Some(root) = memory_path.parent().and_then(Path::parent).and_then(Path::parent) {
+            let _ = tokio::fs::remove_dir_all(root).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_memory_write_append_mode() {
+        let platform = Arc::new(NativePlatform::new());
+        let memory_path = temp_memory_path();
+
+        if let Some(parent) = memory_path.parent() {
+            tokio::fs::create_dir_all(parent).await.unwrap();
+        }
+
+        // Write initial content
+        platform
+            .fs()
+            .write_string(&memory_path, "first")
+            .await
+            .unwrap();
+
+        // Append
+        platform
+            .fs()
+            .append_string(&memory_path, "\n\nsecond")
+            .await
+            .unwrap();
+
+        let content = platform
+            .fs()
+            .read_to_string(&memory_path)
+            .await
+            .unwrap();
+        assert!(content.contains("first"));
+        assert!(content.contains("second"));
+
+        // Cleanup
+        if let Some(root) = memory_path.parent().and_then(Path::parent).and_then(Path::parent) {
+            let _ = tokio::fs::remove_dir_all(root).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_memory_write_tool_missing_content() {
+        let platform = Arc::new(NativePlatform::new());
+        let tool = MemoryWriteTool::new(platform);
+
+        let err = tool.execute(json!({})).await.unwrap_err();
+        assert!(matches!(err, ToolError::InvalidArgs(_)));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_memory_path_returns_primary() {
+        let platform = NativePlatform::new();
+        // Should not error -- always returns a path even if file doesn't exist
+        let path = resolve_memory_path(&platform).await.unwrap();
+        assert!(path.to_string_lossy().contains(".clawft")
+            || path.to_string_lossy().contains(".nanobot"));
+    }
+}

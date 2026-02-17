@@ -1,0 +1,455 @@
+//! [`DiscordChannel`] -- `Channel` trait implementation for Discord.
+//!
+//! Uses the Discord Gateway WebSocket protocol to receive events and
+//! delivers them to the pipeline through
+//! [`ChannelHost::deliver_inbound`](crate::traits::ChannelHost::deliver_inbound).
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use futures_util::{SinkExt, StreamExt};
+use tokio::sync::RwLock;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, warn};
+
+use clawft_types::config::DiscordConfig;
+use clawft_types::error::ChannelError;
+use clawft_types::event::{InboundMessage, OutboundMessage};
+
+use crate::traits::{Channel, ChannelHost, ChannelMetadata, ChannelStatus, MessageId};
+
+use super::api::DiscordApiClient;
+use super::events::{
+    ConnectionProperties, GatewayPayload, HelloData, IdentifyPayload, MessageCreate,
+    ReadyEvent, OP_DISPATCH, OP_HEARTBEAT, OP_HEARTBEAT_ACK, OP_HELLO, OP_INVALID_SESSION,
+    OP_RECONNECT,
+};
+
+/// Delay before reconnecting after a connection failure.
+const RECONNECT_DELAY_SECS: u64 = 5;
+
+/// Discord channel implementation using the Gateway WebSocket protocol.
+///
+/// # Configuration
+///
+/// Created via [`DiscordChannelFactory`](super::factory::DiscordChannelFactory)
+/// from the `DiscordConfig` section of the global config.
+pub struct DiscordChannel {
+    /// Discord REST API client (for sending messages).
+    api: DiscordApiClient,
+    /// Current lifecycle status.
+    status: Arc<RwLock<ChannelStatus>>,
+    /// Parsed configuration.
+    config: DiscordConfig,
+    /// Last received sequence number for heartbeats and resuming.
+    sequence: AtomicU64,
+    /// Session ID from the READY event (for resuming).
+    session_id: RwLock<Option<String>>,
+    /// Resume gateway URL from the READY event.
+    resume_url: RwLock<Option<String>>,
+}
+
+impl DiscordChannel {
+    /// Create a new Discord channel from configuration.
+    pub fn new(config: DiscordConfig) -> Self {
+        Self {
+            api: DiscordApiClient::new(config.token.clone()),
+            status: Arc::new(RwLock::new(ChannelStatus::Stopped)),
+            config,
+            sequence: AtomicU64::new(0),
+            session_id: RwLock::new(None),
+            resume_url: RwLock::new(None),
+        }
+    }
+
+    /// Create a channel with a custom [`DiscordApiClient`] (for testing).
+    #[cfg(test)]
+    pub fn with_api(config: DiscordConfig, api: DiscordApiClient) -> Self {
+        Self {
+            api,
+            status: Arc::new(RwLock::new(ChannelStatus::Stopped)),
+            config,
+            sequence: AtomicU64::new(0),
+            session_id: RwLock::new(None),
+            resume_url: RwLock::new(None),
+        }
+    }
+
+    /// Set status under the write lock.
+    pub(crate) async fn set_status(&self, status: ChannelStatus) {
+        *self.status.write().await = status;
+    }
+
+    /// Process a MESSAGE_CREATE event, delivering it to the host.
+    pub(crate) async fn process_message_create(
+        &self,
+        msg: &MessageCreate,
+        host: &Arc<dyn ChannelHost>,
+    ) -> Result<(), ChannelError> {
+        // Skip bot messages to avoid loops.
+        if msg.author.bot {
+            debug!(
+                author = %msg.author.username,
+                "skipping bot message"
+            );
+            return Ok(());
+        }
+
+        let sender_id = &msg.author.id;
+
+        if !self.is_allowed(sender_id) {
+            warn!(
+                sender_id = %sender_id,
+                channel_id = %msg.channel_id,
+                "message from disallowed user, ignoring"
+            );
+            return Ok(());
+        }
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "message_id".into(),
+            serde_json::Value::String(msg.id.clone()),
+        );
+        metadata.insert(
+            "username".into(),
+            serde_json::Value::String(msg.author.username.clone()),
+        );
+        if let Some(ref guild_id) = msg.guild_id {
+            metadata.insert(
+                "guild_id".into(),
+                serde_json::Value::String(guild_id.clone()),
+            );
+        }
+        if let Some(ref reference) = msg.message_reference {
+            if let Some(ref ref_id) = reference.message_id {
+                metadata.insert(
+                    "reply_to_message_id".into(),
+                    serde_json::Value::String(ref_id.clone()),
+                );
+            }
+        }
+
+        let inbound = InboundMessage {
+            channel: "discord".into(),
+            sender_id: sender_id.clone(),
+            chat_id: msg.channel_id.clone(),
+            content: msg.content.clone(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata,
+        };
+
+        host.deliver_inbound(inbound).await
+    }
+}
+
+#[async_trait]
+impl Channel for DiscordChannel {
+    fn name(&self) -> &str {
+        "discord"
+    }
+
+    fn metadata(&self) -> ChannelMetadata {
+        ChannelMetadata {
+            name: "discord".into(),
+            display_name: "Discord".into(),
+            supports_threads: true,
+            supports_media: true,
+        }
+    }
+
+    fn status(&self) -> ChannelStatus {
+        self.status
+            .try_read()
+            .map(|s| s.clone())
+            .unwrap_or(ChannelStatus::Stopped)
+    }
+
+    fn is_allowed(&self, sender_id: &str) -> bool {
+        self.config.allow_from.is_empty()
+            || self.config.allow_from.iter().any(|id| id == sender_id)
+    }
+
+    async fn start(
+        &self,
+        host: Arc<dyn ChannelHost>,
+        cancel: CancellationToken,
+    ) -> Result<(), ChannelError> {
+        self.set_status(ChannelStatus::Starting).await;
+
+        info!("Discord channel starting");
+
+        // Main reconnection loop.
+        loop {
+            let gateway_url = {
+                let resume = self.resume_url.read().await;
+                resume.clone().unwrap_or_else(|| self.config.gateway_url.clone())
+            };
+
+            // Connect to Gateway WebSocket.
+            let ws_stream = match tokio_tungstenite::connect_async(&gateway_url).await {
+                Ok((stream, _)) => stream,
+                Err(e) => {
+                    error!(error = %e, "failed to connect Discord Gateway");
+                    self.set_status(ChannelStatus::Error(e.to_string())).await;
+
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        _ = tokio::time::sleep(
+                            std::time::Duration::from_secs(RECONNECT_DELAY_SECS)
+                        ) => continue,
+                    }
+                }
+            };
+
+            info!("Discord Gateway connected");
+
+            let (mut ws_write, mut ws_read) = ws_stream.split();
+
+            // Wait for Hello (opcode 10).
+            let heartbeat_interval = loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        let _ = ws_write.close().await;
+                        self.set_status(ChannelStatus::Stopped).await;
+                        return Ok(());
+                    }
+                    msg = ws_read.next() => {
+                        match msg {
+                            Some(Ok(WsMessage::Text(text))) => {
+                                if let Ok(payload) = serde_json::from_str::<GatewayPayload>(&text) {
+                                    if payload.op == OP_HELLO {
+                                        if let Some(d) = payload.d {
+                                            if let Ok(hello) = serde_json::from_value::<HelloData>(d) {
+                                                break hello.heartbeat_interval;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Some(Err(e)) => {
+                                error!(error = %e, "WebSocket error waiting for Hello");
+                                break 41250; // fallback
+                            }
+                            None => break 41250,
+                            _ => {}
+                        }
+                    }
+                }
+            };
+
+            debug!(interval_ms = heartbeat_interval, "received Hello");
+
+            // Send Identify (opcode 2).
+            let identify = GatewayPayload {
+                op: super::events::OP_IDENTIFY,
+                d: Some(
+                    serde_json::to_value(IdentifyPayload {
+                        token: self.config.token.clone(),
+                        intents: self.config.intents,
+                        properties: ConnectionProperties {
+                            os: std::env::consts::OS.to_owned(),
+                            browser: "clawft".into(),
+                            device: "clawft".into(),
+                        },
+                    })
+                    .unwrap_or_default(),
+                ),
+                s: None,
+                t: None,
+            };
+
+            if let Ok(json) = serde_json::to_string(&identify) {
+                if let Err(e) = ws_write.send(WsMessage::Text(json)).await {
+                    error!(error = %e, "failed to send Identify");
+                    self.set_status(ChannelStatus::Error(e.to_string())).await;
+
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        _ = tokio::time::sleep(
+                            std::time::Duration::from_secs(RECONNECT_DELAY_SECS)
+                        ) => continue,
+                    }
+                }
+            }
+
+            self.set_status(ChannelStatus::Running).await;
+
+            // Start heartbeat timer.
+            let mut heartbeat_timer = tokio::time::interval(
+                std::time::Duration::from_millis(heartbeat_interval),
+            );
+            // First tick fires immediately; skip it and wait for the
+            // first real interval.
+            heartbeat_timer.tick().await;
+
+            // Message processing loop.
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        info!("Discord channel received cancellation");
+                        let _ = ws_write.close().await;
+                        self.set_status(ChannelStatus::Stopped).await;
+                        return Ok(());
+                    }
+                    _ = heartbeat_timer.tick() => {
+                        let seq = self.sequence.load(Ordering::SeqCst);
+                        let hb = GatewayPayload {
+                            op: OP_HEARTBEAT,
+                            d: if seq > 0 { Some(serde_json::json!(seq)) } else { None },
+                            s: None,
+                            t: None,
+                        };
+                        if let Ok(json) = serde_json::to_string(&hb) {
+                            if let Err(e) = ws_write.send(WsMessage::Text(json)).await {
+                                warn!(error = %e, "failed to send heartbeat");
+                                break;
+                            }
+                            debug!(seq = seq, "sent heartbeat");
+                        }
+                    }
+                    msg = ws_read.next() => {
+                        match msg {
+                            Some(Ok(WsMessage::Text(text))) => {
+                                match serde_json::from_str::<GatewayPayload>(&text) {
+                                    Ok(payload) => {
+                                        // Update sequence number.
+                                        if let Some(s) = payload.s {
+                                            self.sequence.store(s, Ordering::SeqCst);
+                                        }
+
+                                        match payload.op {
+                                            OP_DISPATCH => {
+                                                if let Some(ref event_name) = payload.t {
+                                                    match event_name.as_str() {
+                                                        "READY" => {
+                                                            if let Some(ref d) = payload.d {
+                                                                if let Ok(ready) = serde_json::from_value::<ReadyEvent>(d.clone()) {
+                                                                    info!(
+                                                                        bot_id = %ready.user.id,
+                                                                        bot_name = %ready.user.username,
+                                                                        "Discord bot authenticated"
+                                                                    );
+                                                                    *self.session_id.write().await = Some(ready.session_id);
+                                                                    *self.resume_url.write().await = ready.resume_gateway_url;
+                                                                }
+                                                            }
+                                                        }
+                                                        "MESSAGE_CREATE" => {
+                                                            if let Some(ref d) = payload.d {
+                                                                match serde_json::from_value::<MessageCreate>(d.clone()) {
+                                                                    Ok(msg) => {
+                                                                        if let Err(e) = self.process_message_create(&msg, &host).await {
+                                                                            error!(
+                                                                                error = %e,
+                                                                                "failed to process MESSAGE_CREATE"
+                                                                            );
+                                                                        }
+                                                                    }
+                                                                    Err(e) => {
+                                                                        warn!(
+                                                                            error = %e,
+                                                                            "failed to parse MESSAGE_CREATE"
+                                                                        );
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        _ => {
+                                                            debug!(
+                                                                event = %event_name,
+                                                                "unhandled dispatch event"
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            OP_HEARTBEAT_ACK => {
+                                                debug!("heartbeat acknowledged");
+                                            }
+                                            OP_HEARTBEAT => {
+                                                // Server requesting immediate heartbeat.
+                                                let seq = self.sequence.load(Ordering::SeqCst);
+                                                let hb = GatewayPayload {
+                                                    op: OP_HEARTBEAT,
+                                                    d: if seq > 0 { Some(serde_json::json!(seq)) } else { None },
+                                                    s: None,
+                                                    t: None,
+                                                };
+                                                if let Ok(json) = serde_json::to_string(&hb) {
+                                                    let _ = ws_write.send(WsMessage::Text(json)).await;
+                                                }
+                                            }
+                                            OP_RECONNECT => {
+                                                info!("server requested reconnect");
+                                                break;
+                                            }
+                                            OP_INVALID_SESSION => {
+                                                warn!("invalid session, reconnecting with fresh identify");
+                                                *self.session_id.write().await = None;
+                                                *self.resume_url.write().await = None;
+                                                self.sequence.store(0, Ordering::SeqCst);
+                                                break;
+                                            }
+                                            _ => {
+                                                debug!(op = payload.op, "unhandled opcode");
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(error = %e, "failed to parse gateway payload");
+                                    }
+                                }
+                            }
+                            Some(Ok(WsMessage::Close(_))) => {
+                                info!("Discord Gateway closed by server");
+                                break;
+                            }
+                            Some(Ok(WsMessage::Ping(data))) => {
+                                let _ = ws_write.send(WsMessage::Pong(data)).await;
+                            }
+                            Some(Err(e)) => {
+                                error!(error = %e, "Discord Gateway WebSocket error");
+                                break;
+                            }
+                            None => {
+                                info!("Discord Gateway stream ended");
+                                break;
+                            }
+                            _ => {} // Binary, Pong, Frame -- ignore
+                        }
+                    }
+                }
+            }
+
+            // Connection dropped. Reconnect unless cancelled.
+            self.set_status(ChannelStatus::Error("disconnected".into())).await;
+
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = tokio::time::sleep(
+                    std::time::Duration::from_secs(RECONNECT_DELAY_SECS)
+                ) => {
+                    info!("reconnecting Discord Gateway...");
+                }
+            }
+        }
+
+        self.set_status(ChannelStatus::Stopped).await;
+        info!("Discord channel stopped");
+        Ok(())
+    }
+
+    async fn send(&self, msg: &OutboundMessage) -> Result<MessageId, ChannelError> {
+        let message_id = self
+            .api
+            .create_message(&msg.chat_id, &msg.content)
+            .await?;
+
+        Ok(MessageId(message_id))
+    }
+}

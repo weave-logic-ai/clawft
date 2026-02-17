@@ -1,0 +1,21 @@
+[package]
+name = "clawft-tools"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Tool implementations for clawft (file, shell, memory)"
+
+[dependencies]
+clawft-types = { workspace = true }
+clawft-platform = { workspace = true }
+clawft-core = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

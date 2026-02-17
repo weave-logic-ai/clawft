@@ -1,0 +1,10 @@
+[package]
+name = "clawft-wasm"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "WASM entrypoint for clawft"
+
+[dependencies]
+clawft-types = { workspace = true }

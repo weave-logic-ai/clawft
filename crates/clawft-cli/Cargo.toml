@@ -1,0 +1,38 @@
+[package]
+name = "clawft-cli"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "CLI binary (weft) for clawft"
+
+[[bin]]
+name = "weft"
+path = "src/main.rs"
+
+[features]
+default = []
+vector-memory = ["clawft-core/vector-memory"]
+
+[dependencies]
+clawft-types = { workspace = true }
+clawft-platform = { workspace = true }
+clawft-core = { workspace = true }
+clawft-tools = { workspace = true }
+clawft-channels = { workspace = true }
+clawft-llm = { workspace = true }
+clawft-services = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+dirs = { workspace = true }
+pulldown-cmark = { workspace = true }
+comfy-table = { workspace = true }
+cron = { workspace = true }
+tokio-util = { workspace = true }

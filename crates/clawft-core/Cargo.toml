@@ -1,0 +1,31 @@
+[package]
+name = "clawft-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Core engine for clawft (agent loop, message bus, context management)"
+
+[features]
+default = []
+vector-memory = ["dep:rand"]
+
+[dependencies]
+clawft-types = { workspace = true }
+clawft-platform = { workspace = true }
+clawft-llm = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+rand = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }
+clawft-platform = { workspace = true }
+clawft-types = { workspace = true }

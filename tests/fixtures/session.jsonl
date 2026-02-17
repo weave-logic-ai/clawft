@@ -1,0 +1,6 @@
+{"_type":"metadata","created_at":"2025-06-15T10:00:00Z","updated_at":"2025-06-15T10:05:00Z","metadata":{},"last_consolidated":0}
+{"role":"user","content":"Hello, can you help me?","timestamp":"2025-06-15T10:00:00Z"}
+{"role":"assistant","content":"Of course! What do you need help with?","timestamp":"2025-06-15T10:00:01Z"}
+{"role":"user","content":"What is the weather today?","timestamp":"2025-06-15T10:01:00Z"}
+{"role":"assistant","content":"I do not have access to real-time weather data, but I can help you find it.","timestamp":"2025-06-15T10:01:01Z"}
+{"role":"user","content":"Thanks, that is fine.","timestamp":"2025-06-15T10:02:00Z"}

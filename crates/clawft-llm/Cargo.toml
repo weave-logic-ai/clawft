@@ -1,0 +1,20 @@
+[package]
+name = "clawft-llm"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "LLM provider abstraction for clawft (OpenAI-compatible + native providers)"
+
+[dependencies]
+async-trait = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
