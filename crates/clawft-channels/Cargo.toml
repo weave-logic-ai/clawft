@@ -4,7 +4,11 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "Channel plugin system for clawft"
+keywords = ["telegram", "slack", "discord", "chat", "bot"]
+categories = ["network-programming"]
 
 [dependencies]
 clawft-types = { workspace = true }

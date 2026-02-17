@@ -13,6 +13,8 @@ use clawft_platform::Platform;
 use serde_json::json;
 use tracing::{debug, warn};
 
+use crate::security_policy::CommandPolicy;
+
 /// Maximum number of concurrent spawned processes.
 const MAX_CONCURRENT_SPAWNS: usize = 5;
 
@@ -25,17 +27,19 @@ static ACTIVE_SPAWNS: AtomicUsize = AtomicUsize::new(0);
 /// Tool for spawning sub-processes.
 ///
 /// Enables the agent to delegate tasks to child processes. Each spawn
-/// runs in the configured workspace directory. A concurrency limit
+/// runs in the configured workspace directory. Commands are validated
+/// against a [`CommandPolicy`] before execution. A concurrency limit
 /// prevents resource exhaustion.
 pub struct SpawnTool<P: Platform> {
     platform: Arc<P>,
     workspace: PathBuf,
+    policy: CommandPolicy,
 }
 
 impl<P: Platform> SpawnTool<P> {
     /// Create a new spawn tool sandboxed to the given workspace directory.
-    pub fn new(platform: Arc<P>, workspace: PathBuf) -> Self {
-        Self { platform, workspace }
+    pub fn new(platform: Arc<P>, workspace: PathBuf, policy: CommandPolicy) -> Self {
+        Self { platform, workspace, policy }
     }
 }
 
@@ -100,6 +104,12 @@ impl<P: Platform + 'static> Tool for SpawnTool<P> {
             .get("timeout")
             .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f as u64)))
             .unwrap_or(DEFAULT_TIMEOUT_SECS);
+
+        // Security policy check.
+        if let Err(e) = self.policy.validate(command) {
+            warn!(command, error = %e, "spawn command rejected by security policy");
+            return Err(ToolError::PermissionDenied(e.to_string()));
+        }
 
         // Check concurrency limit.
         let current = ACTIVE_SPAWNS.load(Ordering::Relaxed);
@@ -174,6 +184,7 @@ mod tests {
         SpawnTool::new(
             Arc::new(NativePlatform::new()),
             PathBuf::from("/tmp"),
+            CommandPolicy::safe_defaults(),
         )
     }
 

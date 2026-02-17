@@ -41,10 +41,10 @@ impl Config {
     /// Get the expanded workspace path.
     pub fn workspace_path(&self) -> PathBuf {
         let raw = &self.agents.defaults.workspace;
-        if let Some(rest) = raw.strip_prefix("~/") {
-            if let Some(home) = dirs::home_dir() {
-                return home.join(rest);
-            }
+        if let Some(rest) = raw.strip_prefix("~/")
+            && let Some(home) = dirs::home_dir()
+        {
+            return home.join(rest);
         }
         PathBuf::from(raw)
     }
@@ -880,6 +880,14 @@ pub struct ToolsConfig {
     /// MCP server connections.
     #[serde(default, alias = "mcpServers")]
     pub mcp_servers: HashMap<String, MCPServerConfig>,
+
+    /// Command execution policy (allowlist/denylist).
+    #[serde(default, alias = "commandPolicy")]
+    pub command_policy: CommandPolicyConfig,
+
+    /// URL safety policy (SSRF protection).
+    #[serde(default, alias = "urlPolicy")]
+    pub url_policy: UrlPolicyConfig,
 }
 
 /// Web tools configuration.
@@ -931,6 +939,81 @@ impl Default for ExecToolConfig {
     fn default() -> Self {
         Self {
             timeout: default_exec_timeout(),
+        }
+    }
+}
+
+/// Command execution security policy configuration.
+///
+/// Controls which commands the shell and spawn tools are allowed to execute.
+/// In allowlist mode (default), only explicitly permitted commands can run.
+/// In denylist mode, any command not matching a blocked pattern is allowed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandPolicyConfig {
+    /// Policy mode: "allowlist" (default, recommended) or "denylist".
+    #[serde(default = "default_policy_mode")]
+    pub mode: String,
+
+    /// Permitted command basenames when in allowlist mode.
+    /// Overrides defaults when non-empty.
+    #[serde(default)]
+    pub allowlist: Vec<String>,
+
+    /// Blocked command patterns when in denylist mode.
+    /// Overrides defaults when non-empty.
+    #[serde(default)]
+    pub denylist: Vec<String>,
+}
+
+fn default_policy_mode() -> String {
+    "allowlist".to_string()
+}
+
+impl Default for CommandPolicyConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_policy_mode(),
+            allowlist: Vec::new(),
+            denylist: Vec::new(),
+        }
+    }
+}
+
+/// URL safety policy configuration for SSRF protection.
+///
+/// Controls which URLs the web fetch tool is allowed to access.
+/// When enabled (default), requests to private networks, loopback
+/// addresses, and cloud metadata endpoints are blocked.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UrlPolicyConfig {
+    /// Whether URL safety validation is enabled.
+    #[serde(default = "default_url_policy_enabled")]
+    pub enabled: bool,
+
+    /// Allow requests to private/internal IP ranges.
+    #[serde(default, alias = "allowPrivate")]
+    pub allow_private: bool,
+
+    /// Domains that bypass all safety checks.
+    #[serde(default, alias = "allowedDomains")]
+    pub allowed_domains: Vec<String>,
+
+    /// Domains that are always blocked.
+    #[serde(default, alias = "blockedDomains")]
+    pub blocked_domains: Vec<String>,
+}
+
+fn default_url_policy_enabled() -> bool {
+    true
+}
+
+impl Default for UrlPolicyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_url_policy_enabled(),
+            allow_private: false,
+            allowed_domains: Vec::new(),
+            blocked_domains: Vec::new(),
         }
     }
 }
@@ -1212,5 +1295,56 @@ mod tests {
         assert_eq!(restored.command, "npx");
         assert_eq!(restored.args.len(), 2);
         assert_eq!(restored.env["API_KEY"], "secret");
+    }
+
+    #[test]
+    fn command_policy_config_defaults() {
+        let config: CommandPolicyConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.mode, "allowlist");
+        assert!(config.allowlist.is_empty());
+        assert!(config.denylist.is_empty());
+    }
+
+    #[test]
+    fn command_policy_config_custom() {
+        let json = r#"{"mode": "denylist", "allowlist": ["echo", "ls"], "denylist": ["rm -rf /"]}"#;
+        let config: CommandPolicyConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.mode, "denylist");
+        assert_eq!(config.allowlist, vec!["echo", "ls"]);
+        assert_eq!(config.denylist, vec!["rm -rf /"]);
+    }
+
+    #[test]
+    fn url_policy_config_defaults() {
+        let config: UrlPolicyConfig = serde_json::from_str("{}").unwrap();
+        assert!(config.enabled);
+        assert!(!config.allow_private);
+        assert!(config.allowed_domains.is_empty());
+        assert!(config.blocked_domains.is_empty());
+    }
+
+    #[test]
+    fn url_policy_config_custom() {
+        let json = r#"{"enabled": false, "allowPrivate": true, "allowedDomains": ["internal.corp"], "blockedDomains": ["evil.com"]}"#;
+        let config: UrlPolicyConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.enabled);
+        assert!(config.allow_private);
+        assert_eq!(config.allowed_domains, vec!["internal.corp"]);
+        assert_eq!(config.blocked_domains, vec!["evil.com"]);
+    }
+
+    #[test]
+    fn tools_config_includes_policies() {
+        let json = r#"{"commandPolicy": {"mode": "denylist"}, "urlPolicy": {"enabled": false}}"#;
+        let config: ToolsConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.command_policy.mode, "denylist");
+        assert!(!config.url_policy.enabled);
+    }
+
+    #[test]
+    fn tools_config_policies_default_when_absent() {
+        let config: ToolsConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.command_policy.mode, "allowlist");
+        assert!(config.url_policy.enabled);
     }
 }

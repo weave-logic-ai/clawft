@@ -182,12 +182,12 @@ fn convert_response(resp: serde_json::Value) -> clawft_types::Result<LlmResponse
     let mut content = Vec::new();
 
     // Extract text content
-    if let Some(text) = message.get("content").and_then(|v| v.as_str()) {
-        if !text.is_empty() {
-            content.push(ContentBlock::Text {
-                text: text.to_string(),
-            });
-        }
+    if let Some(text) = message.get("content").and_then(|v| v.as_str())
+        && !text.is_empty()
+    {
+        content.push(ContentBlock::Text {
+            text: text.to_string(),
+        });
     }
 
     // Extract tool calls

@@ -30,18 +30,27 @@ use clap::Args;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+#[cfg(feature = "channels")]
 use clawft_channels::discord::DiscordChannelFactory;
+#[cfg(feature = "channels")]
 use clawft_channels::slack::SlackChannelFactory;
+#[cfg(feature = "channels")]
 use clawft_channels::telegram::TelegramChannelFactory;
+#[cfg(feature = "channels")]
 use clawft_channels::PluginHost;
 use clawft_core::bootstrap::AppContext;
 use clawft_platform::NativePlatform;
+#[cfg(feature = "services")]
 use clawft_services::cron_service::CronService;
+#[cfg(feature = "services")]
 use clawft_services::heartbeat::HeartbeatService;
 
+#[cfg(feature = "channels")]
 use crate::markdown::dispatch::MarkdownDispatcher;
 
-use super::{expand_workspace, load_config, make_channel_host};
+use super::{expand_workspace, load_config};
+#[cfg(feature = "channels")]
+use super::make_channel_host;
 
 /// Arguments for the `weft gateway` subcommand.
 #[derive(Args)]
@@ -58,6 +67,7 @@ pub struct GatewayArgs {
 /// Resolve the cron JSONL storage path.
 ///
 /// Tries `~/.clawft/cron.jsonl`, falls back to `~/.nanobot/cron.jsonl`.
+#[cfg(feature = "services")]
 fn resolve_cron_storage_path() -> std::path::PathBuf {
     if let Some(home) = dirs::home_dir() {
         let clawft_path = home.join(".clawft").join("cron.jsonl");
@@ -79,6 +89,25 @@ fn resolve_cron_storage_path() -> std::path::PathBuf {
 /// enabled channels, starts them, then runs the agent loop and outbound
 /// dispatch loop until Ctrl+C triggers graceful shutdown.
 pub async fn run(args: GatewayArgs) -> anyhow::Result<()> {
+    // If the channels feature is disabled, bail early with a helpful message.
+    #[cfg(not(feature = "channels"))]
+    {
+        let _ = args;
+        anyhow::bail!(
+            "the gateway command requires the 'channels' feature. \
+             Rebuild with: cargo build -p clawft-cli --features channels"
+        );
+    }
+
+    #[cfg(feature = "channels")]
+    {
+        run_with_channels(args).await
+    }
+}
+
+/// Inner implementation when the `channels` feature is enabled.
+#[cfg(feature = "channels")]
+async fn run_with_channels(args: GatewayArgs) -> anyhow::Result<()> {
     info!("starting weft gateway");
 
     let platform = Arc::new(NativePlatform::new());
@@ -89,9 +118,19 @@ pub async fn run(args: GatewayArgs) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("failed to bootstrap app context: {e}"))?;
 
+    // Build security policies from config.
+    let command_policy = super::agent::build_command_policy(&config.tools.command_policy);
+    let url_policy = super::agent::build_url_policy(&config.tools.url_policy);
+
     // Register tools.
     let workspace = expand_workspace(&config.agents.defaults.workspace);
-    clawft_tools::register_all(ctx.tools_mut(), platform.clone(), workspace);
+    clawft_tools::register_all(
+        ctx.tools_mut(),
+        platform.clone(),
+        workspace,
+        command_policy,
+        url_policy,
+    );
 
     // Register MCP server tools.
     crate::mcp_tools::register_mcp_tools(&config, ctx.tools_mut()).await;
@@ -202,47 +241,61 @@ pub async fn run(args: GatewayArgs) -> anyhow::Result<()> {
 
     // ── Background services ──────────────────────────────────────────
 
-    // CronService
-    let inbound_tx = bus.inbound_sender();
-    let cron_storage = resolve_cron_storage_path();
-    let cron_handle = match CronService::new(cron_storage, inbound_tx.clone()).await {
-        Ok(cron_service) => {
-            let cron_cancel = cancel.clone();
-            let svc = std::sync::Arc::new(cron_service);
-            let svc_clone = svc.clone();
-            info!("cron service initialized");
+    #[cfg(feature = "services")]
+    let (cron_handle, heartbeat_handle) = {
+        // CronService
+        let inbound_tx = bus.inbound_sender();
+        let cron_storage = resolve_cron_storage_path();
+        let cron_handle = match CronService::new(cron_storage, inbound_tx.clone()).await {
+            Ok(cron_service) => {
+                let cron_cancel = cancel.clone();
+                let svc = std::sync::Arc::new(cron_service);
+                let svc_clone = svc.clone();
+                info!("cron service initialized");
+                Some(tokio::spawn(async move {
+                    if let Err(e) = svc_clone.start(cron_cancel).await {
+                        error!(error = %e, "cron service exited with error");
+                    }
+                }))
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to initialize cron service, skipping");
+                None
+            }
+        };
+
+        // HeartbeatService
+        let heartbeat_handle = if config.gateway.heartbeat_interval_minutes > 0 {
+            let svc = HeartbeatService::new(
+                config.gateway.heartbeat_interval_minutes,
+                config.gateway.heartbeat_prompt.clone(),
+                inbound_tx,
+            );
+            let hb_cancel = cancel.clone();
+            info!(
+                interval_minutes = config.gateway.heartbeat_interval_minutes,
+                "heartbeat service started"
+            );
             Some(tokio::spawn(async move {
-                if let Err(e) = svc_clone.start(cron_cancel).await {
-                    error!(error = %e, "cron service exited with error");
+                if let Err(e) = svc.start(hb_cancel).await {
+                    error!(error = %e, "heartbeat service exited with error");
                 }
             }))
-        }
-        Err(e) => {
-            warn!(error = %e, "failed to initialize cron service, skipping");
+        } else {
+            debug!("heartbeat service disabled (interval=0)");
             None
-        }
+        };
+
+        (cron_handle, heartbeat_handle)
     };
 
-    // HeartbeatService
-    let heartbeat_handle = if config.gateway.heartbeat_interval_minutes > 0 {
-        let svc = HeartbeatService::new(
-            config.gateway.heartbeat_interval_minutes,
-            config.gateway.heartbeat_prompt.clone(),
-            inbound_tx,
-        );
-        let hb_cancel = cancel.clone();
-        info!(
-            interval_minutes = config.gateway.heartbeat_interval_minutes,
-            "heartbeat service started"
-        );
-        Some(tokio::spawn(async move {
-            if let Err(e) = svc.start(hb_cancel).await {
-                error!(error = %e, "heartbeat service exited with error");
-            }
-        }))
-    } else {
-        debug!("heartbeat service disabled (interval=0)");
-        None
+    #[cfg(not(feature = "services"))]
+    let (cron_handle, heartbeat_handle): (
+        Option<tokio::task::JoinHandle<()>>,
+        Option<tokio::task::JoinHandle<()>>,
+    ) = {
+        debug!("services feature disabled, skipping cron and heartbeat");
+        (None, None)
     };
 
     // ── Agent loop (inbound processing) ─────────────────────────────
@@ -370,6 +423,7 @@ mod tests {
         assert_eq!(args.config.as_deref(), Some("/tmp/gw-config.json"));
     }
 
+    #[cfg(feature = "services")]
     #[test]
     fn resolve_cron_storage_path_returns_valid() {
         let path = resolve_cron_storage_path();

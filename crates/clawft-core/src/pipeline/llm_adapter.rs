@@ -245,10 +245,10 @@ fn apply_config_overrides(
     };
 
     // Override base URL if provided.
-    if let Some(ref base) = app_provider.api_base {
-        if !base.is_empty() {
-            llm_config.base_url = base.clone();
-        }
+    if let Some(ref base) = app_provider.api_base
+        && !base.is_empty()
+    {
+        llm_config.base_url = base.clone();
     }
 
     // Merge extra headers if provided.

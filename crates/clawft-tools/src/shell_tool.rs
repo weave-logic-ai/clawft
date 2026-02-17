@@ -11,61 +11,41 @@ use clawft_core::tools::registry::{Tool, ToolError};
 use serde_json::json;
 use tracing::{debug, warn};
 
+use crate::security_policy::CommandPolicy;
+
 /// Maximum allowed timeout in seconds.
 const MAX_TIMEOUT_SECS: u64 = 300;
 
 /// Default timeout in seconds when none is specified.
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
-/// Patterns that indicate dangerous commands. If any pattern is found
-/// (case-insensitive) in the command string, execution is rejected.
-const DANGEROUS_PATTERNS: &[&str] = &[
-    "rm -rf /",
-    "sudo ",
-    "mkfs",
-    "dd if=",
-    ":(){ :|:& };:",
-    "chmod 777 /",
-    "> /dev/sd",
-    "shutdown",
-    "reboot",
-    "poweroff",
-    "format c:",
-];
-
-/// Check whether a command string contains any dangerous patterns.
-fn is_dangerous(command: &str) -> Option<&'static str> {
-    let lower = command.to_lowercase();
-    DANGEROUS_PATTERNS
-        .iter()
-        .find(|pattern| lower.contains(*pattern))
-        .copied()
-}
-
 /// Execute shell commands with safety guardrails.
 ///
-/// Commands are run with the working directory set to the configured
-/// workspace. Dangerous commands are rejected before execution, and
-/// a configurable timeout prevents runaway processes.
+/// Commands are validated against a [`CommandPolicy`] before execution.
+/// In the default allowlist mode, only pre-approved commands can run.
+/// A configurable timeout prevents runaway processes.
 pub struct ShellExecTool {
     workspace: PathBuf,
     max_timeout: u64,
+    policy: CommandPolicy,
 }
 
 impl ShellExecTool {
-    /// Create a new `ShellExecTool` with the given workspace directory.
-    pub fn new(workspace: PathBuf) -> Self {
+    /// Create a new `ShellExecTool` with the given workspace directory and policy.
+    pub fn new(workspace: PathBuf, policy: CommandPolicy) -> Self {
         Self {
             workspace,
             max_timeout: MAX_TIMEOUT_SECS,
+            policy,
         }
     }
 
     /// Create a new `ShellExecTool` with a custom maximum timeout.
-    pub fn with_max_timeout(workspace: PathBuf, max_timeout: u64) -> Self {
+    pub fn with_max_timeout(workspace: PathBuf, max_timeout: u64, policy: CommandPolicy) -> Self {
         Self {
             workspace,
             max_timeout,
+            policy,
         }
     }
 }
@@ -109,13 +89,10 @@ impl Tool for ShellExecTool {
             .unwrap_or(DEFAULT_TIMEOUT_SECS)
             .min(self.max_timeout);
 
-        // Safety check: reject dangerous commands.
-        if let Some(pattern) = is_dangerous(command) {
-            warn!(command, pattern, "dangerous command rejected");
-            return Err(ToolError::PermissionDenied(format!(
-                "command blocked by safety guard (matched: {})",
-                pattern
-            )));
+        // Security policy check (allowlist/denylist + dangerous patterns).
+        if let Err(e) = self.policy.validate(command) {
+            warn!(command, error = %e, "command rejected by security policy");
+            return Err(ToolError::PermissionDenied(e.to_string()));
         }
 
         debug!(command, timeout_secs, "executing shell command");
@@ -194,6 +171,7 @@ impl Tool for ShellExecTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::security_policy::CommandPolicy;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -207,7 +185,7 @@ mod tests {
     async fn setup() -> (ShellExecTool, PathBuf) {
         let ws = temp_workspace();
         tokio::fs::create_dir_all(&ws).await.unwrap();
-        let tool = ShellExecTool::new(ws.clone());
+        let tool = ShellExecTool::new(ws.clone(), CommandPolicy::safe_defaults());
         (tool, ws)
     }
 
@@ -235,12 +213,13 @@ mod tests {
     async fn test_nonzero_exit_code() {
         let (tool, ws) = setup().await;
 
+        // `false` is on the default allowlist and returns exit code 1.
         let result = tool
-            .execute(json!({"command": "exit 42"}))
+            .execute(json!({"command": "false"}))
             .await
             .unwrap();
 
-        assert_eq!(result["exit_code"], 42);
+        assert_eq!(result["exit_code"], 1);
 
         cleanup(&ws).await;
     }
@@ -264,7 +243,10 @@ mod tests {
     async fn test_timeout() {
         let ws = temp_workspace();
         tokio::fs::create_dir_all(&ws).await.unwrap();
-        let tool = ShellExecTool::with_max_timeout(ws.clone(), 5);
+        // Use denylist mode so `sleep` is allowed (it's not on the denylist patterns).
+        let mut policy = CommandPolicy::safe_defaults();
+        policy.mode = crate::security_policy::PolicyMode::Denylist;
+        let tool = ShellExecTool::with_max_timeout(ws.clone(), 5, policy);
 
         let err = tool
             .execute(json!({"command": "sleep 60", "timeout": 1}))
@@ -281,7 +263,9 @@ mod tests {
         let ws = temp_workspace();
         tokio::fs::create_dir_all(&ws).await.unwrap();
         // max_timeout = 2, requested timeout = 100 -> clamped to 2
-        let tool = ShellExecTool::with_max_timeout(ws.clone(), 2);
+        let mut policy = CommandPolicy::safe_defaults();
+        policy.mode = crate::security_policy::PolicyMode::Denylist;
+        let tool = ShellExecTool::with_max_timeout(ws.clone(), 2, policy);
 
         let err = tool
             .execute(json!({"command": "sleep 60", "timeout": 100}))
@@ -303,7 +287,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::PermissionDenied(_)));
-        assert!(err.to_string().contains("safety guard"));
 
         cleanup(&ws).await;
     }
@@ -416,21 +399,17 @@ mod tests {
         cleanup(&ws).await;
     }
 
-    #[test]
-    fn test_is_dangerous_none_for_safe() {
-        assert!(is_dangerous("ls -la").is_none());
-        assert!(is_dangerous("echo hello").is_none());
-        assert!(is_dangerous("cat file.txt").is_none());
-        assert!(is_dangerous("rm specific_file.txt").is_none());
-    }
+    #[tokio::test]
+    async fn test_policy_rejects_unlisted_command() {
+        let (tool, ws) = setup().await;
 
-    #[test]
-    fn test_is_dangerous_detects_patterns() {
-        assert!(is_dangerous("rm -rf /").is_some());
-        assert!(is_dangerous("sudo something").is_some());
-        assert!(is_dangerous("SUDO something").is_some()); // case insensitive
-        assert!(is_dangerous("mkfs.ext4 /dev/sda").is_some());
-        assert!(is_dangerous("dd if=/dev/zero").is_some());
-        assert!(is_dangerous(":(){ :|:& };:").is_some());
+        // curl is not on the default allowlist
+        let err = tool
+            .execute(json!({"command": "curl http://example.com"}))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::PermissionDenied(_)));
+
+        cleanup(&ws).await;
     }
 }

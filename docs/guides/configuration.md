@@ -391,6 +391,83 @@ Provider API keys can be set either in the config file (`providers.<name>.api_ke
 or as environment variables. Environment variables are generally preferred to
 avoid storing secrets in files.
 
+## Security Policy
+
+clawft includes configurable security policies for command execution and URL
+access. These policies protect against prompt injection attacks where malicious
+instructions in user content could trick the agent into executing dangerous
+operations.
+
+### Command Execution Policy
+
+The `tools.commandPolicy` section controls which commands the `exec_shell` and
+`spawn` tools can execute.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `mode` | string | `"allowlist"` | `"allowlist"` or `"denylist"` |
+| `allowlist` | string[] | `[]` | Permitted commands (overrides defaults) |
+| `denylist` | string[] | `[]` | Blocked patterns (overrides defaults) |
+
+**Default allowlist** (used when `allowlist` is empty):
+`echo`, `cat`, `ls`, `pwd`, `head`, `tail`, `wc`, `grep`, `find`, `sort`,
+`uniq`, `diff`, `date`, `env`, `true`, `false`, `test`
+
+Example -- expand the allowlist:
+```json
+{
+  "tools": {
+    "commandPolicy": {
+      "mode": "allowlist",
+      "allowlist": ["echo", "cat", "ls", "pwd", "python3", "node", "cargo"]
+    }
+  }
+}
+```
+
+Example -- use denylist mode (less secure, more permissive):
+```json
+{
+  "tools": {
+    "commandPolicy": {
+      "mode": "denylist",
+      "denylist": ["rm -rf /", "sudo ", "mkfs", "dd if="]
+    }
+  }
+}
+```
+
+### URL Safety Policy (SSRF Protection)
+
+The `tools.urlPolicy` section controls which URLs the `web_fetch` tool can
+access. By default, requests to private networks, loopback addresses, and
+cloud metadata endpoints are blocked.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Enable URL safety validation |
+| `allowPrivate` | bool | `false` | Allow private/internal IPs |
+| `allowedDomains` | string[] | `[]` | Domains that bypass checks |
+| `blockedDomains` | string[] | `[]` | Additional blocked domains |
+
+Blocked by default:
+- Private networks: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`
+- Loopback: `127.0.0.0/8`, `::1`
+- Link-local: `169.254.0.0/16`, `fe80::/10`
+- Cloud metadata: `169.254.169.254`, `metadata.google.internal`
+
+Example -- allow specific internal services:
+```json
+{
+  "tools": {
+    "urlPolicy": {
+      "enabled": true,
+      "allowedDomains": ["api.internal.corp", "vault.internal.corp"]
+    }
+  }
+}
+```
+
 ## Feature Flags
 
 Compile-time feature flags enable optional capabilities that are not included

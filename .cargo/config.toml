@@ -1,5 +1,5 @@
-[target.wasm32-wasip2]
+[target.wasm32-wasip1]
 rustflags = ["-C", "opt-level=z"]
 
 [alias]
-wasm = "build --target wasm32-wasip2 --profile release-wasm"
+wasm = "build --target wasm32-wasip1 --profile release-wasm"

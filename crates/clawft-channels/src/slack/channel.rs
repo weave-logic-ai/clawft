@@ -292,16 +292,15 @@ impl Channel for SlackChannel {
                                             envelope_id: envelope.envelope_id.clone(),
                                             payload: None,
                                         };
-                                        if let Ok(ack_json) = serde_json::to_string(&ack) {
-                                            if let Err(e) = ws_write
+                                        if let Ok(ack_json) = serde_json::to_string(&ack)
+                                            && let Err(e) = ws_write
                                                 .send(WsMessage::Text(ack_json))
                                                 .await
-                                            {
-                                                warn!(
-                                                    error = %e,
-                                                    "failed to send acknowledge"
-                                                );
-                                            }
+                                        {
+                                            warn!(
+                                                error = %e,
+                                                "failed to send acknowledge"
+                                            );
                                         }
 
                                         // Process the event.

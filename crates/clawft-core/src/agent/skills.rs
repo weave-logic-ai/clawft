@@ -152,10 +152,10 @@ impl<P: Platform> SkillsLoader<P> {
         let mut names = Vec::new();
         for entry in entries {
             let skill_json = entry.join("skill.json");
-            if self.platform.fs().exists(&skill_json).await {
-                if let Some(name) = entry.file_name() {
-                    names.push(name.to_string_lossy().into_owned());
-                }
+            if self.platform.fs().exists(&skill_json).await
+                && let Some(name) = entry.file_name()
+            {
+                names.push(name.to_string_lossy().into_owned());
             }
         }
 

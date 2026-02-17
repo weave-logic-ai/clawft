@@ -81,9 +81,19 @@ pub async fn run(args: AgentArgs) -> anyhow::Result<()> {
     let mut ctx = AppContext::new(config.clone(), platform.clone()).await
         .map_err(|e| anyhow::anyhow!("bootstrap failed: {e}"))?;
 
+    // Build security policies from config.
+    let command_policy = build_command_policy(&config.tools.command_policy);
+    let url_policy = build_url_policy(&config.tools.url_policy);
+
     // Register tools.
     let workspace = expand_workspace(&config.agents.defaults.workspace);
-    clawft_tools::register_all(ctx.tools_mut(), platform.clone(), workspace);
+    clawft_tools::register_all(
+        ctx.tools_mut(),
+        platform.clone(),
+        workspace,
+        command_policy,
+        url_policy,
+    );
 
     // Register MCP server tools.
     crate::mcp_tools::register_mcp_tools(&config, ctx.tools_mut()).await;
@@ -286,6 +296,37 @@ async fn run_interactive(
 
     println!("Goodbye.");
     Ok(())
+}
+
+/// Build a [`CommandPolicy`] from the configuration.
+pub(crate) fn build_command_policy(config: &clawft_types::config::CommandPolicyConfig) -> clawft_tools::security_policy::CommandPolicy {
+    use clawft_tools::security_policy::{CommandPolicy, PolicyMode};
+
+    let mut policy = CommandPolicy::safe_defaults();
+
+    if config.mode == "denylist" {
+        policy.mode = PolicyMode::Denylist;
+    }
+    if !config.allowlist.is_empty() {
+        policy.allowlist = config.allowlist.iter().cloned().collect();
+    }
+    if !config.denylist.is_empty() {
+        policy.denylist = config.denylist.clone();
+    }
+
+    policy
+}
+
+/// Build a [`UrlPolicy`] from the configuration.
+pub(crate) fn build_url_policy(config: &clawft_types::config::UrlPolicyConfig) -> clawft_tools::url_safety::UrlPolicy {
+    use clawft_tools::url_safety::UrlPolicy;
+
+    UrlPolicy::new(
+        config.enabled,
+        config.allow_private,
+        config.allowed_domains.iter().cloned().collect(),
+        config.blocked_domains.iter().cloned().collect(),
+    )
 }
 
 /// Print the interactive help text.

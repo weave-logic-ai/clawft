@@ -4,7 +4,19 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "WASM entrypoint for clawft"
+keywords = ["wasm", "wasi", "ai", "agent", "edge"]
+categories = ["wasm"]
+
+[features]
+default = []
 
 [dependencies]
 clawft-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+dlmalloc = { version = "0.2", features = ["global"] }

@@ -1,0 +1,107 @@
+name: Benchmarks
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  benchmark:
+    name: Run benchmarks & regression check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Install benchmark dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq bc
+
+      - name: Run benchmarks
+        run: |
+          chmod +x scripts/bench/*.sh
+          bash scripts/bench/run-all.sh target/release/weft
+
+      - name: Save benchmark results
+        run: |
+          bash scripts/bench/save-results.sh target/release/weft bench-results.json
+
+      - name: Check for regressions
+        id: regression
+        continue-on-error: true
+        run: |
+          bash scripts/bench/regression-check.sh \
+            bench-results.json \
+            scripts/bench/baseline.json \
+            10
+
+      - name: Comment on PR if regression detected
+        if: steps.regression.outcome == 'failure' && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let results = '{}';
+            try {
+              results = fs.readFileSync('bench-results.json', 'utf8');
+            } catch (e) {
+              results = 'Could not read results file.';
+            }
+
+            let baseline = '{}';
+            try {
+              baseline = fs.readFileSync('scripts/bench/baseline.json', 'utf8');
+            } catch (e) {
+              baseline = 'Could not read baseline file.';
+            }
+
+            const body = [
+              '## Benchmark Regression Detected',
+              '',
+              'One or more benchmark metrics have regressed beyond the 10% threshold.',
+              '',
+              '### Current Results',
+              '```json',
+              results,
+              '```',
+              '',
+              '### Baseline',
+              '```json',
+              baseline,
+              '```',
+              '',
+              'Please investigate the performance regression before merging.',
+              'If the change is intentional, update `scripts/bench/baseline.json` with the new values.',
+            ].join('\n');
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body,
+            });
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: bench-results.json
+          retention-days: 30

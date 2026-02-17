@@ -4,10 +4,15 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "Core engine for clawft (agent loop, message bus, context management)"
+keywords = ["ai", "agent", "pipeline", "tools", "llm"]
+categories = ["development-tools"]
 
 [features]
-default = []
+default = ["full"]
+full = []
 vector-memory = ["dep:rand"]
 
 [dependencies]

@@ -58,10 +58,10 @@ pub async fn load_config<P: Platform>(
 
 /// Expand `~/` prefixes in workspace paths to the user's home directory.
 pub fn expand_workspace(raw: &str) -> PathBuf {
-    if let Some(rest) = raw.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest);
-        }
+    if let Some(rest) = raw.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
     }
     PathBuf::from(raw)
 }
@@ -77,6 +77,7 @@ pub fn discover_config_path<P: Platform>(platform: &P) -> Option<PathBuf> {
 ///
 /// This is the glue between `clawft-channels::PluginHost` (which expects
 /// an `Arc<dyn ChannelHost>`) and `clawft-core::bus::MessageBus`.
+#[cfg(feature = "channels")]
 pub fn make_channel_host(
     bus: Arc<clawft_core::bus::MessageBus>,
 ) -> Arc<dyn clawft_channels::ChannelHost> {
@@ -87,10 +88,12 @@ pub fn make_channel_host(
 ///
 /// Routes inbound messages from channel plugins into the message bus
 /// for consumption by the agent loop.
+#[cfg(feature = "channels")]
 struct BusChannelHost {
     bus: Arc<clawft_core::bus::MessageBus>,
 }
 
+#[cfg(feature = "channels")]
 #[async_trait::async_trait]
 impl clawft_channels::ChannelHost for BusChannelHost {
     async fn deliver_inbound(

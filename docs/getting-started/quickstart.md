@@ -5,14 +5,14 @@ configuration file, and running your first agent session.
 
 ## Prerequisites
 
-- **Rust 1.85+** (edition 2024). Install via [rustup](https://rustup.rs/):
+- **Rust 1.93+** (edition 2024). Install via [rustup](https://rustup.rs/):
 
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   rustup update
   ```
 
-  Verify with `rustc --version` -- you need at least `1.85.0`.
+  Verify with `rustc --version` -- you need at least `1.93.0`.
 
 - **Cargo** (ships with Rust).
 

@@ -601,7 +601,7 @@ The same fallback pattern applies to workspace directories:
 ## Build Configuration
 
 - Rust edition: 2024
-- Minimum Rust version: 1.85
+- Minimum Rust version: 1.93
 - License: MIT OR Apache-2.0
 - Release profile: `opt-level = "z"`, LTO, stripped symbols, single codegen unit, abort on panic
 - WASM release profile: inherits release with `opt-level = "z"`

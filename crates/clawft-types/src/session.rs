@@ -71,11 +71,11 @@ impl Session {
             "timestamp": Utc::now().to_rfc3339(),
         });
 
-        if let Some(extras) = extras {
-            if let Some(obj) = msg.as_object_mut() {
-                for (k, v) in extras {
-                    obj.insert(k, v);
-                }
+        if let Some(extras) = extras
+            && let Some(obj) = msg.as_object_mut()
+        {
+            for (k, v) in extras {
+                obj.insert(k, v);
             }
         }
 

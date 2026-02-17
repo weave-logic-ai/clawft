@@ -4,7 +4,11 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "LLM provider abstraction for clawft (OpenAI-compatible + native providers)"
+keywords = ["llm", "openai", "anthropic", "ai", "provider"]
+categories = ["development-tools::testing"]
 
 [dependencies]
 async-trait = { workspace = true }

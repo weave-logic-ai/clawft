@@ -168,10 +168,10 @@ impl PluginHost {
         info!(channel = %name, "stopping channel");
         token.cancel();
 
-        if let Some(handle) = self.task_handles.write().await.remove(name) {
-            if let Err(e) = handle.await {
-                warn!(channel = %name, error = %e, "channel task panicked");
-            }
+        if let Some(handle) = self.task_handles.write().await.remove(name)
+            && let Err(e) = handle.await
+        {
+            warn!(channel = %name, error = %e, "channel task panicked");
         }
 
         Ok(())

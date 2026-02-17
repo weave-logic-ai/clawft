@@ -230,6 +230,12 @@ Each entry contains:
 Execute a shell command and capture its output. Commands run via `sh -c` with
 the working directory set to the workspace.
 
+> **Security**: Commands are validated against a configurable security policy.
+> In the default allowlist mode, only pre-approved commands can execute.
+> Dangerous patterns are always blocked regardless of mode.
+> See the [Security Reference](security.md) for the full command policy,
+> allowlist defaults, and configuration options.
+
 **Parameters**
 
 | Name      | Type   | Required | Description                                  |
@@ -435,6 +441,12 @@ rather than an error.
 Fetch content from a URL. Returns the response status, content type, and body
 as text.
 
+> **Security**: URLs are validated against SSRF protection rules. Requests
+> to private networks, loopback addresses, and cloud metadata endpoints
+> are blocked by default.
+> See the [Security Reference](security.md#url-safety--ssrf-protection)
+> for blocked IP ranges, domain lists, and configuration options.
+
 **Parameters**
 
 | Name      | Type   | Required | Description                                    |
@@ -531,6 +543,11 @@ Enables cross-channel communication, notifications, and broadcasting.
 
 Spawn a subprocess to run a command. Processes execute in the workspace
 directory with a concurrency limit.
+
+> **Security**: The spawn tool shares the same command security policy as
+> `exec_shell`. Commands must be on the allowlist to execute.
+> See the [Security Reference](security.md) for the full command policy,
+> dangerous patterns, and configuration options.
 
 **Parameters**
 
@@ -664,11 +681,13 @@ enforce workspace path containment:
 For write operations on paths that do not yet exist, the deepest existing
 ancestor is canonicalized and checked instead.
 
-### Shell Command Denylist
+### Shell Command Policy
 
-The `exec_shell` tool rejects commands matching a set of dangerous patterns
-before execution. Pattern matching is case-insensitive and checks for substring
-containment. Blocked commands receive a `PermissionDenied` error.
+The `exec_shell` and `spawn` tools validate commands against a configurable
+`CommandPolicy` (allowlist or denylist mode) and an always-on dangerous pattern
+check. Blocked commands receive a `PermissionDenied` error. See the
+[Security Reference](security.md#command-execution-policy) for the full policy
+details, default allowlist, dangerous patterns, and configuration options.
 
 ### Output Truncation
 

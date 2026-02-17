@@ -124,13 +124,13 @@ impl DiscordChannel {
                 serde_json::Value::String(guild_id.clone()),
             );
         }
-        if let Some(ref reference) = msg.message_reference {
-            if let Some(ref ref_id) = reference.message_id {
-                metadata.insert(
-                    "reply_to_message_id".into(),
-                    serde_json::Value::String(ref_id.clone()),
-                );
-            }
+        if let Some(ref reference) = msg.message_reference
+            && let Some(ref ref_id) = reference.message_id
+        {
+            metadata.insert(
+                "reply_to_message_id".into(),
+                serde_json::Value::String(ref_id.clone()),
+            );
         }
 
         let inbound = InboundMessage {
@@ -221,14 +221,12 @@ impl Channel for DiscordChannel {
                     msg = ws_read.next() => {
                         match msg {
                             Some(Ok(WsMessage::Text(text))) => {
-                                if let Ok(payload) = serde_json::from_str::<GatewayPayload>(&text) {
-                                    if payload.op == OP_HELLO {
-                                        if let Some(d) = payload.d {
-                                            if let Ok(hello) = serde_json::from_value::<HelloData>(d) {
-                                                break hello.heartbeat_interval;
-                                            }
-                                        }
-                                    }
+                                if let Ok(payload) = serde_json::from_str::<GatewayPayload>(&text)
+                                    && payload.op == OP_HELLO
+                                    && let Some(d) = payload.d
+                                    && let Ok(hello) = serde_json::from_value::<HelloData>(d)
+                                {
+                                    break hello.heartbeat_interval;
                                 }
                             }
                             Some(Err(e)) => {
@@ -263,17 +261,17 @@ impl Channel for DiscordChannel {
                 t: None,
             };
 
-            if let Ok(json) = serde_json::to_string(&identify) {
-                if let Err(e) = ws_write.send(WsMessage::Text(json)).await {
-                    error!(error = %e, "failed to send Identify");
-                    self.set_status(ChannelStatus::Error(e.to_string())).await;
+            if let Ok(json) = serde_json::to_string(&identify)
+                && let Err(e) = ws_write.send(WsMessage::Text(json)).await
+            {
+                error!(error = %e, "failed to send Identify");
+                self.set_status(ChannelStatus::Error(e.to_string())).await;
 
-                    tokio::select! {
-                        _ = cancel.cancelled() => break,
-                        _ = tokio::time::sleep(
-                            std::time::Duration::from_secs(RECONNECT_DELAY_SECS)
-                        ) => continue,
-                    }
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = tokio::time::sleep(
+                        std::time::Duration::from_secs(RECONNECT_DELAY_SECS)
+                    ) => continue,
                 }
             }
 
@@ -327,16 +325,16 @@ impl Channel for DiscordChannel {
                                                 if let Some(ref event_name) = payload.t {
                                                     match event_name.as_str() {
                                                         "READY" => {
-                                                            if let Some(ref d) = payload.d {
-                                                                if let Ok(ready) = serde_json::from_value::<ReadyEvent>(d.clone()) {
-                                                                    info!(
-                                                                        bot_id = %ready.user.id,
-                                                                        bot_name = %ready.user.username,
-                                                                        "Discord bot authenticated"
-                                                                    );
-                                                                    *self.session_id.write().await = Some(ready.session_id);
-                                                                    *self.resume_url.write().await = ready.resume_gateway_url;
-                                                                }
+                                                            if let Some(ref d) = payload.d
+                                                                && let Ok(ready) = serde_json::from_value::<ReadyEvent>(d.clone())
+                                                            {
+                                                                info!(
+                                                                    bot_id = %ready.user.id,
+                                                                    bot_name = %ready.user.username,
+                                                                    "Discord bot authenticated"
+                                                                );
+                                                                *self.session_id.write().await = Some(ready.session_id);
+                                                                *self.resume_url.write().await = ready.resume_gateway_url;
                                                             }
                                                         }
                                                         "MESSAGE_CREATE" => {

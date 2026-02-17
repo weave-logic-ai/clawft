@@ -291,7 +291,7 @@ Outbound message (markdown -> channel-native format)
 
 ### Prerequisites
 
-- Rust 1.85 or later (edition 2024)
+- Rust 1.93 or later (edition 2024)
 - Cargo
 
 ### Build

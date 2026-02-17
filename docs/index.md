@@ -19,6 +19,12 @@ agent, a multi-channel gateway, and management commands.
 - [Tool Calls](guides/tool-calls.md) -- Tool execution lifecycle, MCP integration
 - [RVF Integration](guides/rvf.md) -- Vector memory, RVF format, planned features
 
+## Deployment
+
+- [Docker](deployment/docker.md) -- Docker image, Compose, health checks, security
+- [WASM](deployment/wasm.md) -- WebAssembly build, Wasmtime/WAMR, platform limitations
+- [Releases](deployment/release.md) -- Version numbering, downloading binaries, building from source
+
 ## Architecture
 
 - [Architecture Overview](architecture/overview.md) -- Crate structure, pipeline, message flow

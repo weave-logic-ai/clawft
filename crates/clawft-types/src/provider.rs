@@ -392,29 +392,26 @@ pub fn find_gateway(
     api_base: Option<&str>,
 ) -> Option<&'static ProviderSpec> {
     // 1. Direct match by config key
-    if let Some(name) = provider_name {
-        if let Some(spec) = find_by_name(name) {
-            if spec.is_gateway || spec.is_local {
-                return Some(spec);
-            }
-        }
+    if let Some(name) = provider_name
+        && let Some(spec) = find_by_name(name)
+        && (spec.is_gateway || spec.is_local)
+    {
+        return Some(spec);
     }
 
     // 2. Auto-detect by api_key prefix / api_base keyword
     for spec in PROVIDERS {
-        if !spec.detect_by_key_prefix.is_empty() {
-            if let Some(key) = api_key {
-                if key.starts_with(spec.detect_by_key_prefix) {
-                    return Some(spec);
-                }
-            }
+        if !spec.detect_by_key_prefix.is_empty()
+            && let Some(key) = api_key
+            && key.starts_with(spec.detect_by_key_prefix)
+        {
+            return Some(spec);
         }
-        if !spec.detect_by_base_keyword.is_empty() {
-            if let Some(base) = api_base {
-                if base.contains(spec.detect_by_base_keyword) {
-                    return Some(spec);
-                }
-            }
+        if !spec.detect_by_base_keyword.is_empty()
+            && let Some(base) = api_base
+            && base.contains(spec.detect_by_base_keyword)
+        {
+            return Some(spec);
         }
     }
 

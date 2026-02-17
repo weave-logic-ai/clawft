@@ -71,9 +71,7 @@ impl MarkdownConverter for TelegramMarkdownConverter {
             }
         }
 
-        // Trim trailing whitespace.
-        let trimmed = output.trim_end().to_owned();
-        trimmed
+        output.trim_end().to_owned()
     }
 }
 

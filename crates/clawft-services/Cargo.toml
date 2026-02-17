@@ -4,7 +4,11 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "Services for clawft (cron, heartbeat, MCP)"
+keywords = ["cron", "heartbeat", "scheduling", "service"]
+categories = ["asynchronous"]
 
 [dependencies]
 clawft-types = { workspace = true }

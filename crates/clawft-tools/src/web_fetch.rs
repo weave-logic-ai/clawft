@@ -9,7 +9,9 @@ use async_trait::async_trait;
 use clawft_core::tools::registry::{Tool, ToolError};
 use clawft_platform::Platform;
 use serde_json::json;
-use tracing::debug;
+use tracing::{debug, warn};
+
+use crate::url_safety::{UrlPolicy, validate_url};
 
 /// Maximum response body size in bytes (1 MB).
 const MAX_RESPONSE_BYTES: usize = 1_048_576;
@@ -17,14 +19,16 @@ const MAX_RESPONSE_BYTES: usize = 1_048_576;
 /// Web fetch tool.
 ///
 /// Fetches content from a given URL and returns it as text. Enforces
-/// a maximum response size to prevent memory exhaustion.
+/// SSRF protection via [`UrlPolicy`] and a maximum response size to
+/// prevent memory exhaustion.
 pub struct WebFetchTool<P: Platform> {
     platform: Arc<P>,
+    url_policy: UrlPolicy,
 }
 
 impl<P: Platform> WebFetchTool<P> {
-    pub fn new(platform: Arc<P>) -> Self {
-        Self { platform }
+    pub fn new(platform: Arc<P>, url_policy: UrlPolicy) -> Self {
+        Self { platform, url_policy }
     }
 }
 
@@ -69,6 +73,12 @@ impl<P: Platform + 'static> Tool for WebFetchTool<P> {
             return Err(ToolError::InvalidArgs(
                 "url must start with http:// or https://".into(),
             ));
+        }
+
+        // SSRF protection: validate URL against policy.
+        if let Err(e) = validate_url(url, &self.url_policy) {
+            warn!(url, error = %e, "URL rejected by safety policy");
+            return Err(ToolError::PermissionDenied(e.to_string()));
         }
 
         let method = args.get("method")
@@ -124,7 +134,7 @@ mod tests {
     use clawft_platform::NativePlatform;
 
     fn make_tool() -> WebFetchTool<NativePlatform> {
-        WebFetchTool::new(Arc::new(NativePlatform::new()))
+        WebFetchTool::new(Arc::new(NativePlatform::new()), UrlPolicy::default())
     }
 
     #[test]

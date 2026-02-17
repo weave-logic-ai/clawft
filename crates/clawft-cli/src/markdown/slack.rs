@@ -79,8 +79,7 @@ impl MarkdownConverter for SlackMarkdownConverter {
             }
         }
 
-        let trimmed = output.trim_end().to_owned();
-        trimmed
+        output.trim_end().to_owned()
     }
 }
 
