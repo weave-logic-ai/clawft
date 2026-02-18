@@ -60,6 +60,7 @@ impl ModelRouter for StaticRouter {
             provider: self.default_provider.clone(),
             model: self.default_model.clone(),
             reason: "static routing (Level 0)".into(),
+            ..Default::default()
         }
     }
 
@@ -99,6 +100,7 @@ mod tests {
             model: None,
             max_tokens: None,
             temperature: None,
+            auth_context: None,
         }
     }
 
@@ -133,6 +135,7 @@ mod tests {
             model: Some("different-model".into()),
             max_tokens: Some(9999),
             temperature: Some(0.0),
+            auth_context: None,
         };
         let profile = TaskProfile {
             task_type: TaskType::CodeGeneration,
@@ -209,6 +212,7 @@ mod tests {
             provider: "test".into(),
             model: "test".into(),
             reason: "test".into(),
+            ..Default::default()
         };
         let outcome = ResponseOutcome {
             success: true,

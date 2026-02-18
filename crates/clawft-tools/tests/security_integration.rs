@@ -81,7 +81,7 @@ async fn shell_allowlist_rejects_unlisted_command() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, ToolError::PermissionDenied(_)),
+        matches!(err, ToolError::PermissionDenied { .. }),
         "curl should be rejected in allowlist mode: {err:?}"
     );
 
@@ -119,7 +119,7 @@ async fn shell_denylist_rejects_denylisted_command() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, ToolError::PermissionDenied(_)),
+        matches!(err, ToolError::PermissionDenied { .. }),
         "rm -rf / should be rejected: {err:?}"
     );
 
@@ -138,7 +138,7 @@ async fn shell_dangerous_pattern_blocked_in_allowlist_mode() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, ToolError::PermissionDenied(_)),
+        matches!(err, ToolError::PermissionDenied { .. }),
         "dangerous pattern should be caught: {err:?}"
     );
 
@@ -157,7 +157,7 @@ async fn shell_dangerous_pattern_blocked_in_denylist_mode() {
         .execute(json!({"command": "dd if=/dev/zero of=/dev/sda"}))
         .await
         .unwrap_err();
-    assert!(matches!(err, ToolError::PermissionDenied(_)));
+    assert!(matches!(err, ToolError::PermissionDenied { .. }));
 
     cleanup(&ws).await;
 }
@@ -180,7 +180,7 @@ async fn shell_custom_allowlist() {
         .execute(json!({"command": "echo hi"}))
         .await
         .unwrap_err();
-    assert!(matches!(err, ToolError::PermissionDenied(_)));
+    assert!(matches!(err, ToolError::PermissionDenied { .. }));
 
     cleanup(&ws).await;
 }
@@ -197,7 +197,7 @@ async fn shell_empty_allowlist_blocks_everything() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, ToolError::PermissionDenied(_)),
+        matches!(err, ToolError::PermissionDenied { .. }),
         "empty allowlist should block echo: {err:?}"
     );
 
@@ -205,7 +205,7 @@ async fn shell_empty_allowlist_blocks_everything() {
         .execute(json!({"command": "ls -la"}))
         .await
         .unwrap_err();
-    assert!(matches!(err, ToolError::PermissionDenied(_)));
+    assert!(matches!(err, ToolError::PermissionDenied { .. }));
 
     cleanup(&ws).await;
 }
@@ -221,7 +221,7 @@ async fn shell_piped_command_dangerous_pattern() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, ToolError::PermissionDenied(_)),
+        matches!(err, ToolError::PermissionDenied { .. }),
         "piped dangerous pattern should be caught: {err:?}"
     );
 
@@ -267,7 +267,7 @@ async fn shell_env_var_injection_attempt() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, ToolError::PermissionDenied(_)),
+        matches!(err, ToolError::PermissionDenied { .. }),
         "env var injection with dangerous pattern should be caught: {err:?}"
     );
 
@@ -321,7 +321,7 @@ async fn spawn_unlisted_command_rejected() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, ToolError::PermissionDenied(_)),
+        matches!(err, ToolError::PermissionDenied { .. }),
         "python3 should be rejected in allowlist mode: {err:?}"
     );
 
@@ -338,7 +338,7 @@ async fn spawn_dangerous_sudo_rejected() {
         .execute(json!({"command": "sudo apt install evil"}))
         .await
         .unwrap_err();
-    assert!(matches!(err, ToolError::PermissionDenied(_)));
+    assert!(matches!(err, ToolError::PermissionDenied { .. }));
     assert!(
         err.to_string().contains("dangerous") || err.to_string().contains("sudo"),
         "error should mention dangerous pattern or sudo: {err}"
@@ -357,7 +357,7 @@ async fn spawn_dangerous_mkfs_rejected() {
         .execute(json!({"command": "mkfs.ext4", "args": ["/dev/sda1"]}))
         .await
         .unwrap_err();
-    assert!(matches!(err, ToolError::PermissionDenied(_)));
+    assert!(matches!(err, ToolError::PermissionDenied { .. }));
 
     cleanup(&ws).await;
 }
@@ -393,7 +393,7 @@ async fn spawn_path_traversal_rejected() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, ToolError::PermissionDenied(_)),
+        matches!(err, ToolError::PermissionDenied { .. }),
         "path traversal should be rejected: {err:?}"
     );
 
@@ -541,8 +541,8 @@ async fn cross_tool_same_policy_same_rejection() {
         .unwrap_err();
     let spawn_err = spawn.execute(json!({"command": "curl"})).await.unwrap_err();
 
-    assert!(matches!(shell_err, ToolError::PermissionDenied(_)));
-    assert!(matches!(spawn_err, ToolError::PermissionDenied(_)));
+    assert!(matches!(shell_err, ToolError::PermissionDenied { .. }));
+    assert!(matches!(spawn_err, ToolError::PermissionDenied { .. }));
 
     // Both should reject dangerous "sudo "
     let shell_err = shell
@@ -554,8 +554,8 @@ async fn cross_tool_same_policy_same_rejection() {
         .await
         .unwrap_err();
 
-    assert!(matches!(shell_err, ToolError::PermissionDenied(_)));
-    assert!(matches!(spawn_err, ToolError::PermissionDenied(_)));
+    assert!(matches!(shell_err, ToolError::PermissionDenied { .. }));
+    assert!(matches!(spawn_err, ToolError::PermissionDenied { .. }));
 
     cleanup(&ws).await;
 }
@@ -606,7 +606,7 @@ async fn cross_tool_mode_switch_changes_behavior() {
         .execute(json!({"command": "curl --version"}))
         .await
         .unwrap_err();
-    assert!(matches!(err, ToolError::PermissionDenied(_)));
+    assert!(matches!(err, ToolError::PermissionDenied { .. }));
 
     // In denylist mode: curl is allowed (not in denylist patterns)
     let mut denylist_policy = CommandPolicy::safe_defaults();
@@ -644,8 +644,8 @@ async fn cross_tool_dangerous_always_blocked() {
         .await
         .unwrap_err();
 
-    assert!(matches!(shell_err, ToolError::PermissionDenied(_)));
-    assert!(matches!(spawn_err, ToolError::PermissionDenied(_)));
+    assert!(matches!(shell_err, ToolError::PermissionDenied { .. }));
+    assert!(matches!(spawn_err, ToolError::PermissionDenied { .. }));
 
     cleanup(&ws).await;
 }

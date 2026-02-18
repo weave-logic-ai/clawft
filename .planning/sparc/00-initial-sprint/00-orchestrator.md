@@ -522,7 +522,7 @@ Before spawning any agents:
 
 ```bash
 # 1. Verify repository state
-cd /home/aepod/dev/barni/repos/nanobot
+cd /home/aepod/dev/clawft
 git status  # Ensure clean working tree
 git checkout main
 git pull origin main
@@ -534,7 +534,7 @@ git checkout -b weft/phase-3
 
 # 3. Initialize coordination
 npx @claude-flow/cli@latest swarm init --topology hierarchical-mesh --max-agents 15
-npx @claude-flow/cli@latest memory store --key "project-root" --value "/home/aepod/dev/barni/repos/nanobot"
+npx @claude-flow/cli@latest memory store --key "project-root" --value "/home/aepod/dev/clawft"
 
 # 4. Verify all SPARC plans exist
 ls -lh .planning/sparc/*.md
@@ -550,7 +550,7 @@ Task(
   "foundation-architect",
   `You are the Foundation Architect for the clawft Rust rewrite.
 
-YOUR PLAN: /home/aepod/dev/barni/repos/nanobot/.planning/sparc/1a-types-platform-plugin-api.md
+YOUR PLAN: /home/aepod/dev/clawft/.planning/sparc/1a-types-platform-plugin-api.md
 
 YOUR BRANCH: weft/types
 
@@ -599,7 +599,7 @@ TodoWrite({
     "core-engineer",
     `You are the Core Engine Engineer for the clawft Rust rewrite.
 
-YOUR PLAN: /home/aepod/dev/barni/repos/nanobot/.planning/sparc/1b-core-engine.md
+YOUR PLAN: /home/aepod/dev/clawft/.planning/sparc/1b-core-engine.md
 
 YOUR BRANCH: weft/core
 
@@ -631,7 +631,7 @@ Follow TDD. Batch operations. Never commit to main.`,
     "application-engineer",
     `You are the Application Engineer for the clawft Rust rewrite.
 
-YOUR PLAN: /home/aepod/dev/barni/repos/nanobot/.planning/sparc/1c-provider-tools-cli-telegram.md
+YOUR PLAN: /home/aepod/dev/clawft/.planning/sparc/1c-provider-tools-cli-telegram.md
 
 YOUR BRANCH: weft/provider-tools-cli
 
@@ -676,7 +676,7 @@ Follow TDD. Batch operations. Never commit to main.`,
 
 ```bash
 # Orchestrator runs gate checks
-cd /home/aepod/dev/barni/repos/nanobot
+cd /home/aepod/dev/clawft
 
 # Merge all streams to weft/phase-1
 git checkout weft/phase-1
@@ -720,7 +720,7 @@ git push origin main --tags
     "channel-developer",
     `You are the Channel Developer for the clawft Rust rewrite.
 
-YOUR PLAN: /home/aepod/dev/barni/repos/nanobot/.planning/sparc/2a-channel-plugins.md
+YOUR PLAN: /home/aepod/dev/clawft/.planning/sparc/2a-channel-plugins.md
 
 YOUR BRANCH: weft/channels-slack-discord
 
@@ -747,7 +747,7 @@ Follow TDD. Batch operations. Never commit to main.`,
     "intelligence-engineer",
     `You are the Intelligence Engineer for the clawft Rust rewrite.
 
-YOUR PLAN: /home/aepod/dev/barni/repos/nanobot/.planning/sparc/2b-rvf-integration.md
+YOUR PLAN: /home/aepod/dev/clawft/.planning/sparc/2b-rvf-integration.md
 
 YOUR BRANCH: weft/rvf
 
@@ -775,7 +775,7 @@ Follow TDD. Batch operations. Never commit to main. Feature-gate ALL RVF code.`,
     "services-engineer",
     `You are the Services Engineer for the clawft Rust rewrite.
 
-YOUR PLAN: /home/aepod/dev/barni/repos/nanobot/.planning/sparc/2c-services.md
+YOUR PLAN: /home/aepod/dev/clawft/.planning/sparc/2c-services.md
 
 YOUR BRANCH: weft/services
 
@@ -803,7 +803,7 @@ Follow TDD. Batch operations. Never commit to main.`,
     "cli-developer",
     `You are the CLI Developer for the clawft Rust rewrite.
 
-YOUR PLAN: /home/aepod/dev/barni/repos/nanobot/.planning/sparc/2d-cli-completion.md
+YOUR PLAN: /home/aepod/dev/clawft/.planning/sparc/2d-cli-completion.md
 
 YOUR BRANCH: weft/cli-commands
 
@@ -846,7 +846,7 @@ Follow TDD. Batch operations. Never commit to main.`,
 
 ```bash
 # Orchestrator runs gate checks
-cd /home/aepod/dev/barni/repos/nanobot
+cd /home/aepod/dev/clawft
 
 # Merge all streams to weft/phase-2
 git checkout weft/phase-2
@@ -891,7 +891,7 @@ git push origin main --tags
     "wasm-engineer",
     `You are the WASM Engineer for the clawft Rust rewrite.
 
-YOUR PLAN: /home/aepod/dev/barni/repos/nanobot/.planning/sparc/3a-wasm-core.md
+YOUR PLAN: /home/aepod/dev/clawft/.planning/sparc/3a-wasm-core.md
 
 YOUR BRANCH: weft/wasm
 
@@ -926,7 +926,7 @@ Follow TDD. Batch operations. Never commit to main.`,
     "devops-engineer",
     `You are the DevOps Engineer for the clawft Rust rewrite.
 
-YOUR PLAN: /home/aepod/dev/barni/repos/nanobot/.planning/sparc/3b-polish-cicd.md
+YOUR PLAN: /home/aepod/dev/clawft/.planning/sparc/3b-polish-cicd.md
 
 YOUR BRANCH: weft/cicd
 
@@ -971,7 +971,7 @@ Follow best practices for CI/CD. Batch operations. Never commit to main.`,
 
 ```bash
 # Orchestrator runs gate checks
-cd /home/aepod/dev/barni/repos/nanobot
+cd /home/aepod/dev/clawft
 
 # Merge all streams to weft/phase-3
 git checkout weft/phase-3

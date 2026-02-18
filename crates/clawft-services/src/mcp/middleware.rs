@@ -283,10 +283,10 @@ impl Middleware for SecurityGuard {
             && let Some(cmd) = request.args.get("command").and_then(|v| v.as_str())
         {
             self.command_policy.validate(cmd).map_err(|reason| {
-                ToolError::PermissionDenied(format!(
-                    "command rejected for tool '{}': {reason}",
-                    request.name,
-                ))
+                ToolError::PermissionDenied {
+                    tool: request.name.clone(),
+                    reason: format!("command rejected: {reason}"),
+                }
             })?;
         }
 
@@ -295,10 +295,10 @@ impl Middleware for SecurityGuard {
             && let Some(url) = request.args.get("url").and_then(|v| v.as_str())
         {
             self.url_policy.validate(url).map_err(|reason| {
-                ToolError::PermissionDenied(format!(
-                    "URL rejected for tool '{}': {reason}",
-                    request.name,
-                ))
+                ToolError::PermissionDenied {
+                    tool: request.name.clone(),
+                    reason: format!("URL rejected: {reason}"),
+                }
             })?;
         }
 
@@ -510,9 +510,10 @@ mod tests {
         let result = guard.before_call(req).await;
         assert!(result.is_err());
         match result.unwrap_err() {
-            ToolError::PermissionDenied(msg) => {
-                assert!(msg.contains("command rejected"));
-                assert!(msg.contains("not allowed"));
+            ToolError::PermissionDenied { tool, reason } => {
+                assert_eq!(tool, "exec_shell");
+                assert!(reason.contains("command rejected"));
+                assert!(reason.contains("not allowed"));
             }
             other => panic!("expected PermissionDenied, got: {other}"),
         }
@@ -528,8 +529,9 @@ mod tests {
         let result = guard.before_call(req).await;
         assert!(result.is_err());
         match result.unwrap_err() {
-            ToolError::PermissionDenied(msg) => {
-                assert!(msg.contains("dangerous pattern"));
+            ToolError::PermissionDenied { tool, reason } => {
+                assert_eq!(tool, "exec_shell");
+                assert!(reason.contains("dangerous pattern"));
             }
             other => panic!("expected PermissionDenied, got: {other}"),
         }
@@ -557,8 +559,9 @@ mod tests {
         let result = guard.before_call(req).await;
         assert!(result.is_err());
         match result.unwrap_err() {
-            ToolError::PermissionDenied(msg) => {
-                assert!(msg.contains("URL rejected"));
+            ToolError::PermissionDenied { tool, reason } => {
+                assert_eq!(tool, "web_fetch");
+                assert!(reason.contains("URL rejected"));
             }
             other => panic!("expected PermissionDenied, got: {other}"),
         }

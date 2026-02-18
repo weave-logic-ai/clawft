@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::delegation::DelegationConfig;
+use crate::routing::RoutingConfig;
 
 // ── Root config ──────────────────────────────────────────────────────────
 
@@ -41,6 +42,10 @@ pub struct Config {
     /// Task delegation routing configuration.
     #[serde(default)]
     pub delegation: DelegationConfig,
+
+    /// Tiered routing and permission configuration.
+    #[serde(default)]
+    pub routing: RoutingConfig,
 }
 
 impl Config {

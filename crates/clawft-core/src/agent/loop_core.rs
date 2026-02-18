@@ -35,6 +35,7 @@ use clawft_types::config::AgentsConfig;
 use clawft_types::error::ClawftError;
 use clawft_types::event::{InboundMessage, OutboundMessage};
 use clawft_types::provider::ContentBlock;
+use clawft_types::routing::AuthContext;
 
 use crate::bus::MessageBus;
 use crate::pipeline::traits::{ChatRequest, LlmMessage, PipelineRegistry};
@@ -190,19 +191,25 @@ impl<P: Platform> AgentLoop<P> {
             tool_calls: None,
         });
 
-        // 6. Create pipeline request
+        // 6. Resolve auth context from inbound message identity.
+        //    CLI channel gets admin permissions; other channels get zero-trust
+        //    defaults with the sender_id and channel attached.
+        let auth_context = Self::resolve_auth_context(&msg);
+
+        // 7. Create pipeline request with auth context
         let request = ChatRequest {
             messages,
             tools: self.tools.schemas(),
             model: Some(self.config.defaults.model.clone()),
             max_tokens: Some(self.config.defaults.max_tokens),
             temperature: Some(self.config.defaults.temperature),
+            auth_context: Some(auth_context),
         };
 
-        // 7. Execute pipeline + tool loop
+        // 8. Execute pipeline + tool loop
         let response_text = self.run_tool_loop(request).await?;
 
-        // 8. Add assistant message to session
+        // 9. Add assistant message to session
         session.add_message("assistant", &response_text, None);
 
         // 9. Save session
@@ -222,6 +229,28 @@ impl<P: Platform> AgentLoop<P> {
         debug!(session_key = %session_key, "message processed successfully");
 
         Ok(())
+    }
+
+    /// Resolve [`AuthContext`] from the inbound message's sender identity.
+    ///
+    /// For CLI channel messages (`channel == "cli"`), returns admin-level
+    /// permissions via [`AuthContext::cli_default()`]. For all other channels,
+    /// returns an `AuthContext` with the sender's ID and channel name, using
+    /// zero-trust (default) permissions.
+    ///
+    /// When the `PermissionResolver` (Phase B) is available, this method
+    /// will delegate to `resolver.resolve(sender_id, channel, allow_from_match)`
+    /// for full 5-layer permission resolution.
+    fn resolve_auth_context(msg: &InboundMessage) -> AuthContext {
+        if msg.channel == "cli" {
+            AuthContext::cli_default()
+        } else {
+            AuthContext {
+                sender_id: msg.sender_id.clone(),
+                channel: msg.channel.clone(),
+                permissions: Default::default(), // zero-trust
+            }
+        }
     }
 
     /// Execute the tool loop: call LLM, execute tools, repeat.
@@ -315,7 +344,14 @@ impl<P: Platform> AgentLoop<P> {
 
             // Execute each tool and append results to the request
             for (id, name, input) in tool_calls {
-                let result = self.tools.execute(&name, input.clone()).await;
+                let permissions = request
+                    .auth_context
+                    .as_ref()
+                    .map(|ctx| &ctx.permissions);
+                let result = self
+                    .tools
+                    .execute(&name, input.clone(), permissions)
+                    .await;
                 let result_json = match result {
                     Ok(val) => {
                         let truncated =
@@ -341,6 +377,7 @@ impl<P: Platform> AgentLoop<P> {
             message: format!("max tool iterations ({}) exceeded", max_iterations),
         })
     }
+
 }
 
 #[cfg(test)]
@@ -404,6 +441,7 @@ mod tests {
                 provider: "test".into(),
                 model: "test-model".into(),
                 reason: "mock".into(),
+                ..Default::default()
             }
         }
         fn update(&self, _d: &RoutingDecision, _o: &ResponseOutcome) {}
@@ -745,6 +783,7 @@ mod tests {
             model: Some("test-model".into()),
             max_tokens: Some(4096),
             temperature: Some(0.5),
+            auth_context: None,
         };
 
         let result = agent.run_tool_loop(request).await;
@@ -963,6 +1002,7 @@ mod tests {
             model: Some("test-model".into()),
             max_tokens: Some(4096),
             temperature: Some(0.5),
+            auth_context: None,
         };
 
         let result = agent.run_tool_loop(request).await.unwrap();
@@ -1136,9 +1176,11 @@ mod tests {
         let transport_ref = transport.clone();
         let (agent, dir) = make_agent_loop(transport, "e2e_chain").await;
 
-        // Publish and process a message that triggers tool use
+        // Publish and process a message that triggers tool use.
+        // Use channel "cli" so resolve_auth_context grants admin permissions,
+        // allowing the echo tool to execute through the permission check.
         let inbound = InboundMessage {
-            channel: "e2e-channel".into(),
+            channel: "cli".into(),
             sender_id: "e2e-user".into(),
             chat_id: "e2e-chat".into(),
             content: "please use the echo tool".into(),
@@ -1153,7 +1195,7 @@ mod tests {
         // Verify outbound message is the final text response
         let outbound = agent.bus.consume_outbound().await.unwrap();
         assert_eq!(outbound.content, "I received the tool output successfully");
-        assert_eq!(outbound.channel, "e2e-channel");
+        assert_eq!(outbound.channel, "cli");
         assert_eq!(outbound.chat_id, "e2e-chat");
 
         // Verify the transport was called exactly twice
@@ -1195,7 +1237,7 @@ mod tests {
         // Verify session was persisted with both user and assistant messages
         let session = agent
             .sessions
-            .get_or_create("e2e-channel:e2e-chat")
+            .get_or_create("cli:e2e-chat")
             .await
             .unwrap();
         assert!(
@@ -1215,8 +1257,10 @@ mod tests {
         let transport_ref = transport.clone();
         let (agent, dir) = make_agent_loop(transport, "e2e_multi").await;
 
+        // Use channel "cli" so resolve_auth_context grants admin permissions,
+        // allowing the echo tool to execute through the permission check.
         let inbound = InboundMessage {
-            channel: "multi".into(),
+            channel: "cli".into(),
             sender_id: "user".into(),
             chat_id: "chat".into(),
             content: "use echo twice".into(),
@@ -1432,6 +1476,152 @@ mod tests {
             "tool result should contain error message: {}",
             tool_result.content
         );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    // ── Phase F: Auth context threading tests ────────────────────────
+
+    /// Helper to build an InboundMessage with the given channel and sender.
+    fn make_inbound(channel: &str, sender_id: &str) -> InboundMessage {
+        InboundMessage {
+            channel: channel.into(),
+            sender_id: sender_id.into(),
+            chat_id: "test-chat".into(),
+            content: "test message".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        }
+    }
+
+    /// F-05: CLI channel gets admin-level permissions via cli_default().
+    #[test]
+    fn test_resolve_auth_context_cli() {
+        let msg = make_inbound("cli", "local");
+        let ctx = AgentLoop::<NativePlatform>::resolve_auth_context(&msg);
+
+        assert_eq!(ctx.sender_id, "local");
+        assert_eq!(ctx.channel, "cli");
+        assert_eq!(ctx.permissions.level, 2, "CLI should get admin (level 2)");
+        assert!(
+            ctx.permissions.tool_access.contains(&"*".to_string()),
+            "CLI admin should have wildcard tool access"
+        );
+        assert_eq!(
+            ctx.permissions.rate_limit, 0,
+            "CLI admin should have no rate limit"
+        );
+    }
+
+    /// F-09: Empty sender_id gets zero-trust (level 0) permissions.
+    #[test]
+    fn test_resolve_auth_context_empty_sender() {
+        let msg = make_inbound("telegram", "");
+        let ctx = AgentLoop::<NativePlatform>::resolve_auth_context(&msg);
+
+        assert_eq!(ctx.sender_id, "");
+        assert_eq!(ctx.channel, "telegram");
+        assert_eq!(
+            ctx.permissions.level, 0,
+            "empty sender_id should get zero-trust (level 0)"
+        );
+    }
+
+    /// F-10: Non-CLI channel with unknown sender gets zero-trust defaults.
+    #[test]
+    fn test_resolve_auth_context_gateway_channel() {
+        let msg = make_inbound("gateway", "api_key_user");
+        let ctx = AgentLoop::<NativePlatform>::resolve_auth_context(&msg);
+
+        assert_eq!(ctx.sender_id, "api_key_user");
+        assert_eq!(ctx.channel, "gateway");
+        assert_eq!(
+            ctx.permissions.level, 0,
+            "gateway users should get zero-trust (level 0) by default"
+        );
+        assert!(
+            ctx.permissions.tool_access.is_empty(),
+            "zero-trust should have no tool access"
+        );
+    }
+
+    /// F-06/07: Telegram channel gets zero-trust with sender identity preserved.
+    /// (When PermissionResolver is available, allowed_users will get level >= 1;
+    /// for now, all non-CLI channels get zero-trust.)
+    #[test]
+    fn test_resolve_auth_context_telegram_preserves_identity() {
+        let msg = make_inbound("telegram", "12345");
+        let ctx = AgentLoop::<NativePlatform>::resolve_auth_context(&msg);
+
+        assert_eq!(ctx.sender_id, "12345");
+        assert_eq!(ctx.channel, "telegram");
+        assert_eq!(
+            ctx.permissions.level, 0,
+            "non-CLI channel gets zero-trust until PermissionResolver (Phase B)"
+        );
+    }
+
+    /// F-extra: Discord channel gets zero-trust with sender identity preserved.
+    #[test]
+    fn test_resolve_auth_context_discord() {
+        let msg = make_inbound("discord", "snowflake_987654321");
+        let ctx = AgentLoop::<NativePlatform>::resolve_auth_context(&msg);
+
+        assert_eq!(ctx.sender_id, "snowflake_987654321");
+        assert_eq!(ctx.channel, "discord");
+        assert_eq!(ctx.permissions.level, 0);
+    }
+
+    /// F-extra: Slack channel gets zero-trust with sender identity preserved.
+    #[test]
+    fn test_resolve_auth_context_slack() {
+        let msg = make_inbound("slack", "U12345");
+        let ctx = AgentLoop::<NativePlatform>::resolve_auth_context(&msg);
+
+        assert_eq!(ctx.sender_id, "U12345");
+        assert_eq!(ctx.channel, "slack");
+        assert_eq!(ctx.permissions.level, 0);
+    }
+
+    /// F-12: process_message attaches auth_context to the pipeline request.
+    /// Uses a "cli" channel so the auth_context has admin permissions,
+    /// verifying the full threading from InboundMessage -> ChatRequest.
+    #[tokio::test]
+    async fn test_auth_context_attached_to_chat_request() {
+        let transport = Arc::new(MockTransport::new("auth-verified"));
+        let (agent, dir) = make_agent_loop(transport, "auth_attach").await;
+
+        let inbound = make_inbound("cli", "local");
+        agent.bus.publish_inbound(inbound).unwrap();
+
+        let msg = agent.bus.consume_inbound().await.unwrap();
+        agent.process_message(msg).await.unwrap();
+
+        // Verify response came through (proves pipeline executed successfully
+        // with auth_context attached).
+        let outbound = agent.bus.consume_outbound().await.unwrap();
+        assert_eq!(outbound.content, "auth-verified");
+        assert_eq!(outbound.channel, "cli");
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// F-12b: process_message with non-CLI channel attaches zero-trust auth_context.
+    #[tokio::test]
+    async fn test_auth_context_non_cli_attaches_zero_trust() {
+        let transport = Arc::new(MockTransport::new("zero-trust-ok"));
+        let (agent, dir) = make_agent_loop(transport, "auth_zt").await;
+
+        let inbound = make_inbound("telegram", "user42");
+        agent.bus.publish_inbound(inbound).unwrap();
+
+        let msg = agent.bus.consume_inbound().await.unwrap();
+        agent.process_message(msg).await.unwrap();
+
+        let outbound = agent.bus.consume_outbound().await.unwrap();
+        assert_eq!(outbound.content, "zero-trust-ok");
+        assert_eq!(outbound.channel, "telegram");
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

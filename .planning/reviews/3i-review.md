@@ -52,11 +52,11 @@ The gap analysis states:
 
 This is **wrong**. The current code in both CLI commands calls `enable_live_llm()` unconditionally:
 
-- `/home/aepod/dev/barni/repos/nanobot/clawft/crates/clawft-cli/src/commands/agent.rs`, line 112:
+- `/home/aepod/dev/clawft/crates/clawft-cli/src/commands/agent.rs`, line 112:
   ```rust
   ctx.enable_live_llm();
   ```
-- `/home/aepod/dev/barni/repos/nanobot/clawft/crates/clawft-cli/src/commands/gateway.rs`, line 147:
+- `/home/aepod/dev/clawft/crates/clawft-cli/src/commands/gateway.rs`, line 147:
   ```rust
   ctx.enable_live_llm();
   ```
@@ -75,7 +75,7 @@ The gap analysis states:
 
 > GAP-06: MCP integration incomplete: McpClient and transports exist in clawft-services but are NOT wired into the agent loop. Config has `mcp_servers` field but bootstrap ignores it.
 
-This is **wrong**. The file `/home/aepod/dev/barni/repos/nanobot/clawft/crates/clawft-cli/src/mcp_tools.rs` contains a fully functional MCP tool bridge:
+This is **wrong**. The file `/home/aepod/dev/clawft/crates/clawft-cli/src/mcp_tools.rs` contains a fully functional MCP tool bridge:
 
 1. `register_mcp_tools()` iterates `config.tools.mcp_servers` (a `HashMap<String, MCPServerConfig>`)
 2. For each server, it calls `create_mcp_client()` which supports both stdio and HTTP transports
@@ -102,7 +102,7 @@ The gap analysis states:
 
 > GAP-11: `LlmTransport::complete_stream()` is defined in the trait but the `OpenAiCompatProvider` does NOT implement streaming.
 
-The actual `LlmTransport` trait in `/home/aepod/dev/barni/repos/nanobot/clawft/crates/clawft-core/src/pipeline/traits.rs` (line 233-236) contains only:
+The actual `LlmTransport` trait in `/home/aepod/dev/clawft/crates/clawft-core/src/pipeline/traits.rs` (line 233-236) contains only:
 
 ```rust
 pub trait LlmTransport: Send + Sync {
@@ -120,7 +120,7 @@ There is **no** `complete_stream()` method defined anywhere in the codebase. A g
 
 **ISSUE-04: GAP-03 underspecifies the web search config problem.**
 
-The gap analysis says there's a "mismatch between config schema and tool implementation." The actual problem is worse: `register_all()` in `/home/aepod/dev/barni/repos/nanobot/clawft/crates/clawft-tools/src/lib.rs` (line 91-93) creates the web search tool with `endpoint: None` unconditionally:
+The gap analysis says there's a "mismatch between config schema and tool implementation." The actual problem is worse: `register_all()` in `/home/aepod/dev/clawft/crates/clawft-tools/src/lib.rs` (line 91-93) creates the web search tool with `endpoint: None` unconditionally:
 
 ```rust
 registry.register(Arc::new(web_search::WebSearchTool::new(
@@ -140,7 +140,7 @@ The config has `tools.web.search.api_key` and `tools.web.search.max_results`, bu
 
 **ISSUE-05: The `unimplemented!()` in session.rs (GAP-16) is in test code only, not production code.**
 
-The `unimplemented!()` at `/home/aepod/dev/barni/repos/nanobot/clawft/crates/clawft-core/src/session.rs` line 476 is inside `MockHttp`, a test-only `HttpClient` implementation inside `#[cfg(test)] mod tests`. This is NOT production code. The mock is never called by actual tests (session tests don't make HTTP calls).
+The `unimplemented!()` at `/home/aepod/dev/clawft/crates/clawft-core/src/session.rs` line 476 is inside `MockHttp`, a test-only `HttpClient` implementation inside `#[cfg(test)] mod tests`. This is NOT production code. The mock is never called by actual tests (session tests don't make HTTP calls).
 
 **Impact**: GAP-16 is a false positive P0. The sprint plan allocates 1 hour to replacing an `unimplemented!()` that only exists in test mocks.
 
@@ -186,7 +186,7 @@ The `register_all()` function in `clawft-tools/src/lib.rs` takes `workspace_dir`
 
 ### MISSED-03: `Mutex::unwrap()` in production paths (session.rs)
 
-The file `/home/aepod/dev/barni/repos/nanobot/clawft/crates/clawft-core/src/session.rs` has 10+ occurrences of `self.files.lock().unwrap()` and `self.dirs.lock().unwrap()` in the `MockFs` test helper. While these are in test code (not production), the pattern should be audited in all production `Mutex` uses across the codebase to ensure poisoned lock panics cannot occur.
+The file `/home/aepod/dev/clawft/crates/clawft-core/src/session.rs` has 10+ occurrences of `self.files.lock().unwrap()` and `self.dirs.lock().unwrap()` in the `MockFs` test helper. While these are in test code (not production), the pattern should be audited in all production `Mutex` uses across the codebase to ensure poisoned lock panics cannot occur.
 
 **Priority**: P2 (audit item).
 

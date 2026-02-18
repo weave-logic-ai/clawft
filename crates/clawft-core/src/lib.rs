@@ -12,6 +12,7 @@ pub mod clawft_md;
 pub mod config_merge;
 pub mod json_repair;
 pub mod pipeline;
+pub mod routing_validation;
 pub mod security;
 pub mod session;
 pub mod tools;

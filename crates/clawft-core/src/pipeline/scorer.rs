@@ -57,6 +57,7 @@ mod tests {
             model: None,
             max_tokens: None,
             temperature: None,
+            auth_context: None,
         }
     }
 
@@ -106,6 +107,7 @@ mod tests {
             model: Some("gpt-4o".into()),
             max_tokens: Some(4096),
             temperature: Some(0.0),
+            auth_context: None,
         };
         let score = scorer.score(&req, &make_response());
         assert!((score.overall - 1.0).abs() < f32::EPSILON);

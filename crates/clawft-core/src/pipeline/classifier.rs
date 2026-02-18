@@ -177,6 +177,7 @@ mod tests {
             model: None,
             max_tokens: None,
             temperature: None,
+            auth_context: None,
         }
     }
 
@@ -200,6 +201,7 @@ mod tests {
             model: None,
             max_tokens: None,
             temperature: None,
+            auth_context: None,
         }
     }
 
@@ -307,6 +309,7 @@ mod tests {
             model: None,
             max_tokens: None,
             temperature: None,
+            auth_context: None,
         };
         // Only the last user message is scanned; system messages are ignored.
         let profile = classifier.classify(&req);
@@ -348,6 +351,7 @@ mod tests {
             model: None,
             max_tokens: None,
             temperature: None,
+            auth_context: None,
         };
         let profile = classifier.classify(&req);
         assert_eq!(profile.task_type, TaskType::CodeGeneration);

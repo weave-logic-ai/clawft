@@ -30,9 +30,9 @@ clawft/crates/clawft-types/src/event.rs            # OutboundMessage struct
 
 ### Planning Documents (MUST READ)
 ```
-repos/nanobot/.planning/02-technical-requirements.md  # CLI + tool architecture
-repos/nanobot/.planning/03-development-guide.md       # Stream 2H timeline
-repos/nanobot/.planning/01-project-overview.md        # CLI feature requirements
+.planning/02-technical-requirements.md  # CLI + tool architecture
+.planning/03-development-guide.md       # Stream 2H timeline
+.planning/01-project-overview.md        # CLI feature requirements
 ```
 
 ### Module Structure

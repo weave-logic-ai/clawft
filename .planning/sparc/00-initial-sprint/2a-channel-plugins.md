@@ -18,9 +18,9 @@ repos/nanobot/nanobot/channels/__init__.py     # Channel registry
 
 ### Planning Documents (MUST READ)
 ```
-repos/nanobot/.planning/02-technical-requirements.md  # Channel plugin architecture
-repos/nanobot/.planning/03-development-guide.md       # Stream 2A timeline
-repos/nanobot/.planning/01-project-overview.md        # Channel plugin requirements
+.planning/02-technical-requirements.md  # Channel plugin architecture
+.planning/03-development-guide.md       # Stream 2A timeline
+.planning/01-project-overview.md        # Channel plugin requirements
 ```
 
 ### Module Structure

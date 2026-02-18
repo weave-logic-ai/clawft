@@ -94,7 +94,10 @@ impl<P: Platform + 'static> Tool for WebFetchTool<P> {
         // SSRF protection: validate URL against policy.
         if let Err(e) = validate_url(url, &self.url_policy) {
             warn!(url, error = %e, "URL rejected by safety policy");
-            return Err(ToolError::PermissionDenied(e.to_string()));
+            return Err(ToolError::PermissionDenied {
+                tool: "web_fetch".into(),
+                reason: e.to_string(),
+            });
         }
 
         let method = args

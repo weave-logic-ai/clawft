@@ -136,7 +136,7 @@ The `minimal` feature is defined as `["async-runtime"]` which only adds tokio + 
 
 1. **Use local path deps for development**, git deps for CI/release:
    ```toml
-   rvf-runtime = { path = "/home/aepod/dev/barni/repos/ruvector/crates/rvf/rvf-runtime" }
+   rvf-runtime = { path = "/home/aepod/dev/ruvector/crates/rvf/rvf-runtime" }
    ```
 
 2. **Gate ruvector deps behind non-default features** in clawft-core to prevent WASM compilation issues:

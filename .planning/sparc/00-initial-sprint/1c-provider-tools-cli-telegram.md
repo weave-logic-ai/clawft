@@ -11,10 +11,10 @@
 This is a **planning document**, NOT implementation code. When working on this stream:
 
 1. **Read dependencies first**:
-   - `/home/aepod/dev/barni/repos/nanobot/.planning/02-technical-requirements.md` - clawft-llm spec, tool table, channel plugin API
-   - `/home/aepod/dev/barni/repos/nanobot/.planning/03-development-guide.md` - Stream 1C schedule
-   - `/home/aepod/dev/barni/repos/nanobot/.planning/06-provider-layer-options.md` - Provider extraction plan, provider table with quirks
-   - `/home/aepod/dev/barni/repos/nanobot/.planning/05-ruvector-crates.md` - Pipeline trait details (Section 11)
+   - `.planning/02-technical-requirements.md` - clawft-llm spec, tool table, channel plugin API
+   - `.planning/03-development-guide.md` - Stream 1C schedule
+   - `.planning/06-provider-layer-options.md` - Provider extraction plan, provider table with quirks
+   - `.planning/05-ruvector-crates.md` - Pipeline trait details (Section 11)
 
 2. **Work incrementally by week** (Week 3 → Week 8):
    - Week 3: Provider extraction only

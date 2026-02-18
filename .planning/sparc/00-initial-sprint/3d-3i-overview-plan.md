@@ -548,7 +548,7 @@ Phase 3D-3I is complete when:
 - [ ] RvfToolProvider registers with McpServerShell (if 3F-RVF Sprints 1-4 complete)
 - [ ] All development notes written to `.planning/development_notes/phase3/stream-3?/`
 - [ ] Wave 5 review agents confirm no regressions
-- [ ] User docs in repos/nanobot/clawft/docs have been updated with all new functionality and examples of relevant guides/references/etc have been added.
+- [ ] User docs in docs/ have been updated with all new functionality and examples of relevant guides/references/etc have been added.
 ---
 
 ## 11. Known Issues to Resolve During Implementation

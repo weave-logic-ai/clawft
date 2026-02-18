@@ -1,7 +1,7 @@
 # Rust Toolchain Upgrade Review: clawft Workspace
 
 **Date**: 2026-02-17
-**Workspace**: `/home/aepod/dev/barni/repos/nanobot/clawft`
+**Workspace**: `/home/aepod/dev/clawft`
 **Current Toolchain**: Rust 1.85 (Edition 2024, MSRV 1.85)
 **Target Versions**: 1.87.0, 1.91.1, 1.93.1
 

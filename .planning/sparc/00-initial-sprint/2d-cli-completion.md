@@ -18,9 +18,9 @@ repos/nanobot/nanobot/utils/markdown.py         # Markdown conversion utilities
 
 ### Planning Documents (MUST READ)
 ```
-repos/nanobot/.planning/02-technical-requirements.md    # CLI commands spec
-repos/nanobot/.planning/03-development-guide.md         # Stream 2D timeline
-repos/nanobot/.planning/01-project-overview.md          # CLI overview
+.planning/02-technical-requirements.md    # CLI commands spec
+.planning/03-development-guide.md         # Stream 2D timeline
+.planning/01-project-overview.md          # CLI overview
 ```
 
 ### Module Structure

@@ -56,11 +56,13 @@ mod tests {
                 model: None,
                 max_tokens: None,
                 temperature: None,
+                auth_context: None,
             },
             routing: RoutingDecision {
                 provider: "openai".into(),
                 model: "gpt-4o".into(),
                 reason: "test".into(),
+                ..Default::default()
             },
             response: LlmResponse {
                 id: "resp-1".into(),

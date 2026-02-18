@@ -29,15 +29,15 @@ Read these files to understand the data models and behavior:
 | `nanobot/agent/tools/base.py` | Tool trait (reference) | N/A (tool trait is in Stream 1B) |
 
 ### 📚 Planning Docs to Reference
-- `repos/nanobot/.planning/02-technical-requirements.md` -- All struct definitions, trait signatures, workspace layout
-- `repos/nanobot/.planning/03-development-guide.md` -- Phase overview, dependency graph, testing contracts
-- `repos/nanobot/.planning/06-provider-layer-options.md` -- Provider architecture decisions (clawft-llm standalone library)
+- `.planning/02-technical-requirements.md` -- All struct definitions, trait signatures, workspace layout
+- `.planning/03-development-guide.md` -- Phase overview, dependency graph, testing contracts
+- `.planning/06-provider-layer-options.md` -- Provider architecture decisions (clawft-llm standalone library)
 
 ### 🏗️ Crate/Module Structure to Create
 
 ```
-repos/nanobot/
-├── Cargo.toml                           # Workspace root (create this)
+clawft/                                  # /home/aepod/dev/clawft/
+├── Cargo.toml                           # Workspace root
 ├── rust-toolchain.toml                  # Pin Rust 1.85+, edition 2024
 ├── .cargo/config.toml                   # Build flags, WASM profile
 ├── crates/
@@ -1658,7 +1658,7 @@ impl ChannelHost for MockChannelHost {
 
 #### Step 1: Workspace Compilation
 ```bash
-cd repos/nanobot
+cd /home/aepod/dev/clawft
 cargo build --workspace
 cargo clippy --workspace
 cargo test --workspace

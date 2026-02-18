@@ -28,9 +28,9 @@ clawft/crates/clawft-types/src/config.rs                     # MCPServerConfig, 
 
 ### Planning Documents (MUST READ)
 ```
-repos/nanobot/.planning/02-technical-requirements.md  # Service lifecycle, tool registry, MCP wiring
-repos/nanobot/.planning/03-development-guide.md       # Stream 2G timeline
-repos/nanobot/.planning/01-project-overview.md        # Service integration requirements
+.planning/02-technical-requirements.md  # Service lifecycle, tool registry, MCP wiring
+.planning/03-development-guide.md       # Stream 2G timeline
+.planning/01-project-overview.md        # Service integration requirements
 ```
 
 ### Key Constraints

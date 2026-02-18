@@ -9,10 +9,10 @@
 ## 1. Agent Instructions
 
 ### Documentation References
-- **Primary**: `repos/nanobot/.planning/01-business-requirements.md` (Success criteria, binary targets)
-- **Primary**: `repos/nanobot/.planning/02-technical-requirements.md` (Section 7: Binary size targets)
-- **Primary**: `repos/nanobot/.planning/03-development-guide.md` (Phase 3 checklist)
-- **Supporting**: `repos/nanobot/.planning/05-ruvector-crates.md` (Size profiling techniques)
+- **Primary**: `.planning/01-business-requirements.md` (Success criteria, binary targets)
+- **Primary**: `.planning/02-technical-requirements.md` (Section 7: Binary size targets)
+- **Primary**: `.planning/03-development-guide.md` (Phase 3 checklist)
+- **Supporting**: `.planning/05-ruvector-crates.md` (Size profiling techniques)
 
 ### Repository Structure
 ```

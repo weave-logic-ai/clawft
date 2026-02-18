@@ -9,11 +9,11 @@
 ## 1. Agent Instructions
 
 ### Documentation References
-- **Primary**: `repos/nanobot/.planning/02-technical-requirements.md` (Section 8: WASM Requirements)
-- **Primary**: `repos/nanobot/.planning/04-rvf-integration.md` (Section 5.5: rvf-wasm microkernel)
-- **Primary**: `repos/nanobot/.planning/05-ruvector-crates.md` (WASM size budget, micro-hnsw-wasm)
-- **Supporting**: `repos/nanobot/.planning/01-business-requirements.md` (Success criteria: WASM < 300 KB)
-- **Supporting**: `repos/nanobot/.planning/03-development-guide.md` (Phase 3 checklist)
+- **Primary**: `.planning/02-technical-requirements.md` (Section 8: WASM Requirements)
+- **Primary**: `.planning/04-rvf-integration.md` (Section 5.5: rvf-wasm microkernel)
+- **Primary**: `.planning/05-ruvector-crates.md` (WASM size budget, micro-hnsw-wasm)
+- **Supporting**: `.planning/01-business-requirements.md` (Success criteria: WASM < 300 KB)
+- **Supporting**: `.planning/03-development-guide.md` (Phase 3 checklist)
 
 ### Module Structure
 ```

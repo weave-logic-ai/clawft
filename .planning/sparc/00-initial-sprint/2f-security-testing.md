@@ -26,10 +26,10 @@ clawft/crates/clawft-types/src/event.rs                # InboundMessage, Outboun
 
 ### Planning Documents (MUST READ)
 ```
-repos/nanobot/.planning/02-technical-requirements.md   # Security boundary requirements
-repos/nanobot/.planning/03-development-guide.md        # Stream timeline + testing strategy
-repos/nanobot/.planning/sparc/00-orchestrator.md       # Cross-stream test fixtures, coverage targets
-repos/nanobot/.planning/sparc/1b-core-engine.md        # Session, AgentLoop, MemoryStore spec
+.planning/02-technical-requirements.md   # Security boundary requirements
+.planning/03-development-guide.md        # Stream timeline + testing strategy
+.planning/sparc/00-orchestrator.md       # Cross-stream test fixtures, coverage targets
+.planning/sparc/1b-core-engine.md        # Session, AgentLoop, MemoryStore spec
 ```
 
 ### Module Structure

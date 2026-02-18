@@ -1,7 +1,7 @@
 # clawft Codebase Map
 
 **Generated**: 2026-02-17
-**Workspace root**: `/home/aepod/dev/barni/repos/nanobot/clawft/`
+**Workspace root**: `/home/aepod/dev/clawft/`
 **Rust edition**: 2024, MSRV 1.93
 **Binary name**: `weft`
 **Total lines of Rust**: ~33,222 across all crates

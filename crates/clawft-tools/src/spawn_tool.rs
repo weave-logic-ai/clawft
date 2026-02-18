@@ -112,7 +112,10 @@ impl<P: Platform + 'static> Tool for SpawnTool<P> {
         // Security policy check.
         if let Err(e) = self.policy.validate(command) {
             warn!(command, error = %e, "spawn command rejected by security policy");
-            return Err(ToolError::PermissionDenied(e.to_string()));
+            return Err(ToolError::PermissionDenied {
+                tool: "spawn".into(),
+                reason: e.to_string(),
+            });
         }
 
         // Check concurrency limit.

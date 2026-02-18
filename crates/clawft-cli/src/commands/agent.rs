@@ -171,7 +171,7 @@ async fn run_single_message(
     // Create and publish the inbound message.
     let inbound = InboundMessage {
         channel: "cli".into(),
-        sender_id: "user".into(),
+        sender_id: "local".into(),
         chat_id: "cli-session".into(),
         content: message.to_owned(),
         timestamp: Utc::now(),
@@ -279,7 +279,7 @@ async fn run_interactive(
         // Publish the user message to the bus.
         let inbound = InboundMessage {
             channel: "cli".into(),
-            sender_id: "user".into(),
+            sender_id: "local".into(),
             chat_id: "cli-session".into(),
             content: input.to_owned(),
             timestamp: Utc::now(),

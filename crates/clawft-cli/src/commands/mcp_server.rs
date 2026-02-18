@@ -162,7 +162,7 @@ fn build_builtin_provider(
         let reg = reg_clone.clone();
         let name = name.to_string();
         Box::pin(async move {
-            match reg.execute(&name, args).await {
+            match reg.execute(&name, args, None).await {
                 Ok(value) => Ok(serde_json::to_string(&value).unwrap_or_default()),
                 Err(e) => Err(e.to_string()),
             }

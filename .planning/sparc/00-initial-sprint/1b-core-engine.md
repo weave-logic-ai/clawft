@@ -30,7 +30,7 @@ Read these Python files to understand the implementation:
 - `04-rvf-integration.md` - Future RVF hooks in MemoryStore/SessionManager
 
 ### Module Structure to Create
-All code lives in `repos/nanobot/crates/clawft-core/src/`:
+All code lives in `crates/clawft-core/src/`:
 ```
 clawft-core/
 ├── Cargo.toml

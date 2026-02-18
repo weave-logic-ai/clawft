@@ -4,7 +4,7 @@
 **Status**: PLANNED
 **Timeline**: ~4 sessions (10-13 hours) -- Session 2 expanded for pluggable McpServerShell architecture
 **Depends on**: 2c-services (MCP client), 2e-integration-wiring (tool registry wiring)
-**Codebase root**: `/home/aepod/dev/barni/repos/nanobot/clawft/`
+**Codebase root**: `/home/aepod/dev/clawft/`
 
 ---
 
@@ -1295,7 +1295,7 @@ The tasks build on each other. Here is the dependency-ordered execution plan:
 ### 5.4 Validation Commands
 
 ```bash
-cd /home/aepod/dev/barni/repos/nanobot/clawft
+cd /home/aepod/dev/clawft
 
 # ---- Phase 1: Core MCP fixes (no feature flag) ----
 cargo check --workspace

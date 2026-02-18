@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use clawft_types::provider::LlmResponse;
+use clawft_types::routing::AuthContext;
 
 // ── Request / message types ─────────────────────────────────────────────
 
@@ -43,6 +44,12 @@ pub struct ChatRequest {
     /// Sampling temperature.
     #[serde(default)]
     pub temperature: Option<f64>,
+
+    /// Authentication context for permission-gated routing.
+    /// Populated server-side by channel plugins and AgentLoop.
+    /// `skip_deserializing` prevents JSON injection via the gateway API.
+    #[serde(default, skip_deserializing)]
+    pub auth_context: Option<AuthContext>,
 }
 
 /// A single message in a chat conversation.
@@ -104,7 +111,7 @@ pub enum TaskType {
 // ── Routing types ───────────────────────────────────────────────────────
 
 /// Model routing decision produced by [`ModelRouter`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RoutingDecision {
     /// Provider name (e.g. "openai", "anthropic").
     pub provider: String,
@@ -114,6 +121,18 @@ pub struct RoutingDecision {
 
     /// Human-readable reason for the routing choice.
     pub reason: String,
+
+    /// Tier name that was selected (None for static routing).
+    pub tier: Option<String>,
+
+    /// Estimated cost in USD for this request.
+    pub cost_estimate_usd: Option<f64>,
+
+    /// Whether the request was escalated to a higher tier.
+    pub escalated: bool,
+
+    /// Whether budget constraints affected the routing.
+    pub budget_constrained: bool,
 }
 
 /// Outcome of a response, used to update the router.
@@ -289,6 +308,50 @@ pub trait LearningBackend: Send + Sync {
     fn adapt(&self, signal: &LearningSignal);
 }
 
+// ── Cost & rate-limiting traits ──────────────────────────────────────────
+
+/// Result of a budget check from [`CostTrackable::check_budget`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum BudgetResult {
+    /// The request fits within budget.
+    Approved,
+    /// The daily spending limit has been exceeded.
+    DailyLimitExceeded { spent: f64, limit: f64 },
+    /// The monthly spending limit has been exceeded.
+    MonthlyLimitExceeded { spent: f64, limit: f64 },
+}
+
+/// Budget tracking interface used by the TieredRouter.
+///
+/// The real implementation lives in Phase D (CostTracker). This trait
+/// allows the router to be tested independently with mock implementations.
+pub trait CostTrackable: Send + Sync {
+    /// Check whether the estimated cost fits within the sender's daily and
+    /// monthly limits.
+    fn check_budget(
+        &self,
+        sender_id: &str,
+        estimated_cost: f64,
+        daily_limit: f64,
+        monthly_limit: f64,
+    ) -> BudgetResult;
+
+    /// Record an estimated cost before the LLM call (pre-reservation).
+    fn record_estimated(&self, sender_id: &str, estimated_cost: f64);
+
+    /// Reconcile actual cost after response -- adjusts the reservation.
+    fn record_actual(&self, sender_id: &str, estimated_cost: f64, actual_cost: f64);
+}
+
+/// Rate limiting interface used by the TieredRouter.
+///
+/// The real implementation lives in Phase E (RateLimiter). This trait
+/// allows the router to be tested independently with mock implementations.
+pub trait RateLimitable: Send + Sync {
+    /// Returns true if the request is allowed, false if rate-limited.
+    fn check(&self, sender_id: &str, limit: u32) -> bool;
+}
+
 // ── Pipeline & Registry ─────────────────────────────────────────────────
 
 /// A complete pipeline wiring all 6 stages together.
@@ -456,6 +519,7 @@ mod tests {
             model: Some("gpt-4o".into()),
             max_tokens: Some(1024),
             temperature: Some(0.7),
+            auth_context: None,
         };
         assert_eq!(req.messages.len(), 1);
         assert_eq!(req.model.as_deref(), Some("gpt-4o"));
@@ -490,8 +554,13 @@ mod tests {
             provider: "anthropic".into(),
             model: "claude-opus-4-5".into(),
             reason: "high complexity code task".into(),
+            ..Default::default()
         };
         assert_eq!(decision.provider, "anthropic");
+        assert!(decision.tier.is_none());
+        assert!(decision.cost_estimate_usd.is_none());
+        assert!(!decision.escalated);
+        assert!(!decision.budget_constrained);
     }
 
     #[test]
@@ -583,6 +652,7 @@ mod tests {
             model: Some("gpt-4o".into()),
             max_tokens: Some(4096),
             temperature: Some(0.5),
+            auth_context: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let restored: ChatRequest = serde_json::from_str(&json).unwrap();
@@ -591,6 +661,8 @@ mod tests {
         assert_eq!(restored.model.as_deref(), Some("gpt-4o"));
         assert_eq!(restored.max_tokens, Some(4096));
         assert_eq!(restored.tools.len(), 1);
+        // auth_context is skip_deserializing, so it should be None after roundtrip
+        assert!(restored.auth_context.is_none());
     }
 
     #[test]
@@ -690,6 +762,7 @@ mod tests {
                 provider: self.provider.clone(),
                 model: self.model.clone(),
                 reason: "test".into(),
+                ..Default::default()
             }
         }
 
@@ -783,6 +856,7 @@ mod tests {
             model: None,
             max_tokens: None,
             temperature: None,
+            auth_context: None,
         });
     }
 
@@ -817,6 +891,7 @@ mod tests {
             model: None,
             max_tokens: None,
             temperature: None,
+            auth_context: None,
         };
 
         let response = registry.complete(&request).await.unwrap();
@@ -853,9 +928,171 @@ mod tests {
             model: None,
             max_tokens: None,
             temperature: None,
+            auth_context: None,
         };
 
         // The classifier returns CodeGeneration, so the specialized pipeline is used.
+        let response = registry.complete(&request).await.unwrap();
+        assert_eq!(response.id, "test-resp");
+    }
+
+    // ── Phase F: ChatRequest auth_context serde injection prevention tests ──
+
+    /// F-01: skip_deserializing prevents auth_context injection via JSON input.
+    #[test]
+    fn test_chat_request_skip_deserializing_auth_context() {
+        let json = r#"{
+            "messages": [{"role": "user", "content": "hi"}],
+            "auth_context": {
+                "sender_id": "injected",
+                "channel": "evil",
+                "permissions": {"level": 2}
+            }
+        }"#;
+        let req: ChatRequest = serde_json::from_str(json).unwrap();
+        assert!(
+            req.auth_context.is_none(),
+            "auth_context should be None after deserialization (skip_deserializing)"
+        );
+    }
+
+    /// F-02: ChatRequest without auth_context deserializes correctly.
+    #[test]
+    fn test_chat_request_without_auth_context_deserializes() {
+        let json = r#"{"messages": [{"role": "user", "content": "hi"}]}"#;
+        let req: ChatRequest = serde_json::from_str(json).unwrap();
+        assert!(req.auth_context.is_none());
+        assert_eq!(req.messages.len(), 1);
+    }
+
+    /// F-03: ChatRequest with auth_context: None serializes as null.
+    ///
+    /// The field has `#[serde(default, skip_deserializing)]`. The
+    /// `skip_deserializing` only affects deserialization (prevents JSON
+    /// injection). On the serialization side, `None` becomes `null` in
+    /// the JSON output. This is acceptable -- the security-critical
+    /// direction is deserialization, not serialization. The null value
+    /// in serialized output is harmless and useful for logging/debugging.
+    #[test]
+    fn test_chat_request_none_auth_context_serializes_as_null() {
+        let req = ChatRequest {
+            messages: vec![LlmMessage {
+                role: "user".into(),
+                content: "hi".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            tools: vec![],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            auth_context: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        // skip_deserializing only affects the Deserialize side.
+        // Serialization still includes the field as null.
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            parsed.get("auth_context").is_some(),
+            "auth_context field should be present in serialized JSON"
+        );
+        assert!(
+            parsed["auth_context"].is_null(),
+            "auth_context: None should serialize as null, got: {}",
+            parsed["auth_context"]
+        );
+    }
+
+    /// F-04: AuthContext serializes but does not survive roundtrip (asymmetric serde).
+    #[test]
+    fn test_chat_request_with_auth_context_serializes_but_not_roundtrip() {
+        use clawft_types::routing::{AuthContext, UserPermissions};
+
+        let req = ChatRequest {
+            messages: vec![LlmMessage {
+                role: "user".into(),
+                content: "hi".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            tools: vec![],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            auth_context: Some(AuthContext {
+                sender_id: "user_123".into(),
+                channel: "telegram".into(),
+                permissions: UserPermissions::default(),
+            }),
+        };
+
+        // Serialize -- should include auth_context.
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(
+            json.contains("auth_context"),
+            "auth_context with Some value should appear in serialized JSON"
+        );
+        assert!(
+            json.contains("user_123"),
+            "sender_id should appear in serialized JSON"
+        );
+
+        // Deserialize -- auth_context should be dropped (skip_deserializing).
+        let restored: ChatRequest = serde_json::from_str(&json).unwrap();
+        assert!(
+            restored.auth_context.is_none(),
+            "auth_context should be None after deserialization roundtrip"
+        );
+    }
+
+    /// F-11: Pipeline registry passes auth_context through to transport.
+    #[tokio::test]
+    async fn test_pipeline_registry_passes_auth_context() {
+        use clawft_types::routing::AuthContext;
+
+        let registry =
+            PipelineRegistry::new(make_test_pipeline(TaskType::Chat, "openai", "gpt-4o"));
+
+        let request = ChatRequest {
+            messages: vec![LlmMessage {
+                role: "user".into(),
+                content: "hello".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            tools: vec![],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            auth_context: Some(AuthContext::cli_default()),
+        };
+
+        // Complete should succeed with auth_context present.
+        let response = registry.complete(&request).await.unwrap();
+        assert_eq!(response.id, "test-resp");
+    }
+
+    /// F-12: Pipeline registry works without auth_context (None).
+    #[tokio::test]
+    async fn test_pipeline_registry_works_without_auth_context() {
+        let registry =
+            PipelineRegistry::new(make_test_pipeline(TaskType::Chat, "openai", "gpt-4o"));
+
+        let request = ChatRequest {
+            messages: vec![LlmMessage {
+                role: "user".into(),
+                content: "hello".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            tools: vec![],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            auth_context: None,
+        };
+
+        // Should not panic and should return a valid response.
         let response = registry.complete(&request).await.unwrap();
         assert_eq!(response.id, "test-resp");
     }

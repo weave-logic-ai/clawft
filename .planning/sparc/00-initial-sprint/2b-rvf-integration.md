@@ -10,10 +10,10 @@
 
 ### Critical Planning Documents (MUST READ FIRST)
 ```
-repos/nanobot/.planning/04-rvf-integration.md           # FULL RVF specification (50+ pages)
-repos/nanobot/.planning/05-ruvector-crates.md           # FULL ruvector crate map + APIs
-repos/nanobot/.planning/02-technical-requirements.md    # Pipeline traits, feature flags
-repos/nanobot/.planning/03-development-guide.md         # Stream 2B timeline
+.planning/04-rvf-integration.md           # FULL RVF specification (50+ pages)
+.planning/05-ruvector-crates.md           # FULL ruvector crate map + APIs
+.planning/02-technical-requirements.md    # Pipeline traits, feature flags
+.planning/03-development-guide.md         # Stream 2B timeline
 ```
 
 **CRITICAL**: ADR-026 in `04-rvf-integration.md` specifies 3-tier model routing with Agent Booster (WASM). This MUST be implemented.

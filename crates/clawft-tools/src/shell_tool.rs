@@ -92,7 +92,10 @@ impl Tool for ShellExecTool {
         // Security policy check (allowlist/denylist + dangerous patterns).
         if let Err(e) = self.policy.validate(command) {
             warn!(command, error = %e, "command rejected by security policy");
-            return Err(ToolError::PermissionDenied(e.to_string()));
+            return Err(ToolError::PermissionDenied {
+                tool: "exec_shell".into(),
+                reason: e.to_string(),
+            });
         }
 
         debug!(command, timeout_secs, "executing shell command");
@@ -277,7 +280,7 @@ mod tests {
             .execute(json!({"command": "rm -rf /"}))
             .await
             .unwrap_err();
-        assert!(matches!(err, ToolError::PermissionDenied(_)));
+        assert!(matches!(err, ToolError::PermissionDenied { .. }));
 
         cleanup(&ws).await;
     }
@@ -290,7 +293,7 @@ mod tests {
             .execute(json!({"command": "sudo apt-get install evil"}))
             .await
             .unwrap_err();
-        assert!(matches!(err, ToolError::PermissionDenied(_)));
+        assert!(matches!(err, ToolError::PermissionDenied { .. }));
 
         cleanup(&ws).await;
     }
@@ -303,7 +306,7 @@ mod tests {
             .execute(json!({"command": "mkfs.ext4 /dev/sda1"}))
             .await
             .unwrap_err();
-        assert!(matches!(err, ToolError::PermissionDenied(_)));
+        assert!(matches!(err, ToolError::PermissionDenied { .. }));
 
         cleanup(&ws).await;
     }
@@ -316,7 +319,7 @@ mod tests {
             .execute(json!({"command": "dd if=/dev/zero of=/dev/sda"}))
             .await
             .unwrap_err();
-        assert!(matches!(err, ToolError::PermissionDenied(_)));
+        assert!(matches!(err, ToolError::PermissionDenied { .. }));
 
         cleanup(&ws).await;
     }
@@ -329,7 +332,7 @@ mod tests {
             .execute(json!({"command": ":(){ :|:& };:"}))
             .await
             .unwrap_err();
-        assert!(matches!(err, ToolError::PermissionDenied(_)));
+        assert!(matches!(err, ToolError::PermissionDenied { .. }));
 
         cleanup(&ws).await;
     }
@@ -396,7 +399,7 @@ mod tests {
             .execute(json!({"command": "curl http://example.com"}))
             .await
             .unwrap_err();
-        assert!(matches!(err, ToolError::PermissionDenied(_)));
+        assert!(matches!(err, ToolError::PermissionDenied { .. }));
 
         cleanup(&ws).await;
     }

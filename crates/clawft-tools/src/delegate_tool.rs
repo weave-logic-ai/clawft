@@ -125,7 +125,7 @@ impl Tool for DelegateTaskTool {
                 let registry = registry.clone();
                 let name = name.to_string();
                 Box::pin(async move {
-                    match registry.execute(&name, input).await {
+                    match registry.execute(&name, input, None).await {
                         Ok(result) => Ok(serde_json::to_string(&result).unwrap_or_default()),
                         Err(e) => Err(e.to_string()),
                     }

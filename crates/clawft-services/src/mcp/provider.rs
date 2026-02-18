@@ -72,8 +72,11 @@ pub enum ToolError {
     ExecutionFailed(String),
 
     /// The caller lacks permission to invoke the tool.
-    #[error("permission denied: {0}")]
-    PermissionDenied(String),
+    ///
+    /// `tool` is the name of the tool that was denied.
+    /// `reason` explains why access was denied.
+    #[error("permission denied for tool '{tool}': {reason}")]
+    PermissionDenied { tool: String, reason: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -376,8 +379,14 @@ mod tests {
         let err = ToolError::ExecutionFailed("boom".into());
         assert_eq!(err.to_string(), "execution failed: boom");
 
-        let err = ToolError::PermissionDenied("nope".into());
-        assert_eq!(err.to_string(), "permission denied: nope");
+        let err = ToolError::PermissionDenied {
+            tool: "test".into(),
+            reason: "nope".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "permission denied for tool 'test': nope"
+        );
     }
 
     #[test]

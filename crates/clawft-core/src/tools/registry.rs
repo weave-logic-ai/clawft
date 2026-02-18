@@ -11,7 +11,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use tracing::debug;
+
+use clawft_types::routing::UserPermissions;
 
 /// Error type for tool execution.
 ///
@@ -32,8 +35,12 @@ pub enum ToolError {
     ExecutionFailed(String),
 
     /// The caller lacks permission to invoke this tool.
-    #[error("permission denied: {0}")]
-    PermissionDenied(String),
+    ///
+    /// `tool` is the name of the tool that was denied.
+    /// `reason` explains why (not in allowlist, explicitly denied,
+    /// insufficient level, missing custom permission).
+    #[error("permission denied for tool '{tool}': {reason}")]
+    PermissionDenied { tool: String, reason: String },
 
     /// A file or resource the tool needs was not found.
     #[error("not found: {0}")]
@@ -47,6 +54,216 @@ pub enum ToolError {
     #[error("timeout after {0}s")]
     Timeout(u64),
 }
+
+// ---------------------------------------------------------------------------
+// ToolMetadata
+// ---------------------------------------------------------------------------
+
+/// Permission metadata that a tool can declare.
+///
+/// Built-in tools define this via the `Tool::metadata()` trait method.
+/// MCP tools derive this from their server's tool declaration JSON.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ToolMetadata {
+    /// Minimum permission level required to invoke this tool.
+    /// `None` means no level requirement beyond the allowlist check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_permission_level: Option<u8>,
+
+    /// Custom permission keys and values that must match.
+    /// Example: `{"exec_enabled": true}` requires the user to have
+    /// `custom_permissions["exec_enabled"] == true`.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub required_custom_permissions: HashMap<String, serde_json::Value>,
+}
+
+// ---------------------------------------------------------------------------
+// Glob matching
+// ---------------------------------------------------------------------------
+
+/// Match a tool name against a glob pattern.
+///
+/// Supports `*` (matches zero or more characters) and `?` (matches exactly
+/// one character). This is a minimal implementation sufficient for tool
+/// access patterns without pulling in a full glob crate.
+///
+/// Examples:
+///   `glob_matches("file_*", "file_read")` -> true
+///   `glob_matches("file_*", "web_search")` -> false
+///   `glob_matches("*", "anything")` -> true
+///   `glob_matches("read_?", "read_a")` -> true
+///   `glob_matches("read_?", "read_file")` -> false
+fn glob_matches(pattern: &str, text: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let text: Vec<char> = text.chars().collect();
+    let (plen, tlen) = (pattern.len(), text.len());
+
+    let mut pi = 0;
+    let mut ti = 0;
+    let mut star_pi = None;
+    let mut star_ti = 0;
+
+    while ti < tlen {
+        if pi < plen && (pattern[pi] == '?' || pattern[pi] == text[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < plen && pattern[pi] == '*' {
+            star_pi = Some(pi);
+            star_ti = ti;
+            pi += 1;
+        } else if let Some(spi) = star_pi {
+            pi = spi + 1;
+            star_ti += 1;
+            ti = star_ti;
+        } else {
+            return false;
+        }
+    }
+
+    // Consume trailing stars in pattern.
+    while pi < plen && pattern[pi] == '*' {
+        pi += 1;
+    }
+
+    pi == plen
+}
+
+/// Check whether a tool name matches any pattern in the given list.
+/// Each entry in `patterns` is either an exact name or a glob pattern.
+fn matches_any_pattern(tool_name: &str, patterns: &[String]) -> bool {
+    patterns.iter().any(|pattern| {
+        if pattern.contains('*') || pattern.contains('?') {
+            glob_matches(pattern, tool_name)
+        } else {
+            pattern == tool_name
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Permission checking
+// ---------------------------------------------------------------------------
+
+/// Check whether the given permissions allow invoking the named tool.
+///
+/// This is a pure function with no side effects -- suitable for
+/// unit testing without async or I/O.
+///
+/// Evaluation order:
+///   1. Denylist (checked first, deny overrides everything)
+///   2. Allowlist (empty = deny all, `["*"]` = allow all, else pattern match)
+///   3. Tool metadata `required_permission_level`
+///   4. Tool metadata `required_custom_permissions`
+///
+/// Returns `Ok(())` if allowed, `Err(ToolError::PermissionDenied)` if not.
+pub fn check_tool_permission(
+    tool_name: &str,
+    permissions: &UserPermissions,
+    tool_metadata: Option<&ToolMetadata>,
+) -> Result<(), ToolError> {
+    // Step 1: Denylist check (deny overrides everything, even ["*"] allowlist).
+    if matches_any_pattern(tool_name, &permissions.tool_denylist) {
+        return Err(ToolError::PermissionDenied {
+            tool: tool_name.to_string(),
+            reason: "tool is explicitly denied for this user".to_string(),
+        });
+    }
+
+    // Step 2: Allowlist check.
+    let allowed = if permissions.tool_access.is_empty() {
+        // Empty allowlist = no tools allowed (zero_trust default).
+        false
+    } else if permissions.tool_access.iter().any(|s| s == "*") {
+        // Wildcard entry = all tools allowed (admin default).
+        true
+    } else {
+        // Check each pattern in tool_access for a match.
+        matches_any_pattern(tool_name, &permissions.tool_access)
+    };
+
+    if !allowed {
+        return Err(ToolError::PermissionDenied {
+            tool: tool_name.to_string(),
+            reason: format!(
+                "tool is not in the allowed tools for permission level {}",
+                permissions.level,
+            ),
+        });
+    }
+
+    // Step 3: Tool metadata -- required permission level.
+    if let Some(meta) = tool_metadata {
+        if let Some(required_level) = meta.required_permission_level
+            && permissions.level < required_level
+        {
+            return Err(ToolError::PermissionDenied {
+                tool: tool_name.to_string(),
+                reason: format!(
+                    "tool requires permission level {} but user has level {}",
+                    required_level, permissions.level,
+                ),
+            });
+        }
+
+        // Step 4: Tool metadata -- required custom permissions.
+        for (key, required_value) in &meta.required_custom_permissions {
+            match permissions.custom_permissions.get(key) {
+                None => {
+                    return Err(ToolError::PermissionDenied {
+                        tool: tool_name.to_string(),
+                        reason: format!(
+                            "tool requires custom permission '{}' which is not set",
+                            key,
+                        ),
+                    });
+                }
+                Some(actual) if actual != required_value => {
+                    return Err(ToolError::PermissionDenied {
+                        tool: tool_name.to_string(),
+                        reason: format!(
+                            "tool requires {}={} but user has {}={}",
+                            key, required_value, key, actual,
+                        ),
+                    });
+                }
+                Some(_) => {} // Value matches, continue.
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Extract permission metadata from an MCP tool declaration JSON.
+///
+/// MCP tool declarations may include:
+///   `"required_permission_level": 2`
+///   `"required_custom_permissions": {"exec_enabled": true}`
+pub fn extract_mcp_metadata(tool_decl: &serde_json::Value) -> ToolMetadata {
+    let required_level = tool_decl
+        .get("required_permission_level")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u8);
+
+    let required_custom = tool_decl
+        .get("required_custom_permissions")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    ToolMetadata {
+        required_permission_level: required_level,
+        required_custom_permissions: required_custom,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tool trait
+// ---------------------------------------------------------------------------
 
 /// A tool that can be invoked by the agent pipeline.
 ///
@@ -103,6 +320,14 @@ pub trait Tool: Send + Sync {
     /// Returns a JSON value representing the tool's output, or a
     /// [`ToolError`] on failure.
     async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError>;
+
+    /// Optional permission metadata for this tool.
+    ///
+    /// Override to declare minimum permission levels or required
+    /// custom permissions. Default: no requirements (returns `None`).
+    fn metadata(&self) -> Option<ToolMetadata> {
+        None
+    }
 }
 
 /// Registry of available tools, indexed by name.
@@ -111,6 +336,7 @@ pub trait Tool: Send + Sync {
 /// format, and dispatch-by-name execution.
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
+    metadata: HashMap<String, ToolMetadata>,
 }
 
 impl ToolRegistry {
@@ -118,21 +344,42 @@ impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
+            metadata: HashMap::new(),
         }
     }
 
     /// Register a tool in the registry.
     ///
     /// If a tool with the same name already exists, it is replaced.
+    /// If the tool provides metadata via [`Tool::metadata()`], it is stored
+    /// in the metadata map automatically.
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
         debug!(tool = %name, "registering tool");
+        // Extract metadata from the tool if provided.
+        if let Some(meta) = tool.metadata() {
+            self.metadata.insert(name.clone(), meta);
+        }
+        self.tools.insert(name, tool);
+    }
+
+    /// Register a tool with explicit metadata (used for MCP tools whose
+    /// metadata comes from JSON declarations rather than the Rust trait).
+    pub fn register_with_metadata(&mut self, tool: Arc<dyn Tool>, metadata: ToolMetadata) {
+        let name = tool.name().to_string();
+        debug!(tool = %name, "registering tool with metadata");
+        self.metadata.insert(name.clone(), metadata);
         self.tools.insert(name, tool);
     }
 
     /// Look up a tool by name.
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.tools.get(name).cloned()
+    }
+
+    /// Look up metadata for a tool by name.
+    pub fn get_metadata(&self, name: &str) -> Option<&ToolMetadata> {
+        self.metadata.get(name)
     }
 
     /// List all registered tool names (sorted alphabetically).
@@ -178,18 +425,31 @@ impl ToolRegistry {
         schemas.into_iter().map(|(_, v)| v).collect()
     }
 
-    /// Execute a tool by name with the given arguments.
+    /// Execute a tool by name with optional permission enforcement.
+    ///
+    /// When `permissions` is `None`, all tools are allowed (backward
+    /// compatibility for StaticRouter mode and unit tests).
+    /// When `Some`, permissions are checked before the tool runs.
     ///
     /// Returns [`ToolError::NotFound`] if no tool with that name is registered.
+    /// Returns [`ToolError::PermissionDenied`] if the caller lacks permission.
     pub async fn execute(
         &self,
         name: &str,
         args: serde_json::Value,
+        permissions: Option<&UserPermissions>,
     ) -> Result<serde_json::Value, ToolError> {
+        // Look up the tool first (NotFound fires before PermissionDenied).
         let tool = self
             .tools
             .get(name)
             .ok_or_else(|| ToolError::NotFound(name.to_string()))?;
+
+        // Permission check (only when permissions are provided).
+        if let Some(perms) = permissions {
+            let meta = self.metadata.get(name);
+            check_tool_permission(name, perms, meta)?;
+        }
 
         debug!(tool = %name, "executing tool");
         tool.execute(args).await
@@ -215,6 +475,7 @@ impl ToolRegistry {
     pub fn snapshot(&self) -> Self {
         Self {
             tools: self.tools.clone(),
+            metadata: self.metadata.clone(),
         }
     }
 }
@@ -326,6 +587,29 @@ mod tests {
         }
     }
 
+    /// Helper: build admin permissions (level 2, wildcard tool_access).
+    fn admin_permissions() -> UserPermissions {
+        UserPermissions {
+            level: 2,
+            tool_access: vec!["*".into()],
+            ..UserPermissions::default()
+        }
+    }
+
+    /// Helper: build user-level permissions with specific tools.
+    fn user_permissions(tools: Vec<&str>) -> UserPermissions {
+        UserPermissions {
+            level: 1,
+            tool_access: tools.into_iter().map(String::from).collect(),
+            ..UserPermissions::default()
+        }
+    }
+
+    /// Helper: build zero-trust permissions (empty tool_access).
+    fn zero_trust_permissions() -> UserPermissions {
+        UserPermissions::default()
+    }
+
     #[test]
     fn new_registry_is_empty() {
         let registry = ToolRegistry::new();
@@ -393,7 +677,7 @@ mod tests {
         registry.register(Arc::new(EchoTool));
 
         let result = registry
-            .execute("echo", serde_json::json!({ "text": "hello" }))
+            .execute("echo", serde_json::json!({ "text": "hello" }), None)
             .await
             .unwrap();
 
@@ -406,7 +690,7 @@ mod tests {
         registry.register(Arc::new(AddTool));
 
         let result = registry
-            .execute("add", serde_json::json!({ "a": 3, "b": 4 }))
+            .execute("add", serde_json::json!({ "a": 3, "b": 4 }), None)
             .await
             .unwrap();
 
@@ -416,7 +700,9 @@ mod tests {
     #[tokio::test]
     async fn execute_not_found() {
         let registry = ToolRegistry::new();
-        let result = registry.execute("missing", serde_json::json!({})).await;
+        let result = registry
+            .execute("missing", serde_json::json!({}), None)
+            .await;
 
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -430,7 +716,9 @@ mod tests {
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(FailTool));
 
-        let result = registry.execute("fail", serde_json::json!({})).await;
+        let result = registry
+            .execute("fail", serde_json::json!({}), None)
+            .await;
         assert!(result.is_err());
         match result.unwrap_err() {
             ToolError::ExecutionFailed(msg) => {
@@ -446,7 +734,7 @@ mod tests {
         registry.register(Arc::new(EchoTool));
 
         let result = registry
-            .execute("echo", serde_json::json!({})) // missing "text"
+            .execute("echo", serde_json::json!({}), None) // missing "text"
             .await;
 
         assert!(result.is_err());
@@ -509,8 +797,14 @@ mod tests {
         let err = ToolError::ExecutionFailed("command failed".into());
         assert_eq!(err.to_string(), "execution failed: command failed");
 
-        let err = ToolError::PermissionDenied("no exec access".into());
-        assert_eq!(err.to_string(), "permission denied: no exec access");
+        let err = ToolError::PermissionDenied {
+            tool: "test".into(),
+            reason: "no exec access".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "permission denied for tool 'test': no exec access"
+        );
 
         let err = ToolError::FileNotFound("/tmp/missing.txt".into());
         assert_eq!(err.to_string(), "not found: /tmp/missing.txt");
@@ -537,5 +831,411 @@ mod tests {
         assert_eq!(params["type"], "object");
         assert!(params["properties"].is_object());
         assert!(params["required"].is_array());
+    }
+
+    // ── Glob matching unit tests ──────────────────────────────────────
+
+    #[test]
+    fn test_glob_star_matches() {
+        assert!(glob_matches("file_*", "file_read"));
+        assert!(glob_matches("file_*", "file_write"));
+        assert!(!glob_matches("file_*", "web_search"));
+        assert!(glob_matches("*", "anything"));
+        assert!(glob_matches("*", ""));
+        assert!(glob_matches("myserver__*", "myserver__search"));
+        assert!(!glob_matches("myserver__*", "otherserver__search"));
+    }
+
+    #[test]
+    fn test_glob_question_mark() {
+        assert!(glob_matches("read_?", "read_a"));
+        assert!(!glob_matches("read_?", "read_file"));
+        assert!(glob_matches("?", "a"));
+        assert!(!glob_matches("?", ""));
+    }
+
+    #[test]
+    fn test_glob_exact_match_fast_path() {
+        // matches_any_pattern uses exact match when no wildcards.
+        assert!(matches_any_pattern("read_file", &["read_file".into()]));
+        assert!(!matches_any_pattern("write_file", &["read_file".into()]));
+    }
+
+    // ── Permission check unit tests ───────────────────────────────────
+
+    #[test]
+    fn test_wildcard_allows_all_tools() {
+        let perms = admin_permissions();
+        assert!(check_tool_permission("exec_shell", &perms, None).is_ok());
+        assert!(check_tool_permission("read_file", &perms, None).is_ok());
+        assert!(check_tool_permission("myserver__tool", &perms, None).is_ok());
+    }
+
+    #[test]
+    fn test_empty_allowlist_denies_all_tools() {
+        let perms = zero_trust_permissions();
+        let result = check_tool_permission("read_file", &perms, None);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ToolError::PermissionDenied { tool, reason } => {
+                assert_eq!(tool, "read_file");
+                assert!(reason.contains("not in the allowed tools"));
+            }
+            other => panic!("expected PermissionDenied, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_explicit_allowlist_permits_listed_tool() {
+        let perms = user_permissions(vec!["read_file", "write_file"]);
+        assert!(check_tool_permission("read_file", &perms, None).is_ok());
+        assert!(check_tool_permission("write_file", &perms, None).is_ok());
+    }
+
+    #[test]
+    fn test_explicit_allowlist_denies_unlisted_tool() {
+        let perms = user_permissions(vec!["read_file", "write_file"]);
+        assert!(check_tool_permission("exec_shell", &perms, None).is_err());
+    }
+
+    #[test]
+    fn test_denylist_overrides_wildcard() {
+        let perms = UserPermissions {
+            level: 2,
+            tool_access: vec!["*".into()],
+            tool_denylist: vec!["exec_shell".into()],
+            ..UserPermissions::default()
+        };
+        assert!(check_tool_permission("exec_shell", &perms, None).is_err());
+        assert!(check_tool_permission("read_file", &perms, None).is_ok());
+    }
+
+    #[test]
+    fn test_denylist_overrides_explicit_allow() {
+        let perms = UserPermissions {
+            level: 1,
+            tool_access: vec!["exec_shell".into()],
+            tool_denylist: vec!["exec_shell".into()],
+            ..UserPermissions::default()
+        };
+        assert!(check_tool_permission("exec_shell", &perms, None).is_err());
+    }
+
+    #[test]
+    fn test_glob_allowlist_pattern() {
+        let perms = UserPermissions {
+            level: 1,
+            tool_access: vec!["file_*".into()],
+            ..UserPermissions::default()
+        };
+        assert!(check_tool_permission("file_read", &perms, None).is_ok());
+        assert!(check_tool_permission("file_write", &perms, None).is_ok());
+        assert!(check_tool_permission("web_search", &perms, None).is_err());
+    }
+
+    #[test]
+    fn test_glob_denylist_pattern() {
+        let perms = UserPermissions {
+            level: 2,
+            tool_access: vec!["*".into()],
+            tool_denylist: vec!["exec_*".into()],
+            ..UserPermissions::default()
+        };
+        assert!(check_tool_permission("exec_shell", &perms, None).is_err());
+        assert!(check_tool_permission("exec_spawn", &perms, None).is_err());
+        assert!(check_tool_permission("read_file", &perms, None).is_ok());
+    }
+
+    #[test]
+    fn test_metadata_required_level_blocks_low_user() {
+        let perms = UserPermissions {
+            level: 1,
+            tool_access: vec!["*".into()],
+            ..UserPermissions::default()
+        };
+        let meta = ToolMetadata {
+            required_permission_level: Some(2),
+            ..ToolMetadata::default()
+        };
+        let result = check_tool_permission("admin_tool", &perms, Some(&meta));
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ToolError::PermissionDenied { reason, .. } => {
+                assert!(reason.contains("requires permission level 2"));
+                assert!(reason.contains("user has level 1"));
+            }
+            other => panic!("expected PermissionDenied, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_metadata_required_level_allows_sufficient_user() {
+        let perms = UserPermissions {
+            level: 2,
+            tool_access: vec!["*".into()],
+            ..UserPermissions::default()
+        };
+        let meta = ToolMetadata {
+            required_permission_level: Some(2),
+            ..ToolMetadata::default()
+        };
+        assert!(check_tool_permission("admin_tool", &perms, Some(&meta)).is_ok());
+    }
+
+    #[test]
+    fn test_metadata_custom_permission_missing() {
+        let perms = admin_permissions();
+        let meta = ToolMetadata {
+            required_custom_permissions: HashMap::from([(
+                "exec_enabled".into(),
+                serde_json::json!(true),
+            )]),
+            ..ToolMetadata::default()
+        };
+        let result = check_tool_permission("custom_tool", &perms, Some(&meta));
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ToolError::PermissionDenied { reason, .. } => {
+                assert!(reason.contains("exec_enabled"));
+                assert!(reason.contains("not set"));
+            }
+            other => panic!("expected PermissionDenied, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_metadata_custom_permission_wrong_value() {
+        let perms = UserPermissions {
+            level: 2,
+            tool_access: vec!["*".into()],
+            custom_permissions: HashMap::from([(
+                "exec_enabled".into(),
+                serde_json::json!(false),
+            )]),
+            ..UserPermissions::default()
+        };
+        let meta = ToolMetadata {
+            required_custom_permissions: HashMap::from([(
+                "exec_enabled".into(),
+                serde_json::json!(true),
+            )]),
+            ..ToolMetadata::default()
+        };
+        let result = check_tool_permission("custom_tool", &perms, Some(&meta));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_mcp_namespaced_tool_exact_match() {
+        let perms = UserPermissions {
+            level: 1,
+            tool_access: vec!["myserver__search".into()],
+            ..UserPermissions::default()
+        };
+        assert!(check_tool_permission("myserver__search", &perms, None).is_ok());
+        assert!(check_tool_permission("myserver__exec", &perms, None).is_err());
+    }
+
+    #[test]
+    fn test_mcp_namespaced_tool_glob_match() {
+        let perms = UserPermissions {
+            level: 1,
+            tool_access: vec!["myserver__*".into()],
+            ..UserPermissions::default()
+        };
+        assert!(check_tool_permission("myserver__search", &perms, None).is_ok());
+        assert!(check_tool_permission("otherserver__search", &perms, None).is_err());
+    }
+
+    // ── Registry integration tests ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_registry_execute_with_none_permissions() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool));
+
+        // None permissions = backward compat, all tools allowed.
+        let result = registry
+            .execute("echo", serde_json::json!({ "text": "hello" }), None)
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_registry_execute_with_denied_permissions() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool));
+
+        let perms = zero_trust_permissions();
+        let result = registry
+            .execute(
+                "echo",
+                serde_json::json!({ "text": "hello" }),
+                Some(&perms),
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_registry_execute_not_found_before_permission_check() {
+        let registry = ToolRegistry::new();
+        let perms = zero_trust_permissions();
+
+        // NotFound should fire before PermissionDenied.
+        let result = registry
+            .execute("nonexistent", serde_json::json!({}), Some(&perms))
+            .await;
+        assert!(matches!(result.unwrap_err(), ToolError::NotFound(_)));
+    }
+
+    // ── Security-critical tests ───────────────────────────────────────
+
+    #[test]
+    fn test_zero_trust_blocked_from_exec_and_spawn() {
+        let perms = zero_trust_permissions();
+        assert!(check_tool_permission("exec_shell", &perms, None).is_err());
+        assert!(check_tool_permission("spawn", &perms, None).is_err());
+    }
+
+    #[test]
+    fn test_user_level_blocked_from_exec_and_spawn() {
+        let perms = user_permissions(vec![
+            "read_file",
+            "write_file",
+            "edit_file",
+            "list_dir",
+            "web_search",
+            "web_fetch",
+            "message",
+        ]);
+        assert!(check_tool_permission("exec_shell", &perms, None).is_err());
+        assert!(check_tool_permission("spawn", &perms, None).is_err());
+    }
+
+    #[test]
+    fn test_admin_can_call_all_tools() {
+        let perms = admin_permissions();
+        assert!(check_tool_permission("exec_shell", &perms, None).is_ok());
+        assert!(check_tool_permission("spawn", &perms, None).is_ok());
+        assert!(check_tool_permission("read_file", &perms, None).is_ok());
+        assert!(check_tool_permission("myserver__tool", &perms, None).is_ok());
+    }
+
+    #[test]
+    fn test_permission_denied_error_includes_tool_name() {
+        let perms = zero_trust_permissions();
+        let result = check_tool_permission("exec_shell", &perms, None);
+        match result.unwrap_err() {
+            ToolError::PermissionDenied { tool, reason } => {
+                assert_eq!(tool, "exec_shell");
+                assert!(!reason.is_empty());
+            }
+            other => panic!("expected PermissionDenied, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_permission_denied_error_display_format() {
+        let err = ToolError::PermissionDenied {
+            tool: "exec_shell".into(),
+            reason: "tool is explicitly denied for this user".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "permission denied for tool 'exec_shell': tool is explicitly denied for this user"
+        );
+    }
+
+    // ── MCP metadata extraction ───────────────────────────────────────
+
+    #[test]
+    fn test_extract_mcp_metadata() {
+        let decl = serde_json::json!({
+            "required_permission_level": 2,
+            "required_custom_permissions": {
+                "exec_enabled": true
+            }
+        });
+        let meta = extract_mcp_metadata(&decl);
+        assert_eq!(meta.required_permission_level, Some(2));
+        assert_eq!(
+            meta.required_custom_permissions.get("exec_enabled"),
+            Some(&serde_json::json!(true))
+        );
+    }
+
+    #[test]
+    fn test_extract_mcp_metadata_empty() {
+        let decl = serde_json::json!({});
+        let meta = extract_mcp_metadata(&decl);
+        assert!(meta.required_permission_level.is_none());
+        assert!(meta.required_custom_permissions.is_empty());
+    }
+
+    // ── Register with metadata ────────────────────────────────────────
+
+    #[test]
+    fn test_register_with_metadata_stores_metadata() {
+        let mut registry = ToolRegistry::new();
+        let meta = ToolMetadata {
+            required_permission_level: Some(2),
+            ..ToolMetadata::default()
+        };
+        registry.register_with_metadata(Arc::new(EchoTool), meta);
+
+        let stored = registry.get_metadata("echo").unwrap();
+        assert_eq!(stored.required_permission_level, Some(2));
+    }
+
+    #[tokio::test]
+    async fn test_registry_execute_with_admin_and_metadata() {
+        let mut registry = ToolRegistry::new();
+        let meta = ToolMetadata {
+            required_permission_level: Some(2),
+            ..ToolMetadata::default()
+        };
+        registry.register_with_metadata(Arc::new(EchoTool), meta);
+
+        let perms = admin_permissions();
+        let result = registry
+            .execute(
+                "echo",
+                serde_json::json!({ "text": "hello" }),
+                Some(&perms),
+            )
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_registry_execute_with_low_level_and_metadata() {
+        let mut registry = ToolRegistry::new();
+        let meta = ToolMetadata {
+            required_permission_level: Some(2),
+            ..ToolMetadata::default()
+        };
+        registry.register_with_metadata(Arc::new(EchoTool), meta);
+
+        let perms = UserPermissions {
+            level: 1,
+            tool_access: vec!["*".into()],
+            ..UserPermissions::default()
+        };
+        let result = registry
+            .execute(
+                "echo",
+                serde_json::json!({ "text": "hello" }),
+                Some(&perms),
+            )
+            .await;
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied { .. }
+        ));
     }
 }

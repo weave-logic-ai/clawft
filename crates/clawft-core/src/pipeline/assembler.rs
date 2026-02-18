@@ -148,6 +148,7 @@ mod tests {
             model: None,
             max_tokens: None,
             temperature: None,
+            auth_context: None,
         }
     }
 
