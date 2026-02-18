@@ -45,7 +45,9 @@ const PATTERNS: &[KeywordPattern] = &[
     },
     // Research
     KeywordPattern {
-        keywords: &["search", "find", "research", "look up", "lookup", "discover"],
+        keywords: &[
+            "search", "find", "research", "look up", "lookup", "discover",
+        ],
         task_type: TaskType::Research,
     },
     // Creative

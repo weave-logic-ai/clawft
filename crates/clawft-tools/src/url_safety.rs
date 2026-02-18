@@ -30,11 +30,7 @@ const BLOCKED_IPV4_CIDRS: &[&str] = &[
 ];
 
 /// Private and reserved IPv6 networks.
-const BLOCKED_IPV6_CIDRS: &[&str] = &[
-    "::1/128",
-    "fe80::/10",
-    "fc00::/7",
-];
+const BLOCKED_IPV6_CIDRS: &[&str] = &["::1/128", "fe80::/10", "fc00::/7"];
 
 /// Errors returned by URL safety validation.
 #[derive(Debug, thiserror::Error)]
@@ -199,16 +195,12 @@ pub fn validate_url(url_str: &str, policy: &UrlPolicy) -> Result<(), UrlSafetyEr
 
     // Check blocked domains.
     if policy.blocked_domains.contains(&host) {
-        return Err(UrlSafetyError::BlockedDomain {
-            host: host.clone(),
-        });
+        return Err(UrlSafetyError::BlockedDomain { host: host.clone() });
     }
 
     // Check cloud metadata endpoints.
     if METADATA_HOSTS.iter().any(|&m| m == host) {
-        return Err(UrlSafetyError::MetadataEndpoint {
-            host: host.clone(),
-        });
+        return Err(UrlSafetyError::MetadataEndpoint { host: host.clone() });
     }
 
     // If private IPs are allowed, skip IP-based checks.
@@ -274,9 +266,7 @@ mod tests {
 
     #[test]
     fn public_url_with_path_and_query() {
-        assert!(
-            validate_url("https://example.com/path?key=value", &default_policy()).is_ok()
-        );
+        assert!(validate_url("https://example.com/path?key=value", &default_policy()).is_ok());
     }
 
     // --- Private IPv4 blocked ---
@@ -335,8 +325,7 @@ mod tests {
 
     #[test]
     fn metadata_gcp() {
-        let err =
-            validate_url("http://metadata.google.internal/", &default_policy()).unwrap_err();
+        let err = validate_url("http://metadata.google.internal/", &default_policy()).unwrap_err();
         assert!(matches!(err, UrlSafetyError::MetadataEndpoint { .. }));
     }
 

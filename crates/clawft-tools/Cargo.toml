@@ -13,11 +13,14 @@ categories = ["development-tools"]
 [features]
 default = ["native-exec"]
 native-exec = []
+vector-memory = ["clawft-core/vector-memory"]
+delegate = ["clawft-services/delegate"]
 
 [dependencies]
 clawft-types = { workspace = true }
 clawft-platform = { workspace = true }
 clawft-core = { workspace = true }
+clawft-services = { workspace = true, optional = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

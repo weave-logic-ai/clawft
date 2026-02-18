@@ -104,10 +104,7 @@ impl DiscordApiClient {
 
         let status = resp.status();
         if !status.is_success() {
-            let err_body = resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".into());
+            let err_body = resp.text().await.unwrap_or_else(|_| "unknown error".into());
             return Err(ChannelError::SendFailed(format!(
                 "Discord API returned {status}: {err_body}"
             )));
@@ -165,10 +162,7 @@ impl DiscordApiClient {
 
         let status = resp.status();
         if !status.is_success() {
-            let err_body = resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".into());
+            let err_body = resp.text().await.unwrap_or_else(|_| "unknown error".into());
             return Err(ChannelError::SendFailed(format!(
                 "Discord API returned {status}: {err_body}"
             )));

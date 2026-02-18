@@ -228,14 +228,11 @@ impl<P: Platform> SessionManager<P> {
             "last_consolidated": session.last_consolidated,
         });
 
-        let mut content = serde_json::to_string(&meta)
-            .map_err(ClawftError::Json)?;
+        let mut content = serde_json::to_string(&meta).map_err(ClawftError::Json)?;
         content.push('\n');
 
         for msg in &session.messages {
-            content.push_str(
-                &serde_json::to_string(msg).map_err(ClawftError::Json)?,
-            );
+            content.push_str(&serde_json::to_string(msg).map_err(ClawftError::Json)?);
             content.push('\n');
         }
 
@@ -327,7 +324,11 @@ impl<P: Platform> SessionManager<P> {
         crate::security::validate_session_id(key)?;
         let path = self.session_path(key);
         if self.platform.fs().exists(&path).await {
-            self.platform.fs().remove_file(&path).await.map_err(ClawftError::Io)?;
+            self.platform
+                .fs()
+                .remove_file(&path)
+                .await
+                .map_err(ClawftError::Io)?;
         }
         self.invalidate(key).await;
         Ok(())
@@ -381,11 +382,7 @@ mod tests {
             })
         }
 
-        async fn write_string(
-            &self,
-            path: &std::path::Path,
-            content: &str,
-        ) -> std::io::Result<()> {
+        async fn write_string(&self, path: &std::path::Path, content: &str) -> std::io::Result<()> {
             // Create parent dirs implicitly.
             if let Some(parent) = path.parent() {
                 let mut dirs = self.dirs.lock().unwrap();
@@ -418,10 +415,7 @@ mod tests {
             dirs.contains(&path.to_path_buf())
         }
 
-        async fn list_dir(
-            &self,
-            path: &std::path::Path,
-        ) -> std::io::Result<Vec<PathBuf>> {
+        async fn list_dir(&self, path: &std::path::Path) -> std::io::Result<Vec<PathBuf>> {
             let files = self.files.lock().unwrap();
             let mut entries = Vec::new();
             for file_path in files.keys() {
@@ -575,9 +569,7 @@ mod tests {
 
         mgr.save_session(&session).await.unwrap();
 
-        let path = PathBuf::from(
-            "/mock-home/.clawft/workspace/sessions/fmt_check.jsonl",
-        );
+        let path = PathBuf::from("/mock-home/.clawft/workspace/sessions/fmt_check.jsonl");
         let content = platform.fs.read_to_string(&path).await.unwrap();
         let lines: Vec<&str> = content.lines().collect();
 
@@ -673,9 +665,7 @@ mod tests {
         let path = mgr.session_path("telegram:12345");
         assert_eq!(
             path,
-            PathBuf::from(
-                "/mock-home/.clawft/workspace/sessions/telegram_12345.jsonl"
-            )
+            PathBuf::from("/mock-home/.clawft/workspace/sessions/telegram_12345.jsonl")
         );
     }
 

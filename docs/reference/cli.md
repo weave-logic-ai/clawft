@@ -136,6 +136,71 @@ weft status --detailed
 
 ---
 
+## weft agents
+
+Manage agent definitions. Agents are discovered from workspace
+(`.clawft/agents/`), user (`~/.clawft/agents/`), and builtin sources.
+
+### Subcommands
+
+### weft agents list
+
+List all agents with source annotation.
+
+```
+weft agents list
+```
+
+Displays a table with columns: NAME, SOURCE, MODEL, DESCRIPTION.
+
+### weft agents show
+
+Show details of a specific agent, including model, skills, system prompt
+preview, allowed tools, and variables.
+
+```
+weft agents show <NAME>
+```
+
+| Argument | Description |
+|----------|-------------|
+| `<NAME>` | Agent name to inspect. Required. |
+
+### weft agents use
+
+Set the active agent for the next session. Validates the agent exists and
+prints instructions for using it.
+
+```
+weft agents use <NAME>
+```
+
+| Argument | Description |
+|----------|-------------|
+| `<NAME>` | Agent name to activate. Required. |
+
+### Examples
+
+List all agents:
+
+```
+weft agents list
+```
+
+Show details for a specific agent:
+
+```
+weft agents show researcher
+```
+
+Select an agent for use:
+
+```
+weft agents use coder
+```
+
+---
+
 ## weft channels status
 
 Display the status of all configured channels.
@@ -479,6 +544,352 @@ Show agent configuration from a custom file:
 
 ```
 weft config section agents -c ./staging.toml
+```
+
+---
+
+## weft help
+
+Show help for a specific topic or a general overview of all subcommands.
+
+### Usage
+
+```
+weft help [TOPIC]
+```
+
+### Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `[TOPIC]` | Topic to display help for. One of: `skills`, `agents`, `tools`, `commands`, `config`. When omitted, prints a general overview. |
+
+### Examples
+
+Show general help:
+
+```
+weft help
+```
+
+Show help for skills:
+
+```
+weft help skills
+```
+
+Show help for configuration:
+
+```
+weft help config
+```
+
+---
+
+## weft mcp-server
+
+Start an MCP tool server over stdio. Exposes all registered tools (builtin
+and MCP-proxied) as an MCP server, reading JSON-RPC requests from stdin and
+writing responses to stdout. This allows MCP clients (Claude Desktop, Cursor,
+etc.) to use clawft tools natively.
+
+### Usage
+
+```
+weft mcp-server [OPTIONS]
+```
+
+### Options
+
+| Flag / Option | Description |
+|---------------|-------------|
+| `--config`, `-c` `<PATH>` | Path to a config file. Overrides the default config resolution. |
+
+### Examples
+
+Start the MCP server with default config:
+
+```
+weft mcp-server
+```
+
+Start with a custom config:
+
+```
+weft mcp-server -c /etc/weft/production.toml
+```
+
+---
+
+## weft onboard
+
+Set up initial clawft configuration and workspace. Creates the `~/.clawft/`
+directory structure, generates a config template, and optionally prompts for
+API key configuration.
+
+### Usage
+
+```
+weft onboard [OPTIONS]
+```
+
+### Options
+
+| Flag / Option | Description |
+|---------------|-------------|
+| `--yes`, `-y` | Skip interactive prompts and use defaults. |
+| `--dir` `<PATH>` | Override the config directory (default: `~/.clawft`). |
+
+### Examples
+
+Run the interactive onboarding wizard:
+
+```
+weft onboard
+```
+
+Non-interactive setup with defaults:
+
+```
+weft onboard --yes
+```
+
+Use a custom config directory:
+
+```
+weft onboard --dir /tmp/my-clawft
+```
+
+---
+
+## weft skills
+
+Manage skills. Skills are discovered from workspace (`.clawft/skills/`),
+user (`~/.clawft/skills/`), and builtin sources.
+
+### Subcommands
+
+### weft skills list
+
+List all skills with source annotation.
+
+```
+weft skills list
+```
+
+Displays a table with columns: NAME, SOURCE, FORMAT, DESCRIPTION.
+
+### weft skills show
+
+Show details of a specific skill, including description, version, format,
+variables, allowed tools, metadata, and an instructions preview.
+
+```
+weft skills show <NAME>
+```
+
+| Argument | Description |
+|----------|-------------|
+| `<NAME>` | Skill name to inspect. Required. |
+
+### weft skills install
+
+Install a skill from a local path to the user skills directory
+(`~/.clawft/skills/`).
+
+```
+weft skills install <PATH>
+```
+
+| Argument | Description |
+|----------|-------------|
+| `<PATH>` | Path to a skill directory (containing `SKILL.md` or `skill.json`). Required. |
+
+### Examples
+
+List all skills:
+
+```
+weft skills list
+```
+
+Show details for a specific skill:
+
+```
+weft skills show research
+```
+
+Install a skill from a local directory:
+
+```
+weft skills install ./my-skills/summarize
+```
+
+---
+
+## weft workspace
+
+Manage workspaces. Workspaces provide isolated directories for sessions,
+memory, skills, agents, hooks, and configuration.
+
+### Subcommands
+
+### weft workspace create
+
+Create a new workspace.
+
+```
+weft workspace create <NAME> [OPTIONS]
+```
+
+| Argument / Option | Description |
+|-------------------|-------------|
+| `<NAME>` | Workspace name. Required. |
+| `--dir` `<PATH>` | Parent directory for the workspace. Defaults to the current directory. |
+
+### weft workspace list
+
+List all registered workspaces.
+
+```
+weft workspace list [OPTIONS]
+```
+
+| Flag / Option | Description |
+|---------------|-------------|
+| `--all` | Show all entries including those with missing directories. |
+
+### weft workspace load
+
+Load (activate) a workspace by name or filesystem path.
+
+```
+weft workspace load <NAME_OR_PATH>
+```
+
+| Argument | Description |
+|----------|-------------|
+| `<NAME_OR_PATH>` | Workspace name or filesystem path. Required. |
+
+### weft workspace status
+
+Show status of the current workspace, including session count, config
+presence, and scoped resource paths.
+
+```
+weft workspace status
+```
+
+### weft workspace delete
+
+Delete a workspace from the registry. Files on disk are not removed.
+
+```
+weft workspace delete <NAME> [OPTIONS]
+```
+
+| Argument / Option | Description |
+|-------------------|-------------|
+| `<NAME>` | Workspace name to delete. Required. |
+| `--yes`, `-y` | Skip confirmation prompt. |
+
+### weft workspace config
+
+Manage workspace configuration using dot-separated keys.
+
+### weft workspace config set
+
+Set a configuration key.
+
+```
+weft workspace config set <KEY> <VALUE>
+```
+
+| Argument | Description |
+|----------|-------------|
+| `<KEY>` | Dot-separated config key (e.g., `agents.defaults.model`). Required. |
+| `<VALUE>` | Value to set. Parsed as JSON primitive when possible (number, boolean, null), otherwise stored as string. Required. |
+
+### weft workspace config get
+
+Get the value of a configuration key.
+
+```
+weft workspace config get <KEY>
+```
+
+| Argument | Description |
+|----------|-------------|
+| `<KEY>` | Dot-separated config key. Required. |
+
+### weft workspace config reset
+
+Reset workspace configuration to empty.
+
+```
+weft workspace config reset
+```
+
+### Examples
+
+Create a new workspace:
+
+```
+weft workspace create my-project
+```
+
+Create a workspace in a specific directory:
+
+```
+weft workspace create my-project --dir /home/user/projects
+```
+
+List all workspaces:
+
+```
+weft workspace list
+```
+
+Load a workspace:
+
+```
+weft workspace load my-project
+```
+
+Show current workspace status:
+
+```
+weft workspace status
+```
+
+Set a config value:
+
+```
+weft workspace config set agents.defaults.model openai/gpt-4o
+```
+
+Get a config value:
+
+```
+weft workspace config get agents.defaults.model
+```
+
+Reset workspace config:
+
+```
+weft workspace config reset
+```
+
+Delete a workspace (with confirmation):
+
+```
+weft workspace delete my-project
+```
+
+Delete a workspace without confirmation:
+
+```
+weft workspace delete my-project -y
 ```
 
 ---

@@ -4,6 +4,7 @@
 //!
 //! - `weft agent` -- Start an interactive agent session or send a single message.
 //! - `weft gateway` -- Start channels + agent loop (Telegram, Slack, etc.).
+//! - `weft mcp-server` -- Run as an MCP tool server over stdio.
 //! - `weft status` -- Show configuration status and diagnostics.
 //! - `weft channels` -- Inspect channel configuration status.
 //! - `weft cron` -- Manage scheduled (cron) jobs.
@@ -12,12 +13,19 @@ use clap::{CommandFactory, Parser, Subcommand};
 
 mod commands;
 mod completions;
+mod help_text;
+pub mod interactive;
 mod markdown;
 mod mcp_tools;
 
 /// clawft AI assistant CLI.
 #[derive(Parser)]
-#[command(name = "weft", about = "clawft AI assistant CLI", version)]
+#[command(
+    name = "weft",
+    about = "clawft AI assistant CLI",
+    version,
+    disable_help_subcommand = true
+)]
 struct Cli {
     /// Enable verbose (debug-level) logging.
     #[arg(short, long, global = true)]
@@ -35,6 +43,9 @@ enum Commands {
 
     /// Start the gateway (channels + agent loop).
     Gateway(commands::gateway::GatewayArgs),
+
+    /// Run as an MCP tool server over stdio.
+    McpServer(commands::mcp_server::McpServerArgs),
 
     /// Show configuration status.
     Status(commands::status::StatusArgs),
@@ -68,6 +79,21 @@ enum Commands {
         #[command(subcommand)]
         action: ConfigCmd,
     },
+
+    /// Manage skills (list, show, install).
+    Skills(commands::skills_cmd::SkillsArgs),
+
+    /// Manage agents (list, show, use).
+    Agents(commands::agents_cmd::AgentsArgs),
+
+    /// Manage workspaces.
+    Workspace(commands::workspace_cmd::WorkspaceArgs),
+
+    /// Initialize clawft config and workspace.
+    Onboard(commands::onboard::OnboardArgs),
+
+    /// Show help for a topic (skills, agents, tools, commands, config).
+    Help(commands::help_cmd::HelpArgs),
 
     /// Generate shell completions.
     Completions {
@@ -256,6 +282,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Agent(args) => commands::agent::run(args).await?,
         Commands::Gateway(args) => commands::gateway::run(args).await?,
+        Commands::McpServer(args) => commands::mcp_server::run(args).await?,
         Commands::Status(args) => commands::status::run(args).await?,
         Commands::Channels { action } => {
             let platform = clawft_platform::NativePlatform::new();
@@ -273,7 +300,12 @@ async fn main() -> anyhow::Result<()> {
                     let cfg = commands::load_config(&platform, config.as_deref()).await?;
                     commands::cron::cron_list(&cfg)?;
                 }
-                CronAction::Add { name, schedule, prompt, config } => {
+                CronAction::Add {
+                    name,
+                    schedule,
+                    prompt,
+                    config,
+                } => {
                     let cfg = commands::load_config(&platform, config.as_deref()).await?;
                     commands::cron::cron_add(name, schedule, prompt, &cfg)?;
                 }
@@ -323,7 +355,11 @@ async fn main() -> anyhow::Result<()> {
                     let cfg = commands::load_config(&platform, config.as_deref()).await?;
                     commands::memory_cmd::memory_history(&cfg).await?;
                 }
-                MemoryCmd::Search { query, limit, config } => {
+                MemoryCmd::Search {
+                    query,
+                    limit,
+                    config,
+                } => {
                     let cfg = commands::load_config(&platform, config.as_deref()).await?;
                     commands::memory_cmd::memory_search(&query, limit, &cfg).await?;
                 }
@@ -342,19 +378,22 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Completions { shell } => {
-            match completions::Shell::from_str(&shell) {
-                Some(s) => {
-                    let mut cmd = Cli::command();
-                    completions::generate_completions(&s, &mut cmd);
-                }
-                None => {
-                    eprintln!("unsupported shell: {shell}");
-                    eprintln!("supported: {}", completions::Shell::all_names().join(", "));
-                    std::process::exit(1);
-                }
+        Commands::Skills(args) => commands::skills_cmd::run(args)?,
+        Commands::Agents(args) => commands::agents_cmd::run(args)?,
+        Commands::Workspace(args) => commands::workspace_cmd::run(args)?,
+        Commands::Onboard(args) => commands::onboard::run(args).await?,
+        Commands::Help(args) => commands::help_cmd::run(args)?,
+        Commands::Completions { shell } => match completions::Shell::from_str(&shell) {
+            Some(s) => {
+                let mut cmd = Cli::command();
+                completions::generate_completions(&s, &mut cmd);
             }
-        }
+            None => {
+                eprintln!("unsupported shell: {shell}");
+                eprintln!("supported: {}", completions::Shell::all_names().join(", "));
+                std::process::exit(1);
+            }
+        },
     }
 
     Ok(())
@@ -380,19 +419,62 @@ mod tests {
     #[test]
     fn cli_has_all_subcommands() {
         let cmd = Cli::command();
-        let sub_names: Vec<&str> = cmd
-            .get_subcommands()
-            .map(|s| s.get_name())
-            .collect();
+        let sub_names: Vec<&str> = cmd.get_subcommands().map(|s| s.get_name()).collect();
         assert!(sub_names.contains(&"agent"));
         assert!(sub_names.contains(&"gateway"));
+        assert!(sub_names.contains(&"mcp-server"));
         assert!(sub_names.contains(&"status"));
         assert!(sub_names.contains(&"channels"));
         assert!(sub_names.contains(&"cron"));
         assert!(sub_names.contains(&"sessions"));
         assert!(sub_names.contains(&"memory"));
         assert!(sub_names.contains(&"config"));
+        assert!(sub_names.contains(&"skills"));
+        assert!(sub_names.contains(&"agents"));
+        assert!(sub_names.contains(&"workspace"));
+        assert!(sub_names.contains(&"onboard"));
+        assert!(sub_names.contains(&"help"));
         assert!(sub_names.contains(&"completions"));
+    }
+
+    // ── Skills subcommand parsing ──────────────────────────────────
+
+    #[test]
+    fn cli_skills_list_parses() {
+        let result = Cli::try_parse_from(["weft", "skills", "list"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_skills_show_parses() {
+        let result = Cli::try_parse_from(["weft", "skills", "show", "research"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_skills_install_parses() {
+        let result = Cli::try_parse_from(["weft", "skills", "install", "/path/to/skill"]);
+        assert!(result.is_ok());
+    }
+
+    // ── Agents subcommand parsing ──────────────────────────────────
+
+    #[test]
+    fn cli_agents_list_parses() {
+        let result = Cli::try_parse_from(["weft", "agents", "list"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_agents_show_parses() {
+        let result = Cli::try_parse_from(["weft", "agents", "show", "researcher"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_agents_use_parses() {
+        let result = Cli::try_parse_from(["weft", "agents", "use", "coder"]);
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -406,25 +488,19 @@ mod tests {
 
     #[test]
     fn cli_agent_subcommand_parses_message() {
-        let result = Cli::try_parse_from([
-            "weft", "agent", "--message", "hello world",
-        ]);
+        let result = Cli::try_parse_from(["weft", "agent", "--message", "hello world"]);
         assert!(result.is_ok());
     }
 
     #[test]
     fn cli_agent_subcommand_parses_model() {
-        let result = Cli::try_parse_from([
-            "weft", "agent", "--model", "openai/gpt-4",
-        ]);
+        let result = Cli::try_parse_from(["weft", "agent", "--model", "openai/gpt-4"]);
         assert!(result.is_ok());
     }
 
     #[test]
     fn cli_gateway_subcommand_parses_config() {
-        let result = Cli::try_parse_from([
-            "weft", "gateway", "--config", "/tmp/config.json",
-        ]);
+        let result = Cli::try_parse_from(["weft", "gateway", "--config", "/tmp/config.json"]);
         assert!(result.is_ok());
     }
 
@@ -442,9 +518,8 @@ mod tests {
 
     #[test]
     fn cli_channels_status_with_config() {
-        let result = Cli::try_parse_from([
-            "weft", "channels", "status", "--config", "/tmp/config.json",
-        ]);
+        let result =
+            Cli::try_parse_from(["weft", "channels", "status", "--config", "/tmp/config.json"]);
         assert!(result.is_ok());
     }
 
@@ -457,10 +532,15 @@ mod tests {
     #[test]
     fn cli_cron_add_parses() {
         let result = Cli::try_parse_from([
-            "weft", "cron", "add",
-            "--name", "daily report",
-            "--schedule", "0 9 * * *",
-            "--prompt", "Generate report",
+            "weft",
+            "cron",
+            "add",
+            "--name",
+            "daily report",
+            "--schedule",
+            "0 9 * * *",
+            "--prompt",
+            "Generate report",
         ]);
         assert!(result.is_ok());
     }
@@ -486,6 +566,152 @@ mod tests {
     #[test]
     fn cli_cron_run_parses() {
         let result = Cli::try_parse_from(["weft", "cron", "run", "job-123"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_onboard_parses() {
+        let result = Cli::try_parse_from(["weft", "onboard"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_onboard_yes_flag() {
+        let result = Cli::try_parse_from(["weft", "onboard", "--yes"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_onboard_dir_override() {
+        let result = Cli::try_parse_from(["weft", "onboard", "--dir", "/tmp/test-clawft"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_onboard_short_yes_flag() {
+        let result = Cli::try_parse_from(["weft", "onboard", "-y"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_mcp_server_parses() {
+        let result = Cli::try_parse_from(["weft", "mcp-server"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_mcp_server_with_config() {
+        let result = Cli::try_parse_from(["weft", "mcp-server", "--config", "/tmp/config.json"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_mcp_server_verbose() {
+        let result = Cli::try_parse_from(["weft", "--verbose", "mcp-server"]);
+        assert!(result.is_ok());
+        let cli = result.unwrap();
+        assert!(cli.verbose);
+    }
+
+    // ── Workspace subcommand parsing ────────────────────────────────
+
+    #[test]
+    fn cli_workspace_create_parses() {
+        let result = Cli::try_parse_from(["weft", "workspace", "create", "my-ws"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_workspace_create_with_dir() {
+        let result = Cli::try_parse_from([
+            "weft",
+            "workspace",
+            "create",
+            "my-ws",
+            "--dir",
+            "/tmp/projects",
+        ]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_workspace_list_parses() {
+        let result = Cli::try_parse_from(["weft", "workspace", "list"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_workspace_list_all() {
+        let result = Cli::try_parse_from(["weft", "workspace", "list", "--all"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_workspace_load_parses() {
+        let result = Cli::try_parse_from(["weft", "workspace", "load", "my-ws"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_workspace_status_parses() {
+        let result = Cli::try_parse_from(["weft", "workspace", "status"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_workspace_delete_parses() {
+        let result = Cli::try_parse_from(["weft", "workspace", "delete", "my-ws"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_workspace_delete_yes() {
+        let result = Cli::try_parse_from(["weft", "workspace", "delete", "my-ws", "-y"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_workspace_config_set_parses() {
+        let result = Cli::try_parse_from([
+            "weft",
+            "workspace",
+            "config",
+            "set",
+            "agents.defaults.model",
+            "openai/gpt-4o",
+        ]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_workspace_config_get_parses() {
+        let result = Cli::try_parse_from([
+            "weft",
+            "workspace",
+            "config",
+            "get",
+            "agents.defaults.model",
+        ]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_workspace_config_reset_parses() {
+        let result = Cli::try_parse_from(["weft", "workspace", "config", "reset"]);
+        assert!(result.is_ok());
+    }
+
+    // ── Help subcommand parsing ───────────────────────────────────
+
+    #[test]
+    fn cli_help_no_topic_parses() {
+        let result = Cli::try_parse_from(["weft", "help"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_help_with_topic_parses() {
+        let result = Cli::try_parse_from(["weft", "help", "skills"]);
         assert!(result.is_ok());
     }
 }

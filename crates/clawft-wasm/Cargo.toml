@@ -10,8 +10,14 @@ description = "WASM entrypoint for clawft"
 keywords = ["wasm", "wasi", "ai", "agent", "edge"]
 categories = ["wasm"]
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [features]
 default = []
+alloc-talc = ["dep:talc"]
+alloc-lol = ["dep:lol_alloc"]
+alloc-tracing = []
 
 [dependencies]
 clawft-types = { workspace = true }
@@ -20,3 +26,5 @@ serde_json = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 dlmalloc = { version = "0.2", features = ["global"] }
+talc = { version = "4.4", optional = true }
+lol_alloc = { version = "0.4", optional = true }

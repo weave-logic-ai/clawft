@@ -13,7 +13,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use super::types::{JsonRpcRequest, JsonRpcResponse};
+use super::types::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 use crate::error::{Result, ServiceError};
 
 /// Transport layer for MCP JSON-RPC communication.
@@ -21,6 +21,9 @@ use crate::error::{Result, ServiceError};
 pub trait McpTransport: Send + Sync {
     /// Send a JSON-RPC request and return the response.
     async fn send_request(&self, request: JsonRpcRequest) -> Result<JsonRpcResponse>;
+
+    /// Send a JSON-RPC notification (no `id`, no response expected).
+    async fn send_notification(&self, method: &str, params: serde_json::Value) -> Result<()>;
 }
 
 /// Transport that communicates with a child process via stdin/stdout.
@@ -81,19 +84,19 @@ impl McpTransport for StdioTransport {
             stdin.write_all(line.as_bytes()).await.map_err(|e| {
                 ServiceError::McpTransport(format!("failed to write to stdin: {e}"))
             })?;
-            stdin.flush().await.map_err(|e| {
-                ServiceError::McpTransport(format!("failed to flush stdin: {e}"))
-            })?;
+            stdin
+                .flush()
+                .await
+                .map_err(|e| ServiceError::McpTransport(format!("failed to flush stdin: {e}")))?;
         }
 
         // Read from stdout.
         let mut response_line = String::new();
         {
             let mut stdout = self.stdout.lock().await;
-            stdout
-                .read_line(&mut response_line)
-                .await
-                .map_err(|e| ServiceError::McpTransport(format!("failed to read from stdout: {e}")))?;
+            stdout.read_line(&mut response_line).await.map_err(|e| {
+                ServiceError::McpTransport(format!("failed to read from stdout: {e}"))
+            })?;
         }
 
         if response_line.is_empty() {
@@ -104,6 +107,25 @@ impl McpTransport for StdioTransport {
 
         let response: JsonRpcResponse = serde_json::from_str(response_line.trim())?;
         Ok(response)
+    }
+
+    async fn send_notification(&self, method: &str, params: serde_json::Value) -> Result<()> {
+        let notif = JsonRpcNotification::new(method, params);
+        let mut line = serde_json::to_string(&notif)?;
+        line.push('\n');
+
+        debug!(method = %method, "sending stdio notification");
+
+        let mut stdin = self.stdin.lock().await;
+        stdin.write_all(line.as_bytes()).await.map_err(|e| {
+            ServiceError::McpTransport(format!("failed to write notification to stdin: {e}"))
+        })?;
+        stdin.flush().await.map_err(|e| {
+            ServiceError::McpTransport(format!("failed to flush stdin after notification: {e}"))
+        })?;
+
+        // Notifications do not expect a response -- do NOT read from stdout.
+        Ok(())
     }
 }
 
@@ -147,9 +169,7 @@ impl McpTransport for HttpTransport {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(ServiceError::McpTransport(format!(
-                "HTTP {status}: {body}"
-            )));
+            return Err(ServiceError::McpTransport(format!("HTTP {status}: {body}")));
         }
 
         let response: JsonRpcResponse = resp
@@ -159,15 +179,47 @@ impl McpTransport for HttpTransport {
 
         Ok(response)
     }
+
+    async fn send_notification(&self, method: &str, params: serde_json::Value) -> Result<()> {
+        let notif = JsonRpcNotification::new(method, params);
+
+        debug!(
+            method = %method,
+            endpoint = %self.endpoint,
+            "sending HTTP notification"
+        );
+
+        let resp = self
+            .client
+            .post(&self.endpoint)
+            .json(&notif)
+            .send()
+            .await
+            .map_err(|e| ServiceError::McpTransport(format!("HTTP notification failed: {e}")))?;
+
+        // Log non-success status but don't fail -- notifications are fire-and-forget.
+        let status = resp.status();
+        if !status.is_success() {
+            debug!(
+                method = %method,
+                status = %status,
+                "HTTP notification received non-success status"
+            );
+        }
+
+        Ok(())
+    }
 }
 
 /// A mock transport for testing.
 ///
 /// Allows pre-programming responses that will be returned in order.
+/// Also records all sent notifications for verification.
 #[cfg(test)]
 pub struct MockTransport {
     responses: Arc<Mutex<Vec<JsonRpcResponse>>>,
     requests: Arc<Mutex<Vec<JsonRpcRequest>>>,
+    notifications: Arc<Mutex<Vec<JsonRpcNotification>>>,
 }
 
 #[cfg(test)]
@@ -177,12 +229,18 @@ impl MockTransport {
         Self {
             responses: Arc::new(Mutex::new(responses)),
             requests: Arc::new(Mutex::new(Vec::new())),
+            notifications: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     /// Get all requests that were sent through this transport.
     pub async fn requests(&self) -> Vec<JsonRpcRequest> {
         self.requests.lock().await.clone()
+    }
+
+    /// Get all notifications that were sent through this transport.
+    pub async fn notifications(&self) -> Vec<JsonRpcNotification> {
+        self.notifications.lock().await.clone()
     }
 }
 
@@ -197,6 +255,12 @@ impl McpTransport for MockTransport {
         } else {
             Ok(responses.remove(0))
         }
+    }
+
+    async fn send_notification(&self, method: &str, params: serde_json::Value) -> Result<()> {
+        let notif = JsonRpcNotification::new(method, params);
+        self.notifications.lock().await.push(notif);
+        Ok(())
     }
 }
 
@@ -250,5 +314,37 @@ mod tests {
         let req = JsonRpcRequest::new(1, "test", serde_json::json!({}));
         let result = transport.send_request(req).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn mock_transport_records_notifications() {
+        let transport = MockTransport::new(vec![]);
+        transport
+            .send_notification("notifications/initialized", serde_json::json!({}))
+            .await
+            .unwrap();
+        transport
+            .send_notification(
+                "notifications/progress",
+                serde_json::json!({"token": "abc"}),
+            )
+            .await
+            .unwrap();
+
+        let notifs = transport.notifications().await;
+        assert_eq!(notifs.len(), 2);
+        assert_eq!(notifs[0].method, "notifications/initialized");
+        assert_eq!(notifs[1].method, "notifications/progress");
+        assert_eq!(notifs[1].params["token"], "abc");
+    }
+
+    #[tokio::test]
+    async fn notification_has_no_id_field() {
+        let notif = JsonRpcNotification::new("test/notify", serde_json::json!({}));
+        let json = serde_json::to_string(&notif).unwrap();
+        // JSON-RPC notifications MUST NOT have an "id" field.
+        assert!(!json.contains("\"id\""));
+        assert!(json.contains("\"jsonrpc\":\"2.0\""));
+        assert!(json.contains("\"method\":\"test/notify\""));
     }
 }

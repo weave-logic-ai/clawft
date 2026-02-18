@@ -113,19 +113,13 @@ impl Tool for ShellExecTool {
         let stdout_handle = child.stdout.take();
         let stderr_handle = child.stderr.take();
 
-        let wait_result = tokio::time::timeout(
-            std::time::Duration::from_secs(timeout_secs),
-            child.wait(),
-        )
-        .await;
+        let wait_result =
+            tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), child.wait()).await;
 
         let status = match wait_result {
             Ok(Ok(status)) => status,
             Ok(Err(e)) => {
-                return Err(ToolError::ExecutionFailed(format!(
-                    "process error: {}",
-                    e
-                )));
+                return Err(ToolError::ExecutionFailed(format!("process error: {}", e)));
             }
             Err(_) => {
                 // Attempt to kill the timed-out process.
@@ -214,10 +208,7 @@ mod tests {
         let (tool, ws) = setup().await;
 
         // `false` is on the default allowlist and returns exit code 1.
-        let result = tool
-            .execute(json!({"command": "false"}))
-            .await
-            .unwrap();
+        let result = tool.execute(json!({"command": "false"})).await.unwrap();
 
         assert_eq!(result["exit_code"], 1);
 
@@ -390,10 +381,7 @@ mod tests {
         let (tool, ws) = setup().await;
 
         // A fast command should succeed within default timeout
-        let result = tool
-            .execute(json!({"command": "echo fast"}))
-            .await
-            .unwrap();
+        let result = tool.execute(json!({"command": "echo fast"})).await.unwrap();
         assert_eq!(result["exit_code"], 0);
 
         cleanup(&ws).await;

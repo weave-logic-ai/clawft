@@ -157,6 +157,115 @@ pub struct Usage {
     pub total_tokens: i32,
 }
 
+// ── Streaming types ─────────────────────────────────────────────────────
+
+/// A single chunk received during SSE streaming of a chat completion.
+///
+/// The OpenAI streaming format sends `data:` lines containing JSON objects
+/// with partial content deltas, followed by a `data: [DONE]` sentinel.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StreamChunk {
+    /// A text content delta (partial token).
+    TextDelta {
+        /// The partial text content.
+        text: String,
+    },
+
+    /// A tool call delta (partial tool invocation).
+    ToolCallDelta {
+        /// Index of the tool call in the tool_calls array.
+        index: usize,
+        /// Tool call ID (only present on the first delta for this tool call).
+        id: Option<String>,
+        /// Function name (only present on the first delta for this tool call).
+        name: Option<String>,
+        /// Partial arguments fragment.
+        arguments: Option<String>,
+    },
+
+    /// The stream is complete.
+    Done {
+        /// Finish reason from the last chunk (e.g. "stop", "tool_calls", "length").
+        finish_reason: Option<String>,
+        /// Token usage statistics (if the provider sends them in the final chunk).
+        usage: Option<Usage>,
+    },
+}
+
+/// A streaming delta message from an SSE chunk.
+///
+/// This mirrors the OpenAI `chat.completion.chunk` format. Each SSE `data:`
+/// line (except `[DONE]`) deserializes into this structure.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct StreamDelta {
+    /// The chunk choices array (usually 1 element).
+    #[serde(default)]
+    pub choices: Vec<StreamDeltaChoice>,
+
+    /// Usage statistics (some providers include this in the final chunk).
+    #[serde(default)]
+    pub usage: Option<StreamDeltaUsage>,
+}
+
+/// A single choice within a streaming delta.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct StreamDeltaChoice {
+    /// The delta object containing partial content.
+    #[serde(default)]
+    pub delta: StreamDeltaContent,
+
+    /// Finish reason (present only on the final chunk).
+    #[serde(default)]
+    pub finish_reason: Option<String>,
+}
+
+/// The delta content within a streaming choice.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct StreamDeltaContent {
+    /// Partial text content (if the model is generating text).
+    #[serde(default)]
+    pub content: Option<String>,
+
+    /// Partial tool calls (if the model is invoking tools).
+    #[serde(default)]
+    pub tool_calls: Option<Vec<StreamDeltaToolCall>>,
+}
+
+/// A tool call delta within a streaming choice.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct StreamDeltaToolCall {
+    /// Index of this tool call in the tool_calls array.
+    pub index: usize,
+
+    /// Tool call ID (only in the first delta for this tool call).
+    #[serde(default)]
+    pub id: Option<String>,
+
+    /// Function info (name and/or argument fragments).
+    #[serde(default)]
+    pub function: Option<StreamDeltaFunction>,
+}
+
+/// Function details within a tool call delta.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct StreamDeltaFunction {
+    /// Function name (only in the first delta for this tool call).
+    #[serde(default)]
+    pub name: Option<String>,
+
+    /// Partial arguments fragment.
+    #[serde(default)]
+    pub arguments: Option<String>,
+}
+
+/// Usage statistics in streaming responses.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct StreamDeltaUsage {
+    pub prompt_tokens: Option<i32>,
+    pub completion_tokens: Option<i32>,
+    pub total_tokens: Option<i32>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

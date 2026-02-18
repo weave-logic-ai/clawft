@@ -39,9 +39,7 @@ impl LearningBackend for NoopLearner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::traits::{
-        ChatRequest, LlmMessage, QualityScore, RoutingDecision,
-    };
+    use crate::pipeline::traits::{ChatRequest, LlmMessage, QualityScore, RoutingDecision};
     use clawft_types::provider::{ContentBlock, LlmResponse, StopReason, Usage};
     use std::collections::HashMap;
 
@@ -65,9 +63,7 @@ mod tests {
             },
             response: LlmResponse {
                 id: "resp-1".into(),
-                content: vec![ContentBlock::Text {
-                    text: "Hi!".into(),
-                }],
+                content: vec![ContentBlock::Text { text: "Hi!".into() }],
                 stop_reason: StopReason::EndTurn,
                 usage: Usage {
                     input_tokens: 5,

@@ -316,5 +316,5 @@ RUST_LOG=debug weft gateway
   Validation Framework for structured output validation.
 - [Architecture Overview](../architecture/) -- how the agent pipeline, message
   bus, and channel system fit together.
-- [Adding MCP Servers](../guides/) -- connect external tool servers to extend
-  the agent's capabilities.
+- [Adding MCP Servers](../guides/tool-calls.md#mcp-tools) -- connect external
+  tool servers to extend the agent's capabilities.

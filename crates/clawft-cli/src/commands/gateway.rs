@@ -31,13 +31,13 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 #[cfg(feature = "channels")]
+use clawft_channels::PluginHost;
+#[cfg(feature = "channels")]
 use clawft_channels::discord::DiscordChannelFactory;
 #[cfg(feature = "channels")]
 use clawft_channels::slack::SlackChannelFactory;
 #[cfg(feature = "channels")]
 use clawft_channels::telegram::TelegramChannelFactory;
-#[cfg(feature = "channels")]
-use clawft_channels::PluginHost;
 use clawft_core::bootstrap::AppContext;
 use clawft_platform::NativePlatform;
 #[cfg(feature = "services")]
@@ -48,9 +48,9 @@ use clawft_services::heartbeat::HeartbeatService;
 #[cfg(feature = "channels")]
 use crate::markdown::dispatch::MarkdownDispatcher;
 
-use super::{expand_workspace, load_config};
 #[cfg(feature = "channels")]
 use super::make_channel_host;
+use super::{expand_workspace, load_config};
 
 /// Arguments for the `weft gateway` subcommand.
 #[derive(Args)]
@@ -124,22 +124,28 @@ async fn run_with_channels(args: GatewayArgs) -> anyhow::Result<()> {
 
     // Register tools.
     let workspace = expand_workspace(&config.agents.defaults.workspace);
+    let web_search_config = super::agent::build_web_search_config(&config.tools);
     clawft_tools::register_all(
         ctx.tools_mut(),
         platform.clone(),
         workspace,
         command_policy,
         url_policy,
+        web_search_config,
     );
 
     // Register MCP server tools.
     crate::mcp_tools::register_mcp_tools(&config, ctx.tools_mut()).await;
 
+    // Register delegation tool (feature-gated, graceful degradation).
+    crate::mcp_tools::register_delegation(&config.delegation, ctx.tools_mut());
+
     // Register message tool (needs bus reference, cannot go in register_all).
     let bus_ref = ctx.bus().clone();
-    ctx.tools_mut().register(Arc::new(
-        clawft_tools::message_tool::MessageTool::new(bus_ref),
-    ));
+    ctx.tools_mut()
+        .register(Arc::new(clawft_tools::message_tool::MessageTool::new(
+            bus_ref,
+        )));
 
     info!(tools = ctx.tools().len(), "tool registry initialized");
 

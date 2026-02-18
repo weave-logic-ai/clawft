@@ -5,8 +5,8 @@
 //! [`ChannelHost::deliver_inbound`](crate::traits::ChannelHost::deliver_inbound).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
@@ -23,9 +23,8 @@ use crate::traits::{Channel, ChannelHost, ChannelMetadata, ChannelStatus, Messag
 
 use super::api::DiscordApiClient;
 use super::events::{
-    ConnectionProperties, GatewayPayload, HelloData, IdentifyPayload, MessageCreate,
-    ReadyEvent, OP_DISPATCH, OP_HEARTBEAT, OP_HEARTBEAT_ACK, OP_HELLO, OP_INVALID_SESSION,
-    OP_RECONNECT,
+    ConnectionProperties, GatewayPayload, HelloData, IdentifyPayload, MessageCreate, OP_DISPATCH,
+    OP_HEARTBEAT, OP_HEARTBEAT_ACK, OP_HELLO, OP_INVALID_SESSION, OP_RECONNECT, ReadyEvent,
 };
 
 /// Delay before reconnecting after a connection failure.
@@ -170,8 +169,7 @@ impl Channel for DiscordChannel {
     }
 
     fn is_allowed(&self, sender_id: &str) -> bool {
-        self.config.allow_from.is_empty()
-            || self.config.allow_from.iter().any(|id| id == sender_id)
+        self.config.allow_from.is_empty() || self.config.allow_from.iter().any(|id| id == sender_id)
     }
 
     async fn start(
@@ -187,7 +185,9 @@ impl Channel for DiscordChannel {
         loop {
             let gateway_url = {
                 let resume = self.resume_url.read().await;
-                resume.clone().unwrap_or_else(|| self.config.gateway_url.clone())
+                resume
+                    .clone()
+                    .unwrap_or_else(|| self.config.gateway_url.clone())
             };
 
             // Connect to Gateway WebSocket.
@@ -278,9 +278,8 @@ impl Channel for DiscordChannel {
             self.set_status(ChannelStatus::Running).await;
 
             // Start heartbeat timer.
-            let mut heartbeat_timer = tokio::time::interval(
-                std::time::Duration::from_millis(heartbeat_interval),
-            );
+            let mut heartbeat_timer =
+                tokio::time::interval(std::time::Duration::from_millis(heartbeat_interval));
             // First tick fires immediately; skip it and wait for the
             // first real interval.
             heartbeat_timer.tick().await;
@@ -425,7 +424,8 @@ impl Channel for DiscordChannel {
             }
 
             // Connection dropped. Reconnect unless cancelled.
-            self.set_status(ChannelStatus::Error("disconnected".into())).await;
+            self.set_status(ChannelStatus::Error("disconnected".into()))
+                .await;
 
             tokio::select! {
                 _ = cancel.cancelled() => break,
@@ -443,10 +443,7 @@ impl Channel for DiscordChannel {
     }
 
     async fn send(&self, msg: &OutboundMessage) -> Result<MessageId, ChannelError> {
-        let message_id = self
-            .api
-            .create_message(&msg.chat_id, &msg.content)
-            .await?;
+        let message_id = self.api.create_message(&msg.chat_id, &msg.content).await?;
 
         Ok(MessageId(message_id))
     }

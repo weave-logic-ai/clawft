@@ -228,11 +228,44 @@ pub trait ContextAssembler: Send + Sync {
     async fn assemble(&self, request: &ChatRequest, profile: &TaskProfile) -> AssembledContext;
 }
 
+/// A callback invoked for each streaming chunk from the LLM.
+///
+/// The callback receives a text fragment (for text deltas) or a
+/// serialized chunk description. It is called from the transport
+/// layer as SSE chunks arrive.
+///
+/// The callback should return `true` to continue streaming, or
+/// `false` to abort the stream early.
+pub type StreamCallback = Box<dyn Fn(&str) -> bool + Send + Sync>;
+
 /// Stage 4: Execute the LLM call via HTTP transport.
 #[async_trait]
 pub trait LlmTransport: Send + Sync {
     /// Send a request to the LLM provider and return the response.
     async fn complete(&self, request: &TransportRequest) -> clawft_types::Result<LlmResponse>;
+
+    /// Send a streaming request, invoking `callback` for each text chunk.
+    ///
+    /// The default implementation falls back to `complete()` and invokes
+    /// the callback once with the full response text.
+    async fn complete_stream(
+        &self,
+        request: &TransportRequest,
+        callback: StreamCallback,
+    ) -> clawft_types::Result<LlmResponse> {
+        let response = self.complete(request).await?;
+
+        // Invoke callback with the full text for non-streaming fallback
+        for block in &response.content {
+            if let clawft_types::provider::ContentBlock::Text { text } = block
+                && !callback(text)
+            {
+                break;
+            }
+        }
+
+        Ok(response)
+    }
 }
 
 /// Stage 5: Score the quality of a response.
@@ -339,6 +372,57 @@ impl PipelineRegistry {
             success: true,
             quality: trajectory.quality,
             latency_ms: 0, // Caller should measure actual latency
+        };
+        pipeline.router.update(&routing, &outcome);
+
+        Ok(response)
+    }
+
+    /// Execute the pipeline with streaming: stages 1-3 run normally, then
+    /// stage 4 streams text deltas via `callback`. Stages 5-6 run after
+    /// the stream completes.
+    ///
+    /// The `callback` receives each text delta as it arrives and should
+    /// return `true` to continue or `false` to abort early.
+    pub async fn complete_stream(
+        &self,
+        request: &ChatRequest,
+        callback: StreamCallback,
+    ) -> clawft_types::Result<LlmResponse> {
+        // Stages 1-3 are identical to non-streaming
+        let profile = self.default.classifier.classify(request);
+        let pipeline = self.get(&profile.task_type);
+        let routing = pipeline.router.route(request, &profile).await;
+        let context = pipeline.assembler.assemble(request, &profile).await;
+
+        let transport_request = TransportRequest {
+            provider: routing.provider.clone(),
+            model: routing.model.clone(),
+            messages: context.messages,
+            tools: request.tools.clone(),
+            max_tokens: request.max_tokens,
+            temperature: request.temperature,
+        };
+
+        // Stage 4: streaming transport
+        let response = pipeline
+            .transport
+            .complete_stream(&transport_request, callback)
+            .await?;
+
+        // Stages 5-6: score and learn
+        let quality = pipeline.scorer.score(request, &response);
+        let trajectory = Trajectory {
+            request: request.clone(),
+            routing: routing.clone(),
+            response: response.clone(),
+            quality,
+        };
+        pipeline.learner.record(&trajectory);
+        let outcome = ResponseOutcome {
+            success: true,
+            quality: trajectory.quality,
+            latency_ms: 0,
         };
         pipeline.router.update(&routing, &outcome);
 
@@ -622,10 +706,7 @@ mod tests {
 
     #[async_trait]
     impl LlmTransport for TestTransport {
-        async fn complete(
-            &self,
-            _request: &TransportRequest,
-        ) -> clawft_types::Result<LlmResponse> {
+        async fn complete(&self, _request: &TransportRequest) -> clawft_types::Result<LlmResponse> {
             Ok(LlmResponse {
                 id: "test-resp".into(),
                 content: vec![ContentBlock::Text {
@@ -678,11 +759,8 @@ mod tests {
 
     #[test]
     fn pipeline_registry_new() {
-        let registry = PipelineRegistry::new(make_test_pipeline(
-            TaskType::Chat,
-            "openai",
-            "gpt-4o",
-        ));
+        let registry =
+            PipelineRegistry::new(make_test_pipeline(TaskType::Chat, "openai", "gpt-4o"));
         // Default pipeline should be returned for any task type
         let pipeline = registry.get(&TaskType::CodeGeneration);
         // We cannot easily assert identity, but we can verify it does not panic
@@ -697,11 +775,8 @@ mod tests {
 
     #[test]
     fn pipeline_registry_register_and_get() {
-        let mut registry = PipelineRegistry::new(make_test_pipeline(
-            TaskType::Chat,
-            "openai",
-            "gpt-4o",
-        ));
+        let mut registry =
+            PipelineRegistry::new(make_test_pipeline(TaskType::Chat, "openai", "gpt-4o"));
         registry.register(
             TaskType::CodeGeneration,
             make_test_pipeline(TaskType::CodeGeneration, "anthropic", "claude-opus-4-5"),
@@ -715,11 +790,8 @@ mod tests {
 
     #[tokio::test]
     async fn pipeline_registry_complete_orchestrates_all_stages() {
-        let registry = PipelineRegistry::new(make_test_pipeline(
-            TaskType::Chat,
-            "openai",
-            "gpt-4o",
-        ));
+        let registry =
+            PipelineRegistry::new(make_test_pipeline(TaskType::Chat, "openai", "gpt-4o"));
 
         let request = ChatRequest {
             messages: vec![LlmMessage {

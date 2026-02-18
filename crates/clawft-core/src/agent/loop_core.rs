@@ -228,10 +228,7 @@ impl<P: Platform> AgentLoop<P> {
     /// tool results to the message list, and re-invokes the pipeline.
     /// Continues until the LLM returns a text response or the maximum
     /// iteration limit is reached.
-    async fn run_tool_loop(
-        &self,
-        mut request: ChatRequest,
-    ) -> clawft_types::Result<String> {
+    async fn run_tool_loop(&self, mut request: ChatRequest) -> clawft_types::Result<String> {
         let max_iterations = self.config.defaults.max_tool_iterations.max(1) as usize;
 
         for iteration in 0..max_iterations {
@@ -280,7 +277,8 @@ impl<P: Platform> AgentLoop<P> {
                 let result = self.tools.execute(&name, input.clone()).await;
                 let result_json = match result {
                     Ok(val) => {
-                        let truncated = crate::security::truncate_result(val, MAX_TOOL_RESULT_BYTES);
+                        let truncated =
+                            crate::security::truncate_result(val, MAX_TOOL_RESULT_BYTES);
                         serde_json::to_string(&truncated).unwrap_or_default()
                     }
                     Err(e) => {
@@ -298,10 +296,7 @@ impl<P: Platform> AgentLoop<P> {
         }
 
         Err(ClawftError::Provider {
-            message: format!(
-                "max tool iterations ({}) exceeded",
-                max_iterations
-            ),
+            message: format!("max tool iterations ({}) exceeded", max_iterations),
         })
     }
 }
@@ -312,9 +307,9 @@ mod tests {
     use crate::agent::memory::MemoryStore;
     use crate::agent::skills::SkillsLoader;
     use crate::pipeline::traits::{
-        AssembledContext, LearningBackend, LearningSignal, LlmTransport, ModelRouter,
-        Pipeline, QualityScore, QualityScorer, ResponseOutcome, RoutingDecision,
-        TaskClassifier, TaskProfile, TaskType, Trajectory, TransportRequest,
+        AssembledContext, LearningBackend, LearningSignal, LlmTransport, ModelRouter, Pipeline,
+        QualityScore, QualityScorer, ResponseOutcome, RoutingDecision, TaskClassifier, TaskProfile,
+        TaskType, Trajectory, TransportRequest,
     };
     use crate::tools::registry::Tool;
     use async_trait::async_trait;
@@ -362,11 +357,7 @@ mod tests {
     struct MockRouter;
     #[async_trait]
     impl ModelRouter for MockRouter {
-        async fn route(
-            &self,
-            _request: &ChatRequest,
-            _profile: &TaskProfile,
-        ) -> RoutingDecision {
+        async fn route(&self, _request: &ChatRequest, _profile: &TaskProfile) -> RoutingDecision {
             RoutingDecision {
                 provider: "test".into(),
                 model: "test-model".into(),
@@ -407,10 +398,7 @@ mod tests {
 
     #[async_trait]
     impl LlmTransport for MockTransport {
-        async fn complete(
-            &self,
-            _request: &TransportRequest,
-        ) -> clawft_types::Result<LlmResponse> {
+        async fn complete(&self, _request: &TransportRequest) -> clawft_types::Result<LlmResponse> {
             Ok(LlmResponse {
                 id: "mock-resp".into(),
                 content: vec![ContentBlock::Text {
@@ -441,10 +429,7 @@ mod tests {
 
     #[async_trait]
     impl LlmTransport for MockToolTransport {
-        async fn complete(
-            &self,
-            _request: &TransportRequest,
-        ) -> clawft_types::Result<LlmResponse> {
+        async fn complete(&self, _request: &TransportRequest) -> clawft_types::Result<LlmResponse> {
             let count = self
                 .call_count
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -487,10 +472,7 @@ mod tests {
 
     #[async_trait]
     impl LlmTransport for InfiniteToolTransport {
-        async fn complete(
-            &self,
-            _request: &TransportRequest,
-        ) -> clawft_types::Result<LlmResponse> {
+        async fn complete(&self, _request: &TransportRequest) -> clawft_types::Result<LlmResponse> {
             Ok(LlmResponse {
                 id: "infinite".into(),
                 content: vec![ContentBlock::ToolUse {
@@ -580,24 +562,15 @@ mod tests {
         let bus = Arc::new(MessageBus::new());
 
         let sessions_dir = dir.join("sessions");
-        let sessions =
-            SessionManager::with_dir(platform.clone(), sessions_dir);
+        let sessions = SessionManager::with_dir(platform.clone(), sessions_dir);
 
         let memory = Arc::new(MemoryStore::with_paths(
             dir.join("memory").join("MEMORY.md"),
             dir.join("memory").join("HISTORY.md"),
             platform.clone(),
         ));
-        let skills = Arc::new(SkillsLoader::with_dir(
-            dir.join("skills"),
-            platform.clone(),
-        ));
-        let context = ContextBuilder::new(
-            test_config(),
-            memory,
-            skills,
-            platform.clone(),
-        );
+        let skills = Arc::new(SkillsLoader::with_dir(dir.join("skills"), platform.clone()));
+        let context = ContextBuilder::new(test_config(), memory, skills, platform.clone());
 
         let mut tools = ToolRegistry::new();
         tools.register(Arc::new(EchoTool));
@@ -760,15 +733,21 @@ mod tests {
         // bus is shared via Arc. Instead test the contract: consume_inbound
         // returns None when all senders are dropped.
         // This is already tested in bus.rs. Here we verify the struct compiles.
-        assert!(agent.bus().inbound_sender().send(InboundMessage {
-            channel: "test".into(),
-            sender_id: "u".into(),
-            chat_id: "c".into(),
-            content: "msg".into(),
-            timestamp: chrono::Utc::now(),
-            media: vec![],
-            metadata: HashMap::new(),
-        }).is_ok());
+        assert!(
+            agent
+                .bus()
+                .inbound_sender()
+                .send(InboundMessage {
+                    channel: "test".into(),
+                    sender_id: "u".into(),
+                    chat_id: "c".into(),
+                    content: "msg".into(),
+                    timestamp: chrono::Utc::now(),
+                    media: vec![],
+                    metadata: HashMap::new(),
+                })
+                .is_ok()
+        );
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
@@ -808,5 +787,608 @@ mod tests {
     fn agent_loop_is_send() {
         fn assert_send<T: Send>() {}
         assert_send::<AgentLoop<NativePlatform>>();
+    }
+
+    // ── GAP-19: Tool result truncation verification ───────────────────
+
+    /// Transport that returns a tool call for a tool producing oversized output.
+    struct OversizedToolTransport {
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    impl OversizedToolTransport {
+        fn new() -> Self {
+            Self {
+                call_count: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmTransport for OversizedToolTransport {
+        async fn complete(&self, request: &TransportRequest) -> clawft_types::Result<LlmResponse> {
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if count == 0 {
+                // First call: request a tool call that will produce oversized output
+                Ok(LlmResponse {
+                    id: "oversized-resp".into(),
+                    content: vec![ContentBlock::ToolUse {
+                        id: "call-big".into(),
+                        name: "big_output".into(),
+                        input: serde_json::json!({}),
+                    }],
+                    stop_reason: StopReason::ToolUse,
+                    usage: Usage {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                    },
+                    metadata: HashMap::new(),
+                })
+            } else {
+                // Second call: verify the tool result was included (truncated)
+                // and return text. Check message list for truncation.
+                let last_msg = request.messages.last();
+                let content_text = last_msg
+                    .map(|m| m.content.as_str())
+                    .unwrap_or("no tool result");
+
+                Ok(LlmResponse {
+                    id: "final-resp".into(),
+                    content: vec![ContentBlock::Text {
+                        text: format!("tool_result_len:{}", content_text.len()),
+                    }],
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage {
+                        input_tokens: 20,
+                        output_tokens: 8,
+                    },
+                    metadata: HashMap::new(),
+                })
+            }
+        }
+    }
+
+    /// Tool that produces output exceeding MAX_TOOL_RESULT_BYTES.
+    struct BigOutputTool;
+
+    #[async_trait]
+    impl Tool for BigOutputTool {
+        fn name(&self) -> &str {
+            "big_output"
+        }
+        fn description(&self) -> &str {
+            "Returns a very large output"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {}
+            })
+        }
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+        ) -> Result<serde_json::Value, crate::tools::registry::ToolError> {
+            // Produce output far exceeding 64KB (MAX_TOOL_RESULT_BYTES)
+            let big_string = "x".repeat(200_000);
+            Ok(serde_json::json!({"data": big_string}))
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_result_truncation_enforced() {
+        let dir = temp_dir("truncation");
+        let platform = Arc::new(NativePlatform::new());
+        let bus = Arc::new(MessageBus::new());
+
+        let sessions_dir = dir.join("sessions");
+        let sessions = SessionManager::with_dir(platform.clone(), sessions_dir);
+
+        let memory = Arc::new(MemoryStore::with_paths(
+            dir.join("memory").join("MEMORY.md"),
+            dir.join("memory").join("HISTORY.md"),
+            platform.clone(),
+        ));
+        let skills = Arc::new(SkillsLoader::with_dir(dir.join("skills"), platform.clone()));
+        let context = ContextBuilder::new(test_config(), memory, skills, platform.clone());
+
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(BigOutputTool));
+
+        let pipeline = make_pipeline(Arc::new(OversizedToolTransport::new()));
+
+        let agent = AgentLoop::new(
+            test_config(),
+            platform,
+            bus,
+            pipeline,
+            tools,
+            context,
+            sessions,
+        );
+
+        let request = ChatRequest {
+            messages: vec![LlmMessage {
+                role: "user".into(),
+                content: "trigger big tool".into(),
+                tool_call_id: None,
+            }],
+            tools: vec![],
+            model: Some("test-model".into()),
+            max_tokens: Some(4096),
+            temperature: Some(0.5),
+        };
+
+        let result = agent.run_tool_loop(request).await.unwrap();
+
+        // The tool result should have been truncated to MAX_TOOL_RESULT_BYTES (65536).
+        // The response tells us the length of the tool result message.
+        assert!(
+            result.starts_with("tool_result_len:"),
+            "response should contain truncated tool result length: {result}"
+        );
+        let len_str = result.strip_prefix("tool_result_len:").unwrap();
+        let result_len: usize = len_str.parse().unwrap();
+        assert!(
+            result_len <= MAX_TOOL_RESULT_BYTES,
+            "tool result ({result_len} bytes) should be truncated to <= {} bytes",
+            MAX_TOOL_RESULT_BYTES
+        );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    // ── TEST-04: Agent loop end-to-end test ────────────────────────────
+
+    /// Transport that records every request it receives and drives a full
+    /// tool-use round-trip: call 1 returns tool_use, call 2 verifies the
+    /// tool result was appended and returns text.
+    struct E2eRecordingTransport {
+        call_count: std::sync::atomic::AtomicUsize,
+        /// Snapshot of message lists received on each call.
+        recorded_requests: std::sync::Mutex<Vec<Vec<LlmMessage>>>,
+    }
+
+    impl E2eRecordingTransport {
+        fn new() -> Self {
+            Self {
+                call_count: std::sync::atomic::AtomicUsize::new(0),
+                recorded_requests: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn snapshots(&self) -> Vec<Vec<LlmMessage>> {
+            self.recorded_requests.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl LlmTransport for E2eRecordingTransport {
+        async fn complete(&self, request: &TransportRequest) -> clawft_types::Result<LlmResponse> {
+            // Record the incoming message list
+            self.recorded_requests
+                .lock()
+                .unwrap()
+                .push(request.messages.clone());
+
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+            if count == 0 {
+                // Call 1: LLM returns a tool_use request
+                Ok(LlmResponse {
+                    id: "e2e-resp-1".into(),
+                    content: vec![ContentBlock::ToolUse {
+                        id: "call-e2e-1".into(),
+                        name: "echo".into(),
+                        input: serde_json::json!({"text": "e2e-ping"}),
+                    }],
+                    stop_reason: StopReason::ToolUse,
+                    usage: Usage {
+                        input_tokens: 15,
+                        output_tokens: 10,
+                    },
+                    metadata: HashMap::new(),
+                })
+            } else {
+                // Call 2: LLM receives tool result, returns final text
+                Ok(LlmResponse {
+                    id: "e2e-resp-2".into(),
+                    content: vec![ContentBlock::Text {
+                        text: "I received the tool output successfully".into(),
+                    }],
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage {
+                        input_tokens: 25,
+                        output_tokens: 12,
+                    },
+                    metadata: HashMap::new(),
+                })
+            }
+        }
+    }
+
+    /// Multi-tool transport: returns two tool calls on the first invocation,
+    /// then text on the second.
+    struct MultiToolE2eTransport {
+        call_count: std::sync::atomic::AtomicUsize,
+        recorded_requests: std::sync::Mutex<Vec<Vec<LlmMessage>>>,
+    }
+
+    impl MultiToolE2eTransport {
+        fn new() -> Self {
+            Self {
+                call_count: std::sync::atomic::AtomicUsize::new(0),
+                recorded_requests: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn snapshots(&self) -> Vec<Vec<LlmMessage>> {
+            self.recorded_requests.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl LlmTransport for MultiToolE2eTransport {
+        async fn complete(&self, request: &TransportRequest) -> clawft_types::Result<LlmResponse> {
+            self.recorded_requests
+                .lock()
+                .unwrap()
+                .push(request.messages.clone());
+
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+            if count == 0 {
+                // Return two tool calls at once
+                Ok(LlmResponse {
+                    id: "multi-tool-resp-1".into(),
+                    content: vec![
+                        ContentBlock::ToolUse {
+                            id: "call-mt-1".into(),
+                            name: "echo".into(),
+                            input: serde_json::json!({"text": "first"}),
+                        },
+                        ContentBlock::ToolUse {
+                            id: "call-mt-2".into(),
+                            name: "echo".into(),
+                            input: serde_json::json!({"text": "second"}),
+                        },
+                    ],
+                    stop_reason: StopReason::ToolUse,
+                    usage: Usage {
+                        input_tokens: 20,
+                        output_tokens: 15,
+                    },
+                    metadata: HashMap::new(),
+                })
+            } else {
+                Ok(LlmResponse {
+                    id: "multi-tool-resp-2".into(),
+                    content: vec![ContentBlock::Text {
+                        text: "processed both tools".into(),
+                    }],
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage {
+                        input_tokens: 30,
+                        output_tokens: 10,
+                    },
+                    metadata: HashMap::new(),
+                })
+            }
+        }
+    }
+
+    /// TEST-04: Full e2e test -- mock LLM returns tool_use, tool executes,
+    /// result is sent back to LLM, LLM returns text. Verifies the full
+    /// message chain including intermediate tool result messages.
+    #[tokio::test]
+    async fn e2e_tool_roundtrip_message_chain() {
+        let transport = Arc::new(E2eRecordingTransport::new());
+        let transport_ref = transport.clone();
+        let (agent, dir) = make_agent_loop(transport, "e2e_chain").await;
+
+        // Publish and process a message that triggers tool use
+        let inbound = InboundMessage {
+            channel: "e2e-channel".into(),
+            sender_id: "e2e-user".into(),
+            chat_id: "e2e-chat".into(),
+            content: "please use the echo tool".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        agent.bus.publish_inbound(inbound).unwrap();
+        let msg = agent.bus.consume_inbound().await.unwrap();
+        agent.process_message(msg).await.unwrap();
+
+        // Verify outbound message is the final text response
+        let outbound = agent.bus.consume_outbound().await.unwrap();
+        assert_eq!(outbound.content, "I received the tool output successfully");
+        assert_eq!(outbound.channel, "e2e-channel");
+        assert_eq!(outbound.chat_id, "e2e-chat");
+
+        // Verify the transport was called exactly twice
+        let snapshots = transport_ref.snapshots();
+        assert_eq!(
+            snapshots.len(),
+            2,
+            "transport should be called twice (tool_use -> text)"
+        );
+
+        // Snapshot 1: initial user request
+        let first_call = &snapshots[0];
+        assert!(
+            first_call.iter().any(|m| m.role == "user"),
+            "first call should contain user message"
+        );
+
+        // Snapshot 2: should include the tool result message
+        let second_call = &snapshots[1];
+        let tool_result_msg = second_call
+            .iter()
+            .find(|m| m.role == "tool")
+            .expect("second call should contain a tool result message");
+
+        // Verify the tool result has the correct tool_call_id
+        assert_eq!(
+            tool_result_msg.tool_call_id.as_deref(),
+            Some("call-e2e-1"),
+            "tool result should reference the tool call ID"
+        );
+
+        // Verify the tool result contains the echo output
+        assert!(
+            tool_result_msg.content.contains("e2e-ping"),
+            "tool result should contain the echoed text: {}",
+            tool_result_msg.content
+        );
+
+        // Verify session was persisted with both user and assistant messages
+        let session = agent
+            .sessions
+            .get_or_create("e2e-channel:e2e-chat")
+            .await
+            .unwrap();
+        assert!(
+            session.messages.len() >= 2,
+            "session should have at least user + assistant messages, got {}",
+            session.messages.len()
+        );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// TEST-04: E2e test with multiple tool calls in a single LLM response.
+    /// Verifies that all tool results are sent back with correct IDs.
+    #[tokio::test]
+    async fn e2e_multi_tool_calls_all_results_returned() {
+        let transport = Arc::new(MultiToolE2eTransport::new());
+        let transport_ref = transport.clone();
+        let (agent, dir) = make_agent_loop(transport, "e2e_multi").await;
+
+        let inbound = InboundMessage {
+            channel: "multi".into(),
+            sender_id: "user".into(),
+            chat_id: "chat".into(),
+            content: "use echo twice".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        agent.bus.publish_inbound(inbound).unwrap();
+        let msg = agent.bus.consume_inbound().await.unwrap();
+        agent.process_message(msg).await.unwrap();
+
+        let outbound = agent.bus.consume_outbound().await.unwrap();
+        assert_eq!(outbound.content, "processed both tools");
+
+        // Verify the second call to the transport has both tool results
+        let snapshots = transport_ref.snapshots();
+        assert_eq!(snapshots.len(), 2);
+
+        let second_call = &snapshots[1];
+        let tool_results: Vec<&LlmMessage> =
+            second_call.iter().filter(|m| m.role == "tool").collect();
+
+        assert_eq!(
+            tool_results.len(),
+            2,
+            "second call should have 2 tool result messages"
+        );
+
+        // Verify each tool result has the correct call ID
+        let ids: Vec<&str> = tool_results
+            .iter()
+            .filter_map(|m| m.tool_call_id.as_deref())
+            .collect();
+        assert!(
+            ids.contains(&"call-mt-1"),
+            "should have result for call-mt-1"
+        );
+        assert!(
+            ids.contains(&"call-mt-2"),
+            "should have result for call-mt-2"
+        );
+
+        // Verify tool outputs
+        let first_result = tool_results
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("call-mt-1"))
+            .unwrap();
+        assert!(
+            first_result.content.contains("first"),
+            "first tool result should contain 'first': {}",
+            first_result.content
+        );
+
+        let second_result = tool_results
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("call-mt-2"))
+            .unwrap();
+        assert!(
+            second_result.content.contains("second"),
+            "second tool result should contain 'second': {}",
+            second_result.content
+        );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// TEST-04: E2e test verifying a direct text response (no tool use)
+    /// flows through the full pipeline correctly.
+    #[tokio::test]
+    async fn e2e_direct_text_response_no_tools() {
+        let transport = Arc::new(MockTransport::new("Direct answer from LLM"));
+        let (agent, dir) = make_agent_loop(transport, "e2e_no_tools").await;
+
+        let inbound = InboundMessage {
+            channel: "direct".into(),
+            sender_id: "user".into(),
+            chat_id: "chat".into(),
+            content: "what is 2+2?".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        agent.bus.publish_inbound(inbound).unwrap();
+        let msg = agent.bus.consume_inbound().await.unwrap();
+        agent.process_message(msg).await.unwrap();
+
+        let outbound = agent.bus.consume_outbound().await.unwrap();
+        assert_eq!(outbound.content, "Direct answer from LLM");
+        assert_eq!(outbound.channel, "direct");
+
+        // Session should have user + assistant
+        let session = agent.sessions.get_or_create("direct:chat").await.unwrap();
+        let roles: Vec<String> = session
+            .messages
+            .iter()
+            .filter_map(|m| m.get("role").and_then(|v| v.as_str()).map(String::from))
+            .collect();
+        assert!(
+            roles.iter().any(|r| r == "user"),
+            "session should have user message"
+        );
+        assert!(
+            roles.iter().any(|r| r == "assistant"),
+            "session should have assistant message"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// TEST-04: E2e test verifying tool execution failure is gracefully
+    /// handled and the error is sent back to the LLM.
+    struct FailingToolTransport {
+        call_count: std::sync::atomic::AtomicUsize,
+        recorded_requests: std::sync::Mutex<Vec<Vec<LlmMessage>>>,
+    }
+
+    impl FailingToolTransport {
+        fn new() -> Self {
+            Self {
+                call_count: std::sync::atomic::AtomicUsize::new(0),
+                recorded_requests: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn snapshots(&self) -> Vec<Vec<LlmMessage>> {
+            self.recorded_requests.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl LlmTransport for FailingToolTransport {
+        async fn complete(&self, request: &TransportRequest) -> clawft_types::Result<LlmResponse> {
+            self.recorded_requests
+                .lock()
+                .unwrap()
+                .push(request.messages.clone());
+
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+            if count == 0 {
+                // Request a tool that does not exist
+                Ok(LlmResponse {
+                    id: "fail-resp-1".into(),
+                    content: vec![ContentBlock::ToolUse {
+                        id: "call-fail-1".into(),
+                        name: "nonexistent_tool".into(),
+                        input: serde_json::json!({}),
+                    }],
+                    stop_reason: StopReason::ToolUse,
+                    usage: Usage {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                    },
+                    metadata: HashMap::new(),
+                })
+            } else {
+                // LLM receives the error and returns gracefully
+                Ok(LlmResponse {
+                    id: "fail-resp-2".into(),
+                    content: vec![ContentBlock::Text {
+                        text: "I see the tool failed, let me help differently".into(),
+                    }],
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage {
+                        input_tokens: 20,
+                        output_tokens: 12,
+                    },
+                    metadata: HashMap::new(),
+                })
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn e2e_tool_execution_failure_handled_gracefully() {
+        let transport = Arc::new(FailingToolTransport::new());
+        let transport_ref = transport.clone();
+        let (agent, dir) = make_agent_loop(transport, "e2e_fail").await;
+
+        let inbound = InboundMessage {
+            channel: "fail".into(),
+            sender_id: "user".into(),
+            chat_id: "chat".into(),
+            content: "try a tool".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        agent.bus.publish_inbound(inbound).unwrap();
+        let msg = agent.bus.consume_inbound().await.unwrap();
+        agent.process_message(msg).await.unwrap();
+
+        let outbound = agent.bus.consume_outbound().await.unwrap();
+        assert_eq!(
+            outbound.content,
+            "I see the tool failed, let me help differently"
+        );
+
+        // Verify the error was passed to the LLM in the second call
+        let snapshots = transport_ref.snapshots();
+        assert_eq!(snapshots.len(), 2);
+
+        let second_call = &snapshots[1];
+        let tool_result = second_call
+            .iter()
+            .find(|m| m.role == "tool")
+            .expect("second call should have a tool result with the error");
+
+        assert!(
+            tool_result.content.contains("error"),
+            "tool result should contain error message: {}",
+            tool_result.content
+        );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

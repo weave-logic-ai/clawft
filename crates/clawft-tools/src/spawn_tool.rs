@@ -39,7 +39,11 @@ pub struct SpawnTool<P: Platform> {
 impl<P: Platform> SpawnTool<P> {
     /// Create a new spawn tool sandboxed to the given workspace directory.
     pub fn new(platform: Arc<P>, workspace: PathBuf, policy: CommandPolicy) -> Self {
-        Self { platform, workspace, policy }
+        Self {
+            platform,
+            workspace,
+            policy,
+        }
     }
 }
 
@@ -130,9 +134,7 @@ impl<P: Platform + 'static> Tool for SpawnTool<P> {
 
         // Check if the platform supports process spawning.
         let spawner = self.platform.process().ok_or_else(|| {
-            ToolError::ExecutionFailed(
-                "process spawning not supported on this platform".into(),
-            )
+            ToolError::ExecutionFailed("process spawning not supported on this platform".into())
         })?;
 
         ACTIVE_SPAWNS.fetch_add(1, Ordering::Relaxed);
@@ -141,7 +143,12 @@ impl<P: Platform + 'static> Tool for SpawnTool<P> {
         let arg_refs: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
 
         let result = spawner
-            .run(command, &arg_refs, Some(&self.workspace), Some(timeout_secs))
+            .run(
+                command,
+                &arg_refs,
+                Some(&self.workspace),
+                Some(timeout_secs),
+            )
             .await;
 
         ACTIVE_SPAWNS.fetch_sub(1, Ordering::Relaxed);

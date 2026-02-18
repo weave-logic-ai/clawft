@@ -5,12 +5,14 @@
 //! endpoint), Groq, DeepSeek, Mistral, Together AI, OpenRouter, and many more.
 
 use async_trait::async_trait;
-use tracing::{debug, warn};
+use tokio::sync::mpsc;
+use tracing::{debug, trace, warn};
 
 use crate::config::ProviderConfig;
 use crate::error::{ProviderError, Result};
 use crate::provider::Provider;
-use crate::types::{ChatRequest, ChatResponse};
+use crate::sse::parse_sse_line;
+use crate::types::{ChatRequest, ChatResponse, StreamChunk};
 
 /// An LLM provider that uses the OpenAI-compatible chat completion API.
 ///
@@ -160,6 +162,134 @@ impl Provider for OpenAiCompatProvider {
         );
 
         Ok(chat_response)
+    }
+
+    async fn complete_stream(
+        &self,
+        request: &ChatRequest,
+        tx: mpsc::Sender<StreamChunk>,
+    ) -> Result<()> {
+        let api_key = self.resolve_api_key()?;
+        let url = self.completions_url();
+
+        debug!(
+            provider = %self.config.name,
+            model = %request.model,
+            messages = request.messages.len(),
+            "sending streaming chat completion request"
+        );
+
+        // Build a request with stream: true
+        let mut stream_request = request.clone();
+        stream_request.stream = Some(true);
+
+        let mut req = self
+            .http
+            .post(&url)
+            .header("Authorization", format!("Bearer {api_key}"))
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream");
+
+        for (k, v) in &self.config.headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+
+        let response = req.json(&stream_request).send().await?;
+        let status = response.status();
+
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+
+            if status.as_u16() == 429 {
+                let retry_ms = parse_retry_after_ms(&body).unwrap_or(1000);
+                warn!(
+                    provider = %self.config.name,
+                    retry_after_ms = retry_ms,
+                    "rate limited (streaming)"
+                );
+                return Err(ProviderError::RateLimited {
+                    retry_after_ms: retry_ms,
+                });
+            }
+
+            if status.as_u16() == 401 || status.as_u16() == 403 {
+                return Err(ProviderError::AuthFailed(body));
+            }
+
+            if status.as_u16() == 404 {
+                return Err(ProviderError::ModelNotFound(format!(
+                    "model '{}': {}",
+                    request.model, body
+                )));
+            }
+
+            return Err(ProviderError::RequestFailed(format!(
+                "HTTP {status}: {body}"
+            )));
+        }
+
+        // Read the SSE stream line by line
+        use futures_util::StreamExt;
+        let mut byte_stream = response.bytes_stream();
+        let mut buffer = String::new();
+
+        while let Some(chunk_result) = byte_stream.next().await {
+            let bytes = chunk_result
+                .map_err(|e| ProviderError::RequestFailed(format!("stream read error: {e}")))?;
+
+            let text = String::from_utf8_lossy(&bytes);
+            buffer.push_str(&text);
+
+            // Process complete lines from the buffer
+            while let Some(newline_pos) = buffer.find('\n') {
+                let line = buffer[..newline_pos].to_string();
+                buffer = buffer[newline_pos + 1..].to_string();
+
+                let chunks = match parse_sse_line(&line) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warn!(
+                            provider = %self.config.name,
+                            error = %e,
+                            "SSE parse error, skipping line"
+                        );
+                        continue;
+                    }
+                };
+
+                for chunk in chunks {
+                    trace!(
+                        provider = %self.config.name,
+                        chunk = ?chunk,
+                        "streaming chunk"
+                    );
+                    // If the receiver is dropped, stop processing
+                    if tx.send(chunk).await.is_err() {
+                        debug!(
+                            provider = %self.config.name,
+                            "stream receiver dropped, stopping"
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        // Process any remaining data in the buffer
+        if !buffer.trim().is_empty()
+            && let Ok(chunks) = parse_sse_line(&buffer)
+        {
+            for chunk in chunks {
+                let _ = tx.send(chunk).await;
+            }
+        }
+
+        debug!(
+            provider = %self.config.name,
+            "streaming complete"
+        );
+
+        Ok(())
     }
 }
 
@@ -338,5 +468,57 @@ mod tests {
     #[test]
     fn parse_retry_after_ms_invalid_json() {
         assert_eq!(parse_retry_after_ms("not json"), None);
+    }
+
+    // -- SEC-04: API key leakage audit ------------------------------------
+
+    /// SEC-04: Verify that the Debug impl does not leak API keys.
+    #[test]
+    fn debug_impl_never_leaks_api_key() {
+        let test_keys = [
+            "sk-abc123def456",
+            "sk-proj-ABCDEF1234567890",
+            "key-1234567890abcdef",
+        ];
+
+        for key in &test_keys {
+            let provider = OpenAiCompatProvider::with_api_key(test_config(), key.to_string());
+            let debug_str = format!("{:?}", provider);
+            assert!(
+                !debug_str.contains(key),
+                "Debug output should not contain API key: found '{}' in debug output",
+                key
+            );
+        }
+    }
+
+    /// SEC-04: Verify that the provider's string representations do not
+    /// expose the actual API key value.
+    #[test]
+    fn provider_display_does_not_leak_key() {
+        let provider =
+            OpenAiCompatProvider::with_api_key(test_config(), "sk-secret-test-key-12345".into());
+        // Only Debug is implemented; verify it masks the key.
+        let output = format!("{provider:?}");
+        assert!(!output.contains("sk-secret-test-key-12345"));
+        assert!(output.contains("***"));
+    }
+
+    /// SEC-04: Verify that ProviderConfig stores env var names, not keys,
+    /// and that its Debug output does not contain actual API key values.
+    #[test]
+    fn log_fields_do_not_include_api_key() {
+        let config = test_config();
+        let debug_config = format!("{:?}", config);
+        // ProviderConfig should not contain any actual key values
+        // (it stores the env var NAME, not the key itself).
+        assert!(
+            !debug_config.contains("sk-"),
+            "ProviderConfig debug should not contain API key prefixes: {debug_config}"
+        );
+        assert!(
+            debug_config.contains("TEST_PROVIDER_API_KEY"),
+            "ProviderConfig should show the env var name, not the key"
+        );
     }
 }

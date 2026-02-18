@@ -54,7 +54,11 @@ impl CronScheduler {
             .map_err(|e| ServiceError::InvalidCronExpression(e.to_string()))?;
 
         // Check for duplicate names.
-        if self.jobs.values().any(|j| j.name == job.name && j.id != job.id) {
+        if self
+            .jobs
+            .values()
+            .any(|j| j.name == job.name && j.id != job.id)
+        {
             return Err(ServiceError::DuplicateJobName(job.name.clone()));
         }
 
@@ -120,9 +124,12 @@ impl Default for CronScheduler {
 }
 
 /// Compute the next run time for a cron expression after a given time.
-pub fn compute_next_run(schedule_expr: &str, after: &DateTime<Utc>) -> Result<Option<DateTime<Utc>>> {
-    let schedule =
-        Schedule::from_str(schedule_expr).map_err(|e| ServiceError::InvalidCronExpression(e.to_string()))?;
+pub fn compute_next_run(
+    schedule_expr: &str,
+    after: &DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>> {
+    let schedule = Schedule::from_str(schedule_expr)
+        .map_err(|e| ServiceError::InvalidCronExpression(e.to_string()))?;
     Ok(schedule.after(after).next())
 }
 

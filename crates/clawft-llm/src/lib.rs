@@ -30,14 +30,20 @@
 
 pub mod config;
 pub mod error;
+pub mod failover;
 pub mod openai_compat;
 pub mod provider;
+pub mod retry;
 pub mod router;
+pub mod sse;
 pub mod types;
 
 pub use config::ProviderConfig;
 pub use error::{ProviderError, Result};
+pub use failover::FailoverChain;
 pub use openai_compat::OpenAiCompatProvider;
 pub use provider::Provider;
+pub use retry::{RetryConfig, RetryPolicy};
 pub use router::ProviderRouter;
-pub use types::{ChatMessage, ChatRequest, ChatResponse, ToolCall, Usage};
+pub use sse::parse_sse_line;
+pub use types::{ChatMessage, ChatRequest, ChatResponse, StreamChunk, ToolCall, Usage};

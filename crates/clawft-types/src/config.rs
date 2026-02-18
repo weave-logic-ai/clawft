@@ -9,6 +9,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::delegation::DelegationConfig;
+
 // ── Root config ──────────────────────────────────────────────────────────
 
 /// Root configuration for the clawft framework.
@@ -35,6 +37,10 @@ pub struct Config {
     /// Tool configurations (web search, exec, MCP servers).
     #[serde(default)]
     pub tools: ToolsConfig,
+
+    /// Task delegation routing configuration.
+    #[serde(default)]
+    pub delegation: DelegationConfig,
 }
 
 impl Config {
@@ -590,7 +596,6 @@ pub struct EmailConfig {
     pub consent_granted: bool,
 
     // ── IMAP (receive) ──
-
     /// IMAP server hostname.
     #[serde(default, alias = "imapHost")]
     pub imap_host: String,
@@ -616,7 +621,6 @@ pub struct EmailConfig {
     pub imap_use_ssl: bool,
 
     // ── SMTP (send) ──
-
     /// SMTP server hostname.
     #[serde(default, alias = "smtpHost")]
     pub smtp_host: String,
@@ -646,7 +650,6 @@ pub struct EmailConfig {
     pub from_address: String,
 
     // ── Behavior ──
-
     /// If false, inbound email is read but no automatic reply is sent.
     #[serde(default = "default_true", alias = "autoReplyEnabled")]
     pub auto_reply_enabled: bool,
@@ -1055,8 +1058,8 @@ mod tests {
     );
 
     fn load_fixture() -> Config {
-        let content = std::fs::read_to_string(FIXTURE_PATH)
-            .expect("fixture config.json should exist");
+        let content =
+            std::fs::read_to_string(FIXTURE_PATH).expect("fixture config.json should exist");
         serde_json::from_str(&content).expect("fixture should deserialize")
     }
 
@@ -1110,10 +1113,7 @@ mod tests {
         assert_eq!(cfg.agents.defaults.max_tokens, 8192); // maxTokens
         assert_eq!(cfg.agents.defaults.max_tool_iterations, 20); // maxToolIterations
         assert_eq!(cfg.agents.defaults.memory_window, 50); // memoryWindow
-        assert_eq!(
-            cfg.channels.telegram.allow_from,
-            vec!["user1", "user2"]
-        ); // allowFrom
+        assert_eq!(cfg.channels.telegram.allow_from, vec!["user1", "user2"]); // allowFrom
     }
 
     #[test]

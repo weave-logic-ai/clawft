@@ -47,9 +47,9 @@ fn validate_parent_path(path: &str, workspace: &Path) -> Result<PathBuf, ToolErr
         if ancestor.exists() {
             break;
         }
-        ancestor = ancestor.parent().ok_or_else(|| {
-            ToolError::InvalidPath(format!("path escapes workspace: {}", path))
-        })?;
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| ToolError::InvalidPath(format!("path escapes workspace: {}", path)))?;
     }
 
     let canonical_ancestor = ancestor
@@ -577,10 +577,7 @@ mod tests {
         let (platform, ws) = setup_workspace().await;
         let tool = WriteFileTool::new(platform, ws.clone());
 
-        let err = tool
-            .execute(json!({"path": "file.txt"}))
-            .await
-            .unwrap_err();
+        let err = tool.execute(json!({"path": "file.txt"})).await.unwrap_err();
         assert!(matches!(err, ToolError::InvalidArgs(_)));
 
         cleanup(&ws).await;
@@ -734,7 +731,10 @@ mod tests {
         assert_eq!(entries.len(), 3);
 
         // Should be sorted by name
-        let names: Vec<&str> = entries.iter().map(|e| e["name"].as_str().unwrap()).collect();
+        let names: Vec<&str> = entries
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
         assert_eq!(names, vec!["a.txt", "b.txt", "subdir"]);
 
         // Check is_dir flag
@@ -776,6 +776,132 @@ mod tests {
         let result = tool.execute(json!({"path": "empty"})).await.unwrap();
         let entries = result["entries"].as_array().unwrap();
         assert!(entries.is_empty());
+
+        cleanup(&ws).await;
+    }
+
+    // -- SEC-05: Symlink traversal tests ----------------------------------
+
+    /// SEC-05: Verify that a symlink pointing outside the workspace is
+    /// rejected by validate_path. The canonicalize() call follows the
+    /// symlink and the resulting path falls outside the workspace boundary.
+    #[tokio::test]
+    async fn test_symlink_outside_workspace_rejected() {
+        let (platform, ws) = setup_workspace().await;
+
+        // Create a file outside the workspace
+        let outside_dir = ws.parent().unwrap().join("outside_ws");
+        tokio::fs::create_dir_all(&outside_dir).await.unwrap();
+        let outside_file = outside_dir.join("secret.txt");
+        tokio::fs::write(&outside_file, "secret data")
+            .await
+            .unwrap();
+
+        // Create a symlink inside the workspace pointing to the outside file
+        let symlink_path = ws.join("escape_link");
+        #[cfg(unix)]
+        tokio::fs::symlink(&outside_file, &symlink_path)
+            .await
+            .unwrap();
+
+        // validate_path should reject the symlink because canonicalize()
+        // resolves it to the outside file.
+        let result = validate_path("escape_link", &ws);
+        assert!(
+            result.is_err(),
+            "symlink to file outside workspace should be rejected"
+        );
+        match result.unwrap_err() {
+            ToolError::InvalidPath(msg) => {
+                assert!(
+                    msg.contains("escapes workspace"),
+                    "error should mention workspace escape: {msg}"
+                );
+            }
+            other => panic!("expected InvalidPath, got: {other:?}"),
+        }
+
+        // Also verify ReadFileTool rejects the symlink
+        let tool = ReadFileTool::new(platform.clone(), ws.clone());
+        let err = tool
+            .execute(json!({"path": "escape_link"}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ToolError::InvalidPath(_)),
+            "ReadFileTool should reject symlink outside workspace: {err:?}"
+        );
+
+        // Cleanup
+        let _ = tokio::fs::remove_dir_all(&outside_dir).await;
+        cleanup(&ws).await;
+    }
+
+    /// SEC-05: Symlink to a directory outside the workspace is also rejected.
+    #[tokio::test]
+    async fn test_symlink_to_directory_outside_workspace_rejected() {
+        let (_, ws) = setup_workspace().await;
+
+        // Create a target directory outside the workspace
+        let outside_dir = ws.parent().unwrap().join("outside_dir_target");
+        tokio::fs::create_dir_all(&outside_dir).await.unwrap();
+        tokio::fs::write(outside_dir.join("data.txt"), "private")
+            .await
+            .unwrap();
+
+        // Create a symlink inside the workspace pointing to the outside directory
+        let symlink_path = ws.join("dir_escape_link");
+        #[cfg(unix)]
+        tokio::fs::symlink(&outside_dir, &symlink_path)
+            .await
+            .unwrap();
+
+        // validate_path should reject
+        let result = validate_path("dir_escape_link", &ws);
+        assert!(
+            result.is_err(),
+            "symlink to directory outside workspace should be rejected"
+        );
+
+        // Also verify listing through the symlink is rejected
+        let _ = tokio::fs::remove_dir_all(&outside_dir).await;
+        cleanup(&ws).await;
+    }
+
+    /// SEC-05: Symlinks within the workspace should be allowed.
+    #[tokio::test]
+    async fn test_symlink_within_workspace_allowed() {
+        let (platform, ws) = setup_workspace().await;
+
+        // Create a real file inside the workspace
+        platform
+            .fs()
+            .write_string(&ws.join("real_file.txt"), "allowed content")
+            .await
+            .unwrap();
+
+        // Create a symlink inside the workspace pointing to the real file
+        let symlink_path = ws.join("internal_link");
+        #[cfg(unix)]
+        tokio::fs::symlink(ws.join("real_file.txt"), &symlink_path)
+            .await
+            .unwrap();
+
+        // validate_path should accept because the symlink resolves within workspace
+        let result = validate_path("internal_link", &ws);
+        assert!(
+            result.is_ok(),
+            "symlink within workspace should be allowed: {:?}",
+            result.err()
+        );
+
+        // Also verify ReadFileTool can read through the symlink
+        let tool = ReadFileTool::new(platform.clone(), ws.clone());
+        let result = tool
+            .execute(json!({"path": "internal_link"}))
+            .await
+            .unwrap();
+        assert_eq!(result["content"], "allowed content");
 
         cleanup(&ws).await;
     }

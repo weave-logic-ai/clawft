@@ -9,7 +9,7 @@
 //! weft channels status
 //! ```
 
-use comfy_table::{presets::UTF8_FULL, Table};
+use comfy_table::{Table, presets::UTF8_FULL};
 
 use clawft_types::config::Config;
 
@@ -20,15 +20,60 @@ pub fn channels_status(config: &Config) {
     table.set_header(["CHANNEL", "ENABLED", "CONFIG STATUS"]);
 
     // Known channels.
-    add_row(&mut table, "telegram", config.channels.telegram.enabled, !config.channels.telegram.token.is_empty());
-    add_row(&mut table, "slack", config.channels.slack.enabled, !config.channels.slack.bot_token.is_empty());
-    add_row(&mut table, "discord", config.channels.discord.enabled, !config.channels.discord.token.is_empty());
-    add_row(&mut table, "whatsapp", config.channels.whatsapp.enabled, !config.channels.whatsapp.bridge_token.is_empty());
-    add_row(&mut table, "email", config.channels.email.enabled, !config.channels.email.imap_host.is_empty());
-    add_row(&mut table, "feishu", config.channels.feishu.enabled, !config.channels.feishu.app_id.is_empty());
-    add_row(&mut table, "dingtalk", config.channels.dingtalk.enabled, !config.channels.dingtalk.client_id.is_empty());
-    add_row(&mut table, "mochat", config.channels.mochat.enabled, !config.channels.mochat.claw_token.is_empty());
-    add_row(&mut table, "qq", config.channels.qq.enabled, !config.channels.qq.app_id.is_empty());
+    add_row(
+        &mut table,
+        "telegram",
+        config.channels.telegram.enabled,
+        !config.channels.telegram.token.is_empty(),
+    );
+    add_row(
+        &mut table,
+        "slack",
+        config.channels.slack.enabled,
+        !config.channels.slack.bot_token.is_empty(),
+    );
+    add_row(
+        &mut table,
+        "discord",
+        config.channels.discord.enabled,
+        !config.channels.discord.token.is_empty(),
+    );
+    add_row(
+        &mut table,
+        "whatsapp",
+        config.channels.whatsapp.enabled,
+        !config.channels.whatsapp.bridge_token.is_empty(),
+    );
+    add_row(
+        &mut table,
+        "email",
+        config.channels.email.enabled,
+        !config.channels.email.imap_host.is_empty(),
+    );
+    add_row(
+        &mut table,
+        "feishu",
+        config.channels.feishu.enabled,
+        !config.channels.feishu.app_id.is_empty(),
+    );
+    add_row(
+        &mut table,
+        "dingtalk",
+        config.channels.dingtalk.enabled,
+        !config.channels.dingtalk.client_id.is_empty(),
+    );
+    add_row(
+        &mut table,
+        "mochat",
+        config.channels.mochat.enabled,
+        !config.channels.mochat.claw_token.is_empty(),
+    );
+    add_row(
+        &mut table,
+        "qq",
+        config.channels.qq.enabled,
+        !config.channels.qq.app_id.is_empty(),
+    );
 
     // Unknown / extra channels from config.
     for name in config.channels.extra.keys() {

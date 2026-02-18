@@ -102,10 +102,7 @@ pub trait Tool: Send + Sync {
     /// Arguments are a JSON object matching the schema from [`parameters`].
     /// Returns a JSON value representing the tool's output, or a
     /// [`ToolError`] on failure.
-    async fn execute(
-        &self,
-        args: serde_json::Value,
-    ) -> Result<serde_json::Value, ToolError>;
+    async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError>;
 }
 
 /// Registry of available tools, indexed by name.
@@ -207,6 +204,19 @@ impl ToolRegistry {
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
     }
+
+    /// Create a snapshot of this registry as a new `ToolRegistry`.
+    ///
+    /// The returned registry contains clones of all `Arc<dyn Tool>`
+    /// handles currently registered. This is useful for passing a
+    /// frozen copy of the tool set to components that need shared
+    /// access (e.g., wrapped in `Arc<ToolRegistry>`) without requiring
+    /// the original registry to be `Arc`-wrapped itself.
+    pub fn snapshot(&self) -> Self {
+        Self {
+            tools: self.tools.clone(),
+        }
+    }
 }
 
 impl Default for ToolRegistry {
@@ -245,10 +255,7 @@ mod tests {
             })
         }
 
-        async fn execute(
-            &self,
-            args: serde_json::Value,
-        ) -> Result<serde_json::Value, ToolError> {
+        async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
             let text = args
                 .get("text")
                 .and_then(|v| v.as_str())
@@ -277,10 +284,7 @@ mod tests {
             })
         }
 
-        async fn execute(
-            &self,
-            _args: serde_json::Value,
-        ) -> Result<serde_json::Value, ToolError> {
+        async fn execute(&self, _args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
             Err(ToolError::ExecutionFailed("intentional failure".into()))
         }
     }
@@ -309,10 +313,7 @@ mod tests {
             })
         }
 
-        async fn execute(
-            &self,
-            args: serde_json::Value,
-        ) -> Result<serde_json::Value, ToolError> {
+        async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
             let a = args
                 .get("a")
                 .and_then(|v| v.as_f64())
@@ -415,9 +416,7 @@ mod tests {
     #[tokio::test]
     async fn execute_not_found() {
         let registry = ToolRegistry::new();
-        let result = registry
-            .execute("missing", serde_json::json!({}))
-            .await;
+        let result = registry.execute("missing", serde_json::json!({})).await;
 
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -473,7 +472,11 @@ mod tests {
         assert_eq!(first["type"], "function");
         assert_eq!(first["function"]["name"], "add");
         assert_eq!(first["function"]["description"], "Add two numbers");
-        assert!(first["function"]["parameters"]["properties"].get("a").is_some());
+        assert!(
+            first["function"]["parameters"]["properties"]
+                .get("a")
+                .is_some()
+        );
 
         let second = &schemas[1];
         assert_eq!(second["type"], "function");
@@ -482,9 +485,11 @@ mod tests {
             second["function"]["description"],
             "Echo back the input text"
         );
-        assert!(second["function"]["parameters"]["properties"]
-            .get("text")
-            .is_some());
+        assert!(
+            second["function"]["parameters"]["properties"]
+                .get("text")
+                .is_some()
+        );
     }
 
     #[test]

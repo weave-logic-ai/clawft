@@ -18,6 +18,8 @@ agent, a multi-channel gateway, and management commands.
 - [Routing and Pipeline](guides/routing.md) -- 6-stage pipeline, intelligent routing, scoring and learning
 - [Tool Calls](guides/tool-calls.md) -- Tool execution lifecycle, MCP integration
 - [RVF Integration](guides/rvf.md) -- Vector memory, RVF format, planned features
+- [Skills and Agents](guides/skills-and-agents.md) -- Custom skills, agent definitions, slash commands
+- [Workspaces](guides/workspaces.md) -- Project workspaces, CLAWFT.md, scoped configuration
 
 ## Deployment
 
@@ -34,6 +36,7 @@ agent, a multi-channel gateway, and management commands.
 - [CLI Reference](reference/cli.md) -- Complete command-line reference for `weft`
 - [Tools Reference](reference/tools.md) -- Built-in tools available to the agent
 - [API Documentation](https://docs.rs/clawft) -- Generated Rust API docs
+- [Security](reference/security.md) -- Security model, path traversal protection, prompt injection guards
 
 ## Development
 

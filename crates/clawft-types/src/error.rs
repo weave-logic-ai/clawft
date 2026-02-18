@@ -15,7 +15,6 @@ use thiserror::Error;
 #[non_exhaustive]
 pub enum ClawftError {
     // ── Recoverable ──────────────────────────────────────────────────
-
     /// A transient failure that may succeed on retry.
     #[error("retry required: {source} (attempt {attempts})")]
     Retry {
@@ -48,7 +47,6 @@ pub enum ClawftError {
     },
 
     // ── Fatal ────────────────────────────────────────────────────────
-
     /// Configuration is malformed or semantically invalid.
     #[error("invalid config: {reason}")]
     ConfigInvalid {
@@ -144,8 +142,7 @@ mod tests {
 
     #[test]
     fn clawft_error_from_json() {
-        let json_err = serde_json::from_str::<serde_json::Value>("{{bad}}")
-            .unwrap_err();
+        let json_err = serde_json::from_str::<serde_json::Value>("{{bad}}").unwrap_err();
         let err: ClawftError = json_err.into();
         assert!(matches!(err, ClawftError::Json(_)));
     }
@@ -175,7 +172,10 @@ mod tests {
         let err = ClawftError::SecurityViolation {
             reason: "path traversal detected".into(),
         };
-        assert_eq!(err.to_string(), "security violation: path traversal detected");
+        assert_eq!(
+            err.to_string(),
+            "security violation: path traversal detected"
+        );
     }
 
     #[test]

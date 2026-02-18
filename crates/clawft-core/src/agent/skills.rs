@@ -94,11 +94,12 @@ impl<P: Platform> SkillsLoader<P> {
     /// Returns [`ClawftError::ConfigInvalid`] if no home directory can
     /// be determined.
     pub fn new(platform: Arc<P>) -> Result<Self> {
-        let home = platform.fs().home_dir().ok_or_else(|| {
-            ClawftError::ConfigInvalid {
+        let home = platform
+            .fs()
+            .home_dir()
+            .ok_or_else(|| ClawftError::ConfigInvalid {
                 reason: "could not determine home directory".into(),
-            }
-        })?;
+            })?;
 
         let clawft_skills = home.join(".clawft").join("workspace").join("skills");
         let nanobot_skills = home.join(".nanobot").join("workspace").join("skills");

@@ -94,7 +94,11 @@ impl SlackChannel {
         match self.config.group_policy.as_str() {
             "allowlist" => {
                 self.config.group_allow_from.is_empty()
-                    || self.config.group_allow_from.iter().any(|id| id == sender_id)
+                    || self
+                        .config
+                        .group_allow_from
+                        .iter()
+                        .any(|id| id == sender_id)
             }
             "mention" => {
                 // For mention policy, any user can trigger via @mention.
@@ -176,10 +180,7 @@ impl SlackChannel {
             serde_json::Value::String(event.event_type.clone()),
         );
         if let Some(ref ct) = event.channel_type {
-            metadata.insert(
-                "channel_type".into(),
-                serde_json::Value::String(ct.clone()),
-            );
+            metadata.insert("channel_type".into(), serde_json::Value::String(ct.clone()));
         }
 
         let inbound = InboundMessage {
@@ -342,7 +343,8 @@ impl Channel for SlackChannel {
 
             // If we get here, the connection dropped. Reconnect unless
             // cancellation was requested.
-            self.set_status(ChannelStatus::Error("disconnected".into())).await;
+            self.set_status(ChannelStatus::Error("disconnected".into()))
+                .await;
 
             tokio::select! {
                 _ = cancel.cancelled() => break,
@@ -360,10 +362,7 @@ impl Channel for SlackChannel {
     }
 
     async fn send(&self, msg: &OutboundMessage) -> Result<MessageId, ChannelError> {
-        let thread_ts = msg
-            .metadata
-            .get("thread_ts")
-            .and_then(|v| v.as_str());
+        let thread_ts = msg.metadata.get("thread_ts").and_then(|v| v.as_str());
 
         let ts = self
             .api

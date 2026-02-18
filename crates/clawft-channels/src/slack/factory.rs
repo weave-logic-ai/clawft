@@ -30,13 +30,9 @@ impl ChannelFactory for SlackChannelFactory {
         "slack"
     }
 
-    fn build(
-        &self,
-        config: &serde_json::Value,
-    ) -> Result<Arc<dyn Channel>, ChannelError> {
-        let slack_config: SlackConfig = serde_json::from_value(config.clone()).map_err(|e| {
-            ChannelError::Other(format!("invalid slack config: {e}"))
-        })?;
+    fn build(&self, config: &serde_json::Value) -> Result<Arc<dyn Channel>, ChannelError> {
+        let slack_config: SlackConfig = serde_json::from_value(config.clone())
+            .map_err(|e| ChannelError::Other(format!("invalid slack config: {e}")))?;
 
         if slack_config.bot_token.is_empty() {
             return Err(ChannelError::Other(
@@ -90,7 +86,10 @@ mod tests {
         let result = factory.build(&config);
         match result {
             Err(ChannelError::Other(msg)) => {
-                assert!(msg.contains("bot_token"), "error should mention bot_token: {msg}");
+                assert!(
+                    msg.contains("bot_token"),
+                    "error should mention bot_token: {msg}"
+                );
             }
             Err(other) => panic!("expected ChannelError::Other, got: {other:?}"),
             Ok(_) => panic!("expected error, got Ok"),
@@ -107,7 +106,10 @@ mod tests {
         let result = factory.build(&config);
         match result {
             Err(ChannelError::Other(msg)) => {
-                assert!(msg.contains("app_token"), "error should mention app_token: {msg}");
+                assert!(
+                    msg.contains("app_token"),
+                    "error should mention app_token: {msg}"
+                );
             }
             Err(other) => panic!("expected ChannelError::Other, got: {other:?}"),
             Ok(_) => panic!("expected error, got Ok"),

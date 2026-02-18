@@ -5,19 +5,30 @@
 //! Contains the agent loop, message bus, session management, tool registry,
 //! context builder, memory store, and the 6-stage pipeline system.
 
-pub mod bus;
-pub mod session;
 pub mod agent;
-pub mod tools;
-pub mod pipeline;
 pub mod bootstrap;
+pub mod bus;
+pub mod clawft_md;
+pub mod config_merge;
+pub mod json_repair;
+pub mod pipeline;
 pub mod security;
+pub mod session;
+pub mod tools;
+pub mod workspace;
 
 #[cfg(feature = "vector-memory")]
 pub mod embeddings;
 #[cfg(feature = "vector-memory")]
-pub mod vector_store;
-#[cfg(feature = "vector-memory")]
 pub mod intelligent_router;
 #[cfg(feature = "vector-memory")]
 pub mod session_indexer;
+#[cfg(feature = "vector-memory")]
+pub mod vector_store;
+
+#[cfg(feature = "rvf")]
+pub mod complexity;
+#[cfg(feature = "rvf")]
+pub mod memory_bootstrap;
+#[cfg(feature = "rvf")]
+pub mod scoring;

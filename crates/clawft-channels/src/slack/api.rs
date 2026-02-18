@@ -56,10 +56,7 @@ impl SlackApiClient {
     ///
     /// This endpoint requires the **app-level token** (`xapp-...`), not
     /// the bot token. The caller must supply the app token explicitly.
-    pub async fn apps_connections_open(
-        &self,
-        app_token: &str,
-    ) -> Result<String, ChannelError> {
+    pub async fn apps_connections_open(&self, app_token: &str) -> Result<String, ChannelError> {
         let url = format!("{}/apps.connections.open", self.base_url);
 
         debug!("calling apps.connections.open");
@@ -86,9 +83,7 @@ impl SlackApiClient {
         }
 
         body.url.ok_or_else(|| {
-            ChannelError::ConnectionFailed(
-                "apps.connections.open returned ok but no URL".into(),
-            )
+            ChannelError::ConnectionFailed("apps.connections.open returned ok but no URL".into())
         })
     }
 

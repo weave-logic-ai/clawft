@@ -20,6 +20,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tokio::sync::mpsc;
 use tracing::debug;
 
 use clawft_llm::{
@@ -74,7 +75,8 @@ impl LlmProvider for ClawftLlmAdapter {
         temperature: Option<f64>,
     ) -> Result<serde_json::Value, String> {
         // -- Inbound conversion: Value messages -> ChatMessage ---------------
-        let chat_messages: Vec<ChatMessage> = messages.iter().map(convert_value_to_message).collect();
+        let chat_messages: Vec<ChatMessage> =
+            messages.iter().map(convert_value_to_message).collect();
 
         let request = LlmChatRequest {
             model: model.to_string(),
@@ -103,6 +105,101 @@ impl LlmProvider for ClawftLlmAdapter {
         // -- Outbound conversion: ChatResponse -> Value ----------------------
         Ok(convert_response_to_value(&response))
     }
+
+    async fn complete_stream(
+        &self,
+        model: &str,
+        messages: &[serde_json::Value],
+        tools: &[serde_json::Value],
+        max_tokens: Option<i32>,
+        temperature: Option<f64>,
+        tx: mpsc::Sender<String>,
+    ) -> Result<serde_json::Value, String> {
+        let chat_messages: Vec<ChatMessage> =
+            messages.iter().map(convert_value_to_message).collect();
+
+        let request = LlmChatRequest {
+            model: model.to_string(),
+            messages: chat_messages,
+            max_tokens,
+            temperature,
+            tools: tools.to_vec(),
+            stream: Some(true),
+        };
+
+        debug!(
+            provider = %self.provider.name(),
+            model = %model,
+            messages = request.messages.len(),
+            tools = request.tools.len(),
+            "adapter forwarding streaming request to clawft-llm provider"
+        );
+
+        // Create an internal channel for StreamChunks from clawft-llm
+        let (chunk_tx, mut chunk_rx) = mpsc::channel::<clawft_llm::StreamChunk>(64);
+
+        // Spawn the underlying provider's streaming call
+        let provider = Arc::clone(&self.provider);
+        let stream_handle =
+            tokio::spawn(async move { provider.complete_stream(&request, chunk_tx).await });
+
+        // Forward text deltas to the pipeline's string-based channel
+        // and accumulate them for the final response
+        let mut full_text = String::new();
+        let mut finish_reason = None;
+        let mut usage = None;
+
+        while let Some(chunk) = chunk_rx.recv().await {
+            match chunk {
+                clawft_llm::StreamChunk::TextDelta { text } => {
+                    full_text.push_str(&text);
+                    if tx.send(text).await.is_err() {
+                        // Receiver dropped, stop streaming
+                        break;
+                    }
+                }
+                clawft_llm::StreamChunk::Done {
+                    finish_reason: fr,
+                    usage: u,
+                } => {
+                    if fr.is_some() {
+                        finish_reason = fr;
+                    }
+                    if u.is_some() {
+                        usage = u;
+                    }
+                }
+                clawft_llm::StreamChunk::ToolCallDelta { .. } => {
+                    // Tool call deltas are not forwarded as text, but we
+                    // could extend this in the future
+                }
+            }
+        }
+
+        // Wait for the stream task to complete
+        let _ = stream_handle.await;
+
+        // Build a synthetic ChatResponse from the accumulated text
+        let fr = finish_reason.unwrap_or_else(|| "stop".into());
+        let llm_usage = usage.map(|u| clawft_llm::Usage {
+            prompt_tokens: u.prompt_tokens,
+            completion_tokens: u.completion_tokens,
+            total_tokens: u.total_tokens,
+        });
+
+        let response = ChatResponse {
+            id: "stream-response".into(),
+            model: model.to_string(),
+            choices: vec![clawft_llm::types::Choice {
+                index: 0,
+                message: ChatMessage::assistant(full_text),
+                finish_reason: Some(fr),
+            }],
+            usage: llm_usage,
+        };
+
+        Ok(convert_response_to_value(&response))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -113,14 +210,8 @@ impl LlmProvider for ClawftLlmAdapter {
 ///
 /// Extracts `role`, `content`, `tool_call_id`, and `tool_calls` fields.
 fn convert_value_to_message(value: &serde_json::Value) -> ChatMessage {
-    let role = value["role"]
-        .as_str()
-        .unwrap_or("user")
-        .to_string();
-    let content = value["content"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
+    let role = value["role"].as_str().unwrap_or("user").to_string();
+    let content = value["content"].as_str().unwrap_or("").to_string();
     let tool_call_id = value
         .get("tool_call_id")
         .and_then(|v| v.as_str())
@@ -475,10 +566,7 @@ mod tests {
         fn name(&self) -> &str {
             "failing"
         }
-        async fn complete(
-            &self,
-            _request: &LlmChatRequest,
-        ) -> clawft_llm::Result<ChatResponse> {
+        async fn complete(&self, _request: &LlmChatRequest) -> clawft_llm::Result<ChatResponse> {
             Err(clawft_llm::ProviderError::RequestFailed(
                 "simulated network failure".into(),
             ))
@@ -488,9 +576,7 @@ mod tests {
     #[tokio::test]
     async fn adapter_maps_errors() {
         let adapter = ClawftLlmAdapter::new(Arc::new(FailingProvider));
-        let result = adapter
-            .complete("test-model", &[], &[], None, None)
-            .await;
+        let result = adapter.complete("test-model", &[], &[], None, None).await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -509,10 +595,7 @@ mod tests {
         fn name(&self) -> &str {
             "echo"
         }
-        async fn complete(
-            &self,
-            request: &LlmChatRequest,
-        ) -> clawft_llm::Result<ChatResponse> {
+        async fn complete(&self, request: &LlmChatRequest) -> clawft_llm::Result<ChatResponse> {
             let content = request
                 .messages
                 .last()
@@ -551,10 +634,7 @@ mod tests {
 
         assert_eq!(result["id"], "echo-resp");
         assert_eq!(result["model"], "test-model");
-        assert_eq!(
-            result["choices"][0]["message"]["content"],
-            "echo: ping"
-        );
+        assert_eq!(result["choices"][0]["message"]["content"], "echo: ping");
         assert_eq!(result["usage"]["total_tokens"], 8);
     }
 
@@ -711,7 +791,9 @@ mod tests {
         };
 
         // 5. Call complete and verify
-        let response = transport.complete(&request).await
+        let response = transport
+            .complete(&request)
+            .await
             .expect("transport round-trip should succeed with mock provider");
 
         assert_eq!(response.id, "echo-resp");
@@ -772,7 +854,9 @@ mod tests {
 
         #[async_trait]
         impl clawft_llm::Provider for ToolCallProvider {
-            fn name(&self) -> &str { "tool-call-provider" }
+            fn name(&self) -> &str {
+                "tool-call-provider"
+            }
             async fn complete(
                 &self,
                 _request: &LlmChatRequest,
@@ -823,7 +907,9 @@ mod tests {
             temperature: None,
         };
 
-        let response = transport.complete(&request).await
+        let response = transport
+            .complete(&request)
+            .await
             .expect("tool call round-trip should succeed");
 
         assert_eq!(response.id, "tc-resp");

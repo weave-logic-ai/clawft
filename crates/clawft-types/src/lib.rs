@@ -14,9 +14,12 @@
 
 pub mod config;
 pub mod cron;
+pub mod delegation;
 pub mod error;
 pub mod event;
 pub mod provider;
 pub mod session;
+pub mod skill;
+pub mod workspace;
 
 pub use error::{ChannelError, ClawftError, Result};

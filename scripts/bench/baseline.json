@@ -2,5 +2,11 @@
   "startup_time_ms": 3.5,
   "binary_size_kb": 4710,
   "throughput_invocations_per_sec": 418,
-  "timestamp": "2026-02-17"
+  "timestamp": "2026-02-17",
+  "wasm_size_raw_kb": 57.9,
+  "wasm_size_gzip_kb": 24.3,
+  "wasm_allocator": "dlmalloc",
+  "wasm_target": "wasm32-wasip2",
+  "wasm_instantiation_cold_ms": null,
+  "wasm_instantiation_warm_ms": null
 }

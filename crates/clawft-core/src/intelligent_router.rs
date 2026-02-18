@@ -211,8 +211,11 @@ impl IntelligentRouter {
 
     /// Get aggregate statistics for a specific model.
     pub fn get_model_stats(&self, model: &str) -> ModelStats {
-        let matching: Vec<&CostRecord> =
-            self.cost_records.iter().filter(|r| r.model == model).collect();
+        let matching: Vec<&CostRecord> = self
+            .cost_records
+            .iter()
+            .filter(|r| r.model == model)
+            .collect();
 
         let total_calls = matching.len() as u64;
         let total_cost: f32 = matching.iter().map(|r| r.cost).sum();
@@ -336,10 +339,7 @@ mod tests {
         let router = IntelligentRouter::new(make_embedder()).await;
         let ctx = RoutingContext::default();
 
-        let decision = router
-            .route_request("what is 2 + 2?", &ctx)
-            .await
-            .unwrap();
+        let decision = router.route_request("what is 2 + 2?", &ctx).await.unwrap();
         assert_eq!(decision.tier, 2);
     }
 
@@ -435,8 +435,12 @@ mod tests {
     async fn cost_recording_and_stats() {
         let mut router = IntelligentRouter::new(make_embedder()).await;
 
-        router.record_cost("claude-haiku-3.5", 100, 0.001, 500).await;
-        router.record_cost("claude-haiku-3.5", 200, 0.002, 600).await;
+        router
+            .record_cost("claude-haiku-3.5", 100, 0.001, 500)
+            .await;
+        router
+            .record_cost("claude-haiku-3.5", 200, 0.002, 600)
+            .await;
         router
             .record_cost("claude-sonnet-4.5", 500, 0.01, 2000)
             .await;

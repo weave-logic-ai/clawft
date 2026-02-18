@@ -42,7 +42,10 @@ impl HashEmbedder {
     }
 
     /// Compute the SimHash embedding synchronously.
-    fn compute_embedding(&self, text: &str) -> Vec<f32> {
+    ///
+    /// This is the underlying synchronous implementation. The async
+    /// [`Embedder::embed`] trait method delegates to this.
+    pub fn compute_embedding(&self, text: &str) -> Vec<f32> {
         let mut vector = vec![0.0f32; self.dimension];
 
         let words: Vec<&str> = text.split_whitespace().collect();

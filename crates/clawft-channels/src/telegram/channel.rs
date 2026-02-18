@@ -5,8 +5,8 @@
 //! [`ChannelHost::deliver_inbound`](crate::traits::ChannelHost::deliver_inbound).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use async_trait::async_trait;
 use tokio::sync::RwLock;
@@ -76,10 +76,7 @@ impl TelegramChannel {
 
     /// Create a channel with a custom [`TelegramClient`] (for testing).
     #[cfg(test)]
-    pub fn with_client(
-        client: TelegramClient,
-        allowed_users: Vec<String>,
-    ) -> Self {
+    pub fn with_client(client: TelegramClient, allowed_users: Vec<String>) -> Self {
         Self {
             client,
             status: Arc::new(RwLock::new(ChannelStatus::Stopped)),
@@ -181,8 +178,7 @@ impl Channel for TelegramChannel {
     }
 
     fn is_allowed(&self, sender_id: &str) -> bool {
-        self.allowed_users.is_empty()
-            || self.allowed_users.iter().any(|id| id == sender_id)
+        self.allowed_users.is_empty() || self.allowed_users.iter().any(|id| id == sender_id)
     }
 
     async fn start(
@@ -275,23 +271,16 @@ impl Channel for TelegramChannel {
     }
 
     async fn send(&self, msg: &OutboundMessage) -> Result<MessageId, ChannelError> {
-        let chat_id: i64 = msg
-            .chat_id
-            .parse()
-            .map_err(|_| ChannelError::SendFailed(format!(
-                "invalid chat_id '{}': expected i64",
-                msg.chat_id
-            )))?;
+        let chat_id: i64 = msg.chat_id.parse().map_err(|_| {
+            ChannelError::SendFailed(format!("invalid chat_id '{}': expected i64", msg.chat_id))
+        })?;
 
         let reply_to: Option<i64> = msg
             .reply_to
             .as_ref()
             .map(|id| {
                 id.parse::<i64>().map_err(|_| {
-                    ChannelError::SendFailed(format!(
-                        "invalid reply_to '{}': expected i64",
-                        id
-                    ))
+                    ChannelError::SendFailed(format!("invalid reply_to '{}': expected i64", id))
                 })
             })
             .transpose()?;
@@ -322,16 +311,11 @@ impl ChannelFactory for TelegramChannelFactory {
         "telegram"
     }
 
-    fn build(
-        &self,
-        config: &serde_json::Value,
-    ) -> Result<Arc<dyn Channel>, ChannelError> {
+    fn build(&self, config: &serde_json::Value) -> Result<Arc<dyn Channel>, ChannelError> {
         let token = config
             .get("token")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ChannelError::Other("missing 'token' in telegram config".into())
-            })?;
+            .ok_or_else(|| ChannelError::Other("missing 'token' in telegram config".into()))?;
 
         let allowed_users: Vec<String> = config
             .get("allowed_users")
@@ -344,4 +328,3 @@ impl ChannelFactory for TelegramChannelFactory {
         )))
     }
 }
-

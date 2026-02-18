@@ -178,10 +178,7 @@ impl PluginHost {
     }
 
     /// Route an outbound message to the appropriate channel.
-    pub async fn send_to_channel(
-        &self,
-        msg: &OutboundMessage,
-    ) -> Result<MessageId, ChannelError> {
+    pub async fn send_to_channel(&self, msg: &OutboundMessage) -> Result<MessageId, ChannelError> {
         let channels = self.channels.read().await;
         let channel = channels
             .get(&msg.channel)
@@ -303,10 +300,7 @@ mod tests {
             &self.name
         }
 
-        fn build(
-            &self,
-            _config: &serde_json::Value,
-        ) -> Result<Arc<dyn Channel>, ChannelError> {
+        fn build(&self, _config: &serde_json::Value) -> Result<Arc<dyn Channel>, ChannelError> {
             Ok(Arc::new(MockChannel::new(&self.name)))
         }
     }

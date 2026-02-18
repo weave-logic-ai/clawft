@@ -73,8 +73,7 @@ pub fn verify_signature(
 /// Returns the full `v0={hex}` string.
 pub fn compute_signature(signing_secret: &str, timestamp: &str, body: &str) -> String {
     let base_string = format!("v0:{timestamp}:{body}");
-    let mut mac =
-        HmacSha256::new_from_slice(signing_secret.as_bytes()).expect("HMAC key is valid");
+    let mut mac = HmacSha256::new_from_slice(signing_secret.as_bytes()).expect("HMAC key is valid");
     mac.update(base_string.as_bytes());
     let result = mac.finalize();
     format!("v0={}", hex::encode(result.into_bytes()))
@@ -98,14 +97,11 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 mod hex {
     /// Encode bytes as lowercase hexadecimal.
     pub fn encode(bytes: impl AsRef<[u8]>) -> String {
-        bytes
-            .as_ref()
-            .iter()
-            .fold(String::new(), |mut acc, b| {
-                use std::fmt::Write;
-                let _ = write!(acc, "{b:02x}");
-                acc
-            })
+        bytes.as_ref().iter().fold(String::new(), |mut acc, b| {
+            use std::fmt::Write;
+            let _ = write!(acc, "{b:02x}");
+            acc
+        })
     }
 }
 
@@ -146,7 +142,12 @@ mod tests {
         let body = "original body";
 
         let sig = compute_signature(TEST_SECRET, &timestamp, body);
-        assert!(!verify_signature(TEST_SECRET, &timestamp, "tampered body", &sig));
+        assert!(!verify_signature(
+            TEST_SECRET,
+            &timestamp,
+            "tampered body",
+            &sig
+        ));
     }
 
     #[test]
@@ -184,7 +185,12 @@ mod tests {
 
     #[test]
     fn non_numeric_timestamp_fails() {
-        assert!(!verify_signature(TEST_SECRET, "not-a-number", "body", "v0=abc"));
+        assert!(!verify_signature(
+            TEST_SECRET,
+            "not-a-number",
+            "body",
+            "v0=abc"
+        ));
     }
 
     #[test]

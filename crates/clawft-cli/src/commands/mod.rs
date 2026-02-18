@@ -4,16 +4,23 @@
 //!
 //! - [`agent`] -- Interactive agent session or single-message mode.
 //! - [`gateway`] -- Channel gateway (Telegram, Slack, etc.) + agent loop.
+//! - [`help_cmd`] -- Topic-aware help (`weft help [topic]`).
 //! - [`status`] -- Configuration diagnostics.
 
 pub mod agent;
+pub mod agents_cmd;
 pub mod channels;
 pub mod config_cmd;
 pub mod cron;
 pub mod gateway;
+pub mod help_cmd;
+pub mod mcp_server;
 pub mod memory_cmd;
+pub mod onboard;
 pub mod sessions;
+pub mod skills_cmd;
 pub mod status;
+pub mod workspace_cmd;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -48,7 +55,8 @@ pub async fn load_config<P: Platform>(
             .map_err(|e| anyhow::anyhow!("failed to parse config: {e}"))?;
         clawft_platform::config_loader::normalize_keys(value)
     } else {
-        clawft_platform::config_loader::load_config_raw(platform.fs(), platform.env()).await
+        clawft_platform::config_loader::load_config_raw(platform.fs(), platform.env())
+            .await
             .map_err(|e| anyhow::anyhow!("failed to load config: {e}"))?
     };
 

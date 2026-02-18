@@ -4,9 +4,10 @@
 //! `complete` method for executing chat completion requests.
 
 use async_trait::async_trait;
+use tokio::sync::mpsc;
 
-use crate::error::Result;
-use crate::types::{ChatRequest, ChatResponse};
+use crate::error::{ProviderError, Result};
+use crate::types::{ChatRequest, ChatResponse, StreamChunk};
 
 /// A provider that can execute chat completion requests.
 ///
@@ -41,4 +42,27 @@ pub trait Provider: Send + Sync {
     /// fails due to network issues, authentication problems, rate limiting,
     /// or invalid responses.
     async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse>;
+
+    /// Execute a streaming chat completion request.
+    ///
+    /// Sends [`StreamChunk`] values to the provided channel as they arrive
+    /// from the SSE stream. The stream ends with a [`StreamChunk::Done`]
+    /// chunk.
+    ///
+    /// The default implementation returns an error indicating streaming is
+    /// not supported. Providers that support streaming should override this.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError`](crate::error::ProviderError) if the
+    /// streaming request fails or the provider does not support streaming.
+    async fn complete_stream(
+        &self,
+        _request: &ChatRequest,
+        _tx: mpsc::Sender<StreamChunk>,
+    ) -> Result<()> {
+        Err(ProviderError::RequestFailed(
+            "streaming not supported by this provider".into(),
+        ))
+    }
 }

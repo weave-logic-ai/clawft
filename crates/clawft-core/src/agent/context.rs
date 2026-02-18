@@ -21,6 +21,8 @@ use clawft_platform::Platform;
 use clawft_types::config::AgentsConfig;
 use clawft_types::session::Session;
 
+use super::agents::AgentDefinition;
+use super::helpers::render_template;
 use super::memory::MemoryStore;
 use super::skills::SkillsLoader;
 
@@ -254,6 +256,147 @@ impl<P: Platform> ContextBuilder<P> {
     pub fn config(&self) -> &AgentsConfig {
         &self.config
     }
+
+    /// Build a system prompt message for a specific agent definition.
+    ///
+    /// Prepends the agent's `system_prompt` (with template rendering)
+    /// to the standard system prompt.  If the agent has no custom
+    /// system prompt, only the standard prompt is returned.
+    ///
+    /// # Arguments
+    ///
+    /// * `agent` -- The agent definition to inject
+    /// * `args` -- Arguments string for template variable expansion
+    pub async fn build_system_prompt_for_agent(
+        &self,
+        agent: &AgentDefinition,
+        args: &str,
+    ) -> String {
+        let base = self.build_system_prompt().await;
+
+        match &agent.system_prompt {
+            Some(template) => {
+                let rendered = render_template(template, args, &agent.variables);
+                format!("# Agent: {}\n\n{}\n\n---\n\n{}", agent.name, rendered, base)
+            }
+            None => base,
+        }
+    }
+
+    /// Build the complete message list for an agent-aware LLM call.
+    ///
+    /// Like [`build_messages`](Self::build_messages) but additionally:
+    /// - Uses the agent's system prompt (template-rendered)
+    /// - Activates the agent's declared skills
+    /// - Appends any extra skill instructions as a system message
+    ///
+    /// # Arguments
+    ///
+    /// * `session` -- Current conversation session
+    /// * `agent` -- Agent definition to use
+    /// * `args` -- Arguments string for template rendering
+    /// * `extra_skill_instructions` -- Optional additional skill text to inject
+    pub async fn build_messages_for_agent(
+        &self,
+        session: &Session,
+        agent: &AgentDefinition,
+        args: &str,
+        extra_skill_instructions: Option<&str>,
+    ) -> Vec<LlmMessage> {
+        let mut messages = Vec::new();
+
+        // 1. Agent-aware system prompt
+        let system_prompt = self.build_system_prompt_for_agent(agent, args).await;
+        messages.push(LlmMessage {
+            role: "system".into(),
+            content: system_prompt,
+            tool_call_id: None,
+        });
+
+        // 2. Active skill prompts from agent definition
+        let skill_names: Vec<String> = agent.skills.clone();
+        for skill_name in &skill_names {
+            match self.skills.get_skill(skill_name).await {
+                Some(skill) => {
+                    if let Some(ref prompt) = skill.prompt {
+                        messages.push(LlmMessage {
+                            role: "system".into(),
+                            content: format!("# Skill: {}\n\n{}", skill.name, prompt),
+                            tool_call_id: None,
+                        });
+                    }
+                }
+                None => match self.skills.load_skill(skill_name).await {
+                    Ok(skill) => {
+                        if let Some(ref prompt) = skill.prompt {
+                            messages.push(LlmMessage {
+                                role: "system".into(),
+                                content: format!("# Skill: {}\n\n{}", skill.name, prompt),
+                                tool_call_id: None,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            skill = %skill_name,
+                            agent = %agent.name,
+                            error = %e,
+                            "failed to load agent skill for context"
+                        );
+                    }
+                },
+            }
+        }
+
+        // 3. Extra skill instructions (e.g. from SkillRegistry)
+        if let Some(instructions) = extra_skill_instructions
+            && !instructions.trim().is_empty()
+        {
+            messages.push(LlmMessage {
+                role: "system".into(),
+                content: format!("# Skill Instructions\n\n{instructions}"),
+                tool_call_id: None,
+            });
+        }
+
+        // 4. Memory context
+        match self.memory.read_long_term().await {
+            Ok(memory) if !memory.trim().is_empty() => {
+                messages.push(LlmMessage {
+                    role: "system".into(),
+                    content: format!("# Relevant Memory:\n\n{memory}"),
+                    tool_call_id: None,
+                });
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!(error = %e, "failed to read long-term memory for agent context");
+            }
+        }
+
+        // 5. Conversation history
+        let window = self.config.defaults.memory_window.max(0) as usize;
+        let history = session.get_history(window);
+        for msg in history {
+            let role = msg
+                .get("role")
+                .and_then(|v| v.as_str())
+                .unwrap_or("user")
+                .to_string();
+            let content = msg
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            messages.push(LlmMessage {
+                role,
+                content,
+                tool_call_id: None,
+            });
+        }
+
+        messages
+    }
 }
 
 /// Expand a workspace path, replacing `~/` with the actual home directory.
@@ -356,7 +499,10 @@ mod tests {
     async fn build_messages_includes_memory() {
         let (ctx, dir, memory, _) = setup("memory").await;
 
-        memory.write_long_term("important fact: Rust is fast").await.unwrap();
+        memory
+            .write_long_term("important fact: Rust is fast")
+            .await
+            .unwrap();
 
         let session = Session::new("test:2");
         let messages = ctx.build_messages(&session, &[]).await;
@@ -413,9 +559,7 @@ mod tests {
         skills.load_skill("research").await.unwrap();
 
         let session = Session::new("test:4");
-        let messages = ctx
-            .build_messages(&session, &["research".into()])
-            .await;
+        let messages = ctx.build_messages(&session, &["research".into()]).await;
 
         let skill_msg = messages
             .iter()
@@ -462,8 +606,7 @@ mod tests {
         let messages = ctx.build_messages(&session, &[]).await;
 
         // memory_window=5, so only last 5 history messages
-        let history_msgs: Vec<&LlmMessage> =
-            messages.iter().filter(|m| m.role == "user").collect();
+        let history_msgs: Vec<&LlmMessage> = messages.iter().filter(|m| m.role == "user").collect();
         assert_eq!(history_msgs.len(), 5);
         assert!(history_msgs[0].content.contains("message 15"));
         assert!(history_msgs[4].content.contains("message 19"));
@@ -501,9 +644,7 @@ mod tests {
         let mut session = Session::new("test:7");
         session.add_message("user", "hello", None);
 
-        let messages = ctx
-            .build_messages(&session, &["test_skill".into()])
-            .await;
+        let messages = ctx.build_messages(&session, &["test_skill".into()]).await;
 
         // Order: system, skill, memory, history
         assert_eq!(messages.len(), 4);
@@ -542,9 +683,7 @@ mod tests {
         .unwrap();
 
         let session = Session::new("test:8");
-        let messages = ctx
-            .build_messages(&session, &["lazy_skill".into()])
-            .await;
+        let messages = ctx.build_messages(&session, &["lazy_skill".into()]).await;
 
         let skill_msg = messages
             .iter()
@@ -560,9 +699,7 @@ mod tests {
         let session = Session::new("test:9");
 
         // Request a skill that does not exist
-        let messages = ctx
-            .build_messages(&session, &["nonexistent".into()])
-            .await;
+        let messages = ctx.build_messages(&session, &["nonexistent".into()]).await;
 
         // Should just have system prompt, no error
         assert!(!messages.is_empty());
@@ -612,5 +749,164 @@ mod tests {
         assert_eq!(msg.role, "system");
         assert_eq!(msg.content, "test content");
         assert_eq!(msg.tool_call_id.as_deref(), Some("tc-1"));
+    }
+
+    // ── Agent definition integration tests ───────────────────────────
+
+    use crate::agent::agents::AgentDefinition;
+    use std::collections::HashMap;
+
+    fn test_agent() -> AgentDefinition {
+        let mut vars = HashMap::new();
+        vars.insert("lang".into(), "Rust".into());
+        AgentDefinition {
+            name: "researcher".into(),
+            description: "Research agent".into(),
+            model: Some("custom-model/v2".into()),
+            system_prompt: Some("You are a ${lang} researcher. Arguments: $ARGUMENTS".into()),
+            skills: vec![],
+            allowed_tools: vec!["read_file".into()],
+            max_turns: Some(5),
+            variables: vars,
+            source_path: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn build_system_prompt_for_agent_renders_template() {
+        let (ctx, dir, _, _) = setup("agent_prompt").await;
+        let agent = test_agent();
+
+        let prompt = ctx
+            .build_system_prompt_for_agent(&agent, "topic1 topic2")
+            .await;
+
+        // Should contain the rendered agent prompt
+        assert!(prompt.contains("# Agent: researcher"));
+        assert!(prompt.contains("You are a Rust researcher"));
+        assert!(prompt.contains("Arguments: topic1 topic2"));
+        // Should also contain the base system prompt
+        assert!(prompt.contains("clawft"));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn build_system_prompt_for_agent_without_custom_prompt() {
+        let (ctx, dir, _, _) = setup("agent_no_prompt").await;
+        let mut agent = test_agent();
+        agent.system_prompt = None;
+
+        let prompt = ctx.build_system_prompt_for_agent(&agent, "").await;
+
+        // Should just be the base prompt, no "# Agent:" header
+        assert!(!prompt.contains("# Agent:"));
+        assert!(prompt.contains("clawft"));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn build_messages_for_agent_includes_agent_system_prompt() {
+        let (ctx, dir, _, _) = setup("agent_msgs").await;
+        let agent = test_agent();
+        let session = Session::new("test:agent1");
+
+        let messages = ctx
+            .build_messages_for_agent(&session, &agent, "my-args", None)
+            .await;
+
+        assert!(!messages.is_empty());
+        assert_eq!(messages[0].role, "system");
+        assert!(messages[0].content.contains("# Agent: researcher"));
+        assert!(messages[0].content.contains("Rust researcher"));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn build_messages_for_agent_injects_extra_skill_instructions() {
+        let (ctx, dir, _, _) = setup("agent_skill_instr").await;
+        let agent = test_agent();
+        let session = Session::new("test:agent2");
+
+        let messages = ctx
+            .build_messages_for_agent(&session, &agent, "", Some("Always cite your sources."))
+            .await;
+
+        let skill_instr = messages
+            .iter()
+            .find(|m| m.content.contains("# Skill Instructions"));
+        assert!(skill_instr.is_some());
+        assert!(
+            skill_instr
+                .unwrap()
+                .content
+                .contains("Always cite your sources.")
+        );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn build_messages_for_agent_skips_empty_skill_instructions() {
+        let (ctx, dir, _, _) = setup("agent_empty_instr").await;
+        let agent = test_agent();
+        let session = Session::new("test:agent3");
+
+        let messages = ctx
+            .build_messages_for_agent(&session, &agent, "", Some("   "))
+            .await;
+
+        let skill_instr = messages
+            .iter()
+            .find(|m| m.content.contains("# Skill Instructions"));
+        assert!(skill_instr.is_none());
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn build_messages_for_agent_includes_memory() {
+        let (ctx, dir, memory, _) = setup("agent_memory").await;
+        let agent = test_agent();
+
+        memory
+            .write_long_term("agent-level memory test")
+            .await
+            .unwrap();
+
+        let session = Session::new("test:agent4");
+        let messages = ctx
+            .build_messages_for_agent(&session, &agent, "", None)
+            .await;
+
+        let mem_msg = messages
+            .iter()
+            .find(|m| m.content.contains("Relevant Memory"));
+        assert!(mem_msg.is_some());
+        assert!(mem_msg.unwrap().content.contains("agent-level memory test"));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn build_messages_for_agent_includes_history() {
+        let (ctx, dir, _, _) = setup("agent_history").await;
+        let agent = test_agent();
+
+        let mut session = Session::new("test:agent5");
+        session.add_message("user", "hello agent", None);
+        session.add_message("assistant", "hello user", None);
+
+        let messages = ctx
+            .build_messages_for_agent(&session, &agent, "", None)
+            .await;
+
+        let user_msgs: Vec<_> = messages.iter().filter(|m| m.role == "user").collect();
+        assert_eq!(user_msgs.len(), 1);
+        assert_eq!(user_msgs[0].content, "hello agent");
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

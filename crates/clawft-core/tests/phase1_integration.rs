@@ -113,10 +113,12 @@ async fn test_tool_fixture_parses() {
     let tool_def: serde_json::Value = serde_json::from_str(&content).unwrap();
     assert_eq!(tool_def["type"], "function");
     assert_eq!(tool_def["function"]["name"], "read_file");
-    assert!(tool_def["function"]["parameters"]["required"]
-        .as_array()
-        .unwrap()
-        .contains(&serde_json::Value::String("path".into())));
+    assert!(
+        tool_def["function"]["parameters"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::Value::String("path".into()))
+    );
 }
 
 /// Test 6: Session save/load round-trip preserves metadata.
@@ -154,8 +156,5 @@ async fn test_app_context_into_agent_loop() {
     let _tx = ctx.bus().inbound_sender();
 
     let agent = ctx.into_agent_loop();
-    assert_eq!(
-        agent.config().defaults.model,
-        "anthropic/claude-opus-4-5"
-    );
+    assert_eq!(agent.config().defaults.model, "anthropic/claude-opus-4-5");
 }

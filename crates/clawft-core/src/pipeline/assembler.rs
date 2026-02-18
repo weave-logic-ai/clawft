@@ -9,9 +9,7 @@
 
 use async_trait::async_trait;
 
-use super::traits::{
-    AssembledContext, ChatRequest, ContextAssembler, LlmMessage, TaskProfile,
-};
+use super::traits::{AssembledContext, ChatRequest, ContextAssembler, LlmMessage, TaskProfile};
 
 /// Level 0 token-budget context assembler.
 ///
@@ -191,10 +189,10 @@ mod tests {
         // Create a very tight budget: system message + 1 more message only.
         let assembler = TokenBudgetAssembler::new(20);
         let req = make_request(vec![
-            make_message("system", "Be helpful."),         // ~4 + 4 = 7 tokens
-            make_message("user", "First question here"),   // ~5 + 4 = 9 tokens
-            make_message("assistant", "First answer here"),// ~5 + 4 = 9 tokens
-            make_message("user", "Recent msg"),            // ~3 + 4 = 6 tokens
+            make_message("system", "Be helpful."), // ~4 + 4 = 7 tokens
+            make_message("user", "First question here"), // ~5 + 4 = 9 tokens
+            make_message("assistant", "First answer here"), // ~5 + 4 = 9 tokens
+            make_message("user", "Recent msg"),    // ~3 + 4 = 6 tokens
         ]);
         let ctx = assembler.assemble(&req, &make_profile()).await;
 
@@ -216,7 +214,7 @@ mod tests {
         // Budget that can hold system + ~2 short messages.
         let assembler = TokenBudgetAssembler::new(25);
         let req = make_request(vec![
-            make_message("system", "System."),        // ~2 + 4 = 5 tokens
+            make_message("system", "System."),         // ~2 + 4 = 5 tokens
             make_message("user", "old msg one"),       // ~3 + 4 = 7 tokens
             make_message("assistant", "old reply"),    // ~3 + 4 = 6 tokens
             make_message("user", "recent question"),   // ~4 + 4 = 7 tokens
@@ -272,7 +270,7 @@ mod tests {
     fn estimate_tokens_for_multiple_messages() {
         let messages = vec![
             make_message("system", "You are helpful."), // 16/4 + 4 = 8
-            make_message("user", "Hello"),               // 5/4 + 4 = 5
+            make_message("user", "Hello"),              // 5/4 + 4 = 5
         ];
         let total = estimate_tokens_for_messages(&messages);
         assert_eq!(total, 13);
@@ -288,7 +286,7 @@ mod tests {
     async fn exact_budget_fit_no_truncation() {
         // Build messages that exactly fit the budget.
         let msg1 = make_message("system", "ok"); // 0 + 4 = 4
-        let msg2 = make_message("user", "hi");   // 0 + 4 = 4
+        let msg2 = make_message("user", "hi"); // 0 + 4 = 4
         let budget = estimate_tokens(&msg1) + estimate_tokens(&msg2);
 
         let assembler = TokenBudgetAssembler::new(budget);

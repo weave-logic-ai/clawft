@@ -62,15 +62,18 @@ impl Tool for MessageTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
-        let channel = args.get("channel")
+        let channel = args
+            .get("channel")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidArgs("missing required field: channel".into()))?;
 
-        let chat_id = args.get("chat_id")
+        let chat_id = args
+            .get("chat_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidArgs("missing required field: chat_id".into()))?;
 
-        let content = args.get("content")
+        let content = args
+            .get("content")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidArgs("missing required field: content".into()))?;
 

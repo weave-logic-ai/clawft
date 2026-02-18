@@ -75,13 +75,13 @@ pub async fn load_config_raw(
     }
 
     tracing::debug!(path = %path.display(), "loading config file");
-    let contents = fs.read_to_string(&path).await.map_err(|e| {
-        format!("failed to read config file {}: {}", path.display(), e)
-    })?;
+    let contents = fs
+        .read_to_string(&path)
+        .await
+        .map_err(|e| format!("failed to read config file {}: {}", path.display(), e))?;
 
-    let value: Value = serde_json::from_str(&contents).map_err(|e| {
-        format!("failed to parse config file {}: {}", path.display(), e)
-    })?;
+    let value: Value = serde_json::from_str(&contents)
+        .map_err(|e| format!("failed to parse config file {}: {}", path.display(), e))?;
 
     Ok(normalize_keys(value))
 }
@@ -101,9 +101,7 @@ pub fn normalize_keys(value: Value) -> Value {
             }
             Value::Object(new_map)
         }
-        Value::Array(arr) => {
-            Value::Array(arr.into_iter().map(normalize_keys).collect())
-        }
+        Value::Array(arr) => Value::Array(arr.into_iter().map(normalize_keys).collect()),
         other => other,
     }
 }
@@ -237,10 +235,7 @@ mod tests {
 
     #[test]
     fn test_normalize_keys_empty_object() {
-        assert_eq!(
-            normalize_keys(json!({})),
-            json!({})
-        );
+        assert_eq!(normalize_keys(json!({})), json!({}));
     }
 
     // ── discover_config_path tests ────────────────────────────────────

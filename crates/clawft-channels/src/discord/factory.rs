@@ -29,14 +29,9 @@ impl ChannelFactory for DiscordChannelFactory {
         "discord"
     }
 
-    fn build(
-        &self,
-        config: &serde_json::Value,
-    ) -> Result<Arc<dyn Channel>, ChannelError> {
-        let discord_config: DiscordConfig =
-            serde_json::from_value(config.clone()).map_err(|e| {
-                ChannelError::Other(format!("invalid discord config: {e}"))
-            })?;
+    fn build(&self, config: &serde_json::Value) -> Result<Arc<dyn Channel>, ChannelError> {
+        let discord_config: DiscordConfig = serde_json::from_value(config.clone())
+            .map_err(|e| ChannelError::Other(format!("invalid discord config: {e}")))?;
 
         if discord_config.token.is_empty() {
             return Err(ChannelError::Other(

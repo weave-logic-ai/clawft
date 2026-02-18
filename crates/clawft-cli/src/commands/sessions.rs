@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use comfy_table::{presets::UTF8_FULL, Table};
+use comfy_table::{Table, presets::UTF8_FULL};
 
 use clawft_core::session::SessionManager;
 use clawft_platform::NativePlatform;
@@ -48,10 +48,7 @@ fn message_role(msg: &serde_json::Value) -> &str {
 ///
 /// Truncates to `max_len` characters and appends "..." if truncated.
 fn message_content_preview(msg: &serde_json::Value, max_len: usize) -> String {
-    let content = msg
-        .get("content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
     if content.len() <= max_len {
         content.to_string()
     } else {
@@ -227,7 +224,9 @@ mod tests {
     #[test]
     fn format_datetime_produces_expected_format() {
         use chrono::TimeZone;
-        let dt = chrono::Utc.with_ymd_and_hms(2025, 6, 15, 14, 30, 0).unwrap();
+        let dt = chrono::Utc
+            .with_ymd_and_hms(2025, 6, 15, 14, 30, 0)
+            .unwrap();
         let result = format_datetime(&dt);
         assert_eq!(result, "2025-06-15 14:30:00");
     }

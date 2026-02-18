@@ -46,6 +46,13 @@ pub enum ProviderError {
     /// A JSON serialization/deserialization error.
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+
+    /// All providers in the failover chain have been exhausted.
+    #[error("all providers exhausted: {}", attempts.join("; "))]
+    AllProvidersExhausted {
+        /// Per-provider error summaries in order of attempt.
+        attempts: Vec<String>,
+    },
 }
 
 /// A convenience type alias for provider operations.
@@ -117,5 +124,16 @@ mod tests {
 
         let err: Result<i32> = Err(ProviderError::Timeout);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn display_all_providers_exhausted() {
+        let err = ProviderError::AllProvidersExhausted {
+            attempts: vec!["openai: rate limited".into(), "anthropic: timeout".into()],
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("all providers exhausted"));
+        assert!(msg.contains("openai: rate limited"));
+        assert!(msg.contains("anthropic: timeout"));
     }
 }

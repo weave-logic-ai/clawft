@@ -388,10 +388,7 @@ mod tests {
         let platform = Arc::new(NativePlatform::new());
         let ctx = AppContext::new(test_config(), platform).await.unwrap();
         let agent = ctx.into_agent_loop();
-        assert_eq!(
-            agent.config().defaults.model,
-            "anthropic/claude-opus-4-5"
-        );
+        assert_eq!(agent.config().defaults.model, "anthropic/claude-opus-4-5");
         assert_eq!(agent.config().defaults.max_tokens, 4096);
     }
 
@@ -406,10 +403,7 @@ mod tests {
 
         // Should still produce a valid agent loop
         let agent = ctx.into_agent_loop();
-        assert_eq!(
-            agent.config().defaults.model,
-            "anthropic/claude-opus-4-5"
-        );
+        assert_eq!(agent.config().defaults.model, "anthropic/claude-opus-4-5");
     }
 
     #[tokio::test]
@@ -529,10 +523,7 @@ mod tests {
 
         // Convert to agent loop and verify it's still valid.
         let agent = ctx.into_agent_loop();
-        assert_eq!(
-            agent.config().defaults.model,
-            "anthropic/claude-opus-4-5"
-        );
+        assert_eq!(agent.config().defaults.model, "anthropic/claude-opus-4-5");
     }
 
     // ── Integration: default pipeline uses stub (negative test) ─────

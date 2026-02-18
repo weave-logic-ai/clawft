@@ -96,11 +96,12 @@ async fn shell_denylist_permits_normal_command() {
     policy.mode = PolicyMode::Denylist;
     let tool = make_shell(ws.clone(), policy);
 
-    let result = tool
-        .execute(json!({"command": "curl --version"}))
-        .await;
+    let result = tool.execute(json!({"command": "curl --version"})).await;
     // curl is not in denylist patterns, so it should be allowed
-    assert!(result.is_ok(), "curl should be allowed in denylist mode: {result:?}");
+    assert!(
+        result.is_ok(),
+        "curl should be allowed in denylist mode: {result:?}"
+    );
 
     cleanup(&ws).await;
 }
@@ -246,9 +247,7 @@ async fn shell_rm_rf_build_not_blocked_by_root_pattern() {
     // "rm -rf ./build". Let's check: "rm -rf ./build" lowercased = "rm -rf ./build".
     // The pattern "rm -rf /" -- does "rm -rf ./build" contain "rm -rf /"? No.
     // So it should be allowed.
-    let result = tool
-        .execute(json!({"command": "rm -rf ./build"}))
-        .await;
+    let result = tool.execute(json!({"command": "rm -rf ./build"})).await;
     assert!(
         result.is_ok(),
         "rm -rf ./build should be allowed (no substring match): {result:?}"
@@ -540,10 +539,7 @@ async fn cross_tool_same_policy_same_rejection() {
         .execute(json!({"command": "curl http://example.com"}))
         .await
         .unwrap_err();
-    let spawn_err = spawn
-        .execute(json!({"command": "curl"}))
-        .await
-        .unwrap_err();
+    let spawn_err = spawn.execute(json!({"command": "curl"})).await.unwrap_err();
 
     assert!(matches!(shell_err, ToolError::PermissionDenied(_)));
     assert!(matches!(spawn_err, ToolError::PermissionDenied(_)));

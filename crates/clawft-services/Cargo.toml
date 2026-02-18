@@ -10,6 +10,11 @@ description = "Services for clawft (cron, heartbeat, MCP)"
 keywords = ["cron", "heartbeat", "scheduling", "service"]
 categories = ["asynchronous"]
 
+[features]
+default = []
+delegate = ["regex"]
+rvf = []
+
 [dependencies]
 clawft-types = { workspace = true }
 async-trait = { workspace = true }
@@ -23,6 +28,9 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 cron = { workspace = true }
 reqwest = { workspace = true }
+regex = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+regex = { workspace = true }
+mockito = "1"

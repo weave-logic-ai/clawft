@@ -150,10 +150,7 @@ pub trait ChannelFactory: Send + Sync {
     fn channel_name(&self) -> &str;
 
     /// Create a channel instance from its JSON config section.
-    fn build(
-        &self,
-        config: &serde_json::Value,
-    ) -> Result<Arc<dyn Channel>, ChannelError>;
+    fn build(&self, config: &serde_json::Value) -> Result<Arc<dyn Channel>, ChannelError>;
 }
 
 #[cfg(test)]
@@ -226,13 +223,11 @@ mod tests {
         let cmd = Command {
             name: "/help".into(),
             description: "Show help text".into(),
-            parameters: vec![
-                CommandParameter {
-                    name: "topic".into(),
-                    description: "Help topic".into(),
-                    required: false,
-                },
-            ],
+            parameters: vec![CommandParameter {
+                name: "topic".into(),
+                description: "Help topic".into(),
+                required: false,
+            }],
         };
         assert_eq!(cmd.name, "/help");
         assert_eq!(cmd.parameters.len(), 1);

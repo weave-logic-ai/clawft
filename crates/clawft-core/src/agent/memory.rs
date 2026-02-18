@@ -50,11 +50,12 @@ impl<P: Platform> MemoryStore<P> {
     /// Returns [`ClawftError::ConfigInvalid`] if no home directory can
     /// be determined from the platform.
     pub fn new(platform: Arc<P>) -> Result<Self> {
-        let home = platform.fs().home_dir().ok_or_else(|| {
-            ClawftError::ConfigInvalid {
+        let home = platform
+            .fs()
+            .home_dir()
+            .ok_or_else(|| ClawftError::ConfigInvalid {
                 reason: "could not determine home directory".into(),
-            }
-        })?;
+            })?;
 
         let clawft_memory = home.join(".clawft").join("workspace").join("memory");
         let nanobot_memory = home.join(".nanobot").join("workspace").join("memory");
@@ -223,11 +224,7 @@ mod tests {
     /// Create a MemoryStore pointing at a temp directory.
     fn test_store(dir: &std::path::Path) -> MemoryStore<NativePlatform> {
         let platform = Arc::new(NativePlatform::new());
-        MemoryStore::with_paths(
-            dir.join("MEMORY.md"),
-            dir.join("HISTORY.md"),
-            platform,
-        )
+        MemoryStore::with_paths(dir.join("MEMORY.md"), dir.join("HISTORY.md"), platform)
     }
 
     #[tokio::test]
@@ -243,7 +240,10 @@ mod tests {
         let dir = temp_dir("write_lt");
         let store = test_store(&dir);
 
-        store.write_long_term("fact: the sky is blue").await.unwrap();
+        store
+            .write_long_term("fact: the sky is blue")
+            .await
+            .unwrap();
         let content = store.read_long_term().await.unwrap();
         assert_eq!(content, "fact: the sky is blue");
 
@@ -408,7 +408,10 @@ mod tests {
         let dir = temp_dir("trim");
         let store = test_store(&dir);
 
-        store.append_long_term("entry with trailing   \n\n").await.unwrap();
+        store
+            .append_long_term("entry with trailing   \n\n")
+            .await
+            .unwrap();
         let content = store.read_long_term().await.unwrap();
         // Should be trimmed then followed by exactly one double newline
         assert_eq!(content, "entry with trailing\n\n");
@@ -424,14 +427,18 @@ mod tests {
         let store = store.unwrap();
         // Memory path should be absolute and end with MEMORY.md
         assert!(store.memory_path().is_absolute());
-        assert!(store
-            .memory_path()
-            .file_name()
-            .is_some_and(|n| n == "MEMORY.md"));
-        assert!(store
-            .history_path()
-            .file_name()
-            .is_some_and(|n| n == "HISTORY.md"));
+        assert!(
+            store
+                .memory_path()
+                .file_name()
+                .is_some_and(|n| n == "MEMORY.md")
+        );
+        assert!(
+            store
+                .history_path()
+                .file_name()
+                .is_some_and(|n| n == "HISTORY.md")
+        );
     }
 
     #[tokio::test]

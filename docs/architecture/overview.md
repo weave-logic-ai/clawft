@@ -249,7 +249,7 @@ Built-in tool implementations and bulk registration.
 | `memory_read` | `memory_tool` | Read from long-term memory |
 | `memory_write` | `memory_tool` | Write to long-term memory |
 | `web_search` | `web_search` | Search the web |
-| `web_fetch` | `web_fetch` | Fetch and extract content from URLs |
+| `web_fetch` | `web_fetch` | Fetch raw content from URLs (with SSRF protection and body size limits) |
 | `message` | `message_tool` | Send messages to chat channels |
 | `spawn` | `spawn_tool` | Spawn sub-agent processes |
 
@@ -294,11 +294,56 @@ Background services that generate inbound events.
 **Modules:**
 - `CronService` -- JSONL-backed scheduled job execution using cron expressions. Jobs fire as `InboundMessage` events on the bus.
 - `HeartbeatService` -- periodic health check messages at configurable intervals.
-- `mcp` -- MCP (Model Context Protocol) client for connecting to external tool servers. Uses JSON-RPC 2.0 over pluggable transports (stdio or HTTP). `McpClient` provides `list_tools()` and `call_tool()`. `McpToolWrapper` adapts MCP server tools to the internal `Tool` trait.
+- `mcp` -- Dual-mode MCP (Model Context Protocol) subsystem. In server mode (`weft mcp-server`), `McpServerShell` exposes built-in tools to an LLM host via JSON-RPC over stdio. In client mode (`tools.mcp_servers` config), `McpClient` connects to external MCP servers. Both modes use the pluggable `ToolProvider` trait. See [Pluggable MCP Architecture](#pluggable-mcp-architecture-phase-3h) below.
 
-**Key types:** `McpClient`, `McpTransport` trait, `StdioTransport`, `HttpTransport`, `ToolDefinition`
+**Key types:** `ToolProvider` trait, `McpServerShell`, `CompositeToolProvider`, `McpClient`, `McpTransport` trait, `StdioTransport`, `HttpTransport`, `ToolDefinition`
 
 **Dependencies:** clawft-types, async-trait, serde, cron, tokio
+
+---
+
+### Pluggable MCP Architecture (Phase 3H)
+
+The MCP subsystem in `clawft-services/src/mcp/` uses a pluggable provider model that unifies built-in tools, in-process vector tools, external MCP servers, and LLM delegation behind a single trait.
+
+**Core Trait:**
+
+```rust
+pub trait ToolProvider: Send + Sync {
+    fn namespace(&self) -> &str;
+    fn list_tools(&self) -> Vec<ToolDefinition>;
+    async fn call_tool(&self, name: &str, args: serde_json::Value) -> Result<CallToolResult>;
+}
+```
+
+**Key Types** (all in `clawft-services/src/mcp/`):
+
+| File | Type | Purpose |
+|------|------|---------|
+| `provider.rs` | `ToolProvider` trait, `BuiltinToolProvider` | Core abstraction + built-in tool adapter |
+| `server.rs` | `McpServerShell` | Generic MCP server: JSON-RPC dispatch, stdio framing, `tools/list` + `tools/call` |
+| `middleware.rs` | `SecurityGuard`, `PermissionFilter`, `ResultGuard`, `AuditLog` | Request/response pipeline |
+| `composite.rs` | `CompositeToolProvider` | Multi-provider aggregation with `{server}__{tool}` namespace routing |
+
+**Concrete Providers:**
+
+| Provider | Source | Purpose |
+|----------|--------|---------|
+| `BuiltinToolProvider` | `provider.rs` | Wraps `ToolRegistry` (read_file, write_file, etc.) |
+| `RvfToolProvider` | `clawft-rvf-mcp` | 11 RVF vector tools (in-process) |
+| `ProxyToolProvider` | `McpClient` | Wraps `McpClient` for external MCP servers |
+| `DelegationToolProvider` | delegation module | Claude bridge for tool delegation |
+
+**Two Operating Modes:**
+
+1. **Server mode** (`weft mcp-server`): `McpServerShell` wraps a `CompositeToolProvider` and exposes aggregated tools to an LLM host over newline-delimited JSON-RPC stdio.
+2. **Client mode** (`tools.mcp_servers` config): `McpClient` connects to external MCP servers. Each external server is wrapped in a `ProxyToolProvider` and registered with the `CompositeToolProvider`.
+
+**Namespace routing:** `CompositeToolProvider` maps tool names using the `{server}__{tool}` convention (double underscore), matching the namespace pattern used by Claude Desktop and other MCP hosts.
+
+**Middleware pipeline:** All tool calls pass through `SecurityGuard` (input validation), `PermissionFilter` (access control), and on response through `ResultGuard` (output sanitization) and `AuditLog` (execution logging).
+
+**Protocol:** MCP 2025-06-18 stdio transport uses newline-delimited JSON (not HTTP Content-Length framing).
 
 ---
 

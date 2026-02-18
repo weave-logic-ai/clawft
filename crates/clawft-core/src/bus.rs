@@ -6,8 +6,8 @@
 //!
 //! Ported from Python `nanobot/bus/queue.py`.
 
-use tokio::sync::mpsc;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 use tracing::debug;
 
 use clawft_types::error::ClawftError;

@@ -6,7 +6,7 @@
 
 use clawft_core::security::{sanitize_content, truncate_result, validate_session_id};
 use clawft_types::error::ClawftError;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 // ── Session ID validation ──────────────────────────────────────────
 
@@ -41,10 +41,7 @@ fn test_session_id_rejects_slash() {
 #[test]
 fn test_session_id_rejects_backslash() {
     let result = validate_session_id("foo\\bar");
-    assert!(
-        result.is_err(),
-        "backslash in session ID must be rejected"
-    );
+    assert!(result.is_err(), "backslash in session ID must be rejected");
     assert!(
         matches!(result.unwrap_err(), ClawftError::SecurityViolation { .. }),
         "error must be SecurityViolation"
@@ -54,10 +51,7 @@ fn test_session_id_rejects_backslash() {
 #[test]
 fn test_session_id_rejects_null_byte() {
     let result = validate_session_id("foo\0bar");
-    assert!(
-        result.is_err(),
-        "null byte in session ID must be rejected"
-    );
+    assert!(result.is_err(), "null byte in session ID must be rejected");
     let err = result.unwrap_err();
     assert!(
         matches!(err, ClawftError::SecurityViolation { .. }),

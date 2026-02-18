@@ -57,6 +57,14 @@ pub struct AgentArgs {
     /// Enable intelligent routing (requires vector-memory feature).
     #[arg(long)]
     pub intelligent_routing: bool,
+
+    /// Trust workspace-level (project) skills.
+    ///
+    /// Without this flag, only user and built-in skills are loaded.
+    /// Workspace skills in `.clawft/skills/` are skipped as a security
+    /// measure (SEC-SKILL-05).
+    #[arg(long)]
+    pub trust_project_skills: bool,
 }
 
 /// Run the agent command.
@@ -78,7 +86,8 @@ pub async fn run(args: AgentArgs) -> anyhow::Result<()> {
     info!(model = %effective_model, "initializing agent");
 
     // Bootstrap the application context (bus, sessions, memory, skills, pipeline).
-    let mut ctx = AppContext::new(config.clone(), platform.clone()).await
+    let mut ctx = AppContext::new(config.clone(), platform.clone())
+        .await
         .map_err(|e| anyhow::anyhow!("bootstrap failed: {e}"))?;
 
     // Build security policies from config.
@@ -87,22 +96,28 @@ pub async fn run(args: AgentArgs) -> anyhow::Result<()> {
 
     // Register tools.
     let workspace = expand_workspace(&config.agents.defaults.workspace);
+    let web_search_config = build_web_search_config(&config.tools);
     clawft_tools::register_all(
         ctx.tools_mut(),
         platform.clone(),
         workspace,
         command_policy,
         url_policy,
+        web_search_config,
     );
 
     // Register MCP server tools.
     crate::mcp_tools::register_mcp_tools(&config, ctx.tools_mut()).await;
 
+    // Register delegation tool (feature-gated, graceful degradation).
+    crate::mcp_tools::register_delegation(&config.delegation, ctx.tools_mut());
+
     // Register message tool (needs bus reference, cannot go in register_all).
     let bus_ref = ctx.bus().clone();
-    ctx.tools_mut().register(Arc::new(
-        clawft_tools::message_tool::MessageTool::new(bus_ref),
-    ));
+    ctx.tools_mut()
+        .register(Arc::new(clawft_tools::message_tool::MessageTool::new(
+            bus_ref,
+        )));
 
     let tool_count = ctx.tools().len();
     let tool_names: Vec<String> = ctx.tools().list();
@@ -298,8 +313,32 @@ async fn run_interactive(
     Ok(())
 }
 
+/// Build a [`WebSearchConfig`] from the tools configuration.
+///
+/// Maps the `ToolsConfig.web.search` fields (api_key, max_results) into the
+/// web search tool's configuration struct. Resolves the API key from the
+/// environment variable `BRAVE_SEARCH_API_KEY` if the config value is empty.
+pub(crate) fn build_web_search_config(
+    config: &clawft_types::config::ToolsConfig,
+) -> clawft_tools::web_search::WebSearchConfig {
+    let search = &config.web.search;
+    let api_key = if search.api_key.is_empty() {
+        std::env::var("BRAVE_SEARCH_API_KEY").ok()
+    } else {
+        Some(search.api_key.clone())
+    };
+
+    clawft_tools::web_search::WebSearchConfig {
+        api_key,
+        endpoint: None, // Custom endpoint support can be added to config later.
+        max_results: search.max_results,
+    }
+}
+
 /// Build a [`CommandPolicy`] from the configuration.
-pub(crate) fn build_command_policy(config: &clawft_types::config::CommandPolicyConfig) -> clawft_tools::security_policy::CommandPolicy {
+pub(crate) fn build_command_policy(
+    config: &clawft_types::config::CommandPolicyConfig,
+) -> clawft_tools::security_policy::CommandPolicy {
     use clawft_tools::security_policy::{CommandPolicy, PolicyMode};
 
     let mut policy = CommandPolicy::safe_defaults();
@@ -318,7 +357,9 @@ pub(crate) fn build_command_policy(config: &clawft_types::config::CommandPolicyC
 }
 
 /// Build a [`UrlPolicy`] from the configuration.
-pub(crate) fn build_url_policy(config: &clawft_types::config::UrlPolicyConfig) -> clawft_tools::url_safety::UrlPolicy {
+pub(crate) fn build_url_policy(
+    config: &clawft_types::config::UrlPolicyConfig,
+) -> clawft_tools::url_safety::UrlPolicy {
     use clawft_tools::url_safety::UrlPolicy;
 
     UrlPolicy::new(
@@ -351,6 +392,7 @@ mod tests {
             model: None,
             config: None,
             intelligent_routing: false,
+            trust_project_skills: false,
         };
         assert!(args.message.is_none());
         assert!(args.model.is_none());
@@ -364,6 +406,7 @@ mod tests {
             model: None,
             config: None,
             intelligent_routing: false,
+            trust_project_skills: false,
         };
         assert_eq!(args.message.as_deref(), Some("test message"));
     }
@@ -375,6 +418,7 @@ mod tests {
             model: Some("openai/gpt-4".into()),
             config: None,
             intelligent_routing: false,
+            trust_project_skills: false,
         };
         assert_eq!(args.model.as_deref(), Some("openai/gpt-4"));
     }
@@ -386,6 +430,7 @@ mod tests {
             model: None,
             config: Some("/tmp/test-config.json".into()),
             intelligent_routing: false,
+            trust_project_skills: false,
         };
         assert_eq!(args.config.as_deref(), Some("/tmp/test-config.json"));
     }

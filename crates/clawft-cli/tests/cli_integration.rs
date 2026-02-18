@@ -266,10 +266,7 @@ fn sessions_list_succeeds() {
         .output()
         .expect("failed to run weft");
 
-    assert!(
-        output.status.success(),
-        "weft sessions list should exit 0"
-    );
+    assert!(output.status.success(), "weft sessions list should exit 0");
     let stdout = String::from_utf8_lossy(&output.stdout);
     // With no config, it may show "No sessions found." or list an empty table.
     assert!(
@@ -508,7 +505,9 @@ fn completions_help_output() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("completions") || stdout.contains("Completions") || stdout.contains("shell"),
+        stdout.contains("completions")
+            || stdout.contains("Completions")
+            || stdout.contains("shell"),
         "completions help should mention 'completions' or 'shell', got: {stdout}"
     );
 }
@@ -522,10 +521,7 @@ fn memory_history_succeeds() {
         .output()
         .expect("failed to run weft");
 
-    assert!(
-        output.status.success(),
-        "weft memory history should exit 0"
-    );
+    assert!(output.status.success(), "weft memory history should exit 0");
 }
 
 #[test]
@@ -535,8 +531,5 @@ fn memory_search_succeeds() {
         .output()
         .expect("failed to run weft");
 
-    assert!(
-        output.status.success(),
-        "weft memory search should exit 0"
-    );
+    assert!(output.status.success(), "weft memory search should exit 0");
 }

@@ -140,7 +140,9 @@ mod tests {
     #[test]
     fn fs_returns_errors() {
         let platform = WasmPlatform::new();
-        let result = platform.fs().read_to_string(std::path::Path::new("/tmp/test"));
+        let result = platform
+            .fs()
+            .read_to_string(std::path::Path::new("/tmp/test"));
         assert!(result.is_err());
     }
 }

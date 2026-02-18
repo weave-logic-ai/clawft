@@ -226,6 +226,33 @@ pub fn route(&self, model: &str) -> Option<(&dyn Provider, String)> {
 ```
 
 
+## Adding MCP Tool Providers
+
+To expose a custom tool source over MCP, implement the `ToolProvider` trait
+defined in `clawft-services/src/mcp/provider.rs`:
+
+```rust
+pub trait ToolProvider: Send + Sync {
+    fn namespace(&self) -> &str;
+    fn list_tools(&self) -> Vec<ToolDefinition>;
+    async fn call_tool(&self, name: &str, args: serde_json::Value) -> Result<CallToolResult>;
+}
+```
+
+Register your provider with the MCP server shell:
+
+```rust
+let provider = Box::new(MyProvider::new());
+shell.register_provider(provider);
+```
+
+The provider's tools will be served under the `{namespace}__{tool}` naming
+convention and pass through the standard middleware pipeline (SecurityGuard,
+PermissionFilter, ResultGuard, AuditLog). For proxying an external MCP server,
+use the built-in `ProxyToolProvider` wrapping an `McpClient`.
+
+---
+
 ## Adding Tools
 
 Tools extend the agent's capabilities through LLM function calling. Each tool is a struct that implements the `Tool` trait.

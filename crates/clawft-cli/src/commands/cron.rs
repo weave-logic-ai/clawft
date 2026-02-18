@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use chrono::{TimeZone, Utc};
-use comfy_table::{presets::UTF8_FULL, Table};
+use comfy_table::{Table, presets::UTF8_FULL};
 
 use clawft_types::config::Config;
 use clawft_types::cron::{
@@ -123,16 +123,21 @@ pub fn cron_list(_config: &Config) -> anyhow::Result<()> {
                     "every ?".into()
                 }
             }
-            ScheduleKind::At => {
-                format_ts(job.schedule.at_ms)
-            }
+            ScheduleKind::At => format_ts(job.schedule.at_ms),
         };
 
         let enabled_str = if job.enabled { "yes" } else { "no" };
         let last_run = format_ts(job.state.last_run_at_ms);
         let next_run = format_ts(job.state.next_run_at_ms);
 
-        table.add_row([&job.id, &job.name, &schedule_str, enabled_str, &last_run, &next_run]);
+        table.add_row([
+            &job.id,
+            &job.name,
+            &schedule_str,
+            enabled_str,
+            &last_run,
+            &next_run,
+        ]);
     }
 
     println!("{table}");

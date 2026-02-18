@@ -244,10 +244,18 @@ mod tests {
     #[tokio::test]
     async fn index_and_search_single_turn() {
         let mut indexer = SessionIndexer::new(make_embedder()).await;
-        let turn = make_turn("sess1", 0, "What is Rust?", "Rust is a systems programming language");
+        let turn = make_turn(
+            "sess1",
+            0,
+            "What is Rust?",
+            "Rust is a systems programming language",
+        );
         indexer.index_turn(&turn).await.unwrap();
 
-        let results = indexer.search_turns("Rust programming", None, 5).await.unwrap();
+        let results = indexer
+            .search_turns("Rust programming", None, 5)
+            .await
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].session_id, "sess1");
         assert_eq!(results[0].turn_id, 0);
@@ -282,7 +290,10 @@ mod tests {
             .unwrap();
 
         // Search across all sessions.
-        let results = indexer.search_turns("programming language", None, 10).await.unwrap();
+        let results = indexer
+            .search_turns("programming language", None, 10)
+            .await
+            .unwrap();
         assert_eq!(results.len(), 2);
         // Both sessions should be represented.
         let session_ids: Vec<&str> = results.iter().map(|r| r.session_id.as_str()).collect();
@@ -393,8 +404,7 @@ mod tests {
 
     #[test]
     fn parse_combined_text_normal() {
-        let (user, assistant) =
-            parse_combined_text("User: hello\nAssistant: hi there");
+        let (user, assistant) = parse_combined_text("User: hello\nAssistant: hi there");
         assert_eq!(user, "hello");
         assert_eq!(assistant, "hi there");
     }

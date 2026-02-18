@@ -43,10 +43,7 @@ impl ProviderRouter {
     ///
     /// The first provider in the list becomes the default.
     pub fn from_configs(configs: Vec<ProviderConfig>) -> Self {
-        let default_provider = configs
-            .first()
-            .map(|c| c.name.clone())
-            .unwrap_or_default();
+        let default_provider = configs.first().map(|c| c.name.clone()).unwrap_or_default();
 
         let mut providers: HashMap<String, Box<dyn Provider>> = HashMap::new();
         let mut prefix_map: Vec<(String, String)> = Vec::new();
@@ -194,7 +191,9 @@ mod tests {
         assert_eq!(provider.name(), "openai");
         assert_eq!(model, "gpt-4o");
 
-        let (provider, model) = router.route("anthropic/claude-sonnet-4-5-20250514").unwrap();
+        let (provider, model) = router
+            .route("anthropic/claude-sonnet-4-5-20250514")
+            .unwrap();
         assert_eq!(provider.name(), "anthropic");
         assert_eq!(model, "claude-sonnet-4-5-20250514");
 

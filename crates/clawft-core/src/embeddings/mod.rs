@@ -9,6 +9,13 @@
 #[cfg(feature = "vector-memory")]
 pub mod hash_embedder;
 
+#[cfg(feature = "rvf")]
+pub mod api_embedder;
+#[cfg(feature = "rvf")]
+pub mod progressive;
+#[cfg(feature = "rvf")]
+pub mod rvf_stub;
+
 use async_trait::async_trait;
 use std::fmt;
 
@@ -74,8 +81,7 @@ mod tests {
 
     #[test]
     fn embedding_error_is_error_trait() {
-        let err: Box<dyn std::error::Error> =
-            Box::new(EmbeddingError::Internal("test".into()));
+        let err: Box<dyn std::error::Error> = Box::new(EmbeddingError::Internal("test".into()));
         assert!(err.to_string().contains("test"));
     }
 }

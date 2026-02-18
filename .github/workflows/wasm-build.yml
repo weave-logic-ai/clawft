@@ -1,0 +1,129 @@
+name: WASM Build & Size Gate
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  WASM_TARGET: wasm32-wasip2
+  WASM_BINARY: target/wasm32-wasip2/release-wasm/clawft_wasm.wasm
+  WASM_OPT_BINARY: target/wasm32-wasip2/release-wasm/clawft_wasm.opt.wasm
+
+jobs:
+  wasm-build:
+    name: Build, optimize & gate WASM binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-wasm-
+
+      - name: Install binaryen and wasm-tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binaryen bc
+          cargo install wasm-tools
+
+      - name: Build WASM binary
+        run: |
+          cargo build --target $WASM_TARGET --profile release-wasm -p clawft-wasm
+
+      - name: Run wasm-opt
+        run: |
+          chmod +x scripts/build/wasm-opt.sh
+          bash scripts/build/wasm-opt.sh
+
+      - name: WASM size gate
+        id: size-gate
+        run: |
+          chmod +x scripts/bench/wasm-size-gate.sh
+
+          # For wasip2 component model binaries, the size gate runs on the
+          # original component (not the extracted/optimized core module),
+          # because wasm-opt cannot yet reliably round-trip component binaries.
+          bash scripts/bench/wasm-size-gate.sh "$WASM_BINARY" 300 120
+
+      - name: Twiggy profiling (optional)
+        continue-on-error: true
+        run: |
+          # Install twiggy; don't fail the build if it can't be installed
+          cargo install twiggy 2>/dev/null || {
+            echo "::notice::twiggy could not be installed; skipping WASM profiling"
+            exit 0
+          }
+
+          chmod +x scripts/bench/wasm-twiggy.sh
+
+          # Profile the original component binary (twiggy works on both types)
+          bash scripts/bench/wasm-twiggy.sh "$WASM_BINARY"
+
+      - name: Post size summary
+        if: always()
+        run: |
+          echo "## WASM Binary Size Report" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Metric | Size |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|--------|------|" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -f "$WASM_BINARY" ]; then
+            RAW_BYTES=$(wc -c < "$WASM_BINARY")
+            RAW_KB=$(echo "scale=1; $RAW_BYTES / 1024" | bc)
+            RAW_GZ=$(gzip -9 -c "$WASM_BINARY" | wc -c)
+            RAW_GZ_KB=$(echo "scale=1; $RAW_GZ / 1024" | bc)
+            echo "| Component (raw) | ${RAW_KB} KB |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Component (gzip) | ${RAW_GZ_KB} KB |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ -f "$WASM_OPT_BINARY" ]; then
+            OPT_BYTES=$(wc -c < "$WASM_OPT_BINARY")
+            OPT_KB=$(echo "scale=1; $OPT_BYTES / 1024" | bc)
+            OPT_GZ=$(gzip -9 -c "$WASM_OPT_BINARY" | wc -c)
+            OPT_GZ_KB=$(echo "scale=1; $OPT_GZ / 1024" | bc)
+            echo "| Optimized core (raw) | ${OPT_KB} KB |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Optimized core (gzip) | ${OPT_GZ_KB} KB |" >> "$GITHUB_STEP_SUMMARY"
+
+            if [ -f "$WASM_BINARY" ]; then
+              REDUCTION=$(echo "scale=1; (1 - $OPT_BYTES / $RAW_BYTES) * 100" | bc)
+              echo "| Core module reduction | ${REDUCTION}% |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+          echo "| Budget (raw) | 300 KB |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Budget (gzip) | 120 KB |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload twiggy reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-profile-reports
+          path: target/wasm-profile/
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Upload WASM binaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clawft-wasm-binaries
+          path: |
+            target/wasm32-wasip2/release-wasm/clawft_wasm.wasm
+            target/wasm32-wasip2/release-wasm/clawft_wasm.opt.wasm
+          retention-days: 30
+          if-no-files-found: warn

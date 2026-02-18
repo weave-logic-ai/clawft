@@ -8,9 +8,7 @@ use async_trait::async_trait;
 
 use clawft_types::config::AgentsConfig;
 
-use super::traits::{
-    ChatRequest, ModelRouter, ResponseOutcome, RoutingDecision, TaskProfile,
-};
+use super::traits::{ChatRequest, ModelRouter, ResponseOutcome, RoutingDecision, TaskProfile};
 
 /// Level 0 static router that always returns the same provider/model.
 ///

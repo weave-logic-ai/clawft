@@ -295,14 +295,44 @@ by built-in tools, making them available to the LLM in exactly the same way.
 
 ### Configuration
 
-```toml
-[tools.mcp_servers.my_server]
-command = "npx"
-args = ["-y", "my-mcp-server"]
-
-[tools.mcp_servers.remote_server]
-url = "http://localhost:3000/mcp"
+```json
+{
+  "tools": {
+    "mcp_servers": {
+      "my_server": {
+        "command": "npx",
+        "args": ["-y", "my-mcp-server"]
+      },
+      "remote_server": {
+        "url": "http://localhost:3000/mcp"
+      }
+    }
+  }
+}
 ```
+
+---
+
+## Pluggable MCP ToolProvider Interface
+
+The `weft mcp-server` command exposes clawft's tools over MCP using `McpServerShell`,
+a generic MCP server that handles JSON-RPC framing over newline-delimited stdio.
+Tool implementations are plugged in via the `ToolProvider` trait, which defines
+`namespace()`, `list_tools()`, and `call_tool()`.
+
+External MCP servers are consumed through `ProxyToolProvider`, which wraps an
+`McpClient` connection and forwards calls to the remote server. Tool names for
+proxied MCP tools follow the `{server}__{tool}` convention described above.
+
+Multiple providers can be combined with `CompositeToolProvider`, which aggregates
+providers and routes calls by namespace prefix.
+
+All MCP calls -- both inbound (serving) and outbound (proxied) -- pass through a
+middleware pipeline: **SecurityGuard** (input validation), **PermissionFilter**
+(access control), **ResultGuard** (output sanitization), and **AuditLog** (call
+recording). Custom providers can be added by implementing `ToolProvider` and
+registering with the shell; see the [Contributing Guide](../development/contributing.md)
+for details.
 
 ---
 

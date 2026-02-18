@@ -71,11 +71,7 @@ impl ProcessSpawner for NativeProcessSpawner {
             match tokio::time::timeout(timeout, child.wait_with_output()).await {
                 Ok(result) => result?,
                 Err(_) => {
-                    return Err(format!(
-                        "process '{}' timed out after {}s",
-                        command, secs
-                    )
-                    .into());
+                    return Err(format!("process '{}' timed out after {}s", command, secs).into());
                 }
             }
         } else {
@@ -128,12 +124,7 @@ mod tests {
     async fn test_run_nonexistent_command() {
         let spawner = NativeProcessSpawner;
         let result = spawner
-            .run(
-                "clawft_nonexistent_command_xyz",
-                &[],
-                None,
-                Some(5),
-            )
+            .run("clawft_nonexistent_command_xyz", &[], None, Some(5))
             .await;
 
         assert!(result.is_err());
@@ -165,9 +156,7 @@ mod tests {
     #[tokio::test]
     async fn test_run_timeout() {
         let spawner = NativeProcessSpawner;
-        let result = spawner
-            .run("sleep", &["60"], None, Some(1))
-            .await;
+        let result = spawner.run("sleep", &["60"], None, Some(1)).await;
 
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();

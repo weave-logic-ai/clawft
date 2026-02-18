@@ -59,6 +59,29 @@ pub struct JsonRpcError {
     pub data: Option<serde_json::Value>,
 }
 
+/// JSON-RPC 2.0 notification (no `id` field, no response expected).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonRpcNotification {
+    /// Protocol version, always `"2.0"`.
+    pub jsonrpc: String,
+    /// Method name.
+    pub method: String,
+    /// Notification parameters.
+    #[serde(default = "default_params")]
+    pub params: serde_json::Value,
+}
+
+impl JsonRpcNotification {
+    /// Create a new JSON-RPC 2.0 notification.
+    pub fn new(method: impl Into<String>, params: serde_json::Value) -> Self {
+        Self {
+            jsonrpc: "2.0".to_string(),
+            method: method.into(),
+            params,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,7 +123,8 @@ mod tests {
 
     #[test]
     fn response_with_error() {
-        let json = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}"#;
+        let json =
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}"#;
         let resp: JsonRpcResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.id, 1);
         assert!(resp.result.is_none());
@@ -131,10 +155,53 @@ mod tests {
 
     #[test]
     fn request_roundtrip() {
-        let req = JsonRpcRequest::new(99, "tools/call", serde_json::json!({"name": "echo", "arguments": {}}));
+        let req = JsonRpcRequest::new(
+            99,
+            "tools/call",
+            serde_json::json!({"name": "echo", "arguments": {}}),
+        );
         let json = serde_json::to_string(&req).unwrap();
         let restored: JsonRpcRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.id, 99);
         assert_eq!(restored.method, "tools/call");
+    }
+
+    #[test]
+    fn notification_serialization() {
+        let notif = JsonRpcNotification::new("notifications/initialized", serde_json::json!({}));
+        let json = serde_json::to_string(&notif).unwrap();
+        assert!(json.contains("\"jsonrpc\":\"2.0\""));
+        assert!(json.contains("\"method\":\"notifications/initialized\""));
+        // Notifications must NOT have an "id" field.
+        assert!(!json.contains("\"id\""));
+    }
+
+    #[test]
+    fn notification_deserialization() {
+        let json =
+            r#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"token":"abc"}}"#;
+        let notif: JsonRpcNotification = serde_json::from_str(json).unwrap();
+        assert_eq!(notif.jsonrpc, "2.0");
+        assert_eq!(notif.method, "notifications/progress");
+        assert_eq!(notif.params["token"], "abc");
+    }
+
+    #[test]
+    fn notification_default_params() {
+        let json = r#"{"jsonrpc":"2.0","method":"test"}"#;
+        let notif: JsonRpcNotification = serde_json::from_str(json).unwrap();
+        assert!(notif.params.is_object());
+    }
+
+    #[test]
+    fn notification_roundtrip() {
+        let notif = JsonRpcNotification::new(
+            "notifications/initialized",
+            serde_json::json!({"ready": true}),
+        );
+        let json = serde_json::to_string(&notif).unwrap();
+        let restored: JsonRpcNotification = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.method, "notifications/initialized");
+        assert_eq!(restored.params["ready"], true);
     }
 }

@@ -54,7 +54,10 @@ impl WasiHttpClient {
         _headers: &HashMap<String, String>,
         _body: Option<&[u8]>,
     ) -> Result<HttpResponse, Box<dyn std::error::Error + Send + Sync>> {
-        Err("WASI HTTP not yet implemented: waiting for wasi:http/outgoing-handler stabilisation".into())
+        Err(
+            "WASI HTTP not yet implemented: waiting for wasi:http/outgoing-handler stabilisation"
+                .into(),
+        )
     }
 
     /// Send an HTTP GET request.

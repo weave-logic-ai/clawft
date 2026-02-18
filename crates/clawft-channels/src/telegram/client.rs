@@ -80,9 +80,7 @@ impl TelegramClient {
             .map_err(|e| ChannelError::ReceiveFailed(e.to_string()))?;
 
         if !body.ok {
-            let desc = body
-                .description
-                .unwrap_or_else(|| "unknown error".into());
+            let desc = body.description.unwrap_or_else(|| "unknown error".into());
             return Err(ChannelError::ReceiveFailed(desc));
         }
 
@@ -125,9 +123,7 @@ impl TelegramClient {
             .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
 
         if !body.ok {
-            let desc = body
-                .description
-                .unwrap_or_else(|| "unknown error".into());
+            let desc = body.description.unwrap_or_else(|| "unknown error".into());
             return Err(ChannelError::SendFailed(desc));
         }
 
@@ -156,9 +152,7 @@ impl TelegramClient {
             .map_err(|e| ChannelError::AuthFailed(e.to_string()))?;
 
         if !body.ok {
-            let desc = body
-                .description
-                .unwrap_or_else(|| "unauthorized".into());
+            let desc = body.description.unwrap_or_else(|| "unauthorized".into());
             return Err(ChannelError::AuthFailed(desc));
         }
 
@@ -174,16 +168,12 @@ mod tests {
     #[test]
     fn base_url_construction() {
         let client = TelegramClient::new("123:ABC".into());
-        assert_eq!(
-            client.base_url(),
-            "https://api.telegram.org/bot123:ABC"
-        );
+        assert_eq!(client.base_url(), "https://api.telegram.org/bot123:ABC");
     }
 
     #[test]
     fn custom_base_url() {
-        let client =
-            TelegramClient::with_base_url("tok".into(), "http://localhost:9999".into());
+        let client = TelegramClient::with_base_url("tok".into(), "http://localhost:9999".into());
         assert_eq!(client.base_url(), "http://localhost:9999");
     }
 

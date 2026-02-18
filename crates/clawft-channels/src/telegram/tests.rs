@@ -8,9 +8,7 @@ use async_trait::async_trait;
 use clawft_types::error::ChannelError;
 use clawft_types::event::{InboundMessage, OutboundMessage};
 
-use crate::traits::{
-    Channel, ChannelFactory, ChannelHost, ChannelStatus, Command,
-};
+use crate::traits::{Channel, ChannelFactory, ChannelHost, ChannelStatus, Command};
 
 use super::channel::{TelegramChannel, TelegramChannelFactory};
 use super::types;
@@ -32,18 +30,12 @@ impl MockHost {
 
 #[async_trait]
 impl ChannelHost for MockHost {
-    async fn deliver_inbound(
-        &self,
-        msg: InboundMessage,
-    ) -> Result<(), ChannelError> {
+    async fn deliver_inbound(&self, msg: InboundMessage) -> Result<(), ChannelError> {
         self.messages.lock().await.push(msg);
         Ok(())
     }
 
-    async fn register_command(
-        &self,
-        _cmd: Command,
-    ) -> Result<(), ChannelError> {
+    async fn register_command(&self, _cmd: Command) -> Result<(), ChannelError> {
         Ok(())
     }
 
@@ -72,10 +64,7 @@ fn is_allowed_empty_list_allows_everyone() {
 
 #[test]
 fn is_allowed_with_list_allows_only_listed() {
-    let ch = TelegramChannel::new(
-        "tok".into(),
-        vec!["100".into(), "200".into()],
-    );
+    let ch = TelegramChannel::new("tok".into(), vec!["100".into(), "200".into()]);
     assert!(ch.is_allowed("100"));
     assert!(ch.is_allowed("200"));
     assert!(!ch.is_allowed("300"));
@@ -323,10 +312,7 @@ async fn process_update_skips_message_without_text() {
 
 #[tokio::test]
 async fn process_update_rejects_disallowed_user() {
-    let ch = TelegramChannel::new(
-        "tok".into(),
-        vec!["100".into()],
-    );
+    let ch = TelegramChannel::new("tok".into(), vec!["100".into()]);
     let mock_host = Arc::new(MockHost::new());
     let host: Arc<dyn ChannelHost> = mock_host.clone();
 

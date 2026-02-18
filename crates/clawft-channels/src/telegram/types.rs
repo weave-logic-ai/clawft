@@ -232,8 +232,7 @@ mod tests {
                 }
             ]
         }"#;
-        let resp: TelegramResponse<Vec<Update>> =
-            serde_json::from_str(json).unwrap();
+        let resp: TelegramResponse<Vec<Update>> = serde_json::from_str(json).unwrap();
         assert!(resp.ok);
         let updates = resp.result.unwrap();
         assert_eq!(updates.len(), 2);

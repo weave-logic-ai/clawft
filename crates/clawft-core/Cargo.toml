@@ -14,6 +14,7 @@ categories = ["development-tools"]
 default = ["full"]
 full = []
 vector-memory = ["dep:rand"]
+rvf = ["vector-memory", "dep:rvf-runtime", "dep:rvf-types", "dep:sha2", "dep:reqwest"]
 
 [dependencies]
 clawft-types = { workspace = true }
@@ -27,10 +28,17 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
+dirs = { workspace = true }
 rand = { workspace = true, optional = true }
+serde_yaml = { workspace = true }
+rvf-runtime = { workspace = true, optional = true }
+rvf-types = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 clawft-platform = { workspace = true }
 clawft-types = { workspace = true }

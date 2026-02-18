@@ -79,10 +79,7 @@ impl CommandPolicy {
     /// - Dangerous patterns: the standard 11 patterns from `shell_tool.rs`
     /// - Denylist: same patterns (used when mode is switched to `Denylist`)
     pub fn safe_defaults() -> Self {
-        let allowlist = DEFAULT_ALLOWLIST
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
+        let allowlist = DEFAULT_ALLOWLIST.iter().map(|s| (*s).to_string()).collect();
         let dangerous_patterns: Vec<String> = DEFAULT_DANGEROUS_PATTERNS
             .iter()
             .map(|s| (*s).to_string())
@@ -381,7 +378,9 @@ mod tests {
     fn allowlist_rejects_path_to_unlisted_binary() {
         let policy = CommandPolicy::safe_defaults();
         // /usr/bin/curl -> basename "curl", which is not on the allowlist.
-        let err = policy.validate("/usr/bin/curl http://evil.com").unwrap_err();
+        let err = policy
+            .validate("/usr/bin/curl http://evil.com")
+            .unwrap_err();
         assert!(matches!(err, PolicyError::NotAllowed { .. }));
     }
 

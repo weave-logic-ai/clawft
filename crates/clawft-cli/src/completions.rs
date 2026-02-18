@@ -49,10 +49,7 @@ pub fn generate_completions(shell: &Shell, cmd: &mut clap::Command) {
         Shell::Bash => {
             println!("# {bin_name} bash completion");
             println!("_{bin_name}() {{");
-            println!(
-                "    local commands=\"{}\"",
-                subcommands.join(" ")
-            );
+            println!("    local commands=\"{}\"", subcommands.join(" "));
             println!(
                 "    COMPREPLY=($(compgen -W \"$commands\" -- \"${{COMP_WORDS[COMP_CWORD]}}\"))"
             );
@@ -75,19 +72,13 @@ pub fn generate_completions(shell: &Shell, cmd: &mut clap::Command) {
         }
         Shell::Fish => {
             for cmd_name in &subcommands {
-                println!(
-                    "complete -c {bin_name} -n '__fish_use_subcommand' -a '{cmd_name}'"
-                );
+                println!("complete -c {bin_name} -n '__fish_use_subcommand' -a '{cmd_name}'");
             }
         }
         Shell::PowerShell => {
             println!("# {bin_name} PowerShell completion");
-            println!(
-                "Register-ArgumentCompleter -CommandName {bin_name} -ScriptBlock {{"
-            );
-            println!(
-                "    param($commandName, $wordToComplete, $commandAst, $fakeBoundParameter)"
-            );
+            println!("Register-ArgumentCompleter -CommandName {bin_name} -ScriptBlock {{");
+            println!("    param($commandName, $wordToComplete, $commandAst, $fakeBoundParameter)");
             println!(
                 "    @({}) | Where-Object {{ $_ -like \"$wordToComplete*\" }}",
                 subcommands
@@ -135,22 +126,19 @@ mod tests {
 
     #[test]
     fn generate_completions_zsh() {
-        let mut cmd = clap::Command::new("test")
-            .subcommand(clap::Command::new("sub1"));
+        let mut cmd = clap::Command::new("test").subcommand(clap::Command::new("sub1"));
         generate_completions(&Shell::Zsh, &mut cmd);
     }
 
     #[test]
     fn generate_completions_fish() {
-        let mut cmd = clap::Command::new("test")
-            .subcommand(clap::Command::new("sub1"));
+        let mut cmd = clap::Command::new("test").subcommand(clap::Command::new("sub1"));
         generate_completions(&Shell::Fish, &mut cmd);
     }
 
     #[test]
     fn generate_completions_powershell() {
-        let mut cmd = clap::Command::new("test")
-            .subcommand(clap::Command::new("sub1"));
+        let mut cmd = clap::Command::new("test").subcommand(clap::Command::new("sub1"));
         generate_completions(&Shell::PowerShell, &mut cmd);
     }
 }

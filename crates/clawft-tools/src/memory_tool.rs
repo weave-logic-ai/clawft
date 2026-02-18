@@ -3,6 +3,12 @@
 //! Two tools that read from and write to a workspace-level MEMORY.md file.
 //! The memory file lives at `~/.clawft/workspace/memory/MEMORY.md` (with
 //! fallback to `~/.nanobot/workspace/memory/MEMORY.md`).
+//!
+//! When the `vector-memory` feature is enabled, search queries use the
+//! [`VectorStore`](clawft_core::vector_store::VectorStore) with
+//! [`HashEmbedder`](clawft_core::embeddings::hash_embedder::HashEmbedder)
+//! for semantic similarity ranking. Otherwise, a simple substring paragraph
+//! match is used as a fallback.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -55,6 +61,52 @@ fn search_paragraphs(content: &str, query: &str) -> Vec<String> {
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty())
         .collect()
+}
+
+/// Vector-based semantic search over paragraphs using cosine similarity.
+///
+/// When the `vector-memory` feature is enabled, this function:
+/// 1. Splits content into paragraphs.
+/// 2. Embeds each paragraph using the `HashEmbedder`.
+/// 3. Embeds the query.
+/// 4. Performs cosine similarity search via `VectorStore`.
+/// 5. Returns paragraphs ranked by similarity score.
+///
+/// Falls back to `search_paragraphs` if embedding fails.
+#[cfg(feature = "vector-memory")]
+fn search_paragraphs_vector(content: &str, query: &str, max_results: usize) -> Vec<String> {
+    use clawft_core::embeddings::hash_embedder::HashEmbedder;
+    use clawft_core::vector_store::VectorStore;
+    use std::collections::HashMap;
+
+    let paragraphs: Vec<&str> = content
+        .split("\n\n")
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .collect();
+
+    if paragraphs.is_empty() || query.is_empty() {
+        return Vec::new();
+    }
+
+    let embedder = HashEmbedder::default_dimension();
+    let mut store = VectorStore::new();
+
+    for (i, paragraph) in paragraphs.iter().enumerate() {
+        let embedding = embedder.compute_embedding(paragraph);
+        store.add(
+            format!("p{i}"),
+            paragraph.to_string(),
+            embedding,
+            vec![],
+            HashMap::new(),
+        );
+    }
+
+    let query_embedding = embedder.compute_embedding(query);
+    let results = store.search(&query_embedding, max_results);
+
+    results.into_iter().map(|r| r.text).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -118,15 +170,17 @@ impl<P: Platform + 'static> Tool for MemoryReadTool<P> {
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("failed to read memory: {}", e)))?;
 
-        let query = args
-            .get("query")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
 
         if query.is_empty() {
             Ok(json!({ "content": content }))
         } else {
+            #[cfg(feature = "vector-memory")]
+            let matches = search_paragraphs_vector(&content, query, 20);
+
+            #[cfg(not(feature = "vector-memory"))]
             let matches = search_paragraphs(&content, query);
+
             Ok(json!({
                 "query": query,
                 "matches": matches,
@@ -187,9 +241,7 @@ impl<P: Platform + 'static> Tool for MemoryWriteTool<P> {
         let content = args
             .get("content")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ToolError::InvalidArgs("missing required field: content".to_string())
-            })?;
+            .ok_or_else(|| ToolError::InvalidArgs("missing required field: content".to_string()))?;
 
         let mode = args
             .get("mode")
@@ -323,11 +375,7 @@ mod tests {
             .unwrap();
 
         // Read back directly (bypassing resolve_memory_path)
-        let content = platform
-            .fs()
-            .read_to_string(&memory_path)
-            .await
-            .unwrap();
+        let content = platform.fs().read_to_string(&memory_path).await.unwrap();
         assert!(content.contains("Key decision"));
 
         // Test paragraph search
@@ -336,7 +384,11 @@ mod tests {
         assert!(matches[0].contains("use Rust"));
 
         // Cleanup
-        if let Some(root) = memory_path.parent().and_then(Path::parent).and_then(Path::parent) {
+        if let Some(root) = memory_path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+        {
             let _ = tokio::fs::remove_dir_all(root).await;
         }
     }
@@ -364,16 +416,16 @@ mod tests {
             .await
             .unwrap();
 
-        let content = platform
-            .fs()
-            .read_to_string(&memory_path)
-            .await
-            .unwrap();
+        let content = platform.fs().read_to_string(&memory_path).await.unwrap();
         assert_eq!(content, "new content");
         assert!(!content.contains("original"));
 
         // Cleanup
-        if let Some(root) = memory_path.parent().and_then(Path::parent).and_then(Path::parent) {
+        if let Some(root) = memory_path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+        {
             let _ = tokio::fs::remove_dir_all(root).await;
         }
     }
@@ -401,16 +453,16 @@ mod tests {
             .await
             .unwrap();
 
-        let content = platform
-            .fs()
-            .read_to_string(&memory_path)
-            .await
-            .unwrap();
+        let content = platform.fs().read_to_string(&memory_path).await.unwrap();
         assert!(content.contains("first"));
         assert!(content.contains("second"));
 
         // Cleanup
-        if let Some(root) = memory_path.parent().and_then(Path::parent).and_then(Path::parent) {
+        if let Some(root) = memory_path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+        {
             let _ = tokio::fs::remove_dir_all(root).await;
         }
     }
@@ -429,7 +481,57 @@ mod tests {
         let platform = NativePlatform::new();
         // Should not error -- always returns a path even if file doesn't exist
         let path = resolve_memory_path(&platform).await.unwrap();
-        assert!(path.to_string_lossy().contains(".clawft")
-            || path.to_string_lossy().contains(".nanobot"));
+        assert!(
+            path.to_string_lossy().contains(".clawft")
+                || path.to_string_lossy().contains(".nanobot")
+        );
+    }
+
+    // -- vector search tests (feature-gated) ---------------------------------
+
+    #[cfg(feature = "vector-memory")]
+    mod vector_tests {
+        use super::super::*;
+
+        #[test]
+        fn vector_search_returns_semantically_similar_paragraphs() {
+            let content = "Rust is a systems programming language.\n\nPython is great for scripting.\n\nRust provides memory safety without a garbage collector.\n\nJava runs on the JVM.";
+            let results = search_paragraphs_vector(content, "Rust memory safety", 2);
+            assert!(!results.is_empty(), "should return at least one result");
+            // The paragraph about memory safety should be in top results
+            let joined = results.join(" ");
+            assert!(
+                joined.contains("memory safety") || joined.contains("Rust"),
+                "top results should be about Rust: {:?}",
+                results
+            );
+        }
+
+        #[test]
+        fn vector_search_empty_content_returns_empty() {
+            let results = search_paragraphs_vector("", "query", 5);
+            assert!(results.is_empty());
+        }
+
+        #[test]
+        fn vector_search_empty_query_returns_empty() {
+            let results = search_paragraphs_vector("some content", "", 5);
+            assert!(results.is_empty());
+        }
+
+        #[test]
+        fn vector_search_respects_max_results() {
+            let content = "Paragraph A\n\nParagraph B\n\nParagraph C\n\nParagraph D";
+            let results = search_paragraphs_vector(content, "paragraph", 2);
+            assert!(results.len() <= 2, "should respect max_results");
+        }
+
+        #[test]
+        fn vector_search_single_paragraph() {
+            let content = "Only one paragraph here about Rust programming.";
+            let results = search_paragraphs_vector(content, "Rust", 5);
+            assert_eq!(results.len(), 1);
+            assert!(results[0].contains("Rust"));
+        }
     }
 }

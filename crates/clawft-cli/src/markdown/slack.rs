@@ -115,10 +115,7 @@ mod tests {
 
     #[test]
     fn test_link() {
-        assert_eq!(
-            convert("[text](https://url)"),
-            "<https://url|text>"
-        );
+        assert_eq!(convert("[text](https://url)"), "<https://url|text>");
     }
 
     #[test]

@@ -24,6 +24,8 @@
 //!
 //! Target: < 300 KB uncompressed, < 120 KB gzipped.
 
+#[cfg(feature = "alloc-tracing")]
+pub mod alloc_trace;
 pub mod allocator;
 pub mod env;
 pub mod fs;
@@ -60,7 +62,10 @@ pub fn init() -> i32 {
 /// The agent's response as a string, or an error message.
 pub fn process_message(input: &str) -> String {
     // Phase 3A Week 12: Will run the full 6-stage pipeline.
-    format!("clawft-wasm v{}: received '{}' (pipeline not yet wired)", VERSION, input)
+    format!(
+        "clawft-wasm v{}: received '{}' (pipeline not yet wired)",
+        VERSION, input
+    )
 }
 
 /// Get the agent's capabilities as a JSON string.

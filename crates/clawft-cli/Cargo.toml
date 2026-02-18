@@ -19,6 +19,7 @@ default = ["channels", "services"]
 channels = ["dep:clawft-channels"]
 services = ["dep:clawft-services"]
 vector-memory = ["clawft-core/vector-memory"]
+delegate = ["clawft-services/delegate", "clawft-tools/delegate"]
 
 [dependencies]
 clawft-types = { workspace = true }

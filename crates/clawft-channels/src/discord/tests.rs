@@ -265,7 +265,8 @@ async fn set_status_transitions() {
     ch.set_status(ChannelStatus::Running).await;
     assert_eq!(ch.status(), ChannelStatus::Running);
 
-    ch.set_status(ChannelStatus::Error("test error".into())).await;
+    ch.set_status(ChannelStatus::Error("test error".into()))
+        .await;
     assert_eq!(ch.status(), ChannelStatus::Error("test error".into()));
 
     ch.set_status(ChannelStatus::Stopped).await;

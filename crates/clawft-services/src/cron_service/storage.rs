@@ -46,7 +46,12 @@ impl CronStorage {
     }
 
     /// Append a field update event.
-    pub async fn append_update(&self, job_id: &str, field: &str, value: &serde_json::Value) -> Result<()> {
+    pub async fn append_update(
+        &self,
+        job_id: &str,
+        field: &str,
+        value: &serde_json::Value,
+    ) -> Result<()> {
         let event = StorageEvent::Update {
             job_id: job_id.to_string(),
             field: field.to_string(),
@@ -151,12 +156,16 @@ fn apply_field_update(job: &mut CronJob, field: &str, value: &serde_json::Value)
             }
         }
         "last_run" => {
-            if let Ok(v) = serde_json::from_value::<Option<chrono::DateTime<chrono::Utc>>>(value.clone()) {
+            if let Ok(v) =
+                serde_json::from_value::<Option<chrono::DateTime<chrono::Utc>>>(value.clone())
+            {
                 job.last_run = v;
             }
         }
         "next_run" => {
-            if let Ok(v) = serde_json::from_value::<Option<chrono::DateTime<chrono::Utc>>>(value.clone()) {
+            if let Ok(v) =
+                serde_json::from_value::<Option<chrono::DateTime<chrono::Utc>>>(value.clone())
+            {
                 job.next_run = v;
             }
         }
@@ -274,7 +283,10 @@ mod tests {
 
     #[tokio::test]
     async fn nonexistent_file_returns_empty_list() {
-        let path = std::env::temp_dir().join(format!("clawft-test-nonexistent-{}.jsonl", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!(
+            "clawft-test-nonexistent-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
         let storage = CronStorage::new(path);
         let jobs = storage.load_jobs().await.unwrap();
         assert!(jobs.is_empty());
@@ -286,7 +298,10 @@ mod tests {
         let path = dir.join("cron.jsonl");
         let storage = CronStorage::new(path);
 
-        storage.append_create(&make_job("j1", "test")).await.unwrap();
+        storage
+            .append_create(&make_job("j1", "test"))
+            .await
+            .unwrap();
         storage
             .append_update("j1", "prompt", &serde_json::json!("new prompt"))
             .await

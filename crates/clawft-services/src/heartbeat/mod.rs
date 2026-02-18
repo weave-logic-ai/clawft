@@ -43,7 +43,10 @@ impl HeartbeatService {
     /// Posts an [`InboundMessage`] with `channel: "heartbeat"` at each tick.
     /// Exits gracefully when the cancellation token is triggered.
     pub async fn start(&self, cancel: CancellationToken) -> Result<()> {
-        info!(interval_secs = self.interval.as_secs(), "heartbeat service started");
+        info!(
+            interval_secs = self.interval.as_secs(),
+            "heartbeat service started"
+        );
         let mut interval = tokio::time::interval(self.interval);
 
         // The first tick fires immediately; skip it so the first heartbeat
@@ -93,9 +96,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
 
-        let handle = tokio::spawn(async move {
-            svc.start(cancel_clone).await
-        });
+        let handle = tokio::spawn(async move { svc.start(cancel_clone).await });
 
         // Wait for at least one heartbeat.
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -124,9 +125,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
 
-        let handle = tokio::spawn(async move {
-            svc.start(cancel_clone).await
-        });
+        let handle = tokio::spawn(async move { svc.start(cancel_clone).await });
 
         // Cancel immediately.
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -151,16 +150,11 @@ mod tests {
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
 
-        let handle = tokio::spawn(async move {
-            svc.start(cancel_clone).await
-        });
+        let handle = tokio::spawn(async move { svc.start(cancel_clone).await });
 
         let result = handle.await.unwrap();
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ServiceError::ChannelClosed
-        ));
+        assert!(matches!(result.unwrap_err(), ServiceError::ChannelClosed));
     }
 
     #[test]

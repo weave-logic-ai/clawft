@@ -489,8 +489,10 @@ as text.
 
 **Limits**
 
-- Response bodies larger than 1 MB (1,048,576 bytes) are truncated. A suffix
-  indicating truncation is appended.
+- Response bodies larger than 10 MB (10,485,760 bytes) are truncated by
+  default. The limit is configurable via `WebFetchTool::with_max_bytes()`.
+  Truncated responses include a `truncated`, `limit_bytes`, and `warning`
+  field in the result JSON.
 - Only `http://` and `https://` URL schemes are accepted. Other schemes produce
   an `InvalidArgs` error.
 
@@ -610,13 +612,20 @@ MCP servers are defined in the `tools.mcp_servers` section of the agent
 configuration. Each server entry specifies either a command (stdio transport) or
 a URL (HTTP transport):
 
-```toml
-[tools.mcp_servers.my_server]
-command = "npx"
-args = ["-y", "my-mcp-server"]
-
-[tools.mcp_servers.remote_server]
-url = "http://localhost:3000/mcp"
+```json
+{
+  "tools": {
+    "mcp_servers": {
+      "my_server": {
+        "command": "npx",
+        "args": ["-y", "my-mcp-server"]
+      },
+      "remote_server": {
+        "url": "http://localhost:3000/mcp"
+      }
+    }
+  }
+}
 ```
 
 ### Naming Convention
@@ -642,6 +651,23 @@ For example, a tool named `search` from a server named `web` is registered as
 MCP tools are registered via `register_mcp_tools()` after built-in tools. They
 appear alongside built-in tools in the registry and can be invoked in the same
 way by the agent.
+
+---
+
+## Custom Tool Providers
+
+In addition to the `Tool` trait used for built-in tools, clawft supports a
+pluggable `ToolProvider` interface for serving tools over MCP. A `ToolProvider`
+implements three methods: `namespace()`, `list_tools()`, and `call_tool()`.
+
+Custom providers are registered with `McpServerShell` via
+`shell.register_provider(Box::new(my_provider))` and automatically become
+available to MCP clients connecting to `weft mcp-server`. Multiple providers
+can be composed using `CompositeToolProvider`, which routes calls by
+`{namespace}__{tool}` prefix.
+
+See `clawft-services/src/mcp/provider.rs` for the trait definition and the
+[Contributing Guide](../development/contributing.md) for implementation steps.
 
 ---
 

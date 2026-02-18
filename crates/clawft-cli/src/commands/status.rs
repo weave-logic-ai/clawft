@@ -58,31 +58,65 @@ pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
     println!("Agent defaults:");
     println!("  Model:              {}", config.agents.defaults.model);
     println!("  Workspace:          {}", config.agents.defaults.workspace);
-    println!("  Max tokens:         {}", config.agents.defaults.max_tokens);
-    println!("  Temperature:        {}", config.agents.defaults.temperature);
+    println!(
+        "  Max tokens:         {}",
+        config.agents.defaults.max_tokens
+    );
+    println!(
+        "  Temperature:        {}",
+        config.agents.defaults.temperature
+    );
     println!(
         "  Max tool iterations: {}",
         config.agents.defaults.max_tool_iterations
     );
-    println!("  Memory window:      {}", config.agents.defaults.memory_window);
+    println!(
+        "  Memory window:      {}",
+        config.agents.defaults.memory_window
+    );
 
     if args.detailed {
         println!();
         println!("Gateway:");
-        println!(
-            "  Listen: {}:{}",
-            config.gateway.host, config.gateway.port
-        );
+        println!("  Listen: {}:{}", config.gateway.host, config.gateway.port);
 
         println!();
         println!("Channels:");
-        print_channel_status("  telegram", config.channels.telegram.enabled, !config.channels.telegram.token.is_empty());
-        print_channel_status("  slack", config.channels.slack.enabled, !config.channels.slack.bot_token.is_empty());
-        print_channel_status("  discord", config.channels.discord.enabled, !config.channels.discord.token.is_empty());
-        print_channel_status("  whatsapp", config.channels.whatsapp.enabled, !config.channels.whatsapp.bridge_token.is_empty());
-        print_channel_status("  email", config.channels.email.enabled, !config.channels.email.imap_host.is_empty());
-        print_channel_status("  feishu", config.channels.feishu.enabled, !config.channels.feishu.app_id.is_empty());
-        print_channel_status("  dingtalk", config.channels.dingtalk.enabled, !config.channels.dingtalk.client_id.is_empty());
+        print_channel_status(
+            "  telegram",
+            config.channels.telegram.enabled,
+            !config.channels.telegram.token.is_empty(),
+        );
+        print_channel_status(
+            "  slack",
+            config.channels.slack.enabled,
+            !config.channels.slack.bot_token.is_empty(),
+        );
+        print_channel_status(
+            "  discord",
+            config.channels.discord.enabled,
+            !config.channels.discord.token.is_empty(),
+        );
+        print_channel_status(
+            "  whatsapp",
+            config.channels.whatsapp.enabled,
+            !config.channels.whatsapp.bridge_token.is_empty(),
+        );
+        print_channel_status(
+            "  email",
+            config.channels.email.enabled,
+            !config.channels.email.imap_host.is_empty(),
+        );
+        print_channel_status(
+            "  feishu",
+            config.channels.feishu.enabled,
+            !config.channels.feishu.app_id.is_empty(),
+        );
+        print_channel_status(
+            "  dingtalk",
+            config.channels.dingtalk.enabled,
+            !config.channels.dingtalk.client_id.is_empty(),
+        );
 
         println!();
         println!("Providers:");
@@ -100,8 +134,14 @@ pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
             "  Restrict to workspace: {}",
             config.tools.restrict_to_workspace
         );
-        println!("  Exec timeout:         {}s", config.tools.exec_tool.timeout);
-        println!("  Search max results:   {}", config.tools.web.search.max_results);
+        println!(
+            "  Exec timeout:         {}s",
+            config.tools.exec_tool.timeout
+        );
+        println!(
+            "  Search max results:   {}",
+            config.tools.web.search.max_results
+        );
 
         if !config.tools.mcp_servers.is_empty() {
             println!();

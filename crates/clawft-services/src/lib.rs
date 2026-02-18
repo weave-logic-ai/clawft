@@ -5,6 +5,10 @@
 //! events that feed into the main message bus.
 
 pub mod cron_service;
+#[cfg(feature = "delegate")]
+pub mod delegation;
 pub mod error;
 pub mod heartbeat;
 pub mod mcp;
+#[cfg(feature = "rvf")]
+pub mod rvf_tools;
