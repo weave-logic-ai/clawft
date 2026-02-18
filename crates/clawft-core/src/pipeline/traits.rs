@@ -57,6 +57,12 @@ pub struct LlmMessage {
     /// For tool-result messages, the ID of the tool call this responds to.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+
+    /// For assistant messages that invoke tools, the tool call objects.
+    /// Serialised as OpenAI-format `tool_calls` array so the next request
+    /// round-trip keeps the provider happy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<serde_json::Value>>,
 }
 
 // ── Classification types ────────────────────────────────────────────────
@@ -444,6 +450,7 @@ mod tests {
                 role: "user".into(),
                 content: "hello".into(),
                 tool_call_id: None,
+                tool_calls: None,
             }],
             tools: vec![],
             model: Some("gpt-4o".into()),
@@ -460,6 +467,7 @@ mod tests {
             role: "tool".into(),
             content: "result data".into(),
             tool_call_id: Some("call-123".into()),
+            tool_calls: None,
         };
         assert_eq!(msg.tool_call_id.as_deref(), Some("call-123"));
     }
@@ -503,6 +511,7 @@ mod tests {
                 role: "system".into(),
                 content: "You are a helpful assistant.".into(),
                 tool_call_id: None,
+                tool_calls: None,
             }],
             token_estimate: 50,
             truncated: false,
@@ -561,11 +570,13 @@ mod tests {
                     role: "system".into(),
                     content: "You are helpful.".into(),
                     tool_call_id: None,
+                    tool_calls: None,
                 },
                 LlmMessage {
                     role: "user".into(),
                     content: "Write a function".into(),
                     tool_call_id: None,
+                    tool_calls: None,
                 },
             ],
             tools: vec![serde_json::json!({"type": "function", "name": "web_search"})],
@@ -588,6 +599,7 @@ mod tests {
             role: "tool".into(),
             content: "search results".into(),
             tool_call_id: Some("tc-42".into()),
+            tool_calls: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let restored: LlmMessage = serde_json::from_str(&json).unwrap();
@@ -601,6 +613,7 @@ mod tests {
             role: "user".into(),
             content: "hello".into(),
             tool_call_id: None,
+            tool_calls: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("tool_call_id"));
@@ -798,6 +811,7 @@ mod tests {
                 role: "user".into(),
                 content: "hello".into(),
                 tool_call_id: None,
+                tool_calls: None,
             }],
             tools: vec![],
             model: None,
@@ -833,6 +847,7 @@ mod tests {
                 role: "user".into(),
                 content: "write code".into(),
                 tool_call_id: None,
+                tool_calls: None,
             }],
             tools: vec![],
             model: None,

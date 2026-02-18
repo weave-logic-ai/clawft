@@ -22,8 +22,9 @@ OpenAI-compatible API support.
   Learner for structured message processing
 - **Tool system** -- File operations, shell execution, memory, web search/fetch,
   message dispatch, and agent spawning
-- **MCP integration** -- Model Context Protocol server for tool discovery and
-  invocation
+- **MCP integration** -- Dual-mode Model Context Protocol support: `weft
+  mcp-server` exposes built-in tools to an LLM host (server mode), and
+  `tools.mcp_servers` config connects to external MCP servers as a client
 - **Session persistence** -- JSONL-based session history with consolidation,
   long-term memory (MEMORY.md), and history summaries (HISTORY.md)
 - **Vector memory** -- Optional `vector-memory` feature gate for
@@ -182,11 +183,16 @@ clawft resolves configuration from multiple sources in order of precedence:
       "token_env": "DISCORD_BOT_TOKEN"
     }
   },
-  "services": {
-    "heartbeat_interval_secs": 30,
-    "mcp": {
-      "enabled": true
+  "tools": {
+    "mcp_servers": {
+      "filesystem": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed"]
+      }
     }
+  },
+  "services": {
+    "heartbeat_interval_secs": 30
   }
 }
 ```

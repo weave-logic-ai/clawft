@@ -177,6 +177,7 @@ impl<P: Platform> AgentLoop<P> {
                 role: m.role.clone(),
                 content: m.content.clone(),
                 tool_call_id: None,
+                tool_calls: None,
             })
             .collect();
 
@@ -185,6 +186,7 @@ impl<P: Platform> AgentLoop<P> {
             role: "user".into(),
             content: msg.content.clone(),
             tool_call_id: None,
+            tool_calls: None,
         });
 
         // 6. Create pipeline request
@@ -272,6 +274,44 @@ impl<P: Platform> AgentLoop<P> {
                 "executing tool calls"
             );
 
+            // Append the assistant message (with tool_calls) to the conversation
+            // so the next LLM request sees the correct message sequence:
+            //   ... user -> assistant (tool_use) -> tool results -> ...
+            let assistant_tool_calls: Vec<serde_json::Value> = tool_calls
+                .iter()
+                .map(|(id, name, input)| {
+                    serde_json::json!({
+                        "id": id,
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": serde_json::to_string(input).unwrap_or_default(),
+                        }
+                    })
+                })
+                .collect();
+
+            // Extract any text content from the response for the assistant message
+            let assistant_text: String = response
+                .content
+                .iter()
+                .filter_map(|block| {
+                    if let ContentBlock::Text { text } = block {
+                        Some(text.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("");
+
+            request.messages.push(LlmMessage {
+                role: "assistant".into(),
+                content: assistant_text,
+                tool_call_id: None,
+                tool_calls: Some(assistant_tool_calls),
+            });
+
             // Execute each tool and append results to the request
             for (id, name, input) in tool_calls {
                 let result = self.tools.execute(&name, input.clone()).await;
@@ -291,6 +331,7 @@ impl<P: Platform> AgentLoop<P> {
                     role: "tool".into(),
                     content: result_json,
                     tool_call_id: Some(id),
+                    tool_calls: None,
                 });
             }
         }
@@ -697,6 +738,7 @@ mod tests {
                 role: "user".into(),
                 content: "loop forever".into(),
                 tool_call_id: None,
+                tool_calls: None,
             }],
             tools: vec![],
             model: Some("test-model".into()),
@@ -914,6 +956,7 @@ mod tests {
                 role: "user".into(),
                 content: "trigger big tool".into(),
                 tool_call_id: None,
+                tool_calls: None,
             }],
             tools: vec![],
             model: Some("test-model".into()),

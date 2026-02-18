@@ -129,6 +129,7 @@ mod tests {
             role: role.into(),
             content: content.into(),
             tool_call_id: None,
+            tool_calls: None,
         }
     }
 

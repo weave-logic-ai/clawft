@@ -140,6 +140,9 @@ impl LlmTransport for OpenAiCompatTransport {
                 if let Some(ref id) = m.tool_call_id {
                     msg["tool_call_id"] = serde_json::json!(id);
                 }
+                if let Some(ref tcs) = m.tool_calls {
+                    msg["tool_calls"] = serde_json::json!(tcs);
+                }
                 msg
             })
             .collect();
@@ -190,6 +193,9 @@ impl LlmTransport for OpenAiCompatTransport {
                 });
                 if let Some(ref id) = m.tool_call_id {
                     msg["tool_call_id"] = serde_json::json!(id);
+                }
+                if let Some(ref tcs) = m.tool_calls {
+                    msg["tool_calls"] = serde_json::json!(tcs);
                 }
                 msg
             })
@@ -384,6 +390,7 @@ mod tests {
                 role: "user".into(),
                 content: "hello".into(),
                 tool_call_id: None,
+                tool_calls: None,
             }],
             tools: vec![],
             max_tokens: Some(1024),

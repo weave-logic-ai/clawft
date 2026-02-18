@@ -50,6 +50,7 @@ mod tests {
                     role: "user".into(),
                     content: "hello".into(),
                     tool_call_id: None,
+                    tool_calls: None,
                 }],
                 tools: vec![],
                 model: None,
