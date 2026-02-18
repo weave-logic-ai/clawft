@@ -270,7 +270,7 @@ mod tests {
         .unwrap();
 
         let resp = chain.complete(&test_request()).await.unwrap();
-        assert!(resp.choices[0].message.content.contains("primary"));
+        assert!(resp.choices[0].message.content.as_deref().unwrap().contains("primary"));
     }
 
     #[tokio::test]
@@ -287,7 +287,7 @@ mod tests {
         .unwrap();
 
         let resp = chain.complete(&test_request()).await.unwrap();
-        assert!(resp.choices[0].message.content.contains("backup"));
+        assert!(resp.choices[0].message.content.as_deref().unwrap().contains("backup"));
     }
 
     #[tokio::test]
@@ -304,7 +304,7 @@ mod tests {
         .unwrap();
 
         let resp = chain.complete(&test_request()).await.unwrap();
-        assert!(resp.choices[0].message.content.contains("configured"));
+        assert!(resp.choices[0].message.content.as_deref().unwrap().contains("configured"));
     }
 
     #[tokio::test]
@@ -382,7 +382,7 @@ mod tests {
         .unwrap();
 
         let resp = chain.complete(&test_request()).await.unwrap();
-        assert!(resp.choices[0].message.content.contains("p3"));
+        assert!(resp.choices[0].message.content.as_deref().unwrap().contains("p3"));
     }
 
     #[test]

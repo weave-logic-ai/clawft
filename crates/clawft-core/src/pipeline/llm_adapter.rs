@@ -209,16 +209,32 @@ impl LlmProvider for ClawftLlmAdapter {
 /// Convert a `serde_json::Value` message into a [`ChatMessage`].
 ///
 /// Extracts `role`, `content`, `tool_call_id`, and `tool_calls` fields.
+/// When an assistant message has tool_calls and empty/null content, content
+/// is set to `None` so that the API receives `"content": null` instead of
+/// `"content": ""` (which Anthropic's endpoint rejects).
 fn convert_value_to_message(value: &serde_json::Value) -> ChatMessage {
     let role = value["role"].as_str().unwrap_or("user").to_string();
-    let content = value["content"].as_str().unwrap_or("").to_string();
+    let content_str = value["content"].as_str().map(String::from);
     let tool_call_id = value
         .get("tool_call_id")
         .and_then(|v| v.as_str())
         .map(String::from);
-    let tool_calls = value
+    let tool_calls: Option<Vec<clawft_llm::types::ToolCall>> = value
         .get("tool_calls")
-        .and_then(|v| serde_json::from_value(v.clone()).ok());
+        .filter(|v| !v.is_null())
+        .and_then(|v| {
+            serde_json::from_value(v.clone()).map_err(|e| {
+                debug!("failed to deserialize tool_calls: {e}");
+                e
+            }).ok()
+        });
+
+    // Use None for content when it's empty/missing and tool_calls are present,
+    // so the serialised request sends "content": null (required by Anthropic).
+    let content = match content_str {
+        Some(s) if s.is_empty() && tool_calls.is_some() => None,
+        other => other,
+    };
 
     ChatMessage {
         role,
@@ -236,7 +252,7 @@ fn convert_response_to_value(response: &ChatResponse) -> serde_json::Value {
         .map(|c| {
             let mut msg = serde_json::json!({
                 "role": c.message.role,
-                "content": c.message.content,
+                "content": c.message.content, // Option<String> -> null or "text"
             });
             if let Some(ref tcs) = c.message.tool_calls {
                 msg["tool_calls"] = serde_json::to_value(tcs).unwrap_or_default();
@@ -419,7 +435,7 @@ mod tests {
         });
         let msg = convert_value_to_message(&value);
         assert_eq!(msg.role, "user");
-        assert_eq!(msg.content, "Hello, world!");
+        assert_eq!(msg.content.as_deref(), Some("Hello, world!"));
         assert!(msg.tool_call_id.is_none());
         assert!(msg.tool_calls.is_none());
     }
@@ -433,7 +449,7 @@ mod tests {
         });
         let msg = convert_value_to_message(&value);
         assert_eq!(msg.role, "tool");
-        assert_eq!(msg.content, "result data");
+        assert_eq!(msg.content.as_deref(), Some("result data"));
         assert_eq!(msg.tool_call_id.as_deref(), Some("call-123"));
     }
 
@@ -443,7 +459,7 @@ mod tests {
         let value = serde_json::json!({});
         let msg = convert_value_to_message(&value);
         assert_eq!(msg.role, "user");
-        assert_eq!(msg.content, "");
+        assert!(msg.content.is_none());
     }
 
     // -- convert_response_to_value ------------------------------------------
@@ -513,7 +529,7 @@ mod tests {
                 index: 0,
                 message: ChatMessage {
                     role: "assistant".into(),
-                    content: String::new(),
+                    content: None,
                     tool_call_id: None,
                     tool_calls: Some(vec![ToolCall {
                         id: "call_abc".into(),
@@ -599,7 +615,7 @@ mod tests {
             let content = request
                 .messages
                 .last()
-                .map(|m| format!("echo: {}", m.content))
+                .map(|m| format!("echo: {}", m.content.as_deref().unwrap_or("")))
                 .unwrap_or_else(|| "echo: (empty)".into());
             Ok(ChatResponse {
                 id: "echo-resp".into(),
@@ -871,7 +887,7 @@ mod tests {
                         index: 0,
                         message: ChatMessage {
                             role: "assistant".into(),
-                            content: String::new(),
+                            content: None,
                             tool_call_id: None,
                             tool_calls: Some(vec![ToolCall {
                                 id: "call_xyz".into(),

@@ -12,8 +12,10 @@ pub struct ChatMessage {
     /// The role of the message author (e.g. "system", "user", "assistant", "tool").
     pub role: String,
 
-    /// The content of the message.
-    pub content: String,
+    /// The content of the message. `None` for assistant messages that only
+    /// contain tool calls (serializes as `"content": null`).
+    #[serde(default)]
+    pub content: Option<String>,
 
     /// For tool-result messages, the ID of the tool call this is a response to.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -29,7 +31,7 @@ impl ChatMessage {
     pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             role: role.into(),
-            content: content.into(),
+            content: Some(content.into()),
             tool_call_id: None,
             tool_calls: None,
         }
@@ -274,7 +276,7 @@ mod tests {
     fn chat_message_new_helpers() {
         let sys = ChatMessage::system("You are helpful.");
         assert_eq!(sys.role, "system");
-        assert_eq!(sys.content, "You are helpful.");
+        assert_eq!(sys.content.as_deref(), Some("You are helpful."));
         assert!(sys.tool_call_id.is_none());
         assert!(sys.tool_calls.is_none());
 
@@ -305,7 +307,7 @@ mod tests {
     fn chat_message_with_tool_calls_roundtrip() {
         let msg = ChatMessage {
             role: "assistant".into(),
-            content: String::new(),
+            content: None,
             tool_call_id: None,
             tool_calls: Some(vec![ToolCall {
                 id: "call_abc123".into(),
@@ -391,7 +393,7 @@ mod tests {
         let resp: ChatResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.id, "chatcmpl-abc123");
         assert_eq!(resp.choices.len(), 1);
-        assert_eq!(resp.choices[0].message.content, "Hello!");
+        assert_eq!(resp.choices[0].message.content.as_deref(), Some("Hello!"));
         assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
         let usage = resp.usage.unwrap();
         assert_eq!(usage.prompt_tokens, 10);

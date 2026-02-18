@@ -83,18 +83,27 @@ impl Session {
         self.updated_at = Utc::now();
     }
 
-    /// Get recent messages in LLM format (`role` + `content` only).
+    /// Get recent messages in LLM format.
     ///
     /// Returns at most `max_messages` entries from the end of the history.
+    /// Preserves `tool_call_id` and `tool_calls` metadata when present so
+    /// that the LLM can correctly associate tool results with tool calls.
     pub fn get_history(&self, max_messages: usize) -> Vec<serde_json::Value> {
         let start = self.messages.len().saturating_sub(max_messages);
         self.messages[start..]
             .iter()
             .map(|m| {
-                serde_json::json!({
+                let mut msg = serde_json::json!({
                     "role": m.get("role").and_then(|v| v.as_str()).unwrap_or("user"),
                     "content": m.get("content").and_then(|v| v.as_str()).unwrap_or(""),
-                })
+                });
+                if let Some(tool_call_id) = m.get("tool_call_id").filter(|v| !v.is_null()) {
+                    msg["tool_call_id"] = tool_call_id.clone();
+                }
+                if let Some(tool_calls) = m.get("tool_calls").filter(|v| !v.is_null()) {
+                    msg["tool_calls"] = tool_calls.clone();
+                }
+                msg
             })
             .collect()
     }

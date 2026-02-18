@@ -86,8 +86,8 @@ async fn complete_success_text_response() {
     assert_eq!(response.model, "test-model");
     assert_eq!(response.choices.len(), 1);
     assert_eq!(
-        response.choices[0].message.content,
-        "Hello! How can I help you?"
+        response.choices[0].message.content.as_deref(),
+        Some("Hello! How can I help you?")
     );
     assert_eq!(response.choices[0].message.role, "assistant");
     assert_eq!(response.choices[0].finish_reason.as_deref(), Some("stop"));
@@ -550,8 +550,8 @@ async fn complete_multiple_choices() {
 
     let response = provider.complete(&test_request()).await.unwrap();
     assert_eq!(response.choices.len(), 2);
-    assert_eq!(response.choices[0].message.content, "Choice A");
-    assert_eq!(response.choices[1].message.content, "Choice B");
+    assert_eq!(response.choices[0].message.content.as_deref(), Some("Choice A"));
+    assert_eq!(response.choices[1].message.content.as_deref(), Some("Choice B"));
     assert_eq!(response.choices[0].index, 0);
     assert_eq!(response.choices[1].index, 1);
 }
@@ -587,5 +587,5 @@ async fn complete_usage_without_prompt_finish_reason_null() {
 
     let response = provider.complete(&test_request()).await.unwrap();
     assert!(response.choices[0].finish_reason.is_none());
-    assert_eq!(response.choices[0].message.content, "partial response");
+    assert_eq!(response.choices[0].message.content.as_deref(), Some("partial response"));
 }

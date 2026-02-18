@@ -438,7 +438,7 @@ mod tests {
         let provider = RetryPolicy::new(mock, fast_retry_config());
 
         let resp = provider.complete(&test_request()).await.unwrap();
-        assert_eq!(resp.choices[0].message.content, "Hello!");
+        assert_eq!(resp.choices[0].message.content.as_deref(), Some("Hello!"));
     }
 
     #[tokio::test]
@@ -449,7 +449,7 @@ mod tests {
         let provider = RetryPolicy::new(mock, fast_retry_config());
 
         let resp = provider.complete(&test_request()).await.unwrap();
-        assert_eq!(resp.choices[0].message.content, "Hello!");
+        assert_eq!(resp.choices[0].message.content.as_deref(), Some("Hello!"));
     }
 
     #[tokio::test]
@@ -515,7 +515,7 @@ mod tests {
         let provider = RetryPolicy::new(mock, config);
 
         let resp = provider.complete(&test_request()).await.unwrap();
-        assert_eq!(resp.choices[0].message.content, "Hello!");
+        assert_eq!(resp.choices[0].message.content.as_deref(), Some("Hello!"));
     }
 
     #[test]

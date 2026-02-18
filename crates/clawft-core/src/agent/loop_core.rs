@@ -164,11 +164,12 @@ impl<P: Platform> AgentLoop<P> {
         // 1. Get or create session
         let mut session = self.sessions.get_or_create(&session_key).await?;
 
-        // 2. Add user message to session
-        session.add_message("user", &msg.content, None);
-
-        // 3. Build context messages from memory, skills, and history
+        // 2. Build context messages from memory, skills, and history BEFORE
+        //    adding the user message to session (to avoid duplicate).
         let context_messages = self.context.build_messages(&session, &[]).await;
+
+        // 3. Add user message to session (after building context)
+        session.add_message("user", &msg.content, None);
 
         // 4. Convert context::LlmMessage to pipeline::traits::LlmMessage
         let mut messages: Vec<LlmMessage> = context_messages

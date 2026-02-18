@@ -128,14 +128,21 @@ impl LlmTransport for OpenAiCompatTransport {
                 message: "transport not configured -- call with_provider()".into(),
             })?;
 
-        // Convert pipeline messages to JSON values for the provider
+        // Convert pipeline messages to JSON values for the provider.
+        // For assistant messages with tool_calls, use null content instead of ""
+        // so Anthropic's API correctly associates the tool call IDs.
         let messages: Vec<serde_json::Value> = request
             .messages
             .iter()
             .map(|m| {
+                let content_value = if m.content.is_empty() && m.tool_calls.is_some() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!(m.content)
+                };
                 let mut msg = serde_json::json!({
                     "role": m.role,
-                    "content": m.content,
+                    "content": content_value,
                 });
                 if let Some(ref id) = m.tool_call_id {
                     msg["tool_call_id"] = serde_json::json!(id);
@@ -182,14 +189,20 @@ impl LlmTransport for OpenAiCompatTransport {
                 message: "transport not configured -- call with_provider()".into(),
             })?;
 
-        // Convert pipeline messages to JSON values for the provider
+        // Convert pipeline messages to JSON values for the provider.
+        // For assistant messages with tool_calls, use null content instead of "".
         let messages: Vec<serde_json::Value> = request
             .messages
             .iter()
             .map(|m| {
+                let content_value = if m.content.is_empty() && m.tool_calls.is_some() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!(m.content)
+                };
                 let mut msg = serde_json::json!({
                     "role": m.role,
-                    "content": m.content,
+                    "content": content_value,
                 });
                 if let Some(ref id) = m.tool_call_id {
                     msg["tool_call_id"] = serde_json::json!(id);
