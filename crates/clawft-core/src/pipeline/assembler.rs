@@ -59,8 +59,9 @@ impl ContextAssembler for TokenBudgetAssembler {
 
         // Truncation strategy:
         //   1. Always keep the first message (typically a system prompt).
-        //   2. Add messages from the end until we hit the budget.
-        //   3. Drop messages from the middle.
+        //   2. Always keep the last message (typically the current user input).
+        //   3. Add messages from the end until we hit the budget.
+        //   4. Drop messages from the middle.
         let first = &messages[0];
         let first_tokens = estimate_tokens(first);
 
@@ -73,11 +74,27 @@ impl ContextAssembler for TokenBudgetAssembler {
             };
         }
 
-        let mut remaining_budget = self.max_tokens.saturating_sub(first_tokens);
+        let last = &messages[messages.len() - 1];
+        let last_tokens = estimate_tokens(last);
+
+        if messages.len() == 2 {
+            // Only system + user -- always include both.
+            let total = first_tokens + last_tokens;
+            return AssembledContext {
+                messages: vec![first.clone(), last.clone()],
+                token_estimate: total,
+                truncated: total > self.max_tokens,
+            };
+        }
+
+        // Reserve budget for first and last messages, then fill middle.
+        let reserved = first_tokens + last_tokens;
+        let mut remaining_budget = self.max_tokens.saturating_sub(reserved);
         let mut tail_messages: Vec<LlmMessage> = Vec::new();
 
-        // Walk backwards from the end, adding messages until budget is exhausted.
-        for msg in messages[1..].iter().rev() {
+        // Walk backwards from second-to-last, adding messages until budget is
+        // exhausted. The last message is already reserved.
+        for msg in messages[1..messages.len() - 1].iter().rev() {
             let msg_tokens = estimate_tokens(msg);
             if msg_tokens > remaining_budget {
                 break;
@@ -89,9 +106,10 @@ impl ContextAssembler for TokenBudgetAssembler {
         // Reverse so messages are in chronological order.
         tail_messages.reverse();
 
-        let mut result = Vec::with_capacity(1 + tail_messages.len());
+        let mut result = Vec::with_capacity(2 + tail_messages.len());
         result.push(first.clone());
         result.extend(tail_messages);
+        result.push(last.clone());
 
         let final_tokens = estimate_tokens_for_messages(&result);
         let truncated = result.len() < messages.len();

@@ -119,20 +119,38 @@ impl Provider for OpenAiCompatProvider {
         let status = response.status();
 
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-
             if status.as_u16() == 429 {
-                // Try to parse retry-after from the response body
-                let retry_ms = parse_retry_after_ms(&body).unwrap_or(1000);
+                // Try HTTP Retry-After header first, then body JSON, then default
+                let header_ms = parse_retry_after_header(&response);
+                let body = response.text().await.unwrap_or_default();
+
+                // Some providers (e.g. xAI) use 429 for exhausted credits/quota,
+                // which is not a transient rate limit and should not be retried.
+                if is_quota_exhausted(&body) {
+                    let msg = extract_error_message(&body)
+                        .unwrap_or_else(|| "credits exhausted or spending limit reached".into());
+                    warn!(
+                        provider = %self.config.name,
+                        "quota exhausted (not retryable)"
+                    );
+                    return Err(ProviderError::RequestFailed(msg));
+                }
+
+                let retry_ms = header_ms
+                    .or_else(|| parse_retry_after_ms(&body))
+                    .unwrap_or(1000);
                 warn!(
                     provider = %self.config.name,
                     retry_after_ms = retry_ms,
+                    body = %body,
                     "rate limited"
                 );
                 return Err(ProviderError::RateLimited {
                     retry_after_ms: retry_ms,
                 });
             }
+
+            let body = response.text().await.unwrap_or_default();
 
             if status.as_u16() == 401 || status.as_u16() == 403 {
                 return Err(ProviderError::AuthFailed(body));
@@ -198,19 +216,35 @@ impl Provider for OpenAiCompatProvider {
         let status = response.status();
 
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-
             if status.as_u16() == 429 {
-                let retry_ms = parse_retry_after_ms(&body).unwrap_or(1000);
+                let header_ms = parse_retry_after_header(&response);
+                let body = response.text().await.unwrap_or_default();
+
+                if is_quota_exhausted(&body) {
+                    let msg = extract_error_message(&body)
+                        .unwrap_or_else(|| "credits exhausted or spending limit reached".into());
+                    warn!(
+                        provider = %self.config.name,
+                        "quota exhausted (not retryable)"
+                    );
+                    return Err(ProviderError::RequestFailed(msg));
+                }
+
+                let retry_ms = header_ms
+                    .or_else(|| parse_retry_after_ms(&body))
+                    .unwrap_or(1000);
                 warn!(
                     provider = %self.config.name,
                     retry_after_ms = retry_ms,
+                    body = %body,
                     "rate limited (streaming)"
                 );
                 return Err(ProviderError::RateLimited {
                     retry_after_ms: retry_ms,
                 });
             }
+
+            let body = response.text().await.unwrap_or_default();
 
             if status.as_u16() == 401 || status.as_u16() == 403 {
                 return Err(ProviderError::AuthFailed(body));
@@ -291,6 +325,53 @@ impl Provider for OpenAiCompatProvider {
 
         Ok(())
     }
+}
+
+/// Check if a 429 response body indicates a permanent quota/credit exhaustion
+/// rather than a transient rate limit. Some providers (xAI, OpenAI) return 429
+/// for billing issues that will never resolve with retries.
+fn is_quota_exhausted(body: &str) -> bool {
+    let lower = body.to_lowercase();
+    lower.contains("exhausted")
+        || lower.contains("spending limit")
+        || lower.contains("credits")
+        || lower.contains("billing")
+        || lower.contains("quota exceeded")
+        || lower.contains("insufficient_quota")
+}
+
+/// Extract a human-readable error message from a JSON error response body.
+fn extract_error_message(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    value
+        .get("error")
+        .and_then(|v| {
+            // OpenAI format: {"error": {"message": "..."}}
+            v.get("message")
+                .and_then(|m| m.as_str())
+                .map(String::from)
+                // xAI format: {"error": "..."}
+                .or_else(|| v.as_str().map(String::from))
+        })
+}
+
+/// Try to extract a retry-after value from the HTTP `Retry-After` header.
+///
+/// The header value can be either seconds (integer or float) or an HTTP-date.
+/// We only handle the numeric form here; HTTP-date is rare for API providers.
+fn parse_retry_after_header(response: &reqwest::Response) -> Option<u64> {
+    let header_val = response
+        .headers()
+        .get("retry-after")
+        .or_else(|| response.headers().get("x-ratelimit-reset-after"))
+        .and_then(|v| v.to_str().ok())?;
+
+    // Try as float seconds first (e.g. "1.5"), then integer
+    if let Ok(secs) = header_val.parse::<f64>() {
+        return Some((secs * 1000.0).max(0.0) as u64);
+    }
+
+    None
 }
 
 /// Try to extract a retry-after value from a JSON error response body.

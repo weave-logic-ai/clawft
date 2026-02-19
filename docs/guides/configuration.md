@@ -100,6 +100,60 @@ section you do not need.
     "heartbeat_prompt": "heartbeat"
   },
 
+  "routing": {
+    "mode": "tiered",
+    "tiers": [
+      {
+        "name": "free",
+        "models": ["gemini/gemini-2.5-flash-lite-preview-06-17"],
+        "complexity_range": [0.0, 0.3],
+        "cost_per_1k_tokens": 0.0,
+        "max_context_tokens": 32768
+      },
+      {
+        "name": "standard",
+        "models": ["gemini/gemini-2.5-flash"],
+        "complexity_range": [0.0, 0.7],
+        "cost_per_1k_tokens": 0.0003,
+        "max_context_tokens": 128000
+      },
+      {
+        "name": "premium",
+        "models": ["anthropic/claude-sonnet-4-5"],
+        "complexity_range": [0.5, 1.0],
+        "cost_per_1k_tokens": 0.003,
+        "max_context_tokens": 200000
+      }
+    ],
+    "selection_strategy": "preference_order",
+    "fallback_model": "gemini/gemini-2.5-flash",
+    "permissions": {
+      "users": {
+        "136554197234483201": { "level": 2 }
+      },
+      "channels": {
+        "cli": { "level": 2 },
+        "discord": { "level": 1 }
+      }
+    },
+    "escalation": {
+      "enabled": true,
+      "threshold": 0.6,
+      "max_escalation_tiers": 1
+    },
+    "cost_budgets": {
+      "global_daily_limit_usd": 50.0,
+      "global_monthly_limit_usd": 500.0,
+      "tracking_persistence": true,
+      "reset_hour_utc": 0
+    },
+    "rate_limiting": {
+      "window_seconds": 60,
+      "strategy": "sliding_window",
+      "global_rate_limit_rpm": 0
+    }
+  },
+
   "tools": {
     "web": {
       "search": {
@@ -144,7 +198,7 @@ Default settings applied to every agent instance.
 Credentials and endpoint overrides for LLM providers. Each provider section
 has the same structure. Named providers: `anthropic`, `openai`, `openrouter`,
 `deepseek`, `groq`, `zhipu`, `dashscope`, `vllm`, `gemini`, `moonshot`,
-`minimax`, `aihubmix`, `openai_codex`, `custom`.
+`minimax`, `aihubmix`, `openai_codex`, `xai`, `custom`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -168,6 +222,7 @@ Built-in provider routing:
 | Together | `together/` | `TOGETHER_API_KEY` | `https://api.together.xyz/v1` |
 | OpenRouter | `openrouter/` | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1` |
 | Gemini | `gemini/` | `GOOGLE_GEMINI_API_KEY` | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| xAI | `xai/` | `XAI_API_KEY` | `https://api.x.ai/v1` |
 
 ### gateway
 
@@ -205,6 +260,231 @@ Top-level tool configuration.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `timeout` | integer | `60` | Command execution timeout in seconds. |
+
+### routing
+
+The routing section controls model selection, cost management, and per-user
+permissions. When omitted entirely, the system defaults to `mode = "static"`
+which uses the model from `agents.defaults.model` for every request.
+
+Set `mode` to `"tiered"` to enable complexity-based routing, where the pipeline
+classifies each request and selects a model tier accordingly.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `mode` | string | `"static"` | `"static"` (Level 0 -- single model) or `"tiered"` (Level 1 -- complexity-based routing). |
+| `tiers` | array | `[]` | Model tier definitions, ordered cheapest to most expensive. Only used in tiered mode. |
+| `selection_strategy` | string | `null` | How to pick among multiple models within a tier: `"preference_order"`, `"round_robin"`, `"lowest_cost"`, or `"random"`. |
+| `fallback_model` | string | `null` | Model used when all tiers or budgets are exhausted. Format: `"provider/model"`. |
+| `permissions` | object | `{}` | Permission level defaults and per-user/channel overrides. |
+| `escalation` | object | `{}` | Complexity-based escalation settings. |
+| `cost_budgets` | object | `{}` | Global cost budget limits. |
+| `rate_limiting` | object | `{}` | Rate limiting settings. |
+
+#### routing.tiers
+
+Each tier groups models at a similar cost/capability level. Tiers are evaluated
+from cheapest to most expensive. Complexity ranges may overlap -- the router
+picks the best tier the user is permitted and can afford.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | `""` | Tier name (e.g., `"free"`, `"standard"`, `"premium"`, `"elite"`). |
+| `models` | string[] | `[]` | Models available in this tier, in preference order. Format: `"provider/model"`. |
+| `complexity_range` | [float, float] | `[0.0, 1.0]` | Complexity range this tier covers. Each value is 0.0-1.0. |
+| `cost_per_1k_tokens` | float | `0.0` | Approximate cost per 1K tokens (blended input/output) in USD. Used for budget tracking. |
+| `max_context_tokens` | integer | `8192` | Maximum context window for models in this tier. The pipeline's context assembler uses the largest value across all tiers as its truncation budget. |
+
+Example with three tiers:
+
+```json
+{
+  "routing": {
+    "mode": "tiered",
+    "tiers": [
+      {
+        "name": "free",
+        "models": ["gemini/gemini-2.5-flash-lite-preview-06-17"],
+        "complexity_range": [0.0, 0.3],
+        "cost_per_1k_tokens": 0.0,
+        "max_context_tokens": 32768
+      },
+      {
+        "name": "standard",
+        "models": ["gemini/gemini-2.5-flash"],
+        "complexity_range": [0.0, 0.7],
+        "cost_per_1k_tokens": 0.0003,
+        "max_context_tokens": 128000
+      },
+      {
+        "name": "premium",
+        "models": ["anthropic/claude-sonnet-4-5"],
+        "complexity_range": [0.5, 1.0],
+        "cost_per_1k_tokens": 0.003,
+        "max_context_tokens": 200000
+      }
+    ],
+    "selection_strategy": "preference_order",
+    "fallback_model": "gemini/gemini-2.5-flash"
+  }
+}
+```
+
+> **Note on `max_context_tokens`:** This value controls how much conversation
+> history the context assembler keeps. It is the *input* context window, not
+> the output token limit (`agents.defaults.max_tokens`). The assembler uses the
+> largest `max_context_tokens` across all configured tiers as its budget.
+
+#### routing.permissions
+
+Permissions use three built-in levels with per-user and per-channel overrides.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `zero_trust` | object | `{}` | Level 0 defaults. Most restrictive. Applied to unknown/unauthenticated users. |
+| `user` | object | `{}` | Level 1 defaults. Standard access. |
+| `admin` | object | `{}` | Level 2 defaults. Full access. |
+| `users` | object | `{}` | Per-user overrides, keyed by sender ID (e.g., `"alice_telegram_123"`). |
+| `channels` | object | `{}` | Per-channel overrides, keyed by channel name (e.g., `"cli"`, `"discord"`). |
+
+**Permission resolution order:** built-in defaults -> level config -> per-user
+override -> per-channel override. Later layers win for any field they specify.
+
+**Built-in level defaults:**
+
+| Dimension | Level 0 (zero_trust) | Level 1 (user) | Level 2 (admin) |
+|-----------|---------------------|----------------|-----------------|
+| `max_tier` | `"free"` | (config) | (config) |
+| `max_context_tokens` | 4096 | (config) | (config) |
+| `max_output_tokens` | 1024 | (config) | (config) |
+| `rate_limit` (rpm) | 10 | (config) | 0 (unlimited) |
+| `streaming_allowed` | false | (config) | (config) |
+| `escalation_allowed` | false | (config) | (config) |
+| `escalation_threshold` | 1.0 (never) | (config) | (config) |
+| `model_override` | false | (config) | (config) |
+| `cost_budget_daily_usd` | $0.10 | (config) | 0.0 (unlimited) |
+| `cost_budget_monthly_usd` | $2.00 | (config) | 0.0 (unlimited) |
+
+Each level or override object supports these fields (all optional -- unset
+fields inherit from the resolved level):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `level` | integer | Permission level (0, 1, or 2). |
+| `max_tier` | string | Highest tier name the user can access. |
+| `model_access` | string[] | Explicit model allowlist. Empty = all models in allowed tiers. |
+| `model_denylist` | string[] | Models explicitly denied even if tier allows. |
+| `tool_access` | string[] | Tool names this user can invoke. `["*"]` = all tools. |
+| `tool_denylist` | string[] | Tools explicitly denied even if `tool_access` allows. |
+| `max_context_tokens` | integer | Maximum input context tokens. |
+| `max_output_tokens` | integer | Maximum output tokens per response. |
+| `rate_limit` | integer | Requests per minute. 0 = unlimited. |
+| `streaming_allowed` | boolean | Whether SSE streaming is allowed. |
+| `escalation_allowed` | boolean | Whether complexity-based escalation to higher tiers is allowed. |
+| `escalation_threshold` | float | Complexity threshold (0.0-1.0) above which escalation triggers. |
+| `model_override` | boolean | Whether the user can manually select a model. |
+| `cost_budget_daily_usd` | float | Daily cost budget in USD. 0.0 = unlimited. |
+| `cost_budget_monthly_usd` | float | Monthly cost budget in USD. 0.0 = unlimited. |
+| `custom_permissions` | object | Extensible key-value pairs for custom permission dimensions. |
+
+Example with per-user and per-channel overrides:
+
+```json
+{
+  "routing": {
+    "permissions": {
+      "users": {
+        "136554197234483201": { "level": 2 }
+      },
+      "channels": {
+        "cli": { "level": 2 },
+        "discord": { "level": 1 }
+      }
+    }
+  }
+}
+```
+
+The CLI channel automatically gets admin-level permissions (level 2) with
+`sender_id = "local"`. When no `AuthContext` is present on a request, zero-trust
+defaults apply.
+
+#### routing.escalation
+
+Controls whether the router can automatically promote a request to a higher
+model tier when complexity exceeds a threshold.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Whether escalation is enabled globally. |
+| `threshold` | float | `0.6` | Default complexity threshold for escalation (0.0-1.0). |
+| `max_escalation_tiers` | integer | `1` | Maximum number of tiers a request can jump beyond the user's `max_tier`. |
+
+Example:
+
+```json
+{
+  "routing": {
+    "escalation": {
+      "enabled": true,
+      "threshold": 0.6,
+      "max_escalation_tiers": 1
+    }
+  }
+}
+```
+
+#### routing.cost_budgets
+
+System-wide spending limits that apply regardless of individual user budgets.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `global_daily_limit_usd` | float | `0.0` | Global daily spending limit in USD. 0.0 = unlimited. |
+| `global_monthly_limit_usd` | float | `0.0` | Global monthly spending limit in USD. 0.0 = unlimited. |
+| `tracking_persistence` | boolean | `false` | Whether to persist cost tracking data to disk across restarts. |
+| `reset_hour_utc` | integer | `0` | Hour (0-23 UTC) at which daily budgets reset. |
+
+Example:
+
+```json
+{
+  "routing": {
+    "cost_budgets": {
+      "global_daily_limit_usd": 50.0,
+      "global_monthly_limit_usd": 500.0,
+      "tracking_persistence": true,
+      "reset_hour_utc": 0
+    }
+  }
+}
+```
+
+#### routing.rate_limiting
+
+Controls the sliding-window rate limiter. Per-user limits are defined in the
+permission level config (`rate_limit` field); these settings control the global
+window and strategy.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `window_seconds` | integer | `60` | Window size in seconds for rate limit calculations. |
+| `strategy` | string | `"sliding_window"` | Rate limiting strategy: `"sliding_window"` or `"fixed_window"`. |
+| `global_rate_limit_rpm` | integer | `0` | Global rate limit in requests per minute across all users. 0 = unlimited. Checked before per-user limits. |
+
+Example:
+
+```json
+{
+  "routing": {
+    "rate_limiting": {
+      "window_seconds": 60,
+      "strategy": "sliding_window",
+      "global_rate_limit_rpm": 120
+    }
+  }
+}
+```
 
 ## Channel Setup
 
@@ -433,6 +713,7 @@ The server name (the JSON key) is used for tool namespacing. A server named
 | `TOGETHER_API_KEY` | API key for Together AI models. |
 | `OPENROUTER_API_KEY` | API key for OpenRouter gateway. |
 | `GOOGLE_GEMINI_API_KEY` | API key for Google Gemini models. |
+| `XAI_API_KEY` | API key for xAI (Grok) models. |
 | **Channel Tokens** | |
 | `DISCORD_BOT_TOKEN` | Bot token for the Discord channel. Referenced via `token_env` in the channel config. |
 | `SLACK_BOT_TOKEN` | Bot User OAuth Token for the Slack channel. Referenced via `bot_token_env`. |

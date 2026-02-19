@@ -22,11 +22,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use clawft_llm::{
     ChatMessage, ChatRequest as LlmChatRequest, ChatResponse, OpenAiCompatProvider,
-    ProviderConfig as LlmProviderConfig, ProviderRouter,
+    ProviderConfig as LlmProviderConfig, ProviderError, ProviderRouter,
 };
 use clawft_types::config::Config;
 
@@ -99,15 +99,34 @@ impl LlmProvider for ClawftLlmAdapter {
             "adapter forwarding request to clawft-llm provider"
         );
 
-        // -- Call the underlying provider ------------------------------------
-        let response = self
-            .provider
-            .complete(&request)
-            .await
-            .map_err(|e| e.to_string())?;
+        // -- Call the underlying provider with retry on rate-limit -----------
+        const MAX_RETRIES: u32 = 3;
+        let mut last_err = String::new();
 
-        // -- Outbound conversion: ChatResponse -> Value ----------------------
-        Ok(convert_response_to_value(&response))
+        for attempt in 0..=MAX_RETRIES {
+            match self.provider.complete(&request).await {
+                Ok(response) => return Ok(convert_response_to_value(&response)),
+                Err(ProviderError::RateLimited { retry_after_ms }) => {
+                    if attempt == MAX_RETRIES {
+                        last_err = format!("rate limited after {} retries", MAX_RETRIES);
+                        break;
+                    }
+                    // Use provider-suggested wait, with exponential backoff floor
+                    let backoff_floor = 1000u64 * 2u64.pow(attempt);
+                    let wait = retry_after_ms.max(backoff_floor);
+                    warn!(
+                        provider = %self.provider.name(),
+                        attempt = attempt + 1,
+                        wait_ms = wait,
+                        "rate limited, retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+                }
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+
+        Err(last_err)
     }
 
     async fn complete_stream(
@@ -353,6 +372,7 @@ fn apply_config_overrides(
         "deepseek" => &app_config.providers.deepseek,
         "openrouter" => &app_config.providers.openrouter,
         "gemini" => &app_config.providers.gemini,
+        "xai" => &app_config.providers.xai,
         "mistral" | "together" => return, // supported builtins with no config override
         _ => return,
     };
@@ -425,6 +445,7 @@ fn resolve_app_api_key(provider_name: &str, config: &Config) -> Option<String> {
         "deepseek" => &config.providers.deepseek.api_key,
         "openrouter" => &config.providers.openrouter.api_key,
         "gemini" => &config.providers.gemini.api_key,
+        "xai" => &config.providers.xai.api_key,
         _ => return None,
     };
     if key.is_empty() { None } else { Some(key.clone()) }
@@ -488,9 +509,17 @@ fn create_adapters_for_tiers(config: &Config) -> HashMap<String, Arc<dyn LlmProv
 pub fn build_live_pipeline(config: &Config) -> PipelineRegistry {
     let classifier = Arc::new(KeywordClassifier::new());
     let router: Arc<dyn ModelRouter> = build_router(config);
-    let assembler = Arc::new(TokenBudgetAssembler::new(
-        config.agents.defaults.max_tokens.max(1) as usize,
-    ));
+
+    // Use the context window from the routing tiers (input budget), not
+    // max_tokens (output budget). Fall back to 128 000 if no tier specifies one.
+    let context_budget = config
+        .routing
+        .tiers
+        .iter()
+        .map(|t| t.max_context_tokens as usize)
+        .max()
+        .unwrap_or(128_000);
+    let assembler = Arc::new(TokenBudgetAssembler::new(context_budget));
 
     // Build transport: multi-provider for tiered routing, single for static.
     let transport: Arc<OpenAiCompatTransport> = if config.routing.mode == "tiered" {

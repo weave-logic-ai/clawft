@@ -365,6 +365,21 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         detect_by_base_keyword: "",
         strip_model_prefix: false,
     },
+    ProviderSpec {
+        name: "xai",
+        keywords: &["xai", "grok"],
+        env_key: "XAI_API_KEY",
+        display_name: "xAI",
+        litellm_prefix: "xai",
+        skip_prefixes: &["xai/"],
+        is_gateway: false,
+        is_local: false,
+        is_oauth: false,
+        default_api_base: "https://api.x.ai/v1",
+        detect_by_key_prefix: "xai-",
+        detect_by_base_keyword: "x.ai",
+        strip_model_prefix: false,
+    },
 ];
 
 /// Find a standard provider by model-name keyword (case-insensitive).
@@ -429,7 +444,7 @@ mod tests {
 
     #[test]
     fn provider_count() {
-        assert_eq!(PROVIDERS.len(), 14);
+        assert_eq!(PROVIDERS.len(), 15);
     }
 
     #[test]

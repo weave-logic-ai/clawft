@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use tracing::warn;
+use tracing::{debug, warn};
 
 use clawft_platform::Platform;
 use clawft_types::config::AgentsConfig;
@@ -108,39 +108,91 @@ impl<P: Platform> ContextBuilder<P> {
 
         let mut parts = Vec::new();
 
-        parts.push(format!(
-            "# clawft\n\n\
-            You are clawft, a helpful AI assistant. You have access to tools that allow you to:\n\
-            - Read, write, and edit files\n\
-            - Execute shell commands\n\
-            - Search the web and fetch web pages\n\
-            - Send messages to users on chat channels\n\n\
-            ## Configuration\n\
-            Model: {model}\n\
-            Workspace: {workspace}\n\
-            Memory: {workspace}/memory/MEMORY.md\n\
-            History: {workspace}/memory/HISTORY.md\n\
-            Skills: {workspace}/skills/"
-        ));
-
-        // Load any bootstrap files from the workspace (AGENTS.md, SOUL.md, etc.)
-        let bootstrap_files = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"];
+        // Load bootstrap files from the workspace (AGENTS.md, SOUL.md, etc.)
+        // Searches: workspace root first, then .clawft/ subdirectory.
+        let bootstrap_files = ["SOUL.md", "IDENTITY.md", "AGENTS.md", "USER.md", "TOOLS.md"];
+        let mut loaded_files = std::collections::HashMap::new();
         for filename in &bootstrap_files {
             let home = self.platform.fs().home_dir();
             if let Some(home) = home {
                 let ws_path = expand_workspace(workspace, &home);
-                let file_path = ws_path.join(filename);
-                if self.platform.fs().exists(&file_path).await {
-                    match self.platform.fs().read_to_string(&file_path).await {
-                        Ok(content) if !content.trim().is_empty() => {
-                            parts.push(format!("## {filename}\n\n{content}"));
+                let candidates = [
+                    ws_path.join(filename),
+                    ws_path.join(".clawft").join(filename),
+                ];
+                for file_path in &candidates {
+                    debug!(file = %file_path.display(), "checking for bootstrap file");
+                    if self.platform.fs().exists(file_path).await {
+                        match self.platform.fs().read_to_string(file_path).await {
+                            Ok(content) if !content.trim().is_empty() => {
+                                debug!(file = %filename, bytes = content.len(), "loaded bootstrap file");
+                                loaded_files.insert(*filename, content);
+                            }
+                            Ok(_) => {
+                                debug!(file = %filename, "bootstrap file is empty, skipping");
+                            }
+                            Err(e) => {
+                                warn!(file = %filename, error = %e, "failed to read bootstrap file");
+                            }
                         }
-                        Ok(_) => {}
-                        Err(e) => {
-                            warn!(file = %filename, error = %e, "failed to read bootstrap file");
-                        }
+                        break; // First match wins
                     }
                 }
+                if !loaded_files.contains_key(filename) {
+                    debug!(file = %filename, workspace = %ws_path.display(), "bootstrap file not found");
+                }
+            }
+        }
+
+        // If SOUL.md or IDENTITY.md exists, use it as the identity preamble
+        // instead of the hardcoded default. The config section is always appended.
+        let has_custom_identity =
+            loaded_files.contains_key("SOUL.md") || loaded_files.contains_key("IDENTITY.md");
+
+        if has_custom_identity {
+            // Custom identity from bootstrap files
+            if let Some(soul) = loaded_files.get("SOUL.md") {
+                parts.push(format!("## SOUL.md\n\n{soul}"));
+            }
+            if let Some(identity) = loaded_files.get("IDENTITY.md") {
+                parts.push(format!("## IDENTITY.md\n\n{identity}"));
+            }
+            // Append configuration context
+            parts.push(format!(
+                "## Configuration\n\n\
+                Model: {model}\n\
+                Workspace: {workspace}\n\
+                Memory: {workspace}/memory/MEMORY.md\n\
+                History: {workspace}/memory/HISTORY.md\n\
+                Skills: {workspace}/skills/\n\n\
+                You have access to tools that allow you to:\n\
+                - Read, write, and edit files\n\
+                - Execute shell commands\n\
+                - Search the web and fetch web pages\n\
+                - Send messages to users on chat channels"
+            ));
+        } else {
+            // Default identity when no SOUL.md or IDENTITY.md exists
+            parts.push(format!(
+                "# clawft\n\n\
+                You are clawft, a helpful AI assistant. You have access to tools that allow you to:\n\
+                - Read, write, and edit files\n\
+                - Execute shell commands\n\
+                - Search the web and fetch web pages\n\
+                - Send messages to users on chat channels\n\n\
+                ## Configuration\n\
+                Model: {model}\n\
+                Workspace: {workspace}\n\
+                Memory: {workspace}/memory/MEMORY.md\n\
+                History: {workspace}/memory/HISTORY.md\n\
+                Skills: {workspace}/skills/"
+            ));
+        }
+
+        // Append remaining bootstrap files (AGENTS.md, USER.md, TOOLS.md)
+        for filename in &["AGENTS.md", "USER.md", "TOOLS.md"] {
+            if let Some(content) = loaded_files.get(filename) {
+                parts.push(format!("## {filename}\n\n{content}"));
             }
         }
 

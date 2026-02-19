@@ -104,6 +104,14 @@ pub fn builtin_providers() -> Vec<ProviderConfig> {
             default_model: Some("gemini-2.5-flash".into()),
             headers: HashMap::new(),
         },
+        ProviderConfig {
+            name: "xai".into(),
+            base_url: "https://api.x.ai/v1".into(),
+            api_key_env: "XAI_API_KEY".into(),
+            model_prefix: Some("xai/".into()),
+            default_model: Some("grok-3-mini".into()),
+            headers: HashMap::new(),
+        },
     ]
 }
 
@@ -114,7 +122,7 @@ mod tests {
     #[test]
     fn builtin_providers_count() {
         let providers = builtin_providers();
-        assert_eq!(providers.len(), 8);
+        assert_eq!(providers.len(), 9);
     }
 
     #[test]
@@ -129,6 +137,7 @@ mod tests {
         assert!(names.contains(&"together"));
         assert!(names.contains(&"openrouter"));
         assert!(names.contains(&"gemini"));
+        assert!(names.contains(&"xai"));
     }
 
     #[test]

@@ -278,7 +278,7 @@ mod tests {
     fn with_builtins_has_all_providers() {
         let router = ProviderRouter::with_builtins();
         let providers = router.providers();
-        assert_eq!(providers.len(), 8);
+        assert_eq!(providers.len(), 9);
         assert!(providers.contains(&"openai".to_string()));
         assert!(providers.contains(&"anthropic".to_string()));
         assert!(providers.contains(&"groq".to_string()));
@@ -287,6 +287,7 @@ mod tests {
         assert!(providers.contains(&"together".to_string()));
         assert!(providers.contains(&"openrouter".to_string()));
         assert!(providers.contains(&"gemini".to_string()));
+        assert!(providers.contains(&"xai".to_string()));
     }
 
     #[test]

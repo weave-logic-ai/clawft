@@ -846,6 +846,10 @@ pub struct ProvidersConfig {
     /// OpenAI Codex (OAuth-based).
     #[serde(default)]
     pub openai_codex: ProviderConfig,
+
+    /// xAI (Grok).
+    #[serde(default)]
+    pub xai: ProviderConfig,
 }
 
 // ── Gateway ──────────────────────────────────────────────────────────────
