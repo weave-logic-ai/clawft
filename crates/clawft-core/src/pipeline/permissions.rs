@@ -8,6 +8,8 @@
 
 use std::collections::HashMap;
 
+use tracing::debug;
+
 use clawft_types::routing::{
     AuthContext, PermissionLevelConfig, PermissionsConfig, RoutingConfig, UserPermissions,
 };
@@ -84,20 +86,29 @@ pub fn admin_defaults() -> UserPermissions {
     }
 }
 
-/// Return built-in defaults for a numeric level. Unknown -> zero_trust.
+/// Return built-in defaults for a numeric level.
+///
+/// Levels 0, 1, 2 map to zero_trust, user, admin respectively.
+/// Levels >= 3 are treated as admin (highest built-in level) to avoid
+/// silently downgrading high-privilege configs to zero_trust.
 pub fn defaults_for_level(level: u8) -> UserPermissions {
     match level {
         0 => zero_trust_defaults(),
         1 => user_defaults(),
-        2 => admin_defaults(),
-        _ => zero_trust_defaults(),
+        _ => {
+            let mut perms = admin_defaults();
+            perms.level = level;
+            perms
+        }
     }
 }
 
 /// Convert a numeric level to its config lookup name.
+///
+/// Levels >= 2 map to "admin" (highest built-in level name).
 pub fn level_name(level: u8) -> &'static str {
     match level {
-        0 => "zero_trust", 1 => "user", 2 => "admin", _ => "zero_trust",
+        0 => "zero_trust", 1 => "user", _ => "admin",
     }
 }
 
@@ -223,6 +234,17 @@ impl PermissionResolver {
             let ceiling = self.resolve_global_only(sender_id, channel, allow_from_match);
             Self::enforce_workspace_ceiling(&mut perms, &ceiling);
         }
+
+        debug!(
+            sender_id = %sender_id,
+            channel = %channel,
+            resolved_level = perms.level,
+            level_name = lname,
+            tool_count = perms.tool_access.len(),
+            has_wildcard = perms.tool_access.iter().any(|t| t == "*"),
+            "permissions resolved"
+        );
+
         perms
     }
 
@@ -238,11 +260,26 @@ impl PermissionResolver {
     /// Determine level: user override > channel override > allow_from > cli > zero_trust.
     fn determine_level(&self, sender_id: &str, channel: &str, allow_from_match: bool) -> u8 {
         if let Some(u) = self.user_overrides.get(sender_id)
-            && let Some(level) = u.level { return level; }
+            && let Some(level) = u.level
+        {
+            debug!(sender_id = %sender_id, level, source = "user_override", "permission level determined");
+            return level;
+        }
         if let Some(c) = self.channel_overrides.get(channel)
-            && let Some(level) = c.level { return level; }
-        if allow_from_match { return 1; }
-        if channel == "cli" { return self.cli_default_level; }
+            && let Some(level) = c.level
+        {
+            debug!(sender_id = %sender_id, channel = %channel, level, source = "channel_override", "permission level determined");
+            return level;
+        }
+        if allow_from_match {
+            debug!(sender_id = %sender_id, channel = %channel, level = 1u8, source = "allow_from", "permission level determined");
+            return 1;
+        }
+        if channel == "cli" {
+            debug!(sender_id = %sender_id, level = self.cli_default_level, source = "cli_default", "permission level determined");
+            return self.cli_default_level;
+        }
+        debug!(sender_id = %sender_id, channel = %channel, level = 0u8, source = "fallback_zero_trust", "permission level determined");
         0
     }
 
@@ -597,12 +634,13 @@ mod tests {
     // -- Edge Cases (2) --
 
     #[test]
-    fn test_unknown_level_falls_back_to_zero_trust() {
+    fn test_unknown_level_gets_admin_with_original_level() {
         let p = defaults_for_level(99);
-        assert_eq!(p.level, 0);
-        assert_eq!(p.max_tier, "free");
-        assert!(p.tool_access.is_empty());
-        assert!(!p.escalation_allowed);
+        // Levels >= 2 get admin defaults but retain the original level value.
+        assert_eq!(p.level, 99);
+        assert_eq!(p.max_tier, "elite");
+        assert!(p.tool_access.iter().any(|t| t == "*"));
+        assert!(p.escalation_allowed);
     }
 
     #[test]
@@ -668,7 +706,7 @@ mod tests {
         assert_eq!(level_name(0), "zero_trust");
         assert_eq!(level_name(1), "user");
         assert_eq!(level_name(2), "admin");
-        assert_eq!(level_name(99), "zero_trust");
+        assert_eq!(level_name(99), "admin");
     }
 
     #[test]
