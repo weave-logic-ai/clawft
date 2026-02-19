@@ -31,10 +31,13 @@ use clawft_types::config::Config;
 
 use super::assembler::TokenBudgetAssembler;
 use super::classifier::KeywordClassifier;
+use super::cost_tracker::CostTracker;
 use super::learner::NoopLearner;
+use super::rate_limiter::RateLimiter;
 use super::router::StaticRouter;
 use super::scorer::NoopScorer;
-use super::traits::{Pipeline, PipelineRegistry};
+use super::tiered_router::TieredRouter;
+use super::traits::{ModelRouter, Pipeline, PipelineRegistry};
 use super::transport::{LlmProvider, OpenAiCompatTransport};
 
 // ---------------------------------------------------------------------------
@@ -378,7 +381,7 @@ fn apply_config_overrides(
 /// with an adapter created from the application config.
 pub fn build_live_pipeline(config: &Config) -> PipelineRegistry {
     let classifier = Arc::new(KeywordClassifier::new());
-    let router = Arc::new(StaticRouter::from_config(&config.agents));
+    let router: Arc<dyn ModelRouter> = build_router(config);
     let assembler = Arc::new(TokenBudgetAssembler::new(
         config.agents.defaults.max_tokens.max(1) as usize,
     ));
@@ -397,6 +400,37 @@ pub fn build_live_pipeline(config: &Config) -> PipelineRegistry {
     };
 
     PipelineRegistry::new(pipeline)
+}
+
+/// Build the appropriate router based on `config.routing.mode`.
+///
+/// - `"tiered"` -> [`TieredRouter`] with optional cost tracking and rate limiting
+/// - anything else -> [`StaticRouter`] (Level 0 default)
+fn build_router(config: &Config) -> Arc<dyn ModelRouter> {
+    if config.routing.mode == "tiered" {
+        let routing = config.routing.clone();
+
+        let cost_tracker = Arc::new(
+            CostTracker::new(routing.cost_budgets.reset_hour_utc),
+        );
+        let rate_limiter = Arc::new(
+            RateLimiter::new(
+                routing.rate_limiting.window_seconds,
+                routing.rate_limiting.global_rate_limit_rpm,
+            ),
+        );
+
+        let router = TieredRouter::new(routing)
+            .with_cost_tracker(cost_tracker)
+            .with_rate_limiter(rate_limiter);
+
+        tracing::info!("pipeline: using TieredRouter (Level 1)");
+
+        Arc::new(router)
+    } else {
+        tracing::info!("pipeline: using StaticRouter (Level 0)");
+        Arc::new(StaticRouter::from_config(&config.agents))
+    }
 }
 
 // ---------------------------------------------------------------------------

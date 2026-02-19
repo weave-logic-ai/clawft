@@ -168,7 +168,9 @@ The Level 0 router parses the `"provider/model"` string from
 returns that pair. If no slash is present, the provider defaults to `"openai"`.
 The `update()` method is a no-op.
 
-**Planned upgrade: `IntelligentRouter`** (see Section 5).
+**Upgrade: `TieredRouter` (Level 1)** -- see Section 5a below.
+
+**Planned upgrade: `IntelligentRouter` (Level 2)** -- see Section 5.
 
 ---
 
@@ -394,6 +396,227 @@ When `PipelineRegistry::complete()` runs, it:
    default if none is registered).
 3. Runs stages 2-6 using the selected pipeline.
 4. Calls `router.update()` with the outcome after the response is scored.
+
+---
+
+## 5a. TieredRouter and Permission-Based Routing (Level 1)
+
+The `TieredRouter` replaces the `StaticRouter` when `routing.mode` is set to
+`"tiered"` in the configuration. It selects models based on task complexity,
+user permissions, and cost budgets.
+
+Source: `crates/clawft-core/src/pipeline/tiered_router.rs`,
+`crates/clawft-core/src/pipeline/permissions.rs`
+
+### How It Works
+
+When a `ChatRequest` enters the pipeline, the `TieredRouter` executes an
+8-step routing algorithm:
+
+```mermaid
+flowchart TB
+    A[1. Extract AuthContext] --> B[2. Read permissions]
+    B --> C{3. Rate limit check}
+    C -->|exceeded| F1[Return fallback]
+    C -->|ok| D[4. Filter tiers by max_tier]
+    D --> E{5. Select tier by complexity}
+    E --> G{Escalation needed?}
+    G -->|yes, 3 conditions met| H[Promote to next tier]
+    G -->|no| I[Use selected tier]
+    H --> J{6. Budget check}
+    I --> J
+    J -->|over budget| K[Downgrade to cheaper tier]
+    J -->|ok| L[7. Select model from tier]
+    K --> L
+    L --> M[8. Record estimated cost]
+```
+
+### AuthContext and Permission Resolution
+
+Every request carries an `AuthContext` (sender_id, channel, permissions).
+The `AgentLoop` creates this from the inbound message:
+
+- **CLI channel** -> `admin` (Level 2, full access)
+- **All other channels** -> `zero_trust` (Level 0, free tier only)
+
+Permissions are resolved through a 5-layer merge (lowest to highest priority):
+
+| Priority | Layer | Source |
+|----------|-------|--------|
+| 1 (lowest) | Built-in defaults | `zero_trust_defaults()`, `user_defaults()`, `admin_defaults()` |
+| 2 | Global config | `routing.permissions.zero_trust`, `.user`, `.admin` |
+| 3 | Workspace config | Project-local `.clawft/config.json` routing section |
+| 4 | Per-user override | `routing.permissions.users.{sender_id}` |
+| 5 (highest) | Per-channel override | `routing.permissions.channels.{channel}` |
+
+Each layer can override any dimension independently. For example, a per-user
+override can set `"level": 2` without specifying `max_tier` -- the `max_tier`
+is inherited from the admin defaults.
+
+### Granting Permissions
+
+**Grant a specific user admin access:**
+```json
+{
+  "routing": {
+    "permissions": {
+      "users": {
+        "alice_telegram_123": { "level": 2 }
+      }
+    }
+  }
+}
+```
+
+**Grant an entire channel higher access:**
+```json
+{
+  "routing": {
+    "permissions": {
+      "channels": {
+        "telegram": { "level": 1 },
+        "slack": { "level": 1 }
+      }
+    }
+  }
+}
+```
+
+**Grant a user access to specific tools only:**
+```json
+{
+  "routing": {
+    "permissions": {
+      "users": {
+        "bob_discord_456": {
+          "level": 1,
+          "tool_access": ["read_file", "list_dir", "web_search"],
+          "cost_budget_daily_usd": 2.00
+        }
+      }
+    }
+  }
+}
+```
+
+### Permission Levels
+
+| Level | Name | Default `max_tier` | Tool Access | Rate Limit | Budget |
+|-------|------|-------------------|-------------|------------|--------|
+| 0 | `zero_trust` | `free` | None | 10/min | $0.10/day |
+| 1 | `user` | `standard` | 7 safe tools | 60/min | $5.00/day |
+| 2 | `admin` | `elite` | All (`*`) | Unlimited | Unlimited |
+
+### 16 Permission Dimensions
+
+Each dimension is independently configurable per level, user, or channel:
+
+| Dimension | Type | Description |
+|-----------|------|-------------|
+| `level` | integer | Permission level (0, 1, 2) |
+| `max_tier` | string | Maximum model tier accessible |
+| `model_access` | string[] | Model allowlist (globs: `"anthropic/*"`) |
+| `model_denylist` | string[] | Model denylist |
+| `tool_access` | string[] | Tool allowlist (`["*"]` = all) |
+| `tool_denylist` | string[] | Tool denylist |
+| `max_context_tokens` | integer | Max input tokens |
+| `max_output_tokens` | integer | Max output tokens |
+| `rate_limit` | integer | Requests per window (0 = unlimited) |
+| `streaming_allowed` | boolean | SSE streaming allowed |
+| `escalation_allowed` | boolean | Complexity escalation allowed |
+| `escalation_threshold` | float | Escalation trigger point (0.0-1.0) |
+| `model_override` | boolean | User can override model selection |
+| `cost_budget_daily_usd` | float | Daily budget (0.0 = unlimited) |
+| `cost_budget_monthly_usd` | float | Monthly budget (0.0 = unlimited) |
+| `custom_permissions` | object | Plugin-defined extensions |
+
+### Tier Selection
+
+The router selects the highest-quality tier the user can afford:
+
+1. Filter tiers where the user's `max_tier` ordinal >= tier ordinal.
+2. From allowed tiers, find those whose `complexity_range` contains the task
+   complexity.
+3. Pick the tier with the highest cost (best quality).
+4. If no tier matches and escalation is enabled (3 conditions: user allows it,
+   config enables it, complexity > threshold), promote to the next tier above
+   `max_tier`.
+
+### Model Selection Strategies
+
+Within a chosen tier, the model is selected by one of four strategies:
+
+| Strategy | Behavior |
+|----------|----------|
+| `preference_order` | First model in the tier's `models` list (default) |
+| `round_robin` | Atomic counter rotates through models across requests |
+| `lowest_cost` | First model (tiers sorted by cost) |
+| `random` | Hash-based deterministic selection |
+
+### Cost Tracking
+
+The `CostTracker` maintains per-user daily and monthly spend:
+
+- `reserve_budget()` atomically checks and reserves cost before routing
+  (prevents TOCTOU races)
+- `reconcile_actual()` adjusts spend after the LLM response (actual vs.
+  estimated)
+- Zero budget (0.0) means unlimited
+- Spend resets at `reset_hour_utc` daily
+- Persistence via atomic JSON file with 0600 permissions
+
+When a user exceeds their budget, the router downgrades to a cheaper tier.
+If all tiers are exhausted, the `fallback_model` is used (if permitted by
+the user's `max_tier`).
+
+### Rate Limiting
+
+The `RateLimiter` enforces per-user request limits:
+
+- Two-stage check: global counter (AtomicU64) first, then per-user sliding
+  window
+- LRU eviction when tracking > 10,000 users
+- When rate limited, the router returns the fallback model (if permitted)
+
+### Workspace Ceiling Enforcement
+
+When a workspace config overrides routing permissions, the
+`PermissionResolver` enforces ceilings:
+
+- Workspace cannot grant a level above `max_grantable_level` (default: 1)
+- Workspace cannot enable escalation if global disables it
+- Workspace cannot increase rate limits beyond global
+- Workspace cannot increase cost budgets beyond global
+- Workspace cannot grant wildcard tool access if global doesn't
+
+This prevents a malicious `.clawft/config.json` from escalating privileges.
+
+### Configuration
+
+See the [Configuration Reference](../reference/config.md#routing) for the
+full JSON schema, defaults, and examples.
+
+### Security: AuthContext Injection Prevention
+
+The `auth_context` field on `ChatRequest` is annotated with
+`#[serde(skip_deserializing)]`. This means:
+
+- The field is populated server-side by the `AgentLoop`, not from user input
+- JSON payloads sent through the gateway API cannot inject an `auth_context`
+- Even if a user includes `"auth_context": {"level": 2}` in their request
+  JSON, it is silently dropped during deserialization
+
+### Source Files
+
+| File | Description |
+|------|-------------|
+| `clawft-types/src/routing.rs` | Config types: `RoutingConfig`, `UserPermissions`, `AuthContext`, etc. |
+| `clawft-core/src/pipeline/tiered_router.rs` | `TieredRouter` implementing `ModelRouter` trait |
+| `clawft-core/src/pipeline/permissions.rs` | `PermissionResolver` with 5-layer merge |
+| `clawft-core/src/pipeline/cost_tracker.rs` | `CostTracker` with atomic budget reservation |
+| `clawft-core/src/pipeline/rate_limiter.rs` | `RateLimiter` with sliding window |
+| `clawft-core/src/routing_validation.rs` | Config validation (17+ rules) |
+| `clawft-core/src/tools/registry.rs` | Tool permission enforcement |
 
 ---
 
@@ -681,12 +904,25 @@ here as stubs for future development.
 
 ## Source Files
 
-- `clawft-core/src/pipeline/traits.rs` -- Trait definitions and `PipelineRegistry`
+### Pipeline Stages
+- `clawft-core/src/pipeline/traits.rs` -- Trait definitions, `ChatRequest`, `RoutingDecision`, `PipelineRegistry`
 - `clawft-core/src/pipeline/classifier.rs` -- `KeywordClassifier`
-- `clawft-core/src/pipeline/router.rs` -- `StaticRouter`
+- `clawft-core/src/pipeline/router.rs` -- `StaticRouter` (Level 0)
 - `clawft-core/src/pipeline/assembler.rs` -- `TokenBudgetAssembler`
 - `clawft-core/src/pipeline/transport.rs` -- `OpenAiCompatTransport` and `LlmProvider`
 - `clawft-core/src/pipeline/scorer.rs` -- `NoopScorer`
 - `clawft-core/src/pipeline/learner.rs` -- `NoopLearner`
 - `clawft-core/src/pipeline/llm_adapter.rs` -- `ClawftLlmAdapter` and `build_live_pipeline`
-- `clawft-core/src/intelligent_router.rs` -- `IntelligentRouter` (behind `vector-memory`)
+
+### Tiered Router (Level 1)
+- `clawft-types/src/routing.rs` -- Config types: `RoutingConfig`, `UserPermissions`, `AuthContext`
+- `clawft-core/src/pipeline/tiered_router.rs` -- `TieredRouter` (8-step algorithm, 49 tests)
+- `clawft-core/src/pipeline/permissions.rs` -- `PermissionResolver` (5-layer merge, 31 tests)
+- `clawft-core/src/pipeline/cost_tracker.rs` -- `CostTracker` (atomic budgets, 27 tests)
+- `clawft-core/src/pipeline/rate_limiter.rs` -- `RateLimiter` (sliding window, 21 tests)
+- `clawft-core/src/routing_validation.rs` -- Config validation (17+ rules, 45 tests)
+- `clawft-core/src/tools/registry.rs` -- Permission-gated tool execution
+- `clawft-core/src/agent/loop_core.rs` -- AuthContext creation from inbound messages
+
+### Intelligent Router (Level 2, behind `vector-memory`)
+- `clawft-core/src/intelligent_router.rs` -- `IntelligentRouter`

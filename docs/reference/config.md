@@ -791,7 +791,7 @@ Tiered model routing with permission-based access control, cost budgets, and
 rate limiting. This section is opt-in: existing configs without a `routing`
 section continue to use the `StaticRouter` unchanged.
 
-Source: `.planning/08-tiered-router.md`
+Source: `crates/clawft-types/src/routing.rs`, `crates/clawft-core/src/pipeline/tiered_router.rs`
 
 **Default behavior**: Workspaces are **private by default**. Unidentified users
 receive `zero_trust` permissions (free-tier models only, no tools, aggressive

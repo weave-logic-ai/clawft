@@ -321,6 +321,13 @@ pub enum BudgetResult {
     MonthlyLimitExceeded { spent: f64, limit: f64 },
 }
 
+impl BudgetResult {
+    /// Returns `true` if the budget check passed.
+    pub fn is_approved(&self) -> bool {
+        matches!(self, BudgetResult::Approved)
+    }
+}
+
 /// Budget tracking interface used by the TieredRouter.
 ///
 /// The real implementation lives in Phase D (CostTracker). This trait

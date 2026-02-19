@@ -38,6 +38,7 @@ use clawft_types::provider::ContentBlock;
 use clawft_types::routing::AuthContext;
 
 use crate::bus::MessageBus;
+use crate::pipeline::permissions::PermissionResolver;
 use crate::pipeline::traits::{ChatRequest, LlmMessage, PipelineRegistry};
 use crate::session::SessionManager;
 use crate::tools::registry::ToolRegistry;
@@ -76,6 +77,7 @@ pub struct AgentLoop<P: Platform> {
     tools: ToolRegistry,
     context: ContextBuilder<P>,
     sessions: SessionManager<P>,
+    permission_resolver: PermissionResolver,
 }
 
 impl<P: Platform> AgentLoop<P> {
@@ -90,6 +92,7 @@ impl<P: Platform> AgentLoop<P> {
     /// * `tools` -- Tool registry for executing tool calls
     /// * `context` -- Context builder for assembling prompts
     /// * `sessions` -- Session manager for conversation persistence
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: AgentsConfig,
         platform: Arc<P>,
@@ -98,6 +101,7 @@ impl<P: Platform> AgentLoop<P> {
         tools: ToolRegistry,
         context: ContextBuilder<P>,
         sessions: SessionManager<P>,
+        permission_resolver: PermissionResolver,
     ) -> Self {
         Self {
             config,
@@ -107,6 +111,7 @@ impl<P: Platform> AgentLoop<P> {
             tools,
             context,
             sessions,
+            permission_resolver,
         }
     }
 
@@ -194,7 +199,7 @@ impl<P: Platform> AgentLoop<P> {
         // 6. Resolve auth context from inbound message identity.
         //    CLI channel gets admin permissions; other channels get zero-trust
         //    defaults with the sender_id and channel attached.
-        let auth_context = Self::resolve_auth_context(&msg);
+        let auth_context = self.resolve_auth_context(&msg);
 
         // 7. Create pipeline request with auth context
         let request = ChatRequest {
@@ -233,24 +238,25 @@ impl<P: Platform> AgentLoop<P> {
 
     /// Resolve [`AuthContext`] from the inbound message's sender identity.
     ///
-    /// For CLI channel messages (`channel == "cli"`), returns admin-level
-    /// permissions via [`AuthContext::cli_default()`]. For all other channels,
-    /// returns an `AuthContext` with the sender's ID and channel name, using
-    /// zero-trust (default) permissions.
+    /// Resolve permissions for an inbound message using the 5-layer
+    /// [`PermissionResolver`].
     ///
-    /// When the `PermissionResolver` (Phase B) is available, this method
-    /// will delegate to `resolver.resolve(sender_id, channel, allow_from_match)`
-    /// for full 5-layer permission resolution.
-    fn resolve_auth_context(msg: &InboundMessage) -> AuthContext {
-        if msg.channel == "cli" {
-            AuthContext::cli_default()
-        } else {
-            AuthContext {
-                sender_id: msg.sender_id.clone(),
-                channel: msg.channel.clone(),
-                permissions: Default::default(), // zero-trust
-            }
-        }
+    /// Resolution order (highest priority wins):
+    /// 1. Built-in level defaults
+    /// 2. Global config level overrides
+    /// 3. Workspace config level overrides
+    /// 4. Per-user overrides
+    /// 5. Per-channel overrides (highest priority)
+    ///
+    /// CLI channel messages always receive admin-level (Level 2)
+    /// permissions via the resolver's `cli_default_level`.
+    fn resolve_auth_context(&self, msg: &InboundMessage) -> AuthContext {
+        // allow_from_match is set by channel plugins when they verify the
+        // sender is in the channel's allow_from list. The CLI channel does
+        // NOT use allow_from -- it gets admin via the cli_default_level path
+        // in PermissionResolver::determine_level, so pass false here.
+        self.permission_resolver
+            .resolve_auth_context(&msg.sender_id, &msg.channel, false)
     }
 
     /// Execute the tool loop: call LLM, execute tools, repeat.
@@ -665,6 +671,7 @@ mod tests {
             tools,
             context,
             sessions,
+            PermissionResolver::default_resolver(),
         );
         (agent, dir)
     }
@@ -989,6 +996,7 @@ mod tests {
             tools,
             context,
             sessions,
+            PermissionResolver::default_resolver(),
         );
 
         let request = ChatRequest {
@@ -1495,11 +1503,18 @@ mod tests {
         }
     }
 
+    /// Helper: resolve auth context using the default resolver (CLI=admin,
+    /// everything else=zero_trust) without needing a full AgentLoop.
+    fn resolve_default(msg: &InboundMessage) -> AuthContext {
+        let resolver = PermissionResolver::default_resolver();
+        resolver.resolve_auth_context(&msg.sender_id, &msg.channel, false)
+    }
+
     /// F-05: CLI channel gets admin-level permissions via cli_default().
     #[test]
     fn test_resolve_auth_context_cli() {
         let msg = make_inbound("cli", "local");
-        let ctx = AgentLoop::<NativePlatform>::resolve_auth_context(&msg);
+        let ctx = resolve_default(&msg);
 
         assert_eq!(ctx.sender_id, "local");
         assert_eq!(ctx.channel, "cli");
@@ -1518,7 +1533,7 @@ mod tests {
     #[test]
     fn test_resolve_auth_context_empty_sender() {
         let msg = make_inbound("telegram", "");
-        let ctx = AgentLoop::<NativePlatform>::resolve_auth_context(&msg);
+        let ctx = resolve_default(&msg);
 
         assert_eq!(ctx.sender_id, "");
         assert_eq!(ctx.channel, "telegram");
@@ -1532,7 +1547,7 @@ mod tests {
     #[test]
     fn test_resolve_auth_context_gateway_channel() {
         let msg = make_inbound("gateway", "api_key_user");
-        let ctx = AgentLoop::<NativePlatform>::resolve_auth_context(&msg);
+        let ctx = resolve_default(&msg);
 
         assert_eq!(ctx.sender_id, "api_key_user");
         assert_eq!(ctx.channel, "gateway");
@@ -1547,18 +1562,19 @@ mod tests {
     }
 
     /// F-06/07: Telegram channel gets zero-trust with sender identity preserved.
-    /// (When PermissionResolver is available, allowed_users will get level >= 1;
-    /// for now, all non-CLI channels get zero-trust.)
+    /// With the default resolver (no per-user overrides), all non-CLI channels
+    /// get zero-trust. Config-driven per-user/channel overrides are tested in
+    /// the `permissions` module.
     #[test]
     fn test_resolve_auth_context_telegram_preserves_identity() {
         let msg = make_inbound("telegram", "12345");
-        let ctx = AgentLoop::<NativePlatform>::resolve_auth_context(&msg);
+        let ctx = resolve_default(&msg);
 
         assert_eq!(ctx.sender_id, "12345");
         assert_eq!(ctx.channel, "telegram");
         assert_eq!(
             ctx.permissions.level, 0,
-            "non-CLI channel gets zero-trust until PermissionResolver (Phase B)"
+            "non-CLI channel gets zero-trust with default resolver"
         );
     }
 
@@ -1566,7 +1582,7 @@ mod tests {
     #[test]
     fn test_resolve_auth_context_discord() {
         let msg = make_inbound("discord", "snowflake_987654321");
-        let ctx = AgentLoop::<NativePlatform>::resolve_auth_context(&msg);
+        let ctx = resolve_default(&msg);
 
         assert_eq!(ctx.sender_id, "snowflake_987654321");
         assert_eq!(ctx.channel, "discord");
@@ -1577,7 +1593,7 @@ mod tests {
     #[test]
     fn test_resolve_auth_context_slack() {
         let msg = make_inbound("slack", "U12345");
-        let ctx = AgentLoop::<NativePlatform>::resolve_auth_context(&msg);
+        let ctx = resolve_default(&msg);
 
         assert_eq!(ctx.sender_id, "U12345");
         assert_eq!(ctx.channel, "slack");

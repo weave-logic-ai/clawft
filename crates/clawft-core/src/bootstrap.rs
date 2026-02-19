@@ -32,10 +32,13 @@ use crate::agent::skills::SkillsLoader;
 use crate::bus::MessageBus;
 use crate::pipeline::assembler::TokenBudgetAssembler;
 use crate::pipeline::classifier::KeywordClassifier;
+use crate::pipeline::cost_tracker::CostTracker;
 use crate::pipeline::learner::NoopLearner;
+use crate::pipeline::rate_limiter::RateLimiter;
 use crate::pipeline::router::StaticRouter;
 use crate::pipeline::scorer::NoopScorer;
-use crate::pipeline::traits::{Pipeline, PipelineRegistry};
+use crate::pipeline::tiered_router::TieredRouter;
+use crate::pipeline::traits::{ModelRouter, Pipeline, PipelineRegistry};
 use crate::pipeline::transport::OpenAiCompatTransport;
 use crate::session::SessionManager;
 use crate::tools::registry::ToolRegistry;
@@ -156,6 +159,10 @@ impl<P: Platform> AppContext<P> {
     /// All dependencies are moved into the agent loop. After this call,
     /// the `AppContext` is consumed and cannot be reused.
     pub fn into_agent_loop(self) -> AgentLoop<P> {
+        let resolver = crate::pipeline::permissions::PermissionResolver::new(
+            &self.config.routing,
+            None, // workspace config not yet supported
+        );
         AgentLoop::new(
             self.config.agents,
             self.platform,
@@ -164,6 +171,7 @@ impl<P: Platform> AppContext<P> {
             self.tools,
             self.context,
             self.sessions,
+            resolver,
         )
     }
 
@@ -238,18 +246,17 @@ pub fn build_live_pipeline(config: &Config) -> PipelineRegistry {
     crate::pipeline::llm_adapter::build_live_pipeline(config)
 }
 
-/// Build the default Level 0 pipeline from configuration.
+/// Build the default pipeline from configuration.
 ///
-/// Uses:
-/// - [`KeywordClassifier`] for task classification
-/// - [`StaticRouter`] for model routing (from config defaults)
-/// - [`TokenBudgetAssembler`] with max_tokens from config
-/// - [`OpenAiCompatTransport`] in stub mode (no LLM provider)
-/// - [`NoopScorer`] for quality scoring
-/// - [`NoopLearner`] for learning
+/// Uses the appropriate router based on `config.routing.mode`:
+/// - `"tiered"` -> [`TieredRouter`] with cost tracking and rate limiting
+/// - `"static"` (default) -> [`StaticRouter`] from config defaults
+///
+/// Other stages: [`KeywordClassifier`], [`TokenBudgetAssembler`],
+/// [`OpenAiCompatTransport`] (stub), [`NoopScorer`], [`NoopLearner`].
 fn build_default_pipeline(config: &Config) -> PipelineRegistry {
     let classifier = Arc::new(KeywordClassifier::new());
-    let router = Arc::new(StaticRouter::from_config(&config.agents));
+    let router: Arc<dyn ModelRouter> = build_router_from_config(config);
     let assembler = Arc::new(TokenBudgetAssembler::new(
         config.agents.defaults.max_tokens.max(1) as usize,
     ));
@@ -267,6 +274,26 @@ fn build_default_pipeline(config: &Config) -> PipelineRegistry {
     };
 
     PipelineRegistry::new(pipeline)
+}
+
+/// Build the appropriate router based on `config.routing.mode`.
+fn build_router_from_config(config: &Config) -> Arc<dyn ModelRouter> {
+    if config.routing.mode == "tiered" {
+        let routing = config.routing.clone();
+        let cost_tracker = Arc::new(
+            CostTracker::new(routing.cost_budgets.reset_hour_utc),
+        );
+        let rate_limiter = Arc::new(
+            RateLimiter::new(routing.rate_limiting.window_seconds, routing.rate_limiting.global_rate_limit_rpm),
+        );
+        Arc::new(
+            TieredRouter::new(routing)
+                .with_cost_tracker(cost_tracker)
+                .with_rate_limiter(rate_limiter),
+        )
+    } else {
+        Arc::new(StaticRouter::from_config(&config.agents))
+    }
 }
 
 #[cfg(test)]
@@ -462,13 +489,13 @@ mod tests {
 
     #[tokio::test]
     async fn build_live_pipeline_transport_is_configured() {
+        use crate::pipeline::traits::{LlmMessage, TaskType, TransportRequest};
+
         // The live pipeline should have a configured (non-stub) transport.
         // When we call complete() on the stub transport, it returns an error
         // containing "transport not configured". The live pipeline should
         // NOT produce that error -- it should attempt a real HTTP call
         // (which will fail differently without an API key).
-        use crate::pipeline::traits::{ChatRequest, LlmMessage, TaskType, TransportRequest};
-
         let config = test_config();
         let registry = build_live_pipeline(&config);
 
@@ -510,8 +537,6 @@ mod tests {
 
     #[tokio::test]
     async fn app_context_enable_live_llm() {
-        use crate::pipeline::traits::{ChatRequest, LlmMessage, TaskType, TransportRequest};
-
         let platform = Arc::new(NativePlatform::new());
         let mut ctx = AppContext::new(test_config(), platform).await.unwrap();
 

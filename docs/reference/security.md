@@ -11,16 +11,18 @@ server-side request forgery (SSRF).
 
 clawft adopts a **defense-in-depth** approach to tool security:
 
-1. **Command Execution Policy** -- Controls which shell commands the agent may
+1. **Permission-Gated Tool Access** -- Per-user tool allowlists enforced by
+   `AuthContext` on every request. See [Permission-Gated Tool Access](#permission-gated-tool-access).
+2. **Command Execution Policy** -- Controls which shell commands the agent may
    run. Affects the `exec_shell` and `spawn` tools.
-2. **URL Safety Policy** -- Controls which URLs the agent may fetch. Affects the
+3. **URL Safety Policy** -- Controls which URLs the agent may fetch. Affects the
    `web_fetch` tool. Blocks SSRF attacks targeting private networks and cloud
    metadata endpoints.
-3. **Workspace Containment** -- All file tools are sandboxed to a workspace
+4. **Workspace Containment** -- All file tools are sandboxed to a workspace
    directory. Covered in the [Tools Reference](tools.md#workspace-containment).
-4. **Input Sanitization** -- Session IDs, tool results, and content are
+5. **Input Sanitization** -- Session IDs, tool results, and content are
    validated and sanitized before use.
-5. **Output Truncation** -- Tool results are capped at 64 KB to prevent
+6. **Output Truncation** -- Tool results are capped at 64 KB to prevent
    unbounded context growth.
 
 Each layer operates independently. A command must pass **all** applicable
@@ -271,6 +273,91 @@ configuration.
 Both `snake_case` and `camelCase` field names are accepted in JSON
 configuration files (`command_policy` / `commandPolicy`,
 `url_policy` / `urlPolicy`, `allow_private` / `allowPrivate`, etc.).
+
+---
+
+## Permission-Gated Tool Access
+
+Source: `clawft-core/src/tools/registry.rs`, `clawft-core/src/pipeline/permissions.rs`
+
+The `ToolRegistry` enforces permission checks before every tool execution.
+When an `AuthContext` is present on the `ChatRequest`, the registry validates
+that the user has permission to invoke the requested tool.
+
+### How It Works
+
+```
+Tool call -> Extract permissions from AuthContext -> 4-step check -> Execute or Reject
+```
+
+**Step 1: Null permissions bypass.** If no `AuthContext` is attached (e.g.,
+internal pipeline calls), the tool executes without permission checks.
+
+**Step 2: Tool allowlist.** The user's `tool_access` list is checked. If the
+list is empty, all tools are denied. If it contains `"*"`, all tools are
+allowed. Otherwise, the tool name must appear in the list.
+
+**Step 3: Tool metadata level.** If the tool has a `required_permission_level`
+in its metadata, the user's `level` must be >= that value.
+
+**Step 4: Custom permissions.** If the tool requires specific custom
+permissions (e.g., `"vision_enabled": true`), those must match in the user's
+`custom_permissions` map.
+
+### Error Format
+
+Permission denials return a structured `ToolError::PermissionDenied`:
+
+```rust
+ToolError::PermissionDenied {
+    tool: String,    // the tool that was denied
+    reason: String,  // why it was denied
+}
+```
+
+### Tool Access by Permission Level
+
+| Level | Name | Default Tool Access |
+|-------|------|---------------------|
+| 0 | `zero_trust` | None (empty list) |
+| 1 | `user` | `read_file`, `write_file`, `edit_file`, `list_dir`, `web_search`, `web_fetch`, `message` |
+| 2 | `admin` | All (`*`) |
+
+### Per-User Tool Overrides
+
+Individual users can have custom tool access that differs from their level's
+defaults:
+
+```json
+{
+  "routing": {
+    "permissions": {
+      "users": {
+        "bob_discord_456": {
+          "level": 1,
+          "tool_access": ["read_file", "list_dir", "web_search"]
+        }
+      }
+    }
+  }
+}
+```
+
+Bob gets Level 1 permissions but with a restricted tool set (no `write_file`,
+`edit_file`, `web_fetch`, or `message`).
+
+### AuthContext Injection Prevention
+
+The `auth_context` field on `ChatRequest` uses `#[serde(skip_deserializing)]`,
+which means:
+
+- Users cannot inject permissions via the gateway API JSON payload
+- The field is only populated server-side by the `AgentLoop`
+- CLI users automatically receive `admin` (Level 2) permissions
+- Remote channel users receive `zero_trust` (Level 0) by default
+
+This is a critical security boundary: the permission system is enforced
+server-side and cannot be bypassed through crafted input.
 
 ---
 

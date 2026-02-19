@@ -102,9 +102,9 @@ graph TD
 
 #### Phase 1 Integration Gate
 **Criteria** (ALL must pass before Phase 2):
-- [ ] `cargo build --release --workspace` produces single `weft` binary
+- [x] `cargo build --release --workspace` produces single `weft` binary
 - [x] Binary reads `~/.nanobot/config.json` and `~/.clawft/config.json`
-- [ ] `weft agent -m "What is 2+2?"` returns LLM response
+- [x] `weft agent -m "What is 2+2?"` returns LLM response
 - [x] `weft gateway` starts Telegram bot via plugin architecture
 - [ ] Telegram bot receives messages and responds with tool support
 - [x] File tools (read, write, list) work

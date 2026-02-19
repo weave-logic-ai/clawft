@@ -27,28 +27,7 @@ use std::sync::RwLock;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-// ── BudgetResult ────────────────────────────────────────────────────────
-
-/// Result of a budget check or reservation attempt.
-///
-/// Will be imported from `traits` once wired; defined locally for
-/// standalone compilation during phased development.
-#[derive(Debug, Clone, PartialEq)]
-pub enum BudgetResult {
-    /// Budget allows the request.
-    Approved,
-    /// User's daily budget would be exceeded.
-    DailyLimitExceeded { spent: f64, limit: f64 },
-    /// User's monthly budget would be exceeded.
-    MonthlyLimitExceeded { spent: f64, limit: f64 },
-}
-
-impl BudgetResult {
-    /// Returns `true` if the budget check passed.
-    pub fn is_approved(&self) -> bool {
-        matches!(self, BudgetResult::Approved)
-    }
-}
+use crate::pipeline::traits::{BudgetResult, CostTrackable};
 
 // ── UserSpend ───────────────────────────────────────────────────────────
 
@@ -507,6 +486,26 @@ impl std::fmt::Debug for CostTracker {
             .field("persistence_enabled", &self.persistence_enabled)
             .field("persistence_path", &self.persistence_path)
             .finish()
+    }
+}
+
+impl CostTrackable for CostTracker {
+    fn check_budget(
+        &self,
+        sender_id: &str,
+        estimated_cost: f64,
+        daily_limit: f64,
+        monthly_limit: f64,
+    ) -> BudgetResult {
+        CostTracker::check_budget(self, sender_id, estimated_cost, daily_limit, monthly_limit)
+    }
+
+    fn record_estimated(&self, sender_id: &str, estimated_cost: f64) {
+        CostTracker::record_estimated(self, sender_id, estimated_cost);
+    }
+
+    fn record_actual(&self, sender_id: &str, estimated_cost: f64, actual_cost: f64) {
+        CostTracker::record_actual(self, sender_id, estimated_cost, actual_cost);
     }
 }
 
