@@ -17,6 +17,7 @@
 //! - [`build_live_pipeline`] -- constructs a full [`PipelineRegistry`] wired
 //!   with a real LLM transport.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -372,6 +373,109 @@ fn apply_config_overrides(
 }
 
 // ---------------------------------------------------------------------------
+// Multi-provider adapter factory
+// ---------------------------------------------------------------------------
+
+/// Create an [`LlmProvider`] adapter for a specific provider name.
+///
+/// Looks up the provider in `clawft_llm::config::builtin_providers()`,
+/// applies overrides from the application config (base URL, headers, API key),
+/// and returns the wrapped adapter.
+fn create_adapter_for_provider(
+    provider_name: &str,
+    config: &Config,
+) -> Arc<dyn LlmProvider> {
+    let builtins = clawft_llm::config::builtin_providers();
+
+    let mut provider_config = builtins
+        .iter()
+        .find(|c| c.name == provider_name)
+        .cloned()
+        .unwrap_or_else(|| builtins[0].clone());
+
+    apply_config_overrides(&mut provider_config, config, Some(provider_name));
+
+    debug!(
+        provider = %provider_config.name,
+        base_url = %provider_config.base_url,
+        "creating LLM adapter for provider"
+    );
+
+    // Check for an explicit API key in the app config.
+    let app_api_key = resolve_app_api_key(provider_name, config);
+
+    let provider = if let Some(key) = app_api_key {
+        OpenAiCompatProvider::with_api_key(provider_config, key)
+    } else {
+        OpenAiCompatProvider::new(provider_config)
+    };
+
+    Arc::new(ClawftLlmAdapter::new(Arc::new(provider)))
+}
+
+/// Resolve an explicit API key from the application config for a provider.
+///
+/// Returns `Some(key)` if the config has a non-empty `api_key` for the
+/// provider, `None` otherwise (the provider will fall back to its env var).
+fn resolve_app_api_key(provider_name: &str, config: &Config) -> Option<String> {
+    let key = match provider_name {
+        "openai" => &config.providers.openai.api_key,
+        "anthropic" => &config.providers.anthropic.api_key,
+        "groq" => &config.providers.groq.api_key,
+        "deepseek" => &config.providers.deepseek.api_key,
+        "openrouter" => &config.providers.openrouter.api_key,
+        "gemini" => &config.providers.gemini.api_key,
+        _ => return None,
+    };
+    if key.is_empty() { None } else { Some(key.clone()) }
+}
+
+/// Create adapters for all providers referenced in the routing tiers,
+/// plus the fallback model and the default model.
+///
+/// Returns a map from provider prefix (e.g. `"gemini"`) to an adapter.
+fn create_adapters_for_tiers(config: &Config) -> HashMap<String, Arc<dyn LlmProvider>> {
+    let mut adapters: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
+
+    // Collect all unique provider prefixes from tier models.
+    for tier in &config.routing.tiers {
+        for model_str in &tier.models {
+            let (prefix, _) = ProviderRouter::strip_prefix(model_str);
+            if let Some(name) = prefix {
+                if !adapters.contains_key(&name) {
+                    adapters.insert(name.clone(), create_adapter_for_provider(&name, config));
+                }
+            }
+        }
+    }
+
+    // Ensure the fallback model's provider is included.
+    if let Some(ref fallback_model) = config.routing.fallback_model {
+        let (fallback_prefix, _) = ProviderRouter::strip_prefix(fallback_model);
+        if let Some(name) = fallback_prefix {
+            adapters
+                .entry(name.clone())
+                .or_insert_with(|| create_adapter_for_provider(&name, config));
+        }
+    }
+
+    // Ensure the default model's provider is included.
+    let (default_prefix, _) = ProviderRouter::strip_prefix(&config.agents.defaults.model);
+    if let Some(name) = default_prefix {
+        adapters
+            .entry(name.clone())
+            .or_insert_with(|| create_adapter_for_provider(&name, config));
+    }
+
+    debug!(
+        providers = ?adapters.keys().collect::<Vec<_>>(),
+        "created adapters for tiered routing"
+    );
+
+    adapters
+}
+
+// ---------------------------------------------------------------------------
 // Pipeline construction
 // ---------------------------------------------------------------------------
 
@@ -387,8 +491,17 @@ pub fn build_live_pipeline(config: &Config) -> PipelineRegistry {
     let assembler = Arc::new(TokenBudgetAssembler::new(
         config.agents.defaults.max_tokens.max(1) as usize,
     ));
-    let adapter = create_adapter_from_config(config);
-    let transport = Arc::new(OpenAiCompatTransport::with_provider(adapter));
+
+    // Build transport: multi-provider for tiered routing, single for static.
+    let transport: Arc<OpenAiCompatTransport> = if config.routing.mode == "tiered" {
+        let adapters = create_adapters_for_tiers(config);
+        let fallback = create_adapter_from_config(config);
+        Arc::new(OpenAiCompatTransport::with_providers(adapters, fallback))
+    } else {
+        let adapter = create_adapter_from_config(config);
+        Arc::new(OpenAiCompatTransport::with_provider(adapter))
+    };
+
     let scorer = Arc::new(NoopScorer::new());
     let learner = Arc::new(NoopLearner::new());
 

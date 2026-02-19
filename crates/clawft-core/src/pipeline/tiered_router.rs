@@ -188,7 +188,7 @@ impl TieredRouter {
             .tier_index
             .get(&permissions.max_tier)
             .copied()
-            .unwrap_or(0); // Unknown tier name -> cheapest only
+            .unwrap_or(usize::MAX); // Unknown tier name -> allow all tiers
 
         self.tiers
             .iter()
@@ -1303,7 +1303,7 @@ mod tests {
     }
 
     #[test]
-    fn filter_tiers_unknown_max_tier() {
+    fn filter_tiers_unknown_max_tier_allows_all() {
         let config = make_config(standard_tiers());
         let router = TieredRouter::new(config);
         let perms = UserPermissions {
@@ -1311,9 +1311,9 @@ mod tests {
             ..UserPermissions::default()
         };
         let allowed = router.filter_tiers_by_permissions(&perms);
-        // Unknown tier defaults to ordinal 0 (cheapest only)
-        assert_eq!(allowed.len(), 1);
-        assert_eq!(allowed[0].name, "free");
+        // Unknown tier name -> allow all tiers (e.g. admin with "elite"
+        // max_tier when config only defines free/standard/premium/elite).
+        assert_eq!(allowed.len(), 4);
     }
 
     #[test]

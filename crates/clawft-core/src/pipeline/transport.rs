@@ -85,6 +85,8 @@ pub trait LlmProvider: Send + Sync {
 /// - **Provider mode**: Delegates to an injected [`LlmProvider`] for real calls.
 pub struct OpenAiCompatTransport {
     provider: Option<Arc<dyn LlmProvider>>,
+    /// Named providers for multi-provider routing (keyed by provider prefix).
+    providers: HashMap<String, Arc<dyn LlmProvider>>,
 }
 
 impl OpenAiCompatTransport {
@@ -92,7 +94,10 @@ impl OpenAiCompatTransport {
     ///
     /// Use this during development or when no LLM provider is available.
     pub fn new() -> Self {
-        Self { provider: None }
+        Self {
+            provider: None,
+            providers: HashMap::new(),
+        }
     }
 
     /// Create a transport backed by a real LLM provider.
@@ -103,12 +108,29 @@ impl OpenAiCompatTransport {
     pub fn with_provider(provider: Arc<dyn LlmProvider>) -> Self {
         Self {
             provider: Some(provider),
+            providers: HashMap::new(),
+        }
+    }
+
+    /// Create a transport backed by multiple named LLM providers.
+    ///
+    /// The `providers` map is keyed by provider prefix (e.g. `"gemini"`,
+    /// `"openrouter"`, `"anthropic"`). When a [`TransportRequest`] arrives,
+    /// the transport looks up `request.provider` in this map. If no match
+    /// is found, it falls back to `fallback`.
+    pub fn with_providers(
+        providers: HashMap<String, Arc<dyn LlmProvider>>,
+        fallback: Arc<dyn LlmProvider>,
+    ) -> Self {
+        Self {
+            provider: Some(fallback),
+            providers,
         }
     }
 
     /// Returns true if this transport has a configured provider.
     pub fn is_configured(&self) -> bool {
-        self.provider.is_some()
+        self.provider.is_some() || !self.providers.is_empty()
     }
 }
 
@@ -122,8 +144,9 @@ impl Default for OpenAiCompatTransport {
 impl LlmTransport for OpenAiCompatTransport {
     async fn complete(&self, request: &TransportRequest) -> clawft_types::Result<LlmResponse> {
         let provider = self
-            .provider
-            .as_ref()
+            .providers
+            .get(&request.provider)
+            .or(self.provider.as_ref())
             .ok_or_else(|| ClawftError::Provider {
                 message: "transport not configured -- call with_provider()".into(),
             })?;
@@ -183,8 +206,9 @@ impl LlmTransport for OpenAiCompatTransport {
         callback: StreamCallback,
     ) -> clawft_types::Result<LlmResponse> {
         let provider = self
-            .provider
-            .as_ref()
+            .providers
+            .get(&request.provider)
+            .or(self.provider.as_ref())
             .ok_or_else(|| ClawftError::Provider {
                 message: "transport not configured -- call with_provider()".into(),
             })?;

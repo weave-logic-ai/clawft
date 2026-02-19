@@ -30,13 +30,25 @@ impl ChannelFactory for DiscordChannelFactory {
     }
 
     fn build(&self, config: &serde_json::Value) -> Result<Arc<dyn Channel>, ChannelError> {
-        let discord_config: DiscordConfig = serde_json::from_value(config.clone())
+        let mut discord_config: DiscordConfig = serde_json::from_value(config.clone())
             .map_err(|e| ChannelError::Other(format!("invalid discord config: {e}")))?;
 
+        // Resolve token: explicit value > token_env env var > error
         if discord_config.token.is_empty() {
-            return Err(ChannelError::Other(
-                "missing 'token' in discord config".into(),
-            ));
+            if let Some(ref env_var) = discord_config.token_env {
+                match std::env::var(env_var) {
+                    Ok(val) if !val.is_empty() => discord_config.token = val,
+                    _ => {
+                        return Err(ChannelError::Other(format!(
+                            "discord token_env '{env_var}' is not set or empty"
+                        )));
+                    }
+                }
+            } else {
+                return Err(ChannelError::Other(
+                    "missing 'token' (or 'token_env') in discord config".into(),
+                ));
+            }
         }
 
         Ok(Arc::new(DiscordChannel::new(discord_config)))
@@ -160,6 +172,51 @@ mod tests {
         let ch = channel.unwrap();
         assert!(ch.is_allowed("123"));
         assert!(!ch.is_allowed("999"));
+    }
+
+    #[test]
+    fn factory_build_token_env_resolves() {
+        let env_var = "CLAWFT_TEST_DISCORD_TOKEN_12345";
+        // SAFETY: test-only, single-threaded test runner for this module.
+        unsafe { std::env::set_var(env_var, "token-from-env") };
+        let factory = DiscordChannelFactory;
+        let config = serde_json::json!({
+            "token_env": env_var
+        });
+        let channel = factory.build(&config);
+        unsafe { std::env::remove_var(env_var) };
+        assert!(channel.is_ok());
+        assert_eq!(channel.unwrap().name(), "discord");
+    }
+
+    #[test]
+    fn factory_build_token_env_missing_var_errors() {
+        let factory = DiscordChannelFactory;
+        let config = serde_json::json!({
+            "token_env": "CLAWFT_TEST_NONEXISTENT_VAR_99999"
+        });
+        let result = factory.build(&config);
+        match result {
+            Err(ChannelError::Other(msg)) => {
+                assert!(msg.contains("CLAWFT_TEST_NONEXISTENT_VAR_99999"), "error should mention env var: {msg}");
+            }
+            _ => panic!("expected ChannelError::Other"),
+        }
+    }
+
+    #[test]
+    fn factory_build_explicit_token_takes_priority_over_env() {
+        let env_var = "CLAWFT_TEST_DISCORD_PRIO_TOKEN";
+        // SAFETY: test-only, single-threaded test runner for this module.
+        unsafe { std::env::set_var(env_var, "env-token") };
+        let factory = DiscordChannelFactory;
+        let config = serde_json::json!({
+            "token": "explicit-token",
+            "token_env": env_var
+        });
+        let channel = factory.build(&config);
+        unsafe { std::env::remove_var(env_var) };
+        assert!(channel.is_ok());
     }
 
     #[test]

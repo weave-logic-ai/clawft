@@ -116,6 +116,7 @@ mod tests {
         cfg.channels.telegram = TelegramConfig {
             enabled: true,
             token: "test-token-123".into(),
+            token_env: None,
             allow_from: vec![],
             proxy: None,
         };

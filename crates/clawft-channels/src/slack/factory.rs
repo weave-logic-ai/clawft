@@ -31,19 +31,43 @@ impl ChannelFactory for SlackChannelFactory {
     }
 
     fn build(&self, config: &serde_json::Value) -> Result<Arc<dyn Channel>, ChannelError> {
-        let slack_config: SlackConfig = serde_json::from_value(config.clone())
+        let mut slack_config: SlackConfig = serde_json::from_value(config.clone())
             .map_err(|e| ChannelError::Other(format!("invalid slack config: {e}")))?;
 
+        // Resolve bot_token: explicit value > bot_token_env env var > error
         if slack_config.bot_token.is_empty() {
-            return Err(ChannelError::Other(
-                "missing 'bot_token' in slack config".into(),
-            ));
+            if let Some(ref env_var) = slack_config.bot_token_env {
+                match std::env::var(env_var) {
+                    Ok(val) if !val.is_empty() => slack_config.bot_token = val,
+                    _ => {
+                        return Err(ChannelError::Other(format!(
+                            "slack bot_token_env '{env_var}' is not set or empty"
+                        )));
+                    }
+                }
+            } else {
+                return Err(ChannelError::Other(
+                    "missing 'bot_token' (or 'bot_token_env') in slack config".into(),
+                ));
+            }
         }
 
+        // Resolve app_token: explicit value > app_token_env env var > error
         if slack_config.app_token.is_empty() {
-            return Err(ChannelError::Other(
-                "missing 'app_token' in slack config".into(),
-            ));
+            if let Some(ref env_var) = slack_config.app_token_env {
+                match std::env::var(env_var) {
+                    Ok(val) if !val.is_empty() => slack_config.app_token = val,
+                    _ => {
+                        return Err(ChannelError::Other(format!(
+                            "slack app_token_env '{env_var}' is not set or empty"
+                        )));
+                    }
+                }
+            } else {
+                return Err(ChannelError::Other(
+                    "missing 'app_token' (or 'app_token_env') in slack config".into(),
+                ));
+            }
         }
 
         Ok(Arc::new(SlackChannel::new(slack_config)))

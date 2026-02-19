@@ -65,15 +65,15 @@ section you do not need.
   "channels": {
     "telegram": {
       "enabled": true,
-      "token": "123456:ABC-DEF...",
+      "token_env": "TELEGRAM_BOT_TOKEN",
       "allow_from": ["user1"],
       "proxy": null
     },
     "slack": {
       "enabled": true,
       "mode": "socket",
-      "bot_token": "xoxb-...",
-      "app_token": "xapp-...",
+      "bot_token_env": "SLACK_BOT_TOKEN",
+      "app_token_env": "SLACK_APP_TOKEN",
       "webhook_path": "/slack/events",
       "user_token_read_only": true,
       "group_policy": "mention",
@@ -86,7 +86,7 @@ section you do not need.
     },
     "discord": {
       "enabled": true,
-      "token": "MTIz...",
+      "token_env": "DISCORD_BOT_TOKEN",
       "allow_from": [],
       "gateway_url": "wss://gateway.discord.gg/?v=10&encoding=json",
       "intents": 37377
@@ -167,6 +167,7 @@ Built-in provider routing:
 | Mistral | `mistral/` | `MISTRAL_API_KEY` | `https://api.mistral.ai/v1` |
 | Together | `together/` | `TOGETHER_API_KEY` | `https://api.together.xyz/v1` |
 | OpenRouter | `openrouter/` | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1` |
+| Gemini | `gemini/` | `GOOGLE_GEMINI_API_KEY` | `https://generativelanguage.googleapis.com/v1beta/openai` |
 
 ### gateway
 
@@ -218,18 +219,32 @@ Top-level tool configuration.
   "channels": {
     "telegram": {
       "enabled": true,
+      "token_env": "TELEGRAM_BOT_TOKEN"
+    }
+  }
+}
+```
+
+Or with an inline token (not recommended for shared configs):
+
+```json
+{
+  "channels": {
+    "telegram": {
+      "enabled": true,
       "token": "123456789:ABCdef..."
     }
   }
 }
 ```
 
-**Optional fields:**
+**All fields:**
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | boolean | `false` | Enable or disable the Telegram channel. |
 | `token` | string | `""` | Bot API token from BotFather. |
+| `token_env` | string or null | `null` | Environment variable holding the bot token. Used when `token` is empty. |
 | `allow_from` | string[] | `[]` | Restrict to these user IDs or usernames. Empty allows all users. |
 | `proxy` | string or null | `null` | HTTP or SOCKS5 proxy URL for regions where Telegram is restricted. |
 
@@ -253,6 +268,20 @@ Slack uses Socket Mode, which requires both a Bot Token and an App-Level Token.
   "channels": {
     "slack": {
       "enabled": true,
+      "bot_token_env": "SLACK_BOT_TOKEN",
+      "app_token_env": "SLACK_APP_TOKEN"
+    }
+  }
+}
+```
+
+Or with inline tokens:
+
+```json
+{
+  "channels": {
+    "slack": {
+      "enabled": true,
       "bot_token": "xoxb-...",
       "app_token": "xapp-..."
     }
@@ -267,7 +296,9 @@ Slack uses Socket Mode, which requires both a Bot Token and an App-Level Token.
 | `enabled` | boolean | `false` | Enable or disable the Slack channel. |
 | `mode` | string | `"socket"` | Connection mode. Only `"socket"` is currently supported. |
 | `bot_token` | string | `""` | Bot User OAuth Token (`xoxb-...`). |
+| `bot_token_env` | string or null | `null` | Environment variable holding the bot token. Used when `bot_token` is empty. |
 | `app_token` | string | `""` | App-Level Token (`xapp-...`) for Socket Mode. |
+| `app_token_env` | string or null | `null` | Environment variable holding the app token. Used when `app_token` is empty. |
 | `webhook_path` | string | `"/slack/events"` | Webhook path for event subscriptions (future use). |
 | `user_token_read_only` | boolean | `true` | Whether the user token is treated as read-only. |
 | `group_policy` | string | `"mention"` | Group message policy: `"mention"` (respond when @-mentioned), `"open"` (respond to all), or `"allowlist"` (respond only in listed channels). |
@@ -296,6 +327,19 @@ Slack uses Socket Mode, which requires both a Bot Token and an App-Level Token.
   "channels": {
     "discord": {
       "enabled": true,
+      "token_env": "DISCORD_BOT_TOKEN"
+    }
+  }
+}
+```
+
+Or with an inline token:
+
+```json
+{
+  "channels": {
+    "discord": {
+      "enabled": true,
       "token": "MTIz..."
     }
   }
@@ -308,6 +352,7 @@ Slack uses Socket Mode, which requires both a Bot Token and an App-Level Token.
 |-------|------|---------|-------------|
 | `enabled` | boolean | `false` | Enable or disable the Discord channel. |
 | `token` | string | `""` | Bot token from the Developer Portal. |
+| `token_env` | string or null | `null` | Environment variable holding the bot token. Used when `token` is empty. |
 | `allow_from` | string[] | `[]` | Restrict to these user IDs. Empty allows all users. |
 | `gateway_url` | string | `"wss://gateway.discord.gg/?v=10&encoding=json"` | WebSocket gateway URL. Override only for testing. |
 | `intents` | integer | `37377` | Gateway intents bitmask. Default enables GUILDS, GUILD_MESSAGES, DIRECT_MESSAGES, and MESSAGE_CONTENT. |
@@ -379,6 +424,7 @@ The server name (the JSON key) is used for tool namespacing. A server named
 |----------|-------------|
 | `CLAWFT_CONFIG` | Override the config file path. Takes priority over all file-based discovery. |
 | `RUST_LOG` | Controls log verbosity via `tracing`'s `EnvFilter` syntax. Examples: `info`, `debug`, `clawft_core=trace`, `clawft_llm=debug,info`. |
+| **Provider API Keys** | |
 | `OPENAI_API_KEY` | API key for OpenAI models. |
 | `ANTHROPIC_API_KEY` | API key for Anthropic models. |
 | `GROQ_API_KEY` | API key for Groq models. |
@@ -386,10 +432,20 @@ The server name (the JSON key) is used for tool namespacing. A server named
 | `MISTRAL_API_KEY` | API key for Mistral models. |
 | `TOGETHER_API_KEY` | API key for Together AI models. |
 | `OPENROUTER_API_KEY` | API key for OpenRouter gateway. |
+| `GOOGLE_GEMINI_API_KEY` | API key for Google Gemini models. |
+| **Channel Tokens** | |
+| `DISCORD_BOT_TOKEN` | Bot token for the Discord channel. Referenced via `token_env` in the channel config. |
+| `SLACK_BOT_TOKEN` | Bot User OAuth Token for the Slack channel. Referenced via `bot_token_env`. |
+| `SLACK_APP_TOKEN` | App-Level Token for Slack Socket Mode. Referenced via `app_token_env`. |
+| `TELEGRAM_BOT_TOKEN` | Bot token for the Telegram channel. Referenced via `token_env`. |
 
 Provider API keys can be set either in the config file (`providers.<name>.api_key`)
 or as environment variables. Environment variables are generally preferred to
 avoid storing secrets in files.
+
+Channel tokens support the same pattern via `token_env` / `bot_token_env` /
+`app_token_env` fields. When the inline token is empty, the runtime reads the
+named environment variable instead. This keeps secrets out of the config file.
 
 ## Security Policy
 

@@ -312,19 +312,35 @@ impl ChannelFactory for TelegramChannelFactory {
     }
 
     fn build(&self, config: &serde_json::Value) -> Result<Arc<dyn Channel>, ChannelError> {
-        let token = config
+        let mut token = config
             .get("token")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ChannelError::Other("missing 'token' in telegram config".into()))?;
+            .unwrap_or("")
+            .to_owned();
+
+        // Resolve token: explicit value > token_env env var > error
+        if token.is_empty() {
+            if let Some(env_var) = config.get("token_env").and_then(|v| v.as_str()) {
+                match std::env::var(env_var) {
+                    Ok(val) if !val.is_empty() => token = val,
+                    _ => {
+                        return Err(ChannelError::Other(format!(
+                            "telegram token_env '{env_var}' is not set or empty"
+                        )));
+                    }
+                }
+            } else {
+                return Err(ChannelError::Other(
+                    "missing 'token' (or 'token_env') in telegram config".into(),
+                ));
+            }
+        }
 
         let allowed_users: Vec<String> = config
             .get("allowed_users")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
 
-        Ok(Arc::new(TelegramChannel::new(
-            token.to_owned(),
-            allowed_users,
-        )))
+        Ok(Arc::new(TelegramChannel::new(token, allowed_users)))
     }
 }

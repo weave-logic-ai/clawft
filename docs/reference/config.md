@@ -134,6 +134,7 @@ Source: `crates/clawft-llm/src/config.rs`, `crates/clawft-llm/src/router.rs`
 | 5 | **mistral**  | `mistral/`    | `https://api.mistral.ai/v1`       | `MISTRAL_API_KEY`     | `mistral-large-latest`         |
 | 6 | **together** | `together/`   | `https://api.together.xyz/v1`     | `TOGETHER_API_KEY`    | *(none)*                       |
 | 7 | **openrouter** | `openrouter/` | `https://openrouter.ai/api/v1`  | `OPENROUTER_API_KEY`  | *(none)*                       |
+| 8 | **gemini**   | `gemini/`     | `https://generativelanguage.googleapis.com/v1beta/openai` | `GOOGLE_GEMINI_API_KEY` | `gemini-2.5-flash`     |
 
 The first provider in the list (**openai**) is the default fallback. If a model
 string has no recognized prefix (e.g. `"gpt-4o"` instead of `"openai/gpt-4o"`),
@@ -274,6 +275,7 @@ Chat channel configurations. Each channel has an `enabled` flag that defaults to
 |-------------|--------------|---------|------------------------------------------------|
 | `enabled`   | boolean      | `false` | Whether Telegram is active.                    |
 | `token`     | string       | `""`    | Bot token from `@BotFather`.                   |
+| `tokenEnv`  | string/null  | `null`  | Env var holding the bot token. Used when `token` is empty. |
 | `allowFrom` | string array | `[]`    | Allowed user IDs/usernames. Empty = allow all. |
 | `proxy`     | string/null  | `null`  | HTTP/SOCKS5 proxy URL.                         |
 
@@ -307,7 +309,9 @@ Chat channel configurations. Each channel has an `enabled` flag that defaults to
 | `mode`               | string       | `"socket"`         | Connection mode (only `"socket"` is supported).      |
 | `webhookPath`        | string       | `"/slack/events"`  | Webhook path for event subscriptions.                |
 | `botToken`           | string       | `""`               | Bot token (`xoxb-...`).                              |
+| `botTokenEnv`        | string/null  | `null`             | Env var holding the bot token. Used when `botToken` is empty. |
 | `appToken`           | string       | `""`               | App-level token (`xapp-...`).                        |
+| `appTokenEnv`        | string/null  | `null`             | Env var holding the app token. Used when `appToken` is empty. |
 | `userTokenReadOnly`  | boolean      | `true`             | Whether the user token is read-only.                 |
 | `groupPolicy`        | string       | `"mention"`        | Group message policy: `"mention"`, `"open"`, or `"allowlist"`. |
 | `groupAllowFrom`     | string array | `[]`               | Allowed channel IDs when `groupPolicy` is `"allowlist"`. |
@@ -335,6 +339,7 @@ Chat channel configurations. Each channel has an `enabled` flag that defaults to
 |--------------|--------------|-----------------------------------------------------|-------------------------------------------------|
 | `enabled`    | boolean      | `false`                                             | Whether Discord is active.                      |
 | `token`      | string       | `""`                                                | Bot token from Discord Developer Portal.        |
+| `tokenEnv`   | string/null  | `null`                                              | Env var holding the bot token. Used when `token` is empty. |
 | `allowFrom`  | string array | `[]`                                                | Allowed user IDs. Empty = allow all.            |
 | `gatewayUrl` | string       | `"wss://gateway.discord.gg/?v=10&encoding=json"`   | Gateway WebSocket URL.                          |
 | `intents`    | integer      | `37377`                                             | Gateway intents bitmask (GUILDS + GUILD_MESSAGES + DIRECT_MESSAGES + MESSAGE_CONTENT). |
@@ -1292,6 +1297,13 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 export OPENROUTER_API_KEY="sk-or-..."
 export OPENAI_API_KEY="sk-..."
 export GROQ_API_KEY="gsk_..."
+export GOOGLE_GEMINI_API_KEY="AIza..."
+
+# Channel tokens (when using token_env / bot_token_env / app_token_env)
+export DISCORD_BOT_TOKEN="MTIz..."
+export SLACK_BOT_TOKEN="xoxb-..."
+export SLACK_APP_TOKEN="xapp-..."
+export TELEGRAM_BOT_TOKEN="123456789:ABCdef..."
 ```
 
 ---

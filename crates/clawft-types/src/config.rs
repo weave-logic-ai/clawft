@@ -190,6 +190,11 @@ pub struct TelegramConfig {
     #[serde(default)]
     pub token: String,
 
+    /// Environment variable name that holds the bot token (e.g. `"TELEGRAM_BOT_TOKEN"`).
+    /// When set, the env var is used if `token` is empty.
+    #[serde(default, alias = "tokenEnv")]
+    pub token_env: Option<String>,
+
     /// Allowed user IDs or usernames. Empty = allow all.
     #[serde(default, alias = "allowFrom")]
     pub allow_from: Vec<String>,
@@ -218,9 +223,19 @@ pub struct SlackConfig {
     #[serde(default, alias = "botToken")]
     pub bot_token: String,
 
+    /// Environment variable name for the bot token (e.g. `"SLACK_BOT_TOKEN"`).
+    /// Used when `bot_token` is empty.
+    #[serde(default, alias = "botTokenEnv")]
+    pub bot_token_env: Option<String>,
+
     /// App-level token (`xapp-...`).
     #[serde(default, alias = "appToken")]
     pub app_token: String,
+
+    /// Environment variable name for the app token (e.g. `"SLACK_APP_TOKEN"`).
+    /// Used when `app_token` is empty.
+    #[serde(default, alias = "appTokenEnv")]
+    pub app_token_env: Option<String>,
 
     /// Whether the user token is read-only.
     #[serde(default = "default_true", alias = "userTokenReadOnly")]
@@ -256,7 +271,9 @@ impl Default for SlackConfig {
             mode: default_slack_mode(),
             webhook_path: default_webhook_path(),
             bot_token: String::new(),
+            bot_token_env: None,
             app_token: String::new(),
+            app_token_env: None,
             user_token_read_only: true,
             group_policy: default_group_policy(),
             group_allow_from: Vec::new(),
@@ -306,6 +323,11 @@ pub struct DiscordConfig {
     #[serde(default)]
     pub token: String,
 
+    /// Environment variable name that holds the bot token (e.g. `"DISCORD_BOT_TOKEN"`).
+    /// When set, the env var is used if `token` is empty.
+    #[serde(default, alias = "tokenEnv")]
+    pub token_env: Option<String>,
+
     /// Allowed user IDs. Empty = allow all.
     #[serde(default, alias = "allowFrom")]
     pub allow_from: Vec<String>,
@@ -331,6 +353,7 @@ impl Default for DiscordConfig {
         Self {
             enabled: false,
             token: String::new(),
+            token_env: None,
             allow_from: Vec::new(),
             gateway_url: default_discord_gateway_url(),
             intents: default_discord_intents(),

@@ -59,6 +59,7 @@ fn make_config() -> DiscordConfig {
     DiscordConfig {
         enabled: true,
         token: "test-bot-token".into(),
+        token_env: None,
         allow_from: vec![],
         gateway_url: "wss://gateway.discord.gg/?v=10&encoding=json".into(),
         intents: 37377,
