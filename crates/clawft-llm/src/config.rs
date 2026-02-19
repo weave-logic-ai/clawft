@@ -96,6 +96,14 @@ pub fn builtin_providers() -> Vec<ProviderConfig> {
             default_model: None,
             headers: HashMap::new(),
         },
+        ProviderConfig {
+            name: "gemini".into(),
+            base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
+            api_key_env: "GOOGLE_GEMINI_API_KEY".into(),
+            model_prefix: Some("gemini/".into()),
+            default_model: Some("gemini-2.5-flash".into()),
+            headers: HashMap::new(),
+        },
     ]
 }
 
@@ -106,7 +114,7 @@ mod tests {
     #[test]
     fn builtin_providers_count() {
         let providers = builtin_providers();
-        assert_eq!(providers.len(), 7);
+        assert_eq!(providers.len(), 8);
     }
 
     #[test]
@@ -120,6 +128,7 @@ mod tests {
         assert!(names.contains(&"mistral"));
         assert!(names.contains(&"together"));
         assert!(names.contains(&"openrouter"));
+        assert!(names.contains(&"gemini"));
     }
 
     #[test]

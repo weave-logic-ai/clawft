@@ -263,7 +263,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
     ProviderSpec {
         name: "gemini",
         keywords: &["gemini"],
-        env_key: "GEMINI_API_KEY",
+        env_key: "GOOGLE_GEMINI_API_KEY",
         display_name: "Gemini",
         litellm_prefix: "gemini",
         skip_prefixes: &["gemini/"],

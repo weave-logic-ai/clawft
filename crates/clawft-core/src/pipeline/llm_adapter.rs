@@ -351,6 +351,8 @@ fn apply_config_overrides(
         "groq" => &app_config.providers.groq,
         "deepseek" => &app_config.providers.deepseek,
         "openrouter" => &app_config.providers.openrouter,
+        "gemini" => &app_config.providers.gemini,
+        "mistral" | "together" => return, // supported builtins with no config override
         _ => return,
     };
 
