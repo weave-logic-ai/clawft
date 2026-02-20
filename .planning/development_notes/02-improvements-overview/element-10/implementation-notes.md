@@ -84,6 +84,46 @@
 - Rating clamped to 1-5
 - Moderation flag on comments
 
+### K4 Install/Publish (Phase 5 addition)
+
+#### Ed25519 Signing Module (`clawft-core/src/security/signing.rs`)
+- `security.rs` converted to `security/mod.rs` with `pub mod signing` behind `signing` feature
+- `ed25519-dalek = "2"` added to workspace deps
+- `signing` feature in clawft-core: `["dep:ed25519-dalek", "dep:sha2", "dep:rand"]`
+- `SkillContentHash`: SHA-256 over sorted, length-prefixed file contents
+- `SkillSignature`: hex-encoded Ed25519 signature + public key + algorithm
+- `generate_keypair()`: creates Ed25519 key pair, hex-encoded, 0o600 permissions
+- `compute_content_hash()`: deterministic hash over all non-hidden files
+- `sign_content()` / `verify_signature()`: Ed25519 sign and verify
+- `load_signing_key()` / `load_public_key()`: load from `keys_dir`
+- 8 tests behind `#[cfg(all(test, feature = "signing"))]`
+
+#### ClawHub Client (real HTTP)
+- Replaced stubs in `registry.rs` with `reqwest::Client` calls
+- `ClawHubError` enum: Http, ServerError, ParseError, ApiError, Unreachable, Io
+- `search()`: GET `/skills/search?q=...&limit=...&offset=...`
+- `publish()`: POST `/skills/publish` (JSON body)
+- `download()`: GET `/skills/{id}/download` (raw bytes)
+- `install()`: download + write to disk
+- `ClawHubConfig::from_env()`: reads `CLAWHUB_API_URL` and `CLAWHUB_API_TOKEN`
+- Graceful error handling: connection refused = descriptive error, not panic
+- `clawhub` feature gate added to clawft-services (module always compiled)
+
+#### CLI Subcommands (4 new)
+- `weft skills search <query> [--limit N]`: search ClawHub, display results in table
+- `weft skills publish <path> [--allow-unsigned]`: parse SKILL.md, hash, sign, POST
+- `weft skills remote-install <name> [--allow-unsigned]`: search, download, install
+- `weft skills keygen`: generate Ed25519 key pair at `~/.clawft/keys/`
+- Standalone helpers: base64 encode, hex decode, FNV hash, YAML frontmatter parser
+- All gated behind `#[cfg(feature = "services")]` with fallback error messages
+
+#### Test Summary (K4)
+- 8 signing tests (clawft-core, signing feature)
+- 12 registry tests (clawft-services)
+- 8 CLI parsing tests (clawft-cli main.rs)
+- 10 CLI unit tests (skills_cmd.rs -- frontmatter, base64, hex, hash)
+- Total: 38 new tests
+
 ## K5: Benchmarks
 
 ### Comparison Script

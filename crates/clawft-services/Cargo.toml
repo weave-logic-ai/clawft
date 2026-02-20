@@ -15,6 +15,7 @@ default = []
 delegate = ["regex", "which"]
 rvf = []
 test-utils = []
+clawhub = []
 
 [dependencies]
 clawft-types = { workspace = true }

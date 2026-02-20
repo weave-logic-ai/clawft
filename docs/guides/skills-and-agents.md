@@ -116,10 +116,31 @@ weft skills show research
 
 # Install a skill from a local path into ~/.clawft/skills/
 weft skills install /path/to/my-skill
+
+# Remove a user-installed skill
+weft skills remove my-skill
 ```
 
 `weft skills list` prints a table with columns: NAME, SOURCE (workspace /
 user / builtin), FORMAT (SKILL.md / legacy), and DESCRIPTION.
+
+### Hot-reload
+
+The skill system watches the filesystem for changes. When a `SKILL.md` or
+`skill.json` file is modified, the loader performs an atomic swap so that
+in-flight skill invocations complete with the old definition while new
+invocations use the updated version. No restart is required.
+
+### MCP exposure
+
+Loaded skills are automatically exposed as MCP tools via `SkillToolProvider`.
+Any MCP client connected to `weft mcp-server` can invoke skills as tools.
+
+### Slash-command framework
+
+Skills with `user-invocable: true` contribute commands to the `/help` listing
+in interactive sessions. The `argument-hint` field is shown next to the
+command name.
 
 ### Interactive slash commands
 
@@ -149,6 +170,27 @@ Skills are subject to several security controls:
   `<<SYS>>`, etc.) are stripped from skill instructions automatically.
 - **SEC-SKILL-07**: SKILL.md files are limited to 50 KB. Oversized files are
   rejected.
+
+### Autonomous skill creation
+
+Agents can detect repeated prompt patterns and auto-generate skills. When the
+same pattern is observed three times (configurable via
+`skill_auto_threshold`), the agent:
+
+1. Generates a `SKILL.md` with inferred variables and instructions.
+2. Installs it in the user skills directory with a `pending` status.
+3. Prompts the user for approval before the skill becomes active.
+
+This feature is **disabled by default**. Enable it in config:
+
+```json
+{
+  "skills": {
+    "auto_create": true,
+    "auto_create_threshold": 3
+  }
+}
+```
 
 ---
 
@@ -297,6 +339,54 @@ Agent files share the same security controls as skills:
 - When an agent and a skill both declare `allowed_tools`, only the
   intersection of the two lists is permitted (SEC-SKILL-03).
 
+### Per-agent workspaces
+
+Each agent can have an isolated workspace at `~/.clawft/agents/<id>/`
+containing:
+
+| Path | Purpose |
+|------|---------|
+| `SOUL.md` | Agent personality and persistent memory |
+| `sessions/` | Session store scoped to this agent |
+| `skills/` | Skill overrides (take precedence over user/builtin) |
+| `config.toml` | Agent-specific configuration |
+
+Configuration merges in three levels: **global** -> **agent** -> **workspace**.
+Values at a more specific level override broader ones.
+
+Shared namespaces between agents are configurable. By default, cross-agent
+access is read-only. Explicit opt-in is required for write access. Symlink-
+based cross-agent references allow one agent to reference another's resources
+without duplication.
+
+### Multi-agent routing
+
+When multiple agents are defined, inbound messages are dispatched via a
+routing table with first-match-wins semantics.
+
+Each route entry can match on:
+
+- **keywords** -- Words or phrases in the message content.
+- **channels** -- Specific channel names (e.g., `"slack"`, `"telegram"`).
+- **sender patterns** -- Regex or glob patterns on sender IDs.
+
+A catch-all route handles unmatched messages. If no catch-all is defined and
+no route matches, the message is rejected with a warning log (not silently
+dropped).
+
+### Inter-agent communication
+
+Agents can exchange messages through the `AgentBus`:
+
+- **InterAgentMessage** -- Typed message with `from_agent`, `to_agent`,
+  `task`, and `payload` fields.
+- **Per-agent inboxes** -- Each agent has a bounded channel (configurable
+  capacity) for incoming inter-agent messages.
+- **SwarmCoordinator** -- Provides `dispatch_subtask` (send to one agent)
+  and `broadcast_task` (send to all agents) methods.
+- **TTL enforcement** -- Messages carry a time-to-live; expired messages are
+  dropped on delivery attempt.
+
 ---
 
 ## Examples
@@ -379,45 +469,26 @@ weft agents list
 weft agents show security-auditor
 ```
 
-### Using skills in interactive mode
-
-Start an interactive session and activate a skill:
+### Using skills and agents in interactive mode
 
 ```
 $ weft agent
 
 > /skills
-Available skills (3):
-  - commit-msg
-  - research
-  - coding
+Available skills (3): commit-msg, research, coding
 
 > /use research
 Activated skill: research
 
-> /status
-Agent:  (default)
-Model:  anthropic/claude-sonnet-4-20250514
-Skill:  research
-Tools:  12 registered
-Skills: 3 available
-Agents: 2 available
-
 > Research the latest changes in the Rust async ecosystem
-
 [agent responds using the research skill's instructions and allowed tools]
 
 > /use
 Skill deactivated.
-```
 
-Switch agents mid-session:
-
-```
 > /agent security-auditor
 Switched to agent: security-auditor
 
 > Review src/auth.rs for authentication vulnerabilities
-
 [agent responds using the security-auditor persona and constraints]
 ```

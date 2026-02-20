@@ -121,6 +121,157 @@ The WASM build excludes components that require native OS features:
 The `release-wasm` Cargo profile inherits from `release` and uses `opt-level = "z"`
 for aggressive size optimisation.
 
+---
+
+## WASM Plugin Host (C2)
+
+The WASM plugin host allows third-party plugins to run as isolated WASM
+modules inside the clawft process. Plugins are sandboxed with configurable
+resource limits and have access to a controlled set of host functions.
+
+Source: `clawft-wasm/src/engine.rs`, `clawft-wasm/src/sandbox.rs`
+
+### Feature Gate
+
+The plugin host is gated behind the `wasm-plugins` feature flag:
+
+```bash
+# Build with WASM plugin support
+cargo build --features wasm-plugins
+
+# Build without (default -- smaller binary)
+cargo build
+```
+
+### wasmtime Integration
+
+The plugin host uses [wasmtime](https://wasmtime.dev/) 29 with the WIT
+(WebAssembly Interface Types) component model. Each plugin gets its own
+`wasmtime::Store` with isolated memory and an independent fuel budget.
+
+The engine is configured with:
+
+- `consume_fuel(true)` -- enables fuel metering for CPU limiting
+- `epoch_interruption(true)` -- enables wall-clock timeout via epoch ticks
+
+### Resource Limits
+
+| Resource | Default | Hard Maximum | Description |
+|----------|---------|-------------|-------------|
+| Fuel budget | 1,000,000,000 (~1s CPU) | 10,000,000,000 (~10s) | Fuel units consumed per WASM instruction |
+| Memory | 16 MB | 256 MB | Per-plugin linear memory limit |
+| Table elements | 10,000 | 100,000 | WASM table size limit |
+| Execution timeout | 30s | 300s | Wall-clock timeout via epoch interruption |
+
+Plugin manifests can request custom resource limits. Values are clamped to
+the hard maximums at load time.
+
+### Fuel Metering
+
+Each WASM instruction consumes fuel from the plugin's budget. When fuel is
+exhausted, the WASM execution traps with an error. The fuel budget resets
+on each invocation (a fresh `Store` is created per call).
+
+Configure the fuel budget per plugin:
+
+```toml
+[plugins.my-plugin.resources]
+max_fuel = 500_000_000  # ~0.5s CPU
+```
+
+### Wall-Clock Timeout
+
+Even with generous fuel budgets, a background thread enforces a wall-clock
+timeout via wasmtime epoch interruption. When the timeout fires:
+
+1. The background thread calls `engine.increment_epoch()`
+2. Any running WASM code traps at the next epoch check point
+3. The execution returns an error
+
+This prevents plugins from consuming excessive real time (e.g., a tight
+loop that consumes fuel slowly but runs for minutes).
+
+### Memory Limits
+
+Memory limits are enforced via `wasmtime::StoreLimits`:
+
+```rust
+StoreLimitsBuilder::new()
+    .memory_size(config.max_memory_mb * 1024 * 1024)
+    .table_elements(config.max_table_elements)
+    .instances(10)
+    .tables(10)
+    .memories(2)
+    .build()
+```
+
+A WASM `memory.grow` instruction that would exceed the limit returns `-1`
+(or traps, depending on the module's behavior).
+
+### Host Functions
+
+Plugins interact with the host through 5 WIT-defined host functions:
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `http-request` | `(method, url, headers, body) -> result<string, string>` | Make an HTTP request (validated against sandbox) |
+| `read-file` | `(path) -> result<string, string>` | Read a file (validated against filesystem allowlist) |
+| `write-file` | `(path, content) -> result<_, string>` | Write a file (validated, max 4 MB) |
+| `get-env` | `(name) -> option<string>` | Read an environment variable (allowlist + deny list) |
+| `log` | `(level, message)` | Emit a log message (rate limited, max 4 KB) |
+
+All host function calls pass through the `PluginSandbox` validation layer
+and are recorded in the per-plugin `AuditLog`.
+
+### Sandbox Security
+
+Each plugin runs with a `PluginSandbox` that enforces:
+
+- **Network allowlist**: Only permitted hosts (exact or wildcard `*.example.com`)
+- **SSRF protection**: Private/reserved IPs (127.0.0.0/8, 10.0.0.0/8,
+  169.254.0.0/16, etc.) are always blocked
+- **Filesystem containment**: File access only within declared paths;
+  symlink traversal detected and blocked
+- **Environment variable deny list**: `PATH`, `HOME`, `ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY`, etc. are never accessible regardless of allowlist
+- **Rate limiting**: Per-plugin HTTP and log rate counters
+- **Scheme blocking**: `file://`, `data://`, `ftp://` schemes are blocked
+
+### Binary Size Enforcement
+
+WASM plugin modules must meet size constraints at install/load time:
+
+| Metric | Limit |
+|--------|-------|
+| Uncompressed | < 300 KB |
+| Gzipped | < 120 KB |
+| Plugin directory | < 10 MB |
+
+Modules exceeding these limits are rejected at load time with a clear error.
+
+### Audit Logging
+
+Every host function call produces an audit entry recording:
+
+- Function name (e.g., `http-request`, `read-file`)
+- Parameters summary
+- Whether the call was permitted or denied
+- Error message (if denied)
+- Duration in milliseconds
+
+The audit log is per-plugin and can be queried for compliance and debugging.
+
+### Multi-Plugin Isolation
+
+Each plugin gets independent:
+
+- `wasmtime::Store` (no shared memory between plugins)
+- `PluginSandbox` (separate permission sets)
+- `AuditLog` (separate audit trails)
+- Rate counters (one plugin's rate limit does not affect others)
+
+---
+
 ## Future Roadmap
 
 - **WASI HTTP preview2**: Replace the HTTP stub with real outbound requests

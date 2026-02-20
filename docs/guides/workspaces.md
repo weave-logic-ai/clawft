@@ -293,3 +293,164 @@ Scoped resource paths:
   Memory:   /home/user/projects/my-api/.clawft/memory
   Skills:   /home/user/projects/my-api/.clawft/skills
 ```
+
+---
+
+## Per-Agent Workspaces (H1)
+
+Each agent gets its own isolated workspace directory under the agents root.
+This enables per-agent configuration, personality, session history, and
+skill overrides without affecting other agents.
+
+Source: `clawft-core/src/workspace/agent.rs`,
+`clawft-channels/src/plugin_host.rs`
+
+### Directory Layout
+
+When an agent workspace is created, the following structure is scaffolded:
+
+```
+~/.clawft/agents/<agent_id>/
+  SOUL.md          # Agent personality preamble
+  AGENTS.md        # Agent capabilities description
+  USER.md          # User preferences for this agent
+  config.toml      # Per-agent config overrides
+  sessions/        # Per-agent session store
+  memory/          # Per-agent memory namespace
+  skills/          # Agent-specific skill overrides
+  tool_state/      # Per-plugin state
+```
+
+All directories are created with `0700` permissions on Unix for security.
+Files are only created if they do not already exist (idempotent operation).
+
+### Workspace Creation
+
+Agent workspaces are created on demand via `ensure_agent_workspace()`:
+
+```rust
+pub fn ensure_agent_workspace(&self, agent_id: &str) -> Result<PathBuf>
+```
+
+This method is idempotent -- if the workspace already exists, it returns the
+path without modifying any files. Custom content (such as an edited
+`SOUL.md`) is preserved across calls.
+
+For template-based creation, `create_agent_workspace()` copies an entire
+directory tree from a template:
+
+```rust
+pub fn create_agent_workspace(
+    &self,
+    agent_id: &str,
+    template: Option<&Path>,
+) -> Result<PathBuf>
+```
+
+If no explicit template is provided and a `~/.clawft/agents/default/`
+directory exists, it is used as the template automatically.
+
+### Agent ID Validation
+
+Agent IDs are validated to prevent path traversal attacks:
+
+- Must be non-empty
+- Must not start with `.`
+- Must not contain `/`, `\`, or null bytes
+- Must not be `..`
+
+### 3-Level Config Merge
+
+Agent-level configuration participates in a three-level merge:
+
+```
+compiled defaults  <  ~/.clawft/config.json (global)  <  agent config.toml (per-agent)
+```
+
+Per-agent `config.toml` overrides can set model, max tokens, tool access,
+and other dimensions independently. A workspace-level override (from the
+project's `.clawft/config.json`) can further override agent defaults when
+the agent is operating inside that workspace.
+
+### SOUL.md Injection
+
+The `SOUL.md` file provides per-agent personality without code changes. Its
+content is injected into the Assembler pipeline stage's system prompt:
+
+1. On first message, `SoulConfig::load()` searches for `SOUL.md` in:
+   - `{workspace}/.clawft/SOUL.md`
+   - `{workspace}/SOUL.md`
+   - `~/.clawft/SOUL.md` (global fallback)
+2. The content is appended as a `## Agent Personality (SOUL.md)` section
+   in the system prompt.
+3. The file is cached by modification time (`mtime`). Changes to `SOUL.md`
+   on disk take effect on the next message without requiring a restart.
+
+When no `SOUL.md` exists, the system prompt is unmodified.
+
+### Cross-Agent Memory Sharing
+
+Agents can share memory namespaces via symlink-based references:
+
+```rust
+pub fn link_shared_namespace(
+    &self,
+    exporter_id: &str,
+    importer_id: &str,
+    namespace: &str,
+) -> Result<PathBuf>
+```
+
+This creates a symlink from the importer's `memory/` directory to the
+exporter's namespace directory. The naming convention for the symlink is
+`{exporter_id}--{namespace}`.
+
+**Access rules:**
+
+| Access | Default | Configuration |
+|--------|---------|---------------|
+| Read | Allowed | Symlinks are read-only by default |
+| Write | Denied | Requires explicit `read_write = true` flag |
+
+**Configuration fields:**
+
+- `shared_namespaces`: Declares namespaces an agent exports for read-only
+  cross-agent access.
+- `import_namespaces`: Declares namespaces an agent imports from other agents.
+
+**Security:**
+
+- Both agent IDs and namespace names are validated against path traversal
+- The symlink target must resolve within the agents root directory
+  (canonical path check prevents escapes)
+- Existing symlinks are replaced on re-link (idempotent)
+- Symlink creation requires Unix (`std::os::unix::fs::symlink`)
+
+### Filesystem Permissions
+
+All per-agent directories are created with `0700` permissions on Unix:
+
+- Only the owner can read, write, or enter agent directories
+- This prevents other users on a shared system from accessing agent data
+- On non-Unix platforms, the permission call is a no-op
+
+### CLI Commands
+
+```sh
+# List all agent workspaces
+weft agent list
+
+# Create an agent workspace from a template
+weft agent create my-agent --template ~/.clawft/agents/default
+
+# Delete an agent workspace
+weft agent delete my-agent
+```
+
+### Source Files
+
+| File | Description |
+|------|-------------|
+| `clawft-core/src/workspace/agent.rs` | `ensure_agent_workspace`, `create_agent_workspace`, `link_shared_namespace` |
+| `clawft-channels/src/plugin_host.rs` | `SoulConfig` for SOUL.md loading and injection |
+| `clawft-core/src/agent/context.rs` | Bootstrap file loading (SOUL.md, AGENTS.md, USER.md) |

@@ -698,6 +698,193 @@ Streamable HTTP:
 The server name (the JSON key) is used for tool namespacing. A server named
 `"filesystem"` exposes tools prefixed with `filesystem__`.
 
+## Delegation & Multi-Agent
+
+The `delegation` section controls task delegation to sub-agents, including
+Claude Code and Claude Flow integration. When enabled, the primary agent can
+delegate subtasks to specialized delegate agents that run in isolated
+environments.
+
+### delegation
+
+Top-level delegation settings that apply to all delegate agents unless
+overridden per-agent.
+
+```json
+{
+  "delegation": {
+    "enabled": true,
+    "model": "anthropic/claude-sonnet-4-5",
+    "max_turns": 10,
+    "max_tokens": 4096,
+    "excluded_tools": ["exec_shell"],
+    "claude_enabled": true,
+    "flow_enabled": true
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Master switch for task delegation. When `false`, all delegation requests are rejected. |
+| `model` | string | `"anthropic/claude-sonnet-4-5"` | LLM model used by delegate agents, using `provider/model` syntax. |
+| `max_turns` | integer | `10` | Maximum conversation turns per delegation. Prevents runaway delegate sessions. |
+| `max_tokens` | integer | `4096` | Token limit per delegation response. Controls cost and output length. |
+| `excluded_tools` | string[] | `[]` | Tools that are not available to delegate agents. Use this to restrict dangerous operations like shell execution. |
+| `claude_enabled` | boolean | `true` | Enable Claude Code as a delegation backend. If the `claude` binary is not found on `PATH`, delegation gracefully falls back without error. |
+| `flow_enabled` | boolean | `true` | Enable Claude Flow as a delegation backend. Detection uses `which claude-flow` at startup. |
+
+### delegation.flow
+
+Configuration for the Flow delegator, which spawns Claude Flow as a
+subprocess. The delegator constructs a minimal environment to prevent
+credential leakage between the primary agent and delegates.
+
+```json
+{
+  "delegation": {
+    "flow": {
+      "binary": "claude-flow",
+      "timeout_seconds": 300,
+      "max_depth": 3,
+      "env_passthrough": ["PATH", "HOME", "ANTHROPIC_API_KEY"]
+    }
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `binary` | string | auto-detect | Path or name of the `claude-flow` binary. When omitted, the runtime uses `which claude-flow` to locate it (result is cached with `OnceLock`). |
+| `timeout_seconds` | integer | `300` | Wall-clock timeout in seconds per delegation. The subprocess is killed if it exceeds this limit. |
+| `max_depth` | integer | `3` | Maximum recursive delegation depth. Prevents infinite delegation loops where a delegate spawns another delegate. Exceeding this limit returns `DelegationError::MaxDepthExceeded`. |
+| `env_passthrough` | string[] | `["PATH", "HOME", "ANTHROPIC_API_KEY"]` | Environment variables passed to the subprocess. Only these variables are inherited; all others are stripped for security. |
+
+**Fallback chain:** When a delegation is requested, the runtime attempts
+backends in order: Flow -> Claude -> error. If Flow is unavailable (binary not
+found or `flow_enabled` is `false`), the request falls through to Claude Code.
+If Claude Code is also unavailable, a `DelegationError::FallbackExhausted`
+error is returned.
+
+### delegation.per_agent
+
+Per-agent overrides let you customize delegation behavior for specific agents.
+Each key is an agent name, and the value is a partial delegation config that
+merges on top of the top-level defaults.
+
+```json
+{
+  "delegation": {
+    "per_agent": {
+      "research-agent": {
+        "model": "anthropic/claude-opus-4-5",
+        "max_turns": 20,
+        "excluded_tools": []
+      }
+    }
+  }
+}
+```
+
+Any field from the top-level `delegation` section can be overridden per-agent.
+Fields not specified in the per-agent block inherit from the top-level
+defaults. In this example, `research-agent` uses a more capable model with
+more turns and no tool restrictions, while all other agents use the defaults.
+
+### routing.planning
+
+The planning section configures the `PlanningRouter`, which provides
+structured reasoning strategies for multi-step tasks. The router supports
+two strategies with configurable guard rails to prevent runaway execution.
+
+```json
+{
+  "routing": {
+    "planning": {
+      "strategy": "react",
+      "max_depth": 10,
+      "max_cost_usd": 1.0,
+      "step_timeout_seconds": 60,
+      "circuit_breaker_no_ops": 3
+    }
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `strategy` | string | `"react"` | Planning strategy: `"react"` (step-by-step reasoning with observe-think-act cycles) or `"plan_and_execute"` (generate a full plan first, then execute steps sequentially). |
+| `max_depth` | integer | `10` | Maximum number of planning steps. Execution terminates with partial results when exceeded. |
+| `max_cost_usd` | float | `1.0` | Maximum cost budget in USD for a single planning session. Tracked via token usage from the routing cost system. |
+| `step_timeout_seconds` | integer | `60` | Wall-clock timeout in seconds for each individual planning step. |
+| `circuit_breaker_no_ops` | integer | `3` | Number of consecutive no-op steps (steps that produce no observable state change) before the circuit breaker triggers. When triggered, the planning session aborts and returns partial results with a `TerminationReason`. |
+
+**Guard rails:** `PlanningRouter.check_guard_rails()` is called after each
+step and returns a `TerminationReason` if any limit is exceeded:
+
+| TerminationReason | Trigger |
+|-------------------|---------|
+| `MaxDepthReached` | Step count exceeds `max_depth` |
+| `BudgetExhausted` | Cumulative cost exceeds `max_cost_usd` |
+| `StepTimeout` | A single step exceeds `step_timeout_seconds` |
+| `CircuitBreakerTripped` | Consecutive no-op steps reach `circuit_breaker_no_ops` |
+
+When termination occurs, `explain_termination()` produces a human-readable
+summary of the partial results and the reason for stopping.
+
+### routing.agents
+
+The agent routing table controls how incoming requests are dispatched to
+named agents based on keyword matching and channel origin. Routes are
+evaluated in order (first match wins).
+
+```json
+{
+  "routing": {
+    "agents": {
+      "routes": [
+        {
+          "name": "code-agent",
+          "match": {
+            "keywords": ["code", "implement", "fix"],
+            "channels": ["cli"]
+          },
+          "model": "anthropic/claude-sonnet-4-5",
+          "workspace": "~/.clawft/agents/code-agent/"
+        },
+        {
+          "name": "research-agent",
+          "match": {
+            "keywords": ["research", "search", "find"],
+            "channels": ["cli", "slack"]
+          },
+          "model": "anthropic/claude-opus-4-5",
+          "workspace": "~/.clawft/agents/research-agent/"
+        }
+      ],
+      "catch_all": "default-agent",
+      "reject_unmatched": false
+    }
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `routes` | array | `[]` | Ordered list of agent route definitions. First matching route wins. |
+| `catch_all` | string | `"default-agent"` | Agent name used when no route matches and `reject_unmatched` is `false`. |
+| `reject_unmatched` | boolean | `false` | When `true`, requests that match no route are rejected with a warning log instead of falling through to the catch-all agent. |
+
+**Route fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Agent name. Used as the routing target and workspace identifier. |
+| `match.keywords` | string[] | Keywords to match against the request content (case-insensitive substring match). |
+| `match.channels` | string[] | Channel names this route applies to (e.g., `"cli"`, `"slack"`, `"discord"`). Empty matches all channels. |
+| `model` | string | LLM model override for this agent. Falls back to `agents.defaults.model` if omitted. |
+| `workspace` | string | Workspace directory for this agent. Provides per-agent file isolation. |
+
 ## Environment Variables
 
 | Variable | Description |

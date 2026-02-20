@@ -12,16 +12,28 @@ Channels are bidirectional bridges between external chat platforms and the
 agent pipeline. Each channel receives inbound messages from users and delivers
 outbound messages produced by agents.
 
-clawft ships with three channel plugins:
+clawft ships with eleven channel plugins:
 
-| Channel   | Transport                  | Threading | Media |
-|-----------|----------------------------|-----------|-------|
-| Telegram  | HTTP long polling (Bot API)| No        | Yes   |
-| Slack     | WebSocket (Socket Mode)    | Yes       | Yes   |
-| Discord   | WebSocket (Gateway v10)    | Yes       | Yes   |
+| Channel        | Transport                         | Threading | Media | Feature Gate      |
+|----------------|-----------------------------------|-----------|-------|-------------------|
+| Telegram       | HTTP long polling (Bot API)       | No        | Yes   | `telegram`        |
+| Slack          | WebSocket (Socket Mode)           | Yes       | Yes   | `slack`           |
+| Discord        | WebSocket (Gateway v10)           | Yes       | Yes   | `discord`         |
+| Email          | IMAP + SMTP                       | Yes       | Yes   | `email`           |
+| WhatsApp       | WhatsApp Business API (webhook)   | No        | Yes   | `whatsapp`        |
+| Signal         | Signal CLI / signald bridge       | No        | Yes   | `signal`          |
+| Matrix         | Matrix client-server API          | Yes       | No    | `matrix`          |
+| IRC            | TCP / TLS (RFC 2812)              | No        | No    | `irc`             |
+| Google Chat    | Google Chat API (webhook / SA)    | Yes       | No    | `google-chat`     |
+| Microsoft Teams| Bot Framework / Graph API         | Yes       | Yes   | `teams`           |
+| Discord Resume | WebSocket (Gateway v10, resume)   | Yes       | Yes   | `discord-resume`  |
 
 All channels share the same trait-based interface and lifecycle, so they can
 be enabled, disabled, and swapped without changes to the rest of the system.
+
+Each channel adapter follows the 3-file pattern (`mod.rs`, `channel.rs`,
+`types.rs`) inside `crates/clawft-channels/src/<channel>/` and has its own
+feature gate in `crates/clawft-channels/Cargo.toml`.
 
 ---
 
@@ -524,12 +536,21 @@ group channels (see Section 4.7).
 
 ---
 
-## 7. Creating Custom Channels
+## 7. Additional Channels
+
+Eight new channel adapters were added in the improvements sprint: Email,
+WhatsApp, Signal, Matrix, IRC, Google Chat, Microsoft Teams, and Discord
+Resume. Full setup instructions for each are in
+[channels-additional.md](channels-additional.md).
+
+---
+
+## 8. Creating Custom Channels
 
 To add a new channel plugin, implement `ChannelFactory` and `Channel`, then
 register the factory with the `PluginHost`.
 
-### 7.1 Implement `ChannelFactory`
+### 8.1 Implement `ChannelFactory`
 
 The factory parses JSON configuration and produces a `Channel` instance:
 
@@ -558,7 +579,7 @@ impl ChannelFactory for MyChannelFactory {
 }
 ```
 
-### 7.2 Implement `Channel`
+### 8.2 Implement `Channel`
 
 The channel handles both the inbound receive loop and outbound sends:
 
@@ -640,7 +661,7 @@ impl Channel for MyChannel {
 }
 ```
 
-### 7.3 Register the Factory
+### 8.3 Register the Factory
 
 Register your factory with the `PluginHost` before starting channels:
 
@@ -663,7 +684,7 @@ plugin_host.init_channel("my_channel", &config).await?;
 plugin_host.start_channel("my_channel").await?;
 ```
 
-### 7.4 Add a Markdown Converter (Optional)
+### 8.4 Add a Markdown Converter (Optional)
 
 If your platform uses a formatting language other than CommonMark, implement
 `MarkdownConverter` and register it with the `MarkdownDispatcher`:
@@ -687,7 +708,7 @@ dispatcher.register("my_channel", Box::new(MyMarkdownConverter));
 If no converter is registered for a channel name, the dispatcher passes
 content through unchanged.
 
-### 7.5 Checklist
+### 8.5 Checklist
 
 Before shipping a custom channel:
 
@@ -710,5 +731,13 @@ Before shipping a custom channel:
 - `clawft-channels/src/telegram/` -- Telegram plugin
 - `clawft-channels/src/slack/` -- Slack plugin (Socket Mode, signature)
 - `clawft-channels/src/discord/` -- Discord plugin (Gateway, REST)
+- `clawft-channels/src/email/` -- Email plugin (IMAP + SMTP)
+- `clawft-channels/src/whatsapp/` -- WhatsApp plugin (Business API)
+- `clawft-channels/src/signal/` -- Signal plugin (signald bridge)
+- `clawft-channels/src/matrix/` -- Matrix plugin (CS API)
+- `clawft-channels/src/irc/` -- IRC plugin (RFC 2812, TLS)
+- `clawft-channels/src/google_chat/` -- Google Chat plugin
+- `clawft-channels/src/teams/` -- Microsoft Teams plugin (Bot Framework)
+- `clawft-channels/src/discord_resume/` -- Discord Resume plugin
 - `clawft-cli/src/markdown/` -- Markdown conversion and dispatch
 - `clawft-types/src/config.rs` -- Configuration schema

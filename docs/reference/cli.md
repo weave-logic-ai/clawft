@@ -471,6 +471,34 @@ weft memory search <QUERY> [OPTIONS]
 | `--limit`, `-n` `<N>` | Maximum number of results to return. |
 | `--config`, `-c` `<PATH>` | Path to a config file. |
 
+### weft memory export
+
+Export memory data with a WITNESS integrity chain. Produces a JSON file
+containing all memory entries and their cryptographic hashes.
+
+```
+weft memory export [OPTIONS]
+```
+
+| Flag / Option | Description |
+|---------------|-------------|
+| `--output`, `-o` `<PATH>` | Output file path. Default: `memory-export.json`. |
+| `--config`, `-c` `<PATH>` | Path to a config file. |
+
+### weft memory import
+
+Import previously exported memory data. Validates the WITNESS chain before
+applying entries.
+
+```
+weft memory import <PATH> [OPTIONS]
+```
+
+| Argument / Option | Description |
+|-------------------|-------------|
+| `<PATH>` | Path to the exported memory JSON file. Required. |
+| `--config`, `-c` `<PATH>` | Path to a config file. |
+
 ### Examples
 
 Show the current memory file:
@@ -495,6 +523,18 @@ Search with a result limit:
 
 ```
 weft memory search "auth" --limit 5
+```
+
+Export memory with WITNESS chain:
+
+```
+weft memory export -o backup.json
+```
+
+Import memory from a previous export:
+
+```
+weft memory import backup.json
 ```
 
 ---
@@ -625,6 +665,103 @@ weft mcp-server -c /etc/weft/production.toml
 
 ---
 
+## weft mcp
+
+Manage dynamic MCP server connections. These commands add, remove, and list
+external MCP servers that clawft proxies as tools.
+
+### Subcommands
+
+### weft mcp add
+
+Register a new MCP server. The command after `--` is used to spawn the server
+process.
+
+```
+weft mcp add <NAME> -- <COMMAND...>
+```
+
+| Argument | Description |
+|----------|-------------|
+| `<NAME>` | Unique name for the MCP server. Required. |
+| `<COMMAND...>` | Shell command to start the server (e.g., `npx -y @modelcontextprotocol/server-github`). Required. |
+
+### weft mcp remove
+
+Remove a previously registered MCP server.
+
+```
+weft mcp remove <NAME>
+```
+
+| Argument | Description |
+|----------|-------------|
+| `<NAME>` | Name of the MCP server to remove. Required. |
+
+### weft mcp list
+
+List all configured MCP servers with their status.
+
+```
+weft mcp list
+```
+
+### Examples
+
+Add a GitHub MCP server:
+
+```
+weft mcp add github -- npx -y @modelcontextprotocol/server-github
+```
+
+List configured servers:
+
+```
+weft mcp list
+```
+
+Remove a server:
+
+```
+weft mcp remove github
+```
+
+---
+
+## weft security
+
+Security auditing tools.
+
+### weft security scan
+
+Run 57 security audit checks against the current workspace and configuration.
+Reports findings with severity levels (INFO, WARN, ERROR, CRITICAL).
+
+```
+weft security scan [OPTIONS]
+```
+
+| Flag / Option | Description |
+|---------------|-------------|
+| `--fix` | Automatically fix issues where possible. |
+| `--config`, `-c` `<PATH>` | Path to a config file. |
+
+### Examples
+
+Run a security scan:
+
+```
+weft security scan
+```
+
+Run a scan and auto-fix issues:
+
+```
+weft security scan --fix
+```
+
+---
+
 ## weft onboard
 
 Set up initial clawft configuration and workspace. Creates the `~/.clawft/`
@@ -709,6 +846,19 @@ weft skills install <PATH>
 |----------|-------------|
 | `<PATH>` | Path to a skill directory (containing `SKILL.md` or `skill.json`). Required. |
 
+### weft skills remove
+
+Remove a user-installed skill from `~/.clawft/skills/`. Built-in and
+workspace skills cannot be removed via this command.
+
+```
+weft skills remove <NAME>
+```
+
+| Argument | Description |
+|----------|-------------|
+| `<NAME>` | Skill name to remove. Required. |
+
 ### Examples
 
 List all skills:
@@ -727,6 +877,12 @@ Install a skill from a local directory:
 
 ```
 weft skills install ./my-skills/summarize
+```
+
+Remove a user-installed skill:
+
+```
+weft skills remove summarize
 ```
 
 ---
@@ -762,6 +918,19 @@ weft workspace list [OPTIONS]
 | Flag / Option | Description |
 |---------------|-------------|
 | `--all` | Show all entries including those with missing directories. |
+
+### weft workspace show
+
+Show details of a specific agent workspace, including its SOUL.md, session
+count, skill overrides, and configuration.
+
+```
+weft workspace show <AGENT_ID>
+```
+
+| Argument | Description |
+|----------|-------------|
+| `<AGENT_ID>` | Agent identifier whose workspace to inspect. Required. |
 
 ### weft workspace load
 
@@ -852,6 +1021,12 @@ List all workspaces:
 
 ```
 weft workspace list
+```
+
+Show an agent workspace:
+
+```
+weft workspace show my-agent-id
 ```
 
 Load a workspace:

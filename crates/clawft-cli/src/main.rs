@@ -519,6 +519,67 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[test]
+    fn cli_skills_remove_parses() {
+        let result = Cli::try_parse_from(["weft", "skills", "remove", "old-skill"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_skills_search_parses() {
+        let result = Cli::try_parse_from(["weft", "skills", "search", "coding"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_skills_search_with_limit_parses() {
+        let result =
+            Cli::try_parse_from(["weft", "skills", "search", "coding", "--limit", "5"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_skills_publish_parses() {
+        let result = Cli::try_parse_from(["weft", "skills", "publish", "/path/to/skill"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_skills_publish_unsigned_parses() {
+        let result = Cli::try_parse_from([
+            "weft",
+            "skills",
+            "publish",
+            "/path/to/skill",
+            "--allow-unsigned",
+        ]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_skills_remote_install_parses() {
+        let result = Cli::try_parse_from(["weft", "skills", "remote-install", "coding-agent"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_skills_remote_install_unsigned_parses() {
+        let result = Cli::try_parse_from([
+            "weft",
+            "skills",
+            "remote-install",
+            "coding-agent",
+            "--allow-unsigned",
+        ]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_skills_keygen_parses() {
+        let result = Cli::try_parse_from(["weft", "skills", "keygen"]);
+        assert!(result.is_ok());
+    }
+
     // ── Agents subcommand parsing ──────────────────────────────────
 
     #[test]

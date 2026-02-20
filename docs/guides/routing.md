@@ -944,3 +944,367 @@ here as stubs for future development.
 
 ### Intelligent Router (Level 2, behind `vector-memory`)
 - `clawft-core/src/intelligent_router.rs` -- `IntelligentRouter`
+
+---
+
+## 11. Agent Routing (L1)
+
+Agent routing determines which agent instance handles an inbound message based
+on the channel and sender context. This operates *before* the 6-stage pipeline;
+the agent router picks the agent, then the agent's pipeline processes the
+message.
+
+Source: `clawft-types/src/agent_routing.rs`, `clawft-core/src/agent_routing.rs`
+
+### AgentRouter
+
+The `AgentRouter` evaluates an ordered list of `AgentRoute` rules against each
+inbound message. The first matching rule wins.
+
+```rust
+pub struct AgentRouter {
+    routes: Vec<AgentRoute>,
+    catch_all: Option<String>,
+}
+```
+
+Construction methods:
+
+- `AgentRouter::new(config)` -- from an `AgentRoutingConfig`
+- `AgentRouter::empty()` -- no rules, no catch-all
+- `AgentRouter::with_catch_all(agent)` -- catch-all only, no explicit rules
+
+### AgentRoute Configuration
+
+Each route specifies a channel to match and optional match criteria:
+
+```rust
+pub struct AgentRoute {
+    pub channel: String,
+    pub match_criteria: MatchCriteria,
+    pub agent: String,
+}
+
+pub struct MatchCriteria {
+    pub user_id: Option<String>,
+    pub phone: Option<String>,
+    pub chat_id: Option<String>,
+}
+```
+
+All `MatchCriteria` fields are optional. A field that is `None` matches any
+value. When multiple fields are set, all must match (AND semantics). An
+empty `MatchCriteria` (all `None`) acts as a wildcard for that channel.
+
+### Routing Algorithm
+
+```mermaid
+flowchart TB
+    A[Inbound message] --> B{sender_id empty?}
+    B -->|yes| C{catch_all configured?}
+    B -->|no| D[Walk routes in order]
+    D --> E{Rule matches?}
+    E -->|yes| F["RoutingResult::Agent(rule.agent)"]
+    E -->|no, more rules| D
+    E -->|no rules left| C
+    C -->|yes| G["RoutingResult::CatchAll(catch_all)"]
+    C -->|no| H["RoutingResult::NoMatch + warn log"]
+```
+
+1. If the message has an empty `sender_id` (anonymous), skip rule evaluation
+   and go directly to the catch-all.
+2. Walk routes in declaration order. The first rule where `channel` matches
+   and all non-`None` criteria match the message wins.
+3. If no rule matches and a `catch_all` agent is configured, route there.
+4. If no rule matches and no catch-all is configured, return `NoMatch` and
+   log a warning. Messages are **not** silently dropped.
+
+### Anonymous Routing
+
+Messages with an empty `sender_id` bypass all routing rules and go directly
+to the catch-all agent. If no catch-all is configured, they receive a
+`NoMatch` result with a warning log.
+
+### Configuration Example
+
+```toml
+[[agent_routes]]
+channel = "telegram"
+match = { user_id = "12345" }
+agent = "work-agent"
+
+[[agent_routes]]
+channel = "whatsapp"
+match = { phone = "+1555123" }
+agent = "personal-agent"
+
+[[agent_routes]]
+channel = "slack"
+# Empty match criteria = wildcard for all slack messages
+agent = "slack-agent"
+
+[agent_routing]
+catch_all = "default-agent"
+```
+
+### Source Files
+
+| File | Description |
+|------|-------------|
+| `clawft-types/src/agent_routing.rs` | `AgentRoute`, `MatchCriteria`, `AgentRoutingConfig` types |
+| `clawft-core/src/agent_routing.rs` | `AgentRouter` engine with first-match-wins evaluation |
+
+---
+
+## 12. Planning Strategies (L4)
+
+The planning router adds structured reasoning capabilities with configurable
+guard rails to prevent runaway loops and cost overruns.
+
+Source: `clawft-core/src/planning.rs`
+
+### Strategies
+
+Two planning strategies are available:
+
+| Strategy | Serialized Name | Description |
+|----------|-----------------|-------------|
+| `React` | `react` | Reason+Act loop: alternate between reasoning about the current state and taking an action. Each step is a single reasoning-action pair. |
+| `PlanAndExecute` | `plan_and_execute` | Generate a full plan first, then execute each step sequentially. |
+
+### PlanningConfig
+
+```rust
+pub struct PlanningConfig {
+    pub max_planning_depth: u32,            // default: 10
+    pub max_planning_cost_usd: f64,         // default: 1.00
+    pub planning_step_timeout: Duration,    // default: 60s
+    pub circuit_breaker_no_op_limit: u32,   // default: 3
+}
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `max_planning_depth` | 10 | Maximum number of reasoning steps before forced termination |
+| `max_planning_cost_usd` | $1.00 | Hard budget cap for LLM calls during a single planning session |
+| `planning_step_timeout` | 60s | Maximum wall-clock duration for a single planning step |
+| `circuit_breaker_no_op_limit` | 3 | Consecutive non-actionable steps before circuit breaker abort |
+
+### Configuration
+
+```toml
+[router.planning]
+max_planning_depth = 10
+max_planning_cost_usd = 1.0
+planning_step_timeout = 60
+circuit_breaker_no_op_limit = 3
+```
+
+### Guard Rails
+
+The `PlanningRouter.check_guard_rails()` method validates each step against
+all limits before execution. It returns `Some(TerminationReason)` if a limit
+is reached, or `None` if the step is within bounds.
+
+```rust
+pub fn check_guard_rails(
+    &self,
+    current_step: u32,
+    total_cost_usd: f64,
+    consecutive_no_ops: u32,
+) -> Option<TerminationReason>
+```
+
+### Termination Reasons
+
+When a planning session ends, the `TerminationReason` explains why:
+
+| Reason | Trigger |
+|--------|---------|
+| `Completed` | Planning finished successfully |
+| `MaxDepthReached` | `current_step >= max_planning_depth` |
+| `BudgetExceeded` | `total_cost_usd >= max_planning_cost_usd` |
+| `StepTimeout` | Single step exceeded `planning_step_timeout` |
+| `CircuitBreaker` | `consecutive_no_ops >= circuit_breaker_no_op_limit` |
+| `Cancelled` | User abort or agent shutdown |
+
+### Partial Results
+
+When planning is terminated early, `explain_termination()` produces a
+human-readable summary that includes the termination reason, number of steps
+completed, and total cost spent. The `PlanningOutcome` struct carries all
+step results so that partial work is not lost:
+
+```rust
+pub struct PlanningOutcome {
+    pub strategy: PlanningStrategy,
+    pub termination_reason: TerminationReason,
+    pub steps_executed: u32,
+    pub total_cost_usd: f64,
+    pub total_duration: Duration,
+    pub step_results: Vec<PlanningStepResult>,
+    pub explanation: String,
+}
+```
+
+### Source Files
+
+| File | Description |
+|------|-------------|
+| `clawft-core/src/planning.rs` | `PlanningRouter`, `PlanningConfig`, `PlanningStrategy`, `TerminationReason` |
+
+---
+
+## 13. Delegation (M1-M3)
+
+Delegation allows the agent to spawn external processes for complex tasks,
+with a fallback chain from the `flow` CLI to the Claude API.
+
+Source: `clawft-services/src/delegation/flow.rs`,
+`clawft-services/src/delegation/claude.rs`
+
+### FlowDelegator
+
+The `FlowDelegator` spawns the `claude` CLI binary in non-interactive mode
+(`claude --print`) to delegate tasks. It provides:
+
+- **Timeout enforcement** via `tokio::select!` on subprocess wait + sleep
+- **Depth-limited delegation** (default max depth: 3) to prevent recursive
+  delegation loops
+- **Minimal environment construction** for security
+
+```rust
+pub struct FlowDelegator {
+    claude_binary: String,
+    timeout: Duration,
+    max_depth: u32,
+}
+```
+
+`FlowDelegator::new(config)` returns `None` if the `claude` binary is not
+found on `PATH`. Binary detection uses the `which` crate with `OnceLock`
+caching -- the filesystem is probed once per process lifetime.
+
+### Minimal Environment
+
+The child process receives only four environment variables:
+
+| Variable | Source |
+|----------|--------|
+| `PATH` | Parent `$PATH` |
+| `HOME` | Parent `$HOME` |
+| `ANTHROPIC_API_KEY` | Parent `$ANTHROPIC_API_KEY` |
+| `CLAWFT_AGENT_ID` | Set by the delegator for MCP callback routing |
+
+All other parent environment variables are stripped via `env_clear()`. This
+prevents accidental leakage of secrets or credentials to the child process.
+
+### DelegationError Variants
+
+| Variant | Description |
+|---------|-------------|
+| `SubprocessFailed` | Non-zero exit code with stderr capture |
+| `OutputParseFailed` | stdout was empty or could not be parsed |
+| `Timeout` | Subprocess exceeded configured timeout |
+| `Cancelled` | User abort or agent shutdown |
+| `FallbackExhausted` | All delegation targets (Flow, Claude) failed |
+
+### Fallback Chain
+
+The delegation system tries targets in order:
+
+1. **Flow** (`FlowDelegator`): Spawn `claude --print` as a subprocess.
+   Requires the `claude` binary on `PATH`.
+2. **Claude** (`ClaudeDelegator`): Call the Anthropic Messages API directly
+   with tool-use loop support. Requires `ANTHROPIC_API_KEY`.
+
+If both fail, `DelegationError::FallbackExhausted` is returned with the
+error from each attempt.
+
+### Feature Gate
+
+Delegation is gated behind the `delegate` feature, which is enabled by
+default. To build without delegation:
+
+```bash
+cargo build --no-default-features
+```
+
+### Source Files
+
+| File | Description |
+|------|-------------|
+| `clawft-services/src/delegation/flow.rs` | `FlowDelegator` with subprocess spawning and `which` caching |
+| `clawft-services/src/delegation/claude.rs` | `ClaudeDelegator` with Anthropic API tool-use loop |
+| `clawft-types/src/delegation.rs` | `DelegationConfig`, `DelegationTarget` types |
+
+---
+
+## 14. MCP Server Discovery (M4)
+
+The `McpServerManager` provides runtime management of MCP server connections,
+including hot-reload when the configuration file changes.
+
+Source: `clawft-services/src/mcp/discovery.rs`
+
+### McpServerManager
+
+```rust
+pub struct McpServerManager {
+    servers: HashMap<String, ManagedMcpServer>,
+    debounce: Duration,       // default: 500ms
+    drain_timeout: Duration,  // default: 30s
+}
+```
+
+Core operations:
+
+| Method | Description |
+|--------|-------------|
+| `add_server(config)` | Register a new MCP server (replaces existing by name) |
+| `remove_server(name)` | Remove and drain a server |
+| `list_servers()` | List all managed servers |
+| `get_server(name)` | Look up a server by name |
+| `mark_connected(name, tools)` | Update server status and discovered tools |
+| `mark_error(name)` | Mark a server as errored |
+| `apply_config_diff(new_configs)` | Hot-reload: add, remove, and update servers |
+
+### Server Status
+
+Each managed server has a `ServerStatus`:
+
+| Status | Description |
+|--------|-------------|
+| `Connected` | Server is connected and ready |
+| `Connecting` | Handshake in progress |
+| `Draining` | In-flight requests completing before disconnect |
+| `Disconnected` | Server is not connected |
+| `Error` | Connection failed |
+
+### Hot-Reload Protocol
+
+When `clawft.toml` changes on disk:
+
+1. File watcher detects the change (500ms debounce to coalesce rapid edits).
+2. `apply_config_diff()` computes the diff between old and new server lists.
+3. **New servers**: Added immediately in `Disconnected` state.
+4. **Removed servers**: Marked as `Draining` for up to 30s to complete
+   in-flight calls, then disconnected.
+5. **Changed servers**: Old server is removed, new config is added (remove
+   + add).
+
+`apply_config_diff()` returns `(added, removed, changed)` counts.
+
+### CLI Commands
+
+```sh
+weft mcp add <name> <command|url>
+weft mcp list
+weft mcp remove <name>
+```
+
+### Source Files
+
+| File | Description |
+|------|-------------|
+| `clawft-services/src/mcp/discovery.rs` | `McpServerManager`, `ServerStatus`, `ManagedMcpServer` |

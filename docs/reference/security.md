@@ -446,3 +446,48 @@ similar attacks.
 
 8. **Test policy changes.** After modifying command or URL policies, verify that
    both intended commands succeed and dangerous commands are still blocked.
+
+---
+
+## WASM Plugin Security
+
+Source: `clawft-plugin/src/wasm_host.rs`
+
+The WASM sandbox prevents untrusted plugin code from escaping isolation. All host function calls pass through permission checks before any system resource is accessed.
+
+| Layer | Mechanism | Threat Mitigated |
+|-------|-----------|-----------------|
+| Fuel metering | wasmtime fuel (1B default) | CPU denial-of-service |
+| Memory limits | 16 MB default cap | Out-of-memory crashes |
+| Epoch interruption | Wall-clock timeout | Infinite loops, CPU starvation |
+| Permission allowlists | Per-function checks | Unauthorized resource access |
+| Path canonicalization | `canonicalize` + symlink rejection | Directory traversal |
+| SSRF check | `is_private_ip()` on resolved IPs | Internal network probing |
+| Rate limiting | Token bucket on `log` and `http-request` | Resource exhaustion |
+| Audit logging | All host function calls logged | Post-incident forensics |
+
+Each of the 5 WIT host functions enforces its own gate: `http-request` validates URLs against `permissions.network` and rejects private IPs (reuses `is_private_ip()`); `read-file`/`write-file` canonicalize paths and reject symlinks outside `permissions.filesystem`; `get-env` returns only `permissions.env_vars`; `log` is rate-limited. 45 security tests cover all attack vectors including fuel exhaustion, memory limits, permission denial, path traversal, SSRF, rate limits, and epoch interruption.
+
+---
+
+## Plugin Permission Re-prompt (T41)
+
+When a plugin upgrade requests new permissions, `PermissionDiff` computes the delta against the `PermissionStore`'s previously approved set. Only new permissions (new URLs, paths, env vars, or shell access) are presented to the `PermissionApprover`. If no new permissions exist, the upgrade proceeds silently. On rejection, the old version remains active.
+
+---
+
+## WITNESS Audit Chains (H2.6)
+
+SHA-256 hash-chained audit trail for memory operations. Each record includes the operation, timestamp, and hash of the previous record. Sequential verification from the root detects tampering. Memory exports include the WITNESS chain; imports validate it before accepting data.
+
+---
+
+## Security Plugin (clawft-security)
+
+The `clawft-security` crate provides 57 audit checks across 10 categories: authentication, authorization, input validation, filesystem, network, cryptography, dependencies, configuration, logging, and plugin security. Runs via `weft security scan` and automatically during skill install (K3a).
+
+---
+
+## SandboxPolicy
+
+OS-level process sandboxing (seccomp-bpf/Landlock on Linux 5.13+) with WASM fallback on other platforms. Each agent receives its own policy restricting syscalls, filesystem access, network, and process spawning based on configuration and trust level.

@@ -2,7 +2,7 @@
 
 clawft is a Rust AI assistant framework designed around a modular, platform-abstracted pipeline architecture. It processes messages from chat channels (Telegram, Slack, Discord) through a 6-stage LLM pipeline with tool execution, session persistence, and long-term memory. The binary is named `weft`.
 
-The workspace contains 9 crates organized in a strict dependency hierarchy that enforces separation of concerns: shared types at the bottom, platform abstraction above them, then core engine logic, with tools, channels, services, and the CLI at the top. A WASM crate provides a browser-compatible entrypoint using only the types layer.
+The workspace contains 18 crates organized in a strict dependency hierarchy that enforces separation of concerns: shared types at the bottom, platform abstraction above them, then core engine logic, with tools, channels, services, plugins, and the CLI at the top. A WASM crate provides a browser-compatible entrypoint using only the types layer. Nine plugin crates (added in Element 04) extend the framework with git tools, cargo integration, OAuth2, AST analysis, browser automation, calendar, container management, and security auditing.
 
 ---
 
@@ -19,6 +19,15 @@ graph BT
     services["clawft-services"]
     cli["clawft-cli"]
     wasm["clawft-wasm"]
+    plugin["clawft-plugin"]
+    pgit["clawft-plugin-git"]
+    pcargo["clawft-plugin-cargo"]
+    poauth["clawft-plugin-oauth2"]
+    ptree["clawft-plugin-treesitter"]
+    pbrowser["clawft-plugin-browser"]
+    pcal["clawft-plugin-calendar"]
+    pcontain["clawft-plugin-containers"]
+    security["clawft-security"]
 
     platform --> types
     core --> types
@@ -30,6 +39,16 @@ graph BT
     channels --> types
     channels --> platform
     services --> types
+    plugin --> types
+    pgit --> plugin
+    pcargo --> plugin
+    poauth --> plugin
+    ptree --> plugin
+    pbrowser --> plugin
+    pcal --> plugin
+    pcontain --> plugin
+    security --> types
+    security --> plugin
     cli --> types
     cli --> platform
     cli --> core
@@ -37,12 +56,23 @@ graph BT
     cli --> tools
     cli --> channels
     cli --> services
+    cli --> plugin
+    cli --> security
     wasm --> types
 
     style types fill:#e8f4fd,stroke:#1a73e8
     style platform fill:#e8f4fd,stroke:#1a73e8
     style core fill:#fce8e6,stroke:#d93025
     style cli fill:#f1f3f4,stroke:#5f6368
+    style plugin fill:#e6f4ea,stroke:#137333
+    style pgit fill:#e6f4ea,stroke:#137333
+    style pcargo fill:#e6f4ea,stroke:#137333
+    style poauth fill:#e6f4ea,stroke:#137333
+    style ptree fill:#e6f4ea,stroke:#137333
+    style pbrowser fill:#e6f4ea,stroke:#137333
+    style pcal fill:#e6f4ea,stroke:#137333
+    style pcontain fill:#e6f4ea,stroke:#137333
+    style security fill:#fef7e0,stroke:#ea8600
 ```
 
 `clawft-llm` has no internal dependencies -- it is a standalone LLM provider abstraction depending only on `async-trait`, `reqwest`, and `serde`.
@@ -108,49 +138,11 @@ Standalone LLM provider abstraction with no internal crate dependencies.
 
 ## Provider Architecture
 
-The `clawft-llm` crate implements a prefix-based routing system that maps model identifiers to LLM API endpoints.
+`ProviderRouter` resolves model names (e.g. `"anthropic/claude-opus-4-5"`) to providers via longest-prefix matching. `OpenAiCompatProvider` is the sole `Provider` implementation, targeting any OpenAI-compatible endpoint. API keys are resolved from environment variables at request time.
 
-### ProviderRouter
+**Built-in providers (9):** openai, anthropic, groq, deepseek, mistral, together, openrouter, gemini, xai. Each has a prefix, base URL, and API key env var. Users can override per-provider settings in the config file.
 
-`ProviderRouter` resolves model names like `"anthropic/claude-opus-4-5"` to the correct provider and bare model name. Prefixes are matched longest-first (greedy), so `"openai/o1/"` matches before `"openai/"`. If no prefix matches, the request falls through to the default provider (the first registered).
-
-### OpenAiCompatProvider
-
-The sole `Provider` trait implementation. It wraps a `reqwest::Client` and targets any endpoint that accepts the OpenAI chat completion request format. API keys are resolved from environment variables at request time (or injected explicitly via `with_api_key()`). Error handling distinguishes rate-limiting (429), authentication failures (401/403), model-not-found (404), and generic request failures.
-
-### Built-in Providers
-
-9 providers ship out of the box, each configured with a base URL, API key environment variable, and model prefix:
-
-| Provider | Prefix | Base URL | API Key Env |
-|----------|--------|----------|-------------|
-| openai | `openai/` | `api.openai.com/v1` | `OPENAI_API_KEY` |
-| anthropic | `anthropic/` | `api.anthropic.com/v1` | `ANTHROPIC_API_KEY` |
-| groq | `groq/` | `api.groq.com/openai/v1` | `GROQ_API_KEY` |
-| deepseek | `deepseek/` | `api.deepseek.com/v1` | `DEEPSEEK_API_KEY` |
-| mistral | `mistral/` | `api.mistral.ai/v1` | `MISTRAL_API_KEY` |
-| together | `together/` | `api.together.xyz/v1` | `TOGETHER_API_KEY` |
-| openrouter | `openrouter/` | `openrouter.ai/api/v1` | `OPENROUTER_API_KEY` |
-| gemini | `gemini/` | `generativelanguage.googleapis.com/v1beta/openai` | `GOOGLE_GEMINI_API_KEY` |
-| xai | `xai/` | `api.x.ai/v1` | `XAI_API_KEY` |
-
-Users can override base URLs, API keys, and headers per provider through the application configuration file.
-
-### ClawftLlmAdapter
-
-The pipeline system defines its own `LlmProvider` trait (operating on `serde_json::Value`), while `clawft-llm` uses typed `ChatRequest`/`ChatResponse`. The `ClawftLlmAdapter` bridges the two: it converts inbound `Value` messages to `ChatMessage`, forwards the call to the underlying `clawft_llm::Provider`, then serializes the `ChatResponse` back to `Value` for the pipeline's `OpenAiCompatTransport` to parse.
-
-The factory function `create_adapter_from_config(config)` resolves the right built-in provider from the model prefix in the agent config, applies any user overrides, and returns the adapter wrapped in `Arc<dyn LlmProvider>`.
-
-### Routing Flow
-
-```mermaid
-flowchart LR
-    A["Model ID<br/>anthropic/claude-opus-4-5"] --> B[ProviderRouter]
-    B -- "longest prefix match<br/>prefix = anthropic/" --> C["strip prefix"]
-    C -- "bare model =<br/>claude-opus-4-5" --> D[OpenAiCompatProvider<br/>name = anthropic]
-    D -- "POST /chat/completions<br/>Bearer $ANTHROPIC_API_KEY" --> E["LLM API"]
-```
+`ClawftLlmAdapter` bridges the pipeline's `LlmProvider` trait (`serde_json::Value`) to `clawft-llm`'s typed `ChatRequest`/`ChatResponse`. `create_adapter_from_config()` resolves the provider and returns `Arc<dyn LlmProvider>`.
 
 ---
 
@@ -162,68 +154,15 @@ Central engine crate containing the agent loop, message bus, pipeline system, se
 
 **Modules:**
 
-#### bus -- MessageBus
+**Modules:**
+- **bus** -- `MessageBus`: tokio MPSC channels for inbound/outbound message routing (Send + Sync via `Arc<Mutex<UnboundedReceiver>>`)
+- **pipeline** -- 6-stage pluggable pipeline: `TaskClassifier`, `ModelRouter`, `ContextAssembler`, `LlmTransport`, `QualityScorer`, `LearningBackend`. `PipelineRegistry` maps `TaskType` to specialized pipelines with a default fallback.
+- **agent** -- `AgentLoop` (message processing), `ContextBuilder` (system prompt + skills + memory + history), `MemoryStore` (MEMORY.md/HISTORY.md), `SkillsLoader`
+- **session** -- `SessionManager`: JSONL-backed persistence keyed by `"{channel}:{chat_id}"` with in-memory cache
+- **security** -- `validate_session_id()`, `sanitize_content()`, `truncate_result()` (64KB cap)
+- **bootstrap** -- `AppContext`: wires all dependencies; `enable_live_llm()` swaps stub for `ClawftLlmAdapter`
 
-Thread-safe message router using tokio unbounded MPSC channels.
-
-- `MessageBus` -- owns inbound and outbound channel pairs
-- `publish_inbound()` / `consume_inbound()` -- channel-to-agent direction
-- `dispatch_outbound()` / `consume_outbound()` -- agent-to-channel direction
-- `inbound_sender()` / `outbound_sender()` -- cloneable handles for multi-producer use
-- Send + Sync via `Arc<Mutex<UnboundedReceiver>>`
-
-#### pipeline -- 6-Stage Pipeline
-
-Pluggable processing pipeline with trait-based stage abstraction. Each stage can be implemented at different capability levels (Level 0 = basic, Level 1 = adaptive, Level 2 = neural).
-
-**Stage traits:**
-1. `TaskClassifier` -- classify incoming requests by type and complexity
-2. `ModelRouter` -- select provider/model for the classified task
-3. `ContextAssembler` -- assemble system prompt, memory, skills, and history within token budget
-4. `LlmTransport` -- execute the LLM HTTP call
-5. `QualityScorer` -- score response quality (relevance, coherence)
-6. `LearningBackend` -- record interaction trajectories for future learning
-
-**Supporting types:** `Pipeline` (bundles all 6 stages), `PipelineRegistry` (maps `TaskType` to specialized pipelines with a default fallback), `TaskType` enum (Chat, CodeGeneration, CodeReview, Research, Creative, Analysis, ToolUse, Unknown), `TaskProfile`, `RoutingDecision`, `QualityScore`, `AssembledContext`, `TransportRequest`, `Trajectory`, `LearningSignal`
-
-**Default implementations:** `KeywordClassifier`, `StaticRouter`, `TokenBudgetAssembler`, `OpenAiCompatTransport` (stub or live via `ClawftLlmAdapter`), `NoopScorer`, `NoopLearner`
-
-#### agent -- AgentLoop
-
-Core message processing loop.
-
-- `AgentLoop` -- consumes from MessageBus, builds context, invokes pipeline, executes tool calls, dispatches responses
-- `ContextBuilder` -- assembles LLM messages in order: system prompt, skill prompts, long-term memory, conversation history (truncated to `memory_window`)
-- `MemoryStore` -- manages `MEMORY.md` (long-term facts) and `HISTORY.md` (session summaries) with paragraph-based search
-- `SkillsLoader` -- discovers and loads skill definitions and prompts from the skills directory
-
-#### session -- SessionManager
-
-Conversation persistence with write-through caching.
-
-- Sessions keyed by `"{channel}:{chat_id}"`
-- JSONL file format: metadata header line + one line per conversation turn
-- In-memory `HashMap` cache with disk fallback on cache miss
-- Directory discovery: `~/.clawft/workspace/sessions/` with `~/.nanobot/workspace/sessions/` fallback
-
-#### security -- Security Primitives
-
-Input validation and output sanitization.
-
-- `validate_session_id()` -- rejects empty, overlong (>256 bytes), path-traversal (`..`), directory-separator, null-byte, and control-character identifiers
-- `sanitize_content()` -- strips null bytes, DEL, and ASCII control chars (preserves `\n`, `\r`, `\t`, emoji, CJK, RTL)
-- `truncate_result()` -- caps tool output JSON at 64KB with type-aware truncation (strings get suffix, arrays keep leading elements with sentinel, objects get raw-JSON wrapping)
-
-#### bootstrap -- AppContext
-
-Dependency wiring and initialization.
-
-- `AppContext::new(config, platform)` -- creates MessageBus, SessionManager, MemoryStore, SkillsLoader, ContextBuilder, ToolRegistry, and default pipeline
-- `into_agent_loop()` -- consumes context and produces a ready-to-run `AgentLoop`
-- `enable_live_llm()` -- replaces stub pipeline with real LLM-backed transport via `ClawftLlmAdapter`
-- `set_pipeline()` -- inject custom pipeline configurations
-
-**Optional feature:** `vector-memory` -- enables `embeddings`, `vector_store`, `intelligent_router`, and `session_indexer` modules for semantic memory search
+**Optional feature:** `vector-memory` -- enables embeddings, vector_store, intelligent_router, session_indexer
 
 **Dependencies:** clawft-types, clawft-platform, clawft-llm, async-trait, tokio, serde_json, chrono, tracing
 
@@ -306,46 +245,9 @@ Background services that generate inbound events.
 
 ### Pluggable MCP Architecture (Phase 3H)
 
-The MCP subsystem in `clawft-services/src/mcp/` uses a pluggable provider model that unifies built-in tools, in-process vector tools, external MCP servers, and LLM delegation behind a single trait.
+The MCP subsystem (`clawft-services/src/mcp/`) uses a pluggable `ToolProvider` trait (`namespace()`, `list_tools()`, `call_tool()`) with four concrete providers: `BuiltinToolProvider` (wraps `ToolRegistry`), `RvfToolProvider` (11 vector tools), `ProxyToolProvider` (external MCP servers via `McpClient`), and `DelegationToolProvider` (Claude bridge).
 
-**Core Trait:**
-
-```rust
-pub trait ToolProvider: Send + Sync {
-    fn namespace(&self) -> &str;
-    fn list_tools(&self) -> Vec<ToolDefinition>;
-    async fn call_tool(&self, name: &str, args: serde_json::Value) -> Result<CallToolResult>;
-}
-```
-
-**Key Types** (all in `clawft-services/src/mcp/`):
-
-| File | Type | Purpose |
-|------|------|---------|
-| `provider.rs` | `ToolProvider` trait, `BuiltinToolProvider` | Core abstraction + built-in tool adapter |
-| `server.rs` | `McpServerShell` | Generic MCP server: JSON-RPC dispatch, stdio framing, `tools/list` + `tools/call` |
-| `middleware.rs` | `SecurityGuard`, `PermissionFilter`, `ResultGuard`, `AuditLog` | Request/response pipeline |
-| `composite.rs` | `CompositeToolProvider` | Multi-provider aggregation with `{server}__{tool}` namespace routing |
-
-**Concrete Providers:**
-
-| Provider | Source | Purpose |
-|----------|--------|---------|
-| `BuiltinToolProvider` | `provider.rs` | Wraps `ToolRegistry` (read_file, write_file, etc.) |
-| `RvfToolProvider` | `clawft-rvf-mcp` | 11 RVF vector tools (in-process) |
-| `ProxyToolProvider` | `McpClient` | Wraps `McpClient` for external MCP servers |
-| `DelegationToolProvider` | delegation module | Claude bridge for tool delegation |
-
-**Two Operating Modes:**
-
-1. **Server mode** (`weft mcp-server`): `McpServerShell` wraps a `CompositeToolProvider` and exposes aggregated tools to an LLM host over newline-delimited JSON-RPC stdio.
-2. **Client mode** (`tools.mcp_servers` config): `McpClient` connects to external MCP servers. Each external server is wrapped in a `ProxyToolProvider` and registered with the `CompositeToolProvider`.
-
-**Namespace routing:** `CompositeToolProvider` maps tool names using the `{server}__{tool}` convention (double underscore), matching the namespace pattern used by Claude Desktop and other MCP hosts.
-
-**Middleware pipeline:** All tool calls pass through `SecurityGuard` (input validation), `PermissionFilter` (access control), and on response through `ResultGuard` (output sanitization) and `AuditLog` (execution logging).
-
-**Protocol:** MCP 2025-06-18 stdio transport uses newline-delimited JSON (not HTTP Content-Length framing).
+`CompositeToolProvider` aggregates providers with `{server}__{tool}` namespace routing. `McpServerShell` exposes tools over newline-delimited JSON-RPC stdio (server mode: `weft mcp-server`). Client mode connects to external servers via `McpClient`. Middleware pipeline: `SecurityGuard` -> `PermissionFilter` -> execution -> `ResultGuard` -> `AuditLog`.
 
 ---
 
@@ -376,6 +278,44 @@ Browser/WASM entrypoint. Depends only on clawft-types.
 **Status:** Phase 3A stub. The `Platform` trait is designed for this target -- `process()` returns `None`, HTTP uses fetch API, filesystem uses WASI or in-memory backends.
 
 **Dependencies:** clawft-types
+
+---
+
+### clawft-plugin
+
+Plugin trait definitions and runtime infrastructure.
+
+**Purpose:** Define the six extension-point traits, plugin manifest format, WASM sandbox host (wasmtime 29), skill loader, hot-reload watcher, permission system, slash-command registry, and PluginHost unification.
+
+**Key types:**
+- 6 extension-point traits: `Tool`, `ChannelAdapter`, `PipelineStage`, `Skill`, `MemoryBackend`, `VoiceHandler`
+- `PluginManifest` -- manifest parser and validator
+- `WasmHost` -- wasmtime engine with fuel metering, memory limits, epoch interruption, 5 host functions
+- `SkillLoader` -- YAML-based discovery (workspace > user > builtin precedence)
+- `HotReloadWatcher` -- `notify`-based file watcher with atomic swap and debounce
+- `PluginPermissions` / `PermissionDiff` / `PermissionStore` -- permission system with upgrade re-prompt
+- `SlashCommandRegistry` -- command registration with collision detection
+- `SkillToolProvider` -- MCP bridge for skill-contributed tools
+- `PluginHost` -- unified lifecycle with `ChannelAdapterShim` and concurrent start/stop
+
+**Dependencies:** clawft-types, async-trait, wasmtime, notify, serde_yaml, serde_json, tokio
+
+---
+
+### Plugin Crates (Element 04)
+
+| Crate | Purpose | Key Dependencies |
+|-------|---------|-----------------|
+| `clawft-plugin-git` | 7 git tools (status, diff, log, commit, branch, checkout, blame) | clawft-plugin, git2 |
+| `clawft-plugin-cargo` | 5 cargo subcommands (build, test, check, clippy, fmt) | clawft-plugin |
+| `clawft-plugin-oauth2` | OAuth2 auth flows + authenticated REST tools | clawft-plugin, reqwest |
+| `clawft-plugin-treesitter` | AST analysis (parse, query, symbols, patterns) | clawft-plugin, tree-sitter |
+| `clawft-plugin-browser` | CDP browser automation (navigate, screenshot, eval, interact) | clawft-plugin, tokio |
+| `clawft-plugin-calendar` | Calendar CRUD (create, read, update, delete, list) | clawft-plugin, chrono |
+| `clawft-plugin-containers` | Docker/Podman lifecycle (build, run, stop, logs, list) | clawft-plugin, tokio |
+| `clawft-security` | 57 audit checks across 10 categories; `weft security scan` + skill install gate | clawft-types, clawft-plugin |
+
+All plugin crates depend on `clawft-plugin` for the `Tool` trait. The `clawft-security` crate additionally depends on `clawft-types`.
 
 ---
 
@@ -445,41 +385,11 @@ The `PipelineRegistry` maps `TaskType` variants to specialized `Pipeline` instan
 
 ## Pipeline Stage Details
 
-Each of the 6 stages is defined by a trait in `clawft-core::pipeline::traits`. The current implementation ships Level 0 (baseline) implementations for all stages, with higher levels planned.
+Each stage is defined by a trait in `clawft-core::pipeline::traits`. Current Level 0 implementations: `KeywordClassifier` (keyword-based `TaskType` assignment), `StaticRouter` (config-driven model selection), `TokenBudgetAssembler` (chars/4 heuristic, drops middle messages), `OpenAiCompatTransport` (stub or live via `ClawftLlmAdapter`), `NoopScorer` (returns 1.0), `NoopLearner` (discards trajectories).
 
-### Stage Traits and Current Implementations
+`PipelineRegistry` maps `TaskType` to specialized `Pipeline` instances with a default fallback. Its `complete()` method runs all 6 stages in sequence: classify, route, assemble, transport, score, learn.
 
-| # | Stage | Trait | Level 0 Implementation | Purpose |
-|---|-------|-------|----------------------|---------|
-| 1 | Classifier | `TaskClassifier` | `KeywordClassifier` | Scans message content for keywords to assign a `TaskType` (Chat, CodeGeneration, CodeReview, Research, Creative, Analysis, ToolUse, Unknown) and a complexity score (0.0--1.0). |
-| 2 | Router | `ModelRouter` | `StaticRouter` | Returns the model and provider from the agent config. Does not adapt. `update()` is a no-op. |
-| 3 | Assembler | `ContextAssembler` | `TokenBudgetAssembler` | Estimates token count (chars/4 heuristic) and truncates conversation history to fit within `max_context_tokens`. Preserves the system prompt and most recent messages, dropping older messages from the middle when the budget is exceeded. |
-| 4 | Transport | `LlmTransport` | `OpenAiCompatTransport` | Delegates to an `LlmProvider` (either a stub that returns canned responses, or a live `ClawftLlmAdapter`). Parses OpenAI-format JSON responses into `LlmResponse`. |
-| 5 | Scorer | `QualityScorer` | `NoopScorer` | Returns perfect scores (1.0) for all dimensions. See [Scoring and Learning](#scoring-and-learning) for planned upgrades. |
-| 6 | Learner | `LearningBackend` | `NoopLearner` | Discards all trajectories and learning signals. See [Scoring and Learning](#scoring-and-learning) for planned upgrades. |
-
-### PipelineRegistry
-
-`PipelineRegistry` maps `TaskType` variants to specialized `Pipeline` instances. Each `Pipeline` bundles one implementation of each of the 6 stage traits. Unregistered task types fall back to the default pipeline.
-
-The registry's `complete()` method orchestrates execution across all stages in sequence:
-
-1. Classify the request to obtain a `TaskProfile`.
-2. Route the profile to get a `RoutingDecision` (provider + model).
-3. Assemble the context within token budget.
-4. Execute the LLM transport call.
-5. Score the response quality.
-6. Record the full `Trajectory` (request + routing + response + score) in the learning backend.
-
-### Swapping Stub for Live LLM
-
-During bootstrap, the default pipeline uses a stub transport that returns empty responses. Calling `AppContext::enable_live_llm()` replaces the entire pipeline with one wired through `ClawftLlmAdapter`:
-
-```
-StubTransport  -->  enable_live_llm()  -->  OpenAiCompatTransport(ClawftLlmAdapter(OpenAiCompatProvider))
-```
-
-The `build_live_pipeline(config)` factory constructs the full Level 0 pipeline with real HTTP transport. Custom pipelines can be injected via `AppContext::set_pipeline()`.
+During bootstrap, `AppContext::enable_live_llm()` swaps the stub transport for `ClawftLlmAdapter`. Custom pipelines can be injected via `set_pipeline()`.
 
 ---
 
@@ -505,61 +415,13 @@ For the full tool call protocol and message format, see [guides/tool-calls.md](.
 
 ## Scoring and Learning
 
-Stages 5 and 6 of the pipeline provide hooks for response quality assessment and continuous improvement. The current Level 0 implementations are stubs; real scoring and learning will be introduced progressively.
-
-### Current State (Level 0)
-
-- **`NoopScorer`** -- returns perfect scores (overall: 1.0, relevance: 1.0, coherence: 1.0) for every response regardless of content. No quality signal is produced.
-- **`NoopLearner`** -- silently discards all `Trajectory` records and `LearningSignal` inputs. No adaptation occurs.
-
-### Planned Upgrades
-
-| Level | Scorer | Learner | Description |
-|-------|--------|---------|-------------|
-| 0 | `NoopScorer` | `NoopLearner` | Baseline. No scoring or learning. |
-| 1 | Heuristic scorer | EMA statistics | Score by response length, format compliance, tool success rate. Track exponential moving averages of quality per task type. |
-| 2 | `ruvllm::QualityScoringEngine` | Trajectory store | ML-based quality assessment using the ruvllm scoring engine. Trajectories persisted for offline analysis. |
-| 3 | Neural quality model | `sona::SonaEngine` | Neural scoring with the sona adaptive learning engine. Online fine-tuning from trajectory data. |
-| 4 | Ensemble scorer | Federated learning | Multiple scoring models with consensus. Cross-session learning. |
-| 5 | Self-improving scorer | Autonomous curriculum | Scorer improves its own model from accumulated trajectories. Learner generates synthetic training data. |
-
-### Integration Points
-
-The `QualityScorer` trait receives both the original `ChatRequest` and the `LlmResponse`, enabling scoring based on relevance to the input. The `LearningBackend` receives the full `Trajectory` (request + routing decision + response + quality score), providing all the context needed for model adaptation.
-
-`LearningSignal` carries explicit user feedback (`feedback_type` + `value`) that can be injected via future feedback APIs.
+Stages 5 (Scorer) and 6 (Learner) are currently Level 0 stubs (`NoopScorer` returns 1.0, `NoopLearner` discards trajectories). Planned upgrades progress from heuristic scoring (L1) through ML-based (`ruvllm`, L2), neural (`sona`, L3), ensemble (L4), to self-improving (L5). The `QualityScorer` receives `ChatRequest` + `LlmResponse`; the `LearningBackend` receives the full `Trajectory`. `LearningSignal` carries explicit user feedback for future injection.
 
 ---
 
 ## Vector Memory and RVF
 
-The optional `vector-memory` feature flag enables semantic search over conversation history and long-term memory using vector embeddings.
-
-### Current Architecture (Level 0)
-
-**Embedder: `HashEmbedder`** -- A SimHash-based local embedder that produces deterministic, fixed-dimension (default 384) embedding vectors. For each word, it hashes with `DefaultHasher`, spreads bits across the vector dimensions, then normalizes to unit length (L2 norm). Case-insensitive. Requires no API calls, no model files, and no network access.
-
-**Store: `VectorStore`** -- An in-memory store holding `VectorEntry` records (id, text, embedding, tags, metadata, timestamp). Search is brute-force cosine similarity over all entries, returning top-k results sorted by descending score. Suitable for small to medium datasets (up to tens of thousands of entries).
-
-**Supporting modules (behind `vector-memory` feature):**
-- `embeddings` -- `Embedder` trait with `embed()`, `embed_batch()`, and `dimension()` methods
-- `vector_store` -- `VectorStore` with `add()`, `search()`, `remove()`, `len()`
-- `intelligent_router` -- Semantic routing using embedding similarity
-- `session_indexer` -- Automatic indexing of conversation turns into the vector store
-
-### Planned RVF Integration
-
-The current brute-force search will be replaced by RVF (Rust Vector Framework) for production-scale semantic memory:
-
-| Component | Current (Level 0) | Planned (RVF) |
-|-----------|-------------------|---------------|
-| Embedder | `HashEmbedder` (SimHash, local) | Neural embeddings via API or local model |
-| Index | Brute-force linear scan | HNSW (Hierarchical Navigable Small World) |
-| Storage | In-memory `Vec<VectorEntry>` | Persistent, memory-mapped |
-| Scale | Thousands of entries | Millions of entries |
-| Filtering | None (post-search tag check) | Pre-filter by tags/metadata |
-
-For RVF integration details, see [guides/rvf.md](../guides/rvf.md).
+The optional `vector-memory` feature enables semantic search via `HashEmbedder` (SimHash, 384-dim, local) and `VectorStore` (brute-force cosine similarity). Supporting modules: `embeddings` (Embedder trait), `vector_store`, `intelligent_router` (semantic routing), `session_indexer` (auto-index conversation turns). Planned RVF integration replaces brute-force with HNSW indexing, persistent storage, and neural embeddings. See [guides/rvf.md](../guides/rvf.md).
 
 ---
 
@@ -609,39 +471,18 @@ flowchart TD
 
 ## Security Boundaries
 
-### Input Validation
-- **Session IDs** -- validated via `validate_session_id()` before any filesystem operation. Rejects path traversal (`..`), directory separators (`/`, `\`), null bytes, control characters, empty strings, and IDs exceeding 256 bytes.
-- **Message content** -- sanitized via `sanitize_content()` to strip null bytes, DEL (0x7F), and ASCII control characters (0x00-0x1F except newline, carriage return, and tab). Preserves all valid UTF-8 including emoji, CJK, and RTL text.
-- **Config keys** -- normalized from camelCase to snake_case via `normalize_keys()` during config loading.
+- **Input validation**: `validate_session_id()` rejects path traversal, null bytes, control chars, and overlong IDs. `sanitize_content()` strips control chars while preserving valid UTF-8. Config keys normalized from camelCase to snake_case.
+- **Output containment**: Tool results truncated to 64KB (type-aware). Tool iterations capped at `max_tool_iterations` (default 10).
+- **Filesystem sandboxing**: All file tools validate paths stay within `workspace_dir`. Session filenames are sanitized. `exec_shell` runs in the workspace directory.
+- **Platform isolation**: `Platform` trait decouples core from OS. WASM builds provide sandboxed implementations. `ProcessSpawner` gated behind `Option` (disabled on WASM).
 
-### Output Containment
-- **Tool results** -- truncated to 64KB via `truncate_result()` before being appended to the LLM context. Truncation is type-aware: strings receive a suffix, arrays keep leading elements plus a sentinel object, objects are wrapped in a `_truncated_json` envelope.
-- **Tool iterations** -- capped at `max_tool_iterations` (configurable, default 10). Exceeding the limit produces a `ClawftError::Provider` error rather than an infinite loop.
-
-### Filesystem Sandboxing
-- All file tools (`read_file`, `write_file`, `edit_file`, `list_directory`) receive a `workspace_dir` at registration time and validate that resolved paths remain within it.
-- `exec_shell` uses the workspace directory as its working directory.
-- Session files are written to a dedicated sessions directory with sanitized filenames (colons replaced with underscores).
-
-### Platform Isolation
-- The `Platform` trait decouples the core engine from the operating system. WASM builds can provide sandboxed implementations of HTTP, filesystem, and environment without any `unsafe` code or direct system calls in the core.
-- `ProcessSpawner` is gated behind `Option` -- WASM platforms return `None`, preventing process spawning entirely.
+See [reference/security.md](../reference/security.md) for the full security reference.
 
 ---
 
 ## Configuration Discovery
 
-The framework uses a cascading discovery chain for configuration:
-
-1. `CLAWFT_CONFIG` environment variable (absolute path to JSON file)
-2. `~/.clawft/config.json`
-3. `~/.nanobot/config.json` (legacy fallback)
-4. If none found, empty defaults are used
-
-The same fallback pattern applies to workspace directories:
-- Sessions: `~/.clawft/workspace/sessions/` then `~/.nanobot/workspace/sessions/`
-- Memory: `~/.clawft/workspace/memory/` then `~/.nanobot/workspace/memory/`
-- Skills: `~/.clawft/workspace/skills/`
+Config discovery chain: `CLAWFT_CONFIG` env var -> `~/.clawft/config.json` -> `~/.nanobot/config.json` (legacy) -> empty defaults. Workspace directories follow the same `~/.clawft/` then `~/.nanobot/` fallback pattern for sessions, memory, and skills.
 
 ---
 

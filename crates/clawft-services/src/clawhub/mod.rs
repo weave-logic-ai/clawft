@@ -12,7 +12,7 @@ pub mod registry;
 pub mod search;
 
 pub use registry::{
-    ClawHubClient, ClawHubConfig, PublishRequest, SkillEntry,
+    ClawHubClient, ClawHubConfig, ClawHubError, PublishRequest, SkillEntry,
     SkillInstallResult, ApiResponse,
 };
 pub use search::SkillSearchResult;

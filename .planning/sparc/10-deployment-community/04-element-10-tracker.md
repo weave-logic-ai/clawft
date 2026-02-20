@@ -1,7 +1,7 @@
 # Element 10: Deployment & Community - Sprint Tracker
 **Workstream**: K (Deployment & Community)
 **Timeline**: Weeks 8-12
-**Status**: COMPLETE (K2-K5 delivered, K4 install/publish depends on ClawHub server)
+**Status**: COMPLETE (K2-K5 delivered, K4 install/publish implemented)
 
 ## Phase Tracking
 
@@ -32,10 +32,14 @@
 - [x] CLI commands (weft security scan, weft security checks)
 
 ### K4: ClawHub Registry
-- [x] ClawHub REST API (Contract #20) -- stubs
+- [x] ClawHub REST API (Contract #20) -- real HTTP client (stubs replaced)
 - [x] Vector search + keyword fallback
 - [x] Skill signing, star/comment, versioning
-- [ ] weft skill install/publish from registry (server-side pending)
+- [x] Ed25519 signing module (clawft-core/src/security/signing.rs, 8 tests)
+- [x] weft skills search / publish / remote-install / keygen CLI commands
+- [x] ClawHubClient with real HTTP calls (search, publish, download, install)
+- [x] ClawHubError enum for graceful error handling
+- [x] Content hashing (SHA-256) and digital signature support
 - [ ] Agent auto-search (depends on C3/C4 landing)
 
 ### K5: Benchmarks & MVP Skills
@@ -56,6 +60,10 @@
 | crates/clawft-security/ | K3a | NEW crate (55 checks) | DONE |
 | crates/clawft-cli/src/commands/security_cmd.rs | K3a | NEW | DONE |
 | crates/clawft-services/src/clawhub/ | K4 | NEW module | DONE |
+| crates/clawft-core/src/security/signing.rs | K4 | NEW (Ed25519 signing) | DONE |
+| crates/clawft-core/src/security/mod.rs | K4 | CONVERTED from security.rs | DONE |
+| crates/clawft-services/src/clawhub/registry.rs | K4 | REPLACED stubs with HTTP | DONE |
+| crates/clawft-cli/src/commands/skills_cmd.rs | K4 | EXTENDED (4 new subcommands) | DONE |
 | scripts/bench/compare.sh | K5 | NEW | DONE |
 
 ## Test Results
@@ -65,8 +73,9 @@
 | clawft-security | 19 | PASS |
 | clawft-plugin (sandbox) | 62 | PASS |
 | clawft-core (sandbox+all) | 18 | PASS |
-| clawft-cli | 312 | PASS |
-| clawft-services (clawhub+all) | 252 | PASS |
+| clawft-cli | 329 | PASS |
+| clawft-services (clawhub+all) | 258 | PASS |
+| clawft-core (signing feature) | 8 | PASS |
 
 ## Cross-Element Dependencies
 

@@ -165,3 +165,114 @@ If running behind a corporate proxy, pass proxy environment variables:
 ```bash
 docker run --rm -e HTTPS_PROXY="http://proxy:8080" ...
 ```
+
+---
+
+## CI/CD Pipeline (K2)
+
+clawft uses a GitHub Actions workflow (`.github/workflows/pr-gates.yml`) to
+enforce quality gates on every pull request. The pipeline also supports
+multi-arch Docker image builds for releases.
+
+### PR Gate Jobs
+
+Every pull request must pass all of the following jobs before merge:
+
+| Job | Command | Description |
+|-----|---------|-------------|
+| **Clippy lint** | `cargo clippy --workspace -- -D warnings` | Zero-warning clippy across all crates |
+| **Test suite** | `cargo test --workspace` | Full workspace test suite |
+| **WASM size gate** | `scripts/bench/wasm-size-gate.sh` | Assert WASM binary < 300 KB raw, < 120 KB gzipped |
+| **Binary size check** | `wc -c target/release/weft` | Assert release binary < 10 MB |
+| **Integration smoke** | Docker build + gateway start | Build image, start gateway, verify it runs for 5s |
+
+The pipeline uses `concurrency` groups to cancel stale runs when new commits
+are pushed to the same PR branch.
+
+### Clippy Gate
+
+Clippy runs with `-D warnings` (deny all warnings), which means any new
+warning introduced by a PR will fail the build:
+
+```bash
+cargo clippy --workspace -- -D warnings
+```
+
+### Test Gate
+
+The full workspace test suite runs without feature flags to catch regressions
+in the default build:
+
+```bash
+cargo test --workspace
+```
+
+### WASM Size Assertion
+
+The WASM size gate builds the `clawft-wasm` crate with the `release-wasm`
+profile and checks both raw and gzipped sizes:
+
+```bash
+cargo build --target wasm32-wasip2 --profile release-wasm -p clawft-wasm
+bash scripts/bench/wasm-size-gate.sh "$WASM_BINARY" 300 120
+```
+
+The `release-wasm` profile uses `opt-level = "z"` for aggressive size
+optimization. The CI job also installs `binaryen` for `wasm-opt`.
+
+### Binary Size Check
+
+The release binary must stay under 10 MB:
+
+```bash
+cargo build --release --bin weft
+SIZE_BYTES=$(wc -c < target/release/weft)
+# Fail if > 10 MB
+```
+
+A size report is posted to the GitHub Actions step summary for visibility.
+
+### Multi-Arch Docker Release
+
+The CI pipeline supports multi-architecture Docker image builds:
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 -t weft .
+```
+
+The Dockerfile uses a multi-stage build with `cargo-chef` for dependency
+caching:
+
+1. **Chef stage**: Install `cargo-chef` for dependency recipe extraction
+2. **Planner stage**: Generate the dependency recipe from `Cargo.toml`
+3. **Builder stage**: Cook dependencies (cached layer), then build the app
+4. **Runtime stage**: `debian:bookworm-slim` with only the stripped binary
+
+The runtime image includes `ca-certificates`, `libssl3`, and `libgcc-s1`
+(required by wasmtime). It runs as a non-root `weft` user.
+
+### Docker Image Variants
+
+| Variant | Base | Features | Use Case |
+|---------|------|----------|----------|
+| Default | `debian:bookworm-slim` | Standard build | Production gateway |
+| WASM-enabled | `debian:bookworm-slim` | `--features wasm-plugins` | Plugins support |
+| Minimal | `debian:bookworm-slim` | `--no-default-features` | Smallest image, no delegation |
+
+To build with WASM plugin support:
+
+```bash
+docker build --build-arg FEATURES="wasm-plugins" -t weft:wasm .
+```
+
+### Integration Smoke Test
+
+The smoke test job runs after the test suite passes:
+
+1. Build a Docker image using `docker/build-push-action@v6` with GHA cache
+2. Start the container in gateway mode (`weft gateway`)
+3. Wait 5 seconds and verify the container is still running
+4. Shut down the container
+
+This catches issues like missing runtime dependencies, incorrect entrypoint
+configuration, or crash-on-startup bugs that unit tests cannot detect.

@@ -114,8 +114,8 @@ Even though Voice and UI are out of scope, the following hooks must be built:
 | 06 | Channel Enhancements | 100% | 9/9 | -- |
 | 07 | Dev Tools & Apps | 100% | 10/10 | -- |
 | 08 | Memory & Workspace | 100% | 10/10 | -- |
-| 09 | Multi-Agent Routing | 93% | 13/14 | M6 docs deferred |
-| 10 | Deployment & Community | 95% | K2-K5 core + MVP skills | Skill install/publish blocked on ClawHub server |
+| 09 | Multi-Agent Routing | 100% | 14/14 | -- |
+| 10 | Deployment & Community | 98% | K2-K5 core + MVP skills + K4 install/publish | Agent auto-search deferred |
 
 ### Wave Execution
 
@@ -156,8 +156,8 @@ Email, WhatsApp, Signal, Matrix, IRC, Google Chat, Microsoft Teams, Discord Resu
 
 ### Remaining Items
 
-1. **M6 docs** -- deferred to documentation sprint
-2. **K4 skill install/publish** -- blocked on ClawHub server availability
+1. ~~**M6 docs** -- deferred to documentation sprint~~ **Done** -- Added to `docs/guides/configuration.md` and `docs/guides/tool-calls.md`
+2. ~~**K4 skill install/publish** -- blocked on ClawHub server availability~~ **Done** -- Ed25519 signing module, real HTTP client, CLI subcommands (search/publish/remote-install/keygen)
 
 ---
 

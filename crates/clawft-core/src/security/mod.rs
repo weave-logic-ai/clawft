@@ -1,5 +1,8 @@
 //! Security boundary validation functions.
 
+#[cfg(feature = "signing")]
+pub mod signing;
+
 use clawft_types::error::ClawftError;
 use serde_json::Value;
 

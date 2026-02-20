@@ -1,7 +1,7 @@
 # Element 09: Multi-Agent Routing & Claude Flow Integration - Sprint Tracker
 **Workstreams**: L (Multi-Agent Routing), M (Claude Flow Integration)
 **Timeline**: Weeks 3-9
-**Status**: Complete (13/14 items done, M6 docs deferred to docs sprint)
+**Status**: Complete (14/14 items done, 100%)
 
 ---
 
@@ -62,7 +62,9 @@
   - Circuit breaker: 3 consecutive no-op steps -> abort
   - PlanningRouter.check_guard_rails() with TerminationReason
   - explain_termination() for human-readable partial results
-- [ ] **M6**: Delegation config documentation (deferred to docs sprint)
+- [x] **M6**: Delegation config documentation
+  - Added "Delegation & Multi-Agent" section to `docs/guides/configuration.md`
+  - Added "MCP Bridge Setup" section to `docs/guides/tool-calls.md`
 
 ---
 
@@ -88,8 +90,8 @@
 | `crates/clawft-types/src/lib.rs` | L1/L3 | Register new modules | Done |
 | `crates/clawft-core/src/lib.rs` | L1/L3/L4 | Register new modules | Done |
 | `crates/clawft-services/src/mcp/mod.rs` | M4/M5 | Register new modules | Done |
-| `docs/guides/configuration.md` | M6 | Update | Deferred |
-| `docs/guides/tool-calls.md` | M6 | Update | Deferred |
+| `docs/guides/configuration.md` | M6 | Update | Done |
+| `docs/guides/tool-calls.md` | M6 | Update | Done |
 
 ---
 

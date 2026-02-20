@@ -97,6 +97,9 @@ which = "7"
 # Random (testing)
 rand = "0.8"
 
+# Ed25519 signing
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+
 # File-system watching
 notify = "7"
 

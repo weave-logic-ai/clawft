@@ -437,6 +437,156 @@ loop continues, giving the LLM the opportunity to recover.
 
 ---
 
+## MCP Bridge Setup
+
+clawft supports bidirectional MCP bridging with Claude Code, allowing each
+system to invoke the other's tools. This enables powerful multi-agent
+workflows where clawft and Claude Code cooperate on tasks.
+
+### Outbound Bridge (clawft -> Claude Code)
+
+The outbound bridge exposes clawft's tools to Claude Code over MCP stdio
+transport. `McpServerShell` serves clawft's built-in and plugin tools using
+the standard JSON-RPC 2.0 framing over newline-delimited stdio.
+
+Start the MCP server:
+
+```bash
+# Expose clawft tools as an MCP server
+weft mcp-server
+```
+
+Register clawft as an MCP server in Claude Code:
+
+```bash
+# In Claude Code, add clawft as an MCP server
+claude mcp add clawft -- weft mcp-server
+```
+
+Once registered, Claude Code can discover and invoke all of clawft's tools.
+Tools are namespaced as `clawft__<tool_name>` within Claude Code (for example,
+`clawft__read_file`, `clawft__web_search`).
+
+### Inbound Bridge (Claude Code -> clawft)
+
+The inbound bridge lets clawft consume Claude Code's tools by spawning it as
+an MCP server. Add Claude Code as an MCP server in `config.json`:
+
+```json
+{
+  "tools": {
+    "mcp_servers": {
+      "claude-code": {
+        "command": "claude",
+        "args": ["mcp-server"]
+      }
+    }
+  }
+}
+```
+
+clawft spawns `claude mcp-server` as a child process using stdio transport.
+Tools discovered from Claude Code are registered in the `ToolRegistry` with
+the namespace prefix `claude-code__` (for example, `claude-code__Read`,
+`claude-code__Bash`). The LLM can invoke these tools like any other registered
+tool.
+
+### Bidirectional Bridge
+
+Both bridges can run simultaneously -- clawft exposes its tools to Claude Code
+AND consumes Claude Code's tools. This creates a full bidirectional bridge:
+
+```
++-------------------+              +-------------------+
+|                   |  outbound    |                   |
+|      clawft       |  ---------> |    Claude Code     |
+|                   |  (clawft's  |                   |
+|  Built-in tools   |   tools)    |  Claude Code tools |
+|  Plugin tools     |             |  (Read, Bash, etc) |
+|                   |  inbound    |                   |
+|                   |  <--------- |                   |
+|                   |  (CC tools) |                   |
++-------------------+              +-------------------+
+
+Outbound: weft mcp-server     -> Claude Code calls clawft tools
+Inbound:  claude mcp-server   -> clawft calls Claude Code tools
+```
+
+To enable the full bidirectional bridge:
+
+1. Configure the inbound bridge in `config.json` (Claude Code as MCP server).
+2. Register the outbound bridge in Claude Code (`claude mcp add clawft`).
+3. Both sides can now invoke tools across the bridge.
+
+### Recursive Delegation Protection
+
+When clawft delegates to Claude Code (or vice versa), there is a risk of
+infinite delegation loops -- clawft delegates to Claude Code, which calls back
+into clawft, which delegates again, and so on.
+
+The delegation system prevents this with a depth counter:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `delegation.flow.max_depth` | `3` | Maximum recursive delegation depth. |
+
+Each delegation increments a depth counter passed through the call chain. When
+the counter exceeds `max_depth`, the delegation is rejected immediately with
+`DelegationError::MaxDepthExceeded` instead of spawning another subprocess.
+
+This applies to all delegation backends (Flow and Claude Code) and works
+regardless of which system initiates the delegation.
+
+### Dynamic MCP Server Management
+
+MCP servers can be added and removed at runtime without restarting clawft.
+The `McpServerManager` supports hot-reload through CLI commands and config
+file watching.
+
+**CLI commands:**
+
+```bash
+# Add a new MCP server
+weft mcp add my-server -- npx -y @example/mcp-server
+
+# Remove an existing server
+weft mcp remove my-server
+
+# List all configured MCP servers and their status
+weft mcp list
+```
+
+**Server lifecycle:**
+
+The `McpServerManager` tracks each server through a status lifecycle:
+
+| Status | Description |
+|--------|-------------|
+| `Connecting` | Initial connection being established. |
+| `Connected` | Server is running and tools are registered. |
+| `Draining` | Server is being removed; in-flight requests are completing. |
+| `Disconnected` | Server has been cleanly shut down. |
+| `Error` | Server failed to start or lost connection. |
+
+**Hot-reload via config file watching:**
+
+The manager watches the config file for changes with a 500ms debounce window.
+When the `tools.mcp_servers` section changes, the manager computes a diff and
+applies it:
+
+1. **New servers** are started and their tools are registered.
+2. **Removed servers** enter the `Draining` state. In-flight tool calls are
+   allowed to complete within a 30-second timeout (the drain-and-swap
+   protocol). After draining, the server process is terminated and its tools
+   are unregistered.
+3. **Changed servers** (different command, args, or env) are drained and
+   restarted with the new configuration.
+
+This drain-and-swap protocol ensures that tool calls in progress are not
+interrupted by configuration changes.
+
+---
+
 ## Debugging Tool Calls
 
 ### Verbose Logging

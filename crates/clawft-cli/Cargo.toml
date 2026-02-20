@@ -46,3 +46,4 @@ cron = { workspace = true }
 tokio-util = { workspace = true }
 rpassword = "5"
 uuid = { workspace = true }
+serde_yaml = { workspace = true }
