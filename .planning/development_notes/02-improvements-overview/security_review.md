@@ -14,8 +14,8 @@ Two HIGH-severity vulnerabilities were confirmed with confidence >= 8/10 after f
 
 | # | Severity | Category | File | Confidence | Status |
 |---|----------|----------|------|-----------|--------|
-| 1 | HIGH | `path_traversal` | `clawft-plugin/src/manifest.rs:216` | 8/10 | Open |
-| 2 | HIGH | `privilege_escalation` | `clawft-core/src/agent/sandbox.rs:217` | 9/10 | Open |
+| 1 | HIGH | `path_traversal` | `clawft-plugin/src/manifest.rs:216` | 8/10 | **Fixed** (`aab3271`) |
+| 2 | HIGH | `privilege_escalation` | `clawft-core/src/agent/sandbox.rs:217` | 9/10 | **Fixed** (`aab3271`) |
 
 ---
 
