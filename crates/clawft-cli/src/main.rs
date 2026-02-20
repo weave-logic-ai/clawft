@@ -93,6 +93,9 @@ enum Commands {
     /// Initialize clawft config and workspace.
     Onboard(commands::onboard::OnboardArgs),
 
+    /// Security scanning, auditing, and hardening.
+    Security(commands::security_cmd::SecurityArgs),
+
     /// Show help for a topic (skills, agents, tools, commands, config).
     Help(commands::help_cmd::HelpArgs),
 
@@ -159,6 +162,44 @@ enum MemoryCmd {
         /// Maximum number of results.
         #[arg(long, default_value = "10")]
         limit: usize,
+
+        /// Config file path (overrides auto-discovery).
+        #[arg(short, long)]
+        config: Option<String>,
+    },
+
+    /// Export memory to a file.
+    Export {
+        /// Agent ID to export memory for.
+        #[arg(long)]
+        agent: String,
+
+        /// Output file path.
+        #[arg(short, long)]
+        output: String,
+
+        /// Export format: "json" or "rvf" (default: "json").
+        #[arg(long, default_value = "json")]
+        format: String,
+
+        /// Config file path (overrides auto-discovery).
+        #[arg(short, long)]
+        config: Option<String>,
+    },
+
+    /// Import memory from a file.
+    Import {
+        /// Agent ID to import memory into.
+        #[arg(long)]
+        agent: String,
+
+        /// Input file path.
+        #[arg(short, long)]
+        input: String,
+
+        /// Skip WITNESS chain validation.
+        #[arg(long)]
+        skip_verify: bool,
 
         /// Config file path (overrides auto-discovery).
         #[arg(short, long)]
@@ -365,6 +406,24 @@ async fn main() -> anyhow::Result<()> {
                     let cfg = commands::load_config(&platform, config.as_deref()).await?;
                     commands::memory_cmd::memory_search(&query, limit, &cfg).await?;
                 }
+                MemoryCmd::Export {
+                    agent,
+                    output,
+                    format,
+                    config,
+                } => {
+                    let cfg = commands::load_config(&platform, config.as_deref()).await?;
+                    commands::memory_cmd::memory_export(&agent, &output, &format, &cfg).await?;
+                }
+                MemoryCmd::Import {
+                    agent,
+                    input,
+                    skip_verify,
+                    config,
+                } => {
+                    let cfg = commands::load_config(&platform, config.as_deref()).await?;
+                    commands::memory_cmd::memory_import(&agent, &input, skip_verify, &cfg).await?;
+                }
             }
         }
         Commands::Config { action } => {
@@ -384,6 +443,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Agents(args) => commands::agents_cmd::run(args)?,
         Commands::Workspace(args) => commands::workspace_cmd::run(args)?,
         Commands::Onboard(args) => commands::onboard::run(args).await?,
+        Commands::Security(args) => commands::security_cmd::run(args)?,
         Commands::Help(args) => commands::help_cmd::run(args)?,
         Commands::Completions { shell } => match completions::Shell::from_str(&shell) {
             Some(s) => {

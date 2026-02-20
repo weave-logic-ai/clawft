@@ -23,6 +23,7 @@ wasm-plugins = [
     "dep:thiserror",
     "dep:dirs",
     "dep:chrono",
+    "dep:wasmtime",
 ]
 alloc-talc = ["dep:talc"]
 alloc-lol = ["dep:lol_alloc"]
@@ -41,6 +42,10 @@ tracing = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
 dirs = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
+wasmtime = { version = "29", optional = true, default-features = false, features = ["cranelift", "runtime"] }
+
+[dev-dependencies]
+wat = "1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 dlmalloc = { version = "0.2", features = ["global"] }

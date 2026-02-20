@@ -20,6 +20,7 @@ rvf = ["vector-memory", "dep:rvf-runtime", "dep:rvf-types", "dep:sha2", "dep:req
 clawft-types = { workspace = true }
 clawft-platform = { workspace = true }
 clawft-llm = { workspace = true }
+clawft-plugin = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

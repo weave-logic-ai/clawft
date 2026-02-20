@@ -1,0 +1,28 @@
+[package]
+name = "clawft-plugin-calendar"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Calendar integration tool plugin for clawft"
+keywords = ["plugin", "calendar", "google-calendar", "outlook", "ical"]
+categories = ["development-tools"]
+
+[features]
+default = []
+
+[dependencies]
+clawft-plugin = { workspace = true }
+clawft-plugin-oauth2 = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

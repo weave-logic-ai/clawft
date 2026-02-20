@@ -33,6 +33,7 @@ pub mod google_chat;
 pub mod host;
 #[cfg(feature = "matrix")]
 pub mod matrix;
+pub mod plugin_host;
 #[cfg(feature = "signal")]
 pub mod signal;
 pub mod slack;

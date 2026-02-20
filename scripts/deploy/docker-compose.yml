@@ -1,0 +1,30 @@
+# Docker Compose deployment for weft (clawft).
+#
+# Usage:
+#   docker compose -f scripts/deploy/docker-compose.yml up -d
+#
+# Override image tag via environment:
+#   WEFT_VERSION=0.1.0 docker compose -f scripts/deploy/docker-compose.yml up -d
+
+services:
+  weft:
+    image: ghcr.io/clawft/clawft:${WEFT_VERSION:-latest}
+    container_name: weft
+    restart: unless-stopped
+    ports:
+      - "${WEFT_PORT:-8080}:8080"
+    volumes:
+      - weft-config:/home/weft/.clawft
+    environment:
+      - RUST_LOG=${RUST_LOG:-info}
+    command: ["gateway"]
+    healthcheck:
+      test: ["CMD", "weft", "status"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  weft-config:
+    driver: local

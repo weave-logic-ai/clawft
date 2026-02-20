@@ -1,0 +1,33 @@
+[package]
+name = "clawft-plugin-treesitter"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Code analysis via tree-sitter tool plugin for clawft"
+keywords = ["plugin", "tree-sitter", "ast", "code-analysis", "complexity"]
+categories = ["development-tools"]
+
+[features]
+default = []
+rust = ["dep:tree-sitter-rust"]
+typescript = ["dep:tree-sitter-typescript"]
+python = ["dep:tree-sitter-python"]
+javascript = ["dep:tree-sitter-javascript"]
+
+[dependencies]
+clawft-plugin = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tree-sitter = "0.24"
+tree-sitter-rust = { version = "0.23", optional = true }
+tree-sitter-typescript = { version = "0.23", optional = true }
+tree-sitter-python = { version = "0.23", optional = true }
+tree-sitter-javascript = { version = "0.23", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

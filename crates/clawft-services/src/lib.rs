@@ -4,6 +4,7 @@
 //! functionality. Each service generates [`InboundMessage`](clawft_types::event::InboundMessage)
 //! events that feed into the main message bus.
 
+pub mod clawhub;
 pub mod cron_service;
 #[cfg(feature = "delegate")]
 pub mod delegation;

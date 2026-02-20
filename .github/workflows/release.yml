@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+env:
+  CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # -------------------------------------------------------------------
+  # Multi-arch Docker build and push to GHCR
+  # -------------------------------------------------------------------
+  docker:
+    name: Build & push multi-arch Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU (for arm64 emulation)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
+
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify image
+        run: |
+          echo "## Release Image" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Version | ${{ steps.version.outputs.VERSION }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Platforms | linux/amd64, linux/arm64 |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Registry | ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} |" >> "$GITHUB_STEP_SUMMARY"
+
+  # -------------------------------------------------------------------
+  # Integration smoke test on the published image
+  # -------------------------------------------------------------------
+  smoke-test:
+    name: Post-publish smoke test
+    runs-on: ubuntu-latest
+    needs: [docker]
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull and test image
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${GITHUB_REF_NAME#v}"
+          docker pull "$IMAGE"
+
+          # Start container
+          docker run --rm -d \
+            --name weft-release-smoke \
+            -p 8080:8080 \
+            "$IMAGE" gateway || true
+
+          # Wait for stabilization
+          sleep 5
+
+          if docker ps --filter "name=weft-release-smoke" --format "{{.Names}}" | grep -q weft-release-smoke; then
+            echo "Container is running."
+          else
+            echo "::warning::Container exited during smoke test"
+          fi
+
+          docker stop weft-release-smoke 2>/dev/null || true

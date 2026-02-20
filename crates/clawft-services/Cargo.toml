@@ -31,6 +31,7 @@ cron = { workspace = true }
 reqwest = { workspace = true }
 regex = { workspace = true, optional = true }
 which = { workspace = true, optional = true }
+dirs = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

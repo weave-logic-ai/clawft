@@ -1,0 +1,621 @@
+//! Per-agent sandbox policy definitions.
+//!
+//! The [`SandboxPolicy`] struct defines the runtime security restrictions for
+//! an agent or plugin. It maps from per-agent config (`~/.clawft/agents/<id>/config.toml`)
+//! to enforceable sandbox rules.
+//!
+//! The [`SandboxType`] enum determines which isolation mechanism is used:
+//! - `Wasm` -- WASM sandbox (cross-platform, default for WASM plugins)
+//! - `OsSandbox` -- seccomp + landlock on Linux (default for native on Linux)
+//! - `Combined` -- both WASM + OS sandbox layers
+//!
+//! **Secure by default**: The default sandbox type is NOT `None`. WASM plugins
+//! get `Wasm`, native execution on Linux gets `OsSandbox`.
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::path::PathBuf;
+
+/// Sandbox isolation mechanism.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxType {
+    /// WASM sandbox via wasmtime WASI capabilities (cross-platform).
+    Wasm,
+    /// OS-level sandbox: seccomp + landlock on Linux.
+    OsSandbox,
+    /// Both WASM and OS-level sandbox layers.
+    Combined,
+}
+
+impl Default for SandboxType {
+    fn default() -> Self {
+        // Secure by default: use OS sandbox on Linux, WASM elsewhere.
+        if cfg!(target_os = "linux") {
+            Self::OsSandbox
+        } else {
+            Self::Wasm
+        }
+    }
+}
+
+/// Network access policy for a sandboxed agent.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NetworkPolicy {
+    /// Whether network access is allowed at all.
+    #[serde(default)]
+    pub allow_network: bool,
+
+    /// Allowed domain patterns (exact or wildcard `*.example.com`).
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+
+    /// Blocked domain patterns (takes precedence over allowed).
+    #[serde(default)]
+    pub blocked_domains: Vec<String>,
+
+    /// Maximum outbound connections per minute.
+    #[serde(default = "default_max_connections")]
+    pub max_connections_per_minute: u32,
+}
+
+fn default_max_connections() -> u32 {
+    30
+}
+
+/// Filesystem access policy for a sandboxed agent.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FilesystemPolicy {
+    /// Paths the agent can read from.
+    #[serde(default)]
+    pub readable_paths: Vec<PathBuf>,
+
+    /// Paths the agent can write to.
+    #[serde(default)]
+    pub writable_paths: Vec<PathBuf>,
+
+    /// Whether the agent can create new files.
+    #[serde(default)]
+    pub allow_create: bool,
+
+    /// Whether the agent can delete files.
+    #[serde(default)]
+    pub allow_delete: bool,
+
+    /// Maximum individual file size in bytes (default: 8MB).
+    #[serde(default = "default_max_file_size")]
+    pub max_file_size: u64,
+}
+
+fn default_max_file_size() -> u64 {
+    8 * 1024 * 1024
+}
+
+/// Process execution policy for a sandboxed agent.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProcessPolicy {
+    /// Whether the agent can execute shell commands.
+    #[serde(default)]
+    pub allow_shell: bool,
+
+    /// Allowed command names (empty = none allowed unless `allow_shell` is true).
+    #[serde(default)]
+    pub allowed_commands: Vec<String>,
+
+    /// Blocked command patterns (takes precedence over allowed).
+    #[serde(default)]
+    pub blocked_commands: Vec<String>,
+
+    /// Maximum execution time per command in seconds.
+    #[serde(default = "default_max_exec_time")]
+    pub max_execution_seconds: u32,
+}
+
+fn default_max_exec_time() -> u32 {
+    30
+}
+
+/// Environment variable access policy.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EnvPolicy {
+    /// Allowed environment variable names.
+    #[serde(default)]
+    pub allowed_vars: Vec<String>,
+
+    /// Variables that are never accessible (hardcoded deny list).
+    #[serde(default)]
+    pub denied_vars: Vec<String>,
+}
+
+/// Per-agent sandbox policy.
+///
+/// Created from an agent's configuration and enforced at runtime by the
+/// sandbox enforcement layer. Each agent's tool restrictions map to a
+/// `SandboxPolicy`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxPolicy {
+    /// Agent or plugin identifier.
+    pub agent_id: String,
+
+    /// Sandbox isolation type.
+    #[serde(default)]
+    pub sandbox_type: SandboxType,
+
+    /// Network access policy.
+    #[serde(default)]
+    pub network: NetworkPolicy,
+
+    /// Filesystem access policy.
+    #[serde(default)]
+    pub filesystem: FilesystemPolicy,
+
+    /// Process execution policy.
+    #[serde(default)]
+    pub process: ProcessPolicy,
+
+    /// Environment variable access policy.
+    #[serde(default)]
+    pub env: EnvPolicy,
+
+    /// Tools this agent is allowed to use (empty = all tools allowed).
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+
+    /// Tools explicitly denied to this agent.
+    #[serde(default)]
+    pub denied_tools: Vec<String>,
+
+    /// Whether audit logging is enabled for this agent.
+    #[serde(default = "default_true")]
+    pub audit_logging: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for SandboxPolicy {
+    fn default() -> Self {
+        Self {
+            agent_id: String::new(),
+            sandbox_type: SandboxType::default(),
+            network: NetworkPolicy::default(),
+            filesystem: FilesystemPolicy::default(),
+            process: ProcessPolicy::default(),
+            env: EnvPolicy::default(),
+            allowed_tools: Vec::new(),
+            denied_tools: Vec::new(),
+            audit_logging: true,
+        }
+    }
+}
+
+impl SandboxPolicy {
+    /// Create a new sandbox policy for the given agent.
+    pub fn new(agent_id: impl Into<String>) -> Self {
+        Self {
+            agent_id: agent_id.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Check whether a specific tool is allowed by this policy.
+    pub fn is_tool_allowed(&self, tool_name: &str) -> bool {
+        // Denied tools always take precedence.
+        if self.denied_tools.iter().any(|t| t == tool_name) {
+            return false;
+        }
+        // If allowed_tools is empty, all tools are allowed.
+        if self.allowed_tools.is_empty() {
+            return true;
+        }
+        self.allowed_tools.iter().any(|t| t == tool_name)
+    }
+
+    /// Check whether a domain is allowed by the network policy.
+    pub fn is_domain_allowed(&self, domain: &str) -> bool {
+        if !self.network.allow_network {
+            return false;
+        }
+        // Check blocked domains first (takes precedence).
+        for blocked in &self.network.blocked_domains {
+            if domain_matches(domain, blocked) {
+                return false;
+            }
+        }
+        // If no allowed domains specified, all are allowed.
+        if self.network.allowed_domains.is_empty() {
+            return true;
+        }
+        self.network.allowed_domains.iter().any(|a| domain_matches(domain, a))
+    }
+
+    /// Check whether a file path is readable.
+    pub fn is_path_readable(&self, path: &std::path::Path) -> bool {
+        self.filesystem.readable_paths.iter().any(|allowed| {
+            path.starts_with(allowed)
+        })
+    }
+
+    /// Check whether a file path is writable.
+    pub fn is_path_writable(&self, path: &std::path::Path) -> bool {
+        self.filesystem.writable_paths.iter().any(|allowed| {
+            path.starts_with(allowed)
+        })
+    }
+
+    /// Check whether a command is allowed by the process policy.
+    pub fn is_command_allowed(&self, command: &str) -> bool {
+        if !self.process.allow_shell {
+            return false;
+        }
+        // Blocked commands take precedence.
+        if self.process.blocked_commands.iter().any(|b| b == command) {
+            return false;
+        }
+        // If allowed_commands is empty but allow_shell is true, all allowed.
+        if self.process.allowed_commands.is_empty() {
+            return true;
+        }
+        self.process.allowed_commands.iter().any(|a| a == command)
+    }
+
+    /// Collect the set of all effective tool names that are allowed.
+    pub fn effective_tools(&self) -> HashSet<String> {
+        let mut tools: HashSet<String> = self.allowed_tools.iter().cloned().collect();
+        for denied in &self.denied_tools {
+            tools.remove(denied);
+        }
+        tools
+    }
+
+    /// Return the platform-appropriate sandbox type.
+    ///
+    /// On macOS, downgrades `OsSandbox` and `Combined` to `Wasm` with a
+    /// warning, since seccomp/landlock are Linux-only.
+    pub fn effective_sandbox_type(&self) -> SandboxType {
+        if cfg!(target_os = "linux") {
+            return self.sandbox_type.clone();
+        }
+        // Non-Linux: WASM-only fallback.
+        match &self.sandbox_type {
+            SandboxType::OsSandbox | SandboxType::Combined => {
+                tracing::warn!(
+                    agent = %self.agent_id,
+                    "OS sandbox unavailable on this platform; \
+                     falling back to WASM-only sandbox"
+                );
+                SandboxType::Wasm
+            }
+            other => other.clone(),
+        }
+    }
+}
+
+/// Check whether a domain matches a pattern (exact or wildcard).
+fn domain_matches(domain: &str, pattern: &str) -> bool {
+    let domain_lower = domain.to_lowercase();
+    let pattern_lower = pattern.to_lowercase();
+
+    if pattern_lower == "*" {
+        return true;
+    }
+    if let Some(suffix) = pattern_lower.strip_prefix("*.") {
+        return domain_lower.ends_with(&format!(".{suffix}"))
+            || domain_lower == suffix;
+    }
+    domain_lower == pattern_lower
+}
+
+/// Audit log entry for a sandbox decision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxAuditEntry {
+    /// Timestamp (ISO 8601).
+    pub timestamp: String,
+    /// Agent identifier.
+    pub agent_id: String,
+    /// Action attempted (e.g., "file_read", "network_connect", "tool_invoke").
+    pub action: String,
+    /// Target of the action (e.g., file path, URL, tool name).
+    pub target: String,
+    /// Whether the action was allowed.
+    pub allowed: bool,
+    /// Reason for denial (if denied).
+    pub reason: Option<String>,
+}
+
+impl SandboxAuditEntry {
+    /// Create a new audit entry for an allowed action.
+    pub fn allowed(
+        agent_id: impl Into<String>,
+        action: impl Into<String>,
+        target: impl Into<String>,
+    ) -> Self {
+        Self {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            agent_id: agent_id.into(),
+            action: action.into(),
+            target: target.into(),
+            allowed: true,
+            reason: None,
+        }
+    }
+
+    /// Create a new audit entry for a denied action.
+    pub fn denied(
+        agent_id: impl Into<String>,
+        action: impl Into<String>,
+        target: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            agent_id: agent_id.into(),
+            action: action.into(),
+            target: target.into(),
+            allowed: false,
+            reason: Some(reason.into()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn default_sandbox_type_is_not_none() {
+        let st = SandboxType::default();
+        // On Linux, should be OsSandbox; on other platforms, Wasm.
+        // Either way, it is NOT "None".
+        assert!(matches!(st, SandboxType::OsSandbox | SandboxType::Wasm));
+    }
+
+    #[test]
+    fn default_policy_has_secure_defaults() {
+        let policy = SandboxPolicy::default();
+        assert!(!policy.network.allow_network);
+        assert!(policy.filesystem.readable_paths.is_empty());
+        assert!(policy.filesystem.writable_paths.is_empty());
+        assert!(!policy.process.allow_shell);
+        assert!(policy.audit_logging);
+    }
+
+    #[test]
+    fn tool_allowed_when_list_empty() {
+        let policy = SandboxPolicy::new("test-agent");
+        assert!(policy.is_tool_allowed("any_tool"));
+    }
+
+    #[test]
+    fn tool_denied_when_in_denied_list() {
+        let policy = SandboxPolicy {
+            agent_id: "test".into(),
+            denied_tools: vec!["dangerous_tool".into()],
+            ..Default::default()
+        };
+        assert!(!policy.is_tool_allowed("dangerous_tool"));
+    }
+
+    #[test]
+    fn tool_allowed_only_when_in_allowed_list() {
+        let policy = SandboxPolicy {
+            agent_id: "test".into(),
+            allowed_tools: vec!["read_file".into(), "grep".into()],
+            ..Default::default()
+        };
+        assert!(policy.is_tool_allowed("read_file"));
+        assert!(policy.is_tool_allowed("grep"));
+        assert!(!policy.is_tool_allowed("bash"));
+    }
+
+    #[test]
+    fn denied_takes_precedence_over_allowed() {
+        let policy = SandboxPolicy {
+            agent_id: "test".into(),
+            allowed_tools: vec!["bash".into()],
+            denied_tools: vec!["bash".into()],
+            ..Default::default()
+        };
+        assert!(!policy.is_tool_allowed("bash"));
+    }
+
+    #[test]
+    fn domain_not_allowed_when_network_disabled() {
+        let policy = SandboxPolicy::new("test");
+        assert!(!policy.is_domain_allowed("example.com"));
+    }
+
+    #[test]
+    fn domain_allowed_with_exact_match() {
+        let policy = SandboxPolicy {
+            agent_id: "test".into(),
+            network: NetworkPolicy {
+                allow_network: true,
+                allowed_domains: vec!["api.example.com".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(policy.is_domain_allowed("api.example.com"));
+        assert!(!policy.is_domain_allowed("evil.com"));
+    }
+
+    #[test]
+    fn domain_wildcard_match() {
+        let policy = SandboxPolicy {
+            agent_id: "test".into(),
+            network: NetworkPolicy {
+                allow_network: true,
+                allowed_domains: vec!["*.example.com".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(policy.is_domain_allowed("sub.example.com"));
+        assert!(policy.is_domain_allowed("example.com"));
+        assert!(!policy.is_domain_allowed("evil.com"));
+    }
+
+    #[test]
+    fn blocked_domain_takes_precedence() {
+        let policy = SandboxPolicy {
+            agent_id: "test".into(),
+            network: NetworkPolicy {
+                allow_network: true,
+                allowed_domains: vec!["*.example.com".into()],
+                blocked_domains: vec!["evil.example.com".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(!policy.is_domain_allowed("evil.example.com"));
+        assert!(policy.is_domain_allowed("good.example.com"));
+    }
+
+    #[test]
+    fn path_readable_check() {
+        let policy = SandboxPolicy {
+            agent_id: "test".into(),
+            filesystem: FilesystemPolicy {
+                readable_paths: vec![PathBuf::from("/home/user/workspace")],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(policy.is_path_readable(Path::new("/home/user/workspace/file.rs")));
+        assert!(!policy.is_path_readable(Path::new("/etc/passwd")));
+    }
+
+    #[test]
+    fn path_writable_check() {
+        let policy = SandboxPolicy {
+            agent_id: "test".into(),
+            filesystem: FilesystemPolicy {
+                writable_paths: vec![PathBuf::from("/tmp/sandbox")],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(policy.is_path_writable(Path::new("/tmp/sandbox/output.txt")));
+        assert!(!policy.is_path_writable(Path::new("/etc/config")));
+    }
+
+    #[test]
+    fn command_not_allowed_when_shell_disabled() {
+        let policy = SandboxPolicy::new("test");
+        assert!(!policy.is_command_allowed("ls"));
+    }
+
+    #[test]
+    fn command_allowed_when_shell_enabled() {
+        let policy = SandboxPolicy {
+            agent_id: "test".into(),
+            process: ProcessPolicy {
+                allow_shell: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(policy.is_command_allowed("ls"));
+    }
+
+    #[test]
+    fn command_blocked_takes_precedence() {
+        let policy = SandboxPolicy {
+            agent_id: "test".into(),
+            process: ProcessPolicy {
+                allow_shell: true,
+                allowed_commands: vec!["rm".into()],
+                blocked_commands: vec!["rm".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(!policy.is_command_allowed("rm"));
+    }
+
+    #[test]
+    fn effective_tools_excludes_denied() {
+        let policy = SandboxPolicy {
+            agent_id: "test".into(),
+            allowed_tools: vec!["read".into(), "write".into(), "bash".into()],
+            denied_tools: vec!["bash".into()],
+            ..Default::default()
+        };
+        let effective = policy.effective_tools();
+        assert!(effective.contains("read"));
+        assert!(effective.contains("write"));
+        assert!(!effective.contains("bash"));
+    }
+
+    #[test]
+    fn audit_entry_allowed() {
+        let entry = SandboxAuditEntry::allowed("agent-1", "file_read", "/tmp/test.txt");
+        assert!(entry.allowed);
+        assert!(entry.reason.is_none());
+    }
+
+    #[test]
+    fn audit_entry_denied() {
+        let entry = SandboxAuditEntry::denied(
+            "agent-1",
+            "network_connect",
+            "evil.com",
+            "domain not in allowlist",
+        );
+        assert!(!entry.allowed);
+        assert_eq!(entry.reason.as_deref(), Some("domain not in allowlist"));
+    }
+
+    #[test]
+    fn domain_matches_star() {
+        assert!(domain_matches("anything.com", "*"));
+    }
+
+    #[test]
+    fn domain_matches_case_insensitive() {
+        assert!(domain_matches("API.Example.COM", "api.example.com"));
+    }
+
+    #[test]
+    fn sandbox_policy_serialization_roundtrip() {
+        let policy = SandboxPolicy {
+            agent_id: "test-agent".into(),
+            sandbox_type: SandboxType::Combined,
+            network: NetworkPolicy {
+                allow_network: true,
+                allowed_domains: vec!["*.example.com".into()],
+                blocked_domains: vec!["evil.example.com".into()],
+                max_connections_per_minute: 60,
+            },
+            filesystem: FilesystemPolicy {
+                readable_paths: vec![PathBuf::from("/workspace")],
+                writable_paths: vec![PathBuf::from("/tmp")],
+                allow_create: true,
+                allow_delete: false,
+                max_file_size: 4 * 1024 * 1024,
+            },
+            process: ProcessPolicy {
+                allow_shell: true,
+                allowed_commands: vec!["git".into(), "cargo".into()],
+                blocked_commands: vec!["rm".into()],
+                max_execution_seconds: 60,
+            },
+            env: EnvPolicy {
+                allowed_vars: vec!["HOME".into()],
+                denied_vars: vec!["AWS_SECRET_ACCESS_KEY".into()],
+            },
+            allowed_tools: vec!["read_file".into()],
+            denied_tools: vec!["bash".into()],
+            audit_logging: true,
+        };
+        let json = serde_json::to_string(&policy).unwrap();
+        let restored: SandboxPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.agent_id, "test-agent");
+        assert_eq!(restored.sandbox_type, SandboxType::Combined);
+        assert!(restored.network.allow_network);
+        assert!(restored.audit_logging);
+    }
+}

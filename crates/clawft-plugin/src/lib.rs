@@ -37,6 +37,7 @@
 pub mod error;
 pub mod manifest;
 pub mod message;
+pub mod sandbox;
 pub mod traits;
 
 // Re-export core types at crate root for convenience.
@@ -45,6 +46,10 @@ pub use manifest::{
     PluginCapability, PluginManifest, PluginPermissions, PluginResourceConfig,
 };
 pub use message::MessagePayload;
+pub use sandbox::{
+    SandboxAuditEntry, SandboxPolicy, SandboxType,
+    NetworkPolicy, FilesystemPolicy, ProcessPolicy, EnvPolicy,
+};
 pub use traits::{
     ChannelAdapter, ChannelAdapterHost, KeyValueStore, MemoryBackend,
     PipelineStage, PipelineStageType, Skill, Tool, ToolContext, VoiceHandler,

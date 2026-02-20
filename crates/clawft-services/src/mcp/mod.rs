@@ -4,8 +4,10 @@
 //! JSON-RPC 2.0 over pluggable transports (stdio or HTTP).
 
 pub mod bridge;
+pub mod client;
 pub mod composite;
 pub mod discovery;
+pub mod ide;
 pub mod middleware;
 pub mod provider;
 pub mod server;

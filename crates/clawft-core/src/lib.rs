@@ -26,6 +26,8 @@ pub mod embeddings;
 #[cfg(feature = "vector-memory")]
 pub mod intelligent_router;
 #[cfg(feature = "vector-memory")]
+pub mod policy_kernel;
+#[cfg(feature = "vector-memory")]
 pub mod session_indexer;
 #[cfg(feature = "vector-memory")]
 pub mod vector_store;

@@ -5,7 +5,7 @@
 - **Total items**: 10 (F1-F9b)
 - **Workstream**: F (Software Dev & App Tooling)
 - **Timeline**: Weeks 5-10
-- **Status**: Planning -> Development
+- **Status**: Development Complete (10/10 items)
 - **Dependencies**: 04/C1 (plugin traits), 05/D9 (MCP transport concurrency), 04/C6 (MCP server for skills)
 - **Blocks**: 06/E5a (Google Chat needs F6 OAuth2), 09/M4 (FlowDelegator needs F9a MCP client)
 
@@ -24,15 +24,15 @@ Element 07 has 10 items (F1-F9b) across 3 phases spanning Weeks 5-10.
 
 ### Week 6-9 (F-Advanced -- 4 items, P2)
 
-- [ ] F3 -- Code analysis tree-sitter: AST parsing, complexity metrics, symbol listing -- crates/clawft-plugin-treesitter (new crate)
-- [ ] F4 -- Browser CDP automation (chromiumoxide): screenshot, form fill, scrape, sandboxed -- crates/clawft-plugin-browser (new crate)
-- [ ] F5 -- Calendar integration (REST+OAuth2): Google Cal, Outlook, iCal -- crates/clawft-plugin-calendar (new crate)
-- [ ] F7 -- Docker/Podman orchestration (subprocess): build, run, stop, logs, exec -- crates/clawft-plugin-containers (new crate)
+- [x] F3 -- Code analysis tree-sitter: AST parsing, complexity metrics, symbol listing -- crates/clawft-plugin-treesitter (new crate)
+- [x] F4 -- Browser CDP automation (chromiumoxide): screenshot, form fill, scrape, sandboxed -- crates/clawft-plugin-browser (new crate)
+- [x] F5 -- Calendar integration (REST+OAuth2): Google Cal, Outlook, iCal -- crates/clawft-plugin-calendar (new crate)
+- [x] F7 -- Docker/Podman orchestration (subprocess): build, run, stop, logs, exec -- crates/clawft-plugin-containers (new crate)
 
 ### Week 8-10 (F-MCP -- 2 items, P2)
 
-- [ ] F8 -- MCP deep IDE integration: VS Code extension backend via MCP tools -- clawft-services/src/mcp/ide.rs (new file)
-- [ ] F9b -- Full MCP client features: auto-discovery, connection pooling, schema caching, health checks -- clawft-services/src/mcp/client.rs + discovery.rs
+- [x] F8 -- MCP deep IDE integration: VS Code extension backend via MCP tools -- clawft-services/src/mcp/ide.rs (new file)
+- [x] F9b -- Full MCP client features: auto-discovery, connection pooling, schema caching, health checks -- clawft-services/src/mcp/client.rs + discovery.rs
 
 ---
 
@@ -42,14 +42,14 @@ Element 07 has 10 items (F1-F9b) across 3 phases spanning Weeks 5-10.
 |------|-------------|----------|------|-------------------|--------|-------|--------|-----------------|
 | F1 | Git tool plugin (git2) | P1 | 5-7 | crates/clawft-plugin-git | **Done** | Agent-07 | sprint/phase-5 | 7 tools: clone, commit, branch, diff, blame, log, status. 15 tests. |
 | F2 | Cargo/build integration (subprocess) | P1 | 5-7 | crates/clawft-plugin-cargo | **Done** | Agent-07 | sprint/phase-5 | 5 tools: build, test, clippy, check, publish. Input validation. 18 tests. |
-| F3 | Code analysis tree-sitter (AST, complexity) | P2 | 6-8 | crates/clawft-plugin-treesitter (new) | Pending | -- | -- | Parse Rust/TS/Python, AST query, complexity metrics |
-| F4 | Browser CDP automation (chromiumoxide) | P2 | 6-8 | crates/clawft-plugin-browser (new) | Pending | -- | -- | Screenshot + form fill with BrowserSandboxConfig enforcement |
-| F5 | Calendar integration (REST+OAuth2) | P2 | 7-9 | crates/clawft-plugin-calendar (new) | Pending | -- | -- | List/create/update/delete events for Google Calendar |
+| F3 | Code analysis tree-sitter (AST, complexity) | P2 | 6-8 | crates/clawft-plugin-treesitter | **Done** | Agent-07b | sprint/phase-5 | 4 tools: ts_parse, ts_symbols, ts_complexity, ts_languages. Per-language feature flags (rust, typescript, python, javascript). 12 tests. |
+| F4 | Browser CDP automation (chromiumoxide) | P2 | 6-8 | crates/clawft-plugin-browser | **Done** | Agent-07b | sprint/phase-5 | 6 tools: navigate, screenshot, fill, click, get_text, evaluate. BrowserSandboxConfig with URL scheme blocking + domain allowlist. 20 tests. |
+| F5 | Calendar integration (REST+OAuth2) | P2 | 7-9 | crates/clawft-plugin-calendar | **Done** | Agent-07b | sprint/phase-5 | 5 tools: list_events, create_event, update_event, delete_event, check_availability. RFC 3339 validation. 13 tests. |
 | F6 | Generic REST + OAuth2 helper | **P0** | 5-7 | crates/clawft-plugin-oauth2 | **Done** | Agent-07 | sprint/phase-5 | 4 tools: authorize, callback, refresh, rest_request. PKCE+state CSRF. 0600 token perms. 19 tests. |
-| F7 | Docker/Podman orchestration (subprocess) | P2 | 7-9 | crates/clawft-plugin-containers (new) | Pending | -- | -- | Build, run, stop, logs, exec with concurrency limits |
-| F8 | MCP deep IDE integration | P2 | 8-10 | clawft-services/src/mcp/ide.rs (new) | Pending | -- | -- | VS Code extension connects to MCP server, IDE tools in tools/list |
+| F7 | Docker/Podman orchestration (subprocess) | P2 | 7-9 | crates/clawft-plugin-containers | **Done** | Agent-07b | sprint/phase-5 | 6 tools: build, run, stop, logs, list, exec. ConcurrencyLimiter (AtomicU32). Docker/Podman runtime detection. 22 tests. |
+| F8 | MCP deep IDE integration | P2 | 8-10 | clawft-services/src/mcp/ide.rs | **Done** | Agent-07b | sprint/phase-5 | IdeToolProvider (5 tools: open_file, edit, diagnostics, symbols, hover). IdeDispatchFn callback. Stub mode for testing. 11 tests. |
 | F9a | Core MCP client library (MVP) | **P0** | 5-7 | clawft-services/src/mcp/mod.rs (existing) | **Done** (pre-existing) | -- | sprint/phase-5 | McpClient + McpSession already implemented: connect, list_tools, call_tool, send_raw. 20+ tests. |
-| F9b | Full MCP client features | P2 | 8-10 | clawft-services/src/mcp/client.rs + discovery.rs | Pending | -- | -- | Auto-discovery, connection pooling, schema caching, health checks |
+| F9b | Full MCP client features | P2 | 8-10 | clawft-services/src/mcp/client.rs | **Done** | Agent-07b | sprint/phase-5 | McpClientPool: auto-discover (~/.clawft/mcp/), connection pooling, CachedSchemas with TTL, ConnectionHealth tracking, per-agent overrides. 11 tests. |
 
 ---
 
@@ -188,6 +188,6 @@ Within `crates/clawft-services/src/mcp/`:
 | Phase | Items | Pending | In Progress | Completed | % Done |
 |-------|-------|---------|-------------|-----------|--------|
 | F-Core (F1, F2, F6, F9a) | 4 | 0 | 0 | 4 | 100% |
-| F-Advanced (F3, F4, F5, F7) | 4 | 4 | 0 | 0 | 0% |
-| F-MCP (F8, F9b) | 2 | 2 | 0 | 0 | 0% |
-| **Total** | **10** | **6** | **0** | **4** | **40%** |
+| F-Advanced (F3, F4, F5, F7) | 4 | 0 | 0 | 4 | 100% |
+| F-MCP (F8, F9b) | 2 | 0 | 0 | 2 | 100% |
+| **Total** | **10** | **0** | **0** | **10** | **100%** |

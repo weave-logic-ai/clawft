@@ -29,6 +29,7 @@ clawft-tools = { workspace = true }
 clawft-channels = { workspace = true, optional = true }
 clawft-llm = { workspace = true }
 clawft-services = { workspace = true, optional = true }
+clawft-security = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

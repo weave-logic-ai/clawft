@@ -10,13 +10,21 @@
 pub mod hash_embedder;
 #[cfg(feature = "vector-memory")]
 pub mod hnsw_store;
+#[cfg(feature = "vector-memory")]
+pub mod micro_hnsw;
 
 #[cfg(feature = "rvf")]
 pub mod api_embedder;
 #[cfg(feature = "rvf")]
 pub mod progressive;
 #[cfg(feature = "rvf")]
+pub mod quantization;
+#[cfg(feature = "rvf")]
+pub mod rvf_io;
+#[cfg(feature = "rvf")]
 pub mod rvf_stub;
+#[cfg(feature = "rvf")]
+pub mod witness;
 
 use async_trait::async_trait;
 use std::fmt;

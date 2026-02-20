@@ -36,6 +36,7 @@ tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
+dirs = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

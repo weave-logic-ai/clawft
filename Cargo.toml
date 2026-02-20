@@ -14,6 +14,11 @@ members = [
     "crates/clawft-plugin-git",
     "crates/clawft-plugin-cargo",
     "crates/clawft-plugin-oauth2",
+    "crates/clawft-plugin-treesitter",
+    "crates/clawft-plugin-browser",
+    "crates/clawft-plugin-calendar",
+    "crates/clawft-plugin-containers",
+    "crates/clawft-security",
 ]
 
 [workspace.package]
@@ -114,6 +119,11 @@ clawft-plugin = { path = "crates/clawft-plugin" }
 clawft-plugin-git = { path = "crates/clawft-plugin-git" }
 clawft-plugin-cargo = { path = "crates/clawft-plugin-cargo" }
 clawft-plugin-oauth2 = { path = "crates/clawft-plugin-oauth2" }
+clawft-plugin-treesitter = { path = "crates/clawft-plugin-treesitter" }
+clawft-plugin-browser = { path = "crates/clawft-plugin-browser" }
+clawft-plugin-calendar = { path = "crates/clawft-plugin-calendar" }
+clawft-plugin-containers = { path = "crates/clawft-plugin-containers" }
+clawft-security = { path = "crates/clawft-security" }
 
 [profile.release]
 opt-level = "z"
