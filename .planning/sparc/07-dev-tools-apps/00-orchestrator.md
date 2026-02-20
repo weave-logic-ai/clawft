@@ -2,7 +2,7 @@
 
 **Workstream**: F (Software Dev & App Tooling)
 **Timeline**: Weeks 5-10
-**Status**: Planning
+**Status**: Development Complete (10/10 items)
 **Dependencies**: 04/C1 (plugin traits), 05/D9 (MCP transport for F9)
 **Blocks**: None directly
 
@@ -98,20 +98,20 @@ This config is part of the C1 plugin manifest extension for the browser tool. Th
 
 ## 7. Exit Criteria
 
-- [ ] `weft` can create git branches and commits via tool call
-- [ ] Browser CDP takes screenshots and fills forms
-- [ ] OAuth2 flow works for at least one provider (Google)
-- [ ] F9a: MCP client connects to a single external MCP server and exposes its tools
-- [ ] F9b: MCP client supports auto-discovery, connection pooling, and schema caching
-- [ ] All tools implement `Tool` plugin trait
-- [ ] All existing tests pass
+- [x] `weft` can create git branches and commits via tool call
+- [x] Browser CDP takes screenshots and fills forms
+- [x] OAuth2 flow works for at least one provider (Google)
+- [x] F9a: MCP client connects to a single external MCP server and exposes its tools
+- [x] F9b: MCP client supports auto-discovery, connection pooling, and schema caching
+- [x] All tools implement `Tool` plugin trait
+- [x] All existing tests pass
 
 ### Security Exit Criteria
 
-- [ ] Browser tool blocks `file://`, `data://`, and `javascript://` URL schemes
-- [ ] Browser tool clears state (cookies, storage, sessions) between sessions
-- [ ] MCP stdio child processes do not inherit secret environment variables (minimal env constructed explicitly)
-- [ ] External MCP server tools are tagged as "untrusted" in the tool registry
+- [x] Browser tool blocks `file://`, `data://`, and `javascript://` URL schemes
+- [x] Browser tool clears state (cookies, storage, sessions) between sessions
+- [x] MCP stdio child processes do not inherit secret environment variables (minimal env constructed explicitly)
+- [x] External MCP server tools are tagged as "untrusted" in the tool registry
 
 ---
 

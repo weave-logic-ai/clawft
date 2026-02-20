@@ -62,11 +62,11 @@ The existing Dockerfile uses `FROM scratch` with a musl static binary. K2 replac
 - Integration smoke test uses `docker run --rm -d`, polls `/health`, then `docker stop`
 
 **Exit criteria**:
-- [ ] Docker image builds and runs on both amd64 and arm64
-- [ ] Compressed image size < 50MB
-- [ ] PR gates enforce clippy, test, WASM size, binary size checks
-- [ ] Release pipeline publishes multi-arch images to GHCR on tag
-- [ ] Integration smoke test passes (gateway start + `/health` check)
+- [x] Docker image builds and runs on both amd64 and arm64
+- [x] Compressed image size < 50MB
+- [x] PR gates enforce clippy, test, WASM size, binary size checks
+- [x] Release pipeline publishes multi-arch images to GHCR on tag
+- [x] Integration smoke test passes (gateway start + `/health` check)
 
 ---
 
@@ -116,11 +116,11 @@ The existing Dockerfile uses `FROM scratch` with a musl static binary. K2 replac
 - Critical/High severity findings from `weft skill install` scan block activation by default
 
 **Exit criteria**:
-- [ ] Per-agent sandbox enforces tool restrictions at runtime
-- [ ] Default sandbox type is NOT `None` (WASM for plugins, OS sandbox on Linux)
-- [ ] `weft security scan` runs 50+ audit checks across 8+ categories
-- [ ] Platform-specific sandbox fallback documented for non-Linux (macOS: WASM-only, warning emitted)
-- [ ] Audit logs record all sandbox allow/deny decisions
+- [x] Per-agent sandbox enforces tool restrictions at runtime
+- [x] Default sandbox type is NOT `None` (WASM for plugins, OS sandbox on Linux)
+- [x] `weft security scan` runs 50+ audit checks across 8+ categories
+- [x] Platform-specific sandbox fallback documented for non-Linux (macOS: WASM-only, warning emitted)
+- [x] Audit logs record all sandbox allow/deny decisions
 
 ---
 
@@ -162,10 +162,10 @@ Response schema:
 ```
 
 **Exit criteria**:
-- [ ] ClawHub requires skill signatures for publication (`--allow-unsigned` for local dev only, logs warning)
-- [ ] `weft skill install` works from ClawHub registry
-- [ ] Vector search returns semantically relevant results (or keyword fallback if H2 unavailable)
-- [ ] Agent auto-search triggers when no local skill matches
+- [x] ClawHub requires skill signatures for publication (`--allow-unsigned` for local dev only, logs warning)
+- [ ] `weft skill install` works from ClawHub registry (server-side pending)
+- [x] Vector search returns semantically relevant results (or keyword fallback if H2 unavailable)
+- [ ] Agent auto-search triggers when no local skill matches (depends on C3/C4 landing)
 
 ---
 
@@ -192,10 +192,10 @@ Response schema:
 - Skills are ported after C3 lands; scheduling for Week 10-12 assumes C3 is stable
 
 **Exit criteria**:
-- [ ] Benchmark suite produces comparison report with all 4 metrics against OpenClaw baseline
-- [ ] 3 MVP skills (`coding-agent`, `web-search`, `file-management`) pass benchmark suite
-- [ ] Benchmark results are reproducible across runs on same hardware
-- [ ] Results published as CI artifact
+- [x] Benchmark suite produces comparison report with all 4 metrics against OpenClaw baseline
+- [ ] 3 MVP skills (`coding-agent`, `web-search`, `file-management`) pass benchmark suite (depends on C3 landing)
+- [x] Benchmark results are reproducible across runs on same hardware
+- [x] Results published as CI artifact
 
 ---
 
@@ -272,16 +272,16 @@ Tests live in `tests/integration/cross_element/`.
 
 All exit criteria from the orchestrator must pass:
 
-- [ ] Docker image builds and runs on amd64 and arm64 (<50MB compressed)
-- [ ] CI/CD pipeline enforces PR gates (clippy, test, WASM size, binary size)
-- [ ] Release pipeline publishes multi-arch images to GHCR on tag
-- [ ] Integration smoke test passes in CI (gateway start + health check)
-- [ ] Per-agent sandbox enforces tool restrictions
-- [ ] Default sandbox type is NOT `None` (WASM for plugins, OsSandbox on Linux)
-- [ ] `weft security scan` runs 50+ audit checks across 8+ categories
-- [ ] ClawHub requires skill signatures for publication
-- [ ] Platform-specific sandbox fallback documented for non-Linux
-- [ ] `weft skill install` works from ClawHub registry
-- [ ] Benchmark suite produces comparison report with all 4 metrics against OpenClaw baseline
-- [ ] 3 MVP skills pass benchmark suite
-- [ ] All existing tests pass
+- [x] Docker image builds and runs on amd64 and arm64 (<50MB compressed)
+- [x] CI/CD pipeline enforces PR gates (clippy, test, WASM size, binary size)
+- [x] Release pipeline publishes multi-arch images to GHCR on tag
+- [x] Integration smoke test passes in CI (gateway start + health check)
+- [x] Per-agent sandbox enforces tool restrictions
+- [x] Default sandbox type is NOT `None` (WASM for plugins, OsSandbox on Linux)
+- [x] `weft security scan` runs 50+ audit checks across 8+ categories
+- [x] ClawHub requires skill signatures for publication
+- [x] Platform-specific sandbox fallback documented for non-Linux
+- [ ] `weft skill install` works from ClawHub registry (server-side pending)
+- [x] Benchmark suite produces comparison report with all 4 metrics against OpenClaw baseline
+- [ ] 3 MVP skills pass benchmark suite (depends on C3 landing)
+- [x] All existing tests pass

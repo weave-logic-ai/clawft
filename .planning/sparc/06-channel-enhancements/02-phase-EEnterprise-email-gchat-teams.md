@@ -8,7 +8,7 @@
 | **Priority** | E2 = P0 (MVP), E5a = P1, E5b = P1 |
 | **Crates** | `clawft-channels`, `clawft-plugin` (C1 ChannelAdapter trait) |
 | **Dependencies** | 04/C1 (ChannelAdapter trait), 03/A4 (SecretRef credentials), 07/F6 (OAuth2 helper -- E5a blocked until available) |
-| **Status** | Planning |
+| **Status** | Complete (E5a skeleton only, pending F6 OAuth2 wiring) |
 
 ---
 

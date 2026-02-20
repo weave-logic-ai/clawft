@@ -7,7 +7,7 @@
 > **Crates:** `crates/clawft-channels/` (new submodules: `whatsapp/`, `signal/`, `matrix/`, `irc/`)
 > **Dependencies IN:** C1 (`ChannelAdapter` trait from `clawft-plugin`), A4 (`SecretRef` for credential fields), A9 (feature gates pattern)
 > **Blocks:** None directly
-> **Status:** Planning
+> **Status:** Complete (IRC deferred)
 
 ---
 

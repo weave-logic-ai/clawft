@@ -7,7 +7,7 @@
 > **Crates:** `clawft-plugin-git`, `clawft-plugin-cargo`, `clawft-plugin-oauth2`, extension to `clawft-services`
 > **Dependencies IN:** C1 (plugin traits -- `Tool`, `ToolContext`, `KeyValueStore`), D9 (MCP transport concurrency for F9a), A4 (SecretRef for F6)
 > **Blocks:** E5a (Google Chat depends on F6), F9b (full MCP client depends on F9a), F5 (Calendar depends on F6)
-> **Status:** Planning
+> **Status:** Complete
 
 ---
 

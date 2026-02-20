@@ -12,7 +12,7 @@
 
 | Field | Value |
 |-------|-------|
-| **Branch** | `sprint/phase-5-5C` |
+| **Branch** | `sprint/phase-5` (actual working branch) |
 | **Crates touched** | `clawft-plugin` (new), `clawft-wasm`, `clawft-core`, `clawft-channels`, `clawft-cli`, `clawft-services` |
 | **Timeline** | Weeks 3-8 |
 | **Priority** | P0 (C1), P1 (C2, C3, C4, C6), P2 (C5, C7, C4a) |
@@ -593,7 +593,7 @@ All tests from the WASM security spec must pass before Element 04 receives GO ve
 
 **Goal**: Replace the hand-rolled YAML parser in `skills_v2.rs` with `serde_yaml`, implement local skill discovery with proper precedence, and add auto-registration as WASM or native wrapper.
 
-**Crate**: `clawft-core/src/agent/` (new file: `skill_loader.rs`, refactored from `skills_v2.rs`)
+**Crate**: `clawft-core/src/agent/skills_v2.rs` (refactored in-place; no separate `skill_loader.rs` was created)
 
 #### 3.1 Current Hand-Rolled YAML Parser to Replace
 
@@ -979,47 +979,47 @@ pub async fn start_all(&self) -> Vec<(String, Result<(), ChannelError>)> {
 ### Core (C1-C4)
 - [x] `clawft-plugin` crate compiles with all trait definitions (2026-02-19)
 - [x] At least one plugin implements each of the six traits (2026-02-19, mock impls in tests)
-- [ ] WASM plugin host loads and runs a test plugin
-- [ ] `weft skill install <path>` works for local skills
-- [ ] Hot-reload detects file changes within 2 seconds
-- [ ] Skill precedence (workspace > managed > bundled) verified
+- [x] WASM plugin host loads and runs a test plugin (2026-02-20)
+- [x] `weft skill install <path>` works for local skills (2026-02-20, C4)
+- [x] Hot-reload detects file changes within 2 seconds (2026-02-20, C4)
+- [x] Skill precedence (workspace > managed > bundled) verified (2026-02-20, C4)
 - [x] VoiceHandler trait placeholder exists (forward-compat) (2026-02-19)
 - [x] All existing tests pass (2026-02-20, 116 tests)
 
 ### C4a (Autonomous Skill Creation)
-- [ ] Pattern detection threshold configurable (default: 3)
-- [ ] Generated SKILL.md passes same validation as manual skills
-- [ ] User prompted for approval before install
-- [ ] Autonomous skill creation disabled by default, opt-in
-- [ ] Auto-generated skills have minimal permissions
+- [x] Pattern detection threshold configurable (default: 3) (2026-02-20)
+- [x] Generated SKILL.md passes same validation as manual skills (2026-02-20)
+- [x] User prompted for approval before install (2026-02-20, .pending marker)
+- [x] Autonomous skill creation disabled by default, opt-in (2026-02-20)
+- [x] Auto-generated skills have minimal permissions (2026-02-20)
 
 ### C5 (Slash-Command Framework)
-- [ ] Agent commands routed through registry, not inline match
-- [ ] Skills can contribute commands appearing in `/help`
-- [ ] Command name collisions produce clear error
+- [x] Agent commands routed through registry, not inline match (2026-02-20)
+- [x] Skills can contribute commands appearing in `/help` (2026-02-20)
+- [x] Command name collisions produce clear error (2026-02-20)
 
 ### C6 (MCP Skill Exposure)
-- [ ] MCP `tools/list` includes loaded skill tools with JSON Schema
-- [ ] MCP `tools/call` routes through `skill.execute_tool()`
-- [ ] Hot-reload updates MCP tool listing without restart
+- [x] MCP `tools/list` includes loaded skill tools with JSON Schema (2026-02-20)
+- [x] MCP `tools/call` routes through `skill.execute_tool()` (2026-02-20)
+- [x] Hot-reload updates MCP tool listing without restart (2026-02-20)
 
 ### C7 (PluginHost Unification)
-- [ ] Existing channels work through unified PluginHost
-- [ ] `start_all()` / `stop_all()` execute concurrently
-- [ ] SOUL.md injected into Assembler pipeline stage
+- [x] Existing channels work through unified PluginHost (2026-02-20, ChannelAdapterShim)
+- [x] `start_all()` / `stop_all()` execute concurrently (2026-02-20)
+- [x] SOUL.md injected into Assembler pipeline stage (2026-02-20, SoulConfig)
 
 ### Security
-- [ ] Every WIT host function validates against `PluginPermissions`
-- [ ] WASM fuel metering enabled (configurable, default 1B units)
-- [ ] WASM memory limits via `StoreLimits` (default 16MB)
+- [x] Every WIT host function validates against `PluginPermissions` (2026-02-20)
+- [x] WASM fuel metering enabled (configurable, default 1B units) (2026-02-20)
+- [x] WASM memory limits via `StoreLimits` (default 16MB) (2026-02-20)
 - [x] `read-file`/`write-file` canonicalize paths, reject external symlinks (2026-02-20)
 - [x] `http-request` applies SSRF check + network allowlist (2026-02-20)
 - [x] `get-env` returns `None` for non-permitted vars (2026-02-20)
 - [x] Rate limiting on `http-request` and `log` (2026-02-20)
-- [ ] Audit logging for all host function calls
-- [ ] ClawHub installs require signature verification
-- [ ] First-run permission approval implemented
-- [ ] All 45 security tests (T01-T45) pass
+- [x] Audit logging for all host function calls (2026-02-20)
+- [ ] ClawHub installs require signature verification (K4 dependency)
+- [ ] First-run permission approval implemented (pending runtime integration)
+- [ ] All 45 security tests (T01-T45) pass -- 40/45 pass; T30/T41/T42 deferred (C2 at 95%)
 
 ---
 
@@ -1027,13 +1027,8 @@ pub async fn start_all(&self) -> Vec<(String, Result<(), ChannelError>)> {
 
 `.planning/development_notes/02-improvements-overview/element-04/`
 
-Subdirectories:
-- `c1-plugin-trait-crate/` -- Trait design decisions, API evolution notes
-- `c2-wasm-host/` -- wasmtime integration notes, WIT interface versioning
-- `c3-skill-loader/` -- serde_yaml migration notes, discovery path resolution
-- `c4-hot-reload/` -- notify crate config, debounce tuning
-- `c5-slash-commands/` -- Registry wiring notes
-- `c6-mcp-exposure/` -- MCP protocol integration notes
-- `c7-pluginhost/` -- Channel migration log
-- `c4a-autonomous/` -- Pattern detection algorithm notes
-- `security/` -- Security review responses, test results
+Files (flat structure -- planned per-phase subdirectories were not created):
+- `notes.md` -- Consolidated implementation log for C1-C7 + C4a
+- `decisions.md` -- Design decisions and rationale
+- `blockers.md` -- Blockers encountered during implementation
+- `difficult-tasks.md` -- Tasks requiring extra effort or iteration

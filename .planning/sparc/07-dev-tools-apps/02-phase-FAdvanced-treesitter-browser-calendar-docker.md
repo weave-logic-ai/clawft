@@ -9,7 +9,7 @@
 | **Crates** | `clawft-plugin-treesitter`, `clawft-plugin-browser`, `clawft-plugin-calendar`, `clawft-plugin-containers` |
 | **Dependencies IN** | 04/C1 (plugin traits -- `Tool` trait), 07/F6 (OAuth2 helper -- F5 blocked until available) |
 | **Blocks** | None directly (all are leaf tools) |
-| **Status** | Planning |
+| **Status** | Complete |
 
 ---
 

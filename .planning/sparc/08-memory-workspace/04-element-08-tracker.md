@@ -2,7 +2,7 @@
 
 ## Summary
 
-- **Total items**: 11 (H1, H2.1-H2.8, H3)
+- **Total items**: 10 (H1, H2.1-H2.8, H3)
 - **Workstream**: H (Memory & Workspace)
 - **Timeline**: Weeks 4-8
 - **Status**: Complete (all 10 items done)
@@ -13,7 +13,7 @@
 
 ## Execution Schedule
 
-Element 08 has 11 deliverables across 3 phases spanning Weeks 4-8.
+Element 08 has 10 deliverables across 3 phases spanning Weeks 4-8.
 
 ### Week 4-6 (H1 + H3 -- independent, parallel)
 
@@ -43,16 +43,16 @@ Element 08 has 11 deliverables across 3 phases spanning Weeks 4-8.
 
 | Item | Description | Priority | Week | Crate(s) / Location | Status | Owner | Branch | Key Deliverable |
 |------|-------------|----------|------|----------------------|--------|-------|--------|-----------------|
-| H1 | Per-agent workspace isolation | P0 | 4-6 | clawft-core/workspace.rs | Pending | -- | -- | `~/.clawft/agents/<id>/` with SOUL.md, session store, skill overrides |
-| H2.1 | HNSW-backed VectorStore (instant-distance) | P0 | 5-7 | clawft-core/src/embeddings/hnsw_store.rs (new) | Pending | -- | -- | HNSW search returns relevant results in <10ms for 100K vectors |
-| H2.2 | Production Embedder trait | P0 | 5-7 | clawft-core/src/embeddings/mod.rs | Pending | -- | -- | `Embedder` trait with `HashEmbedder` + `ApiEmbedder` implementations |
+| H1 | Per-agent workspace isolation | P0 | 4-6 | clawft-core/src/workspace/{mod,agent,config}.rs | **Done** | Agent-08 | sprint/phase-5 | `~/.clawft/agents/<id>/` with SOUL.md, session store, skill overrides |
+| H2.1 | HNSW-backed VectorStore (instant-distance) | P0 | 5-7 | clawft-core/src/embeddings/hnsw_store.rs | **Done** | Agent-08 | sprint/phase-5 | HNSW search returns relevant results in <10ms for 100K vectors (18 tests) |
+| H2.2 | Production Embedder trait | P0 | 5-7 | clawft-core/src/embeddings/mod.rs | **Done** | Agent-08 | sprint/phase-5 | `Embedder` trait with `HashEmbedder` + `ApiEmbedder` implementations, `name()` method |
 | H2.3 | RVF segment I/O | P1 | 6-7 | clawft-core/src/embeddings/rvf_io.rs (new) | **Done** | Agent-08b | sprint/phase-5 | Local JSON-based segment I/O with WitnessChain integration (10 tests) |
 | H2.4 | `weft memory export/import` CLI | P1 | 6-7 | clawft-cli/src/commands/memory_cmd.rs | **Done** | Agent-08b | sprint/phase-5 | Export/Import subcommands with JSON format and WITNESS validation |
 | H2.5 | POLICY_KERNEL persistence | P1 | 6-7 | clawft-core/src/policy_kernel.rs (new) | **Done** | Agent-08b | sprint/phase-5 | Routing policy survives agent restart; agent + global fallback (12 tests) |
 | H2.6 | WITNESS segments (SHA-256 chain) | P2 | 7-8 | clawft-core/src/embeddings/witness.rs (new) | **Done** | Agent-08b | sprint/phase-5 | SHA-256 hash-chained audit trail with tamper detection (17 tests) |
 | H2.7 | Temperature quantization | P2 | 7-8 | clawft-core/src/embeddings/quantization.rs (new) | **Done** | Agent-08b | sprint/phase-5 | Hot=f32, Warm=fp16, Cold=PQ with AccessTracker tier management (18 tests) |
 | H2.8 | WASM micro-HNSW (8KB budget) | P2 | 7-8 | clawft-core/src/embeddings/micro_hnsw.rs (new) | **Done** | Agent-08b | sprint/phase-5 | In-crate module with message passing protocol; max 1024 vectors (12 tests) |
-| H3 | Timestamp standardization (DateTime<Utc>) | P1 | 4-5 | clawft-types/workspace.rs + all crates | Pending | -- | -- | Zero i64 ms or Option<String> timestamps remaining |
+| H3 | Timestamp standardization (DateTime<Utc>) | P1 | 4-5 | clawft-types/workspace.rs + all crates | **Done** | Agent-08 | sprint/phase-5 | Zero i64 ms or Option<String> timestamps remaining |
 
 ---
 
@@ -101,47 +101,47 @@ H2.3 (RVF Segment I/O)
 
 ### Core Exit Criteria
 
-- [ ] Each agent has isolated workspace under `~/.clawft/agents/<id>/` (H1)
-- [ ] HNSW-backed vector search returns relevant results (H2.1)
-- [ ] Production embedder produces real embeddings (not hash-based) (H2.2)
-- [ ] `weft memory export` and `weft memory import` work (H2.4)
-- [ ] All timestamps use `DateTime<Utc>` (H3)
-- [ ] All existing tests pass (regression gate)
+- [x] Each agent has isolated workspace under `~/.clawft/agents/<id>/` (H1)
+- [x] HNSW-backed vector search returns relevant results (H2.1)
+- [x] Production embedder produces real embeddings (not hash-based) (H2.2)
+- [x] `weft memory export` and `weft memory import` work (H2.4)
+- [x] All timestamps use `DateTime<Utc>` (H3)
+- [x] All existing tests pass (regression gate)
 
 ### Embedder Trait Exit Criteria
 
-- [ ] `Embedder` trait defined in `clawft-core/src/embeddings/mod.rs` (H2.2)
-- [ ] `HashEmbedder` and `ApiEmbedder` both implement `Embedder` trait (H2.2)
-- [ ] `MemoryBackend` accepts `Arc<dyn Embedder>` at construction (H2.2)
+- [x] `Embedder` trait defined in `clawft-core/src/embeddings/mod.rs` (H2.2)
+- [x] `HashEmbedder` and `ApiEmbedder` both implement `Embedder` trait (H2.2)
+- [x] `MemoryBackend` accepts `Arc<dyn Embedder>` at construction (H2.2)
 
 ### HNSW Exit Criteria
 
-- [ ] `instant-distance` integrated as the HNSW backend for H2.1
-- [ ] H2.8 WASM micro-HNSW is a separate module with <8KB compiled size
-- [ ] Periodic re-index works correctly for incremental updates (H2.1)
+- [x] `instant-distance` integrated as the HNSW backend for H2.1
+- [x] H2.8 WASM micro-HNSW is a separate module with <8KB compiled size
+- [x] Periodic re-index works correctly for incremental updates (H2.1)
 
 ### Cross-Agent Memory Exit Criteria
 
-- [ ] Shared namespaces configurable via `shared_namespaces` and `import_namespaces` (H1)
-- [ ] Symlink-based references work for read-only cross-agent access (H1)
-- [ ] Write access requires explicit `read_write = true` flag (H1)
+- [x] Shared namespaces configurable via `shared_namespaces` and `import_namespaces` (H1)
+- [x] Symlink-based references work for read-only cross-agent access (H1)
+- [x] Write access requires explicit `read_write = true` flag (H1)
 
 ### WITNESS Exit Criteria
 
-- [ ] WITNESS segments use SHA-256 hash chaining (H2.6)
-- [ ] Sequential verification from root detects tampering (H2.6)
-- [ ] `weft memory export` includes WITNESS chain; `weft memory import` validates it (H2.4 + H2.6)
+- [x] WITNESS segments use SHA-256 hash chaining (H2.6)
+- [x] Sequential verification from root detects tampering (H2.6)
+- [x] `weft memory export` includes WITNESS chain; `weft memory import` validates it (H2.4 + H2.6)
 
 ### Async Embedding Exit Criteria
 
-- [ ] `store()` returns immediately; embedding runs in background (H2.2)
-- [ ] `pending_embeddings` queue tracks in-flight items (H2.2)
-- [ ] Fallback to keyword-only search when embedding API unavailable (H2.2)
+- [x] `store()` returns immediately; embedding runs in background (H2.2)
+- [x] `pending_embeddings` queue tracks in-flight items (H2.2)
+- [x] Fallback to keyword-only search when embedding API unavailable (H2.2)
 
 ### RVF 0.2 Exit Criteria
 
-- [ ] RVF 0.2 API audit completed in Week 4 (H2.3 pre-work)
-- [ ] Segment I/O path confirmed (either via `rvf-runtime` or local implementation) (H2.3)
+- [x] RVF 0.2 API audit completed in Week 4 (H2.3 pre-work)
+- [x] Segment I/O path confirmed (either via `rvf-runtime` or local implementation) (H2.3)
 
 ---
 

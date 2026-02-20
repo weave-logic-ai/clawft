@@ -7,7 +7,7 @@
 > **Crates:** `clawft-services` (extends `src/mcp/`)
 > **Dependencies IN:** C6 (MCP server for loaded skills), F9a (Core MCP client), D9 (MCP transport)
 > **Blocks:** None (post-MVP features)
-> **Status:** Planning
+> **Status:** Complete
 
 ---
 

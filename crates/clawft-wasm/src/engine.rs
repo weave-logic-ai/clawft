@@ -21,7 +21,7 @@
 //! - Every host function call is recorded in the [`AuditLog`]
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::audit::AuditLog;
 use crate::sandbox::{
@@ -143,10 +143,12 @@ pub struct WasmPluginEngine {
 }
 
 impl WasmPluginEngine {
-    /// Create a new WASM plugin engine with fuel metering enabled.
+    /// Create a new WASM plugin engine with fuel metering and epoch
+    /// interruption enabled.
     pub fn new() -> Result<Self, PluginError> {
         let mut config = wasmtime::Config::new();
         config.consume_fuel(true);
+        config.epoch_interruption(true);
         // Cranelift is default compiler via features
 
         let engine = wasmtime::Engine::new(&config)
@@ -194,6 +196,13 @@ impl WasmPluginEngine {
         store
             .set_fuel(config.fuel_budget)
             .map_err(|e| PluginError::ExecutionFailed(format!("set fuel: {e}")))?;
+
+        // Set epoch deadline. The deadline is in "ticks" from the current
+        // epoch. The caller is responsible for incrementing the engine epoch
+        // (e.g., from a background thread) at a regular cadence.
+        // We use 1 tick per timeout period -- the background thread will
+        // increment the epoch after `timeout_secs` has elapsed.
+        store.set_epoch_deadline(1);
 
         Ok(store)
     }
@@ -351,6 +360,10 @@ impl WasmPluginEngine {
     /// Creates a fresh `Store` per invocation (fuel resets), instantiates
     /// the module, calls the exported `execute-tool` function, and returns
     /// the result with metrics.
+    ///
+    /// Wall-clock timeout is enforced via wasmtime epoch interruption: a
+    /// background thread increments the engine epoch after `config.timeout_secs`
+    /// has elapsed, causing any running WASM to trap.
     pub fn execute_tool(
         &self,
         module: &wasmtime::Module,
@@ -398,6 +411,16 @@ impl WasmPluginEngine {
             }
         };
 
+        // Start wall-clock timeout enforcer. A background thread will
+        // increment the engine epoch after `timeout_secs`, causing the
+        // WASM execution to trap if it hasn't finished.
+        let timeout = Duration::from_secs(config.timeout_secs);
+        let engine_handle = self.engine.clone();
+        let timeout_thread = std::thread::spawn(move || {
+            std::thread::sleep(timeout);
+            engine_handle.increment_epoch();
+        });
+
         // Look for an exported function `execute-tool` or `execute_tool`
         let func = instance
             .get_typed_func::<(i32, i32, i32, i32), i32>(&mut store, "execute-tool")
@@ -426,6 +449,11 @@ impl WasmPluginEngine {
             }
         };
 
+        // Detach the timeout thread -- it will finish on its own.
+        // We don't join because if execution completed before timeout,
+        // we don't want to wait for the sleep to finish.
+        drop(timeout_thread);
+
         let fuel_consumed = config
             .fuel_budget
             .saturating_sub(store.get_fuel().unwrap_or(0));
@@ -436,6 +464,39 @@ impl WasmPluginEngine {
             fuel_consumed,
             duration_ms,
         }
+    }
+
+    /// Execute a raw WASM function with wall-clock timeout enforcement.
+    ///
+    /// This is a lower-level method for running arbitrary typed WASM functions
+    /// with epoch-based wall-clock timeout. Used by tests and advanced callers
+    /// that need direct control over the function signature.
+    ///
+    /// Returns `Err` if the function traps (including epoch-based timeout).
+    pub fn call_func_with_timeout<Params, Results>(
+        &self,
+        store: &mut wasmtime::Store<HostState>,
+        func: &wasmtime::TypedFunc<Params, Results>,
+        params: Params,
+        timeout: Duration,
+    ) -> Result<Results, wasmtime::Error>
+    where
+        Params: wasmtime::WasmParams,
+        Results: wasmtime::WasmResults,
+    {
+        // Spawn a thread that increments the epoch after the timeout.
+        let engine_handle = self.engine.clone();
+        let timeout_thread = std::thread::spawn(move || {
+            std::thread::sleep(timeout);
+            engine_handle.increment_epoch();
+        });
+
+        let result = func.call(store, params);
+
+        // Detach the timeout thread.
+        drop(timeout_thread);
+
+        result
     }
 
     /// Get a reference to the underlying wasmtime engine.
@@ -1436,5 +1497,281 @@ mod tests {
         // Creating another config gives the same fresh budget
         let config2 = PluginConfig::default_for("test");
         assert_eq!(config2.fuel_budget, config.fuel_budget);
+    }
+
+    /// T30: Wall-clock timeout enforcement.
+    ///
+    /// A WASM module with an infinite loop and a generous fuel budget should
+    /// be terminated by the wall-clock timeout (via epoch interruption) rather
+    /// than running indefinitely. We use a very short timeout (100ms) to keep
+    /// the test fast.
+    #[test]
+    fn t30_wall_clock_timeout() {
+        let engine = WasmPluginEngine::new().unwrap();
+
+        // Infinite-loop module with a local variable increment to consume
+        // fuel slowly enough that a large budget would not exhaust before
+        // the wall-clock timeout fires.
+        let wasm = wat::parse_str(
+            r#"(module
+                (func (export "slow_loop")
+                    (local $i i64)
+                    (loop $L
+                        (local.set $i (i64.add (local.get $i) (i64.const 1)))
+                        (br $L)
+                    )
+                )
+            )"#,
+        )
+        .expect("WAT parsing should succeed");
+
+        // Very large fuel budget -- this should NOT be the limiting factor.
+        let mut config = PluginConfig::default_for("timeout-test");
+        config.fuel_budget = MAX_FUEL_HARD; // 10 billion units
+
+        let sandbox = test_sandbox(vec![], vec![], vec![]);
+        let audit = Arc::new(AuditLog::new("timeout-test".into()));
+
+        let module = wasmtime::Module::new(engine.engine(), &wasm)
+            .expect("module compilation should succeed");
+
+        let mut store = engine.create_store(&config, sandbox, audit).unwrap();
+        let linker = engine.create_linker().unwrap();
+        let instance = linker.instantiate(&mut store, &module).unwrap();
+
+        let func = instance
+            .get_typed_func::<(), ()>(&mut store, "slow_loop")
+            .unwrap();
+
+        // Use a very short wall-clock timeout (100ms) to keep the test fast.
+        let timeout = Duration::from_millis(100);
+        let start = Instant::now();
+
+        let result = engine.call_func_with_timeout(&mut store, &func, (), timeout);
+        let elapsed = start.elapsed();
+
+        // The function should have trapped due to epoch deadline.
+        assert!(
+            result.is_err(),
+            "infinite loop should be terminated by wall-clock timeout"
+        );
+
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        // Wasmtime epoch-based interruption causes a trap. The error may
+        // contain "epoch", "interrupt", "wasm trap", or just be a generic
+        // trap error with a backtrace. We accept any trap from a running
+        // WASM function as evidence that the epoch deadline fired.
+        assert!(
+            err.downcast_ref::<wasmtime::Trap>().is_some()
+                || err_msg.contains("epoch")
+                || err_msg.contains("interrupt")
+                || err_msg.contains("wasm"),
+            "error should be a trap from epoch interruption, got: {err_msg}"
+        );
+
+        // Verify that the execution was terminated reasonably close to the
+        // timeout (within 500ms tolerance to account for thread scheduling).
+        assert!(
+            elapsed < Duration::from_millis(600),
+            "execution should complete within 600ms of timeout, took: {elapsed:?}"
+        );
+
+        // Verify that fuel was NOT the limiting factor -- there should be
+        // significant fuel remaining.
+        let remaining = store.get_fuel().unwrap_or(0);
+        assert!(
+            remaining > 1_000_000,
+            "fuel should NOT be exhausted (epoch should fire first), remaining: {remaining}"
+        );
+    }
+
+    /// T42: Complete audit logging verification.
+    ///
+    /// Executes a plugin dispatcher that calls ALL 5 host functions
+    /// (http-request, read-file, write-file, get-env, log) and verifies
+    /// that every single call produced a correct audit entry with the
+    /// right operation type, target summary, and allowed/denied status.
+    #[test]
+    fn t42_complete_audit_logging_verification() {
+        // Set up temp directory for filesystem operations
+        let dir = std::env::temp_dir().join("clawft_t42_audit");
+        let _ = std::fs::create_dir_all(&dir);
+        let read_file = dir.join("readable.txt");
+        std::fs::write(&read_file, "t42 readable content").unwrap();
+
+        // Set up environment variable
+        unsafe {
+            std::env::set_var("CLAWFT_T42_AUDIT_VAR", "t42_audit_value");
+        }
+
+        // Create a sandbox with permissions for all 5 host function types
+        let permissions = PluginPermissions {
+            network: vec!["audit-test.example.com".into()],
+            filesystem: vec![dir.to_string_lossy().to_string()],
+            env_vars: vec!["CLAWFT_T42_AUDIT_VAR".into()],
+            shell: false,
+        };
+        let sandbox = Arc::new(PluginSandbox::from_manifest(
+            "t42-audit-plugin".into(),
+            permissions,
+            &PluginResourceConfig::default(),
+        ));
+        let audit = Arc::new(AuditLog::new("t42-audit-plugin".into()));
+        let dispatcher = HostFunctionDispatcher::new(sandbox, audit);
+
+        // 1. Call http-request (permitted)
+        let _ = dispatcher.handle_http_request(
+            "POST",
+            "https://audit-test.example.com/api/v1",
+            &[],
+            Some(r#"{"key":"value"}"#),
+        );
+
+        // 2. Call read-file (permitted)
+        let read_result = dispatcher.handle_read_file(read_file.to_str().unwrap());
+        assert!(read_result.is_ok(), "read-file should succeed");
+
+        // 3. Call write-file (permitted)
+        let write_file = dir.join("written.txt");
+        let write_result = dispatcher.handle_write_file(
+            write_file.to_str().unwrap(),
+            "t42 written content",
+        );
+        assert!(write_result.is_ok(), "write-file should succeed");
+
+        // 4. Call get-env (permitted)
+        let env_result = dispatcher.handle_get_env("CLAWFT_T42_AUDIT_VAR");
+        assert_eq!(env_result, Some("t42_audit_value".into()));
+
+        // 5. Call log (permitted)
+        dispatcher.handle_log(2, "t42 audit verification message");
+
+        // ------ Verify audit log completeness ------
+
+        let entries = dispatcher.audit_log().entries();
+        assert_eq!(
+            entries.len(),
+            5,
+            "all 5 host function calls should produce audit entries, got {}",
+            entries.len()
+        );
+
+        // Verify each entry's operation type
+        assert_eq!(entries[0].function, "http-request");
+        assert_eq!(entries[1].function, "read-file");
+        assert_eq!(entries[2].function, "write-file");
+        assert_eq!(entries[3].function, "get-env");
+        assert_eq!(entries[4].function, "log");
+
+        // Verify count per function type
+        assert_eq!(dispatcher.audit_log().count_by_function("http-request"), 1);
+        assert_eq!(dispatcher.audit_log().count_by_function("read-file"), 1);
+        assert_eq!(dispatcher.audit_log().count_by_function("write-file"), 1);
+        assert_eq!(dispatcher.audit_log().count_by_function("get-env"), 1);
+        assert_eq!(dispatcher.audit_log().count_by_function("log"), 1);
+
+        // Verify all entries are permitted (not denied)
+        for entry in &entries {
+            assert!(
+                entry.permitted,
+                "all calls should be permitted, but {} was denied: {:?}",
+                entry.function, entry.error
+            );
+        }
+
+        // Verify target summaries contain expected content
+        assert!(
+            entries[0].params_summary.contains("POST")
+                && entries[0].params_summary.contains("audit-test.example.com"),
+            "http-request summary should contain method and URL, got: {}",
+            entries[0].params_summary
+        );
+        assert!(
+            entries[1].params_summary.contains("readable.txt"),
+            "read-file summary should contain filename, got: {}",
+            entries[1].params_summary
+        );
+        assert!(
+            entries[2].params_summary.contains("written.txt"),
+            "write-file summary should contain filename, got: {}",
+            entries[2].params_summary
+        );
+        assert!(
+            entries[3].params_summary.contains("CLAWFT_T42_AUDIT_VAR"),
+            "get-env summary should contain var name, got: {}",
+            entries[3].params_summary
+        );
+        assert!(
+            entries[4].params_summary.contains("info")
+                || entries[4].params_summary.contains("t42"),
+            "log summary should contain level or message, got: {}",
+            entries[4].params_summary
+        );
+
+        // Verify no denied entries
+        assert_eq!(
+            dispatcher.audit_log().count_denied(),
+            0,
+            "there should be zero denied entries"
+        );
+
+        // Verify audit log plugin_id
+        assert_eq!(dispatcher.audit_log().plugin_id(), "t42-audit-plugin");
+
+        // Verify timestamps are monotonically increasing
+        for i in 1..entries.len() {
+            assert!(
+                entries[i].elapsed_ms >= entries[i - 1].elapsed_ms,
+                "timestamps should be monotonically increasing: entry {} ({}) < entry {} ({})",
+                i,
+                entries[i].elapsed_ms,
+                i - 1,
+                entries[i - 1].elapsed_ms
+            );
+        }
+
+        // ------ Verify denied operations also produce entries ------
+
+        // Try a denied HTTP request (different domain)
+        let _ = dispatcher.handle_http_request(
+            "GET",
+            "https://evil.example.com/steal",
+            &[],
+            None,
+        );
+
+        // Try a denied file read (outside sandbox)
+        let _ = dispatcher.handle_read_file("/etc/shadow");
+
+        // Try a denied env var
+        let _ = dispatcher.handle_get_env("SECRET_TOKEN");
+
+        let all_entries = dispatcher.audit_log().entries();
+        assert_eq!(
+            all_entries.len(),
+            8,
+            "should now have 8 entries (5 permitted + 3 denied)"
+        );
+
+        // Verify the 3 new entries are denied
+        assert!(!all_entries[5].permitted, "denied http should be marked denied");
+        assert!(!all_entries[6].permitted, "denied file should be marked denied");
+        assert!(!all_entries[7].permitted, "denied env should be marked denied");
+
+        // Verify denied entries have error messages
+        for entry in &all_entries[5..] {
+            assert!(
+                entry.error.is_some(),
+                "denied entry for {} should have an error message",
+                entry.function
+            );
+        }
+
+        // Cleanup
+        unsafe {
+            std::env::remove_var("CLAWFT_T42_AUDIT_VAR");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

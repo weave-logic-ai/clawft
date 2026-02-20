@@ -122,7 +122,34 @@
 - 19 tests passing, all patterns verified
 - Clippy clean
 
+### 2026-02-20: C2 WASM Security Tests T30 + T42 -- COMPLETE (C2 at 98%)
+- **T30: Wall-clock timeout enforcement** (`t30_wall_clock_timeout`)
+  - Enabled `epoch_interruption(true)` on wasmtime `Config` in `WasmPluginEngine::new()`
+  - `create_store()` now calls `store.set_epoch_deadline(1)` for epoch-based timeout
+  - `execute_tool()` spawns a background thread that calls `engine.increment_epoch()`
+    after `config.timeout_secs` has elapsed, causing running WASM to trap
+  - Added `call_func_with_timeout()` public method for direct typed function calls
+    with wall-clock timeout (used by tests and advanced callers)
+  - Test uses a WAT infinite loop with 10B fuel budget (would never exhaust via fuel alone)
+    and a 100ms timeout; verifies the trap fires via epoch interruption, not fuel exhaustion
+  - Verifies elapsed time is bounded (< 600ms) and significant fuel remains
+- **T42: Complete audit logging verification** (`t42_complete_audit_logging_verification`)
+  - Exercises all 5 host functions (http-request, read-file, write-file, get-env, log)
+    through the HostFunctionDispatcher with full permissions
+  - Verifies every call produced an audit entry (5 total)
+  - Verifies each entry has the correct operation type (function name)
+  - Verifies each entry has the correct params_summary containing the target
+  - Verifies all 5 entries are permitted (not denied)
+  - Verifies timestamps are monotonically increasing
+  - Additionally tests 3 denied operations (unauthorized domain, file outside sandbox,
+    unpermitted env var) and verifies they produce denied audit entries with error messages
+  - Total: 8 audit entries verified (5 permitted + 3 denied)
+- 160 tests passing in clawft-wasm with wasm-plugins feature (up from 158)
+- 41 tests passing with default features (no regression)
+- Clippy clean with `-D warnings`
+- engine.rs is now ~1700 lines (implementation ~700 + tests ~1000)
+
 ### Remaining
-- C2: T30 (wall-clock timeout), T41 (version upgrade permission re-prompt), T42 (lifecycle security)
+- C2: T41 (version upgrade permission re-prompt) -- deferred
   - HTTP execution wiring (reqwest integration for actual HTTP calls from WASM)
-  - engine.rs is ~1440 lines (implementation ~640 + tests ~800), may need splitting
+  - engine.rs may benefit from splitting tests into a separate file

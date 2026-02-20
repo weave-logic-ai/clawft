@@ -1,7 +1,7 @@
 # Development Assignment: Element 05 - Pipeline & LLM Reliability
 
 ## Quick Reference
-- **Branch**: `sprint/phase-5-pipeline-reliability`
+- **Branch**: `sprint/phase-5` (actual working branch)
 - **Crates touched**: `clawft-core`, `clawft-llm`, `clawft-types`, `clawft-services`
 - **Estimated items**: 11 (D1-D11)
 - **Priority order**: D-Perf (D1, D10, D11) first, then D-Reliability (D3, D4, D7, D2, D8), then D-Observability (D5, D6), then D-Transport (D9)
@@ -560,8 +560,10 @@ All three items are independent and can be implemented in parallel.
 
 ### Regression
 - [x] All existing tests pass -- VERIFIED 2026-02-20
-- [x] `cargo test --workspace` passes -- VERIFIED 2026-02-20 (1,903 tests, 0 failures)
+- [x] `cargo test --workspace` passes -- VERIFIED 2026-02-20 (2,407 tests, 0 failures)
 - [x] `cargo clippy --workspace -- -D warnings` clean -- VERIFIED 2026-02-20
+
+**Note**: The per-item exit criteria in the detailed section above remain as `[ ]` template markers from the original assignment. All items are verified complete per the tracker and the checked summary above.
 
 ---
 

@@ -94,20 +94,20 @@ F9a (MCP Client MVP) ──────> F9b (Full MCP Client)
 
 ### Functional
 
-- [ ] `weft` can create git branches and commits via tool call (F1)
-- [ ] Browser CDP takes screenshots and fills forms (F4)
-- [ ] OAuth2 flow works for at least one provider (Google) (F6)
-- [ ] F9a: MCP client connects to a single external MCP server and exposes its tools
-- [ ] F9b: MCP client supports auto-discovery, connection pooling, and schema caching
-- [ ] All tools implement `Tool` plugin trait (F1-F7)
-- [ ] All existing tests pass (regression gate)
+- [x] `weft` can create git branches and commits via tool call (F1)
+- [x] Browser CDP takes screenshots and fills forms (F4)
+- [x] OAuth2 flow works for at least one provider (Google) (F6)
+- [x] F9a: MCP client connects to a single external MCP server and exposes its tools
+- [x] F9b: MCP client supports auto-discovery, connection pooling, and schema caching
+- [x] All tools implement `Tool` plugin trait (F1-F7)
+- [x] All existing tests pass (regression gate)
 
 ### Security Exit Criteria
 
-- [ ] Browser tool blocks `file://`, `data://`, and `javascript://` URL schemes (F4)
-- [ ] Browser tool clears state (cookies, storage, sessions) between sessions (F4)
-- [ ] MCP stdio child processes do not inherit secret environment variables (minimal env constructed explicitly) (F9a)
-- [ ] External MCP server tools are tagged as "untrusted" in the tool registry (F9a)
+- [x] Browser tool blocks `file://`, `data://`, and `javascript://` URL schemes (F4)
+- [x] Browser tool clears state (cookies, storage, sessions) between sessions (F4)
+- [x] MCP stdio child processes do not inherit secret environment variables (minimal env constructed explicitly) (F9a)
+- [x] External MCP server tools are tagged as "untrusted" in the tool registry (F9a)
 
 ---
 

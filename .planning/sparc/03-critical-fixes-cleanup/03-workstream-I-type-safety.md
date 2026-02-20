@@ -690,12 +690,12 @@ clawft-services = { path = "../clawft-services", features = ["test-utils"] }
 
 ## Exit Criteria
 
-- [ ] All 8 items (I1-I8) resolved or documented as deferred
-- [ ] Zero clippy warnings across affected crates
-- [ ] All existing tests pass (with updated expectations where documented)
-- [ ] No new `#[allow(dead_code)]` attributes added
-- [ ] `cargo build` succeeds
-- [ ] `cargo test` passes for all affected crates:
+- [x] All 8 items (I1-I8) resolved or documented as deferred -- DONE 2026-02-19
+- [x] Zero clippy warnings across affected crates -- VERIFIED
+- [x] All existing tests pass (with updated expectations where documented) -- VERIFIED
+- [x] No new `#[allow(dead_code)]` attributes added -- VERIFIED
+- [x] `cargo build` succeeds -- VERIFIED
+- [x] `cargo test` passes for all affected crates -- VERIFIED:
   - `clawft-types`
   - `clawft-llm`
   - `clawft-cli`

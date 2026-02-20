@@ -7,7 +7,7 @@
 > **Crates:** `clawft-channels` (`src/discord/channel.rs`, `src/discord/events.rs`), `clawft-services` (`src/heartbeat/mod.rs`)
 > **Dependencies IN:** None for E1; B4 (CronService unification from Element 03) for E6
 > **Blocks:** E2 (Email channel depends on E6 for proactive inbox triage)
-> **Status:** Planning
+> **Status:** Complete
 
 ---
 

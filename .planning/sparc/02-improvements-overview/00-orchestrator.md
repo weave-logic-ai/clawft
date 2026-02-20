@@ -7,7 +7,7 @@
 **Execution Model**: 9 feature elements, parallel execution with dependency gates
 **Test Baseline**: 2,075+ tests at sprint start
 **Test Final**: 2,407 tests at sprint end (net +332)
-**Commits**: 6 commits on sprint/phase-5 (07ceb05, 63ebe99, 9d152b5, dfd4066, a67b9e5)
+**Commits**: 9 commits on sprint/phase-5 (63ebe99, 07ceb05, 6f7208f, bf520fc, 9d152b5, dfd4066, a67b9e5, 9b12f7e, 779ea6c)
 **Phase Standard**: All sprint work is Phase 5. Business requirements use sections 5d-5o.
 
 ---
@@ -101,7 +101,7 @@ Even though Voice and UI are out of scope, the following hooks must be built:
 
 ## 6. Sprint Completion Report
 
-**Executed**: 2026-02-19 to 2026-02-20 (4 waves, 6 commits)
+**Executed**: 2026-02-19 to 2026-02-20 (4 waves, 9 commits)
 **Branch**: `sprint/phase-5`
 
 ### Element Completion
@@ -109,7 +109,7 @@ Even though Voice and UI are out of scope, the following hooks must be built:
 | Element | Focus | % Done | Items Done | Deferred/Blocked |
 |---------|-------|--------|------------|-----------------|
 | 03 | Critical Fixes & Cleanup | 100% | 33/33 | -- |
-| 04 | Plugin & Skill System | 99% | 8/8 phases | C2: 3 minor security tests (T30/T41/T42) |
+| 04 | Plugin & Skill System | 99% | 8/8 phases | C2: T41 deferred (version re-prompt, runtime integration) |
 | 05 | Pipeline & LLM Reliability | 100% | 11/11 | -- |
 | 06 | Channel Enhancements | 89% | 8/9 | IRC channel deferred |
 | 07 | Dev Tools & Apps | 100% | 10/10 | -- |
@@ -126,7 +126,7 @@ Even though Voice and UI are out of scope, the following hooks must be built:
 | 3 | Elements 04/06/07/08/09 | `dfd4066` | 93 | 2204 |
 | 4 | Elements 04/07/08/10 | `a67b9e5` | 68 | 2407 |
 
-### New Crates Added (8)
+### New Crates Added (9)
 
 - `clawft-plugin` -- 6 core plugin traits + manifest
 - `clawft-plugin-git` -- 7 git tools via git2
@@ -156,7 +156,7 @@ Email, WhatsApp, Signal, Matrix, Google Chat, Microsoft Teams, Discord Resume
 
 ### Remaining Items
 
-1. **C2 T30/T41/T42** -- 3 WASM security tests (wall-clock timeout, version re-prompt, lifecycle)
+1. **C2 T41** -- Version upgrade permission re-prompt (deferred, requires runtime integration)
 2. **IRC channel** -- deferred (low priority)
 3. **M6 docs** -- deferred to documentation sprint
 4. **K4 skill install/publish** -- blocked on ClawHub server availability

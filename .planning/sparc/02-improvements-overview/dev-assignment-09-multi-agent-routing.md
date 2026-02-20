@@ -227,21 +227,21 @@ claude_enabled: true,  // was false; gracefully degrades if no API key
 
 ### Security Criteria
 
-- [ ] `FlowDelegator` child process receives minimal environment (PATH, HOME, ANTHROPIC_API_KEY only)
-- [ ] Delegation depth limit enforced (default: 3, configurable)
-- [ ] Timeout enforcement with `child.kill()` on expiry
-- [ ] No credentials in error messages or logs
+- [x] `FlowDelegator` child process receives minimal environment (PATH, HOME, ANTHROPIC_API_KEY only)
+- [x] Delegation depth limit enforced (default: 3, configurable)
+- [x] Timeout enforcement with `child.kill()` on expiry
+- [x] No credentials in error messages or logs
 
 ### Acceptance Criteria
 
-- [ ] `FlowDelegator` spawns `claude` CLI and returns results
-- [ ] `FlowDelegator::new()` returns `None` if `claude` not on PATH
-- [ ] `DelegationError` has all 5 required variants
-- [ ] `flow_available` detects `claude` binary at runtime (cached)
-- [ ] `delegate` feature is in `default` features for `clawft-cli`
-- [ ] `claude_enabled` defaults to `true`
-- [ ] Fallback chain works: Flow -> Claude -> Local
-- [ ] All existing delegation tests pass
+- [x] `FlowDelegator` spawns `claude` CLI and returns results
+- [x] `FlowDelegator::new()` returns `None` if `claude` not on PATH
+- [x] `DelegationError` has all 5 required variants
+- [x] `flow_available` detects `claude` binary at runtime (cached)
+- [x] `delegate` feature is in `default` features for `clawft-cli`
+- [x] `claude_enabled` defaults to `true`
+- [x] Fallback chain works: Flow -> Claude -> Local
+- [x] All existing delegation tests pass
 
 ### Test Requirements
 
@@ -292,7 +292,7 @@ pub struct InboundMessage {
 
 #### 2.1 L1: Agent Routing Table
 
-Create `crates/clawft-core/src/routing.rs`:
+Create `crates/clawft-core/src/agent_routing.rs`:
 
 ```rust
 use clawft_types::event::InboundMessage;
@@ -370,19 +370,19 @@ Each routed agent gets:
 
 ### Security Criteria
 
-- [ ] Agents cannot access other agents' workspaces without explicit sharing
-- [ ] Anonymous agents have reduced permissions (no shell access, read-only file ops)
-- [ ] Routing table changes require restart (no runtime modification without auth)
+- [x] Agents cannot access other agents' workspaces without explicit sharing
+- [x] Anonymous agents have reduced permissions (no shell access, read-only file ops)
+- [x] Routing table changes require restart (no runtime modification without auth)
 
 ### Acceptance Criteria
 
-- [ ] Routing table routes messages to correct agent based on channel + user match
-- [ ] First-match-wins semantics work correctly
-- [ ] No-match rejection works with clear error message
-- [ ] Auto-create workspace on first routing to new agent
-- [ ] Anonymous message routing to catch-all agent works
-- [ ] Per-agent session isolation (messages to agent A don't appear in agent B's sessions)
-- [ ] Configuration loaded from `clawft.toml` `[[agent_routes]]` section
+- [x] Routing table routes messages to correct agent based on channel + user match
+- [x] First-match-wins semantics work correctly
+- [x] No-match rejection works with clear error message
+- [x] Auto-create workspace on first routing to new agent
+- [x] Anonymous message routing to catch-all agent works
+- [x] Per-agent session isolation (messages to agent A don't appear in agent B's sessions)
+- [x] Configuration loaded from `clawft.toml` `[[agent_routes]]` section
 
 ### Test Requirements
 
@@ -492,18 +492,18 @@ impl SwarmCoordinator {
 
 ### Security Criteria
 
-- [ ] Bus messages tagged with agent IDs
-- [ ] Agents cannot read other agents' messages (inbox scoping)
-- [ ] Bounded inbox size to prevent memory exhaustion
+- [x] Bus messages tagged with agent IDs
+- [x] Agents cannot read other agents' messages (inbox scoping)
+- [x] Bounded inbox size to prevent memory exhaustion
 
 ### Acceptance Criteria
 
-- [ ] `InterAgentMessage` type defined and serializable
-- [ ] `AgentBus` provides per-agent inboxes
-- [ ] Agent can send message to another agent and receive reply
-- [ ] TTL enforcement: expired messages dropped
-- [ ] Coordinator dispatches subtasks and collects results
-- [ ] `MessagePayload` enum supports Text, Structured, Binary variants
+- [x] `InterAgentMessage` type defined and serializable
+- [x] `AgentBus` provides per-agent inboxes
+- [x] Agent can send message to another agent and receive reply
+- [x] TTL enforcement: expired messages dropped
+- [x] Coordinator dispatches subtasks and collects results
+- [x] `MessagePayload` enum supports Text, Structured, Binary variants
 
 ### Test Requirements
 
@@ -618,19 +618,19 @@ The bridge orchestrates both directions, handling tool namespace conflicts.
 
 ### Security Criteria
 
-- [ ] MCP temp files use `tempfile` crate with `0600` permissions
-- [ ] MCP server connections use validated URLs (SSRF protection)
-- [ ] Drain-and-swap protocol: no tool calls to draining servers after drain starts
+- [x] MCP temp files use `tempfile` crate with `0600` permissions
+- [x] MCP server connections use validated URLs (SSRF protection)
+- [x] Drain-and-swap protocol: no tool calls to draining servers after drain starts
 
 ### Acceptance Criteria
 
-- [ ] `weft mcp add <name> <command>` registers MCP server at runtime
-- [ ] `weft mcp list` shows all registered servers and their status
-- [ ] `weft mcp remove <name>` cleanly disconnects and removes server
-- [ ] Hot-reload: modify `clawft.toml` MCP section -> tools update within debounce window
-- [ ] Drain-and-swap: in-flight calls complete before disconnect
-- [ ] Bidirectional bridge: clawft tools accessible from Claude Code, Claude Code tools from clawft
-- [ ] File ownership respected (M4 = discovery.rs, M5 = bridge.rs)
+- [x] `weft mcp add <name> <command>` registers MCP server at runtime
+- [x] `weft mcp list` shows all registered servers and their status
+- [x] `weft mcp remove <name>` cleanly disconnects and removes server
+- [x] Hot-reload: modify `clawft.toml` MCP section -> tools update within debounce window
+- [x] Drain-and-swap: in-flight calls complete before disconnect
+- [x] Bidirectional bridge: clawft tools accessible from Claude Code, Claude Code tools from clawft
+- [x] File ownership respected (M4 = discovery.rs, M5 = bridge.rs)
 
 ### Test Requirements
 
@@ -694,11 +694,11 @@ L4 is **NOT in MVP** (post-Week 8). This is an advanced feature.
 
 ### Acceptance Criteria
 
-- [ ] `max_planning_depth` enforced
-- [ ] `max_planning_cost_usd` enforced
-- [ ] `planning_step_timeout` enforced
-- [ ] Circuit breaker aborts after 3 consecutive no-op steps
-- [ ] Partial results returned with explanation when limits hit
+- [x] `max_planning_depth` enforced
+- [x] `max_planning_cost_usd` enforced
+- [x] `planning_step_timeout` enforced
+- [x] Circuit breaker aborts after 3 consecutive no-op steps
+- [x] Partial results returned with explanation when limits hit
 
 ### Test Requirements
 
@@ -745,8 +745,8 @@ Add to `docs/guides/tool-calls.md`:
 | `crates/clawft-tools/src/delegate_tool.rs` | 1 | Wire flow_available, add FlowDelegator |
 | `crates/clawft-cli/Cargo.toml` | 1 | Add `delegate` to default features |
 | `crates/clawft-types/src/delegation.rs` | 1 | `claude_enabled` default to `true` |
-| `crates/clawft-core/src/routing.rs` | 2 | NEW: AgentRouter |
-| `crates/clawft-types/src/routing.rs` | 2 | Add AgentRoute, MatchCriteria types |
+| `crates/clawft-core/src/agent_routing.rs` | 2 | NEW: AgentRouter |
+| `crates/clawft-types/src/agent_routing.rs` | 2 | Add AgentRoute, MatchCriteria types |
 | `crates/clawft-types/src/agent_bus.rs` | 3 | NEW: InterAgentMessage, MessagePayload |
 | `crates/clawft-core/src/agent_bus.rs` | 3 | NEW: AgentBus |
 | `crates/clawft-services/src/mcp/discovery.rs` | 4 | NEW: McpServerManager |

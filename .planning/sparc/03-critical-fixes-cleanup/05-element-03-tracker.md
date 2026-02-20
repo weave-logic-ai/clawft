@@ -150,7 +150,7 @@ J7 (plugin docs) ──────> C1-C6 (Element 04)        [J7 DONE (skeleto
 - [x] All P2 items (12) resolved or documented as deferred
 - [x] No files > 500 lines in modified crates (B3) -- impl portions under 500 lines; test code is bulk
 - [x] Zero clippy warnings
-- [x] All 2,075+ existing tests still pass -- 1,967+ tests, 0 failures
+- [x] All 2,075+ existing tests still pass -- 2,407 tests, 0 failures
 - [x] Documentation matches code behavior for all J items
 
 ### Migration-Specific
@@ -208,5 +208,5 @@ J7 (plugin docs) ──────> C1-C6 (Element 04)        [J7 DONE (skeleto
 
 - `cargo build --workspace` -- CLEAN (0 errors)
 - `cargo clippy --workspace -- -D warnings` -- CLEAN (0 warnings)
-- `cargo test --workspace` -- ALL PASS (1,967+ tests, 0 failures, 25 test suites)
-- Verified: 2026-02-19
+- `cargo test --workspace` -- ALL PASS (2,407 tests, 0 failures, 41 test suites)
+- Verified: 2026-02-20

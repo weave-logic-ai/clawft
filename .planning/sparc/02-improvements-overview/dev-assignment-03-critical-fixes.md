@@ -1,9 +1,9 @@
 # Development Assignment: Element 03 - Critical Fixes & Cleanup
 
 ## Quick Reference
-- **Branch**: `sprint/phase-5-critical-fixes`
+- **Branch**: `sprint/phase-5` (actual working branch)
 - **Crates touched**: `clawft-core`, `clawft-types`, `clawft-cli`, `clawft-services`, `clawft-llm`, `clawft-platform`, `clawft-channels`
-- **Estimated items**: 27 (A1-A9, B1-B9, I1-I8, J1-J7)
+- **Total items**: 33 (A1-A9: 9, B1-B9: 9, I1-I8: 8, J1-J7: 7)
 - **Priority order**: P0 first (A1, A2, A4, A5, A6), then P1 (A3, A7, A8, A9, B1-B4, J1-J3), then P2 (B5-B9, I1-I8, J4-J7)
 
 ## Prerequisites
@@ -652,7 +652,7 @@ These are the highest priority items. All P0 items MUST pass code review before 
 - [x] All P2 items resolved or documented as deferred -- DONE 2026-02-19 (B5-B9, I1-I8, J4-J7)
 - [x] No files > 500 lines in modified crates (B3) -- impl under 500; test bulk acceptable
 - [x] Zero clippy warnings -- VERIFIED 2026-02-20
-- [x] All 2,075+ existing tests still pass -- VERIFIED 2026-02-20 (1,903 tests, 0 failures)
+- [x] All existing tests still pass -- VERIFIED 2026-02-20 (1,903 tests at Wave 1; grew to 2,407 by sprint end, 0 failures)
 - [x] Documentation matches code behavior for all J items -- DONE 2026-02-19 (J1-J7)
 - [x] No plaintext credentials in Debug output or serialized JSON -- SecretString wrapper DONE
 
@@ -676,7 +676,7 @@ These are the highest priority items. All P0 items MUST pass code review before 
 ## Development Notes Location
 
 Record decisions, blockers, and difficult tasks in:
-- `.planning/development_notes/02-improvements-overview/element-03/`
+- `.planning/development_notes/03-critical-fixes-cleanup/` (workstream-A, workstream-B, workstream-I, workstream-J subdirectories)
 
 ---
 

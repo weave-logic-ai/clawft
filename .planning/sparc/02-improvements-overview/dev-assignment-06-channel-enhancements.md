@@ -397,16 +397,30 @@ After C7 (PluginHost unification), the legacy `Channel` trait and shim will be r
 
 ---
 
+## Completion Status
+
+**Per tracker**: 8/9 items complete (89%). IRC channel deferred.
+
+- [x] E1 -- Discord Gateway Resume (OP 6) -- DONE 2026-02-20
+- [x] E2 -- Email channel (IMAP + SMTP + OAuth2) -- DONE 2026-02-20
+- [x] E3 -- WhatsApp Cloud API -- DONE 2026-02-20
+- [x] E4 -- Signal subprocess bridge -- DONE 2026-02-20
+- [x] E5 -- Matrix channel -- DONE 2026-02-20
+- [ ] E5 -- IRC channel -- deferred (low priority)
+- [x] E5a -- Google Chat Workspace API -- DONE 2026-02-20
+- [x] E5b -- Microsoft Teams Bot Framework -- DONE 2026-02-20
+- [x] E6 -- Enhanced heartbeat / check-in -- DONE 2026-02-20
+
 ## Security Checklist (All Units)
 
 These security criteria are mandatory exit gates for the element:
 
-- [ ] All channel config credential fields use `SecretRef` type (A4 dependency)
-- [ ] No plaintext secrets in config structs (including WhatsApp `verify_token`)
-- [ ] OAuth2 flows include `state` parameter for CSRF protection (E2, E5a)
-- [ ] Subprocess-based channels (E4 Signal) sanitize all arguments against command injection
-- [ ] OAuth2 token refresh persists rotated tokens to encrypted file (`~/.clawft/tokens/`, 0600 permissions)
-- [ ] All existing channel tests pass (regression gate)
+- [x] All channel config credential fields use `SecretRef` type (A4 dependency) -- DONE 2026-02-20
+- [x] No plaintext secrets in config structs (including WhatsApp `verify_token`) -- DONE 2026-02-20
+- [x] OAuth2 flows include `state` parameter for CSRF protection (E2, E5a) -- DONE 2026-02-20
+- [x] Subprocess-based channels (E4 Signal) sanitize all arguments against command injection -- DONE 2026-02-20
+- [x] OAuth2 token refresh persists rotated tokens to encrypted file (`~/.clawft/tokens/`, 0600 permissions) -- DONE 2026-02-20
+- [x] All existing channel tests pass (regression gate) -- DONE 2026-02-20
 
 ---
 

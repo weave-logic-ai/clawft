@@ -516,13 +516,13 @@ Agent-level entries with the same server name replace global entries. New names 
 
 Mandatory exit gates from the orchestrator:
 
-- [ ] Browser tool blocks `file://`, `data://`, and `javascript://` URL schemes
-- [ ] Browser tool clears state (cookies, storage, sessions) between sessions
-- [ ] MCP stdio child processes do not inherit secret environment variables (minimal env constructed explicitly)
-- [ ] External MCP server tools are tagged as "untrusted" in the tool registry
-- [ ] All tool plugins validate and sanitize command arguments (no command injection)
-- [ ] OAuth2 `state` parameter for CSRF protection
-- [ ] All existing tests pass (regression gate)
+- [x] Browser tool blocks `file://`, `data://`, and `javascript://` URL schemes
+- [x] Browser tool clears state (cookies, storage, sessions) between sessions
+- [x] MCP stdio child processes do not inherit secret environment variables (minimal env constructed explicitly)
+- [x] External MCP server tools are tagged as "untrusted" in the tool registry
+- [x] All tool plugins validate and sanitize command arguments (no command injection)
+- [x] OAuth2 `state` parameter for CSRF protection
+- [x] All existing tests pass (regression gate)
 
 ---
 

@@ -139,19 +139,19 @@ Also update `CronJob` types to use `DateTime<Utc>` instead of `i64` milliseconds
 
 ### Security Criteria
 
-- [ ] Agent workspace directories created with `0700` permissions
-- [ ] Symlink targets validated (no escape to arbitrary paths)
-- [ ] `read_write = true` requires explicit opt-in with fs-level locking
+- [x] Agent workspace directories created with `0700` permissions
+- [x] Symlink targets validated (no escape to arbitrary paths)
+- [x] `read_write = true` requires explicit opt-in with fs-level locking
 
 ### Acceptance Criteria
 
-- [ ] `ensure_agent_workspace("test-agent")` creates full directory structure
-- [ ] `ensure_agent_workspace` is idempotent (second call returns same path)
-- [ ] `delete_agent_workspace` removes the directory
-- [ ] `list_agent_workspaces` lists all agent IDs
-- [ ] Cross-agent symlink sharing works for read-only access
-- [ ] `WorkspaceEntry.last_accessed` and `created_at` use `DateTime<Utc>`
-- [ ] All existing workspace tests pass after timestamp migration
+- [x] `ensure_agent_workspace("test-agent")` creates full directory structure
+- [x] `ensure_agent_workspace` is idempotent (second call returns same path)
+- [x] `delete_agent_workspace` removes the directory
+- [x] `list_agent_workspaces` lists all agent IDs
+- [x] Cross-agent symlink sharing works for read-only access
+- [x] `WorkspaceEntry.last_accessed` and `created_at` use `DateTime<Utc>`
+- [x] All existing workspace tests pass after timestamp migration
 
 ### Test Requirements
 
@@ -263,19 +263,19 @@ Per orchestrator Section 9:
 
 ### Security Criteria
 
-- [ ] API keys resolved from environment variables only (never hardcoded)
-- [ ] Embedding API calls use HTTPS only
-- [ ] Failed API calls logged at `warn` level without leaking request content
+- [x] API keys resolved from environment variables only (never hardcoded)
+- [x] Embedding API calls use HTTPS only
+- [x] Failed API calls logged at `warn` level without leaking request content
 
 ### Acceptance Criteria
 
-- [ ] HNSW search returns relevant results for cosine similarity queries
-- [ ] `instant-distance` integrated as the HNSW backend
-- [ ] `HashEmbedder` uses stable deterministic hash (post-A2 fix)
-- [ ] `ApiEmbedder` calls OpenAI-compatible endpoint successfully
-- [ ] Async pipeline: `store()` returns immediately, embedding runs in background
-- [ ] `pending_embeddings` queue tracks in-flight items
-- [ ] Fallback to keyword-only when embedding API unavailable
+- [x] HNSW search returns relevant results for cosine similarity queries
+- [x] `instant-distance` integrated as the HNSW backend
+- [x] `HashEmbedder` uses stable deterministic hash (post-A2 fix)
+- [x] `ApiEmbedder` calls OpenAI-compatible endpoint successfully
+- [x] Async pipeline: `store()` returns immediately, embedding runs in background
+- [x] `pending_embeddings` queue tracks in-flight items
+- [x] Fallback to keyword-only when embedding API unavailable
 
 ### Test Requirements
 
@@ -341,16 +341,16 @@ Persist `IntelligentRouter` routing policies to disk:
 
 ### Security Criteria
 
-- [ ] RVF files validated before import (no arbitrary code execution)
-- [ ] File permissions on memory directories are `0700`
+- [x] RVF files validated before import (no arbitrary code execution)
+- [x] File permissions on memory directories are `0700`
 
 ### Acceptance Criteria
 
-- [ ] RVF 0.2 API audit completed with findings documented
-- [ ] Segment I/O path confirmed (rvf-runtime or local implementation)
-- [ ] `weft memory export` produces valid RVF file
-- [ ] `weft memory import` loads and validates RVF file
-- [ ] `POLICY_KERNEL` persisted and restored across restarts
+- [x] RVF 0.2 API audit completed with findings documented
+- [x] Segment I/O path confirmed (rvf-runtime or local implementation)
+- [x] `weft memory export` produces valid RVF file
+- [x] `weft memory import` loads and validates RVF file
+- [x] `POLICY_KERNEL` persisted and restored across restarts
 
 ### Test Requirements
 
@@ -423,20 +423,20 @@ Separate WASM module (`micro-hnsw-wasm`) with **8KB size budget**:
 
 ### Security Criteria
 
-- [ ] WITNESS hash chain uses SHA-256 (cryptographic, not hash-map hash)
-- [ ] Chain verification detects any segment tampering
-- [ ] WASM module sandboxed, no filesystem access
+- [x] WITNESS hash chain uses SHA-256 (cryptographic, not hash-map hash)
+- [x] Chain verification detects any segment tampering
+- [x] WASM module sandboxed, no filesystem access
 
 ### Acceptance Criteria
 
-- [ ] WITNESS segments use SHA-256 hash chaining
-- [ ] Sequential verification from root detects tampering
-- [ ] `weft memory export` includes WITNESS chain
-- [ ] `weft memory import` validates WITNESS chain
-- [ ] Temperature tiers work: hot in memory, warm/cold on disk
-- [ ] Tier transitions transparent to search (no index rebuild)
-- [ ] WASM micro-HNSW compiled size < 8KB
-- [ ] WASM module communicates via message passing
+- [x] WITNESS segments use SHA-256 hash chaining
+- [x] Sequential verification from root detects tampering
+- [x] `weft memory export` includes WITNESS chain
+- [x] `weft memory import` validates WITNESS chain
+- [x] Temperature tiers work: hot in memory, warm/cold on disk
+- [x] Tier transitions transparent to search (no index rebuild)
+- [x] WASM micro-HNSW compiled size < 8KB
+- [x] WASM module communicates via message passing
 
 ### Test Requirements
 
@@ -454,17 +454,21 @@ H2.6 (WITNESS), H2.7 (quantization), and H2.8 (WASM micro-HNSW) are **NOT in MVP
 
 | File | Unit | Action |
 |------|------|--------|
-| `crates/clawft-core/src/workspace.rs` | 1 | Extend with per-agent methods |
+| `crates/clawft-core/src/workspace/{mod,agent,config}.rs` | 1 | Split from workspace.rs; per-agent isolation, config merge |
 | `crates/clawft-types/src/workspace.rs` | 1 | Update timestamps to `DateTime<Utc>` |
 | `crates/clawft-core/src/embeddings/mod.rs` | 2 | Enhance `Embedder` trait, add `name()` |
 | `crates/clawft-core/src/embeddings/hash_embedder.rs` | 2 | Fix after A2 (stable hash) |
 | `crates/clawft-core/src/embeddings/api_embedder.rs` | 2 | Already functional, wire to HNSW |
 | `crates/clawft-core/src/embeddings/hnsw_store.rs` | 2 | NEW: HNSW vector store |
-| `crates/clawft-core/src/embeddings/rvf_stub.rs` | 3 | Replace with real RVF I/O |
+| `crates/clawft-core/src/embeddings/rvf_stub.rs` | 3 | Retained as stub; real I/O in rvf_io.rs |
+| `crates/clawft-core/src/embeddings/rvf_io.rs` | 3 | NEW: JSON-based segment I/O with WitnessChain integration |
 | `crates/clawft-core/src/embeddings/progressive.rs` | 3 | Update to use HNSW + RVF |
+| `crates/clawft-core/src/policy_kernel.rs` | 3 | NEW: POLICY_KERNEL persistence |
 | `crates/clawft-core/Cargo.toml` | 2 | Add `instant-distance` dependency |
 | `crates/clawft-core/src/embeddings/witness.rs` | 4 | NEW: WITNESS hash chain |
 | `crates/clawft-core/src/embeddings/quantization.rs` | 4 | NEW: temperature tiers |
+| `crates/clawft-core/src/embeddings/micro_hnsw.rs` | 4 | NEW: WASM micro-HNSW module |
+| `crates/clawft-cli/src/commands/memory_cmd.rs` | 3 | Extended with export/import subcommands |
 
 ---
 
