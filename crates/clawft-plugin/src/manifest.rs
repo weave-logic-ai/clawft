@@ -218,6 +218,20 @@ impl PluginManifest {
                 "manifest: id is required".into(),
             ));
         }
+        if self.id.len() > 128 {
+            return Err(PluginError::LoadFailed(
+                "manifest: id must be 128 characters or fewer".into(),
+            ));
+        }
+        if !self
+            .id
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_')
+        {
+            return Err(PluginError::LoadFailed(
+                "manifest: id must contain only alphanumeric characters, dots, hyphens, and underscores".into(),
+            ));
+        }
         if self.name.is_empty() {
             return Err(PluginError::LoadFailed(
                 "manifest: name is required".into(),

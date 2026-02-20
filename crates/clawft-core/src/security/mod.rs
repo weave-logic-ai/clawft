@@ -315,13 +315,24 @@ pub fn sanitize_skill_instructions(instructions: &str) -> (String, Vec<String>) 
     let mut result = instructions.to_string();
     let mut warnings = Vec::new();
 
-    for token in INJECTION_TOKENS {
-        if result.contains(token) {
-            warnings.push(format!(
-                "stripped injection token '{}' from skill instructions",
-                token
-            ));
-            result = result.replace(token, "");
+    // Loop until no more injection tokens are found (prevents nested bypass
+    // where e.g. "<sy<system>stem>" reconstructs after inner removal).
+    const MAX_SANITIZE_PASSES: usize = 10;
+    let mut passes = 0;
+    loop {
+        let before = result.clone();
+        for token in INJECTION_TOKENS {
+            if result.contains(token) {
+                warnings.push(format!(
+                    "stripped injection token '{}' from skill instructions",
+                    token
+                ));
+                result = result.replace(token, "");
+            }
+        }
+        passes += 1;
+        if result == before || passes >= MAX_SANITIZE_PASSES {
+            break;
         }
     }
 
@@ -728,6 +739,26 @@ mod tests {
         let (result, warnings) = sanitize_skill_instructions(input);
         assert_eq!(result, input);
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn sanitize_strips_nested_injection_tokens() {
+        // Nested token: removing inner "<system>" from "<sy<system>stem>"
+        // must not leave behind a reconstructed "<system>".
+        let input = "before <sy<system>stem>injected</sy</system>stem> after";
+        let (result, warnings) = sanitize_skill_instructions(input);
+        assert!(!result.contains("<system>"), "nested <system> survived: {result}");
+        assert!(!result.contains("</system>"), "nested </system> survived: {result}");
+        assert!(!warnings.is_empty());
+    }
+
+    #[test]
+    fn sanitize_strips_deeply_nested_tokens() {
+        // Double nesting: <<|im_start<|im_start|>|>
+        let input = "x <|im_sta<|im_start|>rt|> y";
+        let (result, warnings) = sanitize_skill_instructions(input);
+        assert!(!result.contains("<|im_start|>"), "deep nested token survived: {result}");
+        assert!(!warnings.is_empty());
     }
 
     #[test]

@@ -1,9 +1,10 @@
 //! Per-agent sandbox enforcement.
 //!
 //! Translates agent configuration into a [`SandboxPolicy`] and enforces
-//! sandbox restrictions at runtime. On Linux, provides seccomp and landlock
-//! wrappers. On non-Linux platforms, falls back to WASM-only sandbox with
-//! a logged warning.
+//! sandbox restrictions at runtime.  The OS-level sandbox (seccomp +
+//! landlock on Linux) is **not yet implemented**; when it is requested the
+//! system logs a warning and falls back to WASM-only sandboxing.  On
+//! non-Linux platforms the same WASM-only fallback applies.
 //!
 //! # Architecture
 //!
@@ -197,7 +198,14 @@ pub fn apply_os_sandbox(policy: &SandboxPolicy) -> Result<(), String> {
         SandboxType::OsSandbox | SandboxType::Combined => {
             #[cfg(target_os = "linux")]
             {
-                apply_linux_sandbox(policy)
+                if let Err(e) = apply_linux_sandbox(policy) {
+                    tracing::warn!(
+                        agent = %policy.agent_id,
+                        error = %e,
+                        "OS sandbox unavailable, using WASM sandbox only"
+                    );
+                }
+                Ok(())
             }
             #[cfg(not(target_os = "linux"))]
             {
@@ -213,21 +221,18 @@ pub fn apply_os_sandbox(policy: &SandboxPolicy) -> Result<(), String> {
 }
 
 /// Linux-specific sandbox setup using seccomp and landlock.
+///
+/// **Not yet implemented.** Returns `Err` so callers can fall back to
+/// WASM-only sandboxing.  When seccomp and landlock support is added this
+/// function should apply the policy and return `Ok(())`.
 #[cfg(target_os = "linux")]
 fn apply_linux_sandbox(policy: &SandboxPolicy) -> Result<(), String> {
-    tracing::info!(
+    tracing::warn!(
         agent = %policy.agent_id,
-        "applying Linux OS sandbox (seccomp + landlock)"
+        "Linux OS sandbox (seccomp + landlock) is not yet implemented; \
+         falling back to WASM-only sandboxing"
     );
-    tracing::debug!(
-        agent = %policy.agent_id,
-        readable_paths = ?policy.filesystem.readable_paths,
-        writable_paths = ?policy.filesystem.writable_paths,
-        allow_shell = policy.process.allow_shell,
-        allow_network = policy.network.allow_network,
-        "sandbox policy details"
-    );
-    Ok(())
+    Err("Linux OS sandbox not yet implemented: seccomp and landlock support pending".into())
 }
 
 #[cfg(test)]

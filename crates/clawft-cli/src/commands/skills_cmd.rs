@@ -531,6 +531,22 @@ async fn skills_remote_install(
         );
     }
 
+    // Validate skill name to prevent path traversal attacks.
+    if skill.name.is_empty()
+        || skill.name.starts_with('.')
+        || !skill
+            .name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_')
+    {
+        anyhow::bail!(
+            "skill name '{}' contains invalid characters. \
+             Only alphanumeric characters, '.', '-', and '_' are allowed, \
+             and the name must not start with '.'.",
+            skill.name
+        );
+    }
+
     println!(
         "Found '{}' v{} by {} ({} stars)",
         skill.name, skill.version, skill.author, skill.stars
@@ -853,7 +869,7 @@ impl SimpleHasher {
 ///
 /// Returns `(signature_hex, public_key_hex)` or `(None, None)` if no key exists.
 fn try_sign_content(
-    content_hash: &str,
+    _content_hash: &str,
     keys_dir: &Path,
     allow_unsigned: bool,
 ) -> anyhow::Result<(Option<String>, Option<String>)> {
@@ -883,28 +899,23 @@ fn try_sign_content(
         );
     }
 
-    // Decode hex to bytes.
-    let priv_bytes = hex_decode(priv_hex)
+    // Decode hex to bytes (validates the key format even if we cannot sign).
+    let _priv_bytes = hex_decode(priv_hex)
         .map_err(|e| anyhow::anyhow!("invalid signing key hex: {e}"))?;
 
-    // Sign: HMAC-like construction using the key and hash.
-    // This is a simple signature scheme for when ed25519-dalek is not
-    // compiled in. The real Ed25519 signature is used when the `signing`
-    // feature is enabled on clawft-core.
-    let mut sig_hasher = SimpleHasher::new();
-    sig_hasher.update(&priv_bytes);
-    sig_hasher.update(content_hash.as_bytes());
-    let signature = sig_hasher.finalize();
+    // Cryptographic signing requires the `signing` feature (ed25519-dalek).
+    // Without it, we refuse to produce a signature rather than falling back
+    // to a non-cryptographic hash (FNV-1a) that would be trivially forgeable.
+    eprintln!(
+        "Warning: cryptographic signing is unavailable (built without the 'signing' feature). \
+         The skill will be published unsigned."
+    );
+    eprintln!(
+        "Rebuild with --features signing to enable Ed25519 signatures, \
+         or use --allow-unsigned to suppress this warning."
+    );
 
-    // Derive a "public key" from the private key for the simplified scheme.
-    let mut pub_hasher = SimpleHasher::new();
-    pub_hasher.update(&priv_bytes);
-    pub_hasher.update(b"public_key_derivation");
-    let public_key = pub_hasher.finalize();
-
-    println!("Signed with key from {}", keys_dir.display());
-
-    Ok((Some(signature), Some(public_key)))
+    Ok((None, None))
 }
 
 /// Decode hex string to bytes.

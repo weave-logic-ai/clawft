@@ -54,28 +54,56 @@ impl PermissionStore {
         Self { base_dir }
     }
 
+    /// Defense-in-depth: verify a constructed path stays within `base_dir`.
+    ///
+    /// Returns the canonical form of `path` on success, or a
+    /// `PermissionDenied` error if the path escapes the base directory.
+    fn ensure_within_base(&self, path: &std::path::Path, plugin_id: &str) -> Result<PathBuf, std::io::Error> {
+        let canonical_base = self.base_dir.canonicalize().unwrap_or_else(|_| self.base_dir.clone());
+        let canonical_path = path.canonicalize()?;
+        if !canonical_path.starts_with(&canonical_base) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("plugin id would escape base directory: {}", plugin_id),
+            ));
+        }
+        Ok(canonical_path)
+    }
+
     /// Path to the approved permissions file for a plugin.
-    fn record_path(&self, plugin_id: &str) -> PathBuf {
-        self.base_dir.join(plugin_id).join(APPROVED_FILE)
+    fn record_path(&self, plugin_id: &str) -> Result<PathBuf, std::io::Error> {
+        let dir = self.base_dir.join(plugin_id);
+        // The directory must already exist to canonicalize; callers that
+        // create the directory (save) call ensure_within_base separately.
+        if dir.exists() {
+            let canonical = self.ensure_within_base(&dir, plugin_id)?;
+            Ok(canonical.join(APPROVED_FILE))
+        } else {
+            Ok(dir.join(APPROVED_FILE))
+        }
     }
 
     /// Load the previously approved permissions for a plugin.
     ///
     /// Returns `None` if the plugin has never been approved or the file
-    /// cannot be read/parsed.
+    /// cannot be read/parsed. Returns `None` if the plugin id would
+    /// escape the base directory.
     pub fn load(&self, plugin_id: &str) -> Option<ApprovedRecord> {
-        let path = self.record_path(plugin_id);
+        let path = self.record_path(plugin_id).ok()?;
         let content = std::fs::read_to_string(path).ok()?;
         serde_json::from_str(&content).ok()
     }
 
     /// Save approved permissions after user consent.
     ///
-    /// Creates the plugin directory if it does not exist.
+    /// Creates the plugin directory if it does not exist. Returns an error
+    /// if the resulting path would escape the base directory.
     pub fn save(&self, plugin_id: &str, record: &ApprovedRecord) -> Result<(), std::io::Error> {
         let dir = self.base_dir.join(plugin_id);
         std::fs::create_dir_all(&dir)?;
-        let path = dir.join(APPROVED_FILE);
+        // Defense-in-depth: ensure the created directory is still under base_dir
+        let canonical_dir = self.ensure_within_base(&dir, plugin_id)?;
+        let path = canonical_dir.join(APPROVED_FILE);
         let json = serde_json::to_string_pretty(record)
             .map_err(std::io::Error::other)?;
         std::fs::write(path, json)
