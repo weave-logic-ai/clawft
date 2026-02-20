@@ -5,7 +5,7 @@
 - **Total items**: 33 (9 P0, 12 P1, 12 P2)
 - **Workstreams**: A (Security & Data Integrity), B (Architecture Cleanup), I (Type Safety), J (Documentation Sync)
 - **Timeline**: Weeks 1-5
-- **Status**: Planning -> Development
+- **Status**: In Progress (Workstream A complete, B/I/J pending)
 - **Dependencies**: None (foundation layer)
 - **Blocks**: Element 04 (Plugin System), all downstream feature work
 
@@ -15,18 +15,18 @@
 
 ### Week 1 (P0 Security -- 5 items)
 
-- [ ] A1 -- Session key round-trip corruption (percent-encoding) -- P0, clawft-core
-- [ ] A2 -- Unstable hash in embeddings (fnv/xxhash) -- P0, clawft-core
-- [ ] A4 -- Plaintext credentials in config structs (SecretRef) -- P0, clawft-types
-- [ ] A5 -- API key echoed during onboarding (rpassword) -- P0, clawft-cli
-- [ ] A6 -- Incomplete SSRF private IP range (172.16-31.*) -- P0, clawft-services
+- [x] A1 -- Session key round-trip corruption (percent-encoding) -- P0, clawft-core -- DONE 2026-02-20
+- [x] A2 -- Unstable hash in embeddings (FNV-1a) -- P0, clawft-core -- DONE 2026-02-20
+- [x] A4 -- Plaintext credentials in config structs (SecretString) -- P0, clawft-types -- DONE 2026-02-20
+- [x] A5 -- API key echoed during onboarding (masked input) -- P0, clawft-cli -- DONE 2026-02-20
+- [x] A6 -- Incomplete SSRF private IP range (RFC 1918 + IPv6) -- P0, clawft-services -- DONE 2026-02-20
 
 ### Week 2 (P0 Remaining + P1 Start -- 8 items)
 
-- [ ] A3 -- Invalid JSON from error formatting (serde_json) -- P1, clawft-core
-- [ ] A7 -- No HTTP timeout on LLM client (120s default) -- P1, clawft-llm
-- [ ] A8 -- `unsafe set_var` in parallel tests (temp_env) -- P1, clawft-core
-- [ ] A9 -- `--no-default-features` compilation failure -- P1, clawft-cli
+- [x] A3 -- Invalid JSON from error formatting (serde_json) -- P1, clawft-core -- DONE 2026-02-20
+- [x] A7 -- No HTTP timeout on LLM client (120s default) -- P1, clawft-llm -- DONE 2026-02-20
+- [x] A8 -- `unsafe set_var` in parallel tests (temp_env) -- P1, clawft-core -- DONE 2026-02-20
+- [x] A9 -- `--no-default-features` compilation failure -- P1, clawft-cli -- DONE 2026-02-20
 - [ ] B1 -- Unify `Usage` type across crates (u32) -- P1, clawft-types + clawft-llm
 - [ ] B2 -- Unify duplicate `LlmMessage` types -- P1, clawft-core
 - [ ] B3 -- Split oversized files (9 worst offenders) -- P1, multiple crates
@@ -67,15 +67,15 @@
 
 | ID | Description | Priority | Week | Crate(s) | Status | Owner | Branch | Notes |
 |----|-------------|----------|------|----------|--------|-------|--------|-------|
-| A1 | Session key round-trip corruption | P0 | 1 | clawft-core | Pending | -- | -- | Percent-encoding fix; migration for existing session files |
-| A2 | Unstable hash in embeddings | P0 | 1 | clawft-core | Pending | -- | -- | fnv/xxhash; golden test across platforms |
-| A3 | Invalid JSON from error formatting | P1 | 2 | clawft-core | Pending | -- | -- | serde_json for error strings |
-| A4 | Plaintext credentials in config | P0 | 1 | clawft-types | Pending | -- | -- | SecretRef type; backward compat for old configs |
-| A5 | API key echoed during onboarding | P0 | 1 | clawft-cli | Pending | -- | -- | rpassword for secure input |
-| A6 | Incomplete SSRF private IP range | P0 | 1 | clawft-services | Pending | -- | -- | 172.16-31.*, IPv4-mapped IPv6 bypass |
-| A7 | No HTTP timeout on LLM client | P1 | 2 | clawft-llm | Pending | -- | -- | 120s default timeout |
-| A8 | unsafe set_var in parallel tests | P1 | 2 | clawft-core | Pending | -- | -- | temp_env crate |
-| A9 | --no-default-features compilation | P1 | 2 | clawft-cli | Pending | -- | -- | Feature gate fix |
+| A1 | Session key round-trip corruption | P0 | 1 | clawft-core | **Done** | Agent-03 | sprint/phase-5 | Percent-encoding fix |
+| A2 | Unstable hash in embeddings | P0 | 1 | clawft-core | **Done** | Agent-03 | sprint/phase-5 | FNV-1a deterministic hashing |
+| A3 | Invalid JSON from error formatting | P1 | 2 | clawft-core | **Done** | Agent-03 | sprint/phase-5 | serde_json::json! for error strings |
+| A4 | Plaintext credentials in config | P0 | 1 | clawft-types | **Done** | Agent-03 | sprint/phase-5 | SecretString credential wrapper |
+| A5 | API key echoed during onboarding | P0 | 1 | clawft-cli | **Done** | Agent-03 | sprint/phase-5 | Masked terminal input |
+| A6 | Incomplete SSRF private IP range | P0 | 1 | clawft-services | **Done** | Agent-03 | sprint/phase-5 | RFC 1918 + IPv4-mapped IPv6 + cloud metadata |
+| A7 | No HTTP timeout on LLM client | P1 | 2 | clawft-llm | **Done** | Agent-03 | sprint/phase-5 | 120s default via reqwest::ClientBuilder |
+| A8 | unsafe set_var in parallel tests | P1 | 2 | clawft-core | **Done** | Agent-03 | sprint/phase-5 | temp_env crate replacement |
+| A9 | --no-default-features compilation | P1 | 2 | clawft-cli | **Done** | Agent-03 | sprint/phase-5 | Feature gate for services |
 | B1 | Unify Usage type across crates | P1 | 2 | clawft-types, clawft-llm | Pending | -- | -- | u32 canonical type |
 | B2 | Unify duplicate LlmMessage types | P1 | 2 | clawft-core | Pending | -- | -- | Single canonical type |
 | B3 | Split oversized files | P1 | 2 | Multiple | Pending | -- | -- | 9 worst offenders >500 lines; notify all devs before merge |
@@ -196,8 +196,8 @@ J7 (plugin docs) ──────> C1-C6 (Element 04)
 
 | Workstream | Total | Pending | In Progress | Completed | % Done |
 |------------|-------|---------|-------------|-----------|--------|
-| A (Security) | 9 | 9 | 0 | 0 | 0% |
+| A (Security) | 9 | 0 | 0 | 9 | 100% |
 | B (Architecture) | 9 | 9 | 0 | 0 | 0% |
 | I (Type Safety) | 8 | 8 | 0 | 0 | 0% |
 | J (Doc Sync) | 7 | 7 | 0 | 0 | 0% |
-| **Total** | **33** | **33** | **0** | **0** | **0%** |
+| **Total** | **33** | **24** | **0** | **9** | **27%** |

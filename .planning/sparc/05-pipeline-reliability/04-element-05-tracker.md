@@ -5,7 +5,7 @@
 - **Total items**: 11 (D1-D11)
 - **Workstream**: D (Pipeline & LLM Reliability)
 - **Timeline**: Weeks 2-5
-- **Status**: Planning -> Development
+- **Status**: Complete (all 11 D-items done)
 - **Dependencies**: None (can run parallel with Element 03)
 - **Blocks**: Element 09 (D6 sender_id for multi-agent cost tracking), Element 09/M1 (D9 MCP concurrency for FlowDelegator)
 
@@ -17,26 +17,26 @@ Element 05 has 11 items (D1-D11) across 4 phases spanning Weeks 2-5.
 
 ### Week 2-3 (D-Perf -- 3 items, all independent/parallel)
 
-- [ ] D1 -- Parallel tool execution (`futures::join_all`) -- clawft-core/src/agent/loop_core.rs
-- [ ] D10 -- Cache skill/agent bootstrap files (mtime check) -- clawft-core/src/agent/context.rs
-- [ ] D11 -- Async file I/O in skills loader (`tokio::fs`) -- clawft-core/src/agent/skills_v2.rs
+- [x] D1 -- Parallel tool execution (`futures::join_all`) -- clawft-core/src/agent/loop_core.rs -- DONE 2026-02-20
+- [x] D10 -- Cache skill/agent bootstrap files (mtime check) -- clawft-core/src/agent/context.rs -- DONE 2026-02-20
+- [x] D11 -- Async file I/O in skills loader (`tokio::fs`) -- clawft-core/src/agent/skills_v2.rs -- DONE 2026-02-20
 
 ### Week 3-4 (D-Reliability -- 5 items, D3->D4 sequential; D7->D2 recommended; D8 independent)
 
-- [ ] D3 -- Structured error variants for retry -- clawft-llm/src/retry.rs, clawft-types/src/error.rs
-- [ ] D4 -- Configurable retry policy (depends on D3) -- clawft-core/src/pipeline/llm_adapter.rs
-- [ ] D7 -- StreamCallback to FnMut -- clawft-core/src/pipeline/traits.rs
-- [ ] D2 -- Streaming failover correctness (reset stream; D7 recommended first) -- clawft-llm/src/failover.rs
-- [ ] D8 -- Bounded message bus channels -- clawft-core/src/bus.rs
+- [x] D3 -- Structured error variants for retry -- clawft-llm/src/retry.rs, clawft-types/src/error.rs -- DONE 2026-02-20
+- [x] D4 -- Configurable retry policy (depends on D3) -- clawft-core/src/pipeline/llm_adapter.rs -- DONE 2026-02-20
+- [x] D7 -- StreamCallback to FnMut -- clawft-core/src/pipeline/traits.rs -- DONE 2026-02-20
+- [x] D2 -- Streaming failover correctness (reset stream; D7 recommended first) -- clawft-llm/src/failover.rs -- DONE 2026-02-20
+- [x] D8 -- Bounded message bus channels -- clawft-core/src/bus.rs -- DONE 2026-02-20
 
 ### Week 4-5 (D-Observability -- 2 items, independent)
 
-- [ ] D5 -- Record actual latency in ResponseOutcome -- clawft-core/src/pipeline/traits.rs, src/agent/loop_core.rs
-- [ ] D6 -- Thread sender_id for cost recording -- clawft-core/src/pipeline/tiered_router.rs
+- [x] D5 -- Record actual latency in ResponseOutcome -- clawft-core/src/pipeline/traits.rs, src/agent/loop_core.rs -- DONE 2026-02-20
+- [x] D6 -- Thread sender_id for cost recording -- clawft-core/src/pipeline/tiered_router.rs -- DONE 2026-02-20
 
 ### Week 4-5 (D-Transport -- 1 item, blocks Element 09/M1)
 
-- [ ] D9 -- MCP transport concurrency (request-ID multiplexing) -- clawft-services/src/mcp/transport.rs
+- [x] D9 -- MCP transport concurrency (request-ID multiplexing) -- clawft-services/src/mcp/transport.rs -- DONE 2026-02-20
 
 ---
 
@@ -44,17 +44,17 @@ Element 05 has 11 items (D1-D11) across 4 phases spanning Weeks 2-5.
 
 | Item | Description | Priority | Week | Crate(s) | Status | Owner | Branch | Key Deliverable |
 |------|-------------|----------|------|----------|--------|-------|--------|-----------------|
-| D1 | Parallel tool execution (`join_all`) | P1 | 2-3 | clawft-core | Pending | -- | -- | Concurrent tool calls; 3 tools @100ms < 200ms |
-| D2 | Streaming failover correctness | P1 | 3-4 | clawft-llm | Pending | -- | -- | StreamFailoverController; clean output on mid-stream fail |
-| D3 | Structured error variants | P1 | 3-4 | clawft-llm, clawft-types | Pending | -- | -- | ProviderError enum; no string-prefix matching |
-| D4 | Configurable retry policy | P1 | 3-4 | clawft-core | Pending | -- | -- | RetryPolicy struct; config.json tunable |
-| D5 | Record actual latency | P2 | 4-5 | clawft-core | Pending | -- | -- | latency_ms in ResponseOutcome |
-| D6 | Thread sender_id for cost | P2 | 4-5 | clawft-core | Pending | -- | -- | End-to-end sender_id propagation to CostTracker |
-| D7 | StreamCallback to FnMut | P1 | 3-4 | clawft-core | Pending | -- | -- | Type alias change; stateful callbacks |
-| D8 | Bounded message bus | P1 | 3-4 | clawft-core | Pending | -- | -- | BusConfig with overflow policy + backpressure |
-| D9 | MCP transport concurrency | P1 | 4-5 | clawft-services | Pending | -- | -- | Request-ID multiplexing for stdio |
-| D10 | Cache bootstrap files | P2 | 2-3 | clawft-core | Pending | -- | -- | mtime-based cache; skip disk on repeat calls |
-| D11 | Async file I/O in skills | P2 | 2-3 | clawft-core | Pending | -- | -- | tokio::fs; no blocking std::fs on async path |
+| D1 | Parallel tool execution (`join_all`) | P1 | 2-3 | clawft-core | **Done** | Agent-05 | sprint/phase-5 | Concurrent tool calls via join_all |
+| D2 | Streaming failover correctness | P1 | 3-4 | clawft-llm | **Done** | Agent-05 | sprint/phase-5 | Stream reset on mid-stream fail |
+| D3 | Structured error variants | P1 | 3-4 | clawft-llm, clawft-types | **Done** | Agent-05 | sprint/phase-5 | ProviderError enum; no string-prefix matching |
+| D4 | Configurable retry policy | P1 | 3-4 | clawft-core | **Done** | Agent-05 | sprint/phase-5 | RetryConfig in config |
+| D5 | Record actual latency | P2 | 4-5 | clawft-core | **Done** | Agent-05 | sprint/phase-5 | Real latency_ms in ResponseOutcome |
+| D6 | Thread sender_id for cost | P2 | 4-5 | clawft-core | **Done** | Agent-05 | sprint/phase-5 | End-to-end sender_id propagation |
+| D7 | StreamCallback to FnMut | P1 | 3-4 | clawft-core | **Done** | Agent-05 | sprint/phase-5 | FnMut type alias; stateful callbacks |
+| D8 | Bounded message bus | P1 | 3-4 | clawft-core | **Done** | Agent-05 | sprint/phase-5 | Bounded channels with backpressure |
+| D9 | MCP transport concurrency | P1 | 4-5 | clawft-services | **Done** | Agent-05 | sprint/phase-5 | Request-ID multiplexing for stdio |
+| D10 | Cache bootstrap files | P2 | 2-3 | clawft-core | **Done** | Agent-05 | sprint/phase-5 | mtime-based cache |
+| D11 | Async file I/O in skills | P2 | 2-3 | clawft-core | **Done** | Agent-05 | sprint/phase-5 | tokio::fs; zero blocking std::fs |
 
 ---
 
@@ -152,8 +152,8 @@ Scoring: Likelihood (Low=1, Medium=2, High=3) x Impact (Low=1, Medium=2, High=3,
 
 | Phase | Items | Pending | In Progress | Completed | % Done |
 |-------|-------|---------|-------------|-----------|--------|
-| D-Perf (D1, D10, D11) | 3 | 3 | 0 | 0 | 0% |
-| D-Reliability (D3, D4, D7, D2, D8) | 5 | 5 | 0 | 0 | 0% |
-| D-Observability (D5, D6) | 2 | 2 | 0 | 0 | 0% |
-| D-Transport (D9) | 1 | 1 | 0 | 0 | 0% |
-| **Total** | **11** | **11** | **0** | **0** | **0%** |
+| D-Perf (D1, D10, D11) | 3 | 0 | 0 | 3 | 100% |
+| D-Reliability (D3, D4, D7, D2, D8) | 5 | 0 | 0 | 5 | 100% |
+| D-Observability (D5, D6) | 2 | 0 | 0 | 2 | 100% |
+| D-Transport (D9) | 1 | 0 | 0 | 1 | 100% |
+| **Total** | **11** | **0** | **0** | **11** | **100%** |
