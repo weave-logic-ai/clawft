@@ -1163,6 +1163,91 @@ Transform input using the WASM module.
         );
     }
 
+    // ── K5: MVP skill parsing tests ───────────────────────────────────
+
+    #[test]
+    fn parse_prompt_log_skill() {
+        let content = include_str!("../../../../skills/prompt-log/SKILL.md");
+        let skill = parse_skill_md(content, None).expect("should parse prompt-log");
+        assert_eq!(skill.name, "prompt-log");
+        assert_eq!(skill.version, "1.0.0");
+        assert!(skill.user_invocable);
+        assert!(!skill.allowed_tools.is_empty());
+        assert!(skill.allowed_tools.contains(&"Read".to_string()));
+        assert!(skill.allowed_tools.contains(&"Write".to_string()));
+        assert!(skill.allowed_tools.contains(&"Bash".to_string()));
+        assert!(skill.allowed_tools.contains(&"Glob".to_string()));
+        assert_eq!(skill.variables, vec!["session_file", "output_path"]);
+        assert!(skill.argument_hint.is_some());
+        assert!(skill.instructions.contains("session log"));
+        assert!(skill.instructions.contains(".jsonl"));
+        assert_eq!(skill.format, SkillFormat::SkillMd);
+    }
+
+    #[test]
+    fn parse_skill_vetting_skill() {
+        let content = include_str!("../../../../skills/skill-vetting/SKILL.md");
+        let skill = parse_skill_md(content, None).expect("should parse skill-vetting");
+        assert_eq!(skill.name, "skill-vetting");
+        assert_eq!(skill.version, "1.0.0");
+        assert!(skill.user_invocable);
+        assert!(!skill.allowed_tools.is_empty());
+        assert!(skill.allowed_tools.contains(&"Read".to_string()));
+        assert!(skill.allowed_tools.contains(&"Bash".to_string()));
+        assert!(skill.allowed_tools.contains(&"Glob".to_string()));
+        assert!(skill.allowed_tools.contains(&"Grep".to_string()));
+        assert_eq!(skill.variables, vec!["skill_path"]);
+        assert!(skill.argument_hint.is_some());
+        assert!(skill.instructions.contains("security"));
+        assert!(skill.instructions.contains("weft security scan"));
+        assert_eq!(skill.format, SkillFormat::SkillMd);
+    }
+
+    #[test]
+    fn parse_discord_skill() {
+        let content = include_str!("../../../../skills/discord/SKILL.md");
+        let skill = parse_skill_md(content, None).expect("should parse discord");
+        assert_eq!(skill.name, "discord");
+        assert_eq!(skill.version, "1.0.0");
+        assert!(skill.user_invocable);
+        assert_eq!(skill.allowed_tools, vec!["Bash".to_string()]);
+        assert_eq!(skill.variables, vec!["action", "channel_id"]);
+        assert!(skill.argument_hint.is_some());
+        assert!(skill.instructions.contains("Discord"));
+        assert!(skill.instructions.contains("weft channel discord"));
+        assert_eq!(skill.format, SkillFormat::SkillMd);
+    }
+
+    #[tokio::test]
+    async fn discover_mvp_skills_from_directory() {
+        // Point discovery at the workspace skills/ directory.
+        let skills_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("skills");
+        let registry = SkillRegistry::discover(Some(&skills_dir), None, vec![])
+            .await
+            .expect("should discover skills from skills/ directory");
+
+        assert!(
+            registry.len() >= 3,
+            "expected at least 3 skills, got {}",
+            registry.len()
+        );
+        assert!(registry.get("prompt-log").is_some(), "missing prompt-log");
+        assert!(
+            registry.get("skill-vetting").is_some(),
+            "missing skill-vetting"
+        );
+        assert!(registry.get("discord").is_some(), "missing discord");
+
+        // Verify names are sorted correctly.
+        let names = registry.names();
+        assert!(names.contains(&"discord"));
+        assert!(names.contains(&"prompt-log"));
+        assert!(names.contains(&"skill-vetting"));
+    }
+
     // ── Helpers ─────────────────────────────────────────────────────────
 
     /// Create a skill subdirectory with a SKILL.md file.

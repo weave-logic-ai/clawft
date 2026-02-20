@@ -115,7 +115,7 @@ Even though Voice and UI are out of scope, the following hooks must be built:
 | 07 | Dev Tools & Apps | 100% | 10/10 | -- |
 | 08 | Memory & Workspace | 100% | 10/10 | -- |
 | 09 | Multi-Agent Routing | 93% | 13/14 | M6 docs deferred |
-| 10 | Deployment & Community | 90% | K2-K5 core | Skill install/publish, MVP skills blocked on C3/C4 runtime |
+| 10 | Deployment & Community | 95% | K2-K5 core + MVP skills | Skill install/publish blocked on ClawHub server |
 
 ### Wave Execution
 
@@ -158,7 +158,6 @@ Email, WhatsApp, Signal, Matrix, IRC, Google Chat, Microsoft Teams, Discord Resu
 
 1. **M6 docs** -- deferred to documentation sprint
 2. **K4 skill install/publish** -- blocked on ClawHub server availability
-3. **K5 3 MVP skills** -- blocked on C3/C4 skill loader runtime integration
 
 ---
 

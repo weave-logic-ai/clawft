@@ -1,7 +1,7 @@
 # Element 10: Deployment & Community - Sprint Tracker
 **Workstream**: K (Deployment & Community)
 **Timeline**: Weeks 8-12
-**Status**: COMPLETE (K2-K5 delivered, blocked items depend on upstream C3/C4/H2)
+**Status**: COMPLETE (K2-K5 delivered, K4 install/publish depends on ClawHub server)
 
 ## Phase Tracking
 
@@ -40,7 +40,7 @@
 
 ### K5: Benchmarks & MVP Skills
 - [x] Benchmark comparison script (4 metrics vs OpenClaw)
-- [ ] 3 MVP skills (depends on C3 skill loader landing)
+- [x] 3 MVP skills: prompt-log, skill-vetting, discord (skills/ directory, 4 parser tests)
 
 ## File Map
 
@@ -73,7 +73,7 @@
 | Dependency | Description | Status |
 |------------|-------------|--------|
 | 04/C2 | WASM host for sandbox | Available |
-| 04/C3-C4 | Skill loader for ClawHub | Pending (MVP skills blocked) |
+| 04/C3-C4 | Skill loader for ClawHub | Available (MVP skills delivered) |
 | 08/H2 | Vector search for ClawHub | Keyword fallback implemented |
 | 09/L2 | Per-agent workspace isolation | Available |
 

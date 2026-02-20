@@ -94,3 +94,56 @@
   4. Throughput (criterion, run separately)
 - Outputs bench-comparison.json
 - Reads baseline from scripts/bench/baseline.json
+
+## K5: MVP Skills
+
+### Overview
+3 MVP skills adapted from OpenClaw references, implemented as SKILL.md files
+in the `skills/` workspace directory. All skills parse correctly through the
+`skills_v2::parse_skill_md` parser and are discoverable by `SkillRegistry::discover`.
+
+### Skills Delivered
+
+#### 1. `skills/prompt-log/SKILL.md`
+- **Adapted from**: openclaw/thesash/prompt-log
+- **Purpose**: Extract conversation transcripts from clawft `.jsonl` session logs
+- **Tools**: Read, Write, Bash, Glob
+- **Variables**: session_file, output_path
+- **Features**: Timestamp filtering (--after/--before), chunked reading for large
+  files, tool call summarization, Markdown transcript output
+
+#### 2. `skills/skill-vetting/SKILL.md`
+- **Adapted from**: openclaw/eddygk/skill-vetting
+- **Purpose**: Security vetting of third-party skills before installation
+- **Tools**: Read, Bash, Glob, Grep
+- **Variables**: skill_path
+- **Features**: 6-step vetting workflow, integrates `weft security scan` (57 audit
+  checks), manual review checklist, decision matrix (APPROVE/REVIEW/REJECT),
+  structured vetting report output
+
+#### 3. `skills/discord/SKILL.md`
+- **Adapted from**: openclaw/steipete/discord
+- **Purpose**: Discord bot control through clawft's channel adapter
+- **Tools**: Bash
+- **Variables**: action, channel_id
+- **Features**: 8 action types (send, react, thread, poll, pin, search, moderation,
+  status), channel ID resolution, rate limit handling, safety rules for
+  moderation actions
+
+### Tests Added (4)
+All tests in `crates/clawft-core/src/agent/skills_v2.rs`:
+
+1. `parse_prompt_log_skill` -- Verifies prompt-log SKILL.md parses with correct
+   name, version, tools, variables, and instruction content
+2. `parse_skill_vetting_skill` -- Verifies skill-vetting SKILL.md parses correctly
+3. `parse_discord_skill` -- Verifies discord SKILL.md parses correctly
+4. `discover_mvp_skills_from_directory` -- Verifies `SkillRegistry::discover`
+   finds all 3 skills when pointed at the `skills/` directory
+
+### File Map
+| File | Action | Status |
+|------|--------|--------|
+| skills/prompt-log/SKILL.md | NEW | DONE |
+| skills/skill-vetting/SKILL.md | NEW | DONE |
+| skills/discord/SKILL.md | NEW | DONE |
+| crates/clawft-core/src/agent/skills_v2.rs | EDITED (4 tests) | DONE |
