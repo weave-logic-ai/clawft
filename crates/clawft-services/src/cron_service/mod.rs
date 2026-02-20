@@ -28,7 +28,7 @@ use storage::CronStorage;
 pub struct CronService {
     scheduler: Arc<RwLock<CronScheduler>>,
     storage: CronStorage,
-    message_tx: mpsc::UnboundedSender<InboundMessage>,
+    message_tx: mpsc::Sender<InboundMessage>,
 }
 
 impl CronService {
@@ -37,7 +37,7 @@ impl CronService {
     /// Loads any existing jobs from the storage file at `storage_path`.
     pub async fn new(
         storage_path: PathBuf,
-        message_tx: mpsc::UnboundedSender<InboundMessage>,
+        message_tx: mpsc::Sender<InboundMessage>,
     ) -> Result<Self> {
         let storage = CronStorage::new(storage_path);
         let mut scheduler = CronScheduler::new();
@@ -191,7 +191,7 @@ impl CronService {
         };
 
         self.message_tx
-            .send(msg)
+            .try_send(msg)
             .map_err(|_| ServiceError::ChannelClosed)?;
 
         Ok(())
@@ -202,10 +202,10 @@ impl CronService {
 mod tests {
     use super::*;
 
-    async fn setup() -> (CronService, mpsc::UnboundedReceiver<InboundMessage>) {
+    async fn setup() -> (CronService, mpsc::Receiver<InboundMessage>) {
         let dir = std::env::temp_dir().join(format!("clawft-cron-test-{}", uuid::Uuid::new_v4()));
         let path = dir.join("cron.jsonl");
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(1024);
         let svc = CronService::new(path, tx).await.unwrap();
         (svc, rx)
     }

@@ -37,7 +37,7 @@ impl ChannelFactory for DiscordChannelFactory {
         if discord_config.token.is_empty() {
             if let Some(ref env_var) = discord_config.token_env {
                 match std::env::var(env_var) {
-                    Ok(val) if !val.is_empty() => discord_config.token = val,
+                    Ok(val) if !val.is_empty() => discord_config.token = val.into(),
                     _ => {
                         return Err(ChannelError::Other(format!(
                             "discord token_env '{env_var}' is not set or empty"

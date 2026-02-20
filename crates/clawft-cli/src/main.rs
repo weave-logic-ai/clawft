@@ -45,6 +45,7 @@ enum Commands {
     Gateway(commands::gateway::GatewayArgs),
 
     /// Run as an MCP tool server over stdio.
+    #[cfg(feature = "services")]
     McpServer(commands::mcp_server::McpServerArgs),
 
     /// Show configuration status.
@@ -282,6 +283,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Agent(args) => commands::agent::run(args).await?,
         Commands::Gateway(args) => commands::gateway::run(args).await?,
+        #[cfg(feature = "services")]
         Commands::McpServer(args) => commands::mcp_server::run(args).await?,
         Commands::Status(args) => commands::status::run(args).await?,
         Commands::Channels { action } => {
@@ -378,7 +380,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Commands::Skills(args) => commands::skills_cmd::run(args)?,
+        Commands::Skills(args) => commands::skills_cmd::run(args).await?,
         Commands::Agents(args) => commands::agents_cmd::run(args)?,
         Commands::Workspace(args) => commands::workspace_cmd::run(args)?,
         Commands::Onboard(args) => commands::onboard::run(args).await?,
@@ -593,18 +595,21 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[cfg(feature = "services")]
     #[test]
     fn cli_mcp_server_parses() {
         let result = Cli::try_parse_from(["weft", "mcp-server"]);
         assert!(result.is_ok());
     }
 
+    #[cfg(feature = "services")]
     #[test]
     fn cli_mcp_server_with_config() {
         let result = Cli::try_parse_from(["weft", "mcp-server", "--config", "/tmp/config.json"]);
         assert!(result.is_ok());
     }
 
+    #[cfg(feature = "services")]
     #[test]
     fn cli_mcp_server_verbose() {
         let result = Cli::try_parse_from(["weft", "--verbose", "mcp-server"]);

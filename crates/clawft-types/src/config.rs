@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::delegation::DelegationConfig;
 use crate::routing::RoutingConfig;
+use crate::secret::SecretString;
 
 // ── Root config ──────────────────────────────────────────────────────────
 
@@ -188,7 +189,7 @@ pub struct TelegramConfig {
 
     /// Bot token from `@BotFather`.
     #[serde(default)]
-    pub token: String,
+    pub token: SecretString,
 
     /// Environment variable name that holds the bot token (e.g. `"TELEGRAM_BOT_TOKEN"`).
     /// When set, the env var is used if `token` is empty.
@@ -221,7 +222,7 @@ pub struct SlackConfig {
 
     /// Bot token (`xoxb-...`).
     #[serde(default, alias = "botToken")]
-    pub bot_token: String,
+    pub bot_token: SecretString,
 
     /// Environment variable name for the bot token (e.g. `"SLACK_BOT_TOKEN"`).
     /// Used when `bot_token` is empty.
@@ -230,7 +231,7 @@ pub struct SlackConfig {
 
     /// App-level token (`xapp-...`).
     #[serde(default, alias = "appToken")]
-    pub app_token: String,
+    pub app_token: SecretString,
 
     /// Environment variable name for the app token (e.g. `"SLACK_APP_TOKEN"`).
     /// Used when `app_token` is empty.
@@ -270,9 +271,9 @@ impl Default for SlackConfig {
             enabled: false,
             mode: default_slack_mode(),
             webhook_path: default_webhook_path(),
-            bot_token: String::new(),
+            bot_token: SecretString::default(),
             bot_token_env: None,
-            app_token: String::new(),
+            app_token: SecretString::default(),
             app_token_env: None,
             user_token_read_only: true,
             group_policy: default_group_policy(),
@@ -321,7 +322,7 @@ pub struct DiscordConfig {
 
     /// Bot token from Discord Developer Portal.
     #[serde(default)]
-    pub token: String,
+    pub token: SecretString,
 
     /// Environment variable name that holds the bot token (e.g. `"DISCORD_BOT_TOKEN"`).
     /// When set, the env var is used if `token` is empty.
@@ -352,7 +353,7 @@ impl Default for DiscordConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            token: String::new(),
+            token: SecretString::default(),
             token_env: None,
             allow_from: Vec::new(),
             gateway_url: default_discord_gateway_url(),
@@ -374,7 +375,7 @@ pub struct WhatsAppConfig {
 
     /// Shared token for bridge authentication.
     #[serde(default, alias = "bridgeToken")]
-    pub bridge_token: String,
+    pub bridge_token: SecretString,
 
     /// Allowed phone numbers. Empty = allow all.
     #[serde(default, alias = "allowFrom")]
@@ -390,7 +391,7 @@ impl Default for WhatsAppConfig {
         Self {
             enabled: false,
             bridge_url: default_whatsapp_bridge_url(),
-            bridge_token: String::new(),
+            bridge_token: SecretString::default(),
             allow_from: Vec::new(),
         }
     }
@@ -409,7 +410,7 @@ pub struct FeishuConfig {
 
     /// App Secret from Feishu Open Platform.
     #[serde(default, alias = "appSecret")]
-    pub app_secret: String,
+    pub app_secret: SecretString,
 
     /// Encrypt Key for event subscription.
     #[serde(default, alias = "encryptKey")]
@@ -417,7 +418,7 @@ pub struct FeishuConfig {
 
     /// Verification Token for event subscription.
     #[serde(default, alias = "verificationToken")]
-    pub verification_token: String,
+    pub verification_token: SecretString,
 
     /// Allowed user open_ids. Empty = allow all.
     #[serde(default, alias = "allowFrom")]
@@ -437,7 +438,7 @@ pub struct DingTalkConfig {
 
     /// AppSecret.
     #[serde(default, alias = "clientSecret")]
-    pub client_secret: String,
+    pub client_secret: SecretString,
 
     /// Allowed staff IDs. Empty = allow all.
     #[serde(default, alias = "allowFrom")]
@@ -517,7 +518,7 @@ pub struct MochatConfig {
 
     /// Authentication token.
     #[serde(default, alias = "clawToken")]
-    pub claw_token: String,
+    pub claw_token: SecretString,
 
     /// Agent user ID for the bot.
     #[serde(default, alias = "agentUserId")]
@@ -599,7 +600,7 @@ impl Default for MochatConfig {
             watch_limit: default_100(),
             retry_delay_ms: default_500(),
             max_retry_attempts: 0,
-            claw_token: String::new(),
+            claw_token: SecretString::default(),
             agent_user_id: String::new(),
             sessions: Vec::new(),
             panels: Vec::new(),
@@ -638,7 +639,7 @@ pub struct EmailConfig {
 
     /// IMAP password.
     #[serde(default, alias = "imapPassword")]
-    pub imap_password: String,
+    pub imap_password: SecretString,
 
     /// IMAP mailbox to watch.
     #[serde(default = "default_imap_mailbox", alias = "imapMailbox")]
@@ -663,7 +664,7 @@ pub struct EmailConfig {
 
     /// SMTP password.
     #[serde(default, alias = "smtpPassword")]
-    pub smtp_password: String,
+    pub smtp_password: SecretString,
 
     /// Use STARTTLS for SMTP.
     #[serde(default = "default_true", alias = "smtpUseTls")]
@@ -730,13 +731,13 @@ impl Default for EmailConfig {
             imap_host: String::new(),
             imap_port: default_imap_port(),
             imap_username: String::new(),
-            imap_password: String::new(),
+            imap_password: SecretString::default(),
             imap_mailbox: default_imap_mailbox(),
             imap_use_ssl: true,
             smtp_host: String::new(),
             smtp_port: default_smtp_port(),
             smtp_username: String::new(),
-            smtp_password: String::new(),
+            smtp_password: SecretString::default(),
             smtp_use_tls: true,
             smtp_use_ssl: false,
             from_address: String::new(),
@@ -763,7 +764,7 @@ pub struct QQConfig {
 
     /// Bot AppSecret.
     #[serde(default)]
-    pub secret: String,
+    pub secret: SecretString,
 
     /// Allowed user openids. Empty = allow all.
     #[serde(default, alias = "allowFrom")]
@@ -777,7 +778,7 @@ pub struct QQConfig {
 pub struct ProviderConfig {
     /// API key for authentication.
     #[serde(default, alias = "apiKey")]
-    pub api_key: String,
+    pub api_key: SecretString,
 
     /// Base URL override (e.g. for proxies).
     #[serde(default, alias = "apiBase")]
@@ -938,7 +939,7 @@ pub struct WebToolsConfig {
 pub struct WebSearchConfig {
     /// Search API key (e.g. Brave Search).
     #[serde(default, alias = "apiKey")]
-    pub api_key: String,
+    pub api_key: SecretString,
 
     /// Maximum number of search results.
     #[serde(default = "default_max_results", alias = "maxResults")]
@@ -952,7 +953,7 @@ fn default_max_results() -> u32 {
 impl Default for WebSearchConfig {
     fn default() -> Self {
         Self {
-            api_key: String::new(),
+            api_key: SecretString::default(),
             max_results: default_max_results(),
         }
     }
@@ -1108,14 +1109,14 @@ mod tests {
 
         // Channels
         assert!(cfg.channels.telegram.enabled);
-        assert_eq!(cfg.channels.telegram.token, "test-bot-token-123");
+        assert_eq!(cfg.channels.telegram.token.expose(), "test-bot-token-123");
         assert_eq!(cfg.channels.telegram.allow_from, vec!["user1", "user2"]);
         assert!(!cfg.channels.slack.enabled);
         assert!(!cfg.channels.discord.enabled);
 
         // Providers
-        assert_eq!(cfg.providers.anthropic.api_key, "sk-ant-test-key");
-        assert_eq!(cfg.providers.openrouter.api_key, "sk-or-test-key");
+        assert_eq!(cfg.providers.anthropic.api_key.expose(), "sk-ant-test-key");
+        assert_eq!(cfg.providers.openrouter.api_key.expose(), "sk-or-test-key");
         assert_eq!(
             cfg.providers.openrouter.api_base.as_deref(),
             Some("https://openrouter.ai/api/v1")
@@ -1185,10 +1186,9 @@ mod tests {
         let restored: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.agents.defaults.model, cfg.agents.defaults.model);
         assert_eq!(restored.gateway.port, cfg.gateway.port);
-        assert_eq!(
-            restored.providers.anthropic.api_key,
-            cfg.providers.anthropic.api_key
-        );
+        // SecretString serializes to "" for security, so after round-trip
+        // the restored api_key is empty (by design).
+        assert!(restored.providers.anthropic.api_key.is_empty());
     }
 
     #[test]
@@ -1206,7 +1206,7 @@ mod tests {
         let cfg: Config = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.agents.defaults.model, "test");
         assert!(!cfg.channels.telegram.enabled);
-        assert_eq!(cfg.providers.anthropic.api_key, "k");
+        assert_eq!(cfg.providers.anthropic.api_key.expose(), "k");
     }
 
     #[test]
@@ -1238,7 +1238,7 @@ mod tests {
             "extraHeaders": { "X-Custom": "value" }
         }"#;
         let cfg: ProviderConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.api_key, "test");
+        assert_eq!(cfg.api_key.expose(), "test");
         let headers = cfg.extra_headers.unwrap();
         assert_eq!(headers["X-Custom"], "value");
     }

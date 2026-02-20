@@ -3,17 +3,30 @@
 //! Wraps MCP server tool definitions as implementations of the
 //! [`Tool`](clawft_core::tools::registry::Tool) trait, allowing MCP
 //! tools to be invoked by the agent loop just like built-in tools.
+//!
+//! Requires the `services` feature. When the feature is off, a no-op stub
+//! is provided for [`register_mcp_tools`].
 
+#[cfg(feature = "services")]
 use std::sync::Arc;
 
+#[cfg(feature = "services")]
 use async_trait::async_trait;
+#[cfg(feature = "services")]
 use tracing::warn;
 
+#[cfg(feature = "services")]
 use clawft_core::tools::registry::{Tool, ToolError};
+#[cfg(feature = "services")]
 use clawft_services::mcp::transport::{HttpTransport, StdioTransport};
+#[cfg(feature = "services")]
 use clawft_services::mcp::{McpSession, ToolDefinition};
+#[cfg(feature = "services")]
 use clawft_types::config::MCPServerConfig;
 
+// -- All MCP tool types and functions below are gated behind the `services` feature. --
+
+#[cfg(feature = "services")]
 /// Extract text from MCP tool result content blocks.
 ///
 /// MCP tool results follow the format:
@@ -43,11 +56,13 @@ fn extract_mcp_tool_result(raw: &serde_json::Value) -> std::result::Result<Strin
     Ok(serde_json::to_string(raw).unwrap_or_default())
 }
 
+#[cfg(feature = "services")]
 /// Extract and concatenate all text blocks from an MCP content array.
 fn extract_text_blocks(raw: &serde_json::Value) -> String {
     try_extract_text_blocks(raw).unwrap_or_else(|| serde_json::to_string(raw).unwrap_or_default())
 }
 
+#[cfg(feature = "services")]
 /// Try to extract text from the `content` array, returning `None` if
 /// the array is missing or contains no text blocks.
 fn try_extract_text_blocks(raw: &serde_json::Value) -> Option<String> {
@@ -70,6 +85,7 @@ fn try_extract_text_blocks(raw: &serde_json::Value) -> Option<String> {
     }
 }
 
+#[cfg(feature = "services")]
 /// Wraps an MCP tool definition for use in the `ToolRegistry`.
 ///
 /// Each wrapper holds a reference to the shared [`McpSession`] for its
@@ -85,6 +101,7 @@ pub struct McpToolWrapper {
     session: Arc<McpSession>,
 }
 
+#[cfg(feature = "services")]
 impl McpToolWrapper {
     /// Create a new wrapper.
     ///
@@ -99,6 +116,7 @@ impl McpToolWrapper {
     }
 }
 
+#[cfg(feature = "services")]
 #[async_trait]
 impl Tool for McpToolWrapper {
     fn name(&self) -> &str {
@@ -128,6 +146,7 @@ impl Tool for McpToolWrapper {
     }
 }
 
+#[cfg(feature = "services")]
 /// Create an MCP session from server configuration.
 ///
 /// Chooses the transport based on config fields:
@@ -172,6 +191,7 @@ pub async fn create_mcp_client(server_name: &str, config: &MCPServerConfig) -> O
     }
 }
 
+#[cfg(feature = "services")]
 /// Discover and register MCP tools from all configured servers.
 ///
 /// For each MCP server in the config, creates a client, lists available
@@ -213,6 +233,15 @@ pub async fn register_mcp_tools(
             }
         }
     }
+}
+
+/// No-op: MCP tools require the `services` feature.
+#[cfg(not(feature = "services"))]
+pub async fn register_mcp_tools(
+    _config: &clawft_types::config::Config,
+    _registry: &mut clawft_core::tools::registry::ToolRegistry,
+) {
+    // MCP services feature not compiled in.
 }
 
 /// Register the delegation tool if an ANTHROPIC_API_KEY is available.
@@ -280,7 +309,7 @@ pub fn register_delegation(
     // Delegation feature not compiled in.
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "services"))]
 mod tests {
     use std::collections::HashMap;
 

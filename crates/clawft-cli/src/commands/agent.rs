@@ -325,7 +325,7 @@ pub(crate) fn build_web_search_config(
     let api_key = if search.api_key.is_empty() {
         std::env::var("BRAVE_SEARCH_API_KEY").ok()
     } else {
-        Some(search.api_key.clone())
+        Some(search.api_key.expose().to_owned())
     };
 
     clawft_tools::web_search::WebSearchConfig {

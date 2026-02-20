@@ -55,7 +55,7 @@ impl DiscordChannel {
     /// Create a new Discord channel from configuration.
     pub fn new(config: DiscordConfig) -> Self {
         Self {
-            api: DiscordApiClient::new(config.token.clone()),
+            api: DiscordApiClient::new(config.token.expose().to_owned()),
             status: Arc::new(RwLock::new(ChannelStatus::Stopped)),
             config,
             sequence: AtomicU64::new(0),
@@ -247,7 +247,7 @@ impl Channel for DiscordChannel {
                 op: super::events::OP_IDENTIFY,
                 d: Some(
                     serde_json::to_value(IdentifyPayload {
-                        token: self.config.token.clone(),
+                        token: self.config.token.expose().to_owned(),
                         intents: self.config.intents,
                         properties: ConnectionProperties {
                             os: std::env::consts::OS.to_owned(),

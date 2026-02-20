@@ -120,13 +120,13 @@ pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
 
         println!();
         println!("Providers:");
-        print_provider("  anthropic", &config.providers.anthropic.api_key);
-        print_provider("  openai", &config.providers.openai.api_key);
-        print_provider("  openrouter", &config.providers.openrouter.api_key);
-        print_provider("  deepseek", &config.providers.deepseek.api_key);
-        print_provider("  groq", &config.providers.groq.api_key);
-        print_provider("  gemini", &config.providers.gemini.api_key);
-        print_provider("  custom", &config.providers.custom.api_key);
+        print_provider("  anthropic", config.providers.anthropic.api_key.expose());
+        print_provider("  openai", config.providers.openai.api_key.expose());
+        print_provider("  openrouter", config.providers.openrouter.api_key.expose());
+        print_provider("  deepseek", config.providers.deepseek.api_key.expose());
+        print_provider("  groq", config.providers.groq.api_key.expose());
+        print_provider("  gemini", config.providers.gemini.api_key.expose());
+        print_provider("  custom", config.providers.custom.api_key.expose());
 
         println!();
         println!("Tools:");

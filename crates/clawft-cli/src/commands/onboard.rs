@@ -153,12 +153,14 @@ fn prompt_provider_config() -> anyhow::Result<ProviderSelection> {
             "You can set your API key now, or set the {} env var later.",
             env_var
         );
+        // Use rpassword to suppress echo so the key is not visible in terminal
+        // scrollback or screen recordings. Falls back to regular stdin on non-TTY.
         print!("API key (leave blank to skip): ");
         io::stdout().flush()?;
-
-        let mut key = String::new();
-        io::stdin().lock().read_line(&mut key)?;
-        let key = key.trim().to_owned();
+        let key = rpassword::read_password()
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
 
         if key.is_empty() {
             return Ok(selection);

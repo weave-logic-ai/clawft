@@ -47,8 +47,8 @@ impl SlackChannel {
     /// Create a new Slack channel from configuration.
     pub fn new(config: SlackConfig) -> Self {
         Self {
-            api: SlackApiClient::new(config.bot_token.clone()),
-            app_token: config.app_token.clone(),
+            api: SlackApiClient::new(config.bot_token.expose().to_owned()),
+            app_token: config.app_token.expose().to_owned(),
             status: Arc::new(RwLock::new(ChannelStatus::Stopped)),
             config,
         }
@@ -59,7 +59,7 @@ impl SlackChannel {
     pub fn with_api(config: SlackConfig, api: SlackApiClient) -> Self {
         Self {
             api,
-            app_token: config.app_token.clone(),
+            app_token: config.app_token.expose().to_owned(),
             status: Arc::new(RwLock::new(ChannelStatus::Stopped)),
             config,
         }

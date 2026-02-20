@@ -193,19 +193,62 @@ impl UrlPolicy {
             return Err(format!("blocked metadata endpoint: {host}"));
         }
 
-        // Block obvious private IP literals.
-        if host.starts_with("10.")
-            || host.starts_with("192.168.")
-            || host.starts_with("172.16.")
-            || host.starts_with("127.")
-            || host == "0.0.0.0"
-            || host == "localhost"
-        {
+        // Block private, loopback, and link-local IP addresses.
+        if is_private_or_loopback(&host) {
             return Err(format!("blocked private address: {host}"));
         }
 
         Ok(())
     }
+}
+
+/// Check if a host string represents a private, loopback, or link-local address.
+///
+/// Handles:
+/// - IPv4: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8
+/// - IPv6 loopback: ::1
+/// - IPv4-mapped IPv6: ::ffff:x.x.x.x (converts to IPv4 and re-checks)
+/// - Link-local: 169.254.0.0/16
+/// - Special: 0.0.0.0, localhost
+fn is_private_or_loopback(host: &str) -> bool {
+    // Direct matches
+    if host == "0.0.0.0" || host == "localhost" || host == "::1" {
+        return true;
+    }
+
+    // IPv4-mapped IPv6: ::ffff:x.x.x.x
+    if let Some(ipv4_part) = host.strip_prefix("::ffff:") {
+        return is_private_or_loopback(ipv4_part);
+    }
+
+    // Parse IPv4 octets
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() == 4
+        && let (Ok(o1), Ok(o2)) = (parts[0].parse::<u8>(), parts[1].parse::<u8>())
+    {
+        // 10.0.0.0/8
+        if o1 == 10 {
+            return true;
+        }
+        // 172.16.0.0/12 (172.16.* through 172.31.*)
+        if o1 == 172 && (16..=31).contains(&o2) {
+            return true;
+        }
+        // 192.168.0.0/16
+        if o1 == 192 && o2 == 168 {
+            return true;
+        }
+        // 127.0.0.0/8
+        if o1 == 127 {
+            return true;
+        }
+        // 169.254.0.0/16 (link-local)
+        if o1 == 169 && o2 == 254 {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Lightweight host extraction from a URL string.
@@ -803,5 +846,122 @@ mod tests {
         let s = summarize_json(&val, 50);
         assert!(s.len() <= 53); // 50 + "..."
         assert!(s.ends_with("..."));
+    }
+
+    // ── is_private_or_loopback (A6) ─────────────────────────────────
+
+    #[test]
+    fn private_ip_rfc1918_10_range() {
+        assert!(is_private_or_loopback("10.0.0.1"));
+        assert!(is_private_or_loopback("10.255.255.255"));
+    }
+
+    #[test]
+    fn private_ip_rfc1918_172_full_range() {
+        // Full /12 range: 172.16.0.0 through 172.31.255.255
+        assert!(is_private_or_loopback("172.16.0.1"));
+        assert!(is_private_or_loopback("172.20.0.1"));
+        assert!(is_private_or_loopback("172.30.0.1"));
+        assert!(is_private_or_loopback("172.31.255.1"));
+        // Outside the /12 range
+        assert!(!is_private_or_loopback("172.15.255.255"));
+        assert!(!is_private_or_loopback("172.32.0.1"));
+    }
+
+    #[test]
+    fn private_ip_rfc1918_192_168_range() {
+        assert!(is_private_or_loopback("192.168.0.1"));
+        assert!(is_private_or_loopback("192.168.255.255"));
+        assert!(!is_private_or_loopback("192.167.0.1"));
+    }
+
+    #[test]
+    fn private_ip_loopback_range() {
+        assert!(is_private_or_loopback("127.0.0.1"));
+        assert!(is_private_or_loopback("127.255.255.255"));
+    }
+
+    #[test]
+    fn private_ip_link_local() {
+        assert!(is_private_or_loopback("169.254.1.1"));
+        assert!(is_private_or_loopback("169.254.169.254"));
+    }
+
+    #[test]
+    fn private_ip_special_addresses() {
+        assert!(is_private_or_loopback("0.0.0.0"));
+        assert!(is_private_or_loopback("localhost"));
+        assert!(is_private_or_loopback("::1"));
+    }
+
+    #[test]
+    fn private_ip_ipv4_mapped_ipv6() {
+        assert!(is_private_or_loopback("::ffff:10.0.0.1"));
+        assert!(is_private_or_loopback("::ffff:192.168.1.1"));
+        assert!(is_private_or_loopback("::ffff:172.30.0.1"));
+        assert!(is_private_or_loopback("::ffff:127.0.0.1"));
+        // Public via mapped should be allowed
+        assert!(!is_private_or_loopback("::ffff:8.8.8.8"));
+    }
+
+    #[test]
+    fn public_ips_allowed() {
+        assert!(!is_private_or_loopback("8.8.8.8"));
+        assert!(!is_private_or_loopback("1.1.1.1"));
+        assert!(!is_private_or_loopback("172.32.0.1"));
+        assert!(!is_private_or_loopback("example.com"));
+    }
+
+    // ── UrlPolicy with full SSRF coverage (A6) ─────────────────────
+
+    #[test]
+    fn url_policy_blocks_full_172_range() {
+        let policy = UrlPolicy::default();
+        assert!(policy.validate("http://172.16.0.1").is_err());
+        assert!(policy.validate("http://172.20.0.1").is_err());
+        assert!(policy.validate("http://172.30.0.1").is_err());
+        assert!(policy.validate("http://172.31.255.1").is_err());
+        // Outside range
+        assert!(policy.validate("http://172.15.255.255").is_ok());
+        assert!(policy.validate("http://172.32.0.1").is_ok());
+    }
+
+    #[test]
+    fn url_policy_blocks_ipv4_mapped_ipv6() {
+        let policy = UrlPolicy::default();
+        assert!(policy.validate("http://[::ffff:10.0.0.1]/").is_err());
+        assert!(policy.validate("http://[::ffff:192.168.1.1]/").is_err());
+        assert!(policy.validate("http://[::ffff:172.30.0.1]/").is_err());
+    }
+
+    #[test]
+    fn url_policy_blocks_ipv6_loopback() {
+        let policy = UrlPolicy::default();
+        assert!(policy.validate("http://[::1]/").is_err());
+        assert!(policy.validate("http://[::1]:8080/").is_err());
+    }
+
+    #[test]
+    fn url_policy_blocks_link_local() {
+        let policy = UrlPolicy::default();
+        assert!(policy.validate("http://169.254.1.1").is_err());
+        assert!(policy.validate("http://169.254.169.254").is_err());
+    }
+
+    #[tokio::test]
+    async fn security_guard_rejects_172_30_url() {
+        let guard = SecurityGuard::default();
+        let req = make_request(
+            "web_fetch",
+            serde_json::json!({"url": "http://172.30.0.1/admin"}),
+        );
+        let result = guard.before_call(req).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ToolError::PermissionDenied { reason, .. } => {
+                assert!(reason.contains("URL rejected"));
+            }
+            other => panic!("expected PermissionDenied, got: {other}"),
+        }
     }
 }

@@ -14,6 +14,7 @@ pub mod config_cmd;
 pub mod cron;
 pub mod gateway;
 pub mod help_cmd;
+#[cfg(feature = "services")]
 pub mod mcp_server;
 pub mod memory_cmd;
 pub mod onboard;

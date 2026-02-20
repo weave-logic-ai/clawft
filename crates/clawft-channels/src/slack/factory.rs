@@ -38,7 +38,7 @@ impl ChannelFactory for SlackChannelFactory {
         if slack_config.bot_token.is_empty() {
             if let Some(ref env_var) = slack_config.bot_token_env {
                 match std::env::var(env_var) {
-                    Ok(val) if !val.is_empty() => slack_config.bot_token = val,
+                    Ok(val) if !val.is_empty() => slack_config.bot_token = val.into(),
                     _ => {
                         return Err(ChannelError::Other(format!(
                             "slack bot_token_env '{env_var}' is not set or empty"
@@ -56,7 +56,7 @@ impl ChannelFactory for SlackChannelFactory {
         if slack_config.app_token.is_empty() {
             if let Some(ref env_var) = slack_config.app_token_env {
                 match std::env::var(env_var) {
-                    Ok(val) if !val.is_empty() => slack_config.app_token = val,
+                    Ok(val) if !val.is_empty() => slack_config.app_token = val.into(),
                     _ => {
                         return Err(ChannelError::Other(format!(
                             "slack app_token_env '{env_var}' is not set or empty"

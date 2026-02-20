@@ -324,10 +324,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".clawft")).unwrap();
 
-        // SAFETY: test-only, single-threaded context.
-        unsafe { std::env::set_var("CLAWFT_WORKSPACE", dir.to_str().unwrap()) };
-        let result = discover_workspace();
-        unsafe { std::env::remove_var("CLAWFT_WORKSPACE") };
+        let result = temp_env::with_var("CLAWFT_WORKSPACE", Some(dir.to_str().unwrap()), || {
+            discover_workspace()
+        });
 
         assert_eq!(result, Some(dir.clone()));
 
@@ -337,10 +336,11 @@ mod tests {
 
     #[test]
     fn discover_workspace_env_var_invalid_skipped() {
-        // SAFETY: test-only, single-threaded context.
-        unsafe { std::env::set_var("CLAWFT_WORKSPACE", "/nonexistent/path/for/test") };
-        let result = discover_workspace();
-        unsafe { std::env::remove_var("CLAWFT_WORKSPACE") };
+        let result = temp_env::with_var(
+            "CLAWFT_WORKSPACE",
+            Some("/nonexistent/path/for/test"),
+            || discover_workspace(),
+        );
 
         // Should still return something (the fallback), not the invalid path.
         assert!(result.is_some());

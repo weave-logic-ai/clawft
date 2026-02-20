@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::Utc;
+use percent_encoding::{percent_decode_str, percent_encode, NON_ALPHANUMERIC};
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
@@ -142,9 +143,31 @@ impl<P: Platform> SessionManager<P> {
     ///
     /// Parses the first line as metadata and remaining lines as messages.
     /// Returns an error if the file does not exist or contains invalid JSON.
+    ///
+    /// Includes a migration path: if the percent-encoded file does not exist
+    /// but the old underscore-encoded file does, the content is copied to the
+    /// new filename (the old file is preserved for safety).
     pub async fn load_session(&self, key: &str) -> clawft_types::Result<Session> {
         crate::security::validate_session_id(key)?;
         let path = self.session_path(key);
+
+        // Migration: try old-format filename if new-format doesn't exist
+        if !self.platform.fs().exists(&path).await {
+            let old_filename = format!("{}.jsonl", key.replace(':', "_"));
+            let old_path = self.sessions_dir.join(&old_filename);
+            if self.platform.fs().exists(&old_path).await {
+                warn!(
+                    key = key,
+                    old = %old_path.display(),
+                    new = %path.display(),
+                    "migrating session file from old encoding format"
+                );
+                // Read from old, write to new, keep old for safety
+                let content = self.platform.fs().read_to_string(&old_path).await?;
+                self.platform.fs().write_string(&path, &content).await?;
+            }
+        }
+
         let content = self.platform.fs().read_to_string(&path).await?;
 
         let mut lines = content.lines();
@@ -286,6 +309,9 @@ impl<P: Platform> SessionManager<P> {
     }
 
     /// List all session keys (derived from `.jsonl` filenames on disk).
+    ///
+    /// Decodes percent-encoded filenames back to the original session key.
+    /// Files that cannot be decoded as valid UTF-8 are skipped with a warning.
     pub async fn list_sessions(&self) -> clawft_types::Result<Vec<String>> {
         let entries = self
             .platform
@@ -299,8 +325,12 @@ impl<P: Platform> SessionManager<P> {
             if let Some(name) = entry.file_name() {
                 let name = name.to_string_lossy();
                 if let Some(stem) = name.strip_suffix(".jsonl") {
-                    // Reverse the filename sanitization: `_` back to `:`.
-                    keys.push(stem.replace('_', ":"));
+                    match percent_decode_str(stem).decode_utf8() {
+                        Ok(decoded) => keys.push(decoded.into_owned()),
+                        Err(e) => {
+                            warn!(filename = %name, error = %e, "skipping undecodable session filename");
+                        }
+                    }
                 }
             }
         }
@@ -340,8 +370,13 @@ impl<P: Platform> SessionManager<P> {
     }
 
     /// Compute the filesystem path for a session key.
+    ///
+    /// Uses percent-encoding to safely represent any valid session key as
+    /// a filename. This is reversible: `list_sessions()` decodes back to
+    /// the original key.
     fn session_path(&self, key: &str) -> PathBuf {
-        let filename = format!("{}.jsonl", key.replace(':', "_"));
+        let encoded = percent_encode(key.as_bytes(), NON_ALPHANUMERIC).to_string();
+        let filename = format!("{encoded}.jsonl");
         self.sessions_dir.join(filename)
     }
 }
@@ -569,7 +604,7 @@ mod tests {
 
         mgr.save_session(&session).await.unwrap();
 
-        let path = PathBuf::from("/mock-home/.clawft/workspace/sessions/fmt_check.jsonl");
+        let path = PathBuf::from("/mock-home/.clawft/workspace/sessions/fmt%3Acheck.jsonl");
         let content = platform.fs.read_to_string(&path).await.unwrap();
         let lines: Vec<&str> = content.lines().collect();
 
@@ -658,15 +693,92 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_path_sanitizes_colons() {
+    async fn session_path_uses_percent_encoding() {
         let platform = make_platform();
         let mgr = make_manager(platform);
 
         let path = mgr.session_path("telegram:12345");
         assert_eq!(
             path,
-            PathBuf::from("/mock-home/.clawft/workspace/sessions/telegram_12345.jsonl")
+            PathBuf::from("/mock-home/.clawft/workspace/sessions/telegram%3A12345.jsonl")
         );
+    }
+
+    #[tokio::test]
+    async fn roundtrip_key_with_underscores() {
+        let platform = make_platform();
+        let mgr = make_manager(platform);
+
+        // Key containing underscores must survive round-trip without corruption.
+        let key = "telegram:user_123";
+        let session = Session::new(key);
+        mgr.save_session(&session).await.unwrap();
+
+        let keys = mgr.list_sessions().await.unwrap();
+        assert!(
+            keys.contains(&key.to_string()),
+            "list_sessions should contain '{key}', got: {keys:?}"
+        );
+
+        mgr.invalidate(key).await;
+        let loaded = mgr.load_session(key).await.unwrap();
+        assert_eq!(loaded.key, key);
+    }
+
+    #[tokio::test]
+    async fn roundtrip_key_with_multiple_colons() {
+        let platform = make_platform();
+        let mgr = make_manager(platform);
+
+        let key = "slack:channel:thread";
+        let session = Session::new(key);
+        mgr.save_session(&session).await.unwrap();
+
+        let keys = mgr.list_sessions().await.unwrap();
+        assert!(keys.contains(&key.to_string()));
+
+        mgr.invalidate(key).await;
+        let loaded = mgr.load_session(key).await.unwrap();
+        assert_eq!(loaded.key, key);
+    }
+
+    #[tokio::test]
+    async fn roundtrip_key_with_special_chars() {
+        let platform = make_platform();
+        let mgr = make_manager(platform);
+
+        let key = "discord:guild#channel+123";
+        let session = Session::new(key);
+        mgr.save_session(&session).await.unwrap();
+
+        let keys = mgr.list_sessions().await.unwrap();
+        assert!(keys.contains(&key.to_string()));
+
+        mgr.invalidate(key).await;
+        let loaded = mgr.load_session(key).await.unwrap();
+        assert_eq!(loaded.key, key);
+    }
+
+    #[tokio::test]
+    async fn migration_from_old_underscore_format() {
+        let platform = make_platform();
+        let mgr = make_manager(platform.clone());
+
+        // Simulate an old-format file written by the previous implementation.
+        let old_path = PathBuf::from("/mock-home/.clawft/workspace/sessions/telegram_user_123.jsonl");
+        let meta = serde_json::json!({
+            "_type": "metadata",
+            "created_at": "2025-01-01T00:00:00Z",
+            "updated_at": "2025-01-01T00:00:00Z",
+            "metadata": {},
+            "last_consolidated": 0,
+        });
+        let content = format!("{}\n", serde_json::to_string(&meta).unwrap());
+        platform.fs.write_string(&old_path, &content).await.unwrap();
+
+        // load_session should find the old file and migrate it.
+        let loaded = mgr.load_session("telegram:user_123").await.unwrap();
+        assert_eq!(loaded.key, "telegram:user_123");
     }
 
     #[tokio::test]

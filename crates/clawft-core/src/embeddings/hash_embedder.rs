@@ -1,14 +1,21 @@
 //! SimHash-based local embedder.
 //!
 //! Produces deterministic, fixed-dimension embeddings by hashing each word
-//! with [`std::hash::DefaultHasher`] and spreading the hash bits across a
+//! with [`FnvHasher`] (FNV-1a) and spreading the hash bits across a
 //! float vector. The result is normalized to unit length.
+//!
+//! FNV-1a is deterministic and platform-independent, producing the same
+//! output for the same input regardless of Rust version or target triple.
+//! This is critical for persisted embeddings that must remain stable across
+//! toolchain upgrades.
 //!
 //! This embedder requires no API calls, no model files, and no network access.
 //! It is suitable as a baseline for semantic similarity when true neural
 //! embeddings are not available.
 
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::{Hash, Hasher};
+
+use fnv::FnvHasher;
 
 use async_trait::async_trait;
 
@@ -19,7 +26,7 @@ use super::{Embedder, EmbeddingError};
 /// # Algorithm
 ///
 /// For each word in the input text:
-/// 1. Hash the word with [`DefaultHasher`].
+/// 1. Hash the word with [`FnvHasher`] (FNV-1a, deterministic cross-platform).
 /// 2. For each dimension `i` in 0..dimension, check bit `(i % 64)` of the hash
 ///    XORed with `i`. If the bit is set, add +1.0 to that dimension; otherwise
 ///    add -1.0.
@@ -56,7 +63,7 @@ impl HashEmbedder {
         }
 
         for word in &words {
-            let mut hasher = DefaultHasher::new();
+            let mut hasher = FnvHasher::default();
             word.to_lowercase().hash(&mut hasher);
             let hash = hasher.finish();
 
@@ -230,6 +237,48 @@ mod tests {
             sim_close > sim_far,
             "similar text should have higher cosine similarity: close={sim_close}, far={sim_far}"
         );
+    }
+
+    /// Golden test: verify that FNV-1a produces deterministic, platform-independent
+    /// embeddings for a known input. These values were recorded from the FNV-1a
+    /// implementation and should produce identical results on x86_64-linux,
+    /// aarch64-linux, and x86_64-darwin.
+    ///
+    /// If this test fails after a change, it means persisted embeddings are
+    /// silently invalidated and must be re-computed.
+    #[test]
+    fn golden_test_hello_world() {
+        let embedder = HashEmbedder::default_dimension();
+        let emb = embedder.compute_embedding("hello world");
+
+        // Golden values recorded from FNV-1a on x86_64-linux (Rust 1.85).
+        // These must be identical on all platforms.
+        let expected_first_8: [f32; 8] = [
+            -0.07715168, -0.07715168, 0.07715168, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ];
+        let expected_last_8: [f32; 8] = [
+            0.0, 0.0, -0.07715168, 0.0, -0.07715168, 0.07715168, 0.0, 0.07715168,
+        ];
+
+        assert_eq!(
+            &emb[..8], &expected_first_8[..],
+            "first 8 dimensions changed -- FNV-1a determinism broken"
+        );
+        assert_eq!(
+            &emb[376..384], &expected_last_8[..],
+            "last 8 dimensions changed -- FNV-1a determinism broken"
+        );
+
+        // Verify the embedding is non-zero and normalized
+        let norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 0.01);
+
+        // Verify determinism: calling twice yields identical output.
+        let emb2 = embedder.compute_embedding("hello world");
+        assert_eq!(emb, emb2, "FNV-1a should be deterministic");
+
+        // Verify dimensionality
+        assert_eq!(emb.len(), 384);
     }
 
     fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {

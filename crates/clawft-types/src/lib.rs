@@ -19,6 +19,7 @@ pub mod error;
 pub mod event;
 pub mod provider;
 pub mod routing;
+pub mod secret;
 pub mod session;
 pub mod skill;
 pub mod workspace;

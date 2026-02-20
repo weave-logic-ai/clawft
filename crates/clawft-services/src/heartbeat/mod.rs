@@ -18,7 +18,7 @@ use clawft_types::event::InboundMessage;
 pub struct HeartbeatService {
     interval: Duration,
     prompt: String,
-    message_tx: mpsc::UnboundedSender<InboundMessage>,
+    message_tx: mpsc::Sender<InboundMessage>,
 }
 
 impl HeartbeatService {
@@ -29,7 +29,7 @@ impl HeartbeatService {
     pub fn new(
         interval_minutes: u64,
         prompt: String,
-        message_tx: mpsc::UnboundedSender<InboundMessage>,
+        message_tx: mpsc::Sender<InboundMessage>,
     ) -> Self {
         Self {
             interval: Duration::from_secs(interval_minutes * 60),
@@ -70,7 +70,7 @@ impl HeartbeatService {
                         metadata: HashMap::new(),
                     };
 
-                    if self.message_tx.send(msg).is_err() {
+                    if self.message_tx.try_send(msg).is_err() {
                         return Err(ServiceError::ChannelClosed);
                     }
                 }
@@ -86,7 +86,7 @@ mod tests {
 
     #[tokio::test]
     async fn heartbeat_sends_messages() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(1024);
         let svc = HeartbeatService {
             interval: Duration::from_millis(50),
             prompt: "heartbeat check".into(),
@@ -115,7 +115,7 @@ mod tests {
 
     #[tokio::test]
     async fn graceful_shutdown_on_cancel() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(1024);
         let svc = HeartbeatService {
             interval: Duration::from_secs(3600), // long interval
             prompt: "test".into(),
@@ -137,7 +137,7 @@ mod tests {
 
     #[tokio::test]
     async fn channel_closed_returns_error() {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(1024);
         let svc = HeartbeatService {
             interval: Duration::from_millis(10),
             prompt: "test".into(),
@@ -159,7 +159,7 @@ mod tests {
 
     #[test]
     fn new_sets_interval_from_minutes() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(1024);
         let svc = HeartbeatService::new(5, "test".into(), tx);
         assert_eq!(svc.interval, Duration::from_secs(300));
     }
