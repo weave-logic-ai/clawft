@@ -54,6 +54,14 @@ pub mod audit;
 #[cfg(feature = "wasm-plugins")]
 pub mod engine;
 
+/// Permission persistence and approval for WASM plugin upgrades.
+///
+/// Provides [`permission_store::PermissionStore`] for saving/loading approved
+/// permissions, and [`permission_store::PermissionApprover`] for requesting
+/// user consent when a plugin upgrade introduces new permissions.
+#[cfg(feature = "wasm-plugins")]
+pub mod permission_store;
+
 pub use platform::WasmPlatform;
 
 /// Version information for the WASM build.

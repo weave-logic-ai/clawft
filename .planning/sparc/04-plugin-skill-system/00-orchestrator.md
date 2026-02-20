@@ -2,7 +2,7 @@
 
 **Workstream**: C (Plugin & Skill System)
 **Timeline**: Weeks 3-8
-**Status**: Done (C2 at 98% -- T41 deferred)
+**Status**: Complete (45/45 security tests)
 **Dependencies**: 03 (B3 file splits must precede C1), 03-A4 (SecretRef pattern used by PluginHost::resolve_secret), 03-A9 (feature gates pattern for MCP)
 **Blocks**: 06, 07, 08, 09, 10 (all feature work uses plugin traits)
 

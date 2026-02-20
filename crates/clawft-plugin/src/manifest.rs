@@ -63,7 +63,7 @@ pub enum PluginCapability {
 }
 
 /// Permissions requested by a plugin.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PluginPermissions {
     /// Allowed network hosts. Empty = no network. `["*"]` = all hosts.
     #[serde(default)]
@@ -138,6 +138,73 @@ impl Default for PluginResourceConfig {
             max_log_messages_per_minute: default_max_log_rpm(),
             max_execution_seconds: default_max_exec_seconds(),
             max_table_elements: default_max_table_elements(),
+        }
+    }
+}
+
+/// Represents new permissions requested by a plugin version upgrade
+/// that were not present in the previously approved permission set.
+///
+/// Used to determine which permissions need user re-approval when a
+/// plugin updates its manifest.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PermissionDiff {
+    /// Network hosts requested that were not previously approved.
+    pub new_network: Vec<String>,
+    /// Filesystem paths requested that were not previously approved.
+    pub new_filesystem: Vec<String>,
+    /// Environment variables requested that were not previously approved.
+    pub new_env_vars: Vec<String>,
+    /// Whether shell access is being escalated from `false` to `true`.
+    pub shell_escalation: bool,
+}
+
+impl PermissionDiff {
+    /// Returns `true` if no new permissions are being requested.
+    pub fn is_empty(&self) -> bool {
+        self.new_network.is_empty()
+            && self.new_filesystem.is_empty()
+            && self.new_env_vars.is_empty()
+            && !self.shell_escalation
+    }
+}
+
+impl PluginPermissions {
+    /// Compute the diff between previously approved permissions and newly
+    /// requested permissions.
+    ///
+    /// Returns a [`PermissionDiff`] containing only the items in `requested`
+    /// that are not present in `approved`. For the `shell` field, only an
+    /// escalation from `false` to `true` counts as a new permission.
+    pub fn diff(approved: &PluginPermissions, requested: &PluginPermissions) -> PermissionDiff {
+        let new_network = requested
+            .network
+            .iter()
+            .filter(|item| !approved.network.contains(item))
+            .cloned()
+            .collect();
+
+        let new_filesystem = requested
+            .filesystem
+            .iter()
+            .filter(|item| !approved.filesystem.contains(item))
+            .cloned()
+            .collect();
+
+        let new_env_vars = requested
+            .env_vars
+            .iter()
+            .filter(|item| !approved.env_vars.contains(item))
+            .cloned()
+            .collect();
+
+        let shell_escalation = !approved.shell && requested.shell;
+
+        PermissionDiff {
+            new_network,
+            new_filesystem,
+            new_env_vars,
+            shell_escalation,
         }
     }
 }
@@ -431,5 +498,164 @@ mod tests {
         assert_eq!(restored.filesystem, perms.filesystem);
         assert_eq!(restored.env_vars, perms.env_vars);
         assert_eq!(restored.shell, perms.shell);
+    }
+
+    // -- PermissionDiff tests --
+
+    #[test]
+    fn diff_identical_permissions_is_empty() {
+        let perms = PluginPermissions {
+            network: vec!["api.example.com".into()],
+            filesystem: vec!["/tmp".into()],
+            env_vars: vec!["HOME".into()],
+            shell: true,
+        };
+        let diff = PluginPermissions::diff(&perms, &perms);
+        assert!(diff.is_empty());
+        assert_eq!(diff, PermissionDiff::default());
+    }
+
+    #[test]
+    fn diff_detects_new_network_hosts() {
+        let approved = PluginPermissions {
+            network: vec!["api.example.com".into()],
+            ..Default::default()
+        };
+        let requested = PluginPermissions {
+            network: vec!["api.example.com".into(), "cdn.example.com".into()],
+            ..Default::default()
+        };
+        let diff = PluginPermissions::diff(&approved, &requested);
+        assert_eq!(diff.new_network, vec!["cdn.example.com"]);
+        assert!(diff.new_filesystem.is_empty());
+        assert!(diff.new_env_vars.is_empty());
+        assert!(!diff.shell_escalation);
+        assert!(!diff.is_empty());
+    }
+
+    #[test]
+    fn diff_detects_new_filesystem_paths() {
+        let approved = PluginPermissions {
+            filesystem: vec!["/tmp".into()],
+            ..Default::default()
+        };
+        let requested = PluginPermissions {
+            filesystem: vec!["/tmp".into(), "/data".into()],
+            ..Default::default()
+        };
+        let diff = PluginPermissions::diff(&approved, &requested);
+        assert_eq!(diff.new_filesystem, vec!["/data"]);
+    }
+
+    #[test]
+    fn diff_detects_new_env_vars() {
+        let approved = PluginPermissions {
+            env_vars: vec!["HOME".into()],
+            ..Default::default()
+        };
+        let requested = PluginPermissions {
+            env_vars: vec!["HOME".into(), "API_KEY".into()],
+            ..Default::default()
+        };
+        let diff = PluginPermissions::diff(&approved, &requested);
+        assert_eq!(diff.new_env_vars, vec!["API_KEY"]);
+    }
+
+    #[test]
+    fn diff_detects_shell_escalation() {
+        let approved = PluginPermissions {
+            shell: false,
+            ..Default::default()
+        };
+        let requested = PluginPermissions {
+            shell: true,
+            ..Default::default()
+        };
+        let diff = PluginPermissions::diff(&approved, &requested);
+        assert!(diff.shell_escalation);
+        assert!(!diff.is_empty());
+    }
+
+    #[test]
+    fn diff_no_shell_escalation_when_already_approved() {
+        let approved = PluginPermissions {
+            shell: true,
+            ..Default::default()
+        };
+        let requested = PluginPermissions {
+            shell: true,
+            ..Default::default()
+        };
+        let diff = PluginPermissions::diff(&approved, &requested);
+        assert!(!diff.shell_escalation);
+    }
+
+    #[test]
+    fn diff_no_shell_escalation_on_downgrade() {
+        let approved = PluginPermissions {
+            shell: true,
+            ..Default::default()
+        };
+        let requested = PluginPermissions {
+            shell: false,
+            ..Default::default()
+        };
+        let diff = PluginPermissions::diff(&approved, &requested);
+        assert!(!diff.shell_escalation);
+    }
+
+    #[test]
+    fn diff_empty_approved_all_requested_are_new() {
+        let approved = PluginPermissions::default();
+        let requested = PluginPermissions {
+            network: vec!["a.com".into(), "b.com".into()],
+            filesystem: vec!["/data".into()],
+            env_vars: vec!["KEY".into()],
+            shell: true,
+        };
+        let diff = PluginPermissions::diff(&approved, &requested);
+        assert_eq!(diff.new_network, vec!["a.com", "b.com"]);
+        assert_eq!(diff.new_filesystem, vec!["/data"]);
+        assert_eq!(diff.new_env_vars, vec!["KEY"]);
+        assert!(diff.shell_escalation);
+    }
+
+    #[test]
+    fn diff_removed_permissions_not_reported() {
+        // If requested drops a permission that was approved, it should NOT
+        // appear as a new permission (only additions are reported).
+        let approved = PluginPermissions {
+            network: vec!["old.example.com".into(), "keep.example.com".into()],
+            ..Default::default()
+        };
+        let requested = PluginPermissions {
+            network: vec!["keep.example.com".into()],
+            ..Default::default()
+        };
+        let diff = PluginPermissions::diff(&approved, &requested);
+        assert!(diff.is_empty());
+    }
+
+    #[test]
+    fn diff_wildcard_network_is_treated_as_new_entry() {
+        // Wildcard "*" is compared as a literal string entry.
+        // If the approved set has specific domains but the requested set
+        // adds a wildcard, the wildcard is detected as a new entry.
+        let approved = PluginPermissions {
+            network: vec!["api.example.com".into()],
+            ..Default::default()
+        };
+        let requested = PluginPermissions {
+            network: vec!["api.example.com".into(), "*".into()],
+            ..Default::default()
+        };
+        let diff = PluginPermissions::diff(&approved, &requested);
+        assert_eq!(diff.new_network, vec!["*"]);
+    }
+
+    #[test]
+    fn permission_diff_is_empty_default() {
+        let diff = PermissionDiff::default();
+        assert!(diff.is_empty());
     }
 }

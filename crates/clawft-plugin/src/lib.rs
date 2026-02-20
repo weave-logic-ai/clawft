@@ -43,7 +43,7 @@ pub mod traits;
 // Re-export core types at crate root for convenience.
 pub use error::PluginError;
 pub use manifest::{
-    PluginCapability, PluginManifest, PluginPermissions, PluginResourceConfig,
+    PermissionDiff, PluginCapability, PluginManifest, PluginPermissions, PluginResourceConfig,
 };
 pub use message::MessagePayload;
 pub use sandbox::{

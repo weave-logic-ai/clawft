@@ -109,7 +109,7 @@ Even though Voice and UI are out of scope, the following hooks must be built:
 | Element | Focus | % Done | Items Done | Deferred/Blocked |
 |---------|-------|--------|------------|-----------------|
 | 03 | Critical Fixes & Cleanup | 100% | 33/33 | -- |
-| 04 | Plugin & Skill System | 99% | 8/8 phases | C2: T41 deferred (version re-prompt, runtime integration) |
+| 04 | Plugin & Skill System | 100% | 8/8 phases | Complete (45/45 security tests) |
 | 05 | Pipeline & LLM Reliability | 100% | 11/11 | -- |
 | 06 | Channel Enhancements | 89% | 8/9 | IRC channel deferred |
 | 07 | Dev Tools & Apps | 100% | 10/10 | -- |
@@ -156,11 +156,10 @@ Email, WhatsApp, Signal, Matrix, Google Chat, Microsoft Teams, Discord Resume
 
 ### Remaining Items
 
-1. **C2 T41** -- Version upgrade permission re-prompt (deferred, requires runtime integration)
-2. **IRC channel** -- deferred (low priority)
-3. **M6 docs** -- deferred to documentation sprint
-4. **K4 skill install/publish** -- blocked on ClawHub server availability
-5. **K5 3 MVP skills** -- blocked on C3/C4 skill loader runtime integration
+1. **IRC channel** -- deferred (low priority)
+2. **M6 docs** -- deferred to documentation sprint
+3. **K4 skill install/publish** -- blocked on ClawHub server availability
+4. **K5 3 MVP skills** -- blocked on C3/C4 skill loader runtime integration
 
 ---
 

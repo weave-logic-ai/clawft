@@ -8,7 +8,7 @@ Element 04 has 8 phases across Weeks 3-8:
 - [x] C1 -- Plugin trait crate (`clawft-plugin` new) -- 6 traits, manifest, permissions (2026-02-19)
 
 **Week 4-5 (P1 WASM)**:
-- [x] C2 -- WASM plugin host -- wasmtime, WIT, 5 host functions, security sandbox, 40/45 security tests (2026-02-20)
+- [x] C2 -- WASM plugin host -- wasmtime, WIT, 5 host functions, security sandbox, 45/45 security tests (2026-02-20)
 
 **Week 5-6 (P1 Skills)**:
 - [x] C3 -- Skill loader -- serde_yaml, local discovery, WASM auto-registration, tokio::fs (2026-02-20)
@@ -31,7 +31,7 @@ Element 04 has 8 phases across Weeks 3-8:
 | Phase | Description | Priority | Week | Crate(s) | Status | Owner | Branch | Key Deliverable |
 |-------|-------------|----------|------|----------|--------|-------|--------|-----------------|
 | C1 | Plugin trait crate | P0 | 3-4 | clawft-plugin (new) | **Done** | Agent-04 | sprint/phase-5 | 6 traits + manifest schema |
-| C2 | WASM plugin host | P1 | 4-5 | clawft-wasm, clawft-core | **Done** | Agent-04b | sprint/phase-5 | Wasmtime engine + fuel + memory + 158 tests |
+| C2 | WASM plugin host | P1 | 4-5 | clawft-wasm, clawft-core | **Done** | Agent-04b | sprint/phase-5 | Wasmtime engine + fuel + memory + 169 tests |
 | C3 | Skill loader | P1 | 5-6 | clawft-core | **Done** | Agent-04 | sprint/phase-5 | serde_yaml + WASM auto-reg |
 | C4 | Hot-reload | P1 | 6-7 | clawft-core, clawft-cli | **Done** | Agent-04 | sprint/phase-5 | notify watcher + CLI |
 | C4a | Autonomous creation | P2 | 8+ | clawft-core | **Done** | Agent-04b | sprint/phase-5 | Pattern detect + auto-gen + approval |
@@ -93,7 +93,7 @@ C1 (trait crate) [NO DEPS]
 - [x] Audit logging for all host function calls (2026-02-20)
 - [x] Wall-clock timeout enforcement via epoch interruption (2026-02-20)
 - [x] Complete audit logging verification for all 5 host functions (2026-02-20)
-- [x] 42/45 security tests pass (T01-T32, T37-T40, T42-T45; T41 deferred) (2026-02-20)
+- [x] 45/45 security tests pass (T01-T32, T37-T45 including T41) (2026-02-20)
 
 ### Integration (C5-C7):
 - [x] Agent commands routed through registry, not inline match (2026-02-20)
@@ -137,11 +137,11 @@ C1 (trait crate) [NO DEPS]
 | Phase | Status | % Done |
 |-------|--------|--------|
 | C1 (Plugin Traits) | **Done** | 100% |
-| C2 (WASM Host) | **Done** | 98% |
+| C2 (WASM Host) | **Done** | 100% |
 | C3 (Skill Loader) | **Done** | 100% |
 | C4 (Hot-Reload) | **Done** | 100% |
 | C4a (Autonomous) | **Done** | 100% |
 | C5 (Slash Commands) | **Done** | 100% |
 | C6 (MCP Exposure) | **Done** | 100% |
 | C7 (PluginHost) | **Done** | 100% |
-| **Total** | **Done** | **99%** (C2 at 98% -- T41 remaining, deferred) |
+| **Total** | **Done** | **100%** (45/45 security tests) |

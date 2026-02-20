@@ -149,7 +149,39 @@
 - Clippy clean with `-D warnings`
 - engine.rs is now ~1700 lines (implementation ~700 + tests ~1000)
 
+### 2026-02-20: C2 T41 Version Upgrade Permission Re-Prompt -- COMPLETE (C2 at 100%)
+- **PermissionDiff** struct added to `clawft-plugin/src/manifest.rs`
+  - Fields: `new_network`, `new_filesystem`, `new_env_vars`, `shell_escalation`
+  - `is_empty()` method for checking if re-prompt is needed
+  - `PluginPermissions::diff(approved, requested)` computes delta
+  - `PartialEq` derive added to `PluginPermissions` for test assertions
+  - `PermissionDiff` re-exported from `clawft-plugin` crate root
+  - 11 unit tests covering: identical perms, new network/fs/env, shell escalation,
+    shell downgrade, empty approved, removed perms, wildcard detection
+- **PermissionStore** added as `clawft-wasm/src/permission_store.rs` (new file)
+  - `ApprovedRecord` struct (version, permissions, approved_at) with JSON serde
+  - `PermissionStore::new(base_dir)` with `load()` and `save()` methods
+  - JSON files at `{base_dir}/{plugin_id}/approved_permissions.json`
+  - 3 unit tests: roundtrip, unknown plugin, overwrite on upgrade
+- **PermissionApprover** trait + implementations
+  - `PermissionApprover` trait with `approve(plugin_id, diff) -> bool`
+  - `AutoApprover`: always returns true (non-interactive mode)
+  - `MockApprover`: records calls, returns configured response (testing)
+  - 2 unit tests for approver implementations
+- **T41 integration test** (`t41_version_upgrade_permission_reprompt`)
+  - Creates temp dir for PermissionStore
+  - v1 manifest: `network: []`, `filesystem: ["/tmp"]`, `env_vars: ["HOME"]`, `shell: false`
+  - Saves v1 approved record
+  - v2 manifest: `network: ["api.example.com"]`, `filesystem: ["/tmp"]`, `env_vars: ["HOME", "API_KEY"]`
+  - Computes diff: asserts `new_network: ["api.example.com"]`, `new_env_vars: ["API_KEY"]`,
+    empty filesystem, no shell escalation
+  - MockApprover verifies it receives exactly the correct diff
+  - After approval, saves v2 record and verifies re-loading shows empty diff
+- **Edge case tests**: shell escalation triggers re-prompt, identical perms = no prompt
+- 73 tests passing in clawft-plugin (up from 62, +11 diff tests)
+- 169 tests passing in clawft-wasm with wasm-plugins feature (up from 160, +9)
+- Clippy clean with `-D warnings` on both crates
+
 ### Remaining
-- C2: T41 (version upgrade permission re-prompt) -- deferred
-  - HTTP execution wiring (reqwest integration for actual HTTP calls from WASM)
-  - engine.rs may benefit from splitting tests into a separate file
+- HTTP execution wiring (reqwest integration for actual HTTP calls from WASM)
+- engine.rs may benefit from splitting tests into a separate file
