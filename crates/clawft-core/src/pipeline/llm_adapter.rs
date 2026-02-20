@@ -462,10 +462,10 @@ fn create_adapters_for_tiers(config: &Config) -> HashMap<String, Arc<dyn LlmProv
     for tier in &config.routing.tiers {
         for model_str in &tier.models {
             let (prefix, _) = ProviderRouter::strip_prefix(model_str);
-            if let Some(name) = prefix {
-                if !adapters.contains_key(&name) {
-                    adapters.insert(name.clone(), create_adapter_for_provider(&name, config));
-                }
+            if let Some(name) = prefix
+                && !adapters.contains_key(&name)
+            {
+                adapters.insert(name.clone(), create_adapter_for_provider(&name, config));
             }
         }
     }
@@ -516,7 +516,7 @@ pub fn build_live_pipeline(config: &Config) -> PipelineRegistry {
         .routing
         .tiers
         .iter()
-        .map(|t| t.max_context_tokens as usize)
+        .map(|t| t.max_context_tokens)
         .max()
         .unwrap_or(128_000);
     let assembler = Arc::new(TokenBudgetAssembler::new(context_budget));
