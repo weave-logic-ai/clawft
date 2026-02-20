@@ -66,4 +66,19 @@ let default_filter = if cli.verbose { "debug" } else { "warn" };
 - B3 -> Element 04 C3 (file splits before skill loader)
 - B5 -> Element 09 L1 (shared registry builder)
 
-<!-- General development notes, observations, code discoveries -->
+## Implementation Log
+
+### 2026-02-20: Workstream A Complete (9/9 items)
+
+**Branch**: `sprint/phase-5`
+**Commit**: `63ebe99` feat(03): complete Workstream A critical fixes (A1-A9)
+**Agent**: Agent-03 (hive-mind worker)
+**Validation**: 1,903 tests passing, zero clippy warnings
+
+All P0 security items (A1, A2, A4, A5, A6) and P1 items (A3, A7, A8, A9) completed in a single agent session. Key decisions:
+
+- **A4**: Used `SecretString` wrapper (not `SecretRef` env-var-name pattern) -- stores the actual value internally but redacts on Debug/Display. `expose()` method returns the inner string. This was simpler than the env-var indirection pattern and still prevents accidental logging.
+- **A7**: Added `timeout_secs: Option<u64>` to `ProviderConfig` so providers can override the 120s default.
+- **A9**: Feature-gated entire MCP tools module behind `services` feature, with no-op stubs when disabled.
+
+### Remaining: Workstreams B, I, J (24 items) - In Progress
