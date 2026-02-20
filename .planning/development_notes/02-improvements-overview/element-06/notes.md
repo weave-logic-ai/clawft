@@ -2,7 +2,7 @@
 
 **Workstream**: E
 **Weeks**: 4-8
-**Status**: Complete (8/9 items, E5a skeleton only)
+**Status**: Complete (9/9 items, E5a skeleton only)
 **Completed**: 2026-02-20
 **Agent**: Agent-06 (a1b5b44)
 
@@ -58,6 +58,21 @@
 - Bot Framework / Graph API integration
 - Feature-gated: `teams`
 
+### E5-IRC: IRC Channel -- DONE
+- `IrcChannelAdapter` implementing `ChannelAdapter` trait (skeleton, no `irc` crate dependency)
+- `IrcAdapterConfig` with server, port, use_tls, nickname, channels, auth_method, password_env, allowed_senders, reconnect_delay_secs
+- `validate_config()` validates auth_method is one of "none"/"nickserv"/"sasl", requires password_env for authenticated methods
+- `sanitize_irc_argument()` for general argument injection prevention (shell metacharacters, protocol injection)
+- `sanitize_channel_name()` allows `#` and `&` as IRC channel prefixes while banning injection characters in the body
+- `is_sender_allowed()` respects allowed_senders list (empty = allow all)
+- `send()` rejects Binary and Structured payloads (IRC is text-only)
+- `start()` validates config, logs connection stub, waits for cancellation
+- Synthetic message IDs: `irc-{target}-{timestamp}`
+- Feature-gated: `irc`
+- 39 IRC-specific tests (types + channel modules)
+- File: `clawft-channels/src/irc/`
+
 ### Test Results
-- 261 tests in clawft-channels (all features) -- all pass
+- 211 tests in clawft-channels (with irc feature) -- all pass
+- 172 tests in clawft-channels (no features, regression) -- all pass
 - All existing channel tests unbroken

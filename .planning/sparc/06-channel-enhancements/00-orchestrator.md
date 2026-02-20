@@ -2,7 +2,7 @@
 
 **Workstream**: E (Channel Enhancements)
 **Timeline**: Weeks 4-8
-**Status**: Development Complete (8/9 items, IRC deferred)
+**Status**: Complete (9/9 items)
 **Dependencies**: 04/C1 (plugin traits for new channels), 03/A4 (credentials cleanup for email), 07/F6 (OAuth2 helper for E5a Google Chat), 04/B4 (cron unification for E6 heartbeat)
 **Blocks**: None directly
 
@@ -68,6 +68,7 @@ New channels implement the `ChannelAdapter` trait from `clawft-plugin`. Existing
 - [x] E3: WhatsApp channel sends and receives text messages via Cloud API
 - [x] E4: Signal channel sends and receives messages via `signal-cli` subprocess
 - [x] E5: Matrix channel joins rooms and sends/receives messages
+- [x] E5-IRC: IRC channel adapter with config validation, sender filtering, text-only enforcement, and feature-gated skeleton
 
 ### Trait & Architecture
 - [x] All new channels implement `ChannelAdapter` plugin trait (not the legacy `Channel` trait)

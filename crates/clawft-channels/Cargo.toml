@@ -17,6 +17,7 @@ whatsapp = []
 signal = []
 matrix = []
 google-chat = []
+irc = []
 teams = []
 
 [dependencies]

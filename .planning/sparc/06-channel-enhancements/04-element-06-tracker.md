@@ -5,7 +5,7 @@
 - **Total items**: 9 (E1-E6, E5a, E5b, plus E5 split into Matrix/IRC)
 - **Workstream**: E (Channel Enhancements)
 - **Timeline**: Weeks 4-8
-- **Status**: Development Complete (8/9 items, IRC deferred)
+- **Status**: Complete (9/9 items)
 - **Dependencies**: 04/C1 (ChannelAdapter trait), 03/A4 (SecretRef), 03/B4 (CronService), 07/F6 (OAuth2 helper)
 - **Blocks**: None directly
 
@@ -31,7 +31,7 @@ Element 06 has 9 channel items across 3 phases spanning Weeks 4-8.
 - [x] E3 -- WhatsApp Cloud API -- DONE 2026-02-20
 - [x] E4 -- Signal subprocess bridge -- DONE 2026-02-20
 - [x] E5 -- Matrix channel (Matrix SDK) -- DONE 2026-02-20
-- [ ] E5 -- IRC channel (IRC protocol) -- deferred
+- [x] E5 -- IRC channel (IRC protocol) -- DONE 2026-02-20
 
 ---
 
@@ -46,6 +46,7 @@ Element 06 has 9 channel items across 3 phases spanning Weeks 4-8.
 | E5 | Matrix channel | P2 | 6-8 | clawft-channels/src/matrix/ | **Done** | Agent-06 | sprint/phase-5 | MatrixChannelAdapter + SecretString access_token + auto_join_rooms |
 | E5a | Google Chat Workspace API | P1 | 5-7 | clawft-channels/src/google_chat/ | **Done** (skeleton) | Agent-06 | sprint/phase-5 | GoogleChatChannelAdapter skeleton + config types; F6 OAuth2 wiring pending |
 | E5b | Microsoft Teams Bot Framework | P1 | 5-7 | clawft-channels/src/teams/ | **Done** | Agent-06 | sprint/phase-5 | TeamsChannelAdapter + Azure AD fields + SecretString client_secret |
+| E5-IRC | IRC channel (IRC protocol) | P2 | 6-8 | clawft-channels/src/irc/ | **Done** | Agent-06 | sprint/phase-5 | IrcChannelAdapter + IrcAdapterConfig + auth validation + sender filtering + 39 tests |
 | E6 | Enhanced heartbeat / check-in | P1 | 4-5 | clawft-services/src/heartbeat/ | **Done** | Agent-06 | sprint/phase-5 | HeartbeatMode enum (Simple/CheckIn) + per-channel prompts + 11 tests |
 
 ---
@@ -117,6 +118,7 @@ New channels (E2-E5b) implement the `ChannelAdapter` trait from `clawft-plugin` 
 - [x] **E3**: WhatsApp channel sends and receives text messages via Cloud API
 - [x] **E4**: Signal channel sends and receives messages via `signal-cli` subprocess
 - [x] **E5**: Matrix channel joins rooms and sends/receives messages
+- [x] **E5-IRC**: IRC channel adapter with config validation, sender filtering, text-only enforcement, and feature-gated skeleton
 
 ### Trait & Architecture
 
@@ -182,5 +184,5 @@ Scoring: Likelihood (Low=1, Medium=2, High=3) x Impact (Low=1, Medium=2, High=3,
 |-------|-------|---------|-------------|-----------|--------|
 | E-Fix (E1, E6) | 2 | 0 | 0 | 2 | 100% |
 | E-Enterprise (E2, E5a, E5b) | 3 | 0 | 0 | 3 | 100% |
-| E-Consumer (E3, E4, E5) | 4 | 1 | 0 | 3 | 75% |
-| **Total** | **9** | **1** | **0** | **8** | **89%** |
+| E-Consumer (E3, E4, E5) | 4 | 0 | 0 | 4 | 100% |
+| **Total** | **9** | **0** | **0** | **9** | **100%** |

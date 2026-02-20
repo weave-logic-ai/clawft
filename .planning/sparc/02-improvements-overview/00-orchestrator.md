@@ -111,7 +111,7 @@ Even though Voice and UI are out of scope, the following hooks must be built:
 | 03 | Critical Fixes & Cleanup | 100% | 33/33 | -- |
 | 04 | Plugin & Skill System | 100% | 8/8 phases | Complete (45/45 security tests) |
 | 05 | Pipeline & LLM Reliability | 100% | 11/11 | -- |
-| 06 | Channel Enhancements | 89% | 8/9 | IRC channel deferred |
+| 06 | Channel Enhancements | 100% | 9/9 | -- |
 | 07 | Dev Tools & Apps | 100% | 10/10 | -- |
 | 08 | Memory & Workspace | 100% | 10/10 | -- |
 | 09 | Multi-Agent Routing | 93% | 13/14 | M6 docs deferred |
@@ -138,9 +138,9 @@ Even though Voice and UI are out of scope, the following hooks must be built:
 - `clawft-plugin-containers` -- Docker/Podman tools
 - `clawft-security` -- 57 audit checks across 10 categories
 
-### New Channel Adapters (7)
+### New Channel Adapters (8)
 
-Email, WhatsApp, Signal, Matrix, Google Chat, Microsoft Teams, Discord Resume
+Email, WhatsApp, Signal, Matrix, IRC, Google Chat, Microsoft Teams, Discord Resume
 
 ### Key Architecture Deliverables
 
@@ -156,10 +156,9 @@ Email, WhatsApp, Signal, Matrix, Google Chat, Microsoft Teams, Discord Resume
 
 ### Remaining Items
 
-1. **IRC channel** -- deferred (low priority)
-2. **M6 docs** -- deferred to documentation sprint
-3. **K4 skill install/publish** -- blocked on ClawHub server availability
-4. **K5 3 MVP skills** -- blocked on C3/C4 skill loader runtime integration
+1. **M6 docs** -- deferred to documentation sprint
+2. **K4 skill install/publish** -- blocked on ClawHub server availability
+3. **K5 3 MVP skills** -- blocked on C3/C4 skill loader runtime integration
 
 ---
 

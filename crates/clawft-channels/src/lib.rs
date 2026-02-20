@@ -31,6 +31,8 @@ pub mod email;
 #[cfg(feature = "google-chat")]
 pub mod google_chat;
 pub mod host;
+#[cfg(feature = "irc")]
+pub mod irc;
 #[cfg(feature = "matrix")]
 pub mod matrix;
 pub mod plugin_host;
