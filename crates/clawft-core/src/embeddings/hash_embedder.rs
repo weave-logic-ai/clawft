@@ -105,6 +105,10 @@ impl Embedder for HashEmbedder {
     fn dimension(&self) -> usize {
         self.dimension
     }
+
+    fn name(&self) -> &str {
+        "hash"
+    }
 }
 
 #[cfg(test)]

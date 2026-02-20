@@ -1,0 +1,27 @@
+[package]
+name = "clawft-plugin-git"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Git operations tool plugin for clawft"
+keywords = ["plugin", "git", "vcs", "commit", "branch"]
+categories = ["development-tools"]
+
+[features]
+default = []
+
+[dependencies]
+clawft-plugin = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+git2 = "0.20"
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = "3"

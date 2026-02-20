@@ -180,6 +180,179 @@ impl ToolProvider for BuiltinToolProvider {
 }
 
 // ---------------------------------------------------------------------------
+// SkillToolProvider
+// ---------------------------------------------------------------------------
+
+/// Type alias for the dispatcher function used by [`SkillToolProvider`].
+///
+/// Accepts a skill (tool) name and JSON arguments, returns a future that
+/// resolves to either a success string or an error string.
+type SkillDispatchFn =
+    dyn Fn(&str, Value) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>>
+        + Send
+        + Sync;
+
+/// A [`ToolProvider`] that exposes loaded skills as MCP tools.
+///
+/// Like [`BuiltinToolProvider`], this avoids depending on `clawft-core`
+/// directly. The caller supplies:
+///
+/// - A list of [`ToolDefinition`]s (one per skill) built from
+///   `SkillDefinition` metadata at the integration layer.
+/// - A dispatch closure that routes `tools/call` to skill execution.
+///
+/// The tool list is wrapped in `Arc<std::sync::RwLock>` so that the
+/// hot-reload watcher can swap in an updated list without replacing
+/// the provider instance.
+pub struct SkillToolProvider {
+    tools: Arc<std::sync::RwLock<Vec<ToolDefinition>>>,
+    dispatcher: Arc<SkillDispatchFn>,
+}
+
+impl SkillToolProvider {
+    /// Create a new skill tool provider.
+    ///
+    /// # Arguments
+    ///
+    /// * `tools` - Initial tool definitions derived from loaded skills.
+    /// * `dispatcher` - Closure that executes a skill tool by name.
+    pub fn new<F>(tools: Vec<ToolDefinition>, dispatcher: F) -> Self
+    where
+        F: Fn(&str, Value) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self {
+            tools: Arc::new(std::sync::RwLock::new(tools)),
+            dispatcher: Arc::new(dispatcher),
+        }
+    }
+
+    /// Replace the tool list with an updated set of skill tools.
+    ///
+    /// Called by the hot-reload watcher after the skill registry is
+    /// rebuilt. Returns the number of tools in the new list.
+    pub fn refresh(&self, tools: Vec<ToolDefinition>) -> usize {
+        let count = tools.len();
+        let mut lock = self.tools.write().expect("SkillToolProvider lock poisoned");
+        *lock = tools;
+        count
+    }
+
+    /// Get a shared handle to the tool list for external inspection.
+    pub fn tools_handle(&self) -> Arc<std::sync::RwLock<Vec<ToolDefinition>>> {
+        Arc::clone(&self.tools)
+    }
+
+    /// Number of currently registered skill tools.
+    pub fn tool_count(&self) -> usize {
+        self.tools.read().expect("SkillToolProvider lock poisoned").len()
+    }
+}
+
+impl std::fmt::Debug for SkillToolProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let count = self.tools.read().map(|t| t.len()).unwrap_or(0);
+        f.debug_struct("SkillToolProvider")
+            .field("tool_count", &count)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl ToolProvider for SkillToolProvider {
+    fn namespace(&self) -> &str {
+        "skill"
+    }
+
+    fn list_tools(&self) -> Vec<ToolDefinition> {
+        self.tools
+            .read()
+            .expect("SkillToolProvider lock poisoned")
+            .clone()
+    }
+
+    async fn call_tool(&self, name: &str, args: Value) -> Result<CallToolResult, ToolError> {
+        // Snapshot the tool list to avoid holding the lock during dispatch.
+        let has_tool = {
+            let tools = self.tools.read().expect("SkillToolProvider lock poisoned");
+            tools.iter().any(|t| t.name == name)
+        };
+
+        if !has_tool {
+            return Err(ToolError::NotFound(name.to_string()));
+        }
+
+        let fut = (self.dispatcher)(name, args);
+        match fut.await {
+            Ok(output) => Ok(CallToolResult::text(output)),
+            Err(msg) => Ok(CallToolResult::error(msg)),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Skill-to-tool conversion
+// ---------------------------------------------------------------------------
+
+/// Convert a [`SkillDefinition`](clawft_types::skill::SkillDefinition) to a
+/// [`ToolDefinition`] suitable for MCP exposure.
+///
+/// Generates a JSON Schema `inputSchema` from the skill's declared
+/// variables. If the skill has no variables, the schema is a plain
+/// `{"type": "object"}`.
+///
+/// This function lives in `clawft-services` (rather than `clawft-core`)
+/// because the output type `ToolDefinition` is defined here.
+pub fn skill_to_tool_definition(
+    skill: &clawft_types::skill::SkillDefinition,
+) -> ToolDefinition {
+    let input_schema = if skill.variables.is_empty() {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "args": {
+                    "type": "string",
+                    "description": "Free-form arguments passed to the skill"
+                }
+            }
+        })
+    } else {
+        let mut properties = serde_json::Map::new();
+        for var in &skill.variables {
+            properties.insert(
+                var.clone(),
+                serde_json::json!({
+                    "type": "string",
+                    "description": format!("Value for template variable '{var}'")
+                }),
+            );
+        }
+        serde_json::json!({
+            "type": "object",
+            "properties": properties,
+            "required": skill.variables
+        })
+    };
+
+    ToolDefinition {
+        name: skill.name.clone(),
+        description: skill.description.clone(),
+        input_schema,
+    }
+}
+
+/// Convert a slice of skill definitions to tool definitions.
+///
+/// Convenience wrapper over [`skill_to_tool_definition`].
+pub fn skills_to_tool_definitions(
+    skills: &[clawft_types::skill::SkillDefinition],
+) -> Vec<ToolDefinition> {
+    skills.iter().map(skill_to_tool_definition).collect()
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -395,5 +568,300 @@ mod tests {
         let debug = format!("{:?}", provider);
         assert!(debug.contains("BuiltinToolProvider"));
         assert!(debug.contains("tool_count: 2"));
+    }
+
+    // ── SkillToolProvider tests ─────────────────────────────────────────
+
+    /// Build a set of skill tool definitions for testing.
+    fn skill_tools() -> Vec<ToolDefinition> {
+        vec![
+            ToolDefinition {
+                name: "research".into(),
+                description: "Deep research on a topic".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "topic": { "type": "string" },
+                        "depth": { "type": "string" }
+                    },
+                    "required": ["topic"]
+                }),
+            },
+            ToolDefinition {
+                name: "code-review".into(),
+                description: "Review code changes".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "diff": { "type": "string" }
+                    }
+                }),
+            },
+        ]
+    }
+
+    /// Build a [`SkillToolProvider`] with a simple dispatcher.
+    fn make_skill_provider() -> SkillToolProvider {
+        SkillToolProvider::new(skill_tools(), |name, args| {
+            let name = name.to_string();
+            Box::pin(async move {
+                match name.as_str() {
+                    "research" => {
+                        let topic = args
+                            .get("topic")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        Ok(format!("Researching: {topic}"))
+                    }
+                    "code-review" => {
+                        let diff = args
+                            .get("diff")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("(no diff)");
+                        Ok(format!("Reviewing: {diff}"))
+                    }
+                    _ => Err(format!("unknown skill: {name}")),
+                }
+            })
+        })
+    }
+
+    #[test]
+    fn skill_namespace_returns_skill() {
+        let provider = make_skill_provider();
+        assert_eq!(provider.namespace(), "skill");
+    }
+
+    #[test]
+    fn skill_list_tools_returns_registered() {
+        let provider = make_skill_provider();
+        let tools = provider.list_tools();
+        assert_eq!(tools.len(), 2);
+
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"research"));
+        assert!(names.contains(&"code-review"));
+    }
+
+    #[test]
+    fn skill_tool_count() {
+        let provider = make_skill_provider();
+        assert_eq!(provider.tool_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn skill_call_tool_dispatches_correctly() {
+        let provider = make_skill_provider();
+
+        let result = provider
+            .call_tool("research", serde_json::json!({"topic": "Rust async"}))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(result.content.len(), 1);
+        match &result.content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "Researching: Rust async"),
+        }
+    }
+
+    #[tokio::test]
+    async fn skill_call_tool_not_found() {
+        let provider = make_skill_provider();
+
+        let result = provider
+            .call_tool("nonexistent", serde_json::json!({}))
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ToolError::NotFound(name) => assert_eq!(name, "nonexistent"),
+            other => panic!("expected NotFound, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn skill_call_tool_dispatcher_error_returns_error_result() {
+        let provider = SkillToolProvider::new(
+            vec![ToolDefinition {
+                name: "broken-skill".into(),
+                description: "A broken skill".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }],
+            |_name, _args| Box::pin(async { Err("skill execution failed".to_string()) }),
+        );
+
+        let result = provider
+            .call_tool("broken-skill", serde_json::json!({}))
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        match &result.content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "skill execution failed"),
+        }
+    }
+
+    #[test]
+    fn skill_refresh_replaces_tool_list() {
+        let provider = make_skill_provider();
+        assert_eq!(provider.tool_count(), 2);
+
+        let new_tools = vec![ToolDefinition {
+            name: "new-skill".into(),
+            description: "A freshly loaded skill".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }];
+
+        let count = provider.refresh(new_tools);
+        assert_eq!(count, 1);
+        assert_eq!(provider.tool_count(), 1);
+
+        let tools = provider.list_tools();
+        assert_eq!(tools[0].name, "new-skill");
+    }
+
+    #[tokio::test]
+    async fn skill_refresh_affects_call_routing() {
+        let provider = make_skill_provider();
+
+        // "research" works before refresh.
+        let result = provider
+            .call_tool("research", serde_json::json!({"topic": "test"}))
+            .await;
+        assert!(result.is_ok());
+
+        // Replace with a different tool set.
+        provider.refresh(vec![ToolDefinition {
+            name: "only-skill".into(),
+            description: "The only skill".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }]);
+
+        // "research" no longer exists.
+        let result = provider
+            .call_tool("research", serde_json::json!({"topic": "test"}))
+            .await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ToolError::NotFound(_)));
+    }
+
+    #[test]
+    fn skill_refresh_to_empty() {
+        let provider = make_skill_provider();
+        assert_eq!(provider.tool_count(), 2);
+
+        let count = provider.refresh(vec![]);
+        assert_eq!(count, 0);
+        assert_eq!(provider.tool_count(), 0);
+        assert!(provider.list_tools().is_empty());
+    }
+
+    #[test]
+    fn skill_tools_handle_shares_state() {
+        let provider = make_skill_provider();
+        let handle = provider.tools_handle();
+
+        // Read through the handle.
+        {
+            let tools = handle.read().unwrap();
+            assert_eq!(tools.len(), 2);
+        }
+
+        // Refresh through provider.
+        provider.refresh(vec![ToolDefinition {
+            name: "via-handle".into(),
+            description: "Test".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }]);
+
+        // Handle sees the update.
+        {
+            let tools = handle.read().unwrap();
+            assert_eq!(tools.len(), 1);
+            assert_eq!(tools[0].name, "via-handle");
+        }
+    }
+
+    #[test]
+    fn skill_debug_format() {
+        let provider = make_skill_provider();
+        let debug = format!("{:?}", provider);
+        assert!(debug.contains("SkillToolProvider"));
+        assert!(debug.contains("tool_count: 2"));
+    }
+
+    #[test]
+    fn skill_empty_provider() {
+        let provider = SkillToolProvider::new(
+            vec![],
+            |_name, _args| Box::pin(async { Ok("noop".to_string()) }),
+        );
+        assert_eq!(provider.namespace(), "skill");
+        assert_eq!(provider.tool_count(), 0);
+        assert!(provider.list_tools().is_empty());
+    }
+
+    // ── skill_to_tool_definition tests ──────────────────────────────────
+
+    #[test]
+    fn convert_skill_with_variables() {
+        use clawft_types::skill::SkillDefinition;
+
+        let mut skill = SkillDefinition::new("research", "Deep research");
+        skill.variables = vec!["topic".into(), "depth".into()];
+
+        let tool = skill_to_tool_definition(&skill);
+        assert_eq!(tool.name, "research");
+        assert_eq!(tool.description, "Deep research");
+
+        let schema = &tool.input_schema;
+        assert_eq!(schema["type"], "object");
+        assert!(schema["properties"]["topic"].is_object());
+        assert!(schema["properties"]["depth"].is_object());
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["topic", "depth"])
+        );
+    }
+
+    #[test]
+    fn convert_skill_without_variables() {
+        use clawft_types::skill::SkillDefinition;
+
+        let skill = SkillDefinition::new("simple", "A simple skill");
+
+        let tool = skill_to_tool_definition(&skill);
+        assert_eq!(tool.name, "simple");
+        assert_eq!(tool.description, "A simple skill");
+
+        // Should have a fallback "args" property.
+        let schema = &tool.input_schema;
+        assert_eq!(schema["type"], "object");
+        assert!(schema["properties"]["args"].is_object());
+        assert_eq!(schema["properties"]["args"]["type"], "string");
+    }
+
+    #[test]
+    fn convert_skills_batch() {
+        use clawft_types::skill::SkillDefinition;
+
+        let skills = vec![
+            SkillDefinition::new("alpha", "Alpha"),
+            SkillDefinition::new("beta", "Beta"),
+            SkillDefinition::new("gamma", "Gamma"),
+        ];
+
+        let tools = skills_to_tool_definitions(&skills);
+        assert_eq!(tools.len(), 3);
+        assert_eq!(tools[0].name, "alpha");
+        assert_eq!(tools[1].name, "beta");
+        assert_eq!(tools[2].name, "gamma");
+    }
+
+    #[test]
+    fn convert_empty_skills_batch() {
+        let tools = skills_to_tool_definitions(&[]);
+        assert!(tools.is_empty());
     }
 }

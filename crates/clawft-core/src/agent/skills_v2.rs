@@ -33,7 +33,9 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
 use clawft_types::skill::{SkillDefinition, SkillFormat};
@@ -196,110 +198,87 @@ fn extract_frontmatter(content: &str) -> Option<(&str, &str)> {
     Some((yaml_block, body))
 }
 
-/// Minimal YAML frontmatter parser.
+/// Parse YAML frontmatter into a flat map of JSON values.
 ///
-/// Supports:
-/// - Scalar values: `key: value`
-/// - Boolean values: `key: true` / `key: false`
-/// - Sequences: lines starting with `  - item` under a key
+/// Uses `serde_yaml` for full YAML parsing, supporting:
+/// - Scalar values (strings, booleans, integers)
+/// - Sequences (both block `- item` and flow `[a, b, c]` syntax)
+/// - Multi-line string values (literal `|` and folded `>` blocks)
+/// - Nested structures (preserved as nested JSON objects)
+/// - Quoted strings with special characters
+/// - Comments and anchors
 ///
-/// This avoids pulling in `serde_yaml` as a dependency.
+/// Float values like `1.0` are converted to strings to avoid ambiguity
+/// with version numbers in skill frontmatter.
 fn parse_yaml_frontmatter(
     yaml: &str,
 ) -> std::result::Result<HashMap<String, serde_json::Value>, String> {
-    let mut map: HashMap<String, serde_json::Value> = HashMap::new();
-    let mut current_key: Option<String> = None;
-    let mut current_list: Vec<String> = Vec::new();
+    let yaml_value: serde_yaml::Value =
+        serde_yaml::from_str(yaml).map_err(|e| format!("YAML parse error: {e}"))?;
 
-    for line in yaml.lines() {
-        let trimmed = line.trim();
+    let mapping = yaml_value
+        .as_mapping()
+        .ok_or_else(|| "YAML frontmatter must be a mapping (key: value pairs)".to_string())?;
 
-        // Skip empty lines and comments.
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-
-        // Check if this is a list item (starts with "- ").
-        if let Some(stripped) = trimmed.strip_prefix("- ") {
-            if current_key.is_some() {
-                current_list.push(stripped.trim().to_string());
-                continue;
-            }
-            return Err(format!("list item without parent key: {trimmed}"));
-        }
-
-        // Flush any pending list.
-        if let Some(key) = current_key.take()
-            && !current_list.is_empty()
-        {
-            let arr: Vec<serde_json::Value> = current_list
-                .drain(..)
-                .map(serde_json::Value::String)
-                .collect();
-            map.insert(key, serde_json::Value::Array(arr));
-        }
-
-        // Parse "key: value".
-        if let Some((key, value)) = trimmed.split_once(':') {
-            let key = key.trim().to_string();
-            let value = value.trim();
-
-            if value.is_empty() {
-                // Key with no inline value -- expect a list on subsequent lines.
-                current_key = Some(key);
-                continue;
-            }
-
-            // Parse the scalar value.
-            let json_value = parse_scalar(value);
-            map.insert(key, json_value);
-        } else {
-            return Err(format!("invalid YAML line (no colon): {trimmed}"));
-        }
-    }
-
-    // Flush any trailing list.
-    if let Some(key) = current_key.take()
-        && !current_list.is_empty()
-    {
-        let arr: Vec<serde_json::Value> = current_list
-            .drain(..)
-            .map(serde_json::Value::String)
-            .collect();
-        map.insert(key, serde_json::Value::Array(arr));
+    let mut map = HashMap::new();
+    for (k, v) in mapping {
+        let key = match k {
+            serde_yaml::Value::String(s) => s.clone(),
+            other => format!("{other:?}"),
+        };
+        let json_value = yaml_value_to_json(v);
+        map.insert(key, json_value);
     }
 
     Ok(map)
 }
 
-/// Parse a YAML scalar value into a JSON value.
+/// Convert a `serde_yaml::Value` to a `serde_json::Value`.
 ///
-/// Only integers and booleans are auto-detected. Floats are intentionally
-/// left as strings because values like `1.0` are ambiguous with version
-/// strings in skill frontmatter.
-fn parse_scalar(s: &str) -> serde_json::Value {
-    let s = s.trim();
-
-    // Strip surrounding quotes.
-    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
-        return serde_json::Value::String(s[1..s.len() - 1].to_string());
+/// Floats that look like version numbers (e.g., `1.0`) are preserved
+/// as strings to maintain backward compatibility with the skill
+/// frontmatter format.
+fn yaml_value_to_json(v: &serde_yaml::Value) -> serde_json::Value {
+    match v {
+        serde_yaml::Value::Null => serde_json::Value::Null,
+        serde_yaml::Value::Bool(b) => serde_json::Value::Bool(*b),
+        serde_yaml::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                serde_json::Value::Number(i.into())
+            } else if let Some(u) = n.as_u64() {
+                serde_json::Value::Number(u.into())
+            } else if let Some(f) = n.as_f64() {
+                // Preserve floats as strings to avoid version ambiguity
+                // (e.g., `version: 1.0` should remain "1.0" not 1.0).
+                // Ensure a decimal point is always present.
+                let s = if f.fract() == 0.0 {
+                    format!("{f:.1}")
+                } else {
+                    format!("{f}")
+                };
+                serde_json::Value::String(s)
+            } else {
+                serde_json::Value::String(n.to_string())
+            }
+        }
+        serde_yaml::Value::String(s) => serde_json::Value::String(s.clone()),
+        serde_yaml::Value::Sequence(seq) => {
+            let arr: Vec<serde_json::Value> = seq.iter().map(yaml_value_to_json).collect();
+            serde_json::Value::Array(arr)
+        }
+        serde_yaml::Value::Mapping(m) => {
+            let mut obj = serde_json::Map::new();
+            for (k, val) in m {
+                let key = match k {
+                    serde_yaml::Value::String(s) => s.clone(),
+                    other => format!("{other:?}"),
+                };
+                obj.insert(key, yaml_value_to_json(val));
+            }
+            serde_json::Value::Object(obj)
+        }
+        serde_yaml::Value::Tagged(tagged) => yaml_value_to_json(&tagged.value),
     }
-
-    // Boolean.
-    match s.to_lowercase().as_str() {
-        "true" | "yes" => return serde_json::Value::Bool(true),
-        "false" | "no" => return serde_json::Value::Bool(false),
-        _ => {}
-    }
-
-    // Integer (no decimal point).
-    if let Ok(n) = s.parse::<i64>() {
-        return serde_json::Value::Number(n.into());
-    }
-
-    // Fallback: string. Floats like "1.0" stay as strings to avoid
-    // ambiguity with version numbers.
-    serde_json::Value::String(s.to_string())
 }
 
 /// Extract a string list from parsed YAML fields.
@@ -556,7 +535,44 @@ impl SkillRegistry {
     pub fn is_empty(&self) -> bool {
         self.skills.is_empty()
     }
+
+    /// Insert or replace a skill. Returns the previous skill if overwritten.
+    ///
+    /// Used by the file-system watcher to incrementally update the registry
+    /// without a full rebuild.
+    pub fn upsert(&mut self, skill: SkillDefinition) -> Option<SkillDefinition> {
+        self.skills.insert(skill.name.clone(), skill)
+    }
+
+    /// Remove a skill by name. Returns the removed skill if it existed.
+    pub fn remove(&mut self, name: &str) -> Option<SkillDefinition> {
+        self.skills.remove(name)
+    }
+
+    /// Rebuild the registry from all sources.
+    ///
+    /// Called after a file-system change to re-apply priority ordering.
+    /// Replaces the entire skill set with a fresh discovery pass.
+    pub async fn rebuild(
+        &mut self,
+        workspace_dir: Option<&Path>,
+        user_dir: Option<&Path>,
+        builtin_skills: Vec<SkillDefinition>,
+        trust_workspace: bool,
+    ) -> Result<()> {
+        let fresh =
+            Self::discover_with_trust(workspace_dir, user_dir, builtin_skills, trust_workspace)
+                .await?;
+        self.skills = fresh.skills;
+        Ok(())
+    }
 }
+
+/// Shared handle to the skill registry.
+///
+/// Multiple agent loop iterations can read concurrently.
+/// The file-system watcher acquires a write lock to update.
+pub type SharedSkillRegistry = Arc<RwLock<SkillRegistry>>;
 
 /// Load a legacy `skill.json` + `prompt.md` skill as a [`SkillDefinition`].
 async fn load_legacy_skill_async(json_path: &Path, skill_dir: &Path) -> Result<SkillDefinition> {
@@ -991,6 +1007,160 @@ Instructions.
         let fields = parse_yaml_frontmatter(yaml).unwrap();
         assert_eq!(fields.len(), 1);
         assert_eq!(fields["name"], serde_json::json!("test"));
+    }
+
+    // ── C3: serde_yaml advanced parsing tests ────────────────────────
+
+    #[test]
+    fn test_serde_yaml_nested_structures() {
+        let content = r#"---
+name: nested-skill
+description: Test nested YAML
+version: 1.0.0
+config:
+  model: gpt-4
+  temperature: 0.7
+  max_tokens: 4096
+  retry:
+    attempts: 3
+    backoff_ms: 500
+---
+
+Nested instructions.
+"#;
+        let skill = parse_skill_md(content, None).unwrap();
+        assert_eq!(skill.name, "nested-skill");
+
+        // The nested config should be in metadata as a JSON object
+        let config = skill.metadata.get("config").unwrap();
+        assert!(config.is_object());
+        assert_eq!(config["model"], serde_json::json!("gpt-4"));
+        assert_eq!(config["max_tokens"], serde_json::json!(4096));
+
+        // Nested within nested
+        let retry = &config["retry"];
+        assert!(retry.is_object());
+        assert_eq!(retry["attempts"], serde_json::json!(3));
+        assert_eq!(retry["backoff_ms"], serde_json::json!(500));
+    }
+
+    #[test]
+    fn test_serde_yaml_multiline_values() {
+        // Literal block scalar with |
+        let content =
+            "---\nname: multiline-skill\ndescription: |\n  This is a multi-line\n  description that spans\n  several lines.\nversion: 1.0.0\n---\n\nBody text.";
+        let skill = parse_skill_md(content, None).unwrap();
+        assert_eq!(skill.name, "multiline-skill");
+        assert!(skill.description.contains("multi-line"));
+        assert!(skill.description.contains("several lines"));
+    }
+
+    #[test]
+    fn test_serde_yaml_flow_sequences() {
+        let content = r#"---
+name: flow-skill
+description: Test flow sequences
+version: 1.0.0
+variables: [topic, depth, format]
+allowed-tools: [WebSearch, Read, Grep]
+---
+
+Flow sequence instructions.
+"#;
+        let skill = parse_skill_md(content, None).unwrap();
+        assert_eq!(skill.name, "flow-skill");
+        assert_eq!(skill.variables, vec!["topic", "depth", "format"]);
+        assert_eq!(skill.allowed_tools, vec!["WebSearch", "Read", "Grep"]);
+    }
+
+    #[test]
+    fn test_serde_yaml_anchors_and_aliases() {
+        // serde_yaml supports anchors/aliases (basic alias references)
+        let yaml = "base_url: &url https://api.example.com\nname: anchor-test\nendpoint: *url";
+        let fields = parse_yaml_frontmatter(yaml).unwrap();
+        assert_eq!(fields["name"], serde_json::json!("anchor-test"));
+        assert_eq!(
+            fields["base_url"],
+            serde_json::json!("https://api.example.com")
+        );
+        // Alias should resolve to the same value as the anchor
+        assert_eq!(
+            fields["endpoint"],
+            serde_json::json!("https://api.example.com")
+        );
+    }
+
+    #[test]
+    fn test_openclaw_skill_compat_extended() {
+        // OpenClaw SKILL.md uses extended metadata fields
+        let content = r#"---
+name: contract-analysis
+description: Analyze legal contracts
+version: 2.0.0
+variables:
+  - document
+  - jurisdiction
+openclaw-category: legal
+openclaw-license: Apache-2.0
+openclaw-registry: https://openclaw.dev/skills
+openclaw-tags:
+  - legal
+  - analysis
+  - contracts
+openclaw-min-version: 0.5.0
+---
+
+Analyze the given {{document}} under {{jurisdiction}} law.
+"#;
+        let skill = parse_skill_md(content, None).unwrap();
+        assert_eq!(skill.name, "contract-analysis");
+        assert_eq!(skill.variables, vec!["document", "jurisdiction"]);
+
+        // All openclaw-* fields should be preserved in metadata
+        assert_eq!(
+            skill.metadata.get("openclaw-category"),
+            Some(&serde_json::json!("legal"))
+        );
+        assert_eq!(
+            skill.metadata.get("openclaw-license"),
+            Some(&serde_json::json!("Apache-2.0"))
+        );
+        assert_eq!(
+            skill.metadata.get("openclaw-registry"),
+            Some(&serde_json::json!("https://openclaw.dev/skills"))
+        );
+        let tags = skill.metadata.get("openclaw-tags").unwrap();
+        assert_eq!(
+            tags,
+            &serde_json::json!(["legal", "analysis", "contracts"])
+        );
+        assert_eq!(
+            skill.metadata.get("openclaw-min-version"),
+            Some(&serde_json::json!("0.5.0"))
+        );
+    }
+
+    #[test]
+    fn test_wasm_skill_format_detection() {
+        // A skill that references a wasm module in metadata
+        let content = r#"---
+name: wasm-transform
+description: A WASM-backed skill
+version: 1.0.0
+wasm-module: transform.wasm
+variables:
+  - input
+allowed-tools: []
+---
+
+Transform input using the WASM module.
+"#;
+        let skill = parse_skill_md(content, None).unwrap();
+        assert_eq!(skill.name, "wasm-transform");
+        assert_eq!(
+            skill.metadata.get("wasm-module"),
+            Some(&serde_json::json!("transform.wasm"))
+        );
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────

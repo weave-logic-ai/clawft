@@ -17,13 +17,13 @@ Element 08 has 11 deliverables across 3 phases spanning Weeks 4-8.
 
 ### Week 4-6 (H1 + H3 -- independent, parallel)
 
-- [ ] H1 -- Per-agent workspace isolation: `~/.clawft/agents/<agentId>/` with SOUL.md, AGENTS.md, USER.md, session store, skill overrides, cross-agent opt-in
-- [ ] H3 -- Timestamp standardization: `DateTime<Utc>` throughout (replacing i64 ms, `Option<String>`)
+- [x] H1 -- Per-agent workspace isolation: workspace.rs split + agent.rs + config.rs -- DONE 2026-02-20
+- [x] H3 -- Timestamp standardization: `DateTime<Utc>` throughout -- DONE 2026-02-20
 
 ### Week 5-7 (H2 Core -- foundational vector memory)
 
-- [ ] H2.1 -- HNSW-backed VectorStore using `instant-distance` (replaces brute-force cosine scan)
-- [ ] H2.2 -- Production Embedder trait + `HashEmbedder` / `ApiEmbedder` implementations (depends on A2 stable hash)
+- [x] H2.1 -- HNSW-backed VectorStore using `instant-distance` (625 lines, 18 tests) -- DONE 2026-02-20
+- [x] H2.2 -- Production Embedder trait + name() implementations -- DONE 2026-02-20
 
 ### Week 6-7 (H2 MVP -- persistence and export)
 
@@ -229,8 +229,8 @@ Within `clawft-core/src/embeddings/`:
 
 | Phase | Items | Pending | In Progress | Completed | % Done |
 |-------|-------|---------|-------------|-----------|--------|
-| H1 + H3 (Workspace + Timestamps) | 2 | 2 | 0 | 0 | 0% |
-| H2 Core (H2.1, H2.2) | 2 | 2 | 0 | 0 | 0% |
+| H1 + H3 (Workspace + Timestamps) | 2 | 0 | 0 | 2 | 100% |
+| H2 Core (H2.1, H2.2) | 2 | 0 | 0 | 2 | 100% |
 | H2 MVP (H2.3, H2.4, H2.5) | 3 | 3 | 0 | 0 | 0% |
 | H2 Advanced (H2.6, H2.7, H2.8) | 3 | 3 | 0 | 0 | 0% |
-| **Total** | **10** | **10** | **0** | **0** | **0%** |
+| **Total** | **10** | **6** | **0** | **4** | **40%** |

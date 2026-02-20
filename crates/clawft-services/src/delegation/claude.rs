@@ -17,11 +17,12 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 
 use serde_json::Value;
 use tracing::{debug, warn};
 
-use clawft_types::delegation::DelegationConfig;
+use clawft_types::delegation::{DelegationConfig, DelegationTarget};
 
 use super::schema;
 
@@ -47,6 +48,31 @@ pub enum DelegationError {
     /// A tool execution failed during delegation.
     #[error("tool execution failed: {0}")]
     ToolExecFailed(String),
+
+    /// The subprocess exited with a non-zero status.
+    #[error("subprocess failed (exit code {exit_code}): {stderr}")]
+    SubprocessFailed { exit_code: i32, stderr: String },
+
+    /// stdout produced output that could not be parsed as expected.
+    #[error("output parse failed: {parse_error}")]
+    OutputParseFailed {
+        raw_output: String,
+        parse_error: String,
+    },
+
+    /// The delegation exceeded the configured timeout.
+    #[error("delegation timed out after {elapsed:?}")]
+    Timeout { elapsed: Duration },
+
+    /// The delegation was cancelled (user abort, agent shutdown).
+    #[error("delegation cancelled")]
+    Cancelled,
+
+    /// All fallback targets exhausted (Flow -> Claude -> Local).
+    #[error("all delegation targets exhausted")]
+    FallbackExhausted {
+        attempts: Vec<(DelegationTarget, String)>,
+    },
 }
 
 /// Result alias for delegation operations.

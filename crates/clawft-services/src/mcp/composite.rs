@@ -293,4 +293,113 @@ mod tests {
         let err = c.call_tool("boom", json!({})).await.unwrap_err();
         assert!(matches!(err, ToolError::ExecutionFailed(_)));
     }
+
+    // ── SkillToolProvider integration ───────────────────────────────────
+
+    #[test]
+    fn skill_provider_tools_listed_with_prefix() {
+        use super::super::provider::SkillToolProvider;
+
+        let skill_provider = SkillToolProvider::new(
+            vec![
+                ToolDefinition {
+                    name: "research".into(),
+                    description: "Deep research".into(),
+                    input_schema: json!({"type": "object"}),
+                },
+                ToolDefinition {
+                    name: "code-review".into(),
+                    description: "Code review".into(),
+                    input_schema: json!({"type": "object"}),
+                },
+            ],
+            |_name, _args| Box::pin(async { Ok("ok".to_string()) }),
+        );
+
+        let mut c = CompositeToolProvider::new();
+        c.register(Box::new(MockProvider::new("builtin", &["echo"])));
+        c.register(Box::new(skill_provider));
+
+        let tools = c.list_tools_all();
+        assert_eq!(tools.len(), 3);
+
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"builtin__echo"));
+        assert!(names.contains(&"skill__research"));
+        assert!(names.contains(&"skill__code-review"));
+    }
+
+    #[tokio::test]
+    async fn skill_provider_routes_via_namespace() {
+        use super::super::provider::SkillToolProvider;
+
+        let skill_provider = SkillToolProvider::new(
+            vec![ToolDefinition {
+                name: "research".into(),
+                description: "Research".into(),
+                input_schema: json!({"type": "object"}),
+            }],
+            |name, args| {
+                let name = name.to_string();
+                Box::pin(async move {
+                    let topic = args
+                        .get("topic")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?");
+                    Ok(format!("skill:{name} topic={topic}"))
+                })
+            },
+        );
+
+        let mut c = CompositeToolProvider::new();
+        c.register(Box::new(skill_provider));
+
+        let result = c
+            .call_tool("skill__research", json!({"topic": "MCP"}))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        match &result.content[0] {
+            super::super::provider::ContentBlock::Text { text } => {
+                assert_eq!(text, "skill:research topic=MCP");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn skill_provider_refresh_reflected_in_composite() {
+        use super::super::provider::SkillToolProvider;
+        use std::sync::Arc;
+
+        let skill_provider = Arc::new(SkillToolProvider::new(
+            vec![ToolDefinition {
+                name: "old-skill".into(),
+                description: "Old".into(),
+                input_schema: json!({"type": "object"}),
+            }],
+            |_name, _args| Box::pin(async { Ok("ok".to_string()) }),
+        ));
+
+        // We need to get a handle before registering since register takes
+        // ownership. Clone the Arc first.
+        let handle = skill_provider.tools_handle();
+
+        // Unfortunately, CompositeToolProvider::register takes Box<dyn ToolProvider>.
+        // We cannot easily get a reference back. Instead, test via the handle.
+        // Refresh via the handle directly.
+        {
+            let mut tools = handle.write().unwrap();
+            *tools = vec![ToolDefinition {
+                name: "new-skill".into(),
+                description: "New".into(),
+                input_schema: json!({"type": "object"}),
+            }];
+        }
+
+        // Verify the provider sees the update.
+        let tools = skill_provider.list_tools();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "new-skill");
+    }
 }

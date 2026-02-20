@@ -35,3 +35,35 @@
 - 116 tests passing with wasm-plugins feature
 - 30/45 security tests complete
 - Remaining: wasmtime engine integration, fuel metering, memory limits, audit logging, 15 security tests
+
+### 2026-02-20: C3 Skill Loader -- COMPLETE
+- `skills_v2.rs` rewritten with serde_yaml replacing hand-rolled YAML parser (+261 lines)
+- Local skill discovery: workspace, ~/.clawft/skills, bundled directories
+- WASM auto-registration from SKILL.md
+- 40 skill tests passing
+
+### 2026-02-20: C4 Hot-Reload & Dynamic Loading -- COMPLETE
+- `skill_watcher.rs` created with `notify` crate for file-system watching
+- Skill precedence: workspace > managed/local > bundled
+- Atomic swap with drain for in-flight calls
+- 10 watcher tests passing
+
+### 2026-02-20: C5 Slash-Command Framework -- COMPLETE
+- Interactive slash-command framework wired in `clawft-cli/src/interactive/`
+- Skills contribute commands to `/help` output
+- Command name collision detection
+- `builtins.rs` +146 lines, `registry.rs` +14 lines
+- 44 interactive tests passing
+
+### 2026-02-20: C6 MCP Skill Exposure -- COMPLETE
+- `SkillToolProvider` in `clawft-services/src/mcp/provider.rs`
+- MCP `tools/list` includes loaded skill tools with JSON Schema
+- MCP `tools/call` routes through skill's `execute_tool()`
+- Hot-reload updates MCP tool listing via RwLock-based refresh
+- 25 new MCP tests (22 SkillToolProvider + 3 integration)
+- 161 total MCP tests passing
+
+### Remaining
+- C2: wasmtime engine integration, fuel metering, memory limits (deferred)
+- C7: PluginHost unification (deferred)
+- C4a: Autonomous skill creation (stretch goal)

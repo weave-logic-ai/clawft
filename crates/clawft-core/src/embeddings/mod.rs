@@ -8,6 +8,8 @@
 
 #[cfg(feature = "vector-memory")]
 pub mod hash_embedder;
+#[cfg(feature = "vector-memory")]
+pub mod hnsw_store;
 
 #[cfg(feature = "rvf")]
 pub mod api_embedder;
@@ -61,6 +63,13 @@ pub trait Embedder: Send + Sync {
 
     /// Return the dimensionality of embeddings produced by this embedder.
     fn dimension(&self) -> usize;
+
+    /// Return the name/identifier of this embedder (e.g. "hash", "openai-text-embedding-3-small").
+    ///
+    /// Used for logging and configuration. Default returns "unknown".
+    fn name(&self) -> &str {
+        "unknown"
+    }
 }
 
 #[cfg(test)]

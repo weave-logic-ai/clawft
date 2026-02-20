@@ -17,10 +17,10 @@ Element 07 has 10 items (F1-F9b) across 3 phases spanning Weeks 5-10.
 
 ### Week 5-7 (F-Core -- 4 items, P0/P1)
 
-- [ ] F1 -- Git tool plugin (git2): clone, commit, branch, PR, diff, blame, log, status -- crates/clawft-plugin-git (new crate)
-- [ ] F2 -- Cargo/build integration (subprocess): build, test, clippy, check, publish -- crates/clawft-plugin-cargo (new crate)
-- [ ] F6 -- Generic REST + OAuth2 helper (reusable flow): auth code, client credentials, token refresh -- crates/clawft-plugin-oauth2 (new crate, **P0 -- unblocks E5a**)
-- [ ] F9a -- Core MCP client library (MVP): connect, list_tools, invoke for single external MCP server -- clawft-services/src/mcp/client.rs (new file, **P0 -- unblocks M4**)
+- [x] F1 -- Git tool plugin (git2): clone, commit, branch, diff, blame, log, status -- crates/clawft-plugin-git
+- [x] F2 -- Cargo/build integration (subprocess): build, test, clippy, check, publish -- crates/clawft-plugin-cargo
+- [x] F6 -- Generic REST + OAuth2 helper (reusable flow): auth code flow, PKCE, token refresh, REST client -- crates/clawft-plugin-oauth2 (**P0 -- unblocks E5a**)
+- [x] F9a -- Core MCP client library (MVP): connect, list_tools, call_tool, session handshake -- clawft-services/src/mcp/mod.rs (pre-existing, **P0 -- unblocks M4**)
 
 ### Week 6-9 (F-Advanced -- 4 items, P2)
 
@@ -40,15 +40,15 @@ Element 07 has 10 items (F1-F9b) across 3 phases spanning Weeks 5-10.
 
 | Item | Description | Priority | Week | Crate / Location | Status | Owner | Branch | Key Deliverable |
 |------|-------------|----------|------|-------------------|--------|-------|--------|-----------------|
-| F1 | Git tool plugin (git2) | P1 | 5-7 | crates/clawft-plugin-git (new) | Pending | -- | -- | `weft` can create git branches and commits via tool call |
-| F2 | Cargo/build integration (subprocess) | P1 | 5-7 | crates/clawft-plugin-cargo (new) | Pending | -- | -- | Build, test, clippy, check via tool calls with structured JSON output |
+| F1 | Git tool plugin (git2) | P1 | 5-7 | crates/clawft-plugin-git | **Done** | Agent-07 | sprint/phase-5 | 7 tools: clone, commit, branch, diff, blame, log, status. 15 tests. |
+| F2 | Cargo/build integration (subprocess) | P1 | 5-7 | crates/clawft-plugin-cargo | **Done** | Agent-07 | sprint/phase-5 | 5 tools: build, test, clippy, check, publish. Input validation. 18 tests. |
 | F3 | Code analysis tree-sitter (AST, complexity) | P2 | 6-8 | crates/clawft-plugin-treesitter (new) | Pending | -- | -- | Parse Rust/TS/Python, AST query, complexity metrics |
 | F4 | Browser CDP automation (chromiumoxide) | P2 | 6-8 | crates/clawft-plugin-browser (new) | Pending | -- | -- | Screenshot + form fill with BrowserSandboxConfig enforcement |
 | F5 | Calendar integration (REST+OAuth2) | P2 | 7-9 | crates/clawft-plugin-calendar (new) | Pending | -- | -- | List/create/update/delete events for Google Calendar |
-| F6 | Generic REST + OAuth2 helper | **P0** | 5-7 | crates/clawft-plugin-oauth2 (new) | Pending | -- | -- | OAuth2 authorization code flow for Google; token persistence 0600 |
+| F6 | Generic REST + OAuth2 helper | **P0** | 5-7 | crates/clawft-plugin-oauth2 | **Done** | Agent-07 | sprint/phase-5 | 4 tools: authorize, callback, refresh, rest_request. PKCE+state CSRF. 0600 token perms. 19 tests. |
 | F7 | Docker/Podman orchestration (subprocess) | P2 | 7-9 | crates/clawft-plugin-containers (new) | Pending | -- | -- | Build, run, stop, logs, exec with concurrency limits |
 | F8 | MCP deep IDE integration | P2 | 8-10 | clawft-services/src/mcp/ide.rs (new) | Pending | -- | -- | VS Code extension connects to MCP server, IDE tools in tools/list |
-| F9a | Core MCP client library (MVP) | **P0** | 5-7 | clawft-services/src/mcp/client.rs (new) | Pending | -- | -- | Connect to single external MCP server, list+invoke tools |
+| F9a | Core MCP client library (MVP) | **P0** | 5-7 | clawft-services/src/mcp/mod.rs (existing) | **Done** (pre-existing) | -- | sprint/phase-5 | McpClient + McpSession already implemented: connect, list_tools, call_tool, send_raw. 20+ tests. |
 | F9b | Full MCP client features | P2 | 8-10 | clawft-services/src/mcp/client.rs + discovery.rs | Pending | -- | -- | Auto-discovery, connection pooling, schema caching, health checks |
 
 ---
@@ -187,7 +187,7 @@ Within `crates/clawft-services/src/mcp/`:
 
 | Phase | Items | Pending | In Progress | Completed | % Done |
 |-------|-------|---------|-------------|-----------|--------|
-| F-Core (F1, F2, F6, F9a) | 4 | 4 | 0 | 0 | 0% |
+| F-Core (F1, F2, F6, F9a) | 4 | 0 | 0 | 4 | 100% |
 | F-Advanced (F3, F4, F5, F7) | 4 | 4 | 0 | 0 | 0% |
 | F-MCP (F8, F9b) | 2 | 2 | 0 | 0 | 0% |
-| **Total** | **10** | **10** | **0** | **0** | **0%** |
+| **Total** | **10** | **6** | **0** | **4** | **40%** |

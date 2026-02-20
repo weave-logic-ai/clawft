@@ -5,5 +5,6 @@ pub mod context;
 pub mod helpers;
 pub mod loop_core;
 pub mod memory;
+pub mod skill_watcher;
 pub mod skills;
 pub mod skills_v2;

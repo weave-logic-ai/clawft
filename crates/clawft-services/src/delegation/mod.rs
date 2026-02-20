@@ -6,6 +6,7 @@
 //! Gated behind the `delegate` feature.
 
 pub mod claude;
+pub mod flow;
 pub mod schema;
 
 use clawft_types::delegation::{DelegationConfig, DelegationRule, DelegationTarget};

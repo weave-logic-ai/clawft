@@ -165,13 +165,16 @@ fn workspace_list(show_all: bool) -> anyhow::Result<()> {
         }
 
         let status = if exists { "ok" } else { "MISSING" };
-        let accessed = entry.last_accessed.as_deref().unwrap_or("-");
+        let accessed = entry
+            .last_accessed
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_else(|| "-".into());
 
         table.add_row([
             entry.name.as_str(),
             &entry.path.display().to_string(),
             status,
-            accessed,
+            &accessed,
         ]);
     }
 

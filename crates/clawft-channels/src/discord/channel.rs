@@ -24,7 +24,8 @@ use crate::traits::{Channel, ChannelHost, ChannelMetadata, ChannelStatus, Messag
 use super::api::DiscordApiClient;
 use super::events::{
     ConnectionProperties, GatewayPayload, HelloData, IdentifyPayload, MessageCreate, OP_DISPATCH,
-    OP_HEARTBEAT, OP_HEARTBEAT_ACK, OP_HELLO, OP_INVALID_SESSION, OP_RECONNECT, ReadyEvent,
+    OP_HEARTBEAT, OP_HEARTBEAT_ACK, OP_HELLO, OP_INVALID_SESSION, OP_RECONNECT, OP_RESUME,
+    ReadyEvent, ResumePayload,
 };
 
 /// Delay before reconnecting after a connection failure.
@@ -242,29 +243,57 @@ impl Channel for DiscordChannel {
 
             debug!(interval_ms = heartbeat_interval, "received Hello");
 
-            // Send Identify (opcode 2).
-            let identify = GatewayPayload {
-                op: super::events::OP_IDENTIFY,
-                d: Some(
-                    serde_json::to_value(IdentifyPayload {
-                        token: self.config.token.expose().to_owned(),
-                        intents: self.config.intents,
-                        properties: ConnectionProperties {
-                            os: std::env::consts::OS.to_owned(),
-                            browser: "clawft".into(),
-                            device: "clawft".into(),
-                        },
-                    })
-                    .unwrap_or_default(),
-                ),
-                s: None,
-                t: None,
+            // Decide whether to Resume (OP 6) or Identify (OP 2).
+            // If we have a session_id from a previous READY event, attempt
+            // to resume the session; otherwise, start fresh with Identify.
+            let auth_payload = {
+                let session_id_guard = self.session_id.read().await;
+                if let Some(ref sid) = *session_id_guard {
+                    let seq = self.sequence.load(Ordering::SeqCst);
+                    info!(
+                        session_id = %sid,
+                        seq = seq,
+                        "attempting Resume (OP 6)"
+                    );
+                    GatewayPayload {
+                        op: OP_RESUME,
+                        d: Some(
+                            serde_json::to_value(ResumePayload {
+                                token: self.config.token.expose().to_owned(),
+                                session_id: sid.clone(),
+                                seq,
+                            })
+                            .unwrap_or_default(),
+                        ),
+                        s: None,
+                        t: None,
+                    }
+                } else {
+                    debug!("no session_id available, sending Identify (OP 2)");
+                    GatewayPayload {
+                        op: super::events::OP_IDENTIFY,
+                        d: Some(
+                            serde_json::to_value(IdentifyPayload {
+                                token: self.config.token.expose().to_owned(),
+                                intents: self.config.intents,
+                                properties: ConnectionProperties {
+                                    os: std::env::consts::OS.to_owned(),
+                                    browser: "clawft".into(),
+                                    device: "clawft".into(),
+                                },
+                            })
+                            .unwrap_or_default(),
+                        ),
+                        s: None,
+                        t: None,
+                    }
+                }
             };
 
-            if let Ok(json) = serde_json::to_string(&identify)
+            if let Ok(json) = serde_json::to_string(&auth_payload)
                 && let Err(e) = ws_write.send(WsMessage::Text(json)).await
             {
-                error!(error = %e, "failed to send Identify");
+                error!(error = %e, "failed to send Resume/Identify");
                 self.set_status(ChannelStatus::Error(e.to_string())).await;
 
                 tokio::select! {
@@ -336,6 +365,9 @@ impl Channel for DiscordChannel {
                                                                 *self.resume_url.write().await = ready.resume_gateway_url;
                                                             }
                                                         }
+                                                        "RESUMED" => {
+                                                            info!("session resumed successfully");
+                                                        }
                                                         "MESSAGE_CREATE" => {
                                                             if let Some(ref d) = payload.d {
                                                                 match serde_json::from_value::<MessageCreate>(d.clone()) {
@@ -386,10 +418,48 @@ impl Channel for DiscordChannel {
                                                 break;
                                             }
                                             OP_INVALID_SESSION => {
-                                                warn!("invalid session, reconnecting with fresh identify");
-                                                *self.session_id.write().await = None;
-                                                *self.resume_url.write().await = None;
-                                                self.sequence.store(0, Ordering::SeqCst);
+                                                // d: true => session is resumable; wait
+                                                // with jitter then retry resume.
+                                                // d: false => not resumable; clear state
+                                                // and fall back to fresh Identify.
+                                                let resumable = payload
+                                                    .d
+                                                    .as_ref()
+                                                    .and_then(|v| v.as_bool())
+                                                    .unwrap_or(false);
+
+                                                if resumable {
+                                                    // Wait 1-5 seconds (random jitter)
+                                                    // then reconnect; session state is
+                                                    // preserved so the next loop
+                                                    // iteration will send Resume.
+                                                    let jitter_ms = 1000
+                                                        + (std::time::SystemTime::now()
+                                                            .duration_since(
+                                                                std::time::UNIX_EPOCH,
+                                                            )
+                                                            .unwrap_or_default()
+                                                            .subsec_millis()
+                                                            % 4000);
+                                                    warn!(
+                                                        jitter_ms,
+                                                        "invalid session (resumable), retrying"
+                                                    );
+                                                    tokio::time::sleep(
+                                                        std::time::Duration::from_millis(
+                                                            jitter_ms.into(),
+                                                        ),
+                                                    )
+                                                    .await;
+                                                } else {
+                                                    warn!(
+                                                        "invalid session (not resumable), \
+                                                         clearing state for fresh Identify"
+                                                    );
+                                                    *self.session_id.write().await = None;
+                                                    *self.resume_url.write().await = None;
+                                                    self.sequence.store(0, Ordering::SeqCst);
+                                                }
                                                 break;
                                             }
                                             _ => {

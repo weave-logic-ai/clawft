@@ -12,7 +12,7 @@ categories = ["asynchronous"]
 
 [features]
 default = []
-delegate = ["regex"]
+delegate = ["regex", "which"]
 rvf = []
 test-utils = []
 
@@ -30,6 +30,7 @@ uuid = { workspace = true }
 cron = { workspace = true }
 reqwest = { workspace = true }
 regex = { workspace = true, optional = true }
+which = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

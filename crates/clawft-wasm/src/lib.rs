@@ -40,6 +40,20 @@ pub mod platform;
 #[cfg(feature = "wasm-plugins")]
 pub mod sandbox;
 
+/// Audit logging for WASM plugin host function calls.
+///
+/// Every host function invocation is recorded in a per-plugin audit log.
+/// This provides a tamper-evident record of all side-effecting operations.
+#[cfg(feature = "wasm-plugins")]
+pub mod audit;
+
+/// WASM plugin engine with fuel metering and memory limits.
+///
+/// Provides [`engine::WasmPluginEngine`] -- the host-side runtime for loading
+/// and executing WASM plugin modules with configurable resource limits.
+#[cfg(feature = "wasm-plugins")]
+pub mod engine;
+
 pub use platform::WasmPlatform;
 
 /// Version information for the WASM build.

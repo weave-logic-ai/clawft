@@ -81,9 +81,10 @@ impl PluginHost {
         Ok(())
     }
 
-    /// Start all initialized channels.
+    /// Start all initialized channels concurrently.
     ///
-    /// Each channel is started in its own tokio task. Returns a list of
+    /// Each channel is started in its own tokio task. All channels are
+    /// started concurrently via `join_all`. Returns a list of
     /// `(channel_name, result)` pairs indicating success or failure for
     /// each channel's initial setup.
     pub async fn start_all(&self) -> Vec<(String, Result<(), ChannelError>)> {
@@ -91,29 +92,36 @@ impl PluginHost {
         let names: Vec<String> = channels.keys().cloned().collect();
         drop(channels);
 
-        let mut results = Vec::with_capacity(names.len());
-        for name in names {
-            let result = self.start_channel(&name).await;
-            results.push((name, result));
-        }
-        results
+        let futures: Vec<_> = names
+            .into_iter()
+            .map(|name| async move {
+                let result = self.start_channel(&name).await;
+                (name, result)
+            })
+            .collect();
+
+        futures_util::future::join_all(futures).await
     }
 
-    /// Stop all running channels gracefully.
+    /// Stop all running channels concurrently.
     ///
-    /// Cancels each channel's token and awaits task completion. Returns
-    /// a list of `(channel_name, result)` pairs.
+    /// Cancels each channel's token and awaits task completion. All
+    /// channels are stopped concurrently via `join_all`. Returns a list
+    /// of `(channel_name, result)` pairs.
     pub async fn stop_all(&self) -> Vec<(String, Result<(), ChannelError>)> {
         let tokens = self.cancel_tokens.read().await;
         let names: Vec<String> = tokens.keys().cloned().collect();
         drop(tokens);
 
-        let mut results = Vec::with_capacity(names.len());
-        for name in names {
-            let result = self.stop_channel(&name).await;
-            results.push((name, result));
-        }
-        results
+        let futures: Vec<_> = names
+            .into_iter()
+            .map(|name| async move {
+                let result = self.stop_channel(&name).await;
+                (name, result)
+            })
+            .collect();
+
+        futures_util::future::join_all(futures).await
     }
 
     /// Start a specific channel by name.

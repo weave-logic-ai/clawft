@@ -40,6 +40,12 @@ pub enum SkillsAction {
         /// Path to a skill directory (containing SKILL.md or skill.json).
         path: String,
     },
+
+    /// Remove a user-installed skill.
+    Remove {
+        /// Skill name to remove from ~/.clawft/skills/.
+        name: String,
+    },
 }
 
 /// Run the skills subcommand.
@@ -54,6 +60,7 @@ pub async fn run(args: SkillsArgs) -> anyhow::Result<()> {
         SkillsAction::List => skills_list(&registry, ws_dir.as_deref(), user_dir.as_deref()),
         SkillsAction::Show { name } => skills_show(&registry, &name),
         SkillsAction::Install { path } => skills_install(&path, user_dir.as_deref()),
+        SkillsAction::Remove { name } => skills_remove(&name, user_dir.as_deref()),
     }
 }
 
@@ -223,6 +230,36 @@ fn skills_install(source_path: &str, user_dir: Option<&Path>) -> anyhow::Result<
     copy_dir_recursive(&source, &dest).map_err(|e| anyhow::anyhow!("failed to copy skill: {e}"))?;
 
     println!("Installed skill '{skill_name}' to {}", dest.display());
+
+    Ok(())
+}
+
+/// Remove a user-installed skill from `~/.clawft/skills/<name>/`.
+///
+/// Only removes skills from the user directory. Workspace and built-in
+/// skills cannot be removed via this command.
+fn skills_remove(name: &str, user_dir: Option<&Path>) -> anyhow::Result<()> {
+    let user_dir = user_dir.ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot determine user skills directory (no home directory). \
+             Set $HOME or use an explicit path."
+        )
+    })?;
+
+    let skill_path = user_dir.join(name);
+
+    if !skill_path.exists() {
+        anyhow::bail!(
+            "skill '{name}' not found in user skills directory ({}). \
+             Only user-installed skills can be removed.",
+            user_dir.display()
+        );
+    }
+
+    std::fs::remove_dir_all(&skill_path)
+        .map_err(|e| anyhow::anyhow!("failed to remove skill '{name}': {e}"))?;
+
+    println!("Removed skill '{name}' from {}", skill_path.display());
 
     Ok(())
 }
@@ -434,6 +471,41 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&src);
         let _ = std::fs::remove_dir_all(&user_dir);
+    }
+
+    #[test]
+    fn skills_remove_success() {
+        let user_dir = temp_dir("remove_user");
+        create_skill_md(&user_dir, "removable", "To be removed");
+
+        assert!(user_dir.join("removable").exists());
+
+        let result = skills_remove("removable", Some(&user_dir));
+        assert!(result.is_ok());
+        assert!(!user_dir.join("removable").exists());
+
+        let _ = std::fs::remove_dir_all(&user_dir);
+    }
+
+    #[test]
+    fn skills_remove_not_found() {
+        let user_dir = temp_dir("remove_not_found");
+        std::fs::create_dir_all(&user_dir).unwrap();
+
+        let result = skills_remove("nonexistent", Some(&user_dir));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("not found"));
+
+        let _ = std::fs::remove_dir_all(&user_dir);
+    }
+
+    #[test]
+    fn skills_remove_no_user_dir() {
+        let result = skills_remove("anything", None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("cannot determine"));
     }
 
     #[test]

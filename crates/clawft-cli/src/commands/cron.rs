@@ -101,16 +101,10 @@ fn generate_job_id() -> String {
     format!("job-{}", uuid::Uuid::new_v4())
 }
 
-/// Format a millisecond timestamp as a human-readable string, or "-" if `None`.
-fn format_ts(ms: Option<i64>) -> String {
-    match ms {
-        Some(ts) => {
-            let dt = Utc.timestamp_millis_opt(ts);
-            match dt.single() {
-                Some(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
-                None => "-".into(),
-            }
-        }
+/// Format a `DateTime<Utc>` as a human-readable string, or "-" if `None`.
+fn format_ts(dt: Option<chrono::DateTime<Utc>>) -> String {
+    match dt {
+        Some(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
         None => "-".into(),
     }
 }
@@ -141,12 +135,20 @@ pub fn cron_list(_config: &Config) -> anyhow::Result<()> {
                     "every ?".into()
                 }
             }
-            ScheduleKind::At => format_ts(job.schedule.at_ms),
+            ScheduleKind::At => {
+                match job.schedule.at_ms {
+                    Some(ms) => Utc.timestamp_millis_opt(ms)
+                        .single()
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                        .unwrap_or_else(|| "-".into()),
+                    None => "-".into(),
+                }
+            }
         };
 
         let enabled_str = if job.enabled { "yes" } else { "no" };
-        let last_run = format_ts(job.state.last_run_at_ms);
-        let next_run = format_ts(job.state.next_run_at_ms);
+        let last_run = format_ts(job.state.last_run_at);
+        let next_run = format_ts(job.state.next_run_at);
 
         table.add_row([
             &job.id,
@@ -196,7 +198,7 @@ pub fn cron_add(
     migrate_legacy_store(&path);
 
     let job_id = generate_job_id();
-    let now_ms = Utc::now().timestamp_millis();
+    let now = Utc::now();
 
     let job = CronJob {
         id: job_id.clone(),
@@ -214,8 +216,8 @@ pub fn cron_add(
             ..Default::default()
         },
         state: CronJobState::default(),
-        created_at_ms: now_ms,
-        updated_at_ms: now_ms,
+        created_at: now,
+        updated_at: now,
         delete_after_run: false,
     };
 
@@ -300,15 +302,16 @@ mod tests {
 
     #[test]
     fn format_ts_valid() {
-        // 2023-11-14 22:13:20 UTC = 1700000000000ms
-        let result = format_ts(Some(1_700_000_000_000));
+        // 2023-11-14 22:13:20 UTC
+        let dt = Utc.timestamp_millis_opt(1_700_000_000_000).unwrap();
+        let result = format_ts(Some(dt));
         assert!(result.contains("2023"));
         assert!(result.contains("22:13:20"));
     }
 
     #[test]
-    fn format_ts_zero() {
-        let result = format_ts(Some(0));
+    fn format_ts_epoch() {
+        let result = format_ts(Some(chrono::DateTime::UNIX_EPOCH));
         assert!(result.contains("1970"));
     }
 
@@ -391,7 +394,7 @@ mod tests {
         ));
         let path = dir.join("cron.jsonl");
 
-        let now_ms = Utc::now().timestamp_millis();
+        let now = Utc::now();
         let job = CronJob {
             id: "test-rt-1".into(),
             name: "roundtrip".into(),
@@ -405,8 +408,8 @@ mod tests {
             },
             payload: CronPayload::default(),
             state: CronJobState::default(),
-            created_at_ms: now_ms,
-            updated_at_ms: now_ms,
+            created_at: now,
+            updated_at: now,
             delete_after_run: false,
         };
 
@@ -427,7 +430,7 @@ mod tests {
         ));
         let path = dir.join("cron.jsonl");
 
-        let now_ms = Utc::now().timestamp_millis();
+        let now = Utc::now();
         let job = CronJob {
             id: "j1".into(),
             name: "test".into(),
@@ -435,8 +438,8 @@ mod tests {
             schedule: CronSchedule::default(),
             payload: CronPayload::default(),
             state: CronJobState::default(),
-            created_at_ms: now_ms,
-            updated_at_ms: now_ms,
+            created_at: now,
+            updated_at: now,
             delete_after_run: false,
         };
 
@@ -463,7 +466,7 @@ mod tests {
         ));
         let path = dir.join("cron.jsonl");
 
-        let now_ms = Utc::now().timestamp_millis();
+        let now = Utc::now();
         let make = |id: &str, name: &str| CronJob {
             id: id.into(),
             name: name.into(),
@@ -471,8 +474,8 @@ mod tests {
             schedule: CronSchedule::default(),
             payload: CronPayload::default(),
             state: CronJobState::default(),
-            created_at_ms: now_ms,
-            updated_at_ms: now_ms,
+            created_at: now,
+            updated_at: now,
             delete_after_run: false,
         };
 

@@ -3,14 +3,19 @@
 //! Provides a client for communicating with MCP servers using
 //! JSON-RPC 2.0 over pluggable transports (stdio or HTTP).
 
+pub mod bridge;
 pub mod composite;
+pub mod discovery;
 pub mod middleware;
 pub mod provider;
 pub mod server;
 pub mod transport;
 pub mod types;
 
-pub use provider::{BuiltinToolProvider, CallToolResult, ContentBlock, ToolError, ToolProvider};
+pub use provider::{
+    BuiltinToolProvider, CallToolResult, ContentBlock, SkillToolProvider, ToolError, ToolProvider,
+    skill_to_tool_definition, skills_to_tool_definitions,
+};
 
 /// The MCP protocol version negotiated during initialize.
 ///

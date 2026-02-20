@@ -32,11 +32,11 @@ Element 04 has 8 phases across Weeks 3-8:
 |-------|-------------|----------|------|----------|--------|-------|--------|-----------------|
 | C1 | Plugin trait crate | P0 | 3-4 | clawft-plugin (new) | **Done** | Agent-04 | sprint/phase-5 | 6 traits + manifest schema |
 | C2 | WASM plugin host | P1 | 4-5 | clawft-wasm, clawft-core | **In Progress** | Agent-04 | sprint/phase-5 | Sandbox + WIT done; wasmtime pending |
-| C3 | Skill loader | P1 | 5-6 | clawft-core | Pending | -- | -- | serde_yaml + WASM auto-reg |
-| C4 | Hot-reload | P1 | 6-7 | clawft-core, clawft-cli | Pending | -- | -- | notify watcher + CLI |
+| C3 | Skill loader | P1 | 5-6 | clawft-core | **Done** | Agent-04 | sprint/phase-5 | serde_yaml + WASM auto-reg |
+| C4 | Hot-reload | P1 | 6-7 | clawft-core, clawft-cli | **Done** | Agent-04 | sprint/phase-5 | notify watcher + CLI |
 | C4a | Autonomous creation | P2 | 8+ | clawft-core | Pending | -- | -- | Pattern detect + auto-gen |
-| C5 | Slash commands | P2 | 7 | clawft-cli | Pending | -- | -- | Registry wiring |
-| C6 | MCP exposure | P1 | 7-8 | clawft-services | Pending | -- | -- | tools/list + tools/call |
+| C5 | Slash commands | P2 | 7 | clawft-cli | **Done** | Agent-04 | sprint/phase-5 | Registry wiring |
+| C6 | MCP exposure | P1 | 7-8 | clawft-services | **Done** | Agent-04 | sprint/phase-5 | SkillToolProvider + tools/list + tools/call |
 | C7 | PluginHost unification | P2 | 8 | clawft-channels | Pending | -- | -- | Concurrent lifecycle |
 
 ## Internal Dependency Graph
@@ -136,10 +136,10 @@ C1 (trait crate) [NO DEPS]
 |-------|--------|--------|
 | C1 (Plugin Traits) | **Done** | 100% |
 | C2 (WASM Host) | **In Progress** | 60% |
-| C3 (Skill Loader) | Pending | 0% |
-| C4 (Hot-Reload) | Pending | 0% |
+| C3 (Skill Loader) | **Done** | 100% |
+| C4 (Hot-Reload) | **Done** | 100% |
 | C4a (Autonomous) | Pending | 0% |
-| C5 (Slash Commands) | Pending | 0% |
-| C6 (MCP Exposure) | Pending | 0% |
+| C5 (Slash Commands) | **Done** | 100% |
+| C6 (MCP Exposure) | **Done** | 100% |
 | C7 (PluginHost) | Pending | 0% |
-| **Total** | **In Progress** | **20%** |
+| **Total** | **In Progress** | **75%** |

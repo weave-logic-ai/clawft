@@ -10,6 +10,8 @@
 //! - `/status` -- show current agent, model, skills
 //! - `/quit` -- exit
 
+use tracing::warn;
+
 use super::registry::{InteractiveContext, SlashCommand, SlashCommandRegistry};
 
 /// Register all built-in slash commands into the given registry.
@@ -22,6 +24,70 @@ pub fn register_builtins(registry: &mut SlashCommandRegistry) {
     registry.register(Box::new(StatusCommand));
     registry.register(Box::new(QuitCommand));
     registry.register(Box::new(ToolsCommand));
+}
+
+/// Register skill-contributed commands into the registry.
+///
+/// Skills with `user_invocable: true` register as `/skill_name` commands.
+/// If a skill command conflicts with a built-in command, the collision is
+/// logged as a warning and the skill command is skipped.
+///
+/// Returns the number of skill commands successfully registered.
+pub fn register_skill_commands(
+    registry: &mut SlashCommandRegistry,
+    skills: &[(String, String)],
+) -> usize {
+    let mut count = 0;
+    for (name, description) in skills {
+        let cmd = Box::new(SkillInvokeCommand {
+            skill_name: name.clone(),
+            skill_description: description.clone(),
+        });
+        match registry.register_checked(cmd) {
+            Ok(()) => {
+                count += 1;
+            }
+            Err(collision) => {
+                warn!(
+                    skill = %name,
+                    collision = %collision,
+                    "skill command '/{name}' conflicts with existing command, skipping"
+                );
+            }
+        }
+    }
+    count
+}
+
+/// A dynamically registered slash command that activates a skill.
+///
+/// When a user types `/<skill_name>`, this command activates the skill
+/// in the interactive context.
+struct SkillInvokeCommand {
+    skill_name: String,
+    skill_description: String,
+}
+
+impl SlashCommand for SkillInvokeCommand {
+    fn name(&self) -> &str {
+        &self.skill_name
+    }
+
+    fn description(&self) -> &str {
+        &self.skill_description
+    }
+
+    fn execute(&self, args: &str, ctx: &mut InteractiveContext) -> anyhow::Result<String> {
+        ctx.active_skill = self.skill_name.clone();
+        if args.is_empty() {
+            Ok(format!("Activated skill: {}", self.skill_name))
+        } else {
+            Ok(format!(
+                "Activated skill: {} (with args: {})",
+                self.skill_name, args
+            ))
+        }
+    }
 }
 
 // ── /help ─────────────────────────────────────────────────────────────────
@@ -560,5 +626,85 @@ mod tests {
         assert!(result.is_some());
         let output = result.unwrap().unwrap();
         assert!(output.contains("Commands:"));
+    }
+
+    // ── skill command registration tests ──────────────────────────────
+
+    #[test]
+    fn register_skill_commands_adds_commands() {
+        let mut reg = SlashCommandRegistry::new();
+        register_builtins(&mut reg);
+        let initial_count = reg.len();
+
+        let skills = vec![
+            ("research".into(), "Deep research on a topic".into()),
+            ("coding".into(), "Write code".into()),
+        ];
+
+        let added = register_skill_commands(&mut reg, &skills);
+        assert_eq!(added, 2);
+        assert_eq!(reg.len(), initial_count + 2);
+        assert!(reg.has("research"));
+        assert!(reg.has("coding"));
+    }
+
+    #[test]
+    fn register_skill_commands_collision_detected() {
+        let mut reg = SlashCommandRegistry::new();
+        register_builtins(&mut reg);
+
+        // "help" collides with the built-in /help command
+        let skills = vec![
+            ("help".into(), "Conflicting skill".into()),
+            ("myskill".into(), "Non-conflicting skill".into()),
+        ];
+
+        let added = register_skill_commands(&mut reg, &skills);
+        assert_eq!(added, 1);
+        assert!(reg.has("myskill"));
+        // /help should still be the built-in version
+        let mut ctx = test_ctx();
+        let result = reg.dispatch("/help", &mut ctx).unwrap().unwrap();
+        assert!(result.contains("Commands:"));
+    }
+
+    #[test]
+    fn skill_invoke_command_activates_skill() {
+        let mut reg = SlashCommandRegistry::new();
+        register_builtins(&mut reg);
+
+        let skills = vec![("research".into(), "Research stuff".into())];
+        register_skill_commands(&mut reg, &skills);
+
+        let mut ctx = test_ctx();
+        let result = reg.dispatch("/research", &mut ctx).unwrap().unwrap();
+        assert!(result.contains("Activated skill: research"));
+        assert_eq!(ctx.active_skill, "research");
+    }
+
+    #[test]
+    fn skill_invoke_command_with_args() {
+        let mut reg = SlashCommandRegistry::new();
+        let skills = vec![("lookup".into(), "Lookup things".into())];
+        register_skill_commands(&mut reg, &skills);
+
+        let mut ctx = test_ctx();
+        let result = reg.dispatch("/lookup some query", &mut ctx).unwrap().unwrap();
+        assert!(result.contains("Activated skill: lookup"));
+        assert!(result.contains("some query"));
+    }
+
+    #[test]
+    fn register_checked_rejects_duplicate() {
+        let mut reg = SlashCommandRegistry::new();
+        register_builtins(&mut reg);
+
+        let cmd = Box::new(SkillInvokeCommand {
+            skill_name: "quit".into(),
+            skill_description: "Conflicts with quit".into(),
+        });
+        let result = reg.register_checked(cmd);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "quit");
     }
 }

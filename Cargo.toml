@@ -11,6 +11,9 @@ members = [
     "crates/clawft-cli",
     "crates/clawft-wasm",
     "crates/clawft-plugin",
+    "crates/clawft-plugin-git",
+    "crates/clawft-plugin-cargo",
+    "crates/clawft-plugin-oauth2",
 ]
 
 [workspace.package]
@@ -83,12 +86,21 @@ serde_yaml = "0.9"
 # Regex
 regex = "1"
 
+# Binary discovery
+which = "7"
+
 # Random (testing)
 rand = "0.8"
+
+# File-system watching
+notify = "7"
 
 # RVF (RuVector Format) -- vector storage
 rvf-runtime = { version = "0.2", default-features = false, features = ["std"] }
 rvf-types = { version = "0.2", default-features = false, features = ["std"] }
+
+# HNSW approximate nearest neighbor search
+instant-distance = "0.6"
 
 # Internal crates
 clawft-types = { path = "crates/clawft-types" }
@@ -99,6 +111,9 @@ clawft-channels = { path = "crates/clawft-channels" }
 clawft-llm = { path = "crates/clawft-llm" }
 clawft-services = { path = "crates/clawft-services" }
 clawft-plugin = { path = "crates/clawft-plugin" }
+clawft-plugin-git = { path = "crates/clawft-plugin-git" }
+clawft-plugin-cargo = { path = "crates/clawft-plugin-cargo" }
+clawft-plugin-oauth2 = { path = "crates/clawft-plugin-oauth2" }
 
 [profile.release]
 opt-level = "z"

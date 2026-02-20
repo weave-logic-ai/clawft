@@ -22,6 +22,7 @@ wasm-plugins = [
     "dep:tracing",
     "dep:thiserror",
     "dep:dirs",
+    "dep:chrono",
 ]
 alloc-talc = ["dep:talc"]
 alloc-lol = ["dep:lol_alloc"]
@@ -39,6 +40,7 @@ regex = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
 dirs = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 dlmalloc = { version = "0.2", features = ["global"] }

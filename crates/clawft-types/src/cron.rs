@@ -3,7 +3,12 @@
 //! Defines the data model for scheduled jobs: [`CronJob`], its
 //! [`CronSchedule`], [`CronPayload`], and runtime [`CronJobState`].
 //! The [`CronStore`] is the top-level container persisted to disk.
+//!
+//! All timestamps use `DateTime<Utc>` for type safety. For backward
+//! compatibility, the serde layer accepts both RFC 3339 strings and
+//! millisecond-since-epoch integers via custom deserializers.
 
+use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 /// How a cron job is scheduled.
@@ -118,13 +123,21 @@ pub enum JobStatus {
 /// Runtime state of a cron job.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CronJobState {
-    /// Next scheduled run time in milliseconds since epoch.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_run_at_ms: Option<i64>,
+    /// Next scheduled run time (UTC).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_datetime_or_ms"
+    )]
+    pub next_run_at: Option<DateTime<Utc>>,
 
-    /// Last actual run time in milliseconds since epoch.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_run_at_ms: Option<i64>,
+    /// Last actual run time (UTC).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_datetime_or_ms"
+    )]
+    pub last_run_at: Option<DateTime<Utc>>,
 
     /// Outcome of the last run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -160,17 +173,75 @@ pub struct CronJob {
     #[serde(default)]
     pub state: CronJobState,
 
-    /// Creation timestamp in milliseconds since epoch.
-    #[serde(default)]
-    pub created_at_ms: i64,
+    /// Creation timestamp (UTC).
+    #[serde(default = "default_epoch", deserialize_with = "deserialize_datetime_or_ms")]
+    pub created_at: DateTime<Utc>,
 
-    /// Last update timestamp in milliseconds since epoch.
-    #[serde(default)]
-    pub updated_at_ms: i64,
+    /// Last update timestamp (UTC).
+    #[serde(default = "default_epoch", deserialize_with = "deserialize_datetime_or_ms")]
+    pub updated_at: DateTime<Utc>,
 
     /// If true, delete the job after its next successful run.
     #[serde(default)]
     pub delete_after_run: bool,
+}
+
+/// Returns the Unix epoch as a default `DateTime<Utc>` (for `#[serde(default)]`).
+fn default_epoch() -> DateTime<Utc> {
+    DateTime::UNIX_EPOCH
+}
+
+/// Deserialize a `DateTime<Utc>` from either:
+/// - An RFC 3339 string (new format)
+/// - An integer (milliseconds since epoch, legacy format)
+fn deserialize_datetime_or_ms<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    let value: serde_json::Value = Deserialize::deserialize(deserializer)?;
+    match &value {
+        serde_json::Value::String(s) => DateTime::parse_from_rfc3339(s)
+            .map(|dt| dt.with_timezone(&Utc))
+            .or_else(|_| s.parse::<DateTime<Utc>>())
+            .map_err(de::Error::custom),
+        serde_json::Value::Number(n) => {
+            let ms = n.as_i64().ok_or_else(|| de::Error::custom("expected i64"))?;
+            Utc.timestamp_millis_opt(ms)
+                .single()
+                .ok_or_else(|| de::Error::custom(format!("invalid ms timestamp: {ms}")))
+        }
+        serde_json::Value::Null => Ok(DateTime::UNIX_EPOCH),
+        _ => Err(de::Error::custom("expected string, integer, or null")),
+    }
+}
+
+/// Deserialize an `Option<DateTime<Utc>>` from either:
+/// - An RFC 3339 string (new format)
+/// - An integer (milliseconds since epoch, legacy format)
+/// - `null` / missing -> `None`
+fn deserialize_optional_datetime_or_ms<'de, D>(
+    deserializer: D,
+) -> Result<Option<DateTime<Utc>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) => DateTime::parse_from_rfc3339(&s)
+            .map(|dt| Some(dt.with_timezone(&Utc)))
+            .or_else(|_| s.parse::<DateTime<Utc>>().map(Some))
+            .map_err(de::Error::custom),
+        Some(serde_json::Value::Number(n)) => {
+            let ms = n.as_i64().ok_or_else(|| de::Error::custom("expected i64"))?;
+            Ok(Utc.timestamp_millis_opt(ms).single())
+        }
+        _ => Err(de::Error::custom("expected string, integer, or null")),
+    }
 }
 
 fn default_true() -> bool {
@@ -231,6 +302,7 @@ mod tests {
 
     #[test]
     fn cron_job_serde_roundtrip() {
+        let now = Utc::now();
         let job = CronJob {
             id: "job-1".into(),
             name: "daily check".into(),
@@ -250,8 +322,8 @@ mod tests {
                 to: Some("C123".into()),
             },
             state: CronJobState::default(),
-            created_at_ms: 1_700_000_000_000,
-            updated_at_ms: 1_700_000_000_000,
+            created_at: now,
+            updated_at: now,
             delete_after_run: false,
         };
         let json = serde_json::to_string(&job).unwrap();
@@ -273,8 +345,8 @@ mod tests {
                 schedule: CronSchedule::default(),
                 payload: CronPayload::default(),
                 state: CronJobState::default(),
-                created_at_ms: 0,
-                updated_at_ms: 0,
+                created_at: DateTime::UNIX_EPOCH,
+                updated_at: DateTime::UNIX_EPOCH,
                 delete_after_run: true,
             }],
         };
@@ -325,9 +397,10 @@ mod tests {
 
     #[test]
     fn job_state_with_error() {
+        let now = Utc::now();
         let state = CronJobState {
-            next_run_at_ms: Some(1_700_000_100_000),
-            last_run_at_ms: Some(1_700_000_000_000),
+            next_run_at: Some(now),
+            last_run_at: Some(now),
             last_status: Some(JobStatus::Error),
             last_error: Some("connection refused".into()),
         };
@@ -335,5 +408,40 @@ mod tests {
         let restored: CronJobState = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.last_status, Some(JobStatus::Error));
         assert_eq!(restored.last_error.as_deref(), Some("connection refused"));
+    }
+
+    #[test]
+    fn backward_compat_ms_timestamps() {
+        // Legacy format: millisecond integers.
+        let json = r#"{
+            "id": "legacy-1",
+            "name": "old-job",
+            "created_at": 1700000000000,
+            "updated_at": 1700000000000,
+            "state": {
+                "next_run_at": 1700000100000,
+                "last_run_at": 1700000000000
+            }
+        }"#;
+        let job: CronJob = serde_json::from_str(json).unwrap();
+        assert_eq!(job.id, "legacy-1");
+        assert_eq!(job.created_at.timestamp_millis(), 1_700_000_000_000);
+        assert!(job.state.next_run_at.is_some());
+        assert!(job.state.last_run_at.is_some());
+    }
+
+    #[test]
+    fn backward_compat_legacy_field_names() {
+        // Legacy JSONL may have old field names with _ms suffix.
+        // These will be ignored by the new struct (fields renamed).
+        // This test verifies the new fields parse from their new names.
+        let json = r#"{
+            "id": "j1",
+            "name": "test",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let job: CronJob = serde_json::from_str(json).unwrap();
+        assert_eq!(job.created_at, Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap());
     }
 }

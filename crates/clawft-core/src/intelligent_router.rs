@@ -129,24 +129,21 @@ impl IntelligentRouter {
         let prompt_embedding = self.embedder.embed(prompt).await?;
         let policy_results = self.policy_store.search(&prompt_embedding, 5);
 
-        if let Some(best) = policy_results.first() {
-            if best.score > 0.85 {
-                // Parse tier from tags.
-                if let Some(tier_tag) = best.tags.first() {
-                    if let Ok(tier) = tier_tag.parse::<u8>() {
-                        let model = tier_to_model(tier);
-                        return Ok(RoutingDecision {
-                            tier,
-                            model,
-                            reason: format!(
-                                "cached policy match (score={:.3}): {}",
-                                best.score, best.text
-                            ),
-                            complexity_score: compute_complexity(prompt),
-                        });
-                    }
-                }
-            }
+        if let Some(best) = policy_results.first()
+            && best.score > 0.85
+            && let Some(tier_tag) = best.tags.first()
+            && let Ok(tier) = tier_tag.parse::<u8>()
+        {
+            let model = tier_to_model(tier);
+            return Ok(RoutingDecision {
+                tier,
+                model,
+                reason: format!(
+                    "cached policy match (score={:.3}): {}",
+                    best.score, best.text
+                ),
+                complexity_score: compute_complexity(prompt),
+            });
         }
 
         // Rule 3: Compute complexity.

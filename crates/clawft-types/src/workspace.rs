@@ -5,9 +5,14 @@
 
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Entry in the global workspace registry (`~/.clawft/workspaces.json`).
+///
+/// Timestamps are stored as `DateTime<Utc>`. For backward compatibility with
+/// registries that stored ISO 8601 strings, the custom deserializer accepts
+/// both RFC 3339 strings and native `DateTime<Utc>` JSON representations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceEntry {
     /// Human-readable workspace name (unique within registry).
@@ -16,13 +21,42 @@ pub struct WorkspaceEntry {
     /// Absolute path to the workspace root directory.
     pub path: PathBuf,
 
-    /// ISO 8601 timestamp of the last time this workspace was accessed.
-    #[serde(default)]
-    pub last_accessed: Option<String>,
+    /// UTC timestamp of the last time this workspace was accessed.
+    #[serde(default, deserialize_with = "deserialize_optional_datetime")]
+    pub last_accessed: Option<DateTime<Utc>>,
 
-    /// ISO 8601 timestamp of when the workspace was first created.
-    #[serde(default)]
-    pub created_at: Option<String>,
+    /// UTC timestamp of when the workspace was first created.
+    #[serde(default, deserialize_with = "deserialize_optional_datetime")]
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+/// Deserialize an `Option<DateTime<Utc>>` that accepts both:
+/// - A native chrono `DateTime<Utc>` JSON value (RFC 3339 string from chrono's Serialize)
+/// - A plain ISO 8601 / RFC 3339 string (legacy format)
+/// - `null` / missing field -> `None`
+fn deserialize_optional_datetime<'de, D>(
+    deserializer: D,
+) -> Result<Option<DateTime<Utc>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    match opt {
+        None => Ok(None),
+        Some(s) => {
+            // Try RFC 3339 parsing (covers both chrono's output and legacy strings).
+            match DateTime::parse_from_rfc3339(&s) {
+                Ok(dt) => Ok(Some(dt.with_timezone(&Utc))),
+                Err(_) => {
+                    // Try a more relaxed ISO 8601 parse as fallback.
+                    match s.parse::<DateTime<Utc>>() {
+                        Ok(dt) => Ok(Some(dt)),
+                        Err(_) => Ok(None), // Gracefully degrade: treat unparseable as missing.
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Global workspace registry.
@@ -87,13 +121,14 @@ impl WorkspaceRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     fn sample_entry(name: &str) -> WorkspaceEntry {
         WorkspaceEntry {
             name: name.into(),
             path: PathBuf::from(format!("/tmp/ws-{name}")),
             last_accessed: None,
-            created_at: Some("2026-01-01T00:00:00Z".into()),
+            created_at: Some(Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()),
         }
     }
 
@@ -190,6 +225,33 @@ mod tests {
         let json = r#"{"name": "ws", "path": "/tmp/ws"}"#;
         let entry: WorkspaceEntry = serde_json::from_str(json).unwrap();
         assert!(entry.last_accessed.is_none());
+        assert!(entry.created_at.is_none());
+    }
+
+    #[test]
+    fn backward_compat_string_timestamps() {
+        // Legacy format: plain ISO 8601 strings in JSON.
+        let json = r#"{
+            "name": "legacy",
+            "path": "/tmp/legacy",
+            "last_accessed": "2026-01-15T10:30:00Z",
+            "created_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let entry: WorkspaceEntry = serde_json::from_str(json).unwrap();
+        assert!(entry.last_accessed.is_some());
+        assert!(entry.created_at.is_some());
+        let created = entry.created_at.unwrap();
+        assert_eq!(created, Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn unparseable_timestamp_becomes_none() {
+        let json = r#"{
+            "name": "bad-ts",
+            "path": "/tmp/bad",
+            "created_at": "not-a-date"
+        }"#;
+        let entry: WorkspaceEntry = serde_json::from_str(json).unwrap();
         assert!(entry.created_at.is_none());
     }
 }

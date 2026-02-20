@@ -17,21 +17,21 @@ Element 06 has 9 channel items across 3 phases spanning Weeks 4-8.
 
 ### Week 4-5 (E-Fix -- 2 items)
 
-- [ ] E1 -- Discord Gateway Resume (OP 6): use stored session_id/resume_url -- clawft-channels/src/discord/channel.rs
-- [ ] E6 -- Enhanced heartbeat / proactive check-in mode (depends on B4 CronService) -- clawft-services/src/heartbeat/
+- [x] E1 -- Discord Gateway Resume (OP 6): use stored session_id/resume_url -- DONE 2026-02-20
+- [x] E6 -- Enhanced heartbeat / proactive check-in mode (depends on B4 CronService) -- DONE 2026-02-20
 
 ### Week 5-7 (E-Enterprise -- 3 items)
 
-- [ ] E2 -- Email channel (IMAP + SMTP + OAuth2 for Gmail) -- clawft-channels/src/email/ (new, feature-gated, P0 MVP)
-- [ ] E5a -- Google Chat Workspace API (depends on F6 OAuth2 helper) -- clawft-channels/src/google_chat/ (new, feature-gated) **TIMELINE RISK: F6 at Week 7-9**
-- [ ] E5b -- Microsoft Teams Bot Framework -- clawft-channels/src/teams/ (new, feature-gated)
+- [x] E2 -- Email channel (IMAP + SMTP + OAuth2 for Gmail) -- DONE 2026-02-20
+- [x] E5a -- Google Chat Workspace API (skeleton, F6 OAuth2 now available) -- DONE 2026-02-20
+- [x] E5b -- Microsoft Teams Bot Framework -- DONE 2026-02-20
 
 ### Week 6-8 (E-Consumer -- 4 items)
 
-- [ ] E3 -- WhatsApp Cloud API -- clawft-channels/src/whatsapp/ (new, feature-gated)
-- [ ] E4 -- Signal subprocess bridge -- clawft-channels/src/signal/ (new, feature-gated)
-- [ ] E5 -- Matrix channel (Matrix SDK) -- clawft-channels/src/matrix/ (new, feature-gated)
-- [ ] E5 -- IRC channel (IRC protocol) -- clawft-channels/src/irc/ (new, feature-gated)
+- [x] E3 -- WhatsApp Cloud API -- DONE 2026-02-20
+- [x] E4 -- Signal subprocess bridge -- DONE 2026-02-20
+- [x] E5 -- Matrix channel (Matrix SDK) -- DONE 2026-02-20
+- [ ] E5 -- IRC channel (IRC protocol) -- deferred
 
 ---
 
@@ -180,7 +180,7 @@ Scoring: Likelihood (Low=1, Medium=2, High=3) x Impact (Low=1, Medium=2, High=3,
 
 | Phase | Items | Pending | In Progress | Completed | % Done |
 |-------|-------|---------|-------------|-----------|--------|
-| E-Fix (E1, E6) | 2 | 2 | 0 | 0 | 0% |
-| E-Enterprise (E2, E5a, E5b) | 3 | 3 | 0 | 0 | 0% |
-| E-Consumer (E3, E4, E5) | 4 | 4 | 0 | 0 | 0% |
-| **Total** | **9** | **9** | **0** | **0** | **0%** |
+| E-Fix (E1, E6) | 2 | 0 | 0 | 2 | 100% |
+| E-Enterprise (E2, E5a, E5b) | 3 | 0 | 0 | 3 | 100% |
+| E-Consumer (E3, E4, E5) | 4 | 1 | 0 | 3 | 75% |
+| **Total** | **9** | **1** | **0** | **8** | **89%** |

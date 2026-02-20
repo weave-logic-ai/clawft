@@ -90,6 +90,20 @@ impl SlashCommandRegistry {
         self.commands.insert(cmd.name().to_string(), cmd);
     }
 
+    /// Register a slash command, checking for collision with existing commands.
+    ///
+    /// Returns `Err(collision_name)` if a command with the same name is already
+    /// registered (the new command is NOT registered in this case).
+    /// Returns `Ok(())` if the command was registered successfully.
+    pub fn register_checked(&mut self, cmd: Box<dyn SlashCommand>) -> Result<(), String> {
+        let name = cmd.name().to_string();
+        if self.commands.contains_key(&name) {
+            return Err(name);
+        }
+        self.commands.insert(name, cmd);
+        Ok(())
+    }
+
     /// Dispatch a line of input.
     ///
     /// The input should start with `/`. The first word (after `/`) is the

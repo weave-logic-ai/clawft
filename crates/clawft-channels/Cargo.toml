@@ -10,9 +10,19 @@ description = "Channel plugin system for clawft"
 keywords = ["telegram", "slack", "discord", "chat", "bot"]
 categories = ["network-programming"]
 
+[features]
+default = []
+email = []
+whatsapp = []
+signal = []
+matrix = []
+google-chat = []
+teams = []
+
 [dependencies]
 clawft-types = { workspace = true }
 clawft-platform = { workspace = true }
+clawft-plugin = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

@@ -59,11 +59,11 @@ fn default_max_tokens() -> u32 {
 impl Default for DelegationConfig {
     fn default() -> Self {
         Self {
-            claude_enabled: false,
+            claude_enabled: true, // Gracefully degrades if no API key
             claude_model: default_delegation_model(),
             max_turns: default_max_turns(),
             max_tokens: default_max_tokens(),
-            claude_flow_enabled: false,
+            claude_flow_enabled: false, // Stays false until Flow fully wired
             rules: Vec::new(),
             excluded_tools: Vec::new(),
         }
@@ -114,7 +114,7 @@ mod tests {
     #[test]
     fn delegation_config_defaults() {
         let cfg = DelegationConfig::default();
-        assert!(!cfg.claude_enabled);
+        assert!(cfg.claude_enabled); // M3: defaults to true, degrades gracefully
         assert_eq!(cfg.claude_model, "claude-sonnet-4-20250514");
         assert_eq!(cfg.max_turns, 10);
         assert_eq!(cfg.max_tokens, 4096);

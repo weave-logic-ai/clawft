@@ -26,10 +26,22 @@
 //! from the `clawft-types` crate. This crate re-exports it for convenience.
 
 pub mod discord;
+#[cfg(feature = "email")]
+pub mod email;
+#[cfg(feature = "google-chat")]
+pub mod google_chat;
 pub mod host;
+#[cfg(feature = "matrix")]
+pub mod matrix;
+#[cfg(feature = "signal")]
+pub mod signal;
 pub mod slack;
+#[cfg(feature = "teams")]
+pub mod teams;
 pub mod telegram;
 pub mod traits;
+#[cfg(feature = "whatsapp")]
+pub mod whatsapp;
 
 pub use host::PluginHost;
 pub use traits::*;

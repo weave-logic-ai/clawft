@@ -68,10 +68,9 @@ impl CronService {
     pub async fn add_job(&self, name: String, schedule: String, prompt: String) -> Result<String> {
         let id = format!("job-{}", uuid::Uuid::new_v4());
         let now = Utc::now();
-        let now_ms = now.timestamp_millis();
 
         // Compute the first next_run.
-        let next_run_ms = compute_next_run(&schedule, &now)?;
+        let next_run = compute_next_run(&schedule, &now)?;
 
         let job = CronJob {
             id: id.clone(),
@@ -89,11 +88,11 @@ impl CronService {
                 ..Default::default()
             },
             state: CronJobState {
-                next_run_at_ms: next_run_ms,
+                next_run_at: next_run,
                 ..Default::default()
             },
-            created_at_ms: now_ms,
-            updated_at_ms: now_ms,
+            created_at: now,
+            updated_at: now,
             delete_after_run: false,
         };
 
@@ -325,6 +324,6 @@ mod tests {
             .await
             .unwrap();
         let jobs = svc.list_jobs().await.unwrap();
-        assert!(jobs[0].state.next_run_at_ms.is_some());
+        assert!(jobs[0].state.next_run_at.is_some());
     }
 }

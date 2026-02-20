@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 
+use chrono::TimeZone;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tracing::warn;
@@ -235,14 +236,24 @@ fn apply_field_update(job: &mut CronJob, field: &str, value: &serde_json::Value)
                 job.name = v.to_string();
             }
         }
-        "last_run_at_ms" => {
-            if let Some(v) = value.as_i64() {
-                job.state.last_run_at_ms = Some(v);
+        "last_run_at_ms" | "last_run_at" => {
+            // Accept both i64 ms (legacy) and RFC 3339 string (new format).
+            if let Some(ms) = value.as_i64() {
+                job.state.last_run_at = chrono::Utc.timestamp_millis_opt(ms).single();
+            } else if let Some(s) = value.as_str()
+                && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s)
+            {
+                job.state.last_run_at = Some(dt.with_timezone(&chrono::Utc));
             }
         }
-        "next_run_at_ms" => {
-            if let Some(v) = value.as_i64() {
-                job.state.next_run_at_ms = Some(v);
+        "next_run_at_ms" | "next_run_at" => {
+            // Accept both i64 ms (legacy) and RFC 3339 string (new format).
+            if let Some(ms) = value.as_i64() {
+                job.state.next_run_at = chrono::Utc.timestamp_millis_opt(ms).single();
+            } else if let Some(s) = value.as_str()
+                && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s)
+            {
+                job.state.next_run_at = Some(dt.with_timezone(&chrono::Utc));
             }
         }
         "last_status" => {
@@ -268,7 +279,7 @@ mod tests {
     use chrono::Utc;
 
     fn make_job(id: &str, name: &str) -> CronJob {
-        let now_ms = Utc::now().timestamp_millis();
+        let now = Utc::now();
         CronJob {
             id: id.into(),
             name: name.into(),
@@ -285,8 +296,8 @@ mod tests {
                 ..Default::default()
             },
             state: CronJobState::default(),
-            created_at_ms: now_ms,
-            updated_at_ms: now_ms,
+            created_at: now,
+            updated_at: now,
             delete_after_run: false,
         }
     }

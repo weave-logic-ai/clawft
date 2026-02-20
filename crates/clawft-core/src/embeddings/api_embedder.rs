@@ -256,6 +256,10 @@ impl Embedder for ApiEmbedder {
     fn dimension(&self) -> usize {
         self.dim
     }
+
+    fn name(&self) -> &str {
+        &self.config.model
+    }
 }
 
 #[cfg(test)]

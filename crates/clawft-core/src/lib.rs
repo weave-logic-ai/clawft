@@ -6,12 +6,15 @@
 //! context builder, memory store, and the 6-stage pipeline system.
 
 pub mod agent;
+pub mod agent_bus;
+pub mod agent_routing;
 pub mod bootstrap;
 pub mod bus;
 pub mod clawft_md;
 pub mod config_merge;
 pub mod json_repair;
 pub mod pipeline;
+pub mod planning;
 pub mod routing_validation;
 pub mod security;
 pub mod session;
