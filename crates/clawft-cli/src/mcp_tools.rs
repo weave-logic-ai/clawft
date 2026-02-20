@@ -244,18 +244,22 @@ pub async fn register_mcp_tools(
     // MCP services feature not compiled in.
 }
 
-/// Register the delegation tool if an ANTHROPIC_API_KEY is available.
+/// Register the delegation tool if an Anthropic API key is available.
 ///
-/// Reads `ANTHROPIC_API_KEY` from the environment and, if present, creates
-/// a [`ClaudeDelegator`] and [`DelegateTaskTool`] and registers it in the
-/// tool registry.
+/// Resolves the API key using a two-step lookup:
+/// 1. `ANTHROPIC_API_KEY` environment variable (highest priority)
+/// 2. `config_api_key` from the providers config section (fallback)
 ///
-/// Gracefully degrades: if the env var is missing or delegation is disabled
+/// Creates a [`ClaudeDelegator`] and [`DelegateTaskTool`] and registers
+/// them in the tool registry.
+///
+/// Gracefully degrades: if no API key is found or delegation is disabled
 /// in config, delegation is simply not available (not a fatal error).
 #[cfg(feature = "delegate")]
 pub fn register_delegation(
     config: &clawft_types::delegation::DelegationConfig,
     registry: &mut clawft_core::tools::registry::ToolRegistry,
+    config_api_key: Option<&str>,
 ) {
     use clawft_services::delegation::DelegationEngine;
     use clawft_services::delegation::claude::ClaudeDelegator;
@@ -266,11 +270,38 @@ pub fn register_delegation(
         return;
     }
 
+    // Resolve API key: env var > config providers section.
     let api_key = match std::env::var("ANTHROPIC_API_KEY") {
         Ok(key) if !key.is_empty() => key,
-        _ => {
-            tracing::info!("ANTHROPIC_API_KEY not set, delegation disabled");
-            return;
+        Ok(_) => {
+            // Env var is set but empty -- fall through to config fallback.
+            tracing::debug!("ANTHROPIC_API_KEY env var is empty, trying config fallback");
+            match config_api_key {
+                Some(key) if !key.is_empty() => key.to_string(),
+                _ => {
+                    tracing::info!(
+                        "ANTHROPIC_API_KEY env var is set but empty and no key in providers config; \
+                         delegation disabled"
+                    );
+                    return;
+                }
+            }
+        }
+        Err(_) => {
+            // Env var not set at all -- try config fallback.
+            match config_api_key {
+                Some(key) if !key.is_empty() => {
+                    tracing::debug!("using Anthropic API key from providers config");
+                    key.to_string()
+                }
+                _ => {
+                    tracing::info!(
+                        "ANTHROPIC_API_KEY not set and no key in providers config; \
+                         delegation disabled"
+                    );
+                    return;
+                }
+            }
         }
     };
 
@@ -305,6 +336,7 @@ pub fn register_delegation(
 pub fn register_delegation(
     _config: &clawft_types::delegation::DelegationConfig,
     _registry: &mut clawft_core::tools::registry::ToolRegistry,
+    _config_api_key: Option<&str>,
 ) {
     // Delegation feature not compiled in.
 }

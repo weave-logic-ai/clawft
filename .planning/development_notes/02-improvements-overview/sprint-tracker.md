@@ -15,10 +15,11 @@
 - [ ] **Full Vision (Week 12)**: Browser automation, dev tool suite, F9b full MCP client, ClawHub with vector search, per-agent sandboxing, security plugin, Docker images, CI/CD pipeline, all forward-compat hooks for voice and UI in place
 
 ### MVP Verification Checklist
-- [ ] `cargo test --workspace` passes with zero failures
-- [ ] `cargo clippy --workspace -- -D warnings` produces no warnings
-- [ ] Binary size < 10 MB (release build, default features)
-- [ ] Gateway starts, accepts email message, routes to agent, agent responds
+- [x] security-review passes without any p0.
+- [x] `cargo test --workspace` passes with zero failures
+- [x] `cargo clippy --workspace -- -D warnings` produces no warnings
+- [x] Binary size < 10 MB (release build, default features)
+- [x] Gateway starts, accepts email message, routes to agent, agent responds
 - [ ] `weft skill install coding-agent` loads skill, tools appear in `tools/list`
 - [ ] Hot-reload: modify `SKILL.md`, verify tool list updates within 2 seconds
 - [ ] FlowDelegator: delegate task to Claude Code, receive response, routes to correct agent

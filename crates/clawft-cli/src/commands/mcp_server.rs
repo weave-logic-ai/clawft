@@ -21,19 +21,23 @@
 //! weft mcp-server --config /path/to/config.json
 //! ```
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Args;
 use tracing::info;
 
+use clawft_core::agent::skills_v2::SkillRegistry;
 use clawft_core::tools::registry::ToolRegistry;
 use clawft_platform::NativePlatform;
 use clawft_services::mcp::BuiltinToolProvider;
+use clawft_services::mcp::SkillToolProvider;
 use clawft_services::mcp::ToolDefinition;
 use clawft_services::mcp::composite::CompositeToolProvider;
 use clawft_services::mcp::middleware::{
     AuditLog, Middleware, PermissionFilter, ResultGuard, SecurityGuard,
 };
+use clawft_services::mcp::provider::skills_to_tool_definitions;
 use clawft_services::mcp::server::McpServerShell;
 
 use super::load_config;
@@ -75,6 +79,59 @@ pub async fn run(args: McpServerArgs) -> anyhow::Result<()> {
     // ── Build CompositeToolProvider ──────────────────────────────────
     let mut composite = CompositeToolProvider::new();
     composite.register(Box::new(provider));
+
+    // ── Load skills and register SkillToolProvider ───────────────────
+    let (ws_skills_dir, user_skills_dir) = discover_skill_dirs();
+    let skill_registry = match SkillRegistry::discover(
+        ws_skills_dir.as_deref(),
+        user_skills_dir.as_deref(),
+        Vec::new(),
+    )
+    .await
+    {
+        Ok(reg) => reg,
+        Err(e) => {
+            info!(error = %e, "skill discovery failed, continuing without skill tools");
+            SkillRegistry::discover(None, None, Vec::new())
+                .await
+                .expect("empty skill discovery should never fail")
+        }
+    };
+
+    let skill_count = skill_registry.len();
+    if skill_count > 0 {
+        let skill_defs = skills_to_tool_definitions(
+            &skill_registry.list().into_iter().cloned().collect::<Vec<_>>(),
+        );
+
+        // Build a lookup from skill name -> instructions for the dispatcher.
+        let instructions_map: std::collections::HashMap<String, String> = skill_registry
+            .list()
+            .into_iter()
+            .map(|s| (s.name.clone(), s.instructions.clone()))
+            .collect();
+        let instructions_map = Arc::new(instructions_map);
+
+        let skill_provider = SkillToolProvider::new(skill_defs, move |name, _args| {
+            let map = instructions_map.clone();
+            let name = name.to_string();
+            Box::pin(async move {
+                match map.get(&name) {
+                    Some(instructions) => Ok(instructions.clone()),
+                    None => Err(format!("skill '{name}' not found")),
+                }
+            })
+        });
+
+        info!(
+            skills = skill_count,
+            names = ?skill_registry.names(),
+            "skill tools registered for MCP server"
+        );
+        composite.register(Box::new(skill_provider));
+    } else {
+        info!("no skills found, skipping skill tool registration");
+    }
 
     // ── Build middleware pipeline ────────────────────────────────────
     let security_guard = build_security_guard(&config.tools);
@@ -181,6 +238,34 @@ fn build_security_guard(tools_config: &clawft_types::config::ToolsConfig) -> Sec
     );
 
     SecurityGuard::new(mw_cmd, mw_url)
+}
+
+/// Discover workspace and user skill directories.
+///
+/// Returns `(workspace_dir, user_dir)`. Either may be `None` if the
+/// directory does not exist or cannot be located.
+///
+/// - **Workspace skills**: Walk upward from `cwd` looking for
+///   `.clawft/skills/`.
+/// - **User skills**: `~/.clawft/skills/`.
+fn discover_skill_dirs() -> (Option<PathBuf>, Option<PathBuf>) {
+    let user_dir = dirs::home_dir().map(|h| h.join(".clawft").join("skills"));
+
+    let ws_dir = std::env::current_dir().ok().and_then(|cwd| {
+        let mut dir: &Path = cwd.as_path();
+        loop {
+            let candidate = dir.join(".clawft").join("skills");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+            match dir.parent() {
+                Some(parent) => dir = parent,
+                None => return None,
+            }
+        }
+    });
+
+    (ws_dir, user_dir)
 }
 
 #[cfg(test)]

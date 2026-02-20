@@ -115,7 +115,15 @@ pub async fn register_core_tools<P: Platform + 'static>(
     );
 
     crate::mcp_tools::register_mcp_tools(config, registry).await;
-    crate::mcp_tools::register_delegation(&config.delegation, registry);
+
+    // Pass the Anthropic provider API key from config as a fallback for delegation.
+    let anthropic_key = config.providers.anthropic.api_key.expose();
+    let config_api_key = if anthropic_key.is_empty() {
+        None
+    } else {
+        Some(anthropic_key)
+    };
+    crate::mcp_tools::register_delegation(&config.delegation, registry, config_api_key);
 }
 
 /// Build an `Arc<ChannelHost>` implementation that bridges the channel
