@@ -177,7 +177,9 @@ async fn run_with_channels(args: GatewayArgs) -> anyhow::Result<()> {
     let mut any_channel = false;
 
     // Telegram
-    if config.channels.telegram.enabled && !config.channels.telegram.token.is_empty() {
+    let telegram_has_token = !config.channels.telegram.token.is_empty()
+        || config.channels.telegram.token_env.as_ref().is_some_and(|v| !v.is_empty());
+    if config.channels.telegram.enabled && telegram_has_token {
         plugin_host
             .register_factory(Arc::new(TelegramChannelFactory))
             .await;
@@ -191,7 +193,9 @@ async fn run_with_channels(args: GatewayArgs) -> anyhow::Result<()> {
     }
 
     // Slack
-    if config.channels.slack.enabled && !config.channels.slack.bot_token.is_empty() {
+    let slack_has_token = !config.channels.slack.bot_token.is_empty()
+        || config.channels.slack.bot_token_env.as_ref().is_some_and(|v| !v.is_empty());
+    if config.channels.slack.enabled && slack_has_token {
         plugin_host
             .register_factory(Arc::new(SlackChannelFactory))
             .await;
@@ -205,7 +209,9 @@ async fn run_with_channels(args: GatewayArgs) -> anyhow::Result<()> {
     }
 
     // Discord
-    if config.channels.discord.enabled && !config.channels.discord.token.is_empty() {
+    let discord_has_token = !config.channels.discord.token.is_empty()
+        || config.channels.discord.token_env.as_ref().is_some_and(|v| !v.is_empty());
+    if config.channels.discord.enabled && discord_has_token {
         plugin_host
             .register_factory(Arc::new(DiscordChannelFactory))
             .await;
@@ -305,7 +311,7 @@ async fn run_with_channels(args: GatewayArgs) -> anyhow::Result<()> {
     };
 
     // ── Agent loop (inbound processing) ─────────────────────────────
-    let agent = ctx.into_agent_loop();
+    let agent = ctx.into_agent_loop().with_cancel(cancel.clone());
 
     let agent_handle = tokio::spawn(async move {
         if let Err(e) = agent.run().await {
@@ -364,16 +370,31 @@ async fn run_with_channels(args: GatewayArgs) -> anyhow::Result<()> {
         }
     });
 
-    info!(
-        channels = started_count,
-        "gateway running -- press Ctrl+C to stop"
+    info!(channels = started_count, "gateway running");
+    eprintln!(
+        "gateway running ({started_count} channel{}) -- press Ctrl+C to stop",
+        if started_count == 1 { "" } else { "s" }
     );
 
     // ── Wait for shutdown signal ────────────────────────────────────
     tokio::signal::ctrl_c().await?;
+    eprintln!("\nshutting down...");
     info!("received shutdown signal");
 
-    // 1. Cancel the dispatch loop.
+    // Spawn a force-exit handler: second Ctrl+C or 10s timeout kills the process.
+    tokio::spawn(async {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("forced exit");
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+                eprintln!("shutdown timed out, forcing exit");
+            }
+        }
+        std::process::exit(1);
+    });
+
+    // 1. Cancel the dispatch loop and channel tasks.
     cancel.cancel();
 
     // 2. Stop all channels (cancels their tasks).
@@ -387,8 +408,10 @@ async fn run_with_channels(args: GatewayArgs) -> anyhow::Result<()> {
         }
     }
 
-    // 3. Drop the bus so the agent loop's inbound channel closes,
-    //    causing it to exit its consume loop.
+    // 3. Drop the plugin host so its Arc<ChannelHost> (which holds a bus
+    //    clone) is released. Then drop our bus reference. Once all senders
+    //    are gone, the agent loop's consume_inbound() returns None and exits.
+    drop(plugin_host);
     drop(bus);
 
     // 4. Await background services.

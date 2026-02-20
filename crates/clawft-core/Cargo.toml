@@ -31,6 +31,7 @@ uuid = { workspace = true }
 dirs = { workspace = true }
 rand = { workspace = true, optional = true }
 serde_yaml = { workspace = true }
+tokio-util = { workspace = true }
 rvf-runtime = { workspace = true, optional = true }
 rvf-types = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }

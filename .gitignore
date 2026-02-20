@@ -1,4 +1,5 @@
 .claude
 .claude-flow/
 .hive-mind
+.swarm/
 target/

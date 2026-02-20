@@ -28,6 +28,7 @@
 
 use std::sync::Arc;
 
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
 use clawft_platform::Platform;
@@ -78,6 +79,7 @@ pub struct AgentLoop<P: Platform> {
     context: ContextBuilder<P>,
     sessions: SessionManager<P>,
     permission_resolver: PermissionResolver,
+    cancel: Option<CancellationToken>,
 }
 
 impl<P: Platform> AgentLoop<P> {
@@ -112,7 +114,15 @@ impl<P: Platform> AgentLoop<P> {
             context,
             sessions,
             permission_resolver,
+            cancel: None,
         }
+    }
+
+    /// Attach a [`CancellationToken`] so the agent loop exits promptly on
+    /// shutdown instead of waiting for all bus senders to be dropped.
+    pub fn with_cancel(mut self, token: CancellationToken) -> Self {
+        self.cancel = Some(token);
+        self
     }
 
     /// Get a reference to the agent configuration.
@@ -130,7 +140,8 @@ impl<P: Platform> AgentLoop<P> {
         &self.bus
     }
 
-    /// Run the agent loop, consuming messages until the bus is closed.
+    /// Run the agent loop, consuming messages until the bus is closed or
+    /// the optional [`CancellationToken`] is triggered.
     ///
     /// This is the main entrypoint. It pulls messages from the inbound
     /// channel and processes each one through the full pipeline. Errors
@@ -139,7 +150,20 @@ impl<P: Platform> AgentLoop<P> {
         info!("agent loop started, waiting for messages");
 
         loop {
-            match self.bus.consume_inbound().await {
+            let msg = if let Some(ref token) = self.cancel {
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => {
+                        info!("agent loop cancelled via token, exiting");
+                        break;
+                    }
+                    msg = self.bus.consume_inbound() => msg,
+                }
+            } else {
+                self.bus.consume_inbound().await
+            };
+
+            match msg {
                 Some(msg) => {
                     debug!(
                         channel = %msg.channel,

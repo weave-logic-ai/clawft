@@ -76,6 +76,14 @@ Tests call `unsafe { std::env::set_var(...) }` under Rust's default parallel tes
 
 **Fix:** Use `temp_env` crate or a mutex guard.
 
+### A9. `--no-default-features` does not compile
+**File:** `clawft-cli/src/mcp_tools.rs`
+**Type:** Bug
+
+`mcp_tools.rs` unconditionally imports `clawft_services` (MCP session, transport, types) even when the `services` feature is disabled. Running `cargo build -p clawft-cli --no-default-features` produces 11 errors (`use of unresolved module or unlinked crate clawft_services`). The `services` feature is effectively required despite being declared optional.
+
+**Fix:** Gate all `clawft_services` imports and the `register_mcp_tools()` function behind `#[cfg(feature = "services")]`. Provide a no-op stub when the feature is off (same pattern already used for `register_delegation()` with the `delegate` feature).
+
 ---
 
 ## Workstream B: Architecture Cleanup (Week 2-4)
@@ -200,6 +208,17 @@ Parse `SKILL.md` (YAML frontmatter -> tool description + execution hints), auto-
 **Deps:** C2, C3
 
 Runtime loading with sandbox isolation. `weft skill install github.com/openclaw/skills/coding-agent` works. Agent can `weft skill create "new skill for X"` and compile to WASM.
+
+**Includes (OpenClaw parity):**
+- **Skill precedence layering:** workspace > managed/local > bundled (matching OpenClaw's resolution order). Skills in `~/.clawft/skills` (managed) are visible to all agents; workspace skills override.
+- **Hot-reload watcher:** File-system watcher (`notify` crate) on skill directories. Changes take effect mid-session without restart.
+- **Plugin-shipped skills:** Plugins declare skill directories in their manifest (`clawft.plugin.json`). Plugin skills load when the plugin is enabled and participate in normal precedence.
+
+### C4a. Autonomous skill creation
+**Type:** Feature
+**Deps:** C4
+
+The agent can decide on its own to create new skills when it encounters a repeated task it doesn't have a skill for. The agent loop detects "I've done this pattern N times" and triggers skill generation: writes `SKILL.md` + implementation, compiles to WASM if native, and installs into managed skills directory. This is OpenClaw's "self-improving" capability.
 
 ### C5. Wire interactive slash-command framework
 **File:** `clawft-cli/src/interactive/`
@@ -355,6 +374,18 @@ Via `signal-cli` subprocess or macOS bridge. Implemented as plugin.
 
 Generic Matrix and IRC channel adapters.
 
+### E5a. Google Chat channel
+**Type:** Feature -- New Plugin
+**Deps:** C1
+
+Google Chat via Google Workspace API. OAuth2 flow (reuse F6). Supports DMs and Spaces.
+
+### E5b. Microsoft Teams channel
+**Type:** Feature -- New Plugin
+**Deps:** C1
+
+Microsoft Teams via Bot Framework / Graph API. Azure AD auth. Supports channels and 1:1 chats.
+
 ### E6. Enhanced heartbeat / proactive check-in
 **File:** `clawft-services/src/heartbeat/`
 **Type:** Feature
@@ -416,43 +447,52 @@ Container lifecycle management from agent context.
 
 Expose agent as VS Code extension backend. Agent edits code live in IDE through MCP.
 
+### F9. MCP client for external servers
+**Type:** Feature
+**Deps:** D9
+
+**OpenClaw parity:** Connect to 1000+ community MCP servers (Google Drive, Slack, databases, enterprise systems) as a client. Agent discovers available MCP servers, lists their tools, and invokes them through the standard MCP protocol. Config via `mcp_servers` section in `clawft.toml` or `weft mcp add <server-uri>`.
+
+**Includes:** Auto-discovery of local MCP servers, connection pooling, tool schema caching, health checks.
+
 ---
 
-## Workstream G: Voice (Week 6-10)
+## ~~Workstream G: Voice~~ -- OUT OF SCOPE
 
-### G1. STT integration
-**Type:** Feature -- New Plugin
-**Deps:** C1
+*Deferred to post-sprint. Full plan in `voice_development.md`.*
 
-`whisper-rs` (local, ONNX) or `vosk-api`. Feature-gated behind `voice`.
-
-### G2. TTS integration
-**Type:** Feature -- New Plugin
-**Deps:** C1
-
-`piper-rs` (local, high-quality) or `tts` crate + ElevenLabs cloud fallback. Feature-gated behind `voice`.
-
-### G3. VoiceChannel
-**Type:** Feature
-**Deps:** G1, G2, C1
-
-Audio -> STT -> pipeline -> TTS response. Support microphone/file input, streaming output. Integrates as a `ChannelAdapter` plugin.
+**Forward-compatibility requirements (in scope):**
+- C1 must define the `VoiceHandler` trait alongside other plugin traits -- placeholder only, no implementation
+- Plugin manifest schema must reserve a `voice` capability type
+- `ChannelAdapter` trait must support binary (audio) payloads, not just text (needed for voice and media messages generally)
+- Feature flag `voice` must be wired in Cargo.toml as empty/no-op so it can be populated later without breaking the feature matrix
 
 ---
 
 ## Workstream H: Memory & Workspace (Week 4-8)
 
-### H1. Markdown workspace
+### H1. Markdown workspace with per-agent isolation
 **Type:** Feature
 **Deps:** C1
 
 `~/.clawft/workspace` with `SKILL.md`, `SOUL.md`, `USER.md`, conversation logs. Coexists with JSONL/vector memory. Auto-summarization of long conversations.
 
-### H2. Long-term vector store improvements
+**Per-agent isolation (OpenClaw parity):** Each agent gets its own workspace under `~/.clawft/agents/<agentId>/` with dedicated `SOUL.md`, `AGENTS.md`, `USER.md`, and session store. Agent-specific personality and memory are fully isolated unless cross-agent access is explicitly enabled.
+
+### H2. Complete RVF Phase 3 (vector memory)
 **Type:** Feature
 **Deps:** A2
 
-After fixing the unstable hash (A2), implement proper vector memory with persistence, auto-indexing, and semantic search.
+RVF Phase 3 roadmap (`docs/guides/rvf.md`) is 1/9 complete -- only the crate dependency integration is done. All functional items are stubs. After fixing the unstable hash (A2), complete the following:
+
+1. **HNSW-backed VectorStore** -- Replace brute-force cosine scan in `vector_store.rs` and `progressive.rs` (both are stubs) with HNSW graph from `rvf-index` when available, or `instant-distance` / `hnsw` crate as interim.
+2. **Production embedder** -- Replace `HashEmbedder` with LLM embedding API (OpenAI/local ONNX). `api_embedder.rs` exists but needs wiring.
+3. **RVF file I/O** -- Implement real RVF segment read/write for memory persistence. Currently `ProgressiveSearch` saves as plain JSON.
+4. **`weft memory export` / `weft memory import`** -- CLI commands for portable data transfer. Currently only `show`, `history`, `search` exist.
+5. **POLICY_KERNEL storage** -- Persist `IntelligentRouter` routing policies across restarts.
+6. **WITNESS segments** -- Tamper-evident audit trail of agent actions.
+7. **Temperature-based quantization** -- Hot/warm/cold tiers to reduce storage for infrequently accessed vectors.
+8. **WASM compatibility** -- `micro-hnsw-wasm` for browser and edge deployments.
 
 ### H3. Standardize timestamp representations
 **Files:** Various across `clawft-types`
@@ -572,29 +612,49 @@ Full docs for the plugin/skill system: architecture, creating plugins, SKILL.md 
 
 ---
 
-## Workstream K: UI, Deployment & Community (Week 8-12)
+## Workstream K: Deployment & Community (Week 8-12)
 
-### K1. Web dashboard
-**Type:** Feature
+*K1 (Web Dashboard + Live Canvas) and K6 (Native Shells) are OUT OF SCOPE -- see `ui_development.md`.*
 
-`weft ui` via Axum + Leptos. Agent management, conversation view, skill browser.
+**Forward-compatibility requirements (in scope):**
+- Agent loop and bus must not assume text-only I/O (support structured/binary payloads for future canvas rendering)
+- MCP server tool schemas should be stable enough that a future dashboard can introspect them without breaking changes
+- Config and session APIs should be read-accessible without going through the agent loop (future dashboard will need direct access)
 
 ### K2. Docker images
 **Type:** DevOps
 
-Multi-arch images with voice deps. One-click VPS scripts.
+Multi-arch Docker images. One-click VPS scripts. Voice deps added later when Workstream G is in scope.
 
-### K3. Enhanced sandbox
+### K3. Enhanced sandbox with per-agent isolation
 **Type:** Security
 **Deps:** C2
 
 WASM + seccomp/landlock. Per-skill permission system. Audit logs.
 
-### K4. ClawHub skill registry
+**Per-agent sandboxing (OpenClaw parity):** Each agent gets its own sandbox with independent tool restrictions. Agent A can have shell access while Agent B is restricted to read-only file ops. Configured in agent workspace config (`~/.clawft/agents/<id>/config.toml`).
+
+### K3a. Security plugin system (SecureClaw-equivalent)
+**Type:** Feature / Security
+**Deps:** C1, K3
+
+A dedicated security plugin with:
+- **Audit checks** (50+): Scan skills for prompt injection vectors, data exfiltration patterns, unsafe shell commands, credential leaks.
+- **Hardening modules:** Auto-apply seccomp/landlock profiles, restrict network access per-skill, enforce allowlisted domains.
+- **Background monitors:** Watch for anomalous tool usage, excessive API calls, unexpected file access patterns.
+- **CLI integration:** `weft security scan`, `weft security audit`, `weft security harden`.
+
+### K4. ClawHub skill registry with vector search
 **Type:** Feature
-**Deps:** C3, C4
+**Deps:** C3, C4, H2
 
 CLI for publishing/installing skills. Community examples repo. Skill templates.
+
+**OpenClaw parity additions:**
+- **Vector search for skill discovery:** Embed skill descriptions and match user queries semantically instead of keyword search. Uses the vector store from H2.
+- **Agent auto-search:** When the agent can't find a matching local skill, it queries ClawHub automatically and offers to install.
+- **Star/comment system:** Users can rate and review skills. Moderation hooks for quality control.
+- **Versioning:** Skills are versioned with semver. `weft skill update` checks for newer versions.
 
 ### K5. Benchmarks vs OpenClaw
 **Type:** Testing
@@ -603,11 +663,142 @@ Feature parity test suite. Performance comparison (binary size, cold start, memo
 
 ---
 
+## Workstream L: Multi-Agent Routing & Orchestration (Week 5-9)
+
+Multi-agent features that match OpenClaw's isolation and routing model.
+
+### L1. Agent routing table
+**Type:** Feature
+**Deps:** B5, C1
+
+Route inbound channels/accounts/peers to isolated agents. Configuration maps channel-specific identifiers (WhatsApp number, Telegram user ID, Slack workspace) to agent IDs. Different people sharing one Gateway get fully isolated AI "brains".
+
+```toml
+[[agent_routes]]
+channel = "telegram"
+match = { user_id = "12345" }
+agent = "work-agent"
+
+[[agent_routes]]
+channel = "whatsapp"
+match = { phone = "+1..." }
+agent = "personal-agent"
+```
+
+### L2. Per-agent workspace and session isolation
+**Type:** Feature
+**Deps:** L1, H1
+
+Each routed agent gets: dedicated `agentDir` under `~/.clawft/agents/<agentId>/`, own session store, own skill overrides, own `SOUL.md`/`AGENTS.md`/`USER.md`. No cross-talk unless explicitly enabled via shared memory namespace.
+
+### L3. Multi-agent swarming
+**Type:** Feature
+**Deps:** L1, L2
+
+Leverage existing `.swarm/` directory and agent spawning. Agents can delegate subtasks to other agents, share results through the message bus. Coordinator agent pattern: one "lead" agent decomposes tasks and dispatches to worker agents.
+
+### L4. Planning strategies in Router
+**Type:** Feature
+**Deps:** D6
+
+ReAct (Reason+Act) and Plan-and-Execute strategies in the pipeline Router. The router can decide to decompose a complex request into a multi-step plan before executing, similar to OpenClaw's agentic reasoning patterns.
+
+---
+
+## Workstream M: Claude Flow / Claude Code Integration (Week 3-7)
+
+The delegation system has well-designed engine logic (rule matching, complexity heuristics, fallback chains) but **zero functional integration** with Claude Flow or Claude Code. The `DelegationTarget::Flow` path is completely dead code.
+
+### M1. Implement `FlowDelegator`
+**File:** `clawft-services/src/delegation/flow.rs` (new)
+**Type:** Feature
+**Deps:** D9
+
+The only delegator is `ClaudeDelegator`. No `FlowDelegator` exists anywhere in the codebase. Implement a `FlowDelegator` that:
+- Spawns `claude` (Claude Code CLI) as a subprocess via `tokio::process::Command`
+- Passes tasks via `claude --print` (non-interactive mode) or `claude --json`
+- Streams results back through the agent loop
+- Supports tool-use: Claude Code can call back into clawft's tool registry via MCP
+- Falls back to `ClaudeDelegator` (direct Anthropic API) if `claude` binary is not available
+
+**Alternative transport:** If `npx @claude-flow/cli` is preferred for multi-agent orchestration, implement as a second transport option alongside the direct CLI.
+
+### M2. Wire `flow_available` to runtime detection
+**File:** `clawft-tools/src/delegate_tool.rs:105`
+**Type:** Bug fix
+
+Currently hardcoded:
+```rust
+let flow_available = false; // Flow not wired yet.
+```
+
+Replace with runtime detection:
+- Check if `claude` binary is on `$PATH` (via `which`/`command -v`)
+- Check if `DelegationConfig.claude_flow_enabled` is `true`
+- Optionally probe the Flow endpoint with a health check
+- Cache the result (don't re-probe on every delegation decision)
+
+### M3. Enable `delegate` feature by default
+**Files:** `clawft-cli/Cargo.toml`, `clawft-services/Cargo.toml`, `clawft-tools/Cargo.toml`
+**Type:** Config fix
+
+The `delegate` feature is optional and off by default. Without it, `register_delegation()` compiles to a no-op stub (`mcp_tools.rs:275-281`). Both `claude_enabled` and `claude_flow_enabled` default to `false` in `DelegationConfig`.
+
+**Fix:**
+- Add `delegate` to the `default` feature list in `clawft-cli/Cargo.toml`
+- Set `claude_enabled` default to `true` (gracefully degrades if no API key)
+- Document the feature flags and config toggles in `docs/guides/configuration.md`
+
+### M4. Dynamic MCP server discovery
+**Files:** `clawft-cli/src/mcp_tools.rs`, `clawft-cli/src/commands/` (new subcommand)
+**Type:** Feature
+**Deps:** F9
+
+`register_mcp_tools()` connects once at startup. If an MCP server is added later, or if a connection fails, there's no recovery path.
+
+**Fix:**
+- Add `weft mcp add <name> <command|url>` CLI command to register servers at runtime
+- Add `weft mcp list` and `weft mcp remove` for management
+- Implement reconnection with exponential backoff for failed MCP connections
+- Support health-check pings to detect stale connections
+- Hot-reload: watch `clawft.toml` for `mcp_servers` changes (reuse `notify` from C4)
+
+### M5. Claude Code as MCP client transport
+**Type:** Feature
+**Deps:** M1, M4
+
+Enable clawft to expose its tools to Claude Code *and* consume Claude Code's tools:
+
+**Bidirectional MCP bridge:**
+- **Outbound (clawft → Claude Code):** clawft registers itself as an MCP server that Claude Code can connect to. Already partially working via `clawft-services/src/mcp/server.rs`, but needs testing and documentation for the `claude mcp add` workflow.
+- **Inbound (Claude Code → clawft):** clawft connects to Claude Code's MCP server as a client, gaining access to Claude Code's tool ecosystem. Uses the MCP client from F9.
+
+**Config example:**
+```toml
+[tools.mcp_servers.claude-code]
+command = "claude"
+args = ["mcp", "serve"]
+```
+
+### M6. Delegation config in `clawft.toml` documentation
+**Files:** `docs/guides/configuration.md`, `docs/guides/tool-calls.md`
+**Type:** Documentation
+**Deps:** M1, M2, M3
+
+The delegation system is undocumented for end users. Add:
+- How to enable delegation (`claude_enabled`, `claude_flow_enabled`)
+- How to write routing rules (regex patterns → targets)
+- How to configure excluded tools
+- How to set up Claude Code integration (PATH, API key, MCP bridge)
+- Troubleshooting: common failures and how to diagnose
+
+---
+
 ## Cross-Cutting Concerns
 
 These apply across multiple workstreams:
 
-1. **Keep core tiny** -- Heavy deps (`wasmtime`, `whisper-rs`, `chromiumoxide`, `git2`) go in optional plugins behind feature flags. Target: <10 MB base binary, sub-100ms cold start.
+1. **Keep core tiny** -- Heavy deps (`wasmtime`, `chromiumoxide`, `git2`) go in optional plugins behind feature flags. Target: <10 MB base binary, sub-100ms cold start. Voice and UI deps are out of scope but the plugin/feature-flag system must accommodate them cleanly when they arrive.
 
 2. **Offline capability** -- All local-first where possible. Cloud is always a fallback, never required.
 
@@ -617,10 +808,12 @@ These apply across multiple workstreams:
    - `wasmtime` + `wit-bindgen` (plugins)
    - `lettre`, `imap` (email)
    - `chromiumoxide` (browser)
-   - `whisper-rs`, `piper-rs` (voice)
    - `git2` (git ops)
    - `oauth2` (auth flows)
    - `tree-sitter` (code analysis)
+   - `notify` (file-system watcher for skill hot-reload)
+   - *Deferred:* `sherpa-rs`, `rustpotter`, `cpal` (voice -- see `voice_development.md`)
+   - *Deferred:* `tauri` / `wry` (native shells -- see `ui_development.md`)
 
 ---
 
@@ -630,12 +823,15 @@ These apply across multiple workstreams:
 |-------|-------|
 | 1-2 | **A**: Critical fixes, **I**: Type safety quick wins |
 | 2-4 | **B**: Architecture cleanup, **D** (early): Pipeline fixes |
-| 3-5 | **J**: Documentation sync, **C** (start): Plugin trait crate |
-| 4-8 | **C**: Plugin system, **E**: Channel enhancements, **H**: Memory |
-| 5-10 | **D** (complete): Pipeline reliability, **F**: Dev tools & apps |
-| 6-10 | **G**: Voice integration |
-| 8-12 | **K**: UI, deployment, community |
+| 3-5 | **J**: Documentation sync, **C** (start): Plugin trait crate, **M** (start): Claude Flow integration (M1-M3) |
+| 4-8 | **C**: Plugin system (incl. skill precedence, hot-reload, autonomous creation), **E**: Channels (incl. Google Chat, Teams), **H**: Memory & per-agent workspaces, **M** (complete): Dynamic MCP + bidirectional bridge (M4-M6) |
+| 5-9 | **L**: Multi-agent routing & orchestration, **D** (complete): Pipeline reliability, **F**: Dev tools & apps (incl. MCP client) |
+| 8-12 | **K**: Deployment (Docker), security plugin, ClawHub, benchmarks |
 
-**MVP milestone (Week 8):** Plugin system working, email channel, 3 ported OpenClaw skills, all critical/high fixes resolved.
+**Out of scope (separate tracks):** Voice (`voice_development.md`), UI/dashboard/native shells (`ui_development.md`). Forward-compat hooks are built into the plugin system (C1) and channel adapter traits so these can be added without breaking changes.
 
-**Full vision (Week 12):** Voice-enabled, browser automation, dev tool suite, ClawHub registry, web dashboard, Docker images. ClawFT passes OpenClaw feature parity + outperforms on speed/memory.
+**MVP milestone (Week 8):** Plugin system working with skill precedence + hot-reload, email channel, multi-agent routing, 3 ported OpenClaw skills, MCP client for external servers, **Claude Flow integration functional (FlowDelegator + dynamic MCP + delegate feature enabled by default)**, all critical/high fixes resolved.
+
+**Full vision (Week 12):** Browser automation, dev tool suite, ClawHub with vector search, per-agent sandboxing, security plugin, Docker images. All forward-compat hooks for voice and UI in place.
+
+**Post-sprint tracks:** Voice (see `voice_development.md`), UI/dashboard/native shells (see `ui_development.md`), mobile, autonomous skill creation, planning strategies (ReAct/Plan-and-Execute).
