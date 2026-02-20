@@ -45,13 +45,8 @@ pub fn is_retryable(err: &ProviderError) -> bool {
         ProviderError::RateLimited { .. } => true,
         ProviderError::Timeout => true,
         ProviderError::Http(_) => true,
-        ProviderError::RequestFailed(msg) => {
-            // Retry on 5xx server errors
-            msg.starts_with("HTTP 500")
-                || msg.starts_with("HTTP 502")
-                || msg.starts_with("HTTP 503")
-                || msg.starts_with("HTTP 504")
-        }
+        ProviderError::ServerError { status, .. } => (500..=599).contains(status),
+        ProviderError::RequestFailed(_) => false,
         ProviderError::AuthFailed(_)
         | ProviderError::ModelNotFound(_)
         | ProviderError::NotConfigured(_)
@@ -182,14 +177,15 @@ impl<P: Provider> Provider for RetryPolicy<P> {
         request: &ChatRequest,
         tx: mpsc::Sender<StreamChunk>,
     ) -> Result<()> {
-        // Streaming retry: we can only retry before the stream starts sending
-        // chunks. Once the inner provider starts streaming successfully, we
-        // cannot replay chunks that were already sent.  Therefore we use the
-        // same retry loop structure but delegate to complete_stream.
+        // Streaming retry with buffer-then-commit: each attempt writes to a
+        // temporary channel. Only on success do we forward chunks to the real
+        // sender, preventing partial output from failed attempts.
         let mut last_err = None;
 
         for attempt in 0..=self.config.max_retries {
-            match self.inner.complete_stream(request, tx.clone()).await {
+            let (attempt_tx, mut attempt_rx) = mpsc::channel::<StreamChunk>(256);
+
+            match self.inner.complete_stream(request, attempt_tx).await {
                 Ok(()) => {
                     if attempt > 0 {
                         debug!(
@@ -198,9 +194,18 @@ impl<P: Provider> Provider for RetryPolicy<P> {
                             "streaming request succeeded after retry"
                         );
                     }
+                    // Forward buffered chunks to the real sender.
+                    while let Some(chunk) = attempt_rx.recv().await {
+                        if tx.send(chunk).await.is_err() {
+                            break;
+                        }
+                    }
                     return Ok(());
                 }
                 Err(err) => {
+                    // Discard buffered partial chunks from this failed attempt.
+                    drop(attempt_rx);
+
                     if !is_retryable(&err) || attempt == self.config.max_retries {
                         return Err(err);
                     }
@@ -335,18 +340,22 @@ mod tests {
 
     #[test]
     fn is_retryable_server_errors() {
-        assert!(is_retryable(&ProviderError::RequestFailed(
-            "HTTP 500: internal".into()
-        )));
-        assert!(is_retryable(&ProviderError::RequestFailed(
-            "HTTP 502: bad gateway".into()
-        )));
-        assert!(is_retryable(&ProviderError::RequestFailed(
-            "HTTP 503: unavailable".into()
-        )));
-        assert!(is_retryable(&ProviderError::RequestFailed(
-            "HTTP 504: timeout".into()
-        )));
+        assert!(is_retryable(&ProviderError::ServerError {
+            status: 500,
+            body: "internal".into(),
+        }));
+        assert!(is_retryable(&ProviderError::ServerError {
+            status: 502,
+            body: "bad gateway".into(),
+        }));
+        assert!(is_retryable(&ProviderError::ServerError {
+            status: 503,
+            body: "unavailable".into(),
+        }));
+        assert!(is_retryable(&ProviderError::ServerError {
+            status: 504,
+            body: "timeout".into(),
+        }));
     }
 
     #[test]
@@ -378,6 +387,19 @@ mod tests {
         assert!(!is_retryable(&ProviderError::RequestFailed(
             "HTTP 400: bad request".into()
         )));
+    }
+
+    #[test]
+    fn is_retryable_server_error_variant() {
+        assert!(is_retryable(&ProviderError::ServerError {
+            status: 500,
+            body: "internal server error".into(),
+        }));
+        // 4xx via ServerError should not be retryable
+        assert!(!is_retryable(&ProviderError::ServerError {
+            status: 400,
+            body: "bad request".into(),
+        }));
     }
 
     #[test]
@@ -443,8 +465,9 @@ mod tests {
 
     #[tokio::test]
     async fn retry_succeeds_after_transient_failures() {
-        let mock = MockProvider::new("test", 2, |_| {
-            ProviderError::RequestFailed("HTTP 503: unavailable".into())
+        let mock = MockProvider::new("test", 2, |_| ProviderError::ServerError {
+            status: 503,
+            body: "unavailable".into(),
         });
         let provider = RetryPolicy::new(mock, fast_retry_config());
 
@@ -454,8 +477,9 @@ mod tests {
 
     #[tokio::test]
     async fn retry_exhausted_returns_last_error() {
-        let mock = MockProvider::new("test", 10, |_| {
-            ProviderError::RequestFailed("HTTP 500: error".into())
+        let mock = MockProvider::new("test", 10, |_| ProviderError::ServerError {
+            status: 500,
+            body: "error".into(),
         });
         let config = RetryConfig {
             max_retries: 2,
@@ -466,7 +490,7 @@ mod tests {
         let provider = RetryPolicy::new(mock, config);
 
         let err = provider.complete(&test_request()).await.unwrap_err();
-        assert!(matches!(err, ProviderError::RequestFailed(_)));
+        assert!(matches!(err, ProviderError::ServerError { .. }));
     }
 
     #[tokio::test]

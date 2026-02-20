@@ -13,8 +13,12 @@
 //!
 //! The current user message is **not** added here; the caller appends it.
 
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
+use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use clawft_platform::Platform;
@@ -25,6 +29,20 @@ use super::agents::AgentDefinition;
 use super::helpers::render_template;
 use super::memory::MemoryStore;
 use super::skills::SkillsLoader;
+
+/// Cached bootstrap file entry with modification-time tracking.
+#[derive(Debug, Clone)]
+struct CachedFile {
+    content: String,
+    mtime: SystemTime,
+}
+
+/// Cache for bootstrap files, keyed by resolved path.
+///
+/// Uses `tokio::sync::Mutex` because the cache is checked/updated
+/// inside async `build_system_prompt()`. The critical section is
+/// short (one HashMap lookup + optional fs::metadata call).
+type BootstrapCache = Arc<Mutex<HashMap<PathBuf, CachedFile>>>;
 
 // Re-export the message type from pipeline::traits. This module will
 // reference the type via a `crate::pipeline::traits::LlmMessage` path.
@@ -69,6 +87,7 @@ pub struct ContextBuilder<P: Platform> {
     memory: Arc<MemoryStore<P>>,
     skills: Arc<SkillsLoader<P>>,
     platform: Arc<P>,
+    bootstrap_cache: BootstrapCache,
 }
 
 impl<P: Platform> ContextBuilder<P> {
@@ -91,6 +110,53 @@ impl<P: Platform> ContextBuilder<P> {
             memory,
             skills,
             platform,
+            bootstrap_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Load a bootstrap file, using the mtime cache to skip disk reads
+    /// when the file has not been modified since last load.
+    ///
+    /// Returns `Some(content)` if the file exists and is non-empty,
+    /// `None` otherwise.
+    async fn load_cached_file(
+        platform: &Arc<P>,
+        cache: &BootstrapCache,
+        file_path: &Path,
+    ) -> Option<String> {
+        // Check current mtime via tokio::fs::metadata (platform trait
+        // does not expose metadata, so we bypass it for this stat call).
+        let current_mtime = match tokio::fs::metadata(file_path).await {
+            Ok(meta) => meta.modified().ok(),
+            Err(_) => return None, // file does not exist or is inaccessible
+        };
+
+        // Cache hit: mtime matches
+        {
+            let cache_guard = cache.lock().await;
+            if let Some(cached) = cache_guard.get(file_path)
+                && current_mtime == Some(cached.mtime)
+            {
+                return Some(cached.content.clone());
+            }
+        }
+
+        // Cache miss or stale: re-read from disk
+        match platform.fs().read_to_string(file_path).await {
+            Ok(content) if !content.trim().is_empty() => {
+                if let Some(mtime) = current_mtime {
+                    let mut cache_guard = cache.lock().await;
+                    cache_guard.insert(
+                        file_path.to_path_buf(),
+                        CachedFile {
+                            content: content.clone(),
+                            mtime,
+                        },
+                    );
+                }
+                Some(content)
+            }
+            _ => None,
         }
     }
 
@@ -110,8 +176,9 @@ impl<P: Platform> ContextBuilder<P> {
 
         // Load bootstrap files from the workspace (AGENTS.md, SOUL.md, etc.)
         // Searches: workspace root first, then .clawft/ subdirectory.
+        // Uses mtime-based cache to skip disk reads when files have not changed.
         let bootstrap_files = ["SOUL.md", "IDENTITY.md", "AGENTS.md", "USER.md", "TOOLS.md"];
-        let mut loaded_files = std::collections::HashMap::new();
+        let mut loaded_files = HashMap::new();
         for filename in &bootstrap_files {
             let home = self.platform.fs().home_dir();
             if let Some(home) = home {
@@ -122,19 +189,15 @@ impl<P: Platform> ContextBuilder<P> {
                 ];
                 for file_path in &candidates {
                     debug!(file = %file_path.display(), "checking for bootstrap file");
-                    if self.platform.fs().exists(file_path).await {
-                        match self.platform.fs().read_to_string(file_path).await {
-                            Ok(content) if !content.trim().is_empty() => {
-                                debug!(file = %filename, bytes = content.len(), "loaded bootstrap file");
-                                loaded_files.insert(*filename, content);
-                            }
-                            Ok(_) => {
-                                debug!(file = %filename, "bootstrap file is empty, skipping");
-                            }
-                            Err(e) => {
-                                warn!(file = %filename, error = %e, "failed to read bootstrap file");
-                            }
-                        }
+                    if let Some(content) = Self::load_cached_file(
+                        &self.platform,
+                        &self.bootstrap_cache,
+                        file_path,
+                    )
+                    .await
+                    {
+                        debug!(file = %filename, bytes = content.len(), "loaded bootstrap file");
+                        loaded_files.insert(*filename, content);
                         break; // First match wins
                     }
                 }

@@ -264,6 +264,7 @@ dependencies = [
  "cron",
  "dirs",
  "pulldown-cmark",
+ "rpassword",
  "serde",
  "serde_json",
  "tokio",
@@ -282,6 +283,9 @@ dependencies = [
  "clawft-platform",
  "clawft-types",
  "dirs",
+ "fnv",
+ "futures-util",
+ "percent-encoding",
  "rand 0.8.5",
  "reqwest",
  "rvf-runtime",
@@ -290,6 +294,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "temp-env",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -306,6 +311,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "temp-env",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -1586,6 +1592,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpassword"
+version = "5.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffc936cf8a7ea60c58f030fd36a612a48f440610214dc54bc36431f9ea0c3efb"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1886,6 +1902,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a3ae828aa394de34c7de08f522d1b86bd1c182c668d27da69caadda00590f26d"
 dependencies = [
  "lock_api",
+]
+
+[[package]]
+name = "temp-env"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96374855068f47402c3121c6eed88d29cb1de8f3ab27090e273e420bdabcf050"
+dependencies = [
+ "parking_lot",
 ]
 
 [[package]]

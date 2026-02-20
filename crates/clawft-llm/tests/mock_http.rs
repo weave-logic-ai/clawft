@@ -35,6 +35,7 @@ fn mock_config(server_url: &str) -> ProviderConfig {
         model_prefix: None,
         default_model: Some("test-model".into()),
         headers: HashMap::new(),
+        timeout_secs: None,
     }
 }
 
@@ -304,7 +305,7 @@ async fn complete_404_returns_model_not_found() {
 }
 
 #[tokio::test]
-async fn complete_500_returns_request_failed() {
+async fn complete_500_returns_server_error() {
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
@@ -319,8 +320,8 @@ async fn complete_500_returns_request_failed() {
 
     let err = provider.complete(&test_request()).await.unwrap_err();
     assert!(
-        matches!(err, ProviderError::RequestFailed(_)),
-        "expected RequestFailed, got: {err:?}"
+        matches!(err, ProviderError::ServerError { status: 500, .. }),
+        "expected ServerError with status 500, got: {err:?}"
     );
     assert!(err.to_string().contains("500"));
 }
@@ -502,6 +503,7 @@ async fn complete_missing_api_key_returns_not_configured() {
         model_prefix: None,
         default_model: None,
         headers: HashMap::new(),
+        timeout_secs: None,
     };
     let provider = OpenAiCompatProvider::new(config);
 

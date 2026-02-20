@@ -163,6 +163,7 @@ mod tests {
                 model_prefix: Some("openai/".into()),
                 default_model: Some("gpt-4o".into()),
                 headers: HashMap::new(),
+                timeout_secs: None,
             },
             ProviderConfig {
                 name: "anthropic".into(),
@@ -171,6 +172,7 @@ mod tests {
                 model_prefix: Some("anthropic/".into()),
                 default_model: None,
                 headers: HashMap::new(),
+                timeout_secs: None,
             },
             ProviderConfig {
                 name: "groq".into(),
@@ -179,6 +181,7 @@ mod tests {
                 model_prefix: Some("groq/".into()),
                 default_model: None,
                 headers: HashMap::new(),
+                timeout_secs: None,
             },
         ]
     }
@@ -321,6 +324,7 @@ mod tests {
             model_prefix: None,
             default_model: None,
             headers: HashMap::new(),
+            timeout_secs: None,
         }];
         let router = ProviderRouter::from_configs(configs);
         // Should still work via default fallback

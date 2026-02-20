@@ -47,6 +47,15 @@ pub enum ProviderError {
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
 
+    /// The provider returned an HTTP 5xx server error.
+    #[error("server error {status}: {body}")]
+    ServerError {
+        /// HTTP status code (500, 502, 503, 504, etc.).
+        status: u16,
+        /// Response body text.
+        body: String,
+    },
+
     /// All providers in the failover chain have been exhausted.
     #[error("all providers exhausted: {}", attempts.join("; "))]
     AllProvidersExhausted {
@@ -124,6 +133,15 @@ mod tests {
 
         let err: Result<i32> = Err(ProviderError::Timeout);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn display_server_error() {
+        let err = ProviderError::ServerError {
+            status: 503,
+            body: "service unavailable".into(),
+        };
+        assert_eq!(err.to_string(), "server error 503: service unavailable");
     }
 
     #[test]

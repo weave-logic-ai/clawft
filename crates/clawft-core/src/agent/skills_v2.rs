@@ -344,12 +344,12 @@ impl SkillRegistry {
     /// * `workspace_dir` -- Path to the workspace `.clawft/skills/` directory.
     /// * `user_dir` -- Path to the user `~/.clawft/skills/` directory.
     /// * `builtin_skills` -- Skills compiled into the binary.
-    pub fn discover(
+    pub async fn discover(
         workspace_dir: Option<&Path>,
         user_dir: Option<&Path>,
         builtin_skills: Vec<SkillDefinition>,
     ) -> Result<Self> {
-        Self::discover_with_trust(workspace_dir, user_dir, builtin_skills, true)
+        Self::discover_with_trust(workspace_dir, user_dir, builtin_skills, true).await
     }
 
     /// Discover and load skills from all sources, with workspace trust control.
@@ -366,7 +366,7 @@ impl SkillRegistry {
     /// * `user_dir` -- Path to the user `~/.clawft/skills/` directory.
     /// * `builtin_skills` -- Skills compiled into the binary.
     /// * `trust_workspace` -- Whether to load workspace-level skills.
-    pub fn discover_with_trust(
+    pub async fn discover_with_trust(
         workspace_dir: Option<&Path>,
         user_dir: Option<&Path>,
         builtin_skills: Vec<SkillDefinition>,
@@ -382,7 +382,7 @@ impl SkillRegistry {
 
         // 2. User skills (medium priority).
         if let Some(dir) = user_dir {
-            match Self::load_dir(dir) {
+            match Self::load_dir(dir).await {
                 Ok(user_skills) => {
                     for skill in user_skills {
                         debug!(skill = %skill.name, path = %dir.display(), "loaded user skill");
@@ -403,7 +403,7 @@ impl SkillRegistry {
                     "workspace skills skipped: --trust-project-skills not set"
                 );
             } else {
-                match Self::load_dir(dir) {
+                match Self::load_dir(dir).await {
                     Ok(ws_skills) => {
                         for skill in ws_skills {
                             debug!(skill = %skill.name, path = %dir.display(), "loaded workspace skill");
@@ -431,23 +431,15 @@ impl SkillRegistry {
     ///
     /// - SEC-SKILL-02: Directory names are validated against path traversal.
     /// - SEC-SKILL-07: File sizes are checked before reading.
-    fn load_dir(dir: &Path) -> Result<Vec<SkillDefinition>> {
-        if !dir.exists() {
+    async fn load_dir(dir: &Path) -> Result<Vec<SkillDefinition>> {
+        if !tokio::fs::try_exists(dir).await.unwrap_or(false) {
             return Ok(Vec::new());
         }
 
-        let entries = std::fs::read_dir(dir).map_err(ClawftError::Io)?;
+        let mut entries = tokio::fs::read_dir(dir).await.map_err(ClawftError::Io)?;
         let mut skills = Vec::new();
 
-        for entry in entries {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(e) => {
-                    warn!(error = %e, "failed to read directory entry");
-                    continue;
-                }
-            };
-
+        while let Some(entry) = entries.next_entry().await.map_err(ClawftError::Io)? {
             let path = entry.path();
             if !path.is_dir() {
                 continue;
@@ -468,9 +460,9 @@ impl SkillRegistry {
             let skill_md_path = path.join("SKILL.md");
             let skill_json_path = path.join("skill.json");
 
-            if skill_md_path.exists() {
+            if tokio::fs::try_exists(&skill_md_path).await.unwrap_or(false) {
                 // SEC-SKILL-07: Check file size before reading.
-                match std::fs::metadata(&skill_md_path) {
+                match tokio::fs::metadata(&skill_md_path).await {
                     Ok(meta) => {
                         if let Err(e) =
                             validate_file_size(meta.len() as usize, MAX_SKILL_MD_SIZE, "SKILL.md")
@@ -493,7 +485,7 @@ impl SkillRegistry {
                     }
                 }
 
-                match std::fs::read_to_string(&skill_md_path) {
+                match tokio::fs::read_to_string(&skill_md_path).await {
                     Ok(content) => match parse_skill_md(&content, Some(&skill_md_path)) {
                         Ok(skill) => {
                             debug!(skill = %skill.name, "loaded SKILL.md");
@@ -515,8 +507,11 @@ impl SkillRegistry {
                         );
                     }
                 }
-            } else if skill_json_path.exists() {
-                match load_legacy_skill(&skill_json_path, &path) {
+            } else if tokio::fs::try_exists(&skill_json_path)
+                .await
+                .unwrap_or(false)
+            {
+                match load_legacy_skill_async(&skill_json_path, &path).await {
                     Ok(skill) => {
                         debug!(skill = %skill.name, "loaded legacy skill.json");
                         skills.push(skill);
@@ -564,8 +559,10 @@ impl SkillRegistry {
 }
 
 /// Load a legacy `skill.json` + `prompt.md` skill as a [`SkillDefinition`].
-fn load_legacy_skill(json_path: &Path, skill_dir: &Path) -> Result<SkillDefinition> {
-    let json_content = std::fs::read_to_string(json_path).map_err(ClawftError::Io)?;
+async fn load_legacy_skill_async(json_path: &Path, skill_dir: &Path) -> Result<SkillDefinition> {
+    let json_content = tokio::fs::read_to_string(json_path)
+        .await
+        .map_err(ClawftError::Io)?;
 
     let mut skill: SkillDefinition =
         serde_json::from_str(&json_content).map_err(|e| ClawftError::PluginLoadFailed {
@@ -577,8 +574,8 @@ fn load_legacy_skill(json_path: &Path, skill_dir: &Path) -> Result<SkillDefiniti
 
     // Load prompt.md if present.
     let prompt_path = skill_dir.join("prompt.md");
-    if prompt_path.exists() {
-        match std::fs::read_to_string(&prompt_path) {
+    if tokio::fs::try_exists(&prompt_path).await.unwrap_or(false) {
+        match tokio::fs::read_to_string(&prompt_path).await {
             Ok(prompt) => {
                 skill.instructions = prompt;
             }
@@ -758,22 +755,22 @@ Instructions.
 
     // ── SkillRegistry tests ─────────────────────────────────────────────
 
-    #[test]
-    fn registry_empty_when_no_sources() {
-        let registry = SkillRegistry::discover(None, None, vec![]).unwrap();
+    #[tokio::test]
+    async fn registry_empty_when_no_sources() {
+        let registry = SkillRegistry::discover(None, None, vec![]).await.unwrap();
         assert!(registry.is_empty());
         assert_eq!(registry.len(), 0);
         assert!(registry.names().is_empty());
         assert!(registry.list().is_empty());
     }
 
-    #[test]
-    fn registry_loads_builtin_skills() {
+    #[tokio::test]
+    async fn registry_loads_builtin_skills() {
         let builtins = vec![
             SkillDefinition::new("alpha", "Alpha skill"),
             SkillDefinition::new("beta", "Beta skill"),
         ];
-        let registry = SkillRegistry::discover(None, None, builtins).unwrap();
+        let registry = SkillRegistry::discover(None, None, builtins).await.unwrap();
 
         assert_eq!(registry.len(), 2);
         assert!(registry.get("alpha").is_some());
@@ -782,8 +779,8 @@ Instructions.
         assert_eq!(registry.names(), vec!["alpha", "beta"]);
     }
 
-    #[test]
-    fn registry_priority_workspace_over_user_over_builtin() {
+    #[tokio::test]
+    async fn registry_priority_workspace_over_user_over_builtin() {
         let dir_user = temp_dir("user_prio");
         let dir_ws = temp_dir("ws_prio");
 
@@ -800,7 +797,7 @@ Instructions.
         let builtin = SkillDefinition::new("shared", "Built-in version");
 
         let registry =
-            SkillRegistry::discover(Some(&dir_ws), Some(&dir_user), vec![builtin]).unwrap();
+            SkillRegistry::discover(Some(&dir_ws), Some(&dir_user), vec![builtin]).await.unwrap();
 
         let skill = registry.get("shared").unwrap();
         // Workspace has highest priority.
@@ -811,14 +808,14 @@ Instructions.
         let _ = std::fs::remove_dir_all(&dir_ws);
     }
 
-    #[test]
-    fn registry_user_overrides_builtin() {
+    #[tokio::test]
+    async fn registry_user_overrides_builtin() {
         let dir_user = temp_dir("user_over_builtin");
         create_skill_md_dir(&dir_user, "tool", "User tool", "User tool prompt");
 
         let builtin = SkillDefinition::new("tool", "Built-in tool");
 
-        let registry = SkillRegistry::discover(None, Some(&dir_user), vec![builtin]).unwrap();
+        let registry = SkillRegistry::discover(None, Some(&dir_user), vec![builtin]).await.unwrap();
 
         let skill = registry.get("tool").unwrap();
         assert_eq!(skill.description, "User tool");
@@ -826,26 +823,27 @@ Instructions.
         let _ = std::fs::remove_dir_all(&dir_user);
     }
 
-    #[test]
-    fn registry_handles_missing_directories() {
+    #[tokio::test]
+    async fn registry_handles_missing_directories() {
         let missing = PathBuf::from("/tmp/clawft_definitely_does_not_exist_12345");
         let registry = SkillRegistry::discover(
             Some(&missing),
             Some(&missing),
             vec![SkillDefinition::new("only", "The only skill")],
         )
+        .await
         .unwrap();
 
         assert_eq!(registry.len(), 1);
         assert!(registry.get("only").is_some());
     }
 
-    #[test]
-    fn registry_loads_legacy_skill_json() {
+    #[tokio::test]
+    async fn registry_loads_legacy_skill_json() {
         let dir = temp_dir("legacy_reg");
         create_legacy_skill_dir(&dir, "legacy", "Legacy skill", "Legacy prompt");
 
-        let registry = SkillRegistry::discover(Some(&dir), None, vec![]).unwrap();
+        let registry = SkillRegistry::discover(Some(&dir), None, vec![]).await.unwrap();
 
         let skill = registry.get("legacy").unwrap();
         assert_eq!(skill.name, "legacy");
@@ -856,8 +854,8 @@ Instructions.
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn registry_skill_md_preferred_over_skill_json() {
+    #[tokio::test]
+    async fn registry_skill_md_preferred_over_skill_json() {
         let dir = temp_dir("prefer_md");
         let skill_dir = dir.join("dual");
         std::fs::create_dir_all(&skill_dir).unwrap();
@@ -877,7 +875,7 @@ Instructions.
         )
         .unwrap();
 
-        let registry = SkillRegistry::discover(Some(&dir), None, vec![]).unwrap();
+        let registry = SkillRegistry::discover(Some(&dir), None, vec![]).await.unwrap();
 
         let skill = registry.get("dual").unwrap();
         // SKILL.md is checked first in load_dir, so it wins.
@@ -887,8 +885,8 @@ Instructions.
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn registry_merges_skills_from_multiple_sources() {
+    #[tokio::test]
+    async fn registry_merges_skills_from_multiple_sources() {
         let dir_user = temp_dir("merge_user");
         let dir_ws = temp_dir("merge_ws");
 
@@ -898,7 +896,7 @@ Instructions.
         let builtin = SkillDefinition::new("builtin_only", "Built-in only");
 
         let registry =
-            SkillRegistry::discover(Some(&dir_ws), Some(&dir_user), vec![builtin]).unwrap();
+            SkillRegistry::discover(Some(&dir_ws), Some(&dir_user), vec![builtin]).await.unwrap();
 
         assert_eq!(registry.len(), 3);
         assert!(registry.get("builtin_only").is_some());
@@ -909,8 +907,8 @@ Instructions.
         let _ = std::fs::remove_dir_all(&dir_ws);
     }
 
-    #[test]
-    fn registry_skips_invalid_skills() {
+    #[tokio::test]
+    async fn registry_skips_invalid_skills() {
         let dir = temp_dir("skip_invalid");
 
         // Good skill.
@@ -925,7 +923,7 @@ Instructions.
         )
         .unwrap();
 
-        let registry = SkillRegistry::discover(Some(&dir), None, vec![]).unwrap();
+        let registry = SkillRegistry::discover(Some(&dir), None, vec![]).await.unwrap();
         assert_eq!(registry.len(), 1);
         assert!(registry.get("good").is_some());
         assert!(registry.get("bad").is_none());
@@ -1055,8 +1053,8 @@ Instructions.
 
     // ── SEC-SKILL-02: Directory traversal rejected ──────────────────────
 
-    #[test]
-    fn sec_skill_02_traversal_dir_rejected() {
+    #[tokio::test]
+    async fn sec_skill_02_traversal_dir_rejected() {
         let dir = temp_dir("sec02_traversal");
 
         // Create a directory with a path-traversal name.
@@ -1071,7 +1069,7 @@ Instructions.
         // Also create a good skill.
         create_skill_md_dir(&dir, "good", "Good skill", "Good prompt");
 
-        let registry = SkillRegistry::discover(Some(&dir), None, vec![]).unwrap();
+        let registry = SkillRegistry::discover(Some(&dir), None, vec![]).await.unwrap();
         assert!(registry.get("good").is_some());
         // The evil directory should be skipped (name contains "..")
         // Note: the actual directory name is "..%2Fevil" which contains ".."
@@ -1081,8 +1079,8 @@ Instructions.
 
     // ── SEC-SKILL-05: Workspace skills blocked without trust flag ────────
 
-    #[test]
-    fn sec_skill_05_workspace_blocked_without_trust() {
+    #[tokio::test]
+    async fn sec_skill_05_workspace_blocked_without_trust() {
         let dir_ws = temp_dir("sec05_ws");
         create_skill_md_dir(&dir_ws, "ws_skill", "WS skill", "WS prompt");
 
@@ -1090,7 +1088,9 @@ Instructions.
 
         // Without trust, workspace skills should NOT be loaded.
         let registry =
-            SkillRegistry::discover_with_trust(Some(&dir_ws), None, vec![builtin], false).unwrap();
+            SkillRegistry::discover_with_trust(Some(&dir_ws), None, vec![builtin], false)
+                .await
+                .unwrap();
 
         assert!(
             registry.get("ws_skill").is_none(),
@@ -1104,14 +1104,16 @@ Instructions.
         let _ = std::fs::remove_dir_all(&dir_ws);
     }
 
-    #[test]
-    fn sec_skill_05_workspace_allowed_with_trust() {
+    #[tokio::test]
+    async fn sec_skill_05_workspace_allowed_with_trust() {
         let dir_ws = temp_dir("sec05_ws_trust");
         create_skill_md_dir(&dir_ws, "ws_skill", "WS skill", "WS prompt");
 
         // With trust, workspace skills should load.
         let registry =
-            SkillRegistry::discover_with_trust(Some(&dir_ws), None, vec![], true).unwrap();
+            SkillRegistry::discover_with_trust(Some(&dir_ws), None, vec![], true)
+                .await
+                .unwrap();
 
         assert!(registry.get("ws_skill").is_some());
 

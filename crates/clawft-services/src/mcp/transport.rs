@@ -2,6 +2,7 @@
 //!
 //! Provides [`McpTransport`] trait and two implementations:
 //! - [`StdioTransport`]: communicates with a child process over stdin/stdout
+//!   using request-ID multiplexing for concurrent requests
 //! - [`HttpTransport`]: communicates over HTTP POST
 
 use std::collections::HashMap;
@@ -10,8 +11,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::Mutex;
-use tracing::debug;
+use tokio::sync::{Mutex, oneshot};
+use tracing::{debug, warn};
 
 use super::types::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 use crate::error::{Result, ServiceError};
@@ -26,19 +27,27 @@ pub trait McpTransport: Send + Sync {
     async fn send_notification(&self, method: &str, params: serde_json::Value) -> Result<()>;
 }
 
+/// Pending response registry: maps request IDs to oneshot senders.
+type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>;
+
 /// Transport that communicates with a child process via stdin/stdout.
 ///
-/// Each request is written as a single JSON line to stdin, and the
-/// corresponding response is read as a single JSON line from stdout.
+/// Uses a background reader task and request-ID multiplexing to support
+/// concurrent requests. Each `send_request` call registers a oneshot
+/// channel keyed by the request ID, writes to stdin, and waits for the
+/// background reader to deliver the matching response.
 pub struct StdioTransport {
     #[allow(dead_code)]
     child: Arc<Mutex<Child>>,
     stdin: Arc<Mutex<tokio::process::ChildStdin>>,
-    stdout: Arc<Mutex<BufReader<tokio::process::ChildStdout>>>,
+    pending: PendingMap,
+    #[allow(dead_code)]
+    reader_handle: Arc<tokio::task::JoinHandle<()>>,
 }
 
 impl StdioTransport {
-    /// Spawn a child process and set up JSON-RPC communication.
+    /// Spawn a child process and set up JSON-RPC communication with
+    /// request-ID multiplexing.
     pub async fn new(
         command: &str,
         args: &[String],
@@ -62,13 +71,65 @@ impl StdioTransport {
             .take()
             .ok_or_else(|| ServiceError::McpTransport("failed to capture stdout".into()))?;
 
+        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+
+        // Spawn background reader task that reads lines from stdout and
+        // dispatches responses to the matching pending oneshot sender.
+        let reader_pending = Arc::clone(&pending);
+        let reader_handle = tokio::spawn(async move {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => {
+                        debug!("stdio reader: child process closed stdout");
+                        break;
+                    }
+                    Ok(_) => {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        match serde_json::from_str::<JsonRpcResponse>(trimmed) {
+                            Ok(response) => {
+                                let id = response.id;
+                                let mut map = reader_pending.lock().await;
+                                if let Some(tx) = map.remove(&id) {
+                                    let _ = tx.send(response);
+                                } else {
+                                    warn!(id, "stdio reader: received response with no pending request");
+                                }
+                            }
+                            Err(e) => {
+                                // Could be a notification or malformed line; skip
+                                debug!(error = %e, "stdio reader: ignoring non-response line");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "stdio reader: read error, exiting");
+                        break;
+                    }
+                }
+            }
+
+            // Signal all pending requests that the reader has stopped.
+            let mut map = reader_pending.lock().await;
+            map.clear();
+        });
+
         Ok(Self {
             child: Arc::new(Mutex::new(child)),
             stdin: Arc::new(Mutex::new(stdin)),
-            stdout: Arc::new(Mutex::new(BufReader::new(stdout))),
+            pending,
+            reader_handle: Arc::new(reader_handle),
         })
     }
 }
+
+/// Default timeout for waiting on a response from the child process.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[async_trait]
 impl McpTransport for StdioTransport {
@@ -76,7 +137,15 @@ impl McpTransport for StdioTransport {
         let mut line = serde_json::to_string(&request)?;
         line.push('\n');
 
-        debug!(method = %request.method, id = request.id, "sending stdio request");
+        let id = request.id;
+        debug!(method = %request.method, id, "sending stdio request");
+
+        // Register a oneshot channel for this request ID.
+        let (tx, rx) = oneshot::channel::<JsonRpcResponse>();
+        {
+            let mut map = self.pending.lock().await;
+            map.insert(id, tx);
+        }
 
         // Write to stdin.
         {
@@ -90,23 +159,25 @@ impl McpTransport for StdioTransport {
                 .map_err(|e| ServiceError::McpTransport(format!("failed to flush stdin: {e}")))?;
         }
 
-        // Read from stdout.
-        let mut response_line = String::new();
-        {
-            let mut stdout = self.stdout.lock().await;
-            stdout.read_line(&mut response_line).await.map_err(|e| {
-                ServiceError::McpTransport(format!("failed to read from stdout: {e}"))
-            })?;
+        // Wait for the background reader to deliver the response, with timeout.
+        match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(_)) => {
+                // Oneshot sender was dropped (reader task exited).
+                Err(ServiceError::McpTransport(
+                    "child process closed stdout before responding".into(),
+                ))
+            }
+            Err(_) => {
+                // Timeout: remove the pending entry.
+                let mut map = self.pending.lock().await;
+                map.remove(&id);
+                Err(ServiceError::McpTransport(format!(
+                    "request {id} timed out after {}s",
+                    REQUEST_TIMEOUT.as_secs()
+                )))
+            }
         }
-
-        if response_line.is_empty() {
-            return Err(ServiceError::McpTransport(
-                "child process closed stdout".into(),
-            ));
-        }
-
-        let response: JsonRpcResponse = serde_json::from_str(response_line.trim())?;
-        Ok(response)
     }
 
     async fn send_notification(&self, method: &str, params: serde_json::Value) -> Result<()> {

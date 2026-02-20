@@ -32,6 +32,10 @@ pub struct ProviderConfig {
     /// Extra HTTP headers to include in every request to this provider.
     #[serde(default)]
     pub headers: HashMap<String, String>,
+
+    /// Request timeout in seconds. Defaults to 120.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 /// Returns the built-in provider configurations.
@@ -47,6 +51,7 @@ pub fn builtin_providers() -> Vec<ProviderConfig> {
             model_prefix: Some("openai/".into()),
             default_model: Some("gpt-4o".into()),
             headers: HashMap::new(),
+            timeout_secs: None,
         },
         ProviderConfig {
             name: "anthropic".into(),
@@ -55,6 +60,7 @@ pub fn builtin_providers() -> Vec<ProviderConfig> {
             model_prefix: Some("anthropic/".into()),
             default_model: Some("claude-sonnet-4-5-20250514".into()),
             headers: HashMap::from([("anthropic-version".into(), "2023-06-01".into())]),
+            timeout_secs: None,
         },
         ProviderConfig {
             name: "groq".into(),
@@ -63,6 +69,7 @@ pub fn builtin_providers() -> Vec<ProviderConfig> {
             model_prefix: Some("groq/".into()),
             default_model: Some("llama-3.1-70b-versatile".into()),
             headers: HashMap::new(),
+            timeout_secs: None,
         },
         ProviderConfig {
             name: "deepseek".into(),
@@ -71,6 +78,7 @@ pub fn builtin_providers() -> Vec<ProviderConfig> {
             model_prefix: Some("deepseek/".into()),
             default_model: Some("deepseek-chat".into()),
             headers: HashMap::new(),
+            timeout_secs: None,
         },
         ProviderConfig {
             name: "mistral".into(),
@@ -79,6 +87,7 @@ pub fn builtin_providers() -> Vec<ProviderConfig> {
             model_prefix: Some("mistral/".into()),
             default_model: Some("mistral-large-latest".into()),
             headers: HashMap::new(),
+            timeout_secs: None,
         },
         ProviderConfig {
             name: "together".into(),
@@ -87,6 +96,7 @@ pub fn builtin_providers() -> Vec<ProviderConfig> {
             model_prefix: Some("together/".into()),
             default_model: None,
             headers: HashMap::new(),
+            timeout_secs: None,
         },
         ProviderConfig {
             name: "openrouter".into(),
@@ -95,6 +105,7 @@ pub fn builtin_providers() -> Vec<ProviderConfig> {
             model_prefix: Some("openrouter/".into()),
             default_model: None,
             headers: HashMap::new(),
+            timeout_secs: None,
         },
         ProviderConfig {
             name: "gemini".into(),
@@ -103,6 +114,7 @@ pub fn builtin_providers() -> Vec<ProviderConfig> {
             model_prefix: Some("gemini/".into()),
             default_model: Some("gemini-2.5-flash".into()),
             headers: HashMap::new(),
+            timeout_secs: None,
         },
         ProviderConfig {
             name: "xai".into(),
@@ -111,6 +123,7 @@ pub fn builtin_providers() -> Vec<ProviderConfig> {
             model_prefix: Some("xai/".into()),
             default_model: Some("grok-3-mini".into()),
             headers: HashMap::new(),
+            timeout_secs: None,
         },
     ]
 }
@@ -205,6 +218,7 @@ mod tests {
             model_prefix: Some("test/".into()),
             default_model: Some("test-model".into()),
             headers: HashMap::from([("X-Custom".into(), "value".into())]),
+            timeout_secs: Some(60),
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: ProviderConfig = serde_json::from_str(&json).unwrap();

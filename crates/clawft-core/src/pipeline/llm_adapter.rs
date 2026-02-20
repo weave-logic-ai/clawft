@@ -22,11 +22,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use clawft_llm::{
     ChatMessage, ChatRequest as LlmChatRequest, ChatResponse, OpenAiCompatProvider,
-    ProviderConfig as LlmProviderConfig, ProviderError, ProviderRouter,
+    ProviderConfig as LlmProviderConfig, ProviderRouter,
 };
 use clawft_types::config::Config;
 
@@ -99,34 +99,12 @@ impl LlmProvider for ClawftLlmAdapter {
             "adapter forwarding request to clawft-llm provider"
         );
 
-        // -- Call the underlying provider with retry on rate-limit -----------
-        const MAX_RETRIES: u32 = 3;
-        let mut last_err = String::new();
-
-        for attempt in 0..=MAX_RETRIES {
-            match self.provider.complete(&request).await {
-                Ok(response) => return Ok(convert_response_to_value(&response)),
-                Err(ProviderError::RateLimited { retry_after_ms }) => {
-                    if attempt == MAX_RETRIES {
-                        last_err = format!("rate limited after {} retries", MAX_RETRIES);
-                        break;
-                    }
-                    // Use provider-suggested wait, with exponential backoff floor
-                    let backoff_floor = 1000u64 * 2u64.pow(attempt);
-                    let wait = retry_after_ms.max(backoff_floor);
-                    warn!(
-                        provider = %self.provider.name(),
-                        attempt = attempt + 1,
-                        wait_ms = wait,
-                        "rate limited, retrying"
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
-                }
-                Err(e) => return Err(e.to_string()),
-            }
+        // Retry is handled by RetryPolicy<P> wrapping at provider construction
+        // time (see create_adapter_from_config). No duplicate retry loop here.
+        match self.provider.complete(&request).await {
+            Ok(response) => Ok(convert_response_to_value(&response)),
+            Err(e) => Err(e.to_string()),
         }
-
-        Err(last_err)
     }
 
     async fn complete_stream(
@@ -348,7 +326,11 @@ pub fn create_adapter_from_config(config: &Config) -> Arc<dyn LlmProvider> {
     );
 
     let provider = OpenAiCompatProvider::new(provider_config);
-    Arc::new(ClawftLlmAdapter::new(Arc::new(provider)))
+    // Wrap in RetryPolicy so transient errors (5xx, rate-limit, timeout)
+    // are retried with exponential backoff at the provider level.
+    let retrying =
+        clawft_llm::retry::RetryPolicy::new(provider, clawft_llm::retry::RetryConfig::default());
+    Arc::new(ClawftLlmAdapter::new(Arc::new(retrying)))
 }
 
 /// Apply API key and base URL overrides from the application config to a
@@ -448,7 +430,7 @@ fn resolve_app_api_key(provider_name: &str, config: &Config) -> Option<String> {
         "xai" => &config.providers.xai.api_key,
         _ => return None,
     };
-    if key.is_empty() { None } else { Some(key.clone()) }
+    if key.is_empty() { None } else { Some(key.expose().to_string()) }
 }
 
 /// Create adapters for all providers referenced in the routing tiers,

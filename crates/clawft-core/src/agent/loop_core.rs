@@ -372,28 +372,37 @@ impl<P: Platform> AgentLoop<P> {
                 tool_calls: Some(assistant_tool_calls),
             });
 
-            // Execute each tool and append results to the request
-            for (id, name, input) in tool_calls {
-                let permissions = request
-                    .auth_context
-                    .as_ref()
-                    .map(|ctx| &ctx.permissions);
-                let result = self
-                    .tools
-                    .execute(&name, input.clone(), permissions)
-                    .await;
-                let result_json = match result {
-                    Ok(val) => {
-                        let truncated =
-                            crate::security::truncate_result(val, MAX_TOOL_RESULT_BYTES);
-                        serde_json::to_string(&truncated).unwrap_or_default()
-                    }
-                    Err(e) => {
-                        error!(tool = %name, error = %e, "tool execution failed");
-                        format!("{{\"error\": \"{}\"}}", e)
-                    }
-                };
+            // Execute all tool calls in parallel and append results in order.
+            let permissions = request
+                .auth_context
+                .as_ref()
+                .map(|ctx| &ctx.permissions);
 
+            let futures: Vec<_> = tool_calls
+                .iter()
+                .map(|(id, name, input)| {
+                    let tools = &self.tools;
+                    async move {
+                        let result = tools.execute(name, input.clone(), permissions).await;
+                        let result_json = match result {
+                            Ok(val) => {
+                                let truncated =
+                                    crate::security::truncate_result(val, MAX_TOOL_RESULT_BYTES);
+                                serde_json::to_string(&truncated).unwrap_or_default()
+                            }
+                            Err(e) => {
+                                error!(tool = %name, error = %e, "tool execution failed");
+                                serde_json::json!({"error": e.to_string()}).to_string()
+                            }
+                        };
+                        (id.clone(), result_json)
+                    }
+                })
+                .collect();
+
+            let results = futures_util::future::join_all(futures).await;
+
+            for (id, result_json) in results {
                 request.messages.push(LlmMessage {
                     role: "tool".into(),
                     content: result_json,
@@ -859,6 +868,7 @@ mod tests {
                     media: vec![],
                     metadata: HashMap::new(),
                 })
+                .await
                 .is_ok()
         );
 
@@ -1645,6 +1655,50 @@ mod tests {
         assert_eq!(outbound.channel, "cli");
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    // ── A3: Error JSON formatting tests ────────────────────────────
+
+    #[test]
+    fn error_json_escapes_double_quotes() {
+        let error_msg = r#"file "foo" not found"#;
+        let json_str = serde_json::json!({"error": error_msg}).to_string();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed["error"].as_str().unwrap(), error_msg);
+    }
+
+    #[test]
+    fn error_json_escapes_backslashes() {
+        let error_msg = r"path C:\Users\test";
+        let json_str = serde_json::json!({"error": error_msg}).to_string();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed["error"].as_str().unwrap(), error_msg);
+    }
+
+    #[test]
+    fn error_json_escapes_newlines() {
+        let error_msg = "line 1\nline 2";
+        let json_str = serde_json::json!({"error": error_msg}).to_string();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed["error"].as_str().unwrap(), error_msg);
+    }
+
+    #[test]
+    fn error_json_escapes_all_special_chars() {
+        let error_msg = "quote: \" backslash: \\ newline: \n tab: \t null: \0";
+        let json_str = serde_json::json!({"error": error_msg}).to_string();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed["error"].as_str().unwrap(), error_msg);
+    }
+
+    #[test]
+    fn error_json_has_single_error_key() {
+        let error_msg = "something went wrong";
+        let json_str = serde_json::json!({"error": error_msg}).to_string();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        let obj = parsed.as_object().unwrap();
+        assert_eq!(obj.len(), 1, "should have exactly one key");
+        assert!(obj.contains_key("error"));
     }
 
     /// F-12b: process_message with non-CLI channel attaches zero-trust auth_context.

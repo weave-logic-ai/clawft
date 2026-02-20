@@ -203,7 +203,7 @@ impl LlmTransport for OpenAiCompatTransport {
     async fn complete_stream(
         &self,
         request: &TransportRequest,
-        callback: StreamCallback,
+        mut callback: StreamCallback,
     ) -> clawft_types::Result<LlmResponse> {
         let provider = self
             .providers

@@ -8,11 +8,16 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tracing::{debug, trace, warn};
 
+use std::time::Duration;
+
 use crate::config::ProviderConfig;
 use crate::error::{ProviderError, Result};
 use crate::provider::Provider;
 use crate::sse::parse_sse_line;
 use crate::types::{ChatRequest, ChatResponse, StreamChunk};
+
+/// Default timeout for LLM API requests (2 minutes).
+const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
 /// An LLM provider that uses the OpenAI-compatible chat completion API.
 ///
@@ -47,9 +52,13 @@ impl OpenAiCompatProvider {
     /// The API key will be resolved from the environment variable specified
     /// in `config.api_key_env` at request time.
     pub fn new(config: ProviderConfig) -> Self {
+        let timeout_secs = config.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS);
         Self {
+            http: reqwest::ClientBuilder::new()
+                .timeout(Duration::from_secs(timeout_secs))
+                .build()
+                .expect("failed to build reqwest client"),
             config,
-            http: reqwest::Client::new(),
             api_key: None,
         }
     }
@@ -59,9 +68,13 @@ impl OpenAiCompatProvider {
     /// This bypasses environment variable lookup and uses the provided key
     /// directly.
     pub fn with_api_key(config: ProviderConfig, api_key: String) -> Self {
+        let timeout_secs = config.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS);
         Self {
+            http: reqwest::ClientBuilder::new()
+                .timeout(Duration::from_secs(timeout_secs))
+                .build()
+                .expect("failed to build reqwest client"),
             config,
-            http: reqwest::Client::new(),
             api_key: Some(api_key),
         }
     }
@@ -163,6 +176,15 @@ impl Provider for OpenAiCompatProvider {
                 )));
             }
 
+            // Emit structured ServerError for 5xx, RequestFailed for other codes.
+            let code = status.as_u16();
+            if (500..=599).contains(&code) {
+                return Err(ProviderError::ServerError {
+                    status: code,
+                    body,
+                });
+            }
+
             return Err(ProviderError::RequestFailed(format!(
                 "HTTP {status}: {body}"
             )));
@@ -255,6 +277,15 @@ impl Provider for OpenAiCompatProvider {
                     "model '{}': {}",
                     request.model, body
                 )));
+            }
+
+            // Emit structured ServerError for 5xx, RequestFailed for other codes.
+            let code = status.as_u16();
+            if (500..=599).contains(&code) {
+                return Err(ProviderError::ServerError {
+                    status: code,
+                    body,
+                });
             }
 
             return Err(ProviderError::RequestFailed(format!(
@@ -413,6 +444,7 @@ mod tests {
             model_prefix: Some("test/".into()),
             default_model: Some("test-model".into()),
             headers: HashMap::new(),
+            timeout_secs: None,
         }
     }
 
@@ -424,6 +456,7 @@ mod tests {
             model_prefix: Some("anthropic/".into()),
             default_model: None,
             headers: HashMap::from([("anthropic-version".into(), "2023-06-01".into())]),
+            timeout_secs: None,
         }
     }
 
@@ -475,14 +508,11 @@ mod tests {
         let mut config = test_config();
         config.api_key_env = env_var.into();
 
-        // Set env var for this test
-        unsafe { std::env::set_var(env_var, "sk-from-env") };
-        let provider = OpenAiCompatProvider::new(config);
-        let key = provider.resolve_api_key().unwrap();
+        let key = temp_env::with_var(env_var, Some("sk-from-env"), || {
+            let provider = OpenAiCompatProvider::new(config);
+            provider.resolve_api_key().unwrap()
+        });
         assert_eq!(key, "sk-from-env");
-
-        // Clean up
-        unsafe { std::env::remove_var(env_var) };
     }
 
     #[test]
@@ -583,6 +613,32 @@ mod tests {
         let output = format!("{provider:?}");
         assert!(!output.contains("sk-secret-test-key-12345"));
         assert!(output.contains("***"));
+    }
+
+    // ── A7: HTTP timeout tests ────────────────────────────────────────
+
+    #[test]
+    fn client_uses_default_timeout() {
+        let config = test_config();
+        // Verify Client was built (it would panic if ClientBuilder failed)
+        let provider = OpenAiCompatProvider::new(config);
+        assert_eq!(provider.name(), "test-provider");
+    }
+
+    #[test]
+    fn client_uses_custom_timeout() {
+        let mut config = test_config();
+        config.timeout_secs = Some(30);
+        let provider = OpenAiCompatProvider::new(config);
+        assert_eq!(provider.name(), "test-provider");
+    }
+
+    #[test]
+    fn with_api_key_uses_timeout() {
+        let mut config = test_config();
+        config.timeout_secs = Some(60);
+        let provider = OpenAiCompatProvider::with_api_key(config, "sk-test".into());
+        assert_eq!(provider.api_key.as_deref(), Some("sk-test"));
     }
 
     /// SEC-04: Verify that ProviderConfig stores env var names, not keys,

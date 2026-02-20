@@ -476,7 +476,7 @@ mod tests {
             media: vec![],
             metadata: HashMap::new(),
         };
-        assert!(tx.send(msg).is_ok());
+        assert!(tx.send(msg).await.is_ok());
     }
 
     #[tokio::test]

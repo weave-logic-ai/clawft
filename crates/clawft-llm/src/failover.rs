@@ -118,10 +118,25 @@ impl Provider for FailoverChain {
         let mut errors: Vec<(String, ProviderError)> = Vec::new();
 
         for (idx, provider) in self.providers.iter().enumerate() {
-            match provider.complete_stream(request, tx.clone()).await {
-                Ok(()) => return Ok(()),
+            // Buffer chunks per attempt to prevent partial output concatenation.
+            // Only forward buffered chunks to the real sender on success.
+            let (attempt_tx, mut attempt_rx) = mpsc::channel::<StreamChunk>(256);
+
+            match provider.complete_stream(request, attempt_tx).await {
+                Ok(()) => {
+                    // Success: forward all buffered chunks to the real sender.
+                    while let Some(chunk) = attempt_rx.recv().await {
+                        if tx.send(chunk).await.is_err() {
+                            break;
+                        }
+                    }
+                    return Ok(());
+                }
                 Err(err) => {
                     let provider_name = provider.name().to_owned();
+
+                    // Discard buffered chunks from this failed attempt by
+                    // dropping attempt_rx (already moved out of scope).
 
                     if !is_retryable(&err) && !is_failover_eligible(&err) {
                         return Err(err);
@@ -278,7 +293,10 @@ mod tests {
         let chain = FailoverChain::new(vec![
             Box::new(FailProvider {
                 name: "broken".into(),
-                error: || ProviderError::RequestFailed("HTTP 503: unavailable".into()),
+                error: || ProviderError::ServerError {
+                    status: 503,
+                    body: "unavailable".into(),
+                },
             }),
             Box::new(SuccessProvider {
                 name: "backup".into(),
@@ -346,7 +364,10 @@ mod tests {
         let chain = FailoverChain::new(vec![
             Box::new(FailProvider {
                 name: "p1".into(),
-                error: || ProviderError::RequestFailed("HTTP 500: error".into()),
+                error: || ProviderError::ServerError {
+                    status: 500,
+                    body: "error".into(),
+                },
             }),
             Box::new(FailProvider {
                 name: "p2".into(),
@@ -371,7 +392,10 @@ mod tests {
         let chain = FailoverChain::new(vec![
             Box::new(FailProvider {
                 name: "p1".into(),
-                error: || ProviderError::RequestFailed("HTTP 502: bad gateway".into()),
+                error: || ProviderError::ServerError {
+                    status: 502,
+                    body: "bad gateway".into(),
+                },
             }),
             Box::new(FailProvider {
                 name: "p2".into(),

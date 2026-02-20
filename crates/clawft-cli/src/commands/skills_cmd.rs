@@ -43,10 +43,12 @@ pub enum SkillsAction {
 }
 
 /// Run the skills subcommand.
-pub fn run(args: SkillsArgs) -> anyhow::Result<()> {
+pub async fn run(args: SkillsArgs) -> anyhow::Result<()> {
     let (ws_dir, user_dir) = discover_skill_dirs();
-    let registry = SkillRegistry::discover(ws_dir.as_deref(), user_dir.as_deref(), Vec::new())
-        .map_err(|e| anyhow::anyhow!("failed to discover skills: {e}"))?;
+    let registry =
+        SkillRegistry::discover(ws_dir.as_deref(), user_dir.as_deref(), Vec::new())
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to discover skills: {e}"))?;
 
     match args.action {
         SkillsAction::List => skills_list(&registry, ws_dir.as_deref(), user_dir.as_deref()),
@@ -336,13 +338,15 @@ mod tests {
         assert_eq!(classify_source(&skill, None, None), "builtin");
     }
 
-    #[test]
-    fn skills_list_with_registry() {
+    #[tokio::test]
+    async fn skills_list_with_registry() {
         let dir = temp_dir("list");
         create_skill_md(&dir, "alpha", "Alpha skill");
         create_skill_md(&dir, "beta", "Beta skill");
 
-        let registry = SkillRegistry::discover(Some(&dir), None, Vec::new()).unwrap();
+        let registry = SkillRegistry::discover(Some(&dir), None, Vec::new())
+            .await
+            .unwrap();
         // Just verify it does not panic and the registry has the skills.
         assert_eq!(registry.len(), 2);
         assert!(registry.get("alpha").is_some());
@@ -351,12 +355,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn skills_show_found() {
+    #[tokio::test]
+    async fn skills_show_found() {
         let dir = temp_dir("show");
         create_skill_md(&dir, "test_skill", "A test skill");
 
-        let registry = SkillRegistry::discover(Some(&dir), None, Vec::new()).unwrap();
+        let registry = SkillRegistry::discover(Some(&dir), None, Vec::new())
+            .await
+            .unwrap();
         let skill = registry.get("test_skill");
         assert!(skill.is_some());
         assert_eq!(skill.unwrap().description, "A test skill");
@@ -364,9 +370,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn skills_show_not_found() {
-        let registry = SkillRegistry::discover(None, None, Vec::new()).unwrap();
+    #[tokio::test]
+    async fn skills_show_not_found() {
+        let registry = SkillRegistry::discover(None, None, Vec::new())
+            .await
+            .unwrap();
         let result = skills_show(&registry, "nonexistent");
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();

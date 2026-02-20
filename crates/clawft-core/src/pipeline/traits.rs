@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -133,6 +134,9 @@ pub struct RoutingDecision {
 
     /// Whether budget constraints affected the routing.
     pub budget_constrained: bool,
+
+    /// The sender who originated this request, for per-user cost attribution.
+    pub sender_id: Option<String>,
 }
 
 /// Outcome of a response, used to update the router.
@@ -261,7 +265,10 @@ pub trait ContextAssembler: Send + Sync {
 ///
 /// The callback should return `true` to continue streaming, or
 /// `false` to abort the stream early.
-pub type StreamCallback = Box<dyn Fn(&str) -> bool + Send + Sync>;
+///
+/// Uses `FnMut` to allow stateful callbacks (e.g. buffering,
+/// counting tokens, accumulating output).
+pub type StreamCallback = Box<dyn FnMut(&str) -> bool + Send>;
 
 /// Stage 4: Execute the LLM call via HTTP transport.
 #[async_trait]
@@ -276,7 +283,7 @@ pub trait LlmTransport: Send + Sync {
     async fn complete_stream(
         &self,
         request: &TransportRequest,
-        callback: StreamCallback,
+        mut callback: StreamCallback,
     ) -> clawft_types::Result<LlmResponse> {
         let response = self.complete(request).await?;
 
@@ -420,7 +427,7 @@ impl PipelineRegistry {
         // Stage 3: assemble context
         let context = pipeline.assembler.assemble(request, &profile).await;
 
-        // Stage 4: transport
+        // Stage 4: transport (with latency measurement)
         let transport_request = TransportRequest {
             provider: routing.provider.clone(),
             model: routing.model.clone(),
@@ -429,7 +436,9 @@ impl PipelineRegistry {
             max_tokens: request.max_tokens,
             temperature: request.temperature,
         };
+        let start = Instant::now();
         let response = pipeline.transport.complete(&transport_request).await?;
+        let latency_ms = start.elapsed().as_millis() as u64;
 
         // Stage 5: score
         let quality = pipeline.scorer.score(request, &response);
@@ -443,11 +452,11 @@ impl PipelineRegistry {
         };
         pipeline.learner.record(&trajectory);
 
-        // Update the router with the outcome
+        // Update the router with the outcome (now with actual latency)
         let outcome = ResponseOutcome {
             success: true,
             quality: trajectory.quality,
-            latency_ms: 0, // Caller should measure actual latency
+            latency_ms,
         };
         pipeline.router.update(&routing, &outcome);
 
@@ -480,11 +489,13 @@ impl PipelineRegistry {
             temperature: request.temperature,
         };
 
-        // Stage 4: streaming transport
+        // Stage 4: streaming transport (with latency measurement)
+        let start = Instant::now();
         let response = pipeline
             .transport
             .complete_stream(&transport_request, callback)
             .await?;
+        let latency_ms = start.elapsed().as_millis() as u64;
 
         // Stages 5-6: score and learn
         let quality = pipeline.scorer.score(request, &response);
@@ -498,7 +509,7 @@ impl PipelineRegistry {
         let outcome = ResponseOutcome {
             success: true,
             quality: trajectory.quality,
-            latency_ms: 0,
+            latency_ms,
         };
         pipeline.router.update(&routing, &outcome);
 

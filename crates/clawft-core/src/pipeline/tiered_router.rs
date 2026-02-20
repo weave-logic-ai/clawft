@@ -660,6 +660,7 @@ impl ModelRouter for TieredRouter {
                             cost_estimate_usd: Some(final_tier.cost_per_1k_tokens),
                             escalated,
                             budget_constrained,
+                            sender_id: Some(auth.sender_id.clone()),
                         };
                     }
                     None => return self.no_tiers_available_decision(),
@@ -695,17 +696,20 @@ impl ModelRouter for TieredRouter {
             cost_estimate_usd: Some(cost_estimate),
             escalated,
             budget_constrained,
+            sender_id: Some(auth.sender_id.clone()),
         }
     }
 
     fn update(&self, decision: &RoutingDecision, _outcome: &ResponseOutcome) {
         // Record actual cost after response is received.
-        // Phase D (CostTracker) will provide real cost calculation.
-        // For Phase C, cost_estimate_usd is used as a proxy for actual cost.
-        if let Some(cost) = decision.cost_estimate_usd {
-            let _ = cost;
-            // NOTE: sender_id is not available on RoutingDecision.
-            // Phase F will thread sender_id through the pipeline properly.
+        // For now, cost_estimate_usd is used as a proxy for actual cost.
+        // A proper cost calculation from token usage will be added later.
+        if let (Some(cost), Some(sender_id)) =
+            (decision.cost_estimate_usd, &decision.sender_id)
+            && let Some(ref tracker) = self.cost_tracker
+        {
+            // Reconcile: actual == estimated for now (no token-based cost yet)
+            tracker.record_actual(sender_id, cost, cost);
         }
     }
 }
