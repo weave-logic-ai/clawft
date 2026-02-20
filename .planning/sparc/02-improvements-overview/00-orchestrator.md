@@ -3,9 +3,11 @@
 **Project**: clawft -- Improvements Sprint (Post-Phase 4)
 **Source**: `.planning/improvements.md`
 **Created**: 2026-02-19
-**Status**: Planning in progress
+**Status**: COMPLETE -- Sprint executed 2026-02-19 to 2026-02-20
 **Execution Model**: 9 feature elements, parallel execution with dependency gates
 **Test Baseline**: 2,075+ tests at sprint start
+**Test Final**: 2,407 tests at sprint end (net +332)
+**Commits**: 6 commits on sprint/phase-5 (07ceb05, 63ebe99, 9d152b5, dfd4066, a67b9e5)
 **Phase Standard**: All sprint work is Phase 5. Business requirements use sections 5d-5o.
 
 ---
@@ -97,7 +99,72 @@ Even though Voice and UI are out of scope, the following hooks must be built:
 
 ---
 
-## 6. Source Documents
+## 6. Sprint Completion Report
+
+**Executed**: 2026-02-19 to 2026-02-20 (4 waves, 6 commits)
+**Branch**: `sprint/phase-5`
+
+### Element Completion
+
+| Element | Focus | % Done | Items Done | Deferred/Blocked |
+|---------|-------|--------|------------|-----------------|
+| 03 | Critical Fixes & Cleanup | 100% | 33/33 | -- |
+| 04 | Plugin & Skill System | 99% | 8/8 phases | C2: 3 minor security tests (T30/T41/T42) |
+| 05 | Pipeline & LLM Reliability | 100% | 11/11 | -- |
+| 06 | Channel Enhancements | 89% | 8/9 | IRC channel deferred |
+| 07 | Dev Tools & Apps | 100% | 10/10 | -- |
+| 08 | Memory & Workspace | 100% | 10/10 | -- |
+| 09 | Multi-Agent Routing | 93% | 13/14 | M6 docs deferred |
+| 10 | Deployment & Community | 90% | K2-K5 core | Skill install/publish, MVP skills blocked on C3/C4 runtime |
+
+### Wave Execution
+
+| Wave | Scope | Commit | Files | Tests |
+|------|-------|--------|-------|-------|
+| 1 | Elements 03-A, 05 | `07ceb05`, `63ebe99` | 59 | 1903 |
+| 2 | Element 03-B/I/J, 04-C1 | `9d152b5` | 77 | 1968 |
+| 3 | Elements 04/06/07/08/09 | `dfd4066` | 93 | 2204 |
+| 4 | Elements 04/07/08/10 | `a67b9e5` | 68 | 2407 |
+
+### New Crates Added (8)
+
+- `clawft-plugin` -- 6 core plugin traits + manifest
+- `clawft-plugin-git` -- 7 git tools via git2
+- `clawft-plugin-cargo` -- 5 cargo subcommands
+- `clawft-plugin-oauth2` -- OAuth2 + REST tools
+- `clawft-plugin-treesitter` -- AST analysis tools
+- `clawft-plugin-browser` -- CDP browser automation
+- `clawft-plugin-calendar` -- Calendar CRUD tools
+- `clawft-plugin-containers` -- Docker/Podman tools
+- `clawft-security` -- 57 audit checks across 10 categories
+
+### New Channel Adapters (7)
+
+Email, WhatsApp, Signal, Matrix, Google Chat, Microsoft Teams, Discord Resume
+
+### Key Architecture Deliverables
+
+- WASM sandbox: wasmtime 29, fuel metering, memory limits, 5 host functions, 45 security tests
+- HNSW vector memory: instant-distance, brute-force fallback, temperature quantization
+- Agent routing: first-match-wins router, AgentBus with per-agent inboxes, SwarmCoordinator
+- MCP ecosystem: discovery, bridge, IDE integration, client pool, skill exposure
+- Plugin lifecycle: hot-reload, autonomous skill creation, slash-command framework
+- Per-agent workspace isolation: SOUL.md injection, 3-level config merge
+- SHA-256 WITNESS audit chains with tamper detection
+- SandboxPolicy with OS sandbox (seccomp/landlock) + WASM fallback
+- CI/CD: PR gates, multi-arch Docker release pipeline
+
+### Remaining Items
+
+1. **C2 T30/T41/T42** -- 3 WASM security tests (wall-clock timeout, version re-prompt, lifecycle)
+2. **IRC channel** -- deferred (low priority)
+3. **M6 docs** -- deferred to documentation sprint
+4. **K4 skill install/publish** -- blocked on ClawHub server availability
+5. **K5 3 MVP skills** -- blocked on C3/C4 skill loader runtime integration
+
+---
+
+## 7. Source Documents
 
 - `.planning/improvements.md` -- Sprint plan (source of truth)
 - `.planning/01-business-requirements.md` -- Business requirements
