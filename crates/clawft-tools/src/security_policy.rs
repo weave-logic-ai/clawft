@@ -3,22 +3,24 @@
 //! Provides configurable allowlist/denylist-based command validation with
 //! defense-in-depth dangerous pattern detection. Used by shell and spawn
 //! tools to gate which executables may be invoked.
-
-use std::collections::HashSet;
+//!
+//! The core types ([`CommandPolicy`], [`PolicyMode`]) are defined in
+//! [`clawft_types::security`] and re-exported here for convenience.
+//! This module adds the [`PolicyError`] type used by tool implementations
+//! and the [`extract_first_token`] helper.
 
 use thiserror::Error;
 
-/// Whether the policy operates in allowlist or denylist mode.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub enum PolicyMode {
-    /// Only commands whose basename appears in the allowlist are permitted.
-    #[default]
-    Allowlist,
-    /// All commands are permitted unless they match a denylist pattern.
-    Denylist,
-}
+// Re-export the canonical types from clawft-types.
+pub use clawft_types::security::{
+    CommandPolicy, CommandPolicyError, PolicyMode, DEFAULT_COMMAND_ALLOWLIST,
+    DEFAULT_DANGEROUS_PATTERNS, extract_first_token,
+};
 
 /// Errors returned when a command fails policy validation.
+///
+/// This wraps [`CommandPolicyError`] with `thiserror` for ergonomic
+/// use in tool implementations that return `Result<_, PolicyError>`.
 #[derive(Debug, Clone, PartialEq, Error)]
 pub enum PolicyError {
     /// The command's executable is not on the allowlist.
@@ -34,154 +36,17 @@ pub enum PolicyError {
     DangerousPattern { command: String, pattern: String },
 }
 
-/// Configurable command execution policy.
-///
-/// Validates commands against an allowlist or denylist, and always checks
-/// a set of dangerous patterns regardless of mode (defense-in-depth).
-#[derive(Debug, Clone)]
-pub struct CommandPolicy {
-    /// Operating mode for the policy.
-    pub mode: PolicyMode,
-    /// Set of permitted executable basenames (used in `Allowlist` mode).
-    pub allowlist: HashSet<String>,
-    /// Patterns to block (substring match, case-insensitive; used in `Denylist` mode).
-    pub denylist: Vec<String>,
-    /// Patterns that are always checked regardless of mode (defense-in-depth).
-    pub dangerous_patterns: Vec<String>,
-}
-
-/// The default set of safe executable basenames for allowlist mode.
-const DEFAULT_ALLOWLIST: &[&str] = &[
-    "echo", "cat", "ls", "pwd", "head", "tail", "wc", "grep", "find", "sort", "uniq", "diff",
-    "date", "env", "true", "false", "test",
-];
-
-/// The default set of dangerous patterns, mirroring those in `shell_tool.rs`.
-const DEFAULT_DANGEROUS_PATTERNS: &[&str] = &[
-    "rm -rf /",
-    "sudo ",
-    "mkfs",
-    "dd if=",
-    ":(){ :|:& };:",
-    "chmod 777 /",
-    "> /dev/sd",
-    "shutdown",
-    "reboot",
-    "poweroff",
-    "format c:",
-];
-
-impl CommandPolicy {
-    /// Create a policy with safe defaults.
-    ///
-    /// - Mode: `Allowlist`
-    /// - Allowlist: common read-only / informational commands
-    /// - Dangerous patterns: the standard 11 patterns from `shell_tool.rs`
-    /// - Denylist: same patterns (used when mode is switched to `Denylist`)
-    pub fn safe_defaults() -> Self {
-        let allowlist = DEFAULT_ALLOWLIST.iter().map(|s| (*s).to_string()).collect();
-        let dangerous_patterns: Vec<String> = DEFAULT_DANGEROUS_PATTERNS
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
-        let denylist = dangerous_patterns.clone();
-
-        Self {
-            mode: PolicyMode::Allowlist,
-            allowlist,
-            denylist,
-            dangerous_patterns,
-        }
-    }
-
-    /// Create a new policy with explicit configuration.
-    pub fn new(mode: PolicyMode, allowlist: HashSet<String>, denylist: Vec<String>) -> Self {
-        let dangerous_patterns: Vec<String> = DEFAULT_DANGEROUS_PATTERNS
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
-
-        Self {
-            mode,
-            allowlist,
-            denylist,
-            dangerous_patterns,
-        }
-    }
-
-    /// Validate a command string against this policy.
-    ///
-    /// 1. Always checks dangerous patterns first (defense-in-depth).
-    /// 2. In `Allowlist` mode, extracts the executable basename and checks the allowlist.
-    /// 3. In `Denylist` mode, checks all denylist patterns (case-insensitive substring match).
-    pub fn validate(&self, command: &str) -> Result<(), PolicyError> {
-        // Normalize whitespace (tabs, etc.) to spaces for pattern matching,
-        // so that "sudo\tsomething" matches the "sudo " pattern.
-        let normalized: String = command
-            .chars()
-            .map(|c| if c.is_whitespace() { ' ' } else { c })
-            .collect();
-        let lower = normalized.to_lowercase();
-
-        // Step 1: Always check dangerous patterns (defense-in-depth).
-        for pattern in &self.dangerous_patterns {
-            if lower.contains(&pattern.to_lowercase()) {
-                return Err(PolicyError::DangerousPattern {
-                    command: command.to_string(),
-                    pattern: pattern.clone(),
-                });
+impl From<CommandPolicyError> for PolicyError {
+    fn from(err: CommandPolicyError) -> Self {
+        match err {
+            CommandPolicyError::NotAllowed { command } => PolicyError::NotAllowed { command },
+            CommandPolicyError::Blocked { command, pattern } => {
+                PolicyError::Blocked { command, pattern }
+            }
+            CommandPolicyError::DangerousPattern { command, pattern } => {
+                PolicyError::DangerousPattern { command, pattern }
             }
         }
-
-        // Step 2: Mode-specific checks.
-        match self.mode {
-            PolicyMode::Allowlist => {
-                let token = extract_first_token(command);
-                if !self.allowlist.contains(token) {
-                    return Err(PolicyError::NotAllowed {
-                        command: command.to_string(),
-                    });
-                }
-            }
-            PolicyMode::Denylist => {
-                for pattern in &self.denylist {
-                    if lower.contains(&pattern.to_lowercase()) {
-                        return Err(PolicyError::Blocked {
-                            command: command.to_string(),
-                            pattern: pattern.clone(),
-                        });
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
-
-/// Extract the first whitespace-delimited token from a command string,
-/// stripping any leading path components (basename extraction).
-///
-/// # Examples
-///
-/// ```text
-/// "echo foo"       -> "echo"
-/// "/usr/bin/ls -la" -> "ls"
-/// "  cat file"     -> "cat"
-/// ""               -> ""
-/// ```
-pub(crate) fn extract_first_token(command: &str) -> &str {
-    let trimmed = command.trim();
-    if trimmed.is_empty() {
-        return "";
-    }
-
-    let token = trimmed.split_whitespace().next().unwrap_or("");
-
-    // Strip path prefix: take everything after the last '/'.
-    match token.rfind('/') {
-        Some(pos) => &token[pos + 1..],
-        None => token,
     }
 }
 
@@ -204,7 +69,7 @@ mod tests {
     #[test]
     fn safe_defaults_has_expected_allowlist() {
         let policy = CommandPolicy::safe_defaults();
-        for cmd in DEFAULT_ALLOWLIST {
+        for cmd in DEFAULT_COMMAND_ALLOWLIST {
             assert!(
                 policy.allowlist.contains(*cmd),
                 "{cmd} should be in allowlist"
@@ -254,35 +119,35 @@ mod tests {
     fn allowlist_rejects_curl() {
         let policy = CommandPolicy::safe_defaults();
         let err = policy.validate("curl http://evil.com").unwrap_err();
-        assert!(matches!(err, PolicyError::NotAllowed { .. }));
+        assert!(matches!(err, CommandPolicyError::NotAllowed { .. }));
     }
 
     #[test]
     fn allowlist_rejects_wget() {
         let policy = CommandPolicy::safe_defaults();
         let err = policy.validate("wget http://evil.com").unwrap_err();
-        assert!(matches!(err, PolicyError::NotAllowed { .. }));
+        assert!(matches!(err, CommandPolicyError::NotAllowed { .. }));
     }
 
     #[test]
     fn allowlist_rejects_nc() {
         let policy = CommandPolicy::safe_defaults();
         let err = policy.validate("nc -l 4444").unwrap_err();
-        assert!(matches!(err, PolicyError::NotAllowed { .. }));
+        assert!(matches!(err, CommandPolicyError::NotAllowed { .. }));
     }
 
     #[test]
     fn allowlist_rejects_python3() {
         let policy = CommandPolicy::safe_defaults();
         let err = policy.validate("python3 -c \"evil\"").unwrap_err();
-        assert!(matches!(err, PolicyError::NotAllowed { .. }));
+        assert!(matches!(err, CommandPolicyError::NotAllowed { .. }));
     }
 
     #[test]
     fn allowlist_rejects_bash() {
         let policy = CommandPolicy::safe_defaults();
         let err = policy.validate("bash -c \"evil\"").unwrap_err();
-        assert!(matches!(err, PolicyError::NotAllowed { .. }));
+        assert!(matches!(err, CommandPolicyError::NotAllowed { .. }));
     }
 
     // -- denylist mode ---------------------------------------------------------
@@ -300,7 +165,7 @@ mod tests {
         policy.mode = PolicyMode::Denylist;
         let err = policy.validate("rm -rf /").unwrap_err();
         // Dangerous patterns are checked first, so this will be DangerousPattern.
-        assert!(matches!(err, PolicyError::DangerousPattern { .. }));
+        assert!(matches!(err, CommandPolicyError::DangerousPattern { .. }));
     }
 
     #[test]
@@ -308,7 +173,7 @@ mod tests {
         let mut policy = CommandPolicy::safe_defaults();
         policy.mode = PolicyMode::Denylist;
         let err = policy.validate("sudo something").unwrap_err();
-        assert!(matches!(err, PolicyError::DangerousPattern { .. }));
+        assert!(matches!(err, CommandPolicyError::DangerousPattern { .. }));
     }
 
     // -- extract_first_token ---------------------------------------------------
@@ -345,7 +210,7 @@ mod tests {
         let policy = CommandPolicy::safe_defaults();
         // "echo" is on the allowlist but the command contains a dangerous pattern.
         let err = policy.validate("echo; rm -rf /").unwrap_err();
-        assert!(matches!(err, PolicyError::DangerousPattern { .. }));
+        assert!(matches!(err, CommandPolicyError::DangerousPattern { .. }));
     }
 
     #[test]
@@ -353,7 +218,7 @@ mod tests {
         let mut policy = CommandPolicy::safe_defaults();
         policy.mode = PolicyMode::Denylist;
         let err = policy.validate("dd if=/dev/zero of=/dev/sda").unwrap_err();
-        assert!(matches!(err, PolicyError::DangerousPattern { .. }));
+        assert!(matches!(err, CommandPolicyError::DangerousPattern { .. }));
     }
 
     // -- case insensitivity ----------------------------------------------------
@@ -362,14 +227,14 @@ mod tests {
     fn case_insensitive_sudo_blocked() {
         let policy = CommandPolicy::safe_defaults();
         let err = policy.validate("SUDO something").unwrap_err();
-        assert!(matches!(err, PolicyError::DangerousPattern { .. }));
+        assert!(matches!(err, CommandPolicyError::DangerousPattern { .. }));
     }
 
     #[test]
     fn case_insensitive_mixed_case_blocked() {
         let policy = CommandPolicy::safe_defaults();
         let err = policy.validate("SuDo apt install evil").unwrap_err();
-        assert!(matches!(err, PolicyError::DangerousPattern { .. }));
+        assert!(matches!(err, CommandPolicyError::DangerousPattern { .. }));
     }
 
     // -- path traversal / basename extraction in allowlist ----------------------
@@ -381,7 +246,7 @@ mod tests {
         let err = policy
             .validate("/usr/bin/curl http://evil.com")
             .unwrap_err();
-        assert!(matches!(err, PolicyError::NotAllowed { .. }));
+        assert!(matches!(err, CommandPolicyError::NotAllowed { .. }));
     }
 
     #[test]
@@ -400,5 +265,17 @@ mod tests {
         // becomes "sudo " which matches the "sudo " dangerous pattern.
         let result = policy.validate("sudo\tsomething");
         assert!(result.is_err(), "tab-separated sudo should be blocked");
+    }
+
+    // -- PolicyError conversion ------------------------------------------------
+
+    #[test]
+    fn policy_error_from_command_policy_error() {
+        let err = CommandPolicyError::NotAllowed {
+            command: "curl".into(),
+        };
+        let policy_err: PolicyError = err.into();
+        assert!(matches!(policy_err, PolicyError::NotAllowed { .. }));
+        assert_eq!(policy_err.to_string(), "command not allowed: curl");
     }
 }

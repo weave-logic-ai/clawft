@@ -9,9 +9,13 @@ These flags are available on all subcommands.
 
 | Flag | Description |
 |------|-------------|
-| `--verbose`, `-v` | Enable debug-level logging |
+| `--verbose`, `-v` | Enable debug-level logging (default level is `warn`) |
 | `--version` | Show version and exit |
 | `--help`, `-h` | Show help text and exit |
+
+The default log level is `warn`. Only warnings and errors are printed unless
+`--verbose` is passed (which sets it to `debug`). The `RUST_LOG` environment
+variable overrides both defaults if set (e.g. `RUST_LOG=info weft agent`).
 
 ---
 

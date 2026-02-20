@@ -71,6 +71,7 @@ mod tests {
             usage: Usage {
                 input_tokens: 5,
                 output_tokens: 3,
+                total_tokens: 0,
             },
             metadata: HashMap::new(),
         }
@@ -123,6 +124,7 @@ mod tests {
             usage: Usage {
                 input_tokens: 1000,
                 output_tokens: 0,
+                total_tokens: 0,
             },
             metadata: HashMap::new(),
         };

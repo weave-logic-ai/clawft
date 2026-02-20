@@ -286,14 +286,17 @@ impl McpTransport for HttpTransport {
 ///
 /// Allows pre-programming responses that will be returned in order.
 /// Also records all sent notifications for verification.
-#[cfg(test)]
+///
+/// Available in tests and when the `test-utils` feature is enabled,
+/// allowing downstream crates to use it in their own test suites.
+#[cfg(any(test, feature = "test-utils"))]
 pub struct MockTransport {
     responses: Arc<Mutex<Vec<JsonRpcResponse>>>,
     requests: Arc<Mutex<Vec<JsonRpcRequest>>>,
     notifications: Arc<Mutex<Vec<JsonRpcNotification>>>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 impl MockTransport {
     /// Create a mock transport with pre-programmed responses.
     pub fn new(responses: Vec<JsonRpcResponse>) -> Self {
@@ -315,7 +318,7 @@ impl MockTransport {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 #[async_trait]
 impl McpTransport for MockTransport {
     async fn send_request(&self, request: JsonRpcRequest) -> Result<JsonRpcResponse> {

@@ -44,3 +44,4 @@ comfy-table = { workspace = true }
 cron = { workspace = true }
 tokio-util = { workspace = true }
 rpassword = "5"
+uuid = { workspace = true }

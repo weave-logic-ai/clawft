@@ -120,7 +120,7 @@ The sole `Provider` trait implementation. It wraps a `reqwest::Client` and targe
 
 ### Built-in Providers
 
-7 providers ship out of the box, each configured with a base URL, API key environment variable, and model prefix:
+9 providers ship out of the box, each configured with a base URL, API key environment variable, and model prefix:
 
 | Provider | Prefix | Base URL | API Key Env |
 |----------|--------|----------|-------------|
@@ -131,6 +131,8 @@ The sole `Provider` trait implementation. It wraps a `reqwest::Client` and targe
 | mistral | `mistral/` | `api.mistral.ai/v1` | `MISTRAL_API_KEY` |
 | together | `together/` | `api.together.xyz/v1` | `TOGETHER_API_KEY` |
 | openrouter | `openrouter/` | `openrouter.ai/api/v1` | `OPENROUTER_API_KEY` |
+| gemini | `gemini/` | `generativelanguage.googleapis.com/v1beta/openai` | `GOOGLE_GEMINI_API_KEY` |
+| xai | `xai/` | `api.x.ai/v1` | `XAI_API_KEY` |
 
 Users can override base URLs, API keys, and headers per provider through the application configuration file.
 
@@ -451,7 +453,7 @@ Each of the 6 stages is defined by a trait in `clawft-core::pipeline::traits`. T
 |---|-------|-------|----------------------|---------|
 | 1 | Classifier | `TaskClassifier` | `KeywordClassifier` | Scans message content for keywords to assign a `TaskType` (Chat, CodeGeneration, CodeReview, Research, Creative, Analysis, ToolUse, Unknown) and a complexity score (0.0--1.0). |
 | 2 | Router | `ModelRouter` | `StaticRouter` | Returns the model and provider from the agent config. Does not adapt. `update()` is a no-op. |
-| 3 | Assembler | `ContextAssembler` | `TokenBudgetAssembler` | Passes through all messages with a token estimate based on `max_tokens`. No truncation at Level 0. |
+| 3 | Assembler | `ContextAssembler` | `TokenBudgetAssembler` | Estimates token count (chars/4 heuristic) and truncates conversation history to fit within `max_context_tokens`. Preserves the system prompt and most recent messages, dropping older messages from the middle when the budget is exceeded. |
 | 4 | Transport | `LlmTransport` | `OpenAiCompatTransport` | Delegates to an `LlmProvider` (either a stub that returns canned responses, or a live `ClawftLlmAdapter`). Parses OpenAI-format JSON responses into `LlmResponse`. |
 | 5 | Scorer | `QualityScorer` | `NoopScorer` | Returns perfect scores (1.0) for all dimensions. See [Scoring and Learning](#scoring-and-learning) for planned upgrades. |
 | 6 | Learner | `LearningBackend` | `NoopLearner` | Discards all trajectories and learning signals. See [Scoring and Learning](#scoring-and-learning) for planned upgrades. |

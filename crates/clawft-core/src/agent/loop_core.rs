@@ -201,16 +201,8 @@ impl<P: Platform> AgentLoop<P> {
         // 3. Add user message to session (after building context)
         session.add_message("user", &msg.content, None);
 
-        // 4. Convert context::LlmMessage to pipeline::traits::LlmMessage
-        let mut messages: Vec<LlmMessage> = context_messages
-            .iter()
-            .map(|m| LlmMessage {
-                role: m.role.clone(),
-                content: m.content.clone(),
-                tool_call_id: None,
-                tool_calls: None,
-            })
-            .collect();
+        // 4. Context messages are already pipeline::traits::LlmMessage (B2 unification).
+        let mut messages: Vec<LlmMessage> = context_messages;
 
         // 5. Add current user message
         messages.push(LlmMessage {
@@ -527,6 +519,7 @@ mod tests {
                 usage: Usage {
                     input_tokens: 10,
                     output_tokens: 5,
+                    total_tokens: 0,
                 },
                 metadata: HashMap::new(),
             })
@@ -565,6 +558,7 @@ mod tests {
                     usage: Usage {
                         input_tokens: 10,
                         output_tokens: 5,
+                        total_tokens: 0,
                     },
                     metadata: HashMap::new(),
                 })
@@ -579,6 +573,7 @@ mod tests {
                     usage: Usage {
                         input_tokens: 20,
                         output_tokens: 8,
+                        total_tokens: 0,
                     },
                     metadata: HashMap::new(),
                 })
@@ -603,6 +598,7 @@ mod tests {
                 usage: Usage {
                     input_tokens: 5,
                     output_tokens: 3,
+                    total_tokens: 0,
                 },
                 metadata: HashMap::new(),
             })
@@ -946,6 +942,7 @@ mod tests {
                     usage: Usage {
                         input_tokens: 10,
                         output_tokens: 5,
+                        total_tokens: 0,
                     },
                     metadata: HashMap::new(),
                 })
@@ -966,6 +963,7 @@ mod tests {
                     usage: Usage {
                         input_tokens: 20,
                         output_tokens: 8,
+                        total_tokens: 0,
                     },
                     metadata: HashMap::new(),
                 })
@@ -1116,6 +1114,7 @@ mod tests {
                     usage: Usage {
                         input_tokens: 15,
                         output_tokens: 10,
+                        total_tokens: 0,
                     },
                     metadata: HashMap::new(),
                 })
@@ -1130,6 +1129,7 @@ mod tests {
                     usage: Usage {
                         input_tokens: 25,
                         output_tokens: 12,
+                        total_tokens: 0,
                     },
                     metadata: HashMap::new(),
                 })
@@ -1189,6 +1189,7 @@ mod tests {
                     usage: Usage {
                         input_tokens: 20,
                         output_tokens: 15,
+                        total_tokens: 0,
                     },
                     metadata: HashMap::new(),
                 })
@@ -1202,6 +1203,7 @@ mod tests {
                     usage: Usage {
                         input_tokens: 30,
                         output_tokens: 10,
+                        total_tokens: 0,
                     },
                     metadata: HashMap::new(),
                 })
@@ -1457,6 +1459,7 @@ mod tests {
                     usage: Usage {
                         input_tokens: 10,
                         output_tokens: 5,
+                        total_tokens: 0,
                     },
                     metadata: HashMap::new(),
                 })
@@ -1471,6 +1474,7 @@ mod tests {
                     usage: Usage {
                         input_tokens: 20,
                         output_tokens: 12,
+                        total_tokens: 0,
                     },
                     metadata: HashMap::new(),
                 })

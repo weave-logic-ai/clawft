@@ -36,7 +36,7 @@ use clawft_services::mcp::middleware::{
 };
 use clawft_services::mcp::server::McpServerShell;
 
-use super::{expand_workspace, load_config};
+use super::load_config;
 
 /// Arguments for the `weft mcp-server` subcommand.
 #[derive(Args)]
@@ -57,28 +57,9 @@ pub async fn run(args: McpServerArgs) -> anyhow::Result<()> {
     let platform = Arc::new(NativePlatform::new());
     let config = load_config(&*platform, args.config.as_deref()).await?;
 
-    // ── Build tool registry (same pattern as agent.rs) ──────────────
+    // ── Build tool registry (shared core tools) ────────────────────
     let mut registry = ToolRegistry::new();
-
-    let command_policy = super::agent::build_command_policy(&config.tools.command_policy);
-    let url_policy = super::agent::build_url_policy(&config.tools.url_policy);
-    let workspace = expand_workspace(&config.agents.defaults.workspace);
-    let web_search_config = super::agent::build_web_search_config(&config.tools);
-
-    clawft_tools::register_all(
-        &mut registry,
-        platform.clone(),
-        workspace,
-        command_policy,
-        url_policy,
-        web_search_config,
-    );
-
-    // Register MCP server tools (proxied from configured MCP servers).
-    crate::mcp_tools::register_mcp_tools(&config, &mut registry).await;
-
-    // Register delegation tool (feature-gated, graceful degradation).
-    crate::mcp_tools::register_delegation(&config.delegation, &mut registry);
+    super::register_core_tools(&mut registry, &config, platform.clone()).await;
 
     let tool_count = registry.len();
     let tool_names = registry.list();
@@ -173,26 +154,31 @@ fn build_builtin_provider(
 /// Build a [`SecurityGuard`] middleware from the tools configuration.
 ///
 /// Translates the CLI-level `CommandPolicyConfig` and `UrlPolicyConfig`
-/// into the middleware-local policy types used by [`SecurityGuard`].
+/// into the canonical policy types used by [`SecurityGuard`].
 fn build_security_guard(tools_config: &clawft_types::config::ToolsConfig) -> SecurityGuard {
-    use clawft_services::mcp::middleware::{
-        CommandPolicy as MwCommandPolicy, UrlPolicy as MwUrlPolicy,
-    };
+    use clawft_types::security::{CommandPolicy, PolicyMode, UrlPolicy};
 
     let cmd_cfg = &tools_config.command_policy;
-    let mut mw_cmd = MwCommandPolicy::default();
+    let mode = match cmd_cfg.mode.as_str() {
+        "denylist" => PolicyMode::Denylist,
+        _ => PolicyMode::Allowlist,
+    };
+    let mut mw_cmd = CommandPolicy::safe_defaults();
+    mw_cmd.mode = mode;
     if !cmd_cfg.allowlist.is_empty() {
-        mw_cmd.allowed_commands = cmd_cfg.allowlist.iter().cloned().collect();
+        mw_cmd.allowlist = cmd_cfg.allowlist.iter().cloned().collect();
     }
     if !cmd_cfg.denylist.is_empty() {
-        mw_cmd.dangerous_patterns = cmd_cfg.denylist.clone();
+        mw_cmd.denylist = cmd_cfg.denylist.clone();
     }
 
     let url_cfg = &tools_config.url_policy;
-    let mw_url = MwUrlPolicy {
-        enabled: url_cfg.enabled,
-        blocked_domains: url_cfg.blocked_domains.iter().cloned().collect(),
-    };
+    let mw_url = UrlPolicy::new(
+        url_cfg.enabled,
+        url_cfg.allow_private,
+        url_cfg.allowed_domains.iter().cloned().collect(),
+        url_cfg.blocked_domains.iter().cloned().collect(),
+    );
 
     SecurityGuard::new(mw_cmd, mw_url)
 }

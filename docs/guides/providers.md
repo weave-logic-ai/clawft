@@ -16,7 +16,7 @@ Key design principles:
   the target provider and the model name.
 - **Environment-driven keys**: API keys are resolved from environment variables
   at request time, never persisted in configuration files.
-- **Zero boilerplate for built-in providers**: seven providers are pre-configured
+- **Zero boilerplate for built-in providers**: nine providers are pre-configured
   and ready to use with a single environment variable each.
 
 
@@ -72,6 +72,8 @@ Each requires only its corresponding environment variable to be set.
 | `mistral` | `https://api.mistral.ai/v1` | `MISTRAL_API_KEY` | `mistral-large-latest` | |
 | `together` | `https://api.together.xyz/v1` | `TOGETHER_API_KEY` | (none) | Open-source model hosting. Specify model explicitly. |
 | `openrouter` | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` | (none) | Multi-provider gateway. Specify model explicitly. |
+| `gemini` | `https://generativelanguage.googleapis.com/v1beta/openai` | `GOOGLE_GEMINI_API_KEY` | `gemini-2.5-flash` | Google Gemini via OpenAI-compatible endpoint. |
+| `xai` | `https://api.x.ai/v1` | `XAI_API_KEY` | `grok-3-mini` | xAI Grok models. |
 
 All built-in providers have a model prefix of `<name>/` (e.g. `openai/`,
 `anthropic/`, `groq/`). Every prefix ends with a forward slash.
@@ -252,6 +254,41 @@ Error mapping by HTTP status code:
 Before any HTTP call is made, the provider resolves the API key from the
 environment. If the environment variable is not set, a `NotConfigured` error
 is returned immediately, without making a network request.
+
+
+## Automatic Retry Behavior
+
+Every provider is wrapped in a `RetryPolicy` that automatically retries
+transient failures with exponential backoff. The default configuration is:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `max_retries` | 3 | Maximum number of retry attempts after the initial call. |
+| `base_delay` | 1 second | Initial delay before the first retry. |
+| `max_delay` | 30 seconds | Upper bound on the delay between retries. |
+| `jitter_fraction` | 0.25 | Random jitter added as a fraction of the computed delay. |
+
+The delay for attempt `n` is `min(base_delay * 2^n, max_delay)` plus
+random jitter of `0..jitter_fraction * delay`.
+
+The following errors are considered retryable:
+
+- `RateLimited` (HTTP 429) -- except for permanent quota/credit exhaustion
+- `ServerError` (HTTP 500-599)
+- `Timeout` -- request exceeded the configured timeout
+- `Http` -- network-level failures (connection refused, DNS, etc.)
+
+Non-retryable errors (authentication, model not found, invalid response,
+permanent billing issues) fail immediately without retry.
+
+For rate-limited responses, the provider parses the `Retry-After` HTTP
+header (numeric seconds) or `retry_after_ms` / `retry_after` fields from
+the JSON error body. If neither is present, a default of 1000 ms is used.
+
+Some providers (e.g. xAI, OpenAI) return HTTP 429 for permanent credit
+or spending limit exhaustion. These are detected by keyword matching
+(e.g. "exhausted", "billing", "insufficient_quota") and are **not**
+retried -- they produce a `RequestFailed` error immediately.
 
 
 ## Using Local LLMs

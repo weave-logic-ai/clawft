@@ -2,6 +2,8 @@
 //!
 //! Events are appended as newline-delimited JSON. On load, the event
 //! log is replayed to reconstruct the current set of active jobs.
+//!
+//! Uses the canonical [`CronJob`] type from [`clawft_types::cron`].
 
 use std::path::PathBuf;
 
@@ -15,9 +17,9 @@ use crate::error::Result;
 /// Event types stored in the JSONL log.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum StorageEvent {
+pub(crate) enum StorageEvent {
     /// A new job was created.
-    Create { job: CronJob },
+    Create { job: Box<CronJob> },
     /// A field on an existing job was updated.
     Update {
         job_id: String,
@@ -39,9 +41,16 @@ impl CronStorage {
         Self { path }
     }
 
+    /// Return the path to the storage file.
+    pub fn path(&self) -> &PathBuf {
+        &self.path
+    }
+
     /// Append a job creation event.
     pub async fn append_create(&self, job: &CronJob) -> Result<()> {
-        let event = StorageEvent::Create { job: job.clone() };
+        let event = StorageEvent::Create {
+            job: Box::new(job.clone()),
+        };
         self.append_event(&event).await
     }
 
@@ -77,37 +86,7 @@ impl CronStorage {
         }
 
         let content = tokio::fs::read_to_string(&self.path).await?;
-        let mut jobs = std::collections::HashMap::<String, CronJob>::new();
-
-        for (line_no, line) in content.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-
-            match serde_json::from_str::<StorageEvent>(line) {
-                Ok(StorageEvent::Create { job }) => {
-                    jobs.insert(job.id.clone(), job);
-                }
-                Ok(StorageEvent::Update {
-                    job_id,
-                    field,
-                    value,
-                }) => {
-                    if let Some(job) = jobs.get_mut(&job_id) {
-                        apply_field_update(job, &field, &value);
-                    }
-                }
-                Ok(StorageEvent::Delete { job_id }) => {
-                    jobs.remove(&job_id);
-                }
-                Err(e) => {
-                    warn!(line = line_no + 1, error = %e, "skipping invalid JSONL line");
-                }
-            }
-        }
-
-        Ok(jobs.into_values().collect())
+        Ok(replay_events(&content))
     }
 
     /// Append a serialized event followed by a newline.
@@ -132,6 +111,112 @@ impl CronStorage {
     }
 }
 
+/// Replay JSONL event content and reconstruct active jobs.
+///
+/// This is the shared logic used by both async ([`CronStorage::load_jobs`])
+/// and synchronous ([`load_jobs_sync`]) loading paths.
+pub fn replay_events(content: &str) -> Vec<CronJob> {
+    let mut jobs = std::collections::HashMap::<String, CronJob>::new();
+
+    for (line_no, line) in content.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        match serde_json::from_str::<StorageEvent>(line) {
+            Ok(StorageEvent::Create { job }) => {
+                jobs.insert(job.id.clone(), *job);
+            }
+            Ok(StorageEvent::Update {
+                job_id,
+                field,
+                value,
+            }) => {
+                if let Some(job) = jobs.get_mut(&job_id) {
+                    apply_field_update(job, &field, &value);
+                }
+            }
+            Ok(StorageEvent::Delete { job_id }) => {
+                jobs.remove(&job_id);
+            }
+            Err(e) => {
+                warn!(line = line_no + 1, error = %e, "skipping invalid JSONL line");
+            }
+        }
+    }
+
+    jobs.into_values().collect()
+}
+
+/// Synchronously load jobs from a JSONL file.
+///
+/// Used by the CLI which runs without an async runtime.
+pub fn load_jobs_sync(path: &std::path::Path) -> std::io::Result<Vec<CronJob>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = std::fs::read_to_string(path)?;
+    Ok(replay_events(&content))
+}
+
+/// Synchronously append a create event to a JSONL file.
+///
+/// Used by the CLI which runs without an async runtime.
+pub fn append_create_sync(path: &std::path::Path, job: &CronJob) -> std::io::Result<()> {
+    let event = StorageEvent::Create {
+        job: Box::new(job.clone()),
+    };
+    append_event_sync(path, &event)
+}
+
+/// Synchronously append a delete event to a JSONL file.
+pub fn append_delete_sync(path: &std::path::Path, job_id: &str) -> std::io::Result<()> {
+    let event = StorageEvent::Delete {
+        job_id: job_id.to_string(),
+    };
+    append_event_sync(path, &event)
+}
+
+/// Synchronously append an update event to a JSONL file.
+pub fn append_update_sync(
+    path: &std::path::Path,
+    job_id: &str,
+    field: &str,
+    value: &serde_json::Value,
+) -> std::io::Result<()> {
+    let event = StorageEvent::Update {
+        job_id: job_id.to_string(),
+        field: field.to_string(),
+        value: value.clone(),
+    };
+    append_event_sync(path, &event)
+}
+
+/// Synchronously append an event to the JSONL file.
+fn append_event_sync(path: &std::path::Path, event: &StorageEvent) -> std::io::Result<()> {
+    use std::io::Write;
+
+    // Ensure parent directory exists.
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut line = serde_json::to_string(event).map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+    })?;
+    line.push('\n');
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    file.write_all(line.as_bytes())?;
+    file.flush()?;
+
+    Ok(())
+}
+
 /// Apply a field update to a job in memory.
 fn apply_field_update(job: &mut CronJob, field: &str, value: &serde_json::Value) {
     match field {
@@ -140,14 +225,9 @@ fn apply_field_update(job: &mut CronJob, field: &str, value: &serde_json::Value)
                 job.enabled = v;
             }
         }
-        "prompt" => {
+        "message" | "prompt" => {
             if let Some(v) = value.as_str() {
-                job.prompt = v.to_string();
-            }
-        }
-        "schedule" => {
-            if let Some(v) = value.as_str() {
-                job.schedule = v.to_string();
+                job.payload.message = v.to_string();
             }
         }
         "name" => {
@@ -155,19 +235,25 @@ fn apply_field_update(job: &mut CronJob, field: &str, value: &serde_json::Value)
                 job.name = v.to_string();
             }
         }
-        "last_run" => {
-            if let Ok(v) =
-                serde_json::from_value::<Option<chrono::DateTime<chrono::Utc>>>(value.clone())
-            {
-                job.last_run = v;
+        "last_run_at_ms" => {
+            if let Some(v) = value.as_i64() {
+                job.state.last_run_at_ms = Some(v);
             }
         }
-        "next_run" => {
-            if let Ok(v) =
-                serde_json::from_value::<Option<chrono::DateTime<chrono::Utc>>>(value.clone())
-            {
-                job.next_run = v;
+        "next_run_at_ms" => {
+            if let Some(v) = value.as_i64() {
+                job.state.next_run_at_ms = Some(v);
             }
+        }
+        "last_status" => {
+            if let Ok(v) = serde_json::from_value::<Option<clawft_types::cron::JobStatus>>(
+                value.clone(),
+            ) {
+                job.state.last_status = v;
+            }
+        }
+        "last_error" => {
+            job.state.last_error = value.as_str().map(|s| s.to_string());
         }
         _ => {
             warn!(field, "unknown field in storage update event");
@@ -178,18 +264,30 @@ fn apply_field_update(job: &mut CronJob, field: &str, value: &serde_json::Value)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clawft_types::cron::{CronPayload, CronSchedule, CronJobState, ScheduleKind};
     use chrono::Utc;
 
     fn make_job(id: &str, name: &str) -> CronJob {
+        let now_ms = Utc::now().timestamp_millis();
         CronJob {
             id: id.into(),
             name: name.into(),
-            schedule: "0 0 * * * * *".into(),
-            prompt: "test".into(),
             enabled: true,
-            last_run: None,
-            next_run: None,
-            created_at: Utc::now(),
+            schedule: CronSchedule {
+                kind: ScheduleKind::Cron,
+                at_ms: None,
+                every_ms: None,
+                expr: Some("0 0 * * * * *".into()),
+                tz: Some("UTC".into()),
+            },
+            payload: CronPayload {
+                message: "test".into(),
+                ..Default::default()
+            },
+            state: CronJobState::default(),
+            created_at_ms: now_ms,
+            updated_at_ms: now_ms,
+            delete_after_run: false,
         }
     }
 
@@ -255,7 +353,8 @@ mod tests {
         tokio::fs::create_dir_all(&dir).await.unwrap();
 
         let job = make_job("j1", "valid");
-        let valid_line = serde_json::to_string(&StorageEvent::Create { job }).unwrap();
+        let valid_line =
+            serde_json::to_string(&StorageEvent::Create { job: Box::new(job) }).unwrap();
         let content = format!("{valid_line}\nthis is garbage\n{{\n");
         tokio::fs::write(&path, content).await.unwrap();
 
@@ -293,7 +392,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_prompt_field() {
+    async fn update_message_field() {
         let dir = std::env::temp_dir().join(format!("clawft-test-{}", uuid::Uuid::new_v4()));
         let path = dir.join("cron.jsonl");
         let storage = CronStorage::new(path);
@@ -303,13 +402,70 @@ mod tests {
             .await
             .unwrap();
         storage
-            .append_update("j1", "prompt", &serde_json::json!("new prompt"))
+            .append_update("j1", "message", &serde_json::json!("new prompt"))
             .await
             .unwrap();
 
         let jobs = storage.load_jobs().await.unwrap();
-        assert_eq!(jobs[0].prompt, "new prompt");
+        assert_eq!(jobs[0].payload.message, "new prompt");
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    // -- Synchronous API tests --
+
+    #[test]
+    fn sync_append_and_load() {
+        let dir = std::env::temp_dir().join(format!("clawft-sync-test-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("cron.jsonl");
+
+        let job = make_job("s1", "sync-test");
+        append_create_sync(&path, &job).unwrap();
+
+        let jobs = load_jobs_sync(&path).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, "s1");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sync_delete() {
+        let dir = std::env::temp_dir().join(format!("clawft-sync-test-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("cron.jsonl");
+
+        append_create_sync(&path, &make_job("s1", "a")).unwrap();
+        append_create_sync(&path, &make_job("s2", "b")).unwrap();
+        append_delete_sync(&path, "s1").unwrap();
+
+        let jobs = load_jobs_sync(&path).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, "s2");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sync_update() {
+        let dir = std::env::temp_dir().join(format!("clawft-sync-test-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("cron.jsonl");
+
+        append_create_sync(&path, &make_job("s1", "test")).unwrap();
+        append_update_sync(&path, "s1", "enabled", &serde_json::json!(false)).unwrap();
+
+        let jobs = load_jobs_sync(&path).unwrap();
+        assert!(!jobs[0].enabled);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sync_nonexistent_returns_empty() {
+        let path = std::env::temp_dir().join(format!(
+            "clawft-sync-nonexistent-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
+        let jobs = load_jobs_sync(&path).unwrap();
+        assert!(jobs.is_empty());
     }
 }

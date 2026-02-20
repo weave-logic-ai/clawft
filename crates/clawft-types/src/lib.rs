@@ -8,7 +8,7 @@
 //! - **[`error`]** -- [`ClawftError`] and [`ChannelError`] error types
 //! - **[`config`]** -- Configuration schema (ported from Python `schema.py`)
 //! - **[`event`]** -- Inbound/outbound message events
-//! - **[`provider`]** -- LLM response types and the 14-provider registry
+//! - **[`provider`]** -- LLM response types and the 15-provider registry
 //! - **[`session`]** -- Conversation session state
 //! - **[`cron`]** -- Scheduled job types
 
@@ -20,6 +20,7 @@ pub mod event;
 pub mod provider;
 pub mod routing;
 pub mod secret;
+pub mod security;
 pub mod session;
 pub mod skill;
 pub mod workspace;

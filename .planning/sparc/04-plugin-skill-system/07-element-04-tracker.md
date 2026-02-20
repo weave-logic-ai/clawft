@@ -5,7 +5,7 @@
 Element 04 has 8 phases across Weeks 3-8:
 
 **Week 3-4 (P0 Foundation)**:
-- [ ] C1 -- Plugin trait crate (`clawft-plugin` new) -- 6 traits, manifest, permissions
+- [x] C1 -- Plugin trait crate (`clawft-plugin` new) -- 6 traits, manifest, permissions (2026-02-19)
 
 **Week 4-5 (P1 WASM)**:
 - [ ] C2 -- WASM plugin host -- wasmtime, WIT, 5 host functions, security sandbox, 45 security tests
@@ -30,8 +30,8 @@ Element 04 has 8 phases across Weeks 3-8:
 
 | Phase | Description | Priority | Week | Crate(s) | Status | Owner | Branch | Key Deliverable |
 |-------|-------------|----------|------|----------|--------|-------|--------|-----------------|
-| C1 | Plugin trait crate | P0 | 3-4 | clawft-plugin (new) | Pending | -- | -- | 6 traits + manifest schema |
-| C2 | WASM plugin host | P1 | 4-5 | clawft-wasm, clawft-core | Pending | -- | -- | wasmtime + 45 security tests |
+| C1 | Plugin trait crate | P0 | 3-4 | clawft-plugin (new) | **Done** | Agent-04 | sprint/phase-5 | 6 traits + manifest schema |
+| C2 | WASM plugin host | P1 | 4-5 | clawft-wasm, clawft-core | **In Progress** | Agent-04 | sprint/phase-5 | Sandbox + WIT done; wasmtime pending |
 | C3 | Skill loader | P1 | 5-6 | clawft-core | Pending | -- | -- | serde_yaml + WASM auto-reg |
 | C4 | Hot-reload | P1 | 6-7 | clawft-core, clawft-cli | Pending | -- | -- | notify watcher + CLI |
 | C4a | Autonomous creation | P2 | 8+ | clawft-core | Pending | -- | -- | Pattern detect + auto-gen |
@@ -74,24 +74,24 @@ C1 (trait crate) [NO DEPS]
 ## Exit Criteria
 
 ### Core (C1-C4):
-- [ ] clawft-plugin crate compiles with all trait definitions
-- [ ] At least one plugin implements each of the 6 traits
+- [x] clawft-plugin crate compiles with all trait definitions (2026-02-19)
+- [x] At least one plugin implements each of the 6 traits (mock impls in tests, 2026-02-19)
 - [ ] WASM plugin host loads and runs a test plugin
 - [ ] weft skill install <path> works for local skills
 - [ ] Hot-reload detects file changes within 2 seconds
 - [ ] Skill precedence (workspace > managed > bundled) verified
-- [ ] VoiceHandler trait placeholder exists
+- [x] VoiceHandler trait placeholder exists (2026-02-19)
 
 ### Security (C2):
 - [ ] Every WIT host function validates against PluginPermissions
 - [ ] WASM fuel metering enabled (configurable, default 1B units)
 - [ ] WASM memory limits via StoreLimits (default 16MB)
-- [ ] read-file/write-file canonicalize paths, reject external symlinks
-- [ ] http-request applies SSRF check + network allowlist
-- [ ] get-env returns None for non-permitted vars
-- [ ] Rate limiting on http-request and log
+- [x] read-file/write-file canonicalize paths, reject external symlinks (2026-02-19)
+- [x] http-request applies SSRF check + network allowlist (2026-02-19)
+- [x] get-env returns None for non-permitted vars (2026-02-19)
+- [x] Rate limiting on http-request and log (2026-02-19)
 - [ ] Audit logging for all host function calls
-- [ ] All 45 security tests (T01-T45) pass
+- [ ] All 45 security tests (T01-T45) pass -- 30/45 done (T01-T27, T33-T36, T44)
 
 ### Integration (C5-C7):
 - [ ] Agent commands routed through registry, not inline match
@@ -134,12 +134,12 @@ C1 (trait crate) [NO DEPS]
 
 | Phase | Status | % Done |
 |-------|--------|--------|
-| C1 (Plugin Traits) | Pending | 0% |
-| C2 (WASM Host) | Pending | 0% |
+| C1 (Plugin Traits) | **Done** | 100% |
+| C2 (WASM Host) | **In Progress** | 60% |
 | C3 (Skill Loader) | Pending | 0% |
 | C4 (Hot-Reload) | Pending | 0% |
 | C4a (Autonomous) | Pending | 0% |
 | C5 (Slash Commands) | Pending | 0% |
 | C6 (MCP Exposure) | Pending | 0% |
 | C7 (PluginHost) | Pending | 0% |
-| **Total** | **Pending** | **0%** |
+| **Total** | **In Progress** | **20%** |

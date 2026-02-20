@@ -88,7 +88,7 @@ pub fn compute_delay(config: &RetryConfig, attempt: u32) -> Duration {
 /// # Example
 ///
 /// ```rust,ignore
-/// use clawft_llm::{OpenAiCompatProvider, ProviderConfig};
+/// use clawft_llm::{OpenAiCompatProvider, LlmProviderConfig};
 /// use clawft_llm::retry::{RetryPolicy, RetryConfig};
 ///
 /// let inner = OpenAiCompatProvider::new(config);
@@ -279,8 +279,8 @@ mod tests {
                     finish_reason: Some("stop".into()),
                 }],
                 usage: Some(Usage {
-                    prompt_tokens: 10,
-                    completion_tokens: 5,
+                    input_tokens: 10,
+                    output_tokens: 5,
                     total_tokens: 15,
                 }),
                 model: "test-model".into(),

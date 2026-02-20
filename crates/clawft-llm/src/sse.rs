@@ -120,9 +120,9 @@ fn convert_delta_to_chunks(delta: &StreamDelta) -> Vec<StreamChunk> {
 /// Convert streaming usage stats to the public [`Usage`] type.
 fn convert_usage(u: &StreamDeltaUsage) -> Usage {
     Usage {
-        prompt_tokens: u.prompt_tokens.unwrap_or(0),
-        completion_tokens: u.completion_tokens.unwrap_or(0),
-        total_tokens: u.total_tokens.unwrap_or(0),
+        input_tokens: u.prompt_tokens.unwrap_or(0) as u32,
+        output_tokens: u.completion_tokens.unwrap_or(0) as u32,
+        total_tokens: u.total_tokens.unwrap_or(0) as u32,
     }
 }
 
@@ -307,8 +307,8 @@ mod tests {
             StreamChunk::Done {
                 finish_reason: Some("stop".into()),
                 usage: Some(Usage {
-                    prompt_tokens: 10,
-                    completion_tokens: 5,
+                    input_tokens: 10,
+                    output_tokens: 5,
                     total_tokens: 15,
                 }),
             }

@@ -204,8 +204,8 @@ mod tests {
                 finish_reason: Some("stop".into()),
             }],
             usage: Some(Usage {
-                prompt_tokens: 10,
-                completion_tokens: 5,
+                input_tokens: 10,
+                output_tokens: 5,
                 total_tokens: 15,
             }),
             model: model.into(),

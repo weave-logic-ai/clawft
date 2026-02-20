@@ -1,36 +1,23 @@
 //! In-memory cron scheduler.
 //!
 //! Maintains a map of [`CronJob`] entries and determines which are due
-//! to fire based on their `next_run` timestamp.
+//! to fire based on their `next_run_at_ms` timestamp.
+//!
+//! Uses the canonical [`CronJob`] type from [`clawft_types::cron`].
 
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use cron::Schedule;
 
 use crate::error::{Result, ServiceError};
 
-/// A scheduled cron job.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct CronJob {
-    /// Unique job identifier.
-    pub id: String,
-    /// Human-readable name.
-    pub name: String,
-    /// Cron expression (7-field format: sec min hour dom month dow year).
-    pub schedule: String,
-    /// Prompt text delivered when the job fires.
-    pub prompt: String,
-    /// Whether the job is active.
-    pub enabled: bool,
-    /// When the job last ran.
-    pub last_run: Option<DateTime<Utc>>,
-    /// When the job should next run.
-    pub next_run: Option<DateTime<Utc>>,
-    /// When the job was created.
-    pub created_at: DateTime<Utc>,
-}
+// Re-export the canonical CronJob from clawft-types.
+pub use clawft_types::cron::{
+    CronJob, CronJobState, CronPayload, CronSchedule, CronStore, JobStatus, PayloadKind,
+    ScheduleKind,
+};
 
 /// In-memory scheduler holding all jobs.
 pub struct CronScheduler {
@@ -47,11 +34,16 @@ impl CronScheduler {
 
     /// Add a job to the scheduler.
     ///
-    /// Returns an error if a job with the same name already exists.
+    /// Validates the cron expression (if the schedule kind is `Cron`)
+    /// and rejects duplicate names.
     pub fn add_job(&mut self, job: CronJob) -> Result<()> {
-        // Validate the cron expression first.
-        Schedule::from_str(&job.schedule)
-            .map_err(|e| ServiceError::InvalidCronExpression(e.to_string()))?;
+        // Validate the cron expression if present.
+        if job.schedule.kind == ScheduleKind::Cron
+            && let Some(ref expr) = job.schedule.expr
+        {
+            Schedule::from_str(expr)
+                .map_err(|e| ServiceError::InvalidCronExpression(e.to_string()))?;
+        }
 
         // Check for duplicate names.
         if self
@@ -74,12 +66,12 @@ impl CronScheduler {
         Ok(())
     }
 
-    /// Return all enabled jobs whose `next_run` is at or before `now`.
+    /// Return all enabled jobs whose `next_run_at_ms` is at or before now.
     pub fn get_due_jobs(&self) -> Vec<CronJob> {
-        let now = Utc::now();
+        let now_ms = Utc::now().timestamp_millis();
         self.jobs
             .values()
-            .filter(|j| j.enabled && j.next_run.is_some_and(|nr| nr <= now))
+            .filter(|j| j.enabled && j.state.next_run_at_ms.is_some_and(|nr| nr <= now_ms))
             .cloned()
             .collect()
     }
@@ -106,11 +98,17 @@ impl CronScheduler {
             .get_mut(job_id)
             .ok_or_else(|| ServiceError::JobNotFound(job_id.to_string()))?;
 
-        job.last_run = Some(run_time);
+        job.state.last_run_at_ms = Some(run_time.timestamp_millis());
+        job.state.last_status = Some(JobStatus::Ok);
+        job.updated_at_ms = run_time.timestamp_millis();
 
-        // Compute next run from the cron schedule.
-        if let Ok(schedule) = Schedule::from_str(&job.schedule) {
-            job.next_run = schedule.after(&run_time).next();
+        // Compute next run from the cron schedule expression.
+        if job.schedule.kind == ScheduleKind::Cron
+            && let Some(ref expr) = job.schedule.expr
+            && let Ok(schedule) = Schedule::from_str(expr)
+        {
+            job.state.next_run_at_ms =
+                schedule.after(&run_time).next().map(|dt| dt.timestamp_millis());
         }
 
         Ok(())
@@ -124,30 +122,49 @@ impl Default for CronScheduler {
 }
 
 /// Compute the next run time for a cron expression after a given time.
+///
+/// Returns `None` if the schedule has no further occurrences.
 pub fn compute_next_run(
     schedule_expr: &str,
     after: &DateTime<Utc>,
-) -> Result<Option<DateTime<Utc>>> {
+) -> Result<Option<i64>> {
     let schedule = Schedule::from_str(schedule_expr)
         .map_err(|e| ServiceError::InvalidCronExpression(e.to_string()))?;
-    Ok(schedule.after(after).next())
+    Ok(schedule.after(after).next().map(|dt| dt.timestamp_millis()))
+}
+
+/// Convert a millisecond timestamp to a `DateTime<Utc>`, if valid.
+pub fn ms_to_datetime(ms: i64) -> Option<DateTime<Utc>> {
+    Utc.timestamp_millis_opt(ms).single()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use chrono::TimeZone;
+    use chrono::Datelike;
 
-    fn make_job(id: &str, name: &str, schedule: &str) -> CronJob {
+    use super::*;
+
+    fn make_job(id: &str, name: &str, schedule_expr: &str) -> CronJob {
+        let now_ms = Utc::now().timestamp_millis();
         CronJob {
             id: id.into(),
             name: name.into(),
-            schedule: schedule.into(),
-            prompt: "test prompt".into(),
             enabled: true,
-            last_run: None,
-            next_run: None,
-            created_at: Utc::now(),
+            schedule: CronSchedule {
+                kind: ScheduleKind::Cron,
+                at_ms: None,
+                every_ms: None,
+                expr: Some(schedule_expr.into()),
+                tz: Some("UTC".into()),
+            },
+            payload: CronPayload {
+                message: "test prompt".into(),
+                ..Default::default()
+            },
+            state: CronJobState::default(),
+            created_at_ms: now_ms,
+            updated_at_ms: now_ms,
+            delete_after_run: false,
         }
     }
 
@@ -222,8 +239,12 @@ mod tests {
     fn get_due_jobs_returns_past_jobs() {
         let mut sched = CronScheduler::new();
         let mut job = make_job("j1", "past", "0 0 * * * * *");
-        // Set next_run in the past.
-        job.next_run = Some(Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap());
+        // Set next_run in the past (2020-01-01 00:00:00 UTC).
+        job.state.next_run_at_ms = Some(
+            Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0)
+                .unwrap()
+                .timestamp_millis(),
+        );
         sched.add_job(job).unwrap();
 
         let due = sched.get_due_jobs();
@@ -234,7 +255,11 @@ mod tests {
     fn no_due_jobs_when_all_in_future() {
         let mut sched = CronScheduler::new();
         let mut job = make_job("j1", "future", "0 0 * * * * *");
-        job.next_run = Some(Utc.with_ymd_and_hms(2099, 12, 31, 23, 59, 59).unwrap());
+        job.state.next_run_at_ms = Some(
+            Utc.with_ymd_and_hms(2099, 12, 31, 23, 59, 59)
+                .unwrap()
+                .timestamp_millis(),
+        );
         sched.add_job(job).unwrap();
 
         let due = sched.get_due_jobs();
@@ -245,7 +270,11 @@ mod tests {
     fn disabled_jobs_not_due() {
         let mut sched = CronScheduler::new();
         let mut job = make_job("j1", "disabled", "0 0 * * * * *");
-        job.next_run = Some(Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap());
+        job.state.next_run_at_ms = Some(
+            Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0)
+                .unwrap()
+                .timestamp_millis(),
+        );
         job.enabled = false;
         sched.add_job(job).unwrap();
 
@@ -257,7 +286,7 @@ mod tests {
     fn jobs_without_next_run_not_due() {
         let mut sched = CronScheduler::new();
         let job = make_job("j1", "no-next", "0 0 * * * * *");
-        // next_run is None by default.
+        // next_run_at_ms is None by default.
         sched.add_job(job).unwrap();
 
         let due = sched.get_due_jobs();
@@ -275,10 +304,10 @@ mod tests {
         sched.update_job_run("j1", run_time).unwrap();
 
         let job = sched.get_job("j1").unwrap();
-        assert_eq!(job.last_run, Some(run_time));
-        assert!(job.next_run.is_some());
+        assert_eq!(job.state.last_run_at_ms, Some(run_time.timestamp_millis()));
+        assert!(job.state.next_run_at_ms.is_some());
         // next_run must be after run_time.
-        assert!(job.next_run.unwrap() > run_time);
+        assert!(job.state.next_run_at_ms.unwrap() > run_time.timestamp_millis());
     }
 
     #[test]
@@ -302,5 +331,26 @@ mod tests {
     fn default_creates_empty_scheduler() {
         let sched = CronScheduler::default();
         assert!(sched.list_jobs().is_empty());
+    }
+
+    #[test]
+    fn ms_to_datetime_valid() {
+        let dt = ms_to_datetime(1_700_000_000_000);
+        assert!(dt.is_some());
+        assert_eq!(dt.unwrap().year(), 2023);
+    }
+
+    #[test]
+    fn update_job_sets_status() {
+        let mut sched = CronScheduler::new();
+        sched
+            .add_job(make_job("j1", "status-test", "0 0 * * * * *"))
+            .unwrap();
+
+        let run_time = Utc::now();
+        sched.update_job_run("j1", run_time).unwrap();
+
+        let job = sched.get_job("j1").unwrap();
+        assert_eq!(job.state.last_status, Some(JobStatus::Ok));
     }
 }

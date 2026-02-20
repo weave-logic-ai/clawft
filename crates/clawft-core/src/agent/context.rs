@@ -44,30 +44,9 @@ struct CachedFile {
 /// short (one HashMap lookup + optional fs::metadata call).
 type BootstrapCache = Arc<Mutex<HashMap<PathBuf, CachedFile>>>;
 
-// Re-export the message type from pipeline::traits. This module will
-// reference the type via a `crate::pipeline::traits::LlmMessage` path.
-// Until the pipeline agent writes that module, we define a local
-// compatible type and re-export it.
-//
-// Once the pipeline module is written, this can be changed to:
-//   use crate::pipeline::traits::LlmMessage;
-//
-// For now we define it inline so the module compiles independently.
-
-/// An LLM message with role and content.
-///
-/// Compatible with the `LlmMessage` type defined in
-/// `crate::pipeline::traits`. Once that module is available, this
-/// definition should be replaced with a re-export.
-#[derive(Debug, Clone)]
-pub struct LlmMessage {
-    /// Message role: `"system"`, `"user"`, `"assistant"`, or `"tool"`.
-    pub role: String,
-    /// Message text content.
-    pub content: String,
-    /// Optional tool call ID (for tool result messages).
-    pub tool_call_id: Option<String>,
-}
+// Re-export the canonical LlmMessage from pipeline::traits so that
+// consumers of context.rs use the same type as the rest of the pipeline.
+pub use crate::pipeline::traits::LlmMessage;
 
 /// Builder for assembling LLM context from multiple sources.
 ///
@@ -282,89 +261,9 @@ impl<P: Platform> ContextBuilder<P> {
         session: &Session,
         active_skills: &[String],
     ) -> Vec<LlmMessage> {
-        let mut messages = Vec::new();
-
-        // 1. System prompt
         let system_prompt = self.build_system_prompt().await;
-        messages.push(LlmMessage {
-            role: "system".into(),
-            content: system_prompt,
-            tool_call_id: None,
-        });
-
-        // 2. Active skill prompts
-        for skill_name in active_skills {
-            match self.skills.get_skill(skill_name).await {
-                Some(skill) => {
-                    if let Some(ref prompt) = skill.prompt {
-                        messages.push(LlmMessage {
-                            role: "system".into(),
-                            content: format!("# Skill: {}\n\n{}", skill.name, prompt),
-                            tool_call_id: None,
-                        });
-                    }
-                }
-                None => {
-                    // Try loading the skill on demand
-                    match self.skills.load_skill(skill_name).await {
-                        Ok(skill) => {
-                            if let Some(ref prompt) = skill.prompt {
-                                messages.push(LlmMessage {
-                                    role: "system".into(),
-                                    content: format!("# Skill: {}\n\n{}", skill.name, prompt),
-                                    tool_call_id: None,
-                                });
-                            }
-                        }
-                        Err(e) => {
-                            warn!(
-                                skill = %skill_name,
-                                error = %e,
-                                "failed to load skill for context"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        // 3. Memory context
-        match self.memory.read_long_term().await {
-            Ok(memory) if !memory.trim().is_empty() => {
-                messages.push(LlmMessage {
-                    role: "system".into(),
-                    content: format!("# Relevant Memory:\n\n{memory}"),
-                    tool_call_id: None,
-                });
-            }
-            Ok(_) => {}
-            Err(e) => {
-                warn!(error = %e, "failed to read long-term memory for context");
-            }
-        }
-
-        // 4. Conversation history (truncated to memory_window)
-        let window = self.config.defaults.memory_window.max(0) as usize;
-        let history = session.get_history(window);
-        for msg in history {
-            let role = msg
-                .get("role")
-                .and_then(|v| v.as_str())
-                .unwrap_or("user")
-                .to_string();
-            let content = msg
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            messages.push(LlmMessage {
-                role,
-                content,
-                tool_call_id: None,
-            });
-        }
-
-        messages
+        self.build_messages_inner(session, system_prompt, active_skills, None)
+            .await
     }
 
     /// Get a reference to the agent configuration.
@@ -418,19 +317,36 @@ impl<P: Platform> ContextBuilder<P> {
         args: &str,
         extra_skill_instructions: Option<&str>,
     ) -> Vec<LlmMessage> {
+        let system_prompt = self.build_system_prompt_for_agent(agent, args).await;
+        self.build_messages_inner(session, system_prompt, &agent.skills, extra_skill_instructions)
+            .await
+    }
+
+    /// Core message assembly logic shared by [`build_messages`] and
+    /// [`build_messages_for_agent`].
+    ///
+    /// Assembles messages in order: system prompt, skill prompts,
+    /// optional extra instructions, memory context, and conversation
+    /// history.
+    async fn build_messages_inner(
+        &self,
+        session: &Session,
+        system_prompt: String,
+        active_skills: &[String],
+        extra_instructions: Option<&str>,
+    ) -> Vec<LlmMessage> {
         let mut messages = Vec::new();
 
-        // 1. Agent-aware system prompt
-        let system_prompt = self.build_system_prompt_for_agent(agent, args).await;
+        // 1. System prompt
         messages.push(LlmMessage {
             role: "system".into(),
             content: system_prompt,
             tool_call_id: None,
+            tool_calls: None,
         });
 
-        // 2. Active skill prompts from agent definition
-        let skill_names: Vec<String> = agent.skills.clone();
-        for skill_name in &skill_names {
+        // 2. Active skill prompts
+        for skill_name in active_skills {
             match self.skills.get_skill(skill_name).await {
                 Some(skill) => {
                     if let Some(ref prompt) = skill.prompt {
@@ -438,6 +354,7 @@ impl<P: Platform> ContextBuilder<P> {
                             role: "system".into(),
                             content: format!("# Skill: {}\n\n{}", skill.name, prompt),
                             tool_call_id: None,
+                            tool_calls: None,
                         });
                     }
                 }
@@ -448,15 +365,15 @@ impl<P: Platform> ContextBuilder<P> {
                                 role: "system".into(),
                                 content: format!("# Skill: {}\n\n{}", skill.name, prompt),
                                 tool_call_id: None,
+                                tool_calls: None,
                             });
                         }
                     }
                     Err(e) => {
                         warn!(
                             skill = %skill_name,
-                            agent = %agent.name,
                             error = %e,
-                            "failed to load agent skill for context"
+                            "failed to load skill for context"
                         );
                     }
                 },
@@ -464,13 +381,14 @@ impl<P: Platform> ContextBuilder<P> {
         }
 
         // 3. Extra skill instructions (e.g. from SkillRegistry)
-        if let Some(instructions) = extra_skill_instructions
+        if let Some(instructions) = extra_instructions
             && !instructions.trim().is_empty()
         {
             messages.push(LlmMessage {
                 role: "system".into(),
                 content: format!("# Skill Instructions\n\n{instructions}"),
                 tool_call_id: None,
+                tool_calls: None,
             });
         }
 
@@ -481,15 +399,16 @@ impl<P: Platform> ContextBuilder<P> {
                     role: "system".into(),
                     content: format!("# Relevant Memory:\n\n{memory}"),
                     tool_call_id: None,
+                    tool_calls: None,
                 });
             }
             Ok(_) => {}
             Err(e) => {
-                warn!(error = %e, "failed to read long-term memory for agent context");
+                warn!(error = %e, "failed to read long-term memory for context");
             }
         }
 
-        // 5. Conversation history
+        // 5. Conversation history (truncated to memory_window)
         let window = self.config.defaults.memory_window.max(0) as usize;
         let history = session.get_history(window);
         for msg in history {
@@ -507,6 +426,7 @@ impl<P: Platform> ContextBuilder<P> {
                 role,
                 content,
                 tool_call_id: None,
+                tool_calls: None,
             });
         }
 
@@ -860,6 +780,7 @@ mod tests {
             role: "system".into(),
             content: "test content".into(),
             tool_call_id: Some("tc-1".into()),
+            tool_calls: None,
         };
         assert_eq!(msg.role, "system");
         assert_eq!(msg.content, "test content");

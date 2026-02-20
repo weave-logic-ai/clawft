@@ -9,7 +9,7 @@
 //! - [`Provider`] trait defines the chat completion interface
 //! - [`OpenAiCompatProvider`] implements it for any OpenAI-compatible API
 //! - [`ProviderRouter`] routes model names (e.g. "openai/gpt-4o") to providers
-//! - [`ProviderConfig`] describes how to connect to a provider
+//! - [`LlmProviderConfig`] describes how to connect to a provider
 //!
 //! # Quick Start
 //!
@@ -38,7 +38,10 @@ pub mod router;
 pub mod sse;
 pub mod types;
 
-pub use config::ProviderConfig;
+pub use config::LlmProviderConfig;
+/// Backward-compatible alias for [`LlmProviderConfig`].
+#[deprecated(since = "0.2.0", note = "renamed to LlmProviderConfig to avoid collision")]
+pub type ProviderConfig = LlmProviderConfig;
 pub use error::{ProviderError, Result};
 pub use failover::FailoverChain;
 pub use openai_compat::OpenAiCompatProvider;

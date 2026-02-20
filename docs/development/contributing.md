@@ -502,7 +502,7 @@ There are three ways to add a new LLM provider, depending on how closely it foll
 
 If the provider exposes an OpenAI-compatible `/v1/chat/completions` endpoint, you only need a configuration entry. No new code is required.
 
-The router ships with 7 built-in providers: OpenAI, Anthropic, Groq, DeepSeek, Mistral, Together, and OpenRouter. Each is a `ProviderConfig` in `crates/clawft-llm/src/config.rs`.
+The router ships with 9 built-in providers: OpenAI, Anthropic, Groq, DeepSeek, Mistral, Together, OpenRouter, Gemini, and xAI. Each is an `LlmProviderConfig` in `crates/clawft-llm/src/config.rs`.
 
 Add a new entry to the `builtin_providers()` function:
 

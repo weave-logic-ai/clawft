@@ -85,15 +85,24 @@ pub struct DelegationRule {
 // ── DelegationTarget ────────────────────────────────────────────────────
 
 /// Where a task should be executed.
+///
+/// Serializes to snake_case (`"local"`, `"claude"`, `"flow"`, `"auto"`).
+/// For backward compatibility, old PascalCase values (`"Local"`, `"Claude"`,
+/// `"Flow"`, `"Auto"`) are accepted on deserialization via serde aliases.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DelegationTarget {
     /// Execute locally (built-in tool pipeline).
+    #[serde(alias = "Local")]
     Local,
     /// Delegate to Claude AI.
+    #[serde(alias = "Claude")]
     Claude,
     /// Delegate to Claude Flow orchestration.
+    #[serde(alias = "Flow")]
     Flow,
     /// Automatically decide based on complexity heuristics.
+    #[serde(alias = "Auto")]
     #[default]
     Auto,
 }
@@ -180,18 +189,33 @@ mod tests {
     }
 
     #[test]
-    fn delegation_target_variants() {
+    fn delegation_target_serializes_snake_case() {
         let targets = [
-            (DelegationTarget::Local, "\"Local\""),
-            (DelegationTarget::Claude, "\"Claude\""),
-            (DelegationTarget::Flow, "\"Flow\""),
-            (DelegationTarget::Auto, "\"Auto\""),
+            (DelegationTarget::Local, "\"local\""),
+            (DelegationTarget::Claude, "\"claude\""),
+            (DelegationTarget::Flow, "\"flow\""),
+            (DelegationTarget::Auto, "\"auto\""),
         ];
         for (target, expected_json) in &targets {
             let json = serde_json::to_string(target).unwrap();
             assert_eq!(&json, expected_json);
             let restored: DelegationTarget = serde_json::from_str(&json).unwrap();
             assert_eq!(restored, *target);
+        }
+    }
+
+    #[test]
+    fn delegation_target_deserializes_legacy_pascal_case() {
+        // Backward compat: old PascalCase values still deserialize.
+        let cases = [
+            ("\"Local\"", DelegationTarget::Local),
+            ("\"Claude\"", DelegationTarget::Claude),
+            ("\"Flow\"", DelegationTarget::Flow),
+            ("\"Auto\"", DelegationTarget::Auto),
+        ];
+        for (json, expected) in &cases {
+            let restored: DelegationTarget = serde_json::from_str(json).unwrap();
+            assert_eq!(restored, *expected);
         }
     }
 

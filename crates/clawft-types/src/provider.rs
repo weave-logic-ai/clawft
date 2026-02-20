@@ -65,12 +65,47 @@ pub enum StopReason {
 }
 
 /// Token usage statistics for a single LLM call.
+///
+/// This is the canonical usage type for the entire workspace. It stores
+/// token counts as `u32` (token counts are never negative). The fields
+/// use the clawft naming convention (`input_tokens`, `output_tokens`),
+/// but serde aliases allow deserialization from the OpenAI naming
+/// convention (`prompt_tokens`, `completion_tokens`) as well.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Usage {
     /// Tokens consumed by the prompt / input.
+    ///
+    /// Deserializes from either `"input_tokens"` or `"prompt_tokens"`.
+    #[serde(alias = "prompt_tokens")]
     pub input_tokens: u32,
+
     /// Tokens generated in the response.
+    ///
+    /// Deserializes from either `"output_tokens"` or `"completion_tokens"`.
+    #[serde(alias = "completion_tokens")]
     pub output_tokens: u32,
+
+    /// Total tokens used (input + output).
+    ///
+    /// When deserializing from providers that include `total_tokens`, this
+    /// field is populated directly. Otherwise it defaults to 0 and callers
+    /// can use [`Usage::total`] to compute it.
+    #[serde(default)]
+    pub total_tokens: u32,
+}
+
+impl Usage {
+    /// Returns the total token count.
+    ///
+    /// If `total_tokens` was populated by the provider, returns that value.
+    /// Otherwise computes `input_tokens + output_tokens`.
+    pub fn total(&self) -> u32 {
+        if self.total_tokens > 0 {
+            self.total_tokens
+        } else {
+            self.input_tokens + self.output_tokens
+        }
+    }
 }
 
 /// A tool-call request extracted from a model response.
@@ -150,7 +185,7 @@ impl ProviderSpec {
 
 /// The provider registry. Order equals match priority (gateways first).
 ///
-/// All 14 providers ported from the Python `nanobot/providers/registry.py`.
+/// All 15 providers ported from the Python `nanobot/providers/registry.py`.
 pub static PROVIDERS: &[ProviderSpec] = &[
     // === Custom (user-provided OpenAI-compatible endpoint) ===
     ProviderSpec {
@@ -526,6 +561,7 @@ mod tests {
             usage: Usage {
                 input_tokens: 10,
                 output_tokens: 5,
+                total_tokens: 15,
             },
             metadata: HashMap::new(),
         };
@@ -534,6 +570,55 @@ mod tests {
         assert_eq!(restored.id, "resp-001");
         assert_eq!(restored.stop_reason, StopReason::EndTurn);
         assert_eq!(restored.usage.input_tokens, 10);
+        assert_eq!(restored.usage.total(), 15);
+    }
+
+    #[test]
+    fn usage_total_computed() {
+        let usage = Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            total_tokens: 0,
+        };
+        assert_eq!(usage.total(), 15);
+    }
+
+    #[test]
+    fn usage_total_from_provider() {
+        let usage = Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            total_tokens: 20, // provider may count differently
+        };
+        assert_eq!(usage.total(), 20);
+    }
+
+    #[test]
+    fn usage_deserializes_from_openai_field_names() {
+        let json = r#"{"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}"#;
+        let usage: Usage = serde_json::from_str(json).unwrap();
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 50);
+        assert_eq!(usage.total_tokens, 150);
+    }
+
+    #[test]
+    fn usage_deserializes_from_canonical_field_names() {
+        let json = r#"{"input_tokens": 100, "output_tokens": 50, "total_tokens": 150}"#;
+        let usage: Usage = serde_json::from_str(json).unwrap();
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 50);
+        assert_eq!(usage.total_tokens, 150);
+    }
+
+    #[test]
+    fn usage_deserializes_without_total() {
+        let json = r#"{"input_tokens": 100, "output_tokens": 50}"#;
+        let usage: Usage = serde_json::from_str(json).unwrap();
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 50);
+        assert_eq!(usage.total_tokens, 0);
+        assert_eq!(usage.total(), 150);
     }
 
     #[test]

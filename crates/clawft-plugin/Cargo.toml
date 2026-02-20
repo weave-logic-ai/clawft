@@ -1,0 +1,26 @@
+[package]
+name = "clawft-plugin"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Plugin trait definitions for clawft"
+keywords = ["plugin", "traits", "ai", "agent", "extensibility"]
+categories = ["development-tools"]
+
+[features]
+default = []
+voice = []   # Empty no-op -- reserves the feature flag for Workstream G
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio-util = { workspace = true }
+semver = "1"
+
+[dev-dependencies]
+tokio = { workspace = true }

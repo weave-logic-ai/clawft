@@ -50,7 +50,7 @@ use crate::markdown::dispatch::MarkdownDispatcher;
 
 #[cfg(feature = "channels")]
 use super::make_channel_host;
-use super::{expand_workspace, load_config};
+use super::load_config;
 
 /// Arguments for the `weft gateway` subcommand.
 #[derive(Args)]
@@ -118,27 +118,8 @@ async fn run_with_channels(args: GatewayArgs) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("failed to bootstrap app context: {e}"))?;
 
-    // Build security policies from config.
-    let command_policy = super::agent::build_command_policy(&config.tools.command_policy);
-    let url_policy = super::agent::build_url_policy(&config.tools.url_policy);
-
-    // Register tools.
-    let workspace = expand_workspace(&config.agents.defaults.workspace);
-    let web_search_config = super::agent::build_web_search_config(&config.tools);
-    clawft_tools::register_all(
-        ctx.tools_mut(),
-        platform.clone(),
-        workspace,
-        command_policy,
-        url_policy,
-        web_search_config,
-    );
-
-    // Register MCP server tools.
-    crate::mcp_tools::register_mcp_tools(&config, ctx.tools_mut()).await;
-
-    // Register delegation tool (feature-gated, graceful degradation).
-    crate::mcp_tools::register_delegation(&config.delegation, ctx.tools_mut());
+    // Register core tools (built-in + MCP proxied + delegation).
+    super::register_core_tools(ctx.tools_mut(), &config, platform.clone()).await;
 
     // Register message tool (needs bus reference, cannot go in register_all).
     let bus_ref = ctx.bus().clone();

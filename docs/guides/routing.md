@@ -812,7 +812,25 @@ environment variable reference.
 
 ### Token Budget
 
-The context assembler's token budget is derived from `agents.defaults.max_tokens`:
+When using the live LLM pipeline (tiered routing), the context assembler's
+token budget is derived from `routing.tiers[].max_context_tokens` -- the
+largest value across all tiers is used. This controls the *input* token
+budget (how many tokens of conversation history to send). It falls back
+to 128,000 if no tier specifies a value.
+
+```json
+{
+  "routing": {
+    "tiers": [
+      { "name": "fast", "max_context_tokens": 8192 },
+      { "name": "balanced", "max_context_tokens": 16384 }
+    ]
+  }
+}
+```
+
+For the default (non-live) pipeline, the budget comes from
+`agents.defaults.max_tokens`:
 
 ```json
 {

@@ -10,6 +10,7 @@ members = [
     "crates/clawft-services",
     "crates/clawft-cli",
     "crates/clawft-wasm",
+    "crates/clawft-plugin",
 ]
 
 [workspace.package]
@@ -97,6 +98,7 @@ clawft-tools = { path = "crates/clawft-tools" }
 clawft-channels = { path = "crates/clawft-channels" }
 clawft-llm = { path = "crates/clawft-llm" }
 clawft-services = { path = "crates/clawft-services" }
+clawft-plugin = { path = "crates/clawft-plugin" }
 
 [profile.release]
 opt-level = "z"

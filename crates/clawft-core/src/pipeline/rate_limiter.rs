@@ -54,7 +54,9 @@ struct SlidingWindow {
 pub struct RateLimiter {
     /// Per-sender sliding window entries. Key is `sender_id`.
     windows: RwLock<HashMap<String, SlidingWindow>>,
-    /// Window size in seconds (used when integrated into pipeline routing).
+    /// Window size in seconds. Stored for future config serialization
+    /// when the rate limiter is persisted or exposed via admin API.
+    /// TODO(Element-09): Expose via admin metrics endpoint (L2).
     #[allow(dead_code)]
     window_seconds: u32,
     /// Window size as a `Duration` (precomputed from `window_seconds`).
@@ -279,6 +281,7 @@ impl RateLimiter {
     ///
     /// This is the public-facing eviction trigger, called internally
     /// but also available for external eviction triggers.
+    /// TODO(Element-09): Used by admin maintenance endpoint (L2).
     #[allow(dead_code)]
     fn evict_if_needed(&self) {
         let mut windows = self.windows.write().unwrap();

@@ -805,6 +805,36 @@ Example -- allow specific internal services:
 }
 ```
 
+## Workspace Bootstrap Files
+
+clawft loads optional Markdown files from the workspace directory to
+customize the system prompt and agent behavior. These files are searched
+in the workspace root first, then in the `.clawft/` subdirectory.
+
+| File | Purpose |
+|------|---------|
+| `SOUL.md` | Primary identity preamble. Overrides the default system prompt identity section. |
+| `IDENTITY.md` | Alternative identity file. Used if `SOUL.md` is absent. |
+| `AGENTS.md` | Agent definitions and team structure. |
+| `USER.md` | User preferences and context. |
+| `TOOLS.md` | Tool usage guidelines and restrictions. |
+
+### Identity Override Behavior
+
+If either `SOUL.md` or `IDENTITY.md` is present, the default hardcoded
+identity preamble is replaced. The priority is:
+
+1. **`SOUL.md`** is included first (if it exists).
+2. **`IDENTITY.md`** is included second (if it exists).
+3. Configuration context (model, workspace, available tools) is always appended.
+
+If neither file exists, the built-in default identity is used, which
+identifies the assistant as "clawft" with the configured agent name and model.
+
+All bootstrap files are cached by modification time (mtime). The cache is
+checked on each system prompt build, so changes to these files take effect
+on the next message without restarting the process.
+
 ## Feature Flags
 
 Compile-time feature flags enable optional capabilities that are not included

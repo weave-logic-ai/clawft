@@ -26,7 +26,7 @@ use tracing::debug;
 
 use clawft_llm::{
     ChatMessage, ChatRequest as LlmChatRequest, ChatResponse, OpenAiCompatProvider,
-    ProviderConfig as LlmProviderConfig, ProviderRouter,
+    LlmProviderConfig, ProviderRouter,
 };
 use clawft_types::config::Config;
 
@@ -183,8 +183,8 @@ impl LlmProvider for ClawftLlmAdapter {
         // Build a synthetic ChatResponse from the accumulated text
         let fr = finish_reason.unwrap_or_else(|| "stop".into());
         let llm_usage = usage.map(|u| clawft_llm::Usage {
-            prompt_tokens: u.prompt_tokens,
-            completion_tokens: u.completion_tokens,
+            input_tokens: u.input_tokens,
+            output_tokens: u.output_tokens,
             total_tokens: u.total_tokens,
         });
 
@@ -268,8 +268,8 @@ fn convert_response_to_value(response: &ChatResponse) -> serde_json::Value {
 
     let usage = response.usage.as_ref().map(|u| {
         serde_json::json!({
-            "prompt_tokens": u.prompt_tokens,
-            "completion_tokens": u.completion_tokens,
+            "prompt_tokens": u.input_tokens,
+            "completion_tokens": u.output_tokens,
             "total_tokens": u.total_tokens,
         })
     });
@@ -634,8 +634,8 @@ mod tests {
                 finish_reason: Some("stop".into()),
             }],
             usage: Some(LlmUsage {
-                prompt_tokens: 10,
-                completion_tokens: 5,
+                input_tokens: 10,
+                output_tokens: 5,
                 total_tokens: 15,
             }),
         }
@@ -703,8 +703,8 @@ mod tests {
                 finish_reason: Some("tool_calls".into()),
             }],
             usage: Some(LlmUsage {
-                prompt_tokens: 15,
-                completion_tokens: 8,
+                input_tokens: 15,
+                output_tokens: 8,
                 total_tokens: 23,
             }),
         };
@@ -786,8 +786,8 @@ mod tests {
                     finish_reason: Some("stop".into()),
                 }],
                 usage: Some(LlmUsage {
-                    prompt_tokens: 5,
-                    completion_tokens: 3,
+                    input_tokens: 5,
+                    output_tokens: 3,
                     total_tokens: 8,
                 }),
             })
@@ -1061,8 +1061,8 @@ mod tests {
                         finish_reason: Some("tool_calls".into()),
                     }],
                     usage: Some(LlmUsage {
-                        prompt_tokens: 20,
-                        completion_tokens: 10,
+                        input_tokens: 20,
+                        output_tokens: 10,
                         total_tokens: 30,
                     }),
                 })

@@ -10,7 +10,7 @@ use tracing::{debug, trace, warn};
 
 use std::time::Duration;
 
-use crate::config::ProviderConfig;
+use crate::config::LlmProviderConfig;
 use crate::error::{ProviderError, Result};
 use crate::provider::Provider;
 use crate::sse::parse_sse_line;
@@ -23,14 +23,14 @@ const DEFAULT_TIMEOUT_SECS: u64 = 120;
 ///
 /// This is the primary provider implementation in clawft-llm. It can be
 /// configured to talk to any endpoint that accepts the OpenAI request format
-/// by changing the `base_url` in the [`ProviderConfig`].
+/// by changing the `base_url` in the [`LlmProviderConfig`].
 ///
 /// # Construction
 ///
 /// ```rust,ignore
-/// use clawft_llm::{OpenAiCompatProvider, ProviderConfig};
+/// use clawft_llm::{OpenAiCompatProvider, LlmProviderConfig};
 ///
-/// let config = ProviderConfig {
+/// let config = LlmProviderConfig {
 ///     name: "openai".into(),
 ///     base_url: "https://api.openai.com/v1".into(),
 ///     api_key_env: "OPENAI_API_KEY".into(),
@@ -41,7 +41,7 @@ const DEFAULT_TIMEOUT_SECS: u64 = 120;
 /// let provider = OpenAiCompatProvider::new(config);
 /// ```
 pub struct OpenAiCompatProvider {
-    config: ProviderConfig,
+    config: LlmProviderConfig,
     http: reqwest::Client,
     api_key: Option<String>,
 }
@@ -51,7 +51,7 @@ impl OpenAiCompatProvider {
     ///
     /// The API key will be resolved from the environment variable specified
     /// in `config.api_key_env` at request time.
-    pub fn new(config: ProviderConfig) -> Self {
+    pub fn new(config: LlmProviderConfig) -> Self {
         let timeout_secs = config.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS);
         Self {
             http: reqwest::ClientBuilder::new()
@@ -67,7 +67,7 @@ impl OpenAiCompatProvider {
     ///
     /// This bypasses environment variable lookup and uses the provided key
     /// directly.
-    pub fn with_api_key(config: ProviderConfig, api_key: String) -> Self {
+    pub fn with_api_key(config: LlmProviderConfig, api_key: String) -> Self {
         let timeout_secs = config.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS);
         Self {
             http: reqwest::ClientBuilder::new()
@@ -80,7 +80,7 @@ impl OpenAiCompatProvider {
     }
 
     /// Returns the provider configuration.
-    pub fn config(&self) -> &ProviderConfig {
+    pub fn config(&self) -> &LlmProviderConfig {
         &self.config
     }
 
@@ -433,11 +433,11 @@ impl std::fmt::Debug for OpenAiCompatProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ProviderConfig;
+    use crate::config::LlmProviderConfig;
     use std::collections::HashMap;
 
-    fn test_config() -> ProviderConfig {
-        ProviderConfig {
+    fn test_config() -> LlmProviderConfig {
+        LlmProviderConfig {
             name: "test-provider".into(),
             base_url: "https://api.example.com/v1".into(),
             api_key_env: "TEST_PROVIDER_API_KEY".into(),
@@ -448,8 +448,8 @@ mod tests {
         }
     }
 
-    fn config_with_headers() -> ProviderConfig {
-        ProviderConfig {
+    fn config_with_headers() -> LlmProviderConfig {
+        LlmProviderConfig {
             name: "anthropic".into(),
             base_url: "https://api.anthropic.com/v1".into(),
             api_key_env: "ANTHROPIC_API_KEY".into(),
@@ -641,21 +641,21 @@ mod tests {
         assert_eq!(provider.api_key.as_deref(), Some("sk-test"));
     }
 
-    /// SEC-04: Verify that ProviderConfig stores env var names, not keys,
+    /// SEC-04: Verify that LlmProviderConfig stores env var names, not keys,
     /// and that its Debug output does not contain actual API key values.
     #[test]
     fn log_fields_do_not_include_api_key() {
         let config = test_config();
         let debug_config = format!("{:?}", config);
-        // ProviderConfig should not contain any actual key values
+        // LlmProviderConfig should not contain any actual key values
         // (it stores the env var NAME, not the key itself).
         assert!(
             !debug_config.contains("sk-"),
-            "ProviderConfig debug should not contain API key prefixes: {debug_config}"
+            "LlmProviderConfig debug should not contain API key prefixes: {debug_config}"
         );
         assert!(
             debug_config.contains("TEST_PROVIDER_API_KEY"),
-            "ProviderConfig should show the env var name, not the key"
+            "LlmProviderConfig should show the env var name, not the key"
         );
     }
 }

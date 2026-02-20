@@ -820,6 +820,7 @@ mod tests {
                 usage: Usage {
                     input_tokens: 10,
                     output_tokens: 5,
+                    total_tokens: 0,
                 },
                 metadata: HashMap::new(),
             })

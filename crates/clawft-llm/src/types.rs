@@ -13,8 +13,9 @@ pub struct ChatMessage {
     pub role: String,
 
     /// The content of the message. `None` for assistant messages that only
-    /// contain tool calls (serializes as `"content": null`).
-    #[serde(default)]
+    /// contain tool calls. When `None`, the field is omitted from JSON
+    /// (some providers reject `"content": null`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
 
     /// For tool-result messages, the ID of the tool call this is a response to.
@@ -147,17 +148,16 @@ pub struct Choice {
 }
 
 /// Token usage statistics for a completion request.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct Usage {
-    /// Number of tokens in the prompt.
-    pub prompt_tokens: i32,
-
-    /// Number of tokens in the generated completion.
-    pub completion_tokens: i32,
-
-    /// Total tokens used (prompt + completion).
-    pub total_tokens: i32,
-}
+///
+/// Re-exported from [`clawft_types::provider::Usage`]. This is the canonical
+/// usage type for the workspace. Field names use the clawft convention
+/// (`input_tokens`, `output_tokens`, `total_tokens`) but serde aliases allow
+/// deserialization from OpenAI field names (`prompt_tokens`, `completion_tokens`).
+///
+/// For backward compatibility, the following field aliases hold:
+/// - `prompt_tokens` -> `input_tokens`
+/// - `completion_tokens` -> `output_tokens`
+pub use clawft_types::provider::Usage;
 
 // ── Streaming types ─────────────────────────────────────────────────────
 
@@ -396,8 +396,8 @@ mod tests {
         assert_eq!(resp.choices[0].message.content.as_deref(), Some("Hello!"));
         assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
         let usage = resp.usage.unwrap();
-        assert_eq!(usage.prompt_tokens, 10);
-        assert_eq!(usage.completion_tokens, 5);
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 5);
         assert_eq!(usage.total_tokens, 15);
         assert_eq!(resp.model, "gpt-4o-2024-05-13");
     }
@@ -422,12 +422,21 @@ mod tests {
     #[test]
     fn usage_serde_roundtrip() {
         let usage = Usage {
-            prompt_tokens: 100,
-            completion_tokens: 50,
+            input_tokens: 100,
+            output_tokens: 50,
             total_tokens: 150,
         };
         let json = serde_json::to_string(&usage).unwrap();
         let parsed: Usage = serde_json::from_str(&json).unwrap();
         assert_eq!(usage, parsed);
+    }
+
+    #[test]
+    fn usage_deserializes_from_openai_format() {
+        let json = r#"{"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}"#;
+        let usage: Usage = serde_json::from_str(json).unwrap();
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 50);
+        assert_eq!(usage.total_tokens, 150);
     }
 }

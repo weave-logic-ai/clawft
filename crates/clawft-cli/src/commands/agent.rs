@@ -37,7 +37,7 @@ use clawft_core::bus::MessageBus;
 use clawft_platform::NativePlatform;
 use clawft_types::event::InboundMessage;
 
-use super::{expand_workspace, load_config};
+use super::load_config;
 
 /// Arguments for the `weft agent` subcommand.
 #[derive(Args)]
@@ -63,6 +63,9 @@ pub struct AgentArgs {
     /// Without this flag, only user and built-in skills are loaded.
     /// Workspace skills in `.clawft/skills/` are skipped as a security
     /// measure (SEC-SKILL-05).
+    ///
+    /// TODO(Element-04/C5): Wire this flag into the skill loader to
+    /// gate project-scoped skill loading. Currently accepted but not enforced.
     #[arg(long)]
     pub trust_project_skills: bool,
 }
@@ -90,27 +93,8 @@ pub async fn run(args: AgentArgs) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("bootstrap failed: {e}"))?;
 
-    // Build security policies from config.
-    let command_policy = build_command_policy(&config.tools.command_policy);
-    let url_policy = build_url_policy(&config.tools.url_policy);
-
-    // Register tools.
-    let workspace = expand_workspace(&config.agents.defaults.workspace);
-    let web_search_config = build_web_search_config(&config.tools);
-    clawft_tools::register_all(
-        ctx.tools_mut(),
-        platform.clone(),
-        workspace,
-        command_policy,
-        url_policy,
-        web_search_config,
-    );
-
-    // Register MCP server tools.
-    crate::mcp_tools::register_mcp_tools(&config, ctx.tools_mut()).await;
-
-    // Register delegation tool (feature-gated, graceful degradation).
-    crate::mcp_tools::register_delegation(&config.delegation, ctx.tools_mut());
+    // Register core tools (built-in + MCP proxied + delegation).
+    super::register_core_tools(ctx.tools_mut(), &config, platform.clone()).await;
 
     // Register message tool (needs bus reference, cannot go in register_all).
     let bus_ref = ctx.bus().clone();

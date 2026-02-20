@@ -20,15 +20,15 @@ use std::collections::HashMap;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use clawft_llm::config::ProviderConfig;
+use clawft_llm::config::LlmProviderConfig;
 use clawft_llm::error::ProviderError;
 use clawft_llm::openai_compat::OpenAiCompatProvider;
 use clawft_llm::provider::Provider;
 use clawft_llm::types::{ChatMessage, ChatRequest};
 
 /// Build a `ProviderConfig` pointing at the given mock server URL.
-fn mock_config(server_url: &str) -> ProviderConfig {
-    ProviderConfig {
+fn mock_config(server_url: &str) -> LlmProviderConfig {
+    LlmProviderConfig {
         name: "mock-provider".into(),
         base_url: server_url.into(),
         api_key_env: "MOCK_UNUSED_KEY".into(),
@@ -94,9 +94,9 @@ async fn complete_success_text_response() {
     assert_eq!(response.choices[0].finish_reason.as_deref(), Some("stop"));
 
     let usage = response.usage.unwrap();
-    assert_eq!(usage.prompt_tokens, 10);
-    assert_eq!(usage.completion_tokens, 8);
-    assert_eq!(usage.total_tokens, 18);
+    assert_eq!(usage.input_tokens, 10);
+    assert_eq!(usage.output_tokens, 8);
+    assert_eq!(usage.total(), 18);
 }
 
 #[tokio::test]
@@ -496,7 +496,7 @@ async fn complete_sends_request_body_correctly() {
 
 #[tokio::test]
 async fn complete_missing_api_key_returns_not_configured() {
-    let config = ProviderConfig {
+    let config = LlmProviderConfig {
         name: "test".into(),
         base_url: "http://localhost:1".into(),
         api_key_env: "CLAWFT_NONEXISTENT_MOCK_KEY_99999".into(),

@@ -8,8 +8,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Configuration for a single LLM provider endpoint.
+///
+/// Renamed from `ProviderConfig` to avoid collision with
+/// `clawft_types::config::ProviderConfig` (the user-facing config type).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProviderConfig {
+pub struct LlmProviderConfig {
     /// Human-readable provider name (e.g. "openai", "anthropic").
     pub name: String,
 
@@ -42,9 +45,9 @@ pub struct ProviderConfig {
 ///
 /// These cover the most common OpenAI-compatible providers. Users can
 /// override or extend these via their clawft configuration file.
-pub fn builtin_providers() -> Vec<ProviderConfig> {
+pub fn builtin_providers() -> Vec<LlmProviderConfig> {
     vec![
-        ProviderConfig {
+        LlmProviderConfig {
             name: "openai".into(),
             base_url: "https://api.openai.com/v1".into(),
             api_key_env: "OPENAI_API_KEY".into(),
@@ -53,7 +56,7 @@ pub fn builtin_providers() -> Vec<ProviderConfig> {
             headers: HashMap::new(),
             timeout_secs: None,
         },
-        ProviderConfig {
+        LlmProviderConfig {
             name: "anthropic".into(),
             base_url: "https://api.anthropic.com/v1".into(),
             api_key_env: "ANTHROPIC_API_KEY".into(),
@@ -62,7 +65,7 @@ pub fn builtin_providers() -> Vec<ProviderConfig> {
             headers: HashMap::from([("anthropic-version".into(), "2023-06-01".into())]),
             timeout_secs: None,
         },
-        ProviderConfig {
+        LlmProviderConfig {
             name: "groq".into(),
             base_url: "https://api.groq.com/openai/v1".into(),
             api_key_env: "GROQ_API_KEY".into(),
@@ -71,7 +74,7 @@ pub fn builtin_providers() -> Vec<ProviderConfig> {
             headers: HashMap::new(),
             timeout_secs: None,
         },
-        ProviderConfig {
+        LlmProviderConfig {
             name: "deepseek".into(),
             base_url: "https://api.deepseek.com/v1".into(),
             api_key_env: "DEEPSEEK_API_KEY".into(),
@@ -80,7 +83,7 @@ pub fn builtin_providers() -> Vec<ProviderConfig> {
             headers: HashMap::new(),
             timeout_secs: None,
         },
-        ProviderConfig {
+        LlmProviderConfig {
             name: "mistral".into(),
             base_url: "https://api.mistral.ai/v1".into(),
             api_key_env: "MISTRAL_API_KEY".into(),
@@ -89,7 +92,7 @@ pub fn builtin_providers() -> Vec<ProviderConfig> {
             headers: HashMap::new(),
             timeout_secs: None,
         },
-        ProviderConfig {
+        LlmProviderConfig {
             name: "together".into(),
             base_url: "https://api.together.xyz/v1".into(),
             api_key_env: "TOGETHER_API_KEY".into(),
@@ -98,7 +101,7 @@ pub fn builtin_providers() -> Vec<ProviderConfig> {
             headers: HashMap::new(),
             timeout_secs: None,
         },
-        ProviderConfig {
+        LlmProviderConfig {
             name: "openrouter".into(),
             base_url: "https://openrouter.ai/api/v1".into(),
             api_key_env: "OPENROUTER_API_KEY".into(),
@@ -107,7 +110,7 @@ pub fn builtin_providers() -> Vec<ProviderConfig> {
             headers: HashMap::new(),
             timeout_secs: None,
         },
-        ProviderConfig {
+        LlmProviderConfig {
             name: "gemini".into(),
             base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
             api_key_env: "GOOGLE_GEMINI_API_KEY".into(),
@@ -116,7 +119,7 @@ pub fn builtin_providers() -> Vec<ProviderConfig> {
             headers: HashMap::new(),
             timeout_secs: None,
         },
-        ProviderConfig {
+        LlmProviderConfig {
             name: "xai".into(),
             base_url: "https://api.x.ai/v1".into(),
             api_key_env: "XAI_API_KEY".into(),
@@ -211,7 +214,7 @@ mod tests {
 
     #[test]
     fn provider_config_serde_roundtrip() {
-        let config = ProviderConfig {
+        let config = LlmProviderConfig {
             name: "test-provider".into(),
             base_url: "https://example.com/v1".into(),
             api_key_env: "TEST_API_KEY".into(),
@@ -221,7 +224,7 @@ mod tests {
             timeout_secs: Some(60),
         };
         let json = serde_json::to_string(&config).unwrap();
-        let parsed: ProviderConfig = serde_json::from_str(&json).unwrap();
+        let parsed: LlmProviderConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.name, config.name);
         assert_eq!(parsed.base_url, config.base_url);
         assert_eq!(parsed.api_key_env, config.api_key_env);
@@ -237,7 +240,7 @@ mod tests {
             "base_url": "https://example.com",
             "api_key_env": "MINIMAL_KEY"
         }"#;
-        let config: ProviderConfig = serde_json::from_str(json).unwrap();
+        let config: LlmProviderConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.name, "minimal");
         assert!(config.model_prefix.is_none());
         assert!(config.default_model.is_none());

@@ -977,14 +977,14 @@ pub async fn start_all(&self) -> Vec<(String, Result<(), ChannelError>)> {
 ## Exit Criteria Checklist
 
 ### Core (C1-C4)
-- [ ] `clawft-plugin` crate compiles with all trait definitions
-- [ ] At least one plugin implements each of the six traits
+- [x] `clawft-plugin` crate compiles with all trait definitions (2026-02-19)
+- [x] At least one plugin implements each of the six traits (2026-02-19, mock impls in tests)
 - [ ] WASM plugin host loads and runs a test plugin
 - [ ] `weft skill install <path>` works for local skills
 - [ ] Hot-reload detects file changes within 2 seconds
 - [ ] Skill precedence (workspace > managed > bundled) verified
-- [ ] VoiceHandler trait placeholder exists (forward-compat)
-- [ ] All existing tests pass
+- [x] VoiceHandler trait placeholder exists (forward-compat) (2026-02-19)
+- [x] All existing tests pass (2026-02-20, 116 tests)
 
 ### C4a (Autonomous Skill Creation)
 - [ ] Pattern detection threshold configurable (default: 3)
@@ -1012,10 +1012,10 @@ pub async fn start_all(&self) -> Vec<(String, Result<(), ChannelError>)> {
 - [ ] Every WIT host function validates against `PluginPermissions`
 - [ ] WASM fuel metering enabled (configurable, default 1B units)
 - [ ] WASM memory limits via `StoreLimits` (default 16MB)
-- [ ] `read-file`/`write-file` canonicalize paths, reject external symlinks
-- [ ] `http-request` applies SSRF check + network allowlist
-- [ ] `get-env` returns `None` for non-permitted vars
-- [ ] Rate limiting on `http-request` and `log`
+- [x] `read-file`/`write-file` canonicalize paths, reject external symlinks (2026-02-20)
+- [x] `http-request` applies SSRF check + network allowlist (2026-02-20)
+- [x] `get-env` returns `None` for non-permitted vars (2026-02-20)
+- [x] Rate limiting on `http-request` and `log` (2026-02-20)
 - [ ] Audit logging for all host function calls
 - [ ] ClawHub installs require signature verification
 - [ ] First-run permission approval implemented

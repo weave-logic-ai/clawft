@@ -1,8 +1,11 @@
 //! `weft cron` -- manage scheduled jobs.
 //!
 //! Provides subcommands for listing, creating, removing, enabling/disabling,
-//! and manually running cron jobs. Jobs are stored in the cron store file
-//! located at `~/.clawft/cron.json` (or `~/.nanobot/cron.json` as fallback).
+//! and manually running cron jobs. Jobs are stored in JSONL event-sourced
+//! format, shared with the [`CronService`] in `clawft-services`.
+//!
+//! The storage file is located at `~/.clawft/cron.jsonl` (or
+//! `~/.nanobot/cron.jsonl` as fallback).
 //!
 //! # Examples
 //!
@@ -23,15 +26,18 @@ use comfy_table::{Table, presets::UTF8_FULL};
 
 use clawft_types::config::Config;
 use clawft_types::cron::{
-    CronJob, CronJobState, CronPayload, CronSchedule, CronStore, ScheduleKind,
+    CronJob, CronJobState, CronPayload, CronSchedule, ScheduleKind,
 };
 
-/// Default cron store filename.
-const CRON_STORE_FILENAME: &str = "cron.json";
+/// Default cron store filename (JSONL, shared with CronService).
+const CRON_STORE_FILENAME: &str = "cron.jsonl";
+
+/// Legacy flat-JSON filename for migration detection.
+const LEGACY_STORE_FILENAME: &str = "cron.json";
 
 /// Resolve the cron store file path.
 ///
-/// Tries `~/.clawft/cron.json`, then `~/.nanobot/cron.json`.
+/// Tries `~/.clawft/cron.jsonl`, then `~/.nanobot/cron.jsonl`.
 /// Returns the first path whose parent directory exists.
 fn cron_store_path() -> PathBuf {
     if let Some(home) = dirs::home_dir() {
@@ -49,39 +55,50 @@ fn cron_store_path() -> PathBuf {
     PathBuf::from(CRON_STORE_FILENAME)
 }
 
-/// Load the cron store from disk, returning an empty store if the file
-/// does not exist.
-fn load_store(path: &Path) -> anyhow::Result<CronStore> {
-    if !path.exists() {
-        return Ok(CronStore::default());
+/// Attempt migration from legacy flat-JSON format to JSONL.
+///
+/// If a `cron.json` file exists alongside the JSONL path and the JSONL
+/// file does not exist, imports the jobs from the legacy file.
+fn migrate_legacy_store(jsonl_path: &Path) {
+    let legacy_path = jsonl_path.with_file_name(LEGACY_STORE_FILENAME);
+    if !legacy_path.exists() || jsonl_path.exists() {
+        return;
     }
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("failed to read cron store at {}: {e}", path.display()))?;
-    let store: CronStore = serde_json::from_str(&content)
-        .map_err(|e| anyhow::anyhow!("failed to parse cron store: {e}"))?;
-    Ok(store)
+
+    let content = match std::fs::read_to_string(&legacy_path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    // Try parsing as a CronStore (legacy flat JSON format).
+    if let Ok(store) = serde_json::from_str::<clawft_types::cron::CronStore>(&content) {
+        for job in &store.jobs {
+            if let Err(e) =
+                clawft_services::cron_service::storage::append_create_sync(jsonl_path, job)
+            {
+                eprintln!("warning: failed to migrate job '{}': {e}", job.id);
+            }
+        }
+        let count = store.jobs.len();
+        if count > 0 {
+            eprintln!(
+                "Migrated {count} job(s) from legacy {} to {}",
+                legacy_path.display(),
+                jsonl_path.display()
+            );
+        }
+    }
 }
 
-/// Save the cron store to disk.
-fn save_store(path: &Path, store: &CronStore) -> anyhow::Result<()> {
-    // Ensure parent directory exists.
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let content = serde_json::to_string_pretty(store)?;
-    std::fs::write(path, content)?;
-    Ok(())
+/// Load jobs from the JSONL store.
+fn load_jobs(path: &Path) -> anyhow::Result<Vec<CronJob>> {
+    clawft_services::cron_service::storage::load_jobs_sync(path)
+        .map_err(|e| anyhow::anyhow!("failed to load cron store at {}: {e}", path.display()))
 }
 
-/// Generate a short random job ID.
+/// Generate a unique job ID using UUID v4.
 fn generate_job_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    // Use lower 32 bits of timestamp + process id for uniqueness.
-    format!("job-{:08x}{:04x}", ts as u32, std::process::id() as u16)
+    format!("job-{}", uuid::Uuid::new_v4())
 }
 
 /// Format a millisecond timestamp as a human-readable string, or "-" if `None`.
@@ -101,9 +118,10 @@ fn format_ts(ms: Option<i64>) -> String {
 /// List all cron jobs in a table.
 pub fn cron_list(_config: &Config) -> anyhow::Result<()> {
     let path = cron_store_path();
-    let store = load_store(&path)?;
+    migrate_legacy_store(&path);
+    let jobs = load_jobs(&path)?;
 
-    if store.jobs.is_empty() {
+    if jobs.is_empty() {
         println!("No cron jobs configured.");
         println!("  Store: {}", path.display());
         return Ok(());
@@ -113,7 +131,7 @@ pub fn cron_list(_config: &Config) -> anyhow::Result<()> {
     table.load_preset(UTF8_FULL);
     table.set_header(["ID", "NAME", "SCHEDULE", "ENABLED", "LAST RUN", "NEXT RUN"]);
 
-    for job in &store.jobs {
+    for job in &jobs {
         let schedule_str = match job.schedule.kind {
             ScheduleKind::Cron => job.schedule.expr.as_deref().unwrap_or("-").to_owned(),
             ScheduleKind::Every => {
@@ -175,7 +193,7 @@ pub fn cron_add(
         .map_err(|e| anyhow::anyhow!("Invalid cron expression: {e}"))?;
 
     let path = cron_store_path();
-    let mut store = load_store(&path)?;
+    migrate_legacy_store(&path);
 
     let job_id = generate_job_id();
     let now_ms = Utc::now().timestamp_millis();
@@ -201,8 +219,8 @@ pub fn cron_add(
         delete_after_run: false,
     };
 
-    store.jobs.push(job);
-    save_store(&path, &store)?;
+    clawft_services::cron_service::storage::append_create_sync(&path, &job)
+        .map_err(|e| anyhow::anyhow!("failed to write cron store: {e}"))?;
 
     println!("Cron job '{name}' created with ID: {job_id}");
     Ok(())
@@ -211,16 +229,16 @@ pub fn cron_add(
 /// Remove a cron job by ID.
 pub fn cron_remove(job_id: String, _config: &Config) -> anyhow::Result<()> {
     let path = cron_store_path();
-    let mut store = load_store(&path)?;
+    migrate_legacy_store(&path);
+    let jobs = load_jobs(&path)?;
 
-    let before_len = store.jobs.len();
-    store.jobs.retain(|j| j.id != job_id);
-
-    if store.jobs.len() == before_len {
+    if !jobs.iter().any(|j| j.id == job_id) {
         anyhow::bail!("cron job not found: {job_id}");
     }
 
-    save_store(&path, &store)?;
+    clawft_services::cron_service::storage::append_delete_sync(&path, &job_id)
+        .map_err(|e| anyhow::anyhow!("failed to write cron store: {e}"))?;
+
     println!("Cron job '{job_id}' removed.");
     Ok(())
 }
@@ -228,18 +246,20 @@ pub fn cron_remove(job_id: String, _config: &Config) -> anyhow::Result<()> {
 /// Enable or disable a cron job.
 pub fn cron_enable(job_id: String, enabled: bool, _config: &Config) -> anyhow::Result<()> {
     let path = cron_store_path();
-    let mut store = load_store(&path)?;
+    migrate_legacy_store(&path);
+    let jobs = load_jobs(&path)?;
 
-    let job = store
-        .jobs
-        .iter_mut()
-        .find(|j| j.id == job_id)
-        .ok_or_else(|| anyhow::anyhow!("cron job not found: {job_id}"))?;
+    if !jobs.iter().any(|j| j.id == job_id) {
+        anyhow::bail!("cron job not found: {job_id}");
+    }
 
-    job.enabled = enabled;
-    job.updated_at_ms = Utc::now().timestamp_millis();
-
-    save_store(&path, &store)?;
+    clawft_services::cron_service::storage::append_update_sync(
+        &path,
+        &job_id,
+        "enabled",
+        &serde_json::json!(enabled),
+    )
+    .map_err(|e| anyhow::anyhow!("failed to write cron store: {e}"))?;
 
     let state = if enabled { "enabled" } else { "disabled" };
     println!("Cron job '{job_id}' {state}.");
@@ -249,10 +269,10 @@ pub fn cron_enable(job_id: String, enabled: bool, _config: &Config) -> anyhow::R
 /// Manually trigger a cron job.
 pub fn cron_run(job_id: String, _config: &Config) -> anyhow::Result<()> {
     let path = cron_store_path();
-    let store = load_store(&path)?;
+    migrate_legacy_store(&path);
+    let jobs = load_jobs(&path)?;
 
-    let job = store
-        .jobs
+    let job = jobs
         .iter()
         .find(|j| j.id == job_id)
         .ok_or_else(|| anyhow::anyhow!("cron job not found: {job_id}"))?;
@@ -296,70 +316,21 @@ mod tests {
     fn generate_job_id_format() {
         let id = generate_job_id();
         assert!(id.starts_with("job-"));
-        assert!(id.len() > 4);
+        // UUID v4 format: job-xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
+        assert_eq!(id.len(), 4 + 36); // "job-" + UUID
     }
 
     #[test]
     fn generate_job_id_unique() {
         let id1 = generate_job_id();
-        // Sleep is not needed: process id + timestamp should differ or be unique enough.
         let id2 = generate_job_id();
-        // They may be the same if called in the same millisecond, but the format
-        // should at least be valid.
-        assert!(id1.starts_with("job-"));
-        assert!(id2.starts_with("job-"));
+        assert_ne!(id1, id2, "UUID-based IDs must be unique");
     }
 
     #[test]
     fn cron_store_path_returns_something() {
         let path = cron_store_path();
-        assert!(path.to_string_lossy().contains("cron.json"));
-    }
-
-    #[test]
-    fn load_store_nonexistent_returns_default() {
-        let path = PathBuf::from("/tmp/nonexistent_clawft_test_cron.json");
-        let store = load_store(&path).unwrap();
-        assert!(store.jobs.is_empty());
-        assert_eq!(store.version, 1);
-    }
-
-    #[test]
-    fn save_and_load_roundtrip() {
-        let dir = std::env::temp_dir().join("clawft_cron_test");
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("test_cron_roundtrip.json");
-
-        let store = CronStore {
-            version: 1,
-            jobs: vec![CronJob {
-                id: "test-job-1".into(),
-                name: "test job".into(),
-                enabled: true,
-                schedule: CronSchedule {
-                    kind: ScheduleKind::Cron,
-                    at_ms: None,
-                    every_ms: None,
-                    expr: Some("0 9 * * *".into()),
-                    tz: Some("UTC".into()),
-                },
-                payload: CronPayload::default(),
-                state: CronJobState::default(),
-                created_at_ms: 1_700_000_000_000,
-                updated_at_ms: 1_700_000_000_000,
-                delete_after_run: false,
-            }],
-        };
-
-        save_store(&path, &store).unwrap();
-        let loaded = load_store(&path).unwrap();
-        assert_eq!(loaded.jobs.len(), 1);
-        assert_eq!(loaded.jobs[0].id, "test-job-1");
-        assert_eq!(loaded.jobs[0].name, "test job");
-
-        // Cleanup.
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir(&dir);
+        assert!(path.to_string_lossy().contains("cron.jsonl"));
     }
 
     #[test]
@@ -409,74 +380,112 @@ mod tests {
     fn cron_list_with_empty_store() {
         // Smoke test: should not panic.
         let config = Config::default();
-        // This will try to load from the default path; if it doesn't exist,
-        // it returns an empty store and prints "No cron jobs configured."
         let _ = cron_list(&config);
     }
 
     #[test]
-    fn cron_remove_nonexistent_job() {
-        // We test the store-level logic directly since cron_remove
-        // depends on the filesystem cron store path.
-        let mut store = CronStore::default();
-        store.jobs.push(CronJob {
-            id: "keep-this".into(),
-            name: "keeper".into(),
+    fn jsonl_roundtrip_via_sync_helpers() {
+        let dir = std::env::temp_dir().join(format!(
+            "clawft-cron-cli-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let path = dir.join("cron.jsonl");
+
+        let now_ms = Utc::now().timestamp_millis();
+        let job = CronJob {
+            id: "test-rt-1".into(),
+            name: "roundtrip".into(),
+            enabled: true,
+            schedule: CronSchedule {
+                kind: ScheduleKind::Cron,
+                at_ms: None,
+                every_ms: None,
+                expr: Some("0 9 * * *".into()),
+                tz: Some("UTC".into()),
+            },
+            payload: CronPayload::default(),
+            state: CronJobState::default(),
+            created_at_ms: now_ms,
+            updated_at_ms: now_ms,
+            delete_after_run: false,
+        };
+
+        clawft_services::cron_service::storage::append_create_sync(&path, &job).unwrap();
+        let loaded = load_jobs(&path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "test-rt-1");
+        assert_eq!(loaded[0].name, "roundtrip");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn enable_disable_via_jsonl() {
+        let dir = std::env::temp_dir().join(format!(
+            "clawft-cron-cli-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let path = dir.join("cron.jsonl");
+
+        let now_ms = Utc::now().timestamp_millis();
+        let job = CronJob {
+            id: "j1".into(),
+            name: "test".into(),
             enabled: true,
             schedule: CronSchedule::default(),
             payload: CronPayload::default(),
             state: CronJobState::default(),
-            created_at_ms: 0,
-            updated_at_ms: 0,
+            created_at_ms: now_ms,
+            updated_at_ms: now_ms,
             delete_after_run: false,
-        });
-
-        let before_len = store.jobs.len();
-        store.jobs.retain(|j| j.id != "nonexistent");
-        assert_eq!(store.jobs.len(), before_len); // nothing removed
-    }
-
-    #[test]
-    fn cron_enable_disable_logic() {
-        let mut store = CronStore {
-            version: 1,
-            jobs: vec![CronJob {
-                id: "j1".into(),
-                name: "test".into(),
-                enabled: true,
-                schedule: CronSchedule::default(),
-                payload: CronPayload::default(),
-                state: CronJobState::default(),
-                created_at_ms: 0,
-                updated_at_ms: 0,
-                delete_after_run: false,
-            }],
         };
 
-        // Disable
-        if let Some(job) = store.jobs.iter_mut().find(|j| j.id == "j1") {
-            job.enabled = false;
-        }
-        assert!(!store.jobs[0].enabled);
+        clawft_services::cron_service::storage::append_create_sync(&path, &job).unwrap();
+        clawft_services::cron_service::storage::append_update_sync(
+            &path,
+            "j1",
+            "enabled",
+            &serde_json::json!(false),
+        )
+        .unwrap();
 
-        // Re-enable
-        if let Some(job) = store.jobs.iter_mut().find(|j| j.id == "j1") {
-            job.enabled = true;
-        }
-        assert!(store.jobs[0].enabled);
+        let loaded = load_jobs(&path).unwrap();
+        assert!(!loaded[0].enabled);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn load_store_invalid_json() {
-        let dir = std::env::temp_dir().join("clawft_cron_test_invalid");
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("bad_cron.json");
-        std::fs::write(&path, "not valid json").unwrap();
+    fn remove_via_jsonl() {
+        let dir = std::env::temp_dir().join(format!(
+            "clawft-cron-cli-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let path = dir.join("cron.jsonl");
 
-        let result = load_store(&path);
-        assert!(result.is_err());
+        let now_ms = Utc::now().timestamp_millis();
+        let make = |id: &str, name: &str| CronJob {
+            id: id.into(),
+            name: name.into(),
+            enabled: true,
+            schedule: CronSchedule::default(),
+            payload: CronPayload::default(),
+            state: CronJobState::default(),
+            created_at_ms: now_ms,
+            updated_at_ms: now_ms,
+            delete_after_run: false,
+        };
 
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir(&dir);
+        clawft_services::cron_service::storage::append_create_sync(&path, &make("j1", "a"))
+            .unwrap();
+        clawft_services::cron_service::storage::append_create_sync(&path, &make("j2", "b"))
+            .unwrap();
+        clawft_services::cron_service::storage::append_delete_sync(&path, "j1").unwrap();
+
+        let loaded = load_jobs(&path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "j2");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

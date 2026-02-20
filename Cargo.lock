@@ -271,6 +271,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -307,6 +308,7 @@ name = "clawft-llm"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "clawft-types",
  "futures-util",
  "reqwest",
  "serde",
@@ -332,6 +334,19 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "clawft-plugin"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "semver",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -389,12 +404,18 @@ dependencies = [
 name = "clawft-wasm"
 version = "0.1.0"
 dependencies = [
+ "clawft-plugin",
  "clawft-types",
+ "dirs",
  "dlmalloc",
  "lol_alloc",
+ "regex",
  "serde",
  "serde_json",
  "talc",
+ "thiserror 2.0.18",
+ "tracing",
+ "url",
 ]
 
 [[package]]

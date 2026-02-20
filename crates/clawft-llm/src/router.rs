@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use crate::config::{self, ProviderConfig};
+use crate::config::{self, LlmProviderConfig};
 use crate::openai_compat::OpenAiCompatProvider;
 use crate::provider::Provider;
 
@@ -42,7 +42,7 @@ impl ProviderRouter {
     /// Create a router from a list of provider configurations.
     ///
     /// The first provider in the list becomes the default.
-    pub fn from_configs(configs: Vec<ProviderConfig>) -> Self {
+    pub fn from_configs(configs: Vec<LlmProviderConfig>) -> Self {
         let default_provider = configs.first().map(|c| c.name.clone()).unwrap_or_default();
 
         let mut providers: HashMap<String, Box<dyn Provider>> = HashMap::new();
@@ -151,12 +151,11 @@ impl std::fmt::Debug for ProviderRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ProviderConfig;
     use std::collections::HashMap;
 
-    fn test_configs() -> Vec<ProviderConfig> {
+    fn test_configs() -> Vec<LlmProviderConfig> {
         vec![
-            ProviderConfig {
+            LlmProviderConfig {
                 name: "openai".into(),
                 base_url: "https://api.openai.com/v1".into(),
                 api_key_env: "OPENAI_API_KEY".into(),
@@ -165,7 +164,7 @@ mod tests {
                 headers: HashMap::new(),
                 timeout_secs: None,
             },
-            ProviderConfig {
+            LlmProviderConfig {
                 name: "anthropic".into(),
                 base_url: "https://api.anthropic.com/v1".into(),
                 api_key_env: "ANTHROPIC_API_KEY".into(),
@@ -174,7 +173,7 @@ mod tests {
                 headers: HashMap::new(),
                 timeout_secs: None,
             },
-            ProviderConfig {
+            LlmProviderConfig {
                 name: "groq".into(),
                 base_url: "https://api.groq.com/openai/v1".into(),
                 api_key_env: "GROQ_API_KEY".into(),
@@ -317,7 +316,7 @@ mod tests {
     #[test]
     fn prefix_no_provider_without_prefix() {
         // Config with no prefix
-        let configs = vec![ProviderConfig {
+        let configs = vec![LlmProviderConfig {
             name: "custom".into(),
             base_url: "https://custom.example.com".into(),
             api_key_env: "CUSTOM_KEY".into(),

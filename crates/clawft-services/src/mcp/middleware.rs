@@ -18,6 +18,9 @@ use tracing::info;
 use super::ToolDefinition;
 use super::provider::{CallToolResult, ContentBlock, ToolError};
 
+// Import canonical policy types from clawft-types.
+pub use clawft_types::security::{CommandPolicy, UrlPolicy};
+
 // ---------------------------------------------------------------------------
 // Middleware trait
 // ---------------------------------------------------------------------------
@@ -58,148 +61,43 @@ pub trait Middleware: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// Simplified security policy types (local to this crate)
+// Lightweight URL validation (no external deps)
 // ---------------------------------------------------------------------------
 
-/// Simplified command execution policy for middleware use.
+/// Lightweight URL validation against a [`UrlPolicy`].
 ///
-/// Since `clawft-services` does not depend on `clawft-tools`, this is a
-/// local mirror of the essential validation logic from
-/// `clawft_tools::security_policy::CommandPolicy`.
-#[derive(Debug, Clone)]
-pub struct CommandPolicy {
-    /// Allowed command basenames. If empty, all commands are rejected.
-    pub allowed_commands: HashSet<String>,
-    /// Dangerous patterns that are always rejected (case-insensitive substring).
-    pub dangerous_patterns: Vec<String>,
-}
-
-impl Default for CommandPolicy {
-    fn default() -> Self {
-        let allowed_commands: HashSet<String> = [
-            "echo", "cat", "ls", "pwd", "head", "tail", "wc", "grep", "find", "sort", "uniq",
-            "diff", "date", "env", "true", "false", "test",
-        ]
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect();
-
-        let dangerous_patterns = vec![
-            "rm -rf /",
-            "sudo ",
-            "mkfs",
-            "dd if=",
-            ":(){ :|:& };:",
-            "chmod 777 /",
-            "> /dev/sd",
-            "shutdown",
-            "reboot",
-            "poweroff",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect();
-
-        Self {
-            allowed_commands,
-            dangerous_patterns,
-        }
+/// Performs basic checks: blocks private IPs and metadata endpoints.
+/// For full SSRF protection with DNS resolution and CIDR checks, prefer
+/// the `clawft_tools::url_safety::validate_url` function.
+fn validate_url_lightweight(url_str: &str, policy: &UrlPolicy) -> Result<(), String> {
+    if !policy.enabled {
+        return Ok(());
     }
-}
 
-impl CommandPolicy {
-    /// Validate a command string against this policy.
-    ///
-    /// Returns `Ok(())` if the command passes, or a descriptive error string.
-    pub fn validate(&self, command: &str) -> Result<(), String> {
-        let normalized: String = command
-            .chars()
-            .map(|c| if c.is_whitespace() { ' ' } else { c })
-            .collect();
-        let lower = normalized.to_lowercase();
+    // Extract host from the URL. We do a lightweight parse here to
+    // avoid pulling in the `url` crate as a dependency.
+    let host = extract_host(url_str).unwrap_or_default();
 
-        // Check dangerous patterns first.
-        for pattern in &self.dangerous_patterns {
-            if lower.contains(&pattern.to_lowercase()) {
-                return Err(format!("dangerous pattern: {pattern}"));
-            }
-        }
-
-        // Extract basename of the first token.
-        let basename = command
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .rsplit('/')
-            .next()
-            .unwrap_or("");
-
-        if !self.allowed_commands.contains(basename) {
-            return Err(format!("command not allowed: {basename}"));
-        }
-
-        Ok(())
+    if policy.blocked_domains.contains(&host) {
+        return Err(format!("blocked domain: {host}"));
     }
-}
 
-/// Simplified URL safety policy for middleware use.
-///
-/// Since `clawft-services` does not depend on `clawft-tools`, this is a
-/// local mirror of the essential validation logic from
-/// `clawft_tools::url_safety::UrlPolicy`.
-#[derive(Debug, Clone)]
-pub struct UrlPolicy {
-    /// Whether URL safety checks are active.
-    pub enabled: bool,
-    /// Domains that are always blocked.
-    pub blocked_domains: HashSet<String>,
-}
-
-impl Default for UrlPolicy {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            blocked_domains: HashSet::new(),
-        }
+    // Block cloud metadata endpoints.
+    const METADATA_HOSTS: &[&str] = &[
+        "169.254.169.254",
+        "metadata.google.internal",
+        "metadata.internal",
+    ];
+    if METADATA_HOSTS.iter().any(|&m| m == host) {
+        return Err(format!("blocked metadata endpoint: {host}"));
     }
-}
 
-impl UrlPolicy {
-    /// Validate a URL string against this policy.
-    ///
-    /// Performs basic checks: blocks private IPs and metadata endpoints.
-    /// For full SSRF protection, prefer the `clawft_tools::url_safety`
-    /// module at the tool-execution layer.
-    pub fn validate(&self, url_str: &str) -> Result<(), String> {
-        if !self.enabled {
-            return Ok(());
-        }
-
-        // Extract host from the URL. We do a lightweight parse here to
-        // avoid pulling in the `url` crate as a dependency.
-        let host = extract_host(url_str).unwrap_or_default();
-
-        if self.blocked_domains.contains(&host) {
-            return Err(format!("blocked domain: {host}"));
-        }
-
-        // Block cloud metadata endpoints.
-        const METADATA_HOSTS: &[&str] = &[
-            "169.254.169.254",
-            "metadata.google.internal",
-            "metadata.internal",
-        ];
-        if METADATA_HOSTS.iter().any(|&m| m == host) {
-            return Err(format!("blocked metadata endpoint: {host}"));
-        }
-
-        // Block private, loopback, and link-local IP addresses.
-        if is_private_or_loopback(&host) {
-            return Err(format!("blocked private address: {host}"));
-        }
-
-        Ok(())
+    // Block private, loopback, and link-local IP addresses.
+    if is_private_or_loopback(&host) {
+        return Err(format!("blocked private address: {host}"));
     }
+
+    Ok(())
 }
 
 /// Check if a host string represents a private, loopback, or link-local address.
@@ -337,7 +235,7 @@ impl Middleware for SecurityGuard {
         if (name_lower.contains("fetch") || name_lower.contains("search"))
             && let Some(url) = request.args.get("url").and_then(|v| v.as_str())
         {
-            self.url_policy.validate(url).map_err(|reason| {
+            validate_url_lightweight(url, &self.url_policy).map_err(|reason| {
                 ToolError::PermissionDenied {
                     tool: request.name.clone(),
                     reason: format!("URL rejected: {reason}"),
@@ -541,7 +439,7 @@ mod tests {
         ]
     }
 
-    // ── SecurityGuard ────────────────────────────────────────────────
+    // -- SecurityGuard ----
 
     #[tokio::test]
     async fn security_guard_rejects_disallowed_shell_command() {
@@ -574,7 +472,7 @@ mod tests {
         match result.unwrap_err() {
             ToolError::PermissionDenied { tool, reason } => {
                 assert_eq!(tool, "exec_shell");
-                assert!(reason.contains("dangerous pattern"));
+                assert!(reason.contains("dangerous"));
             }
             other => panic!("expected PermissionDenied, got: {other}"),
         }
@@ -640,7 +538,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ── PermissionFilter ─────────────────────────────────────────────
+    // -- PermissionFilter ----
 
     #[tokio::test]
     async fn permission_filter_with_allowlist_strips_unauthorized() {
@@ -674,7 +572,7 @@ mod tests {
         assert!(names.contains(&"web_fetch"));
     }
 
-    // ── ResultGuard ──────────────────────────────────────────────────
+    // -- ResultGuard ----
 
     #[tokio::test]
     async fn result_guard_truncates_oversized_content() {
@@ -711,7 +609,7 @@ mod tests {
         assert!(guarded.is_error);
     }
 
-    // ── AuditLog ─────────────────────────────────────────────────────
+    // -- AuditLog ----
 
     #[tokio::test]
     async fn audit_log_passthrough_before_call() {
@@ -742,7 +640,7 @@ mod tests {
         }
     }
 
-    // ── Helper functions ─────────────────────────────────────────────
+    // -- Helper functions ----
 
     #[test]
     fn extract_host_simple_https() {
@@ -807,30 +705,33 @@ mod tests {
         let policy = CommandPolicy::default();
         let result = policy.validate("echo; sudo rm -rf /");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("dangerous pattern"));
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("dangerous"));
     }
 
     #[test]
-    fn url_policy_validate_public() {
+    fn url_validate_public() {
         let policy = UrlPolicy::default();
-        assert!(policy.validate("https://example.com").is_ok());
+        assert!(validate_url_lightweight("https://example.com", &policy).is_ok());
     }
 
     #[test]
-    fn url_policy_validate_private_blocked() {
+    fn url_validate_private_blocked() {
         let policy = UrlPolicy::default();
-        assert!(policy.validate("http://192.168.1.1").is_err());
-        assert!(policy.validate("http://10.0.0.1").is_err());
-        assert!(policy.validate("http://127.0.0.1").is_err());
+        assert!(validate_url_lightweight("http://192.168.1.1", &policy).is_err());
+        assert!(validate_url_lightweight("http://10.0.0.1", &policy).is_err());
+        assert!(validate_url_lightweight("http://127.0.0.1", &policy).is_err());
     }
 
     #[test]
-    fn url_policy_validate_disabled() {
+    fn url_validate_disabled() {
         let policy = UrlPolicy {
             enabled: false,
+            allow_private: false,
+            allowed_domains: HashSet::new(),
             blocked_domains: HashSet::new(),
         };
-        assert!(policy.validate("http://127.0.0.1").is_ok());
+        assert!(validate_url_lightweight("http://127.0.0.1", &policy).is_ok());
     }
 
     #[test]
@@ -848,7 +749,7 @@ mod tests {
         assert!(s.ends_with("..."));
     }
 
-    // ── is_private_or_loopback (A6) ─────────────────────────────────
+    // -- is_private_or_loopback (A6) ----
 
     #[test]
     fn private_ip_rfc1918_10_range() {
@@ -912,40 +813,40 @@ mod tests {
         assert!(!is_private_or_loopback("example.com"));
     }
 
-    // ── UrlPolicy with full SSRF coverage (A6) ─────────────────────
+    // -- URL policy with full SSRF coverage (A6) ----
 
     #[test]
-    fn url_policy_blocks_full_172_range() {
+    fn url_blocks_full_172_range() {
         let policy = UrlPolicy::default();
-        assert!(policy.validate("http://172.16.0.1").is_err());
-        assert!(policy.validate("http://172.20.0.1").is_err());
-        assert!(policy.validate("http://172.30.0.1").is_err());
-        assert!(policy.validate("http://172.31.255.1").is_err());
+        assert!(validate_url_lightweight("http://172.16.0.1", &policy).is_err());
+        assert!(validate_url_lightweight("http://172.20.0.1", &policy).is_err());
+        assert!(validate_url_lightweight("http://172.30.0.1", &policy).is_err());
+        assert!(validate_url_lightweight("http://172.31.255.1", &policy).is_err());
         // Outside range
-        assert!(policy.validate("http://172.15.255.255").is_ok());
-        assert!(policy.validate("http://172.32.0.1").is_ok());
+        assert!(validate_url_lightweight("http://172.15.255.255", &policy).is_ok());
+        assert!(validate_url_lightweight("http://172.32.0.1", &policy).is_ok());
     }
 
     #[test]
-    fn url_policy_blocks_ipv4_mapped_ipv6() {
+    fn url_blocks_ipv4_mapped_ipv6() {
         let policy = UrlPolicy::default();
-        assert!(policy.validate("http://[::ffff:10.0.0.1]/").is_err());
-        assert!(policy.validate("http://[::ffff:192.168.1.1]/").is_err());
-        assert!(policy.validate("http://[::ffff:172.30.0.1]/").is_err());
+        assert!(validate_url_lightweight("http://[::ffff:10.0.0.1]/", &policy).is_err());
+        assert!(validate_url_lightweight("http://[::ffff:192.168.1.1]/", &policy).is_err());
+        assert!(validate_url_lightweight("http://[::ffff:172.30.0.1]/", &policy).is_err());
     }
 
     #[test]
-    fn url_policy_blocks_ipv6_loopback() {
+    fn url_blocks_ipv6_loopback() {
         let policy = UrlPolicy::default();
-        assert!(policy.validate("http://[::1]/").is_err());
-        assert!(policy.validate("http://[::1]:8080/").is_err());
+        assert!(validate_url_lightweight("http://[::1]/", &policy).is_err());
+        assert!(validate_url_lightweight("http://[::1]:8080/", &policy).is_err());
     }
 
     #[test]
-    fn url_policy_blocks_link_local() {
+    fn url_blocks_link_local() {
         let policy = UrlPolicy::default();
-        assert!(policy.validate("http://169.254.1.1").is_err());
-        assert!(policy.validate("http://169.254.169.254").is_err());
+        assert!(validate_url_lightweight("http://169.254.1.1", &policy).is_err());
+        assert!(validate_url_lightweight("http://169.254.169.254", &policy).is_err());
     }
 
     #[tokio::test]

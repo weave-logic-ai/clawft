@@ -5,12 +5,17 @@
 //! This prevents Server-Side Request Forgery (SSRF) attacks where an
 //! attacker tricks the application into making requests to internal
 //! services or cloud instance metadata endpoints.
+//!
+//! The [`UrlPolicy`] type is defined in [`clawft_types::security`] and
+//! re-exported here for convenience.
 
-use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 
 use ipnet::{Ipv4Net, Ipv6Net};
 use url::Url;
+
+// Re-export the canonical UrlPolicy from clawft-types.
+pub use clawft_types::security::UrlPolicy;
 
 /// Cloud metadata service hostnames that must always be blocked.
 const METADATA_HOSTS: &[&str] = &[
@@ -54,62 +59,6 @@ pub enum UrlSafetyError {
     /// DNS resolution failed for the host.
     #[error("failed to resolve host '{host}': {reason}")]
     ResolutionFailed { host: String, reason: String },
-}
-
-/// Policy controlling URL safety checks.
-///
-/// When `enabled` is `false`, all checks are skipped (useful for testing
-/// or development environments). When `enabled` is `true`, URLs are
-/// validated against private IP ranges, metadata endpoints, and the
-/// configured domain lists.
-#[derive(Debug, Clone)]
-pub struct UrlPolicy {
-    /// Whether URL safety checks are active.
-    pub enabled: bool,
-    /// Whether to allow requests to private/reserved IP ranges.
-    pub allow_private: bool,
-    /// Domains that bypass all safety checks.
-    pub allowed_domains: HashSet<String>,
-    /// Domains that are always blocked.
-    pub blocked_domains: HashSet<String>,
-}
-
-impl Default for UrlPolicy {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            allow_private: false,
-            allowed_domains: HashSet::new(),
-            blocked_domains: HashSet::new(),
-        }
-    }
-}
-
-impl UrlPolicy {
-    /// Create a new policy with the given settings.
-    pub fn new(
-        enabled: bool,
-        allow_private: bool,
-        allowed_domains: HashSet<String>,
-        blocked_domains: HashSet<String>,
-    ) -> Self {
-        Self {
-            enabled,
-            allow_private,
-            allowed_domains,
-            blocked_domains,
-        }
-    }
-
-    /// Create a permissive policy that disables all checks.
-    ///
-    /// Intended for testing and development only.
-    pub fn permissive() -> Self {
-        Self {
-            enabled: false,
-            ..Default::default()
-        }
-    }
 }
 
 /// Check whether an IP address belongs to a blocked private/reserved range.
@@ -246,6 +195,8 @@ pub fn validate_url(url_str: &str, policy: &UrlPolicy) -> Result<(), UrlSafetyEr
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     fn default_policy() -> UrlPolicy {

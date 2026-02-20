@@ -1,0 +1,81 @@
+// WIT interface definition for clawft WASM plugins.
+//
+// This defines the contract between the host (clawft-wasm) and guest (plugin)
+// for the WASM component model. Plugins import host functions and export
+// their own entry points.
+//
+// Version: 0.1.0
+// See: .planning/sparc/04-plugin-skill-system/02-phase-C2-wasm-host.md
+
+package clawft:plugin@0.1.0;
+
+world plugin {
+    /// Host functions imported by plugins.
+    import host: interface {
+        /// Make an HTTP request. Returns the response body or an error.
+        ///
+        /// The host validates the URL against the plugin's network allowlist,
+        /// checks for SSRF (private IPs), enforces rate limits, and applies
+        /// body size limits before executing the request.
+        http-request: func(
+            method: string,
+            url: string,
+            headers: list<tuple<string, string>>,
+            body: option<string>,
+        ) -> result<string, string>;
+
+        /// Read a file from the sandboxed filesystem.
+        ///
+        /// The host canonicalizes the path, verifies it falls within the
+        /// plugin's allowed filesystem paths, checks for symlink escapes,
+        /// and enforces the 8 MB read size limit.
+        read-file: func(path: string) -> result<string, string>;
+
+        /// Write content to a file in the sandboxed filesystem.
+        ///
+        /// The host canonicalizes the parent directory, verifies sandbox
+        /// containment, and enforces the 4 MB write size limit.
+        write-file: func(path: string, content: string) -> result<_, string>;
+
+        /// Get an environment variable value.
+        ///
+        /// The host checks the plugin's env_vars allowlist and the hardcoded
+        /// deny list. Returns none for denied or unset variables (the plugin
+        /// cannot distinguish denial from absence).
+        get-env: func(name: string) -> option<string>;
+
+        /// Log a message at the given level.
+        ///
+        /// Level mapping: 0=error, 1=warn, 2=info, 3=debug, 4+=trace.
+        /// The host enforces rate limits (default: 100/min) and truncates
+        /// messages exceeding 4 KB.
+        log: func(level: u8, message: string);
+    }
+
+    /// Plugin-exported functions.
+    export plugin: interface {
+        /// Initialize the plugin. Called once after instantiation.
+        ///
+        /// The plugin should perform any one-time setup here. Returns an
+        /// error string if initialization fails, which will cause the host
+        /// to reject the plugin.
+        init: func() -> result<_, string>;
+
+        /// Execute a tool with the given name and JSON parameters.
+        ///
+        /// Returns the result as a JSON string, or an error string if
+        /// execution fails.
+        execute-tool: func(
+            tool-name: string,
+            params-json: string,
+        ) -> result<string, string>;
+
+        /// Get the plugin's metadata as a JSON string.
+        ///
+        /// Should return a JSON object with at minimum:
+        /// - "name": string
+        /// - "version": string
+        /// - "tools": array of tool descriptors with JSON Schema
+        describe: func() -> string;
+    }
+}

@@ -108,9 +108,10 @@ pub fn normalize_keys(value: Value) -> Value {
 
 /// Convert a single camelCase string to snake_case.
 ///
-/// Inserts an underscore before each uppercase letter (except at position 0)
-/// and lowercases all characters. This matches the Python `camel_to_snake()`
-/// from `nanobot/config/loader.py`.
+/// Handles consecutive uppercase letters (acronyms) correctly:
+/// a run of uppercase letters like `"HTML"` is kept together, with an
+/// underscore inserted only before the last uppercase letter if it is
+/// followed by a lowercase letter (indicating the start of a new word).
 ///
 /// # Examples
 /// ```
@@ -118,13 +119,28 @@ pub fn normalize_keys(value: Value) -> Value {
 /// assert_eq!(camel_to_snake("camelCase"), "camel_case");
 /// assert_eq!(camel_to_snake("systemPrompt"), "system_prompt");
 /// assert_eq!(camel_to_snake("already_snake"), "already_snake");
-/// assert_eq!(camel_to_snake("HTMLParser"), "h_t_m_l_parser");
+/// assert_eq!(camel_to_snake("HTMLParser"), "html_parser");
+/// assert_eq!(camel_to_snake("getHTMLParser"), "get_html_parser");
+/// assert_eq!(camel_to_snake("simpleXML"), "simple_xml");
 /// ```
 pub fn camel_to_snake(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
     let mut result = String::with_capacity(name.len() + 4);
-    for (i, ch) in name.chars().enumerate() {
+
+    for (i, &ch) in chars.iter().enumerate() {
         if ch.is_uppercase() && i > 0 {
-            result.push('_');
+            let prev = chars[i - 1];
+            let next = chars.get(i + 1).copied();
+
+            // Insert underscore before:
+            // 1. An uppercase letter preceded by a lowercase letter (camelCase boundary)
+            // 2. An uppercase letter followed by a lowercase letter, when preceded
+            //    by an uppercase letter (end of acronym: "HTMLParser" -> "html_parser")
+            if prev.is_lowercase()
+                || (prev.is_uppercase() && next.is_some_and(|c| c.is_lowercase()))
+            {
+                result.push('_');
+            }
         }
         result.push(ch.to_ascii_lowercase());
     }
@@ -165,8 +181,17 @@ mod tests {
 
     #[test]
     fn test_camel_to_snake_all_upper() {
-        // Consecutive uppercase letters each get an underscore
-        assert_eq!(camel_to_snake("HTML"), "h_t_m_l");
+        // Pure acronym stays together (no trailing lowercase to split on)
+        assert_eq!(camel_to_snake("HTML"), "html");
+    }
+
+    #[test]
+    fn test_camel_to_snake_acronym_then_word() {
+        // Acronym followed by a word: split before the last uppercase
+        assert_eq!(camel_to_snake("HTMLParser"), "html_parser");
+        assert_eq!(camel_to_snake("getHTMLParser"), "get_html_parser");
+        assert_eq!(camel_to_snake("simpleXML"), "simple_xml");
+        assert_eq!(camel_to_snake("XMLHTTPRequest"), "xmlhttp_request");
     }
 
     #[test]

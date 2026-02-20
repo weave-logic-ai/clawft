@@ -26,6 +26,7 @@ pub mod workspace_cmd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use clawft_core::tools::registry::ToolRegistry;
 use clawft_platform::Platform;
 use clawft_types::config::Config;
 
@@ -79,6 +80,41 @@ pub fn expand_workspace(raw: &str) -> PathBuf {
 pub fn discover_config_path<P: Platform>(platform: &P) -> Option<PathBuf> {
     let home = platform.fs().home_dir();
     clawft_platform::config_loader::discover_config_path(platform.env(), home)
+}
+
+/// Register the core set of tools into a [`ToolRegistry`].
+///
+/// This is the shared tool setup used by `weft agent`, `weft gateway`, and
+/// `weft mcp-server`. It:
+///
+/// 1. Builds security policies (command + URL) from config.
+/// 2. Registers all built-in tools via [`clawft_tools::register_all`].
+/// 3. Registers MCP server tools (proxied from configured MCP servers).
+/// 4. Registers the delegation tool (feature-gated).
+///
+/// Callers that need additional tools (e.g. `MessageTool` with a bus reference)
+/// should register them separately after calling this function.
+pub async fn register_core_tools<P: Platform + 'static>(
+    registry: &mut ToolRegistry,
+    config: &Config,
+    platform: Arc<P>,
+) {
+    let command_policy = agent::build_command_policy(&config.tools.command_policy);
+    let url_policy = agent::build_url_policy(&config.tools.url_policy);
+    let workspace = expand_workspace(&config.agents.defaults.workspace);
+    let web_search_config = agent::build_web_search_config(&config.tools);
+
+    clawft_tools::register_all(
+        registry,
+        platform,
+        workspace,
+        command_policy,
+        url_policy,
+        web_search_config,
+    );
+
+    crate::mcp_tools::register_mcp_tools(config, registry).await;
+    crate::mcp_tools::register_delegation(&config.delegation, registry);
 }
 
 /// Build an `Arc<ChannelHost>` implementation that bridges the channel

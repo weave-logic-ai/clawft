@@ -32,6 +32,14 @@ pub mod fs;
 pub mod http;
 pub mod platform;
 
+/// Plugin sandbox enforcement for WASM plugins.
+///
+/// This module is only available when the `wasm-plugins` feature is enabled.
+/// It provides [`sandbox::PluginSandbox`], validation functions for HTTP,
+/// filesystem, and environment access, plus rate limiting and size enforcement.
+#[cfg(feature = "wasm-plugins")]
+pub mod sandbox;
+
 pub use platform::WasmPlatform;
 
 /// Version information for the WASM build.

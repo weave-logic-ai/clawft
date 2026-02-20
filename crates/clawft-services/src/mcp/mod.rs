@@ -12,6 +12,12 @@ pub mod types;
 
 pub use provider::{BuiltinToolProvider, CallToolResult, ContentBlock, ToolError, ToolProvider};
 
+/// The MCP protocol version negotiated during initialize.
+///
+/// This constant is the single source of truth for protocol version
+/// strings used in both client and server code.
+pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
@@ -199,7 +205,7 @@ impl McpSession {
             .send_raw(
                 "initialize",
                 serde_json::json!({
-                    "protocolVersion": "2025-06-18",
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
                     "capabilities": { "tools": {} },
                     "clientInfo": {
                         "name": "clawft",
@@ -221,7 +227,7 @@ impl McpSession {
         let protocol_version = init_result
             .get("protocolVersion")
             .and_then(|v| v.as_str())
-            .unwrap_or("2025-06-18")
+            .unwrap_or(MCP_PROTOCOL_VERSION)
             .to_string();
 
         // Step 3: Send initialized notification.

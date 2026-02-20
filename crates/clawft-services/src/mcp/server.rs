@@ -14,7 +14,8 @@ use super::provider::CallToolResult;
 
 // ── Constants ───────────────────────────────────────────────────────────
 
-const PROTOCOL_VERSION: &str = "2025-06-18";
+/// Re-use the canonical protocol version from the MCP module.
+const PROTOCOL_VERSION: &str = super::MCP_PROTOCOL_VERSION;
 const SERVER_NAME: &str = "clawft";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 

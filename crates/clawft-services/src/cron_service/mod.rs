@@ -3,6 +3,10 @@
 //! Manages periodic jobs that fire [`InboundMessage`] events into the
 //! message bus. Jobs are persisted via append-only JSONL storage and
 //! scheduled using standard cron expressions.
+//!
+//! Uses the canonical [`CronJob`] type from [`clawft_types::cron`].
+//! The CLI cron commands use the same JSONL storage format via the
+//! synchronous helpers in [`storage`].
 
 pub mod scheduler;
 pub mod storage;
@@ -17,8 +21,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::error::{Result, ServiceError};
+use clawft_types::cron::{CronJobState, CronPayload, CronSchedule, ScheduleKind};
 use clawft_types::event::InboundMessage;
-use scheduler::{CronJob, CronScheduler};
+use scheduler::{CronJob, CronScheduler, compute_next_run};
 use storage::CronStorage;
 
 /// Cron scheduling service.
@@ -34,7 +39,7 @@ pub struct CronService {
 impl CronService {
     /// Create a new cron service.
     ///
-    /// Loads any existing jobs from the storage file at `storage_path`.
+    /// Loads any existing jobs from the JSONL storage file at `storage_path`.
     pub async fn new(
         storage_path: PathBuf,
         message_tx: mpsc::Sender<InboundMessage>,
@@ -61,21 +66,35 @@ impl CronService {
     ///
     /// Returns the generated job ID.
     pub async fn add_job(&self, name: String, schedule: String, prompt: String) -> Result<String> {
-        let id = uuid::Uuid::new_v4().to_string();
+        let id = format!("job-{}", uuid::Uuid::new_v4());
         let now = Utc::now();
+        let now_ms = now.timestamp_millis();
 
         // Compute the first next_run.
-        let next_run = scheduler::compute_next_run(&schedule, &now)?;
+        let next_run_ms = compute_next_run(&schedule, &now)?;
 
         let job = CronJob {
             id: id.clone(),
             name,
-            schedule,
-            prompt,
             enabled: true,
-            last_run: None,
-            next_run,
-            created_at: now,
+            schedule: CronSchedule {
+                kind: ScheduleKind::Cron,
+                at_ms: None,
+                every_ms: None,
+                expr: Some(schedule),
+                tz: Some("UTC".into()),
+            },
+            payload: CronPayload {
+                message: prompt,
+                ..Default::default()
+            },
+            state: CronJobState {
+                next_run_at_ms: next_run_ms,
+                ..Default::default()
+            },
+            created_at_ms: now_ms,
+            updated_at_ms: now_ms,
+            delete_after_run: false,
         };
 
         // Add to in-memory scheduler (validates the cron expression).
@@ -184,7 +203,7 @@ impl CronService {
             channel: "cron".to_string(),
             sender_id: "system".to_string(),
             chat_id: job.id.clone(),
-            content: job.prompt.clone(),
+            content: job.payload.message.clone(),
             timestamp: Utc::now(),
             media: vec![],
             metadata,
@@ -306,6 +325,6 @@ mod tests {
             .await
             .unwrap();
         let jobs = svc.list_jobs().await.unwrap();
-        assert!(jobs[0].next_run.is_some());
+        assert!(jobs[0].state.next_run_at_ms.is_some());
     }
 }

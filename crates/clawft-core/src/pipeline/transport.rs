@@ -293,6 +293,7 @@ impl LlmTransport for OpenAiCompatTransport {
                         usage: Usage {
                             input_tokens: 0,
                             output_tokens: 0,
+                            total_tokens: 0,
                         },
                         metadata: HashMap::new(),
                     })
@@ -398,6 +399,10 @@ fn convert_response(resp: serde_json::Value) -> clawft_types::Result<LlmResponse
             .unwrap_or(0) as u32,
         output_tokens: usage_obj
             .and_then(|u| u.get("completion_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32,
+        total_tokens: usage_obj
+            .and_then(|u| u.get("total_tokens"))
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32,
     };
@@ -1256,13 +1261,14 @@ mod tests {
             .complete_stream(&make_transport_request(), callback)
             .await;
 
-        // The result should still succeed because we fall back to non-streaming
-        // when the stream provider returns an error. Actually, the default
-        // LlmProvider::complete_stream returns an error, so the transport
-        // spawned task fails. Since no text was collected, it propagates the error.
-        // This is correct behavior: use complete() directly for providers
-        // that do not support streaming.
-        assert!(result.is_err() || result.is_ok());
+        // The LlmProvider default complete_stream returns an error, so the
+        // spawned stream task fails. Since no text was collected during
+        // streaming, the transport propagates an error. Callers should use
+        // complete() directly for providers that do not support streaming.
+        assert!(
+            result.is_err(),
+            "expected error from non-streaming provider, got success"
+        );
     }
 
     #[tokio::test]
