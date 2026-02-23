@@ -358,7 +358,7 @@ impl Default for ExecToolConfig {
 }
 
 /// MCP server connection configuration (stdio or HTTP).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MCPServerConfig {
     /// Command to run (for stdio transport, e.g. `"npx"`).
     #[serde(default)]
@@ -375,6 +375,23 @@ pub struct MCPServerConfig {
     /// Streamable HTTP endpoint URL (for HTTP transport).
     #[serde(default)]
     pub url: String,
+
+    /// If true, MCP session is created but tools are NOT registered in ToolRegistry.
+    /// Infrastructure servers (claude-flow, claude-code) should be internal.
+    #[serde(default = "default_true", alias = "internalOnly")]
+    pub internal_only: bool,
+}
+
+impl Default for MCPServerConfig {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            args: Vec::new(),
+            env: HashMap::new(),
+            url: String::new(),
+            internal_only: true,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -618,12 +635,14 @@ mod tests {
                 m
             },
             url: String::new(),
+            internal_only: false,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let restored: MCPServerConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.command, "npx");
         assert_eq!(restored.args.len(), 2);
         assert_eq!(restored.env["API_KEY"], "secret");
+        assert!(!restored.internal_only);
     }
 
     #[test]

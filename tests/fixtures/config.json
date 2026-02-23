@@ -57,7 +57,8 @@
       "test-server": {
         "command": "npx",
         "args": ["-y", "test-mcp-server"],
-        "env": {}
+        "env": {},
+        "internalOnly": false
       }
     }
   }

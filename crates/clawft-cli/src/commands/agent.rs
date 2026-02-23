@@ -25,6 +25,7 @@
 //! ```
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -32,12 +33,16 @@ use clap::Args;
 use tokio::io::AsyncBufReadExt;
 use tracing::info;
 
+use clawft_core::agent::loop_core::AutoDelegation;
+use clawft_core::agent::skills_v2::SkillRegistry;
 use clawft_core::bootstrap::AppContext;
 use clawft_core::bus::MessageBus;
 use clawft_platform::NativePlatform;
 use clawft_types::event::InboundMessage;
 
 use super::load_config;
+use crate::interactive::builtins::{register_builtins, register_skill_commands, QUIT_SENTINEL};
+use crate::interactive::registry::{InteractiveContext, SlashCommandRegistry};
 
 /// Arguments for the `weft agent` subcommand.
 #[derive(Args)]
@@ -63,9 +68,6 @@ pub struct AgentArgs {
     /// Without this flag, only user and built-in skills are loaded.
     /// Workspace skills in `.clawft/skills/` are skipped as a security
     /// measure (SEC-SKILL-05).
-    ///
-    /// TODO(Element-04/C5): Wire this flag into the skill loader to
-    /// gate project-scoped skill loading. Currently accepted but not enforced.
     #[arg(long)]
     pub trust_project_skills: bool,
 }
@@ -110,6 +112,18 @@ pub async fn run(args: AgentArgs) -> anyhow::Result<()> {
     // Wire the live LLM-backed pipeline so real provider calls work.
     ctx.enable_live_llm();
 
+    // Wire auto-delegation: when delegation is enabled and the delegate_task
+    // tool is registered, install a pre-LLM router that checks delegation
+    // rules against each message before sending to the local LLM.
+    #[cfg(feature = "delegate")]
+    {
+        if config.delegation.claude_enabled && ctx.tools().has("delegate_task") {
+            let auto_del = build_auto_delegation(&config.delegation);
+            ctx.set_auto_delegation(auto_del);
+            info!("auto-delegation enabled (pre-LLM routing active)");
+        }
+    }
+
     // Intelligent routing (vector-memory feature gate).
     if args.intelligent_routing {
         #[cfg(feature = "vector-memory")]
@@ -127,6 +141,29 @@ pub async fn run(args: AgentArgs) -> anyhow::Result<()> {
         }
     }
 
+    // Discover v2 skills from workspace (.clawft/skills/) and user (~/.clawft/skills/).
+    let (ws_skill_dir, user_skill_dir) = discover_skill_dirs();
+    let trust_ws = args.trust_project_skills;
+    let skill_registry = match SkillRegistry::discover_with_trust(
+        ws_skill_dir.as_deref(),
+        user_skill_dir.as_deref(),
+        Vec::new(),
+        trust_ws,
+    )
+    .await
+    {
+        Ok(reg) => {
+            info!(skills = reg.len(), "v2 skill discovery complete");
+            reg
+        }
+        Err(e) => {
+            tracing::warn!("v2 skill discovery failed: {e}");
+            SkillRegistry::discover(None, None, Vec::new())
+                .await
+                .expect("empty registry should never fail")
+        }
+    };
+
     // Clone the bus before consuming the context.
     let bus = ctx.bus().clone();
 
@@ -137,7 +174,7 @@ pub async fn run(args: AgentArgs) -> anyhow::Result<()> {
         return run_single_message(message, &bus, agent, effective_model).await;
     }
 
-    run_interactive(&bus, agent, &tool_names, effective_model).await
+    run_interactive(&bus, agent, &tool_names, effective_model, &skill_registry).await
 }
 
 /// Process a single message through the agent loop and exit.
@@ -196,18 +233,47 @@ async fn run_single_message(
 /// Run an interactive REPL loop reading from stdin.
 ///
 /// Spawns the agent loop in the background, then reads user input
-/// line-by-line. Each input is published to the bus and the response
-/// is consumed and printed. Special commands (/exit, /help, etc.)
-/// are handled locally.
+/// line-by-line. Slash commands (including v2 skill activations) are
+/// dispatched locally via [`SlashCommandRegistry`]. All other input is
+/// published to the bus for the agent loop to process.
+///
+/// When a skill is active, its `instructions` and `allowed_tools` are
+/// injected into the message metadata so the agent loop can use them.
 async fn run_interactive(
     bus: &Arc<MessageBus>,
     agent: clawft_core::agent::loop_core::AgentLoop<NativePlatform>,
     tool_names: &[String],
     model: &str,
+    skill_registry: &SkillRegistry,
 ) -> anyhow::Result<()> {
     println!("weft agent -- interactive mode (type /help for commands)");
     println!("Model: {model}");
+
+    // Set up slash command registry with builtins.
+    let mut cmd_registry = SlashCommandRegistry::new();
+    register_builtins(&mut cmd_registry);
+
+    // Register user-invocable v2 skills as slash commands.
+    let skill_entries: Vec<(String, String)> = skill_registry
+        .list()
+        .iter()
+        .filter(|s| s.user_invocable)
+        .map(|s| (s.name.clone(), s.description.clone()))
+        .collect();
+    let skill_count = register_skill_commands(&mut cmd_registry, &skill_entries);
+    if skill_count > 0 {
+        println!("Skills: {skill_count} registered");
+    }
     println!();
+
+    // Initialize interactive context.
+    let mut ctx = InteractiveContext::new(model.to_string());
+    ctx.tool_names = tool_names.to_vec();
+    ctx.skill_names = skill_registry
+        .names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
     // Spawn the agent loop in the background.
     let agent_handle = tokio::spawn(async move {
@@ -235,29 +301,44 @@ async fn run_interactive(
             continue;
         }
 
-        match input {
-            "/exit" | "/quit" => break,
-            "/clear" => {
-                println!("[session cleared]");
-                continue;
-            }
-            "/help" => {
-                print_help();
-                continue;
-            }
-            "/tools" => {
-                if tool_names.is_empty() {
-                    println!("No tools registered.");
-                } else {
-                    println!("Registered tools ({}):", tool_names.len());
-                    for name in tool_names {
-                        println!("  - {name}");
+        // Dispatch through slash command registry (handles /help, /skills,
+        // /use, /tools, /status, /quit, and skill-contributed commands).
+        if input.starts_with('/') {
+            if let Some(result) = cmd_registry.dispatch(input, &mut ctx) {
+                match result {
+                    Ok(output) => {
+                        if output == QUIT_SENTINEL {
+                            break;
+                        }
+                        println!("{output}");
+                        println!();
+                    }
+                    Err(e) => {
+                        eprintln!("error: {e}");
                     }
                 }
-                println!();
                 continue;
             }
-            _ => {}
+            // Unknown slash command -- fall through to send to agent.
+        }
+
+        // Build metadata with active skill info for the agent loop.
+        let mut metadata = HashMap::new();
+        if !ctx.active_skill.is_empty() {
+            if let Some(skill) = skill_registry.get(&ctx.active_skill) {
+                if !skill.instructions.is_empty() {
+                    metadata.insert(
+                        "skill_instructions".into(),
+                        serde_json::json!(skill.instructions),
+                    );
+                }
+                if !skill.allowed_tools.is_empty() {
+                    metadata.insert(
+                        "allowed_tools".into(),
+                        serde_json::json!(skill.allowed_tools),
+                    );
+                }
+            }
         }
 
         // Publish the user message to the bus.
@@ -268,7 +349,7 @@ async fn run_interactive(
             content: input.to_owned(),
             timestamp: Utc::now(),
             media: vec![],
-            metadata: HashMap::new(),
+            metadata,
         };
 
         if let Err(e) = bus.publish_inbound(inbound) {
@@ -354,14 +435,73 @@ pub(crate) fn build_url_policy(
     )
 }
 
-/// Print the interactive help text.
-fn print_help() {
-    println!("Commands:");
-    println!("  /help   -- Show this help");
-    println!("  /clear  -- Clear session history");
-    println!("  /tools  -- List available tools");
-    println!("  /exit   -- Quit the session");
-    println!();
+/// Discover workspace and user skill directories for v2 skill loading.
+///
+/// Walks upward from `cwd` to find `.clawft/skills/` (workspace) and
+/// checks `~/.clawft/skills/` (user). Returns `(workspace_dir, user_dir)`.
+fn discover_skill_dirs() -> (Option<PathBuf>, Option<PathBuf>) {
+    let user_dir = dirs::home_dir().map(|h| h.join(".clawft").join("skills"));
+
+    // Walk upward from cwd to find .clawft/skills/
+    let ws_dir = std::env::current_dir().ok().and_then(|cwd| {
+        let mut dir: &Path = cwd.as_path();
+        loop {
+            let candidate = dir.join(".clawft").join("skills");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+            match dir.parent() {
+                Some(parent) => dir = parent,
+                None => return None,
+            }
+        }
+    });
+
+    (ws_dir, user_dir)
+}
+
+// ---------------------------------------------------------------------------
+// Auto-delegation router implementation
+// ---------------------------------------------------------------------------
+
+/// Pre-LLM auto-delegation router backed by compiled regex rules.
+///
+/// Wraps the [`DelegationEngine`] from `clawft-services` to check inbound
+/// messages against delegation rules before the local LLM sees them.
+/// When a rule matches a non-Local target, the message is routed to
+/// `delegate_task` directly.
+#[cfg(feature = "delegate")]
+struct AutoDelegationRouter {
+    engine: clawft_services::delegation::DelegationEngine,
+}
+
+#[cfg(feature = "delegate")]
+impl AutoDelegation for AutoDelegationRouter {
+    fn should_delegate(&self, content: &str) -> Option<serde_json::Value> {
+        use clawft_types::delegation::DelegationTarget;
+
+        let target = self.engine.decide(content, true);
+        match target {
+            DelegationTarget::Local => None,
+            _ => {
+                tracing::debug!(
+                    target = ?target,
+                    content_preview = &content[..content.len().min(80)],
+                    "auto-delegation matched"
+                );
+                Some(serde_json::json!({ "task": content }))
+            }
+        }
+    }
+}
+
+/// Build an [`AutoDelegation`] router from delegation config.
+#[cfg(feature = "delegate")]
+fn build_auto_delegation(
+    config: &clawft_types::delegation::DelegationConfig,
+) -> Arc<dyn AutoDelegation> {
+    let engine = clawft_services::delegation::DelegationEngine::new(config.clone());
+    Arc::new(AutoDelegationRouter { engine })
 }
 
 #[cfg(test)]
@@ -420,8 +560,92 @@ mod tests {
     }
 
     #[test]
-    fn print_help_does_not_panic() {
-        // Smoke test: just make sure it does not panic.
-        print_help();
+    fn discover_skill_dirs_returns_pair() {
+        // Smoke test: discovery should not panic, and returns a tuple.
+        let (ws, user) = discover_skill_dirs();
+        // user dir should be set if $HOME is set
+        if std::env::var("HOME").is_ok() {
+            assert!(user.is_some());
+        }
+        // ws dir may or may not exist depending on cwd
+        let _ = ws;
+    }
+
+    #[cfg(feature = "delegate")]
+    mod auto_delegation_tests {
+        use super::*;
+        use clawft_types::delegation::{DelegationConfig, DelegationRule, DelegationTarget};
+
+        #[test]
+        fn auto_delegation_router_delegates_matching_messages() {
+            let config = DelegationConfig {
+                claude_enabled: true,
+                rules: vec![
+                    DelegationRule {
+                        pattern: r"(?i)deploy|orchestrate|swarm".into(),
+                        target: DelegationTarget::Flow,
+                    },
+                    DelegationRule {
+                        pattern: r"(?i)research|analyze".into(),
+                        target: DelegationTarget::Claude,
+                    },
+                    DelegationRule {
+                        pattern: r"(?i)^list\b".into(),
+                        target: DelegationTarget::Local,
+                    },
+                ],
+                ..Default::default()
+            };
+            let router = build_auto_delegation(&config);
+
+            // "swarm" matches → should delegate
+            assert!(
+                router.should_delegate("run a swarm security review").is_some(),
+                "swarm should trigger delegation"
+            );
+
+            // "deploy" matches → should delegate
+            assert!(
+                router.should_delegate("deploy to production").is_some(),
+                "deploy should trigger delegation"
+            );
+
+            // "analyze" matches → should delegate
+            assert!(
+                router.should_delegate("analyze the codebase").is_some(),
+                "analyze should trigger delegation"
+            );
+
+            // "list" matches Local → should NOT delegate
+            assert!(
+                router.should_delegate("list all files").is_none(),
+                "list should be local, not delegated"
+            );
+
+            // Simple message, no match → auto-decide by complexity (low = Local)
+            assert!(
+                router.should_delegate("hello").is_none(),
+                "hello should not be delegated"
+            );
+        }
+
+        #[test]
+        fn auto_delegation_router_returns_correct_args() {
+            let config = DelegationConfig {
+                claude_enabled: true,
+                rules: vec![DelegationRule {
+                    pattern: r"(?i)swarm".into(),
+                    target: DelegationTarget::Claude,
+                }],
+                ..Default::default()
+            };
+            let router = build_auto_delegation(&config);
+
+            let args = router
+                .should_delegate("run a swarm task")
+                .expect("should delegate");
+            let task = args.get("task").and_then(|v| v.as_str());
+            assert_eq!(task, Some("run a swarm task"));
+        }
     }
 }

@@ -1157,69 +1157,88 @@ pub struct PlanningOutcome {
 
 ## 13. Delegation (M1-M3)
 
-Delegation allows the agent to spawn external processes for complex tasks,
-with a fallback chain from the `flow` CLI to the Claude API.
+Delegation routes tasks to an appropriate execution target based on regex
+rule matching and complexity heuristics. The architecture uses an MCP-first
+posture: tasks are handled either **locally** or via the **Claude API**
+(Anthropic Messages API). There is no subprocess spawning.
 
-Source: `clawft-services/src/delegation/flow.rs`,
+Source: `clawft-services/src/delegation/mod.rs`,
 `clawft-services/src/delegation/claude.rs`
 
-### FlowDelegator
+### DelegationEngine
 
-The `FlowDelegator` spawns the `claude` CLI binary in non-interactive mode
-(`claude --print`) to delegate tasks. It provides:
-
-- **Timeout enforcement** via `tokio::select!` on subprocess wait + sleep
-- **Depth-limited delegation** (default max depth: 3) to prevent recursive
-  delegation loops
-- **Minimal environment construction** for security
+The `DelegationEngine` compiles delegation rules at construction time and
+evaluates them on each `decide()` call. Rules with invalid regex patterns
+are logged and skipped.
 
 ```rust
-pub struct FlowDelegator {
-    claude_binary: String,
-    timeout: Duration,
-    max_depth: u32,
+pub struct DelegationEngine {
+    config: DelegationConfig,
+    compiled_rules: Vec<CompiledRule>,
 }
 ```
 
-`FlowDelegator::new(config)` returns `None` if the `claude` binary is not
-found on `PATH`. Binary detection uses the `which` crate with `OnceLock`
-caching -- the filesystem is probed once per process lifetime.
+The `decide()` method takes a task string and a `claude_available` flag:
 
-### Minimal Environment
+1. Walk compiled rules in order; first regex match wins.
+2. If the matched target is `Claude` but `claude_available` is false, fall
+   back to `Local`.
+3. If the matched target is `Flow`, resolve it to `Claude` (see below).
+4. If no rule matches, use `Auto` mode (complexity heuristic).
 
-The child process receives only four environment variables:
+### Auto-Decide Heuristic
 
-| Variable | Source |
-|----------|--------|
-| `PATH` | Parent `$PATH` |
-| `HOME` | Parent `$HOME` |
-| `ANTHROPIC_API_KEY` | Parent `$ANTHROPIC_API_KEY` |
-| `CLAWFT_AGENT_ID` | Set by the delegator for MCP callback routing |
+When no rule matches, `DelegationEngine::complexity_estimate()` scores the
+task on a `0.0..1.0` scale using three weighted signals:
 
-All other parent environment variables are stripped via `env_clear()`. This
-prevents accidental leakage of secrets or credentials to the child process.
+| Signal | Weight | Description |
+|--------|--------|-------------|
+| Text length | 30% | Saturates at 500 characters |
+| Question mark density | 20% | Saturates at 3 question marks |
+| Complexity keywords | 50% | `deploy`, `refactor`, `architect`, `security`, etc. (20 keywords) |
+
+Routing based on the score:
+
+| Complexity | Score | Target |
+|------------|-------|--------|
+| Low | < 0.3 | `Local` |
+| Medium / High | >= 0.3 | `Claude` (if available and enabled), else `Local` |
+
+### ClaudeDelegator
+
+The `ClaudeDelegator` calls the Anthropic Messages API directly with a
+multi-turn tool-use loop. It provides:
+
+- **Tool forwarding**: A caller-supplied closure resolves tool calls during
+  the delegation loop.
+- **Turn limiting**: Configurable `max_turns` to prevent runaway loops.
+- **API error handling**: Structured error variants for HTTP, API, parse,
+  and timeout failures.
 
 ### DelegationError Variants
 
 | Variant | Description |
 |---------|-------------|
-| `SubprocessFailed` | Non-zero exit code with stderr capture |
-| `OutputParseFailed` | stdout was empty or could not be parsed |
-| `Timeout` | Subprocess exceeded configured timeout |
+| `Http` | HTTP request to the Claude API failed |
+| `Api` | Non-2xx status with body capture |
+| `InvalidResponse` | Response body could not be parsed |
+| `MaxTurnsExceeded` | Delegation loop hit the configured turn limit |
+| `ToolExecFailed` | A tool execution failed during delegation |
+| `SubprocessFailed` | Non-zero exit code with stderr capture (legacy, retained for compatibility) |
+| `OutputParseFailed` | stdout could not be parsed (legacy, retained for compatibility) |
+| `Timeout` | Delegation exceeded configured timeout |
 | `Cancelled` | User abort or agent shutdown |
-| `FallbackExhausted` | All delegation targets (Flow, Claude) failed |
+| `FallbackExhausted` | All delegation targets exhausted |
 
-### Fallback Chain
+### Flow Target Compatibility
 
-The delegation system tries targets in order:
-
-1. **Flow** (`FlowDelegator`): Spawn `claude --print` as a subprocess.
-   Requires the `claude` binary on `PATH`.
-2. **Claude** (`ClaudeDelegator`): Call the Anthropic Messages API directly
-   with tool-use loop support. Requires `ANTHROPIC_API_KEY`.
-
-If both fail, `DelegationError::FallbackExhausted` is returned with the
-error from each attempt.
+`DelegationTarget::Flow` remains a valid value in `DelegationConfig` rules
+for backward compatibility. At runtime, the engine resolves `Flow` to
+`Claude` (if available and enabled) or `Local`. The `FlowDelegator` and
+its subprocess-based execution model have been removed. For complex
+multi-agent coordination that previously used Flow delegation, the
+recommended approach is now **skill-based orchestration** via MCP servers
+(see Section 14).
 
 ### Feature Gate
 
@@ -1234,9 +1253,9 @@ cargo build --no-default-features
 
 | File | Description |
 |------|-------------|
-| `clawft-services/src/delegation/flow.rs` | `FlowDelegator` with subprocess spawning and `which` caching |
-| `clawft-services/src/delegation/claude.rs` | `ClaudeDelegator` with Anthropic API tool-use loop |
-| `clawft-types/src/delegation.rs` | `DelegationConfig`, `DelegationTarget` types |
+| `clawft-services/src/delegation/mod.rs` | `DelegationEngine` with rule matching and complexity heuristics |
+| `clawft-services/src/delegation/claude.rs` | `ClaudeDelegator` with Anthropic API tool-use loop, `DelegationError` |
+| `clawft-types/src/delegation.rs` | `DelegationConfig`, `DelegationTarget`, `DelegationRule` types |
 
 ---
 
@@ -1281,6 +1300,77 @@ Each managed server has a `ServerStatus`:
 | `Disconnected` | Server is not connected |
 | `Error` | Connection failed |
 
+### Internal-Only Servers
+
+The `MCPServerConfig` has an `internal_only` field that defaults to `true`:
+
+```rust
+pub struct MCPServerConfig {
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: HashMap<String, String>,
+    pub url: String,
+    pub internal_only: bool,  // default: true
+}
+```
+
+When `internal_only` is `true`:
+
+- The MCP session **is** created (the server process starts and the
+  handshake completes normally).
+- The server's tools are **not** registered in the `ToolRegistry`. They
+  will not appear in `schemas()` output and will not be sent to the LLM.
+
+When `internal_only` is `false`:
+
+- The MCP session is created **and** the server's tools are listed and
+  registered in the `ToolRegistry`, making them available to the LLM.
+
+This distinction exists to support **infrastructure MCP servers** such as
+`claude-flow` and `claude-code`. These servers expose hundreds of tools
+(agent management, memory, coordination, etc.) that would overwhelm the
+LLM context if loaded directly. Instead, they are kept internal and their
+capabilities are accessed through **skills**.
+
+```json
+{
+  "mcp_servers": {
+    "claude-flow": {
+      "command": "npx",
+      "args": ["-y", "@claude-flow/cli@latest", "mcp", "start"],
+      "internal_only": true
+    },
+    "project-tools": {
+      "command": "./tools-server",
+      "internal_only": false
+    }
+  }
+}
+```
+
+In this example, `claude-flow` is internal (session only, no tool
+registration) while `project-tools` is external (tools registered and
+visible to the LLM).
+
+### Skill-Based Tool Discovery
+
+Instead of loading all MCP tools into the LLM context, skills act as a
+discovery layer. A skill declares which tools it needs via `allowed-tools`
+glob patterns. The `ToolRegistry::schemas_for_tools()` method filters tool
+schemas by those patterns, so only the relevant subset is sent to the LLM
+on any given turn:
+
+```rust
+// ToolRegistry method
+pub fn schemas_for_tools(&self, allowed: &[String]) -> Vec<serde_json::Value>
+```
+
+Patterns support glob syntax (`*` and `?`). For example, a skill for
+memory operations might declare `allowed-tools: ["memory_*", "search"]`,
+and only those tools would be included in that turn's tool list. This
+prevents context bloat while keeping the full tool surface available when
+needed.
+
 ### Hot-Reload Protocol
 
 When `clawft.toml` changes on disk:
@@ -1308,3 +1398,6 @@ weft mcp remove <name>
 | File | Description |
 |------|-------------|
 | `clawft-services/src/mcp/discovery.rs` | `McpServerManager`, `ServerStatus`, `ManagedMcpServer` |
+| `clawft-types/src/config/mod.rs` | `MCPServerConfig` with `internal_only` field |
+| `clawft-core/src/tools/registry.rs` | `ToolRegistry::schemas_for_tools()` for per-turn filtering |
+| `clawft-cli/src/mcp_tools.rs` | MCP session creation with internal-only branching |

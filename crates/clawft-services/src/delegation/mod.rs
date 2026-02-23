@@ -6,7 +6,6 @@
 //! Gated behind the `delegate` feature.
 
 pub mod claude;
-pub mod flow;
 pub mod schema;
 
 use clawft_types::delegation::{DelegationConfig, DelegationRule, DelegationTarget};
@@ -86,20 +85,19 @@ impl DelegationEngine {
     /// 1. Walk compiled rules in order; first regex match wins.
     /// 2. If the matched target is `Claude` but `claude_available` is false,
     ///    fall back to `Local`.
-    /// 3. If the matched target is `Flow` but `flow_available` is false,
-    ///    fall back to `Claude` (if available) or `Local`.
+    /// 3. If the matched target is `Flow`, treat as Claude (Flow delegation
+    ///    removed in MCP-first architecture).
     /// 4. If no rule matches, use `Auto` mode (complexity heuristic).
     pub fn decide(
         &self,
         task: &str,
         claude_available: bool,
-        flow_available: bool,
     ) -> DelegationTarget {
         // Try explicit rules first.
         for rule in &self.compiled_rules {
             if rule.regex.is_match(task) {
                 let target =
-                    self.resolve_availability(rule.target, claude_available, flow_available);
+                    self.resolve_availability(rule.target, claude_available);
                 debug!(
                     task = %task,
                     matched_target = ?rule.target,
@@ -111,7 +109,7 @@ impl DelegationEngine {
         }
 
         // No rule matched -- use Auto heuristic.
-        self.auto_decide(task, claude_available, flow_available)
+        self.auto_decide(task, claude_available)
     }
 
     /// Estimate task complexity on a 0.0..1.0 scale.
@@ -148,26 +146,16 @@ impl DelegationEngine {
     /// Auto-decide based on complexity.
     ///
     /// - Low complexity (< 0.3): Local
-    /// - Medium complexity (0.3..0.7): Claude (if available), else Local
-    /// - High complexity (>= 0.7): Flow (if available), else Claude, else Local
+    /// - Medium/High complexity (>= 0.3): Claude (if available), else Local
     fn auto_decide(
         &self,
         task: &str,
         claude_available: bool,
-        flow_available: bool,
     ) -> DelegationTarget {
         let complexity = Self::complexity_estimate(task);
 
         let target = if complexity < 0.3 {
             DelegationTarget::Local
-        } else if complexity < 0.7 {
-            if claude_available && self.config.claude_enabled {
-                DelegationTarget::Claude
-            } else {
-                DelegationTarget::Local
-            }
-        } else if flow_available && self.config.claude_flow_enabled {
-            DelegationTarget::Flow
         } else if claude_available && self.config.claude_enabled {
             DelegationTarget::Claude
         } else {
@@ -189,13 +177,13 @@ impl DelegationEngine {
         &self,
         target: DelegationTarget,
         claude_available: bool,
-        flow_available: bool,
     ) -> DelegationTarget {
         match target {
             DelegationTarget::Claude if !claude_available || !self.config.claude_enabled => {
                 DelegationTarget::Local
             }
-            DelegationTarget::Flow if !flow_available || !self.config.claude_flow_enabled => {
+            // Flow delegation removed — treat as Claude fallback.
+            DelegationTarget::Flow => {
                 if claude_available && self.config.claude_enabled {
                     DelegationTarget::Claude
                 } else {
@@ -224,7 +212,6 @@ mod tests {
     fn make_engine(rules: Vec<DelegationRule>) -> DelegationEngine {
         DelegationEngine::new(DelegationConfig {
             claude_enabled: true,
-            claude_flow_enabled: true,
             rules,
             ..Default::default()
         })
@@ -247,20 +234,21 @@ mod tests {
             },
         ]);
 
+        // Flow rules now resolve to Claude (Flow delegation removed).
         assert_eq!(
-            engine.decide("deploy to production", true, true),
-            DelegationTarget::Flow
-        );
-        assert_eq!(
-            engine.decide("list all files", true, true),
-            DelegationTarget::Local
-        );
-        assert_eq!(
-            engine.decide("analyze the codebase", true, true),
+            engine.decide("deploy to production", true),
             DelegationTarget::Claude
         );
         assert_eq!(
-            engine.decide("research best practices", true, true),
+            engine.decide("list all files", true),
+            DelegationTarget::Local
+        );
+        assert_eq!(
+            engine.decide("analyze the codebase", true),
+            DelegationTarget::Claude
+        );
+        assert_eq!(
+            engine.decide("research best practices", true),
             DelegationTarget::Claude
         );
     }
@@ -274,27 +262,27 @@ mod tests {
 
         // Claude unavailable: should fall back to Local.
         assert_eq!(
-            engine.decide("research AI patterns", false, true),
+            engine.decide("research AI patterns", false),
             DelegationTarget::Local
         );
     }
 
     #[test]
-    fn fallback_when_flow_unavailable() {
+    fn flow_target_falls_back_to_claude() {
         let engine = make_engine(vec![DelegationRule {
             pattern: r"(?i)deploy".into(),
             target: DelegationTarget::Flow,
         }]);
 
-        // Flow unavailable, Claude available: fall back to Claude.
+        // Flow delegation removed; Claude available: fall back to Claude.
         assert_eq!(
-            engine.decide("deploy to staging", true, false),
+            engine.decide("deploy to staging", true),
             DelegationTarget::Claude
         );
 
-        // Both unavailable: fall back to Local.
+        // Claude also unavailable: fall back to Local.
         assert_eq!(
-            engine.decide("deploy to staging", false, false),
+            engine.decide("deploy to staging", false),
             DelegationTarget::Local
         );
     }
@@ -303,11 +291,11 @@ mod tests {
     fn auto_mode_low_complexity_is_local() {
         let engine = make_engine(vec![]);
         // Short, simple task with no complexity keywords.
-        assert_eq!(engine.decide("hi", true, true), DelegationTarget::Local);
+        assert_eq!(engine.decide("hi", true), DelegationTarget::Local);
     }
 
     #[test]
-    fn auto_mode_high_complexity_routes_to_flow() {
+    fn auto_mode_high_complexity_routes_to_claude() {
         let engine = make_engine(vec![]);
         // Many keywords + long text + question marks to push score >= 0.7.
         let task = "Please architect and design a comprehensive distributed \
@@ -317,7 +305,8 @@ mod tests {
                     coordinate the orchestration???";
         let score = DelegationEngine::complexity_estimate(task);
         assert!(score >= 0.7, "expected >= 0.7, got {score}");
-        assert_eq!(engine.decide(task, true, true), DelegationTarget::Flow);
+        // Flow removed — high complexity now routes to Claude.
+        assert_eq!(engine.decide(task, true), DelegationTarget::Claude);
     }
 
     #[test]
@@ -332,19 +321,18 @@ mod tests {
             score >= 0.3 && score < 0.7,
             "expected 0.3..0.7, got {score}"
         );
-        assert_eq!(engine.decide(task, true, true), DelegationTarget::Claude);
+        assert_eq!(engine.decide(task, true), DelegationTarget::Claude);
     }
 
     #[test]
     fn auto_mode_falls_back_to_local_when_services_disabled() {
         let engine = DelegationEngine::new(DelegationConfig {
             claude_enabled: false,
-            claude_flow_enabled: false,
             ..Default::default()
         });
         let task = "architect and design a comprehensive distributed system \
                     with security audit and deploy orchestration??";
-        assert_eq!(engine.decide(task, true, true), DelegationTarget::Local);
+        assert_eq!(engine.decide(task, true), DelegationTarget::Local);
     }
 
     #[test]
@@ -387,7 +375,7 @@ mod tests {
         ]);
         // The broken rule is skipped; "hello" still matches.
         assert_eq!(
-            engine.decide("hello world", true, true),
+            engine.decide("hello world", true),
             DelegationTarget::Local
         );
     }
@@ -404,9 +392,10 @@ mod tests {
                 target: DelegationTarget::Local,
             },
         ]);
+        // Flow rules resolve to Claude now.
         assert_eq!(
-            engine.decide("deploy now", true, true),
-            DelegationTarget::Flow
+            engine.decide("deploy now", true),
+            DelegationTarget::Claude
         );
     }
 }

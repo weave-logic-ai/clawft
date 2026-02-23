@@ -192,19 +192,36 @@ pub async fn create_mcp_client(server_name: &str, config: &MCPServerConfig) -> O
 }
 
 #[cfg(feature = "services")]
-/// Discover and register MCP tools from all configured servers.
+/// Discover MCP servers and optionally register their tools.
 ///
-/// For each MCP server in the config, creates a client, lists available
-/// tools, and wraps each as an [`McpToolWrapper`] registered in the
-/// tool registry.
+/// For each MCP server in the config:
+/// - Creates a client session (always).
+/// - If `internal_only` is false, lists tools and registers them in the registry.
+/// - If `internal_only` is true, the session is created but tools are NOT
+///   registered (the server is available for internal use only).
+///
+/// Returns a map of all sessions (both internal and external) keyed by
+/// server name. Callers can use these sessions for internal MCP calls.
 pub async fn register_mcp_tools(
     config: &clawft_types::config::Config,
     registry: &mut clawft_core::tools::registry::ToolRegistry,
-) {
+) -> std::collections::HashMap<String, Arc<McpSession>> {
+    let mut sessions = std::collections::HashMap::new();
+
     for (server_name, server_config) in &config.tools.mcp_servers {
         match create_mcp_client(server_name, server_config).await {
             Some(session) => {
                 let session = Arc::new(session);
+                sessions.insert(server_name.clone(), session.clone());
+
+                if server_config.internal_only {
+                    tracing::info!(
+                        server = %server_name,
+                        "MCP server connected as internal-only (tools not registered)"
+                    );
+                    continue;
+                }
+
                 match session.list_tools().await {
                     Ok(tools) => {
                         let count = tools.len();
@@ -233,15 +250,20 @@ pub async fn register_mcp_tools(
             }
         }
     }
+
+    sessions
 }
 
 /// No-op: MCP tools require the `services` feature.
+///
+/// Returns an empty sessions map.
 #[cfg(not(feature = "services"))]
 pub async fn register_mcp_tools(
     _config: &clawft_types::config::Config,
     _registry: &mut clawft_core::tools::registry::ToolRegistry,
-) {
+) -> std::collections::HashMap<String, std::sync::Arc<()>> {
     // MCP services feature not compiled in.
+    std::collections::HashMap::new()
 }
 
 /// Register the delegation tool if an Anthropic API key is available.
@@ -533,10 +555,8 @@ mod tests {
         // With a URL pointing to a non-existent server, the handshake
         // will fail and `create_mcp_client` should return `None`.
         let config = MCPServerConfig {
-            command: String::new(),
-            args: vec![],
-            env: HashMap::new(),
             url: "http://localhost:19876".into(),
+            ..Default::default()
         };
         let result = create_mcp_client("test", &config).await;
         // Handshake fails against a non-existent server.
@@ -555,9 +575,7 @@ mod tests {
         // A command that does not exist should fail gracefully.
         let config = MCPServerConfig {
             command: "__nonexistent_binary_clawft_test__".into(),
-            args: vec![],
-            env: HashMap::new(),
-            url: String::new(),
+            ..Default::default()
         };
         let result = create_mcp_client("test", &config).await;
         assert!(result.is_none());
@@ -570,9 +588,8 @@ mod tests {
         // (returns None from spawn failure) rather than the URL path.
         let config = MCPServerConfig {
             command: "__nonexistent_binary_clawft_test__".into(),
-            args: vec![],
-            env: HashMap::new(),
             url: "http://localhost:19876".into(),
+            ..Default::default()
         };
         let result = create_mcp_client("test", &config).await;
         // Command spawn fails, so we get None.

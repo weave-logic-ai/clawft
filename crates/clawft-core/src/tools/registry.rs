@@ -372,6 +372,11 @@ impl ToolRegistry {
         self.tools.insert(name, tool);
     }
 
+    /// Check if a tool with the given name is registered.
+    pub fn has(&self, name: &str) -> bool {
+        self.tools.contains_key(name)
+    }
+
     /// Look up a tool by name.
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.tools.get(name).cloned()
@@ -408,6 +413,35 @@ impl ToolRegistry {
         let mut schemas: Vec<(String, serde_json::Value)> = self
             .tools
             .iter()
+            .map(|(name, tool)| {
+                let schema = serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": tool.description(),
+                        "parameters": tool.parameters(),
+                    }
+                });
+                (name.clone(), schema)
+            })
+            .collect();
+
+        schemas.sort_by(|a, b| a.0.cmp(&b.0));
+        schemas.into_iter().map(|(_, v)| v).collect()
+    }
+
+    /// Generate tool schemas for a specified subset of tools.
+    ///
+    /// Only includes tools whose names match at least one pattern in
+    /// `allowed`. Patterns support glob syntax (`*` and `?`).
+    ///
+    /// This enables per-turn tool filtering: skills declare which tools
+    /// they need, and only those schemas are sent to the LLM.
+    pub fn schemas_for_tools(&self, allowed: &[String]) -> Vec<serde_json::Value> {
+        let mut schemas: Vec<(String, serde_json::Value)> = self
+            .tools
+            .iter()
+            .filter(|(name, _)| matches_any_pattern(name, allowed))
             .map(|(name, tool)| {
                 let schema = serde_json::json!({
                     "type": "function",
@@ -784,6 +818,31 @@ mod tests {
     fn schemas_empty_registry() {
         let registry = ToolRegistry::new();
         assert!(registry.schemas().is_empty());
+    }
+
+    #[test]
+    fn schemas_for_tools_filters_by_pattern() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool));
+        registry.register(Arc::new(AddTool));
+        registry.register(Arc::new(FailTool));
+
+        // Exact name filter
+        let schemas = registry.schemas_for_tools(&["echo".into()]);
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(schemas[0]["function"]["name"], "echo");
+
+        // Glob filter
+        let schemas = registry.schemas_for_tools(&["*".into()]);
+        assert_eq!(schemas.len(), 3);
+
+        // No match
+        let schemas = registry.schemas_for_tools(&["nonexistent".into()]);
+        assert!(schemas.is_empty());
+
+        // Multiple patterns
+        let schemas = registry.schemas_for_tools(&["echo".into(), "add".into()]);
+        assert_eq!(schemas.len(), 2);
     }
 
     #[test]

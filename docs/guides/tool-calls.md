@@ -272,26 +272,55 @@ see the [Tools Reference](../reference/tools.md).
 ## MCP Tools
 
 External tools are integrated through the Model Context Protocol (MCP). MCP
-tools are discovered at startup and registered in the same `ToolRegistry` used
-by built-in tools, making them available to the LLM in exactly the same way.
+tools are discovered at startup and optionally registered in the `ToolRegistry`,
+depending on whether the server is marked as internal.
 
 ### How MCP Registration Works
 
-1. For each server in `tools.mcp_servers` configuration, a client is created
-   using the appropriate transport:
+1. For each server in `tools.mcp_servers` configuration, a client session is
+   **always** created using the appropriate transport:
    - **Stdio transport** -- if `command` is set, a child process is spawned and
      communication happens over stdin/stdout via JSON-RPC 2.0.
    - **HTTP transport** -- if `url` is set (and `command` is empty), HTTP
      requests are used.
    - If neither is set, the server is skipped.
 
-2. The client calls `list_tools()` to discover available tools from the server.
+2. If `internal_only` is `true` (the default), the session is stored but
+   registration stops here. The server is available for internal use but its
+   tools are **not** added to the registry.
 
-3. Each discovered tool is wrapped in an `McpToolWrapper` that implements the
+3. If `internal_only` is `false`, the client calls `list_tools()` to discover
+   available tools from the server.
+
+4. Each discovered tool is wrapped in an `McpToolWrapper` that implements the
    `Tool` trait, delegating `execute()` to `McpClient::call_tool()`.
 
-4. The wrapper is registered with the namespaced name `{server_name}__{tool_name}`
+5. The wrapper is registered with the namespaced name `{server_name}__{tool_name}`
    to avoid collisions when multiple servers expose tools with the same base name.
+
+### Internal-Only Servers
+
+Infrastructure MCP servers (e.g., `claude-flow`, `claude-code`) should use
+`internal_only: true` (the default). Their sessions are created at startup so
+the system can communicate with them, but their tools are not registered in the
+`ToolRegistry` and are not exposed to the LLM by default. Instead, their tools
+are surfaced selectively through **skills** using `schemas_for_tools()` --
+see [Skill-Based Tool Filtering](#skill-based-tool-filtering) below.
+
+### Skill-Based Tool Filtering
+
+Skills can declare an `allowed_tools` list in the inbound message metadata.
+When present, the agent loop calls `ToolRegistry::schemas_for_tools()` with
+these patterns instead of sending the full tool set to the LLM. Patterns
+support glob syntax (`*` and `?`) as well as exact names:
+
+```json
+["claude-flow__memory_*", "read_file", "write_file"]
+```
+
+This allows each skill to scope exactly which tools the LLM sees on that turn,
+enabling fine-grained access to infrastructure server tools without registering
+them globally.
 
 ### Configuration
 
@@ -299,9 +328,15 @@ by built-in tools, making them available to the LLM in exactly the same way.
 {
   "tools": {
     "mcp_servers": {
+      "claude-flow": {
+        "command": "npx",
+        "args": ["-y", "@claude-flow/cli@latest", "mcp", "start"],
+        "internal_only": true
+      },
       "my_server": {
         "command": "npx",
-        "args": ["-y", "my-mcp-server"]
+        "args": ["-y", "my-mcp-server"],
+        "internal_only": false
       },
       "remote_server": {
         "url": "http://localhost:3000/mcp"
@@ -310,6 +345,9 @@ by built-in tools, making them available to the LLM in exactly the same way.
   }
 }
 ```
+
+The `internal_only` field defaults to `true`. Set it to `false` explicitly for
+servers whose tools should be registered and available to the LLM on every turn.
 
 ---
 
@@ -470,7 +508,8 @@ Tools are namespaced as `clawft__<tool_name>` within Claude Code (for example,
 ### Inbound Bridge (Claude Code -> clawft)
 
 The inbound bridge lets clawft consume Claude Code's tools by spawning it as
-an MCP server. Add Claude Code as an MCP server in `config.json`:
+an MCP server. The recommended approach is to configure infrastructure servers
+like Claude Code as `internal_only` and access their tools through skills:
 
 ```json
 {
@@ -478,18 +517,43 @@ an MCP server. Add Claude Code as an MCP server in `config.json`:
     "mcp_servers": {
       "claude-code": {
         "command": "claude",
-        "args": ["mcp-server"]
+        "args": ["mcp", "serve"],
+        "env": { "CLAUDECODE": "" },
+        "internal_only": true
       }
     }
   }
 }
 ```
 
-clawft spawns `claude mcp-server` as a child process using stdio transport.
-Tools discovered from Claude Code are registered in the `ToolRegistry` with
-the namespace prefix `claude-code__` (for example, `claude-code__Read`,
-`claude-code__Bash`). The LLM can invoke these tools like any other registered
-tool.
+With `internal_only: true` (the default), clawft spawns `claude mcp serve` as
+a child process and creates a session, but does **not** register Claude Code's
+tools in the `ToolRegistry`. Tools are instead surfaced selectively through
+skills that declare `allowed_tools` patterns (e.g., `["claude-code__Read",
+"claude-code__Bash"]`), giving the LLM access only to the specific tools
+needed for each turn.
+
+To register all Claude Code tools globally instead (not recommended for
+production), set `internal_only: false`:
+
+```json
+{
+  "tools": {
+    "mcp_servers": {
+      "claude-code": {
+        "command": "claude",
+        "args": ["mcp", "serve"],
+        "env": { "CLAUDECODE": "" },
+        "internal_only": false
+      }
+    }
+  }
+}
+```
+
+In this mode, tools are registered in the `ToolRegistry` with the namespace
+prefix `claude-code__` (for example, `claude-code__Read`, `claude-code__Bash`)
+and are available to the LLM on every turn.
 
 ### Bidirectional Bridge
 

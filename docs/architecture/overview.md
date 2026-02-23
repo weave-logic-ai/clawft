@@ -235,11 +235,12 @@ Background services that generate inbound events.
 **Modules:**
 - `CronService` -- JSONL-backed scheduled job execution using cron expressions. Jobs fire as `InboundMessage` events on the bus.
 - `HeartbeatService` -- periodic health check messages at configurable intervals.
-- `mcp` -- Dual-mode MCP (Model Context Protocol) subsystem. In server mode (`weft mcp-server`), `McpServerShell` exposes built-in tools to an LLM host via JSON-RPC over stdio. In client mode (`tools.mcp_servers` config), `McpClient` connects to external MCP servers. Both modes use the pluggable `ToolProvider` trait. See [Pluggable MCP Architecture](#pluggable-mcp-architecture-phase-3h) below.
+- `mcp` -- Dual-mode MCP (Model Context Protocol) subsystem. In server mode (`weft mcp-server`), `McpServerShell` exposes built-in tools to an LLM host via JSON-RPC over stdio. In client mode (`tools.mcp_servers` config), `McpClient` connects to external MCP servers. MCP servers support an `internal_only` flag (default true): when set, the session is created but tools are not registered in the `ToolRegistry`, allowing skills to selectively surface them per turn. Both modes use the pluggable `ToolProvider` trait. See [Pluggable MCP Architecture](#pluggable-mcp-architecture-phase-3h) below.
+- `delegation` -- MCP-first task delegation engine. `DelegationEngine` routes tasks to Local or Claude targets based on regex rules and complexity heuristics. Flow targets (previously subprocess-based) fall back to Claude. Delegation uses the Claude API directly, not subprocess spawning.
 
-**Key types:** `ToolProvider` trait, `McpServerShell`, `CompositeToolProvider`, `McpClient`, `McpTransport` trait, `StdioTransport`, `HttpTransport`, `ToolDefinition`
+**Key types:** `ToolProvider` trait, `McpServerShell`, `CompositeToolProvider`, `McpClient`, `McpTransport` trait, `StdioTransport`, `HttpTransport`, `ToolDefinition`, `DelegationEngine`
 
-**Dependencies:** clawft-types, async-trait, serde, cron, tokio
+**Dependencies:** clawft-types, async-trait, serde, cron, tokio, regex
 
 ---
 
@@ -247,7 +248,7 @@ Background services that generate inbound events.
 
 The MCP subsystem (`clawft-services/src/mcp/`) uses a pluggable `ToolProvider` trait (`namespace()`, `list_tools()`, `call_tool()`) with four concrete providers: `BuiltinToolProvider` (wraps `ToolRegistry`), `RvfToolProvider` (11 vector tools), `ProxyToolProvider` (external MCP servers via `McpClient`), and `DelegationToolProvider` (Claude bridge).
 
-`CompositeToolProvider` aggregates providers with `{server}__{tool}` namespace routing. `McpServerShell` exposes tools over newline-delimited JSON-RPC stdio (server mode: `weft mcp-server`). Client mode connects to external servers via `McpClient`. Middleware pipeline: `SecurityGuard` -> `PermissionFilter` -> execution -> `ResultGuard` -> `AuditLog`.
+`CompositeToolProvider` aggregates providers with `{server}__{tool}` namespace routing. `McpServerShell` exposes tools over newline-delimited JSON-RPC stdio (server mode: `weft mcp-server`). Client mode connects to external servers via `McpClient`. MCP servers configured with `internal_only: true` (the default) have their session created but their tools are not registered in the `ToolRegistry`; instead, skills provide per-turn tool filtering via `ToolRegistry::schemas_for_tools()`, allowing fine-grained control over which tools the LLM sees on each turn. `SkillToolProvider` bridges skill-contributed tools into the MCP layer. Middleware pipeline: `SecurityGuard` -> `PermissionFilter` -> execution -> `ResultGuard` -> `AuditLog`.
 
 ---
 

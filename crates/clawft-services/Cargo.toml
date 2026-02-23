@@ -12,7 +12,7 @@ categories = ["asynchronous"]
 
 [features]
 default = []
-delegate = ["regex", "which"]
+delegate = ["regex"]
 rvf = []
 test-utils = []
 clawhub = []
@@ -31,7 +31,6 @@ uuid = { workspace = true }
 cron = { workspace = true }
 reqwest = { workspace = true }
 regex = { workspace = true, optional = true }
-which = { workspace = true, optional = true }
 dirs = { workspace = true }
 
 [dev-dependencies]

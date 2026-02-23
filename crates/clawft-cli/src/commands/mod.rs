@@ -114,7 +114,7 @@ pub async fn register_core_tools<P: Platform + 'static>(
         web_search_config,
     );
 
-    crate::mcp_tools::register_mcp_tools(config, registry).await;
+    let _mcp_sessions = crate::mcp_tools::register_mcp_tools(config, registry).await;
 
     // Pass the Anthropic provider API key from config as a fallback for delegation.
     let anthropic_key = config.providers.anthropic.api_key.expose();

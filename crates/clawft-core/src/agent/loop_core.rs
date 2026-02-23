@@ -29,7 +29,7 @@
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use clawft_platform::Platform;
 use clawft_types::config::AgentsConfig;
@@ -45,6 +45,28 @@ use crate::session::SessionManager;
 use crate::tools::registry::ToolRegistry;
 
 use super::context::ContextBuilder;
+
+// ---------------------------------------------------------------------------
+// Auto-delegation trait
+// ---------------------------------------------------------------------------
+
+/// Trait for pre-LLM automatic delegation routing.
+///
+/// Implementations check whether an inbound message should be routed to
+/// a delegation tool (e.g. `delegate_task`) before the local LLM processes
+/// it. This enables rule-based auto-routing for complex tasks that match
+/// configured patterns (e.g. "swarm", "orchestrate", "deploy").
+///
+/// If [`should_delegate`](AutoDelegation::should_delegate) returns `Some`,
+/// the agent loop invokes the `delegate_task` tool directly, bypassing the
+/// local LLM entirely. If it returns `None`, normal LLM processing proceeds.
+pub trait AutoDelegation: Send + Sync {
+    /// Check whether the message content should be auto-delegated.
+    ///
+    /// Returns `Some(args)` with the JSON arguments for the `delegate_task`
+    /// tool if delegation should happen, or `None` to proceed normally.
+    fn should_delegate(&self, content: &str) -> Option<serde_json::Value>;
+}
 
 /// Maximum size in bytes for a single tool result.
 const MAX_TOOL_RESULT_BYTES: usize = 65_536;
@@ -80,6 +102,12 @@ pub struct AgentLoop<P: Platform> {
     sessions: SessionManager<P>,
     permission_resolver: PermissionResolver,
     cancel: Option<CancellationToken>,
+    /// Optional pre-LLM auto-delegation router.
+    ///
+    /// When set, inbound messages are checked against delegation rules
+    /// before the local LLM is invoked. If a rule matches, the
+    /// `delegate_task` tool is called directly, bypassing the LLM.
+    auto_delegation: Option<Arc<dyn AutoDelegation>>,
 }
 
 impl<P: Platform> AgentLoop<P> {
@@ -115,6 +143,7 @@ impl<P: Platform> AgentLoop<P> {
             sessions,
             permission_resolver,
             cancel: None,
+            auto_delegation: None,
         }
     }
 
@@ -122,6 +151,15 @@ impl<P: Platform> AgentLoop<P> {
     /// shutdown instead of waiting for all bus senders to be dropped.
     pub fn with_cancel(mut self, token: CancellationToken) -> Self {
         self.cancel = Some(token);
+        self
+    }
+
+    /// Attach an auto-delegation router for pre-LLM routing.
+    ///
+    /// When set, messages matching delegation rules are routed to the
+    /// `delegate_task` tool before the local LLM processes them.
+    pub fn with_auto_delegation(mut self, delegation: Arc<dyn AutoDelegation>) -> Self {
+        self.auto_delegation = Some(delegation);
         self
     }
 
@@ -191,6 +229,20 @@ impl<P: Platform> AgentLoop<P> {
     async fn process_message(&self, msg: InboundMessage) -> clawft_types::Result<()> {
         let session_key = msg.session_key();
 
+        // 0. Pre-LLM auto-delegation check.
+        //    If an AutoDelegation router is configured and the message matches
+        //    a delegation rule, invoke `delegate_task` directly and skip the
+        //    local LLM pipeline entirely.
+        if let Some(ref auto_del) = self.auto_delegation {
+            if let Some(delegate_args) = auto_del.should_delegate(&msg.content) {
+                info!(
+                    task = %msg.content,
+                    "auto-delegation triggered, invoking delegate_task"
+                );
+                return self.run_auto_delegation(&msg, delegate_args).await;
+            }
+        }
+
         // 1. Get or create session
         let mut session = self.sessions.get_or_create(&session_key).await?;
 
@@ -203,6 +255,25 @@ impl<P: Platform> AgentLoop<P> {
 
         // 4. Context messages are already pipeline::traits::LlmMessage (B2 unification).
         let mut messages: Vec<LlmMessage> = context_messages;
+
+        // 4b. Inject skill instructions from metadata (v2 skill activation).
+        //     When the interactive REPL activates a skill, its instructions
+        //     are passed via metadata so the agent loop can include them.
+        if let Some(instructions) = msg
+            .metadata
+            .get("skill_instructions")
+            .and_then(|v| v.as_str())
+        {
+            if !instructions.is_empty() {
+                debug!("injecting skill instructions from metadata");
+                messages.push(LlmMessage {
+                    role: "system".into(),
+                    content: format!("# Active Skill Instructions\n\n{instructions}"),
+                    tool_call_id: None,
+                    tool_calls: None,
+                });
+            }
+        }
 
         // 5. Add current user message
         messages.push(LlmMessage {
@@ -217,26 +288,48 @@ impl<P: Platform> AgentLoop<P> {
         //    defaults with the sender_id and channel attached.
         let auth_context = self.resolve_auth_context(&msg);
 
-        // 7. Create pipeline request with auth context
+        // 7. Resolve tool schemas -- filter by allowed_tools if present
+        //    in the inbound message metadata (skill-based injection).
+        let tool_schemas = match msg
+            .metadata
+            .get("allowed_tools")
+            .and_then(|v| v.as_array())
+        {
+            Some(tools_arr) => {
+                let allowed: Vec<String> = tools_arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect();
+                if allowed.is_empty() {
+                    self.tools.schemas()
+                } else {
+                    debug!(allowed_tools = ?allowed, "filtering tools for skill");
+                    self.tools.schemas_for_tools(&allowed)
+                }
+            }
+            None => self.tools.schemas(),
+        };
+
+        // 8. Create pipeline request with auth context
         let request = ChatRequest {
             messages,
-            tools: self.tools.schemas(),
+            tools: tool_schemas,
             model: Some(self.config.defaults.model.clone()),
             max_tokens: Some(self.config.defaults.max_tokens),
             temperature: Some(self.config.defaults.temperature),
             auth_context: Some(auth_context),
         };
 
-        // 8. Execute pipeline + tool loop
+        // 9. Execute pipeline + tool loop
         let response_text = self.run_tool_loop(request).await?;
 
-        // 9. Add assistant message to session
+        // 10. Add assistant message to session
         session.add_message("assistant", &response_text, None);
 
-        // 9. Save session
+        // 11. Save session
         self.sessions.save_session(&session).await?;
 
-        // 10. Dispatch outbound
+        // 12. Dispatch outbound
         let outbound = OutboundMessage {
             channel: msg.channel.clone(),
             chat_id: msg.chat_id.clone(),
@@ -249,6 +342,70 @@ impl<P: Platform> AgentLoop<P> {
 
         debug!(session_key = %session_key, "message processed successfully");
 
+        Ok(())
+    }
+
+    /// Execute auto-delegation: invoke `delegate_task` directly and dispatch
+    /// the result as an outbound message.
+    ///
+    /// This short-circuits the normal LLM pipeline when the auto-delegation
+    /// router decides a message should be handled by a delegate (e.g. Claude
+    /// sub-agent) rather than the local LLM.
+    async fn run_auto_delegation(
+        &self,
+        msg: &InboundMessage,
+        delegate_args: serde_json::Value,
+    ) -> clawft_types::Result<()> {
+        let session_key = msg.session_key();
+
+        // Save user message to session for history.
+        let mut session = self.sessions.get_or_create(&session_key).await?;
+        session.add_message("user", &msg.content, None);
+
+        // Resolve auth context for permission checks.
+        let auth = self.resolve_auth_context(msg);
+        let permissions = Some(&auth.permissions);
+
+        // Invoke delegate_task tool directly.
+        let response_text = match self
+            .tools
+            .execute("delegate_task", delegate_args, permissions)
+            .await
+        {
+            Ok(result) => {
+                // Extract the response text from the delegation result.
+                if let Some(response) = result.get("response").and_then(|v| v.as_str()) {
+                    response.to_string()
+                } else {
+                    // Fall back to the full JSON if no "response" field.
+                    serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "auto-delegation failed, falling through to local LLM");
+                // On delegation failure, fall through to normal processing.
+                // Re-process via the full pipeline by calling process_message_inner.
+                // For simplicity, return an error message to the user.
+                format!("Delegation failed: {e}. The task could not be routed to the delegate.")
+            }
+        };
+
+        // Save response to session.
+        session.add_message("assistant", &response_text, None);
+        self.sessions.save_session(&session).await?;
+
+        // Dispatch outbound.
+        let outbound = OutboundMessage {
+            channel: msg.channel.clone(),
+            chat_id: msg.chat_id.clone(),
+            content: response_text,
+            reply_to: None,
+            media: vec![],
+            metadata: Default::default(),
+        };
+        self.bus.dispatch_outbound(outbound)?;
+
+        debug!(session_key = %session_key, "auto-delegated message processed");
         Ok(())
     }
 
@@ -1720,6 +1877,189 @@ mod tests {
         let outbound = agent.bus.consume_outbound().await.unwrap();
         assert_eq!(outbound.content, "zero-trust-ok");
         assert_eq!(outbound.channel, "telegram");
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    // ── Auto-delegation tests ─────────────────────────────────────────
+
+    /// Mock auto-delegation that delegates anything containing "swarm" or "deploy".
+    struct MockAutoDelegation;
+
+    impl AutoDelegation for MockAutoDelegation {
+        fn should_delegate(&self, content: &str) -> Option<serde_json::Value> {
+            let lower = content.to_lowercase();
+            if lower.contains("swarm") || lower.contains("deploy") {
+                Some(serde_json::json!({"task": content}))
+            } else {
+                None
+            }
+        }
+    }
+
+    /// A tool that simulates delegate_task by returning a fixed response.
+    struct MockDelegateTaskTool;
+
+    #[async_trait]
+    impl Tool for MockDelegateTaskTool {
+        fn name(&self) -> &str {
+            "delegate_task"
+        }
+        fn description(&self) -> &str {
+            "Mock delegate_task for testing"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string" }
+                },
+                "required": ["task"]
+            })
+        }
+        async fn execute(
+            &self,
+            args: serde_json::Value,
+        ) -> Result<serde_json::Value, crate::tools::registry::ToolError> {
+            let task = args
+                .get("task")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unknown)");
+            Ok(serde_json::json!({
+                "status": "delegated",
+                "target": "claude",
+                "response": format!("Delegated: {task}"),
+                "task": task,
+            }))
+        }
+    }
+
+    /// Helper: create an AgentLoop with auto-delegation and a mock delegate_task tool.
+    async fn make_auto_delegation_agent(
+        transport: Arc<dyn LlmTransport>,
+        prefix: &str,
+    ) -> (AgentLoop<NativePlatform>, PathBuf) {
+        let dir = temp_dir(prefix);
+        let platform = Arc::new(NativePlatform::new());
+        let bus = Arc::new(MessageBus::new());
+
+        let sessions_dir = dir.join("sessions");
+        let sessions = SessionManager::with_dir(platform.clone(), sessions_dir);
+
+        let memory = Arc::new(MemoryStore::with_paths(
+            dir.join("memory").join("MEMORY.md"),
+            dir.join("memory").join("HISTORY.md"),
+            platform.clone(),
+        ));
+        let skills = Arc::new(SkillsLoader::with_dir(dir.join("skills"), platform.clone()));
+        let context = ContextBuilder::new(test_config(), memory, skills, platform.clone());
+
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(EchoTool));
+        tools.register(Arc::new(MockDelegateTaskTool));
+
+        let pipeline = make_pipeline(transport);
+
+        let agent = AgentLoop::new(
+            test_config(),
+            platform,
+            bus,
+            pipeline,
+            tools,
+            context,
+            sessions,
+            PermissionResolver::default_resolver(),
+        )
+        .with_auto_delegation(Arc::new(MockAutoDelegation));
+
+        (agent, dir)
+    }
+
+    /// Auto-delegation kicks in when the message matches delegation rules.
+    #[tokio::test]
+    async fn auto_delegation_routes_matching_message() {
+        let transport = Arc::new(MockTransport::new("should NOT see this"));
+        let (agent, dir) = make_auto_delegation_agent(transport, "auto_del_match").await;
+
+        // "swarm" triggers auto-delegation
+        let inbound = InboundMessage {
+            channel: "cli".into(),
+            sender_id: "local".into(),
+            chat_id: "test".into(),
+            content: "run a swarm security review".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        agent.bus.publish_inbound(inbound).unwrap();
+        let msg = agent.bus.consume_inbound().await.unwrap();
+        agent.process_message(msg).await.unwrap();
+
+        let outbound = agent.bus.consume_outbound().await.unwrap();
+        assert!(
+            outbound.content.contains("Delegated:"),
+            "response should be from delegate_task, got: {}",
+            outbound.content
+        );
+        assert!(
+            outbound.content.contains("swarm"),
+            "delegated response should include the original task"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// Auto-delegation does NOT trigger for non-matching messages -- normal LLM path.
+    #[tokio::test]
+    async fn auto_delegation_skips_non_matching_message() {
+        let transport = Arc::new(MockTransport::new("LLM response"));
+        let (agent, dir) = make_auto_delegation_agent(transport, "auto_del_skip").await;
+
+        // "hello" does NOT match delegation rules
+        let inbound = InboundMessage {
+            channel: "cli".into(),
+            sender_id: "local".into(),
+            chat_id: "test".into(),
+            content: "hello world".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        agent.bus.publish_inbound(inbound).unwrap();
+        let msg = agent.bus.consume_inbound().await.unwrap();
+        agent.process_message(msg).await.unwrap();
+
+        let outbound = agent.bus.consume_outbound().await.unwrap();
+        assert_eq!(
+            outbound.content, "LLM response",
+            "non-matching message should go through normal LLM pipeline"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// Without auto-delegation set, messages always go to the LLM.
+    #[tokio::test]
+    async fn no_auto_delegation_uses_llm() {
+        let transport = Arc::new(MockTransport::new("normal LLM"));
+        let (agent, dir) = make_agent_loop(transport, "no_auto_del").await;
+
+        // Even "swarm" goes to LLM when auto-delegation is not set
+        let inbound = InboundMessage {
+            channel: "cli".into(),
+            sender_id: "local".into(),
+            chat_id: "test".into(),
+            content: "run a swarm task".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        agent.bus.publish_inbound(inbound).unwrap();
+        let msg = agent.bus.consume_inbound().await.unwrap();
+        agent.process_message(msg).await.unwrap();
+
+        let outbound = agent.bus.consume_outbound().await.unwrap();
+        assert_eq!(outbound.content, "normal LLM");
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

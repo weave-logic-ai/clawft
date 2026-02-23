@@ -603,14 +603,15 @@ directory with a concurrency limit.
 ## MCP Tools
 
 External tools can be integrated through MCP (Model Context Protocol) servers.
-MCP tools are discovered at startup, wrapped, and registered in the same
-`ToolRegistry` used by built-in tools.
+MCP tools are discovered at startup, wrapped, and optionally registered in the
+`ToolRegistry` used by built-in tools -- depending on whether the server is
+marked as internal.
 
 ### Configuration
 
 MCP servers are defined in the `tools.mcp_servers` section of the agent
 configuration. Each server entry specifies either a command (stdio transport) or
-a URL (HTTP transport):
+a URL (HTTP transport), along with an `internal_only` flag:
 
 ```json
 {
@@ -618,7 +619,8 @@ a URL (HTTP transport):
     "mcp_servers": {
       "my_server": {
         "command": "npx",
-        "args": ["-y", "my-mcp-server"]
+        "args": ["-y", "my-mcp-server"],
+        "internal_only": false
       },
       "remote_server": {
         "url": "http://localhost:3000/mcp"
@@ -627,6 +629,67 @@ a URL (HTTP transport):
   }
 }
 ```
+
+| Field           | Type     | Default | Description                                         |
+|-----------------|----------|---------|-----------------------------------------------------|
+| `command`       | string   | `""`    | Command to spawn (stdio transport).                 |
+| `args`          | string[] | `[]`    | Arguments passed to the command.                    |
+| `env`           | object   | `{}`    | Environment variables for the child process.        |
+| `url`           | string   | `""`    | URL endpoint (HTTP transport).                      |
+| `internal_only` | boolean  | `true`  | When true, session is created but tools are **not** registered in the `ToolRegistry`. |
+
+#### Internal-Only Servers
+
+By default, `internal_only` is **true**. An internal-only server has its MCP
+session created at startup so that the system can communicate with it, but its
+tools are **not** registered in the `ToolRegistry` and are therefore not
+directly exposed to the LLM. This is the recommended posture for infrastructure
+servers such as `claude-flow` or `claude-code`, whose capabilities are broad and
+should be scoped through skills rather than presented to the LLM all at once.
+
+```json
+{
+  "tools": {
+    "mcp_servers": {
+      "claude-flow": {
+        "command": "npx",
+        "args": ["-y", "@claude-flow/cli@latest", "mcp", "start"],
+        "internal_only": true
+      },
+      "claude-code": {
+        "command": "claude",
+        "args": ["mcp", "serve"],
+        "env": { "CLAUDECODE": "" },
+        "internal_only": true
+      },
+      "custom-tools": {
+        "command": "my-tool-server",
+        "internal_only": false
+      }
+    }
+  }
+}
+```
+
+In this example, `claude-flow` and `claude-code` sessions are active but their
+tools stay out of the registry. Only `custom-tools` has its tools registered
+and visible to the LLM on every turn.
+
+#### Skill-Based Tool Filtering
+
+Internal MCP tools can still be surfaced to the LLM on specific turns through
+**skills**. When a skill is activated, it can declare an `allowed_tools` list
+in the inbound message metadata. The agent loop calls
+`ToolRegistry::schemas_for_tools()` with these patterns to produce a filtered
+set of tool schemas for that turn. Patterns support glob syntax (`*` and `?`)
+as well as exact names:
+
+```json
+["claude-flow__memory_*", "read_file", "write_file"]
+```
+
+This allows fine-grained, per-turn control over which tools the LLM can invoke,
+without permanently registering every tool from infrastructure servers.
 
 ### Naming Convention
 
@@ -648,9 +711,11 @@ For example, a tool named `search` from a server named `web` is registered as
 
 ### Registration
 
-MCP tools are registered via `register_mcp_tools()` after built-in tools. They
-appear alongside built-in tools in the registry and can be invoked in the same
-way by the agent.
+MCP tools are registered via `register_mcp_tools()` after built-in tools. For
+each configured server, a client session is always created. If `internal_only`
+is `false`, the server's tools are listed and registered in the `ToolRegistry`
+alongside built-in tools; if `internal_only` is `true` (the default), the
+session is stored but no tools are registered.
 
 ---
 

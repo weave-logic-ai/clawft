@@ -1239,7 +1239,7 @@ A production configuration with tiered routing and permissions:
     "mcpServers": {
       "claude-flow": {
         "command": "npx",
-        "args": ["-y", "@claude-flow/cli@latest"]
+        "args": ["-y", "@claude-flow/cli@latest", "mcp", "start"]
       }
     }
   },

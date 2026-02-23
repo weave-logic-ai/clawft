@@ -630,7 +630,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
- "which 7.0.3",
 ]
 
 [[package]]

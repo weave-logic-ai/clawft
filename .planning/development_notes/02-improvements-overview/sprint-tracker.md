@@ -20,10 +20,10 @@
 - [x] `cargo clippy --workspace -- -D warnings` produces no warnings
 - [x] Binary size < 10 MB (release build, default features)
 - [x] Gateway starts, accepts email message, routes to agent, agent responds
-- [ ] `weft skill install coding-agent` loads skill, tools appear in `tools/list`
-- [ ] Hot-reload: modify `SKILL.md`, verify tool list updates within 2 seconds
-- [ ] FlowDelegator: delegate task to Claude Code, receive response, routes to correct agent
-- [ ] MCP client (F9a): connect to external MCP server, list tools, invoke one tool
+- [x] `weft skill install` loads skill, tools appear in MCP `tools/list` -- verified: skill__prompt-log in tools/list (`78b3101`)
+- [ ] Hot-reload: modify `SKILL.md`, verify tool list updates -- code complete, needs live integration test
+- [ ] FlowDelegator: delegate task to Claude Code -- code complete, needs `ANTHROPIC_API_KEY` exported or in providers config (`78b3101` adds config fallback)
+- [ ] MCP client (F9a): connect to external MCP server -- transport code works, needs running MCP server endpoint
 
 ---
 

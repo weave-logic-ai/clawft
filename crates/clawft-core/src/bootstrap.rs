@@ -26,7 +26,7 @@ use clawft_platform::Platform;
 use clawft_types::config::Config;
 
 use crate::agent::context::ContextBuilder;
-use crate::agent::loop_core::AgentLoop;
+use crate::agent::loop_core::{AgentLoop, AutoDelegation};
 use crate::agent::memory::MemoryStore;
 use crate::agent::skills::SkillsLoader;
 use crate::bus::MessageBus;
@@ -78,6 +78,9 @@ pub struct AppContext<P: Platform> {
 
     /// Shared skills loader reference (for external access).
     skills: Arc<SkillsLoader<P>>,
+
+    /// Optional auto-delegation router for pre-LLM routing.
+    auto_delegation: Option<Arc<dyn AutoDelegation>>,
 }
 
 impl<P: Platform> AppContext<P> {
@@ -151,6 +154,7 @@ impl<P: Platform> AppContext<P> {
             context,
             memory,
             skills,
+            auto_delegation: None,
         })
     }
 
@@ -163,7 +167,7 @@ impl<P: Platform> AppContext<P> {
             &self.config.routing,
             None, // workspace config not yet supported
         );
-        AgentLoop::new(
+        let mut agent = AgentLoop::new(
             self.config.agents,
             self.platform,
             self.bus,
@@ -172,7 +176,11 @@ impl<P: Platform> AppContext<P> {
             self.context,
             self.sessions,
             resolver,
-        )
+        );
+        if let Some(delegation) = self.auto_delegation {
+            agent = agent.with_auto_delegation(delegation);
+        }
+        agent
     }
 
     /// Get a reference to the root configuration.
@@ -213,6 +221,15 @@ impl<P: Platform> AppContext<P> {
     /// Get a reference to the shared skills loader.
     pub fn skills(&self) -> &Arc<SkillsLoader<P>> {
         &self.skills
+    }
+
+    /// Set an auto-delegation router for pre-LLM routing.
+    ///
+    /// When set, inbound messages are checked against delegation rules
+    /// before the local LLM is invoked. Matching messages are routed
+    /// directly to `delegate_task`.
+    pub fn set_auto_delegation(&mut self, delegation: Arc<dyn AutoDelegation>) {
+        self.auto_delegation = Some(delegation);
     }
 
     /// Replace the pipeline registry with a custom one.
