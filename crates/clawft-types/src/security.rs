@@ -73,9 +73,25 @@ pub struct CommandPolicy {
 }
 
 /// The default set of safe executable basenames for allowlist mode.
+///
+/// Includes read-only utilities, common file operations (dangerous patterns
+/// still block destructive variants like `rm -rf /`), shell builtins, and
+/// development tools commonly needed by AI agent workflows.
 pub const DEFAULT_COMMAND_ALLOWLIST: &[&str] = &[
+    // Read-only / informational
     "echo", "cat", "ls", "pwd", "head", "tail", "wc", "grep", "find", "sort", "uniq", "diff",
-    "date", "env", "true", "false", "test",
+    "date", "env", "true", "false", "test", "which", "basename", "dirname", "stat", "file",
+    "readlink",
+    // Text processing
+    "sed", "awk", "cut", "tr", "tee", "xargs",
+    // File operations (dangerous patterns still block e.g. rm -rf /)
+    "mkdir", "cp", "mv", "touch", "rm", "ln", "chmod",
+    // Shell builtins
+    "cd", "export", "source", "type", "command",
+    // Development tools
+    "git", "cargo", "rustc", "npm", "npx", "node", "python", "python3",
+    // ClawFT ecosystem
+    "weft", "claude-flow",
 ];
 
 /// The default set of dangerous patterns.
@@ -143,8 +159,8 @@ impl CommandPolicy {
     /// Validate a command string against this policy.
     ///
     /// 1. Always checks dangerous patterns first (defense-in-depth).
-    /// 2. In `Allowlist` mode, extracts the executable basename and checks
-    ///    the allowlist.
+    /// 2. In `Allowlist` mode, splits on shell compound operators (`&&`,
+    ///    `||`, `;`, `|`) and validates every sub-command's basename.
     /// 3. In `Denylist` mode, checks all denylist patterns (case-insensitive
     ///    substring match).
     pub fn validate(&self, command: &str) -> Result<(), CommandPolicyError> {
@@ -169,11 +185,16 @@ impl CommandPolicy {
         // Step 2: Mode-specific checks.
         match self.mode {
             PolicyMode::Allowlist => {
-                let token = extract_first_token(command);
-                if !self.allowlist.contains(token) {
-                    return Err(CommandPolicyError::NotAllowed {
-                        command: command.to_string(),
-                    });
+                // Validate every sub-command in compound expressions
+                // (e.g. "cd foo && claude-flow mcp status" checks both
+                // "cd" and "claude-flow").
+                for sub in split_shell_commands(command) {
+                    let token = extract_first_token(sub);
+                    if !self.allowlist.contains(token) {
+                        return Err(CommandPolicyError::NotAllowed {
+                            command: command.to_string(),
+                        });
+                    }
                 }
             }
             PolicyMode::Denylist => {
@@ -190,6 +211,58 @@ impl CommandPolicy {
 
         Ok(())
     }
+}
+
+/// Split a command string on shell compound operators (`&&`, `||`, `;`, `|`).
+///
+/// Returns each sub-command as a trimmed slice. Two-character operators
+/// (`&&`, `||`) are matched before single-character ones (`|`, `;`) so
+/// that `||` is not mis-parsed as two pipes.
+///
+/// Note: this does **not** handle quoting; operators inside quoted strings
+/// will cause harmless extra validation (safe direction: more checks, not
+/// fewer).
+pub fn split_shell_commands(command: &str) -> Vec<&str> {
+    let bytes = command.as_bytes();
+    let len = bytes.len();
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+
+    while i < len {
+        // Two-character operators first (&&, ||).
+        if i + 1 < len {
+            let pair = [bytes[i], bytes[i + 1]];
+            if pair == *b"&&" || pair == *b"||" {
+                let part = command[start..i].trim();
+                if !part.is_empty() {
+                    parts.push(part);
+                }
+                i += 2;
+                start = i;
+                continue;
+            }
+        }
+        // Single-character operators (; |).
+        if bytes[i] == b';' || bytes[i] == b'|' {
+            let part = command[start..i].trim();
+            if !part.is_empty() {
+                parts.push(part);
+            }
+            i += 1;
+            start = i;
+            continue;
+        }
+        i += 1;
+    }
+
+    // Remainder after last operator.
+    let part = command[start..].trim();
+    if !part.is_empty() {
+        parts.push(part);
+    }
+
+    parts
 }
 
 /// Extract the first whitespace-delimited token from a command string,
@@ -397,5 +470,99 @@ mod tests {
             command: "curl".into(),
         };
         assert_eq!(err.to_string(), "command not allowed: curl");
+    }
+
+    // -- split_shell_commands --
+
+    #[test]
+    fn split_simple_command() {
+        assert_eq!(split_shell_commands("echo hello"), vec!["echo hello"]);
+    }
+
+    #[test]
+    fn split_and_operator() {
+        assert_eq!(
+            split_shell_commands("cd foo && claude-flow mcp status"),
+            vec!["cd foo", "claude-flow mcp status"]
+        );
+    }
+
+    #[test]
+    fn split_or_operator() {
+        assert_eq!(
+            split_shell_commands("ls /tmp || echo fallback"),
+            vec!["ls /tmp", "echo fallback"]
+        );
+    }
+
+    #[test]
+    fn split_semicolon() {
+        assert_eq!(
+            split_shell_commands("echo a; echo b"),
+            vec!["echo a", "echo b"]
+        );
+    }
+
+    #[test]
+    fn split_pipe() {
+        assert_eq!(
+            split_shell_commands("cat file | grep pattern"),
+            vec!["cat file", "grep pattern"]
+        );
+    }
+
+    #[test]
+    fn split_mixed_operators() {
+        assert_eq!(
+            split_shell_commands("cd dir && git status | grep modified; echo done"),
+            vec!["cd dir", "git status", "grep modified", "echo done"]
+        );
+    }
+
+    #[test]
+    fn split_empty() {
+        let result: Vec<&str> = split_shell_commands("");
+        assert!(result.is_empty());
+    }
+
+    // -- compound command validation --
+
+    #[test]
+    fn allowlist_permits_compound_when_all_allowed() {
+        let policy = CommandPolicy::safe_defaults();
+        // Both `cd` and `claude-flow` are now in the default allowlist.
+        assert!(policy.validate("cd clawft && claude-flow mcp status").is_ok());
+    }
+
+    #[test]
+    fn allowlist_rejects_compound_when_any_disallowed() {
+        let policy = CommandPolicy::safe_defaults();
+        // `curl` is still not on the allowlist.
+        let err = policy.validate("echo hi && curl http://evil.com").unwrap_err();
+        assert!(matches!(err, CommandPolicyError::NotAllowed { .. }));
+    }
+
+    #[test]
+    fn allowlist_permits_pipe_chain() {
+        let policy = CommandPolicy::safe_defaults();
+        assert!(policy.validate("cat file | grep pattern | sort").is_ok());
+    }
+
+    #[test]
+    fn allowlist_permits_dev_tools() {
+        let policy = CommandPolicy::safe_defaults();
+        assert!(policy.validate("git status").is_ok());
+        assert!(policy.validate("cargo build").is_ok());
+        assert!(policy.validate("npx @claude-flow/cli@latest").is_ok());
+        assert!(policy.validate("weft agent list").is_ok());
+        assert!(policy.validate("npm install").is_ok());
+    }
+
+    #[test]
+    fn dangerous_pattern_still_blocks_compound() {
+        let policy = CommandPolicy::safe_defaults();
+        // Dangerous pattern check runs before compound splitting.
+        let err = policy.validate("echo hi && rm -rf /").unwrap_err();
+        assert!(matches!(err, CommandPolicyError::DangerousPattern { .. }));
     }
 }
