@@ -1,21 +1,21 @@
-# Phase S3: Polish + Advanced Features + Production
+# Phase S3: Polish + Advanced Features + Production + Browser WASM Integration
 
 > **Element:** UI Development
-> **Phase:** S3
-> **Timeline:** Weeks 7-9
-> **Priority:** P1 (delegation/monitoring), P1 (Tauri), P0 (production hardening)
-> **Crates:** `ui/src/` (React components), `clawft-services` (monitoring APIs), Tauri project
-> **Dependencies IN:** S1, S2 (complete dashboard), M1/M2 (FlowDelegator), D5/D6 (latency/cost)
-> **Blocks:** K6 (native shells)
+> **Phase:** S3 (S3.1-S3.7)
+> **Timeline:** Weeks 7-10
+> **Priority:** P1 (delegation/monitoring), P1 (Tauri), P1 (production hardening), P1 (browser WASM), P2 (docs)
+> **Crates:** `ui/src/` (React components), `clawft-services` (monitoring APIs), Tauri project, `clawft-wasm` (browser bridge)
+> **Dependencies IN:** S1, S2 (complete dashboard), M1/M2 (FlowDelegator), D5/D6 (latency/cost), W-BROWSER Phase 5 (WASM entry points)
+> **Blocks:** K6 (native shells), VS3 (voice UI integration via Canvas)
 > **Status:** Planning
 
 ---
 
 ## 1. Overview
 
-Phase S3 closes the UI development cycle with three parallel tracks: delegation monitoring and observability tooling (S3.1), advanced Canvas features (S3.2), and production hardening (S3.3-S3.5). This phase transforms the functional dashboard from S1/S2 into a production-grade application with mobile responsiveness, desktop distribution via Tauri, comprehensive security hardening, and end-to-end test coverage.
+Phase S3 closes the UI development cycle with five parallel tracks: delegation monitoring and observability tooling (S3.1), advanced Canvas features (S3.2), production hardening (S3.3-S3.5), browser WASM integration (S3.6), and documentation (S3.7). This phase transforms the functional dashboard from S1/S2 into a production-grade application with mobile responsiveness, desktop distribution via Tauri, comprehensive security hardening, end-to-end test coverage, and a browser-only mode powered by the clawft WASM module.
 
-S3 depends on the FlowDelegator subsystem (M1/M2) for delegation visibility, the latency recording pipeline (D5) for pipeline inspection, and the cost attribution thread (D6) for per-user cost tracking. The Tauri desktop shell (S3.4) becomes the foundation for K6 cross-platform native shells.
+S3 depends on the FlowDelegator subsystem (M1/M2) for delegation visibility, the latency recording pipeline (D5) for pipeline inspection, the cost attribution thread (D6) for per-user cost tracking, and the W-BROWSER workstream Phase 5 (WASM entry points) for browser-only mode. The Tauri desktop shell (S3.4) becomes the foundation for K6 cross-platform native shells. S3.6 is the critical bridge between W-BROWSER and W-UI workstreams, enabling the dashboard to run with no server at all.
 
 ---
 
@@ -3670,9 +3670,15 @@ export function useAuth() {
 | 31 | S3.5.9 | S3.5 Hardening | Tailscale auth: X-Tailscale-User header extraction and validation middleware | P1 | `crates/clawft-services/src/api/middleware/tailscale.rs` | 4h |
 | 32 | S3.5.10 | S3.5 Hardening | Multi-user session isolation: per-user session key prefixing and access control | P1 | `crates/clawft-services/src/api/middleware/session_isolation.rs` + `ui/src/lib/auth-context.tsx` | 6h |
 
-**Total: 32 tasks** (5 delegation + 5 canvas + 5 mobile/PWA + 7 Tauri + 10 production hardening)
+**Subtotal S3.1-S3.5: 32 tasks** (5 delegation + 5 canvas + 5 mobile/PWA + 7 Tauri + 10 production hardening)
 
-**Estimated total effort: 160 hours** (~20 developer-days across 3 weeks)
+**Subtotal S3.1-S3.5 effort: 160 hours** (~20 developer-days across Weeks 7-9)
+
+**S3.6 Browser WASM: 12 tasks, 57 hours** (~7 developer-days, Weeks 9-10)
+
+**S3.7 Documentation: 4 tasks, 22 hours** (~3 developer-days, Week 10)
+
+**Grand total S3: 48 tasks, 239 hours** (~30 developer-days across 4 weeks)
 
 ### 4.2 Concurrency Plan
 
@@ -3702,7 +3708,20 @@ Week 8:  S3.2.4-S3.2.5 (History/Export) + S3.3.1-S3.3.5 (Mobile/PWA)
          |
 Week 9:  S3.4.5-S3.4.7 (Tauri platform-specific + entry)
          + S3.5.1-S3.5.10 (Production hardening + E2E + accessibility)
+         + S3.6.1-S3.6.6 (Backend adapter interface + WASM adapter)
+         |
+Week 10: S3.6.7-S3.6.12 (Browser config UI + hook migration + caching)
+         + S3.7.1-S3.7.4 (Documentation)
 ```
+
+### 4.4 S3.6 Concurrency Notes
+
+S3.6 (Browser WASM Integration) can run in parallel with S3.5 (Production Hardening):
+- S3.6.1-S3.6.5 (adapter interface, feature detection) are independent of S3.5
+- S3.6.6 (ModeProvider) requires S1.2 scaffolding but NOT S3.5 middleware
+- S3.6.7 (Browser config UI) is independent
+- S3.6.10 (hook migration) is the critical bottleneck -- touches all existing hooks
+- S3.6.3 (WasmAdapter) can be developed against a mock WASM module until W-BROWSER Phase 5 delivers
 
 ---
 
@@ -3816,6 +3835,25 @@ Week 9:  S3.4.5-S3.4.7 (Tauri platform-specific + entry)
 - [ ] `pnpm test` -- all unit tests pass
 - [ ] `pnpm test:e2e` -- all Playwright tests pass
 
+### S3.6 Browser WASM Integration
+
+- [ ] `BackendAdapter` interface is implemented by both `AxumAdapter` and `WasmAdapter`
+- [ ] Existing UI hooks use `useBackend()` instead of direct api-client calls
+- [ ] WASM module loads in browser with visible progress indicator
+- [ ] Browser config UI encrypts API key with Web Crypto before IndexedDB storage
+- [ ] WebChat works end-to-end in WASM mode (user -> WASM pipeline -> LLM -> response)
+- [ ] Routes unavailable in WASM mode are hidden from navigation
+- [ ] Feature detection warns users about missing browser capabilities
+- [ ] Auto-detection correctly falls back from Axum to WASM when server is unreachable
+- [ ] Service worker caches .wasm binary for offline support
+
+### S3.7 Documentation
+
+- [ ] UI developer guide covers project setup through contribution workflow
+- [ ] API reference documents all REST and WS endpoints with examples
+- [ ] Browser mode guide includes per-provider CORS setup instructions
+- [ ] Deployment guide covers Docker, CDN, reverse proxy, Tauri, single-binary, and browser-only modes
+
 ---
 
 ## 7. Risk Notes
@@ -3830,3 +3868,1213 @@ Week 9:  S3.4.5-S3.4.7 (Tauri platform-specific + entry)
 | Tailscale header spoofing when not behind Tailscale proxy | Medium | High | CSP headers prevent JS injection. Backend should only trust Tailscale headers when `tailscale_auth_required: true` is set in config AND the server binds to Tailscale interface only. Document in deployment guide. |
 | react-swipeable conflicts with Canvas touch events | Low | Medium | Only enable swipe handlers in MobileWebChat; Canvas page disables swipe navigation. |
 | Playwright tests flaky due to WebSocket timing | Medium | Low | Use MSW mock mode for E2E; mock WebSocket with deterministic responses. Add `waitForSelector` with generous timeouts. |
+| WASM binary size exceeds 500KB gzipped | Medium | Medium | Tree-shake with `wasm-opt -Oz`. Service worker caches .wasm binary. Use `WebAssembly.compileStreaming()` for parallel download+compile. |
+| CORS blocks direct LLM calls in browser mode | High | High | Anthropic supports direct browser access header. Other providers require CORS proxy. Config UI provides prominent setup guidance. |
+| W-BROWSER Phase 5 WASM entry points not ready for S3.6 | Medium | Medium | S3.6 adapter can be developed against mock WASM module. Real integration tested when W-BROWSER delivers. |
+| API key exposure risk in browser IndexedDB | Medium | High | Web Crypto AES-256-GCM encryption. Non-extractable CryptoKey. UI warns users about browser key exposure. |
+| WASM init blocks main thread causing jank | Medium | Medium | Loading spinner during compile+init. Move to Web Worker if init > 2s. `compileStreaming()` for parallel download. |
+
+---
+
+## 8. Phase S3.6: Browser WASM Integration (Weeks 9-10)
+
+> **CRITICAL**: This phase is the bridge between W-BROWSER and W-UI workstreams. It enables the
+> dashboard to run in two modes: connected to an Axum backend (server mode) or connected to a
+> WASM module loaded in the browser (browser-only mode, no server required).
+
+### 8.1 Overview
+
+Phase S3.6 introduces a backend adapter abstraction that decouples the React UI from the specific
+transport layer. All existing views (Dashboard, Agents, WebChat, Canvas, Sessions, Tools, Memory,
+Config) work identically regardless of whether data flows through REST/WebSocket to an Axum
+server or through wasm-bindgen to an in-browser WASM module running `AgentLoop<BrowserPlatform>`.
+
+The WASM module is built by the W-BROWSER workstream (Phases 1-5). S3.6 consumes the WASM
+entry points defined in `.planning/wasm-browser/04-browser-platform-spec.md`:
+
+- `init(config_json: &str) -> Result<(), JsValue>` -- Initialize platform and agent loop
+- `send_message(text: &str) -> Result<String, JsValue>` -- Send message through pipeline
+- `set_env(key: &str, value: &str)` -- Set environment variable
+- `on_response(callback: JsValue)` -- Register streaming response callback (future)
+
+### 8.2 Current Code (Prerequisites)
+
+From S1/S2/S3.1-S3.5:
+
+- `ui/src/lib/api-client.ts` -- Fetch wrapper with Bearer auth, configurable `VITE_API_URL`
+- `ui/src/lib/ws-client.ts` -- Reconnecting WebSocket with exponential backoff
+- `ui/src/hooks/use-api.ts` -- React hook providing apiClient instance
+- `ui/src/hooks/use-websocket.ts` -- React hook providing WebSocket subscription
+- `ui/src/stores/*.ts` -- Zustand stores for agent, session, canvas, delegation state
+- `ui/src/mocks/*.ts` -- MSW mock handlers for all API endpoints
+
+From W-BROWSER:
+
+- `crates/clawft-wasm/src/lib.rs` -- WASM entry points (`init`, `send_message`, `set_env`)
+- `crates/clawft-wasm/pkg/` -- wasm-pack output (clawft_wasm.js + clawft_wasm_bg.wasm)
+- `crates/clawft-platform/src/browser/` -- `BrowserPlatform` (HttpClient, FileSystem, Environment)
+
+### 8.3 Deliverables
+
+#### 8.3.1 Backend Adapter Interface
+
+**File**: `ui/src/lib/backend-adapter.ts`
+
+The adapter interface defines the contract that both Axum and WASM backends must satisfy.
+All existing hooks and stores call through this interface rather than directly using
+`api-client.ts` or `ws-client.ts`.
+
+```typescript
+// ui/src/lib/backend-adapter.ts
+
+export type BackendMode = "axum" | "wasm" | "mock";
+
+export interface AgentInfo {
+  id: string;
+  name: string;
+  status: "running" | "stopped" | "error";
+  model: string;
+}
+
+export interface SessionInfo {
+  key: string;
+  messageCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ToolInfo {
+  name: string;
+  description: string;
+}
+
+export interface ChatMessage {
+  role: "user" | "assistant" | "system";
+  content: string;
+  timestamp: string;
+  toolCalls?: ToolCallRecord[];
+}
+
+export interface ToolCallRecord {
+  toolName: string;
+  arguments: Record<string, unknown>;
+  result?: string;
+}
+
+export interface MemoryEntry {
+  key: string;
+  value: string;
+  namespace: string;
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BackendCapabilities {
+  /** Whether this backend supports channel management (Axum only). */
+  channels: boolean;
+  /** Whether this backend supports cron scheduling (Axum only). */
+  cron: boolean;
+  /** Whether this backend supports delegation monitoring (Axum only). */
+  delegation: boolean;
+  /** Whether this backend supports multi-user auth (Axum only). */
+  multiUser: boolean;
+  /** Whether this backend supports skill installation from ClawHub (Axum only). */
+  skillInstall: boolean;
+  /** Whether this backend supports real-time WebSocket events. */
+  realtime: boolean;
+  /** Whether the backend is fully initialized and ready. */
+  ready: boolean;
+}
+
+/**
+ * Abstract interface for UI-to-backend communication.
+ *
+ * Implemented by AxumAdapter (REST/WS) and WasmAdapter (wasm-bindgen).
+ * All React hooks and stores call through this interface.
+ */
+export interface BackendAdapter {
+  /** Which mode this adapter operates in. */
+  readonly mode: BackendMode;
+
+  /** What this backend supports. */
+  readonly capabilities: BackendCapabilities;
+
+  /** Initialize the backend. Called once at app startup. */
+  init(config?: Record<string, unknown>): Promise<void>;
+
+  /** Shut down the backend gracefully. */
+  dispose(): Promise<void>;
+
+  // -- Agents --
+  listAgents(): Promise<AgentInfo[]>;
+  getAgent(id: string): Promise<AgentInfo | null>;
+  startAgent(id: string): Promise<void>;
+  stopAgent(id: string): Promise<void>;
+
+  // -- Sessions --
+  listSessions(): Promise<SessionInfo[]>;
+  getSessionMessages(key: string): Promise<ChatMessage[]>;
+  deleteSession(key: string): Promise<void>;
+
+  // -- Chat --
+  sendMessage(sessionKey: string, content: string): Promise<ChatMessage>;
+  onMessage(callback: (msg: ChatMessage) => void): () => void;
+
+  // -- Tools --
+  listTools(): Promise<ToolInfo[]>;
+  getToolSchema(name: string): Promise<Record<string, unknown> | null>;
+
+  // -- Memory --
+  listMemory(namespace?: string): Promise<MemoryEntry[]>;
+  searchMemory(query: string, namespace?: string, threshold?: number): Promise<MemoryEntry[]>;
+  writeMemory(key: string, value: string, namespace?: string, tags?: string[]): Promise<void>;
+  deleteMemory(key: string, namespace?: string): Promise<void>;
+
+  // -- Config (read-only in WASM mode) --
+  getConfig(): Promise<Record<string, unknown>>;
+  updateConfig?(patch: Record<string, unknown>): Promise<void>;
+
+  // -- Events (noop in WASM mode without WS) --
+  subscribe?(topics: string[]): void;
+  unsubscribe?(topics: string[]): void;
+  onEvent?(callback: (event: { topic: string; data: unknown }) => void): () => void;
+}
+```
+
+#### 8.3.2 Axum Adapter
+
+**File**: `ui/src/lib/adapters/axum-adapter.ts`
+
+Wraps the existing `api-client.ts` and `ws-client.ts` behind the `BackendAdapter` interface.
+This is a thin adapter -- most methods delegate directly to the existing fetch/WS clients.
+
+```typescript
+// ui/src/lib/adapters/axum-adapter.ts
+
+import type { BackendAdapter, BackendCapabilities, BackendMode } from "../backend-adapter";
+import { ApiClient } from "../api-client";
+import { WsClient } from "../ws-client";
+
+export class AxumAdapter implements BackendAdapter {
+  readonly mode: BackendMode = "axum";
+  readonly capabilities: BackendCapabilities = {
+    channels: true,
+    cron: true,
+    delegation: true,
+    multiUser: true,
+    skillInstall: true,
+    realtime: true,
+    ready: false,
+  };
+
+  private api: ApiClient;
+  private ws: WsClient;
+
+  constructor(apiUrl: string, wsUrl: string, token?: string) {
+    this.api = new ApiClient(apiUrl, token);
+    this.ws = new WsClient(wsUrl, token);
+  }
+
+  async init(): Promise<void> {
+    this.ws.connect();
+    (this.capabilities as { ready: boolean }).ready = true;
+  }
+
+  async dispose(): Promise<void> {
+    this.ws.disconnect();
+    (this.capabilities as { ready: boolean }).ready = false;
+  }
+
+  // Each method delegates to this.api.get/post/patch/delete
+  // and this.ws.subscribe/onMessage as appropriate.
+  // Full implementation follows existing api-client.ts patterns.
+  // ...
+}
+```
+
+#### 8.3.3 WASM Adapter
+
+**File**: `ui/src/lib/adapters/wasm-adapter.ts`
+
+Bridges the React UI to the in-browser WASM module. Loads the WASM binary,
+calls `init(config_json)`, and translates `BackendAdapter` method calls into
+`send_message()` invocations with appropriate routing.
+
+```typescript
+// ui/src/lib/adapters/wasm-adapter.ts
+
+import type {
+  BackendAdapter,
+  BackendCapabilities,
+  BackendMode,
+  ChatMessage,
+  AgentInfo,
+  SessionInfo,
+  ToolInfo,
+  MemoryEntry,
+} from "../backend-adapter";
+
+interface ClawftWasm {
+  init(config_json: string): Promise<void>;
+  send_message(text: string): Promise<string>;
+  set_env(key: string, value: string): void;
+}
+
+export class WasmAdapter implements BackendAdapter {
+  readonly mode: BackendMode = "wasm";
+  readonly capabilities: BackendCapabilities = {
+    channels: false,
+    cron: false,
+    delegation: false,
+    multiUser: false,
+    skillInstall: false,
+    realtime: false, // No WebSocket in browser-only mode
+    ready: false,
+  };
+
+  private wasm: ClawftWasm | null = null;
+  private messageCallbacks: Array<(msg: ChatMessage) => void> = [];
+  private sessions: Map<string, ChatMessage[]> = new Map();
+  private config: Record<string, unknown> = {};
+
+  constructor(
+    private wasmUrl: string = "/clawft_wasm.js",
+    private onProgress?: (phase: string, pct: number) => void,
+  ) {}
+
+  async init(config?: Record<string, unknown>): Promise<void> {
+    this.onProgress?.("download", 0);
+
+    // Dynamic import of wasm-bindgen generated JS
+    const wasmModule = await import(/* @vite-ignore */ this.wasmUrl);
+
+    this.onProgress?.("compile", 30);
+    await wasmModule.default(); // Loads and compiles .wasm binary
+
+    this.onProgress?.("init", 70);
+    this.wasm = wasmModule;
+
+    if (config) {
+      this.config = config;
+      await this.wasm!.init(JSON.stringify(config));
+    }
+
+    this.onProgress?.("ready", 100);
+    (this.capabilities as { ready: boolean }).ready = true;
+  }
+
+  async dispose(): Promise<void> {
+    this.wasm = null;
+    (this.capabilities as { ready: boolean }).ready = false;
+  }
+
+  // -- Chat (primary interaction) --
+
+  async sendMessage(sessionKey: string, content: string): Promise<ChatMessage> {
+    if (!this.wasm) throw new Error("WASM module not initialized");
+
+    const userMsg: ChatMessage = {
+      role: "user",
+      content,
+      timestamp: new Date().toISOString(),
+    };
+
+    // Store user message in local session
+    const messages = this.sessions.get(sessionKey) ?? [];
+    messages.push(userMsg);
+    this.sessions.set(sessionKey, messages);
+
+    // Send through WASM pipeline
+    const responseText = await this.wasm.send_message(content);
+
+    const assistantMsg: ChatMessage = {
+      role: "assistant",
+      content: responseText,
+      timestamp: new Date().toISOString(),
+    };
+
+    messages.push(assistantMsg);
+    this.messageCallbacks.forEach((cb) => cb(assistantMsg));
+
+    return assistantMsg;
+  }
+
+  onMessage(callback: (msg: ChatMessage) => void): () => void {
+    this.messageCallbacks.push(callback);
+    return () => {
+      this.messageCallbacks = this.messageCallbacks.filter((cb) => cb !== callback);
+    };
+  }
+
+  // -- Agents (single agent in WASM mode) --
+
+  async listAgents(): Promise<AgentInfo[]> {
+    return [
+      {
+        id: "browser-agent",
+        name: "Browser Agent",
+        status: this.capabilities.ready ? "running" : "stopped",
+        model: (this.config as Record<string, Record<string, string>>)
+          ?.defaults?.model ?? "unknown",
+      },
+    ];
+  }
+
+  async getAgent(id: string): Promise<AgentInfo | null> {
+    const agents = await this.listAgents();
+    return agents.find((a) => a.id === id) ?? null;
+  }
+
+  async startAgent(_id: string): Promise<void> {
+    // Agent is always running in WASM mode once initialized
+  }
+
+  async stopAgent(_id: string): Promise<void> {
+    // Cannot stop the agent in WASM mode (it is the runtime)
+  }
+
+  // -- Sessions (in-memory in WASM mode) --
+
+  async listSessions(): Promise<SessionInfo[]> {
+    return Array.from(this.sessions.entries()).map(([key, msgs]) => ({
+      key,
+      messageCount: msgs.length,
+      createdAt: msgs[0]?.timestamp ?? new Date().toISOString(),
+      updatedAt: msgs[msgs.length - 1]?.timestamp ?? new Date().toISOString(),
+    }));
+  }
+
+  async getSessionMessages(key: string): Promise<ChatMessage[]> {
+    return this.sessions.get(key) ?? [];
+  }
+
+  async deleteSession(key: string): Promise<void> {
+    this.sessions.delete(key);
+  }
+
+  // -- Tools (from WASM registry, stubbed until WASM exposes tool list) --
+
+  async listTools(): Promise<ToolInfo[]> {
+    // In browser mode, tools are the browser-safe subset
+    return [
+      { name: "read_file", description: "Read file from OPFS workspace" },
+      { name: "write_file", description: "Write file to OPFS workspace" },
+      { name: "edit_file", description: "Edit file in OPFS workspace" },
+      { name: "list_directory", description: "List OPFS directory contents" },
+      { name: "web_search", description: "Search the web" },
+      { name: "web_fetch", description: "Fetch URL content" },
+      { name: "memory_read", description: "Read from memory store" },
+      { name: "memory_write", description: "Write to memory store" },
+    ];
+  }
+
+  async getToolSchema(_name: string): Promise<Record<string, unknown> | null> {
+    return null; // Schema introspection deferred to future WASM entry point
+  }
+
+  // -- Memory (delegates to WASM via send_message with memory commands) --
+
+  async listMemory(_namespace?: string): Promise<MemoryEntry[]> {
+    // Memory operations go through the agent as tool calls in WASM mode
+    return [];
+  }
+
+  async searchMemory(
+    _query: string,
+    _namespace?: string,
+    _threshold?: number,
+  ): Promise<MemoryEntry[]> {
+    return [];
+  }
+
+  async writeMemory(
+    _key: string,
+    _value: string,
+    _namespace?: string,
+    _tags?: string[],
+  ): Promise<void> {
+    // Delegated to agent tool call
+  }
+
+  async deleteMemory(_key: string, _namespace?: string): Promise<void> {
+    // Delegated to agent tool call
+  }
+
+  // -- Config --
+
+  async getConfig(): Promise<Record<string, unknown>> {
+    return this.config;
+  }
+}
+```
+
+#### 8.3.4 WASM Loader with Progress
+
+**File**: `ui/src/lib/wasm-loader.ts`
+
+```typescript
+// ui/src/lib/wasm-loader.ts
+
+export type LoadPhase = "download" | "compile" | "init" | "ready" | "error";
+
+export interface LoadProgress {
+  phase: LoadPhase;
+  percent: number;
+  message: string;
+}
+
+/**
+ * Check if the browser supports all features needed for WASM mode.
+ */
+export async function checkWasmCapabilities(): Promise<{
+  supported: boolean;
+  missing: string[];
+}> {
+  const missing: string[] = [];
+
+  if (typeof WebAssembly === "undefined") {
+    missing.push("WebAssembly");
+  }
+
+  // Check OPFS support
+  if (!("storage" in navigator) || !("getDirectory" in navigator.storage)) {
+    missing.push("Origin Private File System (OPFS)");
+  }
+
+  // Check Web Crypto for API key encryption
+  if (!("crypto" in globalThis) || !("subtle" in globalThis.crypto)) {
+    missing.push("Web Crypto API");
+  }
+
+  return {
+    supported: missing.length === 0,
+    missing,
+  };
+}
+
+/**
+ * Load WASM binary with streaming compilation and progress tracking.
+ */
+export async function loadWasmModule(
+  wasmJsUrl: string,
+  onProgress: (progress: LoadProgress) => void,
+): Promise<unknown> {
+  try {
+    onProgress({ phase: "download", percent: 0, message: "Downloading WASM module..." });
+
+    // Dynamic import of the wasm-bindgen JS glue
+    const module = await import(/* @vite-ignore */ wasmJsUrl);
+
+    onProgress({ phase: "compile", percent: 40, message: "Compiling WASM binary..." });
+
+    // wasm-bindgen default export initializes the WASM module
+    await module.default();
+
+    onProgress({ phase: "ready", percent: 100, message: "WASM module ready" });
+
+    return module;
+  } catch (error) {
+    onProgress({
+      phase: "error",
+      percent: 0,
+      message: `Failed to load WASM: ${error instanceof Error ? error.message : String(error)}`,
+    });
+    throw error;
+  }
+}
+```
+
+#### 8.3.5 Feature Detection
+
+**File**: `ui/src/lib/feature-detect.ts`
+
+```typescript
+// ui/src/lib/feature-detect.ts
+
+export interface FeatureReport {
+  webAssembly: boolean;
+  opfs: boolean;
+  webCrypto: boolean;
+  serviceWorker: boolean;
+  indexedDb: boolean;
+  fetchStreaming: boolean;
+}
+
+/**
+ * Detect browser features required for each mode.
+ *
+ * Axum mode requires: fetch (always available in modern browsers)
+ * WASM mode requires: WebAssembly, OPFS, Web Crypto, IndexedDB
+ */
+export async function detectFeatures(): Promise<FeatureReport> {
+  return {
+    webAssembly: typeof WebAssembly !== "undefined",
+    opfs:
+      typeof navigator !== "undefined" &&
+      "storage" in navigator &&
+      typeof (navigator.storage as { getDirectory?: unknown }).getDirectory === "function",
+    webCrypto:
+      typeof globalThis.crypto !== "undefined" &&
+      typeof globalThis.crypto.subtle !== "undefined",
+    serviceWorker: "serviceWorker" in navigator,
+    indexedDb: typeof indexedDB !== "undefined",
+    fetchStreaming:
+      typeof ReadableStream !== "undefined" &&
+      typeof Response !== "undefined" &&
+      typeof Response.prototype.body !== "undefined",
+  };
+}
+
+/**
+ * Check whether WASM mode can run in this browser.
+ */
+export function canRunWasmMode(features: FeatureReport): {
+  ok: boolean;
+  warnings: string[];
+  errors: string[];
+} {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (!features.webAssembly) {
+    errors.push("WebAssembly is not supported in this browser.");
+  }
+
+  if (!features.webCrypto) {
+    errors.push("Web Crypto API is required for secure API key storage.");
+  }
+
+  if (!features.indexedDb) {
+    errors.push("IndexedDB is required for configuration storage.");
+  }
+
+  if (!features.opfs) {
+    warnings.push(
+      "Origin Private File System is not available. File operations will use in-memory storage (data lost on reload)."
+    );
+  }
+
+  if (!features.fetchStreaming) {
+    warnings.push(
+      "Fetch streaming is not available. LLM responses will not stream incrementally."
+    );
+  }
+
+  return {
+    ok: errors.length === 0,
+    warnings,
+    errors,
+  };
+}
+```
+
+#### 8.3.6 Mode Context Provider
+
+**File**: `ui/src/lib/mode-context.tsx`
+
+React context that provides the active `BackendAdapter` and capabilities to all components.
+Routes and UI elements check `capabilities` to show/hide features.
+
+```tsx
+// ui/src/lib/mode-context.tsx
+
+import { createContext, useContext, useState, useEffect, useMemo } from "react";
+import type { BackendAdapter, BackendCapabilities, BackendMode } from "./backend-adapter";
+import { AxumAdapter } from "./adapters/axum-adapter";
+import { WasmAdapter } from "./adapters/wasm-adapter";
+import type { LoadProgress } from "./wasm-loader";
+
+interface ModeContextValue {
+  adapter: BackendAdapter;
+  mode: BackendMode;
+  capabilities: BackendCapabilities;
+  isReady: boolean;
+  loadProgress: LoadProgress | null;
+}
+
+const ModeContext = createContext<ModeContextValue | null>(null);
+
+interface ModeProviderProps {
+  children: React.ReactNode;
+}
+
+/**
+ * Determines backend mode from environment variables and initializes
+ * the appropriate adapter.
+ *
+ * - VITE_BACKEND_MODE=axum  -> AxumAdapter (default)
+ * - VITE_BACKEND_MODE=wasm  -> WasmAdapter
+ * - VITE_BACKEND_MODE=auto  -> Try Axum, fall back to WASM
+ */
+export function ModeProvider({ children }: ModeProviderProps) {
+  const [adapter, setAdapter] = useState<BackendAdapter | null>(null);
+  const [loadProgress, setLoadProgress] = useState<LoadProgress | null>(null);
+
+  useEffect(() => {
+    const mode = (import.meta.env.VITE_BACKEND_MODE as string) ?? "axum";
+    const apiUrl = (import.meta.env.VITE_API_URL as string) ?? "http://localhost:18789";
+    const wsUrl = apiUrl.replace(/^http/, "ws") + "/ws";
+
+    async function initAdapter() {
+      if (mode === "wasm") {
+        const wasmAdapter = new WasmAdapter("/clawft_wasm.js", (phase, pct) =>
+          setLoadProgress({ phase: phase as LoadProgress["phase"], percent: pct, message: phase })
+        );
+        // Config loaded from IndexedDB by the WASM config UI component
+        await wasmAdapter.init();
+        setAdapter(wasmAdapter);
+      } else if (mode === "auto") {
+        try {
+          const response = await fetch(`${apiUrl}/api/auth/verify`, { method: "HEAD" });
+          if (response.ok) {
+            const axumAdapter = new AxumAdapter(apiUrl, wsUrl);
+            await axumAdapter.init();
+            setAdapter(axumAdapter);
+          } else {
+            throw new Error("Axum not reachable");
+          }
+        } catch {
+          const wasmAdapter = new WasmAdapter("/clawft_wasm.js", (phase, pct) =>
+            setLoadProgress({ phase: phase as LoadProgress["phase"], percent: pct, message: phase })
+          );
+          await wasmAdapter.init();
+          setAdapter(wasmAdapter);
+        }
+      } else {
+        // Default: Axum mode
+        const token = localStorage.getItem("clawft-auth-token") ?? undefined;
+        const axumAdapter = new AxumAdapter(apiUrl, wsUrl, token);
+        await axumAdapter.init();
+        setAdapter(axumAdapter);
+      }
+    }
+
+    initAdapter().catch(console.error);
+  }, []);
+
+  const value = useMemo<ModeContextValue | null>(() => {
+    if (!adapter) return null;
+    return {
+      adapter,
+      mode: adapter.mode,
+      capabilities: adapter.capabilities,
+      isReady: adapter.capabilities.ready,
+      loadProgress,
+    };
+  }, [adapter, loadProgress]);
+
+  if (!value) {
+    // Show loading state while adapter initializes
+    return (
+      <div className="flex items-center justify-center h-screen">
+        <div className="text-center space-y-4">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto" />
+          <p className="text-muted-foreground">
+            {loadProgress?.message ?? "Connecting to backend..."}
+          </p>
+          {loadProgress && (
+            <div className="w-64 bg-muted rounded-full h-2">
+              <div
+                className="bg-primary h-2 rounded-full transition-all duration-300"
+                style={{ width: `${loadProgress.percent}%` }}
+              />
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return <ModeContext.Provider value={value}>{children}</ModeContext.Provider>;
+}
+
+/**
+ * Hook to access the current backend adapter and capabilities.
+ */
+export function useBackend(): ModeContextValue {
+  const ctx = useContext(ModeContext);
+  if (!ctx) throw new Error("useBackend must be used within ModeProvider");
+  return ctx;
+}
+
+/**
+ * Hook to check if a specific capability is available.
+ *
+ * Usage: const hasCron = useCapability("cron");
+ */
+export function useCapability(cap: keyof BackendCapabilities): boolean {
+  const { capabilities } = useBackend();
+  return capabilities[cap];
+}
+```
+
+#### 8.3.7 Browser Config UI
+
+**File**: `ui/src/components/wasm/browser-config.tsx`
+
+Config setup screen shown on first launch in WASM mode. Handles:
+- API key input with Web Crypto encryption before IndexedDB storage
+- Provider selection (Anthropic direct, OpenAI via proxy, local Ollama)
+- CORS proxy URL configuration
+- Model selection
+
+```tsx
+// ui/src/components/wasm/browser-config.tsx
+
+import { useState, useCallback } from "react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+
+interface BrowserConfigProps {
+  onConfigured: (config: Record<string, unknown>) => void;
+}
+
+const PROVIDERS = [
+  { value: "anthropic", label: "Anthropic (direct browser access)", browserDirect: true },
+  { value: "openai", label: "OpenAI (requires CORS proxy)", browserDirect: false },
+  { value: "ollama", label: "Ollama (local, http://localhost:11434)", browserDirect: true },
+  { value: "lmstudio", label: "LM Studio (local, http://localhost:1234)", browserDirect: true },
+  { value: "custom", label: "Custom OpenAI-compatible", browserDirect: false },
+];
+
+const MODELS: Record<string, string[]> = {
+  anthropic: ["claude-sonnet-4-5-20250929", "claude-opus-4-20250514", "claude-haiku-3-5-20241022"],
+  openai: ["gpt-4o", "gpt-4o-mini", "o3-mini"],
+  ollama: ["llama3.3", "mistral", "codellama"],
+  lmstudio: ["loaded-model"],
+  custom: [],
+};
+
+/**
+ * Encrypt API key using Web Crypto AES-256-GCM.
+ * Returns base64-encoded ciphertext + IV.
+ */
+async function encryptApiKey(apiKey: string): Promise<string> {
+  const key = await crypto.subtle.generateKey(
+    { name: "AES-GCM", length: 256 },
+    false, // non-extractable
+    ["encrypt", "decrypt"]
+  );
+
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encoded = new TextEncoder().encode(apiKey);
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    key,
+    encoded
+  );
+
+  // Store the CryptoKey in IndexedDB (non-extractable, stays in browser)
+  const db = await openConfigDb();
+  const tx = db.transaction("crypto-keys", "readwrite");
+  tx.objectStore("crypto-keys").put(key, "api-key-encryption");
+  await new Promise((resolve) => { tx.oncomplete = resolve; });
+
+  // Return IV + ciphertext as base64
+  const combined = new Uint8Array(iv.length + new Uint8Array(ciphertext).length);
+  combined.set(iv);
+  combined.set(new Uint8Array(ciphertext), iv.length);
+  return btoa(String.fromCharCode(...combined));
+}
+
+async function openConfigDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("clawft-config", 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains("config")) {
+        db.createObjectStore("config");
+      }
+      if (!db.objectStoreNames.contains("crypto-keys")) {
+        db.createObjectStore("crypto-keys");
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export function BrowserConfig({ onConfigured }: BrowserConfigProps) {
+  const [provider, setProvider] = useState("anthropic");
+  const [apiKey, setApiKey] = useState("");
+  const [model, setModel] = useState("");
+  const [corsProxy, setCorsProxy] = useState("");
+  const [customBaseUrl, setCustomBaseUrl] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const selectedProvider = PROVIDERS.find((p) => p.value === provider);
+  const needsProxy = !selectedProvider?.browserDirect;
+
+  const handleSave = useCallback(async () => {
+    setSaving(true);
+    try {
+      const encryptedKey = apiKey ? await encryptApiKey(apiKey) : undefined;
+
+      const config: Record<string, unknown> = {
+        defaults: {
+          model: model || MODELS[provider]?.[0] || "claude-sonnet-4-5-20250929",
+          max_tokens: 4096,
+        },
+        providers: {
+          [provider]: {
+            api_key: apiKey, // Plain key passed to WASM init (encrypted copy in IndexedDB)
+            base_url:
+              provider === "ollama"
+                ? "http://localhost:11434/v1"
+                : provider === "lmstudio"
+                ? "http://localhost:1234/v1"
+                : customBaseUrl || undefined,
+            browser_direct: selectedProvider?.browserDirect ?? false,
+            cors_proxy: needsProxy && corsProxy ? corsProxy : undefined,
+          },
+        },
+        routing: { strategy: "static" },
+      };
+
+      // Store encrypted config in IndexedDB
+      const db = await openConfigDb();
+      const tx = db.transaction("config", "readwrite");
+      tx.objectStore("config").put(
+        { ...config, providers: { [provider]: { encrypted_key: encryptedKey } } },
+        "current"
+      );
+      await new Promise((resolve) => { tx.oncomplete = resolve; });
+
+      onConfigured(config);
+    } finally {
+      setSaving(false);
+    }
+  }, [provider, apiKey, model, corsProxy, customBaseUrl, selectedProvider, needsProxy, onConfigured]);
+
+  return (
+    <div className="max-w-lg mx-auto mt-12 space-y-6">
+      <Card>
+        <CardHeader>
+          <CardTitle>Browser Mode Setup</CardTitle>
+          <p className="text-sm text-muted-foreground">
+            Configure your LLM provider. Your API key is encrypted and stored
+            locally in your browser. It is sent directly from your browser to the
+            provider -- no server involved.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label>Provider</Label>
+            <Select value={provider} onValueChange={setProvider}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {PROVIDERS.map((p) => (
+                  <SelectItem key={p.value} value={p.value}>
+                    {p.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          {provider !== "ollama" && provider !== "lmstudio" && (
+            <div className="space-y-2">
+              <Label>API Key</Label>
+              <Input
+                type="password"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder="sk-..."
+              />
+              <p className="text-xs text-muted-foreground">
+                Your key is sent directly from your browser to {provider}. Use a
+                key with restricted permissions for browser usage.
+              </p>
+            </div>
+          )}
+
+          <div className="space-y-2">
+            <Label>Model</Label>
+            <Select value={model} onValueChange={setModel}>
+              <SelectTrigger>
+                <SelectValue placeholder="Select model" />
+              </SelectTrigger>
+              <SelectContent>
+                {(MODELS[provider] ?? []).map((m) => (
+                  <SelectItem key={m} value={m}>
+                    {m}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          {needsProxy && (
+            <div className="space-y-2">
+              <Label>CORS Proxy URL</Label>
+              <Input
+                value={corsProxy}
+                onChange={(e) => setCorsProxy(e.target.value)}
+                placeholder="https://your-proxy.example.com/"
+              />
+              <p className="text-xs text-muted-foreground">
+                {provider} does not support direct browser access. Route API
+                calls through a CORS proxy that adds the required headers.
+              </p>
+            </div>
+          )}
+
+          {provider === "custom" && (
+            <div className="space-y-2">
+              <Label>Base URL</Label>
+              <Input
+                value={customBaseUrl}
+                onChange={(e) => setCustomBaseUrl(e.target.value)}
+                placeholder="https://api.example.com/v1"
+              />
+            </div>
+          )}
+
+          <Button onClick={handleSave} disabled={saving} className="w-full">
+            {saving ? "Saving..." : "Save and Start"}
+          </Button>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+```
+
+#### 8.3.8 Vite WASM Build Configuration
+
+**File**: `ui/vite.config.ts` (additions)
+
+```typescript
+// Additions to existing ui/vite.config.ts for WASM support
+
+export default defineConfig(({ mode }) => ({
+  // ... existing config ...
+
+  optimizeDeps: {
+    // Exclude WASM glue from pre-bundling (loaded dynamically)
+    exclude: ["clawft_wasm"],
+  },
+
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          // ... existing chunks ...
+          // WASM adapter is loaded only in WASM mode
+          "vendor-wasm": mode === "wasm" ? [] : [],
+        },
+      },
+    },
+    // Enable top-level await for WASM initialization
+    target: "es2022",
+  },
+
+  // Copy WASM binary to dist if building for WASM mode
+  ...(mode === "wasm" && {
+    publicDir: "public",
+    // The WASM files (clawft_wasm.js + clawft_wasm_bg.wasm) are placed in public/
+    // and served as static assets. They are NOT bundled by Vite.
+  }),
+}));
+```
+
+#### 8.3.9 Route Gating
+
+Routes that are not available in WASM mode are hidden from the sidebar and redirect
+to the dashboard if accessed directly. This is handled by the `ModeProvider` context.
+
+```tsx
+// ui/src/components/layout/navigation.tsx (modifications)
+//
+// Wrap route links with capability checks:
+
+import { useCapability } from "@/lib/mode-context";
+
+function NavigationLinks() {
+  const hasCron = useCapability("cron");
+  const hasChannels = useCapability("channels");
+  const hasDelegation = useCapability("delegation");
+
+  return (
+    <nav>
+      {/* Always available */}
+      <NavLink to="/">Dashboard</NavLink>
+      <NavLink to="/agents">Agents</NavLink>
+      <NavLink to="/chat">Chat</NavLink>
+      <NavLink to="/canvas">Canvas</NavLink>
+      <NavLink to="/sessions">Sessions</NavLink>
+      <NavLink to="/tools">Tools</NavLink>
+      <NavLink to="/skills">Skills</NavLink>
+      <NavLink to="/memory">Memory</NavLink>
+      <NavLink to="/config">Config</NavLink>
+
+      {/* Axum-only routes */}
+      {hasCron && <NavLink to="/cron">Cron</NavLink>}
+      {hasChannels && <NavLink to="/channels">Channels</NavLink>}
+      {hasDelegation && <NavLink to="/delegation">Delegation</NavLink>}
+    </nav>
+  );
+}
+```
+
+### 8.4 Tasks
+
+| # | Task ID | Description | Priority | Location | Est. |
+|---|---------|-------------|----------|----------|------|
+| 33 | S3.6.1 | Define `BackendAdapter` interface with all method signatures | P1 | `ui/src/lib/backend-adapter.ts` | 4h |
+| 34 | S3.6.2 | Implement `AxumAdapter` wrapping existing api-client + ws-client | P1 | `ui/src/lib/adapters/axum-adapter.ts` | 6h |
+| 35 | S3.6.3 | Implement `WasmAdapter` with wasm-bindgen bridge | P1 | `ui/src/lib/adapters/wasm-adapter.ts` | 8h |
+| 36 | S3.6.4 | WASM loader with progress tracking and streaming compilation | P1 | `ui/src/lib/wasm-loader.ts` | 4h |
+| 37 | S3.6.5 | Feature detection and capability checking | P1 | `ui/src/lib/feature-detect.ts` | 3h |
+| 38 | S3.6.6 | `ModeProvider` context with auto-detection and adapter initialization | P1 | `ui/src/lib/mode-context.tsx` | 6h |
+| 39 | S3.6.7 | Browser config UI with API key encryption and provider setup | P1 | `ui/src/components/wasm/browser-config.tsx` | 8h |
+| 40 | S3.6.8 | Vite WASM build config and public asset setup | P2 | `ui/vite.config.ts` | 3h |
+| 41 | S3.6.9 | Route gating: hide unavailable routes in WASM mode | P1 | `ui/src/components/layout/navigation.tsx` | 3h |
+| 42 | S3.6.10 | Migrate existing hooks to use `useBackend()` instead of direct api-client | P1 | `ui/src/hooks/*.ts` | 8h |
+| 43 | S3.6.11 | Service worker: cache .wasm binary alongside static assets | P2 | `ui/src/sw.ts` | 2h |
+| 44 | S3.6.12 | CSP update: add `'wasm-unsafe-eval'` for browser-only mode | P1 | `ui/vite.config.ts`, `crates/clawft-services/src/api/middleware/csp.rs` | 2h |
+
+**Total S3.6: 12 tasks, estimated 57 hours** (~7 developer-days)
+
+### 8.5 Tests
+
+| Test | Description | Type |
+|------|-------------|------|
+| `test_backend_adapter_axum_list_agents` | AxumAdapter.listAgents() calls GET /api/agents and returns parsed result | Unit |
+| `test_backend_adapter_wasm_list_agents` | WasmAdapter.listAgents() returns single browser agent | Unit |
+| `test_wasm_adapter_send_message` | WasmAdapter.sendMessage() calls wasm.send_message() and returns ChatMessage | Unit |
+| `test_wasm_adapter_session_persistence` | Messages accumulate in WasmAdapter.sessions map across calls | Unit |
+| `test_feature_detect_modern_browser` | detectFeatures() returns all true in modern Chrome | Unit |
+| `test_feature_detect_missing_opfs` | detectFeatures() returns opfs=false when navigator.storage.getDirectory missing | Unit |
+| `test_can_run_wasm_mode_errors` | canRunWasmMode() returns errors when WebAssembly unavailable | Unit |
+| `test_can_run_wasm_mode_warnings` | canRunWasmMode() returns warnings when OPFS unavailable | Unit |
+| `test_mode_provider_axum_default` | ModeProvider selects AxumAdapter when VITE_BACKEND_MODE=axum | Component |
+| `test_mode_provider_wasm_mode` | ModeProvider selects WasmAdapter when VITE_BACKEND_MODE=wasm | Component |
+| `test_route_gating_hides_cron` | Navigation hides Cron link when capabilities.cron=false | Component |
+| `test_route_gating_shows_cron` | Navigation shows Cron link when capabilities.cron=true | Component |
+| `test_browser_config_saves_encrypted` | BrowserConfig saves encrypted API key to IndexedDB | Integration |
+| `test_browser_config_provider_selection` | Provider dropdown shows CORS proxy input for OpenAI | Component |
+| `test_wasm_loader_progress` | loadWasmModule() emits progress callbacks in order | Unit |
+| `test_e2e_wasm_mode_chat` | Playwright: WASM mode loads, send message, receive response | E2E |
+
+### 8.6 Exit Criteria
+
+- [ ] `BackendAdapter` interface is implemented by both `AxumAdapter` and `WasmAdapter`
+- [ ] Existing UI hooks use `useBackend()` instead of direct api-client calls
+- [ ] WASM module loads in browser with visible progress indicator
+- [ ] Browser config UI encrypts API key with Web Crypto before IndexedDB storage
+- [ ] WebChat works end-to-end in WASM mode (user -> WASM pipeline -> LLM -> response)
+- [ ] Routes unavailable in WASM mode are hidden from navigation
+- [ ] Feature detection warns users about missing browser capabilities
+- [ ] Auto-detection correctly falls back from Axum to WASM when server is unreachable
+- [ ] Service worker caches .wasm binary for offline support
+- [ ] All existing Axum-mode functionality works unchanged after adapter refactor
+
+---
+
+## 9. Phase S3.7: Documentation + Developer Guide (Week 10)
+
+### 9.1 Overview
+
+S3.7 produces four documentation deliverables that cover the UI architecture, API contracts,
+browser-only mode, and deployment options. Documentation is placed in `docs/ui/` per project
+convention.
+
+### 9.2 Deliverables
+
+#### 9.2.1 UI Developer Guide
+
+**File**: `docs/ui/developer-guide.md`
+
+Contents:
+- Project structure: `ui/src/` directory layout (routes, components, hooks, stores, lib, mocks)
+- Tech stack: Vite, React, TypeScript, Tailwind CSS v4, shadcn/ui, TanStack Router/Query, Zustand
+- Getting started: `pnpm install`, `pnpm dev`, `VITE_MOCK_API=true pnpm dev`
+- Adding a new route: file-based routing with TanStack Router
+- Adding a new component: shadcn/ui component patterns, Tailwind conventions
+- Adding a new API endpoint: Rust handler -> TypeScript types -> MSW mock -> React hook
+- State management: Zustand store patterns, when to use vs TanStack Query
+- MSW mock patterns: adding new mock handlers, fixture data
+- Testing: Vitest for unit tests, Playwright for E2E, axe-core for accessibility
+- Code style: ESLint + Prettier config, import conventions, naming conventions
+
+#### 9.2.2 API Reference
+
+**File**: `docs/ui/api-reference.md`
+
+Contents:
+- Auth: `POST /api/auth/token`, `GET /api/auth/verify`
+- Agents: `GET/PATCH /api/agents`, `POST /api/agents/:id/start`, `POST /api/agents/:id/stop`
+- Sessions: `GET/DELETE /api/sessions`
+- Tools: `GET /api/tools`, `GET /api/tools/:name/schema`
+- Canvas: `/ws/canvas` protocol, REST state/snapshot endpoints
+- Skills: `GET/DELETE /api/skills`, `GET /api/skills/hub/search`, `POST /api/skills/hub/install`
+- Memory: `GET/POST/DELETE /api/memory`, `POST /api/memory/search`
+- Config: `GET/PATCH /api/config`, `POST /api/config/validate`
+- Cron: `GET/POST/DELETE/PATCH /api/cron`
+- Channels: `GET /api/channels`, `POST /api/channels/:name/restart`
+- Delegation: `GET /api/delegation/active`, `GET/PATCH/DELETE /api/delegation/rules`
+- Monitoring: `GET /api/monitoring/token-usage`, `GET /api/monitoring/costs`, `GET /api/monitoring/pipeline-runs`
+- WebSocket: `/ws` topic subscription protocol, event types
+
+Each endpoint includes: method, path, request schema, response schema, example curl command,
+TypeScript type reference, and error codes.
+
+#### 9.2.3 Browser Mode Guide
+
+**File**: `docs/ui/browser-mode.md`
+
+Contents:
+- What is browser mode: WASM module runs clawft agent loop directly in the browser
+- Requirements: modern browser (Chrome 102+, Firefox 111+, Safari 15.2+)
+- Building WASM module: `wasm-pack build crates/clawft-wasm --target web --features browser`
+- Deploying browser-only UI: copy `ui/dist/` + WASM files to static hosting
+- Provider CORS setup per provider (Anthropic, OpenAI, Ollama, LM Studio)
+- API key security considerations
+- Feature limitations vs Axum mode
+- Troubleshooting: CORS errors, WASM loading failures, OPFS issues
+
+#### 9.2.4 Deployment Guide
+
+**File**: `docs/ui/deployment.md`
+
+Contents:
+- Docker deployment: `ui/Dockerfile` (nginx:alpine serving `dist/`)
+- CDN deployment: upload `dist/` to S3/Cloudflare/Vercel
+- Reverse proxy: nginx/Caddy config proxying `/api` + `/ws` to Axum backend
+- Single-binary: `weft ui` embedding dist/ via rust-embed
+- Tauri packaging: `cargo tauri build` for macOS/Linux/Windows
+- Browser-only: static hosting with WASM files, no backend required
+- Environment variables: `VITE_API_URL`, `VITE_BACKEND_MODE`, `VITE_MOCK_API`
+
+### 9.3 Tasks
+
+| # | Task ID | Description | Priority | Location | Est. |
+|---|---------|-------------|----------|----------|------|
+| 45 | S3.7.1 | Write UI developer guide | P2 | `docs/ui/developer-guide.md` | 8h |
+| 46 | S3.7.2 | Write API reference with all endpoints | P2 | `docs/ui/api-reference.md` | 6h |
+| 47 | S3.7.3 | Write browser mode guide with CORS setup per provider | P2 | `docs/ui/browser-mode.md` | 4h |
+| 48 | S3.7.4 | Write deployment guide covering all modes | P2 | `docs/ui/deployment.md` | 4h |
+
+**Total S3.7: 4 tasks, estimated 22 hours** (~3 developer-days)
+
+### 9.4 Exit Criteria
+
+- [ ] UI developer guide covers project setup through contribution workflow
+- [ ] API reference documents all REST and WS endpoints with examples
+- [ ] Browser mode guide includes per-provider CORS setup instructions
+- [ ] Deployment guide covers Docker, CDN, reverse proxy, Tauri, single-binary, and browser-only modes
+- [ ] All code examples in docs are tested and match current implementation

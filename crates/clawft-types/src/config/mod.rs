@@ -121,7 +121,7 @@ fn default_workspace() -> String {
     "~/.nanobot/workspace".into()
 }
 fn default_model() -> String {
-    "anthropic/claude-opus-4-5".into()
+    "deepseek/deepseek-chat".into()
 }
 fn default_max_tokens() -> i32 {
     8192
@@ -415,7 +415,7 @@ mod tests {
         let cfg = load_fixture();
 
         // Agents
-        assert_eq!(cfg.agents.defaults.model, "anthropic/claude-opus-4-5");
+        assert_eq!(cfg.agents.defaults.model, "deepseek/deepseek-chat");
         assert_eq!(cfg.agents.defaults.max_tokens, 8192);
         assert_eq!(cfg.agents.defaults.temperature, 0.7);
         assert_eq!(cfg.agents.defaults.max_tool_iterations, 20);
@@ -470,7 +470,7 @@ mod tests {
 
         // Agent defaults
         assert_eq!(cfg.agents.defaults.workspace, "~/.nanobot/workspace");
-        assert_eq!(cfg.agents.defaults.model, "anthropic/claude-opus-4-5");
+        assert_eq!(cfg.agents.defaults.model, "deepseek/deepseek-chat");
         assert_eq!(cfg.agents.defaults.max_tokens, 8192);
         assert!((cfg.agents.defaults.temperature - 0.7).abs() < f64::EPSILON);
         assert_eq!(cfg.agents.defaults.max_tool_iterations, 20);

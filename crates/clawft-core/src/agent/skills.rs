@@ -1,19 +1,20 @@
 //! Skill discovery and loading.
 //!
-//! Scans a directory tree for skill definitions (each skill is a
-//! subdirectory containing `skill.json` metadata and `prompt.md` LLM
-//! instructions). Loaded skills are cached in an `RwLock` for concurrent
-//! read access with infrequent writes.
+//! Scans a directory tree for skill definitions. Two formats are supported:
 //!
-//! Directory layout:
+//! **Legacy format** – each skill is a subdirectory containing `skill.json`
+//! metadata and an optional `prompt.md` with LLM instructions.
+//!
+//! **SKILL.md format** – a single `SKILL.md` file with YAML frontmatter
+//! (delimited by `---`) and a Markdown body that serves as the prompt.
+//!
 //! ```text
 //! skills/
 //! +-- research/
 //! |   +-- skill.json   {"name":"research","description":"...","variables":["topic"]}
 //! |   +-- prompt.md    # LLM instructions text
-//! +-- code_review/
-//!     +-- skill.json
-//!     +-- prompt.md
+//! +-- claude-flow/
+//!     +-- SKILL.md     # YAML frontmatter + markdown prompt
 //! ```
 //!
 //! File locations follow the fallback chain:
@@ -33,8 +34,9 @@ use clawft_types::{ClawftError, Result};
 /// A loaded skill definition.
 ///
 /// Skills consist of JSON metadata (`skill.json`) and an optional LLM
-/// prompt file (`prompt.md`). The prompt is loaded lazily on first use
-/// and cached in the [`SkillsLoader`].
+/// prompt file (`prompt.md`), **or** a single `SKILL.md` with YAML
+/// frontmatter. The prompt is loaded lazily on first use and cached in
+/// the [`SkillsLoader`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Skill {
     /// Skill identifier (matches the directory name).
@@ -47,18 +49,104 @@ pub struct Skill {
     #[serde(default)]
     pub variables: Vec<String>,
 
-    /// LLM instructions loaded from `prompt.md`. `None` until the
-    /// prompt file has been read.
+    /// LLM instructions loaded from `prompt.md` or the Markdown body of
+    /// `SKILL.md`. `None` until the prompt file has been read.
     #[serde(skip)]
     pub prompt: Option<String>,
 
     /// Semantic version of the skill definition.
     #[serde(default = "default_version")]
     pub version: String,
+
+    /// Tool name patterns this skill is allowed to invoke.
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+
+    /// Whether the skill can be invoked directly by the user (e.g. via
+    /// `/skill-name` in the CLI or a Discord command).
+    #[serde(default)]
+    pub user_invocable: bool,
+
+    /// Hint shown to the user about what arguments the skill accepts.
+    #[serde(default)]
+    pub argument_hint: Option<String>,
 }
 
 fn default_version() -> String {
     "1.0.0".into()
+}
+
+/// YAML frontmatter fields in a `SKILL.md` file.
+///
+/// Field names use kebab-case in the YAML (e.g. `allowed-tools`) and are
+/// mapped to snake_case Rust fields via `#[serde(rename)]`.
+#[derive(Debug, Deserialize)]
+struct SkillFrontmatter {
+    name: String,
+    description: String,
+    #[serde(default = "default_version")]
+    version: String,
+    #[serde(default)]
+    variables: Vec<String>,
+    #[serde(default, rename = "allowed-tools")]
+    allowed_tools: Vec<String>,
+    #[serde(default, rename = "user-invocable")]
+    user_invocable: bool,
+    #[serde(default, rename = "argument-hint")]
+    argument_hint: Option<String>,
+}
+
+/// Parse a `SKILL.md` file into a [`Skill`].
+///
+/// Expects the file to start with `---\n`, followed by YAML metadata,
+/// then a closing `---\n`. Everything after the closing delimiter is
+/// used as the prompt.
+fn parse_skill_md(content: &str, fallback_name: &str) -> std::result::Result<Skill, String> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return Err("SKILL.md missing opening --- delimiter".into());
+    }
+
+    // Skip the opening "---" line.
+    let after_open = match trimmed.strip_prefix("---") {
+        Some(rest) => rest.trim_start_matches(['\r', '\n']),
+        None => return Err("SKILL.md missing opening --- delimiter".into()),
+    };
+
+    // Find the closing "---" delimiter.
+    let close_idx = after_open
+        .find("\n---")
+        .ok_or_else(|| "SKILL.md missing closing --- delimiter".to_string())?;
+
+    let yaml_block = &after_open[..close_idx];
+    let body_start = close_idx + 4; // skip "\n---"
+    let body = if body_start < after_open.len() {
+        after_open[body_start..].trim_start_matches(['\r', '\n'])
+    } else {
+        ""
+    };
+
+    let fm: SkillFrontmatter =
+        serde_yaml::from_str(yaml_block).map_err(|e| format!("invalid YAML frontmatter: {e}"))?;
+
+    Ok(Skill {
+        name: if fm.name.is_empty() {
+            fallback_name.to_string()
+        } else {
+            fm.name
+        },
+        description: fm.description,
+        variables: fm.variables,
+        prompt: if body.is_empty() {
+            None
+        } else {
+            Some(body.to_string())
+        },
+        version: fm.version,
+        allowed_tools: fm.allowed_tools,
+        user_invocable: fm.user_invocable,
+        argument_hint: fm.argument_hint,
+    })
 }
 
 /// Loads and caches skill definitions from a workspace directory.
@@ -131,8 +219,9 @@ impl<P: Platform> SkillsLoader<P> {
 
     /// List available skill names by scanning subdirectories.
     ///
-    /// A directory is considered a skill if it contains a `skill.json`
-    /// file. Names are returned in filesystem order (not sorted).
+    /// A directory is considered a skill if it contains `skill.json`
+    /// **or** `SKILL.md`. Names are returned in filesystem order (not
+    /// sorted).
     ///
     /// # Errors
     ///
@@ -152,8 +241,9 @@ impl<P: Platform> SkillsLoader<P> {
 
         let mut names = Vec::new();
         for entry in entries {
-            let skill_json = entry.join("skill.json");
-            if self.platform.fs().exists(&skill_json).await
+            let has_skill_json = self.platform.fs().exists(&entry.join("skill.json")).await;
+            let has_skill_md = self.platform.fs().exists(&entry.join("SKILL.md")).await;
+            if (has_skill_json || has_skill_md)
                 && let Some(name) = entry.file_name()
             {
                 names.push(name.to_string_lossy().into_owned());
@@ -165,20 +255,47 @@ impl<P: Platform> SkillsLoader<P> {
 
     /// Load a specific skill by name.
     ///
-    /// Reads `skill.json` for metadata and `prompt.md` for the LLM
-    /// prompt. The loaded skill is cached for future
+    /// Tries `skill.json` + `prompt.md` first. If `skill.json` does not
+    /// exist, falls back to parsing `SKILL.md` (YAML frontmatter +
+    /// Markdown body). The loaded skill is cached for future
     /// [`get_skill`](SkillsLoader::get_skill) calls.
     ///
     /// # Errors
     ///
-    /// Returns [`ClawftError::PluginLoadFailed`] if the skill directory
-    /// or `skill.json` cannot be read.
+    /// Returns [`ClawftError::PluginLoadFailed`] if neither format can
+    /// be loaded.
     pub async fn load_skill(&self, name: &str) -> Result<Skill> {
         let skill_dir = self.skills_dir.join(name);
         let skill_json_path = skill_dir.join("skill.json");
+        let skill_md_path = skill_dir.join("SKILL.md");
+
+        let skill = if self.platform.fs().exists(&skill_json_path).await {
+            self.load_skill_json(name, &skill_dir).await?
+        } else if self.platform.fs().exists(&skill_md_path).await {
+            self.load_skill_md(name, &skill_md_path).await?
+        } else {
+            return Err(ClawftError::PluginLoadFailed {
+                plugin: format!(
+                    "skill/{name}: neither skill.json nor SKILL.md found"
+                ),
+            });
+        };
+
+        // Cache the loaded skill
+        {
+            let mut cache = self.skills.write().await;
+            cache.insert(name.to_string(), skill.clone());
+        }
+
+        debug!(skill = name, "loaded skill");
+        Ok(skill)
+    }
+
+    /// Load a skill from `skill.json` + optional `prompt.md`.
+    async fn load_skill_json(&self, name: &str, skill_dir: &std::path::Path) -> Result<Skill> {
+        let skill_json_path = skill_dir.join("skill.json");
         let prompt_path = skill_dir.join("prompt.md");
 
-        // Read and parse skill.json
         let json_content = self
             .platform
             .fs()
@@ -193,7 +310,6 @@ impl<P: Platform> SkillsLoader<P> {
                 plugin: format!("skill/{name}: invalid skill.json: {e}"),
             })?;
 
-        // Load prompt.md if it exists
         if self.platform.fs().exists(&prompt_path).await {
             match self.platform.fs().read_to_string(&prompt_path).await {
                 Ok(prompt) => {
@@ -205,14 +321,23 @@ impl<P: Platform> SkillsLoader<P> {
             }
         }
 
-        // Cache the loaded skill
-        {
-            let mut cache = self.skills.write().await;
-            cache.insert(name.to_string(), skill.clone());
-        }
-
-        debug!(skill = name, "loaded skill");
         Ok(skill)
+    }
+
+    /// Load a skill from a `SKILL.md` file with YAML frontmatter.
+    async fn load_skill_md(&self, name: &str, path: &std::path::Path) -> Result<Skill> {
+        let content = self
+            .platform
+            .fs()
+            .read_to_string(path)
+            .await
+            .map_err(|e| ClawftError::PluginLoadFailed {
+                plugin: format!("skill/{name}: {e}"),
+            })?;
+
+        parse_skill_md(&content, name).map_err(|e| ClawftError::PluginLoadFailed {
+            plugin: format!("skill/{name}: {e}"),
+        })
     }
 
     /// Get a cached skill by name.
@@ -469,6 +594,9 @@ mod tests {
             variables: vec!["var1".into(), "var2".into()],
             prompt: Some("prompt text".into()),
             version: "2.0.0".into(),
+            allowed_tools: vec!["read_file".into()],
+            user_invocable: true,
+            argument_hint: Some("hint".into()),
         };
 
         let json = serde_json::to_string(&skill).unwrap();
@@ -515,5 +643,179 @@ mod tests {
         assert!(loader.is_ok());
         let loader = loader.unwrap();
         assert!(loader.skills_dir().is_absolute());
+    }
+
+    // ── SKILL.md format tests ──────────────────────────────────────────
+
+    /// Create a skill directory with only a SKILL.md file.
+    async fn create_skill_md(dir: &std::path::Path, name: &str, content: &str) {
+        let skill_dir = dir.join(name);
+        tokio::fs::create_dir_all(&skill_dir).await.unwrap();
+        tokio::fs::write(skill_dir.join("SKILL.md"), content)
+            .await
+            .unwrap();
+    }
+
+    const SAMPLE_SKILL_MD: &str = "\
+---
+name: claude-flow
+description: Orchestrate multi-agent swarms
+version: 2.0.0
+variables:
+  - objective
+allowed-tools:
+  - claude-flow__swarm_*
+  - claude-flow__agent_*
+user-invocable: true
+argument-hint: Swarm objective
+---
+
+# Claude Flow Skill
+
+This is the prompt body.
+";
+
+    #[test]
+    fn parse_skill_md_full() {
+        let skill = parse_skill_md(SAMPLE_SKILL_MD, "fallback").unwrap();
+        assert_eq!(skill.name, "claude-flow");
+        assert_eq!(skill.description, "Orchestrate multi-agent swarms");
+        assert_eq!(skill.version, "2.0.0");
+        assert_eq!(skill.variables, vec!["objective"]);
+        assert_eq!(
+            skill.allowed_tools,
+            vec!["claude-flow__swarm_*", "claude-flow__agent_*"]
+        );
+        assert!(skill.user_invocable);
+        assert_eq!(skill.argument_hint.as_deref(), Some("Swarm objective"));
+        assert!(skill.prompt.as_ref().unwrap().contains("# Claude Flow Skill"));
+        assert!(skill.prompt.as_ref().unwrap().contains("prompt body"));
+    }
+
+    #[test]
+    fn parse_skill_md_minimal() {
+        let content = "---\nname: minimal\ndescription: A minimal skill\n---\n";
+        let skill = parse_skill_md(content, "fallback").unwrap();
+        assert_eq!(skill.name, "minimal");
+        assert_eq!(skill.version, "1.0.0");
+        assert!(skill.variables.is_empty());
+        assert!(skill.allowed_tools.is_empty());
+        assert!(!skill.user_invocable);
+        assert!(skill.argument_hint.is_none());
+        assert!(skill.prompt.is_none());
+    }
+
+    #[test]
+    fn parse_skill_md_missing_opening_delimiter() {
+        let result = parse_skill_md("name: bad\n---\n", "x");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_skill_md_missing_closing_delimiter() {
+        let result = parse_skill_md("---\nname: bad\n", "x");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_skill_md_uses_fallback_name() {
+        let content = "---\nname: \"\"\ndescription: test\n---\nBody\n";
+        let skill = parse_skill_md(content, "my-fallback").unwrap();
+        assert_eq!(skill.name, "my-fallback");
+    }
+
+    #[tokio::test]
+    async fn list_skills_finds_skill_md_dirs() {
+        let dir = temp_dir("list_md");
+        create_skill(&dir, "json_skill", "JSON skill", Some("prompt")).await;
+        create_skill_md(&dir, "md_skill", SAMPLE_SKILL_MD).await;
+
+        let loader = test_loader(&dir);
+        let mut skills = loader.list_skills().await.unwrap();
+        skills.sort();
+
+        assert_eq!(skills.len(), 2);
+        assert_eq!(skills[0], "json_skill");
+        assert_eq!(skills[1], "md_skill");
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn load_skill_from_skill_md() {
+        let dir = temp_dir("load_md");
+        create_skill_md(&dir, "flow", SAMPLE_SKILL_MD).await;
+
+        let loader = test_loader(&dir);
+        let skill = loader.load_skill("flow").await.unwrap();
+
+        assert_eq!(skill.name, "claude-flow");
+        assert_eq!(skill.description, "Orchestrate multi-agent swarms");
+        assert!(skill.prompt.is_some());
+        assert!(skill.user_invocable);
+        assert_eq!(skill.allowed_tools.len(), 2);
+
+        // Verify it's cached
+        let cached = loader.get_skill("flow").await;
+        assert!(cached.is_some());
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn load_skill_prefers_skill_json_over_skill_md() {
+        let dir = temp_dir("prefer_json");
+        // Create both formats in the same directory
+        create_skill(&dir, "dual", "From JSON", Some("JSON prompt")).await;
+        // Also add a SKILL.md
+        tokio::fs::write(
+            dir.join("dual").join("SKILL.md"),
+            "---\nname: from-md\ndescription: From MD\n---\nMD prompt\n",
+        )
+        .await
+        .unwrap();
+
+        let loader = test_loader(&dir);
+        let skill = loader.load_skill("dual").await.unwrap();
+
+        // skill.json should win
+        assert_eq!(skill.name, "dual");
+        assert_eq!(skill.description, "From JSON");
+        assert_eq!(skill.prompt.as_deref(), Some("JSON prompt"));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn load_skill_neither_format_returns_error() {
+        let dir = temp_dir("neither");
+        let skill_dir = dir.join("empty_skill");
+        tokio::fs::create_dir_all(&skill_dir).await.unwrap();
+        tokio::fs::write(skill_dir.join("readme.md"), "not a skill")
+            .await
+            .unwrap();
+
+        let loader = test_loader(&dir);
+        let result = loader.load_skill("empty_skill").await;
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("neither skill.json nor SKILL.md"));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn load_all_includes_skill_md() {
+        let dir = temp_dir("load_all_md");
+        create_skill(&dir, "json_one", "JSON", Some("prompt")).await;
+        create_skill_md(&dir, "md_one", SAMPLE_SKILL_MD).await;
+
+        let loader = test_loader(&dir);
+        loader.load_all().await.unwrap();
+
+        assert!(loader.get_skill("json_one").await.is_some());
+        assert!(loader.get_skill("md_one").await.is_some());
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

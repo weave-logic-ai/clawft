@@ -2,7 +2,7 @@
   "agents": {
     "defaults": {
       "workspace": "~/.nanobot/workspace",
-      "model": "anthropic/claude-opus-4-5",
+      "model": "deepseek/deepseek-chat",
       "maxTokens": 8192,
       "temperature": 0.7,
       "maxToolIterations": 20,

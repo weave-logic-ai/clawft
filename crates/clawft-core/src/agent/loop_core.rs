@@ -45,6 +45,7 @@ use crate::session::SessionManager;
 use crate::tools::registry::ToolRegistry;
 
 use super::context::ContextBuilder;
+use super::verification;
 
 // ---------------------------------------------------------------------------
 // Auto-delegation trait
@@ -70,6 +71,17 @@ pub trait AutoDelegation: Send + Sync {
 
 /// Maximum size in bytes for a single tool result.
 const MAX_TOOL_RESULT_BYTES: usize = 65_536;
+
+/// Result from the tool loop, including hallucination counters.
+#[derive(Debug)]
+struct ToolLoopResult {
+    /// The final text response from the LLM.
+    text: String,
+    /// Number of write claims that failed verification (hallucinated).
+    hallucinations: usize,
+    /// Number of write claims that passed verification.
+    verified_successes: usize,
+}
 
 /// The core agent loop that processes inbound messages.
 ///
@@ -310,7 +322,23 @@ impl<P: Platform> AgentLoop<P> {
             None => self.tools.schemas(),
         };
 
-        // 8. Create pipeline request with auth context
+        // 8. Read hallucination score from session metadata and compute boost.
+        let hallucination_score = session
+            .metadata
+            .get(verification::HALLUCINATION_SCORE_KEY)
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0) as f32;
+        let complexity_boost = verification::score_to_boost(hallucination_score);
+
+        if complexity_boost > 0.0 {
+            debug!(
+                hallucination_score,
+                complexity_boost,
+                "applying hallucination complexity boost"
+            );
+        }
+
+        // 9. Create pipeline request with auth context + hallucination boost
         let request = ChatRequest {
             messages,
             tools: tool_schemas,
@@ -318,22 +346,44 @@ impl<P: Platform> AgentLoop<P> {
             max_tokens: Some(self.config.defaults.max_tokens),
             temperature: Some(self.config.defaults.temperature),
             auth_context: Some(auth_context),
+            complexity_boost,
         };
 
-        // 9. Execute pipeline + tool loop
-        let response_text = self.run_tool_loop(request).await?;
+        // 10. Execute pipeline + tool loop
+        let tool_result = self.run_tool_loop(request).await?;
 
-        // 10. Add assistant message to session
-        session.add_message("assistant", &response_text, None);
+        // 11. Update hallucination score if any write verifications occurred.
+        if tool_result.hallucinations > 0 || tool_result.verified_successes > 0 {
+            let new_score = verification::update_hallucination_score(
+                hallucination_score,
+                tool_result.hallucinations,
+                tool_result.verified_successes,
+                verification::HALLUCINATION_EMA_ALPHA,
+            );
+            session.metadata.insert(
+                verification::HALLUCINATION_SCORE_KEY.to_string(),
+                serde_json::json!(new_score),
+            );
+            debug!(
+                old_score = hallucination_score,
+                new_score,
+                hallucinations = tool_result.hallucinations,
+                verified = tool_result.verified_successes,
+                "updated hallucination score"
+            );
+        }
 
-        // 11. Save session
+        // 12. Add assistant message to session
+        session.add_message("assistant", &tool_result.text, None);
+
+        // 13. Save session
         self.sessions.save_session(&session).await?;
 
-        // 12. Dispatch outbound
+        // 14. Dispatch outbound
         let outbound = OutboundMessage {
             channel: msg.channel.clone(),
             chat_id: msg.chat_id.clone(),
-            content: response_text,
+            content: tool_result.text,
             reply_to: None,
             media: vec![],
             metadata: Default::default(),
@@ -424,12 +474,27 @@ impl<P: Platform> AgentLoop<P> {
     /// CLI channel messages always receive admin-level (Level 2)
     /// permissions via the resolver's `cli_default_level`.
     fn resolve_auth_context(&self, msg: &InboundMessage) -> AuthContext {
-        // allow_from_match is set by channel plugins when they verify the
-        // sender is in the channel's allow_from list. The CLI channel does
-        // NOT use allow_from -- it gets admin via the cli_default_level path
-        // in PermissionResolver::determine_level, so pass false here.
+        // Channel plugins set "allow_from_match" in metadata when the sender
+        // passed the channel's allow_from verification. This promotes the
+        // sender from zero-trust to at least user-level permissions.
+        let allow_from_match = msg
+            .metadata
+            .get("allow_from_match")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         self.permission_resolver
-            .resolve_auth_context(&msg.sender_id, &msg.channel, false)
+            .resolve_auth_context(&msg.sender_id, &msg.channel, allow_from_match)
+    }
+
+    /// Resolve the workspace path from config, expanding `~` to home dir.
+    fn workspace_path(&self) -> std::path::PathBuf {
+        let raw = &self.config.defaults.workspace;
+        if let Some(rest) = raw.strip_prefix("~/") {
+            if let Some(home) = self.platform.fs().home_dir() {
+                return home.join(rest);
+            }
+        }
+        std::path::PathBuf::from(raw)
     }
 
     /// Execute the tool loop: call LLM, execute tools, repeat.
@@ -439,8 +504,18 @@ impl<P: Platform> AgentLoop<P> {
     /// tool results to the message list, and re-invokes the pipeline.
     /// Continues until the LLM returns a text response or the maximum
     /// iteration limit is reached.
-    async fn run_tool_loop(&self, mut request: ChatRequest) -> clawft_types::Result<String> {
+    ///
+    /// Post-write verification checks whether files claimed by write/edit
+    /// tools actually exist on disk. Hallucinated results are replaced with
+    /// error messages so the LLM can retry.
+    async fn run_tool_loop(
+        &self,
+        mut request: ChatRequest,
+    ) -> clawft_types::Result<ToolLoopResult> {
         let max_iterations = self.config.defaults.max_tool_iterations.max(1) as usize;
+        let mut total_hallucinations: usize = 0;
+        let mut total_verified: usize = 0;
+        let workspace = self.workspace_path();
 
         for iteration in 0..max_iterations {
             let response = self.pipeline.complete(&request).await?;
@@ -474,7 +549,11 @@ impl<P: Platform> AgentLoop<P> {
                     .join("");
 
                 debug!(iteration, "tool loop complete, returning text response");
-                return Ok(text);
+                return Ok(ToolLoopResult {
+                    text,
+                    hallucinations: total_hallucinations,
+                    verified_successes: total_verified,
+                });
             }
 
             debug!(
@@ -544,18 +623,56 @@ impl<P: Platform> AgentLoop<P> {
                                 serde_json::json!({"error": e.to_string()}).to_string()
                             }
                         };
-                        (id.clone(), result_json)
+                        (id.clone(), name.clone(), result_json)
                     }
                 })
                 .collect();
 
             let results = futures_util::future::join_all(futures).await;
 
-            for (id, result_json) in results {
+            // Post-write verification: check that claimed writes exist on disk.
+            let verification_results = verification::verify_write_results(
+                self.platform.fs(),
+                &workspace,
+                &results,
+            )
+            .await;
+
+            // Build a set of hallucinated tool call IDs for result replacement.
+            let hallucinated_ids: std::collections::HashSet<String> = verification_results
+                .iter()
+                .filter(|v| !v.verified)
+                .map(|v| v.tool_call_id.clone())
+                .collect();
+
+            // Count verification outcomes.
+            for vr in &verification_results {
+                if vr.verified {
+                    total_verified += 1;
+                } else {
+                    total_hallucinations += 1;
+                    warn!(
+                        tool_call_id = %vr.tool_call_id,
+                        path = %vr.claimed_path.display(),
+                        "VERIFICATION FAILED: file does not exist (hallucinated write)"
+                    );
+                }
+            }
+
+            for (id, _name, result_json) in &results {
+                let content = if hallucinated_ids.contains(id) {
+                    // Replace the success result with a verification failure error.
+                    serde_json::json!({
+                        "error": "VERIFICATION FAILED: the file you claimed to write does not exist on disk. The write was hallucinated. Please retry the write operation."
+                    }).to_string()
+                } else {
+                    result_json.clone()
+                };
+
                 request.messages.push(LlmMessage {
                     role: "tool".into(),
-                    content: result_json,
-                    tool_call_id: Some(id),
+                    content,
+                    tool_call_id: Some(id.clone()),
                     tool_calls: None,
                 });
             }
@@ -977,6 +1094,7 @@ mod tests {
             max_tokens: Some(4096),
             temperature: Some(0.5),
             auth_context: None,
+            complexity_boost: 0.0,
         };
 
         let result = agent.run_tool_loop(request).await;
@@ -1200,9 +1318,11 @@ mod tests {
             max_tokens: Some(4096),
             temperature: Some(0.5),
             auth_context: None,
+            complexity_boost: 0.0,
         };
 
-        let result = agent.run_tool_loop(request).await.unwrap();
+        let tool_result = agent.run_tool_loop(request).await.unwrap();
+        let result = &tool_result.text;
 
         // The tool result should have been truncated to MAX_TOOL_RESULT_BYTES (65536).
         // The response tells us the length of the tool result message.

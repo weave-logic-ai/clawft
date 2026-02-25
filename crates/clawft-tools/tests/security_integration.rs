@@ -317,12 +317,12 @@ async fn spawn_unlisted_command_rejected() {
     let tool = make_spawn(ws.clone(), CommandPolicy::safe_defaults());
 
     let err = tool
-        .execute(json!({"command": "python3", "args": ["-c", "print('hi')"]}))
+        .execute(json!({"command": "nmap", "args": ["-sS", "10.0.0.0/24"]}))
         .await
         .unwrap_err();
     assert!(
         matches!(err, ToolError::PermissionDenied { .. }),
-        "python3 should be rejected in allowlist mode: {err:?}"
+        "nmap should be rejected in allowlist mode: {err:?}"
     );
 
     cleanup(&ws).await;
@@ -575,7 +575,7 @@ async fn cross_tool_safe_defaults_behavior() {
     assert!(policy.allowlist.contains("ls"));
     assert!(policy.allowlist.contains("grep"));
     assert!(!policy.allowlist.contains("curl"));
-    assert!(!policy.allowlist.contains("python3"));
+    assert!(!policy.allowlist.contains("nmap"));
 
     // Verify dangerous patterns are populated
     assert!(!policy.dangerous_patterns.is_empty());

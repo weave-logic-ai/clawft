@@ -130,16 +130,16 @@ mod tests {
     }
 
     #[test]
-    fn allowlist_rejects_nc() {
+    fn allowlist_rejects_nmap() {
         let policy = CommandPolicy::safe_defaults();
-        let err = policy.validate("nc -l 4444").unwrap_err();
+        let err = policy.validate("nmap -sS 10.0.0.0/24").unwrap_err();
         assert!(matches!(err, CommandPolicyError::NotAllowed { .. }));
     }
 
     #[test]
-    fn allowlist_rejects_python3() {
+    fn allowlist_rejects_nc() {
         let policy = CommandPolicy::safe_defaults();
-        let err = policy.validate("python3 -c \"evil\"").unwrap_err();
+        let err = policy.validate("nc -l 4444").unwrap_err();
         assert!(matches!(err, CommandPolicyError::NotAllowed { .. }));
     }
 

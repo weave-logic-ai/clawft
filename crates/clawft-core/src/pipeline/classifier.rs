@@ -139,7 +139,8 @@ impl TaskClassifier for KeywordClassifier {
         // Estimate complexity from keyword density.
         let word_count = text_lower.split_whitespace().count().max(1) as f32;
         let keyword_density = matched_keywords.len() as f32 / word_count;
-        let complexity = keyword_density.clamp(0.1, 0.9);
+        let raw_complexity = keyword_density + request.complexity_boost;
+        let complexity = raw_complexity.clamp(0.1, 0.9);
 
         TaskProfile {
             task_type: matched_type,
@@ -178,6 +179,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             auth_context: None,
+            complexity_boost: 0.0,
         }
     }
 
@@ -202,6 +204,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             auth_context: None,
+            complexity_boost: 0.0,
         }
     }
 
@@ -310,6 +313,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             auth_context: None,
+            complexity_boost: 0.0,
         };
         // Only the last user message is scanned; system messages are ignored.
         let profile = classifier.classify(&req);
@@ -352,6 +356,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             auth_context: None,
+            complexity_boost: 0.0,
         };
         let profile = classifier.classify(&req);
         assert_eq!(profile.task_type, TaskType::CodeGeneration);
@@ -428,5 +433,37 @@ mod tests {
         // "code" and "explain" both match, but code patterns are checked first.
         let profile = classifier.classify(&make_request("Explain this code to me"));
         assert_eq!(profile.task_type, TaskType::CodeGeneration);
+    }
+
+    // ── Complexity boost tests ──────────────────────────────────────
+
+    #[test]
+    fn complexity_boost_increases_complexity() {
+        let classifier = KeywordClassifier::new();
+        let baseline = classifier.classify(&make_request("hello world"));
+
+        let mut boosted_req = make_request("hello world");
+        boosted_req.complexity_boost = 0.3;
+        let boosted = classifier.classify(&boosted_req);
+
+        assert!(
+            boosted.complexity > baseline.complexity,
+            "boosted={} should be > baseline={}",
+            boosted.complexity,
+            baseline.complexity
+        );
+    }
+
+    #[test]
+    fn complexity_boost_clamps_at_max() {
+        let classifier = KeywordClassifier::new();
+        let mut req = make_request("code function implement debug fix");
+        req.complexity_boost = 0.5;
+        let profile = classifier.classify(&req);
+        assert!(
+            profile.complexity <= 0.9,
+            "complexity {} should be clamped at 0.9",
+            profile.complexity
+        );
     }
 }

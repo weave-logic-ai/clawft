@@ -78,7 +78,7 @@ mod tests {
     #[test]
     fn load_merged_config_defaults_only() {
         let config = load_merged_config_from(None, None).unwrap();
-        assert_eq!(config.agents.defaults.model, "anthropic/claude-opus-4-5");
+        assert_eq!(config.agents.defaults.model, "deepseek/deepseek-chat");
         assert_eq!(config.agents.defaults.max_tokens, 8192);
     }
 
@@ -99,7 +99,7 @@ mod tests {
         assert_eq!(config.agents.defaults.max_tokens, 4096);
         assert_eq!(
             config.agents.defaults.model,
-            "anthropic/claude-opus-4-5"
+            "deepseek/deepseek-chat"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

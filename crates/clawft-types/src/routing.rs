@@ -864,11 +864,11 @@ mod tests {
     #[test]
     fn backward_compat_no_routing() {
         let json = r#"{
-            "agents": { "defaults": { "model": "anthropic/claude-opus-4-5" } },
+            "agents": { "defaults": { "model": "deepseek/deepseek-chat" } },
             "providers": { "anthropic": { "apiKey": "test" } }
         }"#;
         let cfg: crate::config::Config = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.agents.defaults.model, "anthropic/claude-opus-4-5");
+        assert_eq!(cfg.agents.defaults.model, "deepseek/deepseek-chat");
         assert_eq!(cfg.routing.mode, "static");
         assert!(cfg.routing.tiers.is_empty());
     }

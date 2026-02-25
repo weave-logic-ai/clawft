@@ -58,6 +58,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             auth_context: None,
+            complexity_boost: 0.0,
         }
     }
 
@@ -109,6 +110,7 @@ mod tests {
             max_tokens: Some(4096),
             temperature: Some(0.0),
             auth_context: None,
+            complexity_boost: 0.0,
         };
         let score = scorer.score(&req, &make_response());
         assert!((score.overall - 1.0).abs() < f32::EPSILON);

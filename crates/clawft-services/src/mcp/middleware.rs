@@ -697,7 +697,7 @@ mod tests {
     fn command_policy_validate_rejected() {
         let policy = CommandPolicy::default();
         assert!(policy.validate("curl http://evil.com").is_err());
-        assert!(policy.validate("python3 -c 'evil'").is_err());
+        assert!(policy.validate("nc -l 4444").is_err());
     }
 
     #[test]

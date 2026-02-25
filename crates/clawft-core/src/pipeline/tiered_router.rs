@@ -832,6 +832,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             auth_context: None,
+            complexity_boost: 0.0,
         }
     }
 
@@ -848,6 +849,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             auth_context: Some(auth),
+            complexity_boost: 0.0,
         }
     }
 

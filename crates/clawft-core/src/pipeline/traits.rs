@@ -51,6 +51,12 @@ pub struct ChatRequest {
     /// `skip_deserializing` prevents JSON injection via the gateway API.
     #[serde(default, skip_deserializing)]
     pub auth_context: Option<AuthContext>,
+
+    /// Complexity boost applied by hallucination detection.
+    /// Added to the classifier's keyword density to push hallucination-prone
+    /// sessions into higher-tier models.
+    #[serde(default)]
+    pub complexity_boost: f32,
 }
 
 /// A single message in a chat conversation.
@@ -538,6 +544,7 @@ mod tests {
             max_tokens: Some(1024),
             temperature: Some(0.7),
             auth_context: None,
+            complexity_boost: 0.0,
         };
         assert_eq!(req.messages.len(), 1);
         assert_eq!(req.model.as_deref(), Some("gpt-4o"));
@@ -671,6 +678,7 @@ mod tests {
             max_tokens: Some(4096),
             temperature: Some(0.5),
             auth_context: None,
+            complexity_boost: 0.0,
         };
         let json = serde_json::to_string(&req).unwrap();
         let restored: ChatRequest = serde_json::from_str(&json).unwrap();
@@ -876,6 +884,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             auth_context: None,
+            complexity_boost: 0.0,
         });
     }
 
@@ -911,6 +920,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             auth_context: None,
+            complexity_boost: 0.0,
         };
 
         let response = registry.complete(&request).await.unwrap();
@@ -948,6 +958,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             auth_context: None,
+            complexity_boost: 0.0,
         };
 
         // The classifier returns CodeGeneration, so the specialized pipeline is used.
@@ -1006,6 +1017,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             auth_context: None,
+            complexity_boost: 0.0,
         };
         let json = serde_json::to_string(&req).unwrap();
         // skip_deserializing only affects the Deserialize side.
@@ -1043,6 +1055,7 @@ mod tests {
                 channel: "telegram".into(),
                 permissions: UserPermissions::default(),
             }),
+            complexity_boost: 0.0,
         };
 
         // Serialize -- should include auth_context.
@@ -1084,6 +1097,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             auth_context: Some(AuthContext::cli_default()),
+            complexity_boost: 0.0,
         };
 
         // Complete should succeed with auth_context present.
@@ -1109,6 +1123,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             auth_context: None,
+            complexity_boost: 0.0,
         };
 
         // Should not panic and should return a valid response.

@@ -101,6 +101,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             auth_context: None,
+            complexity_boost: 0.0,
         }
     }
 
@@ -136,6 +137,7 @@ mod tests {
             max_tokens: Some(9999),
             temperature: Some(0.0),
             auth_context: None,
+            complexity_boost: 0.0,
         };
         let profile = TaskProfile {
             task_type: TaskType::CodeGeneration,
@@ -178,8 +180,8 @@ mod tests {
     fn from_config_default_agents_config() {
         let config = AgentsConfig::default();
         let router = StaticRouter::from_config(&config);
-        assert_eq!(router.provider(), "anthropic");
-        assert_eq!(router.model(), "claude-opus-4-5");
+        assert_eq!(router.provider(), "deepseek");
+        assert_eq!(router.model(), "deepseek-chat");
     }
 
     #[test]

@@ -1,16 +1,60 @@
 # SPARC UI Element: Web Dashboard + Live Canvas
 
-**Workstream**: K1 (Web Dashboard + Live Canvas)
-**Timeline**: Weeks 1-9 (parallel with voice sprint)
+**Workstream**: W-UI (Web Dashboard + Live Canvas)
+**Timeline**: Weeks 1-10 (parallel with voice sprint)
 **Status**: Planning
-**Dependencies**: B5 (shared tool registry builder), C3/C4/C6 (skill system for skill browser), H1/H2 (memory for explorer), L1 (agent routing), M1/M2 (delegation for monitor), D5/D6 (latency/cost data)
-**Blocks**: K6 (native shells via Tauri)
+**Dependencies**: B5 (shared tool registry builder), C3/C4/C6 (skill system for skill browser), H1/H2 (memory for explorer), L1 (agent routing), M1/M2 (delegation for monitor), D5/D6 (latency/cost data), W-BROWSER Phase 5 (WASM entry points for browser-only mode)
+**Blocks**: K6 (native shells via Tauri), VS3 (voice UI integration -- S2 blocks VS3 canvas voice hooks)
 
 ---
 
 ## 1. Summary
 
-Build a standalone web dashboard and Live Canvas for ClawFT. The UI is an independent application (Vite + React + TypeScript + shadcn/ui + Tailwind CSS) that connects to any clawft gateway instance via configurable API URL. It can be developed, tested, and deployed without the Rust backend running (mock API via MSW). The backend API layer extends the existing Axum gateway with REST endpoints and WebSocket real-time transport. The dashboard covers agent management, WebChat with streaming, session explorer, tool registry, Live Canvas (agent-driven interactive UI), skill browser, memory explorer, configuration editor, delegation monitoring, and Tauri desktop shell. Optionally embeddable into the `weft` binary for single-binary distribution.
+Build a standalone web dashboard and Live Canvas for ClawFT. The UI is an independent application (Vite + React + TypeScript + shadcn/ui + Tailwind CSS) that operates in two modes:
+
+1. **Axum Backend Mode** (default): Connects to any clawft gateway instance via configurable REST API URL and WebSocket transport. Full feature set including channels, cron, delegation monitoring, and multi-user auth.
+
+2. **WASM Browser-Only Mode**: Connects directly to the `clawft-wasm` module loaded in the same browser tab. No server required. The WASM module runs `AgentLoop<BrowserPlatform>` with browser-native file system (OPFS), HTTP client (fetch API), and environment. Feature set is reduced: no channels, no cron, no delegation, no multi-user. LLM calls go directly from browser to provider APIs (Anthropic direct access, or via CORS proxy for other providers).
+
+The UI can be developed, tested, and deployed without the Rust backend running (mock API via MSW). The backend API layer extends the existing Axum gateway with REST endpoints and WebSocket real-time transport. The dashboard covers agent management, WebChat with streaming, session explorer, tool registry, Live Canvas (agent-driven interactive UI), skill browser, memory explorer, configuration editor, delegation monitoring, Tauri desktop shell, and browser WASM integration. Optionally embeddable into the `weft` binary for single-binary distribution.
+
+### 1.1 Dual-Mode Architecture
+
+```
+                   +---------------------+
+                   |  React UI (ui/)     |
+                   |  Vite + shadcn/ui   |
+                   +----------+----------+
+                              |
+              +---------------+---------------+
+              |                               |
+    +---------v---------+         +-----------v-----------+
+    | BackendAdapter    |         | WasmAdapter           |
+    | (api-client.ts)   |         | (wasm-client.ts)      |
+    |                   |         |                       |
+    | REST: /api/*      |         | wasm-bindgen bridge   |
+    | WS: /ws, /ws/*    |         | init(), send_message()|
+    | Bearer token auth |         | on_response(callback) |
+    +---------+---------+         +-----------+-----------+
+              |                               |
+    +---------v---------+         +-----------v-----------+
+    | Axum Gateway      |         | clawft-wasm module    |
+    | (clawft-services) |         | (wasm32-unknown-      |
+    | Port 18789        |         |  unknown)             |
+    +-------------------+         | AgentLoop<Browser-    |
+                                  |  Platform>            |
+                                  +-----------+-----------+
+                                              |
+                                  +-----------v-----------+
+                                  | LLM Provider API      |
+                                  | (direct or via proxy)  |
+                                  +-----------------------+
+```
+
+The adapter layer is selected at startup based on:
+- `VITE_BACKEND_MODE=axum` (default): Use REST/WS API client
+- `VITE_BACKEND_MODE=wasm`: Load and initialize clawft-wasm module
+- Auto-detect: If `VITE_API_URL` is set, use Axum; if `clawft_wasm.js` is present, use WASM
 
 ---
 
@@ -160,6 +204,28 @@ Build a standalone web dashboard and Live Canvas for ClawFT. The UI is an indepe
 | Tailscale auth | X-Tailscale-User header auth provider for remote access | clawft-services |
 | Multi-user isolation | Per-user session isolation + permission scoping | clawft-services |
 
+### Phase S3.6: Browser WASM Integration (Weeks 9-10) -- P1
+
+| Deliverable | Description | Location |
+|-------------|-------------|----------|
+| Backend adapter interface | TypeScript interface abstracting Axum REST/WS vs WASM bridge | ui/src/lib/backend-adapter.ts |
+| Axum adapter | Concrete adapter using api-client.ts + ws-client.ts (existing code) | ui/src/lib/adapters/axum-adapter.ts |
+| WASM adapter | Concrete adapter wrapping clawft-wasm `init()`, `send_message()`, `on_response()` | ui/src/lib/adapters/wasm-adapter.ts |
+| WASM loader | Async loader for clawft_wasm.js + .wasm binary with progress indicator | ui/src/lib/wasm-loader.ts |
+| Config UI for browser mode | IndexedDB config storage, API key input with Web Crypto encryption, provider setup | ui/src/components/wasm/ |
+| Feature detection | Runtime capability detection (OPFS, Web Crypto, wasm-bindgen) with fallback warnings | ui/src/lib/feature-detect.ts |
+| Vite WASM build config | wasm-pack integration or manual WASM loading config for Vite | ui/vite.config.ts |
+| Browser-mode route gating | Disable routes unavailable in WASM mode (channels, cron, delegation, multi-user) | ui/src/lib/mode-context.ts |
+
+### Phase S3.7: Documentation + Developer Guide (Week 10) -- P2
+
+| Deliverable | Description | Location |
+|-------------|-------------|----------|
+| UI developer guide | Setup, architecture, adding new routes/components, MSW patterns | docs/ui/developer-guide.md |
+| API reference | REST + WS endpoint catalog with request/response examples | docs/ui/api-reference.md |
+| Browser mode guide | How to build and deploy browser-only clawft UI with WASM module | docs/ui/browser-mode.md |
+| Deployment guide | Docker, CDN, reverse proxy, Tauri packaging, single-binary embedding | docs/ui/deployment.md |
+
 ---
 
 ## 2.5 Internal Dependency Graph
@@ -190,6 +256,10 @@ S1.2 (Frontend Scaffolding)
   +---> S1.3 (Core Views) -- needs layout shell, router, api-client, ws-client
   |
   +---> S3.3 (Mobile + PWA) -- adapts layout from S1.2
+  |
+  +---> S3.6 (Browser WASM Integration) -- needs adapter layer over api-client/ws-client
+              |
+              +---> S3.7 (Documentation) -- documents both modes
 ```
 
 ### External Workstream Dependencies
@@ -209,6 +279,29 @@ M2  (flow_available detection) ---> S3.1 (runtime delegation target info)
 D5  (record actual latency)    ---> S3.1 (pipeline inspector latency data)
 D6  (thread sender_id)         ---> S3.1 (per-user cost attribution)
 K4  (ClawHub registry)         ---> S2.2 (ClawHub search proxy)
+```
+
+### Cross-Workstream Dependencies
+
+```
+W-BROWSER Workstream                W-UI Phase That Needs It
+-------------------------------     ----------------------
+W-BROWSER Phase 5 (WASM entry  ---> S3.6 (Browser WASM Integration: wasm-adapter.ts calls
+  points: init(), send_message,       init(), send_message(), on_response() from clawft-wasm)
+  on_response)
+W-BROWSER Phase 4 (Browser     ---> S3.6 (Config UI: browser mode config must match
+  Platform: config from JS)           BrowserPlatform init() JSON schema)
+W-BROWSER Phase 3 (LLM         ---> S3.6 (Provider setup UI: CORS proxy config,
+  Transport in browser)               browser_direct toggle, API key encryption)
+
+W-UI Phase That Blocks              Downstream
+-------------------------------     ----------------------
+S2 (Canvas + advanced views)   ---> VS3 (Voice UI integration: voice commands target
+                                      Canvas elements, need stable Canvas protocol)
+S3.6 (Browser WASM)            ---> W-BROWSER can test E2E with real UI (not just
+                                      minimal HTML test harness from Phase 6)
+S3.3 (PWA)                     ---> S3.6 (Service worker must handle WASM binary
+                                      caching alongside static assets)
 ```
 
 ---
@@ -332,6 +425,30 @@ K4  (ClawHub registry)         ---> S2.2 (ClawHub search proxy)
 - [ ] Tailscale auth provider validates X-Tailscale-User headers
 - [ ] Multi-user sessions are isolated (no cross-user data leakage)
 
+### S3.6 Browser WASM Integration
+
+- [ ] `BackendAdapter` interface abstracts Axum and WASM backends with identical method signatures
+- [ ] `AxumAdapter` wraps existing api-client.ts + ws-client.ts behind the adapter interface
+- [ ] `WasmAdapter` loads clawft-wasm module, calls `init(config_json)`, bridges `send_message()` / `on_response()`
+- [ ] WASM module loads with progress indicator (download + compile + init phases)
+- [ ] Browser-mode config UI stores config in IndexedDB, encrypts API keys with Web Crypto AES-256-GCM
+- [ ] Provider setup UI supports `browser_direct` toggle (Anthropic) and `cors_proxy` URL input
+- [ ] Feature detection warns users if OPFS or Web Crypto are unavailable
+- [ ] `VITE_BACKEND_MODE=wasm` env var selects WASM adapter at build time
+- [ ] Auto-detection works: if API URL is reachable use Axum, otherwise fall back to WASM
+- [ ] Routes unavailable in WASM mode (channels, cron, delegation, multi-user) are hidden/disabled
+- [ ] WebChat works end-to-end in WASM mode: user message -> WASM pipeline -> LLM API -> response
+- [ ] Tool results from WASM mode display identically to Axum mode in the UI
+- [ ] Service worker caches .wasm binary alongside static assets for offline PWA shell
+- [ ] CSP headers in browser-only mode allow `'wasm-unsafe-eval'` for WASM execution
+
+### S3.7 Documentation + Developer Guide
+
+- [ ] UI developer guide covers project setup, architecture, and contribution workflow
+- [ ] API reference documents all REST and WS endpoints with request/response examples
+- [ ] Browser mode guide explains build, config, provider CORS setup, and deployment
+- [ ] Deployment guide covers Docker, CDN, reverse proxy, Tauri, and single-binary modes
+
 ---
 
 ## 4. Security Requirements
@@ -389,6 +506,15 @@ The static file serving layer MUST set CSP headers that:
 - Per-user permission scoping prevents users from accessing other users' sessions or memory
 - Audit logging records all config changes with user identity
 
+### 4.8 Browser WASM Security (S3.6)
+
+- API keys in browser mode MUST be encrypted with Web Crypto API (AES-256-GCM) before storage in IndexedDB; encryption key is non-extractable CryptoKey derived from user passphrase or device fingerprint
+- API keys are decrypted only at runtime and passed to the WASM module via `init(config_json)`; they are never stored in plaintext in IndexedDB, localStorage, or OPFS
+- CSP for browser-only mode adds `'wasm-unsafe-eval'` to `script-src` to allow WASM execution; no other unsafe policies are added
+- CORS proxy URL in config MUST be validated to use HTTPS in production (HTTP allowed only for localhost development)
+- The WASM module runs in the main thread or a Web Worker; no `SharedArrayBuffer` is required (avoids COOP/COEP header complexity)
+- Users MUST be warned that API keys transit their browser in WASM mode: "Your API key is sent directly from your browser to the LLM provider. Use a separate API key with restricted permissions for browser usage."
+
 ---
 
 ## 5. Risks
@@ -405,3 +531,8 @@ The static file serving layer MUST set CSP headers that:
 | WebSocket connection instability on unreliable networks | Medium | Medium | **6** | Reconnecting client with exponential backoff (1s, 2s, 4s, ... 30s max). Missed events recovered via REST API polling on reconnect. Connection status indicator in UI header. |
 | shadcn/ui or Tailwind breaking changes during sprint | Low | Medium | **3** | Pin all dependency versions in `pnpm-lock.yaml`. Use `components.json` lock for shadcn. Only upgrade dependencies between sprints, not during. |
 | Multi-user auth bypass via header forgery (Tailscale) | Low | Critical | **5** | Backend MUST verify `X-Tailscale-User-*` headers originate from Tailscale proxy (check source IP or use Tailscale HTTPS cert verification). Disable header auth when not behind Tailscale proxy. |
+| WASM binary size exceeds budget (>500KB gzipped) | Medium | Medium | **6** | Tree-shake via `wasm-opt`, audit dependencies with `twiggy`. Target <500KB gzipped. Service worker caches WASM binary to avoid re-download. |
+| WASM module blocks main thread during init | Medium | Medium | **6** | Show loading spinner during WASM compile+init. Move to Web Worker if init exceeds 2 seconds. Use `WebAssembly.compileStreaming()` for parallel download+compile. |
+| CORS blocks direct LLM API calls in browser mode | High | High | **9** | Anthropic supports `anthropic-dangerous-direct-browser-access` header. Other providers require CORS proxy. Config UI prominently warns about CORS and offers proxy setup instructions. |
+| API key exposure in browser IndexedDB | Medium | High | **8** | Web Crypto AES-256-GCM encryption with non-extractable key. UI warns users to use restricted API keys. Browser storage is inherently less secure than server-side -- document this trade-off. |
+| W-BROWSER Phase 5 not ready when S3.6 starts | Medium | Medium | **6** | S3.6 can be developed against a mock WASM adapter that returns canned responses. Real WASM integration tested once W-BROWSER delivers the entry points. |

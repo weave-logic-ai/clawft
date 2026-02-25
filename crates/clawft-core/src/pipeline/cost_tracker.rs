@@ -626,7 +626,10 @@ mod tests {
     #[test]
     fn daily_reset_boundary_detection() {
         let t = CostTracker::new(0);
-        let now = chrono::Utc::now();
+        // Use a fixed noon timestamp to avoid flaking near midnight UTC.
+        let now = chrono::DateTime::parse_from_rfc3339("2025-06-15T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
         let yesterday = now - chrono::Duration::hours(25);
 
         // Same day: no reset.

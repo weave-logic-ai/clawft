@@ -57,6 +57,7 @@ mod tests {
                 max_tokens: None,
                 temperature: None,
                 auth_context: None,
+                complexity_boost: 0.0,
             },
             routing: RoutingDecision {
                 provider: "openai".into(),

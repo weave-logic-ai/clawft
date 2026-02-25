@@ -31,6 +31,59 @@ use super::events::{
 /// Delay before reconnecting after a connection failure.
 const RECONNECT_DELAY_SECS: u64 = 5;
 
+/// Maximum message length for Discord (standard limit).
+/// Discord allows up to 2000 characters per message (4000 for Nitro).
+/// We use 2000 to be universally safe.
+const DISCORD_MAX_MESSAGE_LEN: usize = 2000;
+
+/// Split a message into chunks that fit within the Discord character limit.
+///
+/// Tries to split at line boundaries first, then word boundaries. If a
+/// single word exceeds the limit, it is hard-split at the limit.
+fn chunk_message(content: &str, max_len: usize) -> Vec<&str> {
+    if content.len() <= max_len {
+        return vec![content];
+    }
+
+    let mut chunks = Vec::new();
+    let mut remaining = content;
+
+    while !remaining.is_empty() {
+        if remaining.len() <= max_len {
+            chunks.push(remaining);
+            break;
+        }
+
+        // Find the best split point within max_len.
+        let search_range = &remaining[..max_len];
+
+        // Prefer splitting at the last newline.
+        let split_at = search_range
+            .rfind('\n')
+            // Fall back to last space.
+            .or_else(|| search_range.rfind(' '))
+            // Hard-split if no natural boundary.
+            .map(|pos| pos + 1)
+            .unwrap_or(max_len);
+
+        let (chunk, rest) = remaining.split_at(split_at);
+        let chunk = chunk.trim_end();
+        if !chunk.is_empty() {
+            chunks.push(chunk);
+        }
+        remaining = rest.trim_start_matches('\n');
+        if remaining.is_empty() {
+            break;
+        }
+    }
+
+    if chunks.is_empty() {
+        chunks.push(content);
+    }
+
+    chunks
+}
+
 /// Discord channel implementation using the Gateway WebSocket protocol.
 ///
 /// # Configuration
@@ -130,6 +183,15 @@ impl DiscordChannel {
             metadata.insert(
                 "reply_to_message_id".into(),
                 serde_json::Value::String(ref_id.clone()),
+            );
+        }
+
+        // Signal that the sender passed the allow_from check so the
+        // permission resolver can promote them from zero-trust to user level.
+        if !self.config.allow_from.is_empty() {
+            metadata.insert(
+                "allow_from_match".into(),
+                serde_json::Value::Bool(true),
             );
         }
 
@@ -513,8 +575,89 @@ impl Channel for DiscordChannel {
     }
 
     async fn send(&self, msg: &OutboundMessage) -> Result<MessageId, ChannelError> {
-        let message_id = self.api.create_message(&msg.chat_id, &msg.content).await?;
+        let chunks = chunk_message(&msg.content, DISCORD_MAX_MESSAGE_LEN);
+        let mut last_id = String::new();
 
-        Ok(MessageId(message_id))
+        for chunk in &chunks {
+            last_id = self.api.create_message(&msg.chat_id, chunk).await?;
+        }
+
+        Ok(MessageId(last_id))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunk_short_message() {
+        let msg = "Hello, world!";
+        let chunks = chunk_message(msg, 2000);
+        assert_eq!(chunks, vec!["Hello, world!"]);
+    }
+
+    #[test]
+    fn chunk_empty_message() {
+        let chunks = chunk_message("", 2000);
+        assert_eq!(chunks, vec![""]);
+    }
+
+    #[test]
+    fn chunk_at_newline_boundary() {
+        let line = "x".repeat(900);
+        let msg = format!("{line}\n{line}\n{line}");
+        let chunks = chunk_message(&msg, 2000);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].len() <= 2000);
+        assert!(chunks[1].len() <= 2000);
+    }
+
+    #[test]
+    fn chunk_at_space_boundary() {
+        // No newlines, but has spaces
+        let word = "word ".repeat(500); // ~2500 chars
+        let chunks = chunk_message(&word, 2000);
+        assert!(chunks.len() >= 2);
+        for chunk in &chunks {
+            assert!(chunk.len() <= 2000);
+        }
+    }
+
+    #[test]
+    fn chunk_hard_split_no_boundaries() {
+        // Single long word with no spaces or newlines
+        let long = "a".repeat(5000);
+        let chunks = chunk_message(&long, 2000);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].len(), 2000);
+        assert_eq!(chunks[1].len(), 2000);
+        assert_eq!(chunks[2].len(), 1000);
+    }
+
+    #[test]
+    fn chunk_exactly_at_limit() {
+        let msg = "a".repeat(2000);
+        let chunks = chunk_message(&msg, 2000);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), 2000);
+    }
+
+    #[test]
+    fn chunk_one_over_limit() {
+        let msg = "a".repeat(2001);
+        let chunks = chunk_message(&msg, 2000);
+        assert_eq!(chunks.len(), 2);
+    }
+
+    #[test]
+    fn chunk_preserves_all_content() {
+        let msg = "Hello\nWorld\nThis is a test\nOf message chunking";
+        let chunks = chunk_message(msg, 20);
+        let reassembled: String = chunks.join("\n");
+        // All words should be present
+        assert!(reassembled.contains("Hello"));
+        assert!(reassembled.contains("World"));
+        assert!(reassembled.contains("chunking"));
     }
 }

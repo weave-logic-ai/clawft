@@ -168,11 +168,15 @@ impl Provider for FailoverChain {
 /// to the next provider (as opposed to immediately returning the error).
 ///
 /// For example, if provider A is not configured but provider B is, we should
-/// try provider B.
+/// try provider B. Similarly, if provider A has exhausted credits/billing
+/// but provider B is a free tier, we should try provider B.
 fn is_failover_eligible(err: &ProviderError) -> bool {
     matches!(
         err,
-        ProviderError::NotConfigured(_) | ProviderError::ModelNotFound(_)
+        ProviderError::NotConfigured(_)
+            | ProviderError::ModelNotFound(_)
+            | ProviderError::RequestFailed(_)
+            | ProviderError::InvalidResponse(_)
     )
 }
 
@@ -421,6 +425,37 @@ mod tests {
         assert!(super::is_failover_eligible(&ProviderError::ModelNotFound(
             "gpt-5".into()
         )));
+    }
+
+    #[test]
+    fn is_failover_eligible_request_failed() {
+        assert!(super::is_failover_eligible(&ProviderError::RequestFailed(
+            "credits exhausted".into()
+        )));
+    }
+
+    #[test]
+    fn is_failover_eligible_invalid_response() {
+        assert!(super::is_failover_eligible(
+            &ProviderError::InvalidResponse("bad json".into())
+        ));
+    }
+
+    #[tokio::test]
+    async fn failover_on_billing_error() {
+        let chain = FailoverChain::new(vec![
+            Box::new(FailProvider {
+                name: "paid".into(),
+                error: || ProviderError::RequestFailed("credits exhausted".into()),
+            }),
+            Box::new(SuccessProvider {
+                name: "free".into(),
+            }),
+        ])
+        .unwrap();
+
+        let resp = chain.complete(&test_request()).await.unwrap();
+        assert!(resp.choices[0].message.content.as_deref().unwrap().contains("free"));
     }
 
     #[test]

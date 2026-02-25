@@ -325,7 +325,7 @@ mod tests {
             agents: AgentsConfig {
                 defaults: AgentDefaults {
                     workspace: "~/.clawft/workspace".into(),
-                    model: "anthropic/claude-opus-4-5".into(),
+                    model: "deepseek/deepseek-chat".into(),
                     max_tokens: 4096,
                     temperature: 0.7,
                     max_tool_iterations: 10,
@@ -349,7 +349,7 @@ mod tests {
         let ctx = AppContext::new(test_config(), platform).await.unwrap();
         assert_eq!(
             ctx.config().agents.defaults.model,
-            "anthropic/claude-opus-4-5"
+            "deepseek/deepseek-chat"
         );
         assert_eq!(ctx.config().agents.defaults.max_tokens, 4096);
     }
@@ -432,7 +432,7 @@ mod tests {
         let platform = Arc::new(NativePlatform::new());
         let ctx = AppContext::new(test_config(), platform).await.unwrap();
         let agent = ctx.into_agent_loop();
-        assert_eq!(agent.config().defaults.model, "anthropic/claude-opus-4-5");
+        assert_eq!(agent.config().defaults.model, "deepseek/deepseek-chat");
         assert_eq!(agent.config().defaults.max_tokens, 4096);
     }
 
@@ -447,7 +447,7 @@ mod tests {
 
         // Should still produce a valid agent loop
         let agent = ctx.into_agent_loop();
-        assert_eq!(agent.config().defaults.model, "anthropic/claude-opus-4-5");
+        assert_eq!(agent.config().defaults.model, "deepseek/deepseek-chat");
     }
 
     #[tokio::test]
@@ -566,7 +566,7 @@ mod tests {
 
         // Convert to agent loop and verify it's still valid.
         let agent = ctx.into_agent_loop();
-        assert_eq!(agent.config().defaults.model, "anthropic/claude-opus-4-5");
+        assert_eq!(agent.config().defaults.model, "deepseek/deepseek-chat");
     }
 
     // ── Integration: default pipeline uses stub (negative test) ─────
