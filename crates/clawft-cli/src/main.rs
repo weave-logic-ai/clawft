@@ -84,6 +84,9 @@ enum Commands {
     /// Manage skills (list, show, install).
     Skills(commands::skills_cmd::SkillsArgs),
 
+    /// Manage tools (list, show, search, deny/allow).
+    Tools(commands::tools_cmd::ToolsArgs),
+
     /// Manage agents (list, show, use).
     Agents(commands::agents_cmd::AgentsArgs),
 
@@ -444,6 +447,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Skills(args) => commands::skills_cmd::run(args).await?,
+        Commands::Tools(args) => commands::tools_cmd::run(args).await?,
         Commands::Agents(args) => commands::agents_cmd::run(args)?,
         Commands::Workspace(args) => commands::workspace_cmd::run(args)?,
         Commands::Onboard(args) => commands::onboard::run(args).await?,
@@ -498,6 +502,7 @@ mod tests {
         assert!(sub_names.contains(&"memory"));
         assert!(sub_names.contains(&"config"));
         assert!(sub_names.contains(&"skills"));
+        assert!(sub_names.contains(&"tools"));
         assert!(sub_names.contains(&"agents"));
         assert!(sub_names.contains(&"workspace"));
         assert!(sub_names.contains(&"onboard"));
@@ -583,6 +588,51 @@ mod tests {
     #[test]
     fn cli_skills_keygen_parses() {
         let result = Cli::try_parse_from(["weft", "skills", "keygen"]);
+        assert!(result.is_ok());
+    }
+
+    // ── Tools subcommand parsing ───────────────────────────────────
+
+    #[test]
+    fn cli_tools_list_parses() {
+        let result = Cli::try_parse_from(["weft", "tools", "list"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_tools_show_parses() {
+        let result = Cli::try_parse_from(["weft", "tools", "show", "read_file"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_tools_mcp_parses() {
+        let result = Cli::try_parse_from(["weft", "tools", "mcp"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_tools_search_parses() {
+        let result = Cli::try_parse_from(["weft", "tools", "search", "web"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_tools_deny_parses() {
+        let result = Cli::try_parse_from(["weft", "tools", "deny", "exec_*"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_tools_allow_parses() {
+        let result = Cli::try_parse_from(["weft", "tools", "allow", "exec_*"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_tools_list_with_config_parses() {
+        let result =
+            Cli::try_parse_from(["weft", "tools", "list", "--config", "/tmp/config.json"]);
         assert!(result.is_ok());
     }
 

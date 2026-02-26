@@ -17,6 +17,7 @@ pub fn general_help() -> String {
     output.push_str("  memory         Read and search agent memory\n");
     output.push_str("  config         Show resolved configuration\n");
     output.push_str("  skills         Manage skills (list, show, install)\n");
+    output.push_str("  tools          Manage tools (list, show, search, deny/allow)\n");
     output.push_str("  agents         Manage agents (list, show, use)\n");
     output.push_str("  workspace      Manage workspaces\n");
     output.push_str("  onboard        Initialize clawft config and workspace\n");
@@ -69,6 +70,15 @@ pub fn topic_help(topic: &str) -> String {
              The agent uses tools to interact with the filesystem, run commands,\n\
              search the web, and more.\n\
              \n\
+             CLI commands:\n\
+             \n\
+             weft tools list              List all registered tools with source\n\
+             weft tools show <name>       Show tool details and parameter schema\n\
+             weft tools mcp               List MCP servers and tool counts\n\
+             weft tools search <query>    Search tools by name or description\n\
+             weft tools deny <pattern>    Add a glob pattern to the tool denylist\n\
+             weft tools allow <pattern>   Remove a pattern from the tool denylist\n\
+             \n\
              Interactive commands:\n\
              \n\
              /tools                       List all registered tools"
@@ -114,6 +124,7 @@ mod tests {
         assert!(text.contains("agent"));
         assert!(text.contains("gateway"));
         assert!(text.contains("skills"));
+        assert!(text.contains("tools"));
         assert!(text.contains("help"));
     }
 
@@ -144,6 +155,8 @@ mod tests {
     fn topic_tools() {
         let text = topic_help("tools");
         assert!(text.contains("functions"));
+        assert!(text.contains("weft tools list"));
+        assert!(text.contains("weft tools deny"));
     }
 
     #[test]
