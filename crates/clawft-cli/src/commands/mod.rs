@@ -22,6 +22,9 @@ pub mod security_cmd;
 pub mod sessions;
 pub mod skills_cmd;
 pub mod status;
+pub mod tools_cmd;
+#[cfg(feature = "voice")]
+pub mod voice;
 pub mod workspace_cmd;
 
 use std::path::{Path, PathBuf};

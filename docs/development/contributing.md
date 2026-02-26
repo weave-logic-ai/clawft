@@ -80,6 +80,20 @@ clawft-wasm        (depends on types)
 
 ## Building and Testing
 
+### Unified Build Script (Recommended)
+
+The `scripts/build.sh` script provides subcommands for all build workflows:
+
+```bash
+scripts/build.sh native          # Release CLI binary
+scripts/build.sh test            # Run all tests
+scripts/build.sh clippy          # Clippy with -D warnings
+scripts/build.sh gate            # Full 11-check phase gate
+scripts/build.sh all             # Build everything (native + WASI + browser + UI)
+```
+
+Run `scripts/build.sh --help` for the full list. The `gate` subcommand runs all checks from the phase gate protocol and reports PASS/FAIL per check.
+
 ### Full Workspace Build
 
 ```bash
@@ -129,7 +143,13 @@ cargo fmt --all
 
 ### Pre-Commit Checklist
 
-Before every commit, run the full suite:
+Before every commit, run the full suite. The fastest way is via the build script:
+
+```bash
+scripts/build.sh gate
+```
+
+Or run the checks individually:
 
 ```bash
 cargo fmt --all -- --check
@@ -138,7 +158,7 @@ cargo test --workspace
 cargo build --workspace
 ```
 
-All four commands must succeed with zero errors and zero warnings.
+All commands must succeed with zero errors and zero warnings.
 
 
 ## Code Style Guidelines

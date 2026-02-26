@@ -32,13 +32,20 @@
 //!
 //! # Feature Flags
 //!
-//! - `voice` -- Reserved for Workstream G. Currently a no-op.
+//! - `voice` -- Enables the voice pipeline module (implies `voice-vad`).
+//! - `voice-vad` -- Voice Activity Detection (Silero VAD stub).
+//! - `voice-stt` -- Speech-to-Text (sherpa-rs stub).
+//! - `voice-tts` -- Text-to-Speech (sherpa-rs stub).
+//! - `voice-wake` -- Wake-word detection (reserved).
 
 pub mod error;
 pub mod manifest;
 pub mod message;
 pub mod sandbox;
 pub mod traits;
+
+#[cfg(feature = "voice")]
+pub mod voice;
 
 // Re-export core types at crate root for convenience.
 pub use error::PluginError;
@@ -51,6 +58,6 @@ pub use sandbox::{
     NetworkPolicy, FilesystemPolicy, ProcessPolicy, EnvPolicy,
 };
 pub use traits::{
-    ChannelAdapter, ChannelAdapterHost, KeyValueStore, MemoryBackend,
+    CancellationToken, ChannelAdapter, ChannelAdapterHost, KeyValueStore, MemoryBackend,
     PipelineStage, PipelineStageType, Skill, Tool, ToolContext, VoiceHandler,
 };

@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 ///
 /// All path arguments use [`Path`] for proper cross-platform path handling.
 /// Implementations should create parent directories when writing files.
-#[async_trait]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
 pub trait FileSystem: Send + Sync {
     /// Read a file's entire contents as a UTF-8 string.
     async fn read_to_string(&self, path: &Path) -> std::io::Result<String>;
@@ -43,8 +44,10 @@ pub trait FileSystem: Send + Sync {
 }
 
 /// Native filesystem implementation using [`tokio::fs`].
+#[cfg(feature = "native")]
 pub struct NativeFileSystem;
 
+#[cfg(feature = "native")]
 #[async_trait]
 impl FileSystem for NativeFileSystem {
     async fn read_to_string(&self, path: &Path) -> std::io::Result<String> {

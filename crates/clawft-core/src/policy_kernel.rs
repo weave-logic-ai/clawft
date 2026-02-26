@@ -125,20 +125,29 @@ impl PolicyKernel {
     ///
     /// Returns `~/.clawft/agents/<agent_id>/policy_kernel.json`.
     pub fn agent_path(agent_id: &str) -> Option<PathBuf> {
-        dirs::home_dir().map(|h| {
+        #[cfg(feature = "native")]
+        { dirs::home_dir().map(|h| {
             h.join(".clawft")
                 .join("agents")
                 .join(agent_id)
                 .join("policy_kernel.json")
-        })
+        }) }
+        #[cfg(not(feature = "native"))]
+        { Some(PathBuf::from(".clawft")
+            .join("agents")
+            .join(agent_id)
+            .join("policy_kernel.json")) }
     }
 
     /// Resolve the default global policy kernel path.
     ///
     /// Returns `~/.clawft/memory/policy_kernel.json`.
     pub fn global_path() -> Option<PathBuf> {
-        dirs::home_dir()
-            .map(|h| h.join(".clawft").join("memory").join("policy_kernel.json"))
+        #[cfg(feature = "native")]
+        { dirs::home_dir()
+            .map(|h| h.join(".clawft").join("memory").join("policy_kernel.json")) }
+        #[cfg(not(feature = "native"))]
+        { Some(PathBuf::from(".clawft").join("memory").join("policy_kernel.json")) }
     }
 
     /// Load the policy kernel from disk, or create a new empty one.

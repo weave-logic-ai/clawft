@@ -6,6 +6,7 @@
 //! context builder, memory store, and the 6-stage pipeline system.
 
 pub mod agent;
+#[cfg(feature = "native")]
 pub mod agent_bus;
 pub mod agent_routing;
 pub mod bootstrap;
@@ -16,6 +17,7 @@ pub mod json_repair;
 pub mod pipeline;
 pub mod planning;
 pub mod routing_validation;
+pub mod runtime;
 pub mod security;
 pub mod session;
 pub mod tools;

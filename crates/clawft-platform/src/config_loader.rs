@@ -22,6 +22,11 @@ use serde_json::Value;
 /// 1. Path from `CLAWFT_CONFIG` environment variable.
 /// 2. `~/.clawft/config.json`
 /// 3. `~/.nanobot/config.json`
+///
+/// On native targets, candidate paths are checked for existence using
+/// synchronous `Path::exists()`. On non-native targets (WASM), the first
+/// candidate path is returned without a filesystem existence check --
+/// the caller's async `fs.exists()` handles validation.
 pub fn discover_config_path(
     env: &dyn super::env::Environment,
     home_dir: Option<PathBuf>,
@@ -35,13 +40,24 @@ pub fn discover_config_path(
     // Step 2 & 3: Check home directory paths
     if let Some(home) = home_dir {
         let clawft_path = home.join(".clawft").join("config.json");
-        if clawft_path.exists() {
-            return Some(clawft_path);
+
+        #[cfg(feature = "native")]
+        {
+            if clawft_path.exists() {
+                return Some(clawft_path);
+            }
+
+            let nanobot_path = home.join(".nanobot").join("config.json");
+            if nanobot_path.exists() {
+                return Some(nanobot_path);
+            }
         }
 
-        let nanobot_path = home.join(".nanobot").join("config.json");
-        if nanobot_path.exists() {
-            return Some(nanobot_path);
+        // On non-native (WASM) targets, return the preferred path without
+        // synchronous filesystem checks. The caller validates asynchronously.
+        #[cfg(not(feature = "native"))]
+        {
+            return Some(clawft_path);
         }
     }
 

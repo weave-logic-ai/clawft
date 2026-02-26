@@ -11,39 +11,66 @@ keywords = ["ai", "agent", "pipeline", "tools", "llm"]
 categories = ["development-tools"]
 
 [features]
-default = ["full"]
+default = ["full", "native"]
 full = []
+native = [
+    "dep:notify",
+    "dep:dirs",
+    "dep:tokio",
+    "dep:tokio-util",
+    "clawft-platform/native",
+    "clawft-llm/native",
+    "clawft-plugin/native",
+    "clawft-types/native",
+]
+browser = [
+    "clawft-platform/browser",
+    "clawft-llm/browser",
+    "dep:wasm-bindgen-futures",
+    "dep:js-sys",
+    "dep:futures-channel",
+]
 vector-memory = ["dep:rand", "dep:instant-distance"]
 rvf = ["vector-memory", "dep:rvf-runtime", "dep:rvf-types", "dep:sha2", "dep:reqwest"]
 signing = ["dep:ed25519-dalek", "dep:sha2", "dep:rand"]
 
 [dependencies]
-clawft-types = { workspace = true }
-clawft-platform = { workspace = true }
-clawft-llm = { workspace = true }
-clawft-plugin = { workspace = true }
+# Always available
+clawft-types = { workspace = true, default-features = false }
+clawft-platform = { workspace = true, default-features = false }
+clawft-llm = { workspace = true, default-features = false }
+clawft-plugin = { workspace = true, default-features = false }
 async-trait = { workspace = true }
-tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
-dirs = { workspace = true }
-rand = { workspace = true, optional = true }
 serde_yaml = { workspace = true }
-tokio-util = { workspace = true }
 futures-util = { workspace = true }
+percent-encoding = "2"
+fnv = "1"
+
+# Native only
+tokio = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
+dirs = { workspace = true, optional = true }
+notify = { workspace = true, optional = true }
+
+# Browser only
+wasm-bindgen-futures = { version = "0.4", optional = true }
+js-sys = { version = "0.3", optional = true }
+futures-channel = { version = "0.3", optional = true }
+
+# Optional across both
+rand = { workspace = true, optional = true }
+instant-distance = { workspace = true, optional = true }
 rvf-runtime = { workspace = true, optional = true }
 rvf-types = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 ed25519-dalek = { workspace = true, optional = true }
-notify = { workspace = true }
-instant-distance = { workspace = true, optional = true }
-percent-encoding = "2"
-fnv = "1"
 
 [dev-dependencies]
 tokio = { workspace = true }

@@ -11,18 +11,25 @@ keywords = ["plugin", "traits", "ai", "agent", "extensibility"]
 categories = ["development-tools"]
 
 [features]
-default = []
-voice = []   # Empty no-op -- reserves the feature flag for Workstream G
+default = ["native"]
+native = ["dep:tokio-util"]
+voice = ["voice-vad", "voice-wake", "dep:tokio"]
+voice-stt = []
+voice-tts = []
+voice-vad = []
+voice-wake = []
 
 [dependencies]
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio-util = { workspace = true }
+tokio-util = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 semver = "1"
+reqwest = { workspace = true, default-features = false, features = ["json", "multipart"] }
 
 [dev-dependencies]
 tokio = { workspace = true }

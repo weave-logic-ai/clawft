@@ -49,7 +49,10 @@ pub fn discover_workspace() -> Option<PathBuf> {
     }
 
     // Step 3: global default
-    dirs::home_dir().map(|h| h.join(".clawft"))
+    #[cfg(feature = "native")]
+    { dirs::home_dir().map(|h| h.join(".clawft")) }
+    #[cfg(not(feature = "native"))]
+    { Some(std::path::PathBuf::from(".clawft")) }
 }
 
 // ── Workspace status ─────────────────────────────────────────────────────
@@ -92,10 +95,13 @@ impl WorkspaceManager {
     ///
     /// The default registry path is `~/.clawft/workspaces.json`.
     pub fn new() -> Result<Self> {
+        #[cfg(feature = "native")]
         let home =
             dirs::home_dir().ok_or_else(|| ClawftError::ConfigInvalid {
                 reason: "cannot determine home directory".into(),
             })?;
+        #[cfg(not(feature = "native"))]
+        let home = std::path::PathBuf::from(".clawft");
         let registry_path = home.join(".clawft").join("workspaces.json");
         let registry = WorkspaceRegistry::load(&registry_path).map_err(|e| {
             ClawftError::ConfigInvalid {

@@ -97,6 +97,9 @@ which = "7"
 # Random (testing)
 rand = "0.8"
 
+# WASM-compatible random
+getrandom = { version = "0.2", features = ["js"] }
+
 # Ed25519 signing
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 
@@ -111,14 +114,14 @@ rvf-types = { version = "0.2", default-features = false, features = ["std"] }
 instant-distance = "0.6"
 
 # Internal crates
-clawft-types = { path = "crates/clawft-types" }
-clawft-platform = { path = "crates/clawft-platform" }
-clawft-core = { path = "crates/clawft-core" }
-clawft-tools = { path = "crates/clawft-tools" }
+clawft-types = { path = "crates/clawft-types", default-features = false }
+clawft-platform = { path = "crates/clawft-platform", default-features = false }
+clawft-core = { path = "crates/clawft-core", default-features = false }
+clawft-tools = { path = "crates/clawft-tools", default-features = false }
 clawft-channels = { path = "crates/clawft-channels" }
-clawft-llm = { path = "crates/clawft-llm" }
+clawft-llm = { path = "crates/clawft-llm", default-features = false }
 clawft-services = { path = "crates/clawft-services" }
-clawft-plugin = { path = "crates/clawft-plugin" }
+clawft-plugin = { path = "crates/clawft-plugin", default-features = false }
 clawft-plugin-git = { path = "crates/clawft-plugin-git" }
 clawft-plugin-cargo = { path = "crates/clawft-plugin-cargo" }
 clawft-plugin-oauth2 = { path = "crates/clawft-plugin-oauth2" }

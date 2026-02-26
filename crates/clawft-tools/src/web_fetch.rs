@@ -47,7 +47,8 @@ impl<P: Platform> WebFetchTool<P> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
 impl<P: Platform + 'static> Tool for WebFetchTool<P> {
     fn name(&self) -> &str {
         "web_fetch"

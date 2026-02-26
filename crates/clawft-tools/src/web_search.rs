@@ -123,7 +123,8 @@ impl<P: Platform> WebSearchTool<P> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
 impl<P: Platform + 'static> Tool for WebSearchTool<P> {
     fn name(&self) -> &str {
         "web_search"

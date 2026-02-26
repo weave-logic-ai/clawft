@@ -6,6 +6,7 @@ pub mod assembler;
 pub mod classifier;
 pub mod cost_tracker;
 pub mod learner;
+#[cfg(feature = "native")]
 pub mod llm_adapter;
 pub mod permissions;
 pub mod rate_limiter;

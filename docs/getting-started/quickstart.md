@@ -23,7 +23,7 @@ Clone the repository and build in release mode:
 ```bash
 git clone https://github.com/clawft/clawft.git
 cd clawft
-cargo build --release
+scripts/build.sh native    # Or: cargo build --release
 ```
 
 The binary is compiled to `target/release/weft`. You can copy it onto your

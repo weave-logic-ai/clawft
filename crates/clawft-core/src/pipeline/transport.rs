@@ -16,13 +16,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::mpsc;
 use tracing::debug;
 
 use clawft_types::error::ClawftError;
 use clawft_types::provider::{ContentBlock, LlmResponse, StopReason, Usage};
 
-use super::traits::{LlmTransport, StreamCallback, TransportRequest};
+use super::traits::LlmTransport;
+#[cfg(feature = "native")]
+use super::traits::StreamCallback;
+use super::traits::TransportRequest;
 
 /// An abstraction over the underlying LLM HTTP client.
 ///
@@ -65,6 +67,9 @@ pub trait LlmProvider: Send + Sync {
     ///
     /// The default implementation returns an error indicating streaming is
     /// not supported. Providers that support streaming should override this.
+    ///
+    /// Only available with the `native` feature (requires tokio channels).
+    #[cfg(feature = "native")]
     async fn complete_stream(
         &self,
         _model: &str,
@@ -72,7 +77,7 @@ pub trait LlmProvider: Send + Sync {
         _tools: &[serde_json::Value],
         _max_tokens: Option<i32>,
         _temperature: Option<f64>,
-        _tx: mpsc::Sender<String>,
+        _tx: tokio::sync::mpsc::Sender<String>,
     ) -> Result<serde_json::Value, String> {
         Err("streaming not supported by this provider".into())
     }
@@ -200,6 +205,7 @@ impl LlmTransport for OpenAiCompatTransport {
         convert_response(raw_response)
     }
 
+    #[cfg(feature = "native")]
     async fn complete_stream(
         &self,
         request: &TransportRequest,
@@ -213,8 +219,6 @@ impl LlmTransport for OpenAiCompatTransport {
                 message: "transport not configured -- call with_provider()".into(),
             })?;
 
-        // Convert pipeline messages to JSON values for the provider.
-        // For assistant messages with tool_calls, use null content instead of "".
         let messages: Vec<serde_json::Value> = request
             .messages
             .iter()
@@ -245,10 +249,8 @@ impl LlmTransport for OpenAiCompatTransport {
             "sending streaming request via transport"
         );
 
-        // Create a channel for streaming text deltas
-        let (tx, mut rx) = mpsc::channel::<String>(64);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(64);
 
-        // Spawn the streaming call in the background
         let model = request.model.clone();
         let tools = request.tools.clone();
         let max_tokens = request.max_tokens;
@@ -261,17 +263,14 @@ impl LlmTransport for OpenAiCompatTransport {
                 .await
         });
 
-        // Collect text chunks and forward them to the callback
         let mut full_text = String::new();
         while let Some(text_delta) = rx.recv().await {
             full_text.push_str(&text_delta);
             if !callback(&text_delta) {
-                // Callback signals to stop streaming
                 break;
             }
         }
 
-        // Wait for the streaming task to complete and get the final response
         let stream_result = stream_handle.await.map_err(|e| ClawftError::Provider {
             message: format!("stream task panicked: {e}"),
         })?;
@@ -279,8 +278,6 @@ impl LlmTransport for OpenAiCompatTransport {
         match stream_result {
             Ok(raw_response) => convert_response(raw_response),
             Err(e) => {
-                // If streaming failed but we collected some text, build a
-                // partial response rather than losing what we have
                 if !full_text.is_empty() {
                     debug!(
                         "stream ended with error but collected {} chars, returning partial response",
@@ -423,6 +420,7 @@ fn convert_response(resp: serde_json::Value) -> clawft_types::Result<LlmResponse
 mod tests {
     use super::*;
     use crate::pipeline::traits::LlmMessage;
+    use tokio::sync::mpsc;
 
     fn make_transport_request() -> TransportRequest {
         TransportRequest {

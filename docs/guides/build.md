@@ -32,7 +32,35 @@ ClawFT is a Cargo workspace with 9 crates:
 
 The binary is always `weft` (from `clawft-cli`).
 
-## Quick Reference
+## Unified Build Script
+
+The `scripts/build.sh` script wraps all build workflows behind simple subcommands:
+
+```bash
+scripts/build.sh native          # Release CLI binary
+scripts/build.sh native-debug    # Debug build (fast)
+scripts/build.sh wasi            # WASM for WASI (wasm32-wasip1)
+scripts/build.sh browser         # WASM for browser (wasm32-unknown-unknown)
+scripts/build.sh ui              # React frontend (tsc + vite)
+scripts/build.sh all             # Build everything
+scripts/build.sh test            # cargo test --workspace
+scripts/build.sh check           # cargo check --workspace
+scripts/build.sh clippy          # Clippy with warnings-as-errors
+scripts/build.sh gate            # Full phase gate (11 checks with PASS/FAIL)
+scripts/build.sh clean           # Clean all artifacts
+```
+
+Options: `--features <f>`, `--profile <p>`, `--verbose`, `--dry-run`, `--help`.
+
+```bash
+# Examples
+scripts/build.sh native --features voice          # CLI with voice
+scripts/build.sh native --features voice,channels # CLI with voice + Discord
+scripts/build.sh native --dry-run                 # Preview commands
+scripts/build.sh gate                             # Run all 11 phase gate checks
+```
+
+## Quick Reference (raw cargo)
 
 ```bash
 # Dev build (fast compile, no optimizations)
