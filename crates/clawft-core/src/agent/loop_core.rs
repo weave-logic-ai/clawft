@@ -28,7 +28,7 @@
 
 use std::sync::Arc;
 
-use tokio_util::sync::CancellationToken;
+use clawft_plugin::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use clawft_platform::Platform;
@@ -201,13 +201,25 @@ impl<P: Platform> AgentLoop<P> {
 
         loop {
             let msg = if let Some(ref token) = self.cancel {
-                tokio::select! {
-                    biased;
-                    _ = token.cancelled() => {
+                #[cfg(feature = "native")]
+                {
+                    tokio::select! {
+                        biased;
+                        _ = token.cancelled() => {
+                            info!("agent loop cancelled via token, exiting");
+                            break;
+                        }
+                        msg = self.bus.consume_inbound() => msg,
+                    }
+                }
+                #[cfg(not(feature = "native"))]
+                {
+                    // On browser, poll cancellation between messages.
+                    if token.is_cancelled() {
                         info!("agent loop cancelled via token, exiting");
                         break;
                     }
-                    msg = self.bus.consume_inbound() => msg,
+                    self.bus.consume_inbound().await
                 }
             } else {
                 self.bus.consume_inbound().await

@@ -128,7 +128,8 @@ impl<P: Platform> MemoryReadTool<P> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
 impl<P: Platform + 'static> Tool for MemoryReadTool<P> {
     fn name(&self) -> &str {
         "memory_read"
@@ -209,7 +210,8 @@ impl<P: Platform> MemoryWriteTool<P> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
 impl<P: Platform + 'static> Tool for MemoryWriteTool<P> {
     fn name(&self) -> &str {
         "memory_write"

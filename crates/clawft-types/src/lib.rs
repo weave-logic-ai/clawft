@@ -14,6 +14,7 @@
 
 pub mod agent_bus;
 pub mod agent_routing;
+pub mod canvas;
 pub mod config;
 pub mod cron;
 pub mod delegation;

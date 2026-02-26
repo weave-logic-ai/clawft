@@ -10,11 +10,15 @@
 //! - [`policies`] -- Security policy configurations (command execution, URL safety)
 
 pub mod channels;
+pub mod personality;
 pub mod policies;
+pub mod voice;
 
 // Re-export channel types at the config level for backward compatibility.
 pub use channels::*;
+pub use personality::*;
 pub use policies::*;
+pub use voice::*;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -64,16 +68,39 @@ pub struct Config {
     /// Tiered routing and permission configuration.
     #[serde(default)]
     pub routing: RoutingConfig,
+
+    /// Voice pipeline configuration (STT, TTS, VAD, wake word).
+    #[serde(default)]
+    pub voice: VoiceConfig,
 }
 
 impl Config {
     /// Get the expanded workspace path.
+    ///
+    /// On native targets (with the `native` feature), this expands `~/` prefixes
+    /// using `dirs::home_dir()`. On WASM or when `native` is disabled, `~/`
+    /// prefixes are left unexpanded.
     pub fn workspace_path(&self) -> PathBuf {
         let raw = &self.agents.defaults.workspace;
-        if let Some(rest) = raw.strip_prefix("~/")
-            && let Some(home) = dirs::home_dir()
-        {
-            return home.join(rest);
+        #[cfg(feature = "native")]
+        if let Some(rest) = raw.strip_prefix("~/") {
+            if let Some(home) = dirs::home_dir() {
+                return home.join(rest);
+            }
+        }
+        PathBuf::from(raw)
+    }
+
+    /// Get the expanded workspace path with an explicit home directory.
+    ///
+    /// This is the browser-friendly variant that does not depend on `dirs`.
+    /// Pass `None` for `home` to skip `~/` expansion.
+    pub fn workspace_path_with_home(&self, home: Option<&std::path::Path>) -> PathBuf {
+        let raw = &self.agents.defaults.workspace;
+        if let Some(rest) = raw.strip_prefix("~/") {
+            if let Some(home) = home {
+                return home.join(rest);
+            }
         }
         PathBuf::from(raw)
     }
@@ -159,12 +186,20 @@ pub struct ProviderConfig {
     pub api_key: SecretString,
 
     /// Base URL override (e.g. for proxies).
-    #[serde(default, alias = "apiBase")]
+    #[serde(default, alias = "apiBase", alias = "baseUrl")]
     pub api_base: Option<String>,
 
     /// Custom HTTP headers (e.g. `APP-Code` for AiHubMix).
     #[serde(default, alias = "extraHeaders")]
     pub extra_headers: Option<HashMap<String, String>>,
+
+    /// Whether this provider supports direct browser access (no CORS proxy needed).
+    #[serde(default, alias = "browserDirect")]
+    pub browser_direct: bool,
+
+    /// CORS proxy URL for browser-mode API calls (e.g. "https://proxy.example.com").
+    #[serde(default, alias = "corsProxy")]
+    pub cors_proxy: Option<String>,
 }
 
 /// Configuration for all LLM providers.
@@ -251,6 +286,18 @@ pub struct GatewayConfig {
     /// Heartbeat prompt text.
     #[serde(default = "default_heartbeat_prompt", alias = "heartbeatPrompt")]
     pub heartbeat_prompt: String,
+
+    /// Port for the UI REST API (separate from gateway port).
+    #[serde(default = "default_api_port", alias = "apiPort")]
+    pub api_port: u16,
+
+    /// Allowed CORS origins for the UI API.
+    #[serde(default = "default_cors_origins", alias = "corsOrigins")]
+    pub cors_origins: Vec<String>,
+
+    /// Whether the REST/WS API is enabled.
+    #[serde(default, alias = "apiEnabled")]
+    pub api_enabled: bool,
 }
 
 fn default_gateway_host() -> String {
@@ -262,6 +309,12 @@ fn default_gateway_port() -> u16 {
 fn default_heartbeat_prompt() -> String {
     "heartbeat".into()
 }
+fn default_api_port() -> u16 {
+    18789
+}
+fn default_cors_origins() -> Vec<String> {
+    vec!["http://localhost:5173".into()]
+}
 
 impl Default for GatewayConfig {
     fn default() -> Self {
@@ -270,6 +323,9 @@ impl Default for GatewayConfig {
             port: default_gateway_port(),
             heartbeat_interval_minutes: 0,
             heartbeat_prompt: default_heartbeat_prompt(),
+            api_port: default_api_port(),
+            cors_origins: default_cors_origins(),
+            api_enabled: false,
         }
     }
 }
@@ -694,5 +750,137 @@ mod tests {
         let config: ToolsConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(config.command_policy.mode, "allowlist");
         assert!(config.url_policy.enabled);
+    }
+
+    // ── Step 0: Three-workstream config field tests ──────────────────────
+
+    #[test]
+    fn voice_config_defaults() {
+        let cfg: VoiceConfig = serde_json::from_str("{}").unwrap();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.audio.sample_rate, 16000);
+        assert_eq!(cfg.audio.chunk_size, 512);
+        assert_eq!(cfg.audio.channels, 1);
+        assert!(cfg.audio.input_device.is_none());
+        assert!(cfg.audio.output_device.is_none());
+        assert!(cfg.stt.enabled);
+        assert_eq!(cfg.stt.model, "sherpa-onnx-streaming-zipformer-en-20M");
+        assert!(cfg.stt.language.is_empty());
+        assert!(cfg.tts.enabled);
+        assert_eq!(cfg.tts.model, "vits-piper-en_US-amy-medium");
+        assert!(cfg.tts.voice.is_empty());
+        assert!((cfg.tts.speed - 1.0).abs() < f32::EPSILON);
+        assert!((cfg.vad.threshold - 0.5).abs() < f32::EPSILON);
+        assert_eq!(cfg.vad.silence_timeout_ms, 1500);
+        assert_eq!(cfg.vad.min_speech_ms, 250);
+        assert!(!cfg.wake.enabled);
+        assert_eq!(cfg.wake.phrase, "hey weft");
+        assert!((cfg.wake.sensitivity - 0.5).abs() < f32::EPSILON);
+        assert!(cfg.wake.model_path.is_none());
+        assert!(!cfg.cloud_fallback.enabled);
+        assert!(cfg.cloud_fallback.stt_provider.is_empty());
+        assert!(cfg.cloud_fallback.tts_provider.is_empty());
+    }
+
+    #[test]
+    fn gateway_api_fields_defaults() {
+        let cfg = GatewayConfig::default();
+        assert_eq!(cfg.api_port, 18789);
+        assert_eq!(cfg.cors_origins, vec!["http://localhost:5173"]);
+        assert!(!cfg.api_enabled);
+    }
+
+    #[test]
+    fn provider_browser_fields_defaults() {
+        let cfg: ProviderConfig = serde_json::from_str("{}").unwrap();
+        assert!(!cfg.browser_direct);
+        assert!(cfg.cors_proxy.is_none());
+    }
+
+    #[test]
+    fn provider_base_url_alias() {
+        let json = r#"{"baseUrl": "https://example.com"}"#;
+        let cfg: ProviderConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.api_base.as_deref(), Some("https://example.com"));
+    }
+
+    #[test]
+    fn config_with_voice_section() {
+        let json = r#"{"voice": {"enabled": true}}"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert!(cfg.voice.enabled);
+        // Sub-structs should still be default
+        assert_eq!(cfg.voice.audio.sample_rate, 16000);
+        assert!(cfg.voice.stt.enabled);
+    }
+
+    #[test]
+    fn config_with_all_new_fields() {
+        let json = r#"{
+            "voice": {
+                "enabled": true,
+                "audio": { "sampleRate": 48000, "chunkSize": 1024, "channels": 2 },
+                "stt": { "model": "custom-stt", "language": "zh" },
+                "tts": { "model": "custom-tts", "voice": "alloy", "speed": 1.5 },
+                "vad": { "threshold": 0.8, "silenceTimeoutMs": 2000, "minSpeechMs": 500 },
+                "wake": { "enabled": true, "phrase": "ok clawft", "sensitivity": 0.7 },
+                "cloudFallback": { "enabled": true, "sttProvider": "whisper", "ttsProvider": "elevenlabs" }
+            },
+            "gateway": {
+                "host": "127.0.0.1",
+                "port": 9000,
+                "apiPort": 9001,
+                "corsOrigins": ["http://localhost:3000", "https://app.example.com"],
+                "apiEnabled": true
+            },
+            "providers": {
+                "openai": {
+                    "apiKey": "sk-test",
+                    "baseUrl": "https://api.openai.com/v1",
+                    "browserDirect": true,
+                    "corsProxy": "https://proxy.example.com"
+                }
+            }
+        }"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+
+        // Voice
+        assert!(cfg.voice.enabled);
+        assert_eq!(cfg.voice.audio.sample_rate, 48000);
+        assert_eq!(cfg.voice.audio.chunk_size, 1024);
+        assert_eq!(cfg.voice.audio.channels, 2);
+        assert_eq!(cfg.voice.stt.model, "custom-stt");
+        assert_eq!(cfg.voice.stt.language, "zh");
+        assert_eq!(cfg.voice.tts.model, "custom-tts");
+        assert_eq!(cfg.voice.tts.voice, "alloy");
+        assert!((cfg.voice.tts.speed - 1.5).abs() < f32::EPSILON);
+        assert!((cfg.voice.vad.threshold - 0.8).abs() < f32::EPSILON);
+        assert_eq!(cfg.voice.vad.silence_timeout_ms, 2000);
+        assert_eq!(cfg.voice.vad.min_speech_ms, 500);
+        assert!(cfg.voice.wake.enabled);
+        assert_eq!(cfg.voice.wake.phrase, "ok clawft");
+        assert!((cfg.voice.wake.sensitivity - 0.7).abs() < f32::EPSILON);
+        assert!(cfg.voice.cloud_fallback.enabled);
+        assert_eq!(cfg.voice.cloud_fallback.stt_provider, "whisper");
+        assert_eq!(cfg.voice.cloud_fallback.tts_provider, "elevenlabs");
+
+        // Gateway new fields
+        assert_eq!(cfg.gateway.api_port, 9001);
+        assert_eq!(
+            cfg.gateway.cors_origins,
+            vec!["http://localhost:3000", "https://app.example.com"]
+        );
+        assert!(cfg.gateway.api_enabled);
+
+        // Provider browser fields
+        assert!(cfg.providers.openai.browser_direct);
+        assert_eq!(
+            cfg.providers.openai.cors_proxy.as_deref(),
+            Some("https://proxy.example.com")
+        );
+        assert_eq!(
+            cfg.providers.openai.api_base.as_deref(),
+            Some("https://api.openai.com/v1")
+        );
     }
 }

@@ -300,7 +300,8 @@ pub fn extract_mcp_metadata(tool_decl: &serde_json::Value) -> ToolMetadata {
 ///     }
 /// }
 /// ```
-#[async_trait]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
 pub trait Tool: Send + Sync {
     /// The unique name of this tool (used in LLM function calling).
     fn name(&self) -> &str;

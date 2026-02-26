@@ -6,6 +6,7 @@ pub mod helpers;
 pub mod loop_core;
 pub mod memory;
 pub mod sandbox;
+#[cfg(feature = "native")]
 pub mod skill_watcher;
 pub mod skill_autogen;
 pub mod skills;

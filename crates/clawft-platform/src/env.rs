@@ -22,8 +22,10 @@ pub trait Environment: Send + Sync {
 }
 
 /// Native environment implementation using [`std::env`].
+#[cfg(feature = "native")]
 pub struct NativeEnvironment;
 
+#[cfg(feature = "native")]
 impl Environment for NativeEnvironment {
     fn get_var(&self, name: &str) -> Option<String> {
         std::env::var(name).ok()

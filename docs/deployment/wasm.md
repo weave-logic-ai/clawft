@@ -37,7 +37,14 @@ Excluded tools: `exec_shell`, `spawn`, `message`.
 
 ## Building
 
-Build the WASM crate from the workspace root:
+Using the unified build script:
+
+```bash
+scripts/build.sh wasi      # WASI target (wasm32-wasip1, release-wasm profile)
+scripts/build.sh browser   # Browser target (wasm32-unknown-unknown)
+```
+
+Or build directly with cargo:
 
 ```bash
 cargo build -p clawft-wasm --target wasm32-wasip2 --release

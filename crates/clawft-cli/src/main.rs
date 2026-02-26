@@ -96,6 +96,10 @@ enum Commands {
     /// Security scanning, auditing, and hardening.
     Security(commands::security_cmd::SecurityArgs),
 
+    /// Voice pipeline commands (setup, test, talk mode).
+    #[cfg(feature = "voice")]
+    Voice(commands::voice::VoiceArgs),
+
     /// Show help for a topic (skills, agents, tools, commands, config).
     Help(commands::help_cmd::HelpArgs),
 
@@ -444,6 +448,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::Workspace(args) => commands::workspace_cmd::run(args)?,
         Commands::Onboard(args) => commands::onboard::run(args).await?,
         Commands::Security(args) => commands::security_cmd::run(args)?,
+        #[cfg(feature = "voice")]
+        Commands::Voice(args) => commands::voice::handle_voice(args).await?,
         Commands::Help(args) => commands::help_cmd::run(args)?,
         Commands::Completions { shell } => match completions::Shell::from_str(&shell) {
             Some(s) => {

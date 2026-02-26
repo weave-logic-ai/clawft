@@ -30,7 +30,8 @@ impl MessageTool {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
 impl Tool for MessageTool {
     fn name(&self) -> &str {
         "message"

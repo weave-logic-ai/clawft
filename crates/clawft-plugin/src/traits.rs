@@ -17,7 +17,53 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio_util::sync::CancellationToken;
+
+#[cfg(feature = "native")]
+pub use tokio_util::sync::CancellationToken;
+
+#[cfg(not(feature = "native"))]
+mod cancellation {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A lightweight cancellation token for non-native (WASM) targets.
+    ///
+    /// On native targets, this is re-exported from `tokio_util`.
+    /// On WASM, we provide a minimal `Arc<AtomicBool>` implementation
+    /// that supports `cancel()` and `is_cancelled()`.
+    #[derive(Clone)]
+    pub struct CancellationToken {
+        cancelled: Arc<AtomicBool>,
+    }
+
+    impl CancellationToken {
+        /// Create a new token that is not yet cancelled.
+        pub fn new() -> Self {
+            Self {
+                cancelled: Arc::new(AtomicBool::new(false)),
+            }
+        }
+
+        /// Signal cancellation.
+        pub fn cancel(&self) {
+            self.cancelled.store(true, Ordering::SeqCst);
+        }
+
+        /// Check whether the token has been cancelled.
+        pub fn is_cancelled(&self) -> bool {
+            self.cancelled.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Default for CancellationToken {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+}
+
+#[cfg(not(feature = "native"))]
+pub use cancellation::CancellationToken;
 
 use crate::error::PluginError;
 use crate::message::MessagePayload;
