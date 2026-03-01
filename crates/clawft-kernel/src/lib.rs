@@ -38,6 +38,7 @@ pub mod process;
 pub mod service;
 pub mod supervisor;
 pub mod topic;
+pub mod wasm_runner;
 
 // Re-export key types at the crate level for convenience.
 pub use a2a::A2ARouter;
@@ -56,3 +57,6 @@ pub use process::{Pid, ProcessEntry, ProcessState, ProcessTable, ResourceUsage};
 pub use service::{ServiceRegistry, ServiceType, SystemService};
 pub use supervisor::{AgentSupervisor, SpawnRequest, SpawnResult};
 pub use topic::{Subscription, TopicRouter};
+pub use wasm_runner::{
+    WasmError, WasmSandboxConfig, WasmTool, WasmToolResult, WasmToolRunner, WasmValidation,
+};
