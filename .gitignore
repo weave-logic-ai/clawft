@@ -3,3 +3,5 @@
 .hive-mind
 .swarm/
 target/
+.env-keys.json
+crates/clawft-wasm/www/pkg/

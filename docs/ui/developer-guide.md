@@ -116,6 +116,146 @@ VITE_MOCK_API=true npm run dev
 
 This starts MSW, which intercepts all `/api/*` requests and returns mock data defined in `src/mocks/handlers.ts`.
 
+## The `weft ui` Command
+
+The `weft ui` command (implemented in `crates/clawft-cli/src/commands/ui_cmd.rs`) is a convenience wrapper that starts the gateway with the API server enabled and optionally serves the built frontend.
+
+```
+weft ui [OPTIONS]
+```
+
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `-c, --config <PATH>` | Config file path (overrides auto-discovery) |
+| `-p, --port <PORT>` | Port for the UI API (overrides `config.gateway.api_port`, default: 18789) |
+| `--no-open` | Don't open the browser automatically |
+| `--ui-dir <DIR>` | Directory containing the built UI for static serving |
+
+### What It Does
+
+1. Loads configuration (auto-discovered or from `--config`)
+2. Forces `gateway.api_enabled = true`
+3. Starts the gateway with the Axum API server
+4. Optionally serves the built frontend from the directory specified by `--ui-dir`
+5. Opens the browser automatically after a 500ms delay (unless `--no-open` is passed)
+
+The command requires the `channels` feature flag at build time. If the feature is missing, it will error with a message instructing you to rebuild with `--features channels`.
+
+### Examples
+
+```bash
+# Development: API only (frontend served by Vite dev server)
+weft ui
+
+# Production: serve built frontend
+cd ui && npm run build
+weft ui --ui-dir ./ui/dist
+
+# Custom port
+weft ui --port 9000
+
+# Without browser auto-open
+weft ui --no-open
+```
+
+## Backend Modes
+
+The UI supports four backend modes, controlled by the `VITE_BACKEND_MODE` environment variable:
+
+| Mode | Description |
+|------|-------------|
+| `axum` | Connects to the Rust Axum API server (default). All REST and WebSocket calls go to the gateway. |
+| `wasm` | Runs the agent directly in the browser via WebAssembly. No backend server required. |
+| `mock` | Uses MSW to intercept API calls with mock data. Useful for frontend development without a backend. |
+| `auto` | Detects WASM capability in the browser; falls back to `axum` if WASM is not available. |
+
+Each mode is implemented as a `BackendAdapter`. The `ModeProvider` component in `src/lib/mode-context.tsx` initializes the correct adapter based on the configured mode, and all data-fetching code accesses the adapter via the `useBackend()` hook.
+
+## API Architecture
+
+### Bridge Pattern
+
+The API layer uses a bridge pattern to decouple Axum route handlers from the `Platform` generic parameter that pervades the core crate. Core services are wrapped in bridge structs that implement trait objects, allowing the API handlers to work with `dyn Trait` references instead of concrete generic types.
+
+| Bridge | Core Service | API Trait |
+|--------|-------------|-----------|
+| `ToolBridge` | `Arc<ToolRegistry>` | `ToolRegistryAccess` |
+| `SessionBridge<P>` | `Arc<SessionManager<P>>` | `SessionAccess` |
+| `AgentBridge` | `Vec<AgentInfo>` snapshot | `AgentAccess` |
+| `BusBridge` | `Arc<MessageBus>` | `BusAccess` |
+| `SkillBridge<P>` | `Arc<SkillsLoader<P>>` | `SkillAccess` |
+| `MemoryBridge<P>` | `Arc<MemoryStore<P>>` | `MemoryAccess` |
+| `ConfigBridge` | `Config` snapshot | `ConfigAccess` |
+| `ChannelBridge` | `ChannelsConfig` snapshot | `ChannelAccess` |
+
+### Async-to-Sync Bridge
+
+`SessionManager` and `SkillsLoader` expose async methods, but the API traits are defined as sync to keep the handler signatures simple. The bridge structs use `tokio::task::block_in_place()` combined with `Handle::current().block_on()` to call async code from the sync trait implementations. This approach is safe because Axum handlers already run on the Tokio runtime.
+
+### Feature Flags
+
+The API is behind the `api` feature flag. The dependency chain is:
+
+```
+clawft-cli/Cargo.toml
+  -> api feature
+    -> clawft-services/api feature
+      -> enables axum, axum-extra, tower-http, futures-util
+```
+
+When the `api` feature is not enabled, none of the API code is compiled, keeping the binary lean for use cases that do not need the web dashboard.
+
+## Gateway Configuration
+
+The gateway section of the configuration file controls the API server:
+
+```json
+{
+  "gateway": {
+    "host": "127.0.0.1",
+    "api_port": 18789,
+    "api_enabled": true,
+    "cors_origins": []
+  }
+}
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `host` | `"127.0.0.1"` | Bind address for the API server |
+| `api_port` | `18789` | Port for the API server |
+| `api_enabled` | `false` | Whether to start the API server (forced `true` by `weft ui`) |
+| `cors_origins` | `[]` | Allowed CORS origins. An empty array means permissive (all origins allowed). |
+
+When running `weft ui`, the `api_enabled` field is always forced to `true` regardless of the config file value.
+
+## Real-time Events
+
+### WebSocket Topics
+
+The `TopicBroadcaster` manages named broadcast channels. The gateway dispatch loop publishes outbound messages to topics such as `sessions:{key}`, `agents`, and others. Clients subscribe to topics via a WebSocket connection and receive JSON-framed messages in real time.
+
+### SSE Streaming
+
+`GET /api/sessions/{key}/stream` provides Server-Sent Events for a specific session. This is useful for components that only need to observe a single session without managing a full WebSocket connection.
+
+Example usage in React:
+
+```tsx
+useEffect(() => {
+  const source = new EventSource(`/api/sessions/${sessionKey}/stream`);
+  source.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    // Handle real-time update
+  };
+  return () => source.close();
+}, [sessionKey]);
+```
+
+The `EventSource` API automatically reconnects on transient failures, making SSE a resilient choice for long-lived subscriptions.
+
 ## Adding a New Route
 
 1. Create a route component in `src/routes/my-feature.tsx`:

@@ -1,7 +1,7 @@
 //! HTTP request handlers for the REST API.
 
 use axum::{
-    extract::State,
+    extract::{Path, State},
     routing::{delete, get, post},
     Json, Router,
 };
@@ -14,6 +14,8 @@ pub fn api_routes() -> Router<ApiState> {
         // Agent endpoints
         .route("/agents", get(list_agents))
         .route("/agents/{name}", get(get_agent))
+        .route("/agents/{name}/start", post(start_agent))
+        .route("/agents/{name}/stop", post(stop_agent))
         // Session endpoints
         .route("/sessions", get(list_sessions))
         .route("/sessions/{key}", get(get_session))
@@ -29,6 +31,20 @@ pub fn api_routes() -> Router<ApiState> {
         .merge(super::delegation::delegation_routes())
         // System monitoring
         .merge(super::monitoring::monitoring_routes())
+        // Skills
+        .merge(super::skills::skills_routes())
+        // Memory
+        .merge(super::memory_api::memory_routes())
+        // Config
+        .merge(super::config_api::config_routes())
+        // Cron
+        .merge(super::cron_api::cron_routes())
+        // Channels
+        .merge(super::channels_api::channel_routes())
+        // Chat (session messages, create, export)
+        .merge(super::chat::chat_routes())
+        // Voice
+        .merge(super::voice_api::voice_routes())
 }
 
 async fn list_agents(State(state): State<ApiState>) -> Json<Vec<super::AgentInfo>> {
@@ -37,9 +53,25 @@ async fn list_agents(State(state): State<ApiState>) -> Json<Vec<super::AgentInfo
 
 async fn get_agent(
     State(state): State<ApiState>,
-    axum::extract::Path(name): axum::extract::Path<String>,
+    Path(name): Path<String>,
 ) -> Json<Option<super::AgentInfo>> {
     Json(state.agents.get_agent(&name))
+}
+
+async fn start_agent(
+    State(_state): State<ApiState>,
+    Path(_name): Path<String>,
+) -> Json<serde_json::Value> {
+    // Stub: agent start will be wired to agent lifecycle management.
+    Json(serde_json::json!({ "ok": true }))
+}
+
+async fn stop_agent(
+    State(_state): State<ApiState>,
+    Path(_name): Path<String>,
+) -> Json<serde_json::Value> {
+    // Stub: agent stop will be wired to agent lifecycle management.
+    Json(serde_json::json!({ "ok": true }))
 }
 
 async fn list_sessions(State(state): State<ApiState>) -> Json<Vec<super::SessionInfo>> {
@@ -48,14 +80,14 @@ async fn list_sessions(State(state): State<ApiState>) -> Json<Vec<super::Session
 
 async fn get_session(
     State(state): State<ApiState>,
-    axum::extract::Path(key): axum::extract::Path<String>,
+    Path(key): Path<String>,
 ) -> Json<Option<super::SessionDetail>> {
     Json(state.sessions.get_session(&key))
 }
 
 async fn delete_session(
     State(state): State<ApiState>,
-    axum::extract::Path(key): axum::extract::Path<String>,
+    Path(key): Path<String>,
 ) -> Json<bool> {
     Json(state.sessions.delete_session(&key))
 }
@@ -66,7 +98,7 @@ async fn list_tools(State(state): State<ApiState>) -> Json<Vec<super::ToolInfo>>
 
 async fn get_tool_schema(
     State(state): State<ApiState>,
-    axum::extract::Path(name): axum::extract::Path<String>,
+    Path(name): Path<String>,
 ) -> Json<Option<serde_json::Value>> {
     Json(state.tools.tool_schema(&name))
 }

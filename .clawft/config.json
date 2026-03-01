@@ -8,13 +8,18 @@
       "memoryWindow": 50
     }
   },
+  "providers": {
+    "openrouter": {
+      "apiKey": ""
+    }
+  },
   "routing": {
     "mode": "tiered",
     "tiers": [
       {
         "name": "free",
         "models": [
-          "openrouter/meta-llama/llama-3.1-8b-instruct:free",
+          "openrouter/arcee-ai/trinity-large-preview:free",
           "groq/llama-3.1-8b",
           "deepseek/deepseek-chat"
         ],
@@ -124,5 +129,12 @@
       "window_seconds": 60,
       "strategy": "sliding_window"
     }
+  },
+  "gateway": {
+    "host": "0.0.0.0",
+    "port": 18790,
+    "apiEnabled": true,
+    "apiPort": 18789,
+    "corsOrigins": ["http://localhost:5173"]
   }
 }

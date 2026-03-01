@@ -256,7 +256,7 @@ exports wasm-bindgen-annotated functions.
 
 ```bash
 # Serve the HTML test harness
-python3 -m http.server 8080 --directory crates/clawft-wasm/www
+scripts/build.sh serve
 ```
 
 Open `http://localhost:8080` in a browser.
@@ -598,3 +598,138 @@ ls docs/ui/              # 4 files: developer-guide, api-reference, browser-mode
 ```
 
 **Verify:** Files exist and contain meaningful content (not stubs).
+
+---
+
+## 7. Voice Pipeline Testing
+
+### 7.1 TTS Provider Configuration
+
+Test that each TTS provider can be configured and the API responds correctly.
+
+```bash
+# Check current TTS config (defaults to browser)
+curl -s http://localhost:18789/api/voice/tts/config | jq
+
+# Expected output:
+# { "provider": "browser", "model": "...", "voice": "", "speed": 1.0 }
+```
+
+### 7.2 Browser TTS (Default)
+
+```bash
+# Should return 400 — browser TTS is handled client-side
+curl -s -X POST http://localhost:18789/api/voice/tts \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "Hello world"}' | jq
+
+# Expected: { "error": "TTS provider is set to 'browser'..." }
+```
+
+### 7.3 OpenAI TTS
+
+Prerequisites: Set `OPENAI_API_KEY` env var or configure `providers.openai.apiKey`.
+
+```bash
+# Set provider to openai in config.json:
+# "voice": { "tts": { "provider": "openai" } }
+
+# Test synthesis — should return audio/mpeg
+curl -s -X POST http://localhost:18789/api/voice/tts \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "This is a test of OpenAI text to speech"}' \
+  -o test_openai.mp3
+
+# Verify it's a valid MP3
+file test_openai.mp3
+# Expected: test_openai.mp3: MPEG ADTS, layer III, ...
+
+# Test with voice override
+curl -s -X POST http://localhost:18789/api/voice/tts \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "Hello from Nova", "voice": "nova", "speed": 1.2}' \
+  -o test_nova.mp3
+
+# Clean up
+rm -f test_openai.mp3 test_nova.mp3
+```
+
+### 7.4 ElevenLabs TTS
+
+Prerequisites: Set `ELEVENLABS_API_KEY` env var or configure `providers.elevenlabs.apiKey`.
+
+```bash
+# Set provider to elevenlabs in config.json:
+# "voice": { "tts": { "provider": "elevenlabs" } }
+
+# Test synthesis
+curl -s -X POST http://localhost:18789/api/voice/tts \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "This is a test of ElevenLabs text to speech"}' \
+  -o test_elevenlabs.mp3
+
+# Verify
+file test_elevenlabs.mp3
+
+# Clean up
+rm -f test_elevenlabs.mp3
+```
+
+### 7.5 Environment Variable Fallback
+
+```bash
+# Ensure no apiKey in config, set env var instead
+export OPENAI_API_KEY=sk-test-key
+
+# Config should have: "voice": { "tts": { "provider": "openai" } }
+# With providers.openai.apiKey empty or absent
+
+# The TTS endpoint should use the env var
+# (will fail with invalid key but should NOT return "No API key configured")
+curl -s -X POST http://localhost:18789/api/voice/tts \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "Test"}' | jq .error
+
+# Expected: "TTS API returned 401" (not "No API key configured")
+```
+
+### 7.6 Voice Status and Settings
+
+```bash
+# Get voice status
+curl -s http://localhost:18789/api/voice/status | jq
+
+# Update voice settings
+curl -s -X PUT http://localhost:18789/api/voice/settings \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled": true, "language": "en-US"}' | jq
+
+# Verify settings persisted
+curl -s http://localhost:18789/api/voice/status | jq .settings
+```
+
+### 7.7 Talk Mode (Browser Testing)
+
+1. Open `http://localhost:5173` in Chrome or Edge
+2. Navigate to the Voice page
+3. Click "Start Talk Mode"
+4. Verify: full-screen overlay appears with microphone icon
+5. Speak a question -- verify transcript appears
+6. Wait for response -- verify assistant response appears and is spoken
+7. During speech playback, tap the center icon -- verify speech stops and listening resumes
+8. Click "End Talk Mode" -- verify overlay closes
+
+**Verify:** Response text is natural conversation (no markdown symbols read aloud).
+
+### 7.8 Markdown Stripping
+
+The `stripMarkdownForSpeech()` function should clean responses for TTS:
+
+| Input | Expected Output |
+|-------|----------------|
+| `**bold text**` | `bold text` |
+| `# Header` | `Header` |
+| `` `inline code` `` | `inline code` |
+| `[link](https://example.com)` | `link` |
+| `- item one\n- item two` | `. item one. . item two` |
+| `https://example.com` | (removed) |

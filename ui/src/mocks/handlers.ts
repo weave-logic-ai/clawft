@@ -266,9 +266,81 @@ const mockChannels: ChannelStatus[] = [
   },
 ];
 
+// ── Agents mock data ───────────────────────────────────────────
+
+const mockAgents = [
+  { id: "agent-001", name: "general-assistant", status: "running" as const, model: "claude-sonnet-4", created_at: "2026-02-24T08:00:00Z" },
+  { id: "agent-002", name: "code-reviewer", status: "running" as const, model: "claude-sonnet-4", created_at: "2026-02-24T08:05:00Z" },
+  { id: "agent-003", name: "researcher", status: "idle" as const, model: "claude-haiku-3.5", created_at: "2026-02-23T14:00:00Z" },
+  { id: "agent-004", name: "test-runner", status: "idle" as const, model: "claude-haiku-3.5", created_at: "2026-02-23T10:00:00Z" },
+  { id: "agent-005", name: "voice-agent", status: "error" as const, model: "claude-sonnet-4", created_at: "2026-02-22T12:00:00Z" },
+];
+
+// ── Sessions mock data ─────────────────────────────────────────
+
+const mockSessions = [
+  { key: "sess-abc-123", agent_id: "agent-001", message_count: 42, updated_at: "2026-02-24T10:30:00Z" },
+  { key: "sess-def-456", agent_id: "agent-002", message_count: 18, updated_at: "2026-02-24T10:25:00Z" },
+  { key: "sess-ghi-789", agent_id: "agent-003", message_count: 7, updated_at: "2026-02-24T09:45:00Z" },
+  { key: "sess-jkl-012", agent_id: "agent-001", message_count: 95, updated_at: "2026-02-23T18:00:00Z" },
+];
+
+// ── Tools mock data ────────────────────────────────────────────
+
+const mockTools = [
+  { name: "read_file", description: "Read a file from the filesystem" },
+  { name: "write_file", description: "Write content to a file" },
+  { name: "edit_file", description: "Make targeted edits to a file" },
+  { name: "list_directory", description: "List contents of a directory" },
+  { name: "exec_shell", description: "Execute a shell command" },
+  { name: "web_search", description: "Search the web for information" },
+  { name: "web_fetch", description: "Fetch content from a URL" },
+  { name: "memory_read", description: "Read from agent memory" },
+  { name: "memory_write", description: "Write to agent memory" },
+  { name: "delegate_task", description: "Delegate a subtask to another model" },
+];
+
 // ── Handlers ────────────────────────────────────────────────────
 
 export const handlers = [
+  // Agents
+  http.get("/api/agents", () => HttpResponse.json(mockAgents)),
+  http.get("/api/agents/:id", ({ params }) => {
+    const agent = mockAgents.find((a) => a.id === params.id);
+    if (!agent) return new HttpResponse(null, { status: 404 });
+    return HttpResponse.json({ ...agent, config: {}, session_count: 2, description: "Mock agent", skills: ["code-review"] });
+  }),
+  http.post("/api/agents/:id/start", () => HttpResponse.json({ ok: true })),
+  http.post("/api/agents/:id/stop", () => HttpResponse.json({ ok: true })),
+
+  // Sessions
+  http.get("/api/sessions", () => HttpResponse.json(mockSessions)),
+  http.get("/api/sessions/:key", ({ params }) => {
+    const session = mockSessions.find((s) => s.key === params.key);
+    if (!session) return new HttpResponse(null, { status: 404 });
+    return HttpResponse.json({ ...session, messages: [
+      { role: "user", content: "Hello", timestamp: "2026-02-24T10:00:00Z" },
+      { role: "assistant", content: "Hi! How can I help?", timestamp: "2026-02-24T10:00:01Z" },
+    ]});
+  }),
+  http.post("/api/sessions", () => HttpResponse.json({ key: `sess-${Date.now()}`, agent_id: "agent-001", message_count: 0, updated_at: new Date().toISOString() })),
+  http.get("/api/sessions/:key/export", () => HttpResponse.json({ messages: [] })),
+  http.delete("/api/sessions/:key", () => HttpResponse.json({ ok: true })),
+
+  // Chat
+  http.post("/api/sessions/:key/messages", () =>
+    HttpResponse.json({ role: "assistant", content: "This is a mock response from MSW.", timestamp: new Date().toISOString() }),
+  ),
+
+  // Tools
+  http.get("/api/tools", () => HttpResponse.json(mockTools)),
+  http.get("/api/tools/:name/schema", ({ params }) =>
+    HttpResponse.json({ type: "object", properties: { path: { type: "string", description: `Path for ${params.name}` } }, required: ["path"] }),
+  ),
+
+  // Auth
+  http.post("/api/auth/token", () => HttpResponse.json({ token: "mock-dev-token-1234" })),
+
   // Skills
   http.get("/api/skills", () => HttpResponse.json(mockSkills)),
   http.post("/api/skills/install", () =>

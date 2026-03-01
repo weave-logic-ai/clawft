@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useVoiceStore } from "../../stores/voice-store";
 import { api } from "../../lib/api-client";
+import { testMicrophone, testSpeaker } from "../../lib/audio";
 import { Card, CardHeader, CardTitle, CardContent } from "../ui/card";
 import { Button } from "../ui/button";
 import { Badge } from "../ui/badge";
@@ -83,8 +84,8 @@ export function VoiceSettings() {
     setTesting("mic");
     setMicTestResult(null);
     try {
-      const result = await api.voice.testMic();
-      setMicTestResult(result);
+      const result = await testMicrophone();
+      setMicTestResult({ success: true, level: result.level });
     } catch {
       setMicTestResult({ success: false, level: 0 });
     } finally {
@@ -96,8 +97,8 @@ export function VoiceSettings() {
     setTesting("speaker");
     setSpeakerTestResult(null);
     try {
-      const result = await api.voice.testSpeaker();
-      setSpeakerTestResult(result);
+      await testSpeaker();
+      setSpeakerTestResult({ success: true });
     } catch {
       setSpeakerTestResult({ success: false });
     } finally {

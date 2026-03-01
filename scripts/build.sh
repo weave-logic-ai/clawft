@@ -4,12 +4,12 @@
 set -euo pipefail
 
 # ── Colors ───────────────────────────────────────────────────────────
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[1;33m'
+CYAN=$'\033[0;36m'
+BOLD=$'\033[1m'
+NC=$'\033[0m'
 
 # ── Resolve workspace root ──────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,6 +21,8 @@ PROFILE=""
 FEATURES=""
 VERBOSE=false
 DRY_RUN=false
+FORCE=false
+SERVE_PORT=""
 COMMAND=""
 
 # ── Reporting helpers ────────────────────────────────────────────────
@@ -41,6 +43,15 @@ timer_end() {
         printf "  ${CYAN}TIME${NC}  %dm %ds\n" "$min" "$sec"
     else
         printf "  ${CYAN}TIME${NC}  %ds\n" "$sec"
+    fi
+}
+
+# ── Force-clean a package before rebuild ───────────────────────────
+force_clean_pkg() {
+    local pkg="$1"
+    if [ "$FORCE" = true ]; then
+        info "Forcing rebuild (cleaning $pkg)"
+        cargo clean -p "$pkg" 2>/dev/null || true
     fi
 }
 
@@ -78,8 +89,10 @@ report_binary_size() {
             local mb
             mb=$(echo "scale=2; $bytes / 1048576" | bc 2>/dev/null || echo "$((kb / 1024))")
             printf "  ${CYAN}SIZE${NC}  %s: %s MB (%s bytes)\n" "$label" "$mb" "$bytes"
-        else
+        elif [ "$kb" -gt 0 ]; then
             printf "  ${CYAN}SIZE${NC}  %s: %s KB (%s bytes)\n" "$label" "$kb" "$bytes"
+        else
+            printf "  ${CYAN}SIZE${NC}  %s: %s bytes\n" "$label" "$bytes"
         fi
     fi
 }
@@ -96,6 +109,7 @@ cargo_features_args() {
 cmd_native() {
     local profile="${PROFILE:-release}"
     header "Building native CLI binary (profile: $profile)"
+    force_clean_pkg clawft-cli
     timer_start
     local args=(cargo build --bin weft)
     if [ "$profile" = "release" ] || [ "$profile" = "release-wasm" ]; then
@@ -115,6 +129,7 @@ cmd_native() {
 
 cmd_native_debug() {
     header "Building native CLI binary (debug)"
+    force_clean_pkg clawft-cli
     timer_start
     local args=(cargo build --bin weft)
     [ -n "$FEATURES" ] && args+=(--features "$FEATURES")
@@ -127,6 +142,7 @@ cmd_wasi() {
     local profile="${PROFILE:-release-wasm}"
     header "Building WASM for WASI (wasm32-wasip1, profile: $profile)"
     if ! check_target_installed wasm32-wasip1; then return 1; fi
+    force_clean_pkg clawft-wasm
     timer_start
     local args=(cargo build --target wasm32-wasip1 --profile "$profile" -p clawft-wasm)
     [ -n "$FEATURES" ] && args+=(--features "$FEATURES")
@@ -139,6 +155,7 @@ cmd_browser() {
     local profile="${PROFILE:-release-wasm}"
     header "Building WASM for browser (wasm32-unknown-unknown, profile: $profile)"
     if ! check_target_installed wasm32-unknown-unknown; then return 1; fi
+    force_clean_pkg clawft-wasm
     timer_start
     local args=(cargo build --target wasm32-unknown-unknown -p clawft-wasm --no-default-features --features browser)
     args+=(--profile "$profile")
@@ -149,7 +166,25 @@ cmd_browser() {
     fi
     run_cmd "${args[@]}"
     timer_end
-    report_binary_size "target/wasm32-unknown-unknown/${profile}/clawft_wasm.wasm" "Browser WASM"
+
+    local wasm_file="target/wasm32-unknown-unknown/${profile}/clawft_wasm.wasm"
+    report_binary_size "$wasm_file" "Browser WASM (raw)"
+
+    # Run wasm-bindgen to generate JS glue into www/pkg/ so the test
+    # harness can be served directly from www/ at the root URL.
+    local pkg_dir="$ROOT/crates/clawft-wasm/www/pkg"
+    if command -v wasm-bindgen >/dev/null 2>&1; then
+        info "Running wasm-bindgen → $pkg_dir"
+        run_cmd wasm-bindgen "$wasm_file" \
+            --out-dir "$pkg_dir" \
+            --target web \
+            --no-typescript
+        report_binary_size "$pkg_dir/clawft_wasm_bg.wasm" "Browser WASM (bindgen)"
+        pass "pkg/ ready — run: scripts/build.sh serve"
+    else
+        skip "wasm-bindgen CLI not found — pkg/ not generated"
+        info "Install with: cargo install wasm-bindgen-cli"
+    fi
 }
 
 cmd_ui() {
@@ -191,7 +226,12 @@ cmd_all() {
 cmd_test() {
     header "Running cargo test --workspace"
     timer_start
-    run_cmd cargo test --workspace
+    if [ "$DRY_RUN" = true ]; then
+        printf "  ${YELLOW}DRY${NC}   cargo test --workspace\n"
+    else
+        # Always show full output — tail -5 hides test results
+        cargo test --workspace 2>&1
+    fi
     timer_end
 }
 
@@ -205,7 +245,12 @@ cmd_check() {
 cmd_clippy() {
     header "Running clippy (warnings as errors)"
     timer_start
-    run_cmd cargo clippy --workspace -- -D warnings
+    if [ "$DRY_RUN" = true ]; then
+        printf "  ${YELLOW}DRY${NC}   cargo clippy --workspace -- -D warnings\n"
+    else
+        # Always show full output — tail -5 hides warnings
+        cargo clippy --workspace -- -D warnings 2>&1
+    fi
     timer_end
 }
 
@@ -216,7 +261,61 @@ cmd_clean() {
         info "Removing ui/dist"
         rm -rf "$ROOT/ui/dist"
     fi
+    if [ -d "$ROOT/crates/clawft-wasm/www/pkg" ]; then
+        info "Removing crates/clawft-wasm/www/pkg"
+        rm -rf "$ROOT/crates/clawft-wasm/www/pkg"
+    fi
     pass "Clean complete"
+}
+
+cmd_serve() {
+    local port="${1:-8080}"
+    local www_dir="$ROOT/crates/clawft-wasm/www"
+    header "Serving browser test harness on http://localhost:$port"
+    if [ ! -d "$www_dir/pkg" ]; then
+        fail "www/pkg/ not found — run 'scripts/build.sh browser' first"
+        return 1
+    fi
+
+    # Generate .env-keys.json from detected environment variables.
+    # Keys are served locally only — never committed (gitignored).
+    local keys_file="$www_dir/.env-keys.json"
+    local found=0
+    printf '{' > "$keys_file"
+    local first=true
+    for pair in \
+        "OPENROUTER_API_KEY:openrouter" \
+        "ANTHROPIC_API_KEY:anthropic" \
+        "OPENAI_API_KEY:openai" \
+        "DEEPSEEK_API_KEY:deepseek" \
+        "GROQ_API_KEY:groq" \
+        "GOOGLE_GEMINI_API_KEY:gemini" \
+        "XAI_API_KEY:xai"; do
+        local env_var="${pair%%:*}"
+        local provider="${pair##*:}"
+        local val="${!env_var:-}"
+        if [ -n "$val" ]; then
+            if [ "$first" = true ]; then first=false; else printf ',' >> "$keys_file"; fi
+            printf '"%s":"%s"' "$provider" "$val" >> "$keys_file"
+            info "Detected $env_var → providers.$provider"
+            found=$((found + 1))
+        fi
+    done
+    printf '}' >> "$keys_file"
+
+    if [ "$found" -gt 0 ]; then
+        pass "$found API key(s) injected into .env-keys.json (local only)"
+    else
+        info "No API keys detected in environment — textarea defaults will be used"
+    fi
+
+    # Clean up keys file on exit (Ctrl+C or normal stop).
+    trap 'rm -f "$keys_file" 2>/dev/null; exit 0' INT TERM
+
+    info "Open http://localhost:$port in your browser"
+    info "API requests proxied via /proxy/ (avoids CORS)"
+    python3 "$SCRIPT_DIR/dev_server.py" "$port" "$www_dir"
+    rm -f "$keys_file" 2>/dev/null
 }
 
 # ── Gate: full phase-gate checks ────────────────────────────────────
@@ -359,11 +458,13 @@ ${BOLD}Commands:${NC}
   check           Run cargo check --workspace (fast compile check)
   clippy          Run clippy with warnings-as-errors
   gate            Run full phase gate (11 checks)
+  serve [port]    Serve browser test harness (default: 8080)
   clean           Clean all build artifacts
 
 ${BOLD}Options:${NC}
   --features <f>  Extra features to enable (e.g. --features voice,channels)
   --profile <p>   Cargo profile: debug, release, release-wasm (default varies)
+  --force, -f     Force rebuild even if artifacts are up-to-date
   --verbose       Show full cargo output
   --dry-run       Print commands without executing
   --help          Show this help
@@ -374,6 +475,8 @@ ${BOLD}Examples:${NC}
   scripts/build.sh browser                          # Browser WASM
   scripts/build.sh gate                             # Full phase gate
   scripts/build.sh native --dry-run                 # Preview commands
+  scripts/build.sh wasi --force                      # Force WASI rebuild
+  scripts/build.sh browser && scripts/build.sh serve # Build + serve test harness
 EOF
 }
 
@@ -387,6 +490,12 @@ parse_args() {
     COMMAND="$1"
     shift
 
+    # Capture positional arg for serve command (port number)
+    if [ "$COMMAND" = "serve" ] && [ $# -gt 0 ] && [[ "$1" =~ ^[0-9]+$ ]]; then
+        SERVE_PORT="$1"
+        shift
+    fi
+
     while [ $# -gt 0 ]; do
         case "$1" in
             --features)
@@ -396,6 +505,10 @@ parse_args() {
             --profile)
                 PROFILE="${2:?'--profile requires a value'}"
                 shift 2
+                ;;
+            --force|-f)
+                FORCE=true
+                shift
                 ;;
             --verbose)
                 VERBOSE=true
@@ -433,6 +546,7 @@ main() {
         check)        cmd_check ;;
         clippy)       cmd_clippy ;;
         gate)         cmd_gate ;;
+        serve)        cmd_serve "$SERVE_PORT" ;;
         clean)        cmd_clean ;;
         --help|-h)    usage ;;
         *)

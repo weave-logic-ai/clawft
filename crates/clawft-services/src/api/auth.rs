@@ -50,3 +50,78 @@ impl Default for TokenStore {
         Self::new()
     }
 }
+
+/// Tower middleware that validates Bearer tokens on protected routes.
+///
+/// Requests to `/api/auth/token` and `/api/health` are exempt from
+/// authentication. All other `/api/*` routes require a valid Bearer
+/// token in the `Authorization` header.
+///
+/// # Usage
+///
+/// This middleware is **not** enabled by default to keep the development
+/// workflow frictionless. To activate it, wrap the `/api` nest in
+/// `build_router()`:
+///
+/// ```ignore
+/// use axum::middleware;
+///
+/// Router::new()
+///     .nest("/api", handlers::api_routes()
+///         .layer(middleware::from_fn_with_state(
+///             state.clone(), auth::auth_middleware)))
+/// ```
+pub async fn auth_middleware(
+    axum::extract::State(state): axum::extract::State<super::ApiState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, axum::http::StatusCode> {
+    let path = request.uri().path();
+
+    // Skip auth for token creation and health-check endpoints.
+    if path == "/api/auth/token" || path == "/api/health" {
+        return Ok(next.run(request).await);
+    }
+
+    // Extract and validate the Bearer token.
+    let auth_header = request
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok());
+
+    match auth_header {
+        Some(header) if header.starts_with("Bearer ") => {
+            let token = &header[7..];
+            if state.auth.validate(token) {
+                Ok(next.run(request).await)
+            } else {
+                Err(axum::http::StatusCode::UNAUTHORIZED)
+            }
+        }
+        _ => Err(axum::http::StatusCode::UNAUTHORIZED),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_store_generate_and_validate() {
+        let store = TokenStore::new();
+        let token = store.generate_token(3600);
+        assert!(store.validate(&token));
+    }
+
+    #[test]
+    fn token_store_rejects_unknown() {
+        let store = TokenStore::new();
+        assert!(!store.validate("not-a-real-token"));
+    }
+
+    #[test]
+    fn token_store_default() {
+        let store = TokenStore::default();
+        assert!(!store.validate("anything"));
+    }
+}

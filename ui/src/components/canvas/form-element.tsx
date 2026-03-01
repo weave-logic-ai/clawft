@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import type { CanvasElementData } from "../../stores/canvas-store";
 import { Button } from "../ui/button";
 
@@ -109,7 +109,10 @@ export function AdvancedFormElement({
   element,
   onInteraction,
 }: AdvancedFormElementProps) {
-  const fields = (element.fields as AdvancedFormFieldData[]) ?? [];
+  const fields = useMemo(
+    () => (element.fields as AdvancedFormFieldData[]) ?? [],
+    [element.fields],
+  );
   const submitAction = (element.submitAction as string) ?? "Submit";
 
   const [values, setValues] = useState<Record<string, string>>(() => {

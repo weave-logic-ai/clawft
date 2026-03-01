@@ -56,6 +56,9 @@ section you do not need.
     "openai": {
       "api_key": "sk-..."
     },
+    "elevenlabs": {
+      "apiKey": ""
+    },
     "openrouter": {
       "api_key": "sk-or-...",
       "api_base": "https://openrouter.ai/api/v1"
@@ -174,6 +177,28 @@ section you do not need.
         }
       }
     }
+  },
+
+  "voice": {
+    "enabled": true,
+    "tts": {
+      "provider": "openai",
+      "model": "tts-1",
+      "voice": "alloy",
+      "speed": 1.0
+    },
+    "stt": {
+      "enabled": true,
+      "language": "en"
+    },
+    "vad": {
+      "threshold": 0.5,
+      "silence_timeout_ms": 1500
+    },
+    "wake": {
+      "enabled": false,
+      "phrase": "hey weft"
+    }
   }
 }
 ```
@@ -198,7 +223,7 @@ Default settings applied to every agent instance.
 Credentials and endpoint overrides for LLM providers. Each provider section
 has the same structure. Named providers: `anthropic`, `openai`, `openrouter`,
 `deepseek`, `groq`, `zhipu`, `dashscope`, `vllm`, `gemini`, `moonshot`,
-`minimax`, `aihubmix`, `openai_codex`, `xai`, `custom`.
+`minimax`, `aihubmix`, `openai_codex`, `xai`, `elevenlabs`, `custom`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -260,6 +285,51 @@ Top-level tool configuration.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `timeout` | integer | `60` | Command execution timeout in seconds. |
+
+### voice
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enable voice features globally. |
+
+#### voice.tts
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Enable text-to-speech. |
+| `provider` | string | `"browser"` | TTS provider: `"browser"`, `"openai"`, or `"elevenlabs"`. |
+| `model` | string | (varies) | TTS model. Defaults: `tts-1` (OpenAI), `eleven_multilingual_v2` (ElevenLabs). |
+| `voice` | string | (varies) | Voice ID. Defaults: `alloy` (OpenAI), `Rachel` (ElevenLabs). |
+| `speed` | float | `1.0` | Speaking speed multiplier (0.25 - 4.0). |
+
+> **Note:** API keys are resolved from `providers.openai.api_key` or
+> `providers.elevenlabs.api_key`. If the config key is empty, the corresponding
+> environment variable is used as fallback (`OPENAI_API_KEY` or
+> `ELEVENLABS_API_KEY`).
+
+#### voice.stt
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Enable speech-to-text. |
+| `model` | string | `"sherpa-onnx-streaming-zipformer-en-20M"` | STT model name. |
+| `language` | string | `""` | Language code. Empty = auto-detect. |
+
+#### voice.vad
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `threshold` | float | `0.5` | VAD activation threshold (0.0 - 1.0). |
+| `silence_timeout_ms` | integer | `1500` | Silence duration in ms before speech end. |
+| `min_speech_ms` | integer | `250` | Minimum speech duration to trigger processing. |
+
+#### voice.wake
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enable wake word detection. |
+| `phrase` | string | `"hey weft"` | Wake word phrase. |
+| `sensitivity` | float | `0.5` | Detection sensitivity (0.0 - 1.0). |
 
 ### routing
 

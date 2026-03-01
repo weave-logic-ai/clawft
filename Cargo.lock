@@ -465,6 +465,7 @@ dependencies = [
  "tokio-tungstenite 0.24.0",
  "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -477,6 +478,7 @@ dependencies = [
  "clap",
  "clawft-channels",
  "clawft-core",
+ "clawft-kernel",
  "clawft-llm",
  "clawft-platform",
  "clawft-plugin",
@@ -533,6 +535,26 @@ dependencies = [
  "tracing",
  "uuid",
  "wasm-bindgen-futures",
+]
+
+[[package]]
+name = "clawft-kernel"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "clawft-core",
+ "clawft-platform",
+ "clawft-plugin",
+ "clawft-types",
+ "dashmap",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -719,6 +741,8 @@ dependencies = [
  "axum",
  "axum-extra",
  "chrono",
+ "clawft-core",
+ "clawft-platform",
  "clawft-types",
  "cron",
  "dirs",
@@ -1074,6 +1098,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "dashmap"
+version = "6.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5041cc499144891f3790297212f32a74fb938e5136a14943f338ef9e0ae276cf"
+dependencies = [
+ "cfg-if",
+ "crossbeam-utils",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
 ]
 
 [[package]]

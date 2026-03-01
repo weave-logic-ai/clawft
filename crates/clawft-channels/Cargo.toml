@@ -38,6 +38,7 @@ futures-util = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 dirs = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

@@ -172,14 +172,17 @@
     <label for="config-textarea">Provider Configuration (JSON)</label>
     <textarea id="config-textarea">{
   "providers": {
+    "openrouter": {
+      "apiKey": "YOUR_OPENROUTER_KEY"
+    },
     "anthropic": {
-      "apiKey": "YOUR_API_KEY_HERE",
+      "apiKey": "YOUR_ANTHROPIC_KEY",
       "browserDirect": true
     }
   },
   "agents": {
     "defaults": {
-      "model": "anthropic/claude-sonnet-4-20250514",
+      "model": "openrouter/meta-llama/llama-3.1-8b-instruct:free",
       "maxTokens": 4096
     }
   }

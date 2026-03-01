@@ -83,12 +83,27 @@ impl ChannelAdapter for ChannelAdapterShim {
     async fn start(
         &self,
         _host: Arc<dyn ChannelAdapterHost>,
-        cancel: CancellationToken,
+        cancel: clawft_plugin::CancellationToken,
     ) -> Result<(), PluginError> {
-        self.channel
-            .start(self.bridge_host.clone(), cancel)
+        // Bridge clawft_plugin's CancellationToken (poll-based) to tokio_util's
+        // (async-based) by spawning a polling task.
+        let tokio_cancel = CancellationToken::new();
+        let tokio_cancel_clone = tokio_cancel.clone();
+        let poll_handle = tokio::spawn(async move {
+            loop {
+                if cancel.is_cancelled() {
+                    tokio_cancel_clone.cancel();
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        });
+        let result = self.channel
+            .start(self.bridge_host.clone(), tokio_cancel)
             .await
-            .map_err(|e| PluginError::ExecutionFailed(format!("channel start: {e}")))
+            .map_err(|e| PluginError::ExecutionFailed(format!("channel start: {e}")));
+        poll_handle.abort();
+        result
     }
 
     async fn send(

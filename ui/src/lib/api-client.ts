@@ -221,5 +221,30 @@ export const api = {
       apiFetch<{ success: boolean }>("/api/voice/test-speaker", {
         method: "POST",
       }),
+    ttsConfig: () =>
+      apiFetch<{ provider: string; model: string; voice: string; speed: number }>(
+        "/api/voice/tts/config",
+      ),
+    /** Synthesize speech via the cloud TTS proxy. Returns an audio Blob. */
+    tts: async (
+      text: string,
+      opts?: { voice?: string; speed?: number },
+    ): Promise<Blob> => {
+      const token = getAuthToken();
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      };
+      const res = await fetch(`${API_URL}/api/voice/tts`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ text, voice: opts?.voice, speed: opts?.speed }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(err.error || `TTS error: ${res.status}`);
+      }
+      return res.blob();
+    },
   },
 };

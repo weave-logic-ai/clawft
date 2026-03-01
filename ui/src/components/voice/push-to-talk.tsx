@@ -1,19 +1,40 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { Mic } from "lucide-react";
 import { useVoiceStore } from "../../stores/voice-store";
-import { wsClient } from "../../lib/ws-client";
+import { sendVoiceMessage } from "../../lib/voice-chat";
+import {
+  createSpeechRecognition,
+  hasSpeechRecognition,
+  speak,
+  type SpeechRecognition,
+  type SpeechRecognitionEvent,
+} from "../../lib/audio";
 import { cn } from "../../lib/utils";
 
 export function PushToTalk() {
-  const { state, setState } = useVoiceStore();
+  const { state, setState, settings, setTranscript, setResponse } =
+    useVoiceStore();
   const [active, setActive] = useState(false);
   const [duration, setDuration] = useState(0);
+  const [error, setError] = useState<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const startTimeRef = useRef<number>(0);
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const transcriptRef = useRef<string>("");
+
+  const supported = hasSpeechRecognition();
 
   const startRecording = useCallback(() => {
+    if (!supported) {
+      setError("Speech recognition not supported in this browser");
+      return;
+    }
+
+    setError(null);
     setActive(true);
     setState("listening");
+    setTranscript("");
+    transcriptRef.current = "";
     startTimeRef.current = Date.now();
     setDuration(0);
 
@@ -21,10 +42,59 @@ export function PushToTalk() {
       setDuration(Math.floor((Date.now() - startTimeRef.current) / 1000));
     }, 100);
 
-    wsClient.send({ type: "voice:push_to_talk_start" });
-  }, [setState]);
+    const recognition = createSpeechRecognition({
+      lang: settings.language || "en-US",
+      continuous: true,
+      interimResults: true,
+    });
 
-  const stopRecording = useCallback(() => {
+    if (!recognition) {
+      setError("Failed to create speech recognition");
+      setActive(false);
+      setState("idle");
+      return;
+    }
+
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
+      let interim = "";
+      let final = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        if (result.isFinal) {
+          final += result[0].transcript;
+        } else {
+          interim += result[0].transcript;
+        }
+      }
+      if (final) {
+        transcriptRef.current += final;
+      }
+      setTranscript(transcriptRef.current + interim);
+    };
+
+    recognition.onerror = (event) => {
+      if (event.error !== "aborted") {
+        setError(`Speech error: ${event.error}`);
+      }
+    };
+
+    recognition.onend = () => {
+      // Recognition can end on its own (e.g. silence timeout).
+      // If we're still active, the user hasn't released yet — restart.
+      if (recognitionRef.current === recognition && active) {
+        try {
+          recognition.start();
+        } catch {
+          // already stopped
+        }
+      }
+    };
+
+    recognition.start();
+    recognitionRef.current = recognition;
+  }, [supported, setState, setTranscript, settings.language, active]);
+
+  const stopRecording = useCallback(async () => {
     setActive(false);
     setState("processing");
 
@@ -33,17 +103,46 @@ export function PushToTalk() {
       timerRef.current = null;
     }
 
-    wsClient.send({ type: "voice:push_to_talk_stop" });
+    // Stop speech recognition
+    if (recognitionRef.current) {
+      const rec = recognitionRef.current;
+      recognitionRef.current = null;
+      rec.abort();
+    }
 
-    // Simulate returning to idle after processing
-    setTimeout(() => setState("idle"), 1500);
-  }, [setState]);
+    const transcript = transcriptRef.current.trim();
+    if (!transcript) {
+      setState("idle");
+      return;
+    }
 
-  // Clean up timer on unmount
+    // Send transcript and wait for the agent's real response via WebSocket.
+    try {
+      const text = await sendVoiceMessage(transcript);
+      setResponse(text);
+      setState("speaking");
+
+      // Use browser TTS to speak the response
+      try {
+        await speak(text, { lang: settings.language || "en-US" });
+      } catch {
+        // TTS not available or failed, that's ok
+      }
+    } catch {
+      setResponse("");
+    }
+    setState("idle");
+  }, [setState, setResponse, settings.language]);
+
+  // Clean up on unmount
   useEffect(() => {
     return () => {
       if (timerRef.current) {
         clearInterval(timerRef.current);
+      }
+      if (recognitionRef.current) {
+        recognitionRef.current.abort();
+        recognitionRef.current = null;
       }
     };
   }, []);
@@ -82,7 +181,7 @@ export function PushToTalk() {
           e.preventDefault();
           stopRecording();
         }}
-        disabled={state === "processing"}
+        disabled={state === "processing" || !supported}
         className={cn(
           "relative flex items-center justify-center rounded-full transition-all",
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2",
@@ -117,12 +216,21 @@ export function PushToTalk() {
             : "text-gray-500 dark:text-gray-400",
         )}
       >
-        {state === "processing"
-          ? "Processing..."
-          : active
-            ? "Release to send"
-            : "Hold to talk"}
+        {!supported
+          ? "Not supported in this browser"
+          : state === "processing"
+            ? "Processing..."
+            : active
+              ? "Release to send"
+              : "Hold to talk"}
       </p>
+
+      {/* Error message */}
+      {error && (
+        <p className="text-xs text-red-500 dark:text-red-400 text-center max-w-48">
+          {error}
+        </p>
+      )}
     </div>
   );
 }

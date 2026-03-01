@@ -208,13 +208,15 @@ function PieChart({
   );
 
   const slices = useMemo(() => {
-    let startAngle = -Math.PI / 2;
-    return data.map((d, i) => {
+    const result = [];
+    let angle = -Math.PI / 2;
+    for (let i = 0; i < data.length; i++) {
+      const d = data[i];
       const sweepAngle = (d.value / total) * Math.PI * 2;
-      const endAngle = startAngle + sweepAngle;
+      const endAngle = angle + sweepAngle;
 
-      const x1 = cx + radius * Math.cos(startAngle);
-      const y1 = cy + radius * Math.sin(startAngle);
+      const x1 = cx + radius * Math.cos(angle);
+      const y1 = cy + radius * Math.sin(angle);
       const x2 = cx + radius * Math.cos(endAngle);
       const y2 = cy + radius * Math.sin(endAngle);
 
@@ -227,17 +229,17 @@ function PieChart({
         "Z",
       ].join(" ");
 
-      const result = {
+      result.push({
         path: pathD,
         color: colors[i % colors.length],
         label: d.label,
         value: d.value,
-        midAngle: startAngle + sweepAngle / 2,
-      };
+        midAngle: angle + sweepAngle / 2,
+      });
 
-      startAngle = endAngle;
-      return result;
-    });
+      angle = endAngle;
+    }
+    return result;
   }, [data, total, cx, cy, radius, colors]);
 
   return (
