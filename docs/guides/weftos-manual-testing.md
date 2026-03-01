@@ -5,34 +5,145 @@
 **Test Count**: 259 unit tests across 18 modules
 **Total SLOC**: ~9,300 lines
 
-This guide provides comprehensive manual and integration testing procedures for the WeftOS kernel beyond automated unit tests. Use this to validate end-to-end behavior, cross-module integration, and production readiness.
+This guide provides comprehensive manual and integration testing procedures
+for the WeftOS kernel. Work through the master checklist below, checking off
+each item as you go. Every checklist item links to its corresponding section.
 
 ---
 
-## Table of Contents
+## Master Checklist
 
-1. [Prerequisites](#prerequisites)
-2. [Running Automated Tests](#running-automated-tests)
-3. [Module-by-Module Manual Testing](#module-by-module-manual-testing)
-   - [K0: Foundation](#k0-foundation)
-   - [K1: Supervisor + RBAC](#k1-supervisor--rbac)
-   - [K2: A2A IPC](#k2-a2a-ipc)
-   - [K3: WASM Sandbox](#k3-wasm-sandbox)
-   - [K4: Containers](#k4-containers)
-   - [K5: App Framework](#k5-app-framework)
-   - [K6a: Distributed](#k6a-distributed)
-   - [K6b: Agency](#k6b-agency)
-4. [Integration Test Scenarios](#integration-test-scenarios)
-5. [CLI Testing](#cli-testing)
-6. [Feature-Gated Module Testing](#feature-gated-module-testing)
-7. [What Cannot Be Tested Yet](#what-cannot-be-tested-yet)
-8. [Regression Checklist](#regression-checklist)
+### Prerequisites (Section 1)
+
+- [ ] **P.1** Rust toolchain installed (1.75+) — [Section 1.1](#11-required-tools)
+- [ ] **P.2** Build script present and executable — [Section 1.1](#11-required-tools)
+- [ ] **P.3** Native debug build succeeds — [Section 1.2](#12-build-the-kernel-crate)
+- [ ] **P.4** All-features build succeeds — [Section 1.2](#12-build-the-kernel-crate)
+- [ ] **P.5** Test suite runs (259 tests, 0 failures) — [Section 1.3](#13-verify-test-suite-runs)
+
+### Automated Test Validation (Section 2)
+
+- [ ] **A.1** Full workspace tests pass (`scripts/build.sh test`) — [Section 2.1](#21-full-test-suite)
+- [ ] **A.2** Kernel-only tests pass (`cargo test -p clawft-kernel`) — [Section 2.1](#21-full-test-suite)
+- [ ] **A.3** Per-module test filters work (boot, process, service) — [Section 2.1](#21-full-test-suite)
+- [ ] **A.4** Test count matches expected (259) — [Section 2.2](#22-coverage-check)
+- [ ] **A.5** Test execution under 1 second — [Section 2.3](#23-performance-benchmarking)
+
+### K0: Foundation — 9 Modules (Section 3.1)
+
+- [ ] **K0.1** `boot.rs` — Boot lifecycle (Booting→Running→ShuttingDown→Halted) — [Section 3.1.1](#311-bootrs---kernel-boot-sequence)
+- [ ] **K0.2** `process.rs` — PID allocation, state transitions, table queries — [Section 3.1.2](#312-processrs---process-table-and-pid-management)
+- [ ] **K0.3** `service.rs` — Register/unregister, start/stop, health checks — [Section 3.1.3](#313-servicers---service-registry)
+- [ ] **K0.4** `ipc.rs` — Message targets, payloads, serialization — [Section 3.1.4](#314-ipcrs---kernel-ipc)
+- [ ] **K0.5** `capability.rs` — Tool permissions, IPC scope, resource limits — [Section 3.1.5](#315-capabilityrs---agent-capabilities-and-rbac)
+- [ ] **K0.6** `health.rs` — Status aggregation (Healthy/Degraded/Down) — [Section 3.1.6](#316-healthrs---health-system)
+- [ ] **K0.7** `console.rs` — Boot events, phase transitions, log formatting — [Section 3.1.7](#317-consolers---boot-events-and-logging)
+- [ ] **K0.8** `config.rs` — KernelConfigExt, defaults, serde round-trip — [Section 3.1.8](#318-configrs---kernel-configuration)
+- [ ] **K0.9** `error.rs` — Error variants, Display, Result propagation — [Section 3.1.9](#319-errorrs---kernel-error-types)
+
+### K1: Supervisor + RBAC — 1 Module (Section 3.2)
+
+- [ ] **K1.1** `supervisor.rs` — Spawn/stop/restart, capabilities, running count — [Section 3.2.1](#321-supervisorrs---agent-supervisor)
+
+### K2: A2A IPC — 2 Modules (Section 3.3)
+
+- [ ] **K2.1** `a2a.rs` — Per-PID inboxes, message delivery, correlation IDs — [Section 3.3.1](#331-a2ars---agent-to-agent-router)
+- [ ] **K2.2** `topic.rs` — Subscribe/unsubscribe/publish, subscriber filtering — [Section 3.3.2](#332-topicrs---topic-based-pubsub)
+
+### K3: WASM Sandbox — 1 Module (Section 3.4)
+
+- [ ] **K3.1** `wasm_runner.rs` — Config, validation, stub error messages — [Section 3.4.1](#341-wasm_runnerrs---wasm-tool-runner-stubbed)
+
+### K4: Containers — 1 Module (Section 3.5)
+
+- [ ] **K4.1** `container.rs` — Config, lifecycle types, stub error messages — [Section 3.5.1](#351-containerrs---container-manager-stubbed)
+
+### K5: App Framework — 1 Module (Section 3.6)
+
+- [ ] **K5.1** `app.rs` — Manifest validation, install/remove, state machine — [Section 3.6.1](#361-apprs---app-manager-and-manifests)
+
+### K6a: Distributed — 3 Modules (Section 3.7)
+
+- [ ] **K6a.1** `cluster.rs` — Peer add/remove, state tracking, heartbeat — [Section 3.7.1](#371-clusterrs---cluster-membership)
+- [ ] **K6a.2** `environment.rs` — Create/remove, class scoping, governance — [Section 3.7.2](#372-environmentrs---environment-manager)
+- [ ] **K6a.3** `governance.rs` — Rules, EffectVector, three-branch decisions — [Section 3.7.3](#373-governancers---governance-engine)
+
+### K6b: Agency — 1 Module (Section 3.8)
+
+- [ ] **K6b.1** `agency.rs` — Roles, manifests, spawn permissions, interfaces — [Section 3.8.1](#381-agencyrs---agent-first-architecture)
+
+### Integration Scenarios (Section 4)
+
+- [ ] **INT.1** Full kernel boot + service registration + health — [Section 4.1](#41-scenario-1-full-kernel-boot-and-service-registration)
+- [ ] **INT.2** Agent spawn + capability checking — [Section 4.2](#42-scenario-2-agent-spawn-with-capability-checking)
+- [ ] **INT.3** A2A message routing with correlation IDs — [Section 4.3](#43-scenario-3-a2a-message-routing-with-correlation)
+- [ ] **INT.4** Topic pub/sub with multiple subscribers — [Section 4.4](#44-scenario-4-topic-pubsub-with-multiple-subscribers)
+- [ ] **INT.5** App lifecycle with governance evaluation — [Section 4.5](#45-scenario-5-app-lifecycle-with-governance)
+- [ ] **INT.6** Cluster environment with multi-node health — [Section 4.6](#46-scenario-6-cluster-environment-with-multi-node-health)
+
+### CLI Testing (Section 5)
+
+- [ ] **CLI.1** `weft kernel status` — Returns state, uptime, counts — [Section 5.1](#51-test-weft-kernel-status)
+- [ ] **CLI.2** `weft kernel services` — Lists services or "No services" — [Section 5.2](#52-test-weft-kernel-services)
+- [ ] **CLI.3** `weft kernel ps` — Shows process table with PID 0 — [Section 5.3](#53-test-weft-kernel-ps)
+- [ ] **CLI.4** `weft kernel boot` — Boots with verbose output — [Section 5.4](#54-test-weft-kernel-boot-interactive)
+- [ ] **CLI.5** `weft kernel shutdown` — Graceful shutdown — [Section 5.5](#55-test-weft-kernel-shutdown)
+
+### Feature-Gated Modules (Section 6)
+
+- [ ] **FG.1** Build with `wasm-sandbox` feature — [Section 6.1](#61-testing-with-wasm-sandbox-feature)
+- [ ] **FG.2** Build with `containers` feature — [Section 6.2](#62-testing-with-containers-feature)
+- [ ] **FG.3** Build with all features combined — [Section 6.3](#63-testing-all-features-together)
+
+### Deferred / Cannot Test Yet (Section 7)
+
+- [ ] **DEF.1** Review: Ruvector integration (not testable) — [Section 7](#7-what-cannot-be-tested-yet)
+- [ ] **DEF.2** Review: Exo-resource-tree (not testable) — [Section 7](#7-what-cannot-be-tested-yet)
+- [ ] **DEF.3** Review: Interactive console REPL (not testable) — [Section 7](#7-what-cannot-be-tested-yet)
+- [ ] **DEF.4** Review: WASM execution (stubbed) — [Section 7](#7-what-cannot-be-tested-yet)
+- [ ] **DEF.5** Review: Container orchestration (stubbed) — [Section 7](#7-what-cannot-be-tested-yet)
+- [ ] **DEF.6** Review: Network transport (not implemented) — [Section 7](#7-what-cannot-be-tested-yet)
+- [ ] **DEF.7** Review: Hook execution (not implemented) — [Section 7](#7-what-cannot-be-tested-yet)
+
+### Regression Checklist (Section 8)
+
+- [ ] **RG.1** Build all targets (native, debug, check, all-features) — [Section 8.1](#81-build-all-targets)
+- [ ] **RG.2** Full test suite (workspace + kernel + all-features) — [Section 8.2](#82-run-full-test-suite)
+- [ ] **RG.3** Lint and format (`clippy` + `cargo fmt --check`) — [Section 8.3](#83-lint-and-format)
+- [ ] **RG.4** Phase gate (`scripts/build.sh gate`) — [Section 8.4](#84-phase-gate-11-checks)
+- [ ] **RG.5** CLI smoke tests (status, services, ps) — [Section 8.5](#85-integration-smoke-tests)
+- [ ] **RG.6** Documentation build (0 warnings) — [Section 8.6](#86-documentation-build)
+- [ ] **RG.7** Feature flag validation (each individually) — [Section 8.7](#87-feature-flag-validation)
+- [ ] **RG.8** Performance (test execution < 1s) — [Section 8.8](#88-memory-and-performance)
+- [ ] **RG.9** Cross-platform check — [Section 8.9](#89-cross-platform-check)
+- [ ] **RG.10** Dependent crate integration — [Section 8.10](#810-integration-with-dependent-crates)
+
+### Totals
+
+| Category | Items | Testable Now | Deferred |
+|----------|-------|-------------|----------|
+| Prerequisites | 5 | 5 | 0 |
+| Automated Tests | 5 | 5 | 0 |
+| K0 Foundation | 9 | 9 | 0 |
+| K1 Supervisor | 1 | 1 | 0 |
+| K2 A2A IPC | 2 | 2 | 0 |
+| K3 WASM | 1 | 1 (stub) | 0 |
+| K4 Containers | 1 | 1 (stub) | 0 |
+| K5 App Framework | 1 | 1 | 0 |
+| K6a Distributed | 3 | 3 | 0 |
+| K6b Agency | 1 | 1 | 0 |
+| Integration | 6 | 6 | 0 |
+| CLI | 5 | 5 | 0 |
+| Feature Gates | 3 | 3 | 0 |
+| Deferred Review | 7 | 0 | 7 |
+| Regression | 10 | 10 | 0 |
+| **TOTAL** | **60** | **53** | **7** |
 
 ---
 
-## Prerequisites
+## 1. Prerequisites
 
-### Required Tools
+### 1.1 Required Tools
 
 ```bash
 # Rust toolchain (1.75+)
@@ -46,7 +157,7 @@ cargo build --release --bin weft
 export PATH="$PWD/target/release:$PATH"
 ```
 
-### Build the Kernel Crate
+### 1.2 Build the Kernel Crate
 
 ```bash
 # Build kernel with default features (native)
@@ -60,7 +171,7 @@ cargo build -p clawft-kernel --features wasm-sandbox
 cargo build -p clawft-kernel --features containers
 ```
 
-### Verify Test Suite Runs
+### 1.3 Verify Test Suite Runs
 
 ```bash
 # Run all kernel tests (should show 259 passed)
@@ -75,9 +186,9 @@ cargo test -p clawft-kernel -- --nocapture
 
 ---
 
-## Running Automated Tests
+## 2. Running Automated Tests
 
-### Full Test Suite
+### 2.1 Full Test Suite
 
 ```bash
 # Run all workspace tests
@@ -95,7 +206,7 @@ cargo test -p clawft-kernel process::tests
 cargo test -p clawft-kernel service::tests
 ```
 
-### Coverage Check
+### 2.2 Coverage Check
 
 ```bash
 # Count tests per module
@@ -104,7 +215,7 @@ cargo test -p clawft-kernel -- --list | wc -l
 # Expected: 259 tests
 ```
 
-### Performance Benchmarking
+### 2.3 Performance Benchmarking
 
 ```bash
 # Time test execution
@@ -115,11 +226,11 @@ time cargo test -p clawft-kernel
 
 ---
 
-## Module-by-Module Manual Testing
+## 3. Module-by-Module Manual Testing
 
-### K0: Foundation
+### 3.1 K0: Foundation
 
-#### `boot.rs` - Kernel Boot Sequence
+#### 3.1.1 `boot.rs` - Kernel Boot Sequence
 
 **What to Test Manually**:
 - Boot lifecycle state transitions (Booting → Running → ShuttingDown → Halted)
@@ -174,7 +285,7 @@ async fn manual_kernel_boot_lifecycle() {
 - Double shutdown (should be idempotent)
 - Access boot log after shutdown (should still be available)
 
-#### `process.rs` - Process Table and PID Management
+#### 3.1.2 `process.rs` - Process Table and PID Management
 
 **What to Test Manually**:
 - PID allocation monotonicity (never reuses PIDs)
@@ -241,7 +352,7 @@ async fn manual_process_lifecycle() {
 - Allocate 10,000+ PIDs (should not wrap or panic)
 - Update resource usage while reading process entry
 
-#### `service.rs` - Service Registry
+#### 3.1.3 `service.rs` - Service Registry
 
 **What to Test Manually**:
 - Service registration and unregistration
@@ -332,7 +443,7 @@ async fn manual_service_registry() {
 - Health check timeout simulation
 - Start/stop service that panics
 
-#### `ipc.rs` - Kernel IPC
+#### 3.1.4 `ipc.rs` - Kernel IPC
 
 **What to Test Manually**:
 - Message creation with different targets (Pid, Topic, Broadcast, Service)
@@ -390,7 +501,7 @@ async fn manual_kernel_ipc() {
 - Send message before bus is initialized
 - Large payload (>1MB JSON)
 
-#### `capability.rs` - Agent Capabilities and RBAC
+#### 3.1.5 `capability.rs` - Agent Capabilities and RBAC
 
 **What to Test Manually**:
 - Tool permission checking
@@ -457,7 +568,7 @@ async fn manual_capability_checking() {
 - Allocate resource at exactly the limit
 - Nested capability inheritance
 
-#### `health.rs` - Health System
+#### 3.1.6 `health.rs` - Health System
 
 **What to Test Manually**:
 - Health status aggregation
@@ -506,7 +617,7 @@ async fn manual_health_system() {
 - Rapid health updates from multiple threads
 - Remove service and check health (should be removed from map)
 
-#### `console.rs` - Boot Events and Logging
+#### 3.1.7 `console.rs` - Boot Events and Logging
 
 **What to Test Manually**:
 - Boot event recording
@@ -556,7 +667,7 @@ async fn manual_boot_console() {
 - Format empty log
 - Record events with unicode characters
 
-#### `config.rs` - Kernel Configuration
+#### 3.1.8 `config.rs` - Kernel Configuration
 
 **What to Test Manually**:
 - KernelConfigExt wrapping
@@ -605,7 +716,7 @@ async fn manual_kernel_config() {
 - Config with negative health_check_interval
 - Config deserialization from partial JSON
 
-#### `error.rs` - Kernel Error Types
+#### 3.1.9 `error.rs` - Kernel Error Types
 
 **What to Test Manually**:
 - Error variant creation
@@ -651,9 +762,9 @@ async fn manual_error_handling() {
 
 ---
 
-### K1: Supervisor + RBAC
+### 3.2 K1: Supervisor + RBAC
 
-#### `supervisor.rs` - Agent Supervisor
+#### 3.2.1 `supervisor.rs` - Agent Supervisor
 
 **What to Test Manually**:
 - Agent spawning with SpawnRequest
@@ -715,9 +826,9 @@ async fn manual_supervisor_spawn() {
 
 ---
 
-### K2: A2A IPC
+### 3.3 K2: A2A IPC
 
-#### `a2a.rs` - Agent-to-Agent Router
+#### 3.3.1 `a2a.rs` - Agent-to-Agent Router
 
 **What to Test Manually**:
 - Per-PID inbox creation
@@ -770,7 +881,7 @@ async fn manual_a2a_routing() {
 - Inbox overflow (>1000 messages)
 - Concurrent sends to same PID
 
-#### `topic.rs` - Topic-Based Pub/Sub
+#### 3.3.2 `topic.rs` - Topic-Based Pub/Sub
 
 **What to Test Manually**:
 - Topic subscription
@@ -824,9 +935,9 @@ async fn manual_topic_pubsub() {
 
 ---
 
-### K3: WASM Sandbox
+### 3.4 K3: WASM Sandbox
 
-#### `wasm_runner.rs` - WASM Tool Runner (Stubbed)
+#### 3.4.1 `wasm_runner.rs` - WASM Tool Runner (Stubbed)
 
 **What to Test Manually**:
 - WasmToolRunner initialization (should fail if wasmtime not enabled)
@@ -870,9 +981,9 @@ async fn manual_wasm_runner() {
 
 ---
 
-### K4: Containers
+### 3.5 K4: Containers
 
-#### `container.rs` - Container Manager (Stubbed)
+#### 3.5.1 `container.rs` - Container Manager (Stubbed)
 
 **What to Test Manually**:
 - ContainerManager initialization (should fail if bollard not enabled)
@@ -910,9 +1021,9 @@ async fn manual_container_manager() {
 
 ---
 
-### K5: App Framework
+### 3.6 K5: App Framework
 
-#### `app.rs` - App Manager and Manifests
+#### 3.6.1 `app.rs` - App Manager and Manifests
 
 **What to Test Manually**:
 - AppManifest parsing and validation
@@ -991,9 +1102,9 @@ async fn manual_app_lifecycle() {
 
 ---
 
-### K6a: Distributed
+### 3.7 K6a: Distributed
 
-#### `cluster.rs` - Cluster Membership
+#### 3.7.1 `cluster.rs` - Cluster Membership
 
 **What to Test Manually**:
 - Node registration
@@ -1050,7 +1161,7 @@ async fn manual_cluster_membership() {
 - List peers when cluster is empty
 - Concurrent peer updates
 
-#### `environment.rs` - Environment Manager
+#### 3.7.2 `environment.rs` - Environment Manager
 
 **What to Test Manually**:
 - Environment creation (Development, Staging, Production, Research)
@@ -1125,7 +1236,7 @@ async fn manual_environment_manager() {
 - Switch environment class after creation
 - Query non-existent environment
 
-#### `governance.rs` - Governance Engine
+#### 3.7.3 `governance.rs` - Governance Engine
 
 **What to Test Manually**:
 - Governance rule creation
@@ -1193,9 +1304,9 @@ async fn manual_governance_engine() {
 
 ---
 
-### K6b: Agency
+### 3.8 K6b: Agency
 
-#### `agency.rs` - Agent-First Architecture
+#### 3.8.1 `agency.rs` - Agent-First Architecture
 
 **What to Test Manually**:
 - Agent role definition
@@ -1265,11 +1376,11 @@ async fn manual_agency() {
 
 ---
 
-## Integration Test Scenarios
+## 4. Integration Test Scenarios
 
 These scenarios test multiple modules working together.
 
-### Scenario 1: Full Kernel Boot and Service Registration
+### 4.1 Scenario 1: Full Kernel Boot and Service Registration
 
 ```rust
 use clawft_kernel::{Kernel, ServiceRegistry, SystemService};
@@ -1309,7 +1420,7 @@ async fn integration_boot_with_services() {
 }
 ```
 
-### Scenario 2: Agent Spawn with Capability Checking
+### 4.2 Scenario 2: Agent Spawn with Capability Checking
 
 ```rust
 use clawft_kernel::{
@@ -1349,7 +1460,7 @@ async fn integration_spawn_with_capabilities() {
 }
 ```
 
-### Scenario 3: A2A Message Routing with Correlation
+### 4.3 Scenario 3: A2A Message Routing with Correlation
 
 ```rust
 use clawft_kernel::{A2ARouter, MessagePayload};
@@ -1386,7 +1497,7 @@ async fn integration_a2a_correlation() {
 }
 ```
 
-### Scenario 4: Topic Pub/Sub with Multiple Subscribers
+### 4.4 Scenario 4: Topic Pub/Sub with Multiple Subscribers
 
 ```rust
 use clawft_kernel::{TopicRouter, MessagePayload};
@@ -1414,7 +1525,7 @@ async fn integration_topic_fanout() {
 }
 ```
 
-### Scenario 5: App Lifecycle with Governance
+### 4.5 Scenario 5: App Lifecycle with Governance
 
 ```rust
 use clawft_kernel::{
@@ -1470,7 +1581,7 @@ async fn integration_app_with_governance() {
 }
 ```
 
-### Scenario 6: Cluster Environment with Multi-Node Health
+### 4.6 Scenario 6: Cluster Environment with Multi-Node Health
 
 ```rust
 use clawft_kernel::{
@@ -1525,11 +1636,11 @@ async fn integration_cluster_health() {
 
 ---
 
-## CLI Testing
+## 5. CLI Testing
 
 The kernel CLI commands are exposed via `weft kernel` (assuming CLI integration is complete).
 
-### Test `weft kernel status`
+### 5.1 Test `weft kernel status`
 
 ```bash
 # Boot kernel (via background service or test harness)
@@ -1546,7 +1657,7 @@ weft kernel status
 # Health: Healthy
 ```
 
-### Test `weft kernel services`
+### 5.2 Test `weft kernel services`
 
 ```bash
 # List registered services
@@ -1558,7 +1669,7 @@ weft kernel services
 # cron          scheduler    running   healthy
 ```
 
-### Test `weft kernel ps`
+### 5.3 Test `weft kernel ps`
 
 ```bash
 # List process table
@@ -1571,7 +1682,7 @@ weft kernel ps
 # 3     agent-worker-2  running   95       48       6
 ```
 
-### Test `weft kernel boot` (Interactive)
+### 5.4 Test `weft kernel boot` (Interactive)
 
 ```bash
 # Boot kernel with verbose output
@@ -1588,7 +1699,7 @@ weft kernel boot --verbose
 # Kernel booted in 2.3 seconds
 ```
 
-### Test `weft kernel shutdown`
+### 5.5 Test `weft kernel shutdown`
 
 ```bash
 # Graceful shutdown
@@ -1602,9 +1713,9 @@ weft kernel shutdown
 
 ---
 
-## Feature-Gated Module Testing
+## 6. Feature-Gated Module Testing
 
-### Testing with `wasm-sandbox` Feature
+### 6.1 Testing with `wasm-sandbox` Feature
 
 ```bash
 # Build with WASM support
@@ -1616,7 +1727,7 @@ cargo test -p clawft-kernel --features wasm-sandbox wasm_runner::tests
 # Expected: Tests pass with actual WASM execution
 ```
 
-### Testing with `containers` Feature
+### 6.2 Testing with `containers` Feature
 
 ```bash
 # Build with container support
@@ -1628,7 +1739,7 @@ cargo test -p clawft-kernel --features containers container::tests
 # Expected: Tests pass with actual Docker integration
 ```
 
-### Testing All Features Together
+### 6.3 Testing All Features Together
 
 ```bash
 # Build with all features
@@ -1642,9 +1753,9 @@ cargo test -p clawft-kernel --all-features
 
 ---
 
-## What Cannot Be Tested Yet
+## 7. What Cannot Be Tested Yet
 
-### Deferred to Future Phases
+### 7.1 Deferred to Future Phases
 
 1. **Ruvector Integration** (boot.rs)
    - Feature-gated, not yet implemented
@@ -1688,11 +1799,11 @@ cargo test -p clawft-kernel --all-features
 
 ---
 
-## Regression Checklist
+## 8. Regression Checklist
 
 Before committing changes to `clawft-kernel`, run this checklist:
 
-### 1. Build All Targets
+### 8.1 Build All Targets
 
 ```bash
 # Native build (default)
@@ -1708,7 +1819,7 @@ scripts/build.sh check
 cargo build -p clawft-kernel --all-features
 ```
 
-### 2. Run Full Test Suite
+### 8.2 Run Full Test Suite
 
 ```bash
 # All kernel tests
@@ -1721,7 +1832,7 @@ cargo test -p clawft-kernel
 cargo test -p clawft-kernel --all-features
 ```
 
-### 3. Lint and Format
+### 8.3 Lint and Format
 
 ```bash
 # Clippy (warnings as errors)
@@ -1731,7 +1842,7 @@ scripts/build.sh clippy
 cargo fmt -p clawft-kernel -- --check
 ```
 
-### 4. Phase Gate (11 Checks)
+### 8.4 Phase Gate (11 Checks)
 
 ```bash
 # Run all pre-commit checks
@@ -1740,7 +1851,7 @@ scripts/build.sh gate
 # Expected: ALL PASS
 ```
 
-### 5. Integration Smoke Tests
+### 8.5 Integration Smoke Tests
 
 ```bash
 # Boot kernel
@@ -1759,7 +1870,7 @@ cargo run --bin weft -- kernel ps
 cargo run --bin weft -- kernel shutdown
 ```
 
-### 6. Documentation Build
+### 8.6 Documentation Build
 
 ```bash
 # Build docs
@@ -1769,7 +1880,7 @@ cargo doc -p clawft-kernel --no-deps --open
 cargo doc -p clawft-kernel --no-deps 2>&1 | grep -i "warning"
 ```
 
-### 7. Feature Flag Validation
+### 8.7 Feature Flag Validation
 
 ```bash
 # Build with no default features (should fail or build minimal)
@@ -1781,7 +1892,7 @@ cargo build -p clawft-kernel --no-default-features --features wasm-sandbox
 cargo build -p clawft-kernel --no-default-features --features containers
 ```
 
-### 8. Memory and Performance
+### 8.8 Memory and Performance
 
 ```bash
 # Run tests with memory profiling (requires valgrind)
@@ -1793,7 +1904,7 @@ time cargo test -p clawft-kernel
 # Expected: <1 second
 ```
 
-### 9. Cross-Platform Check (if applicable)
+### 8.9 Cross-Platform Check (if applicable)
 
 ```bash
 # Check for platform-specific code
@@ -1802,7 +1913,7 @@ rg "cfg\(target_os" crates/clawft-kernel/src
 # Test on Linux/macOS/Windows (if available)
 ```
 
-### 10. Integration with Dependent Crates
+### 8.10 Integration with Dependent Crates
 
 ```bash
 # Test CLI with kernel
@@ -1817,7 +1928,7 @@ scripts/build.sh test
 
 ---
 
-## Summary
+## 9. Summary
 
 This manual testing guide covers:
 
