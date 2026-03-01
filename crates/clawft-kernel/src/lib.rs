@@ -19,6 +19,8 @@
 //!   formatting for the interactive kernel terminal.
 //! - **Configuration** ([`config::KernelConfig`]) -- kernel-specific
 //!   settings embedded in the root config.
+//! - **Containers** ([`container::ContainerManager`]) -- sidecar
+//!   container lifecycle and health integration.
 //!
 //! # Feature Flags
 //!
@@ -38,6 +40,7 @@ pub mod process;
 pub mod service;
 pub mod supervisor;
 pub mod topic;
+pub mod container;
 pub mod wasm_runner;
 
 // Re-export key types at the crate level for convenience.
@@ -57,6 +60,10 @@ pub use process::{Pid, ProcessEntry, ProcessState, ProcessTable, ResourceUsage};
 pub use service::{ServiceRegistry, ServiceType, SystemService};
 pub use supervisor::{AgentSupervisor, SpawnRequest, SpawnResult};
 pub use topic::{Subscription, TopicRouter};
+pub use container::{
+    ContainerConfig, ContainerError, ContainerManager, ContainerState, ManagedContainer,
+    PortMapping, RestartPolicy, VolumeMount,
+};
 pub use wasm_runner::{
     WasmError, WasmSandboxConfig, WasmTool, WasmToolResult, WasmToolRunner, WasmValidation,
 };
