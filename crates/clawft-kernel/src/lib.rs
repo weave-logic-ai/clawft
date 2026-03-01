@@ -29,6 +29,8 @@
 //!   governance-scoped dev/staging/prod environments.
 //! - **Governance** ([`governance::GovernanceEngine`]) -- three-branch
 //!   constitutional governance with effect algebra scoring.
+//! - **Agency** ([`agency::Agency`]) -- agent-first architecture
+//!   with roles, spawn permissions, and agent manifests.
 //!
 //! # Feature Flags
 //!
@@ -37,6 +39,7 @@
 //! - `containers` -- enables container manager (Phase K4).
 
 pub mod a2a;
+pub mod agency;
 pub mod app;
 pub mod boot;
 pub mod capability;
@@ -57,6 +60,10 @@ pub mod wasm_runner;
 
 // Re-export key types at the crate level for convenience.
 pub use a2a::A2ARouter;
+pub use agency::{
+    Agency, AgentHealth, AgentInterface, AgentManifest, AgentPriority, AgentResources,
+    AgentRestartPolicy, AgentRole, InterfaceProtocol, ResponseMode,
+};
 pub use app::{
     AgentSpec, AppCapabilities, AppError, AppHooks, AppManager, AppManifest, AppState,
     InstalledApp, ServiceSpec, ToolSource, ToolSpec,
