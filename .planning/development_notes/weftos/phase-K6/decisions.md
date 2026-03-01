@@ -1,4 +1,4 @@
-# Phase K6a: Cluster, Environment, Governance Types -- Development Notes
+# Phase K6: Distributed Fabric Types -- Development Notes
 
 **Start**: 2026-03-01
 **Status**: Complete
@@ -62,5 +62,50 @@
 - 15 new tests in cluster.rs (config, peers, state transitions, heartbeat, capacity)
 - 16 new tests in environment.rs (register, active, standard set, governance scope serde)
 - 17 new tests in governance.rs (effect algebra, rule evaluation, escalation, serde)
-- All 243 kernel tests pass
+- All 243 kernel tests pass (K6a commit)
+- All workspace tests pass
+
+---
+
+## K6b: Agency Model (Doc 10 -- Agent-First Architecture)
+
+### 6. Agency as hierarchical spawn permissions
+**Decision**: `Agency` struct tracks `max_children`, `allowed_roles`, `capability_ceiling`, and current `children` PIDs. Factory methods provide standard configurations: `Agency::root()` (unlimited), `Agency::supervisor(n)` (services + workers), `Agency::service(n)` (workers only), `Agency::none()` (no agency).
+
+**Rationale**: The agent-first model from doc 10 says "agency = ability to spawn agents." Hierarchical agency prevents privilege escalation: a service agent cannot spawn a supervisor, and a worker cannot spawn anything.
+
+### 7. AgentManifest for .agent.toml files
+**Decision**: `AgentManifest` captures all fields from doc 10's `.agent.toml` format: name, version, role, capabilities, agency, tools, topics, resources, interface, health, dependencies, filesystem access. Serde derives make it format-agnostic (JSON for tests, TOML when the dependency is added).
+
+**Rationale**: Agent manifests are the core of the agent-first architecture. Each OS service (memory, cron, tool-registry, etc.) is described by a manifest file. The types enable validation and lifecycle management without requiring the actual manifest loader.
+
+### 8. AgentCapabilities::root() extension
+**Decision**: Added `AgentCapabilities::root()` constructor to capability.rs (via the agency module's impl block). Root capabilities set all flags to true and all resource limits to `u64::MAX`.
+
+**Rationale**: Root agent (PID 0, user 1) needs unlimited capabilities. The `root()` constructor provides a clear semantic for "no restrictions."
+
+### 9. Clippy: collapsible-if in Agency::can_spawn()
+**Problem**: Nested `if let Some(max) = self.max_children { if self.children.len() >= max { ... } }`.
+
+**Decision**: Collapsed to `if let Some(max) = self.max_children && self.children.len() >= max { ... }`.
+
+**Rationale**: Clippy compliance. Same pattern as K1 capability checker.
+
+### 10. AgentResources manual Default impl
+**Problem**: `#[derive(Default)]` gave `max_memory_mb: 0` but the serde default functions provided meaningful defaults (256 MB). The derive and serde defaults disagreed.
+
+**Decision**: Removed `#[derive(Default)]` and added manual `Default for AgentResources` impl that calls the same default functions as serde.
+
+**Rationale**: Consistency between `AgentResources::default()` and deserialized-from-empty-JSON behavior.
+
+## K6b Files Created
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `crates/clawft-kernel/src/agency.rs` | ~589 | AgentRole, Agency, AgentManifest, 16 tests |
+
+## K6b Test Summary
+
+- 16 new tests in agency.rs (roles, agency hierarchy, child tracking, manifest serde, resources)
+- All 259 kernel tests pass
 - All workspace tests pass
