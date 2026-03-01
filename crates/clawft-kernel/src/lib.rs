@@ -78,7 +78,7 @@ pub use cluster::{
     ClusterConfig, ClusterError, ClusterMembership, NodeId, NodePlatform, NodeState, PeerNode,
 };
 pub use config::KernelConfigExt;
-pub use console::{BootEvent, BootLog, BootPhase, LogLevel};
+pub use console::{BootEvent, BootLog, BootPhase, KernelEventLog, LogLevel};
 pub use container::{
     ContainerConfig, ContainerError, ContainerManager, ContainerState, ManagedContainer,
     PortMapping, RestartPolicy, VolumeMount,

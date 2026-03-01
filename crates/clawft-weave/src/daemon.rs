@@ -16,7 +16,9 @@ use clawft_kernel::{Kernel, KernelState};
 use clawft_platform::NativePlatform;
 use clawft_types::config::{Config, KernelConfig};
 
-use crate::protocol::{self, KernelStatusResult, ProcessInfo, Request, Response, ServiceInfo};
+use crate::protocol::{
+    self, KernelStatusResult, LogEntry, LogsParams, ProcessInfo, Request, Response, ServiceInfo,
+};
 
 /// Run the kernel daemon.
 ///
@@ -63,6 +65,13 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
     let listener = UnixListener::bind(&socket_path)?;
     info!(path = %socket_path.display(), "daemon listening");
     println!("Daemon listening on {}", socket_path.display());
+
+    // Log daemon start to kernel event log
+    {
+        let k = kernel.read().await;
+        k.event_log()
+            .info("daemon", format!("listening on {}", socket_path.display()));
+    }
 
     // Shutdown signal
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -153,6 +162,7 @@ async fn handle_connection(
                 let id = req.id.clone();
                 dispatch(
                     req.method,
+                    req.params,
                     Arc::clone(&kernel),
                     shutdown_tx.clone(),
                 )
@@ -180,6 +190,7 @@ async fn handle_connection(
 /// for use inside `tokio::spawn`.
 async fn dispatch(
     method: String,
+    params: serde_json::Value,
     kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
     shutdown_tx: watch::Sender<bool>,
 ) -> Response {
@@ -223,8 +234,6 @@ async fn dispatch(
         "kernel.services" => {
             let k = kernel.read().await;
             let services = k.services().list();
-            // Skip async health_all() to avoid holding read guard across await.
-            // Daemon can run periodic health checks separately in a future phase.
             let infos: Vec<ServiceInfo> = services
                 .iter()
                 .map(|(name, stype)| ServiceInfo {
@@ -235,7 +244,45 @@ async fn dispatch(
                 .collect();
             Response::success(serde_json::to_value(infos).unwrap())
         }
+        "kernel.logs" => {
+            let log_params: LogsParams = serde_json::from_value(params).unwrap_or(LogsParams {
+                count: 50,
+                level: None,
+            });
+
+            let k = kernel.read().await;
+            let event_log = k.event_log();
+
+            let events = if let Some(ref level_str) = log_params.level {
+                let level = match level_str.as_str() {
+                    "debug" => clawft_kernel::LogLevel::Debug,
+                    "warn" | "warning" => clawft_kernel::LogLevel::Warn,
+                    "error" => clawft_kernel::LogLevel::Error,
+                    _ => clawft_kernel::LogLevel::Info,
+                };
+                event_log.filter_level(&level, log_params.count)
+            } else {
+                event_log.tail(log_params.count)
+            };
+
+            let entries: Vec<LogEntry> = events
+                .iter()
+                .map(|e| LogEntry {
+                    timestamp: e.timestamp.to_rfc3339(),
+                    phase: e.phase.tag().to_owned(),
+                    level: format!("{:?}", e.level).to_lowercase(),
+                    message: e.message.clone(),
+                })
+                .collect();
+
+            Response::success(serde_json::to_value(entries).unwrap())
+        }
         "kernel.shutdown" => {
+            // Log the shutdown event before signaling
+            {
+                let k = kernel.read().await;
+                k.event_log().info("daemon", "shutdown requested via RPC");
+            }
             info!("shutdown requested via RPC");
             let _ = shutdown_tx.send(true);
             Response::success(serde_json::json!("shutting down"))

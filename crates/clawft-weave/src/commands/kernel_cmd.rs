@@ -6,6 +6,7 @@
 //! - `weaver kernel status`   -- kernel state, uptime, process/service counts
 //! - `weaver kernel services` -- list registered services with health
 //! - `weaver kernel ps`       -- list process table entries
+//! - `weaver kernel logs`     -- show kernel event log
 //!
 //! Query commands (`status`, `services`, `ps`) connect to a running daemon
 //! first. If no daemon is running, they boot an ephemeral kernel, display
@@ -52,6 +53,17 @@ pub enum KernelAction {
 
     /// List process table entries.
     Ps,
+
+    /// Show kernel event log.
+    Logs {
+        /// Number of recent entries to show (default: 50, 0 = all).
+        #[arg(short = 'n', long, default_value = "50")]
+        count: usize,
+
+        /// Minimum log level: debug, info, warn, error.
+        #[arg(short, long)]
+        level: Option<String>,
+    },
 }
 
 /// Run the kernel subcommand.
@@ -132,6 +144,33 @@ pub async fn run(args: KernelArgs) -> anyhow::Result<()> {
                 print_ps(&kernel);
             }
         }
+        KernelAction::Logs { count, level } => {
+            if let Some(mut client) = DaemonClient::connect().await {
+                let params = protocol::LogsParams {
+                    count,
+                    level: level.clone(),
+                };
+                let req = protocol::Request::with_params(
+                    "kernel.logs",
+                    serde_json::to_value(params)?,
+                );
+                let resp = client.call(req).await?;
+                if resp.ok {
+                    let entries: Vec<protocol::LogEntry> =
+                        serde_json::from_value(resp.result.unwrap())?;
+                    print_daemon_logs(&entries);
+                } else {
+                    let msg = resp.error.unwrap_or_else(|| "unknown error".into());
+                    eprintln!("daemon error: {msg}");
+                }
+            } else {
+                eprintln!("(no daemon running — booting ephemeral kernel)\n");
+                let platform = NativePlatform::new();
+                let config = super::load_config(&platform, args.config.as_deref()).await?;
+                let kernel = boot_or_exit(config.clone(), config.kernel.clone(), platform).await;
+                print_event_log(&kernel, count, level.as_deref());
+            }
+        }
     }
 
     Ok(())
@@ -201,6 +240,26 @@ fn print_daemon_ps(entries: &[protocol::ProcessInfo]) {
     }
 
     println!("{table}");
+}
+
+/// Print log entries from a daemon response.
+fn print_daemon_logs(entries: &[protocol::LogEntry]) {
+    if entries.is_empty() {
+        println!("No log entries.");
+        return;
+    }
+
+    for entry in entries {
+        let ts = &entry.timestamp[11..19]; // HH:MM:SS from ISO timestamp
+        let level_tag = match entry.level.as_str() {
+            "error" => "ERR ",
+            "warn" => "WARN",
+            "debug" => "DBG ",
+            _ => "INFO",
+        };
+        println!("{ts} [{level_tag}] {}", entry.message);
+    }
+    println!("({} entries)", entries.len());
 }
 
 // ── Ephemeral-mode display (from Kernel<P>) ───────────────────────
@@ -311,6 +370,44 @@ fn print_ps<P: clawft_platform::Platform>(kernel: &Kernel<P>) {
     }
 
     println!("{table}");
+}
+
+/// Print event log from an ephemeral kernel.
+fn print_event_log<P: clawft_platform::Platform>(
+    kernel: &Kernel<P>,
+    count: usize,
+    level: Option<&str>,
+) {
+    let event_log = kernel.event_log();
+
+    let events = if let Some(level_str) = level {
+        let min_level = match level_str {
+            "debug" => clawft_kernel::LogLevel::Debug,
+            "warn" | "warning" => clawft_kernel::LogLevel::Warn,
+            "error" => clawft_kernel::LogLevel::Error,
+            _ => clawft_kernel::LogLevel::Info,
+        };
+        event_log.filter_level(&min_level, count)
+    } else {
+        event_log.tail(count)
+    };
+
+    if events.is_empty() {
+        println!("No log entries.");
+        return;
+    }
+
+    for event in &events {
+        let ts = &event.timestamp.format("%H:%M:%S").to_string();
+        let level_tag = match event.level {
+            clawft_kernel::LogLevel::Error => "ERR ",
+            clawft_kernel::LogLevel::Warn => "WARN",
+            clawft_kernel::LogLevel::Debug => "DBG ",
+            clawft_kernel::LogLevel::Info => "INFO",
+        };
+        println!("{ts} [{level_tag}] {}", event.message);
+    }
+    println!("({} entries)", events.len());
 }
 
 // ── Shared helpers ────────────────────────────────────────────────

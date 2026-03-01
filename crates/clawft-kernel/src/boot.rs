@@ -16,7 +16,7 @@ use clawft_platform::Platform;
 use clawft_types::config::Config;
 
 use crate::capability::AgentCapabilities;
-use crate::console::{BootEvent, BootLog, BootPhase};
+use crate::console::{BootEvent, BootLog, BootPhase, KernelEventLog};
 use crate::error::{KernelError, KernelResult};
 use crate::health::HealthSystem;
 use crate::ipc::KernelIpc;
@@ -71,6 +71,7 @@ pub struct Kernel<P: Platform> {
     health: HealthSystem,
     supervisor: AgentSupervisor<P>,
     boot_log: BootLog,
+    event_log: Arc<KernelEventLog>,
     boot_time: Instant,
 }
 
@@ -184,6 +185,10 @@ impl<P: Platform> Kernel<P> {
             AgentCapabilities::default(),
         );
 
+        // 8. Seed the event ring buffer with boot events
+        let event_log = Arc::new(KernelEventLog::new());
+        event_log.ingest_boot_log(&boot_log);
+
         Ok(Self {
             state: KernelState::Running,
             config: kernel_config,
@@ -195,6 +200,7 @@ impl<P: Platform> Kernel<P> {
             health,
             supervisor,
             boot_log,
+            event_log,
             boot_time,
         })
     }
@@ -213,6 +219,7 @@ impl<P: Platform> Kernel<P> {
 
         info!("kernel shutting down");
         self.state = KernelState::ShuttingDown;
+        self.event_log.info("kernel", "shutdown initiated");
 
         // Stop all services
         if let Err(e) = self.service_registry.stop_all().await {
@@ -231,6 +238,7 @@ impl<P: Platform> Kernel<P> {
         }
 
         self.state = KernelState::Halted;
+        self.event_log.info("kernel", "halted");
         info!("kernel halted");
         Ok(())
     }
@@ -278,6 +286,11 @@ impl<P: Platform> Kernel<P> {
     /// Get the boot log.
     pub fn boot_log(&self) -> &BootLog {
         &self.boot_log
+    }
+
+    /// Get the runtime event log (ring buffer).
+    pub fn event_log(&self) -> &Arc<KernelEventLog> {
+        &self.event_log
     }
 
     /// Get kernel uptime.

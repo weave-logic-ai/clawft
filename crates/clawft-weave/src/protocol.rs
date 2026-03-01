@@ -140,6 +140,26 @@ pub struct ServiceInfo {
     pub health: String,
 }
 
+/// A single log entry for `kernel.logs`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogEntry {
+    pub timestamp: String,
+    pub phase: String,
+    pub level: String,
+    pub message: String,
+}
+
+/// Parameters for `kernel.logs`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogsParams {
+    /// Number of recent entries to return (0 = all).
+    #[serde(default)]
+    pub count: usize,
+    /// Minimum level filter: "debug", "info", "warn", "error".
+    #[serde(default)]
+    pub level: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

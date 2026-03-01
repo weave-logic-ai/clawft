@@ -163,6 +163,142 @@ impl BootLog {
     }
 }
 
+/// Default capacity of the kernel event ring buffer.
+const DEFAULT_EVENT_LOG_CAPACITY: usize = 1024;
+
+/// Thread-safe ring buffer for kernel runtime events.
+///
+/// Captures boot events and any post-boot events (service starts/stops,
+/// agent spawns, health checks, errors). Holds at most `capacity` events
+/// — when full, the oldest event is evicted.
+///
+/// Used by the daemon to serve `kernel.logs` RPC requests.
+pub struct KernelEventLog {
+    events: std::sync::Mutex<std::collections::VecDeque<BootEvent>>,
+    capacity: usize,
+}
+
+impl KernelEventLog {
+    /// Create a new event log with the default capacity (1024).
+    pub fn new() -> Self {
+        Self::with_capacity(DEFAULT_EVENT_LOG_CAPACITY)
+    }
+
+    /// Create a new event log with a specific capacity.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            events: std::sync::Mutex::new(std::collections::VecDeque::with_capacity(capacity)),
+            capacity,
+        }
+    }
+
+    /// Push an event into the ring buffer.
+    pub fn push(&self, event: BootEvent) {
+        let mut events = self.events.lock().unwrap();
+        if events.len() >= self.capacity {
+            events.pop_front();
+        }
+        events.push_back(event);
+    }
+
+    /// Push a simple info event with a source tag and message.
+    pub fn info(&self, source: &str, message: impl Into<String>) {
+        self.push(BootEvent {
+            timestamp: Utc::now(),
+            phase: BootPhase::Ready, // post-boot events use Ready phase
+            message: format!("[{source}] {}", message.into()),
+            level: LogLevel::Info,
+        });
+    }
+
+    /// Push a warning event.
+    pub fn warn(&self, source: &str, message: impl Into<String>) {
+        self.push(BootEvent {
+            timestamp: Utc::now(),
+            phase: BootPhase::Ready,
+            message: format!("[{source}] {}", message.into()),
+            level: LogLevel::Warn,
+        });
+    }
+
+    /// Push an error event.
+    pub fn error(&self, source: &str, message: impl Into<String>) {
+        self.push(BootEvent {
+            timestamp: Utc::now(),
+            phase: BootPhase::Ready,
+            message: format!("[{source}] {}", message.into()),
+            level: LogLevel::Error,
+        });
+    }
+
+    /// Ingest all events from a BootLog (used to seed boot events).
+    pub fn ingest_boot_log(&self, boot_log: &BootLog) {
+        for event in boot_log.events() {
+            self.push(event.clone());
+        }
+    }
+
+    /// Get the last `n` events (or all if `n` is 0 or exceeds count).
+    pub fn tail(&self, n: usize) -> Vec<BootEvent> {
+        let events = self.events.lock().unwrap();
+        if n == 0 || n >= events.len() {
+            events.iter().cloned().collect()
+        } else {
+            events.iter().skip(events.len() - n).cloned().collect()
+        }
+    }
+
+    /// Get all events matching a minimum log level.
+    pub fn filter_level(&self, min_level: &LogLevel, n: usize) -> Vec<BootEvent> {
+        let events = self.events.lock().unwrap();
+        let level_rank = |l: &LogLevel| -> u8 {
+            match l {
+                LogLevel::Debug => 0,
+                LogLevel::Info => 1,
+                LogLevel::Warn => 2,
+                LogLevel::Error => 3,
+            }
+        };
+        let min_rank = level_rank(min_level);
+        let filtered: Vec<BootEvent> = events
+            .iter()
+            .filter(|e| level_rank(&e.level) >= min_rank)
+            .cloned()
+            .collect();
+        if n == 0 || n >= filtered.len() {
+            filtered
+        } else {
+            filtered[filtered.len() - n..].to_vec()
+        }
+    }
+
+    /// Current number of events in the buffer.
+    pub fn len(&self) -> usize {
+        self.events.lock().unwrap().len()
+    }
+
+    /// Check if the buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.events.lock().unwrap().is_empty()
+    }
+}
+
+impl Default for KernelEventLog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for KernelEventLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let len = self.len();
+        f.debug_struct("KernelEventLog")
+            .field("count", &len)
+            .field("capacity", &self.capacity)
+            .finish()
+    }
+}
+
 /// Format the boot banner header.
 pub fn boot_banner() -> String {
     let mut output = String::new();
@@ -265,5 +401,75 @@ mod tests {
 
         let err_event = BootEvent::error(BootPhase::Services, "failed");
         assert_eq!(err_event.level, LogLevel::Error);
+    }
+
+    // ── KernelEventLog tests ──────────────────────────────────
+
+    #[test]
+    fn event_log_push_and_tail() {
+        let log = KernelEventLog::new();
+        log.info("test", "first");
+        log.info("test", "second");
+        log.warn("test", "third");
+
+        assert_eq!(log.len(), 3);
+
+        let all = log.tail(0);
+        assert_eq!(all.len(), 3);
+        assert!(all[0].message.contains("first"));
+
+        let last_two = log.tail(2);
+        assert_eq!(last_two.len(), 2);
+        assert!(last_two[0].message.contains("second"));
+    }
+
+    #[test]
+    fn event_log_ring_buffer_evicts() {
+        let log = KernelEventLog::with_capacity(3);
+        log.info("a", "1");
+        log.info("b", "2");
+        log.info("c", "3");
+        log.info("d", "4"); // evicts "1"
+
+        assert_eq!(log.len(), 3);
+        let all = log.tail(0);
+        assert!(all[0].message.contains("[b] 2"));
+        assert!(all[2].message.contains("[d] 4"));
+    }
+
+    #[test]
+    fn event_log_filter_level() {
+        let log = KernelEventLog::new();
+        log.info("test", "info msg");
+        log.warn("test", "warn msg");
+        log.error("test", "error msg");
+
+        let warns_and_above = log.filter_level(&LogLevel::Warn, 0);
+        assert_eq!(warns_and_above.len(), 2);
+
+        let errors_only = log.filter_level(&LogLevel::Error, 0);
+        assert_eq!(errors_only.len(), 1);
+    }
+
+    #[test]
+    fn event_log_ingest_boot_log() {
+        let mut boot_log = BootLog::new();
+        boot_log.push(BootEvent::info(BootPhase::Init, "booting"));
+        boot_log.push(BootEvent::info(BootPhase::Ready, "ready"));
+
+        let event_log = KernelEventLog::new();
+        event_log.ingest_boot_log(&boot_log);
+
+        assert_eq!(event_log.len(), 2);
+        let events = event_log.tail(0);
+        assert!(events[0].message.contains("booting"));
+    }
+
+    #[test]
+    fn event_log_empty() {
+        let log = KernelEventLog::new();
+        assert!(log.is_empty());
+        assert_eq!(log.len(), 0);
+        assert!(log.tail(10).is_empty());
     }
 }
