@@ -63,6 +63,21 @@ pub async fn kernel_agent_loop(
                     Some(message) => {
                         let cmd = extract_cmd(&message);
 
+                        // Log message receipt on chain
+                        #[cfg(feature = "exochain")]
+                        if let Some(ref cm) = chain {
+                            cm.append(
+                                "ipc",
+                                "ipc.recv",
+                                Some(serde_json::json!({
+                                    "pid": pid,
+                                    "from": message.from,
+                                    "msg_id": &message.id,
+                                    "cmd": cmd.as_deref().unwrap_or("none"),
+                                })),
+                            );
+                        }
+
                         // Handle suspend command
                         if cmd.as_deref() == Some("suspend") {
                             // Send acknowledgement BEFORE transitioning state,
@@ -82,6 +97,19 @@ pub async fn kernel_agent_loop(
                             // Transition to Suspended
                             let _ = process_table.update_state(pid, ProcessState::Suspended);
                             debug!(pid, "agent suspended");
+
+                            #[cfg(feature = "exochain")]
+                            if let Some(ref cm) = chain {
+                                cm.append(
+                                    "supervisor",
+                                    "agent.suspend",
+                                    Some(serde_json::json!({
+                                        "pid": pid,
+                                        "from": message.from,
+                                        "msg_id": &message.id,
+                                    })),
+                                );
+                            }
 
                             // Enter parking loop
                             let resumed = parking_loop(
@@ -171,6 +199,21 @@ pub async fn kernel_agent_loop(
 
                         usage.messages_sent += 1;
 
+                        // Log message acknowledgement on chain
+                        #[cfg(feature = "exochain")]
+                        if let Some(ref cm) = chain {
+                            cm.append(
+                                "ipc",
+                                "ipc.ack",
+                                Some(serde_json::json!({
+                                    "pid": pid,
+                                    "msg_id": &message.id,
+                                    "cmd": cmd.as_deref().unwrap_or("none"),
+                                    "status": "processed",
+                                })),
+                            );
+                        }
+
                         // Update resource counters every 10 messages and periodically
                         if usage.messages_sent % 10 == 0 {
                             usage.cpu_time_ms = started.elapsed().as_millis() as u64;
@@ -232,6 +275,19 @@ async fn parking_loop(
                             // Transition back to Running
                             let _ = process_table.update_state(pid, ProcessState::Running);
                             debug!(pid, "agent resumed");
+
+                            #[cfg(feature = "exochain")]
+                            if let Some(cm) = chain {
+                                cm.append(
+                                    "supervisor",
+                                    "agent.resume",
+                                    Some(serde_json::json!({
+                                        "pid": pid,
+                                        "from": message.from,
+                                        "msg_id": &message.id,
+                                    })),
+                                );
+                            }
 
                             let reply = KernelMessage::with_correlation(
                                 pid,
@@ -1068,5 +1124,161 @@ mod tests {
 
         cancel.cancel();
         handle.await.unwrap();
+    }
+
+    #[cfg(feature = "exochain")]
+    #[tokio::test]
+    async fn chain_logs_ipc_recv_ack() {
+        let (a2a, cron, pt) = setup();
+        let (agent_pid, inbox) = spawn_agent(&pt, &a2a, "chain-test");
+        let mut kernel_inbox = a2a.create_inbox(0);
+
+        let cm = Arc::new(crate::chain::ChainManager::new(0, 1000));
+        let cancel = CancellationToken::new();
+        let cancel2 = cancel.clone();
+        let a2a2 = a2a.clone();
+        let pt2 = pt.clone();
+        let cm2 = cm.clone();
+
+        let handle = tokio::spawn(async move {
+            kernel_agent_loop(
+                agent_pid,
+                cancel2,
+                inbox,
+                a2a2,
+                cron,
+                pt2,
+                Some(cm2),
+                None,
+            )
+            .await
+        });
+
+        // Send ping from kernel (PID 0)
+        let msg = KernelMessage::new(
+            0,
+            MessageTarget::Process(agent_pid),
+            MessagePayload::Json(serde_json::json!({"cmd": "ping"})),
+        );
+        let msg_id = msg.id.clone();
+        a2a.send(msg).await.unwrap();
+
+        // Wait for reply
+        let _reply = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            kernel_inbox.recv(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        cancel.cancel();
+        handle.await.unwrap();
+
+        // Verify chain events: ipc.recv + ipc.ack (plus ipc.send from reply)
+        let events = cm.tail(10);
+        let recv_evt = events.iter().find(|e| e.kind == "ipc.recv");
+        let ack_evt = events.iter().find(|e| e.kind == "ipc.ack");
+
+        assert!(recv_evt.is_some(), "expected ipc.recv event on chain");
+        assert!(ack_evt.is_some(), "expected ipc.ack event on chain");
+
+        let recv_payload = recv_evt.unwrap().payload.as_ref().unwrap();
+        assert_eq!(recv_payload["pid"], agent_pid);
+        assert_eq!(recv_payload["from"], 0);
+        assert_eq!(recv_payload["msg_id"], msg_id);
+        assert_eq!(recv_payload["cmd"], "ping");
+
+        let ack_payload = ack_evt.unwrap().payload.as_ref().unwrap();
+        assert_eq!(ack_payload["pid"], agent_pid);
+        assert_eq!(ack_payload["msg_id"], msg_id);
+        assert_eq!(ack_payload["cmd"], "ping");
+        assert_eq!(ack_payload["status"], "processed");
+    }
+
+    #[cfg(feature = "exochain")]
+    #[tokio::test]
+    async fn chain_logs_suspend_resume() {
+        let (a2a, cron, pt) = setup();
+        let (agent_pid, inbox) = spawn_agent(&pt, &a2a, "suspend-test");
+        let mut kernel_inbox = a2a.create_inbox(0);
+
+        let cm = Arc::new(crate::chain::ChainManager::new(0, 1000));
+        let cancel = CancellationToken::new();
+        let cancel2 = cancel.clone();
+        let a2a2 = a2a.clone();
+        let pt2 = pt.clone();
+        let cm2 = cm.clone();
+
+        let handle = tokio::spawn(async move {
+            kernel_agent_loop(
+                agent_pid,
+                cancel2,
+                inbox,
+                a2a2,
+                cron,
+                pt2,
+                Some(cm2),
+                None,
+            )
+            .await
+        });
+
+        // Send suspend
+        let suspend_msg = KernelMessage::new(
+            0,
+            MessageTarget::Process(agent_pid),
+            MessagePayload::Json(serde_json::json!({"cmd": "suspend"})),
+        );
+        let suspend_id = suspend_msg.id.clone();
+        a2a.send(suspend_msg).await.unwrap();
+
+        // Wait for suspended ack
+        let _reply = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            kernel_inbox.recv(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        // Send resume
+        let resume_msg = KernelMessage::new(
+            0,
+            MessageTarget::Process(agent_pid),
+            MessagePayload::Json(serde_json::json!({"cmd": "resume"})),
+        );
+        let resume_id = resume_msg.id.clone();
+        a2a.send(resume_msg).await.unwrap();
+
+        // Wait for resumed ack
+        let _reply = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            kernel_inbox.recv(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        cancel.cancel();
+        handle.await.unwrap();
+
+        // Verify chain events
+        let events = cm.tail(20);
+        let suspend_evt = events.iter().find(|e| e.kind == "agent.suspend");
+        let resume_evt = events.iter().find(|e| e.kind == "agent.resume");
+
+        assert!(suspend_evt.is_some(), "expected agent.suspend event on chain");
+        assert!(resume_evt.is_some(), "expected agent.resume event on chain");
+
+        let sp = suspend_evt.unwrap().payload.as_ref().unwrap();
+        assert_eq!(sp["pid"], agent_pid);
+        assert_eq!(sp["from"], 0);
+        assert_eq!(sp["msg_id"], suspend_id);
+
+        let rp = resume_evt.unwrap().payload.as_ref().unwrap();
+        assert_eq!(rp["pid"], agent_pid);
+        assert_eq!(rp["from"], 0);
+        assert_eq!(rp["msg_id"], resume_id);
     }
 }

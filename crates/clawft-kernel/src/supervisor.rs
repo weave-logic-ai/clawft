@@ -217,6 +217,10 @@ impl<P: Platform> AgentSupervisor<P> {
         F: FnOnce(Pid, CancellationToken) -> Fut,
         Fut: std::future::Future<Output = i32> + Send + 'static,
     {
+        // Capture parent_pid before spawn() consumes the request
+        #[cfg(feature = "exochain")]
+        let parent_pid = request.parent_pid;
+
         // 1. Create process entry via existing spawn()
         let result = self.spawn(request)?;
         let pid = result.pid;
@@ -239,6 +243,20 @@ impl<P: Platform> AgentSupervisor<P> {
         let _ = self
             .process_table
             .update_state(pid, ProcessState::Running);
+
+        // 3b. Log spawn chain event
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "supervisor",
+                "agent.spawn",
+                Some(serde_json::json!({
+                    "agent_id": result.agent_id,
+                    "pid": pid,
+                    "parent_pid": parent_pid,
+                })),
+            );
+        }
 
         // 4. Spawn tokio task
         let process_table = Arc::clone(&self.process_table);
@@ -1165,5 +1183,47 @@ mod tests {
         // Should have at least 1 result (might be aborted)
         assert!(!results.is_empty());
         assert_eq!(sup.running_task_count(), 0);
+    }
+
+    #[cfg(feature = "exochain")]
+    #[tokio::test]
+    async fn chain_logs_agent_spawn() {
+        let process_table = Arc::new(ProcessTable::new(16));
+        let bus = Arc::new(MessageBus::new());
+        let ipc = Arc::new(KernelIpc::new(bus));
+        let cm = Arc::new(crate::chain::ChainManager::new(0, 1000));
+
+        let sup: AgentSupervisor<clawft_platform::NativePlatform> =
+            AgentSupervisor::new(process_table, ipc, AgentCapabilities::default())
+                .with_exochain(None, Some(cm.clone()));
+
+        let request = SpawnRequest {
+            agent_id: "chain-agent".to_owned(),
+            capabilities: None,
+            parent_pid: Some(99),
+            env: HashMap::new(),
+        };
+
+        let result = sup
+            .spawn_and_run(request, |_pid, _cancel| async { 0 })
+            .unwrap();
+
+        // Wait for the task to complete
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Verify agent.spawn event on chain
+        let events = cm.tail(10);
+        let spawn_evt = events.iter().find(|e| e.kind == "agent.spawn");
+
+        assert!(spawn_evt.is_some(), "expected agent.spawn event on chain");
+
+        let payload = spawn_evt.unwrap().payload.as_ref().unwrap();
+        assert_eq!(payload["agent_id"], "chain-agent");
+        assert_eq!(payload["pid"], result.pid);
+        assert_eq!(payload["parent_pid"], 99);
+
+        // Should also have agent.exit from task completion
+        let exit_evt = events.iter().find(|e| e.kind == "agent.exit");
+        assert!(exit_evt.is_some(), "expected agent.exit event on chain");
     }
 }
