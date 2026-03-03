@@ -199,6 +199,31 @@ impl Default for ChainConfig {
     }
 }
 
+impl ChainConfig {
+    /// Returns the effective checkpoint path.
+    ///
+    /// If `checkpoint_path` is set, returns it. Otherwise falls back to
+    /// `~/.clawft/chain.json` (requires the `native` feature for `dirs`).
+    pub fn effective_checkpoint_path(&self) -> Option<String> {
+        if self.checkpoint_path.is_some() {
+            return self.checkpoint_path.clone();
+        }
+        #[cfg(feature = "native")]
+        {
+            dirs::home_dir().map(|h| {
+                h.join(".clawft")
+                    .join("chain.json")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        }
+        #[cfg(not(feature = "native"))]
+        {
+            None
+        }
+    }
+}
+
 /// Resource tree configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceTreeConfig {

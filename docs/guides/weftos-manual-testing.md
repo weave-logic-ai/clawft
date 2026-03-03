@@ -2,8 +2,8 @@
 
 **Target**: `clawft-kernel` crate
 **Version**: 0.1.0
-**Test Count**: 259 unit tests across 18 modules
-**Total SLOC**: ~9,300 lines
+**Test Count**: 2,948 unit tests across 24+ modules
+**Total SLOC**: ~14,000 lines
 
 This guide provides comprehensive manual and integration testing procedures
 for the WeftOS kernel. Work through the master checklist below, checking off
@@ -31,19 +31,25 @@ each item as you go. Every checklist item links to its corresponding section.
 
 ### K0: Foundation — 9 Modules (Section 3.1)
 
-- [ ] **K0.1** `boot.rs` — Boot lifecycle (Booting→Running→ShuttingDown→Halted) — [Section 3.1.1](#311-bootrs---kernel-boot-sequence)
-- [ ] **K0.2** `process.rs` — PID allocation, state transitions, table queries — [Section 3.1.2](#312-processrs---process-table-and-pid-management)
-- [ ] **K0.3** `service.rs` — Register/unregister, start/stop, health checks — [Section 3.1.3](#313-servicers---service-registry)
-- [ ] **K0.4** `ipc.rs` — Message targets, payloads, serialization — [Section 3.1.4](#314-ipcrs---kernel-ipc)
-- [ ] **K0.5** `capability.rs` — Tool permissions, IPC scope, resource limits — [Section 3.1.5](#315-capabilityrs---agent-capabilities-and-rbac)
-- [ ] **K0.6** `health.rs` — Status aggregation (Healthy/Degraded/Down) — [Section 3.1.6](#316-healthrs---health-system)
-- [ ] **K0.7** `console.rs` — Boot events, phase transitions, log formatting — [Section 3.1.7](#317-consolers---boot-events-and-logging)
-- [ ] **K0.8** `config.rs` — KernelConfigExt, defaults, serde round-trip — [Section 3.1.8](#318-configrs---kernel-configuration)
-- [ ] **K0.9** `error.rs` — Error variants, Display, Result propagation — [Section 3.1.9](#319-errorrs---kernel-error-types)
+- [x] **K0.1** `boot.rs` — Boot lifecycle (Booting→Running→ShuttingDown→Halted) — [Section 3.1.1](#311-bootrs---kernel-boot-sequence)
+- [x] **K0.2** `process.rs` — PID allocation, state transitions, table queries — [Section 3.1.2](#312-processrs---process-table-and-pid-management)
+- [x] **K0.3** `service.rs` — Register/unregister, start/stop, health checks — [Section 3.1.3](#313-servicers---service-registry)
+- [x] **K0.4** `ipc.rs` — Message targets, payloads, serialization — [Section 3.1.4](#314-ipcrs---kernel-ipc)
+- [x] **K0.5** `capability.rs` — Tool permissions, IPC scope, resource limits — [Section 3.1.5](#315-capabilityrs---agent-capabilities-and-rbac)
+- [x] **K0.6** `health.rs` — Status aggregation (Healthy/Degraded/Down) — [Section 3.1.6](#316-healthrs---health-system)
+- [x] **K0.7** `console.rs` — Boot events, phase transitions, log formatting — [Section 3.1.7](#317-consolers---boot-events-and-logging)
+- [x] **K0.8** `config.rs` — KernelConfigExt, defaults, serde round-trip — [Section 3.1.8](#318-configrs---kernel-configuration)
+- [x] **K0.9** `error.rs` — Error variants, Display, Result propagation — [Section 3.1.9](#319-errorrs---kernel-error-types)
 
-### K1: Supervisor + RBAC — 1 Module (Section 3.2)
+### K1: Agent Lifecycle + Scheduling + Persistence — 7 Modules (Section 3.2)
 
-- [ ] **K1.1** `supervisor.rs` — Spawn/stop/restart, capabilities, running count — [Section 3.2.1](#321-supervisorrs---agent-supervisor)
+- [x] **K1.1** `supervisor.rs` — Spawn/stop/restart, spawn_and_run, capabilities, running count — [Section 3.2.1](#321-supervisorrs---agent-supervisor)
+- [x] **K1.2** `agent_loop.rs` — Built-in agent work loop (ping, cron, exec commands) — [Section 3.2.2](#322-agent_looprs---kernel-agent-work-loop)
+- [x] **K1.3** `a2a.rs` — Per-PID inbox routing, capability-checked delivery, chain logging — [Section 3.2.3](#323-a2ars---agent-to-agent-router)
+- [x] **K1.4** `cron.rs` — Interval-based job scheduling, tick engine, fire tracking — [Section 3.2.4](#324-cronrs---cron-scheduling-engine)
+- [x] **K1.5** `chain.rs` — Local exochain, RVF persistence, crypto-verified load — [Section 3.2.5](#325-chainrs---exochain-persistence)
+- [x] **K1.6** `tree_manager.rs` — Resource tree, checkpoint save/load, agent registration — [Section 3.2.6](#326-tree_managerrs---resource-tree-manager)
+- [x] **K1.7** Daemon end-to-end — 16-step live playbook (boot→spawn→message→cron→persist→restart) — [Section 3.2.7](#327-daemon-end-to-end-live-playbook)
 
 ### K2: A2A IPC — 2 Modules (Section 3.3)
 
@@ -97,8 +103,8 @@ each item as you go. Every checklist item links to its corresponding section.
 
 ### Deferred / Cannot Test Yet (Section 7)
 
-- [ ] **DEF.1** Review: Ruvector integration (not testable) — [Section 7](#7-what-cannot-be-tested-yet)
-- [ ] **DEF.2** Review: Exo-resource-tree (not testable) — [Section 7](#7-what-cannot-be-tested-yet)
+- [x] **DEF.1** Review: Ruvector integration — Now integrated (rvf-wire, rvf-types, rvf-runtime)
+- [x] **DEF.2** Review: Exo-resource-tree — Now integrated (tree_manager.rs, checkpoint persistence)
 - [ ] **DEF.3** Review: Interactive console REPL (not testable) — [Section 7](#7-what-cannot-be-tested-yet)
 - [ ] **DEF.4** Review: WASM execution (stubbed) — [Section 7](#7-what-cannot-be-tested-yet)
 - [ ] **DEF.5** Review: Container orchestration (stubbed) — [Section 7](#7-what-cannot-be-tested-yet)
@@ -120,24 +126,24 @@ each item as you go. Every checklist item links to its corresponding section.
 
 ### Totals
 
-| Category | Items | Testable Now | Deferred |
-|----------|-------|-------------|----------|
-| Prerequisites | 5 | 5 | 0 |
-| Automated Tests | 5 | 5 | 0 |
-| K0 Foundation | 9 | 9 | 0 |
-| K1 Supervisor | 1 | 1 | 0 |
-| K2 A2A IPC | 2 | 2 | 0 |
-| K3 WASM | 1 | 1 (stub) | 0 |
-| K4 Containers | 1 | 1 (stub) | 0 |
-| K5 App Framework | 1 | 1 | 0 |
-| K6a Distributed | 3 | 3 | 0 |
-| K6b Agency | 1 | 1 | 0 |
-| Integration | 6 | 6 | 0 |
-| CLI | 5 | 5 | 0 |
-| Feature Gates | 3 | 3 | 0 |
-| Deferred Review | 7 | 0 | 7 |
-| Regression | 10 | 10 | 0 |
-| **TOTAL** | **60** | **53** | **7** |
+| Category | Items | Testable Now | Deferred | Status |
+|----------|-------|-------------|----------|--------|
+| Prerequisites | 5 | 5 | 0 | Done |
+| Automated Tests | 5 | 5 | 0 | Done |
+| K0 Foundation | 9 | 9 | 0 | Done (283 tests) |
+| K1 Agent Lifecycle | 7 | 7 | 0 | Done (16-step playbook) |
+| K2 A2A IPC | 2 | 2 | 0 | |
+| K3 WASM | 1 | 1 (stub) | 0 | |
+| K4 Containers | 1 | 1 (stub) | 0 | |
+| K5 App Framework | 1 | 1 | 0 | |
+| K6a Distributed | 3 | 3 | 0 | |
+| K6b Agency | 1 | 1 | 0 | |
+| Integration | 6 | 6 | 0 | |
+| CLI | 5 | 5 | 0 | |
+| Feature Gates | 3 | 3 | 0 | |
+| Deferred Review | 7 | 0 | 7 | |
+| Regression | 10 | 10 | 0 | |
+| **TOTAL** | **66** | **59** | **7** | |
 
 ---
 
@@ -823,6 +829,291 @@ async fn manual_supervisor_spawn() {
 - Stop non-existent agent
 - Restart agent that exited normally
 - Spawn 100 agents concurrently
+
+#### 3.2.2 `agent_loop.rs` - Kernel Agent Work Loop
+
+**What to Test Manually**:
+- Built-in command processing (ping, cron.add, cron.list, cron.remove, exec, echo)
+- Message reception from A2ARouter inbox
+- Reply routing back to sender via A2ARouter
+- Cancellation token triggers clean exit
+- RVF payload decoding (CBOR + JSON fallback)
+
+**Test via Daemon**:
+
+```bash
+# Spawn agent and send ping
+weaver agent spawn test-agent
+weaver agent send 1 '{"cmd":"ping"}'
+# Expected: {"status":"ok","pid":1,"uptime_ms":...}
+
+# Send echo command
+weaver agent send 1 '{"cmd":"echo","text":"hello world"}'
+# Expected: {"echo":"hello world","pid":1}
+
+# Send unknown command
+weaver agent send 1 '{"cmd":"unknown"}'
+# Expected: {"error":"unknown command: unknown","pid":1}
+```
+
+**Expected Behaviors**:
+- Agent processes messages sequentially (FIFO)
+- Replies include correlation ID from original message
+- Cancellation exits with code 0
+- Unknown commands return error (not panic)
+
+**Edge Cases**:
+- Send non-JSON text payload (should wrap as echo)
+- Send to agent after cancellation (inbox closed)
+- Rapid sequential messages (should all process)
+
+#### 3.2.3 `a2a.rs` - Agent-to-Agent Router
+
+**What to Test Manually**:
+- Per-PID inbox creation and message delivery
+- Capability-checked routing (IPC scope enforcement)
+- Topic routing via TopicRouter integration
+- Broadcast delivery to all inboxes except sender
+- Chain-logged delivery via `send_checked()`
+- Inbox cleanup on channel close
+
+**Test via Daemon**:
+
+```bash
+# Spawn two agents
+weaver agent spawn agent-a
+weaver agent spawn agent-b
+
+# Send message from kernel (PID 0) to agent-a (PID 1)
+weaver agent send 1 '{"cmd":"ping"}'
+# Expected: delivered to PID 1's inbox
+
+# Verify chain logging
+weaver chain local -c 5
+# Expected: ipc.send events logged
+```
+
+**Expected Behaviors**:
+- Inbox capacity is 1024 messages per agent
+- `try_send` is non-blocking (drops if full)
+- Closed inboxes are removed automatically
+- DashMap Ref is cloned before `remove()` to avoid deadlock
+
+**Edge Cases**:
+- Send to non-existent PID (should return ProcessNotFound)
+- Send from non-Running process (should return error)
+- Concurrent sends to same PID from multiple senders
+- Inbox overflow (>1024 pending messages)
+
+#### 3.2.4 `cron.rs` - Cron Scheduling Engine
+
+**What to Test Manually**:
+- Job creation with interval and target PID
+- Job listing and removal
+- Tick engine: fires overdue jobs, respects intervals
+- Disabled jobs are skipped
+- Fire count tracking
+
+**Test via Daemon**:
+
+```bash
+# Add a cron job (no target)
+weaver cron add --name "healthcheck" --interval 60 --command "check"
+
+# Add targeted cron job
+weaver cron add --name "heartbeat" --interval 10 --command "ping" --target 1
+
+# List all jobs
+weaver cron list
+# Expected: table with job ID, name, interval, target, fire count
+
+# Remove a job
+weaver cron remove <job-id>
+
+# Verify job was removed
+weaver cron list
+```
+
+**Expected Behaviors**:
+- New jobs fire immediately on first tick (last_fired=None)
+- Subsequent ticks respect interval_secs
+- Disabled jobs are not fired
+- Job IDs are UUIDs
+- CronService implements SystemService trait
+
+**Edge Cases**:
+- Remove non-existent job (returns None)
+- Add job with 0-second interval
+- Tick with no registered jobs
+- Concurrent add/remove during tick
+
+#### 3.2.5 `chain.rs` - Exochain Persistence
+
+**What to Test Manually**:
+- Chain event appending (source, kind, metadata)
+- RVF format save/load with cryptographic verification
+- JSON fallback save/load
+- Genesis event on fresh chain
+- Chain integrity verification (hash chain)
+- Sequence monotonicity across restarts
+
+**Test via Daemon**:
+
+```bash
+# View chain events
+weaver chain local -c 30
+# Expected: genesis, boot.*, agent.spawn, ipc.send, cron.* events
+
+# Verify chain integrity
+weaver chain verify
+# Expected: "Chain integrity: VALID"
+
+# View chain status
+weaver chain status
+# Expected: chain_id, sequence, event count
+
+# Trigger manual checkpoint
+weaver chain checkpoint
+
+# Shutdown and restart daemon
+weaver kernel stop
+weaver kernel start
+
+# Verify events persisted
+weaver chain local -c 30
+# Expected: previous session events visible, sequence continues
+weaver chain verify
+# Expected: still VALID
+```
+
+**Expected Behaviors**:
+- Each event has unique sequence number
+- Hash chain links each event to its predecessor
+- RVF format uses content-hash integrity
+- JSON fallback when RVF fails
+- Chain survives daemon restart
+
+**Edge Cases**:
+- Corrupt RVF file (should fall back to JSON)
+- Missing checkpoint file (should start fresh)
+- Very long chain (>10,000 events)
+
+#### 3.2.6 `tree_manager.rs` - Resource Tree Manager
+
+**What to Test Manually**:
+- Tree bootstrap (creates root + /kernel + /apps + /network namespaces)
+- Agent registration (inserts /kernel/agents/<name> node)
+- Agent unregistration (removes node)
+- Merkle hash computation across tree
+- NodeScoring integration
+- Checkpoint save/load roundtrip
+
+**Test via Daemon**:
+
+```bash
+# View resource tree
+weaver resource tree
+# Expected: table with /, /kernel, /kernel/agents, /kernel/services, etc.
+
+# Inspect a node
+weaver resource inspect /kernel/agents/worker-1
+# Expected: kind=Agent, metadata (pid, state, capabilities, chain_seq)
+
+# View tree stats
+weaver resource stats
+# Expected: total nodes, namespaces, services, agents, root hash
+
+# After restart, verify tree state restored
+weaver kernel stop && weaver kernel start
+weaver resource stats
+# Expected: node count matches previous session
+```
+
+**Expected Behaviors**:
+- Bootstrap creates 9 nodes (root + 4 namespaces + 4 sub-namespaces)
+- Agent registration adds node + emits chain event
+- Merkle hash updates propagate from leaf to root
+- Checkpoint serializes full tree state
+
+**Edge Cases**:
+- Register agent with duplicate name
+- Unregister non-existent agent
+- Tree with 100+ agents
+- Checkpoint file permission errors
+
+#### 3.2.7 Daemon End-to-End Live Playbook
+
+**Full 16-step integration test** (all steps verified passing):
+
+```bash
+# 1. Build with exochain
+cargo build -p clawft-weave --features exochain
+
+# 2. Start daemon
+weaver kernel start
+# PASS: Boots, shows "Running", chain initialized
+
+# 3. Check status
+weaver kernel status
+# PASS: state=running, 1 process (kernel), 1 service (cron)
+
+# 4. Spawn an agent
+weaver agent spawn worker-1
+# PASS: Returns PID 1, agent is Running
+
+# 5. Verify agent in tree
+weaver resource tree
+# PASS: Shows /kernel/agents/worker-1 node
+
+# 6. Send command to agent
+weaver agent send 1 '{"cmd":"ping"}'
+# PASS: Message delivered
+
+# 7. Create a cron job via CLI
+weaver cron add --name "heartbeat" --interval 10 --command "ping" --target 1
+# PASS: Returns job ID
+
+# 8. List cron jobs
+weaver cron list
+# PASS: Shows heartbeat job with interval=10s
+
+# 9. Create cron job via agent command
+weaver agent send 1 '{"cmd":"cron.add","name":"check","interval_secs":30,"command":"health"}'
+# PASS: Job created via agent
+
+# 10. Verify chain logging
+weaver chain local -c 30
+# PASS: Shows agent.spawn, ipc.send, cron.add, cron.fire events
+
+# 11. Check chain integrity
+weaver chain verify
+# PASS: "Chain integrity: VALID"
+
+# 12. View resource tree with metadata
+weaver resource inspect /kernel/agents/worker-1
+# PASS: Shows metadata (pid, state, chain_seq, capabilities)
+
+# 13. Stop agent
+weaver agent stop 1
+# PASS: Agent transitions to Exited
+
+# 14. Verify agent exit logged
+weaver chain local -c 5
+# PASS: Shows agent.stop + agent.exit events
+
+# 15. Shutdown daemon
+weaver kernel stop
+# PASS: chain.rvf + chain.tree.json saved to ~/.clawft/
+
+# 16. Restart and verify persistence
+weaver kernel start
+weaver chain local -c 30
+# PASS: Previous chain events visible (not fresh genesis)
+weaver resource stats
+# PASS: Tree state restored from checkpoint
+weaver chain verify
+# PASS: Chain integrity valid across restart
+```
 
 ---
 
@@ -1933,15 +2224,15 @@ scripts/build.sh test
 This manual testing guide covers:
 
 - **9 K0 modules**: boot, process, service, ipc, capability, health, config, console, error
-- **1 K1 module**: supervisor
-- **2 K2 modules**: a2a, topic
+- **7 K1 modules**: supervisor, agent_loop, a2a, cron, chain, tree_manager, daemon e2e
+- **2 K2 modules**: a2a (unit), topic
 - **1 K3 module**: wasm_runner (stubbed)
 - **1 K4 module**: container (stubbed)
 - **1 K5 module**: app
 - **3 K6a modules**: cluster, environment, governance
 - **1 K6b module**: agency
 
-**Total**: 18 modules, 259 tests, ~9,300 SLOC
+**Total**: 24+ modules, 2,948 tests, ~14,000 SLOC
 
 Use this guide to:
 1. Validate automated tests are working

@@ -263,7 +263,7 @@ impl<P: Platform> Kernel<P> {
         let chain_manager = {
             let chain_config = kernel_config.chain.clone().unwrap_or_default();
             if chain_config.enabled {
-                let cm = if let Some(ref ckpt_path) = chain_config.checkpoint_path {
+                let cm = if let Some(ref ckpt_path) = chain_config.effective_checkpoint_path() {
                     let json_path = std::path::PathBuf::from(ckpt_path);
                     // Derive RVF path from JSON path: same directory, `.rvf` extension
                     let rvf_path = json_path.with_extension("rvf");
@@ -412,10 +412,9 @@ impl<P: Platform> Kernel<P> {
                     let tm = Arc::new(crate::tree_manager::TreeManager::new(Arc::clone(cm)));
 
                     // Derive tree checkpoint path from chain checkpoint path
-                    let tree_ckpt_path = kernel_config
-                        .chain
-                        .as_ref()
-                        .and_then(|c| c.checkpoint_path.as_ref())
+                    let chain_cfg = kernel_config.chain.clone().unwrap_or_default();
+                    let tree_ckpt_path = chain_cfg
+                        .effective_checkpoint_path()
                         .map(|p| std::path::PathBuf::from(p).with_extension("tree.json"));
 
                     let mut restored_from_checkpoint = false;
@@ -655,13 +654,9 @@ impl<P: Platform> Kernel<P> {
 
         // Persist chain to RVF checkpoint (primary), JSON as fallback
         #[cfg(feature = "exochain")]
-        if let Some(ref cm) = self.chain_manager
-            && let Some(ref ckpt_path) = self
-                .config
-                .chain
-                .as_ref()
-                .and_then(|c| c.checkpoint_path.as_ref())
-        {
+        if let Some(ref cm) = self.chain_manager {
+            let chain_config = self.config.chain.clone().unwrap_or_default();
+            if let Some(ref ckpt_path) = chain_config.effective_checkpoint_path() {
             let json_path = std::path::PathBuf::from(ckpt_path);
             let rvf_path = json_path.with_extension("rvf");
 
@@ -695,6 +690,7 @@ impl<P: Platform> Kernel<P> {
                     }
                     Err(e) => error!(error = %e, "failed to save tree checkpoint"),
                 }
+            }
             }
         }
 

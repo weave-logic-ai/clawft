@@ -170,7 +170,21 @@ pub async fn run(args: AgentArgs) -> anyhow::Result<()> {
             if !resp.ok {
                 anyhow::bail!("{}", resp.error.unwrap_or_default());
             }
-            println!("Message sent to PID {pid}");
+            // Display the agent's reply if one was received within the timeout
+            match resp.result {
+                Some(ref v) if v.is_object() || v.is_array() => {
+                    println!("{}", serde_json::to_string_pretty(v)?);
+                }
+                Some(ref v) if v.as_str() == Some("sent") => {
+                    println!("Message sent to PID {pid} (no reply within timeout)");
+                }
+                Some(ref v) => {
+                    println!("{v}");
+                }
+                None => {
+                    println!("Message sent to PID {pid}");
+                }
+            }
         }
         AgentCommand::Attach { pid } => {
             println!("attach to PID {pid} — not yet implemented (planned for K2)");

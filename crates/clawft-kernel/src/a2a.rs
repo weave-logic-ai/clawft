@@ -183,10 +183,14 @@ impl A2ARouter {
     /// If the inbox does not exist or is full, the message is dropped
     /// with a warning.
     async fn deliver_to_inbox(&self, pid: Pid, msg: KernelMessage) -> KernelResult<()> {
+        // Clone the sender so we release the DashMap read lock before
+        // any potential remove() call (which needs a write lock on the
+        // same shard — holding both would deadlock).
         let tx = self
             .inboxes
             .get(&pid)
-            .ok_or(KernelError::Ipc(format!("no inbox for PID {pid}")))?;
+            .ok_or(KernelError::Ipc(format!("no inbox for PID {pid}")))?
+            .clone();
 
         match tx.try_send(msg) {
             Ok(()) => {
