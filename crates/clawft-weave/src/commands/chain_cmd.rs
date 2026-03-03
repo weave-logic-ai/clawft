@@ -74,12 +74,18 @@ pub async fn run(args: ChainArgs) -> anyhow::Result<()> {
                 serde_json::from_value(resp.result.unwrap_or_default())?;
 
             let mut table = Table::new();
-            table.set_header(vec!["Seq", "Source", "Kind", "Timestamp", "Hash"]);
+            table.set_header(vec!["Seq", "Source", "Kind", "Detail", "Timestamp", "Hash"]);
             for e in &events {
+                let detail = if e.detail.len() > 40 {
+                    format!("{}...", &e.detail[..40])
+                } else {
+                    e.detail.clone()
+                };
                 table.add_row(vec![
                     Cell::new(e.sequence),
                     Cell::new(&e.source),
                     Cell::new(&e.kind),
+                    Cell::new(detail),
                     Cell::new(&e.timestamp[..19]),
                     Cell::new(format!("{}...", &e.hash[..12])),
                 ]);

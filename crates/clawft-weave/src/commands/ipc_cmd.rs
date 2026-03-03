@@ -82,7 +82,16 @@ pub async fn run(args: IpcArgs) -> anyhow::Result<()> {
             if !resp.ok {
                 anyhow::bail!("{}", resp.error.unwrap_or_default());
             }
-            println!("Published to '{topic}'");
+            let subs = resp
+                .result
+                .as_ref()
+                .and_then(|v| v.get("subscribers"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            println!(
+                "Published to '{topic}' ({subs} subscriber{})",
+                if subs == 1 { "" } else { "s" },
+            );
         }
     }
 

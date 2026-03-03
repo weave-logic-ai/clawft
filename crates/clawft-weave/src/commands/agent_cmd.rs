@@ -126,11 +126,19 @@ pub async fn run(args: AgentArgs) -> anyhow::Result<()> {
                 serde_json::from_value(resp.result.unwrap_or_default())?;
 
             println!("Agent {}", info.pid);
-            println!("  Agent ID:    {}", info.agent_id);
-            println!("  State:       {}", info.state);
-            println!("  Parent PID:  {}", info.parent_pid.map_or("none".into(), |p| p.to_string()));
-            println!("  Memory:      {} bytes", info.memory_bytes);
-            println!("  CPU time:    {} ms", info.cpu_time_ms);
+            println!("  Agent ID:      {}", info.agent_id);
+            println!("  State:         {}", info.state);
+            println!("  Parent PID:    {}", info.parent_pid.map_or("none".into(), |p| p.to_string()));
+            println!("  Resource Usage:");
+            println!("    Memory:        {} bytes", info.memory_bytes);
+            println!("    CPU time:      {} ms", info.cpu_time_ms);
+            println!("    Messages sent: {}", info.messages_sent);
+            println!("    Tool calls:    {}", info.tool_calls);
+            if info.topics.is_empty() {
+                println!("  Topics:        (none)");
+            } else {
+                println!("  Topics:        {}", info.topics.join(", "));
+            }
             println!("  Capabilities:");
             println!("    spawn: {}  ipc: {}  tools: {}  network: {}",
                 info.can_spawn, info.can_ipc, info.can_exec_tools, info.can_network);

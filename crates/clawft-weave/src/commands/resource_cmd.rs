@@ -92,6 +92,16 @@ pub async fn run(args: ResourceArgs) -> anyhow::Result<()> {
                     serde_json::to_string_pretty(&node.metadata)?
                 );
             }
+            if let Some(ref score) = node.scoring {
+                println!("  Scoring:");
+                println!("    Trust:       {:.3}", score.trust);
+                println!("    Performance: {:.3}", score.performance);
+                println!("    Difficulty:  {:.3}", score.difficulty);
+                println!("    Reward:      {:.3}", score.reward);
+                println!("    Reliability: {:.3}", score.reliability);
+                println!("    Velocity:    {:.3}", score.velocity);
+                println!("    Composite:   {:.3}", score.composite);
+            }
         }
         ResourceCommand::Stats => {
             let resp = client.simple_call("resource.stats").await?;

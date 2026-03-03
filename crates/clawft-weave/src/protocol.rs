@@ -258,6 +258,9 @@ pub struct ChainEventInfo {
     pub source: String,
     pub kind: String,
     pub hash: String,
+    /// Condensed payload summary (e.g. "pid=2 agent=worker-1").
+    #[serde(default)]
+    pub detail: String,
 }
 
 /// Parameters for `chain.local`.
@@ -301,6 +304,9 @@ pub struct ResourceNodeInfo {
     pub children: Vec<String>,
     pub metadata: serde_json::Value,
     pub merkle_hash: String,
+    /// Optional 6-dimension scoring vector (present when scoring exists).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scoring: Option<ResourceScoreResult>,
 }
 
 /// Parameters for `resource.inspect`.
@@ -358,6 +364,9 @@ pub struct AgentInspectResult {
     pub state: String,
     pub memory_bytes: u64,
     pub cpu_time_ms: u64,
+    pub messages_sent: u64,
+    pub tool_calls: u64,
+    pub topics: Vec<String>,
     pub parent_pid: Option<u64>,
     pub can_spawn: bool,
     pub can_ipc: bool,
