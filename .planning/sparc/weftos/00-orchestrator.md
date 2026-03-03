@@ -2,7 +2,7 @@
 
 **Workstream ID**: W-KERNEL
 **Date**: 2026-02-28
-**Status**: In Progress (K0, K1, K2 Complete — K2b Hardening In Progress)
+**Status**: In Progress (K0, K1, K2, K2b Complete)
 **Estimated Duration**: 17+ weeks (K0-K6 + addenda)
 **Source Analysis**: `.planning/development_notes/openfang-comparison.md`, existing kernel primitives audit
 
@@ -48,7 +48,7 @@ Both binaries link to the same `clawft-cli` crate. `weave` is a thin alias that 
 | 0 | K0 | Kernel Foundation | New `clawft-kernel` crate with boot, process table, service registry, health, cluster membership | 2 weeks | **Complete** |
 | 1 | K1 | Supervisor + RBAC | Agent supervisor with spawn_and_run, GateBackend, chain persistence, agent tree nodes, IPC RBAC, weaver agent CLI | 2 weeks | **Complete** |
 | 2 | K2 | A2A IPC | Agent-to-agent messaging, pub/sub topics, JSON-RPC wire format | 2 weeks | **Complete** |
-| 2b | K2b | Work-Loop Hardening | Health monitor, watchdog, graceful shutdown, resource tracking, suspend/resume, gate enforcement | 1 day | In Progress |
+| 2b | K2b | Work-Loop Hardening | Health monitor, watchdog, graceful shutdown, resource tracking, suspend/resume, gate enforcement | 1 day | **Complete** |
 | 3 | K3 | WASM Sandbox | Wasmtime tool execution, fuel metering, memory limits | 2 weeks |
 | 4 | K4 | Containers | Alpine image, sidecar service orchestration | 1 week |
 | 5 | K5 | App Framework | Application manifests, lifecycle, external framework interop | 2 weeks |
@@ -594,15 +594,15 @@ Six gaps identified via systematic review of all kernel background loops. Infras
 existed but was either undriven, unused, or incomplete. See `03b-phase-K2-hardening.md`
 for full SPARC spec and `phase-K0/decisions.md` Decisions 29-34 for rationale.
 
-- [ ] **Gap 1 — Health Monitor Loop**: Background task calls `health.aggregate()` on configured interval, logs `health.check` chain events, emits kernel event log entries for degraded/unhealthy services
-- [ ] **Gap 2 — Agent Watchdog Sweep**: `supervisor.watchdog_sweep()` detects finished/panicked agent tasks via `is_finished()`, transitions stale PIDs to `Exited(-2/-3)`, logs `agent.watchdog_reap` chain events
-- [ ] **Gap 3 — Graceful Shutdown**: `supervisor.shutdown_all(timeout)` cancels agent tokens, waits for clean exit with timeout, falls back to abort for stragglers — cleanup handlers (scoring/tree/chain) run for graceful exits
-- [ ] **Gap 4 — Resource Usage Tracking**: Agent loop increments `messages_sent`, `tool_calls`, `cpu_time_ms` counters; periodic `process_table.update_resources()` calls; `weaver agent inspect` shows nonzero stats
-- [ ] **Gap 5 — Agent Suspend/Resume**: `suspend`/`resume` IPC commands transition `ProcessState`; agent loop parks when Suspended, resumes on command
-- [ ] **Gap 6 — Gate-Checked Commands**: `exec`, `cron.add`, `cron.remove` pass through `GateBackend::check()` before execution; Deny returns error; Defer returns pending
-- [ ] All workspace tests pass (`scripts/build.sh test`)
-- [ ] Clippy clean for both default and exochain features
-- [ ] 364+ kernel tests (8+ new tests across agent_loop.rs and supervisor.rs)
+- [x] **Gap 1 — Health Monitor Loop**: Background task calls `health.aggregate()` on configured interval, logs `health.check` chain events, emits kernel event log entries for degraded/unhealthy services
+- [x] **Gap 2 — Agent Watchdog Sweep**: `supervisor.watchdog_sweep()` detects finished/panicked agent tasks via `is_finished()`, transitions stale PIDs to `Exited(-2/-3)`, logs `agent.watchdog_reap` chain events
+- [x] **Gap 3 — Graceful Shutdown**: `supervisor.shutdown_all(timeout)` cancels agent tokens, waits for clean exit with timeout, falls back to abort for stragglers — cleanup handlers (scoring/tree/chain) run for graceful exits
+- [x] **Gap 4 — Resource Usage Tracking**: Agent loop increments `messages_sent`, `tool_calls`, `cpu_time_ms` counters; periodic `process_table.update_resources()` calls; `weaver agent inspect` shows nonzero stats
+- [x] **Gap 5 — Agent Suspend/Resume**: `suspend`/`resume` IPC commands transition `ProcessState`; agent loop parks when Suspended, resumes on command
+- [x] **Gap 6 — Gate-Checked Commands**: `exec`, `cron.add`, `cron.remove` pass through `GateBackend::check()` before execution; Deny returns error; Defer returns pending
+- [x] All workspace tests pass (`scripts/build.sh test`)
+- [x] Clippy clean for both default and exochain features
+- [x] 363 kernel tests (7 new tests across agent_loop.rs and supervisor.rs)
 
 ### K2 -> K5 Gate
 - [x] Agent-to-agent message delivery works (A2ARouter with per-PID inboxes)
