@@ -112,6 +112,11 @@ pub async fn run(args: ChainArgs) -> anyhow::Result<()> {
                 println!("Chain integrity: INVALID");
             }
             println!("Events verified: {}", result.event_count);
+            match result.signature_verified {
+                Some(true) => println!("Signature:       VALID (Ed25519)"),
+                Some(false) => println!("Signature:       INVALID"),
+                None => println!("Signature:       unsigned"),
+            }
             println!("Errors: {}", result.errors.len());
             for err in &result.errors {
                 println!("  - {err}");

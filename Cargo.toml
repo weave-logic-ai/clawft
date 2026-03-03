@@ -110,9 +110,9 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 notify = "7"
 
 # RVF (RuVector Format) -- vector storage
-rvf-runtime = { version = "0.2", default-features = false, features = ["std"] }
+rvf-runtime = { path = "../ruvector/crates/rvf/rvf-runtime", default-features = false, features = ["std"] }
 rvf-types = { path = "../ruvector/crates/rvf/rvf-types", default-features = false, features = ["std"] }
-rvf-crypto = { path = "../ruvector/crates/rvf/rvf-crypto", default-features = false, features = ["std"] }
+rvf-crypto = { path = "../ruvector/crates/rvf/rvf-crypto", default-features = false, features = ["std", "ed25519"] }
 rvf-wire = { path = "../ruvector/crates/rvf/rvf-wire" }
 
 # CBOR codec (ExoChain payload format)

@@ -650,7 +650,7 @@ dependencies = [
  "rand 0.8.5",
  "reqwest 0.12.28",
  "rvf-runtime",
- "rvf-types 0.2.0",
+ "rvf-types",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -677,14 +677,17 @@ dependencies = [
  "clawft-types",
  "cognitum-gate-tilezero",
  "dashmap",
+ "ed25519-dalek",
  "exo-resource-tree",
  "futures",
  "parking_lot",
+ "rand 0.8.5",
  "ruvector-cluster",
  "ruvector-raft",
  "ruvector-replication",
  "rvf-crypto",
- "rvf-types 0.2.0",
+ "rvf-runtime",
+ "rvf-types",
  "rvf-wire",
  "serde",
  "serde_json",
@@ -974,7 +977,7 @@ dependencies = [
  "comfy-table",
  "dirs",
  "exo-resource-tree",
- "rvf-types 0.2.0",
+ "rvf-types",
  "rvf-wire",
  "serde",
  "serde_json",
@@ -3732,17 +3735,16 @@ dependencies = [
 name = "rvf-crypto"
 version = "0.2.0"
 dependencies = [
- "rvf-types 0.2.0",
+ "ed25519-dalek",
+ "rvf-types",
  "sha3",
 ]
 
 [[package]]
 name = "rvf-runtime"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e465af193e27d9c5f939519fa71065a7bab22bfb31f85d614fa9c59218f73858"
 dependencies = [
- "rvf-types 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rvf-types",
 ]
 
 [[package]]
@@ -3750,17 +3752,11 @@ name = "rvf-types"
 version = "0.2.0"
 
 [[package]]
-name = "rvf-types"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a497b66e9a16b7e057135e1f0e34f80abaecec0a1c537f662d526ca9a9106e79"
-
-[[package]]
 name = "rvf-wire"
 version = "0.1.0"
 dependencies = [
  "crc32c",
- "rvf-types 0.2.0",
+ "rvf-types",
  "xxhash-rust",
 ]
 

@@ -274,6 +274,9 @@ pub struct ChainVerifyResult {
     pub valid: bool,
     pub event_count: usize,
     pub errors: Vec<String>,
+    /// Ed25519 signature verification: None=unsigned, Some(true)=valid, Some(false)=invalid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_verified: Option<bool>,
 }
 
 // ── Resource tree result types ────────────────────────────
@@ -423,6 +426,75 @@ pub struct CronJobInfo {
     pub fire_count: u64,
     pub last_fired: Option<String>,
     pub created_at: String,
+}
+
+// ── IPC result types ─────────────────────────────────────
+
+/// A topic entry for `ipc.topics`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpcTopicInfo {
+    pub topic: String,
+    pub subscriber_count: usize,
+    pub subscribers: Vec<u64>,
+}
+
+/// Parameters for `ipc.subscribe`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpcSubscribeParams {
+    /// PID to subscribe.
+    pub pid: u64,
+    /// Topic name.
+    pub topic: String,
+}
+
+/// Parameters for `ipc.publish`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpcPublishParams {
+    /// Topic name.
+    pub topic: String,
+    /// Message payload (text or JSON string).
+    pub message: String,
+}
+
+// ── Resource scoring types ───────────────────────────────
+
+/// Parameters for `resource.score`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceScoreParams {
+    /// Resource path to score.
+    pub path: String,
+}
+
+/// Scoring result for `resource.score`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceScoreResult {
+    pub path: String,
+    pub trust: f32,
+    pub performance: f32,
+    pub difficulty: f32,
+    pub reward: f32,
+    pub reliability: f32,
+    pub velocity: f32,
+    pub composite: f32,
+}
+
+/// Parameters for `resource.rank`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceRankParams {
+    /// Number of top-ranked nodes to return.
+    #[serde(default = "default_rank_count")]
+    pub count: usize,
+}
+
+fn default_rank_count() -> usize {
+    10
+}
+
+/// A ranked resource entry for `resource.rank`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceRankEntry {
+    pub path: String,
+    pub score: f32,
 }
 
 #[cfg(test)]

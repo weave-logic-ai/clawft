@@ -59,6 +59,9 @@ enum Commands {
     /// Cron job management (add, list, remove).
     Cron(commands::cron_cmd::CronArgs),
 
+    /// IPC management (topics, subscribe, publish).
+    Ipc(commands::ipc_cmd::IpcArgs),
+
     /// Show version and build info.
     Version,
 }
@@ -82,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Chain(args) => commands::chain_cmd::run(args).await?,
         Commands::Resource(args) => commands::resource_cmd::run(args).await?,
         Commands::Cron(args) => commands::cron_cmd::run(args).await?,
+        Commands::Ipc(args) => commands::ipc_cmd::run(args).await?,
         Commands::Version => {
             println!("weaver {} (WeftOS)", env!("CARGO_PKG_VERSION"));
         }

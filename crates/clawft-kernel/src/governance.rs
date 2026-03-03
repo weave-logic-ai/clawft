@@ -330,6 +330,86 @@ impl GovernanceEngine {
     }
 }
 
+// ── RVF governance bridge ────────────────────────────────────
+//
+// Behind `exochain` feature gate: bidirectional mapping between
+// WeftOS constitutional governance and RVF witness governance.
+//
+// WeftOS governance evaluates *whether* an action should proceed
+// (effect algebra, risk thresholds, branch-based rules).
+// RVF governance records *what happened* during execution
+// (witness bundles, tool call traces, cost budgets).
+
+#[cfg(feature = "exochain")]
+impl GovernanceDecision {
+    /// Map this decision to the equivalent RVF PolicyCheck.
+    ///
+    /// - `Permit` → `Allowed`
+    /// - `PermitWithWarning` / `EscalateToHuman` → `Confirmed`
+    /// - `Deny` → `Denied`
+    pub fn to_rvf_policy_check(&self) -> rvf_types::witness::PolicyCheck {
+        match self {
+            GovernanceDecision::Permit => rvf_types::witness::PolicyCheck::Allowed,
+            GovernanceDecision::PermitWithWarning(_) => rvf_types::witness::PolicyCheck::Confirmed,
+            GovernanceDecision::EscalateToHuman(_) => rvf_types::witness::PolicyCheck::Confirmed,
+            GovernanceDecision::Deny(_) => rvf_types::witness::PolicyCheck::Denied,
+        }
+    }
+}
+
+#[cfg(feature = "exochain")]
+impl GovernanceEngine {
+    /// Derive the equivalent RVF GovernanceMode from this engine's config.
+    ///
+    /// - `risk_threshold >= 1.0` (open) → `Autonomous`
+    /// - `human_approval_required` → `Approved`
+    /// - otherwise → `Restricted`
+    pub fn to_rvf_mode(&self) -> rvf_types::witness::GovernanceMode {
+        if self.risk_threshold >= 1.0 {
+            rvf_types::witness::GovernanceMode::Autonomous
+        } else if self.human_approval_required {
+            rvf_types::witness::GovernanceMode::Approved
+        } else {
+            rvf_types::witness::GovernanceMode::Restricted
+        }
+    }
+
+    /// Build an RVF GovernancePolicy from this engine's configuration.
+    ///
+    /// Uses the default tool lists and cost budgets for each mode.
+    /// Callers can customize the returned policy further if needed.
+    pub fn to_rvf_policy(&self) -> rvf_runtime::GovernancePolicy {
+        match self.to_rvf_mode() {
+            rvf_types::witness::GovernanceMode::Restricted => {
+                rvf_runtime::GovernancePolicy::restricted()
+            }
+            rvf_types::witness::GovernanceMode::Approved => {
+                rvf_runtime::GovernancePolicy::approved()
+            }
+            rvf_types::witness::GovernanceMode::Autonomous => {
+                rvf_runtime::GovernancePolicy::autonomous()
+            }
+        }
+    }
+}
+
+#[cfg(feature = "exochain")]
+impl GovernanceResult {
+    /// Map the decision to an RVF TaskOutcome.
+    ///
+    /// This is a convenience for recording the governance result in a
+    /// witness bundle. The caller should override based on actual execution.
+    pub fn to_rvf_task_outcome(&self) -> rvf_types::witness::TaskOutcome {
+        match &self.decision {
+            GovernanceDecision::Permit | GovernanceDecision::PermitWithWarning(_) => {
+                rvf_types::witness::TaskOutcome::Solved
+            }
+            GovernanceDecision::EscalateToHuman(_) => rvf_types::witness::TaskOutcome::Skipped,
+            GovernanceDecision::Deny(_) => rvf_types::witness::TaskOutcome::Failed,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -598,5 +678,102 @@ mod tests {
         let json = serde_json::to_string(&v).unwrap();
         let restored: EffectVector = serde_json::from_str(&json).unwrap();
         assert!((restored.security - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[cfg(feature = "exochain")]
+    mod rvf_bridge_tests {
+        use super::*;
+
+        #[test]
+        fn decision_to_policy_check() {
+            use rvf_types::witness::PolicyCheck;
+
+            assert_eq!(
+                GovernanceDecision::Permit.to_rvf_policy_check(),
+                PolicyCheck::Allowed,
+            );
+            assert_eq!(
+                GovernanceDecision::PermitWithWarning("low risk".into()).to_rvf_policy_check(),
+                PolicyCheck::Confirmed,
+            );
+            assert_eq!(
+                GovernanceDecision::EscalateToHuman("needs review".into()).to_rvf_policy_check(),
+                PolicyCheck::Confirmed,
+            );
+            assert_eq!(
+                GovernanceDecision::Deny("blocked".into()).to_rvf_policy_check(),
+                PolicyCheck::Denied,
+            );
+        }
+
+        #[test]
+        fn open_engine_maps_to_autonomous() {
+            use rvf_types::witness::GovernanceMode;
+
+            let engine = GovernanceEngine::open();
+            assert_eq!(engine.to_rvf_mode(), GovernanceMode::Autonomous);
+        }
+
+        #[test]
+        fn strict_engine_maps_to_restricted() {
+            use rvf_types::witness::GovernanceMode;
+
+            let engine = GovernanceEngine::new(0.5, false);
+            assert_eq!(engine.to_rvf_mode(), GovernanceMode::Restricted);
+        }
+
+        #[test]
+        fn human_approval_maps_to_approved() {
+            use rvf_types::witness::GovernanceMode;
+
+            let engine = GovernanceEngine::new(0.5, true);
+            assert_eq!(engine.to_rvf_mode(), GovernanceMode::Approved);
+        }
+
+        #[test]
+        fn to_rvf_policy_mode_matches() {
+            use rvf_types::witness::GovernanceMode;
+
+            let open = GovernanceEngine::open();
+            let policy = open.to_rvf_policy();
+            assert_eq!(policy.mode, GovernanceMode::Autonomous);
+
+            let strict = GovernanceEngine::new(0.3, false);
+            let policy = strict.to_rvf_policy();
+            assert_eq!(policy.mode, GovernanceMode::Restricted);
+
+            let human = GovernanceEngine::new(0.3, true);
+            let policy = human.to_rvf_policy();
+            assert_eq!(policy.mode, GovernanceMode::Approved);
+        }
+
+        #[test]
+        fn governance_result_to_task_outcome() {
+            use rvf_types::witness::TaskOutcome;
+
+            let permit_result = GovernanceResult {
+                decision: GovernanceDecision::Permit,
+                evaluated_rules: vec![],
+                effect: EffectVector::default(),
+                threshold_exceeded: false,
+            };
+            assert_eq!(permit_result.to_rvf_task_outcome() as u8, TaskOutcome::Solved as u8);
+
+            let deny_result = GovernanceResult {
+                decision: GovernanceDecision::Deny("blocked".into()),
+                evaluated_rules: vec![],
+                effect: EffectVector::default(),
+                threshold_exceeded: true,
+            };
+            assert_eq!(deny_result.to_rvf_task_outcome() as u8, TaskOutcome::Failed as u8);
+
+            let escalate_result = GovernanceResult {
+                decision: GovernanceDecision::EscalateToHuman("review".into()),
+                evaluated_rules: vec![],
+                effect: EffectVector::default(),
+                threshold_exceeded: true,
+            };
+            assert_eq!(escalate_result.to_rvf_task_outcome() as u8, TaskOutcome::Skipped as u8);
+        }
     }
 }

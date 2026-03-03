@@ -71,6 +71,8 @@ pub enum IpcScope {
     ParentOnly,
     /// Agent may communicate with a specified set of PIDs.
     Restricted(Vec<u64>),
+    /// Agent may only publish/subscribe to specified topics (no direct PID messaging).
+    Topic(Vec<String>),
     /// Agent may not send IPC messages.
     None,
 }
@@ -132,6 +134,20 @@ impl AgentCapabilities {
             IpcScope::All => true,
             IpcScope::ParentOnly => false, // Caller must check parent separately
             IpcScope::Restricted(pids) => pids.contains(&target_pid),
+            IpcScope::Topic(_) => false, // Topic-scoped agents cannot direct-message PIDs
+            IpcScope::None => false,
+        }
+    }
+
+    /// Check whether the agent is allowed to publish/subscribe to a topic.
+    pub fn can_topic(&self, topic: &str) -> bool {
+        if !self.can_ipc {
+            return false;
+        }
+        match &self.ipc_scope {
+            IpcScope::All => true,
+            IpcScope::Topic(topics) => topics.iter().any(|t| t == topic),
+            IpcScope::ParentOnly | IpcScope::Restricted(_) => true, // topic access not restricted
             IpcScope::None => false,
         }
     }
@@ -326,6 +342,32 @@ impl CapabilityChecker {
         Ok(())
     }
 
+    /// Check whether a process may publish or subscribe to a topic.
+    ///
+    /// # Errors
+    ///
+    /// Returns `KernelError::CapabilityDenied` if the agent's IPC
+    /// scope does not permit the given topic.
+    pub fn check_ipc_topic(&self, pid: Pid, topic: &str) -> Result<(), KernelError> {
+        let entry = self
+            .process_table
+            .get(pid)
+            .ok_or(KernelError::ProcessNotFound { pid })?;
+
+        if !entry.capabilities.can_topic(topic) {
+            return Err(KernelError::CapabilityDenied {
+                pid,
+                action: format!("access topic '{topic}'"),
+                reason: format!(
+                    "topic '{topic}' is outside IPC scope {:?}",
+                    entry.capabilities.ipc_scope
+                ),
+            });
+        }
+
+        Ok(())
+    }
+
     /// Check whether a process may access a named service.
     ///
     /// If `tool_permissions` has a non-empty `service_access` list,
@@ -487,6 +529,43 @@ mod tests {
             ..Default::default()
         };
         assert!(!caps.can_message(1));
+    }
+
+    #[test]
+    fn can_message_topic_scope_blocks_direct() {
+        let caps = AgentCapabilities {
+            ipc_scope: IpcScope::Topic(vec!["build".into(), "deploy".into()]),
+            ..Default::default()
+        };
+        // Topic-scoped agents cannot direct-message PIDs
+        assert!(!caps.can_message(1));
+        assert!(!caps.can_message(999));
+    }
+
+    #[test]
+    fn can_topic_with_topic_scope() {
+        let caps = AgentCapabilities {
+            ipc_scope: IpcScope::Topic(vec!["build".into(), "deploy".into()]),
+            ..Default::default()
+        };
+        assert!(caps.can_topic("build"));
+        assert!(caps.can_topic("deploy"));
+        assert!(!caps.can_topic("admin"));
+    }
+
+    #[test]
+    fn can_topic_with_all_scope() {
+        let caps = AgentCapabilities::default(); // IpcScope::All
+        assert!(caps.can_topic("anything"));
+    }
+
+    #[test]
+    fn can_topic_with_none_scope() {
+        let caps = AgentCapabilities {
+            ipc_scope: IpcScope::None,
+            ..Default::default()
+        };
+        assert!(!caps.can_topic("build"));
     }
 
     #[test]
@@ -841,6 +920,29 @@ mod tests {
         let (checker, pid) = make_checker_with_entry(caps);
         let result = checker.check_resource_limit(pid, &ResourceType::Messages(20));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn checker_ipc_topic_allowed() {
+        let caps = AgentCapabilities {
+            ipc_scope: IpcScope::Topic(vec!["build".into(), "deploy".into()]),
+            ..Default::default()
+        };
+        let (checker, pid) = make_checker_with_entry(caps);
+        assert!(checker.check_ipc_topic(pid, "build").is_ok());
+        assert!(checker.check_ipc_topic(pid, "deploy").is_ok());
+        assert!(checker.check_ipc_topic(pid, "admin").is_err());
+    }
+
+    #[test]
+    fn checker_ipc_topic_denied_for_direct_messaging() {
+        let caps = AgentCapabilities {
+            ipc_scope: IpcScope::Topic(vec!["build".into()]),
+            ..Default::default()
+        };
+        let (checker, pid) = make_checker_with_entry(caps);
+        // Topic-scoped agents cannot direct-message PIDs
+        assert!(checker.check_ipc_target(pid, 999).is_err());
     }
 
     #[test]

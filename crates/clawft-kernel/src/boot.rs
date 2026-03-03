@@ -9,6 +9,8 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use tracing::{error, info};
+#[cfg(feature = "exochain")]
+use tracing::warn;
 
 use clawft_core::bootstrap::AppContext;
 use clawft_core::bus::MessageBus;
@@ -263,6 +265,30 @@ impl<P: Platform> Kernel<P> {
         let chain_manager = {
             let chain_config = kernel_config.chain.clone().unwrap_or_default();
             if chain_config.enabled {
+                // Load or generate Ed25519 signing key for chain integrity.
+                let signing_key = if let Some(ref ckpt_path) = chain_config.effective_checkpoint_path() {
+                    let key_path = std::path::PathBuf::from(ckpt_path).with_extension("key");
+                    match crate::chain::ChainManager::load_or_create_key(&key_path) {
+                        Ok(key) => {
+                            boot_log.push(BootEvent::info(
+                                BootPhase::Services,
+                                format!("Ed25519 signing key loaded: {}", key_path.display()),
+                            ));
+                            Some(key)
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "failed to load/create signing key");
+                            boot_log.push(BootEvent::info(
+                                BootPhase::Services,
+                                format!("Signing key unavailable: {e} — chain will be unsigned"),
+                            ));
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
                 let cm = if let Some(ref ckpt_path) = chain_config.effective_checkpoint_path() {
                     let json_path = std::path::PathBuf::from(ckpt_path);
                     // Derive RVF path from JSON path: same directory, `.rvf` extension
@@ -361,12 +387,25 @@ impl<P: Platform> Kernel<P> {
                     ))
                 };
 
+                // Attach Ed25519 signing key if available.
+                let mut cm = cm;
+                if let Some(key) = signing_key
+                    && let Some(inner) = Arc::get_mut(&mut cm)
+                {
+                    inner.set_signing_key(key);
+                    boot_log.push(BootEvent::info(
+                        BootPhase::Services,
+                        "Chain signing enabled (Ed25519)",
+                    ));
+                }
+
                 boot_log.push(BootEvent::info(
                     BootPhase::Services,
                     format!(
-                        "Local chain ready (chain_id={}, seq={})",
+                        "Local chain ready (chain_id={}, seq={}, signed={})",
                         chain_config.chain_id,
                         cm.sequence(),
+                        cm.has_signing_key(),
                     ),
                 ));
 
@@ -418,11 +457,43 @@ impl<P: Platform> Kernel<P> {
                         .map(|p| std::path::PathBuf::from(p).with_extension("tree.json"));
 
                     let mut restored_from_checkpoint = false;
-                    if let Some(ref tree_path) = tree_ckpt_path {
-                        if tree_path.exists() {
-                            match tm.load_checkpoint(tree_path) {
-                                Ok(()) => {
-                                    let stats = tm.stats();
+                    if let Some(ref tree_path) = tree_ckpt_path
+                        && tree_path.exists()
+                    {
+                        match tm.load_checkpoint(tree_path) {
+                            Ok(()) => {
+                                let stats = tm.stats();
+                                // Verify tree root hash against the chain's last recorded hash.
+                                let chain_tree_hash = cm.last_tree_root_hash();
+                                if let Some(ref expected) = chain_tree_hash {
+                                    if stats.root_hash == *expected {
+                                        boot_log.push(BootEvent::info(
+                                            BootPhase::ResourceTree,
+                                            format!(
+                                                "Resource tree restored from checkpoint ({} nodes, root={}..., hash verified)",
+                                                stats.node_count,
+                                                &stats.root_hash[..12],
+                                            ),
+                                        ));
+                                        restored_from_checkpoint = true;
+                                    } else {
+                                        warn!(
+                                            expected = %expected,
+                                            actual = %stats.root_hash,
+                                            "tree checkpoint root hash mismatch — falling back to fresh bootstrap"
+                                        );
+                                        boot_log.push(BootEvent::info(
+                                            BootPhase::ResourceTree,
+                                            format!(
+                                                "Tree checkpoint hash mismatch (expected={}..., got={}...), bootstrapping fresh",
+                                                &expected[..std::cmp::min(12, expected.len())],
+                                                &stats.root_hash[..12],
+                                            ),
+                                        ));
+                                        // Don't set restored_from_checkpoint — falls through to bootstrap.
+                                    }
+                                } else {
+                                    // No hash in chain to verify against — accept as-is.
                                     boot_log.push(BootEvent::info(
                                         BootPhase::ResourceTree,
                                         format!(
@@ -433,9 +504,9 @@ impl<P: Platform> Kernel<P> {
                                     ));
                                     restored_from_checkpoint = true;
                                 }
-                                Err(e) => {
-                                    error!(error = %e, "failed to restore tree checkpoint, bootstrapping fresh");
-                                }
+                            }
+                            Err(e) => {
+                                error!(error = %e, "failed to restore tree checkpoint, bootstrapping fresh");
                             }
                         }
                     }

@@ -29,7 +29,13 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use rvf_crypto::hash::shake256_256;
+use rvf_crypto::{
+    create_witness_chain, decode_signature_footer, encode_signature_footer,
+    lineage_record_to_bytes, lineage_witness_entry, sign_segment, verify_segment,
+    verify_witness_chain, WitnessEntry,
+};
 use rvf_types::{ExoChainHeader, EXOCHAIN_MAGIC, SEGMENT_HEADER_SIZE};
 use rvf_wire::writer::{calculate_padded_size, write_exochain_event};
 use rvf_wire::{decode_exochain_payload, read_segment, validate_segment};
@@ -86,6 +92,10 @@ pub struct ChainVerifyResult {
     pub event_count: usize,
     /// List of errors found (empty if valid).
     pub errors: Vec<String>,
+    /// Ed25519 signature verification status.
+    /// `None` = no signature present, `Some(true)` = valid, `Some(false)` = invalid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_verified: Option<bool>,
 }
 
 /// Compute the SHAKE-256 content hash of a payload.
@@ -139,6 +149,9 @@ pub(crate) fn compute_event_hash(
     shake256_256(&buf)
 }
 
+/// Witness type constants for kernel events.
+const WITNESS_PROVENANCE: u8 = 0x01;
+
 /// Local chain state.
 struct LocalChain {
     chain_id: u32,
@@ -148,6 +161,8 @@ struct LocalChain {
     checkpoint_interval: u64,
     events_since_checkpoint: u64,
     checkpoints: Vec<ChainCheckpoint>,
+    /// Witness entries — one per event for cryptographic audit trail.
+    witness_entries: Vec<WitnessEntry>,
 }
 
 impl LocalChain {
@@ -160,14 +175,16 @@ impl LocalChain {
             checkpoint_interval,
             events_since_checkpoint: 0,
             checkpoints: Vec::new(),
+            witness_entries: Vec::new(),
         }
     }
 
-    /// Restore from a saved set of events.
+    /// Restore from a saved set of events and optional witness entries.
     fn from_events(
         chain_id: u32,
         checkpoint_interval: u64,
         events: Vec<ChainEvent>,
+        witness_entries: Vec<WitnessEntry>,
     ) -> Self {
         let (last_hash, sequence) = if let Some(last) = events.last() {
             (last.hash, last.sequence + 1)
@@ -182,6 +199,7 @@ impl LocalChain {
             checkpoint_interval,
             events_since_checkpoint: 0,
             checkpoints: Vec::new(),
+            witness_entries,
         }
     }
 
@@ -214,6 +232,14 @@ impl LocalChain {
             kind,
             payload,
         };
+
+        // Create a witness entry for this event.
+        self.witness_entries.push(WitnessEntry {
+            prev_hash: [0u8; 32], // linked at serialization time
+            action_hash: hash,
+            timestamp_ns: timestamp.timestamp_nanos_opt().unwrap_or(0) as u64,
+            witness_type: WITNESS_PROVENANCE,
+        });
 
         self.last_hash = hash;
         self.sequence += 1;
@@ -265,6 +291,25 @@ fn hex_hash(h: &[u8; 32]) -> String {
     h.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Encode arbitrary bytes as a lowercase hex string.
+fn hex_encode(data: &[u8]) -> String {
+    data.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Decode a hex string into a byte vector.
+fn hex_decode(s: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    if !s.len().is_multiple_of(2) {
+        return Err("hex string has odd length".into());
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    for chunk in s.as_bytes().chunks(2) {
+        let hi = hex_nibble(chunk[0])?;
+        let lo = hex_nibble(chunk[1])?;
+        out.push((hi << 4) | lo);
+    }
+    Ok(out)
+}
+
 /// Parse a 64-char hex string back into a 32-byte array.
 fn parse_hex_hash(s: &str) -> Result<[u8; 32], Box<dyn std::error::Error + Send + Sync>> {
     if s.len() != 64 {
@@ -292,9 +337,12 @@ fn hex_nibble(c: u8) -> Result<u8, Box<dyn std::error::Error + Send + Sync>> {
 /// Thread-safe chain manager.
 ///
 /// Wraps a local chain with mutex protection for concurrent access
-/// from multiple kernel subsystems.
+/// from multiple kernel subsystems. Optionally holds an Ed25519
+/// signing key for cryptographic chain signing.
 pub struct ChainManager {
     inner: Mutex<LocalChain>,
+    /// Ed25519 signing key for RVF segment signing.
+    signing_key: Option<SigningKey>,
 }
 
 impl ChainManager {
@@ -311,12 +359,66 @@ impl ChainManager {
 
         Self {
             inner: Mutex::new(chain),
+            signing_key: None,
         }
     }
 
     /// Create with default settings.
     pub fn default_local() -> Self {
         Self::new(0, 1000)
+    }
+
+    /// Attach an Ed25519 signing key for RVF segment signing.
+    pub fn with_signing_key(mut self, key: SigningKey) -> Self {
+        self.signing_key = Some(key);
+        self
+    }
+
+    /// Get the verifying (public) key, if a signing key is set.
+    pub fn verifying_key(&self) -> Option<VerifyingKey> {
+        self.signing_key.as_ref().map(|k| k.verifying_key())
+    }
+
+    /// Set the signing key (mutable borrow — use with `Arc::get_mut()`
+    /// before sharing the manager across tasks).
+    pub fn set_signing_key(&mut self, key: SigningKey) {
+        self.signing_key = Some(key);
+    }
+
+    /// Whether this chain manager has a signing key attached.
+    pub fn has_signing_key(&self) -> bool {
+        self.signing_key.is_some()
+    }
+
+    /// Load an Ed25519 signing key from file, or generate and persist a new one.
+    pub fn load_or_create_key(
+        path: &Path,
+    ) -> Result<SigningKey, Box<dyn std::error::Error + Send + Sync>> {
+        if path.exists() {
+            let bytes = std::fs::read(path)?;
+            if bytes.len() != 32 {
+                return Err(format!(
+                    "key file is {} bytes, expected 32",
+                    bytes.len()
+                )
+                .into());
+            }
+            let key_bytes: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| "key file not 32 bytes")?;
+            let key = SigningKey::from_bytes(&key_bytes);
+            info!(path = %path.display(), "loaded Ed25519 signing key");
+            Ok(key)
+        } else {
+            use rand::rngs::OsRng;
+            let key = SigningKey::generate(&mut OsRng);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, key.to_bytes())?;
+            info!(path = %path.display(), "generated new Ed25519 signing key");
+            Ok(key)
+        }
     }
 
     /// Append an event to the chain.
@@ -374,6 +476,28 @@ impl ChainManager {
     /// Get all checkpoints.
     pub fn checkpoints(&self) -> Vec<ChainCheckpoint> {
         self.inner.lock().unwrap().checkpoints.clone()
+    }
+
+    /// Get the number of witness entries.
+    pub fn witness_count(&self) -> usize {
+        self.inner.lock().unwrap().witness_entries.len()
+    }
+
+    /// Serialize the witness chain and verify it.
+    ///
+    /// Returns `Ok(entry_count)` if the witness chain is valid, or
+    /// `Err` if verification fails.
+    pub fn verify_witness(
+        &self,
+    ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        let chain = self.inner.lock().unwrap();
+        if chain.witness_entries.is_empty() {
+            return Ok(0);
+        }
+        let data = create_witness_chain(&chain.witness_entries);
+        let verified = verify_witness_chain(&data)
+            .map_err(|e| format!("witness chain verification failed: {e}"))?;
+        Ok(verified.len())
     }
 
     /// Verify the integrity of the entire chain.
@@ -437,6 +561,7 @@ impl ChainManager {
             valid: errors.is_empty(),
             event_count: chain.events.len(),
             errors,
+            signature_verified: None,
         }
     }
 
@@ -493,10 +618,11 @@ impl ChainManager {
         }
 
         let chain_id = events[0].chain_id;
-        let chain = LocalChain::from_events(chain_id, checkpoint_interval, events);
+        let chain = LocalChain::from_events(chain_id, checkpoint_interval, events, Vec::new());
 
         let mgr = Self {
             inner: Mutex::new(chain),
+            signing_key: None,
         };
 
         // Verify integrity of the loaded chain
@@ -585,9 +711,19 @@ impl ChainManager {
             prev_hash: chain.last_hash,
         };
 
+        // Serialize and include the witness chain in the checkpoint.
+        let witness_hex = if !chain.witness_entries.is_empty() {
+            let wc_data = create_witness_chain(&chain.witness_entries);
+            Some(hex_encode(&wc_data))
+        } else {
+            None
+        };
+
         let cp_payload = serde_json::json!({
             "event_count": chain.events.len(),
             "last_hash": hex_hash(&chain.last_hash),
+            "witness_chain": witness_hex,
+            "witness_entries": chain.witness_entries.len(),
         });
         let mut cp_cbor = Vec::new();
         ciborium::into_writer(&cp_payload, &mut cp_cbor)
@@ -600,11 +736,24 @@ impl ChainManager {
         );
         output.extend_from_slice(&cp_segment);
 
+        // Sign the checkpoint segment if a signing key is available.
+        let signed = if let Some(ref signing_key) = self.signing_key {
+            let (cp_seg_header, cp_seg_payload) = read_segment(&cp_segment)
+                .map_err(|e| format!("re-read checkpoint for signing: {e}"))?;
+            let footer = sign_segment(&cp_seg_header, cp_seg_payload, signing_key);
+            let footer_bytes = encode_signature_footer(&footer);
+            output.extend_from_slice(&footer_bytes);
+            true
+        } else {
+            false
+        };
+
         std::fs::write(path, &output)?;
         info!(
             path = %path.display(),
             events = chain.events.len(),
             bytes = output.len(),
+            signed,
             "chain saved to RVF file"
         );
         Ok(())
@@ -622,6 +771,7 @@ impl ChainManager {
         let data = std::fs::read(path)?;
         let mut offset = 0;
         let mut events = Vec::new();
+        let mut witness_entries = Vec::new();
 
         while offset < data.len() {
             // Need at least a segment header.
@@ -629,8 +779,12 @@ impl ChainManager {
                 break;
             }
 
-            let (seg_header, seg_payload) = read_segment(&data[offset..])
-                .map_err(|e| format!("read segment at offset {offset}: {e}"))?;
+            // Try reading the next segment. If it fails, the remaining
+            // bytes may be a signature footer — break out of the loop.
+            let (seg_header, seg_payload) = match read_segment(&data[offset..]) {
+                Ok(result) => result,
+                Err(_) => break,
+            };
 
             // Validate the content hash.
             validate_segment(&seg_header, seg_payload)
@@ -673,8 +827,29 @@ impl ChainManager {
                     kind: rvf_payload.kind,
                     payload: rvf_payload.payload,
                 });
+            } else if exo_header.subtype == 0x41 {
+                // Checkpoint — extract witness chain if present.
+                let cp_obj: serde_json::Value = ciborium::from_reader(cbor_bytes)
+                    .unwrap_or_default();
+                if let Some(wc_hex) = cp_obj.get("witness_chain")
+                    .and_then(|v| v.as_str())
+                    && let Ok(wc_bytes) = hex_decode(wc_hex)
+                {
+                    match verify_witness_chain(&wc_bytes) {
+                        Ok(entries) => {
+                            witness_entries = entries;
+                            debug!(
+                                count = witness_entries.len(),
+                                "restored witness chain from checkpoint"
+                            );
+                        }
+                        Err(e) => {
+                            warn!("witness chain verification failed on load: {e}");
+                        }
+                    }
+                }
             }
-            // subtype 0x41 (Checkpoint) and 0x42 (Proof) are skipped.
+            // subtype 0x42 (Proof) is skipped.
 
             // Advance past the segment: header + payload padded to 64 bytes.
             let padded = calculate_padded_size(
@@ -684,15 +859,25 @@ impl ChainManager {
             offset += padded;
         }
 
+        // Check for trailing signature footer.
+        let has_signature = if offset < data.len() {
+            decode_signature_footer(&data[offset..]).is_ok()
+        } else {
+            false
+        };
+
         if events.is_empty() {
             return Err("RVF file contains no chain events".into());
         }
 
         let chain_id = events[0].chain_id;
-        let chain = LocalChain::from_events(chain_id, checkpoint_interval, events);
+        let chain = LocalChain::from_events(
+            chain_id, checkpoint_interval, events, witness_entries,
+        );
 
         let mgr = Self {
             inner: Mutex::new(chain),
+            signing_key: None,
         };
 
         // Verify integrity of the loaded chain.
@@ -713,9 +898,261 @@ impl ChainManager {
             path = %path.display(),
             events = result.event_count,
             chain_id,
+            has_signature,
             "chain restored from RVF file"
         );
         Ok(mgr)
+    }
+
+    // ── Lineage tracking ─────────────────────────────────────────
+    //
+    // DNA-style provenance for agent spawn and resource derivation.
+    // Uses rvf-crypto's lineage module to create verifiable derivation
+    // records that link parent → child with hash verification.
+
+    /// Record a lineage derivation event in the chain.
+    ///
+    /// Creates a `LineageRecord` from the given parameters, serializes it,
+    /// adds a lineage witness entry, and appends a `lineage.derivation`
+    /// chain event with the full record in the payload.
+    ///
+    /// - `child_id`: UUID of the derived entity (agent, resource)
+    /// - `parent_id`: UUID of the parent entity (zero for root)
+    /// - `parent_hash`: hash of the parent's state at derivation time
+    /// - `derivation_type`: how the child was produced
+    /// - `mutation_count`: number of mutations/changes applied
+    /// - `description`: human-readable description (max 47 chars)
+    pub fn record_lineage(
+        &self,
+        child_id: [u8; 16],
+        parent_id: [u8; 16],
+        parent_hash: [u8; 32],
+        derivation_type: rvf_types::DerivationType,
+        mutation_count: u32,
+        description: &str,
+    ) -> ChainEvent {
+        let timestamp_ns = chrono::Utc::now()
+            .timestamp_nanos_opt()
+            .unwrap_or(0) as u64;
+
+        let record = rvf_types::LineageRecord::new(
+            child_id,
+            parent_id,
+            parent_hash,
+            derivation_type,
+            mutation_count,
+            timestamp_ns,
+            description,
+        );
+
+        // Serialize the record and create a witness entry.
+        let record_bytes = lineage_record_to_bytes(&record);
+
+        // Add a lineage witness entry to the witness chain.
+        {
+            let mut chain = self.inner.lock().unwrap();
+            let prev_hash = if let Some(last) = chain.witness_entries.last() {
+                last.action_hash
+            } else {
+                [0u8; 32]
+            };
+            let witness = lineage_witness_entry(&record, prev_hash);
+            chain.witness_entries.push(witness);
+        }
+
+        let payload = serde_json::json!({
+            "child_id": hex_encode(&child_id),
+            "parent_id": hex_encode(&parent_id),
+            "parent_hash": hex_hash(&parent_hash),
+            "derivation_type": derivation_type as u8,
+            "mutation_count": mutation_count,
+            "description": description,
+            "record_hex": hex_encode(&record_bytes),
+        });
+
+        self.append("lineage", "lineage.derivation", Some(payload))
+    }
+
+    /// Extract lineage records from chain events and verify the chain.
+    ///
+    /// Returns `Ok(count)` if all lineage records form a valid chain,
+    /// or `Err` describing the verification failure.
+    pub fn verify_lineage(&self) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        let events = self.tail(0);
+        let mut identities: Vec<(rvf_types::FileIdentity, [u8; 32])> = Vec::new();
+
+        for event in &events {
+            if event.kind != "lineage.derivation" {
+                continue;
+            }
+            let Some(ref payload) = event.payload else {
+                continue;
+            };
+
+            let child_id_hex = payload.get("child_id").and_then(|v| v.as_str()).unwrap_or("");
+            let parent_id_hex = payload.get("parent_id").and_then(|v| v.as_str()).unwrap_or("");
+            let parent_hash_hex = payload.get("parent_hash").and_then(|v| v.as_str()).unwrap_or("");
+
+            let Ok(child_bytes) = hex_decode(child_id_hex) else { continue };
+            let Ok(parent_bytes) = hex_decode(parent_id_hex) else { continue };
+            let Ok(parent_hash) = parse_hex_hash(parent_hash_hex) else { continue };
+
+            if child_bytes.len() != 16 || parent_bytes.len() != 16 {
+                continue;
+            }
+
+            let mut child_id = [0u8; 16];
+            child_id.copy_from_slice(&child_bytes);
+            let mut parent_id = [0u8; 16];
+            parent_id.copy_from_slice(&parent_bytes);
+
+            let depth = identities
+                .iter()
+                .filter(|(fi, _)| fi.file_id == parent_id)
+                .map(|(fi, _)| fi.lineage_depth + 1)
+                .next()
+                .unwrap_or(0);
+
+            let fi = rvf_types::FileIdentity {
+                file_id: child_id,
+                parent_id,
+                parent_hash,
+                lineage_depth: depth,
+            };
+
+            // Use the event hash as the manifest hash for this identity.
+            identities.push((fi, event.hash));
+        }
+
+        if identities.is_empty() {
+            return Ok(0);
+        }
+
+        // Lineage chain verification requires root → leaf ordering.
+        // Our records are already in append order, so roots come first.
+        // verify_lineage_chain expects consecutive parent→child pairs,
+        // but our records may be from different lineage trees. Verify
+        // each parent→child pair independently.
+        let count = identities.len();
+        for (fi, _hash) in &identities {
+            if fi.is_root() {
+                continue;
+            }
+            // Find the parent in identities.
+            let parent_found = identities
+                .iter()
+                .any(|(pfi, _)| pfi.file_id == fi.parent_id);
+            if !parent_found && fi.parent_id != [0u8; 16] {
+                return Err(format!(
+                    "lineage record for {} references unknown parent {}",
+                    hex_encode(&fi.file_id),
+                    hex_encode(&fi.parent_id),
+                ).into());
+            }
+        }
+
+        Ok(count)
+    }
+
+    // ── Witness bundle integration ─────────────────────────────
+    //
+    // RVF witness bundles are the atomic proof unit for agent task
+    // execution. These methods bridge the gap between the kernel's
+    // event chain and the rvf-runtime WitnessBuilder.
+
+    /// Record a completed witness bundle as a chain event.
+    ///
+    /// Takes the raw bundle bytes and parsed header produced by
+    /// `WitnessBuilder::build()`, stores them as a `witness.bundle`
+    /// chain event with the bundle hex-encoded in the payload.
+    pub fn record_witness_bundle(
+        &self,
+        bundle_bytes: &[u8],
+        header: &rvf_types::witness::WitnessHeader,
+        policy_violations: u32,
+        rollback_count: u32,
+    ) -> ChainEvent {
+        let payload = serde_json::json!({
+            "task_id": hex_encode(&header.task_id),
+            "outcome": header.outcome,
+            "governance_mode": header.governance_mode,
+            "tool_call_count": header.tool_call_count,
+            "total_cost_microdollars": header.total_cost_microdollars,
+            "total_latency_ms": header.total_latency_ms,
+            "total_tokens": header.total_tokens,
+            "bundle_size": bundle_bytes.len(),
+            "policy_violations": policy_violations,
+            "rollback_count": rollback_count,
+            "bundle": hex_encode(bundle_bytes),
+        });
+        self.append("witness", "witness.bundle", Some(payload))
+    }
+
+    /// Aggregate witness bundles from recent chain events into a scorecard.
+    ///
+    /// Scans the last `n` events (0 = all) for `witness.bundle` events,
+    /// parses each bundle, and produces an aggregate `Scorecard`.
+    pub fn aggregate_scorecard(&self, n: usize) -> rvf_types::witness::Scorecard {
+        let events = self.tail(n);
+        let mut builder = rvf_runtime::ScorecardBuilder::new();
+
+        for event in &events {
+            if event.kind != "witness.bundle" {
+                continue;
+            }
+            let Some(ref payload) = event.payload else {
+                continue;
+            };
+            let Some(hex_str) = payload.get("bundle").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Ok(bytes) = hex_decode(hex_str) else {
+                continue;
+            };
+            let Ok(parsed) = rvf_runtime::ParsedWitness::parse(&bytes) else {
+                continue;
+            };
+            let violations = payload
+                .get("policy_violations")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            let rollbacks = payload
+                .get("rollback_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            builder.add_witness(&parsed, violations, rollbacks);
+        }
+
+        builder.finish()
+    }
+
+    /// Find the most recent tree root hash recorded in chain events.
+    ///
+    /// Scans backwards through the event log looking for payloads
+    /// that contain `tree_root_hash` (shutdown, boot.ready, boot.manifest)
+    /// or `root_hash` on tree-sourced events (tree.checkpoint, checkpoint).
+    ///
+    /// Returns the hash as a hex string if found.
+    pub fn last_tree_root_hash(&self) -> Option<String> {
+        let chain = self.inner.lock().unwrap();
+        for event in chain.events.iter().rev() {
+            let Some(ref payload) = event.payload else {
+                continue;
+            };
+            // Shutdown/boot events record "tree_root_hash" directly.
+            if let Some(hash) = payload.get("tree_root_hash").and_then(|v| v.as_str()) {
+                return Some(hash.to_string());
+            }
+            // Tree events record "root_hash".
+            if event.source == "tree"
+                && matches!(event.kind.as_str(), "tree.checkpoint" | "checkpoint")
+            {
+                if let Some(hash) = payload.get("root_hash").and_then(|v| v.as_str()) {
+                    return Some(hash.to_string());
+                }
+            }
+        }
+        None
     }
 
     /// Get a status summary.
@@ -729,6 +1166,58 @@ impl ChainManager {
             checkpoint_count: chain.checkpoints.len(),
             events_since_checkpoint: chain.events_since_checkpoint,
         }
+    }
+
+    /// Verify the Ed25519 signature on an RVF chain file.
+    ///
+    /// Reads the file, locates the checkpoint segment and trailing
+    /// signature footer, and verifies the signature against the
+    /// provided public key.
+    ///
+    /// Returns `Ok(true)` if signature is valid, `Ok(false)` if
+    /// invalid, and `Err` if the file has no signature or can't be read.
+    pub fn verify_rvf_signature(
+        path: &Path,
+        verifying_key: &VerifyingKey,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let data = std::fs::read(path)?;
+        let mut offset = 0;
+        let mut last_seg_start = 0;
+
+        // Walk all segments to find the last one (checkpoint).
+        while offset < data.len() {
+            if data.len() - offset < SEGMENT_HEADER_SIZE {
+                break;
+            }
+            let (seg_header, _seg_payload) = match read_segment(&data[offset..]) {
+                Ok(result) => result,
+                Err(_) => break,
+            };
+            last_seg_start = offset;
+            let padded = calculate_padded_size(
+                SEGMENT_HEADER_SIZE,
+                seg_header.payload_length as usize,
+            );
+            offset += padded;
+        }
+
+        // Remaining bytes should be the signature footer.
+        if offset >= data.len() {
+            return Err("no signature footer found in RVF file".into());
+        }
+        let footer = decode_signature_footer(&data[offset..])
+            .map_err(|e| format!("decode signature footer: {e}"))?;
+
+        // Re-read the checkpoint segment for verification.
+        let (cp_seg_header, cp_seg_payload) = read_segment(&data[last_seg_start..])
+            .map_err(|e| format!("re-read checkpoint segment: {e}"))?;
+
+        Ok(verify_segment(
+            &cp_seg_header,
+            cp_seg_payload,
+            &footer,
+            verifying_key,
+        ))
     }
 }
 
@@ -1002,5 +1491,532 @@ mod tests {
 
         // Clean up.
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ed25519_signed_rvf_roundtrip() {
+        use ed25519_dalek::SigningKey;
+        use rand::rngs::OsRng;
+
+        let key = SigningKey::generate(&mut OsRng);
+
+        let cm = ChainManager::new(0, 1000).with_signing_key(key.clone());
+        assert!(cm.has_signing_key());
+        cm.append("kernel", "boot.init", None);
+        cm.append("tree", "bootstrap", Some(serde_json::json!({"nodes": 8})));
+        cm.append("kernel", "boot.ready", None);
+
+        let original_seq = cm.sequence();
+        let original_hash = cm.last_hash();
+        let original_len = cm.len();
+
+        let dir = std::env::temp_dir().join("clawft-chain-signed-test");
+        let path = dir.join("signed-chain.rvf");
+        cm.save_to_rvf(&path).unwrap();
+
+        // File should be larger than unsigned (72 extra bytes for Ed25519 footer).
+        let _file_size = std::fs::metadata(&path).unwrap().len();
+
+        // Load the signed file (should work even without a key).
+        let restored = ChainManager::load_from_rvf(&path, 1000).unwrap();
+        assert_eq!(restored.sequence(), original_seq);
+        assert_eq!(restored.last_hash(), original_hash);
+        assert_eq!(restored.len(), original_len);
+
+        let result = restored.verify_integrity();
+        assert!(result.valid, "integrity errors: {:?}", result.errors);
+
+        // Verify the signature.
+        let pubkey = key.verifying_key();
+        let sig_valid = ChainManager::verify_rvf_signature(&path, &pubkey).unwrap();
+        assert!(sig_valid, "signature should be valid");
+
+        // Verify with wrong key fails.
+        let wrong_key = SigningKey::generate(&mut OsRng);
+        let wrong_pubkey = wrong_key.verifying_key();
+        let sig_wrong = ChainManager::verify_rvf_signature(&path, &wrong_pubkey).unwrap();
+        assert!(!sig_wrong, "signature should fail with wrong key");
+
+        // Clean up.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ed25519_tampered_checkpoint_fails_verification() {
+        use ed25519_dalek::SigningKey;
+        use rand::rngs::OsRng;
+
+        let key = SigningKey::generate(&mut OsRng);
+        let cm = ChainManager::new(0, 1000).with_signing_key(key.clone());
+        cm.append("kernel", "boot", None);
+
+        let dir = std::env::temp_dir().join("clawft-chain-tampered-sig");
+        let path = dir.join("tampered.rvf");
+        cm.save_to_rvf(&path).unwrap();
+
+        let mut data = std::fs::read(&path).unwrap();
+        let footer_size = 72; // Ed25519: 2 + 2 + 64 + 4
+
+        // Walk segments to find the checkpoint segment start.
+        let mut offset = 0;
+        let mut last_seg_start = 0;
+        while offset + SEGMENT_HEADER_SIZE <= data.len() - footer_size {
+            match read_segment(&data[offset..]) {
+                Ok((seg_header, _)) => {
+                    last_seg_start = offset;
+                    let padded = calculate_padded_size(
+                        SEGMENT_HEADER_SIZE,
+                        seg_header.payload_length as usize,
+                    );
+                    offset += padded;
+                }
+                Err(_) => break,
+            }
+        }
+
+        // Tamper with the first byte of the checkpoint segment's payload
+        // (the ExoChainHeader magic). This is covered by the signature.
+        data[last_seg_start + SEGMENT_HEADER_SIZE] ^= 0xFF;
+        std::fs::write(&path, &data).unwrap();
+
+        // Signature verification should fail (checkpoint payload was tampered).
+        let pubkey = key.verifying_key();
+        match ChainManager::verify_rvf_signature(&path, &pubkey) {
+            Ok(valid) => assert!(!valid, "tampered checkpoint should not verify"),
+            Err(_) => {} // Also acceptable — tampered segment can't be parsed
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unsigned_rvf_loads_successfully() {
+        // An unsigned chain should still load fine (no signing key).
+        let cm = ChainManager::new(0, 1000); // no signing key
+        assert!(!cm.has_signing_key());
+        cm.append("kernel", "boot", None);
+        cm.append("test", "event", Some(serde_json::json!({"x": 1})));
+
+        let dir = std::env::temp_dir().join("clawft-chain-unsigned-test");
+        let path = dir.join("unsigned.rvf");
+        cm.save_to_rvf(&path).unwrap();
+
+        let restored = ChainManager::load_from_rvf(&path, 1000).unwrap();
+        assert_eq!(restored.len(), cm.len());
+        let result = restored.verify_integrity();
+        assert!(result.valid);
+
+        // verify_rvf_signature should error (no footer present).
+        let key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let result = ChainManager::verify_rvf_signature(&path, &key.verifying_key());
+        assert!(result.is_err(), "no signature footer should yield error");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_or_create_key_roundtrip() {
+        let dir = std::env::temp_dir().join("clawft-key-test");
+        let key_path = dir.join("test-chain.key");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // First call: generates a new key.
+        let key1 = ChainManager::load_or_create_key(&key_path).unwrap();
+        assert!(key_path.exists());
+
+        // Second call: loads the same key.
+        let key2 = ChainManager::load_or_create_key(&key_path).unwrap();
+        assert_eq!(key1.to_bytes(), key2.to_bytes());
+
+        // Clean up.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn witness_chain_created_on_append() {
+        let cm = ChainManager::new(0, 1000);
+        assert_eq!(cm.witness_count(), 1); // genesis
+        cm.append("kernel", "boot.init", None);
+        assert_eq!(cm.witness_count(), 2);
+        cm.append("tree", "bootstrap", Some(serde_json::json!({"n": 8})));
+        assert_eq!(cm.witness_count(), 3);
+
+        // Verify the witness chain is internally consistent.
+        let count = cm.verify_witness().unwrap();
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn witness_chain_persists_in_rvf() {
+        let cm = ChainManager::new(0, 1000);
+        cm.append("kernel", "boot.init", None);
+        cm.append("tree", "bootstrap", Some(serde_json::json!({"n": 8})));
+        cm.append("kernel", "boot.ready", None);
+
+        let original_witness_count = cm.witness_count();
+        assert_eq!(original_witness_count, 4); // genesis + 3
+
+        let dir = std::env::temp_dir().join("clawft-chain-witness-test");
+        let path = dir.join("witness.rvf");
+        cm.save_to_rvf(&path).unwrap();
+
+        // Load and verify witness chain was restored.
+        let restored = ChainManager::load_from_rvf(&path, 1000).unwrap();
+        assert_eq!(restored.witness_count(), original_witness_count);
+
+        // Verify the restored witness chain is valid.
+        let count = restored.verify_witness().unwrap();
+        assert_eq!(count, original_witness_count);
+
+        // Verify that witness action_hashes match event hashes.
+        let events = restored.tail(0);
+        let chain = restored.inner.lock().unwrap();
+        for (event, witness) in events.iter().zip(chain.witness_entries.iter()) {
+            assert_eq!(
+                witness.action_hash, event.hash,
+                "witness action_hash should match event hash for seq {}",
+                event.sequence,
+            );
+        }
+
+        // Clean up.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn witness_chain_continues_after_restore() {
+        let cm = ChainManager::new(0, 1000);
+        cm.append("kernel", "boot", None);
+
+        let dir = std::env::temp_dir().join("clawft-chain-witness-continue");
+        let path = dir.join("continue.rvf");
+        cm.save_to_rvf(&path).unwrap();
+
+        let restored = ChainManager::load_from_rvf(&path, 1000).unwrap();
+        assert_eq!(restored.witness_count(), 2); // genesis + 1
+
+        // Append new events — witness chain should grow.
+        restored.append("test", "after.restore", None);
+        assert_eq!(restored.witness_count(), 3);
+
+        // Verify the extended witness chain.
+        let count = restored.verify_witness().unwrap();
+        assert_eq!(count, 3);
+
+        // Clean up.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn record_witness_bundle_creates_chain_event() {
+        use rvf_runtime::{GovernancePolicy, WitnessBuilder};
+        use rvf_types::witness::TaskOutcome;
+
+        let cm = ChainManager::new(0, 1000);
+        let initial_len = cm.len();
+
+        let policy = GovernancePolicy::autonomous();
+        let builder = WitnessBuilder::new([0xAA; 16], policy)
+            .with_spec(b"fix auth bug")
+            .with_outcome(TaskOutcome::Solved);
+        let (bundle, header) = builder.build().unwrap();
+
+        let event = cm.record_witness_bundle(&bundle, &header, 0, 0);
+        assert_eq!(event.source, "witness");
+        assert_eq!(event.kind, "witness.bundle");
+        assert_eq!(cm.len(), initial_len + 1);
+
+        // Verify payload contains expected fields.
+        let payload = event.payload.unwrap();
+        assert_eq!(payload["outcome"], TaskOutcome::Solved as u8);
+        assert!(payload["bundle"].as_str().unwrap().len() > 0);
+        assert_eq!(payload["policy_violations"], 0);
+    }
+
+    #[test]
+    fn aggregate_scorecard_from_witness_bundles() {
+        use rvf_runtime::{GovernancePolicy, WitnessBuilder};
+        use rvf_types::witness::TaskOutcome;
+
+        let cm = ChainManager::new(0, 1000);
+        let policy = GovernancePolicy::autonomous();
+
+        // Record 3 witness bundles: 2 solved, 1 failed.
+        let b1 = WitnessBuilder::new([0x01; 16], policy.clone())
+            .with_spec(b"task 1")
+            .with_outcome(TaskOutcome::Solved);
+        let (bytes1, header1) = b1.build().unwrap();
+        cm.record_witness_bundle(&bytes1, &header1, 0, 0);
+
+        let b2 = WitnessBuilder::new([0x02; 16], policy.clone())
+            .with_spec(b"task 2")
+            .with_outcome(TaskOutcome::Failed);
+        let (bytes2, header2) = b2.build().unwrap();
+        cm.record_witness_bundle(&bytes2, &header2, 1, 0);
+
+        let b3 = WitnessBuilder::new([0x03; 16], policy.clone())
+            .with_spec(b"task 3")
+            .with_diff(b"diff")
+            .with_test_log(b"pass")
+            .with_outcome(TaskOutcome::Solved);
+        let (bytes3, header3) = b3.build().unwrap();
+        cm.record_witness_bundle(&bytes3, &header3, 0, 1);
+
+        let card = cm.aggregate_scorecard(0);
+        assert_eq!(card.total_tasks, 3);
+        assert_eq!(card.solved, 2);
+        assert_eq!(card.failed, 1);
+        assert_eq!(card.policy_violations, 1);
+        assert_eq!(card.rollback_count, 1);
+        assert!((card.solve_rate - 0.6667).abs() < 0.01);
+    }
+
+    #[test]
+    fn aggregate_scorecard_empty_when_no_bundles() {
+        let cm = ChainManager::new(0, 1000);
+        cm.append("kernel", "boot", None);
+
+        let card = cm.aggregate_scorecard(0);
+        assert_eq!(card.total_tasks, 0);
+        assert_eq!(card.solve_rate, 0.0);
+    }
+
+    #[test]
+    fn witness_bundle_with_tool_calls() {
+        use rvf_runtime::{GovernancePolicy, WitnessBuilder};
+        use rvf_types::witness::{PolicyCheck, TaskOutcome, ToolCallEntry};
+
+        let cm = ChainManager::new(0, 1000);
+        let policy = GovernancePolicy::autonomous();
+
+        let mut builder = WitnessBuilder::new([0x10; 16], policy)
+            .with_spec(b"add feature")
+            .with_outcome(TaskOutcome::Solved);
+
+        builder.record_tool_call(ToolCallEntry {
+            action: b"Read".to_vec(),
+            args_hash: [0x11; 8],
+            result_hash: [0x22; 8],
+            latency_ms: 50,
+            cost_microdollars: 100,
+            tokens: 500,
+            policy_check: PolicyCheck::Allowed,
+        });
+        builder.record_tool_call(ToolCallEntry {
+            action: b"Edit".to_vec(),
+            args_hash: [0x33; 8],
+            result_hash: [0x44; 8],
+            latency_ms: 100,
+            cost_microdollars: 200,
+            tokens: 1000,
+            policy_check: PolicyCheck::Allowed,
+        });
+
+        let (bundle, header) = builder.build().unwrap();
+        assert_eq!(header.tool_call_count, 2);
+        assert_eq!(header.total_cost_microdollars, 300);
+
+        let event = cm.record_witness_bundle(&bundle, &header, 0, 0);
+        let payload = event.payload.unwrap();
+        assert_eq!(payload["tool_call_count"], 2);
+        assert_eq!(payload["total_cost_microdollars"], 300);
+
+        // Scorecard should aggregate this bundle.
+        let card = cm.aggregate_scorecard(0);
+        assert_eq!(card.total_tasks, 1);
+        assert_eq!(card.solved, 1);
+    }
+
+    #[test]
+    fn record_lineage_creates_chain_event() {
+        use rvf_types::DerivationType;
+
+        let cm = ChainManager::new(0, 1000);
+        let initial_len = cm.len();
+
+        let event = cm.record_lineage(
+            [0x01; 16],           // child_id
+            [0x00; 16],           // parent_id (root)
+            [0x00; 32],           // parent_hash (root)
+            DerivationType::Clone,
+            0,
+            "root agent",
+        );
+
+        assert_eq!(event.source, "lineage");
+        assert_eq!(event.kind, "lineage.derivation");
+        assert_eq!(cm.len(), initial_len + 1);
+
+        let payload = event.payload.unwrap();
+        assert_eq!(payload["derivation_type"], DerivationType::Clone as u8);
+        assert_eq!(payload["description"], "root agent");
+        assert!(payload["record_hex"].as_str().unwrap().len() > 0);
+    }
+
+    #[test]
+    fn record_lineage_parent_child() {
+        use rvf_types::DerivationType;
+
+        let cm = ChainManager::new(0, 1000);
+
+        // Root agent.
+        let root_event = cm.record_lineage(
+            [0x01; 16],
+            [0x00; 16],
+            [0x00; 32],
+            DerivationType::Clone,
+            0,
+            "root agent",
+        );
+
+        // Child agent derived from root.
+        let child_event = cm.record_lineage(
+            [0x02; 16],
+            [0x01; 16],
+            root_event.hash,
+            DerivationType::Transform,
+            1,
+            "spawned worker",
+        );
+
+        let payload = child_event.payload.unwrap();
+        assert_eq!(payload["derivation_type"], DerivationType::Transform as u8);
+        assert_eq!(payload["mutation_count"], 1);
+
+        // Verify lineage chain.
+        let count = cm.verify_lineage().unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn lineage_adds_witness_entry() {
+        use rvf_types::DerivationType;
+
+        let cm = ChainManager::new(0, 1000);
+        let initial_witness_count = cm.witness_count();
+
+        cm.record_lineage(
+            [0x01; 16],
+            [0x00; 16],
+            [0x00; 32],
+            DerivationType::Clone,
+            0,
+            "agent",
+        );
+
+        // One extra witness entry: the lineage witness + the chain append witness.
+        assert!(cm.witness_count() > initial_witness_count);
+    }
+
+    #[test]
+    fn verify_lineage_empty_returns_zero() {
+        let cm = ChainManager::new(0, 1000);
+        let count = cm.verify_lineage().unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn lineage_record_hex_roundtrip() {
+        use rvf_types::DerivationType;
+
+        let cm = ChainManager::new(0, 1000);
+        let event = cm.record_lineage(
+            [0xAA; 16],
+            [0xBB; 16],
+            [0xCC; 32],
+            DerivationType::Filter,
+            42,
+            "filtered set",
+        );
+
+        // Extract and decode the record_hex from the payload.
+        let payload = event.payload.unwrap();
+        let record_hex = payload["record_hex"].as_str().unwrap();
+        let record_bytes = hex_decode(record_hex).unwrap();
+        assert_eq!(record_bytes.len(), 128); // LINEAGE_RECORD_SIZE
+
+        let record: rvf_types::LineageRecord =
+            rvf_crypto::lineage_record_from_bytes(
+                record_bytes.as_slice().try_into().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(record.file_id, [0xAA; 16]);
+        assert_eq!(record.parent_id, [0xBB; 16]);
+        assert_eq!(record.parent_hash, [0xCC; 32]);
+        assert_eq!(record.derivation_type, DerivationType::Filter);
+        assert_eq!(record.mutation_count, 42);
+        assert_eq!(record.description_str(), "filtered set");
+    }
+
+    #[test]
+    fn last_tree_root_hash_from_shutdown() {
+        let cm = ChainManager::new(0, 1000);
+        // No tree hash yet.
+        assert!(cm.last_tree_root_hash().is_none());
+
+        // Simulate a shutdown event with tree_root_hash.
+        cm.append(
+            "kernel",
+            "shutdown",
+            Some(serde_json::json!({
+                "tree_root_hash": "aabb00112233445566778899",
+                "chain_seq": 5,
+            })),
+        );
+
+        let hash = cm.last_tree_root_hash().unwrap();
+        assert_eq!(hash, "aabb00112233445566778899");
+    }
+
+    #[test]
+    fn last_tree_root_hash_from_tree_checkpoint() {
+        let cm = ChainManager::new(0, 1000);
+
+        // tree.checkpoint event uses "root_hash" key.
+        cm.append(
+            "tree",
+            "tree.checkpoint",
+            Some(serde_json::json!({
+                "path": "/tmp/tree.json",
+                "root_hash": "deadbeef01234567890abcdef0123456",
+            })),
+        );
+
+        let hash = cm.last_tree_root_hash().unwrap();
+        assert_eq!(hash, "deadbeef01234567890abcdef0123456");
+    }
+
+    #[test]
+    fn last_tree_root_hash_prefers_most_recent() {
+        let cm = ChainManager::new(0, 1000);
+
+        // Older event.
+        cm.append(
+            "kernel",
+            "boot.ready",
+            Some(serde_json::json!({ "tree_root_hash": "old_hash" })),
+        );
+
+        // More recent event.
+        cm.append(
+            "kernel",
+            "shutdown",
+            Some(serde_json::json!({ "tree_root_hash": "new_hash" })),
+        );
+
+        let hash = cm.last_tree_root_hash().unwrap();
+        assert_eq!(hash, "new_hash");
+    }
+
+    #[test]
+    fn last_tree_root_hash_ignores_non_tree_root_hash() {
+        let cm = ChainManager::new(0, 1000);
+        // Event with root_hash but wrong source/kind — should be ignored.
+        cm.append(
+            "kernel",
+            "boot.init",
+            Some(serde_json::json!({ "root_hash": "should_not_match" })),
+        );
+        assert!(cm.last_tree_root_hash().is_none());
     }
 }

@@ -451,10 +451,9 @@ impl TreeManager {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let old = {
             let mut tree = self.tree.lock().map_err(|e| format!("tree lock: {e}"))?;
-            let old = tree
+            tree
                 .update_scoring(id, scoring)
-                .ok_or_else(|| format!("node not found: {id}"))?;
-            old
+                .ok_or_else(|| format!("node not found: {id}"))?
         };
 
         self.chain.append(
@@ -1009,5 +1008,72 @@ mod tests {
         let ranked = tm.rank_by_score(&weights, 3);
         assert!(!ranked.is_empty());
         assert_eq!(ranked[0].0, ResourceId::new("/kernel"));
+    }
+
+    #[test]
+    fn checkpoint_roundtrip_preserves_root_hash() {
+        let chain = test_chain();
+        let tm = TreeManager::new(Arc::clone(&chain));
+        tm.bootstrap().unwrap();
+        tm.register_service("cron").unwrap();
+
+        let original_hash = tm.stats().root_hash;
+
+        // Simulate shutdown: save tree checkpoint and record root hash in chain.
+        let dir = std::env::temp_dir().join("clawft-tree-ckpt-hash-test");
+        let tree_path = dir.join("tree.json");
+        tm.save_checkpoint(&tree_path).unwrap();
+        chain.append(
+            "tree",
+            "tree.checkpoint",
+            Some(serde_json::json!({
+                "path": tree_path.display().to_string(),
+                "root_hash": original_hash,
+            })),
+        );
+
+        // Simulate restart: create new tree manager, load checkpoint.
+        let tm2 = TreeManager::new(Arc::clone(&chain));
+        tm2.load_checkpoint(&tree_path).unwrap();
+
+        // Root hash should match what the chain recorded.
+        let restored_hash = tm2.stats().root_hash;
+        let chain_hash = chain.last_tree_root_hash().unwrap();
+        assert_eq!(restored_hash, chain_hash);
+        assert_eq!(restored_hash, original_hash);
+
+        // Clean up.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn checkpoint_hash_mismatch_detectable() {
+        let chain = test_chain();
+        let tm = TreeManager::new(Arc::clone(&chain));
+        tm.bootstrap().unwrap();
+
+        let dir = std::env::temp_dir().join("clawft-tree-ckpt-mismatch-test");
+        let tree_path = dir.join("tree.json");
+        tm.save_checkpoint(&tree_path).unwrap();
+
+        // Record a fake root hash in the chain (simulating corruption).
+        chain.append(
+            "tree",
+            "tree.checkpoint",
+            Some(serde_json::json!({
+                "root_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            })),
+        );
+
+        // Load checkpoint and compare — should detect mismatch.
+        let tm2 = TreeManager::new(Arc::clone(&chain));
+        tm2.load_checkpoint(&tree_path).unwrap();
+
+        let restored_hash = tm2.stats().root_hash;
+        let chain_hash = chain.last_tree_root_hash().unwrap();
+        assert_ne!(restored_hash, chain_hash, "should detect hash mismatch");
+
+        // Clean up.
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
