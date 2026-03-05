@@ -11,7 +11,10 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+use chrono::{DateTime, Utc};
+
 use crate::health::HealthStatus;
+use crate::process::Pid;
 
 /// Type of system service.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -40,6 +43,60 @@ impl std::fmt::Display for ServiceType {
     }
 }
 
+// ── Service identity model (D1, D9, D19) ───────────────────────
+
+/// How to reach a service at runtime.
+///
+/// A service can be backed by an in-kernel agent (most common),
+/// an external system (Redis, HTTP endpoint), or a container.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ServiceEndpoint {
+    /// Backed by an in-kernel agent (route to its inbox).
+    AgentInbox(Pid),
+    /// Backed by an external system (K3/K4 ServiceApi adapter required).
+    External {
+        /// URL or connection string for the external system.
+        url: String,
+    },
+    /// Backed by a managed container (K4).
+    Container {
+        /// Container identifier.
+        id: String,
+    },
+}
+
+/// Audit level for service call witnessing (D9).
+///
+/// Controls how much of a service's activity is recorded in the
+/// ExoChain. The default is `Full` -- every call is witnessed.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ServiceAuditLevel {
+    /// Witness every call (default, per D9).
+    #[default]
+    Full,
+    /// Only log governance gate decisions (opt-out for high-frequency services).
+    GateOnly,
+}
+
+/// First-class service identity in the registry (D1).
+///
+/// A `ServiceEntry` is metadata about a service -- who owns it, how
+/// to reach it, and how deeply to audit it. It lives alongside (not
+/// replacing) the `SystemService` trait implementations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceEntry {
+    /// Service name (unique within the registry).
+    pub name: String,
+    /// PID of the agent that owns this service (`None` for external services).
+    pub owner_pid: Option<Pid>,
+    /// How to reach the service at runtime.
+    pub endpoint: ServiceEndpoint,
+    /// Audit depth for ExoChain witnessing.
+    pub audit_level: ServiceAuditLevel,
+    /// When this entry was registered.
+    pub registered_at: DateTime<Utc>,
+}
+
 /// A system service managed by the kernel.
 ///
 /// Services are started during boot and stopped during shutdown.
@@ -65,9 +122,16 @@ pub trait SystemService: Send + Sync {
 /// Registry of system services with lifecycle management.
 ///
 /// Uses [`DashMap`] for concurrent access from multiple kernel
-/// subsystems.
+/// subsystems. Maintains two maps:
+///
+/// - `services`: `SystemService` trait object implementations (existing)
+/// - `entries`: `ServiceEntry` metadata for service identity (D1, K2.1)
+///
+/// A service can have metadata before it has a running implementation
+/// (useful for external services), and vice versa.
 pub struct ServiceRegistry {
     services: DashMap<String, Arc<dyn SystemService>>,
+    entries: DashMap<String, ServiceEntry>,
 }
 
 impl ServiceRegistry {
@@ -75,6 +139,7 @@ impl ServiceRegistry {
     pub fn new() -> Self {
         Self {
             services: DashMap::new(),
+            entries: DashMap::new(),
         }
     }
 
@@ -163,6 +228,47 @@ impl ServiceRegistry {
             results.push((name, status));
         }
         results
+    }
+
+    // ── ServiceEntry metadata (D1, K2.1) ──────────────────────────
+
+    /// Register a service entry (metadata, not a running implementation).
+    ///
+    /// Returns an error if an entry with the same name already exists.
+    pub fn register_entry(
+        &self,
+        entry: ServiceEntry,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let name = entry.name.clone();
+        if self.entries.contains_key(&name) {
+            return Err(format!("service entry already registered: {name}").into());
+        }
+        info!(service = %name, "registering service entry");
+        self.entries.insert(name, entry);
+        Ok(())
+    }
+
+    /// Get a service entry by name.
+    pub fn get_entry(&self, name: &str) -> Option<ServiceEntry> {
+        self.entries.get(name).map(|e| e.value().clone())
+    }
+
+    /// Resolve a service name to its owning agent PID.
+    ///
+    /// Returns `None` if the service is not registered or has no
+    /// `owner_pid` (e.g. external services).
+    pub fn resolve_target(&self, name: &str) -> Option<Pid> {
+        self.entries.get(name).and_then(|e| e.value().owner_pid)
+    }
+
+    /// List all registered service entries.
+    pub fn list_entries(&self) -> Vec<ServiceEntry> {
+        self.entries.iter().map(|e| e.value().clone()).collect()
+    }
+
+    /// Remove a service entry by name.
+    pub fn unregister_entry(&self, name: &str) -> Option<ServiceEntry> {
+        self.entries.remove(name).map(|(_, e)| e)
     }
 
     /// Register a service and create a resource tree node + chain event.
@@ -347,5 +453,185 @@ mod tests {
             ServiceType::Custom("webhook".into()).to_string(),
             "custom(webhook)"
         );
+    }
+
+    // ── ServiceEntry tests (K2.1 T3: D1) ───────────────────────
+
+    #[test]
+    fn register_and_get_entry() {
+        let registry = ServiceRegistry::new();
+        let entry = ServiceEntry {
+            name: "auth".into(),
+            owner_pid: Some(42),
+            endpoint: ServiceEndpoint::AgentInbox(42),
+            audit_level: ServiceAuditLevel::Full,
+            registered_at: Utc::now(),
+        };
+        registry.register_entry(entry).unwrap();
+
+        let retrieved = registry.get_entry("auth").unwrap();
+        assert_eq!(retrieved.name, "auth");
+        assert_eq!(retrieved.owner_pid, Some(42));
+    }
+
+    #[test]
+    fn register_entry_duplicate_fails() {
+        let registry = ServiceRegistry::new();
+        let entry1 = ServiceEntry {
+            name: "dup".into(),
+            owner_pid: Some(1),
+            endpoint: ServiceEndpoint::AgentInbox(1),
+            audit_level: ServiceAuditLevel::Full,
+            registered_at: Utc::now(),
+        };
+        let entry2 = ServiceEntry {
+            name: "dup".into(),
+            owner_pid: Some(2),
+            endpoint: ServiceEndpoint::AgentInbox(2),
+            audit_level: ServiceAuditLevel::Full,
+            registered_at: Utc::now(),
+        };
+        registry.register_entry(entry1).unwrap();
+        let result = registry.register_entry(entry2);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_target_returns_owner_pid() {
+        let registry = ServiceRegistry::new();
+        let entry = ServiceEntry {
+            name: "cache".into(),
+            owner_pid: Some(99),
+            endpoint: ServiceEndpoint::AgentInbox(99),
+            audit_level: ServiceAuditLevel::Full,
+            registered_at: Utc::now(),
+        };
+        registry.register_entry(entry).unwrap();
+
+        assert_eq!(registry.resolve_target("cache"), Some(99));
+        assert_eq!(registry.resolve_target("missing"), None);
+    }
+
+    #[test]
+    fn resolve_target_external_returns_none() {
+        let registry = ServiceRegistry::new();
+        let entry = ServiceEntry {
+            name: "redis".into(),
+            owner_pid: None,
+            endpoint: ServiceEndpoint::External {
+                url: "redis://localhost:6379".into(),
+            },
+            audit_level: ServiceAuditLevel::GateOnly,
+            registered_at: Utc::now(),
+        };
+        registry.register_entry(entry).unwrap();
+
+        assert_eq!(registry.resolve_target("redis"), None);
+    }
+
+    #[test]
+    fn unregister_entry() {
+        let registry = ServiceRegistry::new();
+        let entry = ServiceEntry {
+            name: "temp".into(),
+            owner_pid: Some(5),
+            endpoint: ServiceEndpoint::AgentInbox(5),
+            audit_level: ServiceAuditLevel::Full,
+            registered_at: Utc::now(),
+        };
+        registry.register_entry(entry).unwrap();
+
+        let removed = registry.unregister_entry("temp");
+        assert!(removed.is_some());
+        assert!(registry.get_entry("temp").is_none());
+    }
+
+    #[test]
+    fn list_entries() {
+        let registry = ServiceRegistry::new();
+        registry
+            .register_entry(ServiceEntry {
+                name: "svc-a".into(),
+                owner_pid: Some(1),
+                endpoint: ServiceEndpoint::AgentInbox(1),
+                audit_level: ServiceAuditLevel::Full,
+                registered_at: Utc::now(),
+            })
+            .unwrap();
+        registry
+            .register_entry(ServiceEntry {
+                name: "svc-b".into(),
+                owner_pid: None,
+                endpoint: ServiceEndpoint::Container { id: "c1".into() },
+                audit_level: ServiceAuditLevel::GateOnly,
+                registered_at: Utc::now(),
+            })
+            .unwrap();
+
+        let list = registry.list_entries();
+        assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn service_entry_serde_roundtrip() {
+        let entry = ServiceEntry {
+            name: "auth".into(),
+            owner_pid: Some(42),
+            endpoint: ServiceEndpoint::AgentInbox(42),
+            audit_level: ServiceAuditLevel::Full,
+            registered_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let restored: ServiceEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.name, "auth");
+        assert_eq!(restored.owner_pid, Some(42));
+        assert_eq!(restored.audit_level, ServiceAuditLevel::Full);
+    }
+
+    #[test]
+    fn service_endpoint_variants_serde() {
+        let endpoints = vec![
+            ServiceEndpoint::AgentInbox(1),
+            ServiceEndpoint::External {
+                url: "https://api.example.com".into(),
+            },
+            ServiceEndpoint::Container {
+                id: "container-abc".into(),
+            },
+        ];
+        for ep in endpoints {
+            let json = serde_json::to_string(&ep).unwrap();
+            let _: ServiceEndpoint = serde_json::from_str(&json).unwrap();
+        }
+    }
+
+    #[test]
+    fn audit_level_default_is_full() {
+        assert_eq!(ServiceAuditLevel::default(), ServiceAuditLevel::Full);
+    }
+
+    #[test]
+    fn dual_registry_independent() {
+        // SystemService and ServiceEntry registrations are independent
+        let registry = ServiceRegistry::new();
+
+        // Register a SystemService
+        registry
+            .register(Arc::new(MockService::new("both", ServiceType::Core)))
+            .unwrap();
+
+        // Register a ServiceEntry with the same name (independent map)
+        registry
+            .register_entry(ServiceEntry {
+                name: "both".into(),
+                owner_pid: Some(1),
+                endpoint: ServiceEndpoint::AgentInbox(1),
+                audit_level: ServiceAuditLevel::Full,
+                registered_at: Utc::now(),
+            })
+            .unwrap();
+
+        assert!(registry.get("both").is_some());
+        assert!(registry.get_entry("both").is_some());
     }
 }

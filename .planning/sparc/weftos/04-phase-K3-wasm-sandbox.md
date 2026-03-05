@@ -262,6 +262,28 @@ under 64KB without WASI imports (micro-tools), wasmtime for everything else (ful
 
 Cross-reference: `07-ruvector-deep-integration.md`, Section 3 "Phase K3: WASM Tool Sandboxing".
 
+### K2 Symposium Decisions
+
+The following decisions from the K2 Symposium directly shape K3 scope and implementation.
+Reference doc: `docs/weftos/k2-symposium/08-symposium-results-report.md`
+
+| Decision | Summary | Commitment |
+|----------|---------|------------|
+| D3 | `SpawnBackend::Wasm` baked into the API now -- WASM is a first-class spawn target, not an afterthought | C1 |
+| D4 | Layered protocol: kernel IPC -> ServiceApi -> adapters. K3 defines the `ServiceApi` trait; Shell and MCP are the first two adapters | C2 |
+| D7 | Defense in depth: dual-layer gate in `A2ARouter` + `agent_loop`. Both layers must pass before a WASM tool call proceeds | C4 |
+| D8 | Immutable API contracts stored in ExoChain. Service registration writes the contract to the chain; runtime enforcement verifies against it | C3 |
+| D9 | Universal witness by default, configurable per service. Every WASM tool execution emits a witness entry unless the service opts out | -- |
+| D10 | Shell commands: WASM compilation + container sandbox. Shell pipelines compile to WASM modules that are chain-linked and sandboxed | C5 |
+| D11 | Post-quantum dual signing enabled now. Ed25519 + ML-DSA-65 signatures on WASM module attestation | C6 |
+| D17 | Tiny-dancer routing hints layered on governance enforcement. `ruvector-tiny-dancer-core` provides semantic routing hints that inform tool dispatch without overriding governance gates | -- |
+| D20 | Configurable N-dimensional `EffectVector`. Tool execution metrics feed into an N-dim vector (default 6-dim, extensible) for scoring and anomaly detection | C9 |
+
+Key crates for K3:
+- **ruvector-tiny-dancer-core**: semantic routing hints for tool dispatch (D17)
+- **cognitum-gate-kernel**: kernel-level audit verification for dual-layer gate (D7)
+- **ruvector-snapshot**: point-in-time state snapshots for WASM execution checkpoints
+
 ---
 
 ## R -- Refinement
@@ -309,6 +331,11 @@ Cross-reference: `07-ruvector-deep-integration.md`, Section 3 "Phase K3: WASM To
 - [ ] Feature gate: `clawft-kernel` compiles without `wasm-sandbox` feature
 - [ ] All workspace tests pass (`scripts/build.sh test`)
 - [ ] Clippy clean (`scripts/build.sh clippy`)
+- [ ] ServiceApi trait defined and Shell/MCP adapters implemented (C2)
+- [ ] Dual-layer gate in A2ARouter operational (C4)
+- [ ] Chain-anchored service contracts on registration (C3)
+- [ ] WASM-compiled shell pipeline produces chain-linked modules (C5)
+- [ ] Training data collection active for all WASM execution metrics (D18)
 
 ### Testing Verification
 

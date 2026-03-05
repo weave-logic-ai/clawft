@@ -88,6 +88,15 @@ pub enum KernelError {
         reason: String,
     },
 
+    /// Spawn backend not available (defined but not yet implemented).
+    #[error("backend not available: {backend} ({reason})")]
+    BackendNotAvailable {
+        /// The backend that was requested.
+        backend: String,
+        /// Why the backend is not available.
+        reason: String,
+    },
+
     /// Configuration error.
     #[error("config error: {0}")]
     Config(String),

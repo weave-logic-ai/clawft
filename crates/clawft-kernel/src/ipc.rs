@@ -24,8 +24,18 @@ pub enum MessageTarget {
     Topic(String),
     /// Broadcast to all processes.
     Broadcast,
-    /// Send to a named service.
+    /// Send to a named service (routed via ServiceRegistry).
     Service(String),
+    /// Send to a specific method on a named service (D19, K2.1).
+    ///
+    /// The router resolves the service via ServiceRegistry and wraps
+    /// the payload with method metadata for the receiving agent.
+    ServiceMethod {
+        /// Service name to resolve.
+        service: String,
+        /// Method to invoke on the service.
+        method: String,
+    },
     /// Send to the kernel itself.
     Kernel,
 }
@@ -345,6 +355,10 @@ mod tests {
             MessageTarget::Process(1),
             MessageTarget::Broadcast,
             MessageTarget::Service("test".into()),
+            MessageTarget::ServiceMethod {
+                service: "auth".into(),
+                method: "validate_token".into(),
+            },
             MessageTarget::Kernel,
         ];
         for target in targets {

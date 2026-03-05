@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -20,6 +21,48 @@ use crate::capability::AgentCapabilities;
 use crate::error::{KernelError, KernelResult};
 use crate::ipc::KernelIpc;
 use crate::process::{Pid, ProcessEntry, ProcessState, ProcessTable, ResourceUsage};
+
+/// Execution backend for spawning an agent process.
+///
+/// Determines how the agent's work is executed at runtime. Only `Native`
+/// is implemented in K0-K2; other variants are defined to crystallize the
+/// API surface (see Symposium decisions D2, D3, C1, C8) and will return
+/// [`KernelError::BackendNotAvailable`] until their respective K-phases.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SpawnBackend {
+    /// Tokio task with agent_loop (K0-K2, default).
+    Native,
+    /// WASM sandbox via Wasmtime (K3).
+    Wasm {
+        /// Path to the compiled WASM module.
+        module: PathBuf,
+    },
+    /// Docker/Podman container (K4).
+    Container {
+        /// Container image reference (e.g. "ghcr.io/org/agent:latest").
+        image: String,
+    },
+    /// Trusted Execution Environment -- SGX, TrustZone, SEV (K6+).
+    Tee {
+        /// Enclave configuration.
+        enclave: EnclaveConfig,
+    },
+    /// Delegate to a remote node in the cluster (K6).
+    Remote {
+        /// Cluster node identifier.
+        node_id: String,
+    },
+}
+
+/// Placeholder configuration for TEE enclaves (D14, C8).
+///
+/// Will be expanded with actual hardware parameters when TEE
+/// runtime support is implemented.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnclaveConfig {
+    /// Enclave type: "sgx", "trustzone", "sev".
+    pub enclave_type: String,
+}
 
 /// Request to spawn a new supervised agent process.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +82,13 @@ pub struct SpawnRequest {
     /// Environment variables for the agent.
     #[serde(default)]
     pub env: HashMap<String, String>,
+
+    /// Execution backend. `None` defaults to `SpawnBackend::Native`.
+    ///
+    /// Non-Native backends return [`KernelError::BackendNotAvailable`]
+    /// until their respective K-phase implements them.
+    #[serde(default)]
+    pub backend: Option<SpawnBackend>,
 }
 
 /// Result of a successful agent spawn.
@@ -162,6 +212,35 @@ impl<P: Platform> AgentSupervisor<P> {
     /// Returns `KernelError::ProcessTableFull` if the process table
     /// has reached its maximum capacity.
     pub fn spawn(&self, request: SpawnRequest) -> KernelResult<SpawnResult> {
+        // Check backend availability -- only Native is implemented.
+        match &request.backend {
+            None | Some(SpawnBackend::Native) => { /* supported */ }
+            Some(SpawnBackend::Wasm { .. }) => {
+                return Err(KernelError::BackendNotAvailable {
+                    backend: "wasm".into(),
+                    reason: "WASM sandbox requires K3 (Wasmtime integration)".into(),
+                });
+            }
+            Some(SpawnBackend::Container { .. }) => {
+                return Err(KernelError::BackendNotAvailable {
+                    backend: "container".into(),
+                    reason: "container runtime requires K4 (Docker/Podman integration)".into(),
+                });
+            }
+            Some(SpawnBackend::Tee { .. }) => {
+                return Err(KernelError::BackendNotAvailable {
+                    backend: "tee".into(),
+                    reason: "TEE runtime requires K6+ and hardware support".into(),
+                });
+            }
+            Some(SpawnBackend::Remote { .. }) => {
+                return Err(KernelError::BackendNotAvailable {
+                    backend: "remote".into(),
+                    reason: "remote delegation requires K6 (cluster networking)".into(),
+                });
+            }
+        }
+
         let caps = request
             .capabilities
             .unwrap_or_else(|| self.default_capabilities.clone());
@@ -437,6 +516,7 @@ impl<P: Platform> AgentSupervisor<P> {
             capabilities: Some(old_entry.capabilities.clone()),
             parent_pid: Some(pid),
             env: HashMap::new(),
+            backend: None, // restarts always use Native
         };
 
         let result = self.spawn(request)?;
@@ -718,6 +798,7 @@ mod tests {
             capabilities: None,
             parent_pid: None,
             env: HashMap::new(),
+            backend: None,
         }
     }
 
@@ -761,6 +842,7 @@ mod tests {
             capabilities: Some(caps.clone()),
             parent_pid: None,
             env: HashMap::new(),
+            backend: None,
         };
 
         let result = sup.spawn(request).unwrap();
@@ -780,6 +862,7 @@ mod tests {
             capabilities: None,
             parent_pid: Some(parent.pid),
             env: HashMap::new(),
+            backend: None,
         };
 
         let result = sup.spawn(request).unwrap();
@@ -890,6 +973,7 @@ mod tests {
             capabilities: Some(caps),
             parent_pid: None,
             env: HashMap::new(),
+            backend: None,
         };
 
         let original = sup.spawn(request).unwrap();
@@ -988,6 +1072,7 @@ mod tests {
             }),
             parent_pid: Some(5),
             env: HashMap::from([("KEY".into(), "VALUE".into())]),
+            backend: Some(SpawnBackend::Native),
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -1202,6 +1287,7 @@ mod tests {
             capabilities: None,
             parent_pid: Some(99),
             env: HashMap::new(),
+            backend: None,
         };
 
         let result = sup
@@ -1225,5 +1311,113 @@ mod tests {
         // Should also have agent.exit from task completion
         let exit_evt = events.iter().find(|e| e.kind == "agent.exit");
         assert!(exit_evt.is_some(), "expected agent.exit event on chain");
+    }
+
+    // ── SpawnBackend tests (K2.1 T1: C1 + C8) ──────────────────
+
+    #[test]
+    fn spawn_native_explicit() {
+        let sup = make_supervisor();
+        let request = SpawnRequest {
+            agent_id: "native-agent".to_owned(),
+            capabilities: None,
+            parent_pid: None,
+            env: HashMap::new(),
+            backend: Some(SpawnBackend::Native),
+        };
+        let result = sup.spawn(request).unwrap();
+        assert!(result.pid > 0);
+        assert_eq!(result.agent_id, "native-agent");
+    }
+
+    #[test]
+    fn spawn_backend_none_defaults_to_native() {
+        let sup = make_supervisor();
+        let request = SpawnRequest {
+            agent_id: "default-agent".to_owned(),
+            capabilities: None,
+            parent_pid: None,
+            env: HashMap::new(),
+            backend: None,
+        };
+        let result = sup.spawn(request).unwrap();
+        assert!(result.pid > 0);
+        assert_eq!(result.agent_id, "default-agent");
+    }
+
+    #[test]
+    fn spawn_wasm_returns_not_available() {
+        let sup = make_supervisor();
+        let request = SpawnRequest {
+            agent_id: "wasm-agent".to_owned(),
+            capabilities: None,
+            parent_pid: None,
+            env: HashMap::new(),
+            backend: Some(SpawnBackend::Wasm {
+                module: PathBuf::from("/tmp/agent.wasm"),
+            }),
+        };
+        let result = sup.spawn(request);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("wasm"), "error should mention wasm: {msg}");
+        assert!(msg.contains("not available"), "error should say not available: {msg}");
+    }
+
+    #[test]
+    fn spawn_container_returns_not_available() {
+        let sup = make_supervisor();
+        let request = SpawnRequest {
+            agent_id: "container-agent".to_owned(),
+            capabilities: None,
+            parent_pid: None,
+            env: HashMap::new(),
+            backend: Some(SpawnBackend::Container {
+                image: "ghcr.io/test/agent:latest".into(),
+            }),
+        };
+        let result = sup.spawn(request);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("container"), "error should mention container: {msg}");
+    }
+
+    #[test]
+    fn spawn_tee_returns_not_available() {
+        let sup = make_supervisor();
+        let request = SpawnRequest {
+            agent_id: "tee-agent".to_owned(),
+            capabilities: None,
+            parent_pid: None,
+            env: HashMap::new(),
+            backend: Some(SpawnBackend::Tee {
+                enclave: EnclaveConfig {
+                    enclave_type: "sgx".into(),
+                },
+            }),
+        };
+        let result = sup.spawn(request);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("tee"), "error should mention tee: {msg}");
+    }
+
+    #[test]
+    fn spawn_remote_returns_not_available() {
+        let sup = make_supervisor();
+        let request = SpawnRequest {
+            agent_id: "remote-agent".to_owned(),
+            capabilities: None,
+            parent_pid: None,
+            env: HashMap::new(),
+            backend: Some(SpawnBackend::Remote {
+                node_id: "node-42".into(),
+            }),
+        };
+        let result = sup.spawn(request);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("remote"), "error should mention remote: {msg}");
     }
 }

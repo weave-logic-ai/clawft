@@ -1151,6 +1151,7 @@ async fn dispatch(
                 capabilities: None,
                 parent_pid: spawn_params.parent_pid,
                 env: std::collections::HashMap::new(),
+                backend: None,
             };
 
             // Create inbox via A2ARouter before spawning
@@ -1167,6 +1168,32 @@ async fn dispatch(
                 let pt_clone = process_table;
                 #[cfg(feature = "exochain")]
                 let chain_clone = chain.clone();
+                #[cfg(feature = "exochain")]
+                let gate: Option<std::sync::Arc<dyn clawft_kernel::GateBackend>> = {
+                    use clawft_kernel::{
+                        GovernanceGate, GovernanceBranch, GovernanceRule, RuleSeverity,
+                    };
+                    let mut g = GovernanceGate::new(0.8, false);
+                    if let Some(ref cm) = chain {
+                        g = g.with_chain(cm.clone());
+                    }
+                    g = g
+                        .add_rule(GovernanceRule {
+                            id: "exec-guard".into(),
+                            description: "Block high-risk exec actions".into(),
+                            branch: GovernanceBranch::Judicial,
+                            severity: RuleSeverity::Blocking,
+                            active: true,
+                        })
+                        .add_rule(GovernanceRule {
+                            id: "cron-warn".into(),
+                            description: "Warn on cron modifications".into(),
+                            branch: GovernanceBranch::Executive,
+                            severity: RuleSeverity::Warning,
+                            active: true,
+                        });
+                    Some(std::sync::Arc::new(g))
+                };
                 move |pid, cancel| {
                     let inbox = a2a_clone.create_inbox(pid);
                     async move {
@@ -1180,7 +1207,7 @@ async fn dispatch(
                             #[cfg(feature = "exochain")]
                             chain_clone,
                             #[cfg(feature = "exochain")]
-                            None,
+                            gate,
                         )
                         .await
                     }

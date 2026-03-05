@@ -84,7 +84,7 @@ pub use capability::{
 #[cfg(feature = "exochain")]
 pub use chain::{ChainCheckpoint, ChainEvent, ChainManager, ChainStatus, ChainVerifyResult};
 #[cfg(feature = "exochain")]
-pub use gate::{CapabilityGate, GateBackend, GateDecision};
+pub use gate::{CapabilityGate, GateBackend, GateDecision, GovernanceGate};
 #[cfg(feature = "exochain")]
 pub use tree_manager::{TreeManager, TreeStats};
 pub use clawft_types::config::{ClusterNetworkConfig, KernelConfig};
@@ -112,8 +112,10 @@ pub use governance::{
 pub use health::{HealthStatus, HealthSystem, OverallHealth};
 pub use ipc::{KernelIpc, KernelMessage, KernelSignal, MessagePayload, MessageTarget};
 pub use process::{Pid, ProcessEntry, ProcessState, ProcessTable, ResourceUsage};
-pub use service::{ServiceRegistry, ServiceType, SystemService};
-pub use supervisor::{AgentSupervisor, SpawnRequest, SpawnResult};
+pub use service::{
+    ServiceAuditLevel, ServiceEndpoint, ServiceEntry, ServiceRegistry, ServiceType, SystemService,
+};
+pub use supervisor::{AgentSupervisor, EnclaveConfig, SpawnBackend, SpawnRequest, SpawnResult};
 pub use topic::{Subscription, TopicRouter};
 pub use wasm_runner::{
     WasmError, WasmSandboxConfig, WasmTool, WasmToolResult, WasmToolRunner, WasmValidation,

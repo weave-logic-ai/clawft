@@ -27,6 +27,7 @@ use crate::capability::CapabilityChecker;
 use crate::error::{KernelError, KernelResult};
 use crate::ipc::{KernelMessage, MessageTarget};
 use crate::process::{Pid, ProcessState, ProcessTable};
+use crate::service::ServiceRegistry;
 use crate::topic::TopicRouter;
 
 #[cfg(feature = "exochain")]
@@ -50,6 +51,9 @@ pub struct A2ARouter {
     /// Topic router for pub/sub delivery.
     topic_router: Arc<TopicRouter>,
 
+    /// Service registry for service-based routing (D1, D19, K2.1).
+    service_registry: Option<Arc<ServiceRegistry>>,
+
     /// Per-agent inboxes: PID -> sender half of inbox channel.
     inboxes: DashMap<Pid, mpsc::Sender<KernelMessage>>,
 }
@@ -65,8 +69,20 @@ impl A2ARouter {
             process_table,
             capability_checker,
             topic_router,
+            service_registry: None,
             inboxes: DashMap::new(),
         }
+    }
+
+    /// Attach a service registry for service-based routing (D1, D19).
+    pub fn with_service_registry(mut self, registry: Arc<ServiceRegistry>) -> Self {
+        self.service_registry = Some(registry);
+        self
+    }
+
+    /// Get the service registry (if configured).
+    pub fn service_registry(&self) -> Option<&Arc<ServiceRegistry>> {
+        self.service_registry.as_ref()
     }
 
     /// Create an inbox for a process.
@@ -168,8 +184,12 @@ impl A2ARouter {
                 Ok(())
             }
             MessageTarget::Service(name) => {
-                debug!(from, service = %name, "service routing not yet implemented");
-                Ok(())
+                let name = name.clone();
+                self.route_to_service(from, &name, msg).await
+            }
+            MessageTarget::ServiceMethod { service, .. } => {
+                let service_name = service.clone();
+                self.route_to_service(from, &service_name, msg).await
             }
             MessageTarget::Kernel => {
                 debug!(from, "kernel message routing not yet implemented");
@@ -207,6 +227,33 @@ impl A2ARouter {
                 Err(KernelError::Ipc(format!("inbox closed for PID {pid}")))
             }
         }
+    }
+
+    /// Route a message to a named service via the ServiceRegistry.
+    ///
+    /// Resolves the service name to an owning agent PID, then delivers
+    /// the message to that agent's inbox.
+    async fn route_to_service(
+        &self,
+        from: Pid,
+        service_name: &str,
+        msg: KernelMessage,
+    ) -> KernelResult<()> {
+        let registry = self.service_registry.as_ref().ok_or_else(|| {
+            KernelError::Ipc(format!(
+                "no service registry configured; cannot route to service '{service_name}'"
+            ))
+        })?;
+
+        let target_pid = registry.resolve_target(service_name).ok_or_else(|| {
+            KernelError::Ipc(format!("service not found: '{service_name}'"))
+        })?;
+
+        // Check IPC scope
+        self.capability_checker
+            .check_ipc_target(from, target_pid)?;
+
+        self.deliver_to_inbox(target_pid, msg).await
     }
 
     /// Send a message with chain-event logging.
@@ -792,5 +839,221 @@ mod tests {
         let msg = KernelMessage::text(sender_pid, MessageTarget::Process(target_pid), "from-dead");
         let result = router.send(msg).await;
         assert!(result.is_err(), "send from non-Running process should fail");
+    }
+
+    // ── Service routing tests (K2.1 T3: D19 + D1) ──────────────
+
+    fn setup_router_with_registry(
+        agent_count: usize,
+    ) -> (
+        A2ARouter,
+        Vec<Pid>,
+        Vec<mpsc::Receiver<KernelMessage>>,
+        Arc<crate::service::ServiceRegistry>,
+    ) {
+        let table = Arc::new(ProcessTable::new(64));
+        let mut pids = Vec::new();
+
+        for i in 0..agent_count {
+            let entry = ProcessEntry {
+                pid: 0,
+                agent_id: format!("agent-{i}"),
+                state: ProcessState::Running,
+                capabilities: AgentCapabilities::default(),
+                resource_usage: ResourceUsage::default(),
+                cancel_token: CancellationToken::new(),
+                parent_pid: None,
+            };
+            let pid = table.insert(entry).unwrap();
+            pids.push(pid);
+        }
+
+        let checker = Arc::new(CapabilityChecker::new(table.clone()));
+        let topic_router = Arc::new(TopicRouter::new(table.clone()));
+        let registry = Arc::new(crate::service::ServiceRegistry::new());
+        let router = A2ARouter::new(table, checker, topic_router)
+            .with_service_registry(registry.clone());
+
+        let mut receivers = Vec::new();
+        for &pid in &pids {
+            let rx = router.create_inbox(pid);
+            receivers.push(rx);
+        }
+
+        (router, pids, receivers, registry)
+    }
+
+    #[tokio::test]
+    async fn route_to_service_by_name() {
+        let (router, pids, mut receivers, registry) = setup_router_with_registry(2);
+
+        // Register a service owned by pids[1]
+        registry
+            .register_entry(crate::service::ServiceEntry {
+                name: "auth".into(),
+                owner_pid: Some(pids[1]),
+                endpoint: crate::service::ServiceEndpoint::AgentInbox(pids[1]),
+                audit_level: crate::service::ServiceAuditLevel::Full,
+                registered_at: chrono::Utc::now(),
+            })
+            .unwrap();
+
+        let msg = KernelMessage::text(pids[0], MessageTarget::Service("auth".into()), "validate");
+        router.send(msg).await.unwrap();
+
+        let received = receivers[1].try_recv().unwrap();
+        assert_eq!(received.from, pids[0]);
+        assert!(matches!(
+            received.payload,
+            MessagePayload::Text(ref t) if t == "validate"
+        ));
+    }
+
+    #[tokio::test]
+    async fn route_service_method() {
+        let (router, pids, mut receivers, registry) = setup_router_with_registry(2);
+
+        registry
+            .register_entry(crate::service::ServiceEntry {
+                name: "auth".into(),
+                owner_pid: Some(pids[1]),
+                endpoint: crate::service::ServiceEndpoint::AgentInbox(pids[1]),
+                audit_level: crate::service::ServiceAuditLevel::Full,
+                registered_at: chrono::Utc::now(),
+            })
+            .unwrap();
+
+        let msg = KernelMessage::text(
+            pids[0],
+            MessageTarget::ServiceMethod {
+                service: "auth".into(),
+                method: "validate_token".into(),
+            },
+            "token-123",
+        );
+        router.send(msg).await.unwrap();
+
+        let received = receivers[1].try_recv().unwrap();
+        assert_eq!(received.from, pids[0]);
+        assert!(matches!(
+            received.target,
+            MessageTarget::ServiceMethod { ref service, ref method }
+            if service == "auth" && method == "validate_token"
+        ));
+    }
+
+    #[tokio::test]
+    async fn service_not_found_returns_error() {
+        let (router, pids, _receivers, _registry) = setup_router_with_registry(2);
+
+        let msg = KernelMessage::text(
+            pids[0],
+            MessageTarget::Service("nonexistent".into()),
+            "hello",
+        );
+        let result = router.send(msg).await;
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("service not found"),
+            "expected 'service not found', got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn service_entry_registration() {
+        let registry = crate::service::ServiceRegistry::new();
+
+        let entry = crate::service::ServiceEntry {
+            name: "cache".into(),
+            owner_pid: Some(42),
+            endpoint: crate::service::ServiceEndpoint::AgentInbox(42),
+            audit_level: crate::service::ServiceAuditLevel::Full,
+            registered_at: chrono::Utc::now(),
+        };
+        registry.register_entry(entry).unwrap();
+
+        let retrieved = registry.get_entry("cache").unwrap();
+        assert_eq!(retrieved.name, "cache");
+        assert_eq!(retrieved.owner_pid, Some(42));
+    }
+
+    #[tokio::test]
+    async fn service_entry_with_audit_level() {
+        let registry = crate::service::ServiceRegistry::new();
+
+        let entry = crate::service::ServiceEntry {
+            name: "metrics".into(),
+            owner_pid: Some(10),
+            endpoint: crate::service::ServiceEndpoint::AgentInbox(10),
+            audit_level: crate::service::ServiceAuditLevel::GateOnly,
+            registered_at: chrono::Utc::now(),
+        };
+        registry.register_entry(entry).unwrap();
+
+        let retrieved = registry.get_entry("metrics").unwrap();
+        assert_eq!(retrieved.audit_level, crate::service::ServiceAuditLevel::GateOnly);
+    }
+
+    #[tokio::test]
+    async fn resolve_target_finds_owner_pid() {
+        let registry = crate::service::ServiceRegistry::new();
+
+        let entry = crate::service::ServiceEntry {
+            name: "search".into(),
+            owner_pid: Some(77),
+            endpoint: crate::service::ServiceEndpoint::AgentInbox(77),
+            audit_level: crate::service::ServiceAuditLevel::Full,
+            registered_at: chrono::Utc::now(),
+        };
+        registry.register_entry(entry).unwrap();
+
+        assert_eq!(registry.resolve_target("search"), Some(77));
+        assert_eq!(registry.resolve_target("nonexistent"), None);
+    }
+
+    #[tokio::test]
+    async fn service_without_registry_returns_error() {
+        // Router without service registry should fail on Service target
+        let (router_no_reg, pids, _receivers) = setup_router(2);
+
+        let msg = KernelMessage::text(
+            pids[0],
+            MessageTarget::Service("missing".into()),
+            "hello",
+        );
+        let result = router_no_reg.send(msg).await;
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("no service registry"),
+            "expected 'no service registry', got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn external_service_no_pid_returns_error() {
+        let (router, pids, _receivers, registry) = setup_router_with_registry(2);
+
+        // Register external service with no owner_pid
+        registry
+            .register_entry(crate::service::ServiceEntry {
+                name: "redis".into(),
+                owner_pid: None,
+                endpoint: crate::service::ServiceEndpoint::External {
+                    url: "redis://localhost:6379".into(),
+                },
+                audit_level: crate::service::ServiceAuditLevel::GateOnly,
+                registered_at: chrono::Utc::now(),
+            })
+            .unwrap();
+
+        let msg = KernelMessage::text(
+            pids[0],
+            MessageTarget::Service("redis".into()),
+            "ping",
+        );
+        let result = router.send(msg).await;
+        assert!(result.is_err(), "external service with no PID should fail routing");
     }
 }

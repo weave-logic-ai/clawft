@@ -281,6 +281,25 @@ Docker is the fallback for third-party images only available as Docker images.
 Cross-reference: `07-ruvector-deep-integration.md`, Section 3 "Phase K4: Containers"
 and Section 6 "Container Format".
 
+### K2 Symposium Decisions
+
+The following decisions from the K2 Symposium directly shape K4 scope and implementation.
+Reference doc: `docs/weftos/k2-symposium/08-symposium-results-report.md`
+
+| Decision | Summary | Commitment |
+|----------|---------|------------|
+| D10 | Container sandbox for WASM-compiled shell tools. Containers provide the outer isolation layer for chain-linked WASM modules produced in K3 | -- |
+| D12 | `ChainAnchor` trait for blockchain anchoring. All container lifecycle events (start, stop, health) are anchored to the ExoChain | C7 |
+| D13 | SNARK prover research spike during K4. Evaluate feasibility of zero-knowledge proofs for container attestation; results feed K6 | -- |
+| D14 | `SpawnBackend::Tee` variant defined but not implemented. Type exists in the API, returns `BackendNotAvailable` at runtime until K6 TEE support lands | C8 |
+| D18 | Late K4: SONA reuptake spike -- pull forward from K5. Validate that accumulated K3 training metrics can feed the SONA learning pipeline; confirm K5 integration path | -- |
+| D21 | K3 -> K4 -> K5 -> K6 ordering confirmed, iterative cycle. Each phase produces training data and witness entries consumed by the next | -- |
+
+Key crates for K4:
+- **ruvector-tiny-dancer-core**: semantic routing hints for container service dispatch (D17, carried from K3)
+- **cognitum-gate-kernel**: kernel-level audit verification for container lifecycle events
+- **ruvector-snapshot**: point-in-time state snapshots for container checkpoint/restore
+
 ---
 
 ## R -- Refinement
@@ -324,6 +343,10 @@ and Section 6 "Container Format".
 - [ ] Feature gate: kernel compiles without `containers` feature
 - [ ] All workspace tests pass (`scripts/build.sh test`)
 - [ ] Clippy clean (`scripts/build.sh clippy`)
+- [ ] ChainAnchor trait defined with mock implementation (C7)
+- [ ] SpawnBackend::Tee variant returns BackendNotAvailable (C8)
+- [ ] Training data pipeline validated with accumulated K3 metrics
+- [ ] SONA reuptake spike complete - K5 integration path confirmed
 
 ### Testing Verification
 

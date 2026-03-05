@@ -280,6 +280,165 @@ mod tilezero_gate {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Governance gate adapter (behind `exochain` feature)
+// ---------------------------------------------------------------------------
+
+/// Gate backend wrapping the [`GovernanceEngine`].
+///
+/// Bridges the 5D effect-algebra governance engine into the kernel's
+/// gate slot, mapping `GovernanceDecision` → `GateDecision`. Governance
+/// events are logged to the exochain when a `ChainManager` is provided.
+pub struct GovernanceGate {
+    engine: crate::governance::GovernanceEngine,
+    chain: Option<std::sync::Arc<crate::chain::ChainManager>>,
+}
+
+impl GovernanceGate {
+    /// Create a governance gate with the given risk threshold.
+    pub fn new(risk_threshold: f64, human_approval: bool) -> Self {
+        Self {
+            engine: crate::governance::GovernanceEngine::new(risk_threshold, human_approval),
+            chain: None,
+        }
+    }
+
+    /// Create an open governance gate that permits everything.
+    pub fn open() -> Self {
+        Self {
+            engine: crate::governance::GovernanceEngine::open(),
+            chain: None,
+        }
+    }
+
+    /// Attach a chain manager for audit logging.
+    pub fn with_chain(mut self, cm: std::sync::Arc<crate::chain::ChainManager>) -> Self {
+        self.chain = Some(cm);
+        self
+    }
+
+    /// Add a governance rule.
+    pub fn add_rule(mut self, rule: crate::governance::GovernanceRule) -> Self {
+        self.engine.add_rule(rule);
+        self
+    }
+
+    /// Access the inner governance engine.
+    pub fn engine(&self) -> &crate::governance::GovernanceEngine {
+        &self.engine
+    }
+
+    /// Extract an [`EffectVector`] from the gate context JSON.
+    ///
+    /// Looks for an `"effect"` object with `risk`, `fairness`, `privacy`,
+    /// `novelty`, `security` fields. Returns default if absent.
+    fn extract_effect(context: &serde_json::Value) -> crate::governance::EffectVector {
+        context
+            .get("effect")
+            .and_then(|v| serde_json::from_value::<crate::governance::EffectVector>(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Extract string context map from JSON for governance request.
+    fn extract_context(context: &serde_json::Value) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        if let Some(obj) = context.as_object() {
+            for (k, v) in obj {
+                if k == "effect" {
+                    continue; // already extracted separately
+                }
+                if let Some(s) = v.as_str() {
+                    map.insert(k.clone(), s.to_owned());
+                } else {
+                    map.insert(k.clone(), v.to_string());
+                }
+            }
+        }
+        map
+    }
+}
+
+impl GateBackend for GovernanceGate {
+    fn check(
+        &self,
+        agent_id: &str,
+        action: &str,
+        context: &serde_json::Value,
+    ) -> GateDecision {
+        let effect = Self::extract_effect(context);
+        let ctx_map = Self::extract_context(context);
+
+        let request = crate::governance::GovernanceRequest {
+            agent_id: agent_id.to_owned(),
+            action: action.to_owned(),
+            effect,
+            context: ctx_map,
+        };
+
+        let result = self.engine.evaluate(&request);
+
+        let decision = match &result.decision {
+            crate::governance::GovernanceDecision::Permit => GateDecision::Permit { token: None },
+            crate::governance::GovernanceDecision::PermitWithWarning(_) => {
+                GateDecision::Permit { token: None }
+            }
+            crate::governance::GovernanceDecision::EscalateToHuman(reason) => {
+                GateDecision::Defer {
+                    reason: reason.clone(),
+                }
+            }
+            crate::governance::GovernanceDecision::Deny(reason) => GateDecision::Deny {
+                reason: reason.clone(),
+                receipt: None,
+            },
+        };
+
+        // Log to chain.
+        if let Some(ref cm) = self.chain {
+            let (event_kind, extra) = match &result.decision {
+                crate::governance::GovernanceDecision::Permit => {
+                    ("governance.permit", serde_json::json!({}))
+                }
+                crate::governance::GovernanceDecision::PermitWithWarning(w) => {
+                    ("governance.warn", serde_json::json!({"warning": w}))
+                }
+                crate::governance::GovernanceDecision::EscalateToHuman(r) => {
+                    ("governance.defer", serde_json::json!({"reason": r}))
+                }
+                crate::governance::GovernanceDecision::Deny(r) => {
+                    ("governance.deny", serde_json::json!({"reason": r}))
+                }
+            };
+
+            let mut payload = serde_json::json!({
+                "agent_id": agent_id,
+                "action": action,
+                "effect": {
+                    "risk": request.effect.risk,
+                    "fairness": request.effect.fairness,
+                    "privacy": request.effect.privacy,
+                    "novelty": request.effect.novelty,
+                    "security": request.effect.security,
+                },
+                "threshold_exceeded": result.threshold_exceeded,
+                "evaluated_rules": result.evaluated_rules,
+            });
+
+            if let Some(obj) = payload.as_object_mut() {
+                if let Some(extra_obj) = extra.as_object() {
+                    for (k, v) in extra_obj {
+                        obj.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+
+            cm.append("governance", event_kind, Some(payload));
+        }
+
+        decision
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,6 +514,157 @@ mod tests {
             let _: GateDecision = serde_json::from_str(&json).unwrap();
         }
     }
+
+    // ── GovernanceGate tests ─────────────────────────────────────
+
+    use crate::governance::{GovernanceBranch, GovernanceRule, RuleSeverity};
+
+    #[test]
+    fn governance_gate_permits_low_risk() {
+        let gate = GovernanceGate::new(0.5, false).add_rule(GovernanceRule {
+            id: "security-check".into(),
+            description: "Block high-risk actions".into(),
+            branch: GovernanceBranch::Judicial,
+            severity: RuleSeverity::Blocking,
+            active: true,
+        });
+
+        let ctx = serde_json::json!({
+            "effect": { "risk": 0.1, "security": 0.05 }
+        });
+        let decision = gate.check("agent-1", "tool.read_file", &ctx);
+        assert!(decision.is_permit());
+    }
+
+    #[test]
+    fn governance_gate_denies_high_risk() {
+        let gate = GovernanceGate::new(0.5, false).add_rule(GovernanceRule {
+            id: "security-check".into(),
+            description: "Block high-risk actions".into(),
+            branch: GovernanceBranch::Judicial,
+            severity: RuleSeverity::Blocking,
+            active: true,
+        });
+
+        let ctx = serde_json::json!({
+            "effect": { "risk": 0.8, "security": 0.6 }
+        });
+        let decision = gate.check("agent-1", "tool.exec", &ctx);
+        assert!(decision.is_deny());
+    }
+
+    #[test]
+    fn governance_gate_defers_with_human_approval() {
+        let gate = GovernanceGate::new(0.5, true).add_rule(GovernanceRule {
+            id: "security-check".into(),
+            description: "Block high-risk actions".into(),
+            branch: GovernanceBranch::Judicial,
+            severity: RuleSeverity::Blocking,
+            active: true,
+        });
+
+        let ctx = serde_json::json!({
+            "effect": { "risk": 0.8 }
+        });
+        let decision = gate.check("agent-1", "tool.exec", &ctx);
+        assert!(matches!(decision, GateDecision::Defer { .. }));
+    }
+
+    #[test]
+    fn governance_gate_warns_on_threshold() {
+        let gate = GovernanceGate::new(0.5, false).add_rule(GovernanceRule {
+            id: "risk-check".into(),
+            description: "Warn on risky actions".into(),
+            branch: GovernanceBranch::Executive,
+            severity: RuleSeverity::Warning,
+            active: true,
+        });
+
+        let ctx = serde_json::json!({
+            "effect": { "risk": 0.8 }
+        });
+        // Warning rules don't block — should still permit
+        let decision = gate.check("agent-1", "tool.deploy", &ctx);
+        assert!(decision.is_permit());
+    }
+
+    #[test]
+    fn governance_gate_logs_to_chain() {
+        let cm = Arc::new(crate::chain::ChainManager::new(0, 10));
+        let initial_len = cm.len();
+
+        let gate = GovernanceGate::new(0.5, false)
+            .with_chain(cm.clone())
+            .add_rule(GovernanceRule {
+                id: "sec".into(),
+                description: "test".into(),
+                branch: GovernanceBranch::Judicial,
+                severity: RuleSeverity::Blocking,
+                active: true,
+            });
+
+        // Low risk → governance.permit
+        let ctx = serde_json::json!({"effect": {"risk": 0.1}});
+        gate.check("agent-1", "tool.read", &ctx);
+        assert_eq!(cm.len(), initial_len + 1);
+
+        let events = cm.tail(1);
+        assert_eq!(events[0].kind, "governance.permit");
+        assert_eq!(events[0].source, "governance");
+
+        // High risk → governance.deny
+        let ctx = serde_json::json!({"effect": {"risk": 0.9}});
+        gate.check("agent-1", "tool.exec", &ctx);
+        let events = cm.tail(1);
+        assert_eq!(events[0].kind, "governance.deny");
+
+        let payload = events[0].payload.as_ref().unwrap();
+        assert_eq!(payload["agent_id"], "agent-1");
+        assert_eq!(payload["action"], "tool.exec");
+        assert!(payload["threshold_exceeded"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn governance_gate_open_permits_all() {
+        let gate = GovernanceGate::open();
+        let ctx = serde_json::json!({
+            "effect": { "risk": 0.99, "security": 0.99 }
+        });
+        let decision = gate.check("agent-1", "tool.dangerous", &ctx);
+        assert!(decision.is_permit());
+    }
+
+    #[test]
+    fn governance_gate_extracts_effect_from_context() {
+        let gate = GovernanceGate::new(0.5, false).add_rule(GovernanceRule {
+            id: "sec".into(),
+            description: "test".into(),
+            branch: GovernanceBranch::Judicial,
+            severity: RuleSeverity::Blocking,
+            active: true,
+        });
+
+        // Context with effect embedded
+        let ctx = serde_json::json!({
+            "pid": 1,
+            "effect": {
+                "risk": 0.7,
+                "fairness": 0.0,
+                "privacy": 0.3,
+                "novelty": 0.0,
+                "security": 0.0
+            }
+        });
+        let decision = gate.check("agent-1", "tool.exec", &ctx);
+        // magnitude of (0.7, 0, 0.3, 0, 0) ≈ 0.76 > 0.5 → deny
+        assert!(decision.is_deny());
+
+        // Context without effect → default (zero) → permit
+        let ctx_no_effect = serde_json::json!({"pid": 1});
+        let decision = gate.check("agent-1", "tool.exec", &ctx_no_effect);
+        assert!(decision.is_permit());
+    }
+
 }
 
 #[cfg(all(test, feature = "tilezero"))]

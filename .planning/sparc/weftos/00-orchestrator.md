@@ -2,7 +2,7 @@
 
 **Workstream ID**: W-KERNEL
 **Date**: 2026-02-28
-**Status**: In Progress (K0, K1, K2, K2b Complete)
+**Status**: In Progress (K0, K1, K2, K2b, K2.1 Complete; K2 Symposium Complete)
 **Estimated Duration**: 17+ weeks (K0-K6 + addenda)
 **Source Analysis**: `.planning/development_notes/openfang-comparison.md`, existing kernel primitives audit
 
@@ -49,10 +49,12 @@ Both binaries link to the same `clawft-cli` crate. `weave` is a thin alias that 
 | 1 | K1 | Supervisor + RBAC | Agent supervisor with spawn_and_run, GateBackend, chain persistence, agent tree nodes, IPC RBAC, weaver agent CLI | 2 weeks | **Complete** |
 | 2 | K2 | A2A IPC | Agent-to-agent messaging, pub/sub topics, JSON-RPC wire format | 2 weeks | **Complete** |
 | 2b | K2b | Work-Loop Hardening | Health monitor, watchdog, graceful shutdown, resource tracking, suspend/resume, gate enforcement | 1 day | **Complete** |
-| 3 | K3 | WASM Sandbox | Wasmtime tool execution, fuel metering, memory limits | 2 weeks |
-| 4 | K4 | Containers | Alpine image, sidecar service orchestration | 1 week |
-| 5 | K5 | App Framework | Application manifests, lifecycle, external framework interop | 2 weeks |
-| 6 | K6 | Distributed Fabric | Multi-node cluster, cross-node IPC, cryptographic filesystem, governance | 6 weeks |
+| 2s | K2-Symposium | K2 Symposium | Cross-cutting design decisions for K3-K6 scope, commitments C1-C10. Results: `docs/weftos/k2-symposium/08-symposium-results-report.md` | -- | **Complete** |
+| 2.1 | K2.1 | Symposium Implementation | SpawnBackend enum (C1+C8), post-quantum dual signing (C6), breaking IPC changes (D19+D1), ServiceEntry, GovernanceGate verification. SPARC: `03a-phase-K2.1-symposium-implementation.md` | 2-3 days | **Complete** |
+| 3 | K3 | WASM Sandbox | Wasmtime tool execution, fuel metering, memory limits, ServiceApi trait (C2), dual-layer gate (C4) | 2 weeks |
+| 4 | K4 | Containers | Alpine image, sidecar service orchestration, ChainAnchor trait (C7), SONA reuptake spike | 1 week |
+| 5 | K5 | App Framework | Application manifests, lifecycle, external framework interop, clustering (moved from K6 per D6) | 2 weeks |
+| 6 | K6 | Distributed Fabric | Multi-node cluster, cross-node IPC, cryptographic filesystem, governance. Note: SPARC spec required before implementation begins (D22, C10) | 6 weeks |
 
 ---
 
@@ -77,7 +79,11 @@ K0 (Foundation) -- COMPLETE
   |         |
   |         +---> K2 (A2A IPC) -- depends on K1 (agent PIDs, capability checks)
   |                   |
-  |                   +---> K5 (App Framework) -- depends on K1+K2
+  |                   +---> K2.1 (Symposium Implementation) -- depends on K2b (breaking changes)
+  |                             |
+  |                             +---> K3 (WASM Sandbox) -- depends on K2.1 (SpawnBackend, ServiceEntry)
+  |                             |
+  |                             +---> K5 (App Framework) -- depends on K3+K4
   |                             |
   |                             +---> K6 (Distributed Fabric) -- depends on K0+K1+K2+K5
   |
@@ -716,6 +722,20 @@ APIs now exercised across all 4 rvf crates:
 
 3. ~~**Tree checkpoint hash verification**~~ **RESOLVED** — `boot.rs` step 8c now cross-checks the loaded tree's root hash against the chain's last recorded `tree_root_hash`. On mismatch, logs a warning and falls through to fresh bootstrap. `ChainManager::last_tree_root_hash()` scans chain events in reverse for `tree_root_hash` (shutdown/boot events) and `root_hash` (tree.checkpoint events). 6 new tests: 4 chain method tests + 2 tree manager roundtrip/mismatch tests. 356 total kernel tests pass.
 
+
+### K2.1 Gate (Symposium Implementation)
+- [x] `SpawnBackend` enum defined with 5 variants (Native, Wasm, Container, Tee, Remote)
+- [x] `SpawnRequest.backend: Option<SpawnBackend>` field added
+- [x] Non-Native backends return `KernelError::BackendNotAvailable`
+- [x] `MessageTarget` has `Service(String)` and `ServiceMethod` variants
+- [x] `ServiceEntry` struct with `owner_pid`, `endpoint`, `audit_level`
+- [x] `ServiceRegistry` stores both `ServiceEntry` and `SystemService`
+- [x] `A2ARouter` routes `MessageTarget::Service` via registry resolution
+- [x] Post-quantum dual signing investigated (rvf-crypto lacks ML-DSA-65 API — gap documented, not blocking)
+- [x] GovernanceGate chain events verified end-to-end (7 governance_gate tests pass)
+- [x] All workspace tests pass (`scripts/build.sh test`) — 397 kernel (exochain), 322 (default)
+- [x] Clippy clean for both default and exochain features
+- [x] docs/weftos/ updated with K2.1 changes and symposium findings
 
 ### K3 Gate (independent)
 - [ ] WASM tool loads and executes
