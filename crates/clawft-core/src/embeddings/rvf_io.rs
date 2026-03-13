@@ -290,13 +290,20 @@ pub fn segment_file_path(
     agent_id: &str,
     namespace: &str,
 ) -> Option<PathBuf> {
-    dirs::home_dir().map(|h| {
+    #[cfg(feature = "native")]
+    { dirs::home_dir().map(|h| {
         h.join(".clawft")
             .join("agents")
             .join(agent_id)
             .join("memory")
             .join(format!("{namespace}.{RVF_EXTENSION}"))
-    })
+    }) }
+    #[cfg(not(feature = "native"))]
+    { Some(PathBuf::from(".clawft")
+        .join("agents")
+        .join(agent_id)
+        .join("memory")
+        .join(format!("{namespace}.{RVF_EXTENSION}"))) }
 }
 
 /// Create a [`MemorySegment`] from raw components.

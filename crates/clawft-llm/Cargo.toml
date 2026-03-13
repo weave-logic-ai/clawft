@@ -10,17 +10,29 @@ description = "LLM provider abstraction for clawft (OpenAI-compatible + native p
 keywords = ["llm", "openai", "anthropic", "ai", "provider"]
 categories = ["development-tools::testing"]
 
+[features]
+default = ["native"]
+native = ["reqwest/rustls-tls", "dep:tokio", "clawft-types/native"]
+browser = ["clawft-types/browser"]
+
 [dependencies]
+# Always available
 async-trait = { workspace = true }
-clawft-types = { workspace = true }
+clawft-types = { workspace = true, default-features = false }
 futures-util = { workspace = true }
-reqwest = { workspace = true, features = ["stream"] }
-tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
+
+# HTTP client -- always included, TLS backend selected by feature.
+# On native: the `native` feature activates reqwest/rustls-tls.
+# On browser/WASM: reqwest auto-detects wasm32 target and uses Fetch API.
+reqwest = { workspace = true, default-features = false, features = ["json", "stream"] }
+
+# Native only
+tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

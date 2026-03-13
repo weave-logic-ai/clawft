@@ -38,7 +38,8 @@ impl HttpResponse {
 ///
 /// Implementors provide transport-level HTTP operations. The native
 /// implementation uses [`reqwest`]; a WASM implementation would use fetch.
-#[async_trait]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
 pub trait HttpClient: Send + Sync {
     /// Send an HTTP request with the given method, URL, headers, and optional body.
     async fn request(
@@ -70,10 +71,12 @@ pub trait HttpClient: Send + Sync {
 }
 
 /// Native HTTP client using [`reqwest`].
+#[cfg(feature = "native")]
 pub struct NativeHttpClient {
     client: reqwest::Client,
 }
 
+#[cfg(feature = "native")]
 impl NativeHttpClient {
     /// Create a new native HTTP client with sensible defaults.
     ///
@@ -90,12 +93,14 @@ impl NativeHttpClient {
     }
 }
 
+#[cfg(feature = "native")]
 impl Default for NativeHttpClient {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "native")]
 #[async_trait]
 impl HttpClient for NativeHttpClient {
     async fn request(

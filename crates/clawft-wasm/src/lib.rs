@@ -114,6 +114,55 @@ pub fn capabilities() -> String {
     .to_string()
 }
 
+// ---------------------------------------------------------------------------
+// Browser WASM entry point (feature = "browser")
+// ---------------------------------------------------------------------------
+
+/// Browser entry point module providing wasm-bindgen exports for
+/// running clawft in a web browser via the BrowserPlatform.
+#[cfg(feature = "browser")]
+mod browser_entry {
+    use wasm_bindgen::prelude::*;
+
+    /// Initialize the clawft-wasm browser runtime.
+    ///
+    /// Parses the provided JSON config and sets up a BrowserPlatform.
+    /// Must be called once before `send_message`.
+    #[wasm_bindgen]
+    pub async fn init(config_json: &str) -> Result<(), JsValue> {
+        console_error_panic_hook::set_once();
+
+        let _config: clawft_types::config::Config = serde_json::from_str(config_json)
+            .map_err(|e| JsValue::from_str(&format!("config parse error: {}", e)))?;
+
+        let _platform = clawft_platform::BrowserPlatform::new();
+
+        web_sys::console::log_1(&"clawft-wasm initialized".into());
+        Ok(())
+    }
+
+    /// Send a message through the clawft pipeline.
+    ///
+    /// Currently returns a placeholder response; will be wired to the
+    /// full AgentLoop once all internal types are plumbed through.
+    #[wasm_bindgen]
+    pub async fn send_message(text: &str) -> Result<String, JsValue> {
+        Ok(format!("clawft-wasm browser: received '{}'", text))
+    }
+
+    /// Set an environment variable on the BrowserPlatform.
+    ///
+    /// Will be wired to `BrowserPlatform.env().set_var()` when the
+    /// full init sequence stores the platform instance.
+    #[wasm_bindgen]
+    pub fn set_env(_key: &str, _value: &str) {
+        // Stub: will wire to BrowserPlatform.env().set_var()
+    }
+}
+
+#[cfg(feature = "browser")]
+pub use browser_entry::*;
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -245,6 +245,9 @@ impl<P: Platform> AppContext<P> {
     /// Convenience method that calls [`build_live_pipeline`] and sets it
     /// as the active pipeline, enabling real LLM calls through the
     /// `clawft-llm` provider resolved from configuration.
+    ///
+    /// Only available with the `native` feature.
+    #[cfg(feature = "native")]
     pub fn enable_live_llm(&mut self) {
         let pipeline = build_live_pipeline(&self.config);
         self.set_pipeline(pipeline);
@@ -259,6 +262,9 @@ impl<P: Platform> AppContext<P> {
 ///
 /// This is the production counterpart of [`build_default_pipeline`], which
 /// uses a stub transport. All other pipeline stages are identical.
+///
+/// Only available with the `native` feature (requires clawft-llm HTTP providers).
+#[cfg(feature = "native")]
 pub fn build_live_pipeline(config: &Config) -> PipelineRegistry {
     crate::pipeline::llm_adapter::build_live_pipeline(config)
 }

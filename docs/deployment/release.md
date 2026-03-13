@@ -118,10 +118,11 @@ See the [Docker Deployment Guide](docker.md) for full usage instructions.
 ```bash
 git clone https://github.com/clawft/clawft.git
 cd clawft
-cargo build --release
+scripts/build.sh native    # Or: cargo build --release
 ```
 
-The binary is at `target/release/weft`.
+The binary is at `target/release/weft`. Run `scripts/build.sh --help` for all
+build subcommands (WASI, browser WASM, UI, phase gate, etc.).
 
 ### Cross-Compilation
 

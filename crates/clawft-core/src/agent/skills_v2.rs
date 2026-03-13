@@ -35,16 +35,17 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tokio::sync::RwLock;
+use crate::runtime::RwLock;
 use tracing::{debug, warn};
 
 use clawft_types::skill::{SkillDefinition, SkillFormat};
 use clawft_types::{ClawftError, Result};
 
 use crate::security::{
-    MAX_SKILL_MD_SIZE, sanitize_skill_instructions, validate_directory_name, validate_file_size,
-    validate_yaml_depth,
+    MAX_SKILL_MD_SIZE, sanitize_skill_instructions, validate_file_size, validate_yaml_depth,
 };
+#[cfg(feature = "native")]
+use crate::security::validate_directory_name;
 
 // ── SKILL.md parser ─────────────────────────────────────────────────────
 
@@ -410,6 +411,7 @@ impl SkillRegistry {
     ///
     /// - SEC-SKILL-02: Directory names are validated against path traversal.
     /// - SEC-SKILL-07: File sizes are checked before reading.
+    #[cfg(feature = "native")]
     async fn load_dir(dir: &Path) -> Result<Vec<SkillDefinition>> {
         if !tokio::fs::try_exists(dir).await.unwrap_or(false) {
             return Ok(Vec::new());
@@ -509,6 +511,16 @@ impl SkillRegistry {
         Ok(skills)
     }
 
+    /// Load skills from a directory (browser stub).
+    ///
+    /// On browser/WASM, filesystem-based skill discovery is not available.
+    /// Returns an empty list.
+    #[cfg(not(feature = "native"))]
+    async fn load_dir(_dir: &Path) -> Result<Vec<SkillDefinition>> {
+        debug!("skill directory scanning not available on browser");
+        Ok(Vec::new())
+    }
+
     /// Get a skill by name.
     pub fn get(&self, name: &str) -> Option<&SkillDefinition> {
         self.skills.get(name)
@@ -575,6 +587,9 @@ impl SkillRegistry {
 pub type SharedSkillRegistry = Arc<RwLock<SkillRegistry>>;
 
 /// Load a legacy `skill.json` + `prompt.md` skill as a [`SkillDefinition`].
+///
+/// Only available on native (requires tokio::fs).
+#[cfg(feature = "native")]
 async fn load_legacy_skill_async(json_path: &Path, skill_dir: &Path) -> Result<SkillDefinition> {
     let json_content = tokio::fs::read_to_string(json_path)
         .await

@@ -24,7 +24,8 @@ pub struct ProcessOutput {
 /// Implementations run external commands and capture their output.
 /// This is intentionally not part of the [`super::Platform`] trait bundle
 /// because it is unavailable in WASM environments.
-#[async_trait]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
 pub trait ProcessSpawner: Send + Sync {
     /// Run a command with arguments and capture its output.
     ///
@@ -44,8 +45,10 @@ pub trait ProcessSpawner: Send + Sync {
 }
 
 /// Native process spawner using [`tokio::process`].
+#[cfg(feature = "native")]
 pub struct NativeProcessSpawner;
 
+#[cfg(feature = "native")]
 #[async_trait]
 impl ProcessSpawner for NativeProcessSpawner {
     async fn run(

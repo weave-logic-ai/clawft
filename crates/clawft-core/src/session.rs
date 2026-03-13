@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use percent_encoding::{percent_decode_str, percent_encode, NON_ALPHANUMERIC};
-use tokio::sync::Mutex;
+use crate::runtime::Mutex;
 use tracing::{debug, warn};
 
 use clawft_platform::Platform;

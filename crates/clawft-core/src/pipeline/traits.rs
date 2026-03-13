@@ -14,7 +14,6 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -442,9 +441,9 @@ impl PipelineRegistry {
             max_tokens: request.max_tokens,
             temperature: request.temperature,
         };
-        let start = Instant::now();
+        let start_ms = crate::runtime::now_millis();
         let response = pipeline.transport.complete(&transport_request).await?;
-        let latency_ms = start.elapsed().as_millis() as u64;
+        let latency_ms = crate::runtime::now_millis().saturating_sub(start_ms);
 
         // Stage 5: score
         let quality = pipeline.scorer.score(request, &response);
@@ -496,12 +495,12 @@ impl PipelineRegistry {
         };
 
         // Stage 4: streaming transport (with latency measurement)
-        let start = Instant::now();
+        let start_ms = crate::runtime::now_millis();
         let response = pipeline
             .transport
             .complete_stream(&transport_request, callback)
             .await?;
-        let latency_ms = start.elapsed().as_millis() as u64;
+        let latency_ms = crate::runtime::now_millis().saturating_sub(start_ms);
 
         // Stages 5-6: score and learn
         let quality = pipeline.scorer.score(request, &response);

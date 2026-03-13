@@ -29,8 +29,11 @@ fn load_config_file(path: &Path) -> Option<serde_json::Value> {
 /// 3. Merge `<workspace>/.clawft/config.json` (workspace overrides).
 /// 4. Deserialize the merged JSON back into [`Config`].
 pub fn load_merged_config(workspace_path: Option<&Path>) -> Result<Config> {
+    #[cfg(feature = "native")]
     let global_config =
         dirs::home_dir().map(|h| h.join(".clawft").join("config.json"));
+    #[cfg(not(feature = "native"))]
+    let global_config: Option<std::path::PathBuf> = None;
     load_merged_config_from(global_config.as_deref(), workspace_path)
 }
 

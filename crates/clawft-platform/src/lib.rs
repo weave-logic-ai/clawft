@@ -38,6 +38,11 @@ pub mod fs;
 pub mod http;
 pub mod process;
 
+#[cfg(feature = "browser")]
+pub mod browser;
+#[cfg(feature = "browser")]
+pub use browser::BrowserPlatform;
+
 use async_trait::async_trait;
 
 /// Bundle of all platform capabilities.
@@ -46,7 +51,12 @@ use async_trait::async_trait;
 /// The native implementation ([`NativePlatform`]) uses reqwest, tokio::fs,
 /// std::env, and tokio::process. A WASM implementation would use the fetch
 /// API, WASI filesystem, and an in-memory environment.
-#[async_trait]
+///
+/// The `async_trait` bound differs based on target:
+/// - Native: `Send + Sync` required (multi-threaded tokio runtime).
+/// - Browser: `?Send` (single-threaded WASM runtime).
+#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
 pub trait Platform: Send + Sync {
     /// HTTP client for making API requests.
     fn http(&self) -> &dyn http::HttpClient;
@@ -71,6 +81,7 @@ pub trait Platform: Send + Sync {
 /// - Filesystem via [`tokio::fs`].
 /// - Environment via [`std::env`].
 /// - Process spawning via [`tokio::process`].
+#[cfg(feature = "native")]
 pub struct NativePlatform {
     http: http::NativeHttpClient,
     fs: fs::NativeFileSystem,
@@ -78,6 +89,7 @@ pub struct NativePlatform {
     process: process::NativeProcessSpawner,
 }
 
+#[cfg(feature = "native")]
 impl NativePlatform {
     /// Create a new native platform with default configuration.
     pub fn new() -> Self {
@@ -90,12 +102,14 @@ impl NativePlatform {
     }
 }
 
+#[cfg(feature = "native")]
 impl Default for NativePlatform {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "native")]
 #[async_trait]
 impl Platform for NativePlatform {
     fn http(&self) -> &dyn http::HttpClient {

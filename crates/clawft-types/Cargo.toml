@@ -10,13 +10,19 @@ description = "Core types for the clawft AI assistant framework"
 keywords = ["ai", "assistant", "types", "agent", "llm"]
 categories = ["development-tools"]
 
+[features]
+default = ["native"]
+native = ["dep:dirs"]
+browser = ["uuid/js", "dep:getrandom"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
-dirs = { workspace = true }
+dirs = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

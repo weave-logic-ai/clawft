@@ -1,55 +1,39 @@
 //! Message bus for async channel-agent communication.
 //!
-//! Provides a thread-safe [`MessageBus`] using tokio bounded MPSC channels
+//! Provides a thread-safe [`MessageBus`] using bounded MPSC channels
 //! for routing inbound messages (from channels) and outbound messages
 //! (from the agent pipeline) with configurable backpressure.
 //!
+//! On native, uses tokio bounded MPSC channels.
+//! On browser/WASM, uses futures-channel unbounded MPSC channels.
+//!
 //! Ported from Python `nanobot/bus/queue.py`.
 
+#[cfg(feature = "native")]
 use tokio::sync::Mutex;
-use tokio::sync::mpsc;
+
 use tracing::debug;
 
 use clawft_types::error::ClawftError;
 use clawft_types::event::{InboundMessage, OutboundMessage};
 
-/// Default channel capacity for bounded MPSC channels.
-///
-/// This limits the number of messages that can be buffered in memory
-/// before senders must wait (for async sends) or receive an error
-/// (for try-send). 1024 is generous enough for burst traffic while
-/// still providing backpressure protection.
+/// Default channel capacity for bounded MPSC channels (native only).
+#[cfg(feature = "native")]
 const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
 
-/// Thread-safe message bus for routing messages between channels and the agent pipeline.
-///
-/// Uses bounded tokio MPSC channels to provide backpressure when message
-/// volume exceeds the configured capacity. The bus owns both send and receive
-/// halves; callers can obtain cloneable [`mpsc::Sender`] handles via
-/// [`inbound_sender`](MessageBus::inbound_sender) and
-/// [`outbound_sender`](MessageBus::outbound_sender) for multi-producer use.
-///
-/// # Example
-///
-/// ```rust
-/// use clawft_core::bus::MessageBus;
-///
-/// # async fn example() {
-/// let bus = MessageBus::new();
-/// // Channel adapters clone the inbound sender
-/// let tx = bus.inbound_sender();
-/// // Agent loop consumes inbound messages
-/// // tx.send(msg).await.unwrap();
-/// // let msg = bus.consume_inbound().await;
-/// # }
-/// ```
+// ---------------------------------------------------------------------------
+// Native implementation (tokio channels)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "native")]
 pub struct MessageBus {
-    inbound_tx: mpsc::Sender<InboundMessage>,
-    inbound_rx: Mutex<mpsc::Receiver<InboundMessage>>,
-    outbound_tx: mpsc::Sender<OutboundMessage>,
-    outbound_rx: Mutex<mpsc::Receiver<OutboundMessage>>,
+    inbound_tx: tokio::sync::mpsc::Sender<InboundMessage>,
+    inbound_rx: Mutex<tokio::sync::mpsc::Receiver<InboundMessage>>,
+    outbound_tx: tokio::sync::mpsc::Sender<OutboundMessage>,
+    outbound_rx: Mutex<tokio::sync::mpsc::Receiver<OutboundMessage>>,
 }
 
+#[cfg(feature = "native")]
 impl MessageBus {
     /// Create a new message bus with the default channel capacity (1024).
     pub fn new() -> Self {
@@ -61,8 +45,8 @@ impl MessageBus {
     /// Higher capacity allows more burst buffering at the cost of memory.
     /// Lower capacity provides tighter backpressure.
     pub fn with_capacity(capacity: usize) -> Self {
-        let (inbound_tx, inbound_rx) = mpsc::channel(capacity);
-        let (outbound_tx, outbound_rx) = mpsc::channel(capacity);
+        let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(capacity);
+        let (outbound_tx, outbound_rx) = tokio::sync::mpsc::channel(capacity);
 
         debug!(capacity, "MessageBus created with bounded channels");
 
@@ -85,10 +69,10 @@ impl MessageBus {
             "publishing inbound message"
         );
         self.inbound_tx.try_send(msg).map_err(|e| match e {
-            mpsc::error::TrySendError::Full(_) => {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => {
                 ClawftError::Channel("inbound channel full (backpressure)".into())
             }
-            mpsc::error::TrySendError::Closed(_) => {
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
                 ClawftError::Channel("inbound channel closed".into())
             }
         })
@@ -133,10 +117,10 @@ impl MessageBus {
             "dispatching outbound message"
         );
         self.outbound_tx.try_send(msg).map_err(|e| match e {
-            mpsc::error::TrySendError::Full(_) => {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => {
                 ClawftError::Channel("outbound channel full (backpressure)".into())
             }
-            mpsc::error::TrySendError::Closed(_) => {
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
                 ClawftError::Channel("outbound channel closed".into())
             }
         })
@@ -171,7 +155,7 @@ impl MessageBus {
     ///
     /// Channel adapters should clone this sender so that multiple producers
     /// (e.g. Telegram, Slack, Discord) can publish concurrently.
-    pub fn inbound_sender(&self) -> mpsc::Sender<InboundMessage> {
+    pub fn inbound_sender(&self) -> tokio::sync::mpsc::Sender<InboundMessage> {
         self.inbound_tx.clone()
     }
 
@@ -179,8 +163,122 @@ impl MessageBus {
     ///
     /// Pipeline stages or agent tasks can clone this sender for concurrent
     /// outbound dispatch.
-    pub fn outbound_sender(&self) -> mpsc::Sender<OutboundMessage> {
+    pub fn outbound_sender(&self) -> tokio::sync::mpsc::Sender<OutboundMessage> {
         self.outbound_tx.clone()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Browser implementation (futures-channel)
+// ---------------------------------------------------------------------------
+
+#[cfg(not(feature = "native"))]
+pub struct MessageBus {
+    inbound_tx: futures_util::lock::Mutex<futures_channel::mpsc::UnboundedSender<InboundMessage>>,
+    inbound_rx: futures_util::lock::Mutex<futures_channel::mpsc::UnboundedReceiver<InboundMessage>>,
+    outbound_tx: futures_util::lock::Mutex<futures_channel::mpsc::UnboundedSender<OutboundMessage>>,
+    outbound_rx: futures_util::lock::Mutex<futures_channel::mpsc::UnboundedReceiver<OutboundMessage>>,
+}
+
+#[cfg(not(feature = "native"))]
+impl MessageBus {
+    /// Create a new message bus (browser: unbounded channels).
+    pub fn new() -> Self {
+        let (inbound_tx, inbound_rx) = futures_channel::mpsc::unbounded();
+        let (outbound_tx, outbound_rx) = futures_channel::mpsc::unbounded();
+
+        debug!("MessageBus created with unbounded channels (browser)");
+
+        Self {
+            inbound_tx: futures_util::lock::Mutex::new(inbound_tx),
+            inbound_rx: futures_util::lock::Mutex::new(inbound_rx),
+            outbound_tx: futures_util::lock::Mutex::new(outbound_tx),
+            outbound_rx: futures_util::lock::Mutex::new(outbound_rx),
+        }
+    }
+
+    /// Create a new message bus (capacity parameter ignored on browser).
+    pub fn with_capacity(_capacity: usize) -> Self {
+        Self::new()
+    }
+
+    /// Publish an inbound message to the bus.
+    pub fn publish_inbound(&self, msg: InboundMessage) -> Result<(), ClawftError> {
+        debug!(
+            channel = %msg.channel,
+            chat_id = %msg.chat_id,
+            "publishing inbound message"
+        );
+        // For browser single-threaded context, try_lock should always succeed.
+        if let Some(tx) = self.inbound_tx.try_lock() {
+            tx.unbounded_send(msg).map_err(|_| {
+                ClawftError::Channel("inbound channel closed".into())
+            })
+        } else {
+            Err(ClawftError::Channel("inbound channel busy".into()))
+        }
+    }
+
+    /// Publish an inbound message (async version).
+    pub async fn publish_inbound_async(
+        &self,
+        msg: InboundMessage,
+    ) -> Result<(), ClawftError> {
+        debug!(
+            channel = %msg.channel,
+            chat_id = %msg.chat_id,
+            "publishing inbound message (async)"
+        );
+        let tx = self.inbound_tx.lock().await;
+        tx.unbounded_send(msg).map_err(|_| {
+            ClawftError::Channel("inbound channel closed".into())
+        })
+    }
+
+    /// Consume the next inbound message from the bus.
+    pub async fn consume_inbound(&self) -> Option<InboundMessage> {
+        use futures_util::StreamExt;
+        let mut rx = self.inbound_rx.lock().await;
+        rx.next().await
+    }
+
+    /// Dispatch an outbound message to the bus.
+    pub fn dispatch_outbound(&self, msg: OutboundMessage) -> Result<(), ClawftError> {
+        debug!(
+            channel = %msg.channel,
+            chat_id = %msg.chat_id,
+            "dispatching outbound message"
+        );
+        if let Some(tx) = self.outbound_tx.try_lock() {
+            tx.unbounded_send(msg).map_err(|_| {
+                ClawftError::Channel("outbound channel closed".into())
+            })
+        } else {
+            Err(ClawftError::Channel("outbound channel busy".into()))
+        }
+    }
+
+    /// Dispatch an outbound message (async version).
+    pub async fn dispatch_outbound_async(
+        &self,
+        msg: OutboundMessage,
+    ) -> Result<(), ClawftError> {
+        debug!(
+            channel = %msg.channel,
+            chat_id = %msg.chat_id,
+            "dispatching outbound message (async)"
+        );
+        let tx = self.outbound_tx.lock().await;
+        tx.unbounded_send(msg).map_err(|_| {
+            ClawftError::Channel("outbound channel closed".into())
+        })
+    }
+
+    /// Consume the next outbound message from the bus.
+    pub async fn consume_outbound(&self) -> Option<OutboundMessage> {
+        use futures_util::StreamExt;
+        let mut rx = self.outbound_rx.lock().await;
+        rx.next().await
     }
 }
 
@@ -269,6 +367,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn default_creates_valid_bus() {
+        let bus = MessageBus::default();
+        bus.publish_inbound(make_inbound("default-test")).unwrap();
+        bus.dispatch_outbound(make_outbound("default-test"))
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn inbound_and_outbound_are_independent() {
+        let bus = MessageBus::new();
+
+        bus.publish_inbound(make_inbound("in")).unwrap();
+        bus.dispatch_outbound(make_outbound("out")).unwrap();
+
+        let inbound = bus.consume_inbound().await.unwrap();
+        let outbound = bus.consume_outbound().await.unwrap();
+
+        assert_eq!(inbound.content, "in");
+        assert_eq!(outbound.content, "out");
+    }
+
+    // The following tests use tokio-specific APIs (spawn, try_send on tokio
+    // Sender, etc.) and only compile under the native feature.
+
+    #[cfg(feature = "native")]
+    #[tokio::test]
     async fn inbound_sender_allows_multi_producer() {
         let bus = MessageBus::new();
         let tx1 = bus.inbound_sender();
@@ -283,6 +407,7 @@ mod tests {
         assert_eq!(msg2.content, "from-tx2");
     }
 
+    #[cfg(feature = "native")]
     #[tokio::test]
     async fn outbound_sender_allows_multi_producer() {
         let bus = MessageBus::new();
@@ -298,47 +423,40 @@ mod tests {
         assert_eq!(msg2.content, "from-tx2");
     }
 
+    #[cfg(feature = "native")]
     #[tokio::test]
     async fn consume_returns_none_when_all_senders_dropped() {
-        let (tx, rx) = mpsc::channel::<InboundMessage>(16);
-        let rx = Mutex::new(rx);
+        let (tx, rx) = tokio::sync::mpsc::channel::<InboundMessage>(16);
+        let rx = tokio::sync::Mutex::new(rx);
         tx.try_send(make_inbound("msg")).unwrap();
         drop(tx);
 
-        // First recv returns the buffered message.
         let mut guard = rx.lock().await;
         assert!(guard.recv().await.is_some());
-        // Second recv returns None because sender is dropped.
         assert!(guard.recv().await.is_none());
     }
 
+    #[cfg(feature = "native")]
     #[tokio::test]
     async fn publish_inbound_error_on_closed_channel() {
-        let (tx, rx) = mpsc::channel::<InboundMessage>(16);
-        drop(rx); // Close the channel by dropping receiver.
+        let (tx, rx) = tokio::sync::mpsc::channel::<InboundMessage>(16);
+        drop(rx);
 
         let result = tx.try_send(make_inbound("orphan"));
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "native")]
     #[tokio::test]
     async fn dispatch_outbound_error_on_closed_channel() {
-        let (tx, rx) = mpsc::channel::<OutboundMessage>(16);
+        let (tx, rx) = tokio::sync::mpsc::channel::<OutboundMessage>(16);
         drop(rx);
 
         let result = tx.try_send(make_outbound("orphan"));
         assert!(result.is_err());
     }
 
-    #[tokio::test]
-    async fn default_creates_valid_bus() {
-        let bus = MessageBus::default();
-        // Should be able to publish without error.
-        bus.publish_inbound(make_inbound("default-test")).unwrap();
-        bus.dispatch_outbound(make_outbound("default-test"))
-            .unwrap();
-    }
-
+    #[cfg(feature = "native")]
     #[tokio::test]
     async fn concurrent_publish_and_consume() {
         let bus = std::sync::Arc::new(MessageBus::new());
@@ -368,35 +486,21 @@ mod tests {
         assert_eq!(results.len(), 100);
     }
 
+    #[cfg(feature = "native")]
     #[test]
     fn message_bus_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<MessageBus>();
     }
 
-    #[tokio::test]
-    async fn inbound_and_outbound_are_independent() {
-        let bus = MessageBus::new();
-
-        bus.publish_inbound(make_inbound("in")).unwrap();
-        bus.dispatch_outbound(make_outbound("out")).unwrap();
-
-        let inbound = bus.consume_inbound().await.unwrap();
-        let outbound = bus.consume_outbound().await.unwrap();
-
-        assert_eq!(inbound.content, "in");
-        assert_eq!(outbound.content, "out");
-    }
-
+    #[cfg(feature = "native")]
     #[tokio::test]
     async fn custom_capacity_bus() {
         let bus = MessageBus::with_capacity(4);
-        // Fill to capacity
         for i in 0..4 {
             bus.publish_inbound(make_inbound(&format!("msg-{i}")))
                 .unwrap();
         }
-        // 5th message should fail with backpressure
         let result = bus.publish_inbound(make_inbound("overflow"));
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -406,17 +510,16 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "native")]
     #[tokio::test]
     async fn async_publish_waits_when_full() {
         let bus = std::sync::Arc::new(MessageBus::with_capacity(2));
         let bus_producer = bus.clone();
         let bus_consumer = bus.clone();
 
-        // Fill the channel
         bus.publish_inbound(make_inbound("a")).unwrap();
         bus.publish_inbound(make_inbound("b")).unwrap();
 
-        // Async publish should complete after the consumer drains
         let producer = tokio::spawn(async move {
             bus_producer
                 .publish_inbound_async(make_inbound("c"))
@@ -424,12 +527,10 @@ mod tests {
                 .unwrap();
         });
 
-        // Give the producer a moment to block, then consume
         tokio::task::yield_now().await;
         let _ = bus_consumer.consume_inbound().await;
 
         producer.await.unwrap();
-        // Should have "b" and "c" remaining
         let msg_b = bus_consumer.consume_inbound().await.unwrap();
         let msg_c = bus_consumer.consume_inbound().await.unwrap();
         assert_eq!(msg_b.content, "b");

@@ -13,18 +13,64 @@ use clawft_platform::Platform;
 use serde_json::json;
 use tracing::debug;
 
+/// Resolve a path to its canonical form.
+///
+/// On native targets this follows symlinks via `std::fs::canonicalize`.
+/// On browser/WASM targets (no real filesystem symlinks in OPFS) we
+/// normalize the path components without filesystem access.
+#[cfg(feature = "native")]
+fn resolve_sandbox_path(path: &Path) -> std::io::Result<PathBuf> {
+    std::fs::canonicalize(path)
+}
+
+#[cfg(not(feature = "native"))]
+fn resolve_sandbox_path(path: &Path) -> std::io::Result<PathBuf> {
+    // Normalize path without filesystem access (OPFS has no symlinks).
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                components.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => components.push(other),
+        }
+    }
+    if components.is_empty() {
+        Ok(PathBuf::from("."))
+    } else {
+        Ok(components.iter().collect())
+    }
+}
+
+/// Check whether a path exists on the filesystem.
+///
+/// On native targets this uses `std::path::Path::exists()`.
+/// On browser/WASM targets this always returns `true` (the caller
+/// relies on platform filesystem errors for non-existent paths).
+#[cfg(feature = "native")]
+fn path_exists(path: &Path) -> bool {
+    path.exists()
+}
+
+#[cfg(not(feature = "native"))]
+fn path_exists(_path: &Path) -> bool {
+    // In OPFS/browser we cannot synchronously stat paths.
+    // Return true so validate_parent_path falls through to the
+    // workspace containment check using the normalized path.
+    true
+}
+
 /// Validate that `path` resolves to a location within `workspace`.
 ///
 /// Returns the canonical path on success, or a [`ToolError`] if the path
 /// escapes the workspace or does not exist.
 fn validate_path(path: &str, workspace: &Path) -> Result<PathBuf, ToolError> {
     let resolved = workspace.join(path);
-    let canonical = resolved
-        .canonicalize()
+    let canonical = resolve_sandbox_path(&resolved)
         .map_err(|_| ToolError::FileNotFound(path.to_string()))?;
 
-    let workspace_canonical = workspace
-        .canonicalize()
+    let workspace_canonical = resolve_sandbox_path(workspace)
         .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
     if !canonical.starts_with(&workspace_canonical) {
@@ -44,7 +90,7 @@ fn validate_parent_path(path: &str, workspace: &Path) -> Result<PathBuf, ToolErr
     // Find the deepest existing ancestor and canonicalize from there.
     let mut ancestor = resolved.as_path();
     loop {
-        if ancestor.exists() {
+        if path_exists(ancestor) {
             break;
         }
         ancestor = ancestor
@@ -52,12 +98,10 @@ fn validate_parent_path(path: &str, workspace: &Path) -> Result<PathBuf, ToolErr
             .ok_or_else(|| ToolError::InvalidPath(format!("path escapes workspace: {}", path)))?;
     }
 
-    let canonical_ancestor = ancestor
-        .canonicalize()
+    let canonical_ancestor = resolve_sandbox_path(ancestor)
         .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
-    let workspace_canonical = workspace
-        .canonicalize()
+    let workspace_canonical = resolve_sandbox_path(workspace)
         .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
     if !canonical_ancestor.starts_with(&workspace_canonical) {
@@ -100,7 +144,8 @@ impl<P: Platform> ReadFileTool<P> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
 impl<P: Platform + 'static> Tool for ReadFileTool<P> {
     fn name(&self) -> &str {
         "read_file"
@@ -163,7 +208,8 @@ impl<P: Platform> WriteFileTool<P> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
 impl<P: Platform + 'static> Tool for WriteFileTool<P> {
     fn name(&self) -> &str {
         "write_file"
@@ -232,7 +278,8 @@ impl<P: Platform> EditFileTool<P> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
 impl<P: Platform + 'static> Tool for EditFileTool<P> {
     fn name(&self) -> &str {
         "edit_file"
@@ -328,7 +375,8 @@ impl<P: Platform> ListDirectoryTool<P> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
 impl<P: Platform + 'static> Tool for ListDirectoryTool<P> {
     fn name(&self) -> &str {
         "list_directory"
@@ -371,11 +419,16 @@ impl<P: Platform + 'static> Tool for ListDirectoryTool<P> {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
 
-            let metadata = tokio::fs::metadata(entry_path).await;
-            let (is_dir, size) = match metadata {
-                Ok(m) => (m.is_dir(), m.len()),
-                Err(_) => (false, 0),
+            #[cfg(feature = "native")]
+            let (is_dir, size) = {
+                let metadata = tokio::fs::metadata(&entry_path).await;
+                match metadata {
+                    Ok(m) => (m.is_dir(), m.len()),
+                    Err(_) => (false, 0),
+                }
             };
+            #[cfg(not(feature = "native"))]
+            let (is_dir, size) = (false, 0u64);
 
             result.push(json!({
                 "name": name,

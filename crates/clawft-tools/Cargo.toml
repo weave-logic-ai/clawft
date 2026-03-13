@@ -11,24 +11,39 @@ keywords = ["tools", "shell", "file", "memory", "security"]
 categories = ["development-tools"]
 
 [features]
-default = ["native-exec"]
+default = ["native-exec", "native"]
 native-exec = []
+native = [
+    "dep:tokio",
+    "clawft-platform/native",
+    "clawft-core/native",
+    "clawft-types/native",
+]
+browser = [
+    "clawft-platform/browser",
+    "clawft-core/browser",
+]
+canvas = []
 vector-memory = ["clawft-core/vector-memory"]
 delegate = ["clawft-services/delegate"]
+voice = ["clawft-plugin/voice"]
 
 [dependencies]
-clawft-types = { workspace = true }
-clawft-platform = { workspace = true }
-clawft-core = { workspace = true }
+clawft-types = { workspace = true, default-features = false }
+clawft-platform = { workspace = true, default-features = false }
+clawft-core = { workspace = true, default-features = false }
 clawft-services = { workspace = true, optional = true }
+clawft-plugin = { workspace = true, optional = true }
 async-trait = { workspace = true }
-tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 url = "2"
 ipnet = "2"
+
+# Native only
+tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

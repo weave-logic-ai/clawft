@@ -30,23 +30,41 @@
 
 pub mod config;
 pub mod error;
-pub mod failover;
-pub mod openai_compat;
-pub mod provider;
-pub mod retry;
-pub mod router;
 pub mod sse;
 pub mod types;
+
+#[cfg(feature = "native")]
+pub mod failover;
+#[cfg(feature = "native")]
+pub mod openai_compat;
+#[cfg(feature = "native")]
+pub mod provider;
+#[cfg(feature = "native")]
+pub mod retry;
+#[cfg(feature = "native")]
+pub mod router;
+
+#[cfg(feature = "browser")]
+pub mod browser_transport;
 
 pub use config::LlmProviderConfig;
 /// Backward-compatible alias for [`LlmProviderConfig`].
 #[deprecated(since = "0.2.0", note = "renamed to LlmProviderConfig to avoid collision")]
 pub type ProviderConfig = LlmProviderConfig;
 pub use error::{ProviderError, Result};
-pub use failover::FailoverChain;
-pub use openai_compat::OpenAiCompatProvider;
-pub use provider::Provider;
-pub use retry::{RetryConfig, RetryPolicy};
-pub use router::ProviderRouter;
 pub use sse::parse_sse_line;
 pub use types::{ChatMessage, ChatRequest, ChatResponse, StreamChunk, ToolCall, Usage};
+
+#[cfg(feature = "native")]
+pub use failover::FailoverChain;
+#[cfg(feature = "native")]
+pub use openai_compat::OpenAiCompatProvider;
+#[cfg(feature = "native")]
+pub use provider::Provider;
+#[cfg(feature = "native")]
+pub use retry::{RetryConfig, RetryPolicy};
+#[cfg(feature = "native")]
+pub use router::ProviderRouter;
+
+#[cfg(feature = "browser")]
+pub use browser_transport::BrowserLlmClient;
