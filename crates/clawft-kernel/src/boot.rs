@@ -1261,4 +1261,322 @@ mod tests {
         assert_eq!(KernelState::ShuttingDown.to_string(), "shutting_down");
         assert_eq!(KernelState::Halted.to_string(), "halted");
     }
+
+    // ── Full-stack integration helpers ─────────────────────────────
+
+    /// Kernel config with exochain + resource tree enabled (no checkpoint
+    /// path so everything stays in-memory).
+    #[cfg(all(feature = "exochain", feature = "ecc", feature = "wasm-sandbox"))]
+    fn test_kernel_config_full_stack() -> KernelConfig {
+        use clawft_types::config::{ChainConfig, ResourceTreeConfig};
+        KernelConfig {
+            enabled: true,
+            max_processes: 32,
+            health_check_interval_secs: 5,
+            cluster: None,
+            chain: Some(ChainConfig {
+                enabled: true,
+                checkpoint_interval: 10_000,
+                chain_id: 0,
+                checkpoint_path: None,
+            }),
+            resource_tree: Some(ResourceTreeConfig {
+                enabled: true,
+                checkpoint_path: None,
+            }),
+        }
+    }
+
+    // ── Integration: full-stack kernel ──────────────────────────────
+
+    /// K0-K5 integration: native agent + WASM tool + container service + ECC
+    /// all connected in a single kernel with chain witnessing.
+    #[tokio::test]
+    #[cfg(all(feature = "exochain", feature = "ecc", feature = "wasm-sandbox"))]
+    async fn integration_full_stack_kernel() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config_full_stack(), platform)
+            .await
+            .unwrap();
+
+        // ── K0: Kernel is running ──────────────────────────────────
+        assert_eq!(*kernel.state(), KernelState::Running);
+
+        // ── K0: Services registered at boot ────────────────────────
+        // cron + container + hnsw + cognitive_tick = 4 with ecc
+        let svc_count = kernel.services().len();
+        assert!(svc_count >= 4, "expected >= 4 services, got {svc_count}");
+
+        // ── K1: Spawn a native agent ───────────────────────────────
+        let spawn_result = kernel.supervisor().spawn(
+            crate::supervisor::SpawnRequest {
+                agent_id: "integration-agent-1".into(),
+                capabilities: None,
+                parent_pid: None,
+                env: std::collections::HashMap::new(),
+                backend: None, // defaults to Native
+            },
+        );
+        assert!(spawn_result.is_ok(), "native agent spawn failed: {:?}", spawn_result.err());
+        let agent_pid = spawn_result.unwrap().pid;
+        assert!(agent_pid > 0, "agent should get PID > 0");
+
+        // ── K1: Agent appears in process table ─────────────────────
+        let processes = kernel.process_table().list();
+        assert!(
+            processes.iter().any(|p| p.pid == agent_pid),
+            "agent not in process table"
+        );
+
+        // ── K2: A2A messaging between kernel and agent ─────────────
+        let a2a = kernel.a2a_router();
+        let _inbox = a2a.create_inbox(agent_pid);
+
+        // Send a message from kernel (PID 0) to agent
+        let msg = crate::ipc::KernelMessage::new(
+            0, // from kernel
+            crate::ipc::MessageTarget::Process(agent_pid),
+            crate::ipc::MessagePayload::Json(serde_json::json!({"cmd": "ping"})),
+        );
+        let send_result = a2a.send(msg).await;
+        // This should succeed: PID 0 exists, agent inbox exists
+        assert!(send_result.is_ok(), "A2A send failed: {:?}", send_result.err());
+
+        // ── K3: WASM tool execution ────────────────────────────────
+        let wasm_config = crate::wasm_runner::WasmSandboxConfig::default();
+        let wasm_runner = crate::wasm_runner::WasmToolRunner::new(wasm_config);
+
+        // Minimal WAT module that exports _start and immediately returns
+        let noop_wat = r#"(module (func (export "_start")))"#;
+        let result = wasm_runner
+            .execute_bytes("integration-tool", noop_wat.as_bytes(), serde_json::json!({}))
+            .await;
+        assert!(result.is_ok(), "WASM execution failed: {:?}", result.err());
+        let wasm_result = result.unwrap();
+        assert_eq!(wasm_result.exit_code, 0, "WASM tool should exit cleanly");
+        assert!(wasm_result.fuel_consumed > 0, "WASM should consume fuel");
+
+        // ── K3: WASM tool in registry ──────────────────────────────
+        let wasm_runner_arc = Arc::new(
+            crate::wasm_runner::WasmToolRunner::new(
+                crate::wasm_runner::WasmSandboxConfig::default(),
+            ),
+        );
+        let mut registry = crate::wasm_runner::ToolRegistry::new();
+        registry
+            .register_wasm_tool(
+                "demo-tool",
+                "A demo WASM tool for integration testing",
+                noop_wat.as_bytes().to_vec(),
+                wasm_runner_arc,
+            )
+            .unwrap();
+        assert!(registry.get("demo-tool").is_some(), "WASM tool should be in registry");
+        let tool_list = registry.list();
+        assert!(
+            tool_list.contains(&"demo-tool".to_string()),
+            "WASM tool should appear in listing"
+        );
+
+        // ── K4: Container service registered ───────────────────────
+        let svc_list = kernel.services().list();
+        assert!(
+            svc_list.iter().any(|(name, _)| name == "containers"),
+            "container service should be registered"
+        );
+
+        // ── K3c: ECC cognitive substrate active ────────────────────
+        let ecc_hnsw = kernel.ecc_hnsw().expect("HNSW service should be present");
+        // After calibration the store is cleared, so it should be empty
+        assert_eq!(ecc_hnsw.len(), 0, "HNSW should be empty after calibration cleanup");
+
+        let ecc_causal = kernel.ecc_causal().expect("causal graph should be present");
+        assert_eq!(ecc_causal.node_count(), 0, "causal graph should be empty after cleanup");
+
+        let _ecc_tick = kernel.ecc_tick().expect("cognitive tick should be present");
+
+        let calibration = kernel.ecc_calibration().expect("calibration should exist");
+        assert!(calibration.compute_p95_us > 0, "calibration should have run");
+        assert!(calibration.tick_interval_ms > 0, "tick interval should be auto-calibrated");
+
+        // ── ECC: Insert a vector and search ────────────────────────
+        ecc_hnsw.insert(
+            "test-doc".into(),
+            vec![1.0, 0.0, 0.0, 0.0],
+            serde_json::json!({"text": "hello"}),
+        );
+        assert_eq!(ecc_hnsw.len(), 1);
+        let results = ecc_hnsw.search(&[1.0, 0.0, 0.0, 0.0], 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "test-doc");
+
+        // ── ECC: Causal graph operations ───────────────────────────
+        let node1 = ecc_causal.add_node("concept-A".into(), serde_json::json!({}));
+        let node2 = ecc_causal.add_node("concept-B".into(), serde_json::json!({}));
+        ecc_causal.link(
+            node1,
+            node2,
+            crate::causal::CausalEdgeType::Causes,
+            1.0,
+            0,
+            0,
+        );
+        assert_eq!(ecc_causal.node_count(), 2);
+        assert_eq!(ecc_causal.edge_count(), 1);
+        let path = ecc_causal.find_path(node1, node2, 5);
+        assert!(path.is_some(), "should find path between linked nodes");
+
+        // ── ExoChain: Chain has witnessed boot events ──────────────
+        let chain = kernel.chain_manager().expect("chain should exist");
+        assert!(
+            chain.sequence() > 5,
+            "chain should have boot events, got seq={}",
+            chain.sequence()
+        );
+
+        // Verify chain integrity
+        let verify_result = chain.verify_integrity();
+        assert!(verify_result.valid, "chain should be valid: {:?}", verify_result.errors);
+        assert!(verify_result.errors.is_empty(), "no integrity errors");
+
+        // ── ExoChain: ECC calibration event logged ─────────────────
+        let events = chain.tail(0); // 0 = all events
+        let ecc_events: Vec<_> = events.iter().filter(|e| e.kind.starts_with("ecc.")).collect();
+        assert!(
+            !ecc_events.is_empty(),
+            "ECC boot calibration should be logged to chain"
+        );
+
+        // ── Resource Tree: namespaces exist ────────────────────────
+        let tree = kernel.tree_manager().expect("tree should exist");
+        let stats = tree.stats();
+        assert!(
+            stats.node_count > 20,
+            "tree should have many nodes (got {})",
+            stats.node_count
+        );
+
+        // ── K2: ServiceApi + adapters compile ──────────────────────
+        // (validated by service::tests; here we just confirm registry is queryable)
+        assert!(kernel.services().get("cron").is_some(), "cron service should be accessible");
+        assert!(
+            kernel.services().get("containers").is_some(),
+            "container service should be accessible"
+        );
+
+        // ── Graceful shutdown ──────────────────────────────────────
+        let mut kernel = kernel;
+        kernel.shutdown().await.unwrap();
+        assert_eq!(*kernel.state(), KernelState::Halted);
+    }
+
+    // ── Integration: cross-backend tools ───────────────────────────
+
+    /// Demonstrates that native (built-in) tools and WASM tools coexist
+    /// in a single ToolRegistry and can be dispatched through the same
+    /// lookup interface.
+    #[test]
+    #[cfg(all(feature = "wasm-sandbox"))]
+    fn integration_cross_backend_tools() {
+        use crate::wasm_runner::{
+            BuiltinTool, BuiltinToolSpec, ToolCategory, ToolError, ToolRegistry,
+            WasmSandboxConfig, WasmToolRunner,
+        };
+        use crate::governance::EffectVector;
+
+        // ── A native (Rust) tool ───────────────────────────────────
+        struct EchoTool;
+
+        impl BuiltinTool for EchoTool {
+            fn name(&self) -> &str {
+                "native.echo"
+            }
+            fn spec(&self) -> &BuiltinToolSpec {
+                // Leak a static spec for test simplicity
+                static SPEC: std::sync::OnceLock<BuiltinToolSpec> = std::sync::OnceLock::new();
+                SPEC.get_or_init(|| BuiltinToolSpec {
+                    name: "native.echo".into(),
+                    category: ToolCategory::System,
+                    description: "Echoes input back".into(),
+                    parameters: serde_json::json!({}),
+                    gate_action: "tool.native.echo".into(),
+                    effect: EffectVector::default(),
+                    native: true,
+                })
+            }
+            fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+                Ok(serde_json::json!({"echo": args}))
+            }
+        }
+
+        // ── Build a mixed registry ─────────────────────────────────
+        let mut registry = ToolRegistry::new();
+
+        // Register native tool
+        registry.register(Arc::new(EchoTool));
+
+        // Register WASM tool
+        let runner = Arc::new(WasmToolRunner::new(WasmSandboxConfig::default()));
+        let noop_wat = r#"(module (func (export "_start")))"#;
+        registry
+            .register_wasm_tool(
+                "wasm.noop",
+                "A no-op WASM tool",
+                noop_wat.as_bytes().to_vec(),
+                runner,
+            )
+            .unwrap();
+
+        // ── Both tools accessible through one registry ─────────────
+        assert_eq!(registry.list().len(), 2);
+
+        let native = registry.get("native.echo").expect("native tool should exist");
+        assert!(native.spec().native, "native tool should be marked native");
+
+        let wasm = registry.get("wasm.noop").expect("wasm tool should exist");
+        assert!(!wasm.spec().native, "wasm tool should NOT be marked native");
+
+        // ── Native tool executes synchronously ─────────────────────
+        let result = native.execute(serde_json::json!({"hello": "world"})).unwrap();
+        assert_eq!(result["echo"]["hello"], "world");
+
+        // ── Hierarchical registry ──────────────────────────────────
+        // Child registry overlays parent; WASM tools from parent visible
+        let parent = Arc::new(registry);
+        let mut child = ToolRegistry::with_parent(parent);
+
+        // Child sees parent tools
+        assert!(child.get("native.echo").is_some(), "child sees parent native tool");
+        assert!(child.get("wasm.noop").is_some(), "child sees parent wasm tool");
+
+        // Child can shadow
+        struct OverrideTool;
+        impl BuiltinTool for OverrideTool {
+            fn name(&self) -> &str {
+                "native.echo"
+            }
+            fn spec(&self) -> &BuiltinToolSpec {
+                static SPEC: std::sync::OnceLock<BuiltinToolSpec> = std::sync::OnceLock::new();
+                SPEC.get_or_init(|| BuiltinToolSpec {
+                    name: "native.echo".into(),
+                    category: ToolCategory::System,
+                    description: "Overridden echo".into(),
+                    parameters: serde_json::json!({}),
+                    gate_action: "tool.native.echo".into(),
+                    effect: EffectVector::default(),
+                    native: true,
+                })
+            }
+            fn execute(&self, _args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+                Ok(serde_json::json!({"overridden": true}))
+            }
+        }
+
+        child.register(Arc::new(OverrideTool));
+        let result = child.get("native.echo").unwrap().execute(serde_json::json!({})).unwrap();
+        assert_eq!(result["overridden"], true, "child should shadow parent tool");
+
+        // Parent WASM tool still reachable from child
+        assert!(child.get("wasm.noop").is_some(), "WASM tool still reachable via parent");
+    }
 }
