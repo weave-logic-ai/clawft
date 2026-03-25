@@ -597,6 +597,24 @@ impl Default for AppManager {
     }
 }
 
+// ── Manifest Parsing ────────────────────────────────────────────────
+
+impl AppManifest {
+    /// Parse an [`AppManifest`] from a JSON string.
+    ///
+    /// The manifest is validated after parsing; structural errors
+    /// (empty name, duplicate IDs, etc.) are returned as
+    /// [`AppError::ManifestInvalid`].
+    pub fn from_json_str(json: &str) -> Result<Self, AppError> {
+        let manifest: AppManifest =
+            serde_json::from_str(json).map_err(|e| AppError::ManifestInvalid {
+                reason: format!("JSON parse error: {e}"),
+            })?;
+        validate_manifest(&manifest)?;
+        Ok(manifest)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1010,5 +1028,71 @@ mod tests {
         let restored: AppHooks = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.on_install.as_deref(), Some("setup.sh"));
         assert!(restored.on_start.is_none());
+    }
+
+    #[test]
+    fn parse_manifest_from_json() {
+        let json = serde_json::json!({
+            "name": "test-app",
+            "version": "1.0.0",
+            "description": "A test app",
+            "agents": [],
+            "tools": [],
+            "services": [],
+            "capabilities": {
+                "network": false,
+                "filesystem": [],
+                "shell": false,
+                "ipc": "None"
+            },
+            "hooks": {}
+        });
+        let manifest = AppManifest::from_json_str(&json.to_string()).unwrap();
+        assert_eq!(manifest.name, "test-app");
+        assert_eq!(manifest.version, "1.0.0");
+        assert!(manifest.agents.is_empty());
+    }
+
+    #[test]
+    fn parse_manifest_from_json_invalid() {
+        let result = AppManifest::from_json_str("not valid json");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("JSON parse error"));
+    }
+
+    #[test]
+    fn parse_manifest_from_json_empty_name_fails() {
+        let json = serde_json::json!({
+            "name": "",
+            "version": "1.0.0"
+        });
+        let result = AppManifest::from_json_str(&json.to_string());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty"));
+    }
+
+    #[test]
+    fn app_hooks_lifecycle() {
+        let manifest = AppManifest {
+            name: "hooks-test".into(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            author: None,
+            license: None,
+            agents: Vec::new(),
+            tools: Vec::new(),
+            services: Vec::new(),
+            capabilities: AppCapabilities::default(),
+            hooks: AppHooks {
+                on_install: Some("scripts/setup.sh".into()),
+                on_start: Some("scripts/migrate.sh".into()),
+                on_stop: Some("scripts/cleanup.sh".into()),
+                on_remove: None,
+            },
+        };
+        assert_eq!(manifest.hooks.on_install, Some("scripts/setup.sh".into()));
+        assert_eq!(manifest.hooks.on_start, Some("scripts/migrate.sh".into()));
+        assert_eq!(manifest.hooks.on_stop, Some("scripts/cleanup.sh".into()));
+        assert!(manifest.hooks.on_remove.is_none());
     }
 }

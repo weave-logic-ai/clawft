@@ -47,6 +47,9 @@ enum Commands {
     /// Agent lifecycle management (spawn, stop, restart, inspect).
     Agent(commands::agent_cmd::AgentArgs),
 
+    /// Application management (install, start, stop, list).
+    App(commands::app_cmd::AppArgs),
+
     /// Cluster management (nodes, shards, health).
     Cluster(commands::cluster_cmd::ClusterArgs),
 
@@ -87,6 +90,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Kernel(args) => commands::kernel_cmd::run(args).await?,
         Commands::Agent(args) => commands::agent_cmd::run(args).await?,
+        Commands::App(args) => commands::app_cmd::run(args).await?,
         Commands::Cluster(args) => commands::cluster_cmd::run(args).await?,
         Commands::Chain(args) => commands::chain_cmd::run(args).await?,
         Commands::Resource(args) => commands::resource_cmd::run(args).await?,

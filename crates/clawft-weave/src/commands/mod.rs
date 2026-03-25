@@ -1,6 +1,7 @@
 //! Command implementations for `weaver`.
 
 pub mod agent_cmd;
+pub mod app_cmd;
 pub mod chain_cmd;
 pub mod cluster_cmd;
 pub mod console_cmd;
