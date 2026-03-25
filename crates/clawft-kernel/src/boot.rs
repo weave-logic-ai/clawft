@@ -85,6 +85,18 @@ pub struct Kernel<P: Platform> {
     chain_manager: Option<Arc<crate::chain::ChainManager>>,
     #[cfg(feature = "exochain")]
     tree_manager: Option<Arc<crate::tree_manager::TreeManager>>,
+    #[cfg(feature = "ecc")]
+    ecc_hnsw: Option<Arc<crate::hnsw_service::HnswService>>,
+    #[cfg(feature = "ecc")]
+    ecc_causal: Option<Arc<crate::causal::CausalGraph>>,
+    #[cfg(feature = "ecc")]
+    ecc_tick: Option<Arc<crate::cognitive_tick::CognitiveTick>>,
+    #[cfg(feature = "ecc")]
+    ecc_crossrefs: Option<Arc<crate::crossref::CrossRefStore>>,
+    #[cfg(feature = "ecc")]
+    ecc_impulses: Option<Arc<crate::impulse::ImpulseQueue>>,
+    #[cfg(feature = "ecc")]
+    ecc_calibration: Option<crate::calibration::EccCalibration>,
 }
 
 impl<P: Platform> Kernel<P> {
@@ -177,6 +189,22 @@ impl<P: Platform> Kernel<P> {
             error!(error = %e, "failed to register cron service");
         } else {
             boot_log.push(BootEvent::info(BootPhase::Services, "Cron service registered"));
+        }
+
+        // 5c. Register container service (K4)
+        let container_manager = std::sync::Arc::new(
+            crate::container::ContainerManager::new(crate::container::ContainerConfig::default()),
+        );
+        let container_service = std::sync::Arc::new(
+            crate::container::ContainerService::new(container_manager.clone()),
+        );
+        if let Err(e) = service_registry.register(container_service) {
+            error!(error = %e, "failed to register container service");
+        } else {
+            boot_log.push(BootEvent::info(
+                BootPhase::Services,
+                "Container service registered",
+            ));
         }
 
         // 6. Create cluster membership (universal, always present)
@@ -533,6 +561,102 @@ impl<P: Platform> Kernel<P> {
                         tracing::debug!(error = %e, "failed to register cron in tree (may already exist)");
                     }
 
+                    // K4: Register container namespace in the resource tree
+                    {
+                        use exo_resource_tree::model::{ResourceId, ResourceKind};
+                        if let Err(e) = tm.insert(
+                            ResourceId::new("/kernel/containers"),
+                            ResourceKind::Namespace,
+                            ResourceId::new("/kernel"),
+                        ) {
+                            tracing::debug!(
+                                error = %e,
+                                "failed to register containers namespace (may already exist)"
+                            );
+                        }
+                    }
+
+                    // K3c: Register ECC namespaces in the resource tree
+                    #[cfg(feature = "ecc")]
+                    {
+                        use exo_resource_tree::model::{ResourceId, ResourceKind};
+                        let ecc_namespaces = [
+                            ("/kernel/services/ecc", "/kernel/services"),
+                            ("/kernel/services/ecc/hnsw", "/kernel/services/ecc"),
+                            ("/kernel/services/ecc/causal", "/kernel/services/ecc"),
+                            ("/kernel/services/ecc/tick", "/kernel/services/ecc"),
+                            ("/kernel/services/ecc/calibration", "/kernel/services/ecc"),
+                            ("/kernel/services/ecc/crossrefs", "/kernel/services/ecc"),
+                        ];
+                        for (path, parent) in &ecc_namespaces {
+                            if let Err(e) = tm.insert(
+                                ResourceId::new(*path),
+                                ResourceKind::Namespace,
+                                ResourceId::new(*parent),
+                            ) {
+                                tracing::debug!(
+                                    error = %e, path = *path,
+                                    "failed to register ECC namespace (may already exist)"
+                                );
+                            }
+                        }
+                        boot_log.push(BootEvent::info(
+                            BootPhase::Ecc,
+                            "ECC resource tree namespaces registered",
+                        ));
+                    }
+
+                    // K3: Register tool namespaces in the resource tree
+                    {
+                        use exo_resource_tree::model::{ResourceId, ResourceKind};
+                        let tool_namespaces = [
+                            ("/kernel/tools", "/kernel"),
+                            ("/kernel/tools/fs", "/kernel/tools"),
+                            ("/kernel/tools/agent", "/kernel/tools"),
+                            ("/kernel/tools/sys", "/kernel/tools"),
+                            #[cfg(feature = "ecc")]
+                            ("/kernel/tools/ecc", "/kernel/tools"),
+                        ];
+                        for (path, parent) in &tool_namespaces {
+                            if let Err(e) = tm.insert(
+                                ResourceId::new(*path),
+                                ResourceKind::Namespace,
+                                ResourceId::new(*parent),
+                            ) {
+                                tracing::debug!(
+                                    error = %e, path = *path,
+                                    "failed to register tool namespace (may already exist)"
+                                );
+                            }
+                        }
+                        // Register each built-in tool as a Tool node
+                        let catalog = crate::wasm_runner::builtin_tool_catalog();
+                        for spec in &catalog {
+                            let cat_path = match spec.category {
+                                crate::wasm_runner::ToolCategory::Filesystem => "/kernel/tools/fs",
+                                crate::wasm_runner::ToolCategory::Agent => "/kernel/tools/agent",
+                                crate::wasm_runner::ToolCategory::System => "/kernel/tools/sys",
+                                crate::wasm_runner::ToolCategory::Ecc => "/kernel/tools/ecc",
+                                crate::wasm_runner::ToolCategory::User => "/kernel/tools",
+                            };
+                            let tool_path = format!("{}/{}", cat_path, spec.name.replace('.', "/"));
+                            if let Err(e) = tm.insert(
+                                ResourceId::new(&tool_path),
+                                ResourceKind::Tool,
+                                ResourceId::new(cat_path),
+                            ) {
+                                tracing::debug!(
+                                    error = %e, tool = %spec.name,
+                                    "failed to register tool node (may already exist)"
+                                );
+                            }
+                        }
+                        boot_log.push(BootEvent::info(
+                            BootPhase::ResourceTree,
+                            format!("Registered {} built-in tools in resource tree", catalog.len()),
+                        ));
+                    }
+
                     Some(tm)
                 } else {
                     boot_log.push(BootEvent::info(
@@ -602,6 +726,88 @@ impl<P: Platform> Kernel<P> {
             cm.append("kernel", "boot.manifest", Some(manifest));
         }
 
+        // 8e. Initialize ECC cognitive substrate (when ecc feature is enabled)
+        #[cfg(feature = "ecc")]
+        let (ecc_hnsw, ecc_causal, ecc_tick, ecc_crossrefs, ecc_impulses, ecc_calibration) = {
+            use crate::calibration::{EccCalibrationConfig, run_calibration};
+            use crate::causal::CausalGraph;
+            use crate::cognitive_tick::{CognitiveTick, CognitiveTickConfig};
+            use crate::crossref::CrossRefStore;
+            use crate::hnsw_service::{HnswService, HnswServiceConfig};
+            use crate::impulse::ImpulseQueue;
+
+            boot_log.push(BootEvent::info(BootPhase::Ecc, "Initializing ECC cognitive substrate"));
+
+            let hnsw = Arc::new(HnswService::new(HnswServiceConfig::default()));
+            let causal = Arc::new(CausalGraph::new());
+            let crossrefs = Arc::new(CrossRefStore::new());
+            let impulses = Arc::new(ImpulseQueue::new());
+
+            // Run boot-time calibration
+            let cal_config = EccCalibrationConfig::default();
+            let calibration = run_calibration(&hnsw, &causal, &cal_config);
+
+            boot_log.push(BootEvent::info(
+                BootPhase::Ecc,
+                format!(
+                    "ECC calibration complete (p50={}us, p95={}us, tick={}ms, spectral={})",
+                    calibration.compute_p50_us,
+                    calibration.compute_p95_us,
+                    calibration.tick_interval_ms,
+                    calibration.spectral_capable,
+                ),
+            ));
+
+            // Create cognitive tick with calibrated interval
+            let tick_config = CognitiveTickConfig {
+                tick_interval_ms: calibration.tick_interval_ms,
+                ..CognitiveTickConfig::default()
+            };
+            let tick = Arc::new(CognitiveTick::new(tick_config));
+
+            // Register ECC services
+            if let Err(e) = service_registry.register(hnsw.clone()) {
+                tracing::debug!(error = %e, "failed to register HNSW service");
+            }
+            if let Err(e) = service_registry.register(tick.clone()) {
+                tracing::debug!(error = %e, "failed to register cognitive tick service");
+            }
+
+            // Log calibration to chain
+            #[cfg(feature = "exochain")]
+            if let Some(ref cm) = chain_manager {
+                cm.append(
+                    "ecc",
+                    "ecc.boot.calibration",
+                    Some(serde_json::json!({
+                        "compute_p50_us": calibration.compute_p50_us,
+                        "compute_p95_us": calibration.compute_p95_us,
+                        "tick_interval_ms": calibration.tick_interval_ms,
+                        "spectral_capable": calibration.spectral_capable,
+                    })),
+                );
+            }
+
+            boot_log.push(BootEvent::info(
+                BootPhase::Ecc,
+                format!(
+                    "ECC ready (hnsw={}, causal={} nodes, tick={}ms)",
+                    hnsw.len(),
+                    causal.node_count(),
+                    calibration.tick_interval_ms,
+                ),
+            ));
+
+            (
+                Some(hnsw),
+                Some(causal),
+                Some(tick),
+                Some(crossrefs),
+                Some(impulses),
+                Some(calibration),
+            )
+        };
+
         let elapsed = boot_time.elapsed();
         boot_log.push(BootEvent::info(
             BootPhase::Ready,
@@ -661,6 +867,18 @@ impl<P: Platform> Kernel<P> {
             chain_manager,
             #[cfg(feature = "exochain")]
             tree_manager,
+            #[cfg(feature = "ecc")]
+            ecc_hnsw,
+            #[cfg(feature = "ecc")]
+            ecc_causal,
+            #[cfg(feature = "ecc")]
+            ecc_tick,
+            #[cfg(feature = "ecc")]
+            ecc_crossrefs,
+            #[cfg(feature = "ecc")]
+            ecc_impulses,
+            #[cfg(feature = "ecc")]
+            ecc_calibration,
         })
     }
 
@@ -853,6 +1071,42 @@ impl<P: Platform> Kernel<P> {
         self.tree_manager.as_ref()
     }
 
+    /// Get the ECC HNSW service (if ecc feature enabled).
+    #[cfg(feature = "ecc")]
+    pub fn ecc_hnsw(&self) -> Option<&Arc<crate::hnsw_service::HnswService>> {
+        self.ecc_hnsw.as_ref()
+    }
+
+    /// Get the ECC causal graph (if ecc feature enabled).
+    #[cfg(feature = "ecc")]
+    pub fn ecc_causal(&self) -> Option<&Arc<crate::causal::CausalGraph>> {
+        self.ecc_causal.as_ref()
+    }
+
+    /// Get the ECC cognitive tick (if ecc feature enabled).
+    #[cfg(feature = "ecc")]
+    pub fn ecc_tick(&self) -> Option<&Arc<crate::cognitive_tick::CognitiveTick>> {
+        self.ecc_tick.as_ref()
+    }
+
+    /// Get the ECC calibration results (if ecc feature enabled).
+    #[cfg(feature = "ecc")]
+    pub fn ecc_calibration(&self) -> Option<&crate::calibration::EccCalibration> {
+        self.ecc_calibration.as_ref()
+    }
+
+    /// Get the ECC cross-reference store (if ecc feature enabled).
+    #[cfg(feature = "ecc")]
+    pub fn ecc_crossrefs(&self) -> Option<&Arc<crate::crossref::CrossRefStore>> {
+        self.ecc_crossrefs.as_ref()
+    }
+
+    /// Get the ECC impulse queue (if ecc feature enabled).
+    #[cfg(feature = "ecc")]
+    pub fn ecc_impulses(&self) -> Option<&Arc<crate::impulse::ImpulseQueue>> {
+        self.ecc_impulses.as_ref()
+    }
+
     /// Take ownership of the AppContext for agent loop consumption.
     ///
     /// This is a one-shot operation: after calling this, the kernel
@@ -962,7 +1216,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(kernel.services().len(), 1); // cron service registered at boot
+        // cron + containers registered at boot; + hnsw + cognitive_tick with ecc feature
+        #[cfg(feature = "ecc")]
+        assert_eq!(kernel.services().len(), 4);
+        #[cfg(not(feature = "ecc"))]
+        assert_eq!(kernel.services().len(), 2);
     }
 
     #[tokio::test]

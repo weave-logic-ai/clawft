@@ -36,9 +36,101 @@ use rvf_crypto::{
     lineage_record_to_bytes, lineage_witness_entry, sign_segment, verify_segment,
     verify_witness_chain, WitnessEntry,
 };
-use rvf_types::{ExoChainHeader, EXOCHAIN_MAGIC, SEGMENT_HEADER_SIZE};
-use rvf_wire::writer::{calculate_padded_size, write_exochain_event};
-use rvf_wire::{decode_exochain_payload, read_segment, validate_segment};
+use rvf_types::SEGMENT_HEADER_SIZE;
+use rvf_wire::writer::{calculate_padded_size, write_segment};
+use rvf_wire::{read_segment, validate_segment};
+
+// ── ExoChain-specific RVF types ─────────────────────────────────────
+//
+// These were previously in rvf-types/rvf-wire but were removed upstream.
+// They are exochain-specific protocol types that belong with this module.
+
+/// Magic number for ExoChain headers inside RVF segment payloads.
+const EXOCHAIN_MAGIC: u32 = 0x4558_4F43; // "EXOC"
+
+/// 64-byte header embedded in the payload of an RVF segment for exochain events.
+///
+/// Layout (all fields little-endian):
+///   [0..4]   magic: u32        EXOCHAIN_MAGIC
+///   [4]      version: u8       protocol version (1)
+///   [5]      subtype: u8       0x40=Event, 0x41=Checkpoint, 0x42=Proof
+///   [6..8]   flags: u16        reserved
+///   [8..12]  chain_id: u32     chain identifier
+///   [12..16] _reserved: u32    must be 0
+///   [16..24] sequence: u64     event sequence number
+///   [24..32] timestamp_secs: u64  unix timestamp
+///   [32..64] prev_hash: [u8;32]  hash of previous event
+#[derive(Debug, Clone)]
+struct ExoChainHeader {
+    magic: u32,
+    version: u8,
+    subtype: u8,
+    flags: u16,
+    chain_id: u32,
+    _reserved: u32,
+    sequence: u64,
+    timestamp_secs: u64,
+    prev_hash: [u8; 32],
+}
+
+const EXOCHAIN_HEADER_SIZE: usize = 64;
+
+impl ExoChainHeader {
+    fn to_bytes(&self) -> [u8; EXOCHAIN_HEADER_SIZE] {
+        let mut buf = [0u8; EXOCHAIN_HEADER_SIZE];
+        buf[0..4].copy_from_slice(&self.magic.to_le_bytes());
+        buf[4] = self.version;
+        buf[5] = self.subtype;
+        buf[6..8].copy_from_slice(&self.flags.to_le_bytes());
+        buf[8..12].copy_from_slice(&self.chain_id.to_le_bytes());
+        buf[12..16].copy_from_slice(&self._reserved.to_le_bytes());
+        buf[16..24].copy_from_slice(&self.sequence.to_le_bytes());
+        buf[24..32].copy_from_slice(&self.timestamp_secs.to_le_bytes());
+        buf[32..64].copy_from_slice(&self.prev_hash);
+        buf
+    }
+
+    fn from_bytes(data: &[u8]) -> Option<Self> {
+        if data.len() < EXOCHAIN_HEADER_SIZE {
+            return None;
+        }
+        let magic = u32::from_le_bytes(data[0..4].try_into().ok()?);
+        if magic != EXOCHAIN_MAGIC {
+            return None;
+        }
+        Some(Self {
+            magic,
+            version: data[4],
+            subtype: data[5],
+            flags: u16::from_le_bytes(data[6..8].try_into().ok()?),
+            chain_id: u32::from_le_bytes(data[8..12].try_into().ok()?),
+            _reserved: u32::from_le_bytes(data[12..16].try_into().ok()?),
+            sequence: u64::from_le_bytes(data[16..24].try_into().ok()?),
+            timestamp_secs: u64::from_le_bytes(data[24..32].try_into().ok()?),
+            prev_hash: data[32..64].try_into().ok()?,
+        })
+    }
+}
+
+/// Write an RVF segment containing an ExoChainHeader + CBOR payload.
+fn write_exochain_event(header: &ExoChainHeader, cbor: &[u8], segment_id: u64) -> Vec<u8> {
+    let exo_bytes = header.to_bytes();
+    let mut payload = Vec::with_capacity(exo_bytes.len() + cbor.len());
+    payload.extend_from_slice(&exo_bytes);
+    payload.extend_from_slice(cbor);
+    write_segment(
+        0x10, // domain-specific segment type
+        &payload,
+        rvf_types::SegmentFlags::empty(),
+        segment_id,
+    )
+}
+
+/// Decode an RVF segment payload into ExoChainHeader + remaining CBOR bytes.
+fn decode_exochain_payload(payload: &[u8]) -> Option<(ExoChainHeader, &[u8])> {
+    let header = ExoChainHeader::from_bytes(payload)?;
+    Some((header, &payload[EXOCHAIN_HEADER_SIZE..]))
+}
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -1146,10 +1238,9 @@ impl ChainManager {
             // Tree events record "root_hash".
             if event.source == "tree"
                 && matches!(event.kind.as_str(), "tree.checkpoint" | "checkpoint")
+                && let Some(hash) = payload.get("root_hash").and_then(|v| v.as_str())
             {
-                if let Some(hash) = payload.get("root_hash").and_then(|v| v.as_str()) {
-                    return Some(hash.to_string());
-                }
+                return Some(hash.to_string());
             }
         }
         None
@@ -1240,6 +1331,57 @@ impl std::fmt::Debug for ChainManager {
             .field("sequence", &status.sequence)
             .field("event_count", &status.event_count)
             .finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// K4 G1: ChainAnchor trait — external anchoring abstraction (K2 C7)
+// ---------------------------------------------------------------------------
+
+/// Receipt returned by a successful [`ChainAnchor::anchor`] call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnchorReceipt {
+    /// The hash that was anchored.
+    pub hash: [u8; 32],
+    /// Backend-specific transaction/receipt ID.
+    pub tx_id: String,
+    /// Timestamp of the anchoring operation.
+    pub anchored_at: DateTime<Utc>,
+}
+
+/// Trait for anchoring chain state to an external ledger or store.
+///
+/// Implementations might target Bitcoin (via OpenTimestamps), Ethereum,
+/// a ruvector root chain, or simply a mock for testing.
+pub trait ChainAnchor: Send + Sync {
+    /// Anchor the given hash to the external backend.
+    fn anchor(&self, hash: &[u8; 32]) -> Result<AnchorReceipt, String>;
+
+    /// Verify a previously anchored hash against its receipt.
+    fn verify(&self, receipt: &AnchorReceipt) -> Result<bool, String>;
+
+    /// Return the backend name for display/logging.
+    fn backend_name(&self) -> &str;
+}
+
+/// A mock anchor that always succeeds (for testing).
+pub struct MockAnchor;
+
+impl ChainAnchor for MockAnchor {
+    fn anchor(&self, hash: &[u8; 32]) -> Result<AnchorReceipt, String> {
+        Ok(AnchorReceipt {
+            hash: *hash,
+            tx_id: format!("mock-{}", hex_hash(hash).chars().take(16).collect::<String>()),
+            anchored_at: Utc::now(),
+        })
+    }
+
+    fn verify(&self, _receipt: &AnchorReceipt) -> Result<bool, String> {
+        Ok(true)
+    }
+
+    fn backend_name(&self) -> &str {
+        "mock"
     }
 }
 
@@ -2018,5 +2160,30 @@ mod tests {
             Some(serde_json::json!({ "root_hash": "should_not_match" })),
         );
         assert!(cm.last_tree_root_hash().is_none());
+    }
+
+    // --- K4 G1: ChainAnchor tests ---
+
+    #[test]
+    fn mock_anchor_roundtrip() {
+        let anchor = MockAnchor;
+        let hash = [42u8; 32];
+        let receipt = anchor.anchor(&hash).unwrap();
+        assert_eq!(receipt.hash, hash);
+        assert!(receipt.tx_id.starts_with("mock-"));
+        assert!(anchor.verify(&receipt).unwrap());
+    }
+
+    #[test]
+    fn anchor_receipt_serde() {
+        let receipt = AnchorReceipt {
+            hash: [1u8; 32],
+            tx_id: "test-tx".into(),
+            anchored_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&receipt).unwrap();
+        let restored: AnchorReceipt = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.hash, receipt.hash);
+        assert_eq!(restored.tx_id, "test-tx");
     }
 }

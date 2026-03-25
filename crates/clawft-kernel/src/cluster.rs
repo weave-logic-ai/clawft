@@ -176,6 +176,31 @@ impl Default for ClusterConfig {
     }
 }
 
+// ── ECC capability advertisement (K3c) ────────────────────────────
+
+/// ECC capabilities advertised by a cluster node.
+///
+/// Populated during boot-time calibration and advertised to peers
+/// so they can route ECC-related requests to capable nodes.
+#[cfg(feature = "ecc")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeEccCapability {
+    /// Calibrated cognitive tick interval (milliseconds).
+    pub tick_interval_ms: u32,
+    /// 95th percentile compute time per tick (microseconds).
+    pub compute_p95_us: u32,
+    /// Headroom ratio (actual_compute / budget).
+    pub headroom_ratio: f32,
+    /// Number of vectors in the HNSW index.
+    pub hnsw_vector_count: u32,
+    /// Number of edges in the causal graph.
+    pub causal_edge_count: u32,
+    /// Whether this node can perform spectral analysis.
+    pub spectral_capable: bool,
+    /// Unix timestamp when calibration was performed.
+    pub calibrated_at: u64,
+}
+
 /// Cluster membership errors.
 #[derive(Debug, thiserror::Error)]
 pub enum ClusterError {

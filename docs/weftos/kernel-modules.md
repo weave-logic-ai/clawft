@@ -458,14 +458,69 @@ A2ARouter (prevents unauthorized messages) and handler-time in agent_loop
 
 ---
 
+## K3c: ECC Cognitive Substrate (feature: `ecc`)
+
+### causal.rs (~700 lines, 22 tests)
+
+**Purpose**: CausalGraph DAG with typed, weighted directed edges.
+
+**Key Types**: `CausalGraph`, `CausalEdge`, `CausalEdgeType`, `CausalNode`
+
+**Public API**: `add_node`, `get_node`, `remove_node`, `link`, `unlink`, `get_forward_edges`, `get_reverse_edges`, `traverse_forward`, `traverse_reverse`, `find_path`
+
+### cognitive_tick.rs (~550 lines, 20 tests)
+
+**Purpose**: Configurable cognitive loop with adaptive interval and drift detection.
+
+**Key Types**: `CognitiveTick`, `CognitiveTickConfig`, `CognitiveTickStats`
+
+**Public API**: `new`, `with_interval`, `stats`, `record_tick`, `is_running`, `set_running`
+
+**Implements**: `SystemService` (name: `ecc.cognitive_tick`)
+
+### crossref.rs (~425 lines, 12 tests)
+
+**Purpose**: Universal Node IDs (BLAKE3) and cross-structure references.
+
+**Key Types**: `UniversalNodeId`, `StructureTag`, `CrossRefType`, `CrossRef`, `CrossRefStore`
+
+**Public API**: `UniversalNodeId::new` (BLAKE3 hash), `CrossRefStore::insert`, `get_forward`, `get_reverse`, `get_all`, `by_type`
+
+### calibration.rs (~410 lines, 10 tests)
+
+**Purpose**: Boot-time ECC benchmarking — measures HNSW insert/search + causal edge creation + BLAKE3 hashing.
+
+**Key Types**: `EccCalibration`, `EccCalibrationConfig`
+
+**Public API**: `run_calibration(hnsw, causal, config) -> EccCalibration`
+
+### hnsw_service.rs (~280 lines, 11 tests)
+
+**Purpose**: Thread-safe kernel wrapper around clawft-core's HnswStore.
+
+**Key Types**: `HnswService`, `HnswServiceConfig`, `HnswSearchResult`
+
+**Public API**: `insert`, `search`, `len`, `clear`, `insert_count`, `search_count`
+
+**Implements**: `SystemService` (name: `ecc.hnsw`)
+
+### impulse.rs (~320 lines, 8 tests)
+
+**Purpose**: HLC-sorted ephemeral causal event queue for inter-structure communication.
+
+**Key Types**: `ImpulseQueue`, `Impulse`, `ImpulseType`
+
+**Public API**: `emit`, `drain_ready`, `pending_count`, `clear`
+
+---
+
 ## Test Coverage
 
-Total: 373+ kernel tests (363 at K2b completion + 7 GovernanceGate tests + additional).
-K2.1 targets 388+ tests.
+Total: 562 kernel tests (479 baseline + 83 ECC).
 
 Each module has a `#[cfg(test)] mod tests` block. Run with:
 ```bash
-scripts/build.sh test                           # full workspace
-cargo test -p clawft-kernel                      # kernel only (default features)
-cargo test -p clawft-kernel --features exochain  # kernel + exochain tests
+scripts/build.sh test                                      # full workspace
+cargo test -p clawft-kernel --features exochain             # kernel + exochain (479 tests)
+cargo test -p clawft-kernel --features exochain,ecc         # kernel + exochain + ecc (562 tests)
 ```

@@ -23,6 +23,8 @@ pub enum BootPhase {
     Agents,
     /// Network service discovery.
     Network,
+    /// ECC cognitive substrate initialization.
+    Ecc,
     /// Boot complete, ready for commands.
     Ready,
 }
@@ -37,6 +39,7 @@ impl BootPhase {
             BootPhase::ResourceTree => "TREE",
             BootPhase::Agents => "AGENTS",
             BootPhase::Network => "NETWORK",
+            BootPhase::Ecc => "ECC",
             BootPhase::Ready => "READY",
         }
     }

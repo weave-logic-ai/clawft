@@ -358,21 +358,21 @@ and Section 5 "Wire Format Migration".
 
 ### Exit Criteria
 
-- [ ] Direct PID-to-PID messaging works between two agents
+- [x] Direct PID-to-PID messaging works between two agents
 - [ ] Request-response pattern works with timeout
-- [ ] Topic subscription and publish deliver to all subscribers
-- [ ] IPC scope `None` blocks all messaging
-- [ ] IPC scope `Explicit([7])` allows messaging to PID 7 only
-- [ ] IPC scope `Topic(["build"])` allows topic-only communication
-- [ ] IPC scope `All` allows unrestricted messaging
-- [ ] Dead subscriber cleanup works on publish
-- [ ] `weft ipc send <pid> <msg>` CLI command works
-- [ ] `weft ipc topics` lists active topics
-- [ ] `weft ipc subscribe <pid> <topic>` creates subscription
+- [x] Topic subscription and publish deliver to all subscribers
+- [x] IPC scope `None` blocks all messaging
+- [x] IPC scope `Explicit([7])` allows messaging to PID 7 only
+- [x] IPC scope `Topic(["build"])` allows topic-only communication
+- [x] IPC scope `All` allows unrestricted messaging
+- [x] Dead subscriber cleanup works on publish
+- [x] `weft ipc send <pid> <msg>` CLI command works
+- [x] `weft ipc topics` lists active topics
+- [x] `weft ipc subscribe <pid> <topic>` creates subscription
 - [ ] DelegationEngine uses A2A protocol when kernel is active
 - [ ] MCP tools `ipc_send` and `ipc_subscribe` work
-- [ ] All workspace tests pass (`scripts/build.sh test`)
-- [ ] Clippy clean (`scripts/build.sh clippy`)
+- [x] All workspace tests pass (`scripts/build.sh test`)
+- [x] Clippy clean (`scripts/build.sh clippy`)
 
 ### Testing Verification
 

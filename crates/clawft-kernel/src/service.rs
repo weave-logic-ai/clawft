@@ -302,6 +302,55 @@ impl ServiceRegistry {
     pub fn is_empty(&self) -> bool {
         self.services.is_empty()
     }
+
+    /// Register a service contract and log it to the chain (K2 C3, K4 G2).
+    ///
+    /// A service contract is a versioned interface declaration that is
+    /// anchored in the ExoChain for immutability. Once a contract version
+    /// is registered, it cannot be changed — only superseded by a new version.
+    #[cfg(feature = "exochain")]
+    pub fn register_contract(
+        &self,
+        contract: &ServiceContract,
+        chain: &crate::chain::ChainManager,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        info!(
+            service = %contract.service_name,
+            version = %contract.version,
+            "registering service contract on chain"
+        );
+        chain.append(
+            &contract.service_name,
+            "service.contract.register",
+            Some(serde_json::json!({
+                "service": contract.service_name,
+                "version": contract.version,
+                "methods": contract.methods,
+                "hash": contract.content_hash,
+            })),
+        );
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// K4 G2: Service contracts (K2 C3)
+// ---------------------------------------------------------------------------
+
+/// A versioned service contract anchored in the ExoChain.
+///
+/// Contracts declare the interface a service exposes. Once registered
+/// on-chain, a contract version is immutable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceContract {
+    /// Name of the service this contract belongs to.
+    pub service_name: String,
+    /// Semantic version string (e.g. "1.0.0").
+    pub version: String,
+    /// Method names exposed by this contract version.
+    pub methods: Vec<String>,
+    /// SHAKE-256 hash of the canonical contract content.
+    pub content_hash: String,
 }
 
 impl Default for ServiceRegistry {
@@ -633,5 +682,62 @@ mod tests {
 
         assert!(registry.get("both").is_some());
         assert!(registry.get_entry("both").is_some());
+    }
+
+    // --- K4 G2: Service contract tests ---
+
+    #[test]
+    fn service_contract_serde() {
+        let contract = ServiceContract {
+            service_name: "auth".into(),
+            version: "1.0.0".into(),
+            methods: vec!["login".into(), "logout".into()],
+            content_hash: "abc123".into(),
+        };
+        let json = serde_json::to_string(&contract).unwrap();
+        let restored: ServiceContract = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.service_name, "auth");
+        assert_eq!(restored.methods.len(), 2);
+    }
+
+    #[test]
+    #[cfg(feature = "exochain")]
+    fn contract_on_chain() {
+        let registry = ServiceRegistry::new();
+        let chain = crate::chain::ChainManager::new(0, 1000);
+        let contract = ServiceContract {
+            service_name: "auth".into(),
+            version: "1.0.0".into(),
+            methods: vec!["login".into(), "logout".into()],
+            content_hash: "abc123".into(),
+        };
+        registry.register_contract(&contract, &chain).unwrap();
+        // Chain should have genesis + 1 contract event
+        assert_eq!(chain.len(), 2);
+        let tail = chain.tail(1);
+        assert_eq!(tail[0].kind, "service.contract.register");
+    }
+
+    #[test]
+    #[cfg(feature = "exochain")]
+    fn contract_version_immutability() {
+        let chain = crate::chain::ChainManager::new(0, 1000);
+        let registry = ServiceRegistry::new();
+        let v1 = ServiceContract {
+            service_name: "auth".into(),
+            version: "1.0.0".into(),
+            methods: vec!["login".into()],
+            content_hash: "v1hash".into(),
+        };
+        let v2 = ServiceContract {
+            service_name: "auth".into(),
+            version: "2.0.0".into(),
+            methods: vec!["login".into(), "refresh".into()],
+            content_hash: "v2hash".into(),
+        };
+        registry.register_contract(&v1, &chain).unwrap();
+        registry.register_contract(&v2, &chain).unwrap();
+        // Both versions recorded — chain is append-only so v1 cannot be mutated
+        assert_eq!(chain.len(), 3); // genesis + v1 + v2
     }
 }

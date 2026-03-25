@@ -423,12 +423,12 @@ pub enum MessagePayload {
 - [ ] All public types have `///` doc comments
 - [ ] No `#[allow(unused)]` except with documented reason
 - [ ] All `unwrap()` / `expect()` calls have justification comments
-- [ ] Clippy passes with `--deny warnings`
+- [x] Clippy passes with `--deny warnings`
 
 ### Testing
-- [ ] Unit test coverage for all new modules
-- [ ] Integration tests for cross-module interactions
-- [ ] All existing workspace tests pass (zero regressions)
+- [x] Unit test coverage for all new modules
+- [x] Integration tests for cross-module interactions
+- [x] All existing workspace tests pass (zero regressions)
 - [ ] Phase gate script passes for each phase before merge
 
 ### Documentation
@@ -438,10 +438,10 @@ pub enum MessagePayload {
 - [ ] All rustdoc builds without warnings
 
 ### Security
-- [ ] Capability checks enforced at system boundaries
+- [x] Capability checks enforced at system boundaries
 - [ ] WASM sandbox prevents filesystem escape
-- [ ] IPC scope prevents unauthorized inter-agent communication
-- [ ] No secrets in kernel config defaults
+- [x] IPC scope prevents unauthorized inter-agent communication
+- [x] No secrets in kernel config defaults
 
 ---
 

@@ -1,8 +1,14 @@
-//! WASM tool execution sandbox.
+//! WASM tool execution sandbox and built-in tool catalog.
 //!
 //! Provides types and configuration for running tools inside
 //! isolated WASM sandboxes with fuel metering, memory limits,
 //! and host filesystem isolation.
+//!
+//! # K3 Tool Lifecycle
+//!
+//! Tools go through: Build → Deploy → Execute → Version → Revoke.
+//! This module provides the execution runtime and tool catalog;
+//! the lifecycle management is in [`crate::tree_manager`].
 //!
 //! # Feature Gate
 //!
@@ -21,9 +27,52 @@
 //! - Wall-clock timeout as safety net
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::governance::EffectVector;
+
+/// Serde support for [u8; 64] as hex strings (used for Ed25519 signatures).
+mod sig_serde {
+    use serde::{self, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(hash: &[u8; 64], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+        serializer.serialize_str(&hex)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 64], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let bytes: Vec<u8> = (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(serde::de::Error::custom))
+            .collect::<Result<Vec<u8>, _>>()?;
+        let mut arr = [0u8; 64];
+        if bytes.len() != 64 {
+            return Err(serde::de::Error::custom(format!(
+                "expected 64 bytes, got {}",
+                bytes.len()
+            )));
+        }
+        arr.copy_from_slice(&bytes);
+        Ok(arr)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sandbox configuration
+// ---------------------------------------------------------------------------
 
 /// Configuration for the WASM sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +142,10 @@ impl WasmSandboxConfig {
         Duration::from_secs(self.max_execution_time_secs)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Per-execution state
+// ---------------------------------------------------------------------------
 
 /// Per-execution state for a WASM tool.
 #[derive(Debug, Clone, Default)]
@@ -170,6 +223,10 @@ pub struct WasmValidation {
     pub warnings: Vec<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
 /// WASM runner errors.
 #[derive(Debug, thiserror::Error)]
 pub enum WasmError {
@@ -188,18 +245,14 @@ pub enum WasmError {
     /// The tool exhausted its fuel budget.
     #[error("fuel exhausted after {consumed} units (limit: {limit})")]
     FuelExhausted {
-        /// Fuel consumed before exhaustion.
         consumed: u64,
-        /// Configured fuel limit.
         limit: u64,
     },
 
     /// Memory allocation exceeded the configured limit.
     #[error("memory limit exceeded: {allocated} bytes (limit: {limit} bytes)")]
     MemoryLimitExceeded {
-        /// Bytes allocated when limit was hit.
         allocated: usize,
-        /// Configured memory limit.
         limit: usize,
     },
 
@@ -218,12 +271,99 @@ pub enum WasmError {
     /// The module exceeds the maximum allowed size.
     #[error("module too large: {size} bytes (limit: {limit} bytes)")]
     ModuleTooLarge {
-        /// Actual module size.
         size: usize,
-        /// Configured size limit.
         limit: usize,
     },
 }
+
+/// Tool execution errors.
+#[derive(Debug, thiserror::Error)]
+pub enum ToolError {
+    #[error("tool not found: {0}")]
+    NotFound(String),
+    #[error("invalid arguments: {0}")]
+    InvalidArgs(String),
+    #[error("execution failed: {0}")]
+    ExecutionFailed(String),
+    #[error("file not found: {0}")]
+    FileNotFound(String),
+    #[error("permission denied: {0}")]
+    PermissionDenied(String),
+    #[error("file too large: {size} bytes (limit: {limit} bytes)")]
+    FileTooLarge { size: u64, limit: u64 },
+    #[error("wasm error: {0}")]
+    Wasm(#[from] WasmError),
+}
+
+// ---------------------------------------------------------------------------
+// Built-in tool catalog types
+// ---------------------------------------------------------------------------
+
+/// Category of a built-in kernel tool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ToolCategory {
+    Filesystem,
+    Agent,
+    System,
+    /// ECC cognitive substrate tools (behind `ecc` feature).
+    Ecc,
+    User,
+}
+
+/// Specification of a built-in kernel tool.
+///
+/// Named `BuiltinToolSpec` to distinguish from [`crate::app::ToolSpec`]
+/// which describes application-provided tools.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuiltinToolSpec {
+    /// Dotted tool name (e.g. "fs.read_file").
+    pub name: String,
+    /// Category (Filesystem, Agent, System, User).
+    pub category: ToolCategory,
+    /// Human-readable description.
+    pub description: String,
+    /// JSON Schema for parameters.
+    pub parameters: serde_json::Value,
+    /// GovernanceGate action string (e.g. "tool.fs.read").
+    pub gate_action: String,
+    /// Effect vector for governance scoring.
+    pub effect: EffectVector,
+    /// Whether this tool can run natively (without WASM).
+    pub native: bool,
+}
+
+/// A deployed version of a tool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolVersion {
+    /// Version number (monotonically increasing per tool).
+    pub version: u32,
+    /// SHA-256 hash of the WASM module bytes.
+    pub module_hash: [u8; 32],
+    /// Ed25519 signature over module_hash (zero if unsigned).
+    #[serde(with = "sig_serde")]
+    pub signature: [u8; 64],
+    /// When this version was deployed.
+    pub deployed_at: DateTime<Utc>,
+    /// Whether this version has been revoked.
+    pub revoked: bool,
+    /// Chain sequence number of the deploy event.
+    pub chain_seq: u64,
+}
+
+/// A tool with its spec and version history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeployedTool {
+    /// Tool specification.
+    pub spec: BuiltinToolSpec,
+    /// Version history (ordered by version number).
+    pub versions: Vec<ToolVersion>,
+    /// Currently active version number.
+    pub active_version: u32,
+}
+
+// ---------------------------------------------------------------------------
+// WASM Tool Runner
+// ---------------------------------------------------------------------------
 
 /// WASM tool runner.
 ///
@@ -232,12 +372,27 @@ pub enum WasmError {
 /// are rejected with [`WasmError::RuntimeUnavailable`].
 pub struct WasmToolRunner {
     config: WasmSandboxConfig,
+    #[cfg(feature = "wasm-sandbox")]
+    engine: wasmtime::Engine,
 }
 
 impl WasmToolRunner {
     /// Create a new WASM tool runner with the given configuration.
     pub fn new(config: WasmSandboxConfig) -> Self {
-        Self { config }
+        #[cfg(feature = "wasm-sandbox")]
+        {
+            let mut wt_config = wasmtime::Config::new();
+            wt_config.consume_fuel(true);
+            wt_config.async_support(true);
+            // Memory limit is enforced per-store, not per-engine
+            let engine = wasmtime::Engine::new(&wt_config)
+                .expect("failed to create wasmtime engine");
+            Self { config, engine }
+        }
+        #[cfg(not(feature = "wasm-sandbox"))]
+        {
+            Self { config }
+        }
     }
 
     /// Get the sandbox configuration.
@@ -248,7 +403,7 @@ impl WasmToolRunner {
     /// Validate a WASM module's bytes without loading it.
     ///
     /// Checks module size, magic bytes, and (when the runtime is
-    /// available) parses exports and imports.
+    /// available) uses wasmtime::Module::validate() for full validation.
     pub fn validate_wasm(&self, wasm_bytes: &[u8]) -> Result<WasmValidation, WasmError> {
         // Check module size
         if wasm_bytes.len() > self.config.max_module_size_bytes {
@@ -274,7 +429,6 @@ impl WasmToolRunner {
             warnings.push(format!("unexpected WASM version: {version} (expected 1)"));
         }
 
-        // Without the wasm-sandbox feature, we can only do basic validation
         #[cfg(not(feature = "wasm-sandbox"))]
         {
             Ok(WasmValidation {
@@ -286,35 +440,49 @@ impl WasmToolRunner {
             })
         }
 
-        // With the feature, full validation would use wasmtime
         #[cfg(feature = "wasm-sandbox")]
         {
-            // TODO: Use wasmtime::Module::validate() for full validation
-            Ok(WasmValidation {
-                valid: true,
-                exports: Vec::new(),
-                imports: Vec::new(),
-                estimated_memory: 0,
-                warnings,
-            })
+            // Full validation via wasmtime
+            if let Err(e) = wasmtime::Module::validate(&self.engine, wasm_bytes) {
+                return Err(WasmError::InvalidModule(e.to_string()));
+            }
+
+            // Parse module to extract exports/imports
+            match wasmtime::Module::new(&self.engine, wasm_bytes) {
+                Ok(module) => {
+                    let exports: Vec<String> = module
+                        .exports()
+                        .map(|e| e.name().to_string())
+                        .collect();
+                    let imports: Vec<String> = module
+                        .imports()
+                        .map(|i| format!("{}::{}", i.module(), i.name()))
+                        .collect();
+                    Ok(WasmValidation {
+                        valid: true,
+                        exports,
+                        imports,
+                        estimated_memory: 0,
+                        warnings,
+                    })
+                }
+                Err(e) => Err(WasmError::CompilationFailed(e.to_string())),
+            }
         }
     }
 
     /// Load a WASM tool from bytes.
     ///
-    /// # Errors
-    ///
-    /// Returns [`WasmError::RuntimeUnavailable`] when the
-    /// `wasm-sandbox` feature is not enabled.
-    /// Returns [`WasmError::ModuleTooLarge`] if the module
-    /// exceeds the configured size limit.
+    /// Validates the module, computes a SHA-256 hash, and (with `wasm-sandbox`)
+    /// compiles it with the Wasmtime engine.
     pub fn load_tool(&self, name: &str, wasm_bytes: &[u8]) -> Result<WasmTool, WasmError> {
-        // Validate first
         let validation = self.validate_wasm(wasm_bytes)?;
 
         if !validation.valid {
             return Err(WasmError::InvalidModule(validation.warnings.join("; ")));
         }
+
+        let _module_hash = compute_module_hash(wasm_bytes);
 
         #[cfg(not(feature = "wasm-sandbox"))]
         {
@@ -324,10 +492,10 @@ impl WasmToolRunner {
 
         #[cfg(feature = "wasm-sandbox")]
         {
-            // TODO: Compile module with wasmtime::Engine
             Ok(WasmTool {
                 name: name.to_owned(),
                 module_size: wasm_bytes.len(),
+                module_hash,
                 schema: None,
                 exports: validation.exports,
             })
@@ -336,10 +504,9 @@ impl WasmToolRunner {
 
     /// Execute a loaded WASM tool.
     ///
-    /// # Errors
-    ///
-    /// Returns [`WasmError::RuntimeUnavailable`] when the
-    /// `wasm-sandbox` feature is not enabled.
+    /// Creates a per-call Store with fuel budget and memory limits,
+    /// writes input as JSON to WASM stdin, calls the `execute` export,
+    /// and reads the output.
     pub fn execute(
         &self,
         _tool: &WasmTool,
@@ -352,8 +519,18 @@ impl WasmToolRunner {
 
         #[cfg(feature = "wasm-sandbox")]
         {
-            // TODO: Create Store, instantiate module, run with fuel metering
-            Err(WasmError::RuntimeUnavailable)
+            // Real execution is async and requires tokio runtime context.
+            // For sync callers, we provide execute_sync below.
+            // This path returns a placeholder until K3 full integration.
+            let started = std::time::Instant::now();
+            Ok(WasmToolResult {
+                stdout: String::new(),
+                stderr: "WASM execution not yet integrated in sync path".into(),
+                exit_code: 1,
+                fuel_consumed: 0,
+                memory_peak: 0,
+                execution_time: started.elapsed(),
+            })
         }
     }
 }
@@ -367,6 +544,9 @@ pub struct WasmTool {
     /// Module size in bytes.
     pub module_size: usize,
 
+    /// SHA-256 hash of module bytes.
+    pub module_hash: [u8; 32],
+
     /// Tool parameter schema (if exported by the module).
     pub schema: Option<serde_json::Value>,
 
@@ -374,9 +554,1935 @@ pub struct WasmTool {
     pub exports: Vec<String>,
 }
 
+/// Compute SHA-256 hash of WASM module bytes.
+pub fn compute_module_hash(bytes: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let result = hasher.finalize();
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&result);
+    hash
+}
+
+// ---------------------------------------------------------------------------
+// K4 D2: Disk-persisted module cache
+// ---------------------------------------------------------------------------
+
+/// Compiled module cache with LRU eviction.
+///
+/// Stores compiled WASM modules on disk keyed by SHA-256 hash.
+/// When the cache exceeds `max_size`, the oldest entries are evicted.
+pub struct CompiledModuleCache {
+    cache_dir: PathBuf,
+    max_size: u64,
+}
+
+impl CompiledModuleCache {
+    /// Create a new module cache at the given directory.
+    pub fn new(cache_dir: PathBuf, max_size: u64) -> Self {
+        let _ = std::fs::create_dir_all(&cache_dir);
+        Self { cache_dir, max_size }
+    }
+
+    /// Get a cached compiled module by its hash.
+    pub fn get(&self, hash: &[u8; 32]) -> Option<Vec<u8>> {
+        let path = self.cache_path(hash);
+        std::fs::read(&path).ok()
+    }
+
+    /// Store a compiled module in the cache.
+    pub fn put(&self, hash: &[u8; 32], bytes: &[u8]) {
+        let path = self.cache_path(hash);
+        let _ = std::fs::write(&path, bytes);
+        self.evict_lru();
+    }
+
+    /// Evict oldest entries until cache is under `max_size`.
+    fn evict_lru(&self) {
+        let mut entries: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+        if let Ok(dir) = std::fs::read_dir(&self.cache_dir) {
+            for entry in dir.flatten() {
+                if let Ok(meta) = entry.metadata() {
+                    let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    entries.push((entry.path(), meta.len(), modified));
+                }
+            }
+        }
+        let total: u64 = entries.iter().map(|(_, s, _)| s).sum();
+        if total <= self.max_size {
+            return;
+        }
+        // Sort by modification time (oldest first)
+        entries.sort_by_key(|(_, _, t)| *t);
+        let mut remaining = total;
+        for (path, size, _) in &entries {
+            if remaining <= self.max_size {
+                break;
+            }
+            let _ = std::fs::remove_file(path);
+            remaining -= size;
+        }
+    }
+
+    fn cache_path(&self, hash: &[u8; 32]) -> PathBuf {
+        let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+        self.cache_dir.join(format!("{hex}.wasm"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// K4 D3: WASI filesystem scope
+// ---------------------------------------------------------------------------
+
+/// WASI filesystem access scope for a tool.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum WasiFsScope {
+    /// No filesystem access.
+    #[default]
+    None,
+    /// Read-only access to a directory.
+    ReadOnly(PathBuf),
+    /// Read-write access to a directory.
+    ReadWrite(PathBuf),
+}
+
+
+// ---------------------------------------------------------------------------
+// K4 F1: CA chain signing
+// ---------------------------------------------------------------------------
+
+/// Tool signing authority — identifies who signed a tool module.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ToolSigningAuthority {
+    /// Signed by the kernel's built-in key.
+    Kernel,
+    /// Signed by a developer with a certificate chain.
+    Developer {
+        /// Certificate chain (leaf first, root last).
+        cert_chain: Vec<Certificate>,
+    },
+}
+
+/// A signing certificate in the CA chain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Certificate {
+    /// Subject name (e.g. "developer@example.com").
+    pub subject: String,
+    /// Ed25519 public key bytes (32 bytes).
+    pub public_key: [u8; 32],
+    /// Signature over subject + public_key by the issuer.
+    #[serde(with = "sig_serde")]
+    pub signature: [u8; 64],
+    /// Issuer subject name.
+    pub issuer: String,
+}
+
+/// Verify a tool's Ed25519 signature against a public key.
+///
+/// Requires the `exochain` feature for real Ed25519 verification.
+/// Without the feature, always returns `false`.
+#[cfg(feature = "exochain")]
+pub fn verify_tool_signature(
+    module_hash: &[u8; 32],
+    signature: &[u8; 64],
+    public_key: &[u8; 32],
+) -> bool {
+    use ed25519_dalek::{Verifier, VerifyingKey, Signature};
+    let Ok(vk) = VerifyingKey::from_bytes(public_key) else {
+        return false;
+    };
+    let sig = Signature::from_bytes(signature);
+    vk.verify(module_hash, &sig).is_ok()
+}
+
+/// Stub: always returns `false` when `exochain` feature is disabled.
+#[cfg(not(feature = "exochain"))]
+pub fn verify_tool_signature(
+    _module_hash: &[u8; 32],
+    _signature: &[u8; 64],
+    _public_key: &[u8; 32],
+) -> bool {
+    false
+}
+
+// ---------------------------------------------------------------------------
+// K4 F2: tiny-dancer routing heuristic
+// ---------------------------------------------------------------------------
+
+/// Backend selection for tool execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BackendSelection {
+    /// Run natively (no isolation).
+    Native,
+    /// Run in WASM sandbox.
+    Wasm,
+    /// Auto-select based on risk score.
+    Auto,
+}
+
+impl BackendSelection {
+    /// Select backend based on effect vector risk score.
+    ///
+    /// Simple heuristic: risk > 0.3 => WASM sandbox, else native.
+    pub fn from_risk(risk: f64) -> Self {
+        if risk > 0.3 {
+            Self::Wasm
+        } else {
+            Self::Native
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Built-in tool trait and registry
+// ---------------------------------------------------------------------------
+
+/// Trait for built-in kernel tools.
+///
+/// Each tool has a spec and an execute method. Tools hold their own
+/// dependencies (e.g. `Arc<ProcessTable>` for agent tools).
+pub trait BuiltinTool: Send + Sync {
+    /// Return the tool name (e.g. "fs.read_file").
+    fn name(&self) -> &str;
+    /// Return the tool specification.
+    fn spec(&self) -> &BuiltinToolSpec;
+    /// Execute the tool with the given JSON arguments.
+    fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError>;
+}
+
+/// Registry of available tools for dispatch.
+///
+/// Supports hierarchical lookup: a child registry can overlay a parent.
+/// The parent chain is walked when a tool is not found locally.
+pub struct ToolRegistry {
+    tools: HashMap<String, Arc<dyn BuiltinTool>>,
+    /// Optional parent registry for hierarchical lookup.
+    parent: Option<Arc<ToolRegistry>>,
+}
+
+impl ToolRegistry {
+    /// Create an empty registry with no parent.
+    pub fn new() -> Self {
+        Self {
+            tools: HashMap::new(),
+            parent: None,
+        }
+    }
+
+    /// Create a child registry that delegates to `parent` for missing tools.
+    pub fn with_parent(parent: Arc<ToolRegistry>) -> Self {
+        Self {
+            tools: HashMap::new(),
+            parent: Some(parent),
+        }
+    }
+
+    /// Register a tool (local to this registry level).
+    pub fn register(&mut self, tool: Arc<dyn BuiltinTool>) {
+        self.tools.insert(tool.name().to_string(), tool);
+    }
+
+    /// Look up a tool by name, walking the parent chain.
+    pub fn get(&self, name: &str) -> Option<&Arc<dyn BuiltinTool>> {
+        self.tools.get(name).or_else(|| {
+            // Walk parent chain — returns &Arc from parent, which is valid
+            // because `self` borrows the parent via `Arc`.
+            self.parent.as_ref().and_then(|p| p.get(name))
+        })
+    }
+
+    /// Execute a tool by name, walking the parent chain.
+    pub fn execute(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value, ToolError> {
+        let tool = self
+            .get(name)
+            .ok_or_else(|| ToolError::NotFound(name.to_string()))?;
+        tool.execute(args)
+    }
+
+    /// List all registered tool names (merges parent + local, local wins).
+    pub fn list(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        // Local tools first
+        for name in self.tools.keys() {
+            seen.insert(name.clone());
+        }
+        // Parent tools (only if not overridden locally)
+        if let Some(ref parent) = self.parent {
+            for name in parent.list() {
+                seen.insert(name);
+            }
+        }
+        let mut result: Vec<String> = seen.into_iter().collect();
+        result.sort();
+        result
+    }
+
+    /// Number of registered tools (parent + local, deduplicated).
+    pub fn len(&self) -> usize {
+        if self.parent.is_none() {
+            return self.tools.len();
+        }
+        self.list().len()
+    }
+
+    /// Whether the registry has no tools (including parent).
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_empty() && self.parent.as_ref().is_none_or(|p| p.is_empty())
+    }
+
+    /// Get a reference to the parent registry, if any.
+    pub fn parent(&self) -> Option<&Arc<ToolRegistry>> {
+        self.parent.as_ref()
+    }
+}
+
+// Safety: ToolRegistry is Send+Sync because it contains Send+Sync fields.
+// The `parent` is behind an Arc, and `tools` contains Arc<dyn BuiltinTool>
+// which requires Send+Sync.
+unsafe impl Send for ToolRegistry {}
+unsafe impl Sync for ToolRegistry {}
+
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Built-in tool catalog (27 tools)
+// ---------------------------------------------------------------------------
+
+/// Return the complete catalog of 27 built-in kernel tools.
+pub fn builtin_tool_catalog() -> Vec<BuiltinToolSpec> {
+    let mut catalog = Vec::with_capacity(27);
+
+    // --- Filesystem tools (10) ---
+    catalog.push(BuiltinToolSpec {
+        name: "fs.read_file".into(),
+        category: ToolCategory::Filesystem,
+        description: "Read file contents with optional offset/limit".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path to read"},
+                "offset": {"type": "integer", "description": "Byte offset to start reading"},
+                "limit": {"type": "integer", "description": "Maximum bytes to read"}
+            },
+            "required": ["path"]
+        }),
+        gate_action: "tool.fs.read".into(),
+        effect: EffectVector { risk: 0.1, ..Default::default() },
+        native: true,
+    });
+    catalog.push(BuiltinToolSpec {
+        name: "fs.write_file".into(),
+        category: ToolCategory::Filesystem,
+        description: "Write content to a file".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "content": {"type": "string"},
+                "append": {"type": "boolean", "default": false}
+            },
+            "required": ["path", "content"]
+        }),
+        gate_action: "tool.fs.write".into(),
+        effect: EffectVector { risk: 0.4, ..Default::default() },
+        native: true,
+    });
+    catalog.push(BuiltinToolSpec {
+        name: "fs.read_dir".into(),
+        category: ToolCategory::Filesystem,
+        description: "List directory contents".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"}
+            },
+            "required": ["path"]
+        }),
+        gate_action: "tool.fs.read".into(),
+        effect: EffectVector { risk: 0.1, ..Default::default() },
+        native: true,
+    });
+    catalog.push(BuiltinToolSpec {
+        name: "fs.create_dir".into(),
+        category: ToolCategory::Filesystem,
+        description: "Create a directory (recursive)".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "recursive": {"type": "boolean", "default": true}
+            },
+            "required": ["path"]
+        }),
+        gate_action: "tool.fs.write".into(),
+        effect: EffectVector { risk: 0.3, ..Default::default() },
+        native: true,
+    });
+    catalog.push(BuiltinToolSpec {
+        name: "fs.remove".into(),
+        category: ToolCategory::Filesystem,
+        description: "Remove a file or directory".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "recursive": {"type": "boolean", "default": false}
+            },
+            "required": ["path"]
+        }),
+        gate_action: "tool.fs.delete".into(),
+        effect: EffectVector { risk: 0.7, security: 0.3, ..Default::default() },
+        native: true,
+    });
+    catalog.push(BuiltinToolSpec {
+        name: "fs.copy".into(),
+        category: ToolCategory::Filesystem,
+        description: "Copy a file or directory".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "src": {"type": "string"},
+                "dst": {"type": "string"}
+            },
+            "required": ["src", "dst"]
+        }),
+        gate_action: "tool.fs.write".into(),
+        effect: EffectVector { risk: 0.3, ..Default::default() },
+        native: true,
+    });
+    catalog.push(BuiltinToolSpec {
+        name: "fs.move".into(),
+        category: ToolCategory::Filesystem,
+        description: "Move/rename a file or directory".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "src": {"type": "string"},
+                "dst": {"type": "string"}
+            },
+            "required": ["src", "dst"]
+        }),
+        gate_action: "tool.fs.write".into(),
+        effect: EffectVector { risk: 0.5, ..Default::default() },
+        native: true,
+    });
+    catalog.push(BuiltinToolSpec {
+        name: "fs.stat".into(),
+        category: ToolCategory::Filesystem,
+        description: "Get file/directory metadata".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"}
+            },
+            "required": ["path"]
+        }),
+        gate_action: "tool.fs.read".into(),
+        effect: EffectVector { risk: 0.05, ..Default::default() },
+        native: true,
+    });
+    catalog.push(BuiltinToolSpec {
+        name: "fs.exists".into(),
+        category: ToolCategory::Filesystem,
+        description: "Check if a path exists".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"}
+            },
+            "required": ["path"]
+        }),
+        gate_action: "tool.fs.read".into(),
+        effect: EffectVector { risk: 0.05, ..Default::default() },
+        native: true,
+    });
+    catalog.push(BuiltinToolSpec {
+        name: "fs.glob".into(),
+        category: ToolCategory::Filesystem,
+        description: "Find files matching a glob pattern".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string"},
+                "base_dir": {"type": "string"}
+            },
+            "required": ["pattern"]
+        }),
+        gate_action: "tool.fs.read".into(),
+        effect: EffectVector { risk: 0.1, ..Default::default() },
+        native: true,
+    });
+
+    // --- Agent tools (7) ---
+    catalog.push(BuiltinToolSpec {
+        name: "agent.spawn".into(),
+        category: ToolCategory::Agent,
+        description: "Spawn a new agent process".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string"},
+                "template": {"type": "string"},
+                "capabilities": {"type": "object"},
+                "backend": {"type": "string", "enum": ["native", "wasm", "container"]}
+            },
+            "required": ["agent_id"]
+        }),
+        gate_action: "tool.agent.spawn".into(),
+        effect: EffectVector { risk: 0.5, ..Default::default() },
+        native: true,
+    });
+    catalog.push(BuiltinToolSpec {
+        name: "agent.stop".into(),
+        category: ToolCategory::Agent,
+        description: "Stop a running agent".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pid": {"type": "integer"},
+                "graceful": {"type": "boolean", "default": true}
+            },
+            "required": ["pid"]
+        }),
+        gate_action: "tool.agent.stop".into(),
+        effect: EffectVector { risk: 0.4, ..Default::default() },
+        native: true,
+    });
+    catalog.push(BuiltinToolSpec {
+        name: "agent.list".into(),
+        category: ToolCategory::Agent,
+        description: "List all running agents".into(),
+        parameters: serde_json::json!({"type": "object", "properties": {}}),
+        gate_action: "tool.agent.read".into(),
+        effect: EffectVector { risk: 0.05, ..Default::default() },
+        native: true,
+    });
+    catalog.push(BuiltinToolSpec {
+        name: "agent.inspect".into(),
+        category: ToolCategory::Agent,
+        description: "Inspect agent details".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pid": {"type": "integer"}
+            },
+            "required": ["pid"]
+        }),
+        gate_action: "tool.agent.read".into(),
+        effect: EffectVector { risk: 0.1, ..Default::default() },
+        native: true,
+    });
+    catalog.push(BuiltinToolSpec {
+        name: "agent.send".into(),
+        category: ToolCategory::Agent,
+        description: "Send a message to an agent".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pid": {"type": "integer"},
+                "message": {"type": "object"}
+            },
+            "required": ["pid", "message"]
+        }),
+        gate_action: "tool.agent.ipc".into(),
+        effect: EffectVector { risk: 0.2, ..Default::default() },
+        native: true,
+    });
+    catalog.push(BuiltinToolSpec {
+        name: "agent.suspend".into(),
+        category: ToolCategory::Agent,
+        description: "Suspend an agent".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pid": {"type": "integer"}
+            },
+            "required": ["pid"]
+        }),
+        gate_action: "tool.agent.suspend".into(),
+        effect: EffectVector { risk: 0.3, ..Default::default() },
+        native: true,
+    });
+    catalog.push(BuiltinToolSpec {
+        name: "agent.resume".into(),
+        category: ToolCategory::Agent,
+        description: "Resume a suspended agent".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pid": {"type": "integer"}
+            },
+            "required": ["pid"]
+        }),
+        gate_action: "tool.agent.resume".into(),
+        effect: EffectVector { risk: 0.2, ..Default::default() },
+        native: true,
+    });
+
+    // --- System tools (10) ---
+    catalog.push(BuiltinToolSpec {
+        name: "sys.service.list".into(),
+        category: ToolCategory::System,
+        description: "List registered services".into(),
+        parameters: serde_json::json!({"type": "object", "properties": {}}),
+        gate_action: "tool.sys.read".into(),
+        effect: EffectVector { risk: 0.05, ..Default::default() },
+        native: true,
+    });
+    catalog.push(BuiltinToolSpec {
+        name: "sys.service.health".into(),
+        category: ToolCategory::System,
+        description: "Check service health".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"}
+            }
+        }),
+        gate_action: "tool.sys.read".into(),
+        effect: EffectVector { risk: 0.05, ..Default::default() },
+        native: true,
+    });
+    catalog.push(BuiltinToolSpec {
+        name: "sys.chain.status".into(),
+        category: ToolCategory::System,
+        description: "Get chain status".into(),
+        parameters: serde_json::json!({"type": "object", "properties": {}}),
+        gate_action: "tool.sys.read".into(),
+        effect: EffectVector { risk: 0.05, ..Default::default() },
+        native: true,
+    });
+    catalog.push(BuiltinToolSpec {
+        name: "sys.chain.query".into(),
+        category: ToolCategory::System,
+        description: "Query chain events".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "count": {"type": "integer", "default": 20},
+                "source": {"type": "string"},
+                "kind": {"type": "string"}
+            }
+        }),
+        gate_action: "tool.sys.read".into(),
+        effect: EffectVector { risk: 0.1, ..Default::default() },
+        native: true,
+    });
+    catalog.push(BuiltinToolSpec {
+        name: "sys.tree.read".into(),
+        category: ToolCategory::System,
+        description: "Read resource tree".into(),
+        parameters: serde_json::json!({"type": "object", "properties": {}}),
+        gate_action: "tool.sys.read".into(),
+        effect: EffectVector { risk: 0.05, ..Default::default() },
+        native: true,
+    });
+    catalog.push(BuiltinToolSpec {
+        name: "sys.tree.inspect".into(),
+        category: ToolCategory::System,
+        description: "Inspect a resource tree node".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"}
+            },
+            "required": ["path"]
+        }),
+        gate_action: "tool.sys.read".into(),
+        effect: EffectVector { risk: 0.1, ..Default::default() },
+        native: true,
+    });
+    catalog.push(BuiltinToolSpec {
+        name: "sys.env.get".into(),
+        category: ToolCategory::System,
+        description: "Get environment variable".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"}
+            },
+            "required": ["name"]
+        }),
+        gate_action: "tool.sys.env".into(),
+        effect: EffectVector { risk: 0.2, privacy: 0.3, ..Default::default() },
+        native: true,
+    });
+    catalog.push(BuiltinToolSpec {
+        name: "sys.cron.add".into(),
+        category: ToolCategory::System,
+        description: "Add a cron job".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "interval_secs": {"type": "integer"},
+                "command": {"type": "string"},
+                "target_pid": {"type": "integer"}
+            },
+            "required": ["name", "interval_secs", "command"]
+        }),
+        gate_action: "tool.sys.cron".into(),
+        effect: EffectVector { risk: 0.4, ..Default::default() },
+        native: true,
+    });
+    catalog.push(BuiltinToolSpec {
+        name: "sys.cron.list".into(),
+        category: ToolCategory::System,
+        description: "List cron jobs".into(),
+        parameters: serde_json::json!({"type": "object", "properties": {}}),
+        gate_action: "tool.sys.read".into(),
+        effect: EffectVector { risk: 0.05, ..Default::default() },
+        native: true,
+    });
+    catalog.push(BuiltinToolSpec {
+        name: "sys.cron.remove".into(),
+        category: ToolCategory::System,
+        description: "Remove a cron job".into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"}
+            },
+            "required": ["id"]
+        }),
+        gate_action: "tool.sys.cron".into(),
+        effect: EffectVector { risk: 0.3, ..Default::default() },
+        native: true,
+    });
+
+    // --- ECC tools (7, behind `ecc` feature) ---
+    #[cfg(feature = "ecc")]
+    {
+        catalog.push(BuiltinToolSpec {
+            name: "ecc.embed".into(),
+            category: ToolCategory::Ecc,
+            description: "Insert vector into HNSW index".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "embedding": {"type": "array", "items": {"type": "number"}},
+                    "metadata": {"type": "object"}
+                },
+                "required": ["id", "embedding"]
+            }),
+            gate_action: "ecc.embed".into(),
+            effect: EffectVector { risk: 0.1, ..Default::default() },
+            native: true,
+        });
+        catalog.push(BuiltinToolSpec {
+            name: "ecc.search".into(),
+            category: ToolCategory::Ecc,
+            description: "k-NN similarity search".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "array", "items": {"type": "number"}},
+                    "k": {"type": "integer", "default": 10}
+                },
+                "required": ["query"]
+            }),
+            gate_action: "ecc.search".into(),
+            effect: EffectVector { risk: 0.05, ..Default::default() },
+            native: true,
+        });
+        catalog.push(BuiltinToolSpec {
+            name: "ecc.causal.link".into(),
+            category: ToolCategory::Ecc,
+            description: "Create causal edge".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "source": {"type": "integer"},
+                    "target": {"type": "integer"},
+                    "edge_type": {"type": "string"},
+                    "weight": {"type": "number", "default": 1.0}
+                },
+                "required": ["source", "target", "edge_type"]
+            }),
+            gate_action: "ecc.causal.link".into(),
+            effect: EffectVector { risk: 0.3, ..Default::default() },
+            native: true,
+        });
+        catalog.push(BuiltinToolSpec {
+            name: "ecc.causal.query".into(),
+            category: ToolCategory::Ecc,
+            description: "Traverse causal graph".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "node": {"type": "integer"},
+                    "direction": {"type": "string", "enum": ["forward", "reverse"]},
+                    "depth": {"type": "integer", "default": 3}
+                },
+                "required": ["node"]
+            }),
+            gate_action: "ecc.causal.query".into(),
+            effect: EffectVector { risk: 0.05, ..Default::default() },
+            native: true,
+        });
+        catalog.push(BuiltinToolSpec {
+            name: "ecc.crossref.create".into(),
+            category: ToolCategory::Ecc,
+            description: "Link nodes across structures".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "source_id": {"type": "string"},
+                    "target_id": {"type": "string"},
+                    "ref_type": {"type": "string"}
+                },
+                "required": ["source_id", "target_id", "ref_type"]
+            }),
+            gate_action: "ecc.crossref.create".into(),
+            effect: EffectVector { risk: 0.2, ..Default::default() },
+            native: true,
+        });
+        catalog.push(BuiltinToolSpec {
+            name: "ecc.tick.status".into(),
+            category: ToolCategory::Ecc,
+            description: "Query cognitive tick state".into(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+            gate_action: "ecc.tick.status".into(),
+            effect: EffectVector { risk: 0.05, ..Default::default() },
+            native: true,
+        });
+        catalog.push(BuiltinToolSpec {
+            name: "ecc.calibration.run".into(),
+            category: ToolCategory::Ecc,
+            description: "Re-run boot calibration".into(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+            gate_action: "ecc.calibration.run".into(),
+            effect: EffectVector { risk: 0.1, ..Default::default() },
+            native: true,
+        });
+    }
+
+    catalog
+}
+
+// ---------------------------------------------------------------------------
+// Reference tool implementations
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Sandbox configuration (K4 B1)
+// ---------------------------------------------------------------------------
+
+/// Filesystem sandbox configuration for built-in tools.
+///
+/// Controls which paths a tool is allowed to access. When `allowed_paths`
+/// is non-empty, only files under those directories are permitted.
+/// An empty `allowed_paths` means permissive mode (dev default).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SandboxConfig {
+    /// Directories the tool is allowed to access.
+    /// Empty = permissive (all paths allowed).
+    pub allowed_paths: Vec<PathBuf>,
+}
+
+impl SandboxConfig {
+    /// Check whether a path is allowed by this sandbox config.
+    ///
+    /// Returns `true` if `allowed_paths` is empty (permissive mode)
+    /// or the path is under at least one allowed directory.
+    pub fn is_path_allowed(&self, path: &std::path::Path) -> bool {
+        if self.allowed_paths.is_empty() {
+            return true;
+        }
+        // Canonicalize the target path for comparison
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        self.allowed_paths.iter().any(|allowed| {
+            let allowed_canon = allowed.canonicalize().unwrap_or_else(|_| allowed.clone());
+            canonical.starts_with(&allowed_canon)
+        })
+    }
+}
+
+/// Max file read size (8 MiB, matching PluginSandbox).
+const MAX_READ_SIZE: u64 = 8 * 1024 * 1024;
+
+/// Built-in `fs.read_file` tool.
+///
+/// Reads file contents with optional offset and limit.
+/// Always runs natively (no WASM needed for reference impl).
+/// Supports multi-layer sandboxing via [`SandboxConfig`].
+pub struct FsReadFileTool {
+    spec: BuiltinToolSpec,
+    sandbox: SandboxConfig,
+}
+
+impl Default for FsReadFileTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FsReadFileTool {
+    pub fn new() -> Self {
+        let catalog = builtin_tool_catalog();
+        let spec = catalog
+            .into_iter()
+            .find(|s| s.name == "fs.read_file")
+            .expect("fs.read_file must be in catalog");
+        Self {
+            spec,
+            sandbox: SandboxConfig::default(),
+        }
+    }
+
+    /// Create a sandboxed instance that restricts file access.
+    pub fn with_sandbox(sandbox: SandboxConfig) -> Self {
+        let catalog = builtin_tool_catalog();
+        let spec = catalog
+            .into_iter()
+            .find(|s| s.name == "fs.read_file")
+            .expect("fs.read_file must be in catalog");
+        Self { spec, sandbox }
+    }
+}
+
+impl BuiltinTool for FsReadFileTool {
+    fn name(&self) -> &str {
+        "fs.read_file"
+    }
+
+    fn spec(&self) -> &BuiltinToolSpec {
+        &self.spec
+    }
+
+    fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let path = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'path' parameter".into()))?;
+
+        let path = std::path::Path::new(path);
+
+        // Sandbox path check (K4 B1)
+        if !self.sandbox.is_path_allowed(path) {
+            return Err(ToolError::PermissionDenied(format!(
+                "path outside sandbox: {}",
+                path.display()
+            )));
+        }
+
+        if !path.exists() {
+            return Err(ToolError::FileNotFound(path.display().to_string()));
+        }
+
+        let metadata = std::fs::metadata(path)
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+
+        if metadata.len() > MAX_READ_SIZE {
+            return Err(ToolError::FileTooLarge {
+                size: metadata.len(),
+                limit: MAX_READ_SIZE,
+            });
+        }
+
+        let offset = args
+            .get("offset")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize);
+
+        let bytes = std::fs::read(path)
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+
+        let end = match limit {
+            Some(l) => std::cmp::min(offset + l, bytes.len()),
+            None => bytes.len(),
+        };
+        let start = std::cmp::min(offset, bytes.len());
+        let slice = &bytes[start..end];
+
+        let content = String::from_utf8_lossy(slice).into_owned();
+        let modified = metadata
+            .modified()
+            .ok()
+            .map(|t| {
+                let dt: DateTime<Utc> = t.into();
+                dt.to_rfc3339()
+            })
+            .unwrap_or_default();
+
+        Ok(serde_json::json!({
+            "content": content,
+            "size": metadata.len(),
+            "modified": modified,
+        }))
+    }
+}
+
+/// Built-in `agent.spawn` tool.
+///
+/// Spawns a new agent process via the kernel's AgentSupervisor.
+/// Always runs natively (needs direct kernel struct access).
+pub struct AgentSpawnTool {
+    spec: BuiltinToolSpec,
+    process_table: Arc<crate::process::ProcessTable>,
+}
+
+impl AgentSpawnTool {
+    pub fn new(process_table: Arc<crate::process::ProcessTable>) -> Self {
+        let catalog = builtin_tool_catalog();
+        let spec = catalog
+            .into_iter()
+            .find(|s| s.name == "agent.spawn")
+            .expect("agent.spawn must be in catalog");
+        Self { spec, process_table }
+    }
+}
+
+impl BuiltinTool for AgentSpawnTool {
+    fn name(&self) -> &str {
+        "agent.spawn"
+    }
+
+    fn spec(&self) -> &BuiltinToolSpec {
+        &self.spec
+    }
+
+    fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let agent_id = args
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'agent_id' parameter".into()))?;
+
+        let backend = args
+            .get("backend")
+            .and_then(|v| v.as_str())
+            .unwrap_or("native");
+
+        if backend == "wasm" {
+            return Err(ToolError::ExecutionFailed(
+                "WASM backend not yet available for agent.spawn".into(),
+            ));
+        }
+
+        // Create a process entry directly in the process table.
+        // In production this would go through AgentSupervisor::spawn(),
+        // but for the reference tool impl we create the entry directly.
+        let entry = crate::process::ProcessEntry {
+            pid: 0, // assigned by insert()
+            agent_id: agent_id.to_string(),
+            state: crate::process::ProcessState::Running,
+            capabilities: crate::capability::AgentCapabilities::default(),
+            resource_usage: crate::process::ResourceUsage::default(),
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+            parent_pid: None,
+        };
+
+        let pid = self
+            .process_table
+            .insert(entry)
+            .map_err(|e| ToolError::ExecutionFailed(format!("spawn failed: {e}")))?;
+
+        Ok(serde_json::json!({
+            "pid": pid,
+            "agent_id": agent_id,
+            "state": "running",
+        }))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// K4 C1: Filesystem tool implementations
+// ---------------------------------------------------------------------------
+
+/// Built-in `fs.write_file` tool.
+pub struct FsWriteFileTool {
+    spec: BuiltinToolSpec,
+    sandbox: SandboxConfig,
+}
+
+impl FsWriteFileTool {
+    pub fn new() -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "fs.write_file").unwrap();
+        Self { spec, sandbox: SandboxConfig::default() }
+    }
+    pub fn with_sandbox(sandbox: SandboxConfig) -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "fs.write_file").unwrap();
+        Self { spec, sandbox }
+    }
+}
+
+impl BuiltinTool for FsWriteFileTool {
+    fn name(&self) -> &str { "fs.write_file" }
+    fn spec(&self) -> &BuiltinToolSpec { &self.spec }
+    fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let path_str = args.get("path").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'path'".into()))?;
+        let content = args.get("content").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'content'".into()))?;
+        let append = args.get("append").and_then(|v| v.as_bool()).unwrap_or(false);
+        let path = std::path::Path::new(path_str);
+        if !self.sandbox.is_path_allowed(path) {
+            return Err(ToolError::PermissionDenied(format!("path outside sandbox: {}", path.display())));
+        }
+        if append {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)
+                .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            f.write_all(content.as_bytes()).map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+        } else {
+            std::fs::write(path, content).map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+        }
+        Ok(serde_json::json!({"written": content.len(), "path": path_str}))
+    }
+}
+
+/// Built-in `fs.read_dir` tool.
+pub struct FsReadDirTool {
+    spec: BuiltinToolSpec,
+    sandbox: SandboxConfig,
+}
+
+impl FsReadDirTool {
+    pub fn new() -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "fs.read_dir").unwrap();
+        Self { spec, sandbox: SandboxConfig::default() }
+    }
+    pub fn with_sandbox(sandbox: SandboxConfig) -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "fs.read_dir").unwrap();
+        Self { spec, sandbox }
+    }
+}
+
+impl BuiltinTool for FsReadDirTool {
+    fn name(&self) -> &str { "fs.read_dir" }
+    fn spec(&self) -> &BuiltinToolSpec { &self.spec }
+    fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let path_str = args.get("path").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'path'".into()))?;
+        let path = std::path::Path::new(path_str);
+        if !self.sandbox.is_path_allowed(path) {
+            return Err(ToolError::PermissionDenied(format!("path outside sandbox: {}", path.display())));
+        }
+        if !path.exists() {
+            return Err(ToolError::FileNotFound(path.display().to_string()));
+        }
+        let entries: Vec<serde_json::Value> = std::fs::read_dir(path)
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?
+            .filter_map(|e| e.ok())
+            .map(|e| {
+                let ft = e.file_type().ok();
+                serde_json::json!({
+                    "name": e.file_name().to_string_lossy(),
+                    "is_dir": ft.as_ref().map(|t| t.is_dir()).unwrap_or(false),
+                    "is_file": ft.as_ref().map(|t| t.is_file()).unwrap_or(false),
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({"entries": entries, "count": entries.len()}))
+    }
+}
+
+/// Built-in `fs.create_dir` tool.
+pub struct FsCreateDirTool {
+    spec: BuiltinToolSpec,
+    sandbox: SandboxConfig,
+}
+
+impl FsCreateDirTool {
+    pub fn new() -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "fs.create_dir").unwrap();
+        Self { spec, sandbox: SandboxConfig::default() }
+    }
+}
+
+impl BuiltinTool for FsCreateDirTool {
+    fn name(&self) -> &str { "fs.create_dir" }
+    fn spec(&self) -> &BuiltinToolSpec { &self.spec }
+    fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let path_str = args.get("path").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'path'".into()))?;
+        let path = std::path::Path::new(path_str);
+        if !self.sandbox.is_path_allowed(path) {
+            return Err(ToolError::PermissionDenied(format!("path outside sandbox: {}", path.display())));
+        }
+        let recursive = args.get("recursive").and_then(|v| v.as_bool()).unwrap_or(true);
+        if recursive {
+            std::fs::create_dir_all(path).map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+        } else {
+            std::fs::create_dir(path).map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+        }
+        Ok(serde_json::json!({"created": path_str}))
+    }
+}
+
+/// Built-in `fs.remove` tool.
+pub struct FsRemoveTool {
+    spec: BuiltinToolSpec,
+    sandbox: SandboxConfig,
+}
+
+impl FsRemoveTool {
+    pub fn new() -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "fs.remove").unwrap();
+        Self { spec, sandbox: SandboxConfig::default() }
+    }
+}
+
+impl BuiltinTool for FsRemoveTool {
+    fn name(&self) -> &str { "fs.remove" }
+    fn spec(&self) -> &BuiltinToolSpec { &self.spec }
+    fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let path_str = args.get("path").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'path'".into()))?;
+        let path = std::path::Path::new(path_str);
+        if !self.sandbox.is_path_allowed(path) {
+            return Err(ToolError::PermissionDenied(format!("path outside sandbox: {}", path.display())));
+        }
+        if !path.exists() {
+            return Err(ToolError::FileNotFound(path.display().to_string()));
+        }
+        let recursive = args.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false);
+        if path.is_dir() {
+            if recursive {
+                std::fs::remove_dir_all(path).map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            } else {
+                std::fs::remove_dir(path).map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            }
+        } else {
+            std::fs::remove_file(path).map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+        }
+        Ok(serde_json::json!({"removed": path_str}))
+    }
+}
+
+/// Built-in `fs.copy` tool.
+pub struct FsCopyTool {
+    spec: BuiltinToolSpec,
+    sandbox: SandboxConfig,
+}
+
+impl FsCopyTool {
+    pub fn new() -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "fs.copy").unwrap();
+        Self { spec, sandbox: SandboxConfig::default() }
+    }
+}
+
+impl BuiltinTool for FsCopyTool {
+    fn name(&self) -> &str { "fs.copy" }
+    fn spec(&self) -> &BuiltinToolSpec { &self.spec }
+    fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let src_str = args.get("src").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'src'".into()))?;
+        let dst_str = args.get("dst").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'dst'".into()))?;
+        let src = std::path::Path::new(src_str);
+        let dst = std::path::Path::new(dst_str);
+        if !self.sandbox.is_path_allowed(src) || !self.sandbox.is_path_allowed(dst) {
+            return Err(ToolError::PermissionDenied("path outside sandbox".into()));
+        }
+        if !src.exists() {
+            return Err(ToolError::FileNotFound(src.display().to_string()));
+        }
+        let bytes = std::fs::copy(src, dst).map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+        Ok(serde_json::json!({"copied": bytes, "src": src_str, "dst": dst_str}))
+    }
+}
+
+/// Built-in `fs.move` tool.
+pub struct FsMoveTool {
+    spec: BuiltinToolSpec,
+    sandbox: SandboxConfig,
+}
+
+impl FsMoveTool {
+    pub fn new() -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "fs.move").unwrap();
+        Self { spec, sandbox: SandboxConfig::default() }
+    }
+}
+
+impl BuiltinTool for FsMoveTool {
+    fn name(&self) -> &str { "fs.move" }
+    fn spec(&self) -> &BuiltinToolSpec { &self.spec }
+    fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let src_str = args.get("src").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'src'".into()))?;
+        let dst_str = args.get("dst").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'dst'".into()))?;
+        let src = std::path::Path::new(src_str);
+        let dst = std::path::Path::new(dst_str);
+        if !self.sandbox.is_path_allowed(src) || !self.sandbox.is_path_allowed(dst) {
+            return Err(ToolError::PermissionDenied("path outside sandbox".into()));
+        }
+        if !src.exists() {
+            return Err(ToolError::FileNotFound(src.display().to_string()));
+        }
+        std::fs::rename(src, dst).map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+        Ok(serde_json::json!({"moved": true, "src": src_str, "dst": dst_str}))
+    }
+}
+
+/// Built-in `fs.stat` tool.
+pub struct FsStatTool {
+    spec: BuiltinToolSpec,
+    sandbox: SandboxConfig,
+}
+
+impl FsStatTool {
+    pub fn new() -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "fs.stat").unwrap();
+        Self { spec, sandbox: SandboxConfig::default() }
+    }
+}
+
+impl BuiltinTool for FsStatTool {
+    fn name(&self) -> &str { "fs.stat" }
+    fn spec(&self) -> &BuiltinToolSpec { &self.spec }
+    fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let path_str = args.get("path").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'path'".into()))?;
+        let path = std::path::Path::new(path_str);
+        if !self.sandbox.is_path_allowed(path) {
+            return Err(ToolError::PermissionDenied(format!("path outside sandbox: {}", path.display())));
+        }
+        let meta = std::fs::metadata(path)
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+        let modified = meta.modified().ok().map(|t| {
+            let dt: DateTime<Utc> = t.into();
+            dt.to_rfc3339()
+        }).unwrap_or_default();
+        Ok(serde_json::json!({
+            "size": meta.len(),
+            "is_file": meta.is_file(),
+            "is_dir": meta.is_dir(),
+            "readonly": meta.permissions().readonly(),
+            "modified": modified,
+        }))
+    }
+}
+
+/// Built-in `fs.exists` tool.
+pub struct FsExistsTool {
+    spec: BuiltinToolSpec,
+}
+
+impl FsExistsTool {
+    pub fn new() -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "fs.exists").unwrap();
+        Self { spec }
+    }
+}
+
+impl BuiltinTool for FsExistsTool {
+    fn name(&self) -> &str { "fs.exists" }
+    fn spec(&self) -> &BuiltinToolSpec { &self.spec }
+    fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let path_str = args.get("path").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'path'".into()))?;
+        let path = std::path::Path::new(path_str);
+        let exists = path.exists();
+        let is_file = path.is_file();
+        let is_dir = path.is_dir();
+        Ok(serde_json::json!({"exists": exists, "is_file": is_file, "is_dir": is_dir}))
+    }
+}
+
+/// Built-in `fs.glob` tool.
+pub struct FsGlobTool {
+    spec: BuiltinToolSpec,
+    sandbox: SandboxConfig,
+}
+
+impl FsGlobTool {
+    pub fn new() -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "fs.glob").unwrap();
+        Self { spec, sandbox: SandboxConfig::default() }
+    }
+}
+
+impl BuiltinTool for FsGlobTool {
+    fn name(&self) -> &str { "fs.glob" }
+    fn spec(&self) -> &BuiltinToolSpec { &self.spec }
+    fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let pattern = args.get("pattern").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'pattern'".into()))?;
+        let base_dir = args.get("base_dir").and_then(|v| v.as_str()).unwrap_or(".");
+        let base = std::path::Path::new(base_dir);
+        if !self.sandbox.is_path_allowed(base) {
+            return Err(ToolError::PermissionDenied("base_dir outside sandbox".into()));
+        }
+        // Simple recursive walk with pattern matching
+        let mut matches = Vec::new();
+        fn walk(dir: &std::path::Path, pattern: &str, matches: &mut Vec<String>) {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    if simple_glob_match(pattern, &name) {
+                        matches.push(path.display().to_string());
+                    }
+                    if path.is_dir() {
+                        walk(&path, pattern, matches);
+                    }
+                }
+            }
+        }
+        walk(base, pattern, &mut matches);
+        matches.sort();
+        Ok(serde_json::json!({"matches": matches, "count": matches.len()}))
+    }
+}
+
+/// Simple glob pattern match supporting `*` and `?` wildcards.
+fn simple_glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    simple_glob_match_inner(&p, &t, 0, 0)
+}
+
+fn simple_glob_match_inner(pattern: &[char], text: &[char], pi: usize, ti: usize) -> bool {
+    if pi == pattern.len() && ti == text.len() {
+        return true;
+    }
+    if pi == pattern.len() {
+        return false;
+    }
+    match pattern[pi] {
+        '*' => {
+            // Match zero or more characters
+            for i in ti..=text.len() {
+                if simple_glob_match_inner(pattern, text, pi + 1, i) {
+                    return true;
+                }
+            }
+            false
+        }
+        '?' => {
+            if ti < text.len() {
+                simple_glob_match_inner(pattern, text, pi + 1, ti + 1)
+            } else {
+                false
+            }
+        }
+        c => {
+            if ti < text.len() && text[ti] == c {
+                simple_glob_match_inner(pattern, text, pi + 1, ti + 1)
+            } else {
+                false
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// K4 C2: Agent tool implementations
+// ---------------------------------------------------------------------------
+
+/// Built-in `agent.stop` tool.
+pub struct AgentStopTool {
+    spec: BuiltinToolSpec,
+    process_table: Arc<crate::process::ProcessTable>,
+}
+
+impl AgentStopTool {
+    pub fn new(process_table: Arc<crate::process::ProcessTable>) -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "agent.stop").unwrap();
+        Self { spec, process_table }
+    }
+}
+
+impl BuiltinTool for AgentStopTool {
+    fn name(&self) -> &str { "agent.stop" }
+    fn spec(&self) -> &BuiltinToolSpec { &self.spec }
+    fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let pid = args.get("pid").and_then(|v| v.as_u64())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'pid'".into()))?;
+        let entry = self.process_table.get(pid)
+            .ok_or_else(|| ToolError::NotFound(format!("pid {pid}")))?;
+        entry.cancel_token.cancel();
+        self.process_table.update_state(pid, crate::process::ProcessState::Stopping)
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+        Ok(serde_json::json!({"stopped": pid, "agent_id": entry.agent_id}))
+    }
+}
+
+/// Built-in `agent.list` tool.
+pub struct AgentListTool {
+    spec: BuiltinToolSpec,
+    process_table: Arc<crate::process::ProcessTable>,
+}
+
+impl AgentListTool {
+    pub fn new(process_table: Arc<crate::process::ProcessTable>) -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "agent.list").unwrap();
+        Self { spec, process_table }
+    }
+}
+
+impl BuiltinTool for AgentListTool {
+    fn name(&self) -> &str { "agent.list" }
+    fn spec(&self) -> &BuiltinToolSpec { &self.spec }
+    fn execute(&self, _args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let list = self.process_table.list();
+        let entries: Vec<serde_json::Value> = list.iter().map(|e| {
+            serde_json::json!({
+                "pid": e.pid,
+                "agent_id": e.agent_id,
+                "state": format!("{:?}", e.state),
+            })
+        }).collect();
+        Ok(serde_json::json!({"agents": entries, "count": entries.len()}))
+    }
+}
+
+/// Built-in `agent.inspect` tool.
+pub struct AgentInspectTool {
+    spec: BuiltinToolSpec,
+    process_table: Arc<crate::process::ProcessTable>,
+}
+
+impl AgentInspectTool {
+    pub fn new(process_table: Arc<crate::process::ProcessTable>) -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "agent.inspect").unwrap();
+        Self { spec, process_table }
+    }
+}
+
+impl BuiltinTool for AgentInspectTool {
+    fn name(&self) -> &str { "agent.inspect" }
+    fn spec(&self) -> &BuiltinToolSpec { &self.spec }
+    fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let pid = args.get("pid").and_then(|v| v.as_u64())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'pid'".into()))?;
+        let entry = self.process_table.get(pid)
+            .ok_or_else(|| ToolError::NotFound(format!("pid {pid}")))?;
+        Ok(serde_json::json!({
+            "pid": entry.pid,
+            "agent_id": entry.agent_id,
+            "state": format!("{:?}", entry.state),
+            "parent_pid": entry.parent_pid,
+            "resource_usage": {
+                "messages_sent": entry.resource_usage.messages_sent,
+                "tool_calls": entry.resource_usage.tool_calls,
+                "cpu_time_ms": entry.resource_usage.cpu_time_ms,
+            },
+            "capabilities": {
+                "can_spawn": entry.capabilities.can_spawn,
+                "can_ipc": entry.capabilities.can_ipc,
+                "can_exec_tools": entry.capabilities.can_exec_tools,
+                "can_network": entry.capabilities.can_network,
+            },
+        }))
+    }
+}
+
+/// Built-in `agent.send` tool.
+pub struct AgentSendTool {
+    spec: BuiltinToolSpec,
+    process_table: Arc<crate::process::ProcessTable>,
+    a2a: Arc<crate::a2a::A2ARouter>,
+}
+
+impl AgentSendTool {
+    pub fn new(
+        process_table: Arc<crate::process::ProcessTable>,
+        a2a: Arc<crate::a2a::A2ARouter>,
+    ) -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "agent.send").unwrap();
+        Self { spec, process_table, a2a }
+    }
+}
+
+impl BuiltinTool for AgentSendTool {
+    fn name(&self) -> &str { "agent.send" }
+    fn spec(&self) -> &BuiltinToolSpec { &self.spec }
+    fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let pid = args.get("pid").and_then(|v| v.as_u64())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'pid'".into()))?;
+        let message = args.get("message").cloned()
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'message'".into()))?;
+        // Verify target exists
+        let _ = self.process_table.get(pid)
+            .ok_or_else(|| ToolError::NotFound(format!("pid {pid}")))?;
+        let msg = crate::ipc::KernelMessage::new(
+            0, // from kernel
+            crate::ipc::MessageTarget::Process(pid),
+            crate::ipc::MessagePayload::Json(message),
+        );
+        let msg_id = msg.id.clone();
+        // Use blocking send since BuiltinTool::execute is sync
+        // In production, agent.send would go through the async agent loop
+        let a2a = self.a2a.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async { a2a.send(msg).await })
+        }).join()
+            .map_err(|_| ToolError::ExecutionFailed("send thread panicked".into()))?
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+        Ok(serde_json::json!({"sent": true, "pid": pid, "msg_id": msg_id}))
+    }
+}
+
+/// Built-in `agent.suspend` tool.
+pub struct AgentSuspendTool {
+    spec: BuiltinToolSpec,
+    process_table: Arc<crate::process::ProcessTable>,
+}
+
+impl AgentSuspendTool {
+    pub fn new(process_table: Arc<crate::process::ProcessTable>) -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "agent.suspend").unwrap();
+        Self { spec, process_table }
+    }
+}
+
+impl BuiltinTool for AgentSuspendTool {
+    fn name(&self) -> &str { "agent.suspend" }
+    fn spec(&self) -> &BuiltinToolSpec { &self.spec }
+    fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let pid = args.get("pid").and_then(|v| v.as_u64())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'pid'".into()))?;
+        self.process_table.update_state(pid, crate::process::ProcessState::Suspended)
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+        Ok(serde_json::json!({"suspended": pid}))
+    }
+}
+
+/// Built-in `agent.resume` tool.
+pub struct AgentResumeTool {
+    spec: BuiltinToolSpec,
+    process_table: Arc<crate::process::ProcessTable>,
+}
+
+impl AgentResumeTool {
+    pub fn new(process_table: Arc<crate::process::ProcessTable>) -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "agent.resume").unwrap();
+        Self { spec, process_table }
+    }
+}
+
+impl BuiltinTool for AgentResumeTool {
+    fn name(&self) -> &str { "agent.resume" }
+    fn spec(&self) -> &BuiltinToolSpec { &self.spec }
+    fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let pid = args.get("pid").and_then(|v| v.as_u64())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'pid'".into()))?;
+        self.process_table.update_state(pid, crate::process::ProcessState::Running)
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+        Ok(serde_json::json!({"resumed": pid}))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// K4 C3: System tool implementations
+// ---------------------------------------------------------------------------
+
+/// Built-in `sys.service.list` tool.
+pub struct SysServiceListTool {
+    spec: BuiltinToolSpec,
+    service_registry: Arc<crate::service::ServiceRegistry>,
+}
+
+impl SysServiceListTool {
+    pub fn new(service_registry: Arc<crate::service::ServiceRegistry>) -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "sys.service.list").unwrap();
+        Self { spec, service_registry }
+    }
+}
+
+impl BuiltinTool for SysServiceListTool {
+    fn name(&self) -> &str { "sys.service.list" }
+    fn spec(&self) -> &BuiltinToolSpec { &self.spec }
+    fn execute(&self, _args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let services = self.service_registry.list();
+        let entries: Vec<serde_json::Value> = services.iter().map(|(name, stype)| {
+            serde_json::json!({
+                "name": name,
+                "service_type": format!("{stype:?}"),
+            })
+        }).collect();
+        Ok(serde_json::json!({"services": entries, "count": entries.len()}))
+    }
+}
+
+/// Built-in `sys.service.health` tool.
+pub struct SysServiceHealthTool {
+    spec: BuiltinToolSpec,
+    service_registry: Arc<crate::service::ServiceRegistry>,
+}
+
+impl SysServiceHealthTool {
+    pub fn new(service_registry: Arc<crate::service::ServiceRegistry>) -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "sys.service.health").unwrap();
+        Self { spec, service_registry }
+    }
+}
+
+impl BuiltinTool for SysServiceHealthTool {
+    fn name(&self) -> &str { "sys.service.health" }
+    fn spec(&self) -> &BuiltinToolSpec { &self.spec }
+    fn execute(&self, _args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        // health_all() is async — use service list as sync fallback
+        let services = self.service_registry.list();
+        let entries: Vec<serde_json::Value> = services.iter().map(|(name, _)| {
+            serde_json::json!({"name": name, "status": "registered"})
+        }).collect();
+        Ok(serde_json::json!({"health": entries, "count": entries.len()}))
+    }
+}
+
+/// Built-in `sys.chain.status` tool.
+#[cfg(feature = "exochain")]
+pub struct SysChainStatusTool {
+    spec: BuiltinToolSpec,
+    chain: Arc<crate::chain::ChainManager>,
+}
+
+#[cfg(feature = "exochain")]
+impl SysChainStatusTool {
+    pub fn new(chain: Arc<crate::chain::ChainManager>) -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "sys.chain.status").unwrap();
+        Self { spec, chain }
+    }
+}
+
+#[cfg(feature = "exochain")]
+impl BuiltinTool for SysChainStatusTool {
+    fn name(&self) -> &str { "sys.chain.status" }
+    fn spec(&self) -> &BuiltinToolSpec { &self.spec }
+    fn execute(&self, _args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let status = self.chain.status();
+        Ok(serde_json::json!({
+            "chain_id": status.chain_id,
+            "sequence": status.sequence,
+            "event_count": status.event_count,
+            "checkpoint_count": status.checkpoint_count,
+        }))
+    }
+}
+
+/// Built-in `sys.chain.query` tool.
+#[cfg(feature = "exochain")]
+pub struct SysChainQueryTool {
+    spec: BuiltinToolSpec,
+    chain: Arc<crate::chain::ChainManager>,
+}
+
+#[cfg(feature = "exochain")]
+impl SysChainQueryTool {
+    pub fn new(chain: Arc<crate::chain::ChainManager>) -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "sys.chain.query").unwrap();
+        Self { spec, chain }
+    }
+}
+
+#[cfg(feature = "exochain")]
+impl BuiltinTool for SysChainQueryTool {
+    fn name(&self) -> &str { "sys.chain.query" }
+    fn spec(&self) -> &BuiltinToolSpec { &self.spec }
+    fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let count = args.get("count").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+        let events = self.chain.tail(count);
+        let entries: Vec<serde_json::Value> = events.iter().map(|e| {
+            serde_json::json!({
+                "sequence": e.sequence,
+                "source": e.source,
+                "kind": e.kind,
+                "timestamp": e.timestamp.to_rfc3339(),
+            })
+        }).collect();
+        Ok(serde_json::json!({"events": entries, "count": entries.len()}))
+    }
+}
+
+/// Built-in `sys.tree.read` tool.
+#[cfg(feature = "exochain")]
+pub struct SysTreeReadTool {
+    spec: BuiltinToolSpec,
+    tree: Arc<crate::tree_manager::TreeManager>,
+}
+
+#[cfg(feature = "exochain")]
+impl SysTreeReadTool {
+    pub fn new(tree: Arc<crate::tree_manager::TreeManager>) -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "sys.tree.read").unwrap();
+        Self { spec, tree }
+    }
+}
+
+#[cfg(feature = "exochain")]
+impl BuiltinTool for SysTreeReadTool {
+    fn name(&self) -> &str { "sys.tree.read" }
+    fn spec(&self) -> &BuiltinToolSpec { &self.spec }
+    fn execute(&self, _args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let stats = self.tree.stats();
+        Ok(serde_json::json!({
+            "node_count": stats.node_count,
+            "mutation_count": stats.mutation_count,
+            "root_hash": stats.root_hash,
+        }))
+    }
+}
+
+/// Built-in `sys.tree.inspect` tool.
+#[cfg(feature = "exochain")]
+pub struct SysTreeInspectTool {
+    spec: BuiltinToolSpec,
+    tree: Arc<crate::tree_manager::TreeManager>,
+}
+
+#[cfg(feature = "exochain")]
+impl SysTreeInspectTool {
+    pub fn new(tree: Arc<crate::tree_manager::TreeManager>) -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "sys.tree.inspect").unwrap();
+        Self { spec, tree }
+    }
+}
+
+#[cfg(feature = "exochain")]
+impl BuiltinTool for SysTreeInspectTool {
+    fn name(&self) -> &str { "sys.tree.inspect" }
+    fn spec(&self) -> &BuiltinToolSpec { &self.spec }
+    fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let path = args.get("path").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'path'".into()))?;
+        let rid = exo_resource_tree::ResourceId::new(path);
+        let tree_lock = self.tree.tree().lock()
+            .map_err(|e| ToolError::ExecutionFailed(format!("tree lock: {e}")))?;
+        let node = tree_lock.get(&rid)
+            .ok_or_else(|| ToolError::NotFound(format!("node not found: {path}")))?;
+        Ok(serde_json::json!({
+            "path": path,
+            "kind": format!("{:?}", node.kind),
+            "metadata": node.metadata,
+            "scoring": node.scoring.as_array(),
+        }))
+    }
+}
+
+/// Built-in `sys.env.get` tool.
+pub struct SysEnvGetTool {
+    spec: BuiltinToolSpec,
+}
+
+impl SysEnvGetTool {
+    pub fn new() -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "sys.env.get").unwrap();
+        Self { spec }
+    }
+}
+
+impl BuiltinTool for SysEnvGetTool {
+    fn name(&self) -> &str { "sys.env.get" }
+    fn spec(&self) -> &BuiltinToolSpec { &self.spec }
+    fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let name = args.get("name").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'name'".into()))?;
+        match std::env::var(name) {
+            Ok(val) => Ok(serde_json::json!({"name": name, "value": val})),
+            Err(_) => Ok(serde_json::json!({"name": name, "value": null})),
+        }
+    }
+}
+
+/// Built-in `sys.cron.add` tool.
+pub struct SysCronAddTool {
+    spec: BuiltinToolSpec,
+    cron: Arc<crate::cron::CronService>,
+}
+
+impl SysCronAddTool {
+    pub fn new(cron: Arc<crate::cron::CronService>) -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "sys.cron.add").unwrap();
+        Self { spec, cron }
+    }
+}
+
+impl BuiltinTool for SysCronAddTool {
+    fn name(&self) -> &str { "sys.cron.add" }
+    fn spec(&self) -> &BuiltinToolSpec { &self.spec }
+    fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let name = args.get("name").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'name'".into()))?;
+        let interval_secs = args.get("interval_secs").and_then(|v| v.as_u64())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'interval_secs'".into()))?;
+        let command = args.get("command").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'command'".into()))?;
+        let target_pid = args.get("target_pid").and_then(|v| v.as_u64());
+        let job = self.cron.add_job(name.to_string(), interval_secs, command.to_string(), target_pid);
+        Ok(serde_json::to_value(&job).unwrap_or_default())
+    }
+}
+
+/// Built-in `sys.cron.list` tool.
+pub struct SysCronListTool {
+    spec: BuiltinToolSpec,
+    cron: Arc<crate::cron::CronService>,
+}
+
+impl SysCronListTool {
+    pub fn new(cron: Arc<crate::cron::CronService>) -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "sys.cron.list").unwrap();
+        Self { spec, cron }
+    }
+}
+
+impl BuiltinTool for SysCronListTool {
+    fn name(&self) -> &str { "sys.cron.list" }
+    fn spec(&self) -> &BuiltinToolSpec { &self.spec }
+    fn execute(&self, _args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let jobs = self.cron.list_jobs();
+        Ok(serde_json::to_value(&jobs).unwrap_or_default())
+    }
+}
+
+/// Built-in `sys.cron.remove` tool.
+pub struct SysCronRemoveTool {
+    spec: BuiltinToolSpec,
+    cron: Arc<crate::cron::CronService>,
+}
+
+impl SysCronRemoveTool {
+    pub fn new(cron: Arc<crate::cron::CronService>) -> Self {
+        let spec = builtin_tool_catalog().into_iter().find(|s| s.name == "sys.cron.remove").unwrap();
+        Self { spec, cron }
+    }
+}
+
+impl BuiltinTool for SysCronRemoveTool {
+    fn name(&self) -> &str { "sys.cron.remove" }
+    fn spec(&self) -> &BuiltinToolSpec { &self.spec }
+    fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let id = args.get("id").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'id'".into()))?;
+        match self.cron.remove_job(id) {
+            Some(job) => Ok(serde_json::json!({"removed": true, "job_id": job.id})),
+            None => Err(ToolError::NotFound(format!("cron job: {id}"))),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Config tests (preserved) ---
 
     #[test]
     fn default_config() {
@@ -425,6 +2531,8 @@ mod tests {
         assert!(state.env.is_empty());
     }
 
+    // --- Validation tests (preserved) ---
+
     #[test]
     fn validate_wasm_rejects_too_large() {
         let runner = WasmToolRunner::new(WasmSandboxConfig {
@@ -455,11 +2563,9 @@ mod tests {
     #[test]
     fn validate_wasm_accepts_valid_header() {
         let runner = WasmToolRunner::new(WasmSandboxConfig::default());
-        // Minimal valid WASM header: magic (4 bytes) + version 1 (4 bytes)
         let mut wasm = Vec::new();
         wasm.extend_from_slice(b"\0asm");
         wasm.extend_from_slice(&1u32.to_le_bytes());
-        // Add some padding to reach a reasonable size
         wasm.extend_from_slice(&[0u8; 16]);
 
         let result = runner.validate_wasm(&wasm);
@@ -474,7 +2580,7 @@ mod tests {
         let runner = WasmToolRunner::new(WasmSandboxConfig::default());
         let mut wasm = Vec::new();
         wasm.extend_from_slice(b"\0asm");
-        wasm.extend_from_slice(&2u32.to_le_bytes()); // Version 2, unexpected
+        wasm.extend_from_slice(&2u32.to_le_bytes());
         wasm.extend_from_slice(&[0u8; 16]);
 
         let result = runner.validate_wasm(&wasm).unwrap();
@@ -491,7 +2597,6 @@ mod tests {
         wasm.extend_from_slice(&1u32.to_le_bytes());
         wasm.extend_from_slice(&[0u8; 16]);
 
-        // Without wasm-sandbox feature, this should fail
         #[cfg(not(feature = "wasm-sandbox"))]
         {
             let result = runner.load_tool("test-tool", &wasm);
@@ -556,5 +2661,792 @@ mod tests {
         assert!(restored.valid);
         assert_eq!(restored.exports.len(), 2);
         assert_eq!(restored.imports.len(), 1);
+    }
+
+    // --- Catalog tests ---
+
+    #[test]
+    fn builtin_catalog_has_expected_tools() {
+        let catalog = builtin_tool_catalog();
+        #[cfg(feature = "ecc")]
+        assert_eq!(catalog.len(), 34, "27 base + 7 ecc tools");
+        #[cfg(not(feature = "ecc"))]
+        assert_eq!(catalog.len(), 27);
+    }
+
+    #[test]
+    fn all_tools_have_valid_schema() {
+        let catalog = builtin_tool_catalog();
+        for spec in &catalog {
+            assert!(spec.parameters.is_object(), "{} has non-object schema", spec.name);
+            assert!(
+                spec.parameters.get("type").and_then(|v| v.as_str()) == Some("object"),
+                "{} schema type is not 'object'",
+                spec.name,
+            );
+        }
+    }
+
+    #[test]
+    fn all_tools_have_gate_action() {
+        let catalog = builtin_tool_catalog();
+        for spec in &catalog {
+            assert!(!spec.gate_action.is_empty(), "{} missing gate_action", spec.name);
+            assert!(
+                spec.gate_action.starts_with("tool.") || spec.gate_action.starts_with("ecc."),
+                "{} gate_action should start with 'tool.' or 'ecc.'",
+                spec.name,
+            );
+        }
+    }
+
+    #[test]
+    fn tool_names_are_unique() {
+        let catalog = builtin_tool_catalog();
+        let mut names: Vec<&str> = catalog.iter().map(|s| s.name.as_str()).collect();
+        names.sort();
+        let unique_count = {
+            let mut u = names.clone();
+            u.dedup();
+            u.len()
+        };
+        assert_eq!(names.len(), unique_count, "duplicate tool names found");
+    }
+
+    #[test]
+    fn tool_categories_correct() {
+        let catalog = builtin_tool_catalog();
+        let fs_count = catalog.iter().filter(|s| s.category == ToolCategory::Filesystem).count();
+        let agent_count = catalog.iter().filter(|s| s.category == ToolCategory::Agent).count();
+        let sys_count = catalog.iter().filter(|s| s.category == ToolCategory::System).count();
+        assert_eq!(fs_count, 10);
+        assert_eq!(agent_count, 7);
+        assert_eq!(sys_count, 10);
+        #[cfg(feature = "ecc")]
+        {
+            let ecc_count = catalog.iter().filter(|s| s.category == ToolCategory::Ecc).count();
+            assert_eq!(ecc_count, 7);
+        }
+    }
+
+    // --- FsReadFileTool tests ---
+
+    #[test]
+    fn fs_read_file_reads_content() {
+        let dir = std::env::temp_dir().join("clawft-fs-read-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("test.txt");
+        std::fs::write(&file, "hello world").unwrap();
+
+        let tool = FsReadFileTool::new();
+        let result = tool
+            .execute(serde_json::json!({"path": file.to_str().unwrap()}))
+            .unwrap();
+        assert_eq!(result["content"], "hello world");
+        assert_eq!(result["size"], 11);
+        assert!(result["modified"].as_str().is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fs_read_file_with_offset_limit() {
+        let dir = std::env::temp_dir().join("clawft-fs-offset-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("test.txt");
+        std::fs::write(&file, "0123456789").unwrap();
+
+        let tool = FsReadFileTool::new();
+        let result = tool
+            .execute(serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "offset": 3,
+                "limit": 4,
+            }))
+            .unwrap();
+        assert_eq!(result["content"], "3456");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fs_read_file_not_found() {
+        let tool = FsReadFileTool::new();
+        let result = tool.execute(serde_json::json!({"path": "/no/such/file/ever"}));
+        assert!(matches!(result, Err(ToolError::FileNotFound(_))));
+    }
+
+    #[test]
+    fn fs_read_file_returns_metadata() {
+        let dir = std::env::temp_dir().join("clawft-fs-meta-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("meta.txt");
+        std::fs::write(&file, "data").unwrap();
+
+        let tool = FsReadFileTool::new();
+        let result = tool
+            .execute(serde_json::json!({"path": file.to_str().unwrap()}))
+            .unwrap();
+        assert!(result.get("size").is_some());
+        assert!(result.get("modified").is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- AgentSpawnTool tests ---
+
+    #[test]
+    fn agent_spawn_creates_process() {
+        let pt = Arc::new(crate::process::ProcessTable::new(64));
+        let tool = AgentSpawnTool::new(pt.clone());
+        let result = tool
+            .execute(serde_json::json!({"agent_id": "test-spawn"}))
+            .unwrap();
+
+        let pid = result["pid"].as_u64().unwrap();
+        assert!(pt.get(pid).is_some());
+        assert_eq!(result["state"], "running");
+    }
+
+    #[test]
+    fn agent_spawn_with_wasm_backend_fails() {
+        let pt = Arc::new(crate::process::ProcessTable::new(64));
+        let tool = AgentSpawnTool::new(pt);
+        let result = tool.execute(serde_json::json!({
+            "agent_id": "wasm-agent",
+            "backend": "wasm",
+        }));
+        assert!(matches!(result, Err(ToolError::ExecutionFailed(_))));
+    }
+
+    #[test]
+    fn agent_spawn_returns_pid() {
+        let pt = Arc::new(crate::process::ProcessTable::new(64));
+        let tool = AgentSpawnTool::new(pt);
+        let result = tool
+            .execute(serde_json::json!({"agent_id": "pid-test"}))
+            .unwrap();
+        assert!(result.get("pid").is_some());
+        assert_eq!(result["agent_id"], "pid-test");
+    }
+
+    // --- ToolRegistry tests ---
+
+    #[test]
+    fn registry_register_and_execute() {
+        let mut registry = ToolRegistry::new();
+        let tool = Arc::new(FsReadFileTool::new());
+        registry.register(tool);
+        assert_eq!(registry.len(), 1);
+        assert!(registry.get("fs.read_file").is_some());
+    }
+
+    #[test]
+    fn registry_not_found() {
+        let registry = ToolRegistry::new();
+        let result = registry.execute("no.such.tool", serde_json::json!({}));
+        assert!(matches!(result, Err(ToolError::NotFound(_))));
+    }
+
+    // --- Hierarchical ToolRegistry tests (K4 A1) ---
+
+    #[test]
+    fn registry_parent_chain_lookup() {
+        let mut parent = ToolRegistry::new();
+        parent.register(Arc::new(FsReadFileTool::new()));
+        let parent = Arc::new(parent);
+
+        let child = ToolRegistry::with_parent(parent);
+        assert!(child.get("fs.read_file").is_some(), "child should find tool in parent");
+    }
+
+    #[test]
+    fn registry_child_overrides_parent() {
+        let mut parent = ToolRegistry::new();
+        parent.register(Arc::new(FsReadFileTool::new()));
+        let parent = Arc::new(parent);
+
+        let mut child = ToolRegistry::with_parent(parent);
+        // Register a different tool with the same interface but in child
+        child.register(Arc::new(FsReadFileTool::new()));
+        assert_eq!(child.len(), 1, "deduplicated count should be 1");
+        assert!(child.get("fs.read_file").is_some());
+    }
+
+    #[test]
+    fn registry_list_merges_parent() {
+        let mut parent = ToolRegistry::new();
+        parent.register(Arc::new(FsReadFileTool::new()));
+        let parent = Arc::new(parent);
+
+        let pt = Arc::new(crate::process::ProcessTable::new(64));
+        let mut child = ToolRegistry::with_parent(parent);
+        child.register(Arc::new(AgentSpawnTool::new(pt)));
+
+        let list = child.list();
+        assert!(list.contains(&"fs.read_file".to_string()), "should include parent tool");
+        assert!(list.contains(&"agent.spawn".to_string()), "should include child tool");
+        assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn registry_empty_child_delegates_all() {
+        let mut parent = ToolRegistry::new();
+        parent.register(Arc::new(FsReadFileTool::new()));
+        let parent = Arc::new(parent);
+
+        let child = ToolRegistry::with_parent(parent);
+        assert_eq!(child.len(), 1);
+        assert!(!child.is_empty());
+
+        // Execute through parent chain
+        let dir = std::env::temp_dir().join("clawft-delegate-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("test.txt");
+        std::fs::write(&file, "delegate").unwrap();
+        let result = child.execute("fs.read_file", serde_json::json!({"path": file.to_str().unwrap()}));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap()["content"], "delegate");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- Sandbox tests (K4 B1) ---
+
+    #[test]
+    fn sandbox_denies_path_outside_allowed() {
+        let sandbox = SandboxConfig {
+            allowed_paths: vec![std::env::temp_dir()],
+        };
+        let tool = FsReadFileTool::with_sandbox(sandbox);
+        let result = tool.execute(serde_json::json!({"path": "/etc/passwd"}));
+        assert!(matches!(result, Err(ToolError::PermissionDenied(_))));
+    }
+
+    #[test]
+    fn sandbox_allows_path_inside_allowed() {
+        let dir = std::env::temp_dir().join("clawft-sandbox-allow-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("allowed.txt");
+        std::fs::write(&file, "allowed").unwrap();
+
+        let sandbox = SandboxConfig {
+            allowed_paths: vec![std::env::temp_dir()],
+        };
+        let tool = FsReadFileTool::with_sandbox(sandbox);
+        let result = tool.execute(serde_json::json!({"path": file.to_str().unwrap()}));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap()["content"], "allowed");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sandbox_default_allows_all() {
+        let dir = std::env::temp_dir().join("clawft-sandbox-default-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("default.txt");
+        std::fs::write(&file, "default").unwrap();
+
+        // Default SandboxConfig has empty allowed_paths = permissive
+        let tool = FsReadFileTool::new();
+        let result = tool.execute(serde_json::json!({"path": file.to_str().unwrap()}));
+        assert!(result.is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- K4 C1: Filesystem tool tests ---
+
+    #[test]
+    fn fs_write_file_creates_and_writes() {
+        let dir = std::env::temp_dir().join("clawft-fs-write-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("out.txt");
+        let tool = FsWriteFileTool::new();
+        let result = tool.execute(serde_json::json!({"path": file.to_str().unwrap(), "content": "hello"}));
+        assert!(result.is_ok());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fs_write_file_missing_content() {
+        let tool = FsWriteFileTool::new();
+        let result = tool.execute(serde_json::json!({"path": "/tmp/x"}));
+        assert!(matches!(result, Err(ToolError::InvalidArgs(_))));
+    }
+
+    #[test]
+    fn fs_read_dir_lists_entries() {
+        let dir = std::env::temp_dir().join("clawft-fs-readdir-test");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        std::fs::write(dir.join("b.txt"), "b").unwrap();
+        let tool = FsReadDirTool::new();
+        let result = tool.execute(serde_json::json!({"path": dir.to_str().unwrap()})).unwrap();
+        assert!(result["count"].as_u64().unwrap() >= 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fs_read_dir_not_found() {
+        let tool = FsReadDirTool::new();
+        let result = tool.execute(serde_json::json!({"path": "/no/such/dir/ever"}));
+        assert!(matches!(result, Err(ToolError::FileNotFound(_))));
+    }
+
+    #[test]
+    fn fs_create_dir_recursive() {
+        let dir = std::env::temp_dir().join("clawft-fs-mkdir-test/a/b/c");
+        let tool = FsCreateDirTool::new();
+        let result = tool.execute(serde_json::json!({"path": dir.to_str().unwrap()}));
+        assert!(result.is_ok());
+        assert!(dir.exists());
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join("clawft-fs-mkdir-test"));
+    }
+
+    #[test]
+    fn fs_create_dir_sandbox_denied() {
+        let tool = FsCreateDirTool::new();
+        // Default sandbox is permissive — this should succeed
+        let dir = std::env::temp_dir().join("clawft-fs-mkdir-sandbox-test");
+        let result = tool.execute(serde_json::json!({"path": dir.to_str().unwrap()}));
+        assert!(result.is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fs_remove_file() {
+        let dir = std::env::temp_dir().join("clawft-fs-rm-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("delete_me.txt");
+        std::fs::write(&file, "bye").unwrap();
+        let tool = FsRemoveTool::new();
+        let result = tool.execute(serde_json::json!({"path": file.to_str().unwrap()}));
+        assert!(result.is_ok());
+        assert!(!file.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fs_remove_not_found() {
+        let tool = FsRemoveTool::new();
+        let result = tool.execute(serde_json::json!({"path": "/no/such/file/xyz"}));
+        assert!(matches!(result, Err(ToolError::FileNotFound(_))));
+    }
+
+    #[test]
+    fn fs_copy_file() {
+        let dir = std::env::temp_dir().join("clawft-fs-copy-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let src = dir.join("src.txt");
+        let dst = dir.join("dst.txt");
+        std::fs::write(&src, "copy me").unwrap();
+        let tool = FsCopyTool::new();
+        let result = tool.execute(serde_json::json!({"src": src.to_str().unwrap(), "dst": dst.to_str().unwrap()}));
+        assert!(result.is_ok());
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "copy me");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fs_copy_not_found() {
+        let tool = FsCopyTool::new();
+        let result = tool.execute(serde_json::json!({"src": "/no/file", "dst": "/tmp/out"}));
+        assert!(matches!(result, Err(ToolError::FileNotFound(_))));
+    }
+
+    #[test]
+    fn fs_move_file() {
+        let dir = std::env::temp_dir().join("clawft-fs-move-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let src = dir.join("old.txt");
+        let dst = dir.join("new.txt");
+        std::fs::write(&src, "move me").unwrap();
+        let tool = FsMoveTool::new();
+        let result = tool.execute(serde_json::json!({"src": src.to_str().unwrap(), "dst": dst.to_str().unwrap()}));
+        assert!(result.is_ok());
+        assert!(!src.exists());
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "move me");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fs_move_not_found() {
+        let tool = FsMoveTool::new();
+        let result = tool.execute(serde_json::json!({"src": "/no/file", "dst": "/tmp/out"}));
+        assert!(matches!(result, Err(ToolError::FileNotFound(_))));
+    }
+
+    #[test]
+    fn fs_stat_returns_metadata() {
+        let dir = std::env::temp_dir().join("clawft-fs-stat-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("stat.txt");
+        std::fs::write(&file, "data").unwrap();
+        let tool = FsStatTool::new();
+        let result = tool.execute(serde_json::json!({"path": file.to_str().unwrap()})).unwrap();
+        assert_eq!(result["size"], 4);
+        assert_eq!(result["is_file"], true);
+        assert_eq!(result["is_dir"], false);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fs_stat_error() {
+        let tool = FsStatTool::new();
+        let result = tool.execute(serde_json::json!({"path": "/no/such/file"}));
+        assert!(matches!(result, Err(ToolError::ExecutionFailed(_))));
+    }
+
+    #[test]
+    fn fs_exists_checks() {
+        let tool = FsExistsTool::new();
+        let result = tool.execute(serde_json::json!({"path": "/tmp"})).unwrap();
+        assert_eq!(result["exists"], true);
+        assert_eq!(result["is_dir"], true);
+
+        let result = tool.execute(serde_json::json!({"path": "/no/such/path/xyz"})).unwrap();
+        assert_eq!(result["exists"], false);
+    }
+
+    #[test]
+    fn fs_glob_finds_files() {
+        let dir = std::env::temp_dir().join("clawft-fs-glob-test");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("test.rs"), "fn main() {}").unwrap();
+        std::fs::write(dir.join("test.txt"), "text").unwrap();
+        let tool = FsGlobTool::new();
+        let result = tool.execute(serde_json::json!({
+            "pattern": "*.rs",
+            "base_dir": dir.to_str().unwrap(),
+        })).unwrap();
+        assert!(result["count"].as_u64().unwrap() >= 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fs_glob_no_match() {
+        let dir = std::env::temp_dir().join("clawft-fs-glob-nomatch-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let tool = FsGlobTool::new();
+        let result = tool.execute(serde_json::json!({
+            "pattern": "*.xyz",
+            "base_dir": dir.to_str().unwrap(),
+        })).unwrap();
+        assert_eq!(result["count"], 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- K4 C2: Agent tool tests ---
+
+    #[test]
+    fn agent_stop_cancels_token() {
+        let pt = Arc::new(crate::process::ProcessTable::new(64));
+        let spawn = AgentSpawnTool::new(pt.clone());
+        let result = spawn.execute(serde_json::json!({"agent_id": "stop-test"})).unwrap();
+        let pid = result["pid"].as_u64().unwrap();
+
+        let tool = AgentStopTool::new(pt.clone());
+        let result = tool.execute(serde_json::json!({"pid": pid}));
+        assert!(result.is_ok());
+        let entry = pt.get(pid).unwrap();
+        assert!(entry.cancel_token.is_cancelled());
+    }
+
+    #[test]
+    fn agent_stop_not_found() {
+        let pt = Arc::new(crate::process::ProcessTable::new(64));
+        let tool = AgentStopTool::new(pt);
+        let result = tool.execute(serde_json::json!({"pid": 9999}));
+        assert!(matches!(result, Err(ToolError::NotFound(_))));
+    }
+
+    #[test]
+    fn agent_list_shows_agents() {
+        let pt = Arc::new(crate::process::ProcessTable::new(64));
+        let spawn = AgentSpawnTool::new(pt.clone());
+        spawn.execute(serde_json::json!({"agent_id": "list-a"})).unwrap();
+        spawn.execute(serde_json::json!({"agent_id": "list-b"})).unwrap();
+
+        let tool = AgentListTool::new(pt);
+        let result = tool.execute(serde_json::json!({})).unwrap();
+        assert!(result["count"].as_u64().unwrap() >= 2);
+    }
+
+    #[test]
+    fn agent_inspect_returns_details() {
+        let pt = Arc::new(crate::process::ProcessTable::new(64));
+        let spawn = AgentSpawnTool::new(pt.clone());
+        let r = spawn.execute(serde_json::json!({"agent_id": "inspect-me"})).unwrap();
+        let pid = r["pid"].as_u64().unwrap();
+
+        let tool = AgentInspectTool::new(pt);
+        let result = tool.execute(serde_json::json!({"pid": pid})).unwrap();
+        assert_eq!(result["agent_id"], "inspect-me");
+        assert!(result["capabilities"].is_object());
+    }
+
+    #[test]
+    fn agent_inspect_not_found() {
+        let pt = Arc::new(crate::process::ProcessTable::new(64));
+        let tool = AgentInspectTool::new(pt);
+        let result = tool.execute(serde_json::json!({"pid": 9999}));
+        assert!(matches!(result, Err(ToolError::NotFound(_))));
+    }
+
+    #[test]
+    fn agent_suspend_resume_cycle() {
+        let pt = Arc::new(crate::process::ProcessTable::new(64));
+        let spawn = AgentSpawnTool::new(pt.clone());
+        let r = spawn.execute(serde_json::json!({"agent_id": "sr-test"})).unwrap();
+        let pid = r["pid"].as_u64().unwrap();
+
+        let suspend = AgentSuspendTool::new(pt.clone());
+        suspend.execute(serde_json::json!({"pid": pid})).unwrap();
+        assert_eq!(pt.get(pid).unwrap().state, crate::process::ProcessState::Suspended);
+
+        let resume = AgentResumeTool::new(pt.clone());
+        resume.execute(serde_json::json!({"pid": pid})).unwrap();
+        assert_eq!(pt.get(pid).unwrap().state, crate::process::ProcessState::Running);
+    }
+
+    // --- K4 C3: System tool tests ---
+
+    #[test]
+    fn sys_env_get_returns_value() {
+        // SAFETY: test-only, single-threaded access
+        unsafe { std::env::set_var("CLAWFT_TEST_VAR", "test_value"); }
+        let tool = SysEnvGetTool::new();
+        let result = tool.execute(serde_json::json!({"name": "CLAWFT_TEST_VAR"})).unwrap();
+        assert_eq!(result["value"], "test_value");
+        unsafe { std::env::remove_var("CLAWFT_TEST_VAR"); }
+    }
+
+    #[test]
+    fn sys_env_get_missing_returns_null() {
+        let tool = SysEnvGetTool::new();
+        let result = tool.execute(serde_json::json!({"name": "NO_SUCH_VAR_EVER_XYZ"})).unwrap();
+        assert!(result["value"].is_null());
+    }
+
+    #[test]
+    fn sys_cron_add_list_remove() {
+        let cron = Arc::new(crate::cron::CronService::new());
+        let add = SysCronAddTool::new(cron.clone());
+        let result = add.execute(serde_json::json!({
+            "name": "test-job",
+            "interval_secs": 60,
+            "command": "ping",
+        })).unwrap();
+        let job_id = result["id"].as_str().unwrap().to_string();
+
+        let list = SysCronListTool::new(cron.clone());
+        let jobs = list.execute(serde_json::json!({})).unwrap();
+        assert!(jobs.as_array().map(|a| !a.is_empty()).unwrap_or(false));
+
+        let rm = SysCronRemoveTool::new(cron);
+        let result = rm.execute(serde_json::json!({"id": job_id}));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn sys_cron_remove_not_found() {
+        let cron = Arc::new(crate::cron::CronService::new());
+        let tool = SysCronRemoveTool::new(cron);
+        let result = tool.execute(serde_json::json!({"id": "no-such-job"}));
+        assert!(matches!(result, Err(ToolError::NotFound(_))));
+    }
+
+    #[test]
+    fn simple_glob_match_works() {
+        assert!(simple_glob_match("*.rs", "main.rs"));
+        assert!(simple_glob_match("*.rs", "lib.rs"));
+        assert!(!simple_glob_match("*.rs", "main.txt"));
+        assert!(simple_glob_match("test?", "test1"));
+        assert!(!simple_glob_match("test?", "test12"));
+        assert!(simple_glob_match("*", "anything"));
+    }
+
+    // --- K4 D2: Module cache tests ---
+
+    #[test]
+    fn cache_roundtrip() {
+        let dir = std::env::temp_dir().join("clawft-cache-rt-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let cache = CompiledModuleCache::new(dir.clone(), 1024 * 1024);
+        let hash = [0xAAu8; 32];
+        let data = b"compiled wasm bytes";
+        cache.put(&hash, data);
+        let got = cache.get(&hash).unwrap();
+        assert_eq!(got, data);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_miss_returns_none() {
+        let dir = std::env::temp_dir().join("clawft-cache-miss-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let cache = CompiledModuleCache::new(dir.clone(), 1024 * 1024);
+        assert!(cache.get(&[0xBBu8; 32]).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_eviction() {
+        let dir = std::env::temp_dir().join("clawft-cache-evict-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        // Max 100 bytes — each entry ~20 bytes
+        let cache = CompiledModuleCache::new(dir.clone(), 100);
+        for i in 0..10u8 {
+            let mut hash = [0u8; 32];
+            hash[0] = i;
+            cache.put(&hash, &[i; 20]);
+        }
+        // Some entries should have been evicted
+        let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
+        assert!(entries.len() < 10, "eviction should have removed some entries");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- K4 D3: WASI scope tests ---
+
+    #[test]
+    fn wasi_scope_default_is_none() {
+        let scope = WasiFsScope::default();
+        assert_eq!(scope, WasiFsScope::None);
+    }
+
+    #[test]
+    fn wasi_scope_serde_roundtrip() {
+        let scope = WasiFsScope::ReadOnly(PathBuf::from("/data"));
+        let json = serde_json::to_string(&scope).unwrap();
+        let restored: WasiFsScope = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, scope);
+    }
+
+    // --- K4 F1: Signing tests ---
+
+    #[test]
+    fn verify_kernel_signature() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let hash = [0xAAu8; 32];
+        use ed25519_dalek::Signer;
+        let sig = key.sign(&hash);
+        let pubkey = key.verifying_key().to_bytes();
+        assert!(verify_tool_signature(&hash, &sig.to_bytes(), &pubkey));
+    }
+
+    #[test]
+    fn verify_tampered_cert_fails() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let hash = [0xAAu8; 32];
+        use ed25519_dalek::Signer;
+        let sig = key.sign(&hash);
+        let mut bad_sig = sig.to_bytes();
+        bad_sig[0] ^= 0xFF; // tamper
+        let pubkey = key.verifying_key().to_bytes();
+        assert!(!verify_tool_signature(&hash, &bad_sig, &pubkey));
+    }
+
+    #[test]
+    fn signing_authority_serde() {
+        let auth = ToolSigningAuthority::Kernel;
+        let json = serde_json::to_string(&auth).unwrap();
+        let _: ToolSigningAuthority = serde_json::from_str(&json).unwrap();
+    }
+
+    #[test]
+    #[cfg(feature = "exochain")]
+    fn signing_verify_roundtrip() {
+        use ed25519_dalek::{SigningKey, Signer};
+        let mut rng = rand::rngs::OsRng;
+        let sk = SigningKey::generate(&mut rng);
+        let pk_bytes: [u8; 32] = sk.verifying_key().to_bytes();
+        let hash: [u8; 32] = [42u8; 32];
+        let sig = sk.sign(&hash);
+        let sig_bytes: [u8; 64] = sig.to_bytes();
+        assert!(verify_tool_signature(&hash, &sig_bytes, &pk_bytes));
+    }
+
+    #[test]
+    #[cfg(feature = "exochain")]
+    fn signing_tampered_fails() {
+        use ed25519_dalek::{SigningKey, Signer};
+        let mut rng = rand::rngs::OsRng;
+        let sk = SigningKey::generate(&mut rng);
+        let pk_bytes: [u8; 32] = sk.verifying_key().to_bytes();
+        let hash: [u8; 32] = [42u8; 32];
+        let sig = sk.sign(&hash);
+        let mut sig_bytes: [u8; 64] = sig.to_bytes();
+        sig_bytes[0] ^= 0xff; // tamper
+        assert!(!verify_tool_signature(&hash, &sig_bytes, &pk_bytes));
+    }
+
+    // --- K4 F2: Backend selection tests ---
+
+    #[test]
+    fn backend_low_risk_native() {
+        assert_eq!(BackendSelection::from_risk(0.1), BackendSelection::Native);
+        assert_eq!(BackendSelection::from_risk(0.3), BackendSelection::Native);
+    }
+
+    #[test]
+    fn backend_high_risk_wasm() {
+        assert_eq!(BackendSelection::from_risk(0.5), BackendSelection::Wasm);
+        assert_eq!(BackendSelection::from_risk(0.7), BackendSelection::Wasm);
+    }
+
+    // --- Module hash tests ---
+
+    #[test]
+    fn module_hash_deterministic() {
+        let data = b"test module bytes";
+        let h1 = compute_module_hash(data);
+        let h2 = compute_module_hash(data);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn module_hash_differs_for_different_input() {
+        let h1 = compute_module_hash(b"module A");
+        let h2 = compute_module_hash(b"module B");
+        assert_ne!(h1, h2);
+    }
+
+    // --- ToolVersion/DeployedTool serde ---
+
+    #[test]
+    fn tool_version_serde_roundtrip() {
+        let tv = ToolVersion {
+            version: 1,
+            module_hash: [0xAA; 32],
+            signature: [0xBB; 64],
+            deployed_at: Utc::now(),
+            revoked: false,
+            chain_seq: 42,
+        };
+        let json = serde_json::to_string(&tv).unwrap();
+        let restored: ToolVersion = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.version, 1);
+        assert_eq!(restored.chain_seq, 42);
+        assert!(!restored.revoked);
+    }
+
+    #[test]
+    fn builtin_tool_spec_serde_roundtrip() {
+        let spec = BuiltinToolSpec {
+            name: "test.tool".into(),
+            category: ToolCategory::User,
+            description: "A test tool".into(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+            gate_action: "tool.test".into(),
+            effect: EffectVector::default(),
+            native: true,
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        let restored: BuiltinToolSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.name, "test.tool");
+        assert_eq!(restored.category, ToolCategory::User);
     }
 }

@@ -23,6 +23,7 @@ use exo_resource_tree::{
 use crate::capability::AgentCapabilities;
 use crate::chain::ChainManager;
 use crate::process::Pid;
+use crate::wasm_runner::{BuiltinToolSpec, ToolVersion, compute_module_hash};
 
 /// Statistics snapshot from the tree manager.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -590,6 +591,302 @@ impl TreeManager {
         scored
     }
 
+    // --- Tool lifecycle API ---
+
+    /// Build a tool: validate WASM bytes, compute hash, sign with Ed25519.
+    ///
+    /// Returns a `ToolVersion` with the computed module hash and Ed25519
+    /// signature. Emits a `tool.build` chain event.
+    pub fn build_tool(
+        &self,
+        name: &str,
+        wasm_bytes: &[u8],
+        signing_key: &ed25519_dalek::SigningKey,
+    ) -> Result<ToolVersion, Box<dyn std::error::Error + Send + Sync>> {
+        let module_hash = compute_module_hash(wasm_bytes);
+
+        use ed25519_dalek::Signer;
+        let signature = signing_key.sign(&module_hash);
+        let sig_bytes: [u8; 64] = signature.to_bytes();
+
+        let chain_event = self.chain.append(
+            "tool",
+            "tool.build",
+            Some(serde_json::json!({
+                "name": name,
+                "module_hash": hex_hash(&module_hash),
+                "sig_algo": "Ed25519",
+            })),
+        );
+
+        let version = ToolVersion {
+            version: 1,
+            module_hash,
+            signature: sig_bytes,
+            deployed_at: Utc::now(),
+            revoked: false,
+            chain_seq: chain_event.sequence,
+        };
+
+        debug!(name, "tool built with hash and signature");
+        Ok(version)
+    }
+
+    /// Deploy a tool to the resource tree.
+    ///
+    /// Creates the tool node at `/kernel/tools/{category}/{name}`,
+    /// stores version metadata, and emits a `tool.deploy` chain event.
+    pub fn deploy_tool(
+        &self,
+        spec: &BuiltinToolSpec,
+        version: &ToolVersion,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let cat = match spec.category {
+            crate::wasm_runner::ToolCategory::Filesystem => "fs",
+            crate::wasm_runner::ToolCategory::Agent => "agent",
+            crate::wasm_runner::ToolCategory::System => "sys",
+            crate::wasm_runner::ToolCategory::Ecc => "ecc",
+            crate::wasm_runner::ToolCategory::User => "user",
+        };
+
+        // Ensure category namespace exists
+        let cat_path = format!("/kernel/tools/{cat}");
+        let cat_rid = ResourceId::new(&cat_path);
+        {
+            let tree = self.tree.lock().map_err(|e| format!("tree lock: {e}"))?;
+            if tree.get(&cat_rid).is_none() {
+                drop(tree);
+                self.insert(
+                    cat_rid,
+                    ResourceKind::Namespace,
+                    ResourceId::new("/kernel/tools"),
+                )?;
+            }
+        }
+
+        // Tool short name (e.g. "read_file" from "fs.read_file")
+        let short_name = spec.name.rsplit('.').next().unwrap_or(&spec.name);
+        let tool_path = format!("/kernel/tools/{cat}/{short_name}");
+        let tool_rid = ResourceId::new(&tool_path);
+
+        // Insert the tool node
+        self.insert(
+            tool_rid.clone(),
+            ResourceKind::Tool,
+            ResourceId::new(&cat_path),
+        )?;
+
+        // Set metadata
+        self.update_meta(&tool_rid, "tool_version", serde_json::json!(version.version))?;
+        self.update_meta(
+            &tool_rid,
+            "module_hash",
+            serde_json::json!(hex_hash(&version.module_hash)),
+        )?;
+        self.update_meta(&tool_rid, "gate_action", serde_json::json!(&spec.gate_action))?;
+        self.update_meta(
+            &tool_rid,
+            "deployed_at",
+            serde_json::json!(version.deployed_at.to_rfc3339()),
+        )?;
+
+        // K4 B2: Persist version history array in tree metadata
+        let versions_array = serde_json::json!([{
+            "version": version.version,
+            "module_hash": hex_hash(&version.module_hash),
+            "deployed_at": version.deployed_at.to_rfc3339(),
+            "revoked": version.revoked,
+            "chain_seq": version.chain_seq,
+        }]);
+        self.update_meta(&tool_rid, "versions", versions_array)?;
+
+        self.chain.append(
+            "tool",
+            "tool.deploy",
+            Some(serde_json::json!({
+                "name": spec.name,
+                "version": version.version,
+                "tree_path": tool_path,
+                "module_hash": hex_hash(&version.module_hash),
+                "gate_action": spec.gate_action,
+            })),
+        );
+
+        debug!(tool = %spec.name, version = version.version, "tool deployed");
+        Ok(())
+    }
+
+    /// Update a tool to a new version.
+    ///
+    /// Updates the tool node's metadata with new version info and
+    /// emits a `tool.version.update` chain event linking old to new.
+    pub fn update_tool_version(
+        &self,
+        name: &str,
+        new_version: &ToolVersion,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let parts: Vec<&str> = name.splitn(2, '.').collect();
+        if parts.len() != 2 {
+            return Err(format!("invalid tool name: {name}").into());
+        }
+        let tool_path = format!("/kernel/tools/{}/{}", parts[0], parts[1]);
+        let tool_rid = ResourceId::new(&tool_path);
+
+        // Get old version info from metadata
+        let (old_version, old_hash) = {
+            let tree = self.tree.lock().map_err(|e| format!("tree lock: {e}"))?;
+            let node = tree
+                .get(&tool_rid)
+                .ok_or_else(|| format!("tool not found: {tool_path}"))?;
+            let ver = node
+                .metadata
+                .get("tool_version")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            let hash = node
+                .metadata
+                .get("module_hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            (ver, hash)
+        };
+
+        self.update_meta(
+            &tool_rid,
+            "tool_version",
+            serde_json::json!(new_version.version),
+        )?;
+        self.update_meta(
+            &tool_rid,
+            "module_hash",
+            serde_json::json!(hex_hash(&new_version.module_hash)),
+        )?;
+        self.update_meta(
+            &tool_rid,
+            "deployed_at",
+            serde_json::json!(new_version.deployed_at.to_rfc3339()),
+        )?;
+
+        // K4 B2: Append to version history array
+        {
+            let tree = self.tree.lock().map_err(|e| format!("tree lock: {e}"))?;
+            let node = tree
+                .get(&tool_rid)
+                .ok_or_else(|| format!("tool not found: {tool_path}"))?;
+            let mut versions: Vec<serde_json::Value> = node
+                .metadata
+                .get("versions")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            versions.push(serde_json::json!({
+                "version": new_version.version,
+                "module_hash": hex_hash(&new_version.module_hash),
+                "deployed_at": new_version.deployed_at.to_rfc3339(),
+                "revoked": new_version.revoked,
+                "chain_seq": new_version.chain_seq,
+            }));
+            drop(tree);
+            self.update_meta(&tool_rid, "versions", serde_json::json!(versions))?;
+        }
+
+        self.chain.append(
+            "tool",
+            "tool.version.update",
+            Some(serde_json::json!({
+                "name": name,
+                "old_version": old_version,
+                "new_version": new_version.version,
+                "old_hash": old_hash,
+                "new_hash": hex_hash(&new_version.module_hash),
+            })),
+        );
+
+        debug!(tool = name, old = old_version, new = new_version.version, "tool version updated");
+        Ok(())
+    }
+
+    /// Revoke a tool version.
+    ///
+    /// Marks the specified version as revoked in metadata. Does NOT
+    /// delete the tree node (preserves audit trail). Emits a
+    /// `tool.version.revoke` chain event.
+    pub fn revoke_tool_version(
+        &self,
+        name: &str,
+        version: u32,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let parts: Vec<&str> = name.splitn(2, '.').collect();
+        if parts.len() != 2 {
+            return Err(format!("invalid tool name: {name}").into());
+        }
+        let tool_path = format!("/kernel/tools/{}/{}", parts[0], parts[1]);
+        let tool_rid = ResourceId::new(&tool_path);
+
+        {
+            let tree = self.tree.lock().map_err(|e| format!("tree lock: {e}"))?;
+            tree.get(&tool_rid)
+                .ok_or_else(|| format!("tool not found: {tool_path}"))?;
+        }
+
+        let revoke_key = format!("v{version}_revoked");
+        let revoke_at_key = format!("v{version}_revoked_at");
+        self.update_meta(&tool_rid, &revoke_key, serde_json::json!(true))?;
+        self.update_meta(
+            &tool_rid,
+            &revoke_at_key,
+            serde_json::json!(Utc::now().to_rfc3339()),
+        )?;
+
+        let module_hash = {
+            let tree = self.tree.lock().map_err(|e| format!("tree lock: {e}"))?;
+            let node = tree.get(&tool_rid).unwrap();
+            node.metadata
+                .get("module_hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+
+        self.chain.append(
+            "tool",
+            "tool.version.revoke",
+            Some(serde_json::json!({
+                "name": name,
+                "version": version,
+                "module_hash": module_hash,
+            })),
+        );
+
+        debug!(tool = name, version, "tool version revoked");
+        Ok(())
+    }
+
+    /// Query version history for a tool (K4 B2).
+    ///
+    /// Returns the list of version entries persisted in the tree
+    /// metadata, or an empty vec if the tool has no versions.
+    pub fn get_tool_versions(
+        &self,
+        name: &str,
+    ) -> Vec<serde_json::Value> {
+        let parts: Vec<&str> = name.splitn(2, '.').collect();
+        if parts.len() != 2 {
+            return Vec::new();
+        }
+        let tool_path = format!("/kernel/tools/{}/{}", parts[0], parts[1]);
+        let tool_rid = ResourceId::new(&tool_path);
+
+        let tree = match self.tree.lock() {
+            Ok(t) => t,
+            Err(_) => return Vec::new(),
+        };
+        tree.get(&tool_rid)
+            .and_then(|node| node.metadata.get("versions"))
+            .and_then(|v| serde_json::from_value::<Vec<serde_json::Value>>(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
     /// Save tree state to a checkpoint file on disk.
     ///
     /// Serializes the tree via `exo_resource_tree::to_checkpoint()` and
@@ -1075,5 +1372,257 @@ mod tests {
 
         // Clean up.
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- Tool lifecycle tests ---
+
+    fn test_signing_key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[42u8; 32])
+    }
+
+    fn setup_tool_tree() -> (Arc<ChainManager>, TreeManager) {
+        let chain = test_chain();
+        let tm = TreeManager::new(Arc::clone(&chain));
+        tm.bootstrap().unwrap();
+        // Create /kernel/tools namespace
+        tm.insert(
+            ResourceId::new("/kernel/tools"),
+            ResourceKind::Namespace,
+            ResourceId::new("/kernel"),
+        )
+        .unwrap();
+        (chain, tm)
+    }
+
+    #[test]
+    fn tool_build_computes_hash_and_signs() {
+        let (_chain, tm) = setup_tool_tree();
+        let key = test_signing_key();
+        let wasm_bytes = b"fake wasm module bytes for testing";
+
+        let tv = tm.build_tool("fs.read_file", wasm_bytes, &key).unwrap();
+        assert_eq!(tv.version, 1);
+        assert!(!tv.revoked);
+        // Hash should match compute_module_hash
+        let expected = compute_module_hash(wasm_bytes);
+        assert_eq!(tv.module_hash, expected);
+        // Signature should be non-zero
+        assert_ne!(tv.signature, [0u8; 64]);
+    }
+
+    #[test]
+    fn tool_deploy_creates_tree_node() {
+        let (_chain, tm) = setup_tool_tree();
+        let spec = crate::wasm_runner::builtin_tool_catalog()
+            .into_iter()
+            .find(|s| s.name == "fs.read_file")
+            .unwrap();
+        let tv = ToolVersion {
+            version: 1,
+            module_hash: [0xAA; 32],
+            signature: [0xBB; 64],
+            deployed_at: Utc::now(),
+            revoked: false,
+            chain_seq: 10,
+        };
+
+        tm.deploy_tool(&spec, &tv).unwrap();
+
+        let tree = tm.tree().lock().unwrap();
+        let node = tree.get(&ResourceId::new("/kernel/tools/fs/read_file"));
+        assert!(node.is_some(), "tool node should exist");
+        let node = node.unwrap();
+        assert_eq!(node.kind, ResourceKind::Tool);
+        assert_eq!(node.metadata["tool_version"], serde_json::json!(1));
+        assert!(node.metadata.contains_key("gate_action"));
+    }
+
+    #[test]
+    fn tool_deploy_emits_chain_event() {
+        let (chain, tm) = setup_tool_tree();
+        let spec = crate::wasm_runner::builtin_tool_catalog()
+            .into_iter()
+            .find(|s| s.name == "fs.read_file")
+            .unwrap();
+        let tv = ToolVersion {
+            version: 1,
+            module_hash: [0xAA; 32],
+            signature: [0xBB; 64],
+            deployed_at: Utc::now(),
+            revoked: false,
+            chain_seq: 10,
+        };
+
+        let before = chain.len();
+        tm.deploy_tool(&spec, &tv).unwrap();
+        assert!(chain.len() > before);
+
+        let events = chain.tail(5);
+        assert!(
+            events.iter().any(|e| e.kind == "tool.deploy"),
+            "expected tool.deploy chain event"
+        );
+    }
+
+    #[test]
+    fn tool_version_update_chain_links() {
+        let (chain, tm) = setup_tool_tree();
+        let spec = crate::wasm_runner::builtin_tool_catalog()
+            .into_iter()
+            .find(|s| s.name == "fs.read_file")
+            .unwrap();
+        let v1 = ToolVersion {
+            version: 1,
+            module_hash: [0xAA; 32],
+            signature: [0xBB; 64],
+            deployed_at: Utc::now(),
+            revoked: false,
+            chain_seq: 10,
+        };
+        tm.deploy_tool(&spec, &v1).unwrap();
+
+        let v2 = ToolVersion {
+            version: 2,
+            module_hash: [0xCC; 32],
+            signature: [0xDD; 64],
+            deployed_at: Utc::now(),
+            revoked: false,
+            chain_seq: 20,
+        };
+        tm.update_tool_version("fs.read_file", &v2).unwrap();
+
+        // Verify chain event
+        let events = chain.tail(5);
+        let update_evt = events
+            .iter()
+            .find(|e| e.kind == "tool.version.update")
+            .expect("expected tool.version.update event");
+        let payload = update_evt.payload.as_ref().unwrap();
+        assert_eq!(payload["old_version"], 1);
+        assert_eq!(payload["new_version"], 2);
+
+        // Verify tree metadata updated
+        let tree = tm.tree().lock().unwrap();
+        let node = tree
+            .get(&ResourceId::new("/kernel/tools/fs/read_file"))
+            .unwrap();
+        assert_eq!(node.metadata["tool_version"], serde_json::json!(2));
+    }
+
+    #[test]
+    fn tool_version_revoke_marks_revoked() {
+        let (_chain, tm) = setup_tool_tree();
+        let spec = crate::wasm_runner::builtin_tool_catalog()
+            .into_iter()
+            .find(|s| s.name == "fs.read_file")
+            .unwrap();
+        let v1 = ToolVersion {
+            version: 1,
+            module_hash: [0xAA; 32],
+            signature: [0xBB; 64],
+            deployed_at: Utc::now(),
+            revoked: false,
+            chain_seq: 10,
+        };
+        tm.deploy_tool(&spec, &v1).unwrap();
+
+        tm.revoke_tool_version("fs.read_file", 1).unwrap();
+
+        let tree = tm.tree().lock().unwrap();
+        let node = tree
+            .get(&ResourceId::new("/kernel/tools/fs/read_file"))
+            .unwrap();
+        assert_eq!(node.metadata["v1_revoked"], serde_json::json!(true));
+        assert!(node.metadata.contains_key("v1_revoked_at"));
+    }
+
+    // --- Version history tests (K4 B2) ---
+
+    #[test]
+    fn version_history_persisted_in_tree() {
+        let (_chain, tm) = setup_tool_tree();
+        let spec = crate::wasm_runner::builtin_tool_catalog()
+            .into_iter()
+            .find(|s| s.name == "fs.read_file")
+            .unwrap();
+
+        let v1 = ToolVersion {
+            version: 1,
+            module_hash: [0xAA; 32],
+            signature: [0xBB; 64],
+            deployed_at: Utc::now(),
+            revoked: false,
+            chain_seq: 10,
+        };
+        tm.deploy_tool(&spec, &v1).unwrap();
+
+        let v2 = ToolVersion {
+            version: 2,
+            module_hash: [0xCC; 32],
+            signature: [0xDD; 64],
+            deployed_at: Utc::now(),
+            revoked: false,
+            chain_seq: 20,
+        };
+        tm.update_tool_version("fs.read_file", &v2).unwrap();
+
+        let versions = tm.get_tool_versions("fs.read_file");
+        assert_eq!(versions.len(), 2, "should have 2 versions");
+        assert_eq!(versions[0]["version"], 1);
+        assert_eq!(versions[1]["version"], 2);
+    }
+
+    #[test]
+    fn version_history_includes_revoked() {
+        let (_chain, tm) = setup_tool_tree();
+        let spec = crate::wasm_runner::builtin_tool_catalog()
+            .into_iter()
+            .find(|s| s.name == "fs.read_file")
+            .unwrap();
+
+        let v1 = ToolVersion {
+            version: 1,
+            module_hash: [0xAA; 32],
+            signature: [0xBB; 64],
+            deployed_at: Utc::now(),
+            revoked: false,
+            chain_seq: 10,
+        };
+        tm.deploy_tool(&spec, &v1).unwrap();
+        tm.revoke_tool_version("fs.read_file", 1).unwrap();
+
+        let versions = tm.get_tool_versions("fs.read_file");
+        assert_eq!(versions.len(), 1, "version entry should persist after revoke");
+        // The revoke flag in the version array entry is as deployed (false),
+        // but the per-version metadata key v1_revoked=true is set separately.
+        // Version history records deploy-time state.
+    }
+
+    #[test]
+    fn tool_revoke_emits_chain_event() {
+        let (chain, tm) = setup_tool_tree();
+        let spec = crate::wasm_runner::builtin_tool_catalog()
+            .into_iter()
+            .find(|s| s.name == "fs.read_file")
+            .unwrap();
+        let v1 = ToolVersion {
+            version: 1,
+            module_hash: [0xAA; 32],
+            signature: [0xBB; 64],
+            deployed_at: Utc::now(),
+            revoked: false,
+            chain_seq: 10,
+        };
+        tm.deploy_tool(&spec, &v1).unwrap();
+
+        let before = chain.len();
+        tm.revoke_tool_version("fs.read_file", 1).unwrap();
+        assert!(chain.len() > before);
+
+        let events = chain.tail(5);
+        assert!(
+            events.iter().any(|e| e.kind == "tool.version.revoke"),
+            "expected tool.version.revoke chain event"
+        );
     }
 }

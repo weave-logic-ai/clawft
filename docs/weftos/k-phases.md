@@ -135,6 +135,30 @@ What's needed for K3 completion:
 `cognitum-gate-kernel` (audit trail verification),
 `ruvector-snapshot` (WASM state snapshots)
 
+### K3c: ECC Cognitive Substrate
+
+**Status**: COMPLETE (83 tests)
+
+Adds the Ephemeral Causal Cognition (ECC) cognitive substrate behind the `ecc` feature flag.
+
+| Component | File | Tests | Notes |
+|-----------|------|-------|-------|
+| Causal DAG | `causal.rs` | 22 | Typed/weighted edges, BFS traversal, path finding |
+| Cognitive tick | `cognitive_tick.rs` | 20 | Adaptive interval, drift detection, SystemService |
+| Cross-references | `crossref.rs` | 12 | UniversalNodeId (BLAKE3), bidirectional store |
+| Calibration | `calibration.rs` | 10 | Boot-time benchmarking, p50/p95, auto tick interval |
+| HNSW service | `hnsw_service.rs` | 11 | Thread-safe wrapper for clawft-core HnswStore |
+| Impulse queue | `impulse.rs` | 8 | HLC-sorted ephemeral causal events |
+
+Additional changes:
+- `NodeEccCapability` in `cluster.rs` for cluster capability advertisement
+- 7 `ecc.*` tools in `builtin_tool_catalog()` (`wasm_runner.rs`)
+- `BootPhase::Ecc` + `ToolCategory::Ecc` in console/wasm_runner
+- 6 resource tree namespaces under `/kernel/services/ecc/`
+- `weaver ecc` CLI subcommands (status, calibrate, search, causal, crossrefs, tick)
+
+**Source**: ECC Symposium (2026-03-22) — see `docs/weftos/ecc-symposium/`
+
 ### K4: Containers
 
 **Status**: STUBBED (types defined, Docker/Podman integration pending)

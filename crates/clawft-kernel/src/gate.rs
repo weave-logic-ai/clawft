@@ -424,11 +424,11 @@ impl GateBackend for GovernanceGate {
                 "evaluated_rules": result.evaluated_rules,
             });
 
-            if let Some(obj) = payload.as_object_mut() {
-                if let Some(extra_obj) = extra.as_object() {
-                    for (k, v) in extra_obj {
-                        obj.insert(k.clone(), v.clone());
-                    }
+            if let Some(obj) = payload.as_object_mut()
+                && let Some(extra_obj) = extra.as_object()
+            {
+                for (k, v) in extra_obj {
+                    obj.insert(k.clone(), v.clone());
                 }
             }
 

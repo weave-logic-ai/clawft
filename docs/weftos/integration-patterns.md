@@ -474,3 +474,63 @@ chain.append("service", "service.contract.register", json!({
     "schema_hash": shake256(&schema_bytes),
 }));
 ```
+
+---
+
+## Section 6: Adding a New Gated Subsystem — ECC Worked Example (K3c)
+
+The ECC cognitive substrate (Phase K3c) demonstrates the standard integration pattern
+for adding a new subsystem to the kernel.
+
+### Step 1: Define module (`causal.rs`, `hnsw_service.rs`, etc.)
+
+Each module is a standalone Rust file with its own types, public API, and tests.
+Feature-gated via `#[cfg(feature = "ecc")]` in `lib.rs`.
+
+### Step 2: Add chain logging
+
+ECC operations emit chain events with `ecc.*` event kinds:
+- `ecc.boot.calibration` — calibration results at boot
+- `ecc.hnsw.insert`, `ecc.hnsw.search` — vector operations
+- `ecc.causal.link` — causal edge creation
+- `ecc.crossref.create` — cross-structure reference
+- `ecc.impulse.emit` — ephemeral events
+- `ecc.tick.drift` — tick budget exceeded
+
+### Step 3: Register in resource tree
+
+Boot creates 6 namespaces under `/kernel/services/ecc/`:
+```
+/kernel/services/ecc/
+/kernel/services/ecc/hnsw/
+/kernel/services/ecc/causal/
+/kernel/services/ecc/tick/
+/kernel/services/ecc/calibration/
+/kernel/services/ecc/crossrefs/
+```
+
+### Step 4: Add gate checks
+
+7 tool specs in `builtin_tool_catalog()` with `ToolCategory::Ecc`:
+`ecc.embed`, `ecc.search`, `ecc.causal.link`, `ecc.causal.query`,
+`ecc.crossref.create`, `ecc.tick.status`, `ecc.calibration.run`.
+
+Each has an `EffectVector` for governance scoring.
+
+### Step 5: Wire into boot
+
+`boot_ecc()` runs after tree bootstrap:
+1. Create `HnswService`, `CausalGraph`, `CrossRefStore`, `ImpulseQueue`
+2. Run `run_calibration()` — N synthetic ticks measuring performance
+3. Create `CognitiveTick` with calibrated interval
+4. Register `HnswService` and `CognitiveTick` as `SystemService`
+5. Log calibration to chain
+6. Advertise `NodeEccCapability` to cluster
+
+### Step 6: Add CLI commands
+
+`weaver ecc` subcommands: `status`, `calibrate`, `search`, `causal`, `crossrefs`, `tick`.
+
+### Step 7: Write tests
+
+83 unit tests across 6 modules + integration via calibration tests.

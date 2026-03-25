@@ -27,6 +27,7 @@ use crate::process::{Pid, ProcessState, ProcessTable, ResourceUsage};
 /// 7. Exits when the cancellation token is triggered
 ///
 /// Returns an exit code (0 = normal shutdown).
+#[allow(clippy::too_many_arguments)]
 pub async fn kernel_agent_loop(
     pid: Pid,
     cancel: CancellationToken,
@@ -34,6 +35,7 @@ pub async fn kernel_agent_loop(
     a2a: Arc<A2ARouter>,
     cron: Arc<CronService>,
     process_table: Arc<ProcessTable>,
+    tool_registry: Option<Arc<crate::wasm_runner::ToolRegistry>>,
     #[cfg(feature = "exochain")] chain: Option<Arc<crate::chain::ChainManager>>,
     #[cfg(feature = "exochain")] gate: Option<Arc<dyn crate::gate::GateBackend>>,
 ) -> i32 {
@@ -134,57 +136,101 @@ pub async fn kernel_agent_loop(
 
                         // Gate check for protected commands
                         #[cfg(feature = "exochain")]
-                        if let Some(ref gate_backend) = gate {
-                            if let Some(ref cmd_str) = cmd {
-                                let action = match cmd_str.as_str() {
-                                    "exec" => Some("tool.exec"),
-                                    "cron.add" => Some("service.cron.add"),
-                                    "cron.remove" => Some("service.cron.remove"),
-                                    _ => None,
+                        if let Some(ref gate_backend) = gate
+                            && let Some(ref cmd_str) = cmd
+                        {
+                            let action = match cmd_str.as_str() {
+                                "exec" => Some("tool.exec"),
+                                "cron.add" => Some("service.cron.add"),
+                                "cron.remove" => Some("service.cron.remove"),
+                                _ => None,
+                            };
+                            if let Some(action_str) = action {
+                                // Build enriched gate context with tool name and effect vector (K4 A2)
+                                let context = if cmd_str == "exec" {
+                                    let tool_name = extract_tool_name(&message);
+                                    let effect = tool_name.as_deref().and_then(|tn| {
+                                        tool_registry.as_ref().and_then(|reg| {
+                                            reg.get(tn).map(|t| &t.spec().effect)
+                                        })
+                                    });
+                                    let mut ctx = serde_json::json!({"pid": pid});
+                                    if let Some(tn) = &tool_name {
+                                        ctx["tool"] = serde_json::json!(tn);
+                                    }
+                                    if let Some(ev) = effect {
+                                        ctx["effect"] = serde_json::json!({
+                                            "risk": ev.risk,
+                                            "security": ev.security,
+                                            "privacy": ev.privacy,
+                                        });
+                                    }
+                                    ctx
+                                } else {
+                                    serde_json::json!({"pid": pid})
                                 };
-                                if let Some(action_str) = action {
-                                    let context = serde_json::json!({"pid": pid});
-                                    let decision = gate_backend.check(&agent_id, action_str, &context);
-                                    match decision {
-                                        crate::gate::GateDecision::Deny { reason, .. } => {
-                                            let reply = KernelMessage::with_correlation(
-                                                pid,
-                                                MessageTarget::Process(message.from),
-                                                MessagePayload::Json(serde_json::json!({
-                                                    "error": reason,
-                                                    "denied": true,
-                                                })),
-                                                message.id.clone(),
-                                            );
-                                            send_reply(&a2a, reply, chain.as_deref()).await;
-                                            usage.messages_sent += 1;
-                                            continue;
-                                        }
-                                        crate::gate::GateDecision::Defer { reason } => {
-                                            let reply = KernelMessage::with_correlation(
-                                                pid,
-                                                MessageTarget::Process(message.from),
-                                                MessagePayload::Json(serde_json::json!({
-                                                    "deferred": true,
-                                                    "reason": reason,
-                                                })),
-                                                message.id.clone(),
-                                            );
-                                            send_reply(&a2a, reply, chain.as_deref()).await;
-                                            usage.messages_sent += 1;
-                                            continue;
-                                        }
-                                        crate::gate::GateDecision::Permit { .. } => {
-                                            // Permitted — continue with normal handling
-                                        }
+                                let decision = gate_backend.check(&agent_id, action_str, &context);
+                                match decision {
+                                    crate::gate::GateDecision::Deny { reason, .. } => {
+                                        let reply = KernelMessage::with_correlation(
+                                            pid,
+                                            MessageTarget::Process(message.from),
+                                            MessagePayload::Json(serde_json::json!({
+                                                "error": reason,
+                                                "denied": true,
+                                            })),
+                                            message.id.clone(),
+                                        );
+                                        send_reply(&a2a, reply, chain.as_deref()).await;
+                                        usage.messages_sent += 1;
+                                        continue;
+                                    }
+                                    crate::gate::GateDecision::Defer { reason } => {
+                                        let reply = KernelMessage::with_correlation(
+                                            pid,
+                                            MessageTarget::Process(message.from),
+                                            MessagePayload::Json(serde_json::json!({
+                                                "deferred": true,
+                                                "reason": reason,
+                                            })),
+                                            message.id.clone(),
+                                        );
+                                        send_reply(&a2a, reply, chain.as_deref()).await;
+                                        usage.messages_sent += 1;
+                                        continue;
+                                    }
+                                    crate::gate::GateDecision::Permit { .. } => {
+                                        // Permitted — continue with normal handling
                                     }
                                 }
                             }
                         }
 
-                        // Track tool_calls for exec command
+                        // Track tool_calls for exec command and log sudo usage
                         if cmd.as_deref() == Some("exec") {
                             usage.tool_calls += 1;
+
+                            // K4 B1: Log sudo override usage to chain
+                            #[cfg(feature = "exochain")]
+                            {
+                                let sudo_flag = match &message.payload {
+                                    MessagePayload::Json(v) => v.get("sudo").and_then(|s| s.as_bool()).unwrap_or(false),
+                                    _ => false,
+                                };
+                                if sudo_flag
+                                    && let Some(ref cm) = chain
+                                {
+                                    cm.append(
+                                        "security",
+                                        "sudo.override",
+                                        Some(serde_json::json!({
+                                            "pid": pid,
+                                            "agent_id": &agent_id,
+                                            "tool": extract_tool_name(&message).unwrap_or_default(),
+                                        })),
+                                    );
+                                }
+                            }
                         }
 
                         handle_message(
@@ -192,6 +238,7 @@ pub async fn kernel_agent_loop(
                             &message,
                             &a2a,
                             &cron,
+                            tool_registry.as_deref(),
                             #[cfg(feature = "exochain")]
                             chain.as_deref(),
                             &started,
@@ -243,6 +290,20 @@ fn extract_cmd(msg: &KernelMessage) -> Option<String> {
             } else {
                 None
             }
+        }
+        _ => None,
+    }
+}
+
+/// Extract the tool name from an exec message payload.
+#[cfg(feature = "exochain")]
+fn extract_tool_name(msg: &KernelMessage) -> Option<String> {
+    match &msg.payload {
+        MessagePayload::Json(v) => v.get("tool").and_then(|t| t.as_str()).map(String::from),
+        MessagePayload::Text(text) => {
+            serde_json::from_str::<serde_json::Value>(text)
+                .ok()
+                .and_then(|v| v.get("tool").and_then(|t| t.as_str()).map(String::from))
         }
         _ => None,
     }
@@ -352,6 +413,7 @@ async fn handle_message(
     msg: &KernelMessage,
     a2a: &A2ARouter,
     cron: &CronService,
+    tool_registry: Option<&crate::wasm_runner::ToolRegistry>,
     #[cfg(feature = "exochain")] chain: Option<&crate::chain::ChainManager>,
     started: &Instant,
 ) {
@@ -494,16 +556,77 @@ async fn handle_message(
             }
         }
         "exec" => {
-            // Placeholder for K2 tool execution
-            let text = cmd_value
-                .get("text")
+            // K3 tool dispatch via ToolRegistry
+            let tool_name = cmd_value
+                .get("tool")
                 .and_then(|v| v.as_str())
-                .unwrap_or("(no input)");
-            serde_json::json!({
-                "status": "ok",
-                "echo": text,
-                "pid": pid,
-            })
+                .unwrap_or("");
+            let args = cmd_value
+                .get("args")
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
+
+            if tool_name.is_empty() {
+                // Backwards compat: echo mode when no tool specified
+                let text = cmd_value
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(no input)");
+                serde_json::json!({
+                    "status": "ok",
+                    "echo": text,
+                    "pid": pid,
+                })
+            } else if let Some(registry) = tool_registry {
+                match registry.execute(tool_name, args) {
+                    Ok(result) => {
+                        #[cfg(feature = "exochain")]
+                        if let Some(cm) = chain {
+                            cm.append(
+                                "tool",
+                                "tool.exec",
+                                Some(serde_json::json!({
+                                    "tool": tool_name,
+                                    "pid": pid,
+                                    "status": "ok",
+                                })),
+                            );
+                        }
+                        serde_json::json!({
+                            "status": "ok",
+                            "tool": tool_name,
+                            "result": result,
+                            "pid": pid,
+                        })
+                    }
+                    Err(e) => {
+                        #[cfg(feature = "exochain")]
+                        if let Some(cm) = chain {
+                            cm.append(
+                                "tool",
+                                "tool.exec",
+                                Some(serde_json::json!({
+                                    "tool": tool_name,
+                                    "pid": pid,
+                                    "status": "error",
+                                    "error": e.to_string(),
+                                })),
+                            );
+                        }
+                        serde_json::json!({
+                            "error": e.to_string(),
+                            "tool": tool_name,
+                            "pid": pid,
+                        })
+                    }
+                }
+            } else {
+                serde_json::json!({
+                    "error": "tool registry not available",
+                    "tool": tool_name,
+                    "pid": pid,
+                })
+            }
         }
         "echo" => {
             let text = cmd_value
@@ -625,6 +748,7 @@ mod tests {
                 a2a,
                 cron,
                 pt,
+                None, // tool_registry
                 #[cfg(feature = "exochain")]
                 None,
                 #[cfg(feature = "exochain")]
@@ -1025,7 +1149,8 @@ mod tests {
                 a2a2,
                 cron,
                 pt2,
-                None,
+                None, // tool_registry
+                None, // chain
                 Some(Arc::new(AlwaysDeny) as Arc<dyn GateBackend>),
             )
             .await
@@ -1093,7 +1218,8 @@ mod tests {
                 a2a2,
                 cron,
                 pt2,
-                None,
+                None, // tool_registry
+                None, // chain
                 Some(Arc::new(AlwaysPermit) as Arc<dyn GateBackend>),
             )
             .await
@@ -1148,8 +1274,9 @@ mod tests {
                 a2a2,
                 cron,
                 pt2,
+                None, // tool_registry
                 Some(cm2),
-                None,
+                None, // gate
             )
             .await
         });
@@ -1218,8 +1345,9 @@ mod tests {
                 a2a2,
                 cron,
                 pt2,
+                None, // tool_registry
                 Some(cm2),
-                None,
+                None, // gate
             )
             .await
         });

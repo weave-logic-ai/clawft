@@ -62,6 +62,9 @@ enum Commands {
     /// IPC management (topics, subscribe, publish).
     Ipc(commands::ipc_cmd::IpcArgs),
 
+    /// ECC cognitive substrate management (status, calibrate, search).
+    Ecc(commands::ecc_cmd::EccArgs),
+
     /// Show version and build info.
     Version,
 }
@@ -86,6 +89,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Resource(args) => commands::resource_cmd::run(args).await?,
         Commands::Cron(args) => commands::cron_cmd::run(args).await?,
         Commands::Ipc(args) => commands::ipc_cmd::run(args).await?,
+        Commands::Ecc(args) => commands::ecc_cmd::run(args).await?,
         Commands::Version => {
             println!("weaver {} (WeftOS)", env!("CARGO_PKG_VERSION"));
         }

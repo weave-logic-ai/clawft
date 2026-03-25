@@ -37,6 +37,21 @@
 //! - `native` (default) -- enables tokio runtime, native file I/O.
 //! - `wasm-sandbox` -- enables WASM tool runner (Phase K3).
 //! - `containers` -- enables container manager (Phase K4).
+//! - `ecc` -- enables ECC cognitive substrate (Phase K3c).
+
+// ── ECC cognitive substrate modules (K3c) ────────────────────────
+#[cfg(feature = "ecc")]
+pub mod calibration;
+#[cfg(feature = "ecc")]
+pub mod causal;
+#[cfg(feature = "ecc")]
+pub mod cognitive_tick;
+#[cfg(feature = "ecc")]
+pub mod crossref;
+#[cfg(feature = "ecc")]
+pub mod hnsw_service;
+#[cfg(feature = "ecc")]
+pub mod impulse;
 
 pub mod a2a;
 pub mod agency;
@@ -64,6 +79,7 @@ pub mod process;
 pub mod service;
 pub mod supervisor;
 pub mod topic;
+#[allow(clippy::new_without_default)]
 pub mod wasm_runner;
 
 // Re-export key types at the crate level for convenience.
@@ -82,7 +98,18 @@ pub use capability::{
     ToolPermissions,
 };
 #[cfg(feature = "exochain")]
-pub use chain::{ChainCheckpoint, ChainEvent, ChainManager, ChainStatus, ChainVerifyResult};
+pub use chain::{
+    AnchorReceipt, ChainAnchor, ChainCheckpoint, ChainEvent, ChainManager, ChainStatus,
+    ChainVerifyResult, MockAnchor,
+};
+#[cfg(feature = "ecc")]
+pub use calibration::{EccCalibration, EccCalibrationConfig};
+#[cfg(feature = "ecc")]
+pub use causal::{CausalEdgeType, CausalGraph};
+#[cfg(feature = "ecc")]
+pub use cognitive_tick::{CognitiveTick, CognitiveTickConfig, CognitiveTickStats};
+#[cfg(feature = "ecc")]
+pub use crossref::{CrossRef, CrossRefStore, CrossRefType, StructureTag, UniversalNodeId};
 #[cfg(feature = "exochain")]
 pub use gate::{CapabilityGate, GateBackend, GateDecision, GovernanceGate};
 #[cfg(feature = "exochain")]
@@ -97,8 +124,8 @@ pub use config::KernelConfigExt;
 pub use console::{BootEvent, BootLog, BootPhase, KernelEventLog, LogLevel};
 pub use cron::CronService;
 pub use container::{
-    ContainerConfig, ContainerError, ContainerManager, ContainerState, ManagedContainer,
-    PortMapping, RestartPolicy, VolumeMount,
+    ContainerConfig, ContainerError, ContainerManager, ContainerService, ContainerState,
+    ManagedContainer, PortMapping, RestartPolicy, VolumeMount,
 };
 pub use environment::{
     AuditLevel, Environment, EnvironmentClass, EnvironmentError, EnvironmentManager,
@@ -110,13 +137,32 @@ pub use governance::{
     GovernanceResult, GovernanceRule, RuleSeverity,
 };
 pub use health::{HealthStatus, HealthSystem, OverallHealth};
+#[cfg(feature = "ecc")]
+pub use hnsw_service::{HnswSearchResult, HnswService, HnswServiceConfig};
+#[cfg(feature = "ecc")]
+pub use impulse::{ImpulseQueue, ImpulseType};
+#[cfg(feature = "ecc")]
+pub use cluster::NodeEccCapability;
 pub use ipc::{KernelIpc, KernelMessage, KernelSignal, MessagePayload, MessageTarget};
 pub use process::{Pid, ProcessEntry, ProcessState, ProcessTable, ResourceUsage};
 pub use service::{
-    ServiceAuditLevel, ServiceEndpoint, ServiceEntry, ServiceRegistry, ServiceType, SystemService,
+    ServiceAuditLevel, ServiceContract, ServiceEndpoint, ServiceEntry, ServiceRegistry,
+    ServiceType, SystemService,
 };
 pub use supervisor::{AgentSupervisor, EnclaveConfig, SpawnBackend, SpawnRequest, SpawnResult};
 pub use topic::{Subscription, TopicRouter};
 pub use wasm_runner::{
-    WasmError, WasmSandboxConfig, WasmTool, WasmToolResult, WasmToolRunner, WasmValidation,
+    AgentInspectTool, AgentListTool, AgentResumeTool, AgentSendTool, AgentSpawnTool,
+    AgentStopTool, AgentSuspendTool, BackendSelection, BuiltinTool, BuiltinToolSpec, Certificate,
+    CompiledModuleCache, DeployedTool, FsCopyTool, FsCreateDirTool, FsExistsTool, FsGlobTool,
+    FsMoveTool, FsReadDirTool, FsReadFileTool, FsRemoveTool, FsStatTool, FsWriteFileTool,
+    SandboxConfig, SysCronAddTool, SysCronListTool, SysCronRemoveTool, SysEnvGetTool,
+    SysServiceHealthTool, SysServiceListTool, ToolCategory, ToolError, ToolRegistry,
+    ToolSigningAuthority, ToolVersion, WasmError, WasiFsScope, WasmSandboxConfig, WasmTool,
+    WasmToolResult, WasmToolRunner, WasmValidation, builtin_tool_catalog, compute_module_hash,
+    verify_tool_signature,
+};
+#[cfg(feature = "exochain")]
+pub use wasm_runner::{
+    SysChainQueryTool, SysChainStatusTool, SysTreeInspectTool, SysTreeReadTool,
 };

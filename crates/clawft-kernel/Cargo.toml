@@ -41,7 +41,8 @@ tilezero = [
     "exochain",
     "dep:cognitum-gate-tilezero",
 ]
-wasm-sandbox = []
+ecc = ["clawft-core/vector-memory", "dep:blake3"]
+wasm-sandbox = ["dep:wasmtime", "dep:wasmtime-wasi"]
 containers = []
 
 [dependencies]
@@ -66,6 +67,10 @@ ciborium = { workspace = true, optional = true }
 cognitum-gate-tilezero = { workspace = true, optional = true }
 ed25519-dalek = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }
+wasmtime = { workspace = true, optional = true }
+wasmtime-wasi = { workspace = true, optional = true }
+blake3 = { workspace = true, optional = true }
+sha2 = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

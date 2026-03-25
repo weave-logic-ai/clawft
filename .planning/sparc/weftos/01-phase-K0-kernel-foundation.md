@@ -488,25 +488,25 @@ Cross-reference: `07-ruvector-deep-integration.md`, Section 3 "Phase K0: Kernel 
 
 ### Exit Criteria
 
-- [ ] `clawft-kernel` crate compiles with `cargo check`
-- [ ] `Kernel<NativePlatform>` boots successfully in unit test
-- [ ] Process table supports insert, get, remove, list, update_state
-- [ ] At least one `SystemService` implementation exists (CronService wrapper or mock)
-- [ ] Service registry start/stop lifecycle works
-- [ ] Health system aggregates service health correctly
-- [ ] `KernelConfig` parses from JSON with all defaults
-- [ ] `weave kernel status` CLI command returns kernel state
-- [ ] `weave kernel services` CLI command lists registered services
-- [ ] `weave kernel ps` CLI command lists process table
+- [x] `clawft-kernel` crate compiles with `cargo check`
+- [x] `Kernel<NativePlatform>` boots successfully in unit test
+- [x] Process table supports insert, get, remove, list, update_state
+- [x] At least one `SystemService` implementation exists (CronService wrapper or mock)
+- [x] Service registry start/stop lifecycle works
+- [x] Health system aggregates service health correctly
+- [x] `KernelConfig` parses from JSON with all defaults
+- [x] `weave kernel status` CLI command returns kernel state
+- [x] `weave kernel services` CLI command lists registered services
+- [x] `weave kernel ps` CLI command lists process table
 - [ ] `weave console` boots kernel and opens interactive REPL
-- [ ] Boot events display in real-time during boot
+- [x] Boot events display in real-time during boot
 - [ ] `weave console --attach` connects to running kernel
 - [ ] REPL accepts both `weave` and `weft` commands
 - [ ] `boot-log` command replays boot events
-- [ ] All existing workspace tests pass (`scripts/build.sh test`)
-- [ ] Clippy clean (`scripts/build.sh clippy`)
-- [ ] WASM check passes (kernel crate excluded from browser build)
-- [ ] ADR-028 committed to `docs/architecture/`
+- [x] All existing workspace tests pass (`scripts/build.sh test`)
+- [x] Clippy clean (`scripts/build.sh clippy`)
+- [x] WASM check passes (kernel crate excluded from browser build)
+- [x] ADR-028 committed to `docs/architecture/`
 - [ ] Rustdoc builds without warnings for `clawft-kernel`
 
 ### Testing Verification

@@ -106,6 +106,10 @@ getrandom = { version = "0.2", features = ["js"] }
 # Ed25519 signing
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 
+# WASM runtime (feature-gated behind wasm-sandbox)
+wasmtime = { version = "29", default-features = false, features = ["cranelift", "async"] }
+wasmtime-wasi = { version = "29", default-features = false }
+
 # File-system watching
 notify = "7"
 
@@ -120,6 +124,9 @@ ciborium = "0.2"
 
 # HNSW approximate nearest neighbor search
 instant-distance = "0.6"
+
+# BLAKE3 hashing (ECC cognitive substrate)
+blake3 = "1.5"
 
 # Concurrent hash map
 dashmap = "6"
