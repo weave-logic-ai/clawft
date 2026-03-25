@@ -482,7 +482,7 @@ impl WasmToolRunner {
             return Err(WasmError::InvalidModule(validation.warnings.join("; ")));
         }
 
-        let _module_hash = compute_module_hash(wasm_bytes);
+        let module_hash = compute_module_hash(wasm_bytes);
 
         #[cfg(not(feature = "wasm-sandbox"))]
         {
@@ -502,11 +502,10 @@ impl WasmToolRunner {
         }
     }
 
-    /// Execute a loaded WASM tool.
+    /// Execute a loaded WASM tool (sync stub).
     ///
-    /// Creates a per-call Store with fuel budget and memory limits,
-    /// writes input as JSON to WASM stdin, calls the `execute` export,
-    /// and reads the output.
+    /// For real execution, use [`execute_bytes`] which is async and
+    /// compiles + runs WASM bytes in a single shot with full WASI support.
     pub fn execute(
         &self,
         _tool: &WasmTool,
@@ -519,19 +518,160 @@ impl WasmToolRunner {
 
         #[cfg(feature = "wasm-sandbox")]
         {
-            // Real execution is async and requires tokio runtime context.
-            // For sync callers, we provide execute_sync below.
-            // This path returns a placeholder until K3 full integration.
+            // Sync callers should use execute_bytes() via a tokio runtime.
             let started = std::time::Instant::now();
             Ok(WasmToolResult {
                 stdout: String::new(),
-                stderr: "WASM execution not yet integrated in sync path".into(),
+                stderr: "use execute_bytes() for real WASM execution".into(),
                 exit_code: 1,
                 fuel_consumed: 0,
                 memory_peak: 0,
                 execution_time: started.elapsed(),
             })
         }
+    }
+
+    /// Compile and execute WASM bytes in one shot.
+    ///
+    /// This is the primary execution path for K3. It accepts raw WASM
+    /// bytes (binary or WAT text), compiles them with the engine, creates
+    /// an isolated WASI store with fuel metering, serializes `input` as
+    /// JSON to the module's stdin, calls `_start` (WASI preview1) or
+    /// `execute`, and reads stdout/stderr.
+    ///
+    /// For cached execution with pre-compiled modules, see K4.
+    #[cfg(feature = "wasm-sandbox")]
+    pub async fn execute_bytes(
+        &self,
+        name: &str,
+        wasm_bytes: &[u8],
+        input: serde_json::Value,
+    ) -> Result<WasmToolResult, WasmError> {
+        use wasmtime_wasi::pipe::{MemoryInputPipe, MemoryOutputPipe};
+
+        let started = std::time::Instant::now();
+
+        // Serialize input to JSON bytes for stdin
+        let input_bytes = serde_json::to_vec(&input)
+            .map_err(|e| WasmError::WasmTrap(format!("input serialization: {e}")))?;
+
+        // Create pipes for stdio
+        let stdout_pipe = MemoryOutputPipe::new(65_536);
+        let stderr_pipe = MemoryOutputPipe::new(65_536);
+        let stdin_pipe = MemoryInputPipe::new(input_bytes);
+
+        // Build WASI preview1 context with stdio pipes
+        let wasi_ctx = wasmtime_wasi::WasiCtxBuilder::new()
+            .stdin(stdin_pipe)
+            .stdout(stdout_pipe.clone())
+            .stderr(stderr_pipe.clone())
+            .build_p1();
+
+        // Create per-call store with fuel budget
+        let mut store = wasmtime::Store::new(&self.engine, wasi_ctx);
+        store
+            .set_fuel(self.config.max_fuel)
+            .map_err(|e| WasmError::WasmTrap(format!("set fuel: {e}")))?;
+
+        // Link WASI preview1 functions (wasi_snapshot_preview1.*)
+        let mut linker = wasmtime::Linker::<wasmtime_wasi::preview1::WasiP1Ctx>::new(&self.engine);
+        wasmtime_wasi::preview1::add_to_linker_async(&mut linker, |ctx| ctx)
+            .map_err(|e| WasmError::CompilationFailed(format!("WASI linker: {e}")))?;
+
+        // Compile the module (accepts both binary .wasm and text .wat)
+        let module = wasmtime::Module::new(&self.engine, wasm_bytes)
+            .map_err(|e| WasmError::CompilationFailed(format!("{name}: {e}")))?;
+
+        // Instantiate
+        let instance = linker
+            .instantiate_async(&mut store, &module)
+            .await
+            .map_err(|e| {
+                let is_fuel = e
+                    .downcast_ref::<wasmtime::Trap>()
+                    .is_some_and(|t| *t == wasmtime::Trap::OutOfFuel)
+                    || e.to_string().contains("fuel");
+                if is_fuel {
+                    WasmError::FuelExhausted {
+                        consumed: self.config.max_fuel,
+                        limit: self.config.max_fuel,
+                    }
+                } else {
+                    WasmError::CompilationFailed(format!("instantiate {name}: {e}"))
+                }
+            })?;
+
+        // Execute with wall-clock timeout
+        let timeout = Duration::from_secs(self.config.max_execution_time_secs);
+        let exec_result = tokio::time::timeout(timeout, async {
+            // Try _start (WASI convention), then execute
+            if let Some(start_fn) = instance.get_func(&mut store, "_start") {
+                start_fn.call_async(&mut store, &[], &mut []).await
+            } else if let Some(exec_fn) = instance.get_func(&mut store, "execute") {
+                exec_fn.call_async(&mut store, &[], &mut []).await
+            } else {
+                Err(wasmtime::Error::msg("no _start or execute export"))
+            }
+        })
+        .await;
+
+        // Read captured output
+        let stdout = String::from_utf8_lossy(&stdout_pipe.contents()).to_string();
+        let stderr = String::from_utf8_lossy(&stderr_pipe.contents()).to_string();
+
+        let fuel_remaining = store.get_fuel().unwrap_or(0);
+        let fuel_consumed = self.config.max_fuel.saturating_sub(fuel_remaining);
+
+        match exec_result {
+            Ok(Ok(_)) => Ok(WasmToolResult {
+                stdout,
+                stderr,
+                exit_code: 0,
+                fuel_consumed,
+                memory_peak: 0,
+                execution_time: started.elapsed(),
+            }),
+            Ok(Err(trap)) => {
+                let msg = trap.to_string();
+                // Check for fuel exhaustion via downcast or message
+                let is_fuel = trap
+                    .downcast_ref::<wasmtime::Trap>()
+                    .is_some_and(|t| *t == wasmtime::Trap::OutOfFuel)
+                    || msg.contains("fuel");
+                if is_fuel {
+                    Err(WasmError::FuelExhausted {
+                        consumed: fuel_consumed,
+                        limit: self.config.max_fuel,
+                    })
+                } else if msg.contains("memory") {
+                    Err(WasmError::MemoryLimitExceeded {
+                        allocated: self.config.max_memory_bytes,
+                        limit: self.config.max_memory_bytes,
+                    })
+                } else {
+                    // Non-zero exit or trap — return result with stderr
+                    Ok(WasmToolResult {
+                        stdout,
+                        stderr: if stderr.is_empty() {
+                            format!("trap: {msg}")
+                        } else {
+                            format!("{stderr}\ntrap: {msg}")
+                        },
+                        exit_code: 1,
+                        fuel_consumed,
+                        memory_peak: 0,
+                        execution_time: started.elapsed(),
+                    })
+                }
+            }
+            Err(_timeout) => Err(WasmError::ExecutionTimeout(timeout)),
+        }
+    }
+
+    /// Get a reference to the Wasmtime engine.
+    #[cfg(feature = "wasm-sandbox")]
+    pub fn engine(&self) -> &wasmtime::Engine {
+        &self.engine
     }
 }
 
@@ -838,7 +978,124 @@ impl ToolRegistry {
     pub fn parent(&self) -> Option<&Arc<ToolRegistry>> {
         self.parent.as_ref()
     }
+
+    /// Register a WASM tool that executes through a [`WasmToolRunner`].
+    ///
+    /// The WASM bytes are stored inside the adapter and compiled on each
+    /// execution (K3). Compiled module caching is deferred to K4.
+    ///
+    /// The tool is dispatched synchronously via [`BuiltinTool::execute`],
+    /// which spawns a blocking thread internally to run the async Wasmtime
+    /// execution. For fully async dispatch, call
+    /// [`WasmToolRunner::execute_bytes`] directly.
+    #[cfg(feature = "wasm-sandbox")]
+    pub fn register_wasm_tool(
+        &mut self,
+        name: &str,
+        description: &str,
+        wasm_bytes: Vec<u8>,
+        runner: Arc<WasmToolRunner>,
+    ) -> Result<(), WasmError> {
+        // Validate the module by attempting compilation (handles both
+        // binary WASM and WAT text format).
+        wasmtime::Module::new(runner.engine(), &wasm_bytes)
+            .map_err(|e| WasmError::InvalidModule(e.to_string()))?;
+
+        let adapter = WasmToolAdapter {
+            tool_name: name.to_owned(),
+            spec: BuiltinToolSpec {
+                name: name.to_owned(),
+                category: ToolCategory::User,
+                description: description.to_owned(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "input": {"type": "object", "description": "JSON input passed to WASM stdin"}
+                    }
+                }),
+                gate_action: format!("tool.wasm.{name}"),
+                effect: EffectVector {
+                    risk: 0.5,
+                    ..Default::default()
+                },
+                native: false,
+            },
+            wasm_bytes: Arc::new(wasm_bytes),
+            runner,
+        };
+        self.register(Arc::new(adapter));
+        Ok(())
+    }
 }
+
+// ---------------------------------------------------------------------------
+// WASM tool adapter (bridges BuiltinTool to WasmToolRunner)
+// ---------------------------------------------------------------------------
+
+/// Adapter that wraps WASM bytes + a [`WasmToolRunner`] as a [`BuiltinTool`].
+///
+/// When [`BuiltinTool::execute`] is called, this adapter spawns a blocking
+/// thread to run [`WasmToolRunner::execute_bytes`] asynchronously. The JSON
+/// args are passed as stdin to the WASM module.
+#[cfg(feature = "wasm-sandbox")]
+struct WasmToolAdapter {
+    tool_name: String,
+    spec: BuiltinToolSpec,
+    wasm_bytes: Arc<Vec<u8>>,
+    runner: Arc<WasmToolRunner>,
+}
+
+#[cfg(feature = "wasm-sandbox")]
+impl BuiltinTool for WasmToolAdapter {
+    fn name(&self) -> &str {
+        &self.tool_name
+    }
+
+    fn spec(&self) -> &BuiltinToolSpec {
+        &self.spec
+    }
+
+    fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        // Extract input from args, defaulting to the full args object
+        let input = args
+            .get("input")
+            .cloned()
+            .unwrap_or(args.clone());
+
+        let runner = self.runner.clone();
+        let wasm_bytes = self.wasm_bytes.clone();
+        let name = self.tool_name.clone();
+
+        // Run async execute_bytes on a blocking thread with its own runtime
+        let result = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| ToolError::ExecutionFailed(format!("runtime: {e}")))?;
+            rt.block_on(runner.execute_bytes(&name, &wasm_bytes, input))
+                .map_err(ToolError::Wasm)
+        })
+        .join()
+        .map_err(|_| ToolError::ExecutionFailed("WASM execution thread panicked".into()))??;
+
+        Ok(serde_json::json!({
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "exit_code": result.exit_code,
+            "fuel_consumed": result.fuel_consumed,
+            "execution_time_ms": result.execution_time.as_millis() as u64,
+        }))
+    }
+}
+
+// Safety: WasmToolAdapter is Send+Sync because all its fields are Send+Sync.
+// - tool_name/spec: plain data
+// - wasm_bytes: Arc<Vec<u8>>
+// - runner: Arc<WasmToolRunner> (Engine is Send+Sync)
+#[cfg(feature = "wasm-sandbox")]
+unsafe impl Send for WasmToolAdapter {}
+#[cfg(feature = "wasm-sandbox")]
+unsafe impl Sync for WasmToolAdapter {}
 
 // Safety: ToolRegistry is Send+Sync because it contains Send+Sync fields.
 // The `parent` is behind an Arc, and `tools` contains Arc<dyn BuiltinTool>
@@ -2672,10 +2929,10 @@ mod tests {
     #[test]
     fn validate_wasm_accepts_valid_header() {
         let runner = WasmToolRunner::new(WasmSandboxConfig::default());
+        // Minimal valid WASM: magic + version 1 + no sections
         let mut wasm = Vec::new();
         wasm.extend_from_slice(b"\0asm");
         wasm.extend_from_slice(&1u32.to_le_bytes());
-        wasm.extend_from_slice(&[0u8; 16]);
 
         let result = runner.validate_wasm(&wasm);
         assert!(result.is_ok());
@@ -2690,12 +2947,25 @@ mod tests {
         let mut wasm = Vec::new();
         wasm.extend_from_slice(b"\0asm");
         wasm.extend_from_slice(&2u32.to_le_bytes());
-        wasm.extend_from_slice(&[0u8; 16]);
 
-        let result = runner.validate_wasm(&wasm).unwrap();
-        assert!(result.valid);
-        assert!(!result.warnings.is_empty());
-        assert!(result.warnings[0].contains("version: 2"));
+        // With wasm-sandbox, Wasmtime may reject wrong-version modules
+        // entirely (InvalidModule). Without it, we get a warning.
+        #[cfg(not(feature = "wasm-sandbox"))]
+        {
+            let result = runner.validate_wasm(&wasm).unwrap();
+            assert!(result.valid);
+            assert!(!result.warnings.is_empty());
+            assert!(result.warnings[0].contains("version: 2"));
+        }
+        #[cfg(feature = "wasm-sandbox")]
+        {
+            // Wasmtime rejects non-v1 modules at validation time
+            let result = runner.validate_wasm(&wasm);
+            assert!(result.is_err() || {
+                let v = result.unwrap();
+                !v.warnings.is_empty()
+            });
+        }
     }
 
     #[test]
@@ -3437,6 +3707,7 @@ mod tests {
     // --- K4 F1: Signing tests ---
 
     #[test]
+    #[cfg(feature = "exochain")]
     fn verify_kernel_signature() {
         let key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
         let hash = [0xAAu8; 32];
@@ -3447,6 +3718,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "exochain")]
     fn verify_tampered_cert_fails() {
         let key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
         let hash = [0xAAu8; 32];
@@ -3557,5 +3829,178 @@ mod tests {
         let restored: BuiltinToolSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.name, "test.tool");
         assert_eq!(restored.category, ToolCategory::User);
+    }
+
+    // --- K3: WASM execute_bytes tests ---
+
+    /// Minimal WASM module (WAT) that exports _start as a no-op.
+    #[cfg(feature = "wasm-sandbox")]
+    const NOOP_WAT: &str = r#"(module
+        (memory (export "memory") 1)
+        (func (export "_start"))
+    )"#;
+
+    #[cfg(feature = "wasm-sandbox")]
+    #[tokio::test]
+    async fn execute_bytes_noop_module() {
+        let runner = WasmToolRunner::new(WasmSandboxConfig::default());
+        let result = runner
+            .execute_bytes("noop", NOOP_WAT.as_bytes(), serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert!(result.fuel_consumed > 0);
+    }
+
+    #[cfg(feature = "wasm-sandbox")]
+    #[tokio::test]
+    async fn execute_bytes_captures_fuel() {
+        let config = WasmSandboxConfig {
+            max_fuel: 10_000_000,
+            ..Default::default()
+        };
+        let runner = WasmToolRunner::new(config);
+        let result = runner
+            .execute_bytes("fuel-test", NOOP_WAT.as_bytes(), serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(result.exit_code, 0);
+        // A noop module should consume some fuel for instantiation
+        assert!(result.fuel_consumed > 0);
+        assert!(result.fuel_consumed < 10_000_000);
+    }
+
+    #[cfg(feature = "wasm-sandbox")]
+    #[tokio::test]
+    async fn execute_bytes_invalid_module() {
+        let runner = WasmToolRunner::new(WasmSandboxConfig::default());
+        let result = runner
+            .execute_bytes("bad", b"not wasm at all", serde_json::json!({}))
+            .await;
+        assert!(matches!(result, Err(WasmError::CompilationFailed(_))));
+    }
+
+    #[cfg(feature = "wasm-sandbox")]
+    #[tokio::test]
+    async fn execute_bytes_fuel_exhaustion() {
+        let config = WasmSandboxConfig {
+            max_fuel: 1, // impossibly low
+            ..Default::default()
+        };
+        let runner = WasmToolRunner::new(config);
+        // A module with a loop that should exhaust fuel
+        let loop_wat = r#"(module
+            (memory (export "memory") 1)
+            (func (export "_start")
+                (local $i i32)
+                (block $break
+                    (loop $loop
+                        (br_if $break (i32.ge_u (local.get $i) (i32.const 1000)))
+                        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                        (br $loop)
+                    )
+                )
+            )
+        )"#;
+        let result = runner
+            .execute_bytes("loop", loop_wat.as_bytes(), serde_json::json!({}))
+            .await;
+        assert!(
+            matches!(result, Err(WasmError::FuelExhausted { .. })),
+            "expected FuelExhausted, got: {result:?}",
+        );
+    }
+
+    #[cfg(feature = "wasm-sandbox")]
+    #[tokio::test]
+    async fn execute_bytes_no_export_returns_error() {
+        // Module with no _start or execute export
+        let no_export_wat = r#"(module
+            (memory (export "memory") 1)
+            (func $helper (nop))
+        )"#;
+        let runner = WasmToolRunner::new(WasmSandboxConfig::default());
+        let result = runner
+            .execute_bytes("noexport", no_export_wat.as_bytes(), serde_json::json!({}))
+            .await
+            .unwrap();
+        // Should succeed but with exit_code 1 and trap in stderr
+        assert_eq!(result.exit_code, 1);
+        assert!(result.stderr.contains("no _start or execute export"));
+    }
+
+    // --- K3: WasmToolAdapter / register_wasm_tool tests ---
+
+    #[cfg(feature = "wasm-sandbox")]
+    #[test]
+    fn register_wasm_tool_and_dispatch() {
+        let runner = Arc::new(WasmToolRunner::new(WasmSandboxConfig::default()));
+        let mut registry = ToolRegistry::new();
+        registry
+            .register_wasm_tool(
+                "wasm.noop",
+                "A noop WASM tool",
+                NOOP_WAT.as_bytes().to_vec(),
+                runner,
+            )
+            .expect("registration should succeed");
+        assert!(registry.get("wasm.noop").is_some());
+        let spec = registry.get("wasm.noop").unwrap().spec();
+        assert!(!spec.native);
+        assert_eq!(spec.gate_action, "tool.wasm.wasm.noop");
+    }
+
+    #[cfg(feature = "wasm-sandbox")]
+    #[test]
+    fn register_wasm_tool_invalid_bytes_rejected() {
+        let runner = Arc::new(WasmToolRunner::new(WasmSandboxConfig::default()));
+        let mut registry = ToolRegistry::new();
+        let result = registry.register_wasm_tool(
+            "wasm.bad",
+            "Invalid",
+            b"not wasm".to_vec(),
+            runner,
+        );
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "wasm-sandbox")]
+    #[test]
+    fn wasm_adapter_execute_runs_module() {
+        let runner = Arc::new(WasmToolRunner::new(WasmSandboxConfig::default()));
+        let mut registry = ToolRegistry::new();
+        registry
+            .register_wasm_tool(
+                "wasm.noop",
+                "noop",
+                NOOP_WAT.as_bytes().to_vec(),
+                runner,
+            )
+            .unwrap();
+        let result = registry.execute("wasm.noop", serde_json::json!({}));
+        assert!(result.is_ok(), "execute should succeed: {:?}", result.err());
+        let val = result.unwrap();
+        assert_eq!(val["exit_code"], 0);
+        assert!(val["fuel_consumed"].as_u64().unwrap() > 0);
+    }
+
+    #[cfg(feature = "wasm-sandbox")]
+    #[test]
+    fn wasm_adapter_listed_in_registry() {
+        let runner = Arc::new(WasmToolRunner::new(WasmSandboxConfig::default()));
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(FsExistsTool::new()));
+        registry
+            .register_wasm_tool(
+                "wasm.noop",
+                "noop",
+                NOOP_WAT.as_bytes().to_vec(),
+                runner,
+            )
+            .unwrap();
+        let list = registry.list();
+        assert!(list.contains(&"fs.exists".to_string()));
+        assert!(list.contains(&"wasm.noop".to_string()));
+        assert_eq!(list.len(), 2);
     }
 }

@@ -107,8 +107,8 @@ getrandom = { version = "0.2", features = ["js"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 
 # WASM runtime (feature-gated behind wasm-sandbox)
-wasmtime = { version = "29", default-features = false, features = ["cranelift", "async"] }
-wasmtime-wasi = { version = "29", default-features = false }
+wasmtime = { version = "29", default-features = false, features = ["cranelift", "async", "wat"] }
+wasmtime-wasi = { version = "29", default-features = false, features = ["preview1"] }
 
 # File-system watching
 notify = "7"

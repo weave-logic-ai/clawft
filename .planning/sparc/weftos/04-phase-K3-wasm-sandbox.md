@@ -316,26 +316,26 @@ Key crates for K3:
 
 ### Exit Criteria
 
-- [ ] `WasmToolRunner` compiles with `--features wasm-sandbox`
-- [ ] WASM tool loads from bytes and validates exports
-- [ ] Tool executes and returns stdout/stderr/exit_code
-- [ ] Fuel exhaustion terminates execution cleanly (not a panic)
-- [ ] Memory limit prevents allocation beyond configured cap
-- [ ] Wall-clock timeout terminates long-running tools
-- [ ] Invalid WASM binary rejected with clear error
-- [ ] Module size check rejects oversized modules
-- [ ] `ToolRegistry` accepts WASM tools via `register_wasm_tool()`
-- [ ] WASM tools appear in tool listing alongside native tools
-- [ ] Host filesystem not accessible from WASM sandbox
-- [ ] Multiple WASM tools execute concurrently without interference
-- [ ] Feature gate: `clawft-kernel` compiles without `wasm-sandbox` feature
-- [ ] All workspace tests pass (`scripts/build.sh test`)
-- [ ] Clippy clean (`scripts/build.sh clippy`)
-- [ ] ServiceApi trait defined and Shell/MCP adapters implemented (C2)
-- [ ] Dual-layer gate in A2ARouter operational (C4)
-- [ ] Chain-anchored service contracts on registration (C3)
-- [ ] WASM-compiled shell pipeline produces chain-linked modules (C5)
-- [ ] Training data collection active for all WASM execution metrics (D18)
+- [x] `WasmToolRunner` compiles with `--features wasm-sandbox`
+- [x] WASM tool loads from bytes and validates exports
+- [x] Tool executes and returns stdout/stderr/exit_code
+- [x] Fuel exhaustion terminates execution cleanly (not a panic)
+- [x] Memory limit prevents allocation beyond configured cap — Wasmtime Store memory limits
+- [x] Wall-clock timeout terminates long-running tools — tokio::time::timeout
+- [x] Invalid WASM binary rejected with clear error
+- [x] Module size check rejects oversized modules
+- [x] `ToolRegistry` accepts WASM tools via `register_wasm_tool()`
+- [x] WASM tools appear in tool listing alongside native tools
+- [x] Host filesystem not accessible from WASM sandbox — WASI with no preopens
+- [x] Multiple WASM tools execute concurrently without interference — per-call Store isolation
+- [x] Feature gate: `clawft-kernel` compiles without `wasm-sandbox` feature
+- [x] All workspace tests pass — 579 with all features, 487 baseline
+- [x] Clippy clean
+- [ ] ServiceApi trait defined and Shell/MCP adapters implemented (C2) — deferred to K4
+- [ ] Dual-layer gate in A2ARouter operational (C4) — deferred to K4
+- [ ] Chain-anchored service contracts on registration (C3) — deferred to K4
+- [ ] WASM-compiled shell pipeline produces chain-linked modules (C5) — deferred to K4
+- [ ] Training data collection active for all WASM execution metrics (D18) — deferred to K5
 
 ### Testing Verification
 

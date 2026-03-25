@@ -665,7 +665,7 @@ dependencies = [
  "clawft-platform",
  "clawft-plugin",
  "clawft-types",
- "dirs",
+ "dirs 6.0.0",
  "futures-util",
  "hmac",
  "reqwest 0.12.28",
@@ -699,7 +699,7 @@ dependencies = [
  "clawft-types",
  "comfy-table",
  "cron",
- "dirs",
+ "dirs 6.0.0",
  "pulldown-cmark",
  "rpassword",
  "serde",
@@ -722,7 +722,7 @@ dependencies = [
  "clawft-platform",
  "clawft-plugin",
  "clawft-types",
- "dirs",
+ "dirs 6.0.0",
  "ed25519-dalek",
  "fnv",
  "futures-channel",
@@ -810,7 +810,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "clawft-types",
- "dirs",
+ "dirs 6.0.0",
  "getrandom 0.2.17",
  "js-sys",
  "reqwest 0.12.28",
@@ -918,7 +918,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clawft-plugin",
- "dirs",
+ "dirs 6.0.0",
  "oauth2",
  "rand 0.8.5",
  "reqwest 0.12.28",
@@ -974,7 +974,7 @@ dependencies = [
  "clawft-platform",
  "clawft-types",
  "cron",
- "dirs",
+ "dirs 6.0.0",
  "futures-util",
  "mockito",
  "regex",
@@ -1013,7 +1013,7 @@ name = "clawft-types"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "dirs",
+ "dirs 6.0.0",
  "getrandom 0.2.17",
  "serde",
  "serde_json",
@@ -1034,7 +1034,7 @@ dependencies = [
  "clawft-tools",
  "clawft-types",
  "console_error_panic_hook",
- "dirs",
+ "dirs 6.0.0",
  "dlmalloc",
  "js-sys",
  "lol_alloc",
@@ -1063,7 +1063,7 @@ dependencies = [
  "clawft-platform",
  "clawft-types",
  "comfy-table",
- "dirs",
+ "dirs 6.0.0",
  "exo-resource-tree",
  "nix 0.29.0",
  "rvf-types",
@@ -1512,11 +1512,31 @@ dependencies = [
 
 [[package]]
 name = "dirs"
+version = "4.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca3aa72a6f96ea37bbc5aa912f6788242832f75369bdfdadcb0e38423f100059"
+dependencies = [
+ "dirs-sys 0.3.7",
+]
+
+[[package]]
+name = "dirs"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3e8aa94d75141228480295a7d0e7feb620b1a5ad9f12bc40be62411e38cce4e"
 dependencies = [
- "dirs-sys",
+ "dirs-sys 0.5.0",
+]
+
+[[package]]
+name = "dirs-sys"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b1d1d91c932ef41c0f2663aa8b0ca0342d444d842c06914aa0a7e352d0bada6"
+dependencies = [
+ "libc",
+ "redox_users 0.4.6",
+ "winapi",
 ]
 
 [[package]]
@@ -1527,7 +1547,7 @@ checksum = "e01a3366d27ee9890022452ee61b2b63a67e6f13f58900b651ff5665f0bb1fab"
 dependencies = [
  "libc",
  "option-ext",
- "redox_users",
+ "redox_users 0.5.2",
  "windows-sys 0.61.2",
 ]
 
@@ -3479,6 +3499,17 @@ dependencies = [
 
 [[package]]
 name = "redox_users"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba009ff324d1fc1b900bd1fdb31564febe58a8ccc8a6fdbb93b543d33b13ca43"
+dependencies = [
+ "getrandom 0.2.17",
+ "libredox",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "redox_users"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4e608c6638b9c18977b00b475ac1f28d14e84b27d8d42f70e0bf1e3dec127ac"
@@ -4076,6 +4107,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
+]
+
+[[package]]
+name = "shellexpand"
+version = "2.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ccc8076840c4da029af4f87e4e8daeb0fca6b87bbb02e10cb60b791450e11e4"
+dependencies = [
+ "dirs 4.0.0",
 ]
 
 [[package]]
@@ -5124,6 +5164,7 @@ dependencies = [
  "wasmtime-slab",
  "wasmtime-versioned-export-macros",
  "wasmtime-winch",
+ "wat",
  "windows-sys 0.59.0",
 ]
 
@@ -5287,6 +5328,7 @@ dependencies = [
  "trait-variant",
  "url",
  "wasmtime",
+ "wiggle",
  "windows-sys 0.59.0",
 ]
 
@@ -5321,6 +5363,15 @@ dependencies = [
 
 [[package]]
 name = "wast"
+version = "35.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ef140f1b49946586078353a453a1d28ba90adfc54dde75710bc1931de204d68"
+dependencies = [
+ "leb128",
+]
+
+[[package]]
+name = "wast"
 version = "245.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28cf1149285569120b8ce39db8b465e8a2b55c34cbb586bd977e43e2bc7300bf"
@@ -5338,7 +5389,7 @@ version = "1.245.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cd48d1679b6858988cb96b154dda0ec5bbb09275b71db46057be37332d5477be"
 dependencies = [
- "wast",
+ "wast 245.0.1",
 ]
 
 [[package]]
@@ -5414,6 +5465,48 @@ name = "widestring"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
+
+[[package]]
+name = "wiggle"
+version = "29.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b9af35bc9629c52c261465320a9a07959164928b4241980ba1cf923b9e6751d"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bitflags 2.11.0",
+ "thiserror 1.0.69",
+ "tracing",
+ "wasmtime",
+ "wiggle-macro",
+]
+
+[[package]]
+name = "wiggle-generate"
+version = "29.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2cf267dd05673912c8138f4b54acabe6bd53407d9d1536f0fadb6520dd16e101"
+dependencies = [
+ "anyhow",
+ "heck 0.5.0",
+ "proc-macro2",
+ "quote",
+ "shellexpand",
+ "syn",
+ "witx",
+]
+
+[[package]]
+name = "wiggle-macro"
+version = "29.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08c5c473d4198e6c2d377f3809f713ff0c110cab88a0805ae099a82119ee250c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+ "wiggle-generate",
+]
 
 [[package]]
 name = "winapi"
@@ -5935,6 +6028,18 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser 0.244.0",
+]
+
+[[package]]
+name = "witx"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e366f27a5cabcddb2706a78296a40b8fcc451e1a6aba2fc1d94b4a01bdaaef4b"
+dependencies = [
+ "anyhow",
+ "log",
+ "thiserror 1.0.69",
+ "wast 35.0.2",
 ]
 
 [[package]]
