@@ -420,10 +420,14 @@ impl<P: Platform> Kernel<P> {
                 if let Some(key) = signing_key
                     && let Some(inner) = Arc::get_mut(&mut cm)
                 {
+                    // Generate ML-DSA key from Ed25519 key bytes for dual signing.
+                    let ml_dsa_seed = key.to_bytes();
+                    let (ml_key, _ml_vk) = rvf_crypto::MlDsa65Key::generate(&ml_dsa_seed);
                     inner.set_signing_key(key);
+                    inner.set_ml_dsa_key(ml_key);
                     boot_log.push(BootEvent::info(
                         BootPhase::Services,
-                        "Chain signing enabled (Ed25519)",
+                        "Dual signing enabled (Ed25519 + ML-DSA-65)",
                     ));
                 }
 

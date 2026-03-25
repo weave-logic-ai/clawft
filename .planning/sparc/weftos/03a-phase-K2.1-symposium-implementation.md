@@ -278,7 +278,7 @@ K2.1 implements the code changes that those planning docs reference.
 
 **Task 2 — Post-Quantum Dual Signing (C6)**:
 - [x] rvf-crypto DualKey API investigated and documented
-- [ ] ~~If available: dual signing enabled in `save_to_rvf()`, 3 tests pass~~ (API unavailable)
+- [x] Dual signing enabled in `save_to_rvf()`, 3 tests pass (DualKey + ML-DSA-65 placeholder implemented in rvf-crypto)
 - [x] If unavailable: gap documented, issue created, no blocking
 
 **Task 3 — Breaking IPC Changes (D19 + D1)**:

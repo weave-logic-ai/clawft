@@ -34,6 +34,8 @@ use rvf_crypto::hash::shake256_256;
 use rvf_crypto::{
     create_witness_chain, decode_signature_footer, encode_signature_footer,
     lineage_record_to_bytes, lineage_witness_entry, sign_segment, verify_segment,
+    sign_segment_ml_dsa, verify_segment_ml_dsa,
+    MlDsa65Key, MlDsa65VerifyKey,
     verify_witness_chain, WitnessEntry,
 };
 use rvf_types::SEGMENT_HEADER_SIZE;
@@ -435,6 +437,8 @@ pub struct ChainManager {
     inner: Mutex<LocalChain>,
     /// Ed25519 signing key for RVF segment signing.
     signing_key: Option<SigningKey>,
+    /// ML-DSA-65 signing key for post-quantum dual signing.
+    ml_dsa_key: Option<MlDsa65Key>,
 }
 
 impl ChainManager {
@@ -452,6 +456,7 @@ impl ChainManager {
         Self {
             inner: Mutex::new(chain),
             signing_key: None,
+            ml_dsa_key: None,
         }
     }
 
@@ -480,6 +485,16 @@ impl ChainManager {
     /// Whether this chain manager has a signing key attached.
     pub fn has_signing_key(&self) -> bool {
         self.signing_key.is_some()
+    }
+
+    /// Set the ML-DSA-65 key for post-quantum dual signing.
+    pub fn set_ml_dsa_key(&mut self, key: MlDsa65Key) {
+        self.ml_dsa_key = Some(key);
+    }
+
+    /// Whether dual signing (Ed25519 + ML-DSA-65) is enabled.
+    pub fn has_dual_signing(&self) -> bool {
+        self.signing_key.is_some() && self.ml_dsa_key.is_some()
     }
 
     /// Load an Ed25519 signing key from file, or generate and persist a new one.
@@ -715,6 +730,7 @@ impl ChainManager {
         let mgr = Self {
             inner: Mutex::new(chain),
             signing_key: None,
+            ml_dsa_key: None,
         };
 
         // Verify integrity of the loaded chain
@@ -835,10 +851,19 @@ impl ChainManager {
             let footer = sign_segment(&cp_seg_header, cp_seg_payload, signing_key);
             let footer_bytes = encode_signature_footer(&footer);
             output.extend_from_slice(&footer_bytes);
+
+            // Dual-sign with ML-DSA-65 if the key is available.
+            if let Some(ref ml_key) = self.ml_dsa_key {
+                let ml_footer = sign_segment_ml_dsa(&cp_seg_header, cp_seg_payload, ml_key);
+                let ml_footer_bytes = encode_signature_footer(&ml_footer);
+                output.extend_from_slice(&ml_footer_bytes);
+            }
+
             true
         } else {
             false
         };
+        let dual_signed = signed && self.ml_dsa_key.is_some();
 
         std::fs::write(path, &output)?;
         info!(
@@ -846,6 +871,7 @@ impl ChainManager {
             events = chain.events.len(),
             bytes = output.len(),
             signed,
+            dual_signed,
             "chain saved to RVF file"
         );
         Ok(())
@@ -951,12 +977,22 @@ impl ChainManager {
             offset += padded;
         }
 
-        // Check for trailing signature footer.
-        let has_signature = if offset < data.len() {
-            decode_signature_footer(&data[offset..]).is_ok()
-        } else {
-            false
-        };
+        // Check for trailing signature footer(s).
+        // There may be one (Ed25519) or two (Ed25519 + ML-DSA-65) footers.
+        let mut has_signature = false;
+        let mut has_dual_signature = false;
+        if offset < data.len() {
+            if let Ok(first_footer) = decode_signature_footer(&data[offset..]) {
+                has_signature = true;
+                let first_footer_size = first_footer.footer_length as usize;
+                let next_offset = offset + first_footer_size;
+                if next_offset < data.len() {
+                    if decode_signature_footer(&data[next_offset..]).is_ok() {
+                        has_dual_signature = true;
+                    }
+                }
+            }
+        }
 
         if events.is_empty() {
             return Err("RVF file contains no chain events".into());
@@ -970,6 +1006,7 @@ impl ChainManager {
         let mgr = Self {
             inner: Mutex::new(chain),
             signing_key: None,
+            ml_dsa_key: None,
         };
 
         // Verify integrity of the loaded chain.
@@ -991,6 +1028,7 @@ impl ChainManager {
             events = result.event_count,
             chain_id,
             has_signature,
+            has_dual_signature,
             "chain restored from RVF file"
         );
         Ok(mgr)
@@ -1309,6 +1347,59 @@ impl ChainManager {
             &footer,
             verifying_key,
         ))
+    }
+
+    /// Verify dual (Ed25519 + ML-DSA-65) signatures on an RVF chain file.
+    ///
+    /// Returns `Ok(true)` if both signatures are valid, `Ok(false)` if
+    /// either is invalid, and `Err` if the file has no dual signature.
+    pub fn verify_rvf_dual_signature(
+        path: &Path,
+        ed_key: &VerifyingKey,
+        ml_key: &MlDsa65VerifyKey,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let data = std::fs::read(path)?;
+        let mut offset = 0;
+        let mut last_seg_start = 0;
+
+        while offset < data.len() {
+            if data.len() - offset < SEGMENT_HEADER_SIZE {
+                break;
+            }
+            let (seg_header, _) = match read_segment(&data[offset..]) {
+                Ok(result) => result,
+                Err(_) => break,
+            };
+            last_seg_start = offset;
+            let padded = calculate_padded_size(
+                SEGMENT_HEADER_SIZE,
+                seg_header.payload_length as usize,
+            );
+            offset += padded;
+        }
+
+        if offset >= data.len() {
+            return Err("no signature footer found in RVF file".into());
+        }
+
+        let ed_footer = decode_signature_footer(&data[offset..])
+            .map_err(|e| format!("decode Ed25519 signature footer: {e}"))?;
+        let ed_footer_size = ed_footer.footer_length as usize;
+        let ml_offset = offset + ed_footer_size;
+
+        if ml_offset >= data.len() {
+            return Err("no ML-DSA-65 signature footer found (single-signed file)".into());
+        }
+        let ml_footer = decode_signature_footer(&data[ml_offset..])
+            .map_err(|e| format!("decode ML-DSA-65 signature footer: {e}"))?;
+
+        let (cp_seg_header, cp_seg_payload) = read_segment(&data[last_seg_start..])
+            .map_err(|e| format!("re-read checkpoint segment: {e}"))?;
+
+        let ed_ok = verify_segment(&cp_seg_header, cp_seg_payload, &ed_footer, ed_key);
+        let ml_ok = verify_segment_ml_dsa(&cp_seg_header, cp_seg_payload, &ml_footer, ml_key);
+
+        Ok(ed_ok && ml_ok)
     }
 }
 
@@ -2185,5 +2276,124 @@ mod tests {
         let restored: AnchorReceipt = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.hash, receipt.hash);
         assert_eq!(restored.tx_id, "test-tx");
+    }
+
+    #[test]
+    fn ml_dsa_key_set_and_has() {
+        let mut cm = ChainManager::new(0, 1000);
+        assert!(!cm.has_dual_signing());
+
+        // Ed25519 only
+        let ed_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        cm.set_signing_key(ed_key);
+        assert!(cm.has_signing_key());
+        assert!(!cm.has_dual_signing());
+
+        // Add ML-DSA key
+        let (ml_key, _) = rvf_crypto::MlDsa65Key::generate(b"test-seed");
+        cm.set_ml_dsa_key(ml_key);
+        assert!(cm.has_dual_signing());
+    }
+
+    #[test]
+    fn dual_sign_rvf_roundtrip() {
+        use ed25519_dalek::SigningKey;
+        use rand::rngs::OsRng;
+
+        let ed_key = SigningKey::generate(&mut OsRng);
+        let (ml_key, ml_vk) = rvf_crypto::MlDsa65Key::generate(&ed_key.to_bytes());
+
+        let mut cm = ChainManager::new(0, 1000)
+            .with_signing_key(ed_key.clone());
+        cm.set_ml_dsa_key(ml_key);
+        assert!(cm.has_dual_signing());
+
+        cm.append("kernel", "boot.init", None);
+        cm.append("tree", "bootstrap", Some(serde_json::json!({"nodes": 4})));
+        cm.append("kernel", "boot.ready", None);
+
+        let original_seq = cm.sequence();
+        let original_hash = cm.last_hash();
+        let original_len = cm.len();
+
+        let dir = std::env::temp_dir().join("clawft-chain-dual-sign-test");
+        let path = dir.join("dual-signed.rvf");
+        cm.save_to_rvf(&path).unwrap();
+
+        // Load the dual-signed file (should work without keys).
+        let restored = ChainManager::load_from_rvf(&path, 1000).unwrap();
+        assert_eq!(restored.sequence(), original_seq);
+        assert_eq!(restored.last_hash(), original_hash);
+        assert_eq!(restored.len(), original_len);
+
+        let result = restored.verify_integrity();
+        assert!(result.valid, "integrity errors: {:?}", result.errors);
+
+        // Verify Ed25519 signature alone.
+        let ed_pubkey = ed_key.verifying_key();
+        let ed_valid = ChainManager::verify_rvf_signature(&path, &ed_pubkey).unwrap();
+        assert!(ed_valid, "Ed25519 signature should be valid");
+
+        // Verify dual signatures.
+        let dual_valid = ChainManager::verify_rvf_dual_signature(&path, &ed_pubkey, &ml_vk).unwrap();
+        assert!(dual_valid, "dual signature should be valid");
+
+        // Wrong ML-DSA key should fail dual verification.
+        let (_, wrong_ml_vk) = rvf_crypto::MlDsa65Key::generate(b"wrong-seed");
+        let dual_wrong = ChainManager::verify_rvf_dual_signature(&path, &ed_pubkey, &wrong_ml_vk).unwrap();
+        assert!(!dual_wrong, "dual signature should fail with wrong ML-DSA key");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dual_signed_checkpoint_verifies() {
+        use ed25519_dalek::SigningKey;
+        use rand::rngs::OsRng;
+
+        let ed_key = SigningKey::generate(&mut OsRng);
+        let (ml_key, ml_vk) = rvf_crypto::MlDsa65Key::generate(b"checkpoint-test");
+
+        let mut cm = ChainManager::new(0, 1000)
+            .with_signing_key(ed_key.clone());
+        cm.set_ml_dsa_key(ml_key);
+        cm.append("kernel", "boot", None);
+
+        let dir = std::env::temp_dir().join("clawft-chain-dual-cp-test");
+        let path = dir.join("dual-cp.rvf");
+        cm.save_to_rvf(&path).unwrap();
+
+        // Read file and verify it has two footers.
+        let data = std::fs::read(&path).unwrap();
+        let mut offset = 0;
+        while offset + SEGMENT_HEADER_SIZE <= data.len() {
+            match read_segment(&data[offset..]) {
+                Ok((seg_header, _)) => {
+                    let padded = calculate_padded_size(
+                        SEGMENT_HEADER_SIZE,
+                        seg_header.payload_length as usize,
+                    );
+                    offset += padded;
+                }
+                Err(_) => break,
+            }
+        }
+        // First footer: Ed25519
+        let ed_footer = decode_signature_footer(&data[offset..]).unwrap();
+        assert_eq!(ed_footer.sig_algo, 0); // Ed25519
+        assert_eq!(ed_footer.sig_length, 64);
+
+        // Second footer: ML-DSA-65
+        let ml_offset = offset + ed_footer.footer_length as usize;
+        let ml_footer = decode_signature_footer(&data[ml_offset..]).unwrap();
+        assert_eq!(ml_footer.sig_algo, 1); // ML-DSA-65
+        assert_eq!(ml_footer.sig_length, 3309);
+
+        // Verify both independently.
+        let ed_pubkey = ed_key.verifying_key();
+        let dual_valid = ChainManager::verify_rvf_dual_signature(&path, &ed_pubkey, &ml_vk).unwrap();
+        assert!(dual_valid);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
