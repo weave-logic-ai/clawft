@@ -275,7 +275,7 @@ impl ServiceRegistry {
     ///
     /// When the exochain feature is enabled and a tree manager is provided,
     /// creates a node at `/kernel/services/{name}` in the resource tree
-    /// and appends a corresponding chain event via [`TreeManager`].
+    /// and appends a corresponding chain event via `TreeManager`.
     #[cfg(feature = "exochain")]
     pub fn register_with_tree(
         &self,

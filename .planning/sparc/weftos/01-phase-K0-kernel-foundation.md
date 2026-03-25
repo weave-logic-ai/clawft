@@ -498,16 +498,16 @@ Cross-reference: `07-ruvector-deep-integration.md`, Section 3 "Phase K0: Kernel 
 - [x] `weave kernel status` CLI command returns kernel state
 - [x] `weave kernel services` CLI command lists registered services
 - [x] `weave kernel ps` CLI command lists process table
-- [ ] `weave console` boots kernel and opens interactive REPL
+- [x] `weave console` boots kernel and opens interactive REPL
 - [x] Boot events display in real-time during boot
-- [ ] `weave console --attach` connects to running kernel
-- [ ] REPL accepts both `weave` and `weft` commands
-- [ ] `boot-log` command replays boot events
+- [x] `weave console --attach` connects to running kernel
+- [x] REPL accepts both `weave` and `weft` commands
+- [x] `boot-log` command replays boot events
 - [x] All existing workspace tests pass (`scripts/build.sh test`)
 - [x] Clippy clean (`scripts/build.sh clippy`)
 - [x] WASM check passes (kernel crate excluded from browser build)
 - [x] ADR-028 committed to `docs/architecture/`
-- [ ] Rustdoc builds without warnings for `clawft-kernel`
+- [x] Rustdoc builds without warnings for `clawft-kernel`
 
 ### Testing Verification
 

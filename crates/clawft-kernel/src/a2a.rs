@@ -258,7 +258,7 @@ impl A2ARouter {
 
     /// Send a message with chain-event logging.
     ///
-    /// This mirrors [`KernelIpc::send_checked`] but for the A2ARouter:
+    /// This mirrors `KernelIpc::send_checked` but for the A2ARouter:
     /// every routed message is logged as an `ipc.send` chain event with
     /// sender, target, payload type, and message ID — forming a
     /// tamper-evident IPC audit trail in the exochain.

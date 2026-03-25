@@ -273,7 +273,7 @@ impl<P: Platform> AgentSupervisor<P> {
 
     /// Spawn a supervised agent and run its work as a tokio task.
     ///
-    /// Unlike [`spawn`], this method also:
+    /// Unlike `spawn`, this method also:
     /// 1. Transitions the process to `Running`
     /// 2. Registers the agent in the resource tree (if exochain enabled)
     /// 3. Spawns a tokio task to execute the provided work closure

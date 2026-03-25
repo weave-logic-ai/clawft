@@ -1,8 +1,8 @@
-//! HNSW vector search as a kernel [`SystemService`].
+//! HNSW vector search as a kernel `SystemService`.
 //!
 //! Wraps `clawft_core::embeddings::hnsw_store::HnswStore` behind a
-//! [`Mutex`] so that the service satisfies `Send + Sync` and can be
-//! registered in the [`ServiceRegistry`].
+//! `Mutex` so that the service satisfies `Send + Sync` and can be
+//! registered in the `ServiceRegistry`.
 //!
 //! This module is compiled only when the `ecc` feature is enabled.
 

@@ -2,8 +2,8 @@
 //!
 //! [`GateBackend`] provides a unified interface for making access
 //! control decisions. The default implementation wraps
-//! [`CapabilityChecker`] (binary Permit/Deny). When the `tilezero`
-//! feature is enabled, [`TileZeroGate`] adds three-way decisions
+//! `CapabilityChecker` (binary Permit/Deny). When the `tilezero`
+//! feature is enabled, `TileZeroGate` adds three-way decisions
 //! (Permit/Defer/Deny) with cryptographic receipts logged to the chain.
 
 use serde::{Deserialize, Serialize};
@@ -69,7 +69,7 @@ pub trait GateBackend: Send + Sync {
     ) -> GateDecision;
 }
 
-/// Gate backend wrapping the existing [`CapabilityChecker`].
+/// Gate backend wrapping the existing `CapabilityChecker`.
 ///
 /// Always returns `Permit` or `Deny` (never `Defer`). This is the
 /// default gate used when no external gate crate is enabled.
@@ -284,7 +284,7 @@ mod tilezero_gate {
 // Governance gate adapter (behind `exochain` feature)
 // ---------------------------------------------------------------------------
 
-/// Gate backend wrapping the [`GovernanceEngine`].
+/// Gate backend wrapping the `GovernanceEngine`.
 ///
 /// Bridges the 5D effect-algebra governance engine into the kernel's
 /// gate slot, mapping `GovernanceDecision` → `GateDecision`. Governance
