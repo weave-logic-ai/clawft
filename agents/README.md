@@ -1,28 +1,99 @@
-# clawft+WeftOS Agent Skills
+# WeftOS Agent Team
 
-Source-of-truth directory for agent/skill definitions. These are copied to
-`.claude/skills/` at runtime by `scripts/weave-init.sh` (or `weaver init`).
+Specialized agents for developing, operating, and evolving WeftOS.
 
-## Available Skills
+## Team Topology
 
-| Skill | Directory | Description |
-|-------|-----------|-------------|
-| WEAVER | `weftos-ecc/WEAVER.md` | Self-evolving cognitive modeler -- ECC kernel-native SystemService for causal model discovery |
-| KERNEL | `weftos-kernel/KERNEL.md` | WeftOS kernel development -- adding modules, feature flags, testing patterns, K0-K6 phases |
-| MESH | `weftos-mesh/MESH.md` | Mesh networking development -- 5-layer architecture, transport traits, frame types, discovery |
-| CLAWFT | `clawft/CLAWFT.md` | General clawft development -- crate structure, plugin system, providers, channels, tools |
+```
+                    +-------------------+
+                    | kernel-architect  |  Architecture & Phase Planning
+                    +--------+----------+
+                             |
+          +------------------+------------------+
+          |                  |                  |
++---------v---+    +---------v---+    +---------v---+
+| Core Kernel |    | Network &   |    | Intelligence|
+|             |    | Trust       |    | & Governance|
++-------------+    +-------------+    +-------------+
+| process-    |    | mesh-       |    | weaver      |
+|  supervisor |    |  engineer   |    | ecc-analyst |
+| sandbox-    |    | chain-      |    | governance- |
+|  warden     |    |  guardian   |    |  counsel    |
++------+------+    | defi-       |    +------+------+
+       |           |  networker  |           |
+       |           +------+------+           |
+       |                  |                  |
+       +------------------+------------------+
+                          |
+               +----------v----------+
+               |     Operations      |
+               +---------------------+
+               | app-deployer        |
+               | test-sentinel       |
+               | doc-weaver          |
+               +---------------------+
+```
+
+## Agent Directories
+
+| Directory | Purpose |
+|-----------|---------|
+| `weftos/` | 12 specialized agents (this team) |
+| `weftos-ecc/` | ECC Weaver skill (full specification) |
+| `weftos-kernel/` | Kernel development skill |
+| `weftos-mesh/` | Mesh networking skill |
+| `clawft/` | General clawft development skill |
+
+## Agents
+
+### Core Kernel
+
+| Agent | Type | Description |
+|-------|------|-------------|
+| **kernel-architect** | architect | Architecture and K0-K6 phase planning |
+| **process-supervisor** | supervisor | Process lifecycle, restart strategies, health |
+| **sandbox-warden** | security-specialist | WASM/container isolation, fuel metering |
+
+### Networking & Trust
+
+| Agent | Type | Description |
+|-------|------|-------------|
+| **mesh-engineer** | network-engineer | Mesh transport, discovery, 5-layer architecture |
+| **chain-guardian** | security-engineer | ExoChain integrity, dual signing, RVF wire format |
+| **defi-networker** | defi-specialist | Economic incentives, bond staking, trust progression |
+
+### Intelligence & Governance
+
+| Agent | Type | Description |
+|-------|------|-------------|
+| **weaver** | cognitive-modeler | ECC cognitive modeling, confidence-driven iteration |
+| **ecc-analyst** | analyst | Causal analysis, spectral health, HNSW search |
+| **governance-counsel** | governance-expert | Three-branch governance, effect vectors, trajectory learning |
+
+### Operations
+
+| Agent | Type | Description |
+|-------|------|-------------|
+| **app-deployer** | deployer | Application lifecycle, manifest parsing, rolling upgrades |
+| **test-sentinel** | tester | Build gate, feature matrix testing, regression detection |
+| **doc-weaver** | documenter | Fumadocs site, MDX content, SPARC plans |
 
 ## How It Works
 
-1. Skills are authored and maintained in this `agents/` directory (checked into git).
-2. `scripts/weave-init.sh` (or `weaver init`) copies them to `.claude/skills/` (gitignored).
-3. Claude Code loads skills from `.claude/skills/` at runtime.
+1. Agents and skills are authored in this `agents/` directory (checked into git).
+2. `scripts/weave-init.sh` copies them to `.claude/agents/` and `.claude/skills/` (gitignored).
+3. Claude Code loads agents from `.claude/agents/` and skills from `.claude/skills/` at runtime.
 
-This follows the ruflo pattern: the repo is the source of truth, `.claude/` is the runtime copy.
+## Installation
 
-## Adding a New Skill
+```bash
+scripts/weave-init.sh --force
+```
 
-1. Create a new directory under `agents/` (e.g., `agents/my-skill/`)
-2. Add a markdown file with YAML frontmatter (name, description, version, category, tags)
-3. Add an entry to the table above
-4. Run `scripts/weave-init.sh --force` to install
+## Adding a New Agent
+
+1. Create a new `.md` file in the appropriate `agents/` subdirectory
+2. Include YAML frontmatter (name, type, description, capabilities, priority, hooks)
+3. Write "You are a..." instructions with actual tool invocations and code patterns
+4. Add an entry to the table above
+5. Run `scripts/weave-init.sh --force` to install
