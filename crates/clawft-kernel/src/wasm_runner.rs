@@ -1815,16 +1815,92 @@ pub fn builtin_tool_catalog() -> Vec<BuiltinToolSpec> {
 // Sandbox configuration (K4 B1)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Multi-layer sandboxing (k3:D12)
+// ---------------------------------------------------------------------------
+
+/// Which sandbox layer denied (or allowed) access.
+///
+/// Three enforcement layers are evaluated in order (k3:D12):
+/// 1. **Governance** — gate check with tool name + effect vector context
+/// 2. **Environment** — per-environment allowed-path configuration
+/// 3. **SudoOverride** — elevated agent capability that bypasses
+///    environment restrictions (logged to chain, requires `sudo` flag)
+///
+/// The first `Deny` short-circuits. `SudoOverride` can only bypass
+/// the **Environment** layer, never the **Governance** layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SandboxLayer {
+    /// Governance gate check (always authoritative, cannot be overridden).
+    Governance,
+    /// Environment-scoped path restrictions (e.g. dev=permissive, prod=strict).
+    Environment,
+    /// Elevated override that bypasses environment restrictions.
+    /// Requires `AgentCapabilities::sudo` and is always logged to chain.
+    SudoOverride,
+}
+
+impl std::fmt::Display for SandboxLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SandboxLayer::Governance => write!(f, "governance"),
+            SandboxLayer::Environment => write!(f, "environment"),
+            SandboxLayer::SudoOverride => write!(f, "sudo-override"),
+        }
+    }
+}
+
+/// Result of evaluating the multi-layer sandbox stack.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxDecision {
+    /// Whether access is permitted.
+    pub allowed: bool,
+    /// Which layer made the decision.
+    pub decided_by: SandboxLayer,
+    /// Human-readable reason (for logging / chain events).
+    pub reason: String,
+}
+
+impl SandboxDecision {
+    /// Create a permit decision.
+    pub fn permit(layer: SandboxLayer) -> Self {
+        Self {
+            allowed: true,
+            decided_by: layer,
+            reason: "access permitted".into(),
+        }
+    }
+
+    /// Create a deny decision.
+    pub fn deny(layer: SandboxLayer, reason: impl Into<String>) -> Self {
+        Self {
+            allowed: false,
+            decided_by: layer,
+            reason: reason.into(),
+        }
+    }
+}
+
 /// Filesystem sandbox configuration for built-in tools.
 ///
 /// Controls which paths a tool is allowed to access. When `allowed_paths`
 /// is non-empty, only files under those directories are permitted.
 /// An empty `allowed_paths` means permissive mode (dev default).
+///
+/// Part of the multi-layer sandboxing stack (k3:D12):
+/// governance gate -> environment config -> sudo override.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SandboxConfig {
     /// Directories the tool is allowed to access.
     /// Empty = permissive (all paths allowed).
     pub allowed_paths: Vec<PathBuf>,
+
+    /// Whether sudo override is active for this execution.
+    /// When true and path is denied by environment config, access
+    /// is granted anyway (but logged to chain). Governance denials
+    /// can never be overridden.
+    #[serde(default)]
+    pub sudo_override: bool,
 }
 
 impl SandboxConfig {
@@ -1842,6 +1918,52 @@ impl SandboxConfig {
             let allowed_canon = allowed.canonicalize().unwrap_or_else(|_| allowed.clone());
             canonical.starts_with(&allowed_canon)
         })
+    }
+
+    /// Multi-layer sandbox check (k3:D12).
+    ///
+    /// Evaluates the environment layer and optional sudo override.
+    /// The governance layer is evaluated separately by the caller
+    /// (via `GovernanceEngine::evaluate`) because it requires the
+    /// full `GovernanceRequest` context.
+    ///
+    /// Evaluation order:
+    /// 1. Environment config (`allowed_paths`) — if empty, permit.
+    /// 2. If denied and `sudo_override` is true, permit with
+    ///    `SandboxLayer::SudoOverride` (caller must log to chain).
+    /// 3. Otherwise deny with `SandboxLayer::Environment`.
+    pub fn check_path_multilayer(&self, path: &std::path::Path) -> SandboxDecision {
+        // Permissive mode (dev default)
+        if self.allowed_paths.is_empty() {
+            return SandboxDecision::permit(SandboxLayer::Environment);
+        }
+
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let env_allowed = self.allowed_paths.iter().any(|allowed| {
+            let allowed_canon = allowed.canonicalize().unwrap_or_else(|_| allowed.clone());
+            canonical.starts_with(&allowed_canon)
+        });
+
+        if env_allowed {
+            return SandboxDecision::permit(SandboxLayer::Environment);
+        }
+
+        // Environment denied — check sudo override
+        if self.sudo_override {
+            return SandboxDecision {
+                allowed: true,
+                decided_by: SandboxLayer::SudoOverride,
+                reason: format!(
+                    "sudo override: path {} bypassed environment restriction",
+                    path.display()
+                ),
+            };
+        }
+
+        SandboxDecision::deny(
+            SandboxLayer::Environment,
+            format!("path outside sandbox: {}", path.display()),
+        )
     }
 }
 
@@ -3518,6 +3640,7 @@ mod tests {
     fn sandbox_denies_path_outside_allowed() {
         let sandbox = SandboxConfig {
             allowed_paths: vec![std::env::temp_dir()],
+            ..Default::default()
         };
         let tool = FsReadFileTool::with_sandbox(sandbox);
         let result = tool.execute(serde_json::json!({"path": "/etc/passwd"}));
@@ -3533,6 +3656,7 @@ mod tests {
 
         let sandbox = SandboxConfig {
             allowed_paths: vec![std::env::temp_dir()],
+            ..Default::default()
         };
         let tool = FsReadFileTool::with_sandbox(sandbox);
         let result = tool.execute(serde_json::json!({"path": file.to_str().unwrap()}));

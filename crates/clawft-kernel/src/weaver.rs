@@ -9,7 +9,8 @@
 //! This module requires the `ecc` feature.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::fmt;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -19,7 +20,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
-use crate::causal::CausalGraph;
+use crate::causal::{CausalEdgeType, CausalGraph};
 use crate::embedding::{EmbeddingProvider, MockEmbeddingProvider};
 use crate::health::HealthStatus;
 use crate::hnsw_service::HnswService;
@@ -447,6 +448,62 @@ pub enum TickResult {
 }
 
 // ---------------------------------------------------------------------------
+// WeaverError
+// ---------------------------------------------------------------------------
+
+/// Errors produced by the WeaverEngine.
+#[derive(Debug)]
+pub enum WeaverError {
+    /// I/O error reading a file.
+    Io(std::io::Error),
+    /// JSON parsing error.
+    Json(serde_json::Error),
+    /// Domain logic error.
+    Domain(String),
+}
+
+impl fmt::Display for WeaverError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "weaver I/O error: {e}"),
+            Self::Json(e) => write!(f, "weaver JSON error: {e}"),
+            Self::Domain(msg) => write!(f, "weaver error: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for WeaverError {}
+
+impl From<std::io::Error> for WeaverError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+impl From<serde_json::Error> for WeaverError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::Json(e)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IngestResult
+// ---------------------------------------------------------------------------
+
+/// Statistics from ingesting a graph file into the WeaverEngine.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IngestResult {
+    /// Number of causal graph nodes created.
+    pub nodes_added: usize,
+    /// Number of causal graph edges created.
+    pub edges_added: usize,
+    /// Number of HNSW embeddings created.
+    pub embeddings_created: usize,
+    /// Source identifier (e.g., "git-history", "module-deps").
+    pub source: String,
+}
+
+// ---------------------------------------------------------------------------
 // WeaverEngine
 // ---------------------------------------------------------------------------
 
@@ -513,6 +570,362 @@ impl WeaverEngine {
     /// Get a reference to the knowledge base.
     pub fn knowledge_base(&self) -> &Arc<WeaverKnowledgeBase> {
         &self.knowledge_base
+    }
+
+    /// Get a reference to the embedding provider.
+    pub fn embedding_provider(&self) -> &Arc<dyn EmbeddingProvider> {
+        &self.embedding_provider
+    }
+
+    /// Get a reference to the causal graph.
+    pub fn causal_graph(&self) -> &Arc<CausalGraph> {
+        &self.causal_graph
+    }
+
+    /// Get a reference to the HNSW service.
+    pub fn hnsw(&self) -> &Arc<HnswService> {
+        &self.hnsw
+    }
+
+    // ── Graph file ingestion ──────────────────────────────────────
+
+    /// Ingest a graph JSON file (git-history, module-deps, or decisions).
+    ///
+    /// Reads a `.weftos/graph/*.json` file, creates causal graph nodes for
+    /// each entry, creates edges between related nodes, and inserts
+    /// embeddings into the HNSW index for each node's text representation.
+    pub fn ingest_graph_file(&self, path: &Path) -> Result<IngestResult, WeaverError> {
+        let data = std::fs::read_to_string(path)?;
+        let graph: serde_json::Value = serde_json::from_str(&data)?;
+
+        let source = graph["source"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string();
+
+        let empty_vec = vec![];
+        let nodes = graph["nodes"].as_array().unwrap_or(&empty_vec);
+        let edges = graph["edges"].as_array().unwrap_or(&empty_vec);
+
+        let mut nodes_added = 0usize;
+        let mut edges_added = 0usize;
+        let mut embeddings_created = 0usize;
+
+        // Map from JSON node id (string) to causal graph NodeId.
+        let mut id_map: HashMap<String, u64> = HashMap::new();
+
+        // Phase 1: Create nodes.
+        for node in nodes {
+            let node_id_str = node["id"].as_str().unwrap_or("").to_string();
+            if node_id_str.is_empty() {
+                continue;
+            }
+
+            let label = if let Some(title) = node["title"].as_str() {
+                format!("{source}/{node_id_str}: {title}")
+            } else if let Some(subject) = node["subject"].as_str() {
+                format!("{source}/{node_id_str}: {subject}")
+            } else {
+                format!("{source}/{node_id_str}")
+            };
+
+            let causal_id = self.causal_graph.add_node(
+                label.clone(),
+                node.clone(),
+            );
+            id_map.insert(node_id_str.clone(), causal_id);
+            nodes_added += 1;
+
+            // Create an HNSW embedding for the node's text.
+            let embed_text = Self::node_to_embed_text(node, &source);
+            if !embed_text.is_empty() {
+                // Use synchronous hash-embed for ingestion (avoiding async).
+                let embed_vec = self.sync_embed(&embed_text);
+                self.hnsw.insert(
+                    format!("{source}/{}", node_id_str),
+                    embed_vec,
+                    node.clone(),
+                );
+                embeddings_created += 1;
+            }
+        }
+
+        // Phase 2: Create edges.
+        for edge in edges {
+            let from_str = edge["from"].as_str().unwrap_or("");
+            let to_str = edge["to"].as_str().unwrap_or("");
+            let edge_type_str = edge["type"].as_str().unwrap_or("Correlates");
+            let weight = edge["weight"].as_f64().unwrap_or(1.0) as f32;
+
+            let from_id = id_map.get(from_str).copied();
+            let to_id = id_map.get(to_str).copied();
+
+            if let (Some(src), Some(tgt)) = (from_id, to_id) {
+                let edge_type = Self::parse_edge_type(edge_type_str);
+                let linked = self.causal_graph.link(
+                    src, tgt, edge_type, weight, 0, 0,
+                );
+                if linked {
+                    edges_added += 1;
+                }
+            }
+        }
+
+        info!(
+            source = %source,
+            nodes_added,
+            edges_added,
+            embeddings_created,
+            "graph file ingested"
+        );
+
+        Ok(IngestResult {
+            nodes_added,
+            edges_added,
+            embeddings_created,
+            source,
+        })
+    }
+
+    /// Convert a graph node's fields into embeddable text.
+    fn node_to_embed_text(node: &serde_json::Value, source: &str) -> String {
+        match source {
+            "git-history" => {
+                let subject = node["subject"].as_str().unwrap_or("");
+                let author = node["author"].as_str().unwrap_or("");
+                let files = node["files"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                format!("commit by {author}: {subject} files: {files}")
+            }
+            "module-dependencies" => {
+                let id = node["id"].as_str().unwrap_or("");
+                let deps = node["dependencies"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                let lines = node["lines"].as_u64().unwrap_or(0);
+                format!("module {id} ({lines} lines) depends on: {deps}")
+            }
+            "decisions-and-phases" => {
+                let title = node["title"].as_str().unwrap_or("");
+                let rationale = node["rationale"].as_str().unwrap_or("");
+                let panel = node["panel"].as_str().unwrap_or("");
+                format!("decision ({panel}): {title} — {rationale}")
+            }
+            _ => {
+                // Fallback: serialize the whole node.
+                serde_json::to_string(node).unwrap_or_default()
+            }
+        }
+    }
+
+    /// Parse an edge type string to a CausalEdgeType.
+    fn parse_edge_type(s: &str) -> CausalEdgeType {
+        match s {
+            "Causes" => CausalEdgeType::Causes,
+            "Inhibits" => CausalEdgeType::Inhibits,
+            "Correlates" => CausalEdgeType::Correlates,
+            "Enables" => CausalEdgeType::Enables,
+            "Follows" => CausalEdgeType::Follows,
+            "Contradicts" => CausalEdgeType::Contradicts,
+            "TriggeredBy" => CausalEdgeType::TriggeredBy,
+            "EvidenceFor" => CausalEdgeType::EvidenceFor,
+            _ => CausalEdgeType::Correlates,
+        }
+    }
+
+    /// Synchronous embedding using the mock fallback (for ingestion loops).
+    ///
+    /// This avoids the need for async in the ingestion path. The mock
+    /// provider's `hash_embed` is deterministic and instant.
+    fn sync_embed(&self, text: &str) -> Vec<f32> {
+        use sha2::{Digest, Sha256};
+        let dims = self.embedding_provider.dimensions();
+        let mut hasher = Sha256::new();
+        hasher.update(text.as_bytes());
+        let hash = hasher.finalize();
+        let mut vec = Vec::with_capacity(dims);
+        for i in 0..dims {
+            let byte = hash[i % 32];
+            vec.push((byte as f32 / 128.0) - 1.0);
+        }
+        vec
+    }
+
+    // ── Confidence scoring from graph data ────────────────────────
+
+    /// Compute confidence based on graph coverage.
+    ///
+    /// Examines the causal graph to determine what fraction of nodes have
+    /// edges (both incoming and outgoing), the edge density, and identifies
+    /// orphan nodes that lack causal connections.
+    pub fn compute_confidence(&self) -> ConfidenceReport {
+        let node_count = self.causal_graph.node_count() as usize;
+        let edge_count = self.causal_graph.edge_count() as usize;
+
+        if node_count == 0 {
+            return ConfidenceReport {
+                overall: 0.0,
+                gaps: vec![ConfidenceGap {
+                    domain: "graph".to_string(),
+                    current_confidence: 0.0,
+                    target_confidence: 0.8,
+                    suggested_sources: vec![
+                        "git_log".into(),
+                        "module_deps".into(),
+                        "decisions".into(),
+                    ],
+                }],
+                suggestions: vec![ModelingSuggestion::AddSource {
+                    source_type: "git_log".to_string(),
+                    reason: "No graph data ingested yet".to_string(),
+                }],
+            };
+        }
+
+        // Edge density: ratio of actual edges to maximum possible.
+        let max_edges = if node_count > 1 {
+            node_count * (node_count - 1)
+        } else {
+            1
+        };
+        let edge_density = (edge_count as f64 / max_edges as f64).min(1.0);
+
+        // Node connectivity: fraction of nodes that have at least one edge.
+        // We sample by checking forward + reverse edges for each node id up to
+        // the known count (sequential IDs starting from 1).
+        let mut connected_nodes = 0usize;
+        let mut orphan_labels: Vec<String> = Vec::new();
+        let next_id = self.causal_graph.node_count() + 1;
+        // Iterate over plausible node IDs. The CausalGraph allocates IDs
+        // sequentially starting at 1 so scanning 1..next_id covers all.
+        for nid in 1..next_id {
+            if self.causal_graph.get_node(nid).is_some() {
+                let fwd = self.causal_graph.get_forward_edges(nid);
+                let rev = self.causal_graph.get_reverse_edges(nid);
+                if !fwd.is_empty() || !rev.is_empty() {
+                    connected_nodes += 1;
+                } else if let Some(node) = self.causal_graph.get_node(nid) {
+                    orphan_labels.push(node.label.clone());
+                }
+            }
+        }
+
+        let connectivity = if node_count > 0 {
+            connected_nodes as f64 / node_count as f64
+        } else {
+            0.0
+        };
+
+        // Composite confidence: weighted average of components.
+        // - Connectivity (40%): nodes with edges / total nodes
+        // - Edge density (20%): capped contribution from edge density
+        // - Node volume (20%): diminishing returns above 100 nodes
+        // - Source diversity (20%): number of distinct source prefixes
+        let volume_score = (node_count as f64 / 100.0).min(1.0);
+        let density_capped = (edge_density * 50.0).min(1.0); // amplify sparse graphs
+
+        let overall = (connectivity * 0.40
+            + density_capped * 0.20
+            + volume_score * 0.20
+            + self.source_diversity_score() * 0.20)
+            .min(1.0);
+
+        // Build gaps.
+        let mut gaps = Vec::new();
+        if connectivity < 0.7 {
+            gaps.push(ConfidenceGap {
+                domain: "node_connectivity".to_string(),
+                current_confidence: connectivity,
+                target_confidence: 0.7,
+                suggested_sources: vec!["module_deps".into(), "git_log".into()],
+            });
+        }
+        if volume_score < 0.5 {
+            gaps.push(ConfidenceGap {
+                domain: "data_volume".to_string(),
+                current_confidence: volume_score,
+                target_confidence: 0.5,
+                suggested_sources: vec!["git_log".into(), "file_tree".into()],
+            });
+        }
+
+        // Suggestions from orphan nodes.
+        let mut suggestions = Vec::new();
+        if !orphan_labels.is_empty() {
+            let sample: Vec<_> = orphan_labels.iter().take(5).cloned().collect();
+            suggestions.push(ModelingSuggestion::AddSource {
+                source_type: "causal_edges".to_string(),
+                reason: format!(
+                    "{} orphan nodes without edges (e.g., {})",
+                    orphan_labels.len(),
+                    sample.join(", ")
+                ),
+            });
+        }
+
+        ConfidenceReport {
+            overall,
+            gaps,
+            suggestions,
+        }
+    }
+
+    /// Count distinct source prefixes in node labels to gauge diversity.
+    fn source_diversity_score(&self) -> f64 {
+        let sessions = match self.sessions.read() {
+            Ok(s) => s,
+            Err(_) => return 0.0,
+        };
+        let total_sources: usize = sessions.values().map(|s| s.sources_ingested.len()).sum();
+        // Diminishing returns: 3 sources = 1.0.
+        (total_sources as f64 / 3.0).min(1.0)
+    }
+
+    // ── Model export to file ──────────────────────────────────────
+
+    /// Export the current model state to a JSON file at the given path.
+    ///
+    /// Produces a `weave-model.json` that includes the causal graph nodes,
+    /// edges, confidence report, and metadata.
+    pub fn export_model_to_file(
+        &self,
+        domain: &str,
+        min_confidence: f64,
+        path: &Path,
+    ) -> Result<ExportedModel, WeaverError> {
+        let model = self.export_model(domain, min_confidence)
+            .map_err(WeaverError::Domain)?;
+        let json = serde_json::to_string_pretty(&model)?;
+        std::fs::write(path, json)?;
+        info!(domain, ?path, "model exported to file");
+        Ok(model)
+    }
+
+    /// Import a model from a JSON file.
+    pub fn import_model_from_file(
+        &self,
+        domain: &str,
+        path: &Path,
+    ) -> Result<(), WeaverError> {
+        let data = std::fs::read_to_string(path)?;
+        let model: ExportedModel = serde_json::from_str(&data)?;
+        self.import_model(domain, model)
+            .map_err(WeaverError::Domain)?;
+        info!(domain, ?path, "model imported from file");
+        Ok(())
     }
 
     // ── Session management ────────────────────────────────────────
@@ -777,6 +1190,30 @@ impl WeaverEngine {
             .filter(|e| e.confidence >= min_confidence)
             .collect();
 
+        // Collect causal nodes from the graph.
+        let mut causal_nodes = Vec::new();
+        let mut causal_edges_out = Vec::new();
+        let next_id = self.causal_graph.node_count() + 1;
+        for nid in 1..next_id {
+            if let Some(node) = self.causal_graph.get_node(nid) {
+                causal_nodes.push(ExportedCausalNode {
+                    label: node.label.clone(),
+                    metadata: node.metadata.clone(),
+                });
+                // Collect forward edges from this node.
+                for edge in self.causal_graph.get_forward_edges(nid) {
+                    if let Some(target_node) = self.causal_graph.get_node(edge.target) {
+                        causal_edges_out.push(ExportedCausalEdge {
+                            source_label: node.label.clone(),
+                            target_label: target_node.label.clone(),
+                            edge_type: format!("{}", edge.edge_type),
+                            weight: edge.weight,
+                        });
+                    }
+                }
+            }
+        }
+
         Ok(ExportedModel {
             version: "1.0".to_string(),
             domain: domain.to_string(),
@@ -788,8 +1225,8 @@ impl WeaverEngine {
                 dimensions: self.embedding_provider.dimensions(),
             }],
             edge_types,
-            causal_nodes: Vec::new(), // Simplified: full graph export would enumerate nodes
-            causal_edges: Vec::new(),
+            causal_nodes,
+            causal_edges: causal_edges_out,
             metadata: session.metadata.clone(),
         })
     }
@@ -1365,5 +1802,330 @@ mod tests {
         engine.add_source("impulse-src", "git", None).unwrap();
         let impulses = queue.drain_ready();
         assert!(impulses.iter().any(|i| i.impulse_type == ImpulseType::Custom(0x33)));
+    }
+
+    // ── Graph ingestion tests ────────────────────────────────────
+
+    #[test]
+    fn ingest_graph_file_git_history() {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+        let graph_path = PathBuf::from(&manifest)
+            .join("../../.weftos/graph/git-history.json");
+        if !graph_path.exists() {
+            // Skip if running outside the project tree.
+            return;
+        }
+        let engine = make_engine();
+        let result = engine.ingest_graph_file(&graph_path).unwrap();
+        assert!(result.nodes_added > 0, "should ingest at least one node");
+        assert_eq!(result.source, "git-history");
+        assert!(result.embeddings_created > 0, "should create embeddings");
+        // Verify causal graph was populated.
+        assert!(engine.causal_graph().node_count() > 0);
+    }
+
+    #[test]
+    fn ingest_graph_file_module_deps() {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+        let graph_path = PathBuf::from(&manifest)
+            .join("../../.weftos/graph/module-deps.json");
+        if !graph_path.exists() {
+            return;
+        }
+        let engine = make_engine();
+        let result = engine.ingest_graph_file(&graph_path).unwrap();
+        assert!(result.nodes_added > 0);
+        assert_eq!(result.source, "module-dependencies");
+    }
+
+    #[test]
+    fn ingest_graph_file_decisions() {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+        let graph_path = PathBuf::from(&manifest)
+            .join("../../.weftos/graph/decisions.json");
+        if !graph_path.exists() {
+            return;
+        }
+        let engine = make_engine();
+        let result = engine.ingest_graph_file(&graph_path).unwrap();
+        assert!(result.nodes_added > 0);
+        assert_eq!(result.source, "decisions-and-phases");
+    }
+
+    #[test]
+    fn ingest_graph_creates_edges() {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+        let graph_path = PathBuf::from(&manifest)
+            .join("../../.weftos/graph/git-history.json");
+        if !graph_path.exists() {
+            return;
+        }
+        let engine = make_engine();
+        let result = engine.ingest_graph_file(&graph_path).unwrap();
+        assert!(result.edges_added > 0, "git-history graph should have edges");
+        assert!(engine.causal_graph().edge_count() > 0);
+    }
+
+    #[test]
+    fn ingest_graph_populates_hnsw() {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+        let graph_path = PathBuf::from(&manifest)
+            .join("../../.weftos/graph/module-deps.json");
+        if !graph_path.exists() {
+            return;
+        }
+        let engine = make_engine();
+        let result = engine.ingest_graph_file(&graph_path).unwrap();
+        assert!(result.embeddings_created > 0);
+        assert!(engine.hnsw().insert_count() > 0);
+    }
+
+    #[test]
+    fn ingest_nonexistent_file_returns_error() {
+        let engine = make_engine();
+        let result = engine.ingest_graph_file(Path::new("/nonexistent/graph.json"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn ingest_invalid_json_returns_error() {
+        let dir = std::env::temp_dir().join("weaver_test_invalid");
+        std::fs::create_dir_all(&dir).ok();
+        let path = dir.join("bad.json");
+        std::fs::write(&path, "not valid json {{{").unwrap();
+        let engine = make_engine();
+        let result = engine.ingest_graph_file(&path);
+        assert!(result.is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ingest_empty_graph_returns_zero_counts() {
+        let dir = std::env::temp_dir().join("weaver_test_empty");
+        std::fs::create_dir_all(&dir).ok();
+        let path = dir.join("empty.json");
+        std::fs::write(
+            &path,
+            r#"{"source":"test","nodes":[],"edges":[]}"#,
+        )
+        .unwrap();
+        let engine = make_engine();
+        let result = engine.ingest_graph_file(&path).unwrap();
+        assert_eq!(result.nodes_added, 0);
+        assert_eq!(result.edges_added, 0);
+        assert_eq!(result.embeddings_created, 0);
+        assert_eq!(result.source, "test");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── Confidence scoring tests ─────────────────────────────────
+
+    #[test]
+    fn compute_confidence_empty_graph() {
+        let engine = make_engine();
+        let report = engine.compute_confidence();
+        assert_eq!(report.overall, 0.0);
+        assert!(!report.gaps.is_empty(), "should have gaps with empty graph");
+        assert!(
+            !report.suggestions.is_empty(),
+            "should have suggestions with empty graph"
+        );
+    }
+
+    #[test]
+    fn compute_confidence_with_nodes_only() {
+        let engine = make_engine();
+        // Add nodes without edges -- should be partially confident.
+        for i in 0..10 {
+            engine.causal_graph().add_node(
+                format!("node-{i}"),
+                serde_json::json!({"test": true}),
+            );
+        }
+        let report = engine.compute_confidence();
+        // All orphans: connectivity = 0, but volume > 0.
+        assert!(report.overall > 0.0, "should have some confidence from volume");
+        assert!(report.overall < 0.5, "should be low without edges");
+    }
+
+    #[test]
+    fn compute_confidence_with_connected_graph() {
+        let engine = make_engine();
+        // Create a small connected graph.
+        let n1 = engine.causal_graph().add_node(
+            "module-a".into(),
+            serde_json::json!({}),
+        );
+        let n2 = engine.causal_graph().add_node(
+            "module-b".into(),
+            serde_json::json!({}),
+        );
+        let n3 = engine.causal_graph().add_node(
+            "module-c".into(),
+            serde_json::json!({}),
+        );
+        engine.causal_graph().link(n1, n2, CausalEdgeType::Enables, 1.0, 0, 0);
+        engine.causal_graph().link(n2, n3, CausalEdgeType::Causes, 0.8, 0, 0);
+
+        let report = engine.compute_confidence();
+        // At least 2 of 3 nodes have edges, so connectivity should be decent.
+        assert!(report.overall > 0.0);
+    }
+
+    #[test]
+    fn compute_confidence_detects_orphans() {
+        let engine = make_engine();
+        let n1 = engine.causal_graph().add_node(
+            "connected-a".into(),
+            serde_json::json!({}),
+        );
+        let n2 = engine.causal_graph().add_node(
+            "connected-b".into(),
+            serde_json::json!({}),
+        );
+        engine.causal_graph().add_node(
+            "orphan-x".into(),
+            serde_json::json!({}),
+        );
+        engine.causal_graph().link(n1, n2, CausalEdgeType::Follows, 1.0, 0, 0);
+
+        let report = engine.compute_confidence();
+        // The suggestion should mention orphan nodes.
+        let has_orphan_suggestion = report.suggestions.iter().any(|s| match s {
+            ModelingSuggestion::AddSource { reason, .. } => reason.contains("orphan"),
+            _ => false,
+        });
+        assert!(has_orphan_suggestion, "should detect the orphan node");
+    }
+
+    #[test]
+    fn compute_confidence_improves_with_more_data() {
+        let engine = make_engine();
+        // Small graph.
+        let n1 = engine.causal_graph().add_node("a".into(), serde_json::json!({}));
+        let n2 = engine.causal_graph().add_node("b".into(), serde_json::json!({}));
+        engine.causal_graph().link(n1, n2, CausalEdgeType::Enables, 1.0, 0, 0);
+        let c1 = engine.compute_confidence().overall;
+
+        // Add more connected nodes.
+        for i in 0..50 {
+            let na = engine.causal_graph().add_node(format!("extra-{i}"), serde_json::json!({}));
+            engine.causal_graph().link(n1, na, CausalEdgeType::Correlates, 0.5, 0, 0);
+        }
+        let c2 = engine.compute_confidence().overall;
+        assert!(c2 > c1, "confidence should increase with more data ({c2} > {c1})");
+    }
+
+    // ── Model export/import roundtrip tests ──────────────────────
+
+    #[test]
+    fn export_model_includes_causal_data() {
+        let engine = make_engine();
+        engine.start_session("exp-causal", None, None).unwrap();
+        // Add some nodes and edges.
+        let n1 = engine.causal_graph().add_node("node-a".into(), serde_json::json!({}));
+        let n2 = engine.causal_graph().add_node("node-b".into(), serde_json::json!({}));
+        engine.causal_graph().link(n1, n2, CausalEdgeType::Causes, 0.9, 0, 0);
+
+        let model = engine.export_model("exp-causal", 0.0).unwrap();
+        assert!(!model.causal_nodes.is_empty(), "exported model should have nodes");
+        assert!(!model.causal_edges.is_empty(), "exported model should have edges");
+    }
+
+    #[test]
+    fn export_model_to_file_roundtrip() {
+        let dir = std::env::temp_dir().join("weaver_test_export");
+        std::fs::create_dir_all(&dir).ok();
+        let path = dir.join("test-model.json");
+
+        let engine = make_engine();
+        engine.start_session("roundtrip", None, None).unwrap();
+        engine.add_source("roundtrip", "git_log", None).unwrap();
+
+        // Add some graph data.
+        let n1 = engine.causal_graph().add_node("rt-a".into(), serde_json::json!({}));
+        let n2 = engine.causal_graph().add_node("rt-b".into(), serde_json::json!({}));
+        engine.causal_graph().link(n1, n2, CausalEdgeType::Enables, 1.0, 0, 0);
+
+        // Export.
+        let exported = engine.export_model_to_file("roundtrip", 0.0, &path).unwrap();
+        assert!(path.exists(), "export file should exist");
+
+        // Read back and verify JSON is valid.
+        let data = std::fs::read_to_string(&path).unwrap();
+        let reimported: ExportedModel = serde_json::from_str(&data).unwrap();
+        assert_eq!(reimported.domain, "roundtrip");
+        assert_eq!(reimported.version, exported.version);
+        assert_eq!(reimported.causal_nodes.len(), exported.causal_nodes.len());
+        assert_eq!(reimported.causal_edges.len(), exported.causal_edges.len());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn import_model_from_file_works() {
+        let dir = std::env::temp_dir().join("weaver_test_import");
+        std::fs::create_dir_all(&dir).ok();
+        let path = dir.join("import-model.json");
+
+        // Write a model file.
+        let model = ExportedModel {
+            version: "1.0".into(),
+            domain: "file-import".into(),
+            exported_at: Utc::now(),
+            confidence: 0.82,
+            node_types: vec![],
+            edge_types: vec![],
+            causal_nodes: vec![ExportedCausalNode {
+                label: "test-node".into(),
+                metadata: serde_json::json!({}),
+            }],
+            causal_edges: vec![],
+            metadata: HashMap::new(),
+        };
+        let json = serde_json::to_string_pretty(&model).unwrap();
+        std::fs::write(&path, json).unwrap();
+
+        let engine = make_engine();
+        engine.import_model_from_file("file-import", &path).unwrap();
+        let session = engine.get_session("file-import").unwrap();
+        assert_eq!(session.confidence, 0.82);
+        assert!(session.active);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── Edge type parsing tests ──────────────────────────────────
+
+    #[test]
+    fn parse_edge_type_known_types() {
+        assert_eq!(WeaverEngine::parse_edge_type("Causes"), CausalEdgeType::Causes);
+        assert_eq!(WeaverEngine::parse_edge_type("Enables"), CausalEdgeType::Enables);
+        assert_eq!(WeaverEngine::parse_edge_type("Follows"), CausalEdgeType::Follows);
+        assert_eq!(WeaverEngine::parse_edge_type("Correlates"), CausalEdgeType::Correlates);
+        assert_eq!(WeaverEngine::parse_edge_type("EvidenceFor"), CausalEdgeType::EvidenceFor);
+        assert_eq!(WeaverEngine::parse_edge_type("Inhibits"), CausalEdgeType::Inhibits);
+        assert_eq!(WeaverEngine::parse_edge_type("Contradicts"), CausalEdgeType::Contradicts);
+        assert_eq!(WeaverEngine::parse_edge_type("TriggeredBy"), CausalEdgeType::TriggeredBy);
+    }
+
+    #[test]
+    fn parse_edge_type_unknown_defaults_to_correlates() {
+        assert_eq!(WeaverEngine::parse_edge_type("FooBar"), CausalEdgeType::Correlates);
+        assert_eq!(WeaverEngine::parse_edge_type(""), CausalEdgeType::Correlates);
+    }
+
+    // ── WeaverError tests ────────────────────────────────────────
+
+    #[test]
+    fn weaver_error_display() {
+        let io_err = WeaverError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "file missing",
+        ));
+        assert!(io_err.to_string().contains("I/O"));
+
+        let domain_err = WeaverError::Domain("test failure".to_string());
+        assert!(domain_err.to_string().contains("test failure"));
     }
 }

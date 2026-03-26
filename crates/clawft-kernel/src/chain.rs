@@ -246,6 +246,37 @@ pub(crate) fn compute_event_hash(
 /// Witness type constants for kernel events.
 const WITNESS_PROVENANCE: u8 = 0x01;
 
+// ── Well-known chain event kinds (k3:D8, k2:D8) ────────────────────
+//
+// These constants define canonical `kind` strings for chain events
+// so that producers and consumers agree on the vocabulary.
+
+/// Capability revocation event (k3:D8 — informational revocation).
+///
+/// Revocation is recorded in the chain as data; enforcement is
+/// handled by the governance gate at evaluation time. This allows
+/// governance rules to decide whether revoked capabilities result
+/// in a hard block, a warning, or are allowed in specific contexts.
+pub const EVENT_KIND_CAPABILITY_REVOKED: &str = "capability.revoked";
+
+/// API contract registration event (k2:D8).
+///
+/// Emitted when a service registers or updates its API schema.
+/// The payload should include `service`, `version`, `schema_hash`.
+pub const EVENT_KIND_API_CONTRACT_REGISTERED: &str = "service.contract.register";
+
+/// Tool version deployment event.
+pub const EVENT_KIND_TOOL_DEPLOYED: &str = "tool.deploy";
+
+/// Tool version revocation event.
+pub const EVENT_KIND_TOOL_VERSION_REVOKED: &str = "tool.version.revoke";
+
+/// Sandbox sudo override event (k3:D12).
+///
+/// Emitted when a sudo override bypasses environment sandbox restrictions.
+/// The payload should include `agent_id`, `tool`, `path`, `reason`.
+pub const EVENT_KIND_SANDBOX_SUDO_OVERRIDE: &str = "sandbox.sudo.override";
+
 /// Local chain state.
 struct LocalChain {
     chain_id: u32,
@@ -2810,5 +2841,145 @@ mod tests {
             !ChainManager::verify_dual_signature(data, &bad_sig, &ed_pub, Some(&ml_vk)),
             "tampered ML-DSA-65 signature must fail verification"
         );
+    }
+
+    // ── Sprint 09a: serde roundtrip tests for chain types ────────
+
+    #[test]
+    fn chain_event_serde_roundtrip() {
+        let cm = ChainManager::new(0, 1000);
+        cm.append("test", "agent.spawn", Some(serde_json::json!({"name": "test-agent"})));
+        let events = cm.tail(1);
+        let event = &events[0];
+
+        let json = serde_json::to_string(event).unwrap();
+        let restored: ChainEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.sequence, event.sequence);
+        assert_eq!(restored.source, "test");
+        assert_eq!(restored.kind, "agent.spawn");
+        assert!(restored.payload.is_some());
+    }
+
+    #[test]
+    fn chain_event_without_payload_roundtrip() {
+        let cm = ChainManager::new(0, 1000);
+        cm.append("kernel", "boot.complete", None);
+        let events = cm.tail(1);
+        let event = &events[0];
+
+        let json = serde_json::to_string(event).unwrap();
+        let restored: ChainEvent = serde_json::from_str(&json).unwrap();
+        assert!(restored.payload.is_none());
+        assert_eq!(restored.kind, "boot.complete");
+    }
+
+    #[test]
+    fn chain_checkpoint_serde_roundtrip() {
+        let cm = ChainManager::new(0, 1000);
+        cm.append("test", "event.1", None);
+        cm.append("test", "event.2", None);
+        let cp = cm.checkpoint();
+
+        let json = serde_json::to_string(&cp).unwrap();
+        let restored: ChainCheckpoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.chain_id, cp.chain_id);
+        assert_eq!(restored.sequence, cp.sequence);
+        assert_eq!(restored.last_hash, cp.last_hash);
+    }
+
+    #[test]
+    fn chain_verify_result_serde_roundtrip_valid() {
+        let result = ChainVerifyResult {
+            valid: true,
+            event_count: 10,
+            errors: vec![],
+            signature_verified: Some(true),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let restored: ChainVerifyResult = serde_json::from_str(&json).unwrap();
+        assert!(restored.valid);
+        assert_eq!(restored.event_count, 10);
+        assert!(restored.errors.is_empty());
+        assert_eq!(restored.signature_verified, Some(true));
+    }
+
+    #[test]
+    fn chain_verify_result_serde_roundtrip_invalid() {
+        let result = ChainVerifyResult {
+            valid: false,
+            event_count: 5,
+            errors: vec!["hash mismatch at seq 3".into()],
+            signature_verified: None,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let restored: ChainVerifyResult = serde_json::from_str(&json).unwrap();
+        assert!(!restored.valid);
+        assert_eq!(restored.errors.len(), 1);
+        assert!(restored.signature_verified.is_none());
+    }
+
+    #[test]
+    fn chain_status_serde_roundtrip() {
+        let cm = ChainManager::new(42, 1000);
+        cm.append("test", "event.1", None);
+        cm.append("test", "event.2", None);
+        let status = cm.status();
+
+        let json = serde_json::to_string(&status).unwrap();
+        let restored: ChainStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.chain_id, 42);
+        assert_eq!(restored.sequence, status.sequence);
+        assert_eq!(restored.event_count, status.event_count);
+    }
+
+    #[test]
+    fn dual_signature_serde_roundtrip() {
+        let sig = DualSignature {
+            ed25519: vec![0xCA, 0xFE, 0xBA, 0xBE],
+            ml_dsa65: Some(vec![0xDE, 0xAD]),
+        };
+        let json = serde_json::to_string(&sig).unwrap();
+        let restored: DualSignature = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.ed25519, vec![0xCA, 0xFE, 0xBA, 0xBE]);
+        assert_eq!(restored.ml_dsa65.unwrap(), vec![0xDE, 0xAD]);
+    }
+
+    #[test]
+    fn dual_signature_without_ml_dsa_roundtrip() {
+        let sig = DualSignature {
+            ed25519: vec![0x01, 0x02],
+            ml_dsa65: None,
+        };
+        let json = serde_json::to_string(&sig).unwrap();
+        let restored: DualSignature = serde_json::from_str(&json).unwrap();
+        assert!(restored.ml_dsa65.is_none());
+    }
+
+    #[test]
+    fn anchor_receipt_serde_roundtrip() {
+        let receipt = AnchorReceipt {
+            hash: [0xABu8; 32],
+            tx_id: "tx-deadbeef".into(),
+            anchored_at: chrono::Utc::now(),
+        };
+        let json = serde_json::to_string(&receipt).unwrap();
+        let restored: AnchorReceipt = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.hash, [0xABu8; 32]);
+        assert_eq!(restored.tx_id, "tx-deadbeef");
+    }
+
+    #[test]
+    fn chain_genesis_event_hash_is_nonzero() {
+        let cm = ChainManager::new(0, 1000);
+        let events = cm.tail(1);
+        assert_eq!(events[0].kind, "genesis");
+        assert_ne!(events[0].hash, [0u8; 32]);
+    }
+
+    #[test]
+    fn chain_genesis_prev_hash_is_zero() {
+        let cm = ChainManager::new(0, 1000);
+        let events = cm.tail(1);
+        assert_eq!(events[0].prev_hash, [0u8; 32]);
     }
 }

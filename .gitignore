@@ -5,3 +5,6 @@
 target/
 .env-keys.json
 crates/clawft-wasm/www/pkg/
+
+# WeftOS runtime state
+.weftos/

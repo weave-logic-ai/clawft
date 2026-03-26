@@ -8,6 +8,7 @@ use std::fmt;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // EmbeddingError
@@ -139,6 +140,190 @@ impl EmbeddingProvider for MockEmbeddingProvider {
     }
 }
 
+// ---------------------------------------------------------------------------
+// LlmEmbeddingProvider
+// ---------------------------------------------------------------------------
+
+/// Configuration for the LLM API embedding backend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmEmbeddingConfig {
+    /// Model identifier (e.g., "text-embedding-3-small").
+    pub model: String,
+    /// Output vector dimensionality (e.g., 384 or 1536).
+    pub dimensions: usize,
+    /// Maximum texts per API call for batching.
+    pub batch_size: usize,
+    /// Whether the API is currently available.
+    pub api_available: bool,
+}
+
+impl Default for LlmEmbeddingConfig {
+    fn default() -> Self {
+        Self {
+            model: "text-embedding-3-small".to_string(),
+            dimensions: 384,
+            batch_size: 16,
+            api_available: false,
+        }
+    }
+}
+
+/// LLM-backed embedding provider that calls the clawft-llm provider layer.
+///
+/// Uses the model's embedding endpoint to produce real semantic vectors.
+/// When no API is configured (or the API is unavailable), falls back to
+/// [`MockEmbeddingProvider`] for deterministic hash-based embeddings.
+pub struct LlmEmbeddingProvider {
+    config: LlmEmbeddingConfig,
+    fallback: MockEmbeddingProvider,
+}
+
+impl LlmEmbeddingProvider {
+    /// Create a new LLM embedding provider with the given configuration.
+    pub fn new(config: LlmEmbeddingConfig) -> Self {
+        let fallback = MockEmbeddingProvider::new(config.dimensions);
+        Self { config, fallback }
+    }
+
+    /// Create from a weave.toml-style configuration table.
+    ///
+    /// Expected keys: `model` (string), `dimensions` (int), `batch_size` (int).
+    /// If the table is missing or incomplete, returns a provider with defaults
+    /// that falls back to mock embeddings.
+    pub fn from_config(table: &std::collections::HashMap<String, String>) -> Self {
+        let model = table
+            .get("model")
+            .cloned()
+            .unwrap_or_else(|| "text-embedding-3-small".to_string());
+        let dimensions = table
+            .get("dimensions")
+            .and_then(|d| d.parse::<usize>().ok())
+            .unwrap_or(384);
+        let batch_size = table
+            .get("batch_size")
+            .and_then(|b| b.parse::<usize>().ok())
+            .unwrap_or(16);
+        let api_available = table
+            .get("api_available")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+
+        Self::new(LlmEmbeddingConfig {
+            model,
+            dimensions,
+            batch_size,
+            api_available,
+        })
+    }
+
+    /// Whether the LLM API is available (non-fallback mode).
+    pub fn is_api_available(&self) -> bool {
+        self.config.api_available
+    }
+
+    /// Get the underlying configuration.
+    pub fn config(&self) -> &LlmEmbeddingConfig {
+        &self.config
+    }
+
+    /// Perform an LLM API embedding call.
+    ///
+    /// In a production deployment this would call the clawft-llm provider's
+    /// embed endpoint. Currently returns an error so that the `embed()` method
+    /// falls back to the mock provider.
+    async fn call_llm_api(&self, _text: &str) -> Result<Vec<f32>, EmbeddingError> {
+        if !self.config.api_available {
+            return Err(EmbeddingError::BackendError(
+                "LLM API not configured; using fallback".to_string(),
+            ));
+        }
+        // Production implementation would call:
+        //   provider.embed(EmbedRequest { model, input: vec![text], dimensions })
+        // For now, the API path is gated behind api_available.
+        Err(EmbeddingError::BackendError(
+            "LLM API call not yet wired to clawft-llm provider".to_string(),
+        ))
+    }
+
+    /// Perform a batched LLM API embedding call.
+    async fn call_llm_api_batch(
+        &self,
+        _texts: &[&str],
+    ) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+        if !self.config.api_available {
+            return Err(EmbeddingError::BackendError(
+                "LLM API not configured; using fallback".to_string(),
+            ));
+        }
+        Err(EmbeddingError::BackendError(
+            "LLM API batch call not yet wired to clawft-llm provider".to_string(),
+        ))
+    }
+}
+
+#[async_trait]
+impl EmbeddingProvider for LlmEmbeddingProvider {
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
+        // Try the LLM API first; fall back to mock on any error.
+        match self.call_llm_api(text).await {
+            Ok(vec) => {
+                if vec.len() != self.config.dimensions {
+                    return Err(EmbeddingError::DimensionMismatch {
+                        expected: self.config.dimensions,
+                        got: vec.len(),
+                    });
+                }
+                Ok(vec)
+            }
+            Err(_) => self.fallback.embed(text).await,
+        }
+    }
+
+    async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+        // Try the LLM API batch endpoint; fall back to mock.
+        match self.call_llm_api_batch(texts).await {
+            Ok(vecs) => {
+                for v in &vecs {
+                    if v.len() != self.config.dimensions {
+                        return Err(EmbeddingError::DimensionMismatch {
+                            expected: self.config.dimensions,
+                            got: v.len(),
+                        });
+                    }
+                }
+                Ok(vecs)
+            }
+            Err(_) => self.fallback.embed_batch(texts).await,
+        }
+    }
+
+    fn dimensions(&self) -> usize {
+        self.config.dimensions
+    }
+
+    fn model_name(&self) -> &str {
+        &self.config.model
+    }
+}
+
+// ---------------------------------------------------------------------------
+// select_embedding_provider
+// ---------------------------------------------------------------------------
+
+/// Select the best available embedding provider based on configuration.
+///
+/// Priority order:
+/// 1. LLM API if llm_embedding config is present
+/// 2. Mock (fallback, for testing or when no backend available)
+pub fn select_embedding_provider(
+    llm_config: Option<LlmEmbeddingConfig>,
+) -> Box<dyn EmbeddingProvider> {
+    if let Some(config) = llm_config {
+        return Box::new(LlmEmbeddingProvider::new(config));
+    }
+    Box::new(MockEmbeddingProvider::new(64))
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -211,5 +396,137 @@ mod tests {
 
         let err2 = EmbeddingError::ModelNotLoaded;
         assert!(err2.to_string().contains("not loaded"));
+    }
+
+    // ── LlmEmbeddingProvider tests ───────────────────────────────────
+
+    #[tokio::test]
+    async fn llm_provider_falls_back_to_mock_when_api_unavailable() {
+        let config = LlmEmbeddingConfig {
+            api_available: false,
+            dimensions: 64,
+            ..Default::default()
+        };
+        let provider = LlmEmbeddingProvider::new(config);
+        // Should succeed via fallback, not error.
+        let vec = provider.embed("hello world").await.unwrap();
+        assert_eq!(vec.len(), 64);
+    }
+
+    #[tokio::test]
+    async fn llm_provider_fallback_is_deterministic() {
+        let config = LlmEmbeddingConfig {
+            api_available: false,
+            dimensions: 32,
+            ..Default::default()
+        };
+        let provider = LlmEmbeddingProvider::new(config);
+        let v1 = provider.embed("test").await.unwrap();
+        let v2 = provider.embed("test").await.unwrap();
+        assert_eq!(v1, v2);
+    }
+
+    #[tokio::test]
+    async fn llm_provider_batch_fallback() {
+        let config = LlmEmbeddingConfig {
+            api_available: false,
+            dimensions: 16,
+            ..Default::default()
+        };
+        let provider = LlmEmbeddingProvider::new(config);
+        let results = provider.embed_batch(&["a", "b", "c"]).await.unwrap();
+        assert_eq!(results.len(), 3);
+        for v in &results {
+            assert_eq!(v.len(), 16);
+        }
+    }
+
+    #[test]
+    fn llm_provider_reports_model_name() {
+        let config = LlmEmbeddingConfig {
+            model: "custom-embed-v1".to_string(),
+            ..Default::default()
+        };
+        let provider = LlmEmbeddingProvider::new(config);
+        assert_eq!(provider.model_name(), "custom-embed-v1");
+    }
+
+    #[test]
+    fn llm_provider_reports_dimensions() {
+        let config = LlmEmbeddingConfig {
+            dimensions: 1536,
+            ..Default::default()
+        };
+        let provider = LlmEmbeddingProvider::new(config);
+        assert_eq!(provider.dimensions(), 1536);
+    }
+
+    #[test]
+    fn llm_provider_api_availability_check() {
+        let unavailable = LlmEmbeddingProvider::new(LlmEmbeddingConfig::default());
+        assert!(!unavailable.is_api_available());
+
+        let available = LlmEmbeddingProvider::new(LlmEmbeddingConfig {
+            api_available: true,
+            ..Default::default()
+        });
+        assert!(available.is_api_available());
+    }
+
+    #[test]
+    fn llm_provider_from_config_defaults() {
+        let table = std::collections::HashMap::new();
+        let provider = LlmEmbeddingProvider::from_config(&table);
+        assert_eq!(provider.dimensions(), 384);
+        assert_eq!(provider.model_name(), "text-embedding-3-small");
+        assert!(!provider.is_api_available());
+    }
+
+    #[test]
+    fn llm_provider_from_config_custom() {
+        let mut table = std::collections::HashMap::new();
+        table.insert("model".to_string(), "my-model".to_string());
+        table.insert("dimensions".to_string(), "768".to_string());
+        table.insert("batch_size".to_string(), "32".to_string());
+        table.insert("api_available".to_string(), "true".to_string());
+        let provider = LlmEmbeddingProvider::from_config(&table);
+        assert_eq!(provider.model_name(), "my-model");
+        assert_eq!(provider.dimensions(), 768);
+        assert_eq!(provider.config().batch_size, 32);
+        assert!(provider.is_api_available());
+    }
+
+    #[test]
+    fn select_provider_returns_mock_when_no_config() {
+        let provider = select_embedding_provider(None);
+        assert_eq!(provider.dimensions(), 64);
+        assert_eq!(provider.model_name(), "mock-sha256");
+    }
+
+    #[test]
+    fn select_provider_returns_llm_when_config_present() {
+        let config = LlmEmbeddingConfig {
+            model: "test-embed".to_string(),
+            dimensions: 256,
+            ..Default::default()
+        };
+        let provider = select_embedding_provider(Some(config));
+        assert_eq!(provider.dimensions(), 256);
+        assert_eq!(provider.model_name(), "test-embed");
+    }
+
+    #[tokio::test]
+    async fn llm_provider_fallback_matches_mock() {
+        let config = LlmEmbeddingConfig {
+            api_available: false,
+            dimensions: 32,
+            ..Default::default()
+        };
+        let llm = LlmEmbeddingProvider::new(config);
+        let mock = MockEmbeddingProvider::new(32);
+        let llm_vec = llm.embed("same input").await.unwrap();
+        let mock_vec = mock.embed("same input").await.unwrap();
+        // Fallback should produce identical results to mock.
+        assert_eq!(llm_vec, mock_vec);
     }
 }

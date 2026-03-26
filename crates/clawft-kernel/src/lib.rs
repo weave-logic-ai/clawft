@@ -217,12 +217,15 @@ pub use impulse::{ImpulseQueue, ImpulseType};
 #[cfg(feature = "ecc")]
 pub use artifact_store::{ArtifactBackend, ArtifactStore, ArtifactType, StoredArtifact};
 #[cfg(feature = "ecc")]
-pub use embedding::{EmbeddingError, EmbeddingProvider, MockEmbeddingProvider};
+pub use embedding::{
+    select_embedding_provider, EmbeddingError, EmbeddingProvider, LlmEmbeddingConfig,
+    LlmEmbeddingProvider, MockEmbeddingProvider,
+};
 #[cfg(feature = "ecc")]
 pub use weaver::{
-    ConfidenceGap, ConfidenceReport, DataSource, ExportedModel, MetaDecisionType, MetaLoomEvent,
-    ModelingSession, ModelingSuggestion, StrategyPattern, TickResult, WeaverCommand, WeaverEngine,
-    WeaverKnowledgeBase, WeaverResponse,
+    ConfidenceGap, ConfidenceReport, DataSource, ExportedModel, IngestResult, MetaDecisionType,
+    MetaLoomEvent, ModelingSession, ModelingSuggestion, StrategyPattern, TickResult,
+    WeaverCommand, WeaverEngine, WeaverError, WeaverKnowledgeBase, WeaverResponse,
 };
 #[cfg(feature = "ecc")]
 pub use cluster::NodeEccCapability;

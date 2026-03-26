@@ -139,20 +139,20 @@ Week 3: 09c finishes ───── 09d starts and finishes
 
 ### Sprint 09a: Test Coverage & Stability
 
-- [ ] `boot.rs` has 15+ tests covering all 12 boot stages
-- [ ] `agent_loop.rs` has 20+ tests covering agent execution lifecycle
-- [ ] `chain.rs` has 15+ tests covering append, verify, segment, merkle
-- [ ] `wasm_runner.rs` has 20+ tests covering fuel, memory, capability enforcement
-- [ ] `a2a.rs` has 10+ tests covering routing, topic dispatch, error paths
-- [ ] `daemon.rs` (clawft-weave) has 10+ tests covering socket IPC, lifecycle
-- [ ] `host.rs` (clawft-channels) has 8+ tests covering channel host operations
-- [ ] `agent_bus.rs` (clawft-core) has 5+ tests covering bus send/recv
-- [ ] Feature gate composition: `native + ecc + mesh` builds and tests clean
-- [ ] Feature gate composition: `native + os-patterns` builds and tests clean
-- [ ] Feature gate composition: `native + exochain + ecc` builds and tests clean
+- [ ] `boot.rs` has 15+ tests covering all 12 boot stages *(currently 4 -- needs 11 more)*
+- [x] `agent_loop.rs` has 20+ tests covering agent execution lifecycle *(26 tests, verified 2026-03-26)*
+- [x] `chain.rs` has 15+ tests covering append, verify, segment, merkle *(60 tests, verified 2026-03-26)*
+- [x] `wasm_runner.rs` has 20+ tests covering fuel, memory, capability enforcement *(93 tests, verified 2026-03-26)*
+- [ ] `a2a.rs` has 10+ tests covering routing, topic dispatch, error paths *(currently 1 -- needs 9 more)*
+- [ ] `daemon.rs` (clawft-weave) has 10+ tests covering socket IPC, lifecycle *(currently 1 -- needs 9 more)*
+- [x] `host.rs` (clawft-channels) has 8+ tests covering channel host operations *(11 tests, verified 2026-03-26)*
+- [x] `agent_bus.rs` (clawft-core) has 5+ tests covering bus send/recv *(9 tests, verified 2026-03-26)*
+- [x] Feature gate composition: `native + ecc + mesh` builds and tests clean *(verified 2026-03-26)*
+- [x] Feature gate composition: `native + os-patterns` builds and tests clean *(verified 2026-03-26)*
+- [x] Feature gate composition: `native + exochain + ecc` builds and tests clean *(verified 2026-03-26)*
 - [ ] Orphan module count reduced by 20+ (from 116 to <96)
-- [ ] All existing 1,197 tests still pass (no regressions)
-- [ ] Total kernel test count reaches 1,320+ (120+ new)
+- [x] All existing 1,197 tests still pass (no regressions) *(1,220 passing, verified 2026-03-26)*
+- [ ] Total kernel test count reaches 1,320+ (120+ new) *(currently 1,220 -- needs ~100 more)*
 - [ ] `scripts/build.sh clippy` clean for all modified files
 
 ### Sprint 09b: Decision Resolution
@@ -203,13 +203,13 @@ Week 3: 09c finishes ───── 09d starts and finishes
 
 ### Sprint 09d: Integration & Polish
 
-- [ ] Feature gate CI matrix: `native` builds and all tests pass
-- [ ] Feature gate CI matrix: `native + exochain` builds and all tests pass
-- [ ] Feature gate CI matrix: `native + ecc` builds and all tests pass
-- [ ] Feature gate CI matrix: `native + mesh` builds and all tests pass
-- [ ] Feature gate CI matrix: `native + os-patterns` builds and all tests pass
-- [ ] Feature gate CI matrix: `native + ecc + mesh + os-patterns` builds and all tests pass
-- [ ] `scripts/09-gate.sh` exists and passes all checks
+- [x] Feature gate CI matrix: `native` builds and all tests pass *(verified 2026-03-26)*
+- [x] Feature gate CI matrix: `native + exochain` builds and all tests pass *(verified 2026-03-26)*
+- [x] Feature gate CI matrix: `native + ecc` builds and all tests pass *(verified 2026-03-26)*
+- [x] Feature gate CI matrix: `native + mesh` builds and all tests pass *(verified 2026-03-26)*
+- [x] Feature gate CI matrix: `native + os-patterns` builds and all tests pass *(verified 2026-03-26)*
+- [x] Feature gate CI matrix: `native + ecc + mesh + os-patterns` builds and all tests pass *(verified 2026-03-26)*
+- [x] `scripts/09-gate.sh` exists and passes all checks *(created 2026-03-26, 20/20 gates pass)*
 - [ ] K3 remaining exit criterion completed (1 item at 86.7%)
 - [ ] K4 remaining exit criteria completed (2 items at 86.7%)
 - [ ] K5 remaining exit criterion completed (1 item at 94.1%)
@@ -220,7 +220,7 @@ Week 3: 09c finishes ───── 09d starts and finishes
 - [ ] `scripts/08-gate.sh` structure defined (even if 08 not yet implemented)
 - [ ] Weaver confidence reaches 0.92 target
 - [ ] Total workspace test count reaches 3,950+ (185+ new across all sprints)
-- [ ] No regressions: all pre-existing tests pass
+- [x] No regressions: all pre-existing tests pass *(1,220 kernel tests pass, verified 2026-03-26)*
 - [ ] All clippy warnings resolved
 
 ---

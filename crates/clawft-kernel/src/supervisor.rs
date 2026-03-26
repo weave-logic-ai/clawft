@@ -1830,4 +1830,92 @@ mod tests {
             assert!(matches!(&results[0], ResourceCheckResult::Exceeded { resource, .. } if resource == "cpu_time"));
         }
     }
+
+    // ── Sprint 09a: serde roundtrip tests ────────────────────────
+
+    #[test]
+    fn spawn_backend_native_serde_roundtrip() {
+        let backend = SpawnBackend::Native;
+        let json = serde_json::to_string(&backend).unwrap();
+        let _: SpawnBackend = serde_json::from_str(&json).unwrap();
+    }
+
+    #[test]
+    fn spawn_backend_wasm_serde_roundtrip() {
+        let backend = SpawnBackend::Wasm {
+            module: PathBuf::from("/opt/modules/agent.wasm"),
+        };
+        let json = serde_json::to_string(&backend).unwrap();
+        let restored: SpawnBackend = serde_json::from_str(&json).unwrap();
+        assert!(matches!(restored, SpawnBackend::Wasm { .. }));
+    }
+
+    #[test]
+    fn spawn_backend_container_serde_roundtrip() {
+        let backend = SpawnBackend::Container {
+            image: "ghcr.io/org/agent:v1".into(),
+        };
+        let json = serde_json::to_string(&backend).unwrap();
+        let restored: SpawnBackend = serde_json::from_str(&json).unwrap();
+        assert!(matches!(restored, SpawnBackend::Container { .. }));
+    }
+
+    #[test]
+    fn spawn_backend_tee_serde_roundtrip() {
+        let backend = SpawnBackend::Tee {
+            enclave: EnclaveConfig {
+                enclave_type: "sgx".into(),
+            },
+        };
+        let json = serde_json::to_string(&backend).unwrap();
+        let restored: SpawnBackend = serde_json::from_str(&json).unwrap();
+        assert!(matches!(restored, SpawnBackend::Tee { .. }));
+    }
+
+    #[test]
+    fn spawn_backend_remote_serde_roundtrip() {
+        let backend = SpawnBackend::Remote {
+            node_id: "node-42".into(),
+        };
+        let json = serde_json::to_string(&backend).unwrap();
+        let restored: SpawnBackend = serde_json::from_str(&json).unwrap();
+        assert!(matches!(restored, SpawnBackend::Remote { .. }));
+    }
+
+    #[test]
+    fn enclave_config_serde_roundtrip() {
+        let cfg = EnclaveConfig {
+            enclave_type: "trustzone".into(),
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let restored: EnclaveConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.enclave_type, "trustzone");
+    }
+
+    #[test]
+    fn spawn_request_with_backend_serde_roundtrip() {
+        let req = SpawnRequest {
+            agent_id: "test-agent".into(),
+            capabilities: None,
+            parent_pid: Some(42),
+            env: HashMap::from([("LOG_LEVEL".into(), "debug".into())]),
+            backend: Some(SpawnBackend::Native),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let restored: SpawnRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.agent_id, "test-agent");
+        assert_eq!(restored.parent_pid, Some(42));
+        assert!(restored.backend.is_some());
+    }
+
+    #[test]
+    fn spawn_request_minimal_json_deserializes() {
+        let json = r#"{"agent_id":"minimal"}"#;
+        let req: SpawnRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.agent_id, "minimal");
+        assert!(req.capabilities.is_none());
+        assert!(req.parent_pid.is_none());
+        assert!(req.env.is_empty());
+        assert!(req.backend.is_none());
+    }
 }
