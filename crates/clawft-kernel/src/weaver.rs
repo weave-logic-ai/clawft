@@ -13,7 +13,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -504,6 +504,238 @@ pub struct IngestResult {
 }
 
 // ---------------------------------------------------------------------------
+// GitPoller (incremental git change detection)
+// ---------------------------------------------------------------------------
+
+/// Incremental git polling state — detects new commits since last check.
+pub struct GitPoller {
+    /// Repository path.
+    repo_path: PathBuf,
+    /// Last known commit hash.
+    last_known_hash: Option<String>,
+    /// Branch to poll.
+    branch: String,
+    /// Polling enabled flag.
+    enabled: bool,
+}
+
+impl GitPoller {
+    /// Create a new poller for the given repository path and branch.
+    pub fn new(repo_path: PathBuf, branch: String) -> Self {
+        Self {
+            repo_path,
+            last_known_hash: None,
+            branch,
+            enabled: true,
+        }
+    }
+
+    /// Check for new commits since last poll.
+    /// Returns the number of new commits found (0 if none or on error).
+    pub fn poll(&mut self) -> usize {
+        if !self.enabled {
+            return 0;
+        }
+
+        let repo_str = self.repo_path.to_str().unwrap_or(".");
+        let output = std::process::Command::new("git")
+            .args(["-C", repo_str, "rev-parse", "HEAD"])
+            .output();
+
+        match output {
+            Ok(out) if out.status.success() => {
+                let current_hash = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if self.last_known_hash.as_deref() == Some(&current_hash) {
+                    return 0;
+                }
+
+                let count = if let Some(ref last) = self.last_known_hash {
+                    let count_output = std::process::Command::new("git")
+                        .args([
+                            "-C",
+                            repo_str,
+                            "rev-list",
+                            "--count",
+                            &format!("{}..{}", last, current_hash),
+                        ])
+                        .output();
+                    match count_output {
+                        Ok(o) if o.status.success() => {
+                            String::from_utf8_lossy(&o.stdout)
+                                .trim()
+                                .parse()
+                                .unwrap_or(1)
+                        }
+                        _ => 1,
+                    }
+                } else {
+                    1 // First poll — at least 1 commit exists
+                };
+
+                self.last_known_hash = Some(current_hash);
+                count
+            }
+            _ => 0,
+        }
+    }
+
+    /// Get the last known commit hash.
+    pub fn last_hash(&self) -> Option<&str> {
+        self.last_known_hash.as_deref()
+    }
+
+    /// Get the branch being polled.
+    pub fn branch(&self) -> &str {
+        &self.branch
+    }
+
+    /// Whether polling is enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Enable or disable polling.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FileWatcher (mtime-based change detection)
+// ---------------------------------------------------------------------------
+
+/// Simple file change detector using modification timestamps.
+///
+/// Avoids the `notify` crate dependency by comparing cached mtimes on each
+/// poll call. Only watches files that have been explicitly registered.
+pub struct FileWatcher {
+    /// Watched paths with their last known mtime.
+    watched: HashMap<PathBuf, SystemTime>,
+    /// Root directory to scan for initial registration.
+    root: PathBuf,
+    /// File patterns to match (e.g., `"*.rs"`, `"Cargo.toml"`).
+    patterns: Vec<String>,
+    /// Enabled flag.
+    enabled: bool,
+}
+
+impl FileWatcher {
+    /// Create a new file watcher for the given root and patterns.
+    pub fn new(root: PathBuf, patterns: Vec<String>) -> Self {
+        Self {
+            watched: HashMap::new(),
+            root,
+            patterns,
+            enabled: true,
+        }
+    }
+
+    /// Scan watched files for mtime changes since last check.
+    /// Returns paths of files that changed or were deleted.
+    pub fn poll_changes(&mut self) -> Vec<PathBuf> {
+        if !self.enabled {
+            return vec![];
+        }
+
+        let mut changed = Vec::new();
+        let entries: Vec<PathBuf> = self.watched.keys().cloned().collect();
+
+        for path in entries {
+            if let Ok(metadata) = std::fs::metadata(&path) {
+                if let Ok(mtime) = metadata.modified() {
+                    if let Some(last_mtime) = self.watched.get(&path) {
+                        if mtime > *last_mtime {
+                            changed.push(path.clone());
+                            self.watched.insert(path, mtime);
+                        }
+                    }
+                }
+            } else {
+                // File deleted
+                changed.push(path.clone());
+                self.watched.remove(&path);
+            }
+        }
+
+        changed
+    }
+
+    /// Register a single file to watch.
+    pub fn watch(&mut self, path: PathBuf) {
+        if let Ok(metadata) = std::fs::metadata(&path) {
+            if let Ok(mtime) = metadata.modified() {
+                self.watched.insert(path, mtime);
+            }
+        }
+    }
+
+    /// Register all files matching patterns in the root directory (non-recursive).
+    pub fn watch_directory(&mut self) {
+        if let Ok(entries) = std::fs::read_dir(&self.root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    let matches = self.patterns.iter().any(|p| {
+                        if p.starts_with("*.") {
+                            name.ends_with(&p[1..])
+                        } else {
+                            name == p
+                        }
+                    });
+                    if matches {
+                        self.watch(path);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Number of watched files.
+    pub fn watched_count(&self) -> usize {
+        self.watched.len()
+    }
+
+    /// Whether file watching is enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Enable or disable file watching.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CognitiveTickResult
+// ---------------------------------------------------------------------------
+
+/// Detailed outcome of a single cognitive tick processed by the WeaverEngine.
+///
+/// Complements the existing [`TickResult`] enum with per-tick metrics for the
+/// CognitiveTick integration (git polling, file watching, ingestion progress).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CognitiveTickResult {
+    /// Which tick number this result corresponds to.
+    pub tick_number: u64,
+    /// Actual wall-clock time consumed by this tick (ms).
+    pub elapsed_ms: u32,
+    /// Budget allocated for this tick (ms).
+    pub budget_ms: u32,
+    /// Number of new git commits detected during this tick.
+    pub git_commits_found: usize,
+    /// Number of source files that changed since last tick.
+    pub files_changed: usize,
+    /// Number of pending nodes processed during ingestion phase.
+    pub nodes_processed: usize,
+    /// Whether the confidence report was recomputed this tick.
+    pub confidence_updated: bool,
+    /// Whether the tick completed within its budget.
+    pub within_budget: bool,
+}
+
+// ---------------------------------------------------------------------------
 // WeaverEngine
 // ---------------------------------------------------------------------------
 
@@ -529,6 +761,14 @@ pub struct WeaverEngine {
     meta_loom_events: RwLock<HashMap<String, Vec<MetaLoomEvent>>>,
     /// Total ticks processed across all sessions.
     tick_count: AtomicU64,
+    /// Git poller for incremental commit detection.
+    git_poller: Option<GitPoller>,
+    /// File watcher for source file change detection.
+    file_watcher: Option<FileWatcher>,
+    /// Ticks since the last confidence recomputation.
+    ticks_since_confidence_update: u64,
+    /// Last computed confidence report (cached).
+    last_confidence: Option<ConfidenceReport>,
 }
 
 impl WeaverEngine {
@@ -547,6 +787,10 @@ impl WeaverEngine {
             impulse_queue: None,
             meta_loom_events: RwLock::new(HashMap::new()),
             tick_count: AtomicU64::new(0),
+            git_poller: None,
+            file_watcher: None,
+            ticks_since_confidence_update: 0,
+            last_confidence: None,
         }
     }
 
@@ -1416,6 +1660,97 @@ impl WeaverEngine {
         }
     }
 
+    // ── CognitiveTick integration ──────────────────────────────────
+
+    /// Handle a cognitive tick — process pending work within budget.
+    ///
+    /// Called by the CognitiveTick service each cycle. Performs git polling,
+    /// file change detection, pending ingestion, and periodic confidence
+    /// recomputation, all within the supplied time budget.
+    pub fn on_tick(&mut self, budget_ms: u32) -> CognitiveTickResult {
+        let start = Instant::now();
+        let budget = Duration::from_millis(budget_ms as u64);
+        let mut result = CognitiveTickResult {
+            tick_number: self.tick_count.load(Ordering::Relaxed),
+            budget_ms,
+            ..Default::default()
+        };
+
+        // 1. Check for new git commits (if git polling enabled).
+        if start.elapsed() < budget {
+            if let Some(new_commits) = self.poll_git() {
+                result.git_commits_found = new_commits;
+            }
+        }
+
+        // 2. Check for file changes (if file watcher enabled).
+        if start.elapsed() < budget {
+            if let Some(changed_files) = self.poll_file_changes() {
+                result.files_changed = changed_files;
+            }
+        }
+
+        // 3. Process pending ingestion queue (delegate to existing tick()).
+        if start.elapsed() < budget {
+            let remaining = budget.saturating_sub(start.elapsed());
+            let tick_result = self.tick(remaining);
+            if let TickResult::Progress { .. } = tick_result {
+                result.nodes_processed = 1;
+            }
+        }
+
+        // 4. Recompute confidence every 100 ticks.
+        if start.elapsed() < budget && self.ticks_since_confidence_update > 100 {
+            self.last_confidence = Some(self.compute_confidence());
+            self.ticks_since_confidence_update = 0;
+            result.confidence_updated = true;
+        }
+
+        result.elapsed_ms = start.elapsed().as_millis() as u32;
+        result.within_budget = start.elapsed() <= budget;
+        self.tick_count.fetch_add(1, Ordering::Relaxed);
+        self.ticks_since_confidence_update += 1;
+
+        result
+    }
+
+    /// Enable git polling for a repository path and branch.
+    pub fn enable_git_polling(&mut self, repo_path: PathBuf, branch: String) {
+        self.git_poller = Some(GitPoller::new(repo_path, branch));
+    }
+
+    /// Enable file watching for source files under a root directory.
+    pub fn enable_file_watching(&mut self, root: PathBuf, patterns: Vec<String>) {
+        let mut watcher = FileWatcher::new(root, patterns);
+        watcher.watch_directory();
+        self.file_watcher = Some(watcher);
+    }
+
+    /// Poll git for new commits (internal helper for on_tick).
+    fn poll_git(&mut self) -> Option<usize> {
+        self.git_poller.as_mut().map(|p| p.poll())
+    }
+
+    /// Poll file watcher for changed files (internal helper for on_tick).
+    fn poll_file_changes(&mut self) -> Option<usize> {
+        self.file_watcher.as_mut().map(|w| w.poll_changes().len())
+    }
+
+    /// Get the cached confidence report from the last recomputation.
+    pub fn cached_confidence(&self) -> Option<&ConfidenceReport> {
+        self.last_confidence.as_ref()
+    }
+
+    /// Get a reference to the git poller, if enabled.
+    pub fn git_poller(&self) -> Option<&GitPoller> {
+        self.git_poller.as_ref()
+    }
+
+    /// Get a reference to the file watcher, if enabled.
+    pub fn file_watcher(&self) -> Option<&FileWatcher> {
+        self.file_watcher.as_ref()
+    }
+
     /// Total ticks processed.
     pub fn total_ticks(&self) -> u64 {
         self.tick_count.load(Ordering::Relaxed)
@@ -2127,5 +2462,301 @@ mod tests {
 
         let domain_err = WeaverError::Domain("test failure".to_string());
         assert!(domain_err.to_string().contains("test failure"));
+    }
+
+    // ── CognitiveTick integration tests ─────────────────────────
+
+    fn make_engine_mut() -> WeaverEngine {
+        let graph = Arc::new(CausalGraph::new());
+        let hnsw = Arc::new(HnswService::new(HnswServiceConfig::default()));
+        WeaverEngine::new_with_mock(graph, hnsw)
+    }
+
+    #[test]
+    fn on_tick_respects_budget() {
+        let mut engine = make_engine_mut();
+        engine.start_session("tick-budget", None, None).unwrap();
+        let result = engine.on_tick(500); // 500ms budget
+        assert!(
+            result.within_budget,
+            "tick should complete within 500ms budget"
+        );
+        assert!(result.elapsed_ms <= 500, "elapsed should be within budget");
+    }
+
+    #[test]
+    fn on_tick_returns_correct_fields() {
+        let mut engine = make_engine_mut();
+        engine.start_session("tick-fields", None, None).unwrap();
+        let result = engine.on_tick(100);
+        assert_eq!(result.budget_ms, 100);
+        assert_eq!(result.tick_number, 0); // first tick
+        // No git poller or file watcher configured, so these should be 0.
+        assert_eq!(result.git_commits_found, 0);
+        assert_eq!(result.files_changed, 0);
+    }
+
+    #[test]
+    fn on_tick_increments_tick_count() {
+        let mut engine = make_engine_mut();
+        engine.start_session("tick-count", None, None).unwrap();
+        engine.on_tick(100);
+        engine.on_tick(100);
+        engine.on_tick(100);
+        // on_tick calls tick() internally which also increments, plus on_tick itself.
+        // The on_tick method does fetch_add(1) each call.
+        assert!(engine.total_ticks() >= 3, "should have at least 3 ticks");
+    }
+
+    #[test]
+    fn on_tick_confidence_update_after_100_ticks() {
+        let mut engine = make_engine_mut();
+        engine.start_session("conf-update", None, None).unwrap();
+        // Simulate 101 ticks to trigger confidence update.
+        engine.ticks_since_confidence_update = 101;
+        let result = engine.on_tick(1000);
+        assert!(
+            result.confidence_updated,
+            "confidence should be updated after 100+ ticks"
+        );
+        assert!(
+            engine.cached_confidence().is_some(),
+            "cached confidence should be set"
+        );
+        assert_eq!(
+            engine.ticks_since_confidence_update, 1,
+            "counter should reset to 1 (incremented after reset)"
+        );
+    }
+
+    #[test]
+    fn on_tick_no_confidence_update_before_100_ticks() {
+        let mut engine = make_engine_mut();
+        engine.start_session("no-conf-update", None, None).unwrap();
+        let result = engine.on_tick(100);
+        assert!(
+            !result.confidence_updated,
+            "should not update confidence on first tick"
+        );
+    }
+
+    #[test]
+    fn on_tick_git_and_file_watcher_disabled_by_default() {
+        let engine = make_engine_mut();
+        assert!(
+            engine.git_poller().is_none(),
+            "git poller should be None by default"
+        );
+        assert!(
+            engine.file_watcher().is_none(),
+            "file watcher should be None by default"
+        );
+    }
+
+    // ── GitPoller tests ─────────────────────────────────────────
+
+    #[test]
+    fn git_poller_poll_detects_commits_in_real_repo() {
+        // Use the actual project repo for this test.
+        let manifest =
+            std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+        let repo_path = PathBuf::from(&manifest).join("../..");
+        if !repo_path.join(".git").exists() {
+            return; // skip if not in a git repo
+        }
+        let mut poller = GitPoller::new(repo_path, "HEAD".to_string());
+        // First poll should detect at least 1 commit.
+        let count = poller.poll();
+        assert!(count >= 1, "first poll should find at least 1 commit");
+        assert!(poller.last_hash().is_some(), "last hash should be set");
+    }
+
+    #[test]
+    fn git_poller_poll_returns_zero_on_no_changes() {
+        let manifest =
+            std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+        let repo_path = PathBuf::from(&manifest).join("../..");
+        if !repo_path.join(".git").exists() {
+            return;
+        }
+        let mut poller = GitPoller::new(repo_path, "HEAD".to_string());
+        poller.poll(); // first poll sets the baseline
+        let count = poller.poll(); // second poll, no new commits
+        assert_eq!(count, 0, "second poll should find 0 new commits");
+    }
+
+    #[test]
+    fn git_poller_disabled_returns_zero() {
+        let mut poller = GitPoller::new(PathBuf::from("/tmp"), "main".to_string());
+        poller.set_enabled(false);
+        assert_eq!(poller.poll(), 0);
+        assert!(!poller.is_enabled());
+    }
+
+    #[test]
+    fn git_poller_nonexistent_repo_returns_zero() {
+        let mut poller = GitPoller::new(
+            PathBuf::from("/nonexistent/path/to/repo"),
+            "main".to_string(),
+        );
+        let count = poller.poll();
+        assert_eq!(count, 0, "should return 0 for nonexistent repo");
+        assert!(poller.last_hash().is_none());
+    }
+
+    #[test]
+    fn git_poller_branch_accessor() {
+        let poller = GitPoller::new(PathBuf::from("/tmp"), "develop".to_string());
+        assert_eq!(poller.branch(), "develop");
+    }
+
+    // ── FileWatcher tests ───────────────────────────────────────
+
+    #[test]
+    fn file_watcher_watch_and_poll_detects_mtime_change() {
+        let dir = std::env::temp_dir().join("weaver_fw_test_mtime");
+        std::fs::create_dir_all(&dir).ok();
+        let path = dir.join("test.rs");
+        std::fs::write(&path, "fn main() {}").unwrap();
+
+        let mut watcher = FileWatcher::new(dir.clone(), vec!["*.rs".to_string()]);
+        watcher.watch(path.clone());
+        assert_eq!(watcher.watched_count(), 1);
+
+        // First poll: no changes (mtime matches).
+        let changed = watcher.poll_changes();
+        assert!(changed.is_empty(), "no changes on first poll");
+
+        // Simulate mtime change by sleeping briefly and rewriting.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(&path, "fn main() { println!(\"changed\"); }").unwrap();
+
+        let changed = watcher.poll_changes();
+        assert_eq!(changed.len(), 1, "should detect the changed file");
+        assert_eq!(changed[0], path);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_watcher_watch_directory_registers_files() {
+        let dir = std::env::temp_dir().join("weaver_fw_test_dir");
+        std::fs::create_dir_all(&dir).ok();
+        std::fs::write(dir.join("lib.rs"), "// lib").unwrap();
+        std::fs::write(dir.join("main.rs"), "// main").unwrap();
+        std::fs::write(dir.join("readme.md"), "# readme").unwrap();
+
+        let mut watcher = FileWatcher::new(dir.clone(), vec!["*.rs".to_string()]);
+        watcher.watch_directory();
+        assert_eq!(watcher.watched_count(), 2, "should only watch .rs files");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_watcher_detects_deleted_file() {
+        let dir = std::env::temp_dir().join("weaver_fw_test_delete");
+        std::fs::create_dir_all(&dir).ok();
+        let path = dir.join("temp.rs");
+        std::fs::write(&path, "// temp").unwrap();
+
+        let mut watcher = FileWatcher::new(dir.clone(), vec!["*.rs".to_string()]);
+        watcher.watch(path.clone());
+
+        // Delete the file.
+        std::fs::remove_file(&path).unwrap();
+        let changed = watcher.poll_changes();
+        assert_eq!(changed.len(), 1, "should detect deleted file");
+        assert_eq!(watcher.watched_count(), 0, "deleted file should be unregistered");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_watcher_disabled_returns_empty() {
+        let mut watcher = FileWatcher::new(
+            PathBuf::from("/tmp"),
+            vec!["*.rs".to_string()],
+        );
+        watcher.set_enabled(false);
+        assert!(watcher.poll_changes().is_empty());
+        assert!(!watcher.is_enabled());
+    }
+
+    // ── WeaverEngine git/file integration tests ─────────────────
+
+    #[test]
+    fn enable_git_polling_sets_poller() {
+        let mut engine = make_engine_mut();
+        assert!(engine.git_poller().is_none());
+        engine.enable_git_polling(PathBuf::from("/tmp"), "main".to_string());
+        assert!(engine.git_poller().is_some());
+        assert_eq!(engine.git_poller().unwrap().branch(), "main");
+    }
+
+    #[test]
+    fn enable_file_watching_sets_watcher() {
+        let dir = std::env::temp_dir().join("weaver_fw_test_enable");
+        std::fs::create_dir_all(&dir).ok();
+        std::fs::write(dir.join("test.rs"), "// test").unwrap();
+
+        let mut engine = make_engine_mut();
+        assert!(engine.file_watcher().is_none());
+        engine.enable_file_watching(dir.clone(), vec!["*.rs".to_string()]);
+        assert!(engine.file_watcher().is_some());
+        assert_eq!(engine.file_watcher().unwrap().watched_count(), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn on_tick_with_git_polling_enabled() {
+        let manifest =
+            std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+        let repo_path = PathBuf::from(&manifest).join("../..");
+        if !repo_path.join(".git").exists() {
+            return;
+        }
+        let mut engine = make_engine_mut();
+        engine.start_session("git-tick", None, None).unwrap();
+        engine.enable_git_polling(repo_path, "HEAD".to_string());
+        let result = engine.on_tick(500);
+        // First tick should detect at least 1 commit (initial baseline).
+        assert!(
+            result.git_commits_found >= 1,
+            "first on_tick with git polling should find commits"
+        );
+    }
+
+    #[test]
+    fn cognitive_tick_result_default() {
+        let result = CognitiveTickResult::default();
+        assert_eq!(result.tick_number, 0);
+        assert_eq!(result.elapsed_ms, 0);
+        assert_eq!(result.budget_ms, 0);
+        assert_eq!(result.git_commits_found, 0);
+        assert_eq!(result.files_changed, 0);
+        assert_eq!(result.nodes_processed, 0);
+        assert!(!result.confidence_updated);
+        assert!(!result.within_budget);
+    }
+
+    #[test]
+    fn cognitive_tick_result_serde_roundtrip() {
+        let result = CognitiveTickResult {
+            tick_number: 42,
+            elapsed_ms: 15,
+            budget_ms: 50,
+            git_commits_found: 3,
+            files_changed: 2,
+            nodes_processed: 10,
+            confidence_updated: true,
+            within_budget: true,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let restored: CognitiveTickResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.tick_number, 42);
+        assert_eq!(restored.git_commits_found, 3);
+        assert!(restored.confidence_updated);
     }
 }
