@@ -26,9 +26,9 @@ self-contained enough for independent implementation.
 |-------|-------|-------|:----------:|----------|------------|
 | 08a | Self-Healing & Process | K1, K2b | ~1,200 new / ~350 changed | P0 | K0-K6 complete |
 | 08b | Reliable IPC & Observability | K2, Cross-cutting | ~1,800 new / ~350 changed | P1 | 08a K1-G1 (restart strategies) |
-| 08c | Content & Operations | K3, K3c, K5, K6 | ~2,100 new / ~250 changed | P2 | 08a, 08b partial |
+| 08c | Content & Operations | K3, K3c, K5, K6 | ~2,750 new / ~330 changed | P2 | 08a, 08b partial |
 
-**Estimated totals**: ~5,100 new lines, ~950 changed lines across all three phases.
+**Estimated totals**: ~5,750 new lines, ~960 changed lines across all three phases.
 
 ## Feature Gate Structure
 
@@ -70,6 +70,9 @@ for the artifact store (K3 gap).
   +-- K3-G1: Artifact store
   +-- K3c-G1: WeaverEngine
   +-- K3c-G2: EmbeddingProvider
+  +-- K3c-G3: Weaver CLI commands
+  +-- K3c-G4: weave-model.json export/import
+  +-- K3c-G5: Meta-Loom integration
   +-- K5-G1: Config/secrets
   +-- K5-G2: Auth agent
   +-- K5-G3: Tree views
@@ -98,7 +101,7 @@ for the artifact store (K3 gap).
 | kernel-architect | 08b | K2-G1, K2-G2, K2-G3, Cross-G3 |
 | mesh-engineer | 08b, 08c | K2-G4, Cross-G1, K6-G1, K6-G2 |
 | chain-guardian | 08c | K3-G1 (artifact store uses BLAKE3) |
-| weaver | 08c | K3c-G1, K3c-G2 |
+| weaver | 08c | K3c-G1, K3c-G2, K3c-G3, K3c-G4, K3c-G5 (see `agents/weftos/weaver.md`) |
 | governance-counsel | 08c | K5-G1 (config/secrets), K5-G2 (auth) |
 | sandbox-warden | 08c | K5-G3 (tree views), K3-G1 |
 | observability-agent | 08b | Cross-G1 (metrics), Cross-G2 (log service) |
@@ -185,17 +188,21 @@ for the artifact store (K3 gap).
 - [ ] WASM modules loaded from artifact store by hash
 - [ ] File backend writes to correct path structure
 - [ ] Reference counting and garbage collection work
-- [ ] WeaverEngine registers as SystemService at boot
-- [ ] Modeling session start/stop via IPC
-- [ ] Confidence evaluation produces gap analysis
+- [ ] WeaverEngine registers as SystemService at boot (ecc feature)
+- [ ] Modeling session start/stop via `weaver ecc` CLI
+- [ ] Confidence evaluation produces gap analysis with suggestions
 - [ ] Model export produces valid weave-model.json
 - [ ] Git log ingestion creates causal nodes and edges
 - [ ] File tree ingestion creates namespace structure
-- [ ] Meta-Loom records Weaver's own decisions
-- [ ] CognitiveTick handler respects budget
-- [ ] EmbeddingProvider trait defined
-- [ ] Mock embedding implementation for testing
-- [ ] ONNX backend (behind feature flag)
+- [ ] Meta-Loom records Weaver's own modeling decisions as causal events
+- [ ] CognitiveTick handler respects budget allocation
+- [ ] EmbeddingProvider trait defined with mock implementation
+- [ ] Cross-domain WeaverKnowledgeBase persists strategy patterns
+- [ ] ONNX embedding backend (behind feature flag)
+- [ ] CLI `weaver ecc` commands wired through daemon socket IPC
+- [ ] Export + import roundtrip preserves causal graph structure
+- [ ] Meta-Loom events under `meta-loom/{domain}` namespace
+- [ ] Learned strategies applied to new sessions in similar domains
 - [ ] Config service stores and retrieves configuration
 - [ ] Config change notifications delivered to subscribers
 - [ ] Config changes logged to ExoChain
@@ -238,10 +245,10 @@ for the artifact store (K3 gap).
 |------|-----|-----|-----|
 | 17 | K1-G1 restart + K1-G2 links | Cross-G1 metrics (parallel OK) | -- |
 | 18 | K1-G3 resource + K2b-G1 reconciliation | K2-G1 DLQ + K2-G4 trace IDs | K3-G1 artifact store |
-| 19 | K1-G4 quotas + K2b-G2 probes | K2-G2 reliable delivery + K2-G5 signals | K3c-G1 WeaverEngine |
-| 20 | Review + integration test | K2-G3 pipes | K3c-G2 EmbeddingProvider + K5-G1 config |
-| 21 | -- | Cross-G2 log service + Cross-G3 timer | K5-G2 auth + K5-G3 tree views |
-| 22 | -- | Review + integration | K6-G1 exchange + K6-G2 log agg + review |
+| 19 | K1-G4 quotas + K2b-G2 probes | K2-G2 reliable delivery + K2-G5 signals | K3c-G1 WeaverEngine + K3c-G5 Meta-Loom |
+| 20 | Review + integration test | K2-G3 pipes | K3c-G3 CLI + K3c-G4 export/import + K5-G1 config |
+| 21 | -- | Cross-G2 log service + Cross-G3 timer | K5-G2 auth + K5-G3 tree views + K6-G1 exchange |
+| 22 | -- | Review + integration | K6-G2 log agg + Weaver e2e + review |
 
 ## Boot Sequence Integration
 
@@ -297,6 +304,23 @@ scripts/build.sh check
 # Full phase gate
 scripts/build.sh gate
 ```
+
+## Weaver Agent & Skill Reference
+
+The WeaverEngine (K3c gaps) has two companion documents:
+
+- **Agent definition**: `agents/weftos/weaver.md` -- the kernel-native
+  cognitive modeler agent that implements K3c-G1 through K3c-G5. This agent
+  runs the HYPOTHESIZE-OBSERVE-EVALUATE-ADJUST loop on causal models via the
+  WeaverEngine SystemService.
+
+- **Operator skill**: `agents/weftos-ecc/WEAVER.md` -- the Claude interaction
+  guide that describes HOW to interact with the WeaverEngine (session
+  workflows, CLI commands, confidence interpretation, modeling strategy). This
+  skill describes the operator interface; the K3c implementation is the kernel
+  service underneath.
+
+The skill is the user-facing guide. The 08c plan is the implementation spec.
 
 ## Cross-References
 
