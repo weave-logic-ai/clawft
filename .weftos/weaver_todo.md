@@ -34,23 +34,23 @@ Last updated: 2026-03-26 (after graph ingestion)
 - [x] Confidence scoring based on edge coverage (% of modules with causal edges) — `compute_confidence()`
 - [x] Gap detection: modules with no incoming/outgoing causal edges — orphan detection in `compute_confidence()`
 - [x] Suggestion engine: recommend data sources based on confidence gaps — integrated into `ConfidenceReport`
-- [ ] Confidence history tracking in meta-Loom
+- [x] Confidence history tracking in meta-Loom
 
 ## Export / Import
 
 - [x] ExportedModel type defined (`crates/clawft-kernel/src/weaver.rs`)
 - [x] weave-model.json export CLI command (`weaver ecc export`) — `export_model_to_file()` + causal data population
 - [x] weave-model.json import on edge devices — `import_model_from_file()` roundtrip verified
-- [ ] Model diff (compare two exported models)
-- [ ] Model merge (stitch models from different analysis sessions)
+- [x] Model diff (compare two exported models) — `diff_models()` + `ModelDiff` struct
+- [x] Model merge (stitch models from different analysis sessions) — `merge_models()` + `MergeResult`/`MergeConflict`/`MergeStats`
 
 ## Self-Improvement
 
 - [x] MetaLoomEvent + MetaDecisionType types defined (`weaver.rs`)
 - [x] WeaverKnowledgeBase type defined (`weaver.rs`)
-- [ ] Track which analysis strategies improved confidence (meta-Loom)
-- [ ] Cross-domain pattern library persistence
-- [ ] Recommend tick interval adjustments based on change frequency
+- [x] Track which analysis strategies improved confidence (meta-Loom)
+- [x] Cross-domain pattern library persistence — `save_to_file()`/`load_from_file()`/`learn_pattern()`/`find_patterns()` + `SerializableKB`
+- [x] Recommend tick interval adjustments based on change frequency
 
 ## Completed Infrastructure
 

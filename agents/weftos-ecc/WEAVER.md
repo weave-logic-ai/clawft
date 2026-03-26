@@ -393,7 +393,41 @@ weaver ecc stitch inspect --domain product-model
 5. Novel cross-domain connections emit `ImpulseType::NoveltyDetected`
 6. Chain events record the stitch with full provenance
 
-### 6. Manage the Meta-Loom
+### 6. Compare Models (diff)
+
+Compare two exported models to understand what changed between analysis sessions.
+
+**When to use**: Before merging models, reviewing evolution between versions, auditing changes.
+
+**Rust API**: `diff_models(&model_a, &model_b) -> ModelDiff`
+
+The `ModelDiff` struct reports:
+- Node types only in A, only in B, or in both
+- Edge types only in A, only in B, or in both
+- Causal node/edge additions and removals
+- Confidence delta and summary text
+
+### 7. Merge Models
+
+Combine two exported models into one, resolving conflicts by preferring higher-confidence edges.
+
+**Rust API**: `merge_models(&model_a, &model_b) -> MergeResult`
+
+The `MergeResult` contains:
+- `merged`: the combined `ExportedModel`
+- `conflicts`: list of `MergeConflict` records (which fields differed, how resolved)
+- `stats`: `MergeStats` with counts of nodes/edges from each source
+
+### 8. Knowledge Base Persistence
+
+The `WeaverKnowledgeBase` supports cross-session learning with full persistence:
+
+- `save_to_file(path)` -- serialize the KB to JSON via `SerializableKB`
+- `load_from_file(path)` -- reconstruct from a saved file
+- `learn_pattern(pattern)` -- add or update a `StrategyPattern` (merges if same decision_type+context)
+- `find_patterns(characteristics)` -- score patterns by how many domain characteristics match, sorted by relevance
+
+### 9. Manage the Meta-Loom
 
 The meta-Loom tracks the Weaver's own evolution. Every modeling decision is a causal
 event. This is how the Weaver learns to be a better modeler over time.

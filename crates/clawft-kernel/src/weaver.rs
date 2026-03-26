@@ -8,7 +8,7 @@
 //!
 //! This module requires the `ecc` feature.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -135,6 +135,8 @@ pub enum DataSource {
     IssueTracker { url: String },
     /// Documentation corpus.
     Documentation { root: PathBuf },
+    /// SPARC planning artifacts.
+    SparcPlan { root: PathBuf },
     /// User-defined stream.
     CustomStream { name: String },
 }
@@ -148,6 +150,7 @@ impl DataSource {
             Self::CiPipeline { .. } => "ci_pipeline",
             Self::IssueTracker { .. } => "issue_tracker",
             Self::Documentation { .. } => "documentation",
+            Self::SparcPlan { .. } => "sparc_plan",
             Self::CustomStream { .. } => "custom_stream",
         }
     }
@@ -736,6 +739,414 @@ pub struct CognitiveTickResult {
 }
 
 // ---------------------------------------------------------------------------
+// ConfidenceHistory (Item 1: confidence history tracking)
+// ---------------------------------------------------------------------------
+
+/// What triggered a confidence measurement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ConfidenceTrigger {
+    /// Every N ticks.
+    Periodic,
+    /// After a graph file was ingested.
+    PostIngestion,
+    /// Explicit evaluation request.
+    Manual,
+    /// After a modeling adjustment.
+    StrategyChange,
+}
+
+/// A point-in-time confidence snapshot for history tracking.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfidenceSnapshot {
+    /// Timestamp of this measurement.
+    pub timestamp: DateTime<Utc>,
+    /// Tick number when measured.
+    pub tick_number: u64,
+    /// Overall confidence score.
+    pub confidence: f64,
+    /// Number of nodes in the graph.
+    pub node_count: usize,
+    /// Number of edges in the graph.
+    pub edge_count: usize,
+    /// Number of gaps identified.
+    pub gap_count: usize,
+    /// What triggered this measurement.
+    pub trigger: ConfidenceTrigger,
+}
+
+/// Direction of a confidence trend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrendDirection {
+    /// Confidence is improving over time.
+    Improving,
+    /// Confidence is roughly stable.
+    Stable,
+    /// Confidence is declining over time.
+    Declining,
+}
+
+/// Summary of confidence movement over a window of snapshots.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfidenceTrend {
+    /// Overall direction.
+    pub direction: TrendDirection,
+    /// Change over the window (last - first).
+    pub delta: f64,
+    /// Average confidence in the window.
+    pub avg_confidence: f64,
+    /// Number of samples in the window.
+    pub samples: usize,
+}
+
+/// Ring-buffer of confidence snapshots.
+pub struct ConfidenceHistory {
+    snapshots: VecDeque<ConfidenceSnapshot>,
+    max_entries: usize,
+}
+
+impl ConfidenceHistory {
+    /// Create a new history with the given capacity.
+    pub fn new(max_entries: usize) -> Self {
+        Self {
+            snapshots: VecDeque::with_capacity(max_entries),
+            max_entries,
+        }
+    }
+
+    /// Record a new snapshot, evicting the oldest if at capacity.
+    pub fn record(&mut self, snapshot: ConfidenceSnapshot) {
+        if self.snapshots.len() >= self.max_entries {
+            self.snapshots.pop_front();
+        }
+        self.snapshots.push_back(snapshot);
+    }
+
+    /// Get the most recent snapshot.
+    pub fn latest(&self) -> Option<&ConfidenceSnapshot> {
+        self.snapshots.back()
+    }
+
+    /// Compute the trend over the last `last_n` snapshots.
+    pub fn trend(&self, last_n: usize) -> ConfidenceTrend {
+        let n = last_n.min(self.snapshots.len());
+        if n == 0 {
+            return ConfidenceTrend {
+                direction: TrendDirection::Stable,
+                delta: 0.0,
+                avg_confidence: 0.0,
+                samples: 0,
+            };
+        }
+
+        let start = self.snapshots.len() - n;
+        let window: Vec<&ConfidenceSnapshot> =
+            self.snapshots.iter().skip(start).collect();
+
+        let sum: f64 = window.iter().map(|s| s.confidence).sum();
+        let avg = sum / n as f64;
+        let first = window.first().map(|s| s.confidence).unwrap_or(0.0);
+        let last = window.last().map(|s| s.confidence).unwrap_or(0.0);
+        let delta = last - first;
+
+        let direction = if delta > 0.01 {
+            TrendDirection::Improving
+        } else if delta < -0.01 {
+            TrendDirection::Declining
+        } else {
+            TrendDirection::Stable
+        };
+
+        ConfidenceTrend {
+            direction,
+            delta,
+            avg_confidence: avg,
+            samples: n,
+        }
+    }
+
+    /// Get all snapshots.
+    pub fn all(&self) -> &VecDeque<ConfidenceSnapshot> {
+        &self.snapshots
+    }
+
+    /// Number of recorded snapshots.
+    pub fn len(&self) -> usize {
+        self.snapshots.len()
+    }
+
+    /// Whether the history is empty.
+    pub fn is_empty(&self) -> bool {
+        self.snapshots.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// StrategyTracker (Item 4: strategy effectiveness tracking)
+// ---------------------------------------------------------------------------
+
+/// Handle returned by `begin_strategy` to pair with `complete_strategy`.
+#[derive(Debug)]
+pub struct StrategyHandle {
+    /// Strategy name.
+    pub name: String,
+    /// Description of the change.
+    pub description: String,
+    /// Confidence at the start of the strategy.
+    pub confidence_before: f64,
+    /// When the strategy was started.
+    pub started_at: DateTime<Utc>,
+}
+
+/// A record of a strategy change and its impact on confidence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyOutcome {
+    /// What was changed.
+    pub strategy: String,
+    /// Description of the change.
+    pub description: String,
+    /// Confidence before the change.
+    pub confidence_before: f64,
+    /// Confidence after the change.
+    pub confidence_after: f64,
+    /// Delta (positive = improvement).
+    pub delta: f64,
+    /// When the change was made.
+    pub timestamp: DateTime<Utc>,
+    /// Whether this was beneficial (delta > 0.01).
+    pub beneficial: bool,
+}
+
+/// Tracker that learns which strategy changes improve confidence.
+pub struct StrategyTracker {
+    outcomes: Vec<StrategyOutcome>,
+    max_outcomes: usize,
+}
+
+impl StrategyTracker {
+    /// Create a new tracker with the given capacity.
+    pub fn new(max_outcomes: usize) -> Self {
+        Self {
+            outcomes: Vec::new(),
+            max_outcomes,
+        }
+    }
+
+    /// Begin tracking a strategy. Returns a handle for `complete_strategy`.
+    pub fn begin_strategy(
+        &self,
+        name: &str,
+        description: &str,
+        current_confidence: f64,
+    ) -> StrategyHandle {
+        StrategyHandle {
+            name: name.to_string(),
+            description: description.to_string(),
+            confidence_before: current_confidence,
+            started_at: Utc::now(),
+        }
+    }
+
+    /// Complete a strategy and record its outcome.
+    pub fn complete_strategy(
+        &mut self,
+        handle: StrategyHandle,
+        new_confidence: f64,
+    ) {
+        let delta = new_confidence - handle.confidence_before;
+        let outcome = StrategyOutcome {
+            strategy: handle.name,
+            description: handle.description,
+            confidence_before: handle.confidence_before,
+            confidence_after: new_confidence,
+            delta,
+            timestamp: handle.started_at,
+            beneficial: delta > 0.01,
+        };
+
+        if self.outcomes.len() >= self.max_outcomes {
+            self.outcomes.remove(0);
+        }
+        self.outcomes.push(outcome);
+    }
+
+    /// Get the most effective strategies, sorted by delta descending.
+    pub fn most_effective(&self, top_n: usize) -> Vec<&StrategyOutcome> {
+        let mut sorted: Vec<&StrategyOutcome> = self.outcomes.iter().collect();
+        sorted.sort_by(|a, b| {
+            b.delta
+                .partial_cmp(&a.delta)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        sorted.truncate(top_n);
+        sorted
+    }
+
+    /// Get strategies that hurt confidence (negative delta).
+    pub fn harmful_strategies(&self) -> Vec<&StrategyOutcome> {
+        self.outcomes
+            .iter()
+            .filter(|o| o.delta < -0.01)
+            .collect()
+    }
+
+    /// Recommend next strategy based on past effectiveness.
+    ///
+    /// Returns the name of the most effective beneficial strategy,
+    /// or `None` if no beneficial strategies have been recorded.
+    pub fn recommend(&self) -> Option<String> {
+        self.outcomes
+            .iter()
+            .filter(|o| o.beneficial)
+            .max_by(|a, b| {
+                a.delta
+                    .partial_cmp(&b.delta)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|o| o.strategy.clone())
+    }
+
+    /// All recorded outcomes.
+    pub fn outcomes(&self) -> &[StrategyOutcome] {
+        &self.outcomes
+    }
+
+    /// Number of recorded outcomes.
+    pub fn len(&self) -> usize {
+        self.outcomes.len()
+    }
+
+    /// Whether the tracker is empty.
+    pub fn is_empty(&self) -> bool {
+        self.outcomes.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TickHistory / TickRecommendation (Item 6: tick interval recommendation)
+// ---------------------------------------------------------------------------
+
+/// Tick interval recommendation based on observed change patterns.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TickRecommendation {
+    /// Recommended interval in milliseconds.
+    pub recommended_ms: u32,
+    /// Current interval.
+    pub current_ms: u32,
+    /// Reason for recommendation.
+    pub reason: String,
+    /// Observed changes per minute.
+    pub changes_per_minute: f64,
+    /// Confidence in this recommendation (0.0 - 1.0).
+    pub recommendation_confidence: f64,
+}
+
+/// Ring-buffer of recent tick results for analysis.
+pub struct TickHistory {
+    results: VecDeque<CognitiveTickResult>,
+    max_entries: usize,
+}
+
+impl TickHistory {
+    /// Create a new tick history with the given capacity.
+    pub fn new(max_entries: usize) -> Self {
+        Self {
+            results: VecDeque::with_capacity(max_entries),
+            max_entries,
+        }
+    }
+
+    /// Record a tick result, evicting the oldest if at capacity.
+    pub fn record(&mut self, result: CognitiveTickResult) {
+        if self.results.len() >= self.max_entries {
+            self.results.pop_front();
+        }
+        self.results.push_back(result);
+    }
+
+    /// Compute the average changes per minute based on recorded ticks.
+    ///
+    /// Uses total elapsed time and total change events to derive rate.
+    pub fn changes_per_minute(&self) -> f64 {
+        if self.results.len() < 2 {
+            return 0.0;
+        }
+
+        let total_changes: usize = self
+            .results
+            .iter()
+            .map(|r| r.git_commits_found + r.files_changed)
+            .sum();
+
+        let total_elapsed_ms: u64 =
+            self.results.iter().map(|r| r.elapsed_ms as u64).sum();
+        if total_elapsed_ms == 0 {
+            return 0.0;
+        }
+
+        let minutes = total_elapsed_ms as f64 / 60_000.0;
+        if minutes < 0.001 {
+            return 0.0;
+        }
+
+        total_changes as f64 / minutes
+    }
+
+    /// Compute average budget usage ratio (elapsed / budget).
+    pub fn avg_budget_usage(&self) -> f64 {
+        if self.results.is_empty() {
+            return 0.0;
+        }
+
+        let sum: f64 = self
+            .results
+            .iter()
+            .filter(|r| r.budget_ms > 0)
+            .map(|r| r.elapsed_ms as f64 / r.budget_ms as f64)
+            .sum();
+
+        let count = self
+            .results
+            .iter()
+            .filter(|r| r.budget_ms > 0)
+            .count();
+
+        if count == 0 {
+            return 0.0;
+        }
+
+        sum / count as f64
+    }
+
+    /// Count consecutive idle ticks (no changes) at the tail.
+    pub fn idle_ticks(&self) -> usize {
+        self.results
+            .iter()
+            .rev()
+            .take_while(|r| {
+                r.git_commits_found == 0
+                    && r.files_changed == 0
+                    && r.nodes_processed == 0
+            })
+            .count()
+    }
+
+    /// Number of recorded results.
+    pub fn len(&self) -> usize {
+        self.results.len()
+    }
+
+    /// Whether the history is empty.
+    pub fn is_empty(&self) -> bool {
+        self.results.is_empty()
+    }
+
+    /// All recorded tick results.
+    pub fn all(&self) -> &VecDeque<CognitiveTickResult> {
+        &self.results
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WeaverEngine
 // ---------------------------------------------------------------------------
 
@@ -769,6 +1180,14 @@ pub struct WeaverEngine {
     ticks_since_confidence_update: u64,
     /// Last computed confidence report (cached).
     last_confidence: Option<ConfidenceReport>,
+    /// Confidence history ring buffer (Item 1).
+    confidence_history: ConfidenceHistory,
+    /// Strategy effectiveness tracker (Item 4).
+    strategy_tracker: StrategyTracker,
+    /// Tick result history for interval recommendation (Item 6).
+    tick_history: TickHistory,
+    /// Current tick interval in milliseconds (Item 6).
+    current_tick_interval_ms: u32,
 }
 
 impl WeaverEngine {
@@ -791,6 +1210,10 @@ impl WeaverEngine {
             file_watcher: None,
             ticks_since_confidence_update: 0,
             last_confidence: None,
+            confidence_history: ConfidenceHistory::new(500),
+            strategy_tracker: StrategyTracker::new(200),
+            tick_history: TickHistory::new(500),
+            current_tick_interval_ms: 1000,
         }
     }
 
@@ -929,6 +1352,64 @@ impl WeaverEngine {
             embeddings_created,
             source,
         })
+    }
+
+    /// Ingest a graph file with strategy tracking and confidence history.
+    ///
+    /// Wraps [`ingest_graph_file`] with before/after confidence measurement,
+    /// recording the result in the [`StrategyTracker`] and
+    /// [`ConfidenceHistory`].
+    pub fn ingest_graph_file_tracked(
+        &mut self,
+        path: &Path,
+    ) -> Result<IngestResult, WeaverError> {
+        let confidence_before = self.compute_confidence().overall;
+        let source_name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
+        let handle = self.strategy_tracker.begin_strategy(
+            &format!("ingest:{source_name}"),
+            &format!("Ingesting graph file {}", path.display()),
+            confidence_before,
+        );
+
+        let result = self.ingest_graph_file(path)?;
+
+        let report = self.compute_confidence();
+        let confidence_after = report.overall;
+
+        // Record strategy outcome (Item 4).
+        self.strategy_tracker
+            .complete_strategy(handle, confidence_after);
+
+        // Record post-ingestion confidence snapshot (Item 1).
+        let snapshot = ConfidenceSnapshot {
+            timestamp: Utc::now(),
+            tick_number: self.tick_count.load(Ordering::Relaxed),
+            confidence: confidence_after,
+            node_count: self.causal_graph.node_count() as usize,
+            edge_count: self.causal_graph.edge_count() as usize,
+            gap_count: report.gaps.len(),
+            trigger: ConfidenceTrigger::PostIngestion,
+        };
+        self.confidence_history.record(snapshot);
+
+        // Also record a StrategyChange snapshot if confidence changed.
+        if (confidence_after - confidence_before).abs() > 0.001 {
+            let change_snapshot = ConfidenceSnapshot {
+                timestamp: Utc::now(),
+                tick_number: self.tick_count.load(Ordering::Relaxed),
+                confidence: confidence_after,
+                node_count: self.causal_graph.node_count() as usize,
+                edge_count: self.causal_graph.edge_count() as usize,
+                gap_count: report.gaps.len(),
+                trigger: ConfidenceTrigger::StrategyChange,
+            };
+            self.confidence_history.record(change_snapshot);
+        }
+
+        Ok(result)
     }
 
     /// Convert a graph node's fields into embeddable text.
@@ -1699,17 +2180,33 @@ impl WeaverEngine {
             }
         }
 
-        // 4. Recompute confidence every 100 ticks.
+        // 4. Recompute confidence every 100 ticks and record snapshot.
         if start.elapsed() < budget && self.ticks_since_confidence_update > 100 {
-            self.last_confidence = Some(self.compute_confidence());
+            let report = self.compute_confidence();
+            self.last_confidence = Some(report.clone());
             self.ticks_since_confidence_update = 0;
             result.confidence_updated = true;
+
+            // Record confidence snapshot (Item 1).
+            let snapshot = ConfidenceSnapshot {
+                timestamp: Utc::now(),
+                tick_number: self.tick_count.load(Ordering::Relaxed),
+                confidence: report.overall,
+                node_count: self.causal_graph.node_count() as usize,
+                edge_count: self.causal_graph.edge_count() as usize,
+                gap_count: report.gaps.len(),
+                trigger: ConfidenceTrigger::Periodic,
+            };
+            self.confidence_history.record(snapshot);
         }
 
         result.elapsed_ms = start.elapsed().as_millis() as u32;
         result.within_budget = start.elapsed() <= budget;
         self.tick_count.fetch_add(1, Ordering::Relaxed);
         self.ticks_since_confidence_update += 1;
+
+        // Record tick result in history (Item 6).
+        self.tick_history.record(result.clone());
 
         result
     }
@@ -1755,6 +2252,117 @@ impl WeaverEngine {
     pub fn total_ticks(&self) -> u64 {
         self.tick_count.load(Ordering::Relaxed)
     }
+
+    // ── Confidence history accessors (Item 1) ────────────────────
+
+    /// Get a reference to the confidence history.
+    pub fn confidence_history(&self) -> &ConfidenceHistory {
+        &self.confidence_history
+    }
+
+    /// Get a mutable reference to the confidence history.
+    pub fn confidence_history_mut(&mut self) -> &mut ConfidenceHistory {
+        &mut self.confidence_history
+    }
+
+    // ── Strategy tracker accessors (Item 4) ──────────────────────
+
+    /// Get a reference to the strategy tracker.
+    pub fn strategy_tracker(&self) -> &StrategyTracker {
+        &self.strategy_tracker
+    }
+
+    /// Get a mutable reference to the strategy tracker.
+    pub fn strategy_tracker_mut(&mut self) -> &mut StrategyTracker {
+        &mut self.strategy_tracker
+    }
+
+    // ── Tick history / interval recommendation (Item 6) ──────────
+
+    /// Get a reference to the tick history.
+    pub fn tick_history(&self) -> &TickHistory {
+        &self.tick_history
+    }
+
+    /// Set the current tick interval (for recommendation calculations).
+    pub fn set_tick_interval_ms(&mut self, ms: u32) {
+        self.current_tick_interval_ms = ms;
+    }
+
+    /// Analyze recent tick history and recommend interval adjustment.
+    ///
+    /// Looks at recent change frequency to determine if the tick interval
+    /// should be faster, slower, or idle. Thresholds:
+    /// - Frequent changes (>10/min): recommend 200ms (fast).
+    /// - Moderate changes (1-10/min): recommend 1000ms (default).
+    /// - Rare changes (<1/min): recommend 3000ms (slow).
+    /// - No changes for 100+ ticks: recommend 5000ms (idle mode).
+    pub fn recommend_tick_interval(&self) -> TickRecommendation {
+        let idle = self.tick_history.idle_ticks();
+        let cpm = self.tick_history.changes_per_minute();
+        let sample_count = self.tick_history.len();
+
+        // Not enough data to make a confident recommendation.
+        if sample_count < 5 {
+            return TickRecommendation {
+                recommended_ms: self.current_tick_interval_ms,
+                current_ms: self.current_tick_interval_ms,
+                reason: "Insufficient data for recommendation".to_string(),
+                changes_per_minute: cpm,
+                recommendation_confidence: 0.1,
+            };
+        }
+
+        // Idle mode: no changes for many consecutive ticks.
+        if idle >= 100 {
+            return TickRecommendation {
+                recommended_ms: 5000,
+                current_ms: self.current_tick_interval_ms,
+                reason: format!(
+                    "No changes for {idle} consecutive ticks; entering idle mode"
+                ),
+                changes_per_minute: cpm,
+                recommendation_confidence: 0.9,
+            };
+        }
+
+        // High frequency changes: speed up.
+        if cpm > 10.0 {
+            return TickRecommendation {
+                recommended_ms: 200,
+                current_ms: self.current_tick_interval_ms,
+                reason: format!(
+                    "High change rate ({cpm:.1}/min); recommending fast ticks"
+                ),
+                changes_per_minute: cpm,
+                recommendation_confidence: 0.8,
+            };
+        }
+
+        // Moderate frequency: default speed.
+        if cpm >= 1.0 {
+            return TickRecommendation {
+                recommended_ms: 1000,
+                current_ms: self.current_tick_interval_ms,
+                reason: format!(
+                    "Moderate change rate ({cpm:.1}/min); default interval"
+                ),
+                changes_per_minute: cpm,
+                recommendation_confidence: 0.7,
+            };
+        }
+
+        // Low frequency: slow down.
+        TickRecommendation {
+            recommended_ms: 3000,
+            current_ms: self.current_tick_interval_ms,
+            reason: format!(
+                "Low change rate ({cpm:.2}/min); recommending slower ticks"
+            ),
+            changes_per_minute: cpm,
+            recommendation_confidence: 0.6,
+        }
+    }
 }
 
 #[async_trait]
@@ -1790,6 +2398,533 @@ impl SystemService for WeaverEngine {
     async fn health_check(&self) -> HealthStatus {
         // Always healthy: both active and idle states are normal.
         HealthStatus::Healthy
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ModelDiff (K3c-G4b)
+// ---------------------------------------------------------------------------
+
+/// Differences between two exported models.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelDiff {
+    /// Model A identifier (domain).
+    pub model_a: String,
+    /// Model B identifier (domain).
+    pub model_b: String,
+    /// Confidence delta (B - A).
+    pub confidence_delta: f64,
+    /// Node types only in A.
+    pub nodes_only_a: Vec<String>,
+    /// Node types only in B.
+    pub nodes_only_b: Vec<String>,
+    /// Node types in both.
+    pub nodes_common: Vec<String>,
+    /// Edge types only in A.
+    pub edges_only_a: Vec<String>,
+    /// Edge types only in B.
+    pub edges_only_b: Vec<String>,
+    /// Edge types in both.
+    pub edges_common: Vec<String>,
+    /// Causal nodes added in B vs A.
+    pub causal_nodes_added: usize,
+    /// Causal nodes removed in B vs A.
+    pub causal_nodes_removed: usize,
+    /// Causal edges added.
+    pub causal_edges_added: usize,
+    /// Causal edges removed.
+    pub causal_edges_removed: usize,
+    /// Summary assessment.
+    pub summary: String,
+}
+
+/// Compare two exported models and produce a structured diff.
+pub fn diff_models(a: &ExportedModel, b: &ExportedModel) -> ModelDiff {
+    // Node types by name.
+    let a_node_names: HashSet<&str> = a.node_types.iter().map(|n| n.name.as_str()).collect();
+    let b_node_names: HashSet<&str> = b.node_types.iter().map(|n| n.name.as_str()).collect();
+
+    let nodes_only_a: Vec<String> = a_node_names
+        .difference(&b_node_names)
+        .map(|s| s.to_string())
+        .collect();
+    let nodes_only_b: Vec<String> = b_node_names
+        .difference(&a_node_names)
+        .map(|s| s.to_string())
+        .collect();
+    let nodes_common: Vec<String> = a_node_names
+        .intersection(&b_node_names)
+        .map(|s| s.to_string())
+        .collect();
+
+    // Edge types by (from, to, type) composite key.
+    let edge_key =
+        |e: &EdgeTypeSpec| format!("{}->{}:{}", e.from_type, e.to_type, e.edge_type);
+    let a_edge_keys: HashSet<String> = a.edge_types.iter().map(|e| edge_key(e)).collect();
+    let b_edge_keys: HashSet<String> = b.edge_types.iter().map(|e| edge_key(e)).collect();
+
+    let edges_only_a: Vec<String> = a_edge_keys.difference(&b_edge_keys).cloned().collect();
+    let edges_only_b: Vec<String> = b_edge_keys.difference(&a_edge_keys).cloned().collect();
+    let edges_common: Vec<String> = a_edge_keys.intersection(&b_edge_keys).cloned().collect();
+
+    // Causal nodes by label.
+    let a_causal_labels: HashSet<&str> =
+        a.causal_nodes.iter().map(|n| n.label.as_str()).collect();
+    let b_causal_labels: HashSet<&str> =
+        b.causal_nodes.iter().map(|n| n.label.as_str()).collect();
+
+    let causal_nodes_added = b_causal_labels.difference(&a_causal_labels).count();
+    let causal_nodes_removed = a_causal_labels.difference(&b_causal_labels).count();
+
+    // Causal edges by (from, to).
+    let causal_edge_key =
+        |e: &ExportedCausalEdge| format!("{}->{}", e.source_label, e.target_label);
+    let a_causal_edge_keys: HashSet<String> =
+        a.causal_edges.iter().map(|e| causal_edge_key(e)).collect();
+    let b_causal_edge_keys: HashSet<String> =
+        b.causal_edges.iter().map(|e| causal_edge_key(e)).collect();
+
+    let causal_edges_added = b_causal_edge_keys.difference(&a_causal_edge_keys).count();
+    let causal_edges_removed = a_causal_edge_keys.difference(&b_causal_edge_keys).count();
+
+    let confidence_delta = b.confidence - a.confidence;
+
+    // Build summary.
+    let mut parts = Vec::new();
+    if confidence_delta.abs() > f64::EPSILON {
+        parts.push(format!(
+            "confidence {} by {:.3}",
+            if confidence_delta > 0.0 {
+                "increased"
+            } else {
+                "decreased"
+            },
+            confidence_delta.abs()
+        ));
+    }
+    if causal_nodes_added > 0 || causal_nodes_removed > 0 {
+        parts.push(format!(
+            "{} causal nodes added, {} removed",
+            causal_nodes_added, causal_nodes_removed
+        ));
+    }
+    if causal_edges_added > 0 || causal_edges_removed > 0 {
+        parts.push(format!(
+            "{} causal edges added, {} removed",
+            causal_edges_added, causal_edges_removed
+        ));
+    }
+    if !nodes_only_a.is_empty() || !nodes_only_b.is_empty() {
+        parts.push(format!(
+            "{} node types only in A, {} only in B",
+            nodes_only_a.len(),
+            nodes_only_b.len()
+        ));
+    }
+    let summary = if parts.is_empty() {
+        "models are identical".to_string()
+    } else {
+        parts.join("; ")
+    };
+
+    ModelDiff {
+        model_a: a.domain.clone(),
+        model_b: b.domain.clone(),
+        confidence_delta,
+        nodes_only_a,
+        nodes_only_b,
+        nodes_common,
+        edges_only_a,
+        edges_only_b,
+        edges_common,
+        causal_nodes_added,
+        causal_nodes_removed,
+        causal_edges_added,
+        causal_edges_removed,
+        summary,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ModelMerge (K3c-G4c)
+// ---------------------------------------------------------------------------
+
+/// Result of merging two models.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeResult {
+    /// The merged model.
+    pub merged: ExportedModel,
+    /// Conflicts that were resolved.
+    pub conflicts: Vec<MergeConflict>,
+    /// Statistics about the merge.
+    pub stats: MergeStats,
+}
+
+/// A conflict encountered during model merge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeConflict {
+    /// What conflicted.
+    pub item: String,
+    /// Value from model A.
+    pub value_a: String,
+    /// Value from model B.
+    pub value_b: String,
+    /// How it was resolved.
+    pub resolution: ConflictResolution,
+}
+
+/// How a merge conflict was resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConflictResolution {
+    /// Kept the value from model A.
+    KeepA,
+    /// Kept the value from model B.
+    KeepB,
+    /// Merged both values.
+    Merged,
+    /// Used the higher confidence value.
+    HigherConfidence,
+}
+
+/// Statistics about a model merge operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeStats {
+    /// Total node types in the merged model.
+    pub total_node_types: usize,
+    /// Total edge types in the merged model.
+    pub total_edge_types: usize,
+    /// Total causal nodes in the merged model.
+    pub total_causal_nodes: usize,
+    /// Total causal edges in the merged model.
+    pub total_causal_edges: usize,
+    /// Number of conflicts resolved.
+    pub conflicts_resolved: usize,
+    /// Node types from A only.
+    pub nodes_from_a: usize,
+    /// Node types from B only.
+    pub nodes_from_b: usize,
+    /// Node types shared between A and B.
+    pub nodes_shared: usize,
+}
+
+/// Merge two exported models into one.
+///
+/// Node types are unioned by name (higher-dimension embedding strategy wins
+/// on conflict). Edge types are unioned by (from, to, type) key with higher
+/// confidence kept. Causal nodes are unioned by label. Causal edges are
+/// unioned by (source, target) key with weights averaged on overlap.
+pub fn merge_models(a: &ExportedModel, b: &ExportedModel) -> MergeResult {
+    let mut conflicts = Vec::new();
+
+    // ── Node types ──────────────────────────────────────────────
+    let a_node_map: HashMap<&str, &NodeTypeSpec> =
+        a.node_types.iter().map(|n| (n.name.as_str(), n)).collect();
+    let b_node_map: HashMap<&str, &NodeTypeSpec> =
+        b.node_types.iter().map(|n| (n.name.as_str(), n)).collect();
+
+    let all_node_names: HashSet<&str> =
+        a_node_map.keys().chain(b_node_map.keys()).copied().collect();
+
+    let mut merged_node_types = Vec::new();
+    let mut nodes_from_a = 0usize;
+    let mut nodes_from_b = 0usize;
+    let mut nodes_shared = 0usize;
+
+    for name in &all_node_names {
+        match (a_node_map.get(name), b_node_map.get(name)) {
+            (Some(na), None) => {
+                merged_node_types.push((*na).clone());
+                nodes_from_a += 1;
+            }
+            (None, Some(nb)) => {
+                merged_node_types.push((*nb).clone());
+                nodes_from_b += 1;
+            }
+            (Some(na), Some(nb)) => {
+                nodes_shared += 1;
+                if na.embedding_strategy != nb.embedding_strategy {
+                    let (winner, resolution) = if na.dimensions >= nb.dimensions {
+                        ((*na).clone(), ConflictResolution::KeepA)
+                    } else {
+                        ((*nb).clone(), ConflictResolution::KeepB)
+                    };
+                    conflicts.push(MergeConflict {
+                        item: format!("node_type:{}", name),
+                        value_a: na.embedding_strategy.clone(),
+                        value_b: nb.embedding_strategy.clone(),
+                        resolution,
+                    });
+                    merged_node_types.push(winner);
+                } else {
+                    merged_node_types.push((*na).clone());
+                }
+            }
+            (None, None) => unreachable!(),
+        }
+    }
+
+    // ── Edge types ──────────────────────────────────────────────
+    let edge_key =
+        |e: &EdgeTypeSpec| format!("{}->{}:{}", e.from_type, e.to_type, e.edge_type);
+    let a_edge_map: HashMap<String, &EdgeTypeSpec> =
+        a.edge_types.iter().map(|e| (edge_key(e), e)).collect();
+    let b_edge_map: HashMap<String, &EdgeTypeSpec> =
+        b.edge_types.iter().map(|e| (edge_key(e), e)).collect();
+
+    let all_edge_keys: HashSet<&str> = a_edge_map
+        .keys()
+        .chain(b_edge_map.keys())
+        .map(|s| s.as_str())
+        .collect();
+
+    let mut merged_edge_types = Vec::new();
+    for key in &all_edge_keys {
+        match (a_edge_map.get(*key), b_edge_map.get(*key)) {
+            (Some(ea), None) => merged_edge_types.push((*ea).clone()),
+            (None, Some(eb)) => merged_edge_types.push((*eb).clone()),
+            (Some(ea), Some(eb)) => {
+                if (ea.confidence - eb.confidence).abs() > f64::EPSILON {
+                    let (winner, resolution) = if ea.confidence >= eb.confidence {
+                        ((*ea).clone(), ConflictResolution::HigherConfidence)
+                    } else {
+                        ((*eb).clone(), ConflictResolution::HigherConfidence)
+                    };
+                    conflicts.push(MergeConflict {
+                        item: format!("edge_type:{}", key),
+                        value_a: format!("{:.4}", ea.confidence),
+                        value_b: format!("{:.4}", eb.confidence),
+                        resolution,
+                    });
+                    merged_edge_types.push(winner);
+                } else {
+                    merged_edge_types.push((*ea).clone());
+                }
+            }
+            (None, None) => unreachable!(),
+        }
+    }
+
+    // ── Causal nodes ────────────────────────────────────────────
+    let a_cn_map: HashMap<&str, &ExportedCausalNode> =
+        a.causal_nodes.iter().map(|n| (n.label.as_str(), n)).collect();
+    let b_cn_map: HashMap<&str, &ExportedCausalNode> =
+        b.causal_nodes.iter().map(|n| (n.label.as_str(), n)).collect();
+
+    let all_cn_labels: HashSet<&str> =
+        a_cn_map.keys().chain(b_cn_map.keys()).copied().collect();
+
+    let mut merged_causal_nodes = Vec::new();
+    for label in &all_cn_labels {
+        match (a_cn_map.get(label), b_cn_map.get(label)) {
+            (Some(na), None) => merged_causal_nodes.push((*na).clone()),
+            (None, Some(nb)) => merged_causal_nodes.push((*nb).clone()),
+            (Some(_na), Some(nb)) => {
+                // Both have the node; prefer B (assumed later export).
+                merged_causal_nodes.push((*nb).clone());
+            }
+            (None, None) => unreachable!(),
+        }
+    }
+
+    // ── Causal edges ────────────────────────────────────────────
+    let ce_key =
+        |e: &ExportedCausalEdge| format!("{}->{}", e.source_label, e.target_label);
+    let a_ce_map: HashMap<String, &ExportedCausalEdge> =
+        a.causal_edges.iter().map(|e| (ce_key(e), e)).collect();
+    let b_ce_map: HashMap<String, &ExportedCausalEdge> =
+        b.causal_edges.iter().map(|e| (ce_key(e), e)).collect();
+
+    let all_ce_keys: HashSet<&str> = a_ce_map
+        .keys()
+        .chain(b_ce_map.keys())
+        .map(|s| s.as_str())
+        .collect();
+
+    let mut merged_causal_edges = Vec::new();
+    for key in &all_ce_keys {
+        match (a_ce_map.get(*key), b_ce_map.get(*key)) {
+            (Some(ea), None) => merged_causal_edges.push((*ea).clone()),
+            (None, Some(eb)) => merged_causal_edges.push((*eb).clone()),
+            (Some(ea), Some(eb)) => {
+                let mut merged_edge = (*ea).clone();
+                merged_edge.weight = (ea.weight + eb.weight) / 2.0;
+                if ea.edge_type != eb.edge_type {
+                    conflicts.push(MergeConflict {
+                        item: format!("causal_edge:{}", key),
+                        value_a: ea.edge_type.clone(),
+                        value_b: eb.edge_type.clone(),
+                        resolution: ConflictResolution::Merged,
+                    });
+                }
+                merged_causal_edges.push(merged_edge);
+            }
+            (None, None) => unreachable!(),
+        }
+    }
+
+    // ── Merged metadata ─────────────────────────────────────────
+    let mut merged_metadata = a.metadata.clone();
+    for (k, v) in &b.metadata {
+        merged_metadata.entry(k.clone()).or_insert_with(|| v.clone());
+    }
+
+    // ── Merged confidence: weighted average by causal node count ──
+    let a_weight = a.causal_nodes.len().max(1) as f64;
+    let b_weight = b.causal_nodes.len().max(1) as f64;
+    let merged_confidence =
+        (a.confidence * a_weight + b.confidence * b_weight) / (a_weight + b_weight);
+
+    let merged = ExportedModel {
+        version: "1.0".to_string(),
+        domain: format!("{}+{}", a.domain, b.domain),
+        exported_at: Utc::now(),
+        confidence: merged_confidence,
+        node_types: merged_node_types,
+        edge_types: merged_edge_types,
+        causal_nodes: merged_causal_nodes,
+        causal_edges: merged_causal_edges,
+        metadata: merged_metadata,
+    };
+
+    let stats = MergeStats {
+        total_node_types: merged.node_types.len(),
+        total_edge_types: merged.edge_types.len(),
+        total_causal_nodes: merged.causal_nodes.len(),
+        total_causal_edges: merged.causal_edges.len(),
+        conflicts_resolved: conflicts.len(),
+        nodes_from_a,
+        nodes_from_b,
+        nodes_shared,
+    };
+
+    MergeResult {
+        merged,
+        conflicts,
+        stats,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Knowledge Base Persistence (K3c-G5b)
+// ---------------------------------------------------------------------------
+
+/// Serializable form of the knowledge base for JSON persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializableKB {
+    /// Schema version.
+    pub version: u32,
+    /// Learned strategy patterns.
+    pub patterns: Vec<StrategyPattern>,
+    /// Domains that have been modeled.
+    pub domains_modeled: Vec<String>,
+    /// Total modeling sessions conducted.
+    pub total_sessions: u64,
+    /// When the KB was last updated.
+    pub last_updated: DateTime<Utc>,
+}
+
+impl WeaverKnowledgeBase {
+    /// Convert to a serializable representation.
+    pub fn to_serializable(&self) -> SerializableKB {
+        let patterns = self.list_strategies();
+        let domains: Vec<String> = patterns
+            .iter()
+            .map(|p| p.context.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        SerializableKB {
+            version: 1,
+            patterns,
+            domains_modeled: domains,
+            total_sessions: self.count(),
+            last_updated: Utc::now(),
+        }
+    }
+
+    /// Reconstruct from a serializable representation.
+    pub fn from_serializable(kb: SerializableKB) -> Self {
+        let result = Self::new();
+        for pattern in kb.patterns {
+            result.record_strategy(pattern);
+        }
+        result
+    }
+
+    /// Save the knowledge base to a JSON file.
+    pub fn save_to_file(&self, path: &Path) -> Result<(), WeaverError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(&self.to_serializable())?;
+        std::fs::write(path, json)?;
+        Ok(())
+    }
+
+    /// Load the knowledge base from a JSON file.
+    pub fn load_from_file(path: &Path) -> Result<Self, WeaverError> {
+        let data = std::fs::read_to_string(path)?;
+        let kb: SerializableKB = serde_json::from_str(&data)?;
+        Ok(Self::from_serializable(kb))
+    }
+
+    /// Add a strategy pattern learned from a modeling session.
+    ///
+    /// If a similar pattern exists (same decision_type and context),
+    /// updates the existing pattern's improvement based on new evidence.
+    /// Otherwise, adds it as a new pattern.
+    pub fn learn_pattern(&self, pattern: StrategyPattern) {
+        if let Ok(mut strategies) = self.strategies.write() {
+            if let Some(existing) = strategies.iter_mut().find(|s| {
+                s.decision_type == pattern.decision_type
+                    && s.context == pattern.context
+            }) {
+                existing.improvement =
+                    (existing.improvement + pattern.improvement) / 2.0;
+                existing.timestamp = pattern.timestamp;
+                return;
+            }
+            strategies.push(pattern);
+            self.strategy_count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Find applicable patterns for a domain given its characteristics.
+    ///
+    /// Scores each pattern by how many of the provided characteristics
+    /// appear in the pattern's context. Returns patterns sorted by
+    /// relevance (highest match score first).
+    pub fn find_patterns(
+        &self,
+        domain_characteristics: &[String],
+    ) -> Vec<StrategyPattern> {
+        let strategies = match self.strategies.read() {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut scored: Vec<(usize, &StrategyPattern)> = strategies
+            .iter()
+            .filter_map(|s| {
+                let score = domain_characteristics
+                    .iter()
+                    .filter(|c| s.context.contains(c.as_str()))
+                    .count();
+                if score > 0 {
+                    Some((score, s))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.into_iter().map(|(_, p)| p.clone()).collect()
+    }
+
+    /// Number of stored patterns.
+    pub fn pattern_count(&self) -> usize {
+        self.strategies.read().map(|s| s.len()).unwrap_or(0)
     }
 }
 
@@ -2758,5 +3893,1065 @@ mod tests {
         assert_eq!(restored.tick_number, 42);
         assert_eq!(restored.git_commits_found, 3);
         assert!(restored.confidence_updated);
+    }
+
+    // ── ConfidenceHistory tests (Item 1) ─────────────────────────
+
+    #[test]
+    fn confidence_history_record_and_latest() {
+        let mut history = ConfidenceHistory::new(10);
+        assert!(history.is_empty());
+        assert!(history.latest().is_none());
+
+        history.record(ConfidenceSnapshot {
+            timestamp: Utc::now(),
+            tick_number: 1,
+            confidence: 0.5,
+            node_count: 10,
+            edge_count: 5,
+            gap_count: 2,
+            trigger: ConfidenceTrigger::Periodic,
+        });
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.latest().unwrap().confidence, 0.5);
+    }
+
+    #[test]
+    fn confidence_history_ring_buffer_eviction() {
+        let mut history = ConfidenceHistory::new(3);
+        for i in 0..5 {
+            history.record(ConfidenceSnapshot {
+                timestamp: Utc::now(),
+                tick_number: i,
+                confidence: i as f64 * 0.1,
+                node_count: 0,
+                edge_count: 0,
+                gap_count: 0,
+                trigger: ConfidenceTrigger::Periodic,
+            });
+        }
+        assert_eq!(history.len(), 3);
+        // Oldest should have been evicted; first remaining is tick 2.
+        assert_eq!(history.all().front().unwrap().tick_number, 2);
+        assert_eq!(history.latest().unwrap().tick_number, 4);
+    }
+
+    #[test]
+    fn confidence_history_trend_improving() {
+        let mut history = ConfidenceHistory::new(10);
+        for i in 0..5 {
+            history.record(ConfidenceSnapshot {
+                timestamp: Utc::now(),
+                tick_number: i,
+                confidence: 0.3 + i as f64 * 0.1,
+                node_count: 0,
+                edge_count: 0,
+                gap_count: 0,
+                trigger: ConfidenceTrigger::Periodic,
+            });
+        }
+        let trend = history.trend(5);
+        assert_eq!(trend.direction, TrendDirection::Improving);
+        assert!(trend.delta > 0.01);
+        assert_eq!(trend.samples, 5);
+    }
+
+    #[test]
+    fn confidence_history_trend_declining() {
+        let mut history = ConfidenceHistory::new(10);
+        for i in 0..4 {
+            history.record(ConfidenceSnapshot {
+                timestamp: Utc::now(),
+                tick_number: i,
+                confidence: 0.8 - i as f64 * 0.1,
+                node_count: 0,
+                edge_count: 0,
+                gap_count: 0,
+                trigger: ConfidenceTrigger::Periodic,
+            });
+        }
+        let trend = history.trend(4);
+        assert_eq!(trend.direction, TrendDirection::Declining);
+        assert!(trend.delta < -0.01);
+    }
+
+    #[test]
+    fn confidence_history_trend_stable() {
+        let mut history = ConfidenceHistory::new(10);
+        for i in 0..5 {
+            history.record(ConfidenceSnapshot {
+                timestamp: Utc::now(),
+                tick_number: i,
+                confidence: 0.75,
+                node_count: 0,
+                edge_count: 0,
+                gap_count: 0,
+                trigger: ConfidenceTrigger::Periodic,
+            });
+        }
+        let trend = history.trend(5);
+        assert_eq!(trend.direction, TrendDirection::Stable);
+        assert!(trend.delta.abs() <= 0.01);
+        assert!((trend.avg_confidence - 0.75).abs() < 0.001);
+    }
+
+    #[test]
+    fn confidence_history_trend_empty() {
+        let history = ConfidenceHistory::new(10);
+        let trend = history.trend(5);
+        assert_eq!(trend.direction, TrendDirection::Stable);
+        assert_eq!(trend.samples, 0);
+    }
+
+    #[test]
+    fn confidence_history_trend_window_clamp() {
+        let mut history = ConfidenceHistory::new(10);
+        history.record(ConfidenceSnapshot {
+            timestamp: Utc::now(),
+            tick_number: 0,
+            confidence: 0.5,
+            node_count: 0,
+            edge_count: 0,
+            gap_count: 0,
+            trigger: ConfidenceTrigger::Manual,
+        });
+        // Ask for 100 but only 1 exists.
+        let trend = history.trend(100);
+        assert_eq!(trend.samples, 1);
+    }
+
+    // ── StrategyTracker tests (Item 4) ──────────────────────────
+
+    #[test]
+    fn strategy_tracker_begin_complete() {
+        let mut tracker = StrategyTracker::new(50);
+        assert!(tracker.is_empty());
+        let handle = tracker.begin_strategy("add_git", "Add git log", 0.4);
+        tracker.complete_strategy(handle, 0.55);
+        assert_eq!(tracker.len(), 1);
+        let outcome = &tracker.outcomes()[0];
+        assert_eq!(outcome.strategy, "add_git");
+        assert!((outcome.delta - 0.15).abs() < 0.001);
+        assert!(outcome.beneficial);
+    }
+
+    #[test]
+    fn strategy_tracker_most_effective() {
+        let mut tracker = StrategyTracker::new(50);
+        let h1 = tracker.begin_strategy("a", "desc a", 0.3);
+        tracker.complete_strategy(h1, 0.5); // +0.2
+        let h2 = tracker.begin_strategy("b", "desc b", 0.5);
+        tracker.complete_strategy(h2, 0.9); // +0.4
+        let h3 = tracker.begin_strategy("c", "desc c", 0.9);
+        tracker.complete_strategy(h3, 0.85); // -0.05
+
+        let top = tracker.most_effective(2);
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].strategy, "b"); // highest delta
+        assert_eq!(top[1].strategy, "a");
+    }
+
+    #[test]
+    fn strategy_tracker_harmful_strategies() {
+        let mut tracker = StrategyTracker::new(50);
+        let h1 = tracker.begin_strategy("good", "good move", 0.5);
+        tracker.complete_strategy(h1, 0.7);
+        let h2 = tracker.begin_strategy("bad", "bad move", 0.7);
+        tracker.complete_strategy(h2, 0.5);
+
+        let harmful = tracker.harmful_strategies();
+        assert_eq!(harmful.len(), 1);
+        assert_eq!(harmful[0].strategy, "bad");
+        assert!(!harmful[0].beneficial);
+    }
+
+    #[test]
+    fn strategy_tracker_recommend() {
+        let mut tracker = StrategyTracker::new(50);
+        assert!(tracker.recommend().is_none());
+
+        let h1 = tracker.begin_strategy("small_win", "desc", 0.5);
+        tracker.complete_strategy(h1, 0.55);
+        let h2 = tracker.begin_strategy("big_win", "desc", 0.55);
+        tracker.complete_strategy(h2, 0.85);
+
+        assert_eq!(tracker.recommend(), Some("big_win".to_string()));
+    }
+
+    #[test]
+    fn strategy_tracker_recommend_ignores_harmful() {
+        let mut tracker = StrategyTracker::new(50);
+        let h = tracker.begin_strategy("harmful", "desc", 0.5);
+        tracker.complete_strategy(h, 0.3);
+        // Only harmful strategies => no recommendation.
+        assert!(tracker.recommend().is_none());
+    }
+
+    #[test]
+    fn strategy_tracker_eviction() {
+        let mut tracker = StrategyTracker::new(2);
+        let h1 = tracker.begin_strategy("first", "d", 0.1);
+        tracker.complete_strategy(h1, 0.2);
+        let h2 = tracker.begin_strategy("second", "d", 0.2);
+        tracker.complete_strategy(h2, 0.3);
+        let h3 = tracker.begin_strategy("third", "d", 0.3);
+        tracker.complete_strategy(h3, 0.4);
+
+        assert_eq!(tracker.len(), 2);
+        assert_eq!(tracker.outcomes()[0].strategy, "second");
+        assert_eq!(tracker.outcomes()[1].strategy, "third");
+    }
+
+    // ── TickHistory tests (Item 6) ──────────────────────────────
+
+    #[test]
+    fn tick_history_record_and_len() {
+        let mut history = TickHistory::new(10);
+        assert!(history.is_empty());
+        history.record(CognitiveTickResult {
+            tick_number: 0,
+            elapsed_ms: 10,
+            budget_ms: 50,
+            ..Default::default()
+        });
+        assert_eq!(history.len(), 1);
+    }
+
+    #[test]
+    fn tick_history_eviction() {
+        let mut history = TickHistory::new(3);
+        for i in 0..5 {
+            history.record(CognitiveTickResult {
+                tick_number: i,
+                elapsed_ms: 10,
+                budget_ms: 50,
+                ..Default::default()
+            });
+        }
+        assert_eq!(history.len(), 3);
+        assert_eq!(history.all().front().unwrap().tick_number, 2);
+    }
+
+    #[test]
+    fn tick_history_changes_per_minute() {
+        let mut history = TickHistory::new(100);
+        // 10 ticks, each 100ms elapsed, each with 1 git commit.
+        for i in 0..10 {
+            history.record(CognitiveTickResult {
+                tick_number: i,
+                elapsed_ms: 100,
+                budget_ms: 200,
+                git_commits_found: 1,
+                files_changed: 0,
+                ..Default::default()
+            });
+        }
+        // Total: 10 changes in 1000ms = 1 second.
+        // Changes per minute = 10 / (1000/60000) = 600.
+        let cpm = history.changes_per_minute();
+        assert!(cpm > 100.0, "expected high cpm, got {cpm}");
+    }
+
+    #[test]
+    fn tick_history_changes_per_minute_no_changes() {
+        let mut history = TickHistory::new(100);
+        for i in 0..10 {
+            history.record(CognitiveTickResult {
+                tick_number: i,
+                elapsed_ms: 100,
+                budget_ms: 200,
+                ..Default::default()
+            });
+        }
+        assert_eq!(history.changes_per_minute(), 0.0);
+    }
+
+    #[test]
+    fn tick_history_changes_per_minute_insufficient_data() {
+        let history = TickHistory::new(10);
+        assert_eq!(history.changes_per_minute(), 0.0);
+
+        let mut history2 = TickHistory::new(10);
+        history2.record(CognitiveTickResult::default());
+        assert_eq!(history2.changes_per_minute(), 0.0);
+    }
+
+    #[test]
+    fn tick_history_avg_budget_usage() {
+        let mut history = TickHistory::new(100);
+        // 50% usage each tick.
+        for i in 0..5 {
+            history.record(CognitiveTickResult {
+                tick_number: i,
+                elapsed_ms: 50,
+                budget_ms: 100,
+                ..Default::default()
+            });
+        }
+        let usage = history.avg_budget_usage();
+        assert!((usage - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn tick_history_avg_budget_usage_empty() {
+        let history = TickHistory::new(10);
+        assert_eq!(history.avg_budget_usage(), 0.0);
+    }
+
+    #[test]
+    fn tick_history_idle_ticks() {
+        let mut history = TickHistory::new(100);
+        // 3 active ticks followed by 5 idle ticks.
+        for i in 0..3 {
+            history.record(CognitiveTickResult {
+                tick_number: i,
+                git_commits_found: 1,
+                ..Default::default()
+            });
+        }
+        for i in 3..8 {
+            history.record(CognitiveTickResult {
+                tick_number: i,
+                ..Default::default()
+            });
+        }
+        assert_eq!(history.idle_ticks(), 5);
+    }
+
+    #[test]
+    fn tick_history_idle_ticks_none_idle() {
+        let mut history = TickHistory::new(100);
+        history.record(CognitiveTickResult {
+            tick_number: 0,
+            files_changed: 1,
+            ..Default::default()
+        });
+        assert_eq!(history.idle_ticks(), 0);
+    }
+
+    // ── TickRecommendation tests (Item 6) ────────────────────────
+
+    #[test]
+    fn tick_recommend_insufficient_data() {
+        let engine = make_engine_mut();
+        let rec = engine.recommend_tick_interval();
+        assert_eq!(rec.recommended_ms, engine.current_tick_interval_ms);
+        assert!(rec.reason.contains("Insufficient"));
+        assert!(rec.recommendation_confidence < 0.5);
+    }
+
+    #[test]
+    fn tick_recommend_idle_mode() {
+        let mut engine = make_engine_mut();
+        // Fill with 110 idle ticks.
+        for i in 0..110 {
+            engine.tick_history.record(CognitiveTickResult {
+                tick_number: i,
+                elapsed_ms: 10,
+                budget_ms: 100,
+                ..Default::default()
+            });
+        }
+        let rec = engine.recommend_tick_interval();
+        assert_eq!(rec.recommended_ms, 5000);
+        assert!(rec.reason.contains("idle"));
+    }
+
+    #[test]
+    fn tick_recommend_high_frequency() {
+        let mut engine = make_engine_mut();
+        // 20 ticks, each 100ms, each with 5 git commits.
+        for i in 0..20 {
+            engine.tick_history.record(CognitiveTickResult {
+                tick_number: i,
+                elapsed_ms: 100,
+                budget_ms: 200,
+                git_commits_found: 5,
+                ..Default::default()
+            });
+        }
+        let rec = engine.recommend_tick_interval();
+        assert_eq!(rec.recommended_ms, 200);
+        assert!(rec.changes_per_minute > 10.0);
+    }
+
+    #[test]
+    fn tick_recommend_low_frequency() {
+        let mut engine = make_engine_mut();
+        // 20 ticks, each 6000ms (6s), 1 change total.
+        for i in 0..20 {
+            engine.tick_history.record(CognitiveTickResult {
+                tick_number: i,
+                elapsed_ms: 6000,
+                budget_ms: 10000,
+                git_commits_found: if i == 0 { 1 } else { 0 },
+                ..Default::default()
+            });
+        }
+        let rec = engine.recommend_tick_interval();
+        assert_eq!(rec.recommended_ms, 3000);
+        assert!(rec.changes_per_minute < 1.0);
+    }
+
+    #[test]
+    fn tick_recommend_moderate_frequency() {
+        let mut engine = make_engine_mut();
+        // 10 ticks, each 1000ms, each with 1 change => ~60 cpm, but
+        // we need a moderate rate. Let's do 1 change per 10s.
+        for i in 0..10 {
+            engine.tick_history.record(CognitiveTickResult {
+                tick_number: i,
+                elapsed_ms: 10000,
+                budget_ms: 15000,
+                git_commits_found: if i % 5 == 0 { 1 } else { 0 },
+                files_changed: if i % 3 == 0 { 1 } else { 0 },
+                ..Default::default()
+            });
+        }
+        let rec = engine.recommend_tick_interval();
+        // With ~6 changes in 100s => ~3.6 cpm => moderate.
+        assert!(
+            rec.recommended_ms == 1000,
+            "expected 1000ms for moderate, got {}ms (cpm={:.2})",
+            rec.recommended_ms,
+            rec.changes_per_minute
+        );
+    }
+
+    // ── Integration: on_tick records tick_history ─────────────────
+
+    #[test]
+    fn on_tick_records_tick_history() {
+        let mut engine = make_engine_mut();
+        engine.start_session("hist", None, None).unwrap();
+        engine.on_tick(100);
+        engine.on_tick(100);
+        assert_eq!(engine.tick_history().len(), 2);
+    }
+
+    // ── Integration: on_tick records confidence snapshot ──────────
+
+    #[test]
+    fn on_tick_records_confidence_snapshot_on_periodic() {
+        let mut engine = make_engine_mut();
+        engine.start_session("snap", None, None).unwrap();
+        engine.ticks_since_confidence_update = 101;
+        engine.on_tick(1000);
+        assert!(
+            !engine.confidence_history().is_empty(),
+            "should have recorded a confidence snapshot"
+        );
+        let snap = engine.confidence_history().latest().unwrap();
+        assert!(matches!(snap.trigger, ConfidenceTrigger::Periodic));
+    }
+
+    // ── Integration: ingest_graph_file_tracked ───────────────────
+
+    #[test]
+    fn ingest_graph_file_tracked_records_strategy_and_snapshot() {
+        let dir = std::env::temp_dir().join("weaver_test_tracked");
+        std::fs::create_dir_all(&dir).ok();
+        let path = dir.join("small.json");
+        std::fs::write(
+            &path,
+            r#"{"source":"test","nodes":[{"id":"n1","title":"Node 1"}],"edges":[]}"#,
+        )
+        .unwrap();
+
+        let mut engine = make_engine_mut();
+        let result = engine.ingest_graph_file_tracked(&path).unwrap();
+        assert_eq!(result.nodes_added, 1);
+
+        // Strategy tracker should have one outcome.
+        assert_eq!(engine.strategy_tracker().len(), 1);
+        assert_eq!(engine.strategy_tracker().outcomes()[0].strategy, "ingest:small");
+
+        // Confidence history should have at least one PostIngestion snapshot.
+        assert!(!engine.confidence_history().is_empty());
+        let has_post_ingestion = engine
+            .confidence_history()
+            .all()
+            .iter()
+            .any(|s| matches!(s.trigger, ConfidenceTrigger::PostIngestion));
+        assert!(has_post_ingestion);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── ConfidenceSnapshot / StrategyOutcome serde tests ─────────
+
+    #[test]
+    fn confidence_snapshot_serde_roundtrip() {
+        let snap = ConfidenceSnapshot {
+            timestamp: Utc::now(),
+            tick_number: 42,
+            confidence: 0.78,
+            node_count: 100,
+            edge_count: 200,
+            gap_count: 3,
+            trigger: ConfidenceTrigger::PostIngestion,
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        let restored: ConfidenceSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.tick_number, 42);
+        assert!((restored.confidence - 0.78).abs() < 0.001);
+    }
+
+    #[test]
+    fn strategy_outcome_serde_roundtrip() {
+        let outcome = StrategyOutcome {
+            strategy: "add_git".to_string(),
+            description: "desc".to_string(),
+            confidence_before: 0.4,
+            confidence_after: 0.6,
+            delta: 0.2,
+            timestamp: Utc::now(),
+            beneficial: true,
+        };
+        let json = serde_json::to_string(&outcome).unwrap();
+        let restored: StrategyOutcome = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.strategy, "add_git");
+        assert!(restored.beneficial);
+    }
+
+    #[test]
+    fn tick_recommendation_serde_roundtrip() {
+        let rec = TickRecommendation {
+            recommended_ms: 200,
+            current_ms: 1000,
+            reason: "fast".to_string(),
+            changes_per_minute: 50.0,
+            recommendation_confidence: 0.8,
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        let restored: TickRecommendation = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.recommended_ms, 200);
+    }
+
+    // ── diff_models tests ───────────────────────────────────────
+
+    fn make_model(domain: &str, confidence: f64) -> ExportedModel {
+        ExportedModel {
+            version: "1.0".into(),
+            domain: domain.into(),
+            exported_at: Utc::now(),
+            confidence,
+            node_types: vec![],
+            edge_types: vec![],
+            causal_nodes: vec![],
+            causal_edges: vec![],
+            metadata: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn diff_models_identical_produces_empty_diff() {
+        let a = make_model("alpha", 0.8);
+        let b = a.clone();
+        let diff = diff_models(&a, &b);
+        assert!(diff.nodes_only_a.is_empty());
+        assert!(diff.nodes_only_b.is_empty());
+        assert!(diff.edges_only_a.is_empty());
+        assert!(diff.edges_only_b.is_empty());
+        assert_eq!(diff.causal_nodes_added, 0);
+        assert_eq!(diff.causal_nodes_removed, 0);
+        assert_eq!(diff.causal_edges_added, 0);
+        assert_eq!(diff.causal_edges_removed, 0);
+        assert_eq!(diff.summary, "models are identical");
+    }
+
+    #[test]
+    fn diff_models_different_node_types_detected() {
+        let mut a = make_model("alpha", 0.5);
+        a.node_types.push(NodeTypeSpec {
+            name: "module".into(),
+            embedding_strategy: "hash".into(),
+            dimensions: 64,
+        });
+        a.node_types.push(NodeTypeSpec {
+            name: "shared".into(),
+            embedding_strategy: "hash".into(),
+            dimensions: 64,
+        });
+
+        let mut b = make_model("beta", 0.5);
+        b.node_types.push(NodeTypeSpec {
+            name: "commit".into(),
+            embedding_strategy: "hash".into(),
+            dimensions: 64,
+        });
+        b.node_types.push(NodeTypeSpec {
+            name: "shared".into(),
+            embedding_strategy: "hash".into(),
+            dimensions: 64,
+        });
+
+        let diff = diff_models(&a, &b);
+        assert_eq!(diff.nodes_only_a, vec!["module"]);
+        assert_eq!(diff.nodes_only_b, vec!["commit"]);
+        assert_eq!(diff.nodes_common, vec!["shared"]);
+    }
+
+    #[test]
+    fn diff_models_causal_additions_removals_counted() {
+        let mut a = make_model("alpha", 0.5);
+        a.causal_nodes.push(ExportedCausalNode {
+            label: "A".into(),
+            metadata: serde_json::json!({}),
+        });
+        a.causal_nodes.push(ExportedCausalNode {
+            label: "shared".into(),
+            metadata: serde_json::json!({}),
+        });
+
+        let mut b = make_model("beta", 0.5);
+        b.causal_nodes.push(ExportedCausalNode {
+            label: "B".into(),
+            metadata: serde_json::json!({}),
+        });
+        b.causal_nodes.push(ExportedCausalNode {
+            label: "shared".into(),
+            metadata: serde_json::json!({}),
+        });
+
+        let diff = diff_models(&a, &b);
+        assert_eq!(diff.causal_nodes_added, 1); // B
+        assert_eq!(diff.causal_nodes_removed, 1); // A
+    }
+
+    #[test]
+    fn diff_models_causal_edge_changes() {
+        let mut a = make_model("alpha", 0.5);
+        a.causal_edges.push(ExportedCausalEdge {
+            source_label: "X".into(),
+            target_label: "Y".into(),
+            edge_type: "Causes".into(),
+            weight: 1.0,
+        });
+
+        let mut b = make_model("beta", 0.5);
+        b.causal_edges.push(ExportedCausalEdge {
+            source_label: "Y".into(),
+            target_label: "Z".into(),
+            edge_type: "Enables".into(),
+            weight: 0.5,
+        });
+
+        let diff = diff_models(&a, &b);
+        assert_eq!(diff.causal_edges_added, 1);
+        assert_eq!(diff.causal_edges_removed, 1);
+    }
+
+    #[test]
+    fn diff_models_confidence_delta_in_summary() {
+        let a = make_model("alpha", 0.5);
+        let b = make_model("beta", 0.8);
+        let diff = diff_models(&a, &b);
+        assert!((diff.confidence_delta - 0.3).abs() < 1e-10);
+        assert!(diff.summary.contains("increased"));
+    }
+
+    #[test]
+    fn diff_models_summary_shows_decrease() {
+        let a = make_model("alpha", 0.9);
+        let b = make_model("beta", 0.6);
+        let diff = diff_models(&a, &b);
+        assert!(diff.summary.contains("decreased"));
+    }
+
+    #[test]
+    fn diff_models_edge_type_differences() {
+        let mut a = make_model("a", 0.5);
+        a.edge_types.push(EdgeTypeSpec {
+            from_type: "mod".into(),
+            to_type: "mod".into(),
+            edge_type: "uses".into(),
+            confidence: 0.8,
+        });
+
+        let mut b = make_model("b", 0.5);
+        b.edge_types.push(EdgeTypeSpec {
+            from_type: "mod".into(),
+            to_type: "test".into(),
+            edge_type: "tests".into(),
+            confidence: 0.7,
+        });
+
+        let diff = diff_models(&a, &b);
+        assert_eq!(diff.edges_only_a.len(), 1);
+        assert_eq!(diff.edges_only_b.len(), 1);
+        assert!(diff.edges_common.is_empty());
+    }
+
+    // ── merge_models tests ──────────────────────────────────────
+
+    #[test]
+    fn merge_models_disjoint_produces_union() {
+        let mut a = make_model("alpha", 0.6);
+        a.node_types.push(NodeTypeSpec {
+            name: "mod_a".into(),
+            embedding_strategy: "hash".into(),
+            dimensions: 64,
+        });
+        a.causal_nodes.push(ExportedCausalNode {
+            label: "A1".into(),
+            metadata: serde_json::json!({}),
+        });
+
+        let mut b = make_model("beta", 0.8);
+        b.node_types.push(NodeTypeSpec {
+            name: "mod_b".into(),
+            embedding_strategy: "hash".into(),
+            dimensions: 64,
+        });
+        b.causal_nodes.push(ExportedCausalNode {
+            label: "B1".into(),
+            metadata: serde_json::json!({}),
+        });
+
+        let result = merge_models(&a, &b);
+        assert_eq!(result.stats.total_node_types, 2);
+        assert_eq!(result.stats.total_causal_nodes, 2);
+        assert_eq!(result.stats.nodes_from_a, 1);
+        assert_eq!(result.stats.nodes_from_b, 1);
+        assert_eq!(result.stats.nodes_shared, 0);
+        assert_eq!(result.conflicts.len(), 0);
+    }
+
+    #[test]
+    fn merge_models_overlapping_nodes_higher_confidence() {
+        let mut a = make_model("alpha", 0.6);
+        a.node_types.push(NodeTypeSpec {
+            name: "shared".into(),
+            embedding_strategy: "hash_v1".into(),
+            dimensions: 64,
+        });
+
+        let mut b = make_model("beta", 0.8);
+        b.node_types.push(NodeTypeSpec {
+            name: "shared".into(),
+            embedding_strategy: "hash_v2".into(),
+            dimensions: 128,
+        });
+
+        let result = merge_models(&a, &b);
+        assert_eq!(result.stats.nodes_shared, 1);
+        assert_eq!(result.conflicts.len(), 1);
+        // B has higher dimensions so KeepB.
+        assert_eq!(result.conflicts[0].resolution, ConflictResolution::KeepB);
+        assert_eq!(
+            result.merged.node_types[0].embedding_strategy,
+            "hash_v2"
+        );
+    }
+
+    #[test]
+    fn merge_models_causal_edges_merged_by_id() {
+        let mut a = make_model("alpha", 0.5);
+        a.causal_edges.push(ExportedCausalEdge {
+            source_label: "X".into(),
+            target_label: "Y".into(),
+            edge_type: "Causes".into(),
+            weight: 1.0,
+        });
+
+        let mut b = make_model("beta", 0.5);
+        b.causal_edges.push(ExportedCausalEdge {
+            source_label: "X".into(),
+            target_label: "Y".into(),
+            edge_type: "Causes".into(),
+            weight: 0.5,
+        });
+
+        let result = merge_models(&a, &b);
+        assert_eq!(result.stats.total_causal_edges, 1);
+        // Weight should be averaged: (1.0 + 0.5) / 2.0 = 0.75
+        assert!((result.merged.causal_edges[0].weight - 0.75).abs() < 1e-5);
+    }
+
+    #[test]
+    fn merge_models_conflict_resolution_recorded() {
+        let mut a = make_model("alpha", 0.5);
+        a.edge_types.push(EdgeTypeSpec {
+            from_type: "m".into(),
+            to_type: "m".into(),
+            edge_type: "uses".into(),
+            confidence: 0.3,
+        });
+
+        let mut b = make_model("beta", 0.5);
+        b.edge_types.push(EdgeTypeSpec {
+            from_type: "m".into(),
+            to_type: "m".into(),
+            edge_type: "uses".into(),
+            confidence: 0.9,
+        });
+
+        let result = merge_models(&a, &b);
+        assert_eq!(result.conflicts.len(), 1);
+        assert_eq!(
+            result.conflicts[0].resolution,
+            ConflictResolution::HigherConfidence
+        );
+        // The higher confidence edge (0.9) should win.
+        assert!((result.merged.edge_types[0].confidence - 0.9).abs() < 1e-10);
+    }
+
+    #[test]
+    fn merge_models_confidence_is_weighted_average() {
+        let mut a = make_model("alpha", 0.4);
+        a.causal_nodes.push(ExportedCausalNode {
+            label: "A1".into(),
+            metadata: serde_json::json!({}),
+        });
+        // A has 1 node
+
+        let mut b = make_model("beta", 0.8);
+        b.causal_nodes.push(ExportedCausalNode {
+            label: "B1".into(),
+            metadata: serde_json::json!({}),
+        });
+        b.causal_nodes.push(ExportedCausalNode {
+            label: "B2".into(),
+            metadata: serde_json::json!({}),
+        });
+        b.causal_nodes.push(ExportedCausalNode {
+            label: "B3".into(),
+            metadata: serde_json::json!({}),
+        });
+        // B has 3 nodes
+
+        let result = merge_models(&a, &b);
+        // Weighted: (0.4*1 + 0.8*3) / (1+3) = 2.8/4 = 0.7
+        assert!((result.merged.confidence - 0.7).abs() < 1e-10);
+    }
+
+    #[test]
+    fn merge_models_domain_combined() {
+        let a = make_model("alpha", 0.5);
+        let b = make_model("beta", 0.5);
+        let result = merge_models(&a, &b);
+        assert_eq!(result.merged.domain, "alpha+beta");
+    }
+
+    #[test]
+    fn merge_models_causal_edge_type_conflict() {
+        let mut a = make_model("a", 0.5);
+        a.causal_edges.push(ExportedCausalEdge {
+            source_label: "X".into(),
+            target_label: "Y".into(),
+            edge_type: "Causes".into(),
+            weight: 1.0,
+        });
+
+        let mut b = make_model("b", 0.5);
+        b.causal_edges.push(ExportedCausalEdge {
+            source_label: "X".into(),
+            target_label: "Y".into(),
+            edge_type: "Enables".into(),
+            weight: 0.5,
+        });
+
+        let result = merge_models(&a, &b);
+        assert!(result.conflicts.iter().any(|c| {
+            c.item.starts_with("causal_edge:")
+                && c.resolution == ConflictResolution::Merged
+        }));
+    }
+
+    // ── knowledge_base persistence tests ────────────────────────
+
+    #[test]
+    fn knowledge_base_save_load_roundtrip() {
+        let dir = std::env::temp_dir().join("weaver_kb_test_roundtrip");
+        std::fs::create_dir_all(&dir).ok();
+        let path = dir.join("kb.json");
+
+        let kb = WeaverKnowledgeBase::new();
+        kb.record_strategy(StrategyPattern {
+            decision_type: "SourceAdded".into(),
+            context: "rust-project".into(),
+            improvement: 0.15,
+            timestamp: Utc::now(),
+        });
+        kb.record_strategy(StrategyPattern {
+            decision_type: "EdgeType".into(),
+            context: "python-project".into(),
+            improvement: 0.25,
+            timestamp: Utc::now(),
+        });
+
+        kb.save_to_file(&path).unwrap();
+        let loaded = WeaverKnowledgeBase::load_from_file(&path).unwrap();
+        assert_eq!(loaded.pattern_count(), 2);
+
+        let strategies = loaded.list_strategies();
+        assert!(strategies
+            .iter()
+            .any(|s| s.decision_type == "SourceAdded" && s.context == "rust-project"));
+        assert!(strategies
+            .iter()
+            .any(|s| s.decision_type == "EdgeType" && s.context == "python-project"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn knowledge_base_learn_pattern_adds_new() {
+        let kb = WeaverKnowledgeBase::new();
+        kb.learn_pattern(StrategyPattern {
+            decision_type: "SourceAdded".into(),
+            context: "rust".into(),
+            improvement: 0.1,
+            timestamp: Utc::now(),
+        });
+        assert_eq!(kb.pattern_count(), 1);
+
+        kb.learn_pattern(StrategyPattern {
+            decision_type: "EdgeType".into(),
+            context: "python".into(),
+            improvement: 0.2,
+            timestamp: Utc::now(),
+        });
+        assert_eq!(kb.pattern_count(), 2);
+    }
+
+    #[test]
+    fn knowledge_base_learn_pattern_updates_existing() {
+        let kb = WeaverKnowledgeBase::new();
+        kb.learn_pattern(StrategyPattern {
+            decision_type: "SourceAdded".into(),
+            context: "rust".into(),
+            improvement: 0.1,
+            timestamp: Utc::now(),
+        });
+
+        // Same decision_type + context should update, not add.
+        kb.learn_pattern(StrategyPattern {
+            decision_type: "SourceAdded".into(),
+            context: "rust".into(),
+            improvement: 0.3,
+            timestamp: Utc::now(),
+        });
+
+        assert_eq!(kb.pattern_count(), 1);
+        let strategies = kb.list_strategies();
+        // Average of 0.1 and 0.3 = 0.2
+        assert!((strategies[0].improvement - 0.2).abs() < 1e-10);
+    }
+
+    #[test]
+    fn knowledge_base_find_patterns_returns_matching() {
+        let kb = WeaverKnowledgeBase::new();
+        kb.learn_pattern(StrategyPattern {
+            decision_type: "SourceAdded".into(),
+            context: "rust-backend".into(),
+            improvement: 0.1,
+            timestamp: Utc::now(),
+        });
+        kb.learn_pattern(StrategyPattern {
+            decision_type: "EdgeType".into(),
+            context: "python-ml".into(),
+            improvement: 0.2,
+            timestamp: Utc::now(),
+        });
+        kb.learn_pattern(StrategyPattern {
+            decision_type: "Tick".into(),
+            context: "go-service".into(),
+            improvement: 0.15,
+            timestamp: Utc::now(),
+        });
+
+        let matches = kb.find_patterns(&["rust".to_string()]);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].context, "rust-backend");
+    }
+
+    #[test]
+    fn knowledge_base_find_patterns_sorted_by_relevance() {
+        let kb = WeaverKnowledgeBase::new();
+        kb.learn_pattern(StrategyPattern {
+            decision_type: "A".into(),
+            context: "rust".into(),
+            improvement: 0.1,
+            timestamp: Utc::now(),
+        });
+        kb.learn_pattern(StrategyPattern {
+            decision_type: "B".into(),
+            context: "rust-backend-api".into(),
+            improvement: 0.2,
+            timestamp: Utc::now(),
+        });
+        kb.learn_pattern(StrategyPattern {
+            decision_type: "C".into(),
+            context: "python".into(),
+            improvement: 0.3,
+            timestamp: Utc::now(),
+        });
+
+        let matches = kb.find_patterns(&[
+            "rust".to_string(),
+            "backend".to_string(),
+            "api".to_string(),
+        ]);
+        // B should rank first (matches rust, backend, api = 3 hits).
+        // A should rank second (matches rust = 1 hit).
+        // C should not appear.
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].decision_type, "B");
+        assert_eq!(matches[1].decision_type, "A");
+    }
+
+    #[test]
+    fn knowledge_base_empty_handles_gracefully() {
+        let kb = WeaverKnowledgeBase::new();
+        assert_eq!(kb.pattern_count(), 0);
+        assert!(kb.find_patterns(&["rust".to_string()]).is_empty());
+        assert!(kb.list_strategies().is_empty());
+
+        // save/load empty KB.
+        let dir = std::env::temp_dir().join("weaver_kb_empty_test");
+        std::fs::create_dir_all(&dir).ok();
+        let path = dir.join("empty-kb.json");
+        kb.save_to_file(&path).unwrap();
+        let loaded = WeaverKnowledgeBase::load_from_file(&path).unwrap();
+        assert_eq!(loaded.pattern_count(), 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn knowledge_base_serializable_kb_fields() {
+        let kb = WeaverKnowledgeBase::new();
+        kb.record_strategy(StrategyPattern {
+            decision_type: "SourceAdded".into(),
+            context: "rust".into(),
+            improvement: 0.1,
+            timestamp: Utc::now(),
+        });
+        let ser = kb.to_serializable();
+        assert_eq!(ser.version, 1);
+        assert_eq!(ser.patterns.len(), 1);
+        assert!(ser.domains_modeled.contains(&"rust".to_string()));
+    }
+
+    #[test]
+    fn knowledge_base_load_nonexistent_file_errors() {
+        let result = WeaverKnowledgeBase::load_from_file(
+            Path::new("/nonexistent/path/kb.json"),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn knowledge_base_find_patterns_no_match_returns_empty() {
+        let kb = WeaverKnowledgeBase::new();
+        kb.learn_pattern(StrategyPattern {
+            decision_type: "X".into(),
+            context: "rust".into(),
+            improvement: 0.1,
+            timestamp: Utc::now(),
+        });
+        let matches = kb.find_patterns(&["java".to_string()]);
+        assert!(matches.is_empty());
     }
 }

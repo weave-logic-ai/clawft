@@ -117,6 +117,11 @@ adaptive = true
 root = "."
 patterns = ["**/*.{ext}"]
 
+[embedding]
+provider = "mock-sha256"
+dimensions = 384
+batch_size = 16
+
 [governance]
 default_environment = "development"
 risk_threshold = 0.9

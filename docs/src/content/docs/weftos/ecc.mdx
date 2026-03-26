@@ -245,3 +245,53 @@ weaver ecc tick            # Show cognitive tick stats
 | `ecc.causal.link` | Create causal edge |
 | `ecc.crossref.add` | Add cross-reference |
 | `ecc.impulse.emit` | Emit an impulse |
+
+## WeaverEngine
+
+**Source**: `crates/clawft-kernel/src/weaver.rs` (~4,800 lines, 126 tests)
+
+The WeaverEngine is a `SystemService` that drives iterative causal modeling over data sources. It runs a HYPOTHESIZE-OBSERVE-EVALUATE-ADJUST loop within the cognitive tick, maintaining confidence scores and self-improvement tracking via a meta-Loom.
+
+### Capabilities
+
+- **Modeling sessions**: Start, stop, resume domain-specific modeling sessions
+- **Data ingestion**: Git history, file trees, CI pipelines, issue trackers, documentation, SPARC plans, and custom streams (7 source types)
+- **Confidence evaluation**: Edge coverage scoring, orphan detection, gap suggestions
+- **Confidence history**: Ring-buffer of snapshots with trend analysis (improving/stable/declining)
+- **Strategy tracking**: Records which analysis strategies improved confidence, recommends effective strategies
+- **Model export/import**: `ExportedModel` serialization with causal nodes/edges for edge device deployment
+- **Model diff**: `diff_models()` compares two exported models, producing `ModelDiff` with node/edge/confidence deltas
+- **Model merge**: `merge_models()` stitches models from different sessions, resolving conflicts by higher confidence
+- **Meta-Loom**: `MetaLoomEvent` and `MetaDecisionType` track the Weaver's own evolution
+- **WeaverKnowledgeBase**: Cross-domain pattern library with `save_to_file()`/`load_from_file()`, `learn_pattern()`/`find_patterns()` persistence
+- **Tick interval recommendation**: Analyzes change frequency to suggest optimal tick intervals
+- **Git polling**: Incremental commit detection via `GitPoller`
+- **File watching**: mtime-based change detection via `FileWatcher`
+
+### Embedding Providers
+
+**Source**: `crates/clawft-kernel/src/embedding.rs` and `embedding_onnx.rs` (62 tests)
+
+| Provider | Dimensions | Use Case |
+|----------|-----------|----------|
+| `MockEmbeddingProvider` | configurable | Deterministic SHA-256 hash vectors for testing |
+| `LlmEmbeddingProvider` | 384 (default) | LLM API embeddings with mock fallback |
+| `OnnxEmbeddingProvider` | 384 | all-MiniLM-L6-v2 with hash fallback |
+| `SentenceTransformerProvider` | 384 | Markdown-aware, sentence-splitting, mean pooling |
+| `AstEmbeddingProvider` | 256 | Hybrid structural+semantic for Rust code |
+
+### CLI Commands
+
+```bash
+weaver ecc session start --domain my-project --git .
+weaver ecc source add --domain my-project --type ci_pipeline
+weaver ecc confidence --domain my-project --verbose
+weaver ecc export --domain my-project --output weave-model.json
+weaver ecc stitch --source frontend --target backend
+weaver ecc meta --domain my-project
+weaver ecc meta export-kb --output weaver-kb.json
+```
+
+### IPC Protocol
+
+`WeaverCommand` (13 variants) and `WeaverResponse` for communication with CLI and agents via `KernelMessage`.
