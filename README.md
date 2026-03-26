@@ -3,67 +3,154 @@
 [![CI](https://github.com/weave-logic-ai/clawft/actions/workflows/ci.yml/badge.svg)](https://github.com/weave-logic-ai/clawft/actions/workflows/ci.yml)
 [![License](https://img.shields.io/crates/l/clawft.svg)](LICENSE)
 
-**clawft** is a modular, async Rust framework for building AI assistants.
-**WeftOS** is the kernel layer that turns clawft into a distributed operating
-system for AI agents — with process management, capability-based security,
-mesh networking, and a cognitive substrate.
+**AI that remembers everything, runs anywhere, trusts no one, and never stops learning.**
 
-Together, they run on 5 platforms: native Linux/macOS/Windows binaries, WASI
-containers, browser tabs (via WASM), edge devices, and cloud VMs — forming
-encrypted peer-to-peer clusters across all of them.
+clawft + WeftOS is a secure, ephemeral AI operating system built in Rust. It
+replaces the fragile pattern of cloud-dependent chatbots with something
+fundamentally different: a distributed kernel that gives AI agents persistent
+memory, verifiable reasoning, and constitutional governance — running on
+everything from a Raspberry Pi to a browser tab to an air-gapped data center.
+
+## The Problems We Solve
+
+### No more context windows
+
+LLMs forget. Every conversation starts from zero. clawft eliminates this with a
+**vector-indexed knowledge graph** (ECC) that grows continuously. The causal DAG
+tracks how every idea, decision, and outcome relates to every other. HNSW
+approximate nearest neighbor search retrieves relevant context in sub-millisecond
+time. Your agents don't have a context window — they have a growing, searchable
+memory that spans sessions, conversations, and nodes.
+
+### No more hallucination without accountability
+
+Every agent action is recorded in an **append-only hash chain** (ExoChain) with
+SHAKE-256 hash linking and Ed25519 + ML-DSA-65 dual signatures. Every tool call,
+every IPC message, every governance decision is witnessed. When an agent claims
+it did something, you can verify it cryptographically. The chain is not just a
+log — it is a tamper-evident audit trail that makes hallucination detectable and
+provenance traceable.
+
+### No more trusting the cloud with your data
+
+WeftOS runs **entirely on your hardware**. Local LLM inference via Ollama,
+llama.cpp, or vLLM means your prompts never leave your network. The mesh network
+uses **Noise Protocol encryption** with post-quantum ML-KEM-768 key exchange —
+even a future quantum computer cannot decrypt intercepted traffic. Air-gapped
+deployments work identically to connected ones. Your data, your models, your
+control.
+
+### No more single points of failure
+
+Agents form **encrypted peer-to-peer mesh clusters** across heterogeneous
+devices. A $35 Raspberry Pi running on your desk, a browser tab on your laptop,
+and a GPU server in your rack all join the same cluster over mDNS, Kademlia DHT,
+or static seed peers. If one node goes down, SWIM heartbeats detect it in
+seconds. Services automatically resolve to surviving replicas. Chain state
+replicates incrementally. There is no central server to fail.
+
+### No more uncontrolled AI
+
+Every privileged operation passes through a **three-branch constitutional
+governance engine** — Legislative (what agents can do), Executive (runtime
+approval), Judicial (post-hoc audit). A 5-dimensional effect vector scores every
+action on risk, fairness, privacy, novelty, and security. Production environments
+enforce strict thresholds. Development environments are lenient. The governance
+rules themselves are stored on-chain and synchronized across the cluster. No
+single agent, node, or operator can bypass the constitution.
+
+### No more "works on my machine"
+
+The same binary runs on **7 platforms**: Linux, macOS, Windows, browser (WASM),
+WASI containers, ARM64 edge devices, and cloud VMs. A browser tab joins the
+same mesh as a bare-metal server. Feature flags compile out what you don't need —
+a minimal edge build has zero networking dependencies; a full cloud build includes
+QUIC transport, Kademlia DHT, WASM sandbox, and container orchestration.
+
+---
 
 ## What This Is
 
 ```
-+------------------------------------------------------------------+
-|                        clawft                                     |
-|  AI assistant framework: LLM providers, channels, tools, skills  |
-+------------------------------------------------------------------+
-|                        WeftOS                                     |
-|  Kernel: processes, IPC, governance, ExoChain, mesh networking   |
-+------------------------------------------------------------------+
-|                     ECC Cognitive Substrate                       |
-|  Causal DAG, cognitive tick, HNSW search, impulse queue          |
-+------------------------------------------------------------------+
-|                     Platform Layer                                |
-|  Native (tokio) | WASI | Browser (wasm32) | Edge | Cloud        |
-+------------------------------------------------------------------+
++-------------------------------------------------------------------+
+|                         clawft                                     |
+|  AI framework: LLM providers, channels, tools, skills, agents    |
++-------------------------------------------------------------------+
+|                         WeftOS Kernel                               |
+|  Processes, IPC, governance, ExoChain, mesh networking, apps      |
++-------------------------------------------------------------------+
+|                    ECC Cognitive Substrate                          |
+|  Causal DAG, cognitive tick, HNSW memory, impulse queue           |
++-------------------------------------------------------------------+
+|                      Platform Layer                                |
+|  Native | WASI | Browser | Edge | Cloud | Air-Gapped | Docker    |
++-------------------------------------------------------------------+
 ```
 
-**clawft** handles the AI layer: connecting to LLM providers (OpenAI, Anthropic,
-Ollama, local models), managing conversations across channels (Telegram, Slack,
-Discord, CLI, WebSocket), executing tools in sandboxes, and composing agent
-skills.
+**clawft** is the AI framework layer: connecting to LLM providers (OpenAI,
+Anthropic, Ollama, local models), managing conversations across channels
+(Telegram, Slack, Discord, CLI, WebSocket), executing tools in WASM sandboxes,
+and composing agent skills.
 
-**WeftOS** handles the OS layer: booting a kernel with a process table, enforcing
-per-agent RBAC capabilities, routing messages between agents (locally and across
-nodes), maintaining an append-only hash chain (ExoChain) for audit trails,
-synchronizing resource trees across clusters, and governing all operations
-through a three-branch constitutional model.
+**WeftOS** is the kernel layer: process management with PID allocation and
+capability-based RBAC, typed IPC with 7 target types, an append-only ExoChain
+for cryptographic audit trails, three-branch constitutional governance, encrypted
+mesh networking with post-quantum key exchange, and an application framework
+for packaged agent deployments.
 
-**ECC** (Ephemeral Causal Cognition) is the cognitive substrate: a causal DAG
-that tracks how ideas relate, a cognitive tick that adaptively processes events,
-HNSW approximate nearest neighbor search for semantic memory, cross-references
-linking structures across the kernel, and an impulse queue for ephemeral
-real-time signals.
+**ECC** (Ephemeral Causal Cognition) is the cognitive layer: a causal DAG that
+tracks how ideas relate, an adaptive cognitive tick that processes events in
+real-time, HNSW approximate nearest neighbor search for semantic memory,
+BLAKE3-indexed cross-references linking every structure in the kernel, and an
+impulse queue for ephemeral signals that decay rather than accumulate. ECC
+operates in three modes — **Act** (real-time conversation), **Analyze**
+(post-hoc corpus understanding), and **Generate** (goal-directed planning) —
+using the same engine, the same data structures, and the same scoring system.
 
 ## Platform Support
 
-| Platform | Binary | Transport | Features |
-|----------|--------|-----------|----------|
-| **Linux** (x86_64, aarch64) | `weft` / `weave` | TCP, QUIC, WebSocket | Full kernel + mesh + WASM sandbox |
-| **macOS** (x86_64, aarch64) | `weft` / `weave` | TCP, QUIC, WebSocket | Full kernel + mesh + WASM sandbox |
-| **Windows** (x86_64) | `weft.exe` / `weave.exe` | TCP, WebSocket | Full kernel + mesh |
-| **Browser** (wasm32) | `clawft-wasm` | WebSocket | Agent framework, restricted IPC |
-| **WASI** (wasm32-wasi) | `clawft-wasi` | WebSocket | Agent framework, sandboxed tools |
-| **Edge** (ARM64) | `weft` | TCP, mDNS | Kernel + local mesh discovery |
-| **Cloud VM** | `weft` / `weave` | TCP, QUIC, WebSocket | Full stack + Kademlia DHT |
-| **Docker** | `alpine:weft` | Configurable | Sidecar orchestration |
+| Platform | Binary | Transport | Mesh Role | Use Case |
+|----------|--------|-----------|-----------|----------|
+| **Linux** (x86_64, aarch64) | `weft` / `weave` | TCP, QUIC, WebSocket | Full node | Servers, workstations, CI/CD |
+| **macOS** (x86_64, aarch64) | `weft` / `weave` | TCP, QUIC, WebSocket | Full node | Development, local inference |
+| **Windows** (x86_64) | `weft.exe` / `weave.exe` | TCP, WebSocket | Full node | Enterprise workstations |
+| **Raspberry Pi** (ARM64) | `weft` | TCP, mDNS | Edge node | IoT, local-first AI, offline |
+| **Browser** (wasm32) | `clawft-wasm` | WebSocket | Light node | Web UI, mobile access |
+| **WASI** (wasm32-wasi) | `clawft-wasi` | WebSocket | Sandboxed | Serverless, plugin isolation |
+| **Cloud VM** | `weft` / `weave` | TCP, QUIC, WebSocket, Kademlia | Seed node | GPU inference, DHT bootstrap |
+| **Docker** | `alpine:weft` | Configurable | Any | Sidecar orchestration, k8s |
+| **Air-gapped** | `weft` | TCP (local) | Isolated cluster | Classified, medical, financial |
 
-All platforms can join the same mesh cluster. A browser tab running `clawft-wasm`
-connects via WebSocket to a cloud VM running full WeftOS, which peers with edge
-devices over mDNS — all sharing the same governance rules, chain state, and
-service registry.
+All platforms join the same mesh. A Raspberry Pi on your desk discovers a
+MacBook over mDNS. The MacBook connects to a cloud GPU server via QUIC. A
+browser tab on your phone joins over WebSocket. An air-gapped server in a
+secure facility runs a self-contained cluster with local Ollama inference.
+They all share the same governance constitution, chain state, and service
+registry — or they run completely independently. Your choice.
+
+### Deployment Patterns
+
+**Personal AI assistant** — Single node on a laptop. Local LLM (Ollama).
+No cloud, no API keys, no data leaving the machine. Full ExoChain audit trail.
+
+**Team mesh** — 3-5 nodes on a LAN. mDNS auto-discovery. Shared knowledge
+graph. Agents specialize: one does code review, one monitors CI, one handles
+Slack. Governance prevents any agent from exceeding its role.
+
+**Edge + cloud hybrid** — Raspberry Pis at branch offices handle local queries
+with small models. Complex requests route to a central GPU server. Chain state
+replicates incrementally. If the WAN goes down, edge nodes continue operating
+autonomously.
+
+**Air-gapped secure** — Military, medical, or financial deployment where no
+data can leave the network. Local inference only. Post-quantum encryption on
+all internal mesh links. ExoChain provides a cryptographic audit trail for
+compliance. The governance engine enforces data classification policies.
+
+**Browser-first** — Lightweight deployment where users access agents through
+a web UI. The browser WASM binary connects to backend nodes via WebSocket.
+Browser agents start with restricted capabilities; elevation requires governance
+approval.
 
 ## Key Features
 
