@@ -637,6 +637,58 @@ pub enum ArtifactBackend {
 
 ---
 
+## K3c Gaps: ECC Cognitive Substrate
+
+**Why K3c**: The ECC modules (`causal.rs`, `cognitive_tick.rs`, `crossref.rs`,
+`hnsw_service.rs`, `impulse.rs`, `calibration.rs`) were introduced in K3c.
+These gaps extend the cognitive substrate with the WeaverEngine service and
+the EmbeddingProvider abstraction required for HNSW vectorization.
+
+### K3c-G1: WeaverEngine SystemService (~500 lines)
+
+**Source**: ECC Weaver SPARC Plan (09-ecc-weaver-crate.md)
+
+Register `WeaverEngine` as a `SystemService` at boot (when `ecc` feature enabled):
+- `ModelingSession` management (start, resume, stop)
+- Confidence-driven modeling loop within CognitiveTick
+- Multi-source data ingestion (git, files, docs, CI, issues)
+- `weave-model.json` export for edge deployment
+- Meta-Loom tracking (Weaver's own evolution as causal events)
+- WeaverKnowledgeBase for cross-domain learning
+- A2ARouter IPC message handling for `weaver ecc` CLI commands
+- Tree registration at `/kernel/services/weaver`
+
+**Files**: New `crates/clawft-kernel/src/weaver.rs` or `crates/ecc-weaver/`
+**Estimate**: ~500 lines for core service + ~300 lines for data source ingestion
+**Priority**: P1 (High -- enables ECC to actually process real data)
+
+**Exit criteria**:
+- [ ] WeaverEngine registers as SystemService at boot
+- [ ] Modeling session start/stop via IPC
+- [ ] Confidence evaluation produces gap analysis
+- [ ] Model export produces valid weave-model.json
+- [ ] Git log ingestion creates causal nodes and edges
+- [ ] File tree ingestion creates namespace structure
+- [ ] Meta-Loom records Weaver's own decisions
+- [ ] CognitiveTick handler respects budget
+
+### K3c-G2: EmbeddingProvider Trait (~150 lines)
+
+Trait for pluggable embedding backends (local ONNX, remote LLM API, mock
+for testing). Required by WeaverEngine for HNSW vectorization of ingested
+data.
+
+**Files**: New `crates/clawft-kernel/src/embedding.rs`
+**Estimate**: ~150 lines
+**Priority**: P1 (High -- required by WeaverEngine for HNSW operations)
+
+**Exit criteria**:
+- [ ] EmbeddingProvider trait defined
+- [ ] Mock implementation for testing
+- [ ] ONNX backend (behind feature flag)
+
+---
+
 ## K5 Gaps: App Framework
 
 **Why K5**: The `AppManager` (`app.rs`), `AppManifest`, and application

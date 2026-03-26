@@ -7,6 +7,7 @@ pub mod cluster_cmd;
 pub mod console_cmd;
 pub mod ecc_cmd;
 pub mod cron_cmd;
+pub mod init_cmd;
 pub mod ipc_cmd;
 pub mod kernel_cmd;
 pub mod resource_cmd;

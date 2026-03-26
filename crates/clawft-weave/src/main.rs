@@ -71,6 +71,9 @@ enum Commands {
     /// ECC cognitive substrate management (status, calibrate, search).
     Ecc(commands::ecc_cmd::EccArgs),
 
+    /// Initialize development environment (install skills, verify tools).
+    Init(commands::init_cmd::InitArgs),
+
     /// Show version and build info.
     Version,
 }
@@ -98,6 +101,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Ipc(args) => commands::ipc_cmd::run(args).await?,
         Commands::Console(args) => commands::console_cmd::run(args).await?,
         Commands::Ecc(args) => commands::ecc_cmd::run(args).await?,
+        Commands::Init(args) => commands::init_cmd::run(args).await?,
         Commands::Version => {
             println!("weaver {} (WeftOS)", env!("CARGO_PKG_VERSION"));
         }
