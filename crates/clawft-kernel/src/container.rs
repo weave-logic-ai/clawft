@@ -1126,4 +1126,221 @@ mod tests {
             "expected Down after stopping all containers, got {overall:?}"
         );
     }
+
+    // ── Sprint 09a: serde roundtrip tests ────────────────────────
+
+    #[test]
+    fn container_state_serde_roundtrip_all_variants() {
+        let variants = vec![
+            ContainerState::Pulling,
+            ContainerState::Creating,
+            ContainerState::Running,
+            ContainerState::Stopping,
+            ContainerState::Stopped,
+            ContainerState::Failed("oom killed".into()),
+        ];
+        for state in variants {
+            let json = serde_json::to_string(&state).unwrap();
+            let restored: ContainerState = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored, state);
+        }
+    }
+
+    #[test]
+    fn port_mapping_serde_roundtrip() {
+        let pm = PortMapping {
+            host_port: 8080,
+            container_port: 80,
+            protocol: "tcp".into(),
+        };
+        let json = serde_json::to_string(&pm).unwrap();
+        let restored: PortMapping = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.host_port, 8080);
+        assert_eq!(restored.container_port, 80);
+        assert_eq!(restored.protocol, "tcp");
+    }
+
+    #[test]
+    fn port_mapping_default_protocol() {
+        let json = r#"{"host_port": 3000, "container_port": 3000}"#;
+        let pm: PortMapping = serde_json::from_str(json).unwrap();
+        assert_eq!(pm.protocol, "tcp");
+    }
+
+    #[test]
+    fn volume_mount_serde_roundtrip() {
+        let vm = VolumeMount {
+            host_path: "/data".into(),
+            container_path: "/var/data".into(),
+            read_only: true,
+        };
+        let json = serde_json::to_string(&vm).unwrap();
+        let restored: VolumeMount = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.host_path, "/data");
+        assert_eq!(restored.container_path, "/var/data");
+        assert!(restored.read_only);
+    }
+
+    #[test]
+    fn volume_mount_default_read_only() {
+        let json = r#"{"host_path": "/a", "container_path": "/b"}"#;
+        let vm: VolumeMount = serde_json::from_str(json).unwrap();
+        assert!(!vm.read_only);
+    }
+
+    #[test]
+    fn restart_policy_serde_roundtrip_all_variants() {
+        let variants = vec![
+            RestartPolicy::Never,
+            RestartPolicy::OnFailure { max_retries: 5 },
+            RestartPolicy::Always,
+        ];
+        for policy in variants {
+            let json = serde_json::to_string(&policy).unwrap();
+            let restored: RestartPolicy = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored, policy);
+        }
+    }
+
+    #[test]
+    fn restart_policy_default_is_never() {
+        assert_eq!(RestartPolicy::default(), RestartPolicy::Never);
+    }
+
+    #[test]
+    fn container_health_serde_roundtrip() {
+        let health = ContainerHealth {
+            container_id: "redis-1".into(),
+            status: ContainerState::Running,
+            healthy: true,
+            message: None,
+        };
+        let json = serde_json::to_string(&health).unwrap();
+        let restored: ContainerHealth = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.container_id, "redis-1");
+        assert!(restored.healthy);
+        assert!(restored.message.is_none());
+    }
+
+    #[test]
+    fn container_health_with_message_roundtrip() {
+        let health = ContainerHealth {
+            container_id: "pg-1".into(),
+            status: ContainerState::Failed("timeout".into()),
+            healthy: false,
+            message: Some("health check failed after 30s".into()),
+        };
+        let json = serde_json::to_string(&health).unwrap();
+        let restored: ContainerHealth = serde_json::from_str(&json).unwrap();
+        assert!(!restored.healthy);
+        assert_eq!(restored.message.unwrap(), "health check failed after 30s");
+    }
+
+    #[test]
+    fn container_state_display_all_variants() {
+        assert_eq!(ContainerState::Pulling.to_string(), "pulling");
+        assert_eq!(ContainerState::Creating.to_string(), "creating");
+        assert_eq!(ContainerState::Running.to_string(), "running");
+        assert_eq!(ContainerState::Stopping.to_string(), "stopping");
+        assert_eq!(ContainerState::Stopped.to_string(), "stopped");
+        assert_eq!(
+            ContainerState::Failed("oom".into()).to_string(),
+            "failed: oom"
+        );
+    }
+
+    #[test]
+    fn container_config_health_check_interval() {
+        let cfg = ContainerConfig {
+            health_check_interval_secs: 10,
+            ..Default::default()
+        };
+        assert_eq!(cfg.health_check_interval(), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn container_config_defaults_populated() {
+        let cfg = ContainerConfig::default();
+        assert_eq!(cfg.docker_socket, "unix:///var/run/docker.sock");
+        assert_eq!(cfg.network_name, "weftos");
+        assert_eq!(cfg.default_restart_policy, RestartPolicy::Never);
+        assert_eq!(cfg.health_check_interval_secs, 30);
+    }
+
+    #[test]
+    fn managed_container_with_env_and_volumes_roundtrip() {
+        let mut env = HashMap::new();
+        env.insert("REDIS_URL".into(), "redis://localhost".into());
+        env.insert("LOG_LEVEL".into(), "debug".into());
+
+        let mc = ManagedContainer {
+            name: "full-spec".into(),
+            image: "redis:7".into(),
+            container_id: Some("abc123".into()),
+            state: ContainerState::Running,
+            ports: vec![PortMapping {
+                host_port: 6379,
+                container_port: 6379,
+                protocol: "tcp".into(),
+            }],
+            env,
+            volumes: vec![VolumeMount {
+                host_path: "/data/redis".into(),
+                container_path: "/data".into(),
+                read_only: false,
+            }],
+            health_endpoint: Some("http://localhost:6379/ping".into()),
+            restart_policy: Some(RestartPolicy::Always),
+        };
+
+        let json = serde_json::to_string(&mc).unwrap();
+        let restored: ManagedContainer = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.name, "full-spec");
+        assert_eq!(restored.container_id, Some("abc123".into()));
+        assert_eq!(restored.ports.len(), 1);
+        assert_eq!(restored.env.len(), 2);
+        assert_eq!(restored.volumes.len(), 1);
+        assert_eq!(restored.restart_policy, Some(RestartPolicy::Always));
+    }
+
+    #[test]
+    fn configure_multiple_containers_succeeds() {
+        let manager = ContainerManager::new(ContainerConfig::default());
+        let spec1 = ManagedContainer {
+            name: "svc-a".into(),
+            image: "alpine:latest".into(),
+            container_id: None,
+            state: ContainerState::Stopped,
+            ports: vec![PortMapping {
+                host_port: 8080,
+                container_port: 80,
+                protocol: "tcp".into(),
+            }],
+            env: HashMap::new(),
+            volumes: Vec::new(),
+            health_endpoint: None,
+            restart_policy: None,
+        };
+        manager.configure(spec1).unwrap();
+
+        let spec2 = ManagedContainer {
+            name: "svc-b".into(),
+            image: "nginx:latest".into(),
+            container_id: None,
+            state: ContainerState::Stopped,
+            ports: vec![PortMapping {
+                host_port: 9090,
+                container_port: 80,
+                protocol: "tcp".into(),
+            }],
+            env: HashMap::new(),
+            volumes: Vec::new(),
+            health_endpoint: None,
+            restart_policy: None,
+        };
+        manager.configure(spec2).unwrap();
+
+        assert_eq!(manager.container_state("svc-a"), Some(ContainerState::Stopped));
+        assert_eq!(manager.container_state("svc-b"), Some(ContainerState::Stopped));
+    }
 }

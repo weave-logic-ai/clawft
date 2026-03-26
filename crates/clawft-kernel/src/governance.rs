@@ -237,6 +237,44 @@ impl GovernanceRequest {
         self.effect = effect;
         self
     }
+
+    /// Enrich the request with tool execution context (k3:D2).
+    ///
+    /// Sets the `context` map with tool-specific fields so governance
+    /// rules can distinguish between different tool invocations even
+    /// when the action string is the generic `"tool.exec"`.
+    ///
+    /// # Fields set
+    ///
+    /// - `tool` — tool name (e.g. `"fs.read_file"`)
+    /// - `gate_action` — the per-tool gate action from the catalog
+    /// - `pid` — stringified PID of the requesting agent
+    ///
+    /// The `effect` field is set from the tool's declared effect vector,
+    /// enabling threshold-based governance that varies per tool.
+    pub fn with_tool_context(
+        mut self,
+        tool_name: impl Into<String>,
+        gate_action: impl Into<String>,
+        effect: EffectVector,
+        pid: u64,
+    ) -> Self {
+        self.context.insert("tool".into(), tool_name.into());
+        self.context.insert("gate_action".into(), gate_action.into());
+        self.context.insert("pid".into(), pid.to_string());
+        self.effect = effect;
+        self
+    }
+
+    /// Add a single key-value pair to the context map.
+    pub fn with_context_entry(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.context.insert(key.into(), value.into());
+        self
+    }
 }
 
 /// Governance evaluation result.
@@ -1581,6 +1619,161 @@ mod tests {
         let recorder = TrajectoryRecorder::new(10);
         assert!(recorder.is_empty());
         assert!(recorder.extract_patterns().is_empty());
+    }
+
+    // ── Sprint 09a: serde roundtrip + behavioral tests ─────────
+
+    #[test]
+    fn governance_branch_serde_roundtrip() {
+        for branch in [
+            GovernanceBranch::Legislative,
+            GovernanceBranch::Executive,
+            GovernanceBranch::Judicial,
+        ] {
+            let json = serde_json::to_string(&branch).unwrap();
+            let restored: GovernanceBranch = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored, branch);
+        }
+    }
+
+    #[test]
+    fn rule_severity_serde_roundtrip() {
+        for severity in [
+            RuleSeverity::Advisory,
+            RuleSeverity::Warning,
+            RuleSeverity::Blocking,
+            RuleSeverity::Critical,
+        ] {
+            let json = serde_json::to_string(&severity).unwrap();
+            let restored: RuleSeverity = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored, severity);
+        }
+    }
+
+    #[test]
+    fn rule_severity_display() {
+        assert_eq!(RuleSeverity::Advisory.to_string(), "advisory");
+        assert_eq!(RuleSeverity::Warning.to_string(), "warning");
+        assert_eq!(RuleSeverity::Blocking.to_string(), "blocking");
+        assert_eq!(RuleSeverity::Critical.to_string(), "critical");
+    }
+
+    #[test]
+    fn governance_decision_serde_roundtrip_all_variants() {
+        let variants = vec![
+            GovernanceDecision::Permit,
+            GovernanceDecision::PermitWithWarning("low risk".into()),
+            GovernanceDecision::EscalateToHuman("needs review".into()),
+            GovernanceDecision::Deny("policy violation".into()),
+        ];
+        for decision in variants {
+            let json = serde_json::to_string(&decision).unwrap();
+            let restored: GovernanceDecision = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored, decision);
+        }
+    }
+
+    #[test]
+    fn governance_result_serde_roundtrip() {
+        let result = GovernanceResult {
+            decision: GovernanceDecision::Permit,
+            evaluated_rules: vec!["rule-1".into(), "rule-2".into()],
+            effect: EffectVector {
+                risk: 0.3,
+                ..Default::default()
+            },
+            threshold_exceeded: false,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let restored: GovernanceResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.decision, GovernanceDecision::Permit);
+        assert_eq!(restored.evaluated_rules.len(), 2);
+        assert!(!restored.threshold_exceeded);
+    }
+
+    #[test]
+    fn governance_result_deny_serde_roundtrip() {
+        let result = GovernanceResult {
+            decision: GovernanceDecision::Deny("threshold exceeded".into()),
+            evaluated_rules: vec![],
+            effect: EffectVector {
+                risk: 0.9,
+                security: 0.8,
+                ..Default::default()
+            },
+            threshold_exceeded: true,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let restored: GovernanceResult = serde_json::from_str(&json).unwrap();
+        assert!(restored.threshold_exceeded);
+        assert!(matches!(restored.decision, GovernanceDecision::Deny(_)));
+    }
+
+    #[test]
+    fn trajectory_outcome_serde_roundtrip() {
+        let variants: Vec<TrajectoryOutcome> = vec![
+            TrajectoryOutcome::Success { reward: 1.5 },
+            TrajectoryOutcome::Failure {
+                reason: "timeout".into(),
+            },
+            TrajectoryOutcome::Pending,
+        ];
+        for outcome in variants {
+            let json = serde_json::to_string(&outcome).unwrap();
+            let _restored: TrajectoryOutcome = serde_json::from_str(&json).unwrap();
+        }
+    }
+
+    #[test]
+    fn trajectory_record_serde_roundtrip() {
+        use chrono::Utc;
+        let record = TrajectoryRecord {
+            agent_id: "agent-1".into(),
+            action: "tool.execute".into(),
+            context: serde_json::json!({"tool": "read_file", "path": "/etc/hosts"}),
+            outcome: TrajectoryOutcome::Success { reward: 1.0 },
+            timestamp: Utc::now(),
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        let restored: TrajectoryRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.agent_id, "agent-1");
+        assert_eq!(restored.action, "tool.execute");
+    }
+
+    #[test]
+    fn governance_rule_with_sop_fields_roundtrip() {
+        let rule = GovernanceRule {
+            id: "SOP-001".into(),
+            description: "Do not access prod data".into(),
+            branch: GovernanceBranch::Legislative,
+            severity: RuleSeverity::Critical,
+            active: true,
+            reference_url: Some("https://sops.example.com/001".into()),
+            sop_category: Some("data-access".into()),
+        };
+        let json = serde_json::to_string(&rule).unwrap();
+        let restored: GovernanceRule = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.reference_url.unwrap(), "https://sops.example.com/001");
+        assert_eq!(restored.sop_category.unwrap(), "data-access");
+    }
+
+    #[test]
+    fn effect_vector_default_is_zero() {
+        let v = EffectVector::default();
+        assert!((v.magnitude() - 0.0).abs() < f64::EPSILON);
+        assert!(!v.any_exceeds(0.0));
+    }
+
+    #[test]
+    fn effect_vector_max_dimension() {
+        let v = EffectVector {
+            risk: 0.1,
+            fairness: 0.5,
+            privacy: 0.3,
+            novelty: 0.9,
+            security: 0.2,
+        };
+        assert!((v.max_dimension() - 0.9).abs() < f64::EPSILON);
     }
 
     #[cfg(feature = "exochain")]

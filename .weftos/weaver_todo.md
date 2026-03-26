@@ -8,10 +8,10 @@ Last updated: 2026-03-26 (after graph ingestion)
 - [x] EmbeddingProvider trait defined (`crates/clawft-kernel/src/embedding.rs`)
 - [x] MockEmbeddingProvider (deterministic SHA-256 hash-based, for testing)
 - [ ] ONNX backend (all-MiniLM-L6-v2, 384 dimensions) — behind `onnx-embeddings` feature
-- [ ] LLM API backend (call clawft-llm provider for embeddings) — uses existing provider trait
+- [x] LLM API backend (call clawft-llm provider for embeddings) — `LlmEmbeddingProvider` with fallback to mock
 - [ ] Sentence-transformer backend for documentation chunks
 - [ ] AST-aware backend for Rust code (function signatures, type definitions)
-- [ ] Batch embedding pipeline (process multiple chunks in one call)
+- [x] Batch embedding pipeline (process multiple chunks in one call) — `embed_batch` + `sync_embed` for ingestion
 
 ## Data Ingestion
 
@@ -31,16 +31,16 @@ Last updated: 2026-03-26 (after graph ingestion)
 ## Confidence Improvement
 
 - [x] Initial confidence assessment (0.62 → 0.78 after ingestion) — see `docs/weftos/weaver-analysis-clawft.md`
-- [ ] Confidence scoring based on edge coverage (% of modules with causal edges)
-- [ ] Gap detection: modules with no incoming/outgoing causal edges
-- [ ] Suggestion engine: recommend data sources based on confidence gaps
+- [x] Confidence scoring based on edge coverage (% of modules with causal edges) — `compute_confidence()`
+- [x] Gap detection: modules with no incoming/outgoing causal edges — orphan detection in `compute_confidence()`
+- [x] Suggestion engine: recommend data sources based on confidence gaps — integrated into `ConfidenceReport`
 - [ ] Confidence history tracking in meta-Loom
 
 ## Export / Import
 
 - [x] ExportedModel type defined (`crates/clawft-kernel/src/weaver.rs`)
-- [ ] weave-model.json export CLI command (`weaver ecc export`)
-- [ ] weave-model.json import on edge devices
+- [x] weave-model.json export CLI command (`weaver ecc export`) — `export_model_to_file()` + causal data population
+- [x] weave-model.json import on edge devices — `import_model_from_file()` roundtrip verified
 - [ ] Model diff (compare two exported models)
 - [ ] Model merge (stitch models from different analysis sessions)
 

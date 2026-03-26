@@ -2249,4 +2249,74 @@ mod tests {
             .unwrap();
         assert_eq!(kernel.process_table().max_processes(), 42);
     }
+
+    // ── Sprint 09a: KernelState serde + display tests ────────────
+
+    #[test]
+    fn kernel_state_serde_roundtrip_all_variants() {
+        for state in [
+            KernelState::Booting,
+            KernelState::Running,
+            KernelState::ShuttingDown,
+            KernelState::Halted,
+        ] {
+            let json = serde_json::to_string(&state).unwrap();
+            let restored: KernelState = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored, state);
+        }
+    }
+
+    #[test]
+    fn kernel_state_equality() {
+        assert_eq!(KernelState::Running, KernelState::Running);
+        assert_ne!(KernelState::Running, KernelState::Halted);
+    }
+
+    #[tokio::test]
+    async fn kernel_state_is_running_after_boot() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        assert_eq!(kernel.state(), &KernelState::Running);
+    }
+
+    #[tokio::test]
+    async fn boot_log_has_entries() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        let log = kernel.boot_log();
+        assert!(log.events().len() > 0, "boot log should have events");
+    }
+
+    #[tokio::test]
+    async fn bus_is_accessible_after_boot() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        // Bus should exist (used for message passing)
+        let _bus = kernel.bus();
+    }
+
+    #[tokio::test]
+    async fn a2a_router_has_inboxes_after_boot() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        let _router = kernel.a2a_router();
+        // Router should be accessible after boot
+    }
+
+    #[tokio::test]
+    async fn ipc_accessible_after_boot() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        let _ipc = kernel.ipc();
+    }
 }

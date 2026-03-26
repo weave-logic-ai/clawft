@@ -1056,4 +1056,199 @@ mod tests {
         assert_eq!(hash.len(), 64);
         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
     }
+
+    // ── Sprint 09a: serde roundtrip tests ────────────────────────
+
+    #[test]
+    fn service_type_serde_roundtrip_core() {
+        let st = ServiceType::Core;
+        let json = serde_json::to_string(&st).unwrap();
+        let restored: ServiceType = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, ServiceType::Core);
+    }
+
+    #[test]
+    fn service_type_serde_roundtrip_plugin() {
+        let st = ServiceType::Plugin;
+        let json = serde_json::to_string(&st).unwrap();
+        let restored: ServiceType = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, ServiceType::Plugin);
+    }
+
+    #[test]
+    fn service_type_serde_roundtrip_custom() {
+        let st = ServiceType::Custom("webhook".into());
+        let json = serde_json::to_string(&st).unwrap();
+        let restored: ServiceType = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, ServiceType::Custom("webhook".into()));
+    }
+
+    #[test]
+    fn service_audit_level_serde_roundtrip() {
+        for level in [ServiceAuditLevel::Full, ServiceAuditLevel::GateOnly] {
+            let json = serde_json::to_string(&level).unwrap();
+            let restored: ServiceAuditLevel = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored, level);
+        }
+    }
+
+    #[test]
+    fn service_info_serde_roundtrip() {
+        let info = ServiceInfo {
+            name: "cache".into(),
+            service_type: "core".into(),
+            healthy: true,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let restored: ServiceInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.name, "cache");
+        assert_eq!(restored.service_type, "core");
+        assert!(restored.healthy);
+    }
+
+    #[test]
+    fn service_info_unhealthy_roundtrip() {
+        let info = ServiceInfo {
+            name: "broken".into(),
+            service_type: "plugin".into(),
+            healthy: false,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let restored: ServiceInfo = serde_json::from_str(&json).unwrap();
+        assert!(!restored.healthy);
+    }
+
+    #[test]
+    fn snapshot_returns_all_services() {
+        let registry = ServiceRegistry::new();
+        registry
+            .register(Arc::new(MockService::new("svc-a", ServiceType::Core)))
+            .unwrap();
+        registry
+            .register(Arc::new(MockService::new("svc-b", ServiceType::Plugin)))
+            .unwrap();
+
+        let snapshot = registry.snapshot();
+        assert_eq!(snapshot.len(), 2);
+        let names: Vec<&str> = snapshot.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"svc-a"));
+        assert!(names.contains(&"svc-b"));
+    }
+
+    #[test]
+    fn snapshot_is_independent_of_registry() {
+        let registry = ServiceRegistry::new();
+        registry
+            .register(Arc::new(MockService::new("snap-svc", ServiceType::Core)))
+            .unwrap();
+
+        let snapshot = registry.snapshot();
+        // Remove from registry -- snapshot should still have it
+        registry.unregister("snap-svc");
+        assert!(registry.get("snap-svc").is_none());
+        assert_eq!(snapshot.len(), 1);
+    }
+
+    #[test]
+    fn get_nonexistent_service_returns_none() {
+        let registry = ServiceRegistry::new();
+        assert!(registry.get("ghost").is_none());
+    }
+
+    #[test]
+    fn get_nonexistent_entry_returns_none() {
+        let registry = ServiceRegistry::new();
+        assert!(registry.get_entry("ghost").is_none());
+    }
+
+    #[tokio::test]
+    async fn shell_adapter_missing_dot_returns_error() {
+        let api = Arc::new(MockServiceApi);
+        let shell = ShellAdapter::new(api);
+        let result = shell.execute("nodot").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn shell_adapter_json_array_args() {
+        let api = Arc::new(MockServiceApi);
+        let shell = ShellAdapter::new(api);
+        let result = shell.execute("svc.method [1,2,3]").await.unwrap();
+        assert_eq!(result["service"], "svc");
+        assert_eq!(result["method"], "method");
+    }
+
+    #[tokio::test]
+    async fn mcp_adapter_dot_separator() {
+        let api = Arc::new(MockServiceApi);
+        let mcp = McpAdapter::new(api);
+        let result = mcp
+            .handle_tool_call("kernel.status", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(result["service"], "kernel");
+        assert_eq!(result["method"], "status");
+    }
+
+    #[tokio::test]
+    async fn mcp_adapter_invalid_tool_name_returns_error() {
+        let api = Arc::new(MockServiceApi);
+        let mcp = McpAdapter::new(api);
+        let result = mcp
+            .handle_tool_call("noseparator", serde_json::json!({}))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn service_type_all_variants_serde() {
+        let variants = vec![
+            ServiceType::Core,
+            ServiceType::Plugin,
+            ServiceType::Cron,
+            ServiceType::Api,
+            ServiceType::Custom("special".into()),
+        ];
+        for v in variants {
+            let json = serde_json::to_string(&v).unwrap();
+            let _: ServiceType = serde_json::from_str(&json).unwrap();
+        }
+    }
+
+    #[test]
+    fn service_entry_external_endpoint_roundtrip() {
+        let entry = ServiceEntry {
+            name: "ext".into(),
+            owner_pid: None,
+            endpoint: ServiceEndpoint::External {
+                url: "https://api.example.com/v2".into(),
+            },
+            audit_level: ServiceAuditLevel::GateOnly,
+            registered_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let restored: ServiceEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.name, "ext");
+        assert!(restored.owner_pid.is_none());
+        assert_eq!(restored.audit_level, ServiceAuditLevel::GateOnly);
+    }
+
+    #[test]
+    fn service_entry_container_endpoint_roundtrip() {
+        let entry = ServiceEntry {
+            name: "docker-svc".into(),
+            owner_pid: None,
+            endpoint: ServiceEndpoint::Container {
+                id: "abc123".into(),
+            },
+            audit_level: ServiceAuditLevel::Full,
+            registered_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let restored: ServiceEntry = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            restored.endpoint,
+            ServiceEndpoint::Container { ref id } if id == "abc123"
+        ));
+    }
 }

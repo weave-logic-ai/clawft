@@ -433,9 +433,9 @@ pub enum MessagePayload {
 
 ### Documentation
 - [x] ADR-028 written and linked from `docs/architecture/`
-- [ ] Per-phase `decisions.md` in `.planning/development_notes/weftos/phase-K{N}/`
-- [ ] Kernel guide at `docs/guides/kernel.md` (created in K5)
-- [ ] All rustdoc builds without warnings
+- [x] Per-phase `decisions.md` in `.planning/development_notes/weftos/phase-K{N}/` *(K0-K6 all present, verified 2026-03-26)*
+- [x] Kernel guide at `docs/src/content/docs/weftos/kernel-guide.mdx` *(created, verified 2026-03-26; path differs from original plan)*
+- [ ] All rustdoc builds without warnings *(30 warnings remain as of 2026-03-26)*
 
 ### Security
 - [x] Capability checks enforced at system boundaries
