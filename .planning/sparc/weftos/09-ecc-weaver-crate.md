@@ -1,9 +1,9 @@
-# ECC Weaver Crate -- SPARC Plan
+# ECC Weaver Crate -- SPARC Plan (v2: Self-Evolving Cognitive Modeler)
 
 **Crate**: `crates/ecc-weaver`
 **Status**: Design
 **Date**: 2026-03-26
-**Depends on**: `clawft-kernel` (ECC types), `exo-resource-tree`
+**Depends on**: `clawft-kernel` (ECC types, SystemService, A2ARouter, AgentSupervisor)
 
 ---
 
@@ -11,17 +11,30 @@
 
 ### What This Crate Provides
 
-The `ecc-weaver` crate is the Rust API backing the Weaver skill. It orchestrates
-all operations on the ECC forest of trees: initialization, ingestion, stitching,
-pruning, and analysis. It treats the combined ECC structures as a single cognitive
-fabric called a Loom.
+The `ecc-weaver` crate is a kernel-native `SystemService` that iteratively discovers,
+refines, and maintains causal models from data. It runs a continuous confidence-driven
+**HYPOTHESIZE -> OBSERVE -> EVALUATE -> ADJUST** loop, tracking its own evolution in
+a meta-Loom. The Weaver's learned models export as `weave-model.json` for edge deployment.
+
+### Kernel Integration Contract
+
+The Weaver is NOT an external tool. It runs inside WeftOS:
+
+- Implements `SystemService`, registered at boot when `ecc` feature is enabled
+- Gets a PID in `ProcessTable`, supervised by `AgentSupervisor`
+- Holds `Arc` references to kernel ECC structures (no serialization boundary)
+- Consumes `CognitiveTick` events (does not run its own timer loop)
+- Communicates via `A2ARouter` IPC (`KernelMessage`)
+- Registers at `/kernel/services/weaver` in the resource tree
+- Meta-Loom lives in the kernel's own ECC structures (tag `Custom(0x40)`)
+- CLI commands (`weaver ecc *`) send messages via daemon Unix socket
 
 ### Key Types
 
 ```rust
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::Arc;
 
 use clawft_kernel::causal::{CausalGraph, CausalEdge, CausalEdgeType, NodeId};
 use clawft_kernel::cognitive_tick::{CognitiveTick, CognitiveTickConfig};
@@ -30,278 +43,298 @@ use clawft_kernel::hnsw_service::{HnswService, HnswServiceConfig, HnswSearchResu
 use clawft_kernel::impulse::{ImpulseQueue, ImpulseType, Impulse};
 use clawft_kernel::chain::ChainManager;
 use clawft_kernel::tree_manager::TreeManager;
+use clawft_kernel::service::{SystemService, ServiceType};
+use clawft_kernel::a2a::A2ARouter;
+use clawft_kernel::process::ProcessTable;
+
+// ── The Loom ──────────────────────────────────────────────────────
 
 /// The combined ECC structures for a single domain.
 ///
-/// A Loom holds all the trees in the forest for one cognitive workspace.
-/// Every operation on the Loom maintains consistency across all structures:
-/// causal edges have CrossRefs to HNSW entries, chain events record provenance,
-/// and the resource tree reflects the domain's namespace organization.
+/// A Loom holds Arc references to the SHARED kernel structures.
+/// Every operation maintains consistency across all structures.
 pub struct Loom {
-    /// Domain identifier (e.g., "my-project").
     pub domain: String,
-    /// The causal reasoning graph.
-    pub causal: CausalGraph,
-    /// HNSW vector search index.
-    pub hnsw: HnswService,
-    /// Cross-references linking nodes across structures.
-    pub crossrefs: CrossRefStore,
-    /// Ephemeral inter-structure event queue.
-    pub impulses: ImpulseQueue,
-    /// Provenance chain for tamper-evident audit trail.
-    pub chain: ChainManager,
-    /// Namespace and resource organization.
-    pub tree: TreeManager,
-    /// Cognitive tick heartbeat.
-    pub tick: CognitiveTick,
-    /// Parsed configuration from weave.toml.
-    pub config: WeaveConfig,
+    pub causal: Arc<CausalGraph>,
+    pub hnsw: Arc<HnswService>,
+    pub crossrefs: Arc<CrossRefStore>,
+    pub impulses: Arc<ImpulseQueue>,
+    pub chain: Arc<ChainManager>,
+    pub tree: Arc<TreeManager>,
 }
 
-/// The top-level orchestrator for all weaving operations.
+// ── Modeling Session ──────────────────────────────────────────────
+
+/// The Weaver's core modeling loop state.
 ///
-/// Manages multiple Looms (one per domain) and the pattern library.
-/// Provides the public API that the Weaver skill and CLI invoke.
-pub struct WeaverEngine {
-    /// Active looms keyed by domain name.
-    looms: HashMap<String, Loom>,
-    /// Global pattern library (shared across looms).
-    patterns: Vec<Pattern>,
+/// A session tracks the iterative hypothesis-observe-evaluate-adjust
+/// loop for one domain. Its meta-Loom entries live in the kernel's
+/// CausalGraph tagged with StructureTag::Custom(0x40).
+pub struct ModelingSession {
+    /// Domain identifier.
+    pub domain: String,
+    /// User-provided context that shapes model hypotheses.
+    pub context: String,
+    /// Target confidence the Weaver aims to reach.
+    pub target_confidence: f64,
+    /// The learned causal model (versioned, exportable).
+    pub model: CausalModel,
+    /// Latest confidence assessment.
+    pub confidence: ConfidenceReport,
+    /// Active data sources feeding this session.
+    pub sources: Vec<DataSource>,
+    /// Version history of the model.
+    pub history: Vec<ModelVersion>,
+    /// Arc to the Loom this session operates on.
+    pub loom: Loom,
+    /// Meta-loom root node ID (in the kernel's CausalGraph).
+    pub meta_root: NodeId,
+    /// Whether auto-adjust is enabled (Act mode = true).
+    pub auto_adjust: bool,
 }
 
-/// A recurrent structural pattern (warp thread).
+// ── Causal Model ──────────────────────────────────────────────────
+
+/// A causal model learned from data. This is the Weaver's output.
 ///
-/// Patterns define sequences of CausalEdgeTypes that repeat under
-/// certain conditions. They are the "shape" of the conversation.
-pub struct Pattern {
-    /// Human-readable name (e.g., "ci-cd").
+/// Contains the discovered structure: what kinds of nodes exist,
+/// what kinds of edges connect them, what patterns recur, and
+/// how the cognitive tick should be configured.
+pub struct CausalModel {
+    /// Monotonically increasing version number.
+    pub version: u32,
+    /// Discovered node type specifications.
+    pub node_types: Vec<NodeTypeSpec>,
+    /// Discovered edge type specifications with confidence.
+    pub edge_types: Vec<EdgeTypeSpec>,
+    /// Recurring patterns discovered in the data.
+    pub patterns: Vec<LearnedPattern>,
+    /// Cognitive tick configuration (may be adjusted by the Weaver).
+    pub tick_config: CognitiveTickConfig,
+    /// Data sources the model requires or recommends.
+    pub sources_required: Vec<SourceRequirement>,
+}
+
+pub struct NodeTypeSpec {
     pub name: String,
-    /// Description of what this pattern represents.
-    pub description: String,
-    /// The sequence of edge types that constitutes one occurrence.
-    pub edge_sequence: Vec<CausalEdgeType>,
-    /// When this pattern recurs.
-    pub recurrence: RecurrenceType,
-}
-
-/// When a Pattern fires.
-pub enum RecurrenceType {
-    /// Fire on every new commit event.
-    OnCommit,
-    /// Fire on every cognitive tick.
-    OnTick,
-    /// Fire when a named event occurs.
-    OnEvent(String),
-    /// Fire at a fixed interval.
-    Periodic(Duration),
-}
-
-// ── Configuration ──────────────────────────────────────────────────
-
-/// Parsed weave.toml.
-pub struct WeaveConfig {
-    pub domain: DomainConfig,
-    pub tick: CognitiveTickConfig,
-    pub causal: CausalConfig,
-    pub hnsw: HnswConfig,
-    pub impulse: ImpulseConfig,
-    pub patterns: Vec<PatternConfig>,
-    pub sources: Vec<SourceConfig>,
-    pub meta: MetaConfig,
-}
-
-pub struct DomainConfig {
-    pub name: String,
-    pub description: String,
-    pub mode: OperatingMode,
-}
-
-pub enum OperatingMode {
-    Act,
-    Analyze,
-    Generate,
-}
-
-pub struct CausalConfig {
-    pub edge_types: Vec<CausalEdgeType>,
-    pub decay_rate: f32,
-    pub decay_threshold: f32,
-    pub max_edges: usize,
-    pub max_nodes: usize,
-}
-
-pub struct HnswConfig {
+    pub embedding_strategy: String,
     pub dimensions: usize,
-    pub ef_search: usize,
-    pub ef_construction: usize,
-    pub max_entries: usize,
 }
 
-pub struct ImpulseConfig {
-    pub ttl_ticks: u32,
-    pub max_queue_depth: usize,
-}
-
-pub struct PatternConfig {
-    pub name: String,
-    pub description: String,
-    pub edge_sequence: Vec<String>,
-    pub recurrence: String,
-}
-
-pub struct MetaConfig {
-    pub enabled: bool,
-    pub conversations: Vec<MetaConversationConfig>,
-}
-
-pub struct MetaConversationConfig {
-    pub name: String,
-    pub relates_to: Vec<String>,
-    pub pattern: String,
-}
-
-// ── Source configuration ───────────────────────────────────────────
-
-pub enum SourceConfig {
-    GitLog { path: PathBuf, branch: String },
-    FileTree { root: PathBuf, patterns: Vec<String> },
-    Documentation { root: PathBuf },
-    SparcPlan { path: PathBuf },
-    Api { url: String, auth: Option<String> },
-}
-
-// ── Analysis types ─────────────────────────────────────────────────
-
-/// Codebase analyzer that produces initialization plans.
-pub struct Analyzer {
-    pub domain: String,
-}
-
-impl Analyzer {
-    pub fn analyze_codebase(path: &Path) -> AnalysisPlan { todo!() }
-    pub fn analyze_documentation(path: &Path) -> AnalysisPlan { todo!() }
-    pub fn analyze_git_history(path: &Path) -> AnalysisPlan { todo!() }
-    pub fn suggest_patterns(plan: &AnalysisPlan) -> Vec<Pattern> { todo!() }
-    pub fn identify_meta_conversations(plan: &AnalysisPlan) -> Vec<MetaConversation> { todo!() }
-}
-
-/// The output of analysis: a plan for what to create in the Loom.
-pub struct AnalysisPlan {
-    pub nodes: Vec<PlannedNode>,
-    pub edges: Vec<PlannedEdge>,
-    pub embeddings: Vec<PlannedEmbedding>,
-    pub crossrefs: Vec<PlannedCrossRef>,
-    pub estimated_vectors: usize,
-    pub estimated_edges: usize,
-    pub recommended_dimensions: usize,
-    pub meta_conversations: Vec<MetaConversation>,
-}
-
-pub struct PlannedNode {
-    pub label: String,
-    pub node_type: String,
-    pub metadata: serde_json::Value,
-}
-
-pub struct PlannedEdge {
-    pub source_label: String,
-    pub target_label: String,
+pub struct EdgeTypeSpec {
+    pub from: String,
+    pub to: String,
     pub edge_type: CausalEdgeType,
-    pub weight: f32,
+    pub confidence: f64,
+    pub sample_count: usize,
+    pub note: Option<String>,
 }
 
-pub struct PlannedEmbedding {
-    pub node_label: String,
-    pub content_chunk: String,
-    pub estimated_dimensions: usize,
-}
-
-pub struct PlannedCrossRef {
-    pub source_structure: StructureTag,
-    pub target_structure: StructureTag,
-    pub ref_type: CrossRefType,
-    pub description: String,
-}
-
-pub struct MetaConversation {
+pub struct LearnedPattern {
     pub name: String,
-    pub description: String,
-    pub relates_to: Vec<String>,
-    pub pattern: String,
+    pub sequence: Vec<String>,
+    pub confidence: f64,
+    pub instances_found: usize,
 }
 
-// ── Merging ────────────────────────────────────────────────────────
-
-/// Forest stitching operations.
-pub struct Merger;
-
-impl Merger {
-    pub fn stitch(source: &Loom, target: &Loom) -> StitchResult { todo!() }
-    pub fn resolve_conflicts(a: &CausalEdge, b: &CausalEdge) -> ConflictResolution { todo!() }
+pub struct SourceRequirement {
+    pub source_type: String,
+    pub required: bool,
+    pub improves: Vec<String>,
 }
 
-pub struct StitchResult {
-    pub cross_refs_created: usize,
-    pub conflicts_resolved: usize,
-    pub novel_connections: Vec<NovelConnection>,
+// ── Confidence ────────────────────────────────────────────────────
+
+/// Confidence assessment with gap analysis.
+pub struct ConfidenceReport {
+    /// Weighted mean confidence across all edges.
+    pub overall: f64,
+    /// Per-edge confidence breakdown.
+    pub per_edge: HashMap<String, EdgeConfidence>,
+    /// Identified gaps with suggestions.
+    pub gaps: Vec<ConfidenceGap>,
+    /// Actionable suggestions (may be auto-applied in Act mode).
+    pub suggestions: Vec<ModelingSuggestion>,
 }
 
-pub struct NovelConnection {
-    pub source_domain: String,
-    pub target_domain: String,
-    pub similarity: f32,
-    pub description: String,
+pub struct EdgeConfidence {
+    pub confidence: f64,
+    pub sample_count: usize,
+    pub coverage: f64,
+    pub consistency: f64,
+    pub status: ConfidenceStatus,
 }
 
-pub enum ConflictResolution {
-    PreferHigherWeight,
-    PreferMoreRecent,
-    KeepBoth,
+pub enum ConfidenceStatus {
+    Strong,       // >= 0.80
+    Developing,   // >= 0.50
+    Weak,         // >= 0.30
+    Insufficient, // < 0.30
 }
 
-// ── Pruning ────────────────────────────────────────────────────────
-
-/// Trimming and garbage collection.
-pub struct Pruner;
-
-impl Pruner {
-    pub fn apply_decay(loom: &Loom, decay_rate: f32) -> DecayReport { todo!() }
-    pub fn prune(loom: &Loom, threshold: f32) -> PruneReport { todo!() }
-    pub fn gc_crossrefs(loom: &Loom) -> usize { todo!() }
-    pub fn archive_subtree(loom: &Loom, root_node: NodeId) -> Vec<u8> { todo!() }
+pub struct ConfidenceGap {
+    pub relationship: String,
+    pub confidence: f64,
+    pub reason: String,
+    pub suggestion: ModelingSuggestion,
 }
 
-pub struct DecayReport {
-    pub edges_decayed: usize,
-    pub edges_below_threshold: usize,
+pub enum ModelingSuggestion {
+    /// Request a new data source.
+    AddSource {
+        source_type: String,
+        description: String,
+        expected_improvement: f64,
+    },
+    /// Refine an edge type (e.g., "Causes" should be "Enables").
+    RefineEdgeType {
+        from: String,
+        to: String,
+        current: CausalEdgeType,
+        suggested: CausalEdgeType,
+        reason: String,
+    },
+    /// Split a coarse node category into finer ones.
+    SplitCategory {
+        category: String,
+        into: Vec<String>,
+        reason: String,
+    },
+    /// Merge categories that turned out to be the same thing.
+    MergeCategories {
+        categories: Vec<String>,
+        into: String,
+        reason: String,
+    },
+    /// Change HNSW dimensions for a node type.
+    AdjustDimensions {
+        node_type: String,
+        current: usize,
+        suggested: usize,
+        reason: String,
+    },
+    /// Adjust the cognitive tick interval.
+    ChangeTick {
+        current_ms: u32,
+        suggested_ms: u32,
+        reason: String,
+    },
 }
 
-pub struct PruneReport {
-    pub edges_removed: usize,
-    pub nodes_removed: usize,
-    pub hnsw_entries_removed: usize,
-    pub crossrefs_removed: usize,
-    pub bytes_archived: usize,
+// ── Data Sources ──────────────────────────────────────────────────
+
+/// Data source that feeds the modeling loop.
+pub enum DataSource {
+    GitLog {
+        path: PathBuf,
+        branch: Option<String>,
+        watch: bool,
+        last_oid: Option<String>,
+    },
+    FileTree {
+        root: PathBuf,
+        patterns: Vec<String>,
+        watch: bool,
+    },
+    CiPipeline {
+        webhook_url: String,
+    },
+    IssueTracker {
+        api_url: String,
+        auth_env_var: Option<String>,
+    },
+    Documentation {
+        root: PathBuf,
+    },
+    SparcPlan {
+        path: PathBuf,
+    },
+    CustomStream {
+        name: String,
+        format: StreamFormat,
+    },
 }
 
-// ── Ingestion ──────────────────────────────────────────────────────
-
-/// Data source ingestion into ECC structures.
-pub struct Ingester;
-
-impl Ingester {
-    pub fn ingest_git_log(loom: &mut Loom, config: &SourceConfig) -> IngestReport { todo!() }
-    pub fn ingest_file_tree(loom: &mut Loom, config: &SourceConfig) -> IngestReport { todo!() }
-    pub fn ingest_documentation(loom: &mut Loom, config: &SourceConfig) -> IngestReport { todo!() }
-    pub fn ingest_sparc_plan(loom: &mut Loom, config: &SourceConfig) -> IngestReport { todo!() }
+pub enum StreamFormat {
+    JsonLines,
+    Csv,
+    Custom(String),
 }
 
-pub struct IngestReport {
-    pub nodes_created: usize,
-    pub edges_created: usize,
-    pub embeddings_inserted: usize,
-    pub crossrefs_created: usize,
-    pub duration_ms: u64,
+// ── Model Export ──────────────────────────────────────────────────
+
+/// Exportable model configuration for edge deployment.
+///
+/// Serializes to weave-model.json. Contains the learned model
+/// but NOT the data — only the schema for how to model.
+#[derive(Serialize, Deserialize)]
+pub struct ExportedModel {
+    pub version: u32,
+    pub domain: String,
+    pub created_by: String,
+    pub confidence: f64,
+    pub model: SerializableCausalModel,
+    pub evolution_history: Vec<ModelVersion>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ModelVersion {
+    pub version: u32,
+    pub change: String,
+    pub confidence_before: f64,
+    pub confidence_after: f64,
+    pub timestamp: u64,
+}
+
+// ── Weaver Knowledge Base ─────────────────────────────────────────
+
+/// Cross-domain learning accumulated from past modeling sessions.
+///
+/// The knowledge base stores in the kernel's ECC structures
+/// (tagged Custom(0x41)). Over time, the Weaver develops domain
+/// expertise: a Weaver that has modeled 50 Rust codebases knows
+/// that CI output is the best source for commit->test edges.
+pub struct WeaverKnowledgeBase {
+    /// Root node in the kernel CausalGraph for KB entries.
+    pub kb_root: NodeId,
+    /// Reference to shared kernel structures.
+    pub loom: Loom,
+}
+
+/// A learned strategy pattern for a domain type.
+pub struct StrategyPattern {
+    /// Domain characteristics that trigger this strategy.
+    pub domain_characteristics: Vec<String>,
+    /// Recommended data sources.
+    pub recommended_sources: Vec<String>,
+    /// Recommended edge types.
+    pub recommended_edge_types: Vec<CausalEdgeType>,
+    /// How confident are we in this strategy?
+    pub confidence: f64,
+    /// Which past sessions contributed to learning this.
+    pub learned_from: Vec<String>,
+}
+
+// ── The Engine ────────────────────────────────────────────────────
+
+/// The top-level SystemService.
+///
+/// Manages multiple ModelingSessions (one per domain) and the
+/// shared WeaverKnowledgeBase. Processes cognitive tick events
+/// by advancing each active session's modeling loop.
+pub struct WeaverEngine {
+    /// Active sessions keyed by domain name.
+    sessions: HashMap<String, ModelingSession>,
+    /// Cross-domain knowledge base.
+    knowledge_base: WeaverKnowledgeBase,
+    /// Arc references to kernel structures.
+    causal: Arc<CausalGraph>,
+    hnsw: Arc<HnswService>,
+    crossrefs: Arc<CrossRefStore>,
+    impulses: Arc<ImpulseQueue>,
+    chain: Arc<ChainManager>,
+    tree: Arc<TreeManager>,
+    router: Arc<A2ARouter>,
 }
 ```
 
@@ -311,8 +344,8 @@ pub struct IngestReport {
 [features]
 default = ["git", "embeddings"]
 git = ["gix"]               # Git history ingestion via gitoxide
-embeddings = []              # Embedding generation (trait-based, runtime pluggable)
-watch = ["notify"]           # Filesystem watching for act mode
+embeddings = []              # Embedding generation (trait-based, pluggable)
+watch = ["notify"]           # Filesystem watching for Act mode
 ```
 
 ### Error Types
@@ -320,22 +353,28 @@ watch = ["notify"]           # Filesystem watching for act mode
 ```rust
 #[derive(Debug, thiserror::Error)]
 pub enum WeaverError {
-    #[error("loom not found: {0}")]
-    LoomNotFound(String),
+    #[error("session not found: {0}")]
+    SessionNotFound(String),
+    #[error("domain already has active session: {0}")]
+    SessionExists(String),
     #[error("configuration error: {0}")]
     ConfigError(String),
     #[error("ingestion failed: {source}")]
     IngestError { source: Box<dyn std::error::Error + Send + Sync> },
+    #[error("confidence below threshold: {current:.2} < {required:.2}")]
+    ConfidenceBelowThreshold { current: f64, required: f64 },
     #[error("stitch conflict: {0}")]
     StitchConflict(String),
-    #[error("pruning error: {0}")]
-    PruneError(String),
-    #[error("analysis error: {0}")]
-    AnalysisError(String),
+    #[error("export error: {0}")]
+    ExportError(String),
+    #[error("source error: {0}")]
+    SourceError(String),
+    #[error("kernel service unavailable: {0}")]
+    KernelUnavailable(String),
     #[error("io error: {source}")]
     Io { #[from] source: std::io::Error },
-    #[error("toml parse error: {source}")]
-    TomlParse { #[from] source: toml::de::Error },
+    #[error("json error: {source}")]
+    Json { #[from] source: serde_json::Error },
 }
 ```
 
@@ -343,298 +382,401 @@ pub enum WeaverError {
 
 ## P -- Pseudocode
 
-### 1. Loom Initialization from WeaveConfig
+### 1. SystemService Implementation
 
 ```
-FUNCTION init_loom(config: WeaveConfig) -> Result<Loom>:
-    # 1. Create empty ECC structures
-    causal = CausalGraph::new()
-    hnsw = HnswService::new(HnswServiceConfig {
-        ef_search: config.hnsw.ef_search,
-        ef_construction: config.hnsw.ef_construction,
-        default_dimensions: config.hnsw.dimensions,
-    })
-    crossrefs = CrossRefStore::new()
-    impulses = ImpulseQueue::new()
-    chain = ChainManager::new(config.domain.name)
-    tree = TreeManager::new(chain)
-    tick = CognitiveTick::new(config.tick.clone())
+impl SystemService for WeaverEngine:
+    fn name() -> &str:
+        "ecc.weaver"
 
-    # 2. Run calibration
-    calibration = run_calibration(&hnsw, &causal, &default_calibration_config())
-    IF calibration.tick_interval_ms > config.tick.tick_interval_ms:
-        log_warn("Hardware requires slower tick: {}ms", calibration.tick_interval_ms)
+    fn service_type() -> ServiceType:
+        ServiceType::Extension
 
-    # 3. Create domain root node in causal graph
-    root_id = causal.add_node(
-        label: format!("domain:{}", config.domain.name),
+    async fn start():
+        # Register in resource tree
+        tree.insert("/kernel/services/weaver", ResourceKind::Service)
+
+        # Initialize WeaverKnowledgeBase from persisted KB entries
+        knowledge_base = WeaverKnowledgeBase::load_from(causal, hnsw, crossrefs)
+
+        # Subscribe to CognitiveTick events
+        tick_rx = subscribe_to_tick_events()
+
+        # Subscribe to A2ARouter for CLI commands
+        router.register("ecc.weaver", handle_message)
+
+        # Record boot in chain
+        chain.append("weaver.boot", json!({
+            "kb_strategies": knowledge_base.strategy_count(),
+            "persisted_sessions": 0,
+        }))
+
+    async fn stop():
+        # Checkpoint all active sessions
+        for session in sessions.values():
+            checkpoint_session(session)
+        # Flush impulse queue
+        impulses.flush()
+
+    async fn health_check() -> HealthStatus:
+        for session in sessions.values():
+            if session.confidence.overall < 0.1:
+                return HealthStatus::Degraded("session {session.domain} has very low confidence")
+        HealthStatus::Healthy
+```
+
+### 2. Cognitive Tick Handler
+
+The Weaver does NOT run its own timer. It processes tick events from the kernel.
+
+```
+FUNCTION on_tick(tick_id: u64, budget_ms: f32):
+    # Divide budget across active sessions
+    per_session_budget = budget_ms / sessions.len()
+
+    FOR session IN sessions.values_mut():
+        start = Instant::now()
+
+        # Phase 1: Ingest new data from sources
+        for source in session.sources WHERE source.has_pending():
+            events = source.poll(budget: per_session_budget * 0.4)
+            for event in events:
+                ingest_event(session, event)
+
+        # Phase 2: Evaluate confidence (lightweight, runs every tick)
+        IF tick_id % session.model.tick_config.evaluation_interval == 0:
+            new_report = evaluate_confidence(session)
+
+            IF new_report.overall != session.confidence.overall:
+                # Record in meta-loom
+                record_meta_event(session, "confidence_evaluation", json!({
+                    "tick": tick_id,
+                    "before": session.confidence.overall,
+                    "after": new_report.overall,
+                    "gaps": new_report.gaps.len(),
+                }))
+                session.confidence = new_report
+
+        # Phase 3: Auto-adjust if enabled and confidence is below target
+        IF session.auto_adjust AND session.confidence.overall < session.target_confidence:
+            for suggestion in session.confidence.suggestions:
+                MATCH suggestion:
+                    RefineEdgeType(change):
+                        apply_edge_refinement(session, change)
+                        record_meta_event(session, "auto_adjust:refine_edge", json!(change))
+
+                    SplitCategory(spec):
+                        apply_category_split(session, spec)
+                        record_meta_event(session, "auto_adjust:split_category", json!(spec))
+
+                    MergeCategories(spec):
+                        apply_category_merge(session, spec)
+                        record_meta_event(session, "auto_adjust:merge_categories", json!(spec))
+
+                    AdjustDimensions(spec):
+                        apply_dimension_adjustment(session, spec)
+                        record_meta_event(session, "auto_adjust:adjust_dimensions", json!(spec))
+
+                    ChangeTick(spec):
+                        apply_tick_change(session, spec)
+                        record_meta_event(session, "auto_adjust:change_tick", json!(spec))
+
+                    AddSource(spec):
+                        # Cannot auto-add — emit impulse for operator
+                        impulses.emit(
+                            source_structure: StructureTag::Custom(0x40).as_u8(),
+                            source_node: session.meta_root_universal_id(),
+                            target_structure: StructureTag::CausalGraph.as_u8(),
+                            impulse_type: ImpulseType::Custom(0x33),
+                            payload: json!({"action": "source_request", "spec": spec}),
+                            hlc_timestamp: now_hlc(),
+                        )
+                        record_meta_event(session, "source_request_emitted", json!(spec))
+
+            # If any adjustments were applied, bump model version
+            IF adjustments_applied > 0:
+                old_version = session.model.version
+                session.model.version += 1
+                session.history.push(ModelVersion {
+                    version: session.model.version,
+                    change: describe_changes(applied_adjustments),
+                    confidence_before: previous_confidence,
+                    confidence_after: session.confidence.overall,
+                    timestamp: now_hlc(),
+                })
+
+                # Record version bump in chain
+                chain.append("weaver.model.version_bump", json!({
+                    "domain": session.domain,
+                    "old_version": old_version,
+                    "new_version": session.model.version,
+                    "confidence": session.confidence.overall,
+                }))
+
+                # Emit model-changed impulse
+                impulses.emit(
+                    source_structure: StructureTag::Custom(0x40).as_u8(),
+                    source_node: session.meta_root_universal_id(),
+                    target_structure: StructureTag::CausalGraph.as_u8(),
+                    impulse_type: ImpulseType::Custom(0x32),
+                    payload: json!({
+                        "version": session.model.version,
+                        "confidence": session.confidence.overall,
+                    }),
+                    hlc_timestamp: now_hlc(),
+                )
+
+                # Update WeaverKnowledgeBase with what we learned
+                update_knowledge_base(session)
+
+        # Budget enforcement
+        IF start.elapsed() > per_session_budget:
+            break  # yield remaining budget to next session
+```
+
+### 3. Event Ingestion
+
+```
+FUNCTION ingest_event(session: &mut ModelingSession, event: SourceEvent):
+    loom = &session.loom
+    model = &session.model
+
+    # 1. Determine node type from event
+    node_type = classify_event(event, model.node_types)
+
+    # 2. Create causal graph node
+    node_id = loom.causal.add_node(
+        label: format!("{}:{}", node_type.name, event.id),
         metadata: json!({
-            "type": "domain_root",
-            "mode": config.domain.mode,
-            "created_at": now_hlc()
+            "type": node_type.name,
+            "source": event.source_name,
+            "timestamp": event.timestamp,
+            "data": event.payload,
         })
     )
 
-    # 4. Create namespace nodes from sources
-    FOR source IN config.sources:
-        namespace_label = source.namespace_label()
-        ns_id = causal.add_node(namespace_label, json!({"type": "namespace"}))
-        causal.link(root_id, ns_id, Enables, 1.0, now_hlc(), chain.next_seq())
+    # 3. Generate embedding using the node type's strategy
+    embedding = generate_embedding(event.content, node_type.embedding_strategy)
+    hnsw_id = format!("{}:{}", session.domain, event.id)
+    loom.hnsw.insert(hnsw_id, embedding, json!({"node_id": node_id}))
 
-        # Create ResourceTree entry
-        tree.insert(namespace_label, ResourceKind::Namespace)
-
-    # 5. Record genesis in ExoChain
-    chain.append("weaver.genesis", json!({
-        "domain": config.domain.name,
-        "namespaces": config.sources.len(),
-        "calibration": calibration,
-    }))
-
-    # 6. Create CrossRefs linking chain genesis to causal root
-    crossrefs.insert(CrossRef {
-        source: chain.genesis_universal_id(),
-        source_structure: StructureTag::ExoChain,
-        target: causal_node_universal_id(root_id),
-        target_structure: StructureTag::CausalGraph,
-        ref_type: CrossRefType::TriggeredBy,
-        created_at: now_hlc(),
-        chain_seq: chain.current_seq(),
-    })
-
-    # 7. Start cognitive tick
-    tick.start()
-
-    RETURN Ok(Loom {
-        domain: config.domain.name,
-        causal, hnsw, crossrefs, impulses,
-        chain, tree, tick, config
-    })
-```
-
-### 2. Codebase Analysis into AnalysisPlan
-
-```
-FUNCTION analyze_codebase(path: Path) -> AnalysisPlan:
-    plan = AnalysisPlan::empty()
-
-    # Phase 1: File tree discovery
-    files = walk_directory(path, skip: [".git", "target", "node_modules"])
-    FOR file IN files:
-        plan.nodes.push(PlannedNode {
-            label: file.relative_path,
-            node_type: classify_file(file),  # "source", "test", "config", "doc"
-            metadata: json!({ "size": file.size, "ext": file.extension }),
-        })
-
-    # Phase 2: Module/dependency analysis
-    modules = extract_modules(files)  # parse Cargo.toml, package.json, mod.rs, etc.
-    FOR (mod_a, mod_b) IN module_dependencies(modules):
-        plan.edges.push(PlannedEdge {
-            source: mod_a.name,
-            target: mod_b.name,
-            edge_type: Causes,  # mod_a depends on mod_b
-            weight: 0.8,
-        })
-
-    # Phase 3: Test-to-source mapping
-    FOR (test_file, source_file) IN test_source_pairs(files):
-        plan.edges.push(PlannedEdge {
-            source: test_file,
-            target: source_file,
-            edge_type: EvidenceFor,
-            weight: 0.9,
-        })
-
-    # Phase 4: Embedding plan
-    FOR file IN files WHERE file.is_source_or_doc():
-        chunks = chunk_file(file, max_tokens: 512)
-        FOR chunk IN chunks:
-            plan.embeddings.push(PlannedEmbedding {
-                node_label: file.relative_path,
-                content_chunk: chunk.text,
-                estimated_dimensions: 384,
-            })
-
-    # Phase 5: CrossRef plan
-    FOR embedding IN plan.embeddings:
-        plan.crossrefs.push(PlannedCrossRef {
-            source_structure: StructureTag::HnswIndex,
-            target_structure: StructureTag::CausalGraph,
-            ref_type: CrossRefType::MemoryEncoded,
-            description: format!("embedding for {}", embedding.node_label),
-        })
-
-    # Phase 6: Meta-conversation identification
-    plan.meta_conversations = identify_meta_conversations(files, modules)
-
-    # Phase 7: Compute estimates
-    plan.estimated_vectors = plan.embeddings.len()
-    plan.estimated_edges = plan.edges.len()
-    plan.recommended_dimensions = recommend_dimensions(plan.estimated_vectors)
-
-    RETURN plan
-```
-
-### 3. Pattern Weaving (SDLC as Conversation)
-
-```
-FUNCTION weave_git_history(loom: &mut Loom, repo_path: Path, branch: String) -> IngestReport:
-    report = IngestReport::zero()
-    repo = open_git_repo(repo_path)
-    commits = repo.log(branch, limit: loom.config.sources.git_depth)
-
-    # Create nodes for all commits
-    commit_nodes: HashMap<OID, NodeId> = {}
-    FOR commit IN commits:
-        node_id = loom.causal.add_node(
-            label: format!("commit:{}", commit.short_oid),
-            metadata: json!({
-                "oid": commit.oid,
-                "author": commit.author,
-                "message": commit.message,
-                "timestamp": commit.timestamp,
-                "files_changed": commit.files_changed,
-            })
+    # 4. Infer edges using the model's edge types
+    for edge_spec in model.edge_types WHERE edge_spec.from == node_type.name:
+        # Search HNSW for candidate targets of this edge type
+        candidates = loom.hnsw.search(
+            &embedding,
+            top_k: 10,
+            filter: |meta| meta["type"] == edge_spec.to,
         )
-        commit_nodes.insert(commit.oid, node_id)
-        report.nodes_created += 1
 
-    # Create edges for commit relationships
-    FOR commit IN commits:
-        node = commit_nodes[commit.oid]
+        for candidate in candidates WHERE candidate.score > edge_spec.threshold():
+            target_node_id = candidate.metadata["node_id"]
+            loom.causal.link(
+                node_id,
+                target_node_id,
+                edge_spec.edge_type.clone(),
+                candidate.score,  # weight = similarity score
+                now_hlc(),
+                loom.chain.next_seq(),
+            )
 
-        # Parent -> child = Follows (sequential conversation flow)
-        FOR parent_oid IN commit.parents:
-            IF parent_node = commit_nodes.get(parent_oid):
-                loom.causal.link(parent_node, node, Follows, 1.0, commit.hlc, chain_seq)
-                report.edges_created += 1
+    # 5. CrossRef: HNSW entry <-> CausalGraph node
+    loom.crossrefs.insert(CrossRef {
+        source: hnsw_universal_id(hnsw_id),
+        source_structure: StructureTag::HnswIndex,
+        target: causal_node_universal_id(node_id),
+        target_structure: StructureTag::CausalGraph,
+        ref_type: CrossRefType::MemoryEncoded,
+        created_at: now_hlc(),
+        chain_seq: loom.chain.next_seq(),
+    })
 
-        # Merge commits: both parents Enable the merge
-        IF commit.parents.len() > 1:
-            FOR parent_oid IN commit.parents:
-                IF parent_node = commit_nodes.get(parent_oid):
-                    loom.causal.link(parent_node, node, Enables, 0.9, commit.hlc, chain_seq)
-
-        # Issue references: commit TriggeredBy issue
-        FOR issue_ref IN extract_issue_refs(commit.message):
-            issue_node = get_or_create_issue_node(loom, issue_ref)
-            loom.causal.link(issue_node, node, TriggeredBy, 0.8, commit.hlc, chain_seq)
-            report.edges_created += 1
-
-    # Create embeddings for commit messages + diffs
-    FOR (oid, node_id) IN commit_nodes:
-        commit = repo.get_commit(oid)
-        content = format!("{}\n{}", commit.message, commit.diff_summary)
-        embedding = generate_embedding(content)  # via pluggable trait
-        hnsw_id = format!("commit:{}", oid)
-        loom.hnsw.insert(hnsw_id, embedding, json!({"node_id": node_id}))
-        report.embeddings_inserted += 1
-
-        # CrossRef: HNSW entry -> CausalGraph node
-        loom.crossrefs.insert(CrossRef {
-            source: hnsw_universal_id(hnsw_id),
-            source_structure: StructureTag::HnswIndex,
-            target: causal_node_universal_id(node_id),
-            target_structure: StructureTag::CausalGraph,
-            ref_type: CrossRefType::MemoryEncoded,
-            created_at: now_hlc(),
-            chain_seq: loom.chain.next_seq(),
-        })
-        report.crossrefs_created += 1
-
-    # Record in ExoChain
-    loom.chain.append("weaver.ingest.git", json!({
-        "branch": branch,
-        "commits": commits.len(),
-        "report": report,
+    # 6. Record in chain
+    loom.chain.append("weaver.ingest.event", json!({
+        "domain": session.domain,
+        "event_id": event.id,
+        "node_type": node_type.name,
+        "node_id": node_id,
     }))
+```
 
-    # Detect patterns in the ingested history
-    apply_patterns(loom, &commit_nodes)
+### 4. Confidence Evaluation
+
+```
+FUNCTION evaluate_confidence(session: &ModelingSession) -> ConfidenceReport:
+    report = ConfidenceReport::empty()
+    model = &session.model
+    loom = &session.loom
+
+    # For each edge type in the model, measure confidence
+    for edge_spec in model.edge_types:
+        key = format!("{}->{}:{}", edge_spec.from, edge_spec.to, edge_spec.edge_type)
+
+        # Count: how many source nodes of this type have at least one edge?
+        source_nodes = count_nodes_of_type(loom.causal, edge_spec.from)
+        nodes_with_edge = count_nodes_with_outgoing_edge(
+            loom.causal, edge_spec.from, edge_spec.edge_type
+        )
+
+        coverage = IF source_nodes > 0 THEN nodes_with_edge / source_nodes ELSE 0.0
+
+        # Consistency: do edges of this type have consistent weights?
+        weights = collect_edge_weights(loom.causal, edge_spec.edge_type)
+        consistency = 1.0 - standard_deviation(weights)  # low variance = high consistency
+
+        # Sample count
+        sample_count = weights.len()
+
+        # Composite confidence
+        confidence = weighted_mean([
+            (coverage, 0.4),
+            (consistency, 0.3),
+            (sample_size_factor(sample_count), 0.3),
+        ])
+
+        status = MATCH confidence:
+            >= 0.80 => Strong
+            >= 0.50 => Developing
+            >= 0.30 => Weak
+            _       => Insufficient
+
+        report.per_edge.insert(key, EdgeConfidence {
+            confidence, sample_count, coverage, consistency, status
+        })
+
+        # Identify gaps
+        IF confidence < session.target_confidence:
+            gap = identify_gap(edge_spec, coverage, sample_count, consistency)
+            suggestion = generate_suggestion(gap, session, &knowledge_base)
+            report.gaps.push(ConfidenceGap {
+                relationship: key,
+                confidence,
+                reason: gap.reason,
+                suggestion,
+            })
+            report.suggestions.push(suggestion)
+
+    # Overall confidence: weighted mean of per-edge, weighted by goal relevance
+    report.overall = weighted_mean_by_goal_relevance(
+        report.per_edge,
+        session.context,
+    )
 
     RETURN report
 
-FUNCTION apply_patterns(loom: &mut Loom, nodes: &HashMap<OID, NodeId>):
-    FOR pattern IN loom.config.patterns:
-        # Scan for sequences of edges matching the pattern's edge_sequence
-        matches = find_pattern_matches(loom.causal, pattern.edge_sequence)
-        FOR match IN matches:
-            # Reinforce matched edges by refreshing their weight
-            FOR edge IN match.edges:
-                edge.weight = (edge.weight + 0.1).min(1.0)
-            # Emit novelty impulse if this is a new pattern instance
-            IF match.is_new:
-                loom.impulses.emit(
-                    source_structure: StructureTag::CausalGraph.as_u8(),
-                    source_node: match.root_universal_id,
-                    target_structure: StructureTag::HnswIndex.as_u8(),
-                    impulse_type: ImpulseType::NoveltyDetected,
-                    payload: json!({"pattern": pattern.name, "match": match.id}),
-                    hlc_timestamp: now_hlc(),
-                )
+FUNCTION generate_suggestion(gap, session, kb) -> ModelingSuggestion:
+    # Check if the WeaverKnowledgeBase has a strategy for this gap
+    strategy = kb.find_strategy(session.domain_characteristics(), gap.relationship)
+    IF strategy.is_some():
+        RETURN strategy.as_suggestion()
+
+    # Otherwise, reason from the gap
+    MATCH gap.type:
+        LowCoverage:
+            # Not enough source nodes have this edge
+            # Likely need a new data source
+            source_type = infer_needed_source(gap.edge_spec)
+            RETURN AddSource {
+                source_type,
+                description: format!("{} data would establish {} causation", source_type, gap.relationship),
+                expected_improvement: estimate_improvement(gap, source_type),
+            }
+        LowConsistency:
+            # Edges exist but weights vary wildly
+            # Likely the edge type is too coarse
+            RETURN RefineEdgeType {
+                from: gap.edge_spec.from,
+                to: gap.edge_spec.to,
+                current: gap.edge_spec.edge_type,
+                suggested: infer_better_edge_type(gap),
+                reason: "edge weights are inconsistent, suggesting the relationship is more nuanced",
+            }
+        LowSampleCount:
+            # Not enough data points
+            RETURN AddSource { ... }
 ```
 
-### 4. Forest Stitching (Merge Two Looms)
+### 5. Model Export
 
 ```
-FUNCTION stitch(source: &Loom, target: &Loom) -> StitchResult:
+FUNCTION export_model(session: &ModelingSession) -> ExportedModel:
+    # Serialize the learned model (NOT the data)
+    exported = ExportedModel {
+        version: session.model.version,
+        domain: session.domain.clone(),
+        created_by: "weaver-engine".to_string(),
+        confidence: session.confidence.overall,
+        model: session.model.to_serializable(),
+        evolution_history: session.history.clone(),
+    }
+
+    # Record export in chain
+    session.loom.chain.append("weaver.export", json!({
+        "domain": session.domain,
+        "version": session.model.version,
+        "confidence": session.confidence.overall,
+    }))
+
+    # Record in meta-loom
+    record_meta_event(session, "model_exported", json!({
+        "version": session.model.version,
+        "confidence": session.confidence.overall,
+    }))
+
+    RETURN exported
+```
+
+### 6. Forest Stitching
+
+```
+FUNCTION stitch_sessions(source: &ModelingSession, target: &ModelingSession) -> StitchResult:
     result = StitchResult::empty()
 
-    # Phase 1: Find semantic matches via HNSW cross-search
-    # For each entry in source HNSW, search target HNSW for similar vectors
-    source_entries = source.hnsw.all_entries()  # would need iteration API
+    # Phase 1: Cross-domain HNSW similarity search
+    source_entries = source.loom.hnsw.all_entries()
     FOR entry IN source_entries:
-        matches = target.hnsw.search(&entry.embedding, top_k: 5)
-        FOR match IN matches WHERE match.score > 0.8:  # similarity threshold
-            # Found a cross-domain semantic connection
-            result.novel_connections.push(NovelConnection {
+        matches = target.loom.hnsw.search(&entry.embedding, top_k: 5)
+        FOR match IN matches WHERE match.score > threshold:
+            result.connections.push(CrossDomainConnection {
                 source_domain: source.domain,
                 target_domain: target.domain,
+                source_node: entry.metadata["node_id"],
+                target_node: match.metadata["node_id"],
                 similarity: match.score,
-                description: format!("{} ~ {}", entry.id, match.id),
             })
 
             # Create cross-forest CrossRef
-            target.crossrefs.insert(CrossRef {
+            target.loom.crossrefs.insert(CrossRef {
                 source: entry.universal_id,
                 source_structure: StructureTag::HnswIndex,
                 target: match.universal_id,
                 target_structure: StructureTag::HnswIndex,
                 ref_type: CrossRefType::Elaborates,
                 created_at: now_hlc(),
-                chain_seq: target.chain.next_seq(),
+                chain_seq: target.loom.chain.next_seq(),
             })
-            result.cross_refs_created += 1
 
-    # Phase 2: Resolve causal graph conflicts
-    # For each pair of matched nodes, check if their causal neighborhoods conflict
-    FOR connection IN result.novel_connections:
-        source_node = lookup_causal_node(source, connection.source_hnsw_id)
-        target_node = lookup_causal_node(target, connection.target_hnsw_id)
-        IF source_node AND target_node:
-            source_edges = source.causal.get_forward_edges(source_node)
-            target_edges = target.causal.get_forward_edges(target_node)
-            conflicts = find_contradictions(source_edges, target_edges)
-            FOR conflict IN conflicts:
-                resolution = resolve_conflict(conflict)
-                MATCH resolution:
-                    PreferHigherWeight => keep_edge_with_higher_weight(conflict)
-                    PreferMoreRecent => keep_edge_with_later_timestamp(conflict)
-                    KeepBoth => keep_both_with_provenance_metadata(conflict)
-                result.conflicts_resolved += 1
+    # Phase 2: Resolve causal conflicts
+    FOR connection IN result.connections:
+        source_edges = source.loom.causal.get_forward_edges(connection.source_node)
+        target_edges = target.loom.causal.get_forward_edges(connection.target_node)
+        conflicts = find_contradictions(source_edges, target_edges)
+        FOR conflict IN conflicts:
+            resolution = resolve_by_confidence(conflict)
+            apply_resolution(target.loom.causal, resolution)
+            result.conflicts_resolved += 1
 
-    # Phase 3: Create ExoChain bridge events
-    target.chain.append("weaver.stitch.bridge", json!({
-        "source_domain": source.domain,
-        "target_domain": target.domain,
-        "connections": result.novel_connections.len(),
+    # Phase 3: Chain provenance
+    target.loom.chain.append("weaver.stitch", json!({
+        "source": source.domain,
+        "target": target.domain,
+        "connections": result.connections.len(),
         "conflicts": result.conflicts_resolved,
     }))
 
-    # Phase 4: Emit novelty impulses
-    FOR connection IN result.novel_connections:
-        target.impulses.emit(
+    # Phase 4: Novelty impulses
+    FOR connection IN result.connections:
+        target.loom.impulses.emit(
             source_structure: StructureTag::HnswIndex.as_u8(),
             source_node: connection.source_universal_id,
             target_structure: StructureTag::CausalGraph.as_u8(),
@@ -646,75 +788,200 @@ FUNCTION stitch(source: &Loom, target: &Loom) -> StitchResult:
     RETURN result
 ```
 
-### 5. Pruning with Decay
+### 7. Meta-Loom Recording
 
 ```
-FUNCTION prune_loom(loom: &mut Loom) -> PruneReport:
-    report = PruneReport::zero()
-    config = &loom.config.causal
+FUNCTION record_meta_event(session: &mut ModelingSession, event_type: &str, payload: Value):
+    loom = &session.loom
 
-    # Phase 1: Apply decay to all edges
-    all_node_ids = loom.causal.all_node_ids()
-    FOR node_id IN all_node_ids:
-        edges = loom.causal.get_forward_edges(node_id)
-        FOR edge IN edges:
-            # Decay: new_weight = weight * (1.0 - decay_rate)
-            new_weight = edge.weight * (1.0 - config.decay_rate)
-            IF new_weight < config.decay_threshold:
-                # Mark for removal
-                edges_to_remove.push((edge.source, edge.target))
-            ELSE:
-                # Update weight (requires mutable edge access or re-link)
-                update_edge_weight(loom.causal, edge, new_weight)
-
-    # Phase 2: Remove decayed edges
-    FOR (source, target) IN edges_to_remove:
-        removed = loom.causal.unlink(source, target)
-        report.edges_removed += removed
-
-    # Phase 3: Remove orphaned nodes (no edges in or out)
-    FOR node_id IN all_node_ids:
-        forward = loom.causal.get_forward_edges(node_id)
-        reverse = loom.causal.get_reverse_edges(node_id)
-        IF forward.is_empty() AND reverse.is_empty():
-            # Check if node is a domain root (never prune roots)
-            node = loom.causal.get_node(node_id)
-            IF node.metadata["type"] != "domain_root":
-                loom.causal.remove_node(node_id)
-                report.nodes_removed += 1
-
-    # Phase 4: Clean up HNSW entries for removed nodes
-    FOR removed_node_id IN removed_nodes:
-        # Find HNSW entries linked to this node via CrossRefs
-        universal_id = causal_node_universal_id(removed_node_id)
-        refs = loom.crossrefs.get_reverse(&universal_id)
-        FOR ref IN refs WHERE ref.source_structure == StructureTag::HnswIndex:
-            # Remove the HNSW entry (requires HnswService.remove API)
-            remove_hnsw_entry(loom.hnsw, ref.source)
-            report.hnsw_entries_removed += 1
-
-    # Phase 5: Garbage collect unreferenced CrossRefs
-    report.crossrefs_removed = gc_crossrefs(loom)
-
-    # Phase 6: Record in ExoChain
-    loom.chain.append("weaver.prune", json!({
-        "edges_removed": report.edges_removed,
-        "nodes_removed": report.nodes_removed,
-        "hnsw_removed": report.hnsw_entries_removed,
-        "crossrefs_removed": report.crossrefs_removed,
-    }))
-
-    # Phase 7: Emit completion impulse
-    loom.impulses.emit(
-        source_structure: StructureTag::CausalGraph.as_u8(),
-        source_node: [0u8; 32],
-        target_structure: StructureTag::CausalGraph.as_u8(),
-        impulse_type: ImpulseType::Custom(0x30),  # Pruning complete
-        payload: json!(report),
-        hlc_timestamp: now_hlc(),
+    # Create a meta-loom causal node
+    node_id = loom.causal.add_node(
+        label: format!("meta:{}:{}:{}", session.domain, event_type, session.model.version),
+        metadata: json!({
+            "type": "weaver_meta",
+            "structure_tag": 0x40,
+            "domain": session.domain,
+            "event_type": event_type,
+            "model_version": session.model.version,
+            "payload": payload,
+            "timestamp": now_hlc(),
+        })
     )
 
-    RETURN report
+    # Link to previous meta event (Follows edge)
+    IF let Some(prev_meta_node) = session.last_meta_node:
+        loom.causal.link(
+            prev_meta_node,
+            node_id,
+            CausalEdgeType::Follows,
+            1.0,
+            now_hlc(),
+            loom.chain.next_seq(),
+        )
+
+    # Link to meta root (Enables edge — session enables this event)
+    loom.causal.link(
+        session.meta_root,
+        node_id,
+        CausalEdgeType::Enables,
+        1.0,
+        now_hlc(),
+        loom.chain.next_seq(),
+    )
+
+    session.last_meta_node = Some(node_id)
+
+    # Embed the meta event for cross-domain similarity
+    embedding = generate_embedding(
+        format!("{}: {}", event_type, serde_json::to_string(&payload).unwrap()),
+        "meta_event",
+    )
+    loom.hnsw.insert(
+        format!("meta:{}:{}", session.domain, node_id),
+        embedding,
+        json!({"node_id": node_id, "type": "weaver_meta"}),
+    )
+```
+
+### 8. WeaverKnowledgeBase Update
+
+```
+FUNCTION update_knowledge_base(session: &ModelingSession):
+    kb = &mut knowledge_base
+
+    # Extract domain characteristics from session context + sources
+    characteristics = extract_characteristics(session)
+    # e.g., ["rust", "cargo", "github-actions", "ci_pipeline"]
+
+    # Check if a similar strategy already exists
+    existing = kb.find_similar_strategy(characteristics)
+
+    IF existing.is_some():
+        # Update existing strategy with new evidence
+        strategy = existing.unwrap()
+        strategy.confidence = weighted_update(
+            strategy.confidence,
+            session.confidence.overall,
+        )
+        strategy.learned_from.push(session.domain.clone())
+
+        # Record in meta-loom
+        record_meta_event(session, "kb_strategy_updated", json!({
+            "characteristics": characteristics,
+            "confidence": strategy.confidence,
+        }))
+    ELSE:
+        # Create new strategy pattern
+        strategy = StrategyPattern {
+            domain_characteristics: characteristics,
+            recommended_sources: session.sources.iter().map(|s| s.type_name()).collect(),
+            recommended_edge_types: session.model.edge_types.iter()
+                .filter(|e| e.confidence > 0.6)
+                .map(|e| e.edge_type.clone())
+                .collect(),
+            confidence: session.confidence.overall,
+            learned_from: vec![session.domain.clone()],
+        }
+
+        # Store in kernel CausalGraph with KB tag
+        kb_node = loom.causal.add_node(
+            label: format!("kb:strategy:{}", characteristics.join("+")),
+            metadata: json!({
+                "type": "weaver_kb_strategy",
+                "structure_tag": 0x41,
+                "strategy": strategy,
+            })
+        )
+
+        # Link to KB root
+        loom.causal.link(kb.kb_root, kb_node, CausalEdgeType::Enables, 1.0, now_hlc(), chain_seq)
+
+        # Embed for similarity search
+        embedding = generate_embedding(
+            format!("domain strategy: {}", characteristics.join(", ")),
+            "kb_strategy",
+        )
+        loom.hnsw.insert(format!("kb:strategy:{}", kb_node), embedding, json!({"node_id": kb_node}))
+
+        record_meta_event(session, "kb_strategy_created", json!({
+            "characteristics": characteristics,
+            "confidence": strategy.confidence,
+        }))
+```
+
+### 9. CLI Message Handler
+
+```
+FUNCTION handle_message(msg: KernelMessage) -> KernelMessage:
+    MATCH msg.command:
+        "session.start" =>
+            domain = msg.payload["domain"]
+            context = msg.payload["context"]
+            goal = msg.payload["goal"]
+
+            # Check if session exists
+            IF sessions.contains_key(domain):
+                RETURN error("session already exists, use session.resume")
+
+            # Create Loom from shared kernel structures
+            loom = Loom {
+                domain, causal, hnsw, crossrefs, impulses, chain, tree,
+            }
+
+            # Query knowledge base for initial hypothesis
+            initial_model = knowledge_base.hypothesize(context, domain_characteristics)
+
+            # Create session
+            session = ModelingSession::new(domain, context, goal, loom, initial_model)
+            sessions.insert(domain, session)
+
+            # Ingest initial sources
+            for source in msg.payload["sources"]:
+                add_source_to_session(session, source)
+
+            RETURN ok(json!({ "domain": domain, "model_version": 1, "confidence": session.confidence.overall }))
+
+        "session.resume" =>
+            domain = msg.payload["domain"]
+            session = sessions.get(domain)?
+            RETURN ok(json!({ "domain": domain, "model_version": session.model.version, "confidence": session.confidence.overall }))
+
+        "source.add" =>
+            domain = msg.payload["domain"]
+            session = sessions.get_mut(domain)?
+            source = parse_source(msg.payload)
+            add_source_to_session(session, source)
+            RETURN ok(json!({ "source_added": true, "confidence": session.confidence.overall }))
+
+        "confidence" =>
+            domain = msg.payload["domain"]
+            session = sessions.get(domain)?
+            RETURN ok(serde_json::to_value(&session.confidence))
+
+        "export" =>
+            domain = msg.payload["domain"]
+            session = sessions.get(domain)?
+            min_confidence = msg.payload.get("min_confidence").unwrap_or(0.0)
+            IF session.confidence.overall < min_confidence:
+                RETURN error(format!("confidence {:.2} below threshold {:.2}", ...))
+            exported = export_model(session)
+            RETURN ok(serde_json::to_value(&exported))
+
+        "stitch" =>
+            source_domain = msg.payload["source"]
+            target_domain = msg.payload["target"]
+            source = sessions.get(source_domain)?
+            target = sessions.get(target_domain)?
+            result = stitch_sessions(source, target)
+            RETURN ok(serde_json::to_value(&result))
+
+        "meta" =>
+            domain = msg.payload["domain"]
+            session = sessions.get(domain)?
+            trajectory = collect_meta_trajectory(session)
+            RETURN ok(serde_json::to_value(&trajectory))
+
+        _ => RETURN error("unknown command")
 ```
 
 ---
@@ -725,28 +992,33 @@ FUNCTION prune_loom(loom: &mut Loom) -> PruneReport:
 
 ```
 crates/
-  clawft-core/           # Core types, embeddings, HNSW store
-  clawft-kernel/         # ECC services: CausalGraph, HnswService, CrossRefStore, etc.
-  exo-resource-tree/     # Resource tree data structure
-  rvf-crypto/            # BLAKE3, Ed25519, SHAKE-256 hashing
-  ecc-weaver/            # THIS CRATE
+  clawft-kernel/           # ECC services, SystemService trait, A2ARouter
+  exo-resource-tree/       # Resource tree data structure
+  rvf-crypto/              # BLAKE3, Ed25519, SHAKE-256
+  ecc-weaver/              # THIS CRATE
     src/
-      lib.rs             # Re-exports, WeaverEngine
-      loom.rs            # Loom struct and lifecycle
-      config.rs          # WeaveConfig, TOML parsing
-      analyzer.rs        # Codebase analysis -> AnalysisPlan
-      ingester/
-        mod.rs           # Ingester trait and dispatch
-        git.rs           # Git history ingestion
-        file_tree.rs     # Source tree ingestion
-        docs.rs          # Documentation ingestion
-        sparc.rs         # SPARC plan ingestion
-      merger.rs          # Forest stitching
-      pruner.rs          # Decay, pruning, GC
-      patterns.rs        # Pattern matching and detection
-      meta.rs            # Meta-conversation tracking
-      embedding.rs       # Embedding trait (pluggable providers)
-      error.rs           # WeaverError
+      lib.rs               # Re-exports, WeaverEngine SystemService impl
+      engine.rs            # WeaverEngine: session management, tick handler
+      session.rs           # ModelingSession: the modeling loop state
+      model.rs             # CausalModel, NodeTypeSpec, EdgeTypeSpec, LearnedPattern
+      confidence.rs        # ConfidenceReport, evaluation logic, gap analysis
+      suggestion.rs        # ModelingSuggestion, auto-adjustment application
+      export.rs            # ExportedModel, weave-model.json serialization
+      source/
+        mod.rs             # DataSource enum, SourceEvent trait
+        git.rs             # Git history ingestion via gitoxide
+        file_tree.rs       # Source tree ingestion
+        ci.rs              # CI pipeline webhook receiver
+        issue.rs           # Issue tracker API client
+        docs.rs            # Documentation ingestion
+        sparc.rs           # SPARC plan ingestion
+        custom.rs          # Custom stream ingestion
+      stitch.rs            # Forest stitching, cross-domain merge
+      meta_loom.rs         # Meta-Loom recording, trajectory collection
+      knowledge_base.rs    # WeaverKnowledgeBase, StrategyPattern, cross-domain learning
+      embedding.rs         # EmbeddingProvider trait (pluggable backends)
+      classify.rs          # Event classification, node type inference
+      error.rs             # WeaverError
     Cargo.toml
 ```
 
@@ -754,24 +1026,54 @@ crates/
 
 ```
 ecc-weaver
-  |-- clawft-kernel  (CausalGraph, HnswService, CrossRefStore, ImpulseQueue,
-  |                    CognitiveTick, ChainManager, TreeManager, calibration)
-  |-- exo-resource-tree  (ResourceTree, MutationLog, ResourceKind)
-  |-- rvf-crypto  (BLAKE3 hashing for UniversalNodeId generation)
-  |-- toml  (weave.toml parsing)
-  |-- serde + serde_json  (serialization)
-  |-- thiserror  (error types)
-  |-- tracing  (structured logging)
-  |-- gix  (optional: git history via gitoxide)
-  |-- notify  (optional: filesystem watching for act mode)
-  |-- glob  (file pattern matching)
+  |-- clawft-kernel (Arc<CausalGraph>, Arc<HnswService>, Arc<CrossRefStore>,
+  |                   Arc<ImpulseQueue>, Arc<ChainManager>, Arc<TreeManager>,
+  |                   SystemService, A2ARouter, AgentSupervisor, CognitiveTick)
+  |-- exo-resource-tree (ResourceKind)
+  |-- rvf-crypto (BLAKE3 for UniversalNodeId)
+  |-- serde + serde_json (serialization)
+  |-- thiserror (error types)
+  |-- tracing (structured logging)
+  |-- gix (optional: git history via gitoxide)
+  |-- notify (optional: filesystem watching for Act mode)
+  |-- glob (file pattern matching)
 ```
 
-### Integration Points
+### Data Flow
 
-**Kernel registration**: The WeaverEngine registers as a `SystemService` at
-kernel boot when the `ecc` feature is enabled. It listens for impulses and
-processes them on the cognitive tick.
+```
+Source Data (git, files, CI, issues, docs)
+    |
+    v
+DataSource.poll() yields SourceEvents
+    |
+    v
+ingest_event():
+    |
+    |--creates-->  CausalGraph nodes + edges (via Arc<CausalGraph>)
+    |--generates-> Embeddings --> Arc<HnswService>
+    |--creates-->  CrossRefs linking HNSW <-> Causal <-> Chain
+    |--records-->  Arc<ChainManager> (provenance events)
+    |
+    v
+on_tick() (driven by kernel CognitiveTick):
+    |
+    |--evaluates--> ConfidenceReport (gap analysis)
+    |--adjusts----> CausalModel (if auto_adjust=true)
+    |--records----> Meta-Loom (in kernel CausalGraph, tag 0x40)
+    |--updates----> WeaverKnowledgeBase (in kernel CausalGraph, tag 0x41)
+    |--emits------> Impulses (via Arc<ImpulseQueue>)
+    |
+    v
+export_model():
+    |
+    v
+weave-model.json (deployable config for edge devices)
+
+CLI (weaver ecc *) --unix-socket--> A2ARouter --KernelMessage--> WeaverEngine
+```
+
+### SystemService Registration
 
 ```rust
 #[async_trait]
@@ -780,60 +1082,46 @@ impl SystemService for WeaverEngine {
     fn service_type(&self) -> ServiceType { ServiceType::Extension }
 
     async fn start(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        // Load all weave.toml configs from known locations
-        // Initialize looms for each domain
+        // Register in resource tree at /kernel/services/weaver
+        self.tree.insert("/kernel/services/weaver", ResourceKind::Service)?;
+        // Load KB from persisted state in CausalGraph
+        self.knowledge_base.load()?;
+        // Subscribe to tick events
+        self.subscribe_ticks()?;
+        // Register A2A handler for CLI commands
+        self.router.register("ecc.weaver", Self::handle_message)?;
+        // Record boot in chain
+        self.chain.append("weaver.boot", json!({
+            "kb_strategies": self.knowledge_base.strategy_count(),
+        }))?;
         Ok(())
     }
 
     async fn stop(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        // Checkpoint all looms
-        // Flush impulse queues
+        // Checkpoint all sessions, flush impulses
+        for session in self.sessions.values() {
+            self.checkpoint_session(session)?;
+        }
         Ok(())
     }
 
     async fn health_check(&self) -> HealthStatus {
-        // Check all looms are healthy
-        // Report any with high drift counts
-        HealthStatus::Healthy
+        let degraded = self.sessions.values()
+            .any(|s| s.confidence.overall < 0.1 && s.sources.len() > 0);
+        if degraded { HealthStatus::Degraded } else { HealthStatus::Healthy }
     }
 }
 ```
 
-**CLI integration**: The `weaver ecc` subcommand dispatches to `WeaverEngine`
-methods. This lives in the CLI crate, not in `ecc-weaver` itself.
-
-**Embedding trait**: Embeddings are generated through a pluggable trait, allowing
-different backends (local model, API call, pre-computed):
+### Embedding Trait
 
 ```rust
 pub trait EmbeddingProvider: Send + Sync {
-    fn embed(&self, text: &str) -> Result<Vec<f32>, WeaverError>;
-    fn dimensions(&self) -> usize;
+    /// Generate an embedding for the given text using the named strategy.
+    fn embed(&self, text: &str, strategy: &str) -> Result<Vec<f32>, WeaverError>;
+    /// Return the output dimensions for a given strategy.
+    fn dimensions(&self, strategy: &str) -> usize;
 }
-```
-
-### Data Flow
-
-```
-Source Data (git, files, docs)
-    |
-    v
-Ingester  --creates-->  CausalGraph nodes + edges
-    |                        |
-    |--generates-->  Embeddings --> HnswService
-    |                        |          |
-    |--creates-->  CrossRefs linking HNSW <-> Causal <-> Chain
-    |                                           |
-    |--records-->  ChainManager (ExoChain events for provenance)
-    |
-    v
-CognitiveTick processes impulses each tick
-    |
-    v
-Pruner applies decay, removes stale structure
-    |
-    v
-Analyzer reads the loom and produces reports
 ```
 
 ---
@@ -842,67 +1130,77 @@ Analyzer reads the loom and produces reports
 
 ### Performance Considerations
 
-1. **Incremental ingestion**: When re-weaving git history, only process commits
-   newer than the last ingested commit (stored in ExoChain metadata). Do not
-   rebuild the entire history.
+1. **Incremental ingestion**: When re-ingesting git history, only process commits
+   newer than `last_oid` stored in the DataSource. Never rebuild the full history.
 
-2. **Batch HNSW inserts**: Group embedding insertions into batches of 100 to
-   reduce lock contention on the `Mutex<HnswStore>`.
+2. **Tick budget enforcement**: The Weaver must yield to the kernel's tick budget.
+   If a session's ingestion or evaluation exceeds its allocation, it defers work
+   to the next tick. This prevents the Weaver from starving other services.
 
-3. **Lazy embedding generation**: If no embedding provider is configured, store
-   nodes without embeddings and mark them for later processing. The cognitive
-   tick can embed in background ticks.
+3. **Batch HNSW inserts**: Group embedding insertions into batches of 100 to
+   reduce lock contention on `Arc<HnswService>`.
 
-4. **Pruning budget**: Pruning should respect the tick budget. If the graph is
-   large, prune in chunks across multiple ticks rather than all at once.
+4. **Lazy embedding**: If no embedding provider is configured, nodes are stored
+   without embeddings and marked for later processing. The next tick fills them in.
 
-5. **HNSW iteration**: The current `HnswService` API does not expose iteration
-   over all entries. Forest stitching requires this. Either add an `iter()`
-   method to `HnswService` or maintain a separate manifest of entry IDs in
-   the Loom.
+5. **Confidence evaluation frequency**: Full evaluation runs every N ticks
+   (configurable, default 10). Per-tick work is limited to ingestion + incremental
+   edge updates.
+
+6. **Meta-Loom pruning**: The meta-Loom itself grows over time. Apply decay to
+   meta-Loom edges, pruning old modeling decisions that are no longer relevant.
+   Keep model version boundaries as anchor nodes (never pruned).
+
+7. **HNSW iteration for stitching**: Requires `HnswService` to expose an iteration
+   API. If not available, maintain a manifest of entry IDs in the session.
 
 ### Security Considerations
 
-1. **No secrets in embeddings**: The ingester must strip secrets, API keys, and
-   credentials from content before embedding. Apply the same rules as `.gitignore`
-   plus additional patterns for common secret formats.
+1. **No secrets in embeddings**: Strip secrets, API keys, and credentials before
+   embedding. Apply `.gitignore` rules plus common secret patterns.
 
-2. **Chain provenance**: Every weaving operation is recorded in ExoChain. This
-   provides a tamper-evident audit trail of all modifications to the loom.
+2. **Chain provenance**: Every model version bump is chain-recorded. Tamper-evident
+   audit trail of all modeling decisions.
 
-3. **Source validation**: When ingesting from external APIs, validate TLS
-   certificates and authenticate requests. Never store raw API credentials
-   in `weave.toml` -- use environment variable references.
+3. **Source authentication**: External API sources (issue_tracker, ci_pipeline) use
+   environment variable references for auth, never stored in config.
 
-4. **CrossRef integrity**: CrossRefs use `UniversalNodeId` (BLAKE3 hashes).
-   Verify that referenced nodes actually exist before creating CrossRefs.
+4. **CrossRef integrity**: Verify referenced nodes exist before creating CrossRefs.
+
+5. **Export sanitization**: Exported `weave-model.json` contains no data, only
+   structural schema. Verify no PII leaks into model descriptions.
 
 ### Testing Strategy
 
 1. **Unit tests per module**:
-   - `config.rs`: TOML parsing roundtrip, invalid config rejection
-   - `analyzer.rs`: Codebase analysis on fixture directories
-   - `ingester/git.rs`: Git history parsing on a test repository
-   - `ingester/file_tree.rs`: File tree scanning on fixture directories
-   - `merger.rs`: Stitch two small looms, verify CrossRef creation
-   - `pruner.rs`: Decay application, orphan removal, threshold correctness
-   - `patterns.rs`: Pattern matching on known edge sequences
+   - `confidence.rs`: Scoring calculation, gap identification, status thresholds
+   - `suggestion.rs`: Suggestion generation for each gap type
+   - `model.rs`: Model versioning, serialization roundtrip
+   - `export.rs`: ExportedModel JSON schema compliance
+   - `source/git.rs`: Git history parsing on a test repository
+   - `source/file_tree.rs`: File tree scanning on fixture directories
+   - `stitch.rs`: Stitch two small sessions, verify CrossRef creation
+   - `meta_loom.rs`: Meta event recording, trajectory collection
+   - `knowledge_base.rs`: Strategy pattern storage, retrieval, similarity
 
 2. **Integration tests**:
-   - Full pipeline: analyze -> init -> weave -> prune on a real git repo
-   - Cross-domain stitch on two test looms
-   - Cognitive tick interaction: verify impulses are emitted correctly
+   - Full modeling loop: start session -> ingest -> evaluate -> adjust -> export
+   - Cross-domain stitch on two test sessions
+   - Tick handler: verify impulses emitted, meta-loom populated, budget respected
+   - Knowledge base: model two similar domains, verify strategy reuse on third
 
 3. **Property tests** (proptest):
-   - Pruning never removes domain root nodes
-   - Decay is monotonically decreasing
-   - CrossRef count after GC <= CrossRef count before GC
-   - Stitch is commutative (stitch(A,B) produces same connections as stitch(B,A))
+   - Confidence is monotonically non-decreasing as data is added (ceteris paribus)
+   - Model version is strictly increasing
+   - Meta-loom node count >= model version count (every version has meta events)
+   - Export confidence matches session confidence at time of export
+   - Stitch is commutative (connections A<->B same regardless of direction)
 
 4. **Benchmark tests**:
-   - Ingestion throughput: commits/second for git history weaving
-   - Pruning latency: time to prune a 10K-node graph
-   - Stitch latency: time to stitch two 5K-entry HNSW indices
+   - Ingestion throughput: events/second for git history
+   - Confidence evaluation latency on 10K-node graph
+   - Stitch latency for two 5K-entry HNSW indices
+   - Tick budget compliance: Weaver never exceeds allocated budget
 
 ---
 
@@ -910,25 +1208,31 @@ Analyzer reads the loom and produces reports
 
 ### Exit Criteria Checklist
 
-- [ ] `WeaveConfig` parses from TOML and round-trips through serde
-- [ ] `Loom::init()` creates all ECC structures and records genesis in ExoChain
-- [ ] `Analyzer::analyze_codebase()` produces an `AnalysisPlan` for a test directory
-- [ ] `Analyzer::suggest_patterns()` identifies at least one pattern in a test plan
-- [ ] `Ingester::ingest_git_log()` creates causal nodes/edges for a test git repo
-- [ ] `Ingester::ingest_file_tree()` maps files to causal nodes with correct edge types
-- [ ] Embeddings are inserted into HNSW with CrossRefs back to causal nodes
-- [ ] `Merger::stitch()` creates cross-forest CrossRefs for semantically similar nodes
-- [ ] `Merger::resolve_conflicts()` handles contradictory edges correctly
-- [ ] `Pruner::apply_decay()` reduces edge weights by the configured rate
-- [ ] `Pruner::prune()` removes edges below threshold and cleans orphaned nodes
-- [ ] `Pruner::gc_crossrefs()` removes CrossRefs pointing to deleted nodes
-- [ ] Pattern detection finds known patterns in a seeded causal graph
-- [ ] Meta-conversations are identified and tracked as separate causal subgraphs
-- [ ] All operations record provenance events in ExoChain
-- [ ] Impulses are emitted for novelty detection, coherence alerts, and pruning
 - [ ] `WeaverEngine` implements `SystemService` and registers at kernel boot
+- [ ] `WeaverEngine` registered in resource tree at `/kernel/services/weaver`
+- [ ] `WeaverEngine` processes cognitive tick events (no independent timer)
+- [ ] `WeaverEngine` handles A2ARouter messages for all CLI commands
+- [ ] `ModelingSession` creates a Loom from shared kernel Arc references
+- [ ] `ModelingSession` tracks a versioned `CausalModel` with evolution history
+- [ ] `CausalModel` exports to `weave-model.json` via `ExportedModel`
+- [ ] Confidence evaluation produces per-edge scores, gaps, and suggestions
+- [ ] `ModelingSuggestion::AddSource` emits impulse for operator action
+- [ ] Auto-adjustment applies `RefineEdgeType`, `SplitCategory`, `MergeCategories`, `AdjustDimensions`, `ChangeTick` automatically in Act mode
+- [ ] Model version bumps recorded in chain with full provenance
+- [ ] Meta-Loom records every modeling decision in kernel CausalGraph (tag 0x40)
+- [ ] Meta-Loom trajectory can be collected and displayed
+- [ ] `WeaverKnowledgeBase` stores strategy patterns in kernel CausalGraph (tag 0x41)
+- [ ] `WeaverKnowledgeBase` provides initial hypotheses for new sessions based on domain similarity
+- [ ] Cross-domain learning: strategy confidence updates when reused
+- [ ] Forest stitching creates cross-forest CrossRefs for semantically similar nodes
+- [ ] Stitching resolves causal conflicts by confidence
+- [ ] All data sources (`GitLog`, `FileTree`, `CiPipeline`, `IssueTracker`, `Documentation`, `SparcPlan`, `CustomStream`) have working ingestion
+- [ ] Watch mode: sources with `watch: true` yield events on each tick
+- [ ] Impulses emitted: `BeliefUpdate`, `CoherenceAlert`, `NoveltyDetected`, `EdgeConfirmed`, `Custom(0x32)` model bump, `Custom(0x33)` source request
+- [ ] Tick budget enforcement: Weaver never exceeds allocated budget
+- [ ] `EmbeddingProvider` trait is pluggable, no hardcoded provider
 - [ ] `scripts/build.sh check` passes with no warnings
 - [ ] `scripts/build.sh clippy` passes
 - [ ] `scripts/build.sh test` passes all unit, integration, and property tests
 - [ ] Benchmark tests establish baseline throughput numbers
-- [ ] The WEAVER.md skill file commands map to working `WeaverEngine` methods
+- [ ] The WEAVER.md skill file CLI commands map to working A2ARouter handlers

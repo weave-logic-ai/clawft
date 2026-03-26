@@ -1,7 +1,7 @@
 ---
 name: weftos-ecc-weaver
-description: ECC Weaver agent skill for constructing, analyzing, and maintaining Causal Merkle Vector Graph forests across domains
-version: 0.1.0
+description: Self-evolving cognitive modeler — a kernel-native SystemService that iteratively learns causal models from data, tracks its own evolution in a meta-Loom, and exports deployable configurations for edge devices
+version: 0.2.0
 category: architecture
 tags:
   - ecc
@@ -10,25 +10,633 @@ tags:
   - hnsw
   - weaving
   - cognitive-tick
-  - sdlc-as-conversation
+  - self-evolving
+  - confidence-driven
+  - meta-loom
+  - edge-deployment
 author: WeftOS Kernel Team
 ---
 
-# ECC Weaver
+# ECC Weaver — Self-Evolving Cognitive Modeler
 
-The Weaver operates on the forest of trees that Ephemeral Causal Cognition represents.
-It initializes, populates, stitches, prunes, and analyzes the combined ECC structures --
-CausalGraph, HNSW vector index, CrossRefStore, ImpulseQueue, ExoChain, and ResourceTree --
-treating them as a single cognitive fabric called a **Loom**.
+The Weaver is a kernel-native `SystemService` that iteratively discovers, refines, and
+maintains causal models from data. It does not produce a fixed model. It runs a continuous
+**HYPOTHESIZE -> OBSERVE -> EVALUATE -> ADJUST** loop, tracking its own evolution as an
+ECC conversation in its meta-Loom. The Weaver improves at weaving by weaving its own
+improvement trajectory.
+
+## Architecture: Kernel-Native Process
+
+The Weaver runs INSIDE WeftOS as a supervised kernel process:
+
+- **PID**: Registered in `ProcessTable` at boot when `ecc` feature is enabled
+- **Service path**: `/kernel/services/weaver`
+- **Struct**: `WeaverEngine` implements `SystemService`
+- **Data access**: Direct `Arc` references to kernel ECC structures (no serialization, no RPC)
+- **Communication**: A2ARouter IPC via `KernelMessage`
+- **Supervision**: `AgentSupervisor` with restart policies
+- **Tick participation**: Consumes kernel `CognitiveTick` events (does NOT run its own loop)
+- **Meta-Loom**: Part of the kernel's ECC structures, not a separate store
+- **CLI interface**: `weaver ecc` subcommands talk to the Weaver process via daemon Unix socket
+
+The Weaver is NOT a CLI tool. The `weaver ecc` CLI sends messages to the running Weaver
+process, which performs operations on the shared kernel structures.
+
+---
 
 ## Core Metaphor
 
-- **Loom** -- the combined ECC structures for a single domain
-- **Threads** -- causal edges woven through the loom
-- **Warp threads** -- recurrent patterns (build-test-deploy, plan-implement-review)
-- **Weft threads** -- individual events (commits, utterances, test results)
-- **Tapestry** -- multiple looms stitched into a cross-domain cognitive structure
-- **weave.toml** -- the loom configuration that guides the cognitive tick
+- **Loom** — the combined ECC structures for a single domain
+- **ModelingSession** — an active hypothesis-observe-evaluate-adjust loop on a Loom
+- **CausalModel** — the learned structure: node types, edge types, patterns, tick config
+- **ConfidenceReport** — gap analysis with actionable suggestions
+- **ExportedModel** — serialized `weave-model.json` for edge deployment
+- **Meta-Loom** — the Weaver's own ECC tracking its modeling decisions and outcomes
+- **WeaverKnowledgeBase** — cross-domain learning accumulated from past sessions
+
+---
+
+## The Modeling Loop
+
+The Weaver's core operation is a confidence-driven iteration:
+
+```
+1. HYPOTHESIZE  — Propose a causal model ("commits Cause test results")
+2. OBSERVE      — Ingest data, attempt to fit the model
+3. EVALUATE     — Measure confidence: do edges hold? Enough data? Predictive accuracy?
+4. ADJUST       — If confidence is low:
+                   - Refine edge types ("Causes" -> "Enables")
+                   - Request new data sources
+                   - Split or merge categories
+                   - Adjust HNSW dimensions or embedding strategy
+                   - Change the cognitive tick interval
+5. REPEAT       — On each cognitive tick, run the loop
+```
+
+This is the **Generate -> Analyze -> Act** cycle applied to modeling itself.
+
+Every modeling decision, confidence assessment, data source addition, schema adjustment,
+and improvement is a causal event tracked in the meta-Loom. The Weaver's own evolution
+IS an ECC conversation.
+
+---
+
+## Capabilities
+
+### 1. Start a New Modeling Session
+
+Create a new modeling session for a domain. The Weaver hypothesizes an initial causal
+model from available data and begins iterating.
+
+**When to use**: Onboarding a new codebase, starting analysis of a new domain, beginning
+a modeling project.
+
+**CLI**:
+
+```bash
+# Start a modeling session for a git repository
+weaver ecc session start --domain my-project --git /path/to/repo
+
+# Start with explicit context and goals
+weaver ecc session start --domain my-project \
+  --context "Rust microservices codebase with CI/CD" \
+  --goal "model commit-to-deployment causation with 0.8+ confidence"
+
+# Resume an existing session
+weaver ecc session resume --domain my-project
+```
+
+**What happens**:
+
+1. WeaverEngine creates a `ModelingSession` associated with a `Loom`
+2. Session registers in the resource tree at `/kernel/services/weaver/sessions/{domain}`
+3. Initial model is hypothesized from available data:
+   - If the WeaverKnowledgeBase has similar domains, it uses learned strategies
+   - Otherwise, it starts with default node/edge types and iterates
+4. The cognitive tick begins processing the session
+5. Chain event records session genesis with domain, context, goals
+
+**Initial hypothesis for a Rust codebase** (from WeaverKnowledgeBase if available):
+
+```json
+{
+  "node_types": [
+    { "name": "commit", "embedding_strategy": "diff_summary", "dimensions": 384 },
+    { "name": "file", "embedding_strategy": "ast_signature", "dimensions": 256 },
+    { "name": "test", "embedding_strategy": "test_name_context", "dimensions": 128 }
+  ],
+  "edge_types": [
+    { "from": "commit", "to": "file", "type": "Modifies", "confidence": 0.99 },
+    { "from": "commit", "to": "test", "type": "EvidenceFor", "confidence": 0.50 }
+  ]
+}
+```
+
+The initial confidence is intentionally low. The Weaver will iterate upward.
+
+### 2. Add Data Sources
+
+Integrate new data streams into a running session. The Weaver re-evaluates its entire
+model when new sources arrive — not just the new data.
+
+**When to use**: When the confidence report suggests new sources, when new data becomes
+available, when expanding domain coverage.
+
+**CLI**:
+
+```bash
+# Add CI pipeline data to improve commit->test confidence
+weaver ecc source add --domain my-project --type ci_pipeline \
+  --webhook-url https://ci.example.com/hooks/weaver
+
+# Add issue tracker data
+weaver ecc source add --domain my-project --type issue_tracker \
+  --api-url https://github.com/org/repo/issues
+
+# Add file tree with watch mode for live updates
+weaver ecc source add --domain my-project --type file_tree \
+  --root src/ --patterns "**/*.rs" --watch
+
+# Add documentation
+weaver ecc source add --domain my-project --type documentation \
+  --root docs/
+
+# List active sources
+weaver ecc source list --domain my-project
+```
+
+**What happens**:
+
+1. Source registers with the session
+2. Weaver ingests initial data from the source
+3. For each event from the source:
+   - Creates a causal node of the appropriate type
+   - Generates embedding via the session's embedding strategy
+   - Inserts into HNSW with metadata linking back to the causal node
+   - Infers edges using the current model's edge types
+   - CrossRefs link HNSW entry <-> causal node <-> chain event
+4. Full model re-evaluation triggers:
+   - All existing edges are re-scored given the new data
+   - New edge types may be discovered
+   - Confidence report updates
+5. Meta-loom records: `source_added -> model_reevaluated -> confidence_changed`
+
+**Source types**:
+
+| Source Type | What It Provides | Required? |
+|-------------|-----------------|-----------|
+| `git_log` | Commit history, branch structure, authorship | Yes (for code domains) |
+| `file_tree` | Module structure, imports, test-source mapping | Yes (for code domains) |
+| `ci_pipeline` | Test results, build outcomes, deployment events | No — improves commit->test |
+| `issue_tracker` | Issues, labels, assignments, closures | No — improves issue->commit |
+| `documentation` | Design docs, ADRs, READMEs | No — improves context |
+| `sparc_plan` | SPARC planning artifacts | No — improves goal modeling |
+| `custom_stream` | Application-specific event streams | No — domain extension |
+
+### 3. Evaluate Confidence
+
+Produce a confidence report with gap analysis and actionable suggestions. The Weaver
+does this continuously on the cognitive tick, but you can request an explicit report.
+
+**When to use**: To understand model quality, to identify what data is missing, to
+decide whether to export.
+
+**CLI**:
+
+```bash
+# Get current confidence report
+weaver ecc confidence --domain my-project
+
+# Get confidence for a specific relationship
+weaver ecc confidence --domain my-project --edge "commit->test"
+
+# Get confidence with suggestion detail
+weaver ecc confidence --domain my-project --verbose
+
+# Watch confidence evolve in real-time
+weaver ecc confidence --domain my-project --watch
+```
+
+**Output format**:
+
+```json
+{
+  "confidence_report": {
+    "domain": "my-project",
+    "model_version": 3,
+    "overall_confidence": 0.62,
+    "target_confidence": 0.80,
+    "per_edge": {
+      "commit->file:Modifies": { "confidence": 0.99, "samples": 1247, "status": "strong" },
+      "commit->test:EvidenceFor": { "confidence": 0.45, "samples": 89, "status": "weak" },
+      "issue->commit:Causes": { "confidence": 0.31, "samples": 23, "status": "insufficient" },
+      "file->file:Enables": { "confidence": 0.52, "samples": 340, "status": "developing" }
+    },
+    "gaps": [
+      {
+        "relationship": "commit->test:EvidenceFor",
+        "confidence": 0.45,
+        "reason": "only 30% of commits have corresponding test runs",
+        "suggestion": {
+          "action": "add_source",
+          "source_type": "ci_pipeline",
+          "description": "CI test results would establish commit->test causation",
+          "expected_confidence_improvement": 0.25
+        }
+      },
+      {
+        "relationship": "issue->commit:Causes",
+        "confidence": 0.31,
+        "reason": "commit messages don't consistently reference issues",
+        "suggestion": {
+          "action": "add_source",
+          "source_type": "issue_tracker",
+          "description": "Issue tracker data with commit cross-references",
+          "expected_confidence_improvement": 0.30
+        }
+      }
+    ],
+    "patterns": {
+      "feature_lifecycle": {
+        "sequence": ["issue.created", "branch.created", "commit.series", "pr.opened", "review.cycle", "pr.merged"],
+        "confidence": 0.71,
+        "instances_found": 14
+      }
+    },
+    "meta_loom_summary": {
+      "model_versions": 3,
+      "adjustments_made": 7,
+      "sources_added": 2,
+      "last_improvement": "refined file->file edges using import analysis (+0.15 confidence)"
+    }
+  }
+}
+```
+
+**Confidence scoring method**:
+
+For each edge type, the Weaver measures:
+- **Coverage**: What fraction of source nodes have this edge? (>0.7 = strong)
+- **Consistency**: Do the edges agree with each other? (low contradiction = strong)
+- **Predictive accuracy**: If this edge exists, does the predicted relationship hold?
+- **Sample size**: Enough data points? (>100 samples = reliable)
+
+Overall confidence is the weighted mean of per-edge confidences, where weight reflects
+the edge type's importance to the user's stated goals.
+
+### 4. Export Model
+
+Produce a `weave-model.json` that captures the learned modeling approach — not the data,
+but the way to model. This is the deployable configuration for edge devices.
+
+**When to use**: When confidence is sufficient, when deploying to edge devices (Raspberry Pi,
+embedded systems), when sharing models across teams.
+
+**CLI**:
+
+```bash
+# Export the current model
+weaver ecc export --domain my-project --output weave-model.json
+
+# Export only if confidence exceeds threshold
+weaver ecc export --domain my-project --min-confidence 0.75 --output weave-model.json
+
+# Export with full evolution history
+weaver ecc export --domain my-project --include-history --output weave-model.json
+```
+
+**Output**: `weave-model.json`
+
+```json
+{
+  "version": 3,
+  "domain": "rust-codebase-sdlc",
+  "created_by": "weaver-engine",
+  "confidence": 0.87,
+  "model": {
+    "node_types": [
+      { "name": "commit", "embedding_strategy": "diff_summary", "dimensions": 384 },
+      { "name": "file", "embedding_strategy": "ast_signature", "dimensions": 256 },
+      { "name": "test", "embedding_strategy": "test_name_context", "dimensions": 128 },
+      { "name": "issue", "embedding_strategy": "title_body", "dimensions": 384 },
+      { "name": "pr", "embedding_strategy": "description_diff", "dimensions": 384 }
+    ],
+    "edge_types": [
+      { "from": "commit", "to": "file", "type": "Modifies", "confidence": 0.99 },
+      { "from": "commit", "to": "test", "type": "EvidenceFor", "confidence": 0.78 },
+      { "from": "issue", "to": "commit", "type": "Causes", "confidence": 0.65 },
+      { "from": "pr", "to": "commit", "type": "Contains", "confidence": 0.99 },
+      { "from": "file", "to": "file", "type": "Enables", "confidence": 0.52, "note": "import dependency" }
+    ],
+    "patterns": [
+      {
+        "name": "feature_lifecycle",
+        "sequence": ["issue.created", "branch.created", "commit.series", "pr.opened", "review.cycle", "pr.merged", "deploy"],
+        "confidence": 0.71
+      }
+    ],
+    "tick_config": {
+      "interval_ms": 100,
+      "budget_ratio": 0.4,
+      "adaptive": true,
+      "focus_areas": ["commit_frequency", "test_coverage_delta"]
+    },
+    "sources_required": [
+      { "type": "git_log", "required": true },
+      { "type": "file_tree", "required": true },
+      { "type": "ci_results", "required": false, "improves": ["commit->test confidence"] },
+      { "type": "issue_tracker", "required": false, "improves": ["issue->commit confidence"] }
+    ]
+  },
+  "evolution_history": [
+    { "version": 1, "change": "initial model from codebase analysis", "confidence": 0.45 },
+    { "version": 2, "change": "added ci_results source, improved commit->test edge", "confidence": 0.72 },
+    { "version": 3, "change": "refined file->file edges using import analysis", "confidence": 0.87 }
+  ]
+}
+```
+
+**Edge deployment**: This JSON is pushed to a Raspberry Pi or embedded device that runs
+the cognitive tick with this learned model. The device does NOT need LLM access — it uses
+the model's node types, edge types, embedding strategies, and tick config to process live
+data through the same ECC kernel structures. The model IS the configuration.
+
+### 5. Stitch Models
+
+Combine models from different domains into a cross-domain model. The Weaver identifies
+shared concepts via HNSW similarity search and creates cross-forest CrossRefs.
+
+**When to use**: Combining frontend + backend + infrastructure models, merging team-specific
+models, creating organization-wide views.
+
+**CLI**:
+
+```bash
+# Stitch two domain models
+weaver ecc stitch --source frontend --target backend --output product-model
+
+# Stitch with similarity threshold
+weaver ecc stitch --source frontend --target backend --threshold 0.85
+
+# Inspect cross-domain connections
+weaver ecc stitch inspect --domain product-model
+```
+
+**What happens**:
+
+1. For each HNSW entry in the source, search the target for similar vectors
+2. Matches above threshold create cross-forest CrossRefs (CrossRefType::Elaborates)
+3. Causal graph conflicts are resolved:
+   - Same nodes with different edge types: prefer higher-confidence edge
+   - Contradictory edges: keep both with provenance metadata
+4. The stitched model gets its own confidence report
+5. Novel cross-domain connections emit `ImpulseType::NoveltyDetected`
+6. Chain events record the stitch with full provenance
+
+### 6. Manage the Meta-Loom
+
+The meta-Loom tracks the Weaver's own evolution. Every modeling decision is a causal
+event. This is how the Weaver learns to be a better modeler over time.
+
+**When to use**: Understanding why the model is in its current state, debugging confidence
+issues, reviewing the Weaver's decision history.
+
+**CLI**:
+
+```bash
+# Show the meta-loom's causal history
+weaver ecc meta --domain my-project
+
+# Show the reasoning trajectory for a specific model change
+weaver ecc meta --domain my-project --version 3
+
+# Show cross-domain strategy patterns
+weaver ecc meta strategies
+
+# Export the WeaverKnowledgeBase
+weaver ecc meta export-kb --output weaver-kb.json
+```
+
+**Meta-Loom structure**:
+
+The meta-Loom is stored in the kernel's ECC structures (same CausalGraph, HNSW,
+CrossRefStore used by all other services). Its nodes are tagged with
+`StructureTag::Custom(0x40)` — the Weaver meta namespace.
+
+```
+meta-loom/
+  causal edges:
+    "session_started" --Causes--> "initial_hypothesis"
+    "initial_hypothesis" --Enables--> "data_ingestion"
+    "data_ingestion" --Causes--> "confidence_evaluation_v1"
+    "confidence_evaluation_v1" --Causes--> "adjustment:add_source(ci_pipeline)"
+    "adjustment:add_source(ci_pipeline)" --Enables--> "confidence_evaluation_v2"
+    "confidence_evaluation_v2" --EvidenceFor--> "model_improvement(+0.27)"
+
+  hnsw entries:
+    embeddings of domain characteristics for similarity matching
+    embeddings of modeling strategies for cross-domain reuse
+
+  crossrefs:
+    links between domain types and successful modeling strategies
+    links between confidence gaps and effective remediation actions
+```
+
+**WeaverKnowledgeBase**:
+
+The knowledge base accumulates cross-domain learning. A Weaver that has modeled 50 Rust
+codebases knows that `cargo test` output is the best source for commit->test edges and
+suggests this immediately instead of discovering it from scratch.
+
+```json
+{
+  "strategy_patterns": [
+    {
+      "domain_characteristics": ["rust", "cargo", "github-actions"],
+      "recommended_sources": ["git_log", "file_tree", "ci_pipeline"],
+      "recommended_edge_types": ["Modifies", "EvidenceFor", "Causes", "Enables"],
+      "confidence": 0.91,
+      "learned_from": ["project-alpha", "project-beta", "project-gamma"]
+    }
+  ]
+}
+```
+
+### 7. Stream Processing
+
+The Weaver processes live data within the kernel's cognitive tick. It does not run its
+own loop — it is a consumer of CognitiveTick events.
+
+**When to use**: Continuous model maintenance, real-time confidence monitoring, live
+data ingestion.
+
+**CLI**:
+
+```bash
+# Enable watch mode on a session (sources with watch=true start streaming)
+weaver ecc session watch --domain my-project
+
+# View live impulse stream
+weaver ecc stream --domain my-project
+
+# View cognitive tick metrics for the Weaver
+weaver ecc metrics --domain my-project
+```
+
+**What happens on each cognitive tick**:
+
+1. **Poll sources**: Each source with `watch: true` yields new events
+2. **Ingest events**: Create causal nodes, embeddings, edges, CrossRefs
+3. **Evaluate confidence**: Re-score affected edges
+4. **Check thresholds**: If confidence dropped, emit `CoherenceAlert` impulse
+5. **Adjust if needed**: Apply pending suggestions (auto-mode) or queue for operator
+6. **Record in meta-Loom**: Track what happened this tick
+7. **Export check**: If model version bumped and auto-export enabled, write `weave-model.json`
+
+**Impulse types emitted by the Weaver**:
+
+| ImpulseType | When | Payload |
+|-------------|------|---------|
+| `BeliefUpdate` | New data changes the model | `{ edge, old_confidence, new_confidence }` |
+| `CoherenceAlert` | Confidence drops below threshold | `{ domain, confidence, gaps }` |
+| `NoveltyDetected` | New pattern or cross-domain connection | `{ pattern, similarity }` |
+| `EdgeConfirmed` | Chain validation confirmed an edge | `{ edge, evidence }` |
+| `Custom(0x32)` | Model version bumped | `{ version, changes, confidence }` |
+| `Custom(0x33)` | Source request (needs operator action) | `{ source_type, reason }` |
+
+---
+
+## Integration with Kernel Services
+
+The Weaver operates on kernel services via direct `Arc` references:
+
+| Service | Role in Weaving |
+|---------|----------------|
+| `CausalGraph` | Stores typed/weighted causal edges — the model's learned relationships |
+| `HnswService` | Vector similarity for semantic matching and cross-domain stitching |
+| `CrossRefStore` | Links nodes across structures (causal<->hnsw, chain<->model) |
+| `ImpulseQueue` | Emits confidence alerts, novelty detection, source requests |
+| `ChainManager` | Provenance: every model version bump, every adjustment recorded |
+| `TreeManager` | Session and model organization at `/kernel/services/weaver/` |
+| `CognitiveTick` | The Weaver consumes tick events, does not run its own loop |
+| `A2ARouter` | IPC with other agents that may provide data or consume models |
+| `AgentSupervisor` | Restart policies for the Weaver process |
+
+### CrossRef Types
+
+| CrossRefType | Usage |
+|-------------|-------|
+| `MemoryEncoded` | HNSW embedding encodes a causal node's content |
+| `EvidenceFor` | Test result provides evidence for code correctness |
+| `Elaborates` | Cross-forest stitch link |
+| `TriggeredBy` | Chain event triggered model adjustment |
+| `Custom(0x40)` | Meta-loom node (Weaver's own reasoning) |
+| `Custom(0x41)` | Strategy pattern link (knowledge base) |
+
+---
+
+## Workflow Examples
+
+### Example 1: Model the WeftOS Codebase
+
+```
+User: weaver ecc session start --domain weftos --git . \
+        --context "Rust kernel codebase, ECC architecture" \
+        --goal "model module dependencies and test coverage with 0.8+ confidence"
+
+Weaver: Session started for domain "weftos".
+  Initial hypothesis: 3 node types (commit, file, test), 2 edge types
+  Ingesting git log... 847 commits processed
+  Ingesting file tree... 234 files mapped
+  Initial confidence: 0.48
+
+  Gaps identified:
+  - commit->test (0.32): only 18% of commits have test runs in history
+    SUGGESTION: add ci_pipeline source
+  - file->file (0.41): import analysis not yet performed
+    SUGGESTION: will refine on next tick using Cargo.toml + use statements
+
+User: weaver ecc source add --domain weftos --type ci_pipeline \
+        --webhook-url https://ci.example.com/hooks/weaver
+
+Weaver: Source added. Re-evaluating model...
+  commit->test confidence: 0.32 -> 0.67 (+0.35)
+  Overall confidence: 0.48 -> 0.71
+
+  Model version bumped: v1 -> v2
+  Remaining gap: issue->commit (0.29) — suggest adding issue tracker
+
+User: weaver ecc confidence --domain weftos --verbose
+
+Weaver: Confidence report for "weftos" (model v2, confidence: 0.71)
+  [strong]      commit->file:Modifies        0.99  (847 samples)
+  [developing]  commit->test:EvidenceFor      0.67  (312 samples)
+  [developing]  file->file:Enables            0.58  (189 samples)
+  [insufficient] issue->commit:Causes          0.29  (12 samples)
+
+  Pattern: "feature_lifecycle" detected 8 instances (confidence: 0.64)
+
+  To reach 0.80 target:
+  1. Add issue_tracker source (expected +0.15 overall)
+  2. Wait for more CI data (expected +0.08 for commit->test)
+
+User: weaver ecc export --domain weftos --output weave-model.json
+
+Weaver: Exported model v2 (confidence: 0.71) to weave-model.json
+  Warning: below target confidence (0.80). Export anyway? [y/N]
+
+User: y
+
+Weaver: Written. Evolution history: v1(0.48) -> v2(0.71)
+```
+
+### Example 2: Cross-Domain Stitching
+
+```
+User: weaver ecc stitch --source frontend --target backend --output product
+
+Weaver: Stitching "frontend" (confidence: 0.83) + "backend" (confidence: 0.79)
+  Searching for cross-domain semantic matches...
+  Found 47 connections above threshold (0.80):
+  - frontend:api-client <-> backend:api-handler (0.94)
+  - frontend:auth-store <-> backend:auth-service (0.91)
+  - frontend:user-model <-> backend:user-schema (0.89)
+  ...
+
+  Conflicts resolved: 3 (all PreferHigherConfidence)
+  Novel connections: 12 (patterns not seen in either domain alone)
+
+  Product model confidence: 0.76
+  Impulse emitted: NoveltyDetected (12 cross-domain patterns)
+```
+
+### Example 3: Meta-Loom Inspection
+
+```
+User: weaver ecc meta --domain weftos
+
+Weaver: Meta-Loom for "weftos" — Weaver reasoning trajectory:
+
+  v1 (confidence: 0.48)
+  |- "initial_hypothesis" based on WeaverKnowledgeBase match (rust, cargo)
+  |- "ingested git_log" -> 847 commits, 1204 edges
+  |- "ingested file_tree" -> 234 nodes, 189 import edges
+  |- "evaluated confidence" -> 0.48 (below target 0.80)
+  |- "identified gap: commit->test at 0.32"
+  |- "recommended: add ci_pipeline"
+
+  v2 (confidence: 0.71)
+  |- "source_added: ci_pipeline" -> 312 test results linked
+  |- "model_reevaluated" -> commit->test improved 0.32 -> 0.67
+  |- "refined file->file edges using use-statement analysis"
+  |- "identified gap: issue->commit at 0.29"
+  |- "recommended: add issue_tracker"
+
+  Strategy learned: "for Rust/Cargo codebases, CI pipeline data is high-value"
+  This strategy will apply to future Rust domain sessions.
+```
+
+---
 
 ## Fundamental Principle: SDLC as Conversation
 
@@ -45,532 +653,37 @@ The Weaver treats all software development lifecycle activity as conversation:
 | Incident | Interruption | Contradicts |
 | Refactor | Clarification | Enables |
 
-Meta-conversations are conversations ABOUT the main conversation: "our testing strategy"
-is a meta-conversation about the "implementation" conversation. The Weaver identifies
-and tracks these explicitly.
-
----
-
-## Capabilities
-
-### 1. Loom Initialization
-
-Create a new ECC space for a domain and prime it with initial structure.
-
-**When to use**: Starting a new project, onboarding an existing codebase, creating a
-domain-specific cognitive workspace.
-
-**Steps**:
-
-1. Parse or generate a `weave.toml` configuration file
-2. Create the CausalGraph root nodes representing the domain's top-level namespaces
-3. Initialize the HNSW index with configured dimensions and parameters
-4. Bootstrap the CrossRefStore with links between initial structure nodes
-5. Create genesis chain events in ExoChain for provenance
-6. Initialize the ResourceTree with namespace entries
-7. Configure the CognitiveTick for this domain's cadence
-8. Run calibration to determine hardware-appropriate tick parameters
-
-**Commands**:
-
-```bash
-# Analyze a codebase and generate weave.toml
-weaver ecc analyze /path/to/codebase --output weave.toml
-
-# Initialize a loom from configuration
-weaver ecc init --config weave.toml
-
-# Quick init with defaults for a git repository
-weaver ecc init --git /path/to/repo --domain my-project
-```
-
-**Produced artifacts**:
-- `weave.toml` -- domain configuration
-- CausalGraph with root nodes for each top-level namespace
-- HNSW index seeded with initial embeddings (if embedding source available)
-- CrossRef links between ExoChain genesis and initial CausalGraph nodes
-- Calibration results logged to ExoChain
-
-### 2. Pattern Weaving
-
-Build the recurrent causal structure that represents how the domain's conversation flows.
-
-**When to use**: After loom initialization, when ingesting new data sources, when
-the domain's conversation patterns change.
-
-**Warp threads** (recurrent patterns):
-
-```
-build -> test -> deploy          # CI/CD conversation
-plan -> implement -> review      # feature development conversation
-report -> triage -> fix -> verify  # bug lifecycle conversation
-propose -> discuss -> decide     # architecture decision conversation
-write -> review -> merge         # PR conversation
-```
-
-**Steps**:
-
-1. Identify the data source type (git log, file tree, documentation, SPARC plan)
-2. Parse source data into candidate nodes and edges
-3. Create CausalGraph nodes for each significant event
-4. Create typed causal edges following the domain's patterns
-5. Generate embeddings for each node's content
-6. Insert embeddings into HNSW with metadata linking back to causal nodes
-7. Create CrossRefs linking HNSW entries to CausalGraph nodes and ExoChain events
-8. Emit impulses for any novelty detected during weaving
-
-**Commands**:
-
-```bash
-# Ingest git history into the loom
-weaver ecc weave git --repo /path/to/repo --branch main --depth 500
-
-# Ingest source tree structure
-weaver ecc weave source --root /path/to/src --patterns "**/*.rs,**/*.ts"
-
-# Ingest documentation
-weaver ecc weave docs --root /path/to/docs
-
-# Ingest a SPARC plan
-weaver ecc weave sparc --plan /path/to/.planning/sparc/
-
-# Weave all configured sources
-weaver ecc weave all --config weave.toml
-```
-
-**Git history weaving detail**:
-
-Each commit becomes a CausalGraph node. Edges are created as:
-- Sequential commits on the same branch: `Follows` edges
-- Merge commits: `Enables` edges from both parents
-- Commits referencing issues: `TriggeredBy` edges to the issue node
-- Commits that break tests: `Contradicts` edges to the test node
-- Commits that fix tests: `EvidenceFor` edges to the fix
-
-PR nodes aggregate their commits. Issue nodes link to their resolution commits.
-The result is a conversation where the git history tells a causal story.
-
-**Source tree weaving detail**:
-
-Files become leaf nodes. Directories become namespace nodes. Edges:
-- File belongs to module: `Enables` (module enables the file's function)
-- Module imports module: `Causes` (dependency relationship)
-- Test file tests source file: `EvidenceFor`
-- Config file configures module: `Enables`
-
-### 3. Forest Stitching
-
-Merge multiple Looms into a unified cognitive structure (Tapestry).
-
-**When to use**: Combining related projects, creating cross-domain analysis,
-linking a codebase loom to its documentation loom.
-
-**Steps**:
-
-1. Load both Looms and their configurations
-2. Identify shared concepts via HNSW similarity search across both indices
-3. Create cross-forest CrossRefs for matched concepts (CrossRefType::Elaborates)
-4. Resolve causal graph conflicts:
-   - If both graphs have edges between matched nodes with different types, prefer
-     the edge with higher weight
-   - If edges contradict (one Causes, other Inhibits), create both with provenance
-     metadata noting the conflict
-5. Merge HNSW indices (union of vector spaces, dedup by similarity threshold)
-6. Create ExoChain bridge events linking the forests' chains
-7. Emit ImpulseType::NoveltyDetected for any cross-domain connections discovered
-
-**Commands**:
-
-```bash
-# Stitch two looms
-weaver ecc stitch --source loom-a --target loom-b --output tapestry
-
-# Stitch with conflict resolution strategy
-weaver ecc stitch --source loom-a --target loom-b --strategy prefer-recent
-
-# List cross-forest connections
-weaver ecc stitch inspect --tapestry tapestry
-```
-
-### 4. Pruning and Trimming
-
-Remove stale structure to keep the loom healthy and performant.
-
-**When to use**: Periodic maintenance, after major refactors, when the loom
-exceeds size thresholds, during cold storage archival.
-
-**Decay function**: Every causal edge has a weight. On each cognitive tick,
-edges that have not been refreshed (referenced by a new event) decay:
-
-```
-new_weight = weight * (1.0 - decay_rate)
-```
-
-When weight drops below a configurable threshold (default 0.05), the edge
-is eligible for pruning.
-
-**Steps**:
-
-1. Apply decay to all edges not refreshed since the last prune cycle
-2. Remove edges below the weight threshold
-3. Remove orphaned CausalGraph nodes (no remaining edges)
-4. Remove HNSW entries whose corresponding causal nodes were pruned
-5. Garbage collect unreferenced CrossRefs
-6. Archive pruned subtrees to cold storage (serialized snapshot)
-7. Record pruning statistics in ExoChain
-
-**Commands**:
-
-```bash
-# Run pruning cycle
-weaver ecc prune --config weave.toml
-
-# Dry run -- show what would be pruned
-weaver ecc prune --dry-run --config weave.toml
-
-# Archive a subtree to cold storage
-weaver ecc archive --subtree namespace::old_module --output archive.bin
-
-# Restore from archive
-weaver ecc restore --input archive.bin --target loom
-```
-
-### 5. Analysis and Planning
-
-Analyze existing data and produce an ECC initialization or restructuring plan.
-
-**When to use**: Before initializing a loom for an existing codebase, when
-evaluating loom health, when planning domain expansion.
-
-**Three modes apply** (from 06-three-modes.md):
-- **Analyze**: Read existing code/docs/git and map the conversation structure
-- **Generate**: Produce weave.toml and initialization plans
-- **Act**: Execute the plan by creating the loom and weaving data
-
-**Analysis outputs**:
-
-1. **AnalysisPlan** -- structured report containing:
-   - Discovered nodes (files, modules, features, tests)
-   - Recommended causal edges with types and estimated weights
-   - Embedding plan (which chunks to embed, estimated vector count)
-   - CrossRef plan (which structures to link)
-   - Recommended HNSW dimensions based on content complexity
-   - Identified meta-conversations (testing strategy, deployment pipeline, etc.)
-   - Estimated resource requirements (memory, storage, tick budget)
-
-2. **Suggested patterns** -- recurrent sequences identified in the data:
-   - From git history: commit frequency patterns, PR lifecycle patterns
-   - From code structure: dependency chains, test coverage patterns
-   - From documentation: topic flow, reference patterns
-
-3. **Meta-conversation identification**:
-   - "Testing strategy" -- conversations about how testing is done
-   - "Deployment pipeline" -- conversations about how code reaches production
-   - "Architecture decisions" -- conversations about system structure
-   - "Technical debt" -- conversations about what needs improvement
-
-**Commands**:
-
-```bash
-# Full analysis of a codebase
-weaver ecc analyze /path/to/codebase --output analysis.json
-
-# Analyze only git history
-weaver ecc analyze /path/to/repo --source git --output git-analysis.json
-
-# Analyze and generate weave.toml
-weaver ecc analyze /path/to/codebase --generate-config --output weave.toml
-
-# Health check on existing loom
-weaver ecc analyze --loom my-project --health
-```
-
-### 6. Cognitive Tick Configuration
-
-The `weave.toml` file controls how the cognitive tick processes this domain's loom.
-
-**Structure**:
-
-```toml
-[domain]
-name = "my-project"
-description = "Main application codebase"
-mode = "analyze"  # act | analyze | generate
-
-[tick]
-interval_ms = 50
-budget_ratio = 0.3
-calibration_ticks = 100
-adaptive = true
-adaptive_window_s = 30
-
-[causal]
-edge_types = [
-    "Causes", "Inhibits", "Correlates", "Enables",
-    "Follows", "Contradicts", "TriggeredBy", "EvidenceFor"
-]
-decay_rate = 0.01
-decay_threshold = 0.05
-max_edges = 100000
-max_nodes = 50000
-
-[hnsw]
-dimensions = 384
-ef_search = 100
-ef_construction = 200
-max_entries = 100000
-
-[impulse]
-ttl_ticks = 100
-max_queue_depth = 1000
-
-[[patterns]]
-name = "ci-cd"
-description = "Build, test, deploy lifecycle"
-edge_sequence = ["Causes", "EvidenceFor", "TriggeredBy"]
-recurrence = "on_commit"
-
-[[patterns]]
-name = "feature-dev"
-description = "Plan, implement, review cycle"
-edge_sequence = ["Causes", "Follows", "Enables", "EvidenceFor"]
-recurrence = "on_event:pr_opened"
-
-[[patterns]]
-name = "bug-lifecycle"
-description = "Report, triage, fix, verify"
-edge_sequence = ["Causes", "Enables", "Follows", "EvidenceFor"]
-recurrence = "on_event:issue_opened"
-
-[[patterns]]
-name = "architecture-decision"
-description = "Propose, discuss, decide, document"
-edge_sequence = ["Causes", "Correlates", "Enables", "EvidenceFor"]
-recurrence = "periodic:weekly"
-
-[[sources]]
-type = "git_log"
-path = "."
-branch = "main"
-
-[[sources]]
-type = "file_tree"
-root = "src/"
-patterns = ["**/*.rs", "**/*.ts"]
-
-[[sources]]
-type = "documentation"
-root = "docs/"
-
-[[sources]]
-type = "sparc_plan"
-path = ".planning/sparc/"
-
-[meta]
-enabled = true
-conversations = [
-    { name = "testing-strategy", relates_to = ["implementation"], pattern = "plan-implement-review-reflect" },
-    { name = "deployment-pipeline", relates_to = ["ci-cd"], pattern = "configure-test-deploy-monitor" },
-    { name = "architecture", relates_to = ["feature-dev"], pattern = "propose-discuss-decide-document" },
-]
-```
-
-**Configuration sections explained**:
-
-- `[domain]` -- Identity and operating mode. The mode determines whether the
-  cognitive tick processes live events (act), reads existing data (analyze),
-  or produces new structure toward a goal (generate).
-
-- `[tick]` -- CognitiveTick parameters. These map directly to `CognitiveTickConfig`.
-  The adaptive option auto-adjusts interval based on measured compute latency.
-
-- `[causal]` -- CausalGraph parameters. `decay_rate` controls how fast unused
-  edges lose weight per tick. `max_edges`/`max_nodes` trigger pruning when exceeded.
-
-- `[hnsw]` -- HnswService parameters. `dimensions` should match the embedding
-  model output size. 384 is standard for MiniLM/all-MiniLM-L6-v2.
-
-- `[impulse]` -- ImpulseQueue parameters. `ttl_ticks` is how many ticks an
-  unacknowledged impulse survives before being garbage collected.
-
-- `[[patterns]]` -- Recurrent structural patterns (warp threads). Each pattern
-  defines a sequence of CausalEdgeTypes that recurs under certain conditions.
-  `recurrence` can be `on_commit`, `on_tick`, `on_event:<event_name>`, or
-  `periodic:<interval>`.
-
-- `[[sources]]` -- Data sources to ingest. Each source type has its own
-  ingestion strategy.
-
-- `[meta]` -- Meta-conversation configuration. Each meta-conversation tracks
-  a higher-order discussion about some aspect of the main domain conversation.
+The Weaver's modeling loop discovers WHICH of these mappings hold for the specific domain
+and quantifies their confidence. The table above is the initial hypothesis; the Weaver
+validates, refines, or replaces each mapping based on evidence.
 
 ---
 
 ## Operating Modes
 
+The Weaver inherits the three-mode paradigm from the kernel:
+
 ### Analyze Mode
-
-Read existing artifacts and build an understanding without modifying the source.
-
-```bash
-# Enter analyze mode
-weaver ecc mode analyze --config weave.toml
-
-# The cognitive tick in analyze mode:
-# 1. Reads source data (git log, file tree, docs)
-# 2. Creates causal nodes and edges (read-only model)
-# 3. Generates embeddings and inserts into HNSW
-# 4. Scores coherence, identifies gaps
-# 5. Produces analysis report
-```
-
-Outputs: structural analysis, goal completion status, coherence scores, causal
-decision graph, gap identification.
+Read existing artifacts, build understanding, produce confidence reports.
+The modeling loop runs in evaluation-only: it hypothesizes and evaluates but does not
+auto-adjust. Suggestions are queued for operator review.
 
 ### Generate Mode
-
-Set a goal and produce new structure toward it.
-
-```bash
-# Enter generate mode with a goal
-weaver ecc mode generate --config weave.toml \
-  --goal "Produce architecture plan for real-time bidding system"
-
-# The cognitive tick in generate mode:
-# 1. Spawns expert agent processes
-# 2. Agents converse toward the goal (their utterances become causal nodes)
-# 3. Speculative branches are explored and pruned
-# 4. Winning approach commits to the MainLine
-# 5. Output is the committed conversation with full causal provenance
-```
-
-Outputs: goal artifact, causal history of production, quality scores.
+Set a goal and produce new model structure toward it. Expert agents may be spawned
+to provide domain-specific hypotheses. The Weaver evaluates their proposals.
 
 ### Act Mode
-
-Process live events in real-time.
-
-```bash
-# Enter act mode
-weaver ecc mode act --config weave.toml
-
-# The cognitive tick in act mode:
-# 1. Watches for new events (commits, PRs, test results)
-# 2. Creates causal nodes and edges in real-time
-# 3. Emits impulses for cross-structure communication
-# 4. Updates HNSW embeddings incrementally
-# 5. Maintains live coherence scoring
-```
-
-Outputs: live cognitive model, real-time impulse stream, coherence metrics.
-
----
-
-## Integration with Kernel Services
-
-The Weaver operates on these kernel services (all from `clawft-kernel`):
-
-| Service | Role in Weaving |
-|---------|----------------|
-| `CausalGraph` | Stores typed/weighted causal edges between nodes |
-| `HnswService` | Vector similarity search for semantic matching |
-| `CrossRefStore` | Links nodes across structures (causal-to-hnsw, chain-to-tree) |
-| `ImpulseQueue` | Inter-structure event communication |
-| `ChainManager` | Provenance recording (ExoChain events) |
-| `TreeManager` | Namespace and resource organization |
-| `CognitiveTick` | Heartbeat driving the processing cycle |
-| `EccCalibration` | Hardware capability measurement at boot |
-
-### CrossRef Types Used by Weaver
-
-| CrossRefType | Weaver Usage |
-|-------------|-------------|
-| `TriggeredBy` | Commit node triggered by issue node |
-| `EvidenceFor` | Test result provides evidence for code correctness |
-| `Elaborates` | Documentation elaborates on code structure |
-| `GoalMotivation` | Issue motivates feature implementation |
-| `MemoryEncoded` | HNSW embedding encodes a causal node's content |
-| `Custom(0x20)` | Cross-forest stitch link |
-| `Custom(0x21)` | Meta-conversation link |
-
-### Impulse Types Used by Weaver
-
-| ImpulseType | Weaver Usage |
-|------------|-------------|
-| `BeliefUpdate` | New commit changes the causal model |
-| `CoherenceAlert` | Graph structure has become incoherent |
-| `NoveltyDetected` | New pattern or cross-domain connection found |
-| `EdgeConfirmed` | Chain validation confirmed an edge |
-| `Custom(0x30)` | Pruning completed |
-| `Custom(0x31)` | Forest stitch completed |
-
----
-
-## Workflow Examples
-
-### Bootstrap a Rust Project
-
-```bash
-# 1. Analyze the codebase
-weaver ecc analyze /path/to/rust-project --generate-config --output weave.toml
-
-# 2. Review and edit weave.toml as needed
-# (adjust dimensions, patterns, sources)
-
-# 3. Initialize the loom
-weaver ecc init --config weave.toml
-
-# 4. Weave all sources
-weaver ecc weave all --config weave.toml
-
-# 5. Check loom health
-weaver ecc analyze --loom rust-project --health
-```
-
-### Cross-Project Analysis
-
-```bash
-# 1. Initialize looms for each project
-weaver ecc init --git /path/to/frontend --domain frontend
-weaver ecc init --git /path/to/backend --domain backend
-weaver ecc init --git /path/to/infra --domain infrastructure
-
-# 2. Weave each
-weaver ecc weave all --loom frontend
-weaver ecc weave all --loom backend
-weaver ecc weave all --loom infrastructure
-
-# 3. Stitch into tapestry
-weaver ecc stitch --source frontend --target backend --output product-tapestry
-weaver ecc stitch --source product-tapestry --target infrastructure --output full-tapestry
-
-# 4. Analyze cross-domain connections
-weaver ecc analyze --loom full-tapestry --cross-domain
-```
-
-### Continuous Weaving (Act Mode)
-
-```bash
-# Start the weaver in act mode, watching for git events
-weaver ecc mode act --config weave.toml --watch
-
-# The weaver will:
-# - Watch for new commits and create causal nodes
-# - Watch for PR events and create topic-shift edges
-# - Watch for CI results and create evidence edges
-# - Emit impulses for any coherence alerts
-# - Auto-prune on the configured schedule
-```
+Process live events in real-time. Auto-adjustment is enabled: when confidence drops,
+the Weaver applies its suggestions automatically and records the reasoning in the
+meta-Loom. This is the steady-state operating mode for production.
 
 ---
 
 ## Related Skills
 
-- **sparc-methodology** -- SPARC plans are a primary data source for weaving
-- **stream-chain** -- Chain pipelines can drive generate-mode conversations
-- **swarm-orchestration** -- Swarm agents can be expert participants in generate mode
-
----
+- **sparc-methodology** — SPARC plans are a primary data source for weaving
+- **stream-chain** — Chain pipelines can drive generate-mode conversations
+- **swarm-orchestration** — Swarm agents can provide domain-specific hypotheses
 
 ## Backing Crate
 
