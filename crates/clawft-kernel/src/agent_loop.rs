@@ -1409,4 +1409,423 @@ mod tests {
         assert_eq!(rp["from"], 0);
         assert_eq!(rp["msg_id"], resume_id);
     }
+
+    // ── Additional agent_loop coverage tests ─────────────────────
+
+    #[tokio::test]
+    async fn echo_command() {
+        let (a2a, cron, pt) = setup();
+        let (agent_pid, inbox) = spawn_agent(&pt, &a2a, "echo-agent");
+        let mut kernel_inbox = a2a.create_inbox(0);
+
+        let cancel = CancellationToken::new();
+        let handle = spawn_loop(agent_pid, cancel.clone(), inbox, a2a.clone(), cron, pt);
+
+        let msg = KernelMessage::new(
+            0,
+            MessageTarget::Process(agent_pid),
+            MessagePayload::Json(serde_json::json!({"cmd": "echo", "text": "hello world"})),
+        );
+        a2a.send(msg).await.unwrap();
+
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            kernel_inbox.recv(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        if let MessagePayload::Json(v) = &reply.payload {
+            assert_eq!(v["echo"], "hello world");
+            assert_eq!(v["pid"], agent_pid);
+        } else {
+            panic!("expected JSON reply");
+        }
+
+        cancel.cancel();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn text_payload_parsed_as_json() {
+        let (a2a, cron, pt) = setup();
+        let (agent_pid, inbox) = spawn_agent(&pt, &a2a, "text-agent");
+        let mut kernel_inbox = a2a.create_inbox(0);
+
+        let cancel = CancellationToken::new();
+        let handle = spawn_loop(agent_pid, cancel.clone(), inbox, a2a.clone(), cron, pt);
+
+        // Send text payload that is valid JSON
+        let msg = KernelMessage::new(
+            0,
+            MessageTarget::Process(agent_pid),
+            MessagePayload::Text(r#"{"cmd": "ping"}"#.into()),
+        );
+        a2a.send(msg).await.unwrap();
+
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            kernel_inbox.recv(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        if let MessagePayload::Json(v) = &reply.payload {
+            assert_eq!(v["status"], "ok");
+        } else {
+            panic!("expected JSON reply");
+        }
+
+        cancel.cancel();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn text_payload_non_json_becomes_echo() {
+        let (a2a, cron, pt) = setup();
+        let (agent_pid, inbox) = spawn_agent(&pt, &a2a, "text-echo-agent");
+        let mut kernel_inbox = a2a.create_inbox(0);
+
+        let cancel = CancellationToken::new();
+        let handle = spawn_loop(agent_pid, cancel.clone(), inbox, a2a.clone(), cron, pt);
+
+        // Send plain text that isn't JSON
+        let msg = KernelMessage::new(
+            0,
+            MessageTarget::Process(agent_pid),
+            MessagePayload::Text("just plain text".into()),
+        );
+        a2a.send(msg).await.unwrap();
+
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            kernel_inbox.recv(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        if let MessagePayload::Json(v) = &reply.payload {
+            // Plain text becomes {"cmd": "echo", "text": "just plain text"}
+            assert_eq!(v["echo"], "just plain text");
+        } else {
+            panic!("expected JSON reply");
+        }
+
+        cancel.cancel();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn inbox_close_causes_clean_exit() {
+        let pt = Arc::new(ProcessTable::new(64));
+
+        // Insert kernel process
+        let kernel_entry = ProcessEntry {
+            pid: 0,
+            agent_id: "kernel".into(),
+            state: ProcessState::Running,
+            capabilities: AgentCapabilities::default(),
+            resource_usage: ResourceUsage::default(),
+            cancel_token: CancellationToken::new(),
+            parent_pid: None,
+        };
+        pt.insert_with_pid(kernel_entry).unwrap();
+
+        let checker = Arc::new(CapabilityChecker::new(pt.clone()));
+        let topic_router = Arc::new(TopicRouter::new(pt.clone()));
+        let a2a = Arc::new(A2ARouter::new(pt.clone(), checker, topic_router));
+        let cron = Arc::new(CronService::new());
+
+        // Create agent with a manually controlled inbox
+        let (tx, rx) = mpsc::channel(32);
+        let agent_entry = ProcessEntry {
+            pid: 0,
+            agent_id: "close-agent".into(),
+            state: ProcessState::Running,
+            capabilities: AgentCapabilities::default(),
+            resource_usage: ResourceUsage::default(),
+            cancel_token: CancellationToken::new(),
+            parent_pid: None,
+        };
+        let agent_pid = pt.insert(agent_entry).unwrap();
+
+        let cancel = CancellationToken::new();
+        let handle = spawn_loop(agent_pid, cancel.clone(), rx, a2a, cron, pt);
+
+        // Drop the sender to close the inbox
+        drop(tx);
+
+        let code = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            handle,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(code, 0, "should exit cleanly when inbox closes");
+    }
+
+    #[tokio::test]
+    async fn cron_list_returns_empty() {
+        let (a2a, cron, pt) = setup();
+        let (agent_pid, inbox) = spawn_agent(&pt, &a2a, "cron-list-agent");
+        let mut kernel_inbox = a2a.create_inbox(0);
+
+        let cancel = CancellationToken::new();
+        let handle = spawn_loop(agent_pid, cancel.clone(), inbox, a2a.clone(), cron, pt);
+
+        let msg = KernelMessage::new(
+            0,
+            MessageTarget::Process(agent_pid),
+            MessagePayload::Json(serde_json::json!({"cmd": "cron.list"})),
+        );
+        a2a.send(msg).await.unwrap();
+
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            kernel_inbox.recv(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        if let MessagePayload::Json(v) = &reply.payload {
+            assert!(v.is_array(), "cron.list should return array");
+            assert_eq!(v.as_array().unwrap().len(), 0, "should be empty");
+        } else {
+            panic!("expected JSON reply");
+        }
+
+        cancel.cancel();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cron_remove_nonexistent() {
+        let (a2a, cron, pt) = setup();
+        let (agent_pid, inbox) = spawn_agent(&pt, &a2a, "cron-rm-agent");
+        let mut kernel_inbox = a2a.create_inbox(0);
+
+        let cancel = CancellationToken::new();
+        let handle = spawn_loop(agent_pid, cancel.clone(), inbox, a2a.clone(), cron, pt);
+
+        let msg = KernelMessage::new(
+            0,
+            MessageTarget::Process(agent_pid),
+            MessagePayload::Json(serde_json::json!({"cmd": "cron.remove", "id": "nonexistent"})),
+        );
+        a2a.send(msg).await.unwrap();
+
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            kernel_inbox.recv(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        if let MessagePayload::Json(v) = &reply.payload {
+            assert_eq!(v["removed"], false);
+            assert!(v["error"].as_str().is_some());
+        } else {
+            panic!("expected JSON reply");
+        }
+
+        cancel.cancel();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn exec_without_tool_echoes() {
+        let (a2a, cron, pt) = setup();
+        let (agent_pid, inbox) = spawn_agent(&pt, &a2a, "exec-agent");
+        let mut kernel_inbox = a2a.create_inbox(0);
+
+        let cancel = CancellationToken::new();
+        let handle = spawn_loop(agent_pid, cancel.clone(), inbox, a2a.clone(), cron, pt);
+
+        // exec without tool name falls back to echo mode
+        let msg = KernelMessage::new(
+            0,
+            MessageTarget::Process(agent_pid),
+            MessagePayload::Json(serde_json::json!({"cmd": "exec", "text": "fallback"})),
+        );
+        a2a.send(msg).await.unwrap();
+
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            kernel_inbox.recv(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        if let MessagePayload::Json(v) = &reply.payload {
+            assert_eq!(v["status"], "ok");
+            assert_eq!(v["echo"], "fallback");
+        } else {
+            panic!("expected JSON reply");
+        }
+
+        cancel.cancel();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn exec_with_tool_name_no_registry() {
+        let (a2a, cron, pt) = setup();
+        let (agent_pid, inbox) = spawn_agent(&pt, &a2a, "exec-noreg-agent");
+        let mut kernel_inbox = a2a.create_inbox(0);
+
+        let cancel = CancellationToken::new();
+        let handle = spawn_loop(agent_pid, cancel.clone(), inbox, a2a.clone(), cron, pt);
+
+        // exec with tool name but no registry
+        let msg = KernelMessage::new(
+            0,
+            MessageTarget::Process(agent_pid),
+            MessagePayload::Json(serde_json::json!({"cmd": "exec", "tool": "fs.read", "args": {}})),
+        );
+        a2a.send(msg).await.unwrap();
+
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            kernel_inbox.recv(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        if let MessagePayload::Json(v) = &reply.payload {
+            assert!(
+                v["error"].as_str().unwrap().contains("tool registry not available"),
+                "should report tool registry unavailable"
+            );
+        } else {
+            panic!("expected JSON reply");
+        }
+
+        cancel.cancel();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn multiple_messages_increment_usage() {
+        let (a2a, cron, pt) = setup();
+        let (agent_pid, inbox) = spawn_agent(&pt, &a2a, "multi-msg-agent");
+        let mut kernel_inbox = a2a.create_inbox(0);
+
+        let cancel = CancellationToken::new();
+        let handle = spawn_loop(agent_pid, cancel.clone(), inbox, a2a.clone(), cron, pt.clone());
+
+        // Send 3 pings
+        for _ in 0..3 {
+            let msg = KernelMessage::new(
+                0,
+                MessageTarget::Process(agent_pid),
+                MessagePayload::Json(serde_json::json!({"cmd": "ping"})),
+            );
+            a2a.send(msg).await.unwrap();
+            let _reply = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                kernel_inbox.recv(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+
+        cancel.cancel();
+        let _code = handle.await.unwrap();
+
+        let entry = pt.get(agent_pid).unwrap();
+        assert!(
+            entry.resource_usage.messages_sent >= 3,
+            "should have sent at least 3 messages, got {}",
+            entry.resource_usage.messages_sent
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_during_suspend_exits_cleanly() {
+        let (a2a, cron, pt) = setup();
+        let (agent_pid, inbox) = spawn_agent(&pt, &a2a, "cancel-suspend-agent");
+        let mut kernel_inbox = a2a.create_inbox(0);
+
+        let cancel = CancellationToken::new();
+        let handle = spawn_loop(agent_pid, cancel.clone(), inbox, a2a.clone(), cron, pt);
+
+        // Send suspend
+        let msg = KernelMessage::new(
+            0,
+            MessageTarget::Process(agent_pid),
+            MessagePayload::Json(serde_json::json!({"cmd": "suspend"})),
+        );
+        a2a.send(msg).await.unwrap();
+
+        // Wait for suspended ack
+        let _reply = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            kernel_inbox.recv(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        // Cancel while suspended
+        cancel.cancel();
+        let code = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            handle,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(code, 0, "should exit cleanly when cancelled during suspend");
+    }
+
+    #[tokio::test]
+    async fn extract_cmd_from_json() {
+        let msg = KernelMessage::new(
+            0,
+            MessageTarget::Process(1),
+            MessagePayload::Json(serde_json::json!({"cmd": "test_cmd"})),
+        );
+        assert_eq!(extract_cmd(&msg), Some("test_cmd".to_string()));
+    }
+
+    #[tokio::test]
+    async fn extract_cmd_from_text() {
+        let msg = KernelMessage::new(
+            0,
+            MessageTarget::Process(1),
+            MessagePayload::Text(r#"{"cmd": "from_text"}"#.into()),
+        );
+        assert_eq!(extract_cmd(&msg), Some("from_text".to_string()));
+    }
+
+    #[tokio::test]
+    async fn extract_cmd_from_plain_text_returns_none() {
+        let msg = KernelMessage::new(
+            0,
+            MessageTarget::Process(1),
+            MessagePayload::Text("not json".into()),
+        );
+        assert_eq!(extract_cmd(&msg), None);
+    }
+
+    #[tokio::test]
+    async fn extract_cmd_from_signal_returns_none() {
+        let msg = KernelMessage::new(
+            0,
+            MessageTarget::Process(1),
+            MessagePayload::Signal(crate::ipc::KernelSignal::Shutdown),
+        );
+        assert_eq!(extract_cmd(&msg), None);
+    }
 }

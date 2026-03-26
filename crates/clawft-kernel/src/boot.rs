@@ -1950,4 +1950,303 @@ mod tests {
         // Parent WASM tool still reachable from child
         assert!(child.get("wasm.noop").is_some(), "WASM tool still reachable via parent");
     }
+
+    // ── Boot path coverage tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn boot_reaches_running_state() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        assert_eq!(*kernel.state(), KernelState::Running);
+    }
+
+    #[tokio::test]
+    async fn boot_registers_cron_service() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        assert!(
+            kernel.services().get("cron").is_some(),
+            "cron service must be registered at boot"
+        );
+    }
+
+    #[tokio::test]
+    async fn boot_registers_container_service() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        assert!(
+            kernel.services().get("containers").is_some(),
+            "container service must be registered at boot"
+        );
+    }
+
+    #[cfg(feature = "exochain")]
+    fn test_kernel_config_exochain() -> KernelConfig {
+        use clawft_types::config::{ChainConfig, ResourceTreeConfig};
+        KernelConfig {
+            enabled: true,
+            max_processes: 16,
+            health_check_interval_secs: 5,
+            cluster: None,
+            chain: Some(ChainConfig {
+                enabled: true,
+                checkpoint_interval: 10_000,
+                chain_id: 0,
+                checkpoint_path: None,
+            }),
+            resource_tree: Some(ResourceTreeConfig {
+                enabled: true,
+                checkpoint_path: None,
+            }),
+        }
+    }
+
+    #[cfg(feature = "exochain")]
+    #[tokio::test]
+    async fn boot_exochain_creates_chain_manager() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config_exochain(), platform)
+            .await
+            .unwrap();
+        assert!(
+            kernel.chain_manager().is_some(),
+            "chain manager must be present with exochain feature and enabled chain config"
+        );
+    }
+
+    #[cfg(feature = "exochain")]
+    #[tokio::test]
+    async fn boot_exochain_creates_tree_manager() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config_exochain(), platform)
+            .await
+            .unwrap();
+        assert!(
+            kernel.tree_manager().is_some(),
+            "tree manager must be present with exochain feature and enabled config"
+        );
+    }
+
+    #[cfg(feature = "exochain")]
+    #[tokio::test]
+    async fn boot_exochain_chain_has_boot_events() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config_exochain(), platform)
+            .await
+            .unwrap();
+        let chain = kernel.chain_manager().unwrap();
+        // Chain should have boot.init, boot.config, boot.services, boot.cluster, boot.ready, boot.manifest at minimum
+        assert!(
+            chain.sequence() >= 6,
+            "chain should have at least 6 boot events, got {}",
+            chain.sequence()
+        );
+    }
+
+    #[cfg(feature = "exochain")]
+    #[tokio::test]
+    async fn boot_exochain_governance_gate_present() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config_exochain(), platform)
+            .await
+            .unwrap();
+        assert!(
+            kernel.governance_gate().is_some(),
+            "governance gate should be present when chain is enabled"
+        );
+    }
+
+    #[cfg(feature = "ecc")]
+    #[tokio::test]
+    async fn boot_ecc_registers_hnsw_service() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        assert!(
+            kernel.ecc_hnsw().is_some(),
+            "HNSW service must be present with ecc feature"
+        );
+    }
+
+    #[cfg(feature = "ecc")]
+    #[tokio::test]
+    async fn boot_ecc_registers_cognitive_tick() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        assert!(
+            kernel.ecc_tick().is_some(),
+            "cognitive tick must be present with ecc feature"
+        );
+    }
+
+    #[cfg(feature = "ecc")]
+    #[tokio::test]
+    async fn boot_ecc_calibration_has_valid_results() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        let cal = kernel.ecc_calibration().unwrap();
+        assert!(cal.tick_interval_ms > 0, "tick interval must be positive");
+        assert!(cal.compute_p50_us > 0, "p50 latency must be measured");
+        assert!(cal.compute_p95_us >= cal.compute_p50_us, "p95 >= p50");
+    }
+
+    #[cfg(feature = "ecc")]
+    #[tokio::test]
+    async fn boot_ecc_causal_graph_accessible() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        assert!(kernel.ecc_causal().is_some(), "causal graph must be accessible");
+        assert_eq!(kernel.ecc_causal().unwrap().node_count(), 0, "causal graph starts empty");
+    }
+
+    #[cfg(feature = "ecc")]
+    #[tokio::test]
+    async fn boot_ecc_crossrefs_and_impulses_accessible() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        assert!(kernel.ecc_crossrefs().is_some(), "cross-ref store must be accessible");
+        assert!(kernel.ecc_impulses().is_some(), "impulse queue must be accessible");
+    }
+
+    #[tokio::test]
+    async fn boot_cluster_membership_accessible() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        let cm = kernel.cluster_membership();
+        assert!(!cm.local_node_id().is_empty(), "cluster membership should have a node ID");
+    }
+
+    #[tokio::test]
+    async fn shutdown_transitions_to_halted() {
+        let platform = Arc::new(NativePlatform::new());
+        let mut kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        assert_eq!(*kernel.state(), KernelState::Running);
+        kernel.shutdown().await.unwrap();
+        assert_eq!(*kernel.state(), KernelState::Halted);
+    }
+
+    #[tokio::test]
+    async fn shutdown_from_halted_fails() {
+        let platform = Arc::new(NativePlatform::new());
+        let mut kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        kernel.shutdown().await.unwrap();
+        let err = kernel.shutdown().await.unwrap_err();
+        match err {
+            KernelError::WrongState { expected, actual } => {
+                assert_eq!(expected, "Running");
+                assert_eq!(actual, "halted");
+            }
+            other => panic!("expected WrongState, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn process_table_has_kernel_pid_zero() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        let entry = kernel.process_table().get(0).expect("PID 0 should exist");
+        assert_eq!(entry.agent_id, "kernel");
+        assert_eq!(entry.state, ProcessState::Running);
+        assert_eq!(entry.pid, 0);
+    }
+
+    #[tokio::test]
+    async fn a2a_router_accessible_after_boot() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        let a2a = kernel.a2a_router();
+        // Should be able to create an inbox for a future PID
+        // (A2ARouter is wired to the same process table)
+        let _inbox = a2a.create_inbox(0); // kernel PID
+    }
+
+    #[tokio::test]
+    async fn boot_log_contains_expected_phases() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        let formatted = kernel.boot_log().format_all();
+        assert!(formatted.contains("WeftOS v0.1.0"), "should contain version");
+        assert!(formatted.contains("Service registry ready"), "should have service phase");
+        assert!(formatted.contains("A2A router ready"), "should have A2A phase");
+        assert!(formatted.contains("Boot complete"), "should have ready phase");
+    }
+
+    #[tokio::test]
+    async fn event_log_populated_after_boot() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        // The event_log is populated from boot_log during boot
+        let events = kernel.event_log();
+        // At minimum there should be some events from boot ingestion
+        assert!(!events.is_empty(), "event log should have entries after boot");
+    }
+
+    #[tokio::test]
+    async fn health_system_accessible() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        let _health = kernel.health();
+        // Health system should be constructable and accessible
+    }
+
+    #[tokio::test]
+    async fn uptime_is_positive_after_boot() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        let uptime = kernel.uptime();
+        assert!(uptime.as_nanos() > 0, "uptime should be positive");
+    }
+
+    #[tokio::test]
+    async fn cron_service_accessible_and_empty() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        assert_eq!(kernel.cron_service().job_count(), 0, "no cron jobs at boot");
+    }
+
+    #[tokio::test]
+    async fn max_processes_matches_config() {
+        let platform = Arc::new(NativePlatform::new());
+        let mut kconfig = test_kernel_config();
+        kconfig.max_processes = 42;
+        let kernel = Kernel::boot(test_config(), kconfig, platform)
+            .await
+            .unwrap();
+        assert_eq!(kernel.process_table().max_processes(), 42);
+    }
 }
