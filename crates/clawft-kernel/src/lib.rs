@@ -53,6 +53,8 @@ pub mod crossref;
 #[cfg(feature = "ecc")]
 pub mod embedding;
 #[cfg(feature = "ecc")]
+pub mod embedding_onnx;
+#[cfg(feature = "ecc")]
 pub mod hnsw_service;
 #[cfg(feature = "ecc")]
 pub mod impulse;
@@ -220,6 +222,11 @@ pub use artifact_store::{ArtifactBackend, ArtifactStore, ArtifactType, StoredArt
 pub use embedding::{
     select_embedding_provider, EmbeddingError, EmbeddingProvider, LlmEmbeddingConfig,
     LlmEmbeddingProvider, MockEmbeddingProvider,
+};
+#[cfg(feature = "ecc")]
+pub use embedding_onnx::{
+    AstEmbeddingProvider, OnnxEmbeddingProvider, RustCodeFeatures, SentenceTransformerProvider,
+    extract_rust_features, preprocess_markdown, split_sentences,
 };
 #[cfg(feature = "ecc")]
 pub use weaver::{

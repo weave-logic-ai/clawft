@@ -48,6 +48,7 @@ mesh = [
     "dep:futures-util",
 ]
 ecc = ["clawft-core/vector-memory", "dep:blake3"]
+onnx-embeddings = []  # Future: add dep:ort when ONNX Runtime is available
 wasm-sandbox = ["dep:wasmtime", "dep:wasmtime-wasi"]
 os-patterns = ["exochain"]
 containers = []

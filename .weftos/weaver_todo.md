@@ -7,10 +7,10 @@ Last updated: 2026-03-26 (after graph ingestion)
 
 - [x] EmbeddingProvider trait defined (`crates/clawft-kernel/src/embedding.rs`)
 - [x] MockEmbeddingProvider (deterministic SHA-256 hash-based, for testing)
-- [ ] ONNX backend (all-MiniLM-L6-v2, 384 dimensions) — behind `onnx-embeddings` feature
+- [x] ONNX backend (all-MiniLM-L6-v2, 384 dimensions) — behind `onnx-embeddings` feature; hash-fallback until `ort` available
 - [x] LLM API backend (call clawft-llm provider for embeddings) — `LlmEmbeddingProvider` with fallback to mock
-- [ ] Sentence-transformer backend for documentation chunks
-- [ ] AST-aware backend for Rust code (function signatures, type definitions)
+- [x] Sentence-transformer backend for documentation chunks — `SentenceTransformerProvider` with markdown preprocessing + mean pooling
+- [x] AST-aware backend for Rust code (function signatures, type definitions) — `AstEmbeddingProvider` with hybrid structural+text embedding
 - [x] Batch embedding pipeline (process multiple chunks in one call) — `embed_batch` + `sync_embed` for ingestion
 
 ## Data Ingestion
