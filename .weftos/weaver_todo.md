@@ -23,10 +23,10 @@ Last updated: 2026-03-26 (after graph ingestion)
 
 ## Cognitive Tick Integration
 
-- [ ] Register Weaver with CognitiveTick as a tick consumer
-- [ ] Budget-aware tick processing (respect tick_budget_ratio)
-- [ ] Incremental git polling (detect new commits since last tick)
-- [ ] File watcher integration (detect source file changes)
+- [x] Register Weaver with CognitiveTick as a tick consumer — `on_tick()` method on WeaverEngine
+- [x] Budget-aware tick processing (respect tick_budget_ratio) — `on_tick(budget_ms)` checks elapsed vs budget at each phase
+- [x] Incremental git polling (detect new commits since last tick) — `GitPoller` struct, `enable_git_polling()`
+- [x] File watcher integration (detect source file changes) — `FileWatcher` struct (mtime-based), `enable_file_watching()`
 
 ## Confidence Improvement
 
