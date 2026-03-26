@@ -1,0 +1,39 @@
+[package]
+name = "weftos"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "WeftOS: A portable AI kernel with process management, mesh networking, and cognitive substrate"
+keywords = ["os", "kernel", "ai", "mesh", "ecc"]
+categories = ["development-tools", "network-programming"]
+
+[[bin]]
+name = "weftos"
+path = "src/main.rs"
+
+[features]
+default = ["native"]
+native = ["clawft-kernel/native"]
+exochain = ["clawft-kernel/exochain"]
+cluster = ["clawft-kernel/cluster"]
+mesh = ["clawft-kernel/mesh"]
+ecc = ["clawft-kernel/ecc"]
+wasm-sandbox = ["clawft-kernel/wasm-sandbox"]
+containers = ["clawft-kernel/containers"]
+os-patterns = ["clawft-kernel/os-patterns"]
+full = ["native", "exochain", "cluster", "mesh", "ecc", "wasm-sandbox", "containers", "os-patterns"]
+
+[dependencies]
+clawft-kernel = { workspace = true, default-features = false }
+clawft-types = { workspace = true, default-features = false }
+clawft-platform = { workspace = true, default-features = false }
+clawft-core = { workspace = true, default-features = false }
+exo-resource-tree = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+clap = { workspace = true }
+tracing-subscriber = { workspace = true }

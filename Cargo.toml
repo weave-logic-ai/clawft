@@ -22,6 +22,7 @@ members = [
     "crates/clawft-kernel",
     "crates/clawft-weave",
     "crates/exo-resource-tree",
+    "crates/weftos",
 ]
 
 [workspace.package]
@@ -158,6 +159,7 @@ clawft-plugin-containers = { path = "crates/clawft-plugin-containers" }
 clawft-security = { path = "crates/clawft-security" }
 clawft-kernel = { path = "crates/clawft-kernel", default-features = false }
 exo-resource-tree = { path = "crates/exo-resource-tree" }
+weftos = { path = "crates/weftos", default-features = false }
 
 [profile.release]
 opt-level = "z"
