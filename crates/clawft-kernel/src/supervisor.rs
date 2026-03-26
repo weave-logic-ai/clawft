@@ -22,6 +22,175 @@ use crate::error::{KernelError, KernelResult};
 use crate::ipc::KernelIpc;
 use crate::process::{Pid, ProcessEntry, ProcessState, ProcessTable, ResourceUsage};
 
+// ── K1-G1: Restart strategies (os-patterns) ─────────────────────
+
+/// Supervisor restart strategy (Erlang-inspired).
+///
+/// Determines what happens to sibling agents when one agent fails.
+/// Configured per AppManifest or per supervisor instance.
+#[cfg(feature = "os-patterns")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RestartStrategy {
+    /// Restart only the failed child.
+    OneForOne,
+    /// Restart all children if one fails.
+    OneForAll,
+    /// Restart the failed child and all children started after it.
+    RestForOne,
+}
+
+#[cfg(feature = "os-patterns")]
+impl Default for RestartStrategy {
+    fn default() -> Self {
+        RestartStrategy::OneForOne
+    }
+}
+
+/// Restart budget: max N restarts within M seconds.
+///
+/// When the budget is exceeded, the supervisor escalates (stops itself
+/// and notifies its parent). Prevents infinite restart loops.
+#[cfg(feature = "os-patterns")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestartBudget {
+    /// Maximum restarts allowed in the time window.
+    pub max_restarts: u32,
+    /// Time window in seconds.
+    pub within_secs: u64,
+}
+
+#[cfg(feature = "os-patterns")]
+impl Default for RestartBudget {
+    fn default() -> Self {
+        Self {
+            max_restarts: 5,
+            within_secs: 60,
+        }
+    }
+}
+
+/// Restart state tracking per supervised agent.
+#[cfg(feature = "os-patterns")]
+pub struct RestartTracker {
+    /// Number of restarts in the current window.
+    pub restart_count: u32,
+    /// When the current budget window started.
+    pub window_start: std::time::Instant,
+    /// When the last restart occurred.
+    pub last_restart: Option<std::time::Instant>,
+    /// Current backoff delay in milliseconds (exponential: 100ms -> 30s max).
+    pub backoff_ms: u64,
+}
+
+#[cfg(feature = "os-patterns")]
+impl RestartTracker {
+    /// Create a new tracker with the window starting now.
+    pub fn new() -> Self {
+        Self {
+            restart_count: 0,
+            window_start: std::time::Instant::now(),
+            last_restart: None,
+            backoff_ms: 0,
+        }
+    }
+
+    /// Calculate the next backoff delay in milliseconds.
+    ///
+    /// Exponential backoff: 100ms * 2^(restart_count - 1), capped at 30s.
+    pub fn next_backoff_ms(&self) -> u64 {
+        let base: u64 = 100;
+        let exponent = self.restart_count.saturating_sub(1);
+        let delay = base.saturating_mul(1u64 << exponent.min(20));
+        delay.min(30_000)
+    }
+
+    /// Check if the restart budget window has expired and reset if so.
+    pub fn check_window(&mut self, budget: &RestartBudget) {
+        let now = std::time::Instant::now();
+        if now.duration_since(self.window_start).as_secs() > budget.within_secs {
+            self.restart_count = 0;
+            self.window_start = now;
+        }
+    }
+
+    /// Record a restart attempt. Returns `true` if within budget,
+    /// `false` if budget exceeded.
+    pub fn record_restart(&mut self, budget: &RestartBudget) -> bool {
+        self.check_window(budget);
+        self.restart_count += 1;
+        self.backoff_ms = self.next_backoff_ms();
+        self.last_restart = Some(std::time::Instant::now());
+        self.restart_count <= budget.max_restarts
+    }
+}
+
+#[cfg(feature = "os-patterns")]
+impl Default for RestartTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ── K1-G3: Resource enforcement types ───────────────────────────
+
+/// Result of a resource limit check.
+#[cfg(feature = "os-patterns")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResourceCheckResult {
+    /// Resource usage is within safe limits.
+    Ok,
+    /// Resource usage is at 80-99% of the limit.
+    Warning {
+        resource: String,
+        current: u64,
+        limit: u64,
+    },
+    /// Resource usage has reached or exceeded the limit.
+    Exceeded {
+        resource: String,
+        current: u64,
+        limit: u64,
+    },
+}
+
+/// Check resource usage against limits and return the worst result.
+#[cfg(feature = "os-patterns")]
+pub fn check_resource_usage(
+    usage: &ResourceUsage,
+    limits: &crate::capability::ResourceLimits,
+) -> Vec<ResourceCheckResult> {
+    let mut results = Vec::new();
+
+    let checks: &[(&str, u64, u64)] = &[
+        ("memory", usage.memory_bytes, limits.max_memory_bytes),
+        ("cpu_time", usage.cpu_time_ms, limits.max_cpu_time_ms),
+        ("messages", usage.messages_sent, limits.max_messages),
+        ("tool_calls", usage.tool_calls, limits.max_tool_calls),
+    ];
+
+    for &(name, current, limit) in checks {
+        if limit == 0 {
+            continue; // unlimited
+        }
+        let ratio = current as f64 / limit as f64;
+        if ratio >= 1.0 {
+            results.push(ResourceCheckResult::Exceeded {
+                resource: name.to_owned(),
+                current,
+                limit,
+            });
+        } else if ratio >= 0.8 {
+            results.push(ResourceCheckResult::Warning {
+                resource: name.to_owned(),
+                current,
+                limit,
+            });
+        }
+    }
+
+    results
+}
+
 /// Execution backend for spawning an agent process.
 ///
 /// Determines how the agent's work is executed at runtime. Only `Native`
@@ -1419,5 +1588,246 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("remote"), "error should mention remote: {msg}");
+    }
+
+    // ── K1-G1: Restart strategy tests (os-patterns) ─────────────
+
+    #[cfg(feature = "os-patterns")]
+    mod restart_tests {
+        use super::*;
+        use crate::supervisor::{
+            RestartBudget, RestartStrategy, RestartTracker,
+            ResourceCheckResult, check_resource_usage,
+        };
+        use crate::capability::ResourceLimits;
+
+        #[test]
+        fn restart_strategy_default_is_one_for_one() {
+            assert_eq!(RestartStrategy::default(), RestartStrategy::OneForOne);
+        }
+
+        #[test]
+        fn restart_strategy_serde_roundtrip() {
+            let strategies = vec![
+                RestartStrategy::OneForOne,
+                RestartStrategy::OneForAll,
+                RestartStrategy::RestForOne,
+            ];
+            for strategy in strategies {
+                let json = serde_json::to_string(&strategy).unwrap();
+                let restored: RestartStrategy = serde_json::from_str(&json).unwrap();
+                assert_eq!(restored, strategy);
+            }
+        }
+
+        #[test]
+        fn restart_budget_default() {
+            let budget = RestartBudget::default();
+            assert_eq!(budget.max_restarts, 5);
+            assert_eq!(budget.within_secs, 60);
+        }
+
+        #[test]
+        fn restart_budget_serde_roundtrip() {
+            let budget = RestartBudget {
+                max_restarts: 3,
+                within_secs: 30,
+            };
+            let json = serde_json::to_string(&budget).unwrap();
+            let restored: RestartBudget = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored.max_restarts, 3);
+            assert_eq!(restored.within_secs, 30);
+        }
+
+        #[test]
+        fn tracker_new_starts_at_zero() {
+            let tracker = RestartTracker::new();
+            assert_eq!(tracker.restart_count, 0);
+            assert_eq!(tracker.backoff_ms, 0);
+            assert!(tracker.last_restart.is_none());
+        }
+
+        #[test]
+        fn tracker_backoff_exponential() {
+            let mut tracker = RestartTracker::new();
+            let budget = RestartBudget {
+                max_restarts: 10,
+                within_secs: 60,
+            };
+
+            // First restart: 100ms
+            tracker.record_restart(&budget);
+            assert_eq!(tracker.backoff_ms, 100);
+
+            // Second restart: 200ms
+            tracker.record_restart(&budget);
+            assert_eq!(tracker.backoff_ms, 200);
+
+            // Third restart: 400ms
+            tracker.record_restart(&budget);
+            assert_eq!(tracker.backoff_ms, 400);
+
+            // Fourth restart: 800ms
+            tracker.record_restart(&budget);
+            assert_eq!(tracker.backoff_ms, 800);
+        }
+
+        #[test]
+        fn tracker_backoff_caps_at_30s() {
+            let mut tracker = RestartTracker::new();
+            tracker.restart_count = 20;
+            let delay = tracker.next_backoff_ms();
+            assert!(delay <= 30_000, "backoff should cap at 30s, got {delay}");
+        }
+
+        #[test]
+        fn tracker_budget_exceeded_returns_false() {
+            let mut tracker = RestartTracker::new();
+            let budget = RestartBudget {
+                max_restarts: 2,
+                within_secs: 60,
+            };
+
+            assert!(tracker.record_restart(&budget)); // 1
+            assert!(tracker.record_restart(&budget)); // 2
+            assert!(!tracker.record_restart(&budget)); // 3 > 2 = exceeded
+        }
+
+        #[test]
+        fn tracker_budget_within_returns_true() {
+            let mut tracker = RestartTracker::new();
+            let budget = RestartBudget {
+                max_restarts: 5,
+                within_secs: 60,
+            };
+
+            for _ in 0..5 {
+                assert!(tracker.record_restart(&budget));
+            }
+        }
+
+        #[test]
+        fn tracker_records_last_restart() {
+            let mut tracker = RestartTracker::new();
+            let budget = RestartBudget::default();
+            assert!(tracker.last_restart.is_none());
+
+            tracker.record_restart(&budget);
+            assert!(tracker.last_restart.is_some());
+        }
+
+        // ── K1-G3: Resource enforcement tests ───────────────────
+
+        #[test]
+        fn resource_check_within_limits() {
+            let usage = ResourceUsage {
+                memory_bytes: 100,
+                cpu_time_ms: 100,
+                tool_calls: 10,
+                messages_sent: 10,
+            };
+            let limits = ResourceLimits::default(); // 256 MiB, etc.
+            let results = check_resource_usage(&usage, &limits);
+            assert!(results.is_empty());
+        }
+
+        #[test]
+        fn resource_check_warning_at_80_percent() {
+            let usage = ResourceUsage {
+                memory_bytes: 220 * 1024 * 1024, // ~86% of 256 MiB
+                cpu_time_ms: 100,
+                tool_calls: 10,
+                messages_sent: 10,
+            };
+            let limits = ResourceLimits::default();
+            let results = check_resource_usage(&usage, &limits);
+            assert_eq!(results.len(), 1);
+            assert!(matches!(&results[0], ResourceCheckResult::Warning { resource, .. } if resource == "memory"));
+        }
+
+        #[test]
+        fn resource_check_exceeded_at_100_percent() {
+            let usage = ResourceUsage {
+                memory_bytes: 300 * 1024 * 1024, // >256 MiB
+                cpu_time_ms: 100,
+                tool_calls: 10,
+                messages_sent: 10,
+            };
+            let limits = ResourceLimits::default();
+            let results = check_resource_usage(&usage, &limits);
+            assert_eq!(results.len(), 1);
+            assert!(matches!(&results[0], ResourceCheckResult::Exceeded { resource, .. } if resource == "memory"));
+        }
+
+        #[test]
+        fn resource_check_unlimited_skipped() {
+            let usage = ResourceUsage {
+                memory_bytes: 999_999_999,
+                cpu_time_ms: 999_999_999,
+                tool_calls: 999_999_999,
+                messages_sent: 999_999_999,
+            };
+            let limits = ResourceLimits {
+                max_memory_bytes: 0,
+                max_cpu_time_ms: 0,
+                max_tool_calls: 0,
+                max_messages: 0,
+                ..Default::default()
+            };
+            let results = check_resource_usage(&usage, &limits);
+            assert!(results.is_empty(), "0 = unlimited should skip enforcement");
+        }
+
+        #[test]
+        fn resource_check_multiple_exceeded() {
+            let limits = ResourceLimits {
+                max_memory_bytes: 100,
+                max_cpu_time_ms: 100,
+                max_tool_calls: 10,
+                max_messages: 10,
+                ..Default::default()
+            };
+            let usage = ResourceUsage {
+                memory_bytes: 200,
+                cpu_time_ms: 200,
+                tool_calls: 20,
+                messages_sent: 20,
+            };
+            let results = check_resource_usage(&usage, &limits);
+            assert_eq!(results.len(), 4);
+            for r in &results {
+                assert!(matches!(r, ResourceCheckResult::Exceeded { .. }));
+            }
+        }
+
+        #[test]
+        fn resource_check_message_limit() {
+            let limits = ResourceLimits {
+                max_messages: 100,
+                ..Default::default()
+            };
+            let usage = ResourceUsage {
+                messages_sent: 100,
+                ..Default::default()
+            };
+            let results = check_resource_usage(&usage, &limits);
+            assert_eq!(results.len(), 1);
+            assert!(matches!(&results[0], ResourceCheckResult::Exceeded { resource, .. } if resource == "messages"));
+        }
+
+        #[test]
+        fn resource_check_cpu_time_limit() {
+            let limits = ResourceLimits {
+                max_cpu_time_ms: 1000,
+                ..Default::default()
+            };
+            let usage = ResourceUsage {
+                cpu_time_ms: 1000,
+                ..Default::default()
+            };
+            let results = check_resource_usage(&usage, &limits);
+            assert_eq!(results.len(), 1);
+            assert!(matches!(&results[0], ResourceCheckResult::Exceeded { resource, .. } if resource == "cpu_time"));
+        }
     }
 }

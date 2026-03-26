@@ -49,6 +49,7 @@ mesh = [
 ]
 ecc = ["clawft-core/vector-memory", "dep:blake3"]
 wasm-sandbox = ["dep:wasmtime", "dep:wasmtime-wasi"]
+os-patterns = ["exochain"]
 containers = []
 
 [dependencies]

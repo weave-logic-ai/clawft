@@ -110,6 +110,18 @@ pub enum KernelError {
     #[error("config error: {0}")]
     Config(String),
 
+    /// Disk quota exceeded (K1-G4).
+    #[cfg(feature = "os-patterns")]
+    #[error("disk quota exceeded for agent '{agent_id}': {current_bytes} > {limit_bytes} bytes")]
+    QuotaExceeded {
+        /// Agent that exceeded its quota.
+        agent_id: String,
+        /// Current disk usage.
+        current_bytes: u64,
+        /// Configured limit.
+        limit_bytes: u64,
+    },
+
     /// Mesh networking error.
     #[error("mesh error: {0}")]
     Mesh(String),

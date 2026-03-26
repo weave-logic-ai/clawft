@@ -32,6 +32,14 @@ pub struct ResourceLimits {
     /// Maximum number of IPC messages the agent may send.
     #[serde(default = "default_max_messages", alias = "maxMessages")]
     pub max_messages: u64,
+
+    /// Maximum disk usage in bytes for this agent (K1-G4).
+    ///
+    /// Enforced when writing to the resource tree under `/agents/{agent_id}/`.
+    /// Default: 100 MiB. Set to 0 for unlimited.
+    #[cfg(feature = "os-patterns")]
+    #[serde(default = "default_max_disk", alias = "maxDiskBytes")]
+    pub max_disk_bytes: u64,
 }
 
 fn default_max_memory() -> u64 {
@@ -50,6 +58,11 @@ fn default_max_messages() -> u64 {
     5000
 }
 
+#[cfg(feature = "os-patterns")]
+fn default_max_disk() -> u64 {
+    100 * 1024 * 1024 // 100 MiB
+}
+
 impl Default for ResourceLimits {
     fn default() -> Self {
         Self {
@@ -57,6 +70,8 @@ impl Default for ResourceLimits {
             max_cpu_time_ms: default_max_cpu(),
             max_tool_calls: default_max_tool_calls(),
             max_messages: default_max_messages(),
+            #[cfg(feature = "os-patterns")]
+            max_disk_bytes: default_max_disk(),
         }
     }
 }
@@ -142,6 +157,8 @@ impl AgentCapabilities {
                 max_cpu_time_ms: 60_000,             // 1 minute
                 max_tool_calls: 200,
                 max_messages: 500,
+                #[cfg(feature = "os-patterns")]
+                max_disk_bytes: 10 * 1024 * 1024, // 10 MiB for browser agents
             },
         }
     }
@@ -672,6 +689,7 @@ mod tests {
                 max_cpu_time_ms: 100,
                 max_tool_calls: 5,
                 max_messages: 5,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -694,6 +712,7 @@ mod tests {
                 max_cpu_time_ms: 500,
                 max_tool_calls: 10,
                 max_messages: 20,
+                ..Default::default()
             },
         };
         let json = serde_json::to_string(&caps).unwrap();
@@ -1139,5 +1158,44 @@ mod tests {
         assert!(!req.current.can_network);
         assert!(req.requested.can_network);
         assert!(req.reason.contains("browser"));
+    }
+
+    // ── K1-G4: Disk quota tests (os-patterns) ────────────────────
+
+    #[cfg(feature = "os-patterns")]
+    mod disk_quota_tests {
+        use super::*;
+
+        #[test]
+        fn default_disk_quota_is_100_mib() {
+            let limits = ResourceLimits::default();
+            assert_eq!(limits.max_disk_bytes, 100 * 1024 * 1024);
+        }
+
+        #[test]
+        fn browser_disk_quota_is_10_mib() {
+            let caps = AgentCapabilities::browser_default();
+            assert_eq!(caps.resource_limits.max_disk_bytes, 10 * 1024 * 1024);
+        }
+
+        #[test]
+        fn disk_quota_serde_roundtrip() {
+            let limits = ResourceLimits {
+                max_disk_bytes: 50 * 1024 * 1024,
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&limits).unwrap();
+            let restored: ResourceLimits = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored.max_disk_bytes, 50 * 1024 * 1024);
+        }
+
+        #[test]
+        fn disk_quota_zero_means_unlimited() {
+            let limits = ResourceLimits {
+                max_disk_bytes: 0,
+                ..Default::default()
+            };
+            assert_eq!(limits.max_disk_bytes, 0);
+        }
     }
 }

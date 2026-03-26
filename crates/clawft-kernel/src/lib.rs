@@ -41,6 +41,8 @@
 
 // ── ECC cognitive substrate modules (K3c) ────────────────────────
 #[cfg(feature = "ecc")]
+pub mod artifact_store;
+#[cfg(feature = "ecc")]
 pub mod calibration;
 #[cfg(feature = "ecc")]
 pub mod causal;
@@ -49,9 +51,13 @@ pub mod cognitive_tick;
 #[cfg(feature = "ecc")]
 pub mod crossref;
 #[cfg(feature = "ecc")]
+pub mod embedding;
+#[cfg(feature = "ecc")]
 pub mod hnsw_service;
 #[cfg(feature = "ecc")]
 pub mod impulse;
+#[cfg(feature = "ecc")]
+pub mod weaver;
 
 pub mod a2a;
 pub mod agency;
@@ -79,8 +85,33 @@ pub mod process;
 pub mod service;
 pub mod supervisor;
 pub mod topic;
+
+// ── Self-healing & process management modules (08a) ─────────────
+#[cfg(feature = "os-patterns")]
+pub mod monitor;
+#[cfg(feature = "os-patterns")]
+pub mod reconciler;
 #[allow(clippy::new_without_default)]
 pub mod wasm_runner;
+
+// ── Reliable IPC & observability modules (08b) ──────────────────
+#[cfg(feature = "os-patterns")]
+pub mod dead_letter;
+#[cfg(feature = "os-patterns")]
+pub mod reliable_queue;
+#[cfg(feature = "os-patterns")]
+pub mod named_pipe;
+#[cfg(feature = "os-patterns")]
+pub mod metrics;
+#[cfg(feature = "os-patterns")]
+pub mod log_service;
+#[cfg(feature = "os-patterns")]
+pub mod timer;
+
+// ── Content integrity & operational services (08c) ───────────────
+pub mod auth_service;
+pub mod config_service;
+pub mod tree_view;
 
 // ── Mesh networking modules (K6) ──────────────────────────────
 #[cfg(feature = "mesh")]
@@ -119,6 +150,10 @@ pub mod mesh_ws;
 pub mod mesh_mdns;
 #[cfg(feature = "mesh")]
 pub mod mesh_kad;
+#[cfg(feature = "mesh")]
+pub mod mesh_artifact;
+#[cfg(feature = "mesh")]
+pub mod mesh_log;
 
 // Re-export key types at the crate level for convenience.
 pub use a2a::A2ARouter;
@@ -180,8 +215,21 @@ pub use hnsw_service::{HnswSearchResult, HnswService, HnswServiceConfig};
 #[cfg(feature = "ecc")]
 pub use impulse::{ImpulseQueue, ImpulseType};
 #[cfg(feature = "ecc")]
+pub use artifact_store::{ArtifactBackend, ArtifactStore, ArtifactType, StoredArtifact};
+#[cfg(feature = "ecc")]
+pub use embedding::{EmbeddingError, EmbeddingProvider, MockEmbeddingProvider};
+#[cfg(feature = "ecc")]
+pub use weaver::{
+    ConfidenceGap, ConfidenceReport, DataSource, ExportedModel, MetaDecisionType, MetaLoomEvent,
+    ModelingSession, ModelingSuggestion, StrategyPattern, TickResult, WeaverCommand, WeaverEngine,
+    WeaverKnowledgeBase, WeaverResponse,
+};
+#[cfg(feature = "ecc")]
 pub use cluster::NodeEccCapability;
-pub use ipc::{GlobalPid, KernelIpc, KernelMessage, KernelSignal, MessagePayload, MessageTarget};
+pub use ipc::{
+    ExitReason as SignalExitReason, GlobalPid, KernelIpc, KernelMessage, KernelSignal,
+    MessagePayload, MessageTarget, ProcessDown as SignalProcessDown,
+};
 #[cfg(any(feature = "mesh", feature = "exochain"))]
 pub use cluster::NodeIdentity;
 #[cfg(feature = "mesh")]
@@ -236,12 +284,52 @@ pub use mesh_kad::{
     bucket_index, leading_zeros, xor_distance,
     K_BUCKET_SIZE, ALPHA, KEY_BITS,
 };
+#[cfg(feature = "mesh")]
+pub use mesh_artifact::{ArtifactAnnouncement, ArtifactExchange, ArtifactRequest, ArtifactResponse};
+#[cfg(feature = "mesh")]
+pub use mesh_log::{LogAggregator, LogQuery as MeshLogQuery, RemoteLogEntry};
+pub use auth_service::{
+    AuditEntry, AuthService, CredentialGrant, CredentialRequest, CredentialType, IssuedToken,
+    StoredCredential as AuthStoredCredential,
+};
+pub use config_service::{ConfigChange, ConfigService, SecretRef};
+pub use tree_view::{AgentTreeView, TreeScope};
 pub use process::{Pid, ProcessEntry, ProcessState, ProcessTable, ResourceUsage};
 pub use service::{
     McpAdapter, ServiceApi, ServiceAuditLevel, ServiceContract, ServiceEndpoint, ServiceEntry,
     ServiceInfo, ServiceRegistry, ServiceType, ShellAdapter, SystemService,
 };
 pub use supervisor::{AgentSupervisor, EnclaveConfig, SpawnBackend, SpawnRequest, SpawnResult};
+#[cfg(feature = "os-patterns")]
+pub use supervisor::{
+    RestartBudget, RestartStrategy, RestartTracker,
+    ResourceCheckResult, check_resource_usage,
+};
+#[cfg(feature = "os-patterns")]
+pub use monitor::{ExitReason, MonitorRegistry, ProcessDown, ProcessLink, ProcessMonitor};
+#[cfg(feature = "os-patterns")]
+pub use reconciler::{DesiredAgentState, DriftEvent, ReconciliationController};
+#[cfg(feature = "os-patterns")]
+pub use health::{ProbeConfig, ProbeResult, ProbeState};
+// ── 08b re-exports ──────────────────────────────────────────────
+#[cfg(feature = "os-patterns")]
+pub use dead_letter::{DeadLetter, DeadLetterQueue, DeadLetterReason};
+#[cfg(feature = "os-patterns")]
+pub use reliable_queue::{DeliveryResult, PendingDelivery, ReliableConfig, ReliableQueue};
+#[cfg(feature = "os-patterns")]
+pub use named_pipe::{NamedPipe, NamedPipeRegistry, PipeInfo};
+#[cfg(feature = "os-patterns")]
+pub use metrics::{
+    Histogram, MetricSnapshot, MetricsRegistry,
+    METRIC_MESSAGES_SENT, METRIC_MESSAGES_DELIVERED, METRIC_MESSAGES_DROPPED,
+    METRIC_AGENT_SPAWNS, METRIC_AGENT_CRASHES, METRIC_TOOL_EXECUTIONS,
+    METRIC_ACTIVE_AGENTS, METRIC_ACTIVE_SERVICES, METRIC_CHAIN_LENGTH,
+    METRIC_IPC_LATENCY_MS, METRIC_TOOL_EXECUTION_MS, METRIC_GOVERNANCE_EVAL_MS,
+};
+#[cfg(feature = "os-patterns")]
+pub use log_service::{LogEntry, LogQuery, LogService};
+#[cfg(feature = "os-patterns")]
+pub use timer::{TimerEntry, TimerInfo, TimerService};
 pub use topic::{Subscription, TopicRouter};
 pub use wasm_runner::{
     AgentInspectTool, AgentListTool, AgentResumeTool, AgentSendTool, AgentSpawnTool,

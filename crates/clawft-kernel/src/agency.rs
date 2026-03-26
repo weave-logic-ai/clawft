@@ -404,6 +404,8 @@ impl AgentCapabilities {
                 max_cpu_time_ms: u64::MAX,
                 max_tool_calls: u64::MAX,
                 max_messages: u64::MAX,
+                #[cfg(feature = "os-patterns")]
+                max_disk_bytes: u64::MAX,
             },
         }
     }

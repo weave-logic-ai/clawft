@@ -117,6 +117,24 @@ pub trait SystemService: Send + Sync {
 
     /// Perform a health check.
     async fn health_check(&self) -> HealthStatus;
+
+    /// Liveness probe (K2b-G2, os-patterns).
+    ///
+    /// Returns whether the service process is alive. Default implementation
+    /// returns `Live` for backward compatibility.
+    #[cfg(feature = "os-patterns")]
+    async fn liveness_check(&self) -> crate::health::ProbeResult {
+        crate::health::ProbeResult::Live
+    }
+
+    /// Readiness probe (K2b-G2, os-patterns).
+    ///
+    /// Returns whether the service is ready to accept traffic. Default
+    /// implementation returns `Ready` for backward compatibility.
+    #[cfg(feature = "os-patterns")]
+    async fn readiness_check(&self) -> crate::health::ProbeResult {
+        crate::health::ProbeResult::Ready
+    }
 }
 
 /// Registry of system services with lifecycle management.

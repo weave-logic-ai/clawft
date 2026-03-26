@@ -29,6 +29,12 @@ pub enum FrameType {
     JoinResponse = 0x09,
     /// Sync state digest.
     SyncDigest = 0x0A,
+    /// Artifact request (K6-G1).
+    ArtifactRequest = 0x0B,
+    /// Artifact response (K6-G1).
+    ArtifactResponse = 0x0C,
+    /// Log aggregation (K6-G2).
+    LogAggregation = 0x0D,
 }
 
 impl FrameType {
@@ -46,6 +52,9 @@ impl FrameType {
             0x08 => Some(Self::JoinRequest),
             0x09 => Some(Self::JoinResponse),
             0x0A => Some(Self::SyncDigest),
+            0x0B => Some(Self::ArtifactRequest),
+            0x0C => Some(Self::ArtifactResponse),
+            0x0D => Some(Self::LogAggregation),
             _ => None,
         }
     }
@@ -136,6 +145,9 @@ mod tests {
             (0x08, FrameType::JoinRequest),
             (0x09, FrameType::JoinResponse),
             (0x0A, FrameType::SyncDigest),
+            (0x0B, FrameType::ArtifactRequest),
+            (0x0C, FrameType::ArtifactResponse),
+            (0x0D, FrameType::LogAggregation),
         ];
         for (byte, variant) in expected {
             assert_eq!(FrameType::from_byte(byte), Some(variant));
@@ -145,7 +157,7 @@ mod tests {
     #[test]
     fn frame_type_from_byte_unknown() {
         assert!(FrameType::from_byte(0x00).is_none());
-        assert!(FrameType::from_byte(0x0B).is_none());
+        assert!(FrameType::from_byte(0x0E).is_none());
         assert!(FrameType::from_byte(0xFF).is_none());
     }
 
@@ -225,6 +237,9 @@ mod tests {
             FrameType::JoinRequest,
             FrameType::JoinResponse,
             FrameType::SyncDigest,
+            FrameType::ArtifactRequest,
+            FrameType::ArtifactResponse,
+            FrameType::LogAggregation,
         ];
         for ft in types {
             let frame = MeshFrame {

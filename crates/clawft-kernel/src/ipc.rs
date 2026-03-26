@@ -98,6 +98,28 @@ impl MessagePayload {
     }
 }
 
+/// Reason a process exited (used in link/monitor notifications).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ExitReason {
+    /// Normal exit (process completed successfully).
+    Normal,
+    /// Process crashed with an error.
+    Crash(String),
+    /// Process was killed.
+    Killed,
+    /// Process timed out.
+    Timeout,
+}
+
+/// Notification that a monitored process went down.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessDown {
+    /// PID of the process that went down.
+    pub pid: crate::process::Pid,
+    /// Why the process exited.
+    pub reason: ExitReason,
+}
+
 /// Kernel control signals.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum KernelSignal {
@@ -111,6 +133,32 @@ pub enum KernelSignal {
     Ping,
     /// Response to a heartbeat ping.
     Pong,
+    /// Reload configuration (K2-G5).
+    ReloadConfig,
+    /// Dump internal state for debugging (K2-G5).
+    DumpState,
+    /// User-defined signal with a discriminant (K2-G5).
+    UserDefined(u8),
+    /// Immediate kill -- no cleanup, no graceful shutdown (K2-G5).
+    Kill,
+    /// Crash notification from a linked process (K1-G2).
+    LinkExit {
+        /// PID of the linked process that exited.
+        pid: crate::process::Pid,
+        /// Reason the process exited.
+        reason: ExitReason,
+    },
+    /// Monitor DOWN notification (K1-G2).
+    MonitorDown(ProcessDown),
+    /// Resource usage warning at 80% of limit (K1-G3).
+    ResourceWarning {
+        /// Name of the resource (e.g. "memory", "cpu_time").
+        resource: String,
+        /// Current usage value.
+        current: u64,
+        /// Configured limit.
+        limit: u64,
+    },
 }
 
 /// A typed message envelope for kernel IPC.
@@ -133,6 +181,13 @@ pub struct KernelMessage {
     /// request-response tracking.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<String>,
+    /// Distributed trace ID for end-to-end request tracing (K2-G4).
+    ///
+    /// External messages entering the kernel receive a new UUID v4
+    /// trace_id. Internal messages inherit the parent's trace_id
+    /// via correlation linkage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
 }
 
 impl KernelMessage {
@@ -145,6 +200,7 @@ impl KernelMessage {
             payload,
             timestamp: Utc::now(),
             correlation_id: None,
+            trace_id: None,
         }
     }
 
@@ -162,7 +218,40 @@ impl KernelMessage {
             payload,
             timestamp: Utc::now(),
             correlation_id: Some(correlation_id),
+            trace_id: None,
         }
+    }
+
+    /// Create a new kernel message with a trace ID (for external entry points).
+    pub fn with_trace(
+        from: Pid,
+        target: MessageTarget,
+        payload: MessagePayload,
+        trace_id: String,
+    ) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            from,
+            target,
+            payload,
+            timestamp: Utc::now(),
+            correlation_id: None,
+            trace_id: Some(trace_id),
+        }
+    }
+
+    /// Set the trace ID on this message (builder pattern).
+    pub fn set_trace_id(mut self, trace_id: impl Into<String>) -> Self {
+        self.trace_id = Some(trace_id.into());
+        self
+    }
+
+    /// Ensure this message has a trace ID, generating one if missing.
+    pub fn ensure_trace_id(mut self) -> Self {
+        if self.trace_id.is_none() {
+            self.trace_id = Some(uuid::Uuid::new_v4().to_string());
+        }
+        self
     }
 
     /// Create a text message.
@@ -423,6 +512,62 @@ mod tests {
     }
 
     #[test]
+    fn expanded_signal_variants_serde() {
+        let signals = vec![
+            KernelSignal::ReloadConfig,
+            KernelSignal::DumpState,
+            KernelSignal::UserDefined(42),
+            KernelSignal::Kill,
+            KernelSignal::LinkExit {
+                pid: 7,
+                reason: ExitReason::Crash("boom".into()),
+            },
+            KernelSignal::MonitorDown(ProcessDown {
+                pid: 9,
+                reason: ExitReason::Normal,
+            }),
+            KernelSignal::ResourceWarning {
+                resource: "memory".into(),
+                current: 800,
+                limit: 1000,
+            },
+        ];
+        for signal in signals {
+            let json = serde_json::to_string(&signal).unwrap();
+            let restored: KernelSignal = serde_json::from_str(&json).unwrap();
+            // Verify roundtrip by re-serializing
+            let json2 = serde_json::to_string(&restored).unwrap();
+            assert_eq!(json, json2);
+        }
+    }
+
+    #[test]
+    fn exit_reason_variants() {
+        let reasons = vec![
+            ExitReason::Normal,
+            ExitReason::Crash("error".into()),
+            ExitReason::Killed,
+            ExitReason::Timeout,
+        ];
+        for reason in reasons {
+            let json = serde_json::to_string(&reason).unwrap();
+            let _: ExitReason = serde_json::from_str(&json).unwrap();
+        }
+    }
+
+    #[test]
+    fn process_down_serde() {
+        let pd = ProcessDown {
+            pid: 42,
+            reason: ExitReason::Crash("segfault".into()),
+        };
+        let json = serde_json::to_string(&pd).unwrap();
+        let restored: ProcessDown = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.pid, 42);
+        assert!(matches!(restored.reason, ExitReason::Crash(ref s) if s == "segfault"));
+    }
+
+    #[test]
     fn message_with_correlation_id() {
         let msg = KernelMessage::with_correlation(
             1,
@@ -587,5 +732,75 @@ mod tests {
         let msg = KernelMessage::text(1, MessageTarget::Process(2), "hello");
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("correlation_id"));
+    }
+
+    // ── K2-G4: Trace ID tests ──────────────────────────────────
+
+    #[test]
+    fn trace_id_absent_by_default() {
+        let msg = KernelMessage::text(1, MessageTarget::Process(2), "hello");
+        assert!(msg.trace_id.is_none());
+    }
+
+    #[test]
+    fn trace_id_with_trace() {
+        let msg = KernelMessage::with_trace(
+            1,
+            MessageTarget::Process(2),
+            MessagePayload::Text("traced".into()),
+            "trace-abc-123".into(),
+        );
+        assert_eq!(msg.trace_id, Some("trace-abc-123".into()));
+    }
+
+    #[test]
+    fn trace_id_set_builder() {
+        let msg = KernelMessage::text(1, MessageTarget::Process(2), "hello")
+            .set_trace_id("my-trace");
+        assert_eq!(msg.trace_id, Some("my-trace".into()));
+    }
+
+    #[test]
+    fn trace_id_ensure_generates() {
+        let msg = KernelMessage::text(1, MessageTarget::Process(2), "hello").ensure_trace_id();
+        assert!(msg.trace_id.is_some());
+        assert!(!msg.trace_id.as_ref().unwrap().is_empty());
+    }
+
+    #[test]
+    fn trace_id_ensure_preserves_existing() {
+        let msg = KernelMessage::text(1, MessageTarget::Process(2), "hello")
+            .set_trace_id("existing-trace")
+            .ensure_trace_id();
+        assert_eq!(msg.trace_id, Some("existing-trace".into()));
+    }
+
+    #[test]
+    fn trace_id_serde_roundtrip() {
+        let msg = KernelMessage::with_trace(
+            1,
+            MessageTarget::Process(2),
+            MessagePayload::Text("traced".into()),
+            "trace-roundtrip".into(),
+        );
+        let json = serde_json::to_string(&msg).unwrap();
+        let restored: KernelMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.trace_id, Some("trace-roundtrip".into()));
+    }
+
+    #[test]
+    fn trace_id_absent_in_json_when_none() {
+        let msg = KernelMessage::text(1, MessageTarget::Process(2), "hello");
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(!json.contains("trace_id"));
+    }
+
+    #[test]
+    fn trace_id_backward_compat_deserialization() {
+        // Simulate a message serialized without trace_id field
+        let json = r#"{"id":"test-id","from":1,"target":{"Process":2},"payload":{"Text":"hello"},"timestamp":"2024-01-01T00:00:00Z"}"#;
+        let msg: KernelMessage = serde_json::from_str(json).unwrap();
+        assert!(msg.trace_id.is_none());
+        assert!(msg.correlation_id.is_none());
     }
 }

@@ -131,6 +131,135 @@ impl HealthSystem {
     }
 }
 
+// ── K2b-G2: Liveness and readiness probes (os-patterns) ─────────
+
+/// Result of a liveness or readiness probe.
+#[cfg(feature = "os-patterns")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProbeResult {
+    /// Service is live (responding to probes).
+    Live,
+    /// Service is not live.
+    NotLive { reason: String },
+    /// Service is ready to accept traffic.
+    Ready,
+    /// Service is not ready.
+    NotReady { reason: String },
+}
+
+/// Configuration for liveness and readiness probes.
+#[cfg(feature = "os-patterns")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProbeConfig {
+    /// How often to check liveness (default: 10s).
+    pub liveness_interval_secs: u64,
+    /// How often to check readiness (default: 5s).
+    pub readiness_interval_secs: u64,
+    /// Number of consecutive failures before marking as failed.
+    pub failure_threshold: u32,
+    /// Number of consecutive successes before marking as recovered.
+    pub success_threshold: u32,
+}
+
+#[cfg(feature = "os-patterns")]
+impl Default for ProbeConfig {
+    fn default() -> Self {
+        Self {
+            liveness_interval_secs: 10,
+            readiness_interval_secs: 5,
+            failure_threshold: 3,
+            success_threshold: 1,
+        }
+    }
+}
+
+/// Tracks consecutive probe results for threshold-based decisions.
+#[cfg(feature = "os-patterns")]
+#[derive(Debug, Clone)]
+pub struct ProbeState {
+    /// Consecutive liveness failures.
+    pub liveness_failures: u32,
+    /// Consecutive readiness failures.
+    pub readiness_failures: u32,
+    /// Consecutive readiness successes (for recovery).
+    pub readiness_successes: u32,
+    /// Whether the service is currently considered live.
+    pub is_live: bool,
+    /// Whether the service is currently considered ready.
+    pub is_ready: bool,
+}
+
+#[cfg(feature = "os-patterns")]
+impl Default for ProbeState {
+    fn default() -> Self {
+        Self {
+            liveness_failures: 0,
+            readiness_failures: 0,
+            readiness_successes: 0,
+            is_live: true,
+            is_ready: true,
+        }
+    }
+}
+
+#[cfg(feature = "os-patterns")]
+impl ProbeState {
+    /// Record a liveness probe result.
+    ///
+    /// Returns `true` if the service should be restarted (failures >= threshold).
+    pub fn record_liveness(&mut self, result: &ProbeResult, config: &ProbeConfig) -> bool {
+        match result {
+            ProbeResult::Live => {
+                self.liveness_failures = 0;
+                self.is_live = true;
+                false
+            }
+            ProbeResult::NotLive { .. } => {
+                self.liveness_failures += 1;
+                if self.liveness_failures >= config.failure_threshold {
+                    self.is_live = false;
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false, // readiness results ignored here
+        }
+    }
+
+    /// Record a readiness probe result.
+    ///
+    /// Returns the readiness state change:
+    /// - `Some(false)` if service should be removed from registry
+    /// - `Some(true)` if service should be re-added (recovered)
+    /// - `None` if no state change
+    pub fn record_readiness(&mut self, result: &ProbeResult, config: &ProbeConfig) -> Option<bool> {
+        match result {
+            ProbeResult::Ready => {
+                self.readiness_failures = 0;
+                self.readiness_successes += 1;
+                if !self.is_ready && self.readiness_successes >= config.success_threshold {
+                    self.is_ready = true;
+                    Some(true) // recovered
+                } else {
+                    None
+                }
+            }
+            ProbeResult::NotReady { .. } => {
+                self.readiness_successes = 0;
+                self.readiness_failures += 1;
+                if self.is_ready && self.readiness_failures >= config.failure_threshold {
+                    self.is_ready = false;
+                    Some(false) // became unready
+                } else {
+                    None
+                }
+            }
+            _ => None, // liveness results ignored here
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,5 +385,152 @@ mod tests {
     fn check_interval() {
         let health = HealthSystem::new(15);
         assert_eq!(health.check_interval_secs(), 15);
+    }
+
+    // ── K2b-G2: Probe tests (os-patterns) ────────────────────────
+
+    #[cfg(feature = "os-patterns")]
+    mod probe_tests {
+        use super::super::*;
+
+        #[test]
+        fn probe_config_default() {
+            let config = ProbeConfig::default();
+            assert_eq!(config.liveness_interval_secs, 10);
+            assert_eq!(config.readiness_interval_secs, 5);
+            assert_eq!(config.failure_threshold, 3);
+            assert_eq!(config.success_threshold, 1);
+        }
+
+        #[test]
+        fn probe_config_serde_roundtrip() {
+            let config = ProbeConfig {
+                liveness_interval_secs: 15,
+                readiness_interval_secs: 10,
+                failure_threshold: 5,
+                success_threshold: 2,
+            };
+            let json = serde_json::to_string(&config).unwrap();
+            let restored: ProbeConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored.liveness_interval_secs, 15);
+            assert_eq!(restored.failure_threshold, 5);
+        }
+
+        #[test]
+        fn probe_result_serde_roundtrip() {
+            let results = vec![
+                ProbeResult::Live,
+                ProbeResult::NotLive { reason: "oom".into() },
+                ProbeResult::Ready,
+                ProbeResult::NotReady { reason: "init".into() },
+            ];
+            for result in results {
+                let json = serde_json::to_string(&result).unwrap();
+                let restored: ProbeResult = serde_json::from_str(&json).unwrap();
+                assert_eq!(restored, result);
+            }
+        }
+
+        #[test]
+        fn probe_state_default_is_live_and_ready() {
+            let state = ProbeState::default();
+            assert!(state.is_live);
+            assert!(state.is_ready);
+            assert_eq!(state.liveness_failures, 0);
+            assert_eq!(state.readiness_failures, 0);
+        }
+
+        #[test]
+        fn liveness_resets_on_success() {
+            let config = ProbeConfig {
+                failure_threshold: 3,
+                ..Default::default()
+            };
+            let mut state = ProbeState::default();
+            state.liveness_failures = 2;
+
+            let restart = state.record_liveness(&ProbeResult::Live, &config);
+            assert!(!restart);
+            assert_eq!(state.liveness_failures, 0);
+            assert!(state.is_live);
+        }
+
+        #[test]
+        fn liveness_triggers_restart_at_threshold() {
+            let config = ProbeConfig {
+                failure_threshold: 3,
+                ..Default::default()
+            };
+            let mut state = ProbeState::default();
+
+            // 2 failures: no restart
+            assert!(!state.record_liveness(&ProbeResult::NotLive { reason: "hang".into() }, &config));
+            assert!(!state.record_liveness(&ProbeResult::NotLive { reason: "hang".into() }, &config));
+            assert!(state.is_live);
+
+            // 3rd failure: restart
+            assert!(state.record_liveness(&ProbeResult::NotLive { reason: "hang".into() }, &config));
+            assert!(!state.is_live);
+        }
+
+        #[test]
+        fn readiness_removes_at_threshold() {
+            let config = ProbeConfig {
+                failure_threshold: 2,
+                ..Default::default()
+            };
+            let mut state = ProbeState::default();
+
+            assert!(state.record_readiness(&ProbeResult::NotReady { reason: "init".into() }, &config).is_none());
+            let change = state.record_readiness(&ProbeResult::NotReady { reason: "init".into() }, &config);
+            assert_eq!(change, Some(false)); // should be removed
+            assert!(!state.is_ready);
+        }
+
+        #[test]
+        fn readiness_recovery_re_adds() {
+            let config = ProbeConfig {
+                failure_threshold: 1,
+                success_threshold: 1,
+                ..Default::default()
+            };
+            let mut state = ProbeState::default();
+
+            // Make it unready
+            state.record_readiness(&ProbeResult::NotReady { reason: "init".into() }, &config);
+            assert!(!state.is_ready);
+
+            // Recover
+            let change = state.record_readiness(&ProbeResult::Ready, &config);
+            assert_eq!(change, Some(true));
+            assert!(state.is_ready);
+        }
+
+        #[test]
+        fn threshold_prevents_flapping() {
+            let config = ProbeConfig {
+                failure_threshold: 3,
+                success_threshold: 2,
+                ..Default::default()
+            };
+            let mut state = ProbeState::default();
+
+            // One failure shouldn't change anything
+            assert!(state.record_readiness(&ProbeResult::NotReady { reason: "x".into() }, &config).is_none());
+            assert!(state.is_ready);
+
+            // One success resets failures
+            assert!(state.record_readiness(&ProbeResult::Ready, &config).is_none());
+            assert!(state.is_ready);
+        }
+
+        #[test]
+        fn default_probe_returns_live_ready() {
+            // Default liveness/readiness should return Live/Ready
+            let live = ProbeResult::Live;
+            let ready = ProbeResult::Ready;
+            assert_eq!(live, ProbeResult::Live);
+            assert_eq!(ready, ProbeResult::Ready);
+        }
     }
 }
