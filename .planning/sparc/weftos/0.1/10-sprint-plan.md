@@ -362,9 +362,9 @@ GATE VALIDATION (checked 2026-03-27):
     - [x] Persistence: kernel state survives clean restart
     - [x] Mesh: two nodes discover + exchange message on LAN
     - [x] DEMOCRITUS: ECC loop runs continuously, graph grows with activity
-    - [ ] D10: WASM shell command executes in sandbox (scaffolded, not e2e)
+    - [x] D10: WASM shell command executes in sandbox (shell.exec tool, 6 tests)
     - [x] D3: 10 new tools functional
-    - [ ] D9: tool signing verifies on load (framework exists, not wired)
+    - [x] D9: tool signing verifies on load (register_signed + require mode, 6 tests)
     - [x] 200+ new tests added this sprint (983 new: 613→1,596)
     - [x] Clippy clean, all feature gates verified (6/6 combos GREEN)
 
@@ -586,9 +586,9 @@ Sprint 10 is complete when:
 3. [x] Persistence: kernel state survives restart — CausalGraph + HNSW save/load, 12 tests
 4. [x] Mesh: two-node LAN communication demonstrated — MeshRuntime + 2-node exchange test
 5. [x] DEMOCRITUS: ECC loop runs continuously — DemocritusLoop Sense→Embed→Search→Update→Commit, 12 tests
-6. [ ] D10: WASM shell command executes — Wasmtime activation scaffolded, not end-to-end tested
+6. [x] D10: WASM shell command executes — ShellCommand/ShellResult types, execute_shell(), shell.exec tool, 6 tests
 7. [x] D3: 10 new tools functional — tools_extended.rs with 16 tests
-8. [ ] D9: tool signing on ExoChain — Ed25519 signing framework exists, not wired into tool load path
+8. [x] D9: tool signing on ExoChain — ToolSignature, register_signed(), verify, require_signatures mode, 6 tests
 9. [x] 200+ new tests — 983 new kernel tests (613 → 1,596)
 
 **Client-Facing:**

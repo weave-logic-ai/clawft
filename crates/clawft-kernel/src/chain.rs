@@ -277,6 +277,18 @@ pub const EVENT_KIND_TOOL_VERSION_REVOKED: &str = "tool.version.revoke";
 /// The payload should include `agent_id`, `tool`, `path`, `reason`.
 pub const EVENT_KIND_SANDBOX_SUDO_OVERRIDE: &str = "sandbox.sudo.override";
 
+/// Tool signed event (k3:D9).
+///
+/// Emitted when a tool is registered with a verified cryptographic signature.
+/// The payload should include `tool_name`, `tool_hash`, `signer_id`.
+pub const EVENT_KIND_TOOL_SIGNED: &str = "tool.signed";
+
+/// Shell command execution event (k3:D10).
+///
+/// Emitted when a shell command is executed through the sandbox.
+/// The payload should include `command`, `exit_code`, `execution_time_ms`.
+pub const EVENT_KIND_SHELL_EXEC: &str = "shell.exec";
+
 /// Local chain state.
 struct LocalChain {
     chain_id: u32,
