@@ -1,0 +1,536 @@
+# WeftOS Integration Patterns
+
+How RVF crypto, ExoChain, resource trees, governance, and scoring integrate
+across the kernel. This document is the primary reference for K3+ implementors
+adding new subsystems.
+
+---
+
+## 1. The Three Pillars
+
+WeftOS kernel integration rests on three interconnected subsystems:
+
+1. **ExoChain** (the ledger) -- append-only hash-linked event log
+2. **Resource Tree** (the economy) -- hierarchical namespace with Merkle integrity
+3. **Governance Gate** (the judiciary) -- effect-algebra access control
+
+Every new kernel subsystem should integrate with all three.
+
+## 2. ExoChain Integration
+
+### When to Log
+
+Log a chain event when:
+- An agent lifecycle state changes (spawn, suspend, resume, stop)
+- A message is sent or received (IPC events)
+- A resource is created, modified, or deleted (tree mutations)
+- An access control decision is made (gate events)
+- A service starts or stops
+- A cron job fires
+
+### How to Log
+
+```rust
+// Get chain reference (passed through boot or daemon context)
+let chain: Arc<ChainManager> = /* from kernel context */;
+
+// Append an event
+let event = chain.append(
+    "source-module",        // e.g. "supervisor", "governance", "cron"
+    "event.kind",           // e.g. "agent.spawn", "governance.permit"
+    Some(serde_json::json!({
+        "agent_id": "agent-1",
+        "action": "tool.exec",
+        "details": { /* arbitrary JSON */ }
+    })),
+);
+// event.sequence, event.hash now available
+```
+
+### Event Naming Convention
+
+```
+{source}.{verb}
+
+Examples:
+  agent.spawn         supervisor spawned an agent
+  agent.suspend       agent suspended
+  agent.resume        agent resumed
+  ipc.recv            message received
+  ipc.ack             acknowledgment sent
+  cron.fire           cron job executed
+  tree.insert         resource tree node created
+  tree.remove         resource tree node deleted
+  tree.bootstrap      standard namespaces created
+  governance.permit   gate permitted action
+  governance.deny     gate denied action
+  governance.warn     gate permitted with warning
+  governance.defer    gate deferred to human
+  gate.permit         capability gate permitted
+  gate.deny           capability gate denied
+  service.start            service started
+  service.stop             service stopped
+  service.contract.register  service API schema anchored (D8)
+  service.contract.version   new contract version published
+  shell.wasm.compile          shell script compiled to WASM (D10)
+```
+
+### Chain Verification
+
+```rust
+let result = chain.verify_integrity();
+assert!(result.valid);
+// result.event_count, result.errors available
+```
+
+### RVF Persistence
+
+The chain persists to RVF segment files on kernel shutdown:
+
+```rust
+// Save (called during Kernel::shutdown)
+chain.save_to_rvf(&path)?;
+
+// Load (called during Kernel::boot)
+let chain = ChainManager::load_from_rvf(&path)?;
+```
+
+RVF file format:
+1. Segment header (ExoChainHeader: magic, version, chain_id, sequence)
+2. CBOR-encoded payload (ChainEvent fields)
+3. Content hash for validation
+4. Padding to 64-byte boundary
+5. Ed25519 signature footer (last segment)
+
+### Witness Chains
+
+Witness chains provide independent verification:
+
+```rust
+// Create witness entries from chain events
+let witness = chain.verify_witness()?;
+
+// Record provenance (DNA-style lineage)
+let lineage = chain.record_lineage(parent_id, child_id, DerivationType::Clone);
+```
+
+---
+
+## 3. Resource Tree Integration
+
+### When to Use
+
+Register resources in the tree when:
+- A new agent is spawned → `/kernel/agents/{name}`
+- A service is registered → `/kernel/services/{name}`
+- An app is installed → `/apps/{name}`
+- A cluster peer joins → `/network/peers/{node_id}`
+- An environment is created → `/environments/{name}`
+
+### How to Integrate
+
+```rust
+let tree: Arc<TreeManager> = /* from kernel context */;
+
+// Insert a node (automatically creates chain event + mutation event)
+tree.insert(
+    "/kernel/agents/worker-1",
+    HashMap::from([
+        ("pid".to_string(), "42".to_string()),
+        ("type".to_string(), "worker".to_string()),
+    ]),
+)?;
+
+// The chain event includes the tree path and metadata
+// The tree node stores chain_seq for two-way traceability
+```
+
+### Standard Namespace Layout
+
+```
+/
+├── kernel/
+│   ├── services/       # registered SystemService instances
+│   ├── agents/         # spawned agent processes
+│   └── cron/           # registered cron jobs
+├── apps/               # installed applications (AppManifest)
+├── network/
+│   └── peers/          # cluster peer nodes
+└── environments/       # governance-scoped environments
+```
+
+### Two-Way Traceability
+
+Every tree node stores `chain_seq` metadata:
+- Given a tree node → look up chain event by sequence number
+- Given a chain event → find tree path in event payload
+
+### Merkle Integrity
+
+The resource tree uses `rvf_crypto` for Merkle hashing. After any mutation,
+the tree's root hash changes, providing tamper-evident integrity.
+
+---
+
+## 4. Governance Gate Integration
+
+### When to Gate
+
+Gate checks should happen when:
+- An agent attempts to execute a tool (`tool.exec`)
+- An agent modifies cron jobs (`service.cron.add`, `service.cron.remove`)
+- An agent sends a message to another agent (IPC scope check)
+- An application requests privileged capabilities
+- A service call is routed through A2ARouter (D7 routing-time check)
+- A WASM tool is loaded or executed (K3)
+- A container is started or stopped (K4)
+- An app is installed or started (K5)
+
+### How to Add a Gate Check
+
+In the agent loop or any command handler:
+
+```rust
+// Gate is available as Option<Arc<dyn GateBackend>>
+if let Some(ref gate) = gate {
+    let context = serde_json::json!({
+        "pid": pid.0,
+        "effect": {
+            "risk": 0.3,
+            "security": 0.2,
+            "privacy": 0.1,
+            "novelty": 0.0,
+            "fairness": 0.0
+        }
+    });
+
+    match gate.check(agent_id, "tool.my_action", &context) {
+        GateDecision::Permit { .. } => {
+            // proceed with action
+        }
+        GateDecision::Defer { reason } => {
+            // queue for human review
+            // send error reply to agent
+        }
+        GateDecision::Deny { reason, .. } => {
+            // log denial, send error reply
+        }
+    }
+}
+```
+
+### Effect Vector Guidelines
+
+The 5D effect vector quantifies the impact of an action:
+
+| Dimension | Meaning | Example |
+|-----------|---------|---------|
+| `risk` | Probability of negative outcome | 0.9 for `rm -rf`, 0.1 for read |
+| `security` | System security impact | 0.8 for credential access |
+| `privacy` | Data privacy impact | 0.7 for PII processing |
+| `novelty` | How unprecedented the action is | 0.5 for first-time tool use |
+| `fairness` | Impact on equitable treatment | 0.3 for resource reallocation |
+
+**Magnitude calculation**: `sqrt(risk^2 + security^2 + privacy^2 + novelty^2 + fairness^2)`
+
+**K3 Update**: The EffectVector will become N-dimensional with configurable named
+dimensions (C9, D20). The current 5D schema remains the default. Edge devices
+can use a compact 3D profile. New dimensions (velocity, scope, reversibility,
+uncertainty, cascading_risk) will be available for environments that opt in.
+
+If magnitude exceeds the environment's threshold (default 0.8) and a `Blocking`
+rule matches, the action is denied.
+
+### Adding Governance Rules
+
+```rust
+let gate = GovernanceGate::new(0.8, false)  // threshold, human_approval
+    .with_chain(chain.clone())
+    .add_rule(GovernanceRule {
+        id: "my-rule".into(),
+        description: "Block dangerous operations".into(),
+        branch: GovernanceBranch::Judicial,
+        severity: RuleSeverity::Blocking,
+        active: true,
+    });
+```
+
+Rule severities:
+- `Informational` -- logged but never blocks
+- `Warning` -- logged with warning, action still permitted
+- `Blocking` -- denies action when effect exceeds threshold
+
+---
+
+## 5. RVF Crypto Usage
+
+### Available Functions (rvf-crypto)
+
+| Function | Purpose | Used In |
+|----------|---------|---------|
+| `shake256_256(data)` | SHAKE-256 hash (256-bit) | ChainManager event hashing |
+| `sign_segment(data, key)` | Ed25519 signing | Chain checkpoint persistence |
+| `verify_segment(data, sig, pubkey)` | Ed25519 verification | Chain loading |
+| `create_witness_chain(entries)` | Serialize witness entries | Witness chain creation |
+| `verify_witness_chain(data)` | Parse + verify witnesses | Witness chain verification |
+| `lineage_record_to_bytes(record)` | Serialize lineage | Provenance tracking |
+| `lineage_witness_entry(lineage)` | Create witness from lineage | Spawn provenance |
+| `encode_signature_footer(footer)` | Encode sig footer | RVF file writing |
+| `decode_signature_footer(data)` | Decode sig footer | RVF file loading |
+
+### Available Types (rvf-types)
+
+| Type | Purpose |
+|------|---------|
+| `ExoChainHeader` | 64-byte segment header (magic, version, chain_id, sequence, timestamp, prev_hash) |
+| `LineageRecord` | DNA-style provenance: parent_id, child_id, derivation_type, timestamp |
+| `DerivationType` | `Clone`, `Mutate`, `Combine`, `Derive`, `Fork` |
+| `FileIdentity` | File identifier tuple (file_id, parent_id, parent_hash, lineage_depth) |
+| `Scorecard` | Witness scorecard for aggregated metrics |
+| `EXOCHAIN_MAGIC` | Magic bytes `[0x45, 0x58, 0x4F]` ("EXO") |
+| `SEGMENT_HEADER_SIZE` | 32 bytes |
+
+### Available Functions (rvf-wire)
+
+| Function | Purpose |
+|----------|---------|
+| `read_segment(data)` | Parse segment header + payload |
+| `validate_segment(header, data)` | Verify content hash |
+| `write_exochain_event(header, payload)` | Create full RVF segment |
+| `calculate_padded_size(size)` | Align to 64-byte boundaries |
+
+---
+
+## 6. Pattern: Adding a New Gated Subsystem
+
+When implementing K3+ features that need full integration, follow this pattern:
+
+### Step 1: Define the Module
+
+```rust
+// crates/clawft-kernel/src/my_module.rs
+
+pub struct MyManager {
+    // ... module state
+}
+
+impl MyManager {
+    pub fn new() -> Self { /* ... */ }
+}
+```
+
+### Step 2: Add Chain Logging
+
+```rust
+impl MyManager {
+    pub fn do_action(
+        &self,
+        #[cfg(feature = "exochain")] chain: &Option<Arc<ChainManager>>,
+    ) {
+        // ... perform action ...
+
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = chain {
+            cm.append("my_module", "my_module.action", Some(json!({
+                "details": "..."
+            })));
+        }
+    }
+}
+```
+
+### Step 3: Register in Resource Tree
+
+```rust
+// During boot or registration
+#[cfg(feature = "exochain")]
+if let Some(ref tree) = tree_manager {
+    tree.insert("/kernel/my_module/instance-1", metadata)?;
+}
+```
+
+### Step 4: Add Gate Check
+
+```rust
+// Before performing a potentially risky action
+#[cfg(feature = "exochain")]
+if let Some(ref gate) = gate {
+    let ctx = json!({"pid": pid.0, "effect": {"risk": 0.5}});
+    match gate.check(agent_id, "my_module.action", &ctx) {
+        GateDecision::Permit { .. } => { /* proceed */ }
+        GateDecision::Deny { reason, .. } => {
+            return Err(KernelError::PermissionDenied(reason));
+        }
+        GateDecision::Defer { reason } => {
+            return Err(KernelError::DeferredToHuman(reason));
+        }
+    }
+}
+```
+
+### Step 5: Wire into Boot
+
+In `boot.rs` or `daemon.rs`, initialize your module during kernel boot and pass
+chain/tree/gate references as needed.
+
+### Step 6: Add CLI Commands
+
+In `crates/clawft-weave/src/commands/`, add a command module following existing
+patterns (e.g. `resource_cmd.rs`, `chain_cmd.rs`).
+
+### Step 7: Write Tests
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn action_logs_to_chain() {
+        let cm = Arc::new(ChainManager::new(0, 100));
+        let manager = MyManager::new();
+        manager.do_action(&Some(cm.clone()));
+        let events = cm.tail(1);
+        assert_eq!(events[0].kind, "my_module.action");
+    }
+
+    #[test]
+    fn action_denied_by_gate() {
+        // ... test gate denial ...
+    }
+}
+```
+
+---
+
+## 7. Integration Status Matrix
+
+| Module | Chain | Tree | Governance | Gate |
+|--------|-------|------|------------|------|
+| boot.rs | Boot events | Bootstrap tree | Init engine | Create gate |
+| process.rs | Via agent_loop | /kernel/agents | Via capabilities | Via gate check |
+| supervisor.rs | agent.spawn/stop | /kernel/agents/{name} | Enforce spawn rules | Gate spawn |
+| ipc.rs | ipc.send/recv/ack | - | Check scope | IPC scope |
+| a2a.rs | Via send_checked | - | Sender capabilities | routing-time gate (D7) + send_checked |
+| topic.rs | Via publish | - | Subscription perms | Check access |
+| agent_loop.rs | Built-in logging | - | - | Before exec/cron |
+| cron.rs | cron.fire | /kernel/cron | Execution perms | Gate execution |
+| health.rs | Health results | - | - | - |
+| service.rs | service.start/stop | /kernel/services | - | - |
+| chain.rs | IS the chain | Checkpoint metadata | Lineage | - |
+| tree_manager.rs | tree.insert/remove | IS the tree | Via scoring | Via gate |
+| gate.rs | governance.* events | - | IS the engine | IS the gate |
+| governance.rs | - | - | IS the engine | EffectVector scoring |
+| cluster.rs | peer.join/leave | /network/peers | Node join rules | - |
+| app.rs | app.install/start | /apps | Validate manifest | Check perms |
+| container.rs | container.start/stop | /kernel/services | - | - |
+| environment.rs | - | /environments | Scoped governance | Environment rules |
+| agency.rs | Role assignments | /kernel/agents | Agent manifests | - |
+| wasm_runner.rs | Tool execution | - | Sandbox policy | Via capability |
+| console.rs | Boot events | - | - | - |
+| config.rs | - | - | Load governance | - |
+| capability.rs | - | - | Enforced at gate | Central to gate |
+| error.rs | - | - | - | - |
+
+---
+
+## 8. K2 Symposium Patterns
+
+The K2 Symposium (2026-03-04) introduced several new integration patterns for K3+.
+Full decisions: `k2-symposium/08-symposium-results-report.md`
+
+### Service Routing
+
+Services are separate from processes (D1). `MessageTarget::Service(name)` routes
+through `ServiceRegistry::resolve_target()` to find the owning agent's PID.
+
+```rust
+// Route to a service by name
+let msg = KernelMessage {
+    to: MessageTarget::Service("redis".to_string()),
+    // ...
+};
+// A2ARouter resolves "redis" -> owner PID -> deliver to inbox
+```
+
+### Dual-Layer Gate (D7)
+
+Every service call passes TWO gate checks:
+1. **Routing-time** in `A2ARouter::route()` -- prevents unauthorized messages from reaching services
+2. **Handler-time** in `kernel_agent_loop()` -- GovernanceGate checks before command execution
+
+### Universal Witness (D9)
+
+Every service call generates a witness entry by default (SHAKE-256, sub-microsecond).
+Services can opt out via `AuditLevel::GateOnly` in their `ServiceEntry`.
+
+### Chain-Anchored Contracts (D8)
+
+When a service registers its schema, the schema hash is written to the ExoChain:
+```rust
+chain.append("service", "service.contract.register", json!({
+    "service": name,
+    "version": 1,
+    "schema_hash": shake256(&schema_bytes),
+}));
+```
+
+---
+
+## Section 6: Adding a New Gated Subsystem — ECC Worked Example (K3c)
+
+The ECC cognitive substrate (Phase K3c) demonstrates the standard integration pattern
+for adding a new subsystem to the kernel.
+
+### Step 1: Define module (`causal.rs`, `hnsw_service.rs`, etc.)
+
+Each module is a standalone Rust file with its own types, public API, and tests.
+Feature-gated via `#[cfg(feature = "ecc")]` in `lib.rs`.
+
+### Step 2: Add chain logging
+
+ECC operations emit chain events with `ecc.*` event kinds:
+- `ecc.boot.calibration` — calibration results at boot
+- `ecc.hnsw.insert`, `ecc.hnsw.search` — vector operations
+- `ecc.causal.link` — causal edge creation
+- `ecc.crossref.create` — cross-structure reference
+- `ecc.impulse.emit` — ephemeral events
+- `ecc.tick.drift` — tick budget exceeded
+
+### Step 3: Register in resource tree
+
+Boot creates 6 namespaces under `/kernel/services/ecc/`:
+```
+/kernel/services/ecc/
+/kernel/services/ecc/hnsw/
+/kernel/services/ecc/causal/
+/kernel/services/ecc/tick/
+/kernel/services/ecc/calibration/
+/kernel/services/ecc/crossrefs/
+```
+
+### Step 4: Add gate checks
+
+7 tool specs in `builtin_tool_catalog()` with `ToolCategory::Ecc`:
+`ecc.embed`, `ecc.search`, `ecc.causal.link`, `ecc.causal.query`,
+`ecc.crossref.create`, `ecc.tick.status`, `ecc.calibration.run`.
+
+Each has an `EffectVector` for governance scoring.
+
+### Step 5: Wire into boot
+
+`boot_ecc()` runs after tree bootstrap:
+1. Create `HnswService`, `CausalGraph`, `CrossRefStore`, `ImpulseQueue`
+2. Run `run_calibration()` — N synthetic ticks measuring performance
+3. Create `CognitiveTick` with calibrated interval
+4. Register `HnswService` and `CognitiveTick` as `SystemService`
+5. Log calibration to chain
+6. Advertise `NodeEccCapability` to cluster
+
+### Step 6: Add CLI commands
+
+`weaver ecc` subcommands: `status`, `calibrate`, `search`, `causal`, `crossrefs`, `tick`.
+
+### Step 7: Write tests
+
+83 unit tests across 6 modules + integration via calibration tests.

@@ -15,6 +15,21 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
+browser = [
+    "dep:clawft-core",
+    "dep:clawft-llm",
+    "dep:clawft-tools",
+    "dep:clawft-platform",
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:web-sys",
+    "dep:js-sys",
+    "dep:console_error_panic_hook",
+    "clawft-core/browser",
+    "clawft-llm/browser",
+    "clawft-tools/browser",
+    "clawft-platform/browser",
+]
 wasm-plugins = [
     "dep:clawft-plugin",
     "dep:url",
@@ -30,9 +45,20 @@ alloc-lol = ["dep:lol_alloc"]
 alloc-tracing = []
 
 [dependencies]
-clawft-types = { workspace = true }
+clawft-types = { workspace = true, default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# Behind browser feature
+clawft-core = { workspace = true, default-features = false, optional = true }
+clawft-llm = { workspace = true, default-features = false, optional = true }
+clawft-tools = { workspace = true, default-features = false, optional = true }
+clawft-platform = { workspace = true, default-features = false, optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", optional = true, features = ["console"] }
+js-sys = { version = "0.3", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
 
 # Behind wasm-plugins feature
 clawft-plugin = { workspace = true, optional = true }

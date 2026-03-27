@@ -1,0 +1,231 @@
+---
+title: "Kernel Developer Guide"
+description: "Practical guide for working with the WeftOS kernel: building, testing, extending, adding modules, and common development patterns."
+---
+
+This guide covers practical development workflows for working with the WeftOS kernel.
+
+## Building
+
+Always use `scripts/build.sh` for build operations:
+
+```bash
+# Build native CLI (release)
+scripts/build.sh native
+
+# Build native CLI (debug, fast iteration)
+scripts/build.sh native-debug
+
+# Fast compile check (no codegen)
+scripts/build.sh check
+
+# Lint (clippy, warnings as errors)
+scripts/build.sh clippy
+
+# Full phase gate (11 checks -- use before committing)
+scripts/build.sh gate
+```
+
+## Testing
+
+```bash
+# Full workspace tests
+scripts/build.sh test
+
+# Kernel only (default features)
+cargo test -p clawft-kernel
+
+# Kernel + exochain (479 tests)
+cargo test -p clawft-kernel --features exochain
+
+# Kernel + ECC (562 tests)
+cargo test -p clawft-kernel --features "exochain,ecc"
+
+# Kernel + mesh (133 additional tests)
+cargo test -p clawft-kernel --features "mesh"
+
+# All features
+cargo test -p clawft-kernel --features "exochain,cluster,wasm-sandbox,containers,mesh,ecc"
+```
+
+## Project Structure
+
+```
+crates/clawft-kernel/
+  src/
+    lib.rs           -- Crate root, module declarations, re-exports
+    boot.rs          -- Kernel<P> struct, boot sequence (K0)
+    process.rs       -- ProcessTable, PID allocation (K1)
+    supervisor.rs    -- AgentSupervisor, SpawnRequest (K1)
+    capability.rs    -- AgentCapabilities, RBAC (K1)
+    ipc.rs           -- KernelMessage, MessageTarget (K2)
+    a2a.rs           -- A2ARouter (K2)
+    topic.rs         -- TopicRouter (K2)
+    agent_loop.rs    -- kernel_agent_loop() (K2)
+    service.rs       -- ServiceRegistry, SystemService (K2)
+    chain.rs         -- ChainManager (exochain)
+    tree_manager.rs  -- TreeManager (exochain)
+    gate.rs          -- GateBackend (exochain)
+    governance.rs    -- GovernanceEngine (always compiled)
+    wasm_runner.rs   -- WasmToolRunner, tool catalog (K3)
+    container.rs     -- ContainerManager (K4)
+    app.rs           -- AppManager (K5)
+    cluster.rs       -- ClusterMembership (K6)
+    mesh*.rs         -- 14 mesh modules (K6, mesh feature)
+    causal.rs        -- CausalGraph (K3c, ecc)
+    cognitive_tick.rs -- CognitiveTick (K3c, ecc)
+    crossref.rs      -- CrossRefStore (K3c, ecc)
+    calibration.rs   -- EccCalibration (K3c, ecc)
+    hnsw_service.rs  -- HnswService (K3c, ecc)
+    impulse.rs       -- ImpulseQueue (K3c, ecc)
+  Cargo.toml
+```
+
+## Adding a New Kernel Module
+
+1. **Create the source file** in `crates/clawft-kernel/src/`.
+
+2. **Add module declaration** in `lib.rs`:
+   ```rust
+   // If feature-gated:
+   #[cfg(feature = "my-feature")]
+   pub mod my_module;
+
+   // If always compiled:
+   pub mod my_module;
+   ```
+
+3. **Add re-exports** for key types:
+   ```rust
+   #[cfg(feature = "my-feature")]
+   pub use my_module::{MyType, MyOtherType};
+   ```
+
+4. **Add tests** as a `#[cfg(test)] mod tests` block inside the module.
+
+5. **If feature-gated**, add the feature to `Cargo.toml`:
+   ```toml
+   [features]
+   my-feature = ["dep:some-crate"]
+   ```
+
+## Integration Checklist
+
+Every new module should satisfy:
+
+- [ ] Chain logging for state changes (if `exochain` feature)
+- [ ] Tree registration in standard namespace
+- [ ] Gate check before privileged operations
+- [ ] Tests (aim for >80% coverage)
+- [ ] CLI commands in `clawft-weave` (if user-facing)
+- [ ] Feature flag if external dependency
+- [ ] Documentation in `docs/weftos/`
+
+## Common Patterns
+
+### Adding a System Service
+
+Implement the `SystemService` trait and register during boot:
+
+```rust
+use crate::service::SystemService;
+use crate::health::HealthStatus;
+
+pub struct MyService { /* ... */ }
+
+#[async_trait]
+impl SystemService for MyService {
+    fn name(&self) -> &str { "my-service" }
+    async fn start(&self) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
+    fn health_check(&self) -> HealthStatus { HealthStatus::Healthy }
+}
+```
+
+### Adding Chain Events
+
+```rust
+#[cfg(feature = "exochain")]
+{
+    let event = chain.append(
+        "my-module",           // source
+        "my-module.action",    // kind
+        Some(json!({           // payload
+            "key": "value"
+        })),
+    );
+}
+```
+
+### Adding a Gate Check
+
+```rust
+#[cfg(feature = "exochain")]
+if let Some(gate) = &self.gate {
+    let context = json!({ "pid": pid, "tool": tool_name });
+    match gate.check(&agent_id, "tool.my_tool", &context) {
+        GateDecision::Permit { .. } => { /* proceed */ }
+        GateDecision::Deny { reason, .. } => {
+            return Err(KernelError::PermissionDenied(reason));
+        }
+        GateDecision::Defer { reason } => { /* queue for review */ }
+    }
+}
+```
+
+### Using DashMap for Concurrent State
+
+```rust
+use dashmap::DashMap;
+
+pub struct MyRegistry {
+    entries: DashMap<String, MyEntry>,
+}
+
+impl MyRegistry {
+    pub fn insert(&self, key: String, entry: MyEntry) {
+        self.entries.insert(key, entry);
+    }
+    pub fn get(&self, key: &str) -> Option<MyEntry> {
+        self.entries.get(key).map(|e| e.clone())
+    }
+}
+```
+
+## Feature Flag Guidelines
+
+- Use feature gates for external dependencies (wasmtime, docker, quinn, snow)
+- Keep the default build lean (no mesh, no WASM, no containers)
+- All types should compile unconditionally where possible
+- Feature gates control runtime behavior, not type definitions
+- One feature flag per subsystem (not per-module)
+
+## CLI Integration
+
+Kernel commands are exposed through the `weaver` binary (`clawft-weave`):
+
+```bash
+weaver kernel start        # Boot the kernel daemon
+weaver kernel stop         # Graceful shutdown
+weaver kernel status       # Show kernel state
+weaver kernel logs         # Display boot events
+weaver agent list          # List all processes
+weaver agent inspect <pid> # Show process details
+weaver agent spawn <type>  # Spawn a new agent
+weaver chain status        # ExoChain status
+weaver chain verify        # Verify chain integrity
+weaver health              # Health check summary
+```
+
+## Debugging
+
+```bash
+# Run with verbose logging
+RUST_LOG=clawft_kernel=debug cargo test -p clawft-kernel
+
+# Run a specific test
+cargo test -p clawft-kernel test_name -- --nocapture
+
+# Check for deadlocks (DashMap)
+RUST_LOG=clawft_kernel::a2a=trace cargo test -p clawft-kernel
+```

@@ -17,12 +17,15 @@ pub fn general_help() -> String {
     output.push_str("  memory         Read and search agent memory\n");
     output.push_str("  config         Show resolved configuration\n");
     output.push_str("  skills         Manage skills (list, show, install)\n");
+    output.push_str("  tools          Manage tools (list, show, search, deny/allow)\n");
     output.push_str("  agents         Manage agents (list, show, use)\n");
     output.push_str("  workspace      Manage workspaces\n");
     output.push_str("  onboard        Initialize clawft config and workspace\n");
+    output.push_str("  ui             Start the web dashboard\n");
+    output.push_str("  kernel         WeftOS kernel management (status, ps, boot)\n");
     output.push_str("  help           Show help for a topic\n");
     output.push_str("  completions    Generate shell completions\n");
-    output.push_str("\nHelp topics: skills, agents, tools, commands, config\n");
+    output.push_str("\nHelp topics: skills, agents, tools, commands, config, ui, kernel\n");
     output.push_str("  Run 'weft help <topic>' for more information on a topic.");
     output
 }
@@ -69,6 +72,15 @@ pub fn topic_help(topic: &str) -> String {
              The agent uses tools to interact with the filesystem, run commands,\n\
              search the web, and more.\n\
              \n\
+             CLI commands:\n\
+             \n\
+             weft tools list              List all registered tools with source\n\
+             weft tools show <name>       Show tool details and parameter schema\n\
+             weft tools mcp               List MCP servers and tool counts\n\
+             weft tools search <query>    Search tools by name or description\n\
+             weft tools deny <pattern>    Add a glob pattern to the tool denylist\n\
+             weft tools allow <pattern>   Remove a pattern from the tool denylist\n\
+             \n\
              Interactive commands:\n\
              \n\
              /tools                       List all registered tools"
@@ -84,6 +96,31 @@ pub fn topic_help(topic: &str) -> String {
              /status                      Show current agent, model, skills\n\
              /quit                        Exit the session"
             .into(),
+        "ui" => "## weft ui\n\
+             \n\
+             Start the web dashboard.\n\
+             \n\
+             This command starts the gateway with the REST/WS API enabled\n\
+             and optionally serves a built frontend from a local directory.\n\
+             \n\
+             ### Usage\n\
+             \n\
+               weft ui [OPTIONS]\n\
+             \n\
+             ### Options\n\
+             \n\
+               -c, --config <PATH>    Config file override\n\
+               -p, --port <PORT>      API port (default: 18789)\n\
+               --no-open              Don't open browser\n\
+               --ui-dir <DIR>         Serve built UI from this directory\n\
+             \n\
+             ### Examples\n\
+             \n\
+               weft ui                        # Start with defaults\n\
+               weft ui --port 9000            # Custom port\n\
+               weft ui --ui-dir ./ui/dist     # Serve built frontend\n\
+               weft ui --no-open              # Skip browser auto-open"
+            .into(),
         "config" => "Configuration is loaded from (in priority order):\n\
              \n\
              1. $CLAWFT_CONFIG environment variable\n\
@@ -96,10 +133,23 @@ pub fn topic_help(topic: &str) -> String {
              weft config section <name>   Show a specific section\n\
              weft status                  Show configuration status and diagnostics"
             .into(),
+        "kernel" => "## WeftOS Kernel\n\
+             \n\
+             The WeftOS kernel provides process management, service lifecycle,\n\
+             IPC, and health monitoring for the clawft agent framework.\n\
+             \n\
+             CLI commands:\n\
+             \n\
+             weft kernel status         Show kernel state, uptime, counts\n\
+             weft kernel services       List registered services with health\n\
+             weft kernel ps             List process table entries\n\
+             weft kernel boot           Boot kernel (non-interactive)\n\
+             weft kernel boot --fg      Boot in foreground with log output"
+            .into(),
         other => format!(
             "No help available for topic: {other}\n\
              \n\
-             Available topics: skills, agents, tools, commands, config"
+             Available topics: skills, agents, tools, commands, config, ui, kernel"
         ),
     }
 }
@@ -114,6 +164,7 @@ mod tests {
         assert!(text.contains("agent"));
         assert!(text.contains("gateway"));
         assert!(text.contains("skills"));
+        assert!(text.contains("tools"));
         assert!(text.contains("help"));
     }
 
@@ -144,6 +195,8 @@ mod tests {
     fn topic_tools() {
         let text = topic_help("tools");
         assert!(text.contains("functions"));
+        assert!(text.contains("weft tools list"));
+        assert!(text.contains("weft tools deny"));
     }
 
     #[test]

@@ -198,9 +198,67 @@ impl DelegationEngine {
         }
     }
 
+    /// Delegate a tool call to another agent via A2A IPC.
+    ///
+    /// When a kernel A2A router is available, tool delegation uses
+    /// PID-addressed IPC instead of in-process dispatch. This enables
+    /// cross-agent tool delegation within a single kernel instance.
+    ///
+    /// Falls back to returning the DelegationTarget for external handling
+    /// when no A2A router is configured.
+    pub fn delegate_tool_call(
+        &self,
+        task: &str,
+        claude_available: bool,
+        target_pid: Option<u64>,
+    ) -> DelegationResult {
+        let target = self.decide(task, claude_available);
+        DelegationResult {
+            target,
+            target_pid,
+            task: task.to_owned(),
+        }
+    }
+
     /// Get a reference to the underlying config.
     pub fn config(&self) -> &DelegationConfig {
         &self.config
+    }
+}
+
+/// Result of a delegation decision.
+///
+/// This is a plain data type that carries enough information for the caller
+/// (who has access to an A2A router) to dispatch via kernel IPC when a
+/// `target_pid` is present.
+#[derive(Debug, Clone)]
+pub struct DelegationResult {
+    /// Where to route the task.
+    pub target: DelegationTarget,
+    /// Optional PID for kernel-internal delegation.
+    pub target_pid: Option<u64>,
+    /// The task description.
+    pub task: String,
+}
+
+impl DelegationResult {
+    /// Whether this delegation should use A2A IPC.
+    pub fn is_kernel_local(&self) -> bool {
+        self.target_pid.is_some()
+    }
+
+    /// Build payload for A2A dispatch.
+    ///
+    /// Returns `(target_pid, payload)` if a target PID is set,
+    /// or `None` if this delegation should be handled externally.
+    pub fn to_ipc_message(&self, _from_pid: u64) -> Option<(u64, serde_json::Value)> {
+        let target_pid = self.target_pid?;
+        let payload = serde_json::json!({
+            "cmd": "delegate",
+            "task": self.task,
+            "target": format!("{:?}", self.target),
+        });
+        Some((target_pid, payload))
     }
 }
 
@@ -378,6 +436,50 @@ mod tests {
             engine.decide("hello world", true),
             DelegationTarget::Local
         );
+    }
+
+    #[test]
+    fn delegate_tool_call_with_pid() {
+        let engine = make_engine(vec![DelegationRule {
+            pattern: r"(?i)deploy".into(),
+            target: DelegationTarget::Claude,
+        }]);
+        let result = engine.delegate_tool_call("deploy service", true, Some(42));
+        assert_eq!(result.target, DelegationTarget::Claude);
+        assert_eq!(result.target_pid, Some(42));
+        assert_eq!(result.task, "deploy service");
+        assert!(result.is_kernel_local());
+    }
+
+    #[test]
+    fn delegate_tool_call_without_pid() {
+        let engine = make_engine(vec![]);
+        let result = engine.delegate_tool_call("hello", true, None);
+        assert_eq!(result.target, DelegationTarget::Local);
+        assert_eq!(result.target_pid, None);
+        assert!(!result.is_kernel_local());
+    }
+
+    #[test]
+    fn delegation_result_to_ipc_message() {
+        let result = DelegationResult {
+            target: DelegationTarget::Claude,
+            target_pid: Some(99),
+            task: "analyze logs".to_owned(),
+        };
+        let (pid, payload) = result.to_ipc_message(1).expect("should produce message");
+        assert_eq!(pid, 99);
+        assert_eq!(payload["cmd"], "delegate");
+        assert_eq!(payload["task"], "analyze logs");
+        assert_eq!(payload["target"], "Claude");
+
+        // Without a target_pid, to_ipc_message returns None.
+        let no_pid = DelegationResult {
+            target: DelegationTarget::Local,
+            target_pid: None,
+            task: "noop".to_owned(),
+        };
+        assert!(no_pid.to_ipc_message(1).is_none());
     }
 
     #[test]

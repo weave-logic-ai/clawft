@@ -1,0 +1,20 @@
+version: "3.9"
+services:
+  weaver:
+    build:
+      context: ../..
+      dockerfile: crates/clawft-kernel/Dockerfile.alpine
+    ports:
+      - "18789:18789"
+    volumes:
+      - weft-data:/data
+    environment:
+      - CLAWFT_CONFIG=/data/config.json
+    depends_on:
+      - redis
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+volumes:
+  weft-data:

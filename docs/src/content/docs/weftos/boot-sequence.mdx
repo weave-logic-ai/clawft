@@ -1,0 +1,194 @@
+---
+title: "Boot Sequence and Lifecycle"
+description: "WeftOS kernel boot state machine, boot phases and events, service registration, shutdown sequence, and boot event logging."
+---
+
+The WeftOS kernel manages its lifecycle through a `KernelState` state machine. The `Kernel<P: Platform>` struct is the central coordinator, wrapping `AppContext<P>` with structured startup and shutdown.
+
+**Source**: `crates/clawft-kernel/src/boot.rs` (~600 lines, 14 tests)
+
+## KernelState State Machine
+
+```rust
+pub enum KernelState {
+    Booting,
+    Running,
+    ShuttingDown,
+    Halted,
+}
+```
+
+Valid transitions:
+
+```
+Booting ---------> Running
+    |                 |
+    |                 v
+    |           ShuttingDown
+    |                 |
+    v                 v
+  Halted          Halted
+```
+
+- **Booting**: Kernel is initializing subsystems. No commands accepted.
+- **Running**: All subsystems active. Accepting RPC requests.
+- **ShuttingDown**: Graceful teardown in progress. New commands rejected.
+- **Halted**: Terminal state. Kernel process exits.
+
+## Boot Phases
+
+Boot events are organized into phases tracked by the `BootPhase` enum:
+
+```rust
+pub enum BootPhase {
+    Init,       // Core subsystem initialization
+    Services,   // Service registration and startup
+    Network,    // Cluster and mesh initialization
+    Ready,      // Boot complete, kernel running
+    Ecc,        // ECC cognitive substrate (ecc feature)
+}
+```
+
+## Boot Sequence
+
+The full boot sequence, triggered by `weaver kernel start`:
+
+```
+weaver kernel start
+  1. Fork background daemon process
+  2. Read KernelConfig from config file
+  3. Kernel::boot(config, kernel_config, platform):
+     PHASE: Init
+       a. ProcessTable::new(max_processes)
+       b. ServiceRegistry::new()
+       c. KernelIpc::new(message_bus)
+       d. HealthSystem::new(interval)
+       e. A2ARouter::new()
+
+     PHASE: Services
+       f. CronService::new() -> register as system service
+       g. ClusterMembership::new()
+       h. [exochain] ChainManager::new()
+          -> load_from_rvf() if checkpoint exists
+       i. [exochain] TreeManager::new(chain)
+          -> bootstrap standard namespaces:
+             /kernel
+             /kernel/services
+             /kernel/agents
+             /apps
+             /network/peers
+             /environments
+       j. [exochain] GovernanceGate::new(threshold, human_approval)
+          -> attach to chain
+          -> write governance.genesis event
+          -> write governance.rule events (22 default rules)
+       k. [K2.1] SpawnBackend dispatch attached to supervisor
+       l. [K2.1] ServiceEntry metadata added to ServiceRegistry
+
+     PHASE: Network
+       m. [mesh] Start transport listener on bind_address
+       n. [mesh] Initialize discovery backends
+       o. [mesh] Start heartbeat ticker
+
+     PHASE: Ecc
+       p. [ecc] EccCalibration::run_calibration()
+       q. [ecc] CognitiveTick::new() -> register as service
+       r. [ecc] HnswService::new() -> register as service
+
+     PHASE: Ready
+       s. KernelState transitions to Running
+  4. Bind Unix socket for JSON-RPC
+  5. Start cron tick loop
+  6. Listen for RPC requests
+```
+
+## Boot Event Logging
+
+Every boot step emits a `BootEvent` to the `BootLog`:
+
+```rust
+pub struct BootEvent {
+    pub timestamp: DateTime<Utc>,
+    pub phase: BootPhase,
+    pub message: String,
+    pub level: LogLevel,
+}
+
+pub enum LogLevel {
+    Info,
+    Warn,
+    Error,
+    Debug,
+}
+
+pub struct BootLog {
+    events: Vec<BootEvent>,
+}
+```
+
+The `KernelEventLog` aggregates boot events and is accessible via `weaver kernel logs`.
+
+## Service Registration at Boot
+
+During the Services phase, the kernel registers its built-in services:
+
+| Service | Type | Description |
+|---------|------|-------------|
+| `cron` | Core | Scheduled job execution |
+| `health` | Core | Aggregated health monitoring |
+| `governance` | Core | Governance gate evaluation |
+| `ecc.cognitive_tick` | Core (ecc) | Adaptive cognitive loop |
+| `ecc.hnsw` | Core (ecc) | HNSW vector search |
+
+Each service implements the `SystemService` trait:
+
+```rust
+#[async_trait]
+pub trait SystemService: Send + Sync + 'static {
+    fn name(&self) -> &str;
+    async fn start(&self) -> Result<(), Box<dyn std::error::Error>>;
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>>;
+    fn health_check(&self) -> HealthStatus;
+}
+```
+
+## Shutdown Sequence
+
+Triggered by `weaver kernel stop` or SIGTERM:
+
+```
+weaver kernel stop
+  1. Send "kernel.stop" RPC to daemon
+  2. Daemon sets KernelState::ShuttingDown
+  3. ServiceRegistry::stop_all()
+     -- stops all services in reverse registration order
+  4. [exochain] ChainManager::save_to_rvf()
+     -- persist chain checkpoint to disk
+  5. Remove PID file + Unix socket
+  6. KernelState transitions to Halted
+  7. Process exits
+```
+
+### Signal Handling (K2b)
+
+| Signal | Action |
+|--------|--------|
+| `SIGTERM` | Initiate graceful shutdown |
+| `SIGHUP` | Reload configuration and restart services |
+
+## Kernel Public API
+
+```rust
+impl<P: Platform> Kernel<P> {
+    pub fn boot(config: Config, kernel_config: KernelConfig, platform: P)
+        -> KernelResult<Self>;
+    pub fn shutdown(&self) -> KernelResult<()>;
+    pub fn state(&self) -> KernelState;
+    pub fn process_table(&self) -> &ProcessTable;
+    pub fn service_registry(&self) -> &ServiceRegistry;
+    pub fn ipc(&self) -> &KernelIpc;
+    pub fn health(&self) -> &HealthSystem;
+    pub fn a2a(&self) -> &A2ARouter;
+    pub fn cron(&self) -> &CronService;
+}
+```

@@ -1,0 +1,72 @@
+---
+title: "Peer Discovery"
+description: "DiscoveryBackend trait, DiscoveryCoordinator, bootstrap peers, peer exchange, mDNS, Kademlia DHT, and DHT key namespacing."
+---
+
+WeftOS provides pluggable peer discovery through the `DiscoveryBackend` trait with cross-backend deduplication.
+
+**Source**: `crates/clawft-kernel/src/mesh_discovery.rs`, `mesh_bootstrap.rs`, `mesh_mdns.rs`, `mesh_kad.rs`
+**Feature**: `mesh`
+
+## DiscoveryBackend Trait
+
+```rust
+#[async_trait]
+pub trait DiscoveryBackend: Send + Sync {
+    fn name(&self) -> &str;
+    async fn start(&mut self) -> Result<(), DiscoveryError>;
+    async fn poll(&mut self) -> Result<Vec<DiscoveredPeer>, DiscoveryError>;
+    async fn stop(&mut self) -> Result<(), DiscoveryError>;
+}
+
+pub enum DiscoverySource { SeedPeer, PeerExchange, Mdns, Dht }
+```
+
+## DiscoveryCoordinator
+
+`poll_all()` queries all backends and deduplicates using node IDs.
+
+## Bootstrap Discovery
+
+Reads `ClusterConfig.seed_peers`. Idempotent, zero dependencies.
+
+## Peer Exchange
+
+Learns peers from `JoinResponse.peer_list` during handshake.
+
+## mDNS (LAN Discovery)
+
+```rust
+pub struct MdnsDiscovery { /* UDP multicast 224.0.0.251:5353 */ }
+pub const WEFTOS_SERVICE_NAME: &str = "_weftos._tcp.local";
+```
+
+Announcements include governance genesis hash for cluster isolation.
+
+## Kademlia DHT
+
+```rust
+pub struct KademliaTable {
+    local_id: DhtKey,
+    buckets: Vec<Vec<DhtEntry>>,
+}
+
+pub const K_BUCKET_SIZE: usize = 20;
+pub const ALPHA: usize = 3;
+pub const KEY_BITS: usize = 256;
+```
+
+XOR distance metric: `xor_distance()`, `leading_zeros()`, `bucket_index()`.
+
+### DHT Key Namespacing
+
+```rust
+pub struct NamespacedDhtKey {
+    pub governance_genesis: String,
+    pub key_type: String,
+    pub key: String,
+}
+// Format: "{genesis_prefix}:{key_type}:{key}"
+```
+
+Prevents cross-cluster DHT pollution.

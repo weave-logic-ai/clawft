@@ -1,0 +1,174 @@
+---
+title: "Getting Started"
+description: "Install clawft, configure a provider, and run your first AI assistant conversation."
+---
+
+## Installation
+
+### From Source (Cargo)
+
+Requires Rust 1.93+ (edition 2024).
+
+```bash
+git clone https://github.com/clawft/clawft.git
+cd clawft
+cargo build --release --bin weft
+```
+
+The binary is produced at `target/release/weft`. Copy it to a directory on your `PATH`:
+
+```bash
+cp target/release/weft ~/.local/bin/
+```
+
+### Using the Build Script
+
+The project ships a build script that wraps common cargo operations:
+
+```bash
+# Release build
+scripts/build.sh native
+
+# Debug build (faster iteration)
+scripts/build.sh native-debug
+
+# Build with optional features
+scripts/build.sh native --features voice,channels
+```
+
+### Docker
+
+Pull the pre-built image:
+
+```bash
+docker pull ghcr.io/clawft/clawft:latest
+docker run --rm -it ghcr.io/clawft/clawft:latest --version
+```
+
+The container starts in gateway mode by default. See [Deployment](/docs/clawft/deployment) for full Docker configuration.
+
+## Configuration Basics
+
+### Set an API Key
+
+clawft resolves API keys from environment variables at request time. Set at least one:
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+# or
+export OPENAI_API_KEY="sk-..."
+```
+
+No configuration file is required for built-in providers. The model identifier in the config handles routing (e.g., `anthropic/claude-sonnet-4-20250514` routes to Anthropic).
+
+### Create a Config File (Optional)
+
+For persistent settings, create `~/.clawft/config.json`:
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": "anthropic/claude-sonnet-4-20250514",
+      "max_tokens": 8192,
+      "temperature": 0.7
+    }
+  }
+}
+```
+
+Config discovery chain:
+
+1. `CLAWFT_CONFIG` environment variable (absolute path)
+2. `~/.clawft/config.json`
+3. `~/.nanobot/config.json` (legacy fallback)
+
+Both `snake_case` and `camelCase` keys are accepted.
+
+### Run Onboarding
+
+For guided setup, run the onboarding wizard:
+
+```bash
+weft onboard
+```
+
+This creates the `~/.clawft/` directory structure, generates a config template, and optionally prompts for API key configuration. Use `--yes` for non-interactive defaults.
+
+## Your First Conversation
+
+### Interactive REPL
+
+Start a REPL session:
+
+```bash
+weft agent
+```
+
+You can type messages and the agent will respond using the configured model. Use slash commands during the session:
+
+```
+/skills              -- list available skills
+/use research        -- activate the "research" skill
+/use                 -- deactivate the current skill
+/agent researcher    -- switch to a named agent
+/status              -- show current agent, model, and active skill
+```
+
+### Single Message Mode
+
+Send a message and exit:
+
+```bash
+weft agent -m "What are the key differences between async-std and tokio?"
+```
+
+### Override the Model
+
+```bash
+weft agent --model openai/gpt-4o -m "Draft a status update"
+```
+
+## Key Concepts
+
+### Message Pipeline
+
+Every message flows through a 6-stage pipeline:
+
+1. **Classifier** -- Determines the task type (chat, code generation, research, etc.)
+2. **Router** -- Selects the provider and model based on task profile
+3. **Assembler** -- Builds the context window (system prompt, skills, memory, history)
+4. **Transport** -- Sends the request to the LLM provider
+5. **Scorer** -- Evaluates response quality
+6. **Learner** -- Records trajectories for future improvement
+
+### Tools
+
+The agent can invoke tools during conversations: reading and writing files, executing shell commands, searching the web, and more. Tools execute in a loop -- the LLM calls a tool, receives the result, and decides whether to call more tools or produce a final answer. The loop is capped at `max_tool_iterations` (default 20).
+
+### Skills
+
+Skills are reusable prompt bundles packaged as `SKILL.md` files with YAML frontmatter. They declare variables, tool allowlists, and LLM instructions. Skills are discovered from workspace (`.clawft/skills/`), user (`~/.clawft/skills/`), and builtin sources.
+
+### Agents
+
+Agents are named personas that bundle a system prompt, model selection, tool constraints, and skill activations. Define them as `agent.yaml` files in `.clawft/agents/` or `~/.clawft/agents/`.
+
+### Channels
+
+Channels bridge external chat platforms (Telegram, Slack, Discord, etc.) to the agent pipeline. The `weft gateway` command starts all enabled channels simultaneously.
+
+### Sessions
+
+Sessions track conversation history per channel and chat ID. They are persisted as JSONL files and can be listed, inspected, and deleted via `weft sessions`.
+
+### Memory
+
+The agent maintains persistent memory in `MEMORY.md` and `HISTORY.md` files. Tools can read from and write to memory, and you can search it via `weft memory search`.
+
+## Next Steps
+
+- [Architecture](/docs/clawft/architecture) -- Understand the crate structure and data flow
+- [CLI Reference](/docs/clawft/cli-reference) -- Full command-line reference
+- [Configuration](/docs/clawft/configuration) -- All configuration options
+- [Providers](/docs/clawft/providers) -- Set up additional LLM providers

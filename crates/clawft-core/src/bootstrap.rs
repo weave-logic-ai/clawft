@@ -62,10 +62,10 @@ pub struct AppContext<P: Platform> {
     bus: Arc<MessageBus>,
 
     /// Session manager for conversation persistence.
-    sessions: SessionManager<P>,
+    sessions: Arc<SessionManager<P>>,
 
     /// Tool registry with registered tools.
-    tools: ToolRegistry,
+    tools: Arc<ToolRegistry>,
 
     /// Pipeline registry with all 6 stages wired.
     pipeline: PipelineRegistry,
@@ -120,7 +120,21 @@ impl<P: Platform> AppContext<P> {
         );
 
         // 4. Skills loader
-        let skills = Arc::new(SkillsLoader::new(platform.clone())?);
+        let mut skills_loader = SkillsLoader::new(platform.clone())?;
+
+        // Also scan extra `skills/` directories if they exist:
+        // - workspace/skills/  (from config workspace path)
+        // - ./skills/          (current working directory)
+        for candidate in [
+            config.workspace_path().join("skills"),
+            std::env::current_dir().unwrap_or_default().join("skills"),
+        ] {
+            if candidate.is_dir() {
+                skills_loader.add_extra_dir(candidate);
+            }
+        }
+
+        let skills = Arc::new(skills_loader);
         debug!(
             skills_dir = %skills.skills_dir().display(),
             "skills loader initialized"
@@ -136,7 +150,7 @@ impl<P: Platform> AppContext<P> {
         debug!("context builder created");
 
         // 6. Tool registry (empty -- caller adds tools)
-        let tools = ToolRegistry::new();
+        let tools = Arc::new(ToolRegistry::new());
 
         // 7. Default Level 0 pipeline
         let pipeline = build_default_pipeline(&config);
@@ -148,7 +162,7 @@ impl<P: Platform> AppContext<P> {
             config,
             platform,
             bus,
-            sessions,
+            sessions: Arc::new(sessions),
             tools,
             pipeline,
             context,
@@ -172,9 +186,9 @@ impl<P: Platform> AppContext<P> {
             self.platform,
             self.bus,
             self.pipeline,
-            self.tools,
+            self.tools.clone(),
             self.context,
-            self.sessions,
+            self.sessions.clone(),
             resolver,
         );
         if let Some(delegation) = self.auto_delegation {
@@ -204,13 +218,28 @@ impl<P: Platform> AppContext<P> {
     /// Get a mutable reference to the tool registry.
     ///
     /// Call this to register tools before converting to an agent loop.
+    ///
+    /// # Panics
+    ///
+    /// Panics if Arc clones have already been taken (e.g. via `tools_arc()`).
+    /// Always call `tools_mut()` for registration *before* sharing the registry.
     pub fn tools_mut(&mut self) -> &mut ToolRegistry {
-        &mut self.tools
+        Arc::get_mut(&mut self.tools).expect("tools already shared -- register tools before cloning Arc")
     }
 
     /// Get a reference to the tool registry.
-    pub fn tools(&self) -> &ToolRegistry {
+    pub fn tools(&self) -> &Arc<ToolRegistry> {
         &self.tools
+    }
+
+    /// Get a clone of the `Arc<ToolRegistry>` for sharing with other components.
+    pub fn tools_arc(&self) -> Arc<ToolRegistry> {
+        self.tools.clone()
+    }
+
+    /// Get a reference to the session manager.
+    pub fn sessions(&self) -> &Arc<SessionManager<P>> {
+        &self.sessions
     }
 
     /// Get a reference to the shared memory store.
@@ -245,6 +274,9 @@ impl<P: Platform> AppContext<P> {
     /// Convenience method that calls [`build_live_pipeline`] and sets it
     /// as the active pipeline, enabling real LLM calls through the
     /// `clawft-llm` provider resolved from configuration.
+    ///
+    /// Only available with the `native` feature.
+    #[cfg(feature = "native")]
     pub fn enable_live_llm(&mut self) {
         let pipeline = build_live_pipeline(&self.config);
         self.set_pipeline(pipeline);
@@ -259,6 +291,9 @@ impl<P: Platform> AppContext<P> {
 ///
 /// This is the production counterpart of [`build_default_pipeline`], which
 /// uses a stub transport. All other pipeline stages are identical.
+///
+/// Only available with the `native` feature (requires clawft-llm HTTP providers).
+#[cfg(feature = "native")]
 pub fn build_live_pipeline(config: &Config) -> PipelineRegistry {
     crate::pipeline::llm_adapter::build_live_pipeline(config)
 }

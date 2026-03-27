@@ -1,0 +1,23 @@
+{
+  "title": "clawft",
+  "description": "AI-native development framework",
+  "root": true,
+  "pages": [
+    "index",
+    "getting-started",
+    "architecture",
+    "---",
+    "cli-reference",
+    "configuration",
+    "---",
+    "plugins",
+    "providers",
+    "channels",
+    "tools",
+    "skills",
+    "---",
+    "browser",
+    "deployment",
+    "security"
+  ]
+}

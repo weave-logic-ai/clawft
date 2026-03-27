@@ -60,10 +60,17 @@ impl AutogenConfig {
     /// Get the effective install directory, defaulting to `~/.clawft/skills/`.
     pub fn install_dir(&self) -> PathBuf {
         self.install_dir.clone().unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".clawft")
-                .join("skills")
+            #[cfg(feature = "native")]
+            {
+                dirs::home_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(".clawft")
+                    .join("skills")
+            }
+            #[cfg(not(feature = "native"))]
+            {
+                PathBuf::from(".clawft").join("skills")
+            }
         })
     }
 }

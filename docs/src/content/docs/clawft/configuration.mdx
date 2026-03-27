@@ -1,0 +1,337 @@
+---
+title: "Configuration"
+description: "Complete configuration reference for clawft including file location, all config keys with types and defaults, and environment variables."
+---
+
+## Config File Location
+
+The runtime resolves configuration through a three-step discovery chain, stopping at the first match:
+
+| Priority | Source | Notes |
+|----------|--------|-------|
+| 1 | `CLAWFT_CONFIG` environment variable | Absolute path to a JSON file |
+| 2 | `~/.clawft/config.json` | Recommended location |
+| 3 | `~/.nanobot/config.json` | Legacy fallback for migration |
+
+If no file is found, all values use compiled-in defaults (equivalent to `{}`).
+
+Inspect the resolved configuration:
+
+```bash
+weft config show              # full config as JSON
+weft config section agents    # single section
+weft config section gateway
+```
+
+## Config File Format
+
+The configuration file accepts both `snake_case` and `camelCase` keys. Keys are normalized to `snake_case` internally. Unknown fields are silently ignored for forward compatibility.
+
+## Root Structure
+
+```json
+{
+  "agents": { },
+  "providers": { },
+  "channels": { },
+  "gateway": { },
+  "routing": { },
+  "tools": { },
+  "delegation": { },
+  "voice": { }
+}
+```
+
+---
+
+## agents.defaults
+
+Default settings applied to every agent instance.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `model` | string | `"anthropic/claude-opus-4-5"` | LLM model using `provider/model` syntax |
+| `workspace` | string | `"~/.nanobot/workspace"` | Working directory for file tools. Tilde expanded at runtime. |
+| `max_tokens` | integer | `8192` | Maximum tokens in a single LLM response |
+| `temperature` | float | `0.7` | Sampling temperature (0.0 = deterministic, 1.0 = creative) |
+| `max_tool_iterations` | integer | `20` | Maximum tool-use rounds per message turn |
+| `memory_window` | integer | `50` | Number of recent messages included in context |
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": "anthropic/claude-sonnet-4-20250514",
+      "max_tokens": 8192,
+      "temperature": 0.7,
+      "max_tool_iterations": 20,
+      "memory_window": 50
+    }
+  }
+}
+```
+
+---
+
+## providers
+
+Credentials and endpoint overrides for LLM providers. API keys should be set via environment variables rather than hardcoded in configuration files.
+
+Each provider entry has the same shape:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `api_key` | string | `""` | API key (prefer env vars instead) |
+| `api_base` | string or null | `null` | Base URL override for proxies or self-hosted endpoints |
+| `extra_headers` | object | `{}` | Additional HTTP headers sent with every request |
+
+### Built-in Provider Routing
+
+| Provider | Prefix | API Key Env Var | Base URL |
+|----------|--------|-----------------|----------|
+| OpenAI | `openai/` | `OPENAI_API_KEY` | `https://api.openai.com/v1` |
+| Anthropic | `anthropic/` | `ANTHROPIC_API_KEY` | `https://api.anthropic.com/v1` |
+| Groq | `groq/` | `GROQ_API_KEY` | `https://api.groq.com/openai/v1` |
+| DeepSeek | `deepseek/` | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/v1` |
+| Mistral | `mistral/` | `MISTRAL_API_KEY` | `https://api.mistral.ai/v1` |
+| Together | `together/` | `TOGETHER_API_KEY` | `https://api.together.xyz/v1` |
+| OpenRouter | `openrouter/` | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1` |
+| Gemini | `gemini/` | `GOOGLE_GEMINI_API_KEY` | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| xAI | `xai/` | `XAI_API_KEY` | `https://api.x.ai/v1` |
+
+---
+
+## gateway
+
+HTTP server and heartbeat settings.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `host` | string | `"0.0.0.0"` | Bind address |
+| `port` | integer | `18790` | Listen port |
+| `heartbeat_interval_minutes` | integer | `0` | Minutes between heartbeat messages. `0` disables. |
+| `heartbeat_prompt` | string | `"heartbeat"` | Prompt text sent on each heartbeat tick |
+
+---
+
+## channels
+
+Each channel has an `enabled` boolean that defaults to `false`. Only enabled channels are started at runtime.
+
+### channels.telegram
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enable Telegram |
+| `token` | string | `""` | Bot token from @BotFather |
+| `token_env` | string/null | `null` | Env var holding the token (used when `token` is empty) |
+| `allow_from` | string[] | `[]` | Allowed user IDs. Empty = allow all. |
+| `proxy` | string/null | `null` | HTTP/SOCKS5 proxy URL |
+
+### channels.slack
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enable Slack |
+| `bot_token` | string | `""` | Bot User OAuth Token (`xoxb-...`) |
+| `app_token` | string | `""` | App-level token for Socket Mode (`xapp-...`) |
+| `mode` | string | `"socket"` | Connection mode |
+| `group_policy` | string | `"mention"` | Group policy: `"mention"`, `"open"`, `"allowlist"` |
+| `group_allow_from` | string[] | `[]` | Channel IDs for allowlist policy |
+| `dm.enabled` | boolean | `true` | Accept direct messages |
+| `dm.policy` | string | `"open"` | DM policy: `"open"` or `"allowlist"` |
+| `dm.allow_from` | string[] | `[]` | User IDs for allowlist DM policy |
+
+### channels.discord
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enable Discord |
+| `token` | string | `""` | Bot token from Developer Portal |
+| `allow_from` | string[] | `[]` | Allowed user IDs. Empty = allow all. |
+| `gateway_url` | string | `"wss://gateway.discord.gg/?v=10&encoding=json"` | Gateway URL |
+| `intents` | integer | `37377` | Gateway intents bitmask |
+
+---
+
+## routing
+
+Controls model selection, cost management, and per-user permissions. When omitted, defaults to `mode = "static"` (single model from `agents.defaults.model`).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `mode` | string | `"static"` | `"static"` or `"tiered"` |
+| `tiers` | array | `[]` | Model tier definitions |
+| `selection_strategy` | string | `null` | `"preference_order"`, `"round_robin"`, `"lowest_cost"`, `"random"` |
+| `fallback_model` | string | `null` | Fallback model when all tiers exhausted |
+
+### routing.tiers
+
+Each tier groups models at a similar cost/capability level:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Tier name (e.g., `"free"`, `"standard"`, `"premium"`) |
+| `models` | string[] | Models in preference order (`"provider/model"`) |
+| `complexity_range` | [float, float] | Complexity range (0.0-1.0) |
+| `cost_per_1k_tokens` | float | Approximate cost per 1K tokens in USD |
+| `max_context_tokens` | integer | Maximum context window size |
+
+### routing.permissions
+
+Per-user and per-channel permission levels:
+
+```json
+{
+  "routing": {
+    "permissions": {
+      "users": {
+        "user_id_123": { "level": 2 }
+      },
+      "channels": {
+        "cli": { "level": 2 },
+        "discord": { "level": 1 }
+      }
+    }
+  }
+}
+```
+
+### routing.cost_budgets
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `global_daily_limit_usd` | float | `50.0` | Daily spend limit |
+| `global_monthly_limit_usd` | float | `500.0` | Monthly spend limit |
+| `tracking_persistence` | boolean | `true` | Persist cost tracking across restarts |
+
+### routing.rate_limiting
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `window_seconds` | integer | `60` | Rate limit window |
+| `strategy` | string | `"sliding_window"` | Rate limiting strategy |
+| `global_rate_limit_rpm` | integer | `0` | Global rate limit (0 = unlimited) |
+
+---
+
+## tools
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `restrict_to_workspace` | boolean | `false` | Sandbox all file tools to workspace |
+
+### tools.web.search
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `api_key` | string | `""` | Search provider API key |
+| `max_results` | integer | `5` | Maximum search results |
+
+### tools.exec
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `timeout` | integer | `60` | Command execution timeout in seconds |
+
+### tools.commandPolicy
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `mode` | string | `"allowlist"` | `"allowlist"` or `"denylist"` |
+| `allowlist` | string[] | `[]` | Permitted basenames (empty = 17 built-in defaults) |
+| `denylist` | string[] | `[]` | Blocked patterns for denylist mode |
+
+### tools.urlPolicy
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Whether URL safety checks are active |
+| `allowPrivate` | boolean | `false` | Allow requests to private IP ranges |
+| `allowedDomains` | string[] | `[]` | Domains that bypass all safety checks |
+| `blockedDomains` | string[] | `[]` | Domains that are always blocked |
+
+### tools.mcp_servers
+
+External MCP server configurations. Each entry specifies a command (stdio) or URL (HTTP):
+
+```json
+{
+  "tools": {
+    "mcp_servers": {
+      "my_server": {
+        "command": "npx",
+        "args": ["-y", "my-mcp-server"],
+        "internal_only": false
+      }
+    }
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `command` | string | `""` | Command to spawn (stdio transport) |
+| `args` | string[] | `[]` | Command arguments |
+| `env` | object | `{}` | Environment variables for the child process |
+| `url` | string | `""` | URL endpoint (HTTP transport) |
+| `internal_only` | boolean | `true` | When true, tools are not registered in the ToolRegistry |
+
+---
+
+## voice
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enable voice features globally |
+
+### voice.tts
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `provider` | string | `"browser"` | `"browser"`, `"openai"`, or `"elevenlabs"` |
+| `model` | string | varies | TTS model |
+| `voice` | string | varies | Voice ID |
+| `speed` | float | `1.0` | Speed multiplier (0.25 - 4.0) |
+
+### voice.stt
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Enable speech-to-text |
+| `language` | string | `""` | Language code. Empty = auto-detect. |
+
+### voice.vad
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `threshold` | float | `0.5` | VAD activation threshold (0.0 - 1.0) |
+| `silence_timeout_ms` | integer | `1500` | Silence duration before speech end |
+
+### voice.wake
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enable wake word detection |
+| `phrase` | string | `"hey weft"` | Wake word phrase |
+
+---
+
+## Environment Variables
+
+Key environment variables used by clawft:
+
+| Variable | Purpose |
+|----------|---------|
+| `CLAWFT_CONFIG` | Override config file path |
+| `RUST_LOG` | Override log level (e.g., `debug`, `info`, `clawft_llm=debug`) |
+| `OPENAI_API_KEY` | OpenAI API key |
+| `ANTHROPIC_API_KEY` | Anthropic API key |
+| `GROQ_API_KEY` | Groq API key |
+| `DEEPSEEK_API_KEY` | DeepSeek API key |
+| `MISTRAL_API_KEY` | Mistral API key |
+| `TOGETHER_API_KEY` | Together API key |
+| `OPENROUTER_API_KEY` | OpenRouter API key |
+| `GOOGLE_GEMINI_API_KEY` | Google Gemini API key |
+| `XAI_API_KEY` | xAI API key |
+| `ELEVENLABS_API_KEY` | ElevenLabs TTS API key |

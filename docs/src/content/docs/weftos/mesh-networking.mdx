@@ -1,0 +1,159 @@
+---
+title: "Mesh Networking"
+description: "K6 mesh networking: 5-layer model, transport backends, Noise Protocol encryption, hybrid KEM, wire framing, connection pool, cross-node IPC, service resolution, and sync frames."
+---
+
+K6 delivers the transport-agnostic encrypted mesh networking layer for WeftOS, extending the kernel from single-node to multi-node with encrypted peer-to-peer communication, distributed IPC, chain replication, tree synchronization, and cluster-wide service discovery.
+
+**Status**: Phase 1 Complete (3,543 lines, 14 new files, 133 tests)
+**Feature**: `mesh`
+
+## 5-Layer Model
+
+```
++-------------------------------------------------------------------+
+| APPLICATION LAYER                                                  |
+|  mesh_ipc.rs       -- MeshIpcEnvelope, hop tracking, dedup        |
+|  mesh_service.rs   -- ServiceResolveRequest/Response, cache       |
+|  mesh_chain.rs     -- ChainSyncRequest/Response, fork detection   |
+|  mesh_tree.rs      -- TreeSyncRequest/Response, Merkle proofs     |
++-------------------------------------------------------------------+
+| DISCOVERY LAYER                                                    |
+|  mesh_discovery.rs  -- DiscoveryBackend trait, coordinator         |
+|  mesh_bootstrap.rs  -- Seed peers, peer exchange                   |
+|  mesh_service_adv.rs -- ClusterServiceRegistry gossip              |
+|  mesh_process.rs    -- DistributedProcessTable CRDT gossip         |
+|  mesh_heartbeat.rs  -- SWIM heartbeat / failure detection          |
++-------------------------------------------------------------------+
+| FRAMING LAYER                                                      |
+|  mesh_framing.rs   -- [4-byte len][1-byte type][payload]           |
++-------------------------------------------------------------------+
+| ENCRYPTION LAYER                                                   |
+|  mesh_noise.rs     -- EncryptedChannel trait, NoiseConfig          |
++-------------------------------------------------------------------+
+| TRANSPORT LAYER                                                    |
+|  mesh.rs           -- MeshTransport / MeshStream / TransportListener|
+|  mesh_listener.rs  -- MeshConnectionPool, JoinRequest/Response     |
+|  mesh_tcp.rs       -- TCP transport backend                        |
+|  mesh_ws.rs        -- WebSocket transport backend                  |
++-------------------------------------------------------------------+
+| IDENTITY LAYER                                                     |
+|  cluster.rs        -- NodeIdentity (Ed25519 keypair)               |
+|  ipc.rs            -- GlobalPid (node_id, pid)                     |
++-------------------------------------------------------------------+
+```
+
+## Transport Traits
+
+```rust
+#[async_trait]
+pub trait MeshTransport: Send + Sync + 'static {
+    async fn connect(&self, addr: &str) -> Result<Box<dyn MeshStream>, MeshError>;
+    async fn listen(&self, addr: &str) -> Result<Box<dyn TransportListener>, MeshError>;
+    fn supports(&self, addr: &str) -> bool;
+}
+
+#[async_trait]
+pub trait MeshStream: Send + Sync + 'static {
+    async fn send(&mut self, data: &[u8]) -> Result<(), MeshError>;
+    async fn recv(&mut self) -> Result<Vec<u8>, MeshError>;
+    async fn close(&mut self) -> Result<(), MeshError>;
+    fn remote_addr(&self) -> Option<SocketAddr>;
+}
+```
+
+Backends: `TcpTransport` (`mesh_tcp.rs`), `WsTransport` (`mesh_ws.rs`), future QUIC.
+
+## Noise Protocol Encryption
+
+```rust
+pub trait EncryptedChannel: Send + Sync {
+    async fn send_encrypted(&mut self, data: &[u8]) -> Result<(), MeshError>;
+    async fn recv_encrypted(&mut self) -> Result<Vec<u8>, MeshError>;
+    fn remote_static_key(&self) -> Option<Vec<u8>>;
+    async fn close(&mut self) -> Result<(), MeshError>;
+}
+
+pub enum NoisePattern {
+    XX,  // First contact, mutual auth, 2 RTT
+    IK,  // Known peer, 1 RTT
+}
+```
+
+### Hybrid KEM (Post-Quantum)
+
+After Noise XX handshake, ML-KEM-768 key encapsulation upgrade runs inside the encrypted channel. Final session key combines X25519 + ML-KEM-768 via HKDF. Negotiated via `WeftHandshake.kem_supported`.
+
+## Wire Framing
+
+Format: `[4-byte BE length][1-byte type][payload]`. Max: 16 MiB.
+
+```rust
+pub enum FrameType {
+    Handshake = 0x01, Message = 0x02, Heartbeat = 0x03,
+    Discovery = 0x04, ChainSync = 0x05, TreeSync = 0x06,
+    ServiceResolve = 0x07, ProcessGossip = 0x08,
+    ServiceGossip = 0x09, SyncDigest = 0x0A,
+}
+```
+
+## WeftHandshake
+
+```rust
+pub struct WeftHandshake {
+    pub node_id: String,
+    pub governance_genesis_hash: String,
+    pub governance_version: String,
+    pub capabilities: u64,
+    pub kem_supported: bool,
+    pub chain_seq: u64,
+    pub supported_sync_streams: Vec<String>,
+}
+```
+
+Peers with different `governance_genesis_hash` are rejected.
+
+## Connection Pool
+
+`MeshConnectionPool` uses `DashMap<String, MeshPeerConnection>` for lock-free concurrent access.
+
+## Cross-Node IPC
+
+```rust
+pub struct MeshIpcEnvelope {
+    pub source_node: String,
+    pub dest_node: String,
+    pub hop_count: u8,        // Max 8
+    pub envelope_id: String,  // UUID for dedup
+    pub message: KernelMessage,
+}
+```
+
+`DedupFilter`: time-bounded HashMap (60s TTL, 10k capacity) for exact deduplication.
+
+## Service Resolution Cache
+
+Dual-cache with positive entries (per-entry TTL) and negative entries (30s TTL). Positive insert clears negative entry.
+
+## Stream Priorities and Sync Frames
+
+`SyncStateDigest` provides compact summary for sync initialization. Frame types implicitly define priority (heartbeat highest).
+
+## Module Dependency Graph
+
+```
+mesh_heartbeat --.
+mesh_process ----.
+mesh_service_adv --> ipc (GlobalPid)
+mesh_ipc ----------> ipc (KernelMessage, MessageTarget)
+mesh_service ------> (standalone)
+mesh_dedup --------> (standalone)
+mesh_chain --------> (standalone)
+mesh_tree ---------> (standalone)
+mesh_discovery ----> (standalone trait)
+mesh_bootstrap ----> mesh_discovery (DiscoveryBackend)
+mesh_framing ------> mesh (MeshError, MeshStream)
+mesh_noise --------> mesh (MeshError, MeshStream)
+mesh_listener -----> mesh (MeshPeer, WeftHandshake)
+mesh --------------> (root: traits, errors, handshake)
+```

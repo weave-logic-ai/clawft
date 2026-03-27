@@ -303,41 +303,41 @@ async fn run_interactive(
 
         // Dispatch through slash command registry (handles /help, /skills,
         // /use, /tools, /status, /quit, and skill-contributed commands).
-        if input.starts_with('/') {
-            if let Some(result) = cmd_registry.dispatch(input, &mut ctx) {
-                match result {
-                    Ok(output) => {
-                        if output == QUIT_SENTINEL {
-                            break;
-                        }
-                        println!("{output}");
-                        println!();
+        if input.starts_with('/')
+            && let Some(result) = cmd_registry.dispatch(input, &mut ctx)
+        {
+            match result {
+                Ok(output) => {
+                    if output == QUIT_SENTINEL {
+                        break;
                     }
-                    Err(e) => {
-                        eprintln!("error: {e}");
-                    }
+                    println!("{output}");
+                    println!();
                 }
-                continue;
+                Err(e) => {
+                    eprintln!("error: {e}");
+                }
             }
+            continue;
             // Unknown slash command -- fall through to send to agent.
         }
 
         // Build metadata with active skill info for the agent loop.
         let mut metadata = HashMap::new();
-        if !ctx.active_skill.is_empty() {
-            if let Some(skill) = skill_registry.get(&ctx.active_skill) {
-                if !skill.instructions.is_empty() {
-                    metadata.insert(
-                        "skill_instructions".into(),
-                        serde_json::json!(skill.instructions),
-                    );
-                }
-                if !skill.allowed_tools.is_empty() {
-                    metadata.insert(
-                        "allowed_tools".into(),
-                        serde_json::json!(skill.allowed_tools),
-                    );
-                }
+        if !ctx.active_skill.is_empty()
+            && let Some(skill) = skill_registry.get(&ctx.active_skill)
+        {
+            if !skill.instructions.is_empty() {
+                metadata.insert(
+                    "skill_instructions".into(),
+                    serde_json::json!(skill.instructions),
+                );
+            }
+            if !skill.allowed_tools.is_empty() {
+                metadata.insert(
+                    "allowed_tools".into(),
+                    serde_json::json!(skill.allowed_tools),
+                );
             }
         }
 

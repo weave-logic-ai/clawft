@@ -1,0 +1,180 @@
+---
+title: "Architecture"
+description: "Crate dependency structure, core abstractions, pipeline stages, and message flow in the clawft framework."
+---
+
+## Crate Structure
+
+The workspace contains 18 crates organized in a strict dependency hierarchy. Shared types sit at the bottom, platform abstraction above them, then core engine logic, with tools, channels, services, plugins, and the CLI at the top.
+
+```
+                          clawft-cli (weft binary)
+                     /    |    |    |    \     \      \
+               clawft-  clawft- clawft- clawft- clawft- clawft-
+               tools   channels services plugin  llm   security
+                 |        |       |       |              |
+                 +--------+-------+       |              |
+                 |                        |              |
+               clawft-core          (plugin crates x8)  |
+                 |    \                   |              |
+           clawft-    clawft-        clawft-plugin -----+
+           platform     llm              |
+                 \                        |
+                  clawft-types -----------+
+
+               clawft-wasm (browser entrypoint)
+                     |
+                clawft-types
+```
+
+`clawft-llm` has no internal dependencies -- it is a standalone LLM provider abstraction depending only on `async-trait`, `reqwest`, and `serde`.
+
+## Crate Reference
+
+### clawft-types
+
+Foundation crate with zero internal dependencies. All other crates depend on it.
+
+Key types:
+- `ClawftError` / `ChannelError` -- error enums used framework-wide
+- `Config` -- root configuration schema (deserialized from JSON)
+- `AgentsConfig` / `AgentDefaults` -- agent parameters (model, max_tokens, temperature, memory_window, max_tool_iterations)
+- `InboundMessage` / `OutboundMessage` -- message events flowing through the bus
+- `LlmResponse` / `ContentBlock` / `StopReason` / `Usage` -- LLM response types
+- `Session` -- conversation session state with JSONL-backed persistence
+
+### clawft-platform
+
+Platform abstraction layer enabling portability across native and WASM targets.
+
+Key traits:
+- `Platform` -- bundles `fs()`, `env()`, `http()`, and `process()` accessors
+- `NativePlatform` -- production implementation (reqwest, tokio::fs, std::env, tokio::process)
+- `HttpClient` / `FileSystem` / `Environment` / `ProcessSpawner` -- async abstractions
+- `ConfigLoader` -- config file discovery chain with camelCase-to-snake_case normalization
+
+`ProcessSpawner` returns `Option` from `Platform::process()` since WASM lacks process spawning.
+
+### clawft-llm
+
+Standalone LLM provider abstraction.
+
+Key types:
+- `Provider` trait -- defines `complete(ChatRequest) -> ChatResponse`
+- `OpenAiCompatProvider` -- implementation for any OpenAI-compatible HTTP API
+- `ProviderRouter` -- routes model identifiers (e.g., `"openai/gpt-4o"`) to provider instances via longest-prefix matching
+- `ProviderConfig` -- connection configuration (base URL, API key, headers)
+- `ChatRequest` / `ChatResponse` / `ToolCall` / `Usage` -- request/response types
+
+### clawft-core
+
+Central engine containing the agent loop, message bus, pipeline, session management, and security primitives.
+
+Modules:
+- **bus** -- `MessageBus`: tokio MPSC channels for inbound/outbound message routing
+- **pipeline** -- 6-stage pluggable pipeline with `PipelineRegistry` mapping `TaskType` to specialized pipelines
+- **agent** -- `AgentLoop` (message processing), `ContextBuilder` (system prompt + skills + memory + history), `MemoryStore`, `SkillsLoader`
+- **session** -- `SessionManager`: JSONL-backed persistence keyed by `"{channel}:{chat_id}"`
+- **security** -- `validate_session_id()`, `sanitize_content()`, `truncate_result()` (64KB cap)
+- **bootstrap** -- `AppContext`: wires all dependencies; `enable_live_llm()` swaps stub for `ClawftLlmAdapter`
+
+Optional feature: `vector-memory` -- enables embeddings, vector store, intelligent router, session indexer.
+
+### clawft-tools
+
+Built-in tool implementations. Provides 11 tools: `read_file`, `write_file`, `edit_file`, `list_directory`, `exec_shell`, `memory_read`, `memory_write`, `web_search`, `web_fetch`, `message`, and `spawn`. All file tools enforce workspace path containment.
+
+### clawft-channels
+
+Plugin-based chat channel system with three core traits (`Channel`, `ChannelHost`, `ChannelFactory`) and `PluginHost` for lifecycle management. Ships 11 channel adapters.
+
+### clawft-services
+
+Background services: `CronService` (scheduled jobs), `HeartbeatService`, MCP subsystem (server and client modes), and `DelegationEngine` (task routing).
+
+### clawft-plugin
+
+Plugin trait definitions and runtime infrastructure: six extension-point traits, WASM sandbox (wasmtime 29), skill loader, hot-reload watcher, permission system, slash-command registry, and unified `PluginHost`.
+
+### clawft-cli
+
+The `weft` binary. Depends on all workspace crates. Provides the clap-derived CLI command tree and terminal-friendly markdown rendering.
+
+### clawft-wasm
+
+Browser/WASM entrypoint. Depends only on `clawft-types`. Provides a WASM-compatible surface; the `Platform` trait is designed for this target.
+
+## Pipeline Architecture
+
+Every message flows through a 6-stage pipeline:
+
+```
+  ChatRequest
+      |
+  [1. Classifier] -- TaskProfile (type, complexity)
+      |
+  [2. Router]     -- RoutingDecision (provider, model)
+      |
+  [3. Assembler]  -- AssembledContext (messages, token estimate)
+      |
+  [4. Transport]  -- LlmResponse
+      |
+  [5. Scorer]     -- QualityScore (overall, relevance, coherence)
+      |
+  [6. Learner]    -- Trajectory
+      |
+  LlmResponse
+```
+
+The `PipelineRegistry` maps `TaskType` variants to specialized `Pipeline` instances. Unregistered task types fall back to the default pipeline. Current Level 0 implementations:
+
+| Stage | Implementation | Behavior |
+|-------|---------------|----------|
+| Classifier | `KeywordClassifier` | Keyword-based TaskType assignment |
+| Router | `StaticRouter` | Config-driven model selection |
+| Assembler | `TokenBudgetAssembler` | chars/4 heuristic, drops middle messages |
+| Transport | `OpenAiCompatTransport` | Stub or live via `ClawftLlmAdapter` |
+| Scorer | `NoopScorer` | Returns 1.0 |
+| Learner | `NoopLearner` | Discards trajectories |
+
+## Message Flow
+
+1. A **Channel** plugin receives an external message and publishes an `InboundMessage` to the `MessageBus`.
+2. The **AgentLoop** consumes the inbound message, retrieves or creates a `Session`, and builds the LLM context via `ContextBuilder`.
+3. The **Pipeline** processes the request through all 6 stages.
+4. If the LLM response contains `ToolUse` blocks, the agent enters a tool execution loop:
+   - Each tool is executed via the `ToolRegistry`.
+   - Results are truncated to 64KB and appended as tool-result messages.
+   - The pipeline is re-invoked with the extended message list.
+   - The loop continues until no tool calls remain or `max_tool_iterations` is reached.
+5. The agent saves the session and dispatches an `OutboundMessage` to the bus.
+6. The bus routes the outbound message to the target channel, which sends it via the platform API.
+
+## Bootstrap Sequence
+
+```
+AppContext::new(config, platform)
+    |
+    +-- Create MessageBus
+    +-- Initialize SessionManager (discover sessions dir)
+    +-- Initialize MemoryStore (discover memory dir)
+    +-- Initialize SkillsLoader (discover skills dir)
+    +-- Create ContextBuilder
+    +-- Create empty ToolRegistry
+    +-- Wire default Level 0 Pipeline
+    |
+    +-- tools_mut().register()     -- Register tools
+    +-- enable_live_llm()          -- Replace stub with ClawftLlmAdapter
+    +-- set_pipeline()             -- Inject custom pipeline (optional)
+    |
+    +-- into_agent_loop()
+    +-- AgentLoop::run()
+```
+
+## Build Configuration
+
+- Rust edition: 2024
+- Minimum Rust version: 1.93
+- License: MIT OR Apache-2.0
+- Release profile: `opt-level = "z"`, LTO, stripped symbols, single codegen unit, abort on panic
+- WASM release profile: inherits release with `opt-level = "z"`

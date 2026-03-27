@@ -28,7 +28,7 @@
 
 use std::sync::Arc;
 
-use tokio_util::sync::CancellationToken;
+use clawft_plugin::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use clawft_platform::Platform;
@@ -72,6 +72,29 @@ pub trait AutoDelegation: Send + Sync {
 /// Maximum size in bytes for a single tool result.
 const MAX_TOOL_RESULT_BYTES: usize = 65_536;
 
+/// System prompt injected for voice-mode sessions.
+///
+/// Instructs the LLM to respond in natural conversational language suitable
+/// for text-to-speech, rather than written/markdown format. The frontend
+/// strips any residual formatting before passing to the TTS engine.
+const VOICE_MODE_PROMPT: &str = "\
+# Voice Mode
+
+You are responding via voice. Your answer will be spoken aloud by a text-to-speech engine.
+
+Rules:
+- Respond in natural, conversational language as if speaking to someone in person.
+- Keep responses to 1-3 sentences for simple questions. Use more for complex topics, but stay concise.
+- Use contractions: say \"it's\", \"you'll\", \"that's\", \"I'd\" instead of formal equivalents.
+- Never use markdown formatting: no bold, italic, headers, bullet lists, numbered lists, or code fences.
+- Never read URLs, file paths, or raw code aloud. Instead, describe what it does or say \"I can show that on screen\".
+- For numbers, use natural speech: \"about seventy-two degrees\" not \"72F\", \"around three hundred\" not \"300\".
+- Use natural transitions instead of lists: \"there are a couple of things\" or \"first... and then...\" rather than enumerating with dashes or numbers.
+- If you need to share code, a table, or structured data, give a brief spoken summary and note that the details are on screen.
+- Do not start with \"Sure!\" or \"Of course!\". Just answer naturally.
+- Do not narrate your actions (\"Let me search for...\"). Just provide the answer.
+- Sound warm and natural, not robotic or formal.";
+
 /// Result from the tool loop, including hallucination counters.
 #[derive(Debug)]
 struct ToolLoopResult {
@@ -109,9 +132,9 @@ pub struct AgentLoop<P: Platform> {
     platform: Arc<P>,
     bus: Arc<MessageBus>,
     pipeline: PipelineRegistry,
-    tools: ToolRegistry,
+    tools: Arc<ToolRegistry>,
     context: ContextBuilder<P>,
-    sessions: SessionManager<P>,
+    sessions: Arc<SessionManager<P>>,
     permission_resolver: PermissionResolver,
     cancel: Option<CancellationToken>,
     /// Optional pre-LLM auto-delegation router.
@@ -140,9 +163,9 @@ impl<P: Platform> AgentLoop<P> {
         platform: Arc<P>,
         bus: Arc<MessageBus>,
         pipeline: PipelineRegistry,
-        tools: ToolRegistry,
+        tools: Arc<ToolRegistry>,
         context: ContextBuilder<P>,
-        sessions: SessionManager<P>,
+        sessions: Arc<SessionManager<P>>,
         permission_resolver: PermissionResolver,
     ) -> Self {
         Self {
@@ -201,13 +224,25 @@ impl<P: Platform> AgentLoop<P> {
 
         loop {
             let msg = if let Some(ref token) = self.cancel {
-                tokio::select! {
-                    biased;
-                    _ = token.cancelled() => {
+                #[cfg(feature = "native")]
+                {
+                    tokio::select! {
+                        biased;
+                        _ = token.cancelled() => {
+                            info!("agent loop cancelled via token, exiting");
+                            break;
+                        }
+                        msg = self.bus.consume_inbound() => msg,
+                    }
+                }
+                #[cfg(not(feature = "native"))]
+                {
+                    // On browser, poll cancellation between messages.
+                    if token.is_cancelled() {
                         info!("agent loop cancelled via token, exiting");
                         break;
                     }
-                    msg = self.bus.consume_inbound() => msg,
+                    self.bus.consume_inbound().await
                 }
             } else {
                 self.bus.consume_inbound().await
@@ -245,14 +280,14 @@ impl<P: Platform> AgentLoop<P> {
         //    If an AutoDelegation router is configured and the message matches
         //    a delegation rule, invoke `delegate_task` directly and skip the
         //    local LLM pipeline entirely.
-        if let Some(ref auto_del) = self.auto_delegation {
-            if let Some(delegate_args) = auto_del.should_delegate(&msg.content) {
-                info!(
-                    task = %msg.content,
-                    "auto-delegation triggered, invoking delegate_task"
-                );
-                return self.run_auto_delegation(&msg, delegate_args).await;
-            }
+        if let Some(ref auto_del) = self.auto_delegation
+            && let Some(delegate_args) = auto_del.should_delegate(&msg.content)
+        {
+            info!(
+                task = %msg.content,
+                "auto-delegation triggered, invoking delegate_task"
+            );
+            return self.run_auto_delegation(&msg, delegate_args).await;
         }
 
         // 1. Get or create session
@@ -275,16 +310,30 @@ impl<P: Platform> AgentLoop<P> {
             .metadata
             .get("skill_instructions")
             .and_then(|v| v.as_str())
+            && !instructions.is_empty()
         {
-            if !instructions.is_empty() {
-                debug!("injecting skill instructions from metadata");
-                messages.push(LlmMessage {
-                    role: "system".into(),
-                    content: format!("# Active Skill Instructions\n\n{instructions}"),
-                    tool_call_id: None,
-                    tool_calls: None,
-                });
-            }
+            debug!("injecting skill instructions from metadata");
+            messages.push(LlmMessage {
+                role: "system".into(),
+                content: format!("# Active Skill Instructions\n\n{instructions}"),
+                tool_call_id: None,
+                tool_calls: None,
+            });
+        }
+
+        // 4c. Voice mode prompt injection.
+        //     When the message originates from a voice session, inject
+        //     instructions that make the LLM respond in natural spoken
+        //     language instead of written/markdown format. The spoken
+        //     response is sent to TTS; the frontend handles visual display.
+        if msg.chat_id == "voice" {
+            debug!("injecting voice mode system prompt");
+            messages.push(LlmMessage {
+                role: "system".into(),
+                content: VOICE_MODE_PROMPT.into(),
+                tool_call_id: None,
+                tool_calls: None,
+            });
         }
 
         // 5. Add current user message
@@ -489,10 +538,10 @@ impl<P: Platform> AgentLoop<P> {
     /// Resolve the workspace path from config, expanding `~` to home dir.
     fn workspace_path(&self) -> std::path::PathBuf {
         let raw = &self.config.defaults.workspace;
-        if let Some(rest) = raw.strip_prefix("~/") {
-            if let Some(home) = self.platform.fs().home_dir() {
-                return home.join(rest);
-            }
+        if let Some(rest) = raw.strip_prefix("~/")
+            && let Some(home) = self.platform.fs().home_dir()
+        {
+            return home.join(rest);
         }
         std::path::PathBuf::from(raw)
     }
@@ -971,9 +1020,9 @@ mod tests {
             platform,
             bus,
             pipeline,
-            tools,
+            Arc::new(tools),
             context,
-            sessions,
+            Arc::new(sessions),
             PermissionResolver::default_resolver(),
         );
         (agent, dir)
@@ -1300,9 +1349,9 @@ mod tests {
             platform,
             bus,
             pipeline,
-            tools,
+            Arc::new(tools),
             context,
-            sessions,
+            Arc::new(sessions),
             PermissionResolver::default_resolver(),
         );
 
@@ -2085,9 +2134,9 @@ mod tests {
             platform,
             bus,
             pipeline,
-            tools,
+            Arc::new(tools),
             context,
-            sessions,
+            Arc::new(sessions),
             PermissionResolver::default_resolver(),
         )
         .with_auto_delegation(Arc::new(MockAutoDelegation));

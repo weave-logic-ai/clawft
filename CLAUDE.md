@@ -40,19 +40,52 @@
 
 ## Build & Test
 
+**MANDATORY: Use `scripts/build.sh` for ALL build, test, check, and lint operations.**
+Do NOT run `cargo build`, `cargo test`, `cargo check`, or `cargo clippy` directly
+unless you are debugging a specific compilation issue that requires direct cargo
+flags not exposed by the script. If that happens, extend `scripts/build.sh` with
+the new capability so future builds use it.
+
 ```bash
-# Build
-npm run build
+# Build native CLI (release)
+scripts/build.sh native
 
-# Test
-npm test
+# Build native CLI (debug, fast iteration)
+scripts/build.sh native-debug
 
-# Lint
-npm run lint
+# Build with extra features
+scripts/build.sh native --features voice,channels
+
+# Run workspace tests
+scripts/build.sh test
+
+# Fast compile check (no codegen)
+scripts/build.sh check
+
+# Lint (clippy, warnings as errors)
+scripts/build.sh clippy
+
+# Build WASM targets
+scripts/build.sh wasi
+scripts/build.sh browser
+
+# Build everything (native + wasi + browser + ui)
+scripts/build.sh all
+
+# Full phase gate (11 checks — use before committing)
+scripts/build.sh gate
+
+# Preview what a command would do
+scripts/build.sh native --dry-run
+
+# See all commands and options
+scripts/build.sh --help
 ```
 
-- ALWAYS run tests after making code changes
-- ALWAYS verify build succeeds before committing
+- ALWAYS run `scripts/build.sh test` after making code changes
+- ALWAYS run `scripts/build.sh check` (or `gate`) before committing
+- If a new feature needs build flags not in the script, ADD them to `scripts/build.sh`
+- Agents MUST use `scripts/build.sh`, not raw cargo, except for critical debugging
 
 ## Security Rules
 

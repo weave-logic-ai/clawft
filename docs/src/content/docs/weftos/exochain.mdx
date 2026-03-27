@@ -1,0 +1,106 @@
+---
+title: "ExoChain Subsystem"
+description: "Append-only hash chain with SHAKE-256, Ed25519 and ML-DSA-65 dual signing, RVF persistence, witness chains, and integrity verification."
+---
+
+The ExoChain provides a cryptographically verifiable audit trail for all kernel state changes. Every significant event is appended to a hash-linked chain that can be verified for integrity and replicated across nodes.
+
+**Source**: `crates/clawft-kernel/src/chain.rs` (~1100 lines, 28 tests)
+**Feature**: `exochain`
+
+## ChainEvent
+
+```rust
+pub struct ChainEvent {
+    pub sequence: u64,
+    pub source: String,
+    pub kind: String,
+    pub payload: Option<serde_json::Value>,
+    pub timestamp: DateTime<Utc>,
+    pub hash: [u8; 32],
+    pub prev_hash: [u8; 32],
+    pub payload_hash: [u8; 32],
+}
+```
+
+### Hash Scheme
+
+Every event carries three SHAKE-256 hashes:
+- **`prev_hash`**: Hash of the preceding event (chain link)
+- **`payload_hash`**: Hash of canonical JSON payload bytes (content commitment; zeroed when payload is `None`)
+- **`hash`**: Hash of `(sequence || chain_id || prev_hash || source || 0x00 || kind || 0x00 || timestamp || payload_hash)`
+
+This enables two-way verification: verify the chain link backward and the payload content independently.
+
+## ChainManager API
+
+```rust
+impl ChainManager {
+    pub fn new(chain_id: &str, max_events: usize) -> Self;
+    pub fn append(&mut self, source: &str, kind: &str, payload: Option<Value>) -> ChainEvent;
+    pub fn verify_integrity(&self) -> ChainVerifyResult;
+    pub fn tail(&self, n: usize) -> Vec<ChainEvent>;
+    pub fn tail_from(&self, after: u64) -> Vec<ChainEvent>;
+    pub fn save_to_rvf(&self, path: &Path) -> Result<()>;
+    pub fn load_from_rvf(path: &Path) -> Result<Self>;
+    pub fn record_lineage(&mut self, parent: &str, child: &str, derivation: &str) -> LineageRecord;
+    pub fn verify_lineage(&self, records: &[LineageRecord]) -> bool;
+    pub fn verify_witness(&self) -> Result<bool>;
+}
+```
+
+## Ed25519 + ML-DSA-65 Dual Signing
+
+Post-quantum protection (Symposium D11):
+
+- **Ed25519**: Fast classical signature for all chain events
+- **ML-DSA-65**: Post-quantum lattice-based signature for store-now-decrypt-later protection
+
+Both signatures must verify for cross-node chain events. Uses `rvf_crypto::sign_segment_ml_dsa()` and `rvf_crypto::verify_segment_ml_dsa()`.
+
+## RVF Segment Persistence
+
+Chain events are persisted as RVF segments with a 64-byte `ExoChainHeader`:
+
+```
+ Offset  Field            Size   Description
+ 0..4    magic            u32    0x45584F43 ("EXOC")
+ 4       version          u8     Protocol version (1)
+ 5       subtype          u8     0x40=Event, 0x41=Checkpoint, 0x42=Proof
+ 8..12   chain_id         u32    Chain identifier
+ 16..24  sequence         u64    Event sequence number
+ 24..32  timestamp_secs   u64    Unix timestamp
+ 32..64  prev_hash        [u8;32]
+```
+
+`save_to_rvf()` serializes events as RVF segments with CBOR payload and Ed25519 signature footer. `load_from_rvf()` reads, validates, and restores.
+
+## Witness Chains and Lineage
+
+Witness chain entries provide additional verification via `rvf_crypto::create_witness_chain()` and `verify_witness_chain()`.
+
+Lineage records track derivation relationships for agent spawn hierarchies and resource provenance.
+
+## Chain Integrity Verification
+
+`verify_integrity()` walks the chain checking: prev_hash links, hash computation, payload_hash matches, and monotonic sequence numbers.
+
+## tail_from() for Replication
+
+```rust
+let delta = chain.tail_from(100); // events with sequence > 100
+```
+
+Used by the mesh networking layer for cross-node chain synchronization.
+
+## ChainAnchor Trait
+
+```rust
+pub trait ChainAnchor: Send + Sync {
+    async fn anchor(&self, chain_status: &ChainStatus) -> Result<AnchorReceipt>;
+    async fn verify(&self, receipt: &AnchorReceipt) -> Result<bool>;
+    async fn status(&self, receipt: &AnchorReceipt) -> Result<AnchorStatus>;
+}
+```
+
+A `MockAnchor` implementation exists for testing. Production target: OpenTimestamps.

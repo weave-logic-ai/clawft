@@ -1,0 +1,256 @@
+---
+title: "Security"
+description: "Security model, command execution policy, SSRF protection, workspace containment, WASM sandbox, and permission-gated tool access."
+---
+
+## Overview
+
+clawft adopts a **defense-in-depth** approach to tool security:
+
+1. **Permission-Gated Tool Access** -- Per-user tool allowlists enforced by `AuthContext` on every request
+2. **Command Execution Policy** -- Controls which shell commands the agent may run
+3. **URL Safety Policy** -- Blocks SSRF attacks targeting private networks and cloud metadata
+4. **Workspace Containment** -- All file tools sandboxed to a workspace directory
+5. **Input Sanitization** -- Session IDs, tool results, and content validated before use
+6. **Output Truncation** -- Tool results capped at 64 KB
+7. **WASM Plugin Sandbox** -- Fuel metering, memory limits, permission gates for untrusted plugins
+
+Each layer operates independently. A request must pass **all** applicable checks before it executes.
+
+## Threat Model
+
+clawft's primary security concern is **LLM prompt injection leading to tool execution**:
+
+1. An attacker crafts a message that manipulates the LLM's behavior
+2. The LLM issues tool calls the attacker intended (destructive commands, data exfiltration, infrastructure probing)
+
+The security policies act as a guardrail between the LLM and the operating system, bounding damage even if the LLM is compromised.
+
+---
+
+## Command Execution Policy
+
+Source: `clawft-tools/src/security_policy.rs`
+
+The `CommandPolicy` validates every command before `exec_shell` or `spawn` executes it.
+
+### Policy Modes
+
+| Mode | Behavior | Default |
+|------|----------|---------|
+| `allowlist` | Only commands with basename on the allowlist may run | Yes |
+| `denylist` | Any command permitted unless it matches a denylist pattern | No |
+
+In both modes, dangerous patterns are always checked first.
+
+### Default Allowlist (17 commands)
+
+`echo`, `cat`, `ls`, `pwd`, `head`, `tail`, `wc`, `grep`, `find`, `sort`, `uniq`, `diff`, `date`, `env`, `true`, `false`, `test`
+
+These are read-only or informational commands that cannot modify the system.
+
+### Dangerous Patterns (Always Blocked)
+
+Regardless of mode, these patterns are always rejected (case-insensitive substring match):
+
+| Pattern | Threat |
+|---------|--------|
+| `rm -rf /` | Filesystem destruction |
+| `sudo ` | Privilege escalation |
+| `mkfs` | Filesystem formatting |
+| `dd if=` | Raw disk write |
+| `:(){ :\|:& };:` | Fork bomb |
+| `chmod 777 /` | Dangerous permission change |
+| `> /dev/sd` | Raw device write |
+| `shutdown` | System shutdown |
+| `reboot` | System reboot |
+| `poweroff` | System power off |
+| `format c:` | Disk formatting (Windows) |
+
+A command matching a dangerous pattern returns `PermissionDenied` even if its basename is on the allowlist.
+
+### Configuration
+
+```json
+{
+  "tools": {
+    "commandPolicy": {
+      "mode": "allowlist",
+      "allowlist": ["echo", "cat", "ls", "pwd", "cargo", "rustc"]
+    }
+  }
+}
+```
+
+When `allowlist` is empty, the 17 built-in defaults are used. A non-empty array replaces the defaults entirely.
+
+### Why Allowlist Over Denylist
+
+For LLM-controlled execution, allowlist mode is strongly recommended:
+
+- Denylists are inherently incomplete -- attackers can find bypasses
+- Allowlists fail closed -- unapproved commands are rejected
+- The LLM's needs are bounded -- a small set of informational commands covers most use cases
+
+---
+
+## URL Safety / SSRF Protection
+
+Source: `clawft-tools/src/url_safety.rs`
+
+The `UrlPolicy` validates every URL before `web_fetch` makes an HTTP request.
+
+### Validation Flow
+
+1. Parse URL and extract host
+2. Check `allowed_domains` -- if present, skip all further checks
+3. Check `blocked_domains` -- reject if present
+4. Check cloud metadata endpoints -- reject if matched
+5. Check `allow_private` -- if true, skip IP checks
+6. If host is a literal IP, check against blocked CIDR ranges
+7. If host is a domain, resolve via DNS and check all IPs
+8. If DNS fails, allow through (downstream HTTP client will fail)
+
+### Blocked IP Ranges
+
+**IPv4:**
+
+| CIDR | Description |
+|------|-------------|
+| `10.0.0.0/8` | Private (RFC 1918 Class A) |
+| `172.16.0.0/12` | Private (RFC 1918 Class B) |
+| `192.168.0.0/16` | Private (RFC 1918 Class C) |
+| `127.0.0.0/8` | Loopback |
+| `169.254.0.0/16` | Link-local / APIPA |
+| `0.0.0.0/8` | "This" network |
+
+**IPv6:** `::1/128` (loopback), `fe80::/10` (link-local), `fc00::/7` (ULA). IPv4-mapped IPv6 addresses are also checked.
+
+### Cloud Metadata Blocking
+
+| Hostname | Service |
+|----------|---------|
+| `169.254.169.254` | AWS / Azure |
+| `metadata.google.internal` | GCP |
+| `metadata.internal` | Generic |
+
+### Configuration
+
+```json
+{
+  "tools": {
+    "urlPolicy": {
+      "enabled": true,
+      "allowPrivate": false,
+      "allowedDomains": ["api.internal.corp"],
+      "blockedDomains": ["malicious-site.com"]
+    }
+  }
+}
+```
+
+Do not set `enabled: false` in production.
+
+---
+
+## Permission-Gated Tool Access
+
+Source: `clawft-core/src/tools/registry.rs`
+
+The `ToolRegistry` enforces permission checks before every tool execution when an `AuthContext` is present.
+
+### Permission Check Flow
+
+1. **Null permissions bypass** -- No `AuthContext` (internal calls) executes without checks
+2. **Tool allowlist** -- User's `tool_access` list is checked. Empty = all denied. `"*"` = all allowed.
+3. **Tool metadata level** -- User's `level` must be >= tool's `required_permission_level`
+4. **Custom permissions** -- Tool-specific custom permissions must match
+
+### Permission Levels
+
+| Level | Name | Default Tool Access |
+|-------|------|---------------------|
+| 0 | `zero_trust` | None |
+| 1 | `user` | `read_file`, `write_file`, `edit_file`, `list_dir`, `web_search`, `web_fetch`, `message` |
+| 2 | `admin` | All (`*`) |
+
+### Default Access by Context
+
+- **CLI users** -- Automatically receive `admin` (Level 2)
+- **Remote channel users** -- Receive `zero_trust` (Level 0) by default
+
+### Injection Prevention
+
+The `auth_context` field on `ChatRequest` uses `#[serde(skip_deserializing)]`, preventing users from injecting permissions via the gateway API. Permissions are populated server-side only.
+
+---
+
+## Workspace Containment
+
+All file tools (`read_file`, `write_file`, `edit_file`, `list_directory`) enforce path containment:
+
+1. Provided path is joined to the workspace directory
+2. Result is canonicalized (resolving symlinks and `..`)
+3. Canonical path must start with canonical workspace directory
+4. Violation returns `InvalidPath` error
+
+For write operations on non-existent paths, the deepest existing ancestor is canonicalized instead.
+
+---
+
+## WASM Plugin Sandbox
+
+Source: `clawft-plugin/src/wasm_host.rs`
+
+The WASM sandbox prevents untrusted plugin code from escaping isolation.
+
+| Layer | Mechanism | Threat Mitigated |
+|-------|-----------|-----------------|
+| Fuel metering | wasmtime fuel (1B default) | CPU denial-of-service |
+| Memory limits | 16 MB default cap | Out-of-memory crashes |
+| Epoch interruption | Wall-clock timeout | Infinite loops |
+| Permission allowlists | Per-function checks | Unauthorized resource access |
+| Path canonicalization | `canonicalize` + symlink rejection | Directory traversal |
+| SSRF check | `is_private_ip()` on resolved IPs | Internal network probing |
+| Rate limiting | Token bucket on `log` and `http-request` | Resource exhaustion |
+| Audit logging | All host function calls logged | Post-incident forensics |
+
+Each of the 5 WIT host functions enforces its own gate: `http-request` validates against `permissions.network`; `read-file`/`write-file` canonicalize paths; `get-env` returns only `permissions.env_vars`; `log` is rate-limited.
+
+---
+
+## Additional Security Features
+
+### Plugin Permission Re-prompt
+
+When a plugin upgrade requests new permissions, `PermissionDiff` computes the delta against previously approved permissions. Only new permissions require user approval.
+
+### WITNESS Audit Chains
+
+SHA-256 hash-chained audit trail for memory operations. Sequential verification from the root detects tampering. Memory exports include the chain; imports validate before accepting.
+
+### Security Auditor
+
+The `clawft-security` crate provides 57 audit checks across 10 categories: authentication, authorization, input validation, filesystem, network, cryptography, dependencies, configuration, logging, and plugin security.
+
+```bash
+weft security scan          # run all checks
+weft security scan --fix    # auto-fix where possible
+```
+
+### SandboxPolicy
+
+OS-level process sandboxing (seccomp-bpf / Landlock on Linux 5.13+) with WASM fallback. Each agent receives its own policy restricting syscalls, filesystem, network, and process spawning.
+
+---
+
+## Best Practices
+
+1. **Keep the allowlist minimal.** Only add commands the agent genuinely needs.
+2. **Review custom allowlist additions.** Commands like `curl`, `python`, `bash`, and `node` should be added with extreme caution.
+3. **Do not disable URL safety in production.**
+4. **Use `allowedDomains` sparingly.** Each bypasses all URL safety checks.
+5. **Monitor tool execution logs.** Rejections are logged at `warn` level.
+6. **Run `weft security scan` regularly.**
+7. **Prefer allowlist mode** unless broad command access is specifically required.
+8. **Test policy changes** to verify intended commands succeed and dangerous ones are blocked.

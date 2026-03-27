@@ -12,6 +12,8 @@
 //! All file and directory operations enforce workspace path containment
 //! to prevent directory traversal attacks.
 
+#[cfg(feature = "canvas")]
+pub mod render_ui;
 #[cfg(feature = "delegate")]
 pub mod delegate_tool;
 pub mod file_tools;
@@ -23,6 +25,14 @@ pub mod shell_tool;
 #[cfg(feature = "native-exec")]
 pub mod spawn_tool;
 pub mod url_safety;
+#[cfg(feature = "voice")]
+pub mod audio_synthesize;
+#[cfg(feature = "voice")]
+pub mod audio_transcribe;
+#[cfg(feature = "voice")]
+pub mod voice_listen;
+#[cfg(feature = "voice")]
+pub mod voice_speak;
 pub mod web_fetch;
 pub mod web_search;
 
@@ -106,4 +116,15 @@ pub fn register_all<P: Platform + 'static>(
         workspace_dir,
         command_policy,
     )));
+
+    #[cfg(feature = "voice")]
+    {
+        registry.register(Arc::new(voice_listen::VoiceListenTool::new()));
+        registry.register(Arc::new(voice_speak::VoiceSpeakTool::new()));
+        registry.register(Arc::new(audio_transcribe::AudioTranscribeTool::new()));
+        registry.register(Arc::new(audio_synthesize::AudioSynthesizeTool::new()));
+    }
+
+    #[cfg(feature = "canvas")]
+    registry.register(Arc::new(render_ui::RenderUiTool::new()));
 }

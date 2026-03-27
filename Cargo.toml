@@ -19,6 +19,10 @@ members = [
     "crates/clawft-plugin-calendar",
     "crates/clawft-plugin-containers",
     "crates/clawft-security",
+    "crates/clawft-kernel",
+    "crates/clawft-weave",
+    "crates/exo-resource-tree",
+    "crates/weftos",
 ]
 
 [workspace.package]
@@ -97,28 +101,58 @@ which = "7"
 # Random (testing)
 rand = "0.8"
 
+# WASM-compatible random
+getrandom = { version = "0.2", features = ["js"] }
+
 # Ed25519 signing
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+
+# WASM runtime (feature-gated behind wasm-sandbox)
+wasmtime = { version = "29", default-features = false, features = ["cranelift", "async", "wat"] }
+wasmtime-wasi = { version = "29", default-features = false, features = ["preview1"] }
 
 # File-system watching
 notify = "7"
 
 # RVF (RuVector Format) -- vector storage
-rvf-runtime = { version = "0.2", default-features = false, features = ["std"] }
-rvf-types = { version = "0.2", default-features = false, features = ["std"] }
+rvf-runtime = { path = "../ruvector/crates/rvf/rvf-runtime", default-features = false, features = ["std"] }
+rvf-types = { path = "../ruvector/crates/rvf/rvf-types", default-features = false, features = ["std"] }
+rvf-crypto = { path = "../ruvector/crates/rvf/rvf-crypto", default-features = false, features = ["std", "ed25519"] }
+rvf-wire = { path = "../ruvector/crates/rvf/rvf-wire" }
+
+# CBOR codec (ExoChain payload format)
+ciborium = "0.2"
 
 # HNSW approximate nearest neighbor search
 instant-distance = "0.6"
 
+# ONNX Runtime (embedding inference)
+ort = { version = "2.0.0-rc.12", default-features = false }
+ndarray = "0.16"
+
+# BLAKE3 hashing (ECC cognitive substrate)
+blake3 = "1.5"
+
+# Concurrent hash map
+dashmap = "6"
+
+# Distributed coordination (ruvector)
+ruvector-cluster = { path = "../ruvector/crates/ruvector-cluster" }
+ruvector-raft = { path = "../ruvector/crates/ruvector-raft" }
+ruvector-replication = { path = "../ruvector/crates/ruvector-replication" }
+cognitum-gate-tilezero = { path = "../ruvector/crates/cognitum-gate-tilezero" }
+parking_lot = "0.12"
+futures = "0.3"
+
 # Internal crates
-clawft-types = { path = "crates/clawft-types" }
-clawft-platform = { path = "crates/clawft-platform" }
-clawft-core = { path = "crates/clawft-core" }
-clawft-tools = { path = "crates/clawft-tools" }
+clawft-types = { path = "crates/clawft-types", default-features = false }
+clawft-platform = { path = "crates/clawft-platform", default-features = false }
+clawft-core = { path = "crates/clawft-core", default-features = false }
+clawft-tools = { path = "crates/clawft-tools", default-features = false }
 clawft-channels = { path = "crates/clawft-channels" }
-clawft-llm = { path = "crates/clawft-llm" }
+clawft-llm = { path = "crates/clawft-llm", default-features = false }
 clawft-services = { path = "crates/clawft-services" }
-clawft-plugin = { path = "crates/clawft-plugin" }
+clawft-plugin = { path = "crates/clawft-plugin", default-features = false }
 clawft-plugin-git = { path = "crates/clawft-plugin-git" }
 clawft-plugin-cargo = { path = "crates/clawft-plugin-cargo" }
 clawft-plugin-oauth2 = { path = "crates/clawft-plugin-oauth2" }
@@ -127,6 +161,9 @@ clawft-plugin-browser = { path = "crates/clawft-plugin-browser" }
 clawft-plugin-calendar = { path = "crates/clawft-plugin-calendar" }
 clawft-plugin-containers = { path = "crates/clawft-plugin-containers" }
 clawft-security = { path = "crates/clawft-security" }
+clawft-kernel = { path = "crates/clawft-kernel", default-features = false }
+exo-resource-tree = { path = "crates/exo-resource-tree" }
+weftos = { path = "crates/weftos", default-features = false }
 
 [profile.release]
 opt-level = "z"

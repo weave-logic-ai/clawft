@@ -1,0 +1,89 @@
+---
+title: "Cluster Management"
+description: "ClusterMembership, NodeIdentity, NodeState lifecycle, SWIM heartbeat, distributed process table, service advertisement, chain replication, and CRDT gossip."
+---
+
+WeftOS clustering extends the kernel to multi-node operation with peer tracking, failure detection, distributed process management, service advertisement, and data replication.
+
+**Source**: `crates/clawft-kernel/src/cluster.rs`, `mesh_process.rs`, `mesh_service_adv.rs`, `mesh_heartbeat.rs`, `mesh_chain.rs`, `mesh_tree.rs`
+**Feature**: `mesh` (types), `cluster` (raft consensus)
+
+## NodeIdentity
+
+Ed25519-based identity:
+
+```rust
+pub struct NodeIdentity { /* Ed25519 keypair */ }
+
+impl NodeIdentity {
+    pub fn generate() -> Self;
+    pub fn sign(&self, data: &[u8]) -> Vec<u8>;
+    pub fn verify(&self, data: &[u8], signature: &[u8]) -> bool;
+    pub fn node_id(&self) -> String;  // hex(SHAKE-256(pubkey)[0..16])
+}
+```
+
+## NodeState Lifecycle
+
+```rust
+pub enum NodeState { Joining, Active, Suspect, Unreachable, Left }
+```
+
+## SWIM Heartbeat
+
+```rust
+pub struct HeartbeatConfig {
+    pub probe_interval_ms: u64,     // 1000
+    pub ping_timeout_ms: u64,       // 500
+    pub suspect_timeout_ms: u64,    // 5000
+    pub indirect_witnesses: usize,  // 3
+}
+```
+
+State: `Alive -> Suspect -> Dead`. Indirect pings provide confirmation.
+
+## Distributed Process Table
+
+LWW CRDT: `merge()` compares `last_updated` timestamps (newer wins).
+
+```rust
+pub struct ProcessAdvertisement {
+    pub global_pid: GlobalPid,
+    pub agent_type: String,
+    pub capabilities: Vec<String>,
+    pub status: ProcessStatus,
+    pub resource_summary: ResourceSummary,
+}
+```
+
+Query: `find_by_type()`, `find_by_capability()`, `least_loaded_node()`.
+
+## ConsistentHashRing
+
+Distributes PID assignment: `ConsistentHashRing { ring: BTreeMap<u64, String> }`.
+
+## Service Advertisement
+
+```rust
+pub struct ClusterServiceRegistry {
+    services: HashMap<String, Vec<ServiceAdvertisement>>,
+}
+```
+
+LWW merge per (service_name, node_id). `resolve_preferred()` tries specific node, falls back to replicas.
+
+## Chain Replication
+
+`ChainSyncRequest` with `after_sequence` for incremental pull. `detect_chain_fork()` returns `InSync`, `LocalBehind`, `RemoteBehind`, or `Forked`.
+
+## Tree Synchronization
+
+Merkle-based: `compare_tree_roots()` returns sync action. `MerkleProof` with `verify()`.
+
+## Metadata Consensus
+
+Raft-style (behind `cluster` feature): `ConsensusRole { Follower, Candidate, Leader }`.
+
+## CRDT Gossip
+
+`CrdtGossipState` holds `DistributedProcessTable` + `ClusterServiceRegistry` for eventual consistency.

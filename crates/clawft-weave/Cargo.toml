@@ -1,0 +1,41 @@
+[package]
+name = "clawft-weave"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "WeftOS operator CLI (weaver) — kernel management, services, and agent orchestration"
+keywords = ["cli", "kernel", "os", "agent", "operator"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "weaver"
+path = "src/main.rs"
+
+[features]
+default = []
+cluster = ["clawft-kernel/cluster"]
+exochain = ["clawft-kernel/exochain", "dep:exo-resource-tree"]
+rvf-rpc = ["dep:rvf-wire", "dep:rvf-types"]
+
+[dependencies]
+clawft-kernel = { workspace = true, features = ["native"] }
+clawft-platform = { workspace = true }
+clawft-types = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+comfy-table = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+dirs = { workspace = true }
+exo-resource-tree = { workspace = true, optional = true }
+rvf-wire = { workspace = true, optional = true }
+rvf-types = { workspace = true, optional = true }
+nix = { version = "0.29", default-features = false, features = ["signal", "process"] }

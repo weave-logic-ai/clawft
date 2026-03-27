@@ -1,0 +1,98 @@
+[package]
+name = "clawft-kernel"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "WeftOS kernel: boot sequence, process table, service registry, and health subsystem"
+keywords = ["kernel", "os", "process", "service", "health"]
+categories = ["development-tools"]
+
+[features]
+default = ["native"]
+native = [
+    "dep:tokio",
+    "dep:tokio-util",
+    "dep:futures",
+    "clawft-core/native",
+    "clawft-platform/native",
+    "clawft-types/native",
+]
+cluster = [
+    "dep:ruvector-cluster",
+    "dep:ruvector-raft",
+    "dep:ruvector-replication",
+    "dep:parking_lot",
+    "dep:futures",
+]
+exochain = [
+    "dep:exo-resource-tree",
+    "dep:rvf-crypto",
+    "dep:rvf-wire",
+    "dep:rvf-types",
+    "dep:rvf-runtime",
+    "dep:ciborium",
+    "dep:ed25519-dalek",
+    "dep:rand",
+]
+tilezero = [
+    "exochain",
+    "dep:cognitum-gate-tilezero",
+]
+mesh = [
+    "dep:ed25519-dalek",
+    "dep:rand",
+    "dep:tokio-tungstenite",
+    "dep:futures-util",
+]
+ecc = ["clawft-core/vector-memory", "dep:blake3"]
+onnx-embeddings = ["dep:ort", "dep:ndarray"]
+wasm-sandbox = ["dep:wasmtime", "dep:wasmtime-wasi"]
+os-patterns = ["exochain"]
+containers = []
+
+[dependencies]
+clawft-core = { workspace = true, default-features = false }
+clawft-types = { workspace = true, default-features = false }
+clawft-platform = { workspace = true, default-features = false }
+clawft-plugin = { workspace = true, default-features = false }
+dashmap = { workspace = true }
+tokio = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
+ruvector-cluster = { workspace = true, optional = true }
+ruvector-raft = { workspace = true, optional = true }
+ruvector-replication = { workspace = true, optional = true }
+parking_lot = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+exo-resource-tree = { workspace = true, optional = true }
+rvf-crypto = { workspace = true, optional = true }
+rvf-wire = { workspace = true, optional = true }
+rvf-types = { workspace = true, optional = true }
+rvf-runtime = { workspace = true, optional = true }
+ciborium = { workspace = true, optional = true }
+cognitum-gate-tilezero = { workspace = true, optional = true }
+ed25519-dalek = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
+wasmtime = { workspace = true, optional = true }
+wasmtime-wasi = { workspace = true, optional = true }
+blake3 = { workspace = true, optional = true }
+ort = { workspace = true, optional = true }
+ndarray = { workspace = true, optional = true }
+tokio-tungstenite = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+sha2 = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }
+clawft-platform = { workspace = true }
+clawft-types = { workspace = true }

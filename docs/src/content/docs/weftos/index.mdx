@@ -1,0 +1,170 @@
+---
+title: "WeftOS Overview"
+description: "The kernel layer for clawft -- OS abstractions for agent orchestration, process management, IPC, governance, and cryptographic audit trails."
+---
+
+WeftOS is the kernel abstraction layer for clawft. It sits between the CLI/API surface (`clawft-weave`, `clawft-cli`) and the core agent runtime (`clawft-core`), providing OS-like abstractions for agent orchestration: process management, inter-process communication, governance, cryptographic audit trails, and resource namespacing.
+
+## What is WeftOS
+
+WeftOS treats AI agents as first-class OS processes. Each agent receives a PID, a set of capabilities, an IPC inbox, and resource limits -- all managed by a central kernel that boots, supervises, and shuts down the agent fleet.
+
+The kernel is implemented in the `clawft-kernel` crate (25+ source files, 560+ tests) and is organized into six phases (K0 through K6) that incrementally add capabilities from basic boot/process management through mesh networking.
+
+### Platform Identity
+
+WeftOS is an agent operating system kernel -- a Rust-native runtime that manages AI agents as first-class processes under constitutional governance. Every action is auditable via cryptographic hash chains, every capability is checked at the gate, and every decision is logged to a tamper-evident ExoChain.
+
+## Design Principles
+
+**Composition, not rewrite.** The kernel wraps existing clawft primitives (`MessageBus`, `SandboxEnforcer`, `AgentLoop`, `Platform` trait) into a unified coordination layer. No existing code is forked or duplicated.
+
+**Incremental adoption.** The kernel is opt-in. Existing `weft` commands work without kernel activation. Feature flags gate heavy dependencies (Wasmtime, Docker, mesh networking) so the default binary stays lean.
+
+**Kernel wraps AppContext.** The central `Kernel<P: Platform>` struct wraps `AppContext<P>` in a boot sequence with a state machine (Booting -> Running -> ShuttingDown -> Halted), adding process tracking, service lifecycle, IPC, and health monitoring on top.
+
+**Chain-anchored governance.** Every significant state change is logged to an append-only hash chain (ExoChain) using SHAKE-256, creating a tamper-evident audit trail. Governance rules are anchored to the chain at genesis and cannot be modified.
+
+**Cognitive platform.** WeftOS is not merely an agent orchestrator -- it is a cognitive platform where every kernel instance is a node in a distributed nervous system. From embedded devices to GPU servers, all run the same `Kernel<P: Platform>`, differentiated only by boot-time calibration and Platform trait implementation.
+
+## Feature Flags and Build Configurations
+
+| Feature | What It Enables | Key Dependencies |
+|---------|----------------|-----------------|
+| `native` (default) | Tokio runtime, native I/O | tokio, dirs |
+| `exochain` | Chain, TreeManager, Gate, RVF persistence | rvf-crypto, rvf-types, ed25519-dalek |
+| `tilezero` | TileZeroGate (three-way gate with receipts) | cognitum-gate-tilezero |
+| `cluster` | ClusterService with raft consensus | ruvector-cluster, ruvector-raft |
+| `wasm-sandbox` | Wasmtime-based tool runner | wasmtime |
+| `containers` | Container lifecycle management | system docker/podman |
+| `mesh` | K6 mesh networking (14 modules) | ed25519-dalek, rand |
+| `ecc` | ECC cognitive substrate (6 modules) | (internal) |
+
+### Build Configurations
+
+| Build | Features | Use Case |
+|-------|----------|----------|
+| Single-node | `default` (no mesh) | Development, testing, embedded |
+| Static cluster | `mesh` | Known peers, seed-peer bootstrap |
+| Dynamic cluster | `mesh-full` | DHT + mDNS auto-discovery |
+| Cognitive | `ecc` | Causal reasoning, HNSW search |
+
+## Phase Roadmap (K0-K6)
+
+| Phase | Name | Status | Tests | Scope |
+|-------|------|--------|------:|-------|
+| K0 | Kernel Foundation | Complete | 45+ | Boot state machine, event logging, config, errors |
+| K1 | Process and Supervision | Complete | 80+ | PID allocation, process table, agent supervisor, RBAC |
+| K2 | IPC and Communication | Complete | 130+ | Message envelopes, A2A routing, pub/sub, cron, health, services |
+| K2b | Hardening | Complete | 30+ | Chain-logged lifecycle, signal handling, DashMap safety |
+| ExoChain | Cryptographic Audit | Complete | 60+ | Hash chain, resource tree, gate backends |
+| K3 | WASM Sandbox | Complete | -- | Wasmtime runner, fuel metering, sandbox config |
+| K3c | ECC Cognitive Substrate | Complete | 83 | Causal DAG, cognitive tick, HNSW, impulse queue |
+| K4 | Containers | Complete | -- | Container lifecycle, config validation, health propagation |
+| K5 | App Framework | Complete | -- | Manifest parsing, app lifecycle, agent spawning |
+| K6 | Mesh Networking | Phase 1 Complete | 133 | Transport traits, discovery, cross-node IPC, replication |
+
+## Architecture Diagram
+
+```
++---------------------------------------------------------------+
+|                        CLI / API Surface                       |
+|  clawft-cli (weft)          clawft-weave (weaver)             |
++-------------------------------+-------------------------------+
+                                |
+                                v
++---------------------------------------------------------------+
+|                     clawft-kernel (WeftOS)                     |
+|                                                               |
+|  +----------+  +-----------+  +--------+  +-----------+      |
+|  | K0: Boot |  | K1: Proc  |  | K2:IPC |  | ExoChain  |      |
+|  | State    |  | Table +   |  | A2A    |  | Chain +   |      |
+|  | Machine  |  | Supervisor|  | Topics |  | Tree +    |      |
+|  |          |  | RBAC      |  | Cron   |  | Gate      |      |
+|  +----------+  +-----------+  +--------+  +-----------+      |
+|                                                               |
+|  +----------+  +-----------+  +--------+  +-----------+      |
+|  | K3: WASM |  | K4:       |  | K5:App |  | K6: Mesh  |      |
+|  | Sandbox  |  | Container |  | Framwk |  | Network   |      |
+|  | Runner   |  | Manager   |  | Manifst|  | Discovery |      |
+|  +----------+  +-----------+  +--------+  +-----------+      |
+|                                                               |
+|  +---------------------------------------------------+       |
+|  | K3c: ECC Cognitive Substrate                       |       |
+|  | CausalGraph | CognitiveTick | HNSW | CrossRef     |       |
+|  +---------------------------------------------------+       |
++-------------------------------+-------------------------------+
+                                |
+                                v
++---------------------------------------------------------------+
+|                      clawft-core                               |
+|  Agent loop, MessageBus, Pipeline, Sessions, Tools            |
++-------------------------------+-------------------------------+
+                                |
+                                v
++---------------------------------------------------------------+
+|  clawft-platform    clawft-types    clawft-llm                |
+|  (native/browser)   (shared types)  (LLM providers)          |
++---------------------------------------------------------------+
+```
+
+## Crate Dependencies
+
+```
+clawft-cli          weft binary (user-facing CLI)
+clawft-weave        weaver binary (operator CLI + daemon)
+    |                   |
+    v                   v
+clawft-kernel       OS abstractions (WeftOS)
+    |
+    v
+clawft-core         Agent loop, message bus, pipeline, sessions
+    |
+    v
+clawft-platform     Platform traits (native / browser)
+clawft-types        Shared domain types and config
+clawft-llm          LLM provider abstraction
+```
+
+## Running Tests
+
+```bash
+# All kernel tests (default features)
+scripts/build.sh test
+
+# Kernel only
+cargo test -p clawft-kernel
+
+# Kernel + exochain
+cargo test -p clawft-kernel --features exochain
+
+# Kernel + all features
+cargo test -p clawft-kernel --features "exochain,cluster,wasm-sandbox,containers"
+
+# Kernel + ECC cognitive substrate
+cargo test -p clawft-kernel --features "exochain,ecc"
+
+# Full phase gate (11 checks)
+scripts/build.sh gate
+```
+
+## Documentation Map
+
+- [Architecture](/docs/weftos/architecture) -- 5-layer kernel architecture deep dive
+- [Kernel Phases](/docs/weftos/kernel-phases) -- detailed K0-K6 phase breakdown
+- [Boot Sequence](/docs/weftos/boot-sequence) -- kernel lifecycle and state machine
+- [Process Table](/docs/weftos/process-table) -- PID allocation and process management
+- [IPC](/docs/weftos/ipc) -- inter-process communication and A2A messaging
+- [Capabilities](/docs/weftos/capabilities) -- RBAC and capability-based access control
+- [ExoChain](/docs/weftos/exochain) -- cryptographic audit trail
+- [Governance](/docs/weftos/governance) -- three-branch constitutional governance
+- [WASM Sandbox](/docs/weftos/wasm-sandbox) -- tool sandboxing with Wasmtime
+- [Containers](/docs/weftos/containers) -- container integration
+- [App Framework](/docs/weftos/app-framework) -- application manifests and lifecycle
+- [Mesh Networking](/docs/weftos/mesh-networking) -- K6 multi-node networking
+- [Discovery](/docs/weftos/discovery) -- peer discovery protocols
+- [Clustering](/docs/weftos/clustering) -- cluster management and distributed state
+- [Security](/docs/weftos/security) -- security model overview
+- [ECC](/docs/weftos/ecc) -- Ephemeral Causal Cognition cognitive substrate
+- [Decisions](/docs/weftos/decisions) -- symposium design decisions
+- [Kernel Guide](/docs/weftos/kernel-guide) -- developer guide

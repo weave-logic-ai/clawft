@@ -1,0 +1,242 @@
+---
+title: "Kernel Architecture"
+description: "Deep dive into the WeftOS kernel's 5-layer architecture, crate structure, key types, feature gate matrix, and boot sequence flow."
+---
+
+The WeftOS kernel is organized into five architectural layers that build on each other. Each layer is implemented as one or more Rust modules in `crates/clawft-kernel/src/`, gated by feature flags where external dependencies are involved.
+
+## 5-Layer Architecture
+
+```
++-------------------------------------------------------------------+
+| Layer 5: MESH NETWORKING (K6)                                     |
+|  mesh.rs, mesh_noise.rs, mesh_framing.rs, mesh_listener.rs       |
+|  mesh_discovery.rs, mesh_bootstrap.rs, mesh_ipc.rs               |
+|  mesh_chain.rs, mesh_tree.rs, mesh_process.rs                    |
+|  mesh_heartbeat.rs, mesh_service_adv.rs, mesh_tcp.rs, mesh_ws.rs |
+|  Feature: mesh                                                    |
++-------------------------------------------------------------------+
+| Layer 4: SERVICES (K3-K5)                                         |
+|  wasm_runner.rs    -- WASM tool execution (wasm-sandbox)          |
+|  container.rs      -- Container lifecycle (containers)            |
+|  app.rs            -- Application manifests and lifecycle         |
+|  governance.rs     -- Three-branch governance engine              |
+|  environment.rs    -- Governance-scoped environments              |
+|  agency.rs         -- Agent-first architecture                    |
++-------------------------------------------------------------------+
+| Layer 3: IPC (K2)                                                 |
+|  ipc.rs            -- KernelMessage envelopes                     |
+|  a2a.rs            -- Agent-to-agent routing                      |
+|  topic.rs          -- Pub/sub topic routing                       |
+|  agent_loop.rs     -- Kernel work loop                            |
+|  cron.rs           -- Scheduled job execution                     |
+|  health.rs         -- Aggregated health checks                    |
+|  service.rs        -- Service registry + lifecycle                |
++-------------------------------------------------------------------+
+| Layer 2: PROCESS (K1)                                             |
+|  process.rs        -- PID allocation, ProcessTable                |
+|  supervisor.rs     -- Agent spawn/stop/restart                    |
+|  capability.rs     -- RBAC, IpcScope, SandboxPolicy               |
++-------------------------------------------------------------------+
+| Layer 1: BOOT (K0)                                                |
+|  boot.rs           -- Kernel<P> state machine                     |
+|  console.rs        -- Boot event logging                          |
+|  config.rs         -- KernelConfigExt trait                       |
+|  error.rs          -- KernelError + KernelResult                  |
++-------------------------------------------------------------------+
+| Cross-cutting: EXOCHAIN (feature-gated)                           |
+|  chain.rs          -- Append-only hash chain                      |
+|  tree_manager.rs   -- Resource tree + mutation log facade         |
+|  gate.rs           -- GateBackend trait + implementations         |
++-------------------------------------------------------------------+
+```
+
+## Layered Protocol Architecture (Symposium D4)
+
+The kernel IPC layer is the foundation for a layered protocol architecture:
+
+```
+Kernel IPC (K0-K2)
+  |
+  v
+ServiceApi (K3 -- internal, local dispatch)
+  |
+  +---> MCP adapter (K3/K4)
+  +---> gRPC adapter (K4/K5)
+  +---> Shell adapter (K3)
+  +---> HTTP/REST adapter (K5 -- when networking lands)
+```
+
+This architecture means the internal API surface runs local to the kernel as a service. Protocol adapters bind to this surface. Networking comes later to expose the API externally. All protocols work long-term; the API layer gives both performance and interoperability.
+
+## Crate Structure
+
+The `clawft-kernel` crate contains 25+ source files organized by kernel phase:
+
+```
+crates/clawft-kernel/
+  src/
+    lib.rs              Crate root + re-exports
+    boot.rs             Kernel<P> generic over Platform (K0)
+    console.rs          Boot event log (K0)
+    config.rs           KernelConfig extension (K0)
+    error.rs            Error types (K0)
+    process.rs          ProcessTable (K1)
+    supervisor.rs       AgentSupervisor (K1)
+    capability.rs       AgentCapabilities + checker (K1)
+    ipc.rs              KernelIpc + message envelopes (K2)
+    a2a.rs              A2ARouter (K2)
+    topic.rs            TopicRouter (K2)
+    agent_loop.rs       kernel_agent_loop() (K2)
+    cron.rs             CronService (K2)
+    health.rs           HealthSystem (K2)
+    service.rs          ServiceRegistry (K2)
+    chain.rs            ChainManager (exochain)
+    tree_manager.rs     TreeManager (exochain)
+    gate.rs             GateBackend + impls (exochain)
+    wasm_runner.rs      WasmToolRunner (K3)
+    causal.rs           CausalGraph (K3c, ecc)
+    cognitive_tick.rs   CognitiveTick (K3c, ecc)
+    crossref.rs         CrossRefStore (K3c, ecc)
+    calibration.rs      EccCalibration (K3c, ecc)
+    hnsw_service.rs     HnswService (K3c, ecc)
+    impulse.rs          ImpulseQueue (K3c, ecc)
+    container.rs        ContainerManager (K4)
+    app.rs              AppManager (K5)
+    cluster.rs          ClusterMembership (K6)
+    environment.rs      EnvironmentManager (K6)
+    governance.rs       GovernanceEngine (K6)
+    agency.rs           Agency model (K6)
+    mesh*.rs            14 mesh modules (K6, mesh feature)
+  Cargo.toml
+```
+
+## Key Types
+
+### Kernel (boot.rs)
+
+The central coordinator. Generic over the `Platform` trait to support native and browser targets.
+
+```rust
+pub struct Kernel<P: Platform> {
+    state: KernelState,
+    process_table: Arc<ProcessTable>,
+    service_registry: Arc<ServiceRegistry>,
+    ipc: Arc<KernelIpc>,
+    health: Arc<HealthSystem>,
+    a2a: Arc<A2ARouter>,
+    cron: Arc<CronService>,
+    // [exochain] chain: Arc<Mutex<ChainManager>>,
+    // [exochain] tree: Arc<Mutex<TreeManager>>,
+    // [exochain] gate: Arc<dyn GateBackend>,
+}
+
+pub enum KernelState {
+    Booting,
+    Running,
+    ShuttingDown,
+    Halted,
+}
+```
+
+### ProcessTable (process.rs)
+
+PID-based agent tracking with `DashMap` for lock-free concurrent access.
+
+```rust
+pub type Pid = u64;
+
+pub struct ProcessTable {
+    entries: DashMap<Pid, ProcessEntry>,
+    next_pid: AtomicU64,
+    max_processes: u32,
+}
+```
+
+### A2ARouter (a2a.rs)
+
+Agent-to-agent message routing with per-agent inboxes and capability-based access control.
+
+```rust
+pub struct A2ARouter {
+    inboxes: DashMap<Pid, mpsc::Sender<KernelMessage>>,
+}
+```
+
+### ChainManager (chain.rs, exochain feature)
+
+Append-only hash-linked event log with SHAKE-256 integrity and Ed25519 signing.
+
+### TreeManager (tree_manager.rs, exochain feature)
+
+Unified facade over ResourceTree + MutationLog + ChainManager. Every tree mutation creates a chain event for two-way traceability.
+
+## Feature Gate Matrix
+
+| Module | `default` | `exochain` | `cluster` | `wasm-sandbox` | `containers` | `mesh` | `ecc` |
+|--------|:---------:|:----------:|:---------:|:--------------:|:------------:|:------:|:-----:|
+| boot.rs | x | x | | | | | |
+| process.rs | x | | | | | | |
+| supervisor.rs | x | | | | | | |
+| capability.rs | x | | | | | | |
+| ipc.rs | x | | | | | | |
+| a2a.rs | x | | | | | | |
+| topic.rs | x | | | | | | |
+| agent_loop.rs | x | x | | | | | |
+| chain.rs | | x | | | | | |
+| tree_manager.rs | | x | | | | | |
+| gate.rs | | x | | | | | |
+| wasm_runner.rs | x | | | x | | | |
+| container.rs | x | | | | x | | |
+| app.rs | x | | | | | | |
+| cluster.rs | x | | x | | | | |
+| governance.rs | x | | | | | | |
+| mesh*.rs | | | | | | x | |
+| causal.rs | | | | | | | x |
+| cognitive_tick.rs | | | | | | | x |
+| crossref.rs | | | | | | | x |
+
+## Concurrency Model
+
+| Primitive | Usage |
+|-----------|-------|
+| `DashMap` | Lock-free concurrent maps for ProcessTable, ServiceRegistry, A2ARouter inboxes |
+| `tokio::sync::Mutex` | Protecting ChainManager, TreeManager internals |
+| `Arc` | Shared ownership across async tasks |
+| `CancellationToken` | Cooperative shutdown for agent loops and services |
+| `tokio::sync::mpsc` | Channels for IPC message delivery |
+
+## Boot Sequence Flow
+
+```
+weaver kernel start
+  1. Fork background daemon process
+  2. Read KernelConfig from config file
+  3. Kernel::boot(config, kernel_config, platform):
+     a. ProcessTable::new(max_processes)
+     b. ServiceRegistry::new()
+     c. KernelIpc::new(message_bus)
+     d. HealthSystem::new(interval)
+     e. A2ARouter::new()
+     f. CronService::new() -> register as system service
+     g. ClusterMembership::new()
+     h. [exochain] ChainManager::new() -> load_from_rvf()
+     i. [exochain] TreeManager::new(chain) -> bootstrap namespaces
+     j. [exochain] GovernanceGate::new() -> attach chain
+     k. [K2.1] SpawnBackend dispatch attached to supervisor
+  4. Bind Unix socket for JSON-RPC
+  5. Start cron tick loop
+  6. Listen for RPC requests
+```
+
+## Shutdown Sequence
+
+```
+weaver kernel stop
+  1. Send "kernel.stop" RPC
+  2. Daemon sets KernelState::ShuttingDown
+  3. ServiceRegistry::stop_all()
+  4. [exochain] ChainManager::save_to_rvf()
+  5. Remove PID file + socket
+  6. KernelState::Halted
+```

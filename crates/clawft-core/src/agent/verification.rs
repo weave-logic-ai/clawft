@@ -63,20 +63,20 @@ pub fn parse_write_claim(
     if let Ok(val) = serde_json::from_str::<serde_json::Value>(result_json) {
         // Check common JSON fields: "path", "file_path", "file"
         for key in &["path", "file_path", "file", "filename"] {
-            if let Some(p) = val.get(key).and_then(|v| v.as_str()) {
-                if !p.is_empty() {
-                    return (true, Some(p.to_string()));
-                }
+            if let Some(p) = val.get(key).and_then(|v| v.as_str())
+                && !p.is_empty()
+            {
+                return (true, Some(p.to_string()));
             }
         }
 
         // Check nested: {"result": {"path": "..."}}
         if let Some(inner) = val.get("result") {
             for key in &["path", "file_path", "file"] {
-                if let Some(p) = inner.get(key).and_then(|v| v.as_str()) {
-                    if !p.is_empty() {
-                        return (true, Some(p.to_string()));
-                    }
+                if let Some(p) = inner.get(key).and_then(|v| v.as_str())
+                    && !p.is_empty()
+                {
+                    return (true, Some(p.to_string()));
                 }
             }
         }
@@ -88,7 +88,7 @@ pub fn parse_write_claim(
         // Take until end of string or next quote/whitespace
         let path_str = after
             .trim_matches(|c: char| c == '"' || c == '\'' || c == '`')
-            .split(|c: char| c == '"' || c == '\n')
+            .split(['"', '\n'])
             .next()
             .unwrap_or("")
             .trim();

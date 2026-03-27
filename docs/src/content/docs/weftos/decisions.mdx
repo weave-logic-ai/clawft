@@ -1,0 +1,135 @@
+---
+title: "Symposium Decisions"
+description: "Consolidated design decisions from all WeftOS symposiums: K2, K3, ECC, and K5."
+---
+
+WeftOS development is guided by formal symposium processes where specialist panels evaluate the kernel and render design decisions. This page consolidates key decisions from all four symposiums.
+
+## K2 Symposium (2026-03-04)
+
+**Scope**: K0-K2 readiness for K3+ development
+**Result**: 22 decisions, 10 approved changes
+
+### Architecture Decisions
+
+| ID | Decision | Impact |
+|----|----------|--------|
+| D1 | Services are separate from processes (`ServiceEntry`) | ServiceRegistry decoupled from PID |
+| D2 | Agent backend selection: explicit > manifest > policy > default | `SpawnBackend` in SpawnRequest |
+| D3 | Bake SpawnBackend API now, implement incrementally | All variants defined, only Native implemented |
+| D4 | Layered protocol: kernel IPC -> ServiceApi -> adapters | `ServiceApi` trait as internal surface |
+| D5 | Kernel-native first, then A2A + MCP as adapters | MCP adapter near-term follow-on |
+| D6 | K3 = same-node. Clustering moved to K5 (from K6) | K6 becomes deep networking only |
+| D7 | Defense-in-depth: dual gate checks (routing + handler) | Two enforcement points per message |
+| D8 | ExoChain-stored immutable API contracts | `service.contract.register` events |
+| D9 | Universal witness by default, configurable per service | `AuditLevel::Full` or `GateOnly` |
+| D10 | WASM-compiled shell with container sandbox | Shell scripts compiled to WASM |
+| D11 | Post-quantum dual signing (Ed25519 + ML-DSA-65) | Dual signatures on chain events |
+| D14 | `SpawnBackend::Tee` variant defined, returns not-available | TEE placeholder until hardware |
+| D19 | Breaking IPC: `MessageTarget::Service(name)` routing | Service-oriented message routing |
+| D21 | Phase ordering: K3 -> K4 -> K5 -> K6 with iteration | Not a strict waterfall |
+
+### Approved Changes (C1-C10)
+
+| ID | Change | Phase |
+|----|--------|-------|
+| C1 | `SpawnBackend` enum in `SpawnRequest` | K2.1 |
+| C2 | `ServiceApi` trait for internal API surface | K3 |
+| C3 | Chain-anchored service contracts | K3 |
+| C4 | Dual-layer gate in A2ARouter | K3 |
+| C5 | WASM-compiled shell pipeline | K3/K4 |
+| C6 | Post-quantum dual signing path | K2.1 |
+| C7 | `ChainAnchor` trait for blockchain anchoring | K4 |
+| C8 | `SpawnBackend::Tee` with `EnclaveConfig` | K2.1 |
+| C9 | N-dimensional `EffectVector` (configurable) | K3 |
+| C10 | K6 SPARC specification requirement | Pre-K6 |
+
+## K3 Symposium (2026-03-04)
+
+**Scope**: K3 tool lifecycle evaluation
+**Result**: 14 decisions, 8.1/10 overall score
+
+### Key Findings
+
+| ID | Finding | Severity |
+|----|---------|----------|
+| CF-1 | Gate action granularity gap (all tools gated as `tool.exec`) | Medium |
+| CF-2 | FsReadFileTool reads any path (no sandboxing) | Medium |
+| CF-3 | Per-agent ToolRegistry duplication | Low |
+
+### Decisions
+
+| ID | Decision | Impact |
+|----|----------|--------|
+| D1 | Tool-specific `gate_action` must be used in exec handler | K4 fix |
+| D2 | Tool sandboxing via `SandboxEnforcer.check_file_read()` | K4 |
+| D3 | Move ToolRegistry to Kernel struct, share via Arc | K4 optimization |
+
+### K2 Commitment Status at K3
+
+| Commitment | Status |
+|------------|--------|
+| C1 SpawnBackend | Shipped in K2.1 |
+| C2 ServiceApi | Not started |
+| C4 Dual-layer gate | Partial (handler done, routing deferred) |
+| C6 Post-quantum signing | Blocked (rvf-crypto API gap) |
+
+## ECC Symposium (2026-03-22)
+
+**Scope**: Ephemeral Causal Cognition substrate design
+**Result**: 14 decisions, SPARC plan created, K3c implementation plan
+
+### Architecture Decisions
+
+| ID | Decision | Rationale |
+|----|----------|-----------|
+| D1 | Nervous system model: every kernel instance is a cognitive node | Hardware-agnostic design |
+| D2 | Forest of trees (polyglot ensemble), not one graph | Domain-appropriate structures |
+| D3 | Self-calibrating cognitive tick (boot-time benchmark) | Hardware-determined interval |
+| D4 | CRDTs for convergence, Merkle for verification | Complementary, not competing |
+| D5 | DEMOCRITUS as nervous system operation (continuous, not batch) | 30s micro-batches |
+| D6 | BLAKE3 for new ECC code, SHAKE-256 for existing ExoChain | Single-hash per subsystem |
+| D7 | Per-tree scoring with uniform CrossRef indexing | Universal Node IDs |
+| D8 | One feature flag (`ecc`), boot decides what is active | Compile provides capability, boot provides config |
+
+### K3c Scope
+
+~3,500 lines across 6 modules: CausalGraph, HnswService, CognitiveTick, Calibration, CrossRef, ImpulseQueue.
+
+### Deferred to K4+
+
+WASM cognitive modules, RVF persistence migration, platform traits (Android/ESP32), CMVG delta sync, CRDT layered sync, spectral offloading, SONA integration, DEMOCRITUS flywheel.
+
+## K5 Symposium (2026-03-25)
+
+**Scope**: K6 mesh networking architecture
+**Result**: 15 decisions, 5 commitments, 8.0/10 readiness score
+
+### Architecture Decisions
+
+| ID | Decision | Rationale |
+|----|----------|-----------|
+| D1 | Selective composition (snow + quinn + selective libp2p) | Full control, fewer dependencies |
+| D2 | Ed25519 public key as node identity | Self-authenticating, no CA needed |
+| D3 | Noise Protocol for all inter-node encryption | Transport-agnostic, forward secrecy |
+| D4 | `governance.genesis` hash as cluster trust root | Already exists, no new infrastructure |
+| D5 | Feature-gated mesh networking (`mesh` feature) | Zero networking in default build |
+| D6 | QUIC primary, WebSocket for browsers | Multiplexing + browser compatibility |
+| D7 | Ruvector crates as pure computation (no I/O) | Clean composition boundary |
+| D8 | rvf-wire as mesh wire format | Already in workspace, zero-copy |
+| D9 | Dual signing (Ed25519 + ML-DSA-65) for cross-node events | Quantum resistance |
+| D10 | 6-phase implementation (K6.0-K6.5) | Each phase independently testable |
+
+### Commitments
+
+| ID | Commitment | Phase |
+|----|------------|-------|
+| C1 | `MessageTarget::RemoteNode` variant | K6.0 |
+| C2 | `GlobalPid` composite identifier | K6.0 |
+| C3 | `MeshTransport` trait | K6.1 |
+| C4 | `mesh` feature gate | K6.0 |
+| C5 | Cluster-join authentication via governance.genesis | K6.1 |
+
+### Readiness Assessment
+
+41 items wire-ready (GREEN), 22 need minor changes (YELLOW), 21 missing (RED). 6 critical gaps all addressable in ~1,500 new lines + ~370 changed lines.

@@ -1,0 +1,224 @@
+---
+title: "Deployment"
+description: "Docker deployment, WASM targets, CI/CD pipeline, and production configuration for clawft."
+---
+
+## Docker Deployment
+
+clawft ships as a minimal Docker image containing the statically-linked `weft` binary. The runtime image uses `debian:bookworm-slim` with only `ca-certificates`, `libssl3`, and `libgcc-s1`.
+
+### Quick Start
+
+```bash
+docker pull ghcr.io/clawft/clawft:latest
+docker run --rm -it ghcr.io/clawft/clawft:latest --version
+```
+
+By default the container starts in gateway mode (`weft gateway`).
+
+### Building from Source
+
+```bash
+git clone https://github.com/clawft/clawft.git
+cd clawft
+
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl
+
+mkdir -p docker-build
+cp target/x86_64-unknown-linux-musl/release/weft docker-build/weft-linux-x86_64
+
+docker build -t clawft:local .
+```
+
+### Configuration
+
+Mount your config file and pass API keys via environment variables:
+
+```bash
+docker run --rm -it \
+  -e OPENAI_API_KEY="sk-..." \
+  -v "$HOME/.clawft:/root/.clawft:ro" \
+  ghcr.io/clawft/clawft:latest gateway
+```
+
+For persistent session data, mount the workspace without `:ro`:
+
+```bash
+docker run --rm -it \
+  -v "$HOME/.clawft:/root/.clawft" \
+  ghcr.io/clawft/clawft:latest gateway
+```
+
+### Docker Compose
+
+```yaml
+services:
+  clawft:
+    image: ghcr.io/clawft/clawft:latest
+    command: ["gateway"]
+    restart: unless-stopped
+    volumes:
+      - ./config.json:/root/.clawft/config.json:ro
+      - clawft-data:/root/.clawft/workspace
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/weft", "status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  clawft-data:
+```
+
+```bash
+docker compose up -d
+docker compose logs -f clawft
+```
+
+### Health Checks
+
+The `weft status` command returns a non-zero exit code if the agent cannot initialize. Use it as a Docker health check or probe manually:
+
+```bash
+docker exec <container> /usr/local/bin/weft status
+```
+
+### Docker Image Variants
+
+| Variant | Features | Use Case |
+|---------|----------|----------|
+| Default | Standard build | Production gateway |
+| WASM-enabled | `--features wasm-plugins` | Plugin support |
+| Minimal | `--no-default-features` | Smallest image |
+
+```bash
+docker build --build-arg FEATURES="wasm-plugins" -t weft:wasm .
+```
+
+### Security Considerations
+
+- **Read-only filesystem** -- mount config as `:ro`, use named volumes for workspace
+- **Non-root execution** -- run with `--user 1000:1000` and adjust volume permissions
+- **Network restrictions** -- use `--network=none` for offline testing or create a dedicated network
+- **Secrets** -- never bake API keys into the image; use environment variables or Docker secrets
+
+---
+
+## WASM Deployment
+
+### Build Targets
+
+```bash
+# WASI target
+scripts/build.sh wasi
+
+# Browser target
+scripts/build.sh browser
+```
+
+The WASM binary is subject to size gates: < 300 KB raw, < 120 KB gzipped. The `release-wasm` profile uses `opt-level = "z"`.
+
+### Static Hosting
+
+Serve the `clawft_wasm.js` and `clawft_wasm_bg.wasm` files from any static host. Set `Content-Type: application/wasm` for `.wasm` files and enable compression.
+
+See [Browser Mode](/docs/clawft/browser) for detailed browser deployment instructions.
+
+---
+
+## CI/CD Pipeline
+
+The GitHub Actions workflow (`.github/workflows/pr-gates.yml`) enforces quality gates on every pull request.
+
+### PR Gate Jobs
+
+| Job | Command | Description |
+|-----|---------|-------------|
+| Clippy lint | `cargo clippy --workspace -- -D warnings` | Zero-warning clippy |
+| Test suite | `cargo test --workspace` | Full workspace tests |
+| WASM size gate | `scripts/bench/wasm-size-gate.sh` | Binary < 300 KB raw, < 120 KB gzipped |
+| Binary size check | `wc -c target/release/weft` | Release binary < 10 MB |
+| Integration smoke | Docker build + gateway start | Build, start gateway, verify 5s uptime |
+
+The pipeline uses `concurrency` groups to cancel stale runs.
+
+### Multi-Arch Docker Builds
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 -t weft .
+```
+
+The Dockerfile uses a multi-stage build with `cargo-chef` for dependency caching:
+
+1. **Chef stage** -- Install `cargo-chef`
+2. **Planner stage** -- Generate dependency recipe
+3. **Builder stage** -- Cook dependencies (cached), then build
+4. **Runtime stage** -- `debian:bookworm-slim` with stripped binary
+
+---
+
+## Production Configuration
+
+### Recommended Settings
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": "anthropic/claude-sonnet-4-20250514",
+      "max_tokens": 8192,
+      "max_tool_iterations": 10,
+      "memory_window": 30
+    }
+  },
+  "gateway": {
+    "host": "0.0.0.0",
+    "port": 18790
+  },
+  "tools": {
+    "commandPolicy": {
+      "mode": "allowlist"
+    },
+    "urlPolicy": {
+      "enabled": true,
+      "allowPrivate": false
+    }
+  }
+}
+```
+
+### Checklist
+
+- Set API keys via environment variables, never in config files
+- Use allowlist mode for command execution policy
+- Keep URL safety enabled with `allowPrivate: false`
+- Mount config as read-only in containers
+- Enable health checks for container orchestration
+- Set `RUST_LOG` appropriately (`warn` for production, `info` or `debug` for troubleshooting)
+- Review `weft security scan` output before deployment
+- Use persistent volumes for session and memory data
+
+### Troubleshooting
+
+**Container exits immediately** -- Check config JSON validity and volume mount paths:
+
+```bash
+docker run --rm -it \
+  -v "$HOME/.clawft:/root/.clawft:ro" \
+  ghcr.io/clawft/clawft:latest status --detailed
+```
+
+**Cannot reach LLM API** -- Verify DNS and network access. If behind a proxy, pass `HTTPS_PROXY`:
+
+```bash
+docker run --rm -e HTTPS_PROXY="http://proxy:8080" ...
+```
+
+**Permission denied on config** -- Ensure the file is readable:
+
+```bash
+chmod 644 ~/.clawft/config.json
+```

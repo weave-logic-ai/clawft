@@ -10,16 +10,31 @@ description = "Platform abstraction layer for clawft"
 keywords = ["platform", "abstraction", "wasm", "http", "filesystem"]
 categories = ["development-tools"]
 
+[features]
+default = ["native"]
+native = ["dep:tokio", "dep:reqwest", "dep:dirs", "clawft-types/native"]
+browser = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:web-sys", "dep:js-sys", "dep:getrandom", "clawft-types/browser"]
+
 [dependencies]
-clawft-types = { workspace = true }
+# Always available (trait definitions)
+clawft-types = { workspace = true, default-features = false }
 async-trait = { workspace = true }
-tokio = { workspace = true }
-reqwest = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-dirs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# Native only
+tokio = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+dirs = { workspace = true, optional = true }
+
+# Browser only
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", optional = true, features = ["Request", "RequestInit", "RequestMode", "Response", "Headers", "Window", "WorkerGlobalScope"] }
+js-sys = { version = "0.3", optional = true }
+getrandom = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

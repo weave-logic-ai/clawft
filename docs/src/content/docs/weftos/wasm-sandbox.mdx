@@ -1,0 +1,69 @@
+---
+title: "WASM Sandbox"
+description: "WASM tool sandboxing with Wasmtime, fuel metering, memory limits, tool catalog, and lifecycle chain logging."
+---
+
+The WASM sandbox provides isolated tool execution with configurable resource limits. Tools run as WASM modules inside a Wasmtime runtime with fuel metering, memory caps, and optional WASI access.
+
+**Source**: `crates/clawft-kernel/src/wasm_runner.rs` (~1,639 lines)
+**Feature**: `wasm-sandbox`
+
+## WasmToolRunner
+
+```rust
+pub struct WasmToolRunner {
+    config: WasmSandboxConfig,
+}
+```
+
+Executes WASM modules with fuel metering (each instruction consumes fuel), memory limits via `ResourceLimiter`, and configurable timeout.
+
+## WasmSandboxConfig
+
+```rust
+pub struct WasmSandboxConfig {
+    pub fuel_limit: u64,
+    pub memory_limit_bytes: u64,
+    pub timeout_ms: u64,
+    pub wasi_enabled: bool,
+    pub wasi_fs_scope: WasiFsScope,
+}
+
+pub enum WasiFsScope {
+    None,
+    ReadOnly(Vec<PathBuf>),
+    ReadWrite(Vec<PathBuf>),
+}
+```
+
+## Tool Catalog (27 Built-in Tools)
+
+| Category | Tools | Gate Action Prefix |
+|----------|------:|-------------------|
+| Agent | 7 | `tool.agent.*` |
+| IPC | 2 | `tool.ipc.*` |
+| Filesystem | 9 | `tool.fs.*` |
+| System | 6 | `tool.sys.*` |
+| ECC | 7 | `tool.ecc.*` (ecc feature) |
+
+Each tool has a `BuiltinToolSpec` with an `EffectVector` for governance scoring.
+
+## Tool Lifecycle
+
+```
+Build -> Deploy -> Execute -> Version -> Revoke
+```
+
+All phases are chain-logged when `exochain` is enabled.
+
+## Host Isolation
+
+By default, WASM modules have no access to filesystem, network, environment variables, or system clock unless explicitly configured via `WasiFsScope`.
+
+## Tool Signing
+
+`ToolSigningAuthority` provides Ed25519 signing for tool provenance. `compute_module_hash()` and `verify_tool_signature()` ensure tool integrity.
+
+## CompiledModuleCache
+
+LRU cache of compiled WASM modules keyed by content hash to avoid repeated compilation.

@@ -1,0 +1,150 @@
+---
+title: "Governance"
+description: "Three-branch constitutional governance model with EffectVector scoring, GovernanceDecision outcomes, GateBackend trait, and environment-scoped enforcement."
+---
+
+WeftOS implements a three-branch constitutional governance model. Every action an agent takes passes through a governance evaluation pipeline before it is allowed to proceed.
+
+**Source**: `crates/clawft-kernel/src/governance.rs` (~400 lines), `crates/clawft-kernel/src/gate.rs` (~850 lines)
+
+## Three-Branch Model
+
+```
+                    +-----------------+
+                    |   Constitution  |
+                    | (Chain Genesis) |
+                    +--------+--------+
+                             |
+            +----------------+----------------+
+            |                |                |
+   +--------v--------+  +---v-----------+  +-v--------------+
+   |   LEGISLATIVE   |  |   EXECUTIVE   |  |    JUDICIAL    |
+   |                  |  |               |  |                |
+   | SOPs, manifests, |  | Agent exec    |  | CGR validation |
+   | genesis rules,   |  | policies,     |  | engine, bias   |
+   | data protection  |  | deployment,   |  | checks, audit  |
+   |                  |  | lifecycle     |  | compliance     |
+   +------------------+  +---------------+  +----------------+
+```
+
+No branch can modify another branch's constraints. The `GovernanceBranch` attached to every rule is immutable once anchored to the chain.
+
+```rust
+pub enum GovernanceBranch { Legislative, Executive, Judicial }
+```
+
+## GovernanceRule
+
+```rust
+pub struct GovernanceRule {
+    pub id: String,
+    pub description: String,
+    pub branch: GovernanceBranch,
+    pub severity: RuleSeverity,
+    pub active: bool,
+    pub reference_url: Option<String>,
+    pub sop_category: Option<String>,
+}
+
+pub enum RuleSeverity { Informational, Warning, Blocking }
+```
+
+## GovernanceRequest and Decision
+
+```rust
+pub struct GovernanceRequest {
+    pub agent_id: String,
+    pub action: String,
+    pub effect: EffectVector,
+    pub context: serde_json::Value,
+    pub node_id: Option<String>,
+}
+
+pub enum GovernanceDecision {
+    Permit,
+    PermitWithWarning(String),
+    EscalateToHuman(String),
+    Deny(String),
+}
+```
+
+## EffectVector (5D)
+
+```rust
+pub struct EffectVector {
+    pub risk: f64,       // 0.0 - 1.0
+    pub fairness: f64,
+    pub privacy: f64,
+    pub novelty: f64,
+    pub security: f64,
+}
+```
+
+**Magnitude**: `sqrt(risk^2 + fairness^2 + privacy^2 + novelty^2 + security^2)`
+
+If magnitude exceeds `risk_threshold` and a Blocking rule matches, the decision is Deny.
+
+## Dual-Layer Enforcement (Symposium D7)
+
+```
+  Agent A                                        Agent B
+    |                                              |
+    | send(msg)                                    |
+    |----> A2ARouter                               |
+    |        | 1. ROUTING GATE                     |
+    |        |    Deny -> error to A               |
+    |        |    Permit -> deliver                 |
+    |        +-----------------------------------> |
+    |                                   agent_loop |
+    |                                   2. HANDLER |
+    |                                      GATE    |
+    |                                   Deny->err  |
+    |                                   Permit->ok |
+```
+
+## GateBackend Trait
+
+```rust
+pub trait GateBackend: Send + Sync {
+    fn check(&self, agent_id: &str, action: &str, context: &Value) -> GateDecision;
+}
+
+pub enum GateDecision {
+    Permit { token: Option<String> },
+    Defer { reason: String },
+    Deny { reason: String, receipt: Option<String> },
+}
+```
+
+Implementations: `CapabilityGate`, `GovernanceGate`, `TileZeroGate` (tilezero feature).
+
+## Environment-Scoped Governance
+
+```rust
+pub enum EnvironmentClass { Development, Staging, Production }
+```
+
+Each environment configures its governance scope, risk threshold, audit level, and learning mode.
+
+## Default Genesis Rules
+
+22 rules across all three branches:
+
+| Branch | Count | Blocking | Warning | Advisory |
+|--------|------:|:--------:|:-------:|:--------:|
+| Legislative | 8 | 3 | 4 | 1 |
+| Executive | 7 | 2 | 2 | 3 |
+| Judicial | 7 | 3 | 2 | 2 |
+
+Includes AI-SDLC SOP compliance rules (AI-IRB approval, secure coding, bias assessment, data protection).
+
+## Chain Events
+
+| Event Kind | Trigger |
+|------------|---------|
+| `governance.genesis` | Boot (constitution) |
+| `governance.rule` | Boot (per-rule anchor) |
+| `governance.permit` | Action permitted |
+| `governance.warn` | Action permitted with warning |
+| `governance.defer` | Action escalated |
+| `governance.deny` | Action denied |

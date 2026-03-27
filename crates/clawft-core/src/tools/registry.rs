@@ -300,7 +300,8 @@ pub fn extract_mcp_metadata(tool_decl: &serde_json::Value) -> ToolMetadata {
 ///     }
 /// }
 /// ```
-#[async_trait]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
 pub trait Tool: Send + Sync {
     /// The unique name of this tool (used in LLM function calling).
     fn name(&self) -> &str;
@@ -497,6 +498,34 @@ impl ToolRegistry {
     /// Return true if no tools are registered.
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
+    }
+
+    /// Create a filtered snapshot of this registry containing only tools
+    /// whose names are in the given allow list.
+    ///
+    /// If `allow` is empty, all tools are included (no filtering).
+    /// If `deny` is non-empty, matching tools are excluded even if
+    /// they appear in the allow list (deny overrides allow).
+    ///
+    /// This is used by the kernel supervisor to create per-agent
+    /// tool registries that respect capability restrictions.
+    pub fn filtered_tools(&self, allow: &[String], deny: &[String]) -> Self {
+        let mut filtered = Self::new();
+        for (name, tool) in &self.tools {
+            // Check deny list first
+            if deny.iter().any(|d| d == name) {
+                continue;
+            }
+            // Check allow list (empty = all allowed)
+            if !allow.is_empty() && !allow.iter().any(|a| a == name) {
+                continue;
+            }
+            filtered.tools.insert(name.clone(), tool.clone());
+            if let Some(meta) = self.metadata.get(name) {
+                filtered.metadata.insert(name.clone(), meta.clone());
+            }
+        }
+        filtered
     }
 
     /// Create a snapshot of this registry as a new `ToolRegistry`.
@@ -1269,6 +1298,78 @@ mod tests {
             )
             .await;
         assert!(result.is_ok());
+    }
+
+    // ── filtered_tools tests ───────────────────────────────────────
+
+    #[test]
+    fn filtered_tools_allow_empty_returns_all() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool));
+        registry.register(Arc::new(AddTool));
+        registry.register(Arc::new(FailTool));
+
+        let filtered = registry.filtered_tools(&[], &[]);
+        assert_eq!(filtered.len(), 3);
+    }
+
+    #[test]
+    fn filtered_tools_allow_restricts() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool));
+        registry.register(Arc::new(AddTool));
+        registry.register(Arc::new(FailTool));
+
+        let filtered = registry.filtered_tools(&["echo".into(), "add".into()], &[]);
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.has("echo"));
+        assert!(filtered.has("add"));
+        assert!(!filtered.has("fail"));
+    }
+
+    #[test]
+    fn filtered_tools_deny_overrides_allow() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool));
+        registry.register(Arc::new(AddTool));
+
+        let filtered = registry.filtered_tools(
+            &["echo".into(), "add".into()],
+            &["echo".into()],
+        );
+        assert_eq!(filtered.len(), 1);
+        assert!(filtered.has("add"));
+        assert!(!filtered.has("echo"));
+    }
+
+    #[test]
+    fn filtered_tools_deny_only() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool));
+        registry.register(Arc::new(AddTool));
+        registry.register(Arc::new(FailTool));
+
+        let filtered = registry.filtered_tools(&[], &["fail".into()]);
+        assert_eq!(filtered.len(), 2);
+        assert!(!filtered.has("fail"));
+    }
+
+    #[test]
+    fn filtered_tools_preserves_metadata() {
+        let mut registry = ToolRegistry::new();
+        let meta = ToolMetadata {
+            required_permission_level: Some(2),
+            ..ToolMetadata::default()
+        };
+        registry.register_with_metadata(Arc::new(EchoTool), meta);
+        registry.register(Arc::new(AddTool));
+
+        let filtered = registry.filtered_tools(&["echo".into()], &[]);
+        assert!(filtered.get_metadata("echo").is_some());
+        assert_eq!(
+            filtered.get_metadata("echo").unwrap().required_permission_level,
+            Some(2)
+        );
     }
 
     #[tokio::test]

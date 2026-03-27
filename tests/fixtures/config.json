@@ -28,7 +28,8 @@
   },
   "providers": {
     "anthropic": {
-      "apiKey": "sk-ant-test-key"
+      "apiKey": "sk-ant-test-key",
+      "browserDirect": true
     },
     "openrouter": {
       "apiKey": "sk-or-test-key",
@@ -40,7 +41,10 @@
   },
   "gateway": {
     "host": "0.0.0.0",
-    "port": 18790
+    "port": 18790,
+    "apiPort": 18789,
+    "corsOrigins": ["http://localhost:5173"],
+    "apiEnabled": false
   },
   "tools": {
     "web": {
@@ -60,6 +64,18 @@
         "env": {},
         "internalOnly": false
       }
+    }
+  },
+  "voice": {
+    "enabled": false,
+    "audio": {
+      "sampleRate": 16000,
+      "chunkSize": 512,
+      "channels": 1
+    },
+    "vad": {
+      "threshold": 0.5,
+      "silenceTimeoutMs": 1500
     }
   }
 }

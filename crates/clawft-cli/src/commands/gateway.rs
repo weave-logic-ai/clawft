@@ -38,6 +38,8 @@ use clawft_channels::discord::DiscordChannelFactory;
 use clawft_channels::slack::SlackChannelFactory;
 #[cfg(feature = "channels")]
 use clawft_channels::telegram::TelegramChannelFactory;
+#[cfg(all(feature = "channels", feature = "api"))]
+use clawft_channels::web::{WebChannelFactory, WebPublisher};
 use clawft_core::bootstrap::AppContext;
 use clawft_platform::NativePlatform;
 #[cfg(feature = "services")]
@@ -51,6 +53,16 @@ use crate::markdown::dispatch::MarkdownDispatcher;
 #[cfg(feature = "channels")]
 use super::make_channel_host;
 use super::load_config;
+
+#[cfg(feature = "api")]
+use clawft_services::api::{AgentInfo, ApiState};
+#[cfg(feature = "api")]
+use clawft_services::api::bridge::{
+    AgentBridge, BusBridge, ChannelBridge, ConfigBridge, MemoryBridge, SessionBridge, SkillBridge,
+    ToolBridge, VoiceBridge,
+};
+#[cfg(feature = "api")]
+use clawft_services::api::broadcaster::TopicBroadcaster;
 
 /// Arguments for the `weft gateway` subcommand.
 #[derive(Args)]
@@ -108,10 +120,25 @@ pub async fn run(args: GatewayArgs) -> anyhow::Result<()> {
 /// Inner implementation when the `channels` feature is enabled.
 #[cfg(feature = "channels")]
 async fn run_with_channels(args: GatewayArgs) -> anyhow::Result<()> {
+    let platform = Arc::new(NativePlatform::new());
+    let config = load_config(&*platform, args.config.as_deref()).await?;
+    run_with_config(config, args.intelligent_routing, None).await
+}
+
+/// Run the gateway with a pre-loaded [`Config`].
+///
+/// This is the shared inner function used by both `weft gateway` and
+/// `weft ui`. The `static_dir` parameter, when `Some`, enables SPA-style
+/// static file serving for the built frontend.
+#[cfg(feature = "channels")]
+pub async fn run_with_config(
+    config: clawft_types::config::Config,
+    intelligent_routing: bool,
+    static_dir: Option<String>,
+) -> anyhow::Result<()> {
     info!("starting weft gateway");
 
     let platform = Arc::new(NativePlatform::new());
-    let config = load_config(&*platform, args.config.as_deref()).await?;
 
     // ── Bootstrap AppContext (bus, sessions, tools, pipeline) ────────
     let mut ctx = AppContext::new(config.clone(), platform.clone())
@@ -134,7 +161,7 @@ async fn run_with_channels(args: GatewayArgs) -> anyhow::Result<()> {
     ctx.enable_live_llm();
 
     // Intelligent routing.
-    if args.intelligent_routing {
+    if intelligent_routing {
         #[cfg(feature = "vector-memory")]
         {
             info!("intelligent routing enabled for gateway");
@@ -148,8 +175,61 @@ async fn run_with_channels(args: GatewayArgs) -> anyhow::Result<()> {
         }
     }
 
-    // Clone the bus reference before consuming AppContext.
+    // Clone shared references before consuming AppContext.
     let bus = ctx.bus().clone();
+
+    // ── Cancellation token (shared by all background tasks) ─────────
+    let cancel = CancellationToken::new();
+
+    // ── API server (optional, feature-gated) ────────────────────────
+    //
+    // The broadcaster is created here so it can be shared between the
+    // API (WebSocket/SSE handlers) and the outbound dispatch loop.
+    #[cfg(feature = "api")]
+    let api_broadcaster: Option<Arc<TopicBroadcaster>> = if config.gateway.api_enabled {
+        Some(Arc::new(TopicBroadcaster::new()))
+    } else {
+        None
+    };
+
+    #[cfg(not(feature = "api"))]
+    let api_broadcaster: Option<()> = None;
+
+    #[cfg(feature = "api")]
+    let api_handle: Option<tokio::task::JoinHandle<()>> = if config.gateway.api_enabled {
+        let broadcaster = api_broadcaster.clone().expect("broadcaster created above");
+        let api_state = build_api_state(&ctx, &config, broadcaster);
+        let cors_origins = config.gateway.cors_origins.clone();
+        let api_host = config.gateway.host.clone();
+        let port = config.gateway.api_port;
+        let addr = format!("{api_host}:{port}");
+        let listener = tokio::net::TcpListener::bind(&addr)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to bind API listener on {addr}: {e}"))?;
+        info!(addr = %addr, "REST/WS API listening");
+        eprintln!("API listening on http://{}:{}", api_host, port);
+        let api_cancel = cancel.clone();
+        let api_static_dir = static_dir.clone();
+        let handle = tokio::spawn(async move {
+            if let Err(e) = clawft_services::api::serve(
+                listener,
+                api_state,
+                &cors_origins,
+                api_static_dir.as_deref(),
+                api_cancel.cancelled_owned(),
+            )
+            .await
+            {
+                error!(error = %e, "API server exited with error");
+            }
+        });
+        Some(handle)
+    } else {
+        None
+    };
+
+    #[cfg(not(feature = "api"))]
+    let api_handle: Option<tokio::task::JoinHandle<()>> = None;
 
     // ── Channel setup ───────────────────────────────────────────────
     let host = make_channel_host(bus.clone());
@@ -205,11 +285,30 @@ async fn run_with_channels(args: GatewayArgs) -> anyhow::Result<()> {
         any_channel = true;
     }
 
-    if !any_channel {
+    // Web channel — register when the API (and its broadcaster) is enabled.
+    #[cfg(feature = "api")]
+    if config.gateway.api_enabled
+        && let Some(ref broadcaster) = api_broadcaster
+    {
+        let publisher: Arc<dyn WebPublisher> = Arc::new(BroadcasterPublisher {
+            broadcaster: broadcaster.clone(),
+        });
+        plugin_host
+            .register_factory(Arc::new(WebChannelFactory::new(publisher)))
+            .await;
+        plugin_host
+            .init_channel("web", &serde_json::json!({}))
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to init web channel: {e}"))?;
+        info!("web channel initialized");
+        any_channel = true;
+    }
+
+    if !any_channel && !config.gateway.api_enabled {
         anyhow::bail!(
-            "no channels are enabled in config. \
+            "no channels are enabled and API is disabled. \
              Enable at least one channel (e.g., telegram, slack, discord) \
-             and provide credentials."
+             with credentials, or set gateway.api_enabled = true."
         );
     }
 
@@ -225,12 +324,9 @@ async fn run_with_channels(args: GatewayArgs) -> anyhow::Result<()> {
     }
 
     let started_count = start_results.iter().filter(|(_, r)| r.is_ok()).count();
-    if started_count == 0 {
-        anyhow::bail!("no channels started successfully");
+    if started_count == 0 && !config.gateway.api_enabled {
+        anyhow::bail!("no channels started successfully and API is disabled");
     }
-
-    // ── Cancellation token (shared by all background tasks) ─────────
-    let cancel = CancellationToken::new();
 
     // ── Background services ──────────────────────────────────────────
 
@@ -306,6 +402,10 @@ async fn run_with_channels(args: GatewayArgs) -> anyhow::Result<()> {
     let plugin_host_for_dispatch = plugin_host.clone();
     let md_dispatcher = MarkdownDispatcher::new();
 
+    // Clone the broadcaster for the dispatch loop (if API is enabled).
+    #[cfg(feature = "api")]
+    let dispatch_broadcaster = api_broadcaster.clone();
+
     let dispatch_handle = tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -329,6 +429,9 @@ async fn run_with_channels(args: GatewayArgs) -> anyhow::Result<()> {
                                 &outbound.channel,
                                 &outbound.content,
                             );
+
+                            // Route through the plugin host — all channels
+                            // (telegram, slack, discord, web) are registered.
                             if let Err(e) = plugin_host_for_dispatch
                                 .send_to_channel(&outbound)
                                 .await
@@ -339,6 +442,35 @@ async fn run_with_channels(args: GatewayArgs) -> anyhow::Result<()> {
                                     error = %e,
                                     "outbound dispatch failed"
                                 );
+                            }
+
+                            // For non-web channels, also broadcast to
+                            // WebSocket/SSE subscribers so the web dashboard
+                            // can display messages from all channels.
+                            // (Web channel messages are already broadcast by
+                            // WebChannel::send().)
+                            #[cfg(feature = "api")]
+                            if outbound.channel != "web"
+                                && let Some(ref bc) = dispatch_broadcaster
+                            {
+                                let topic = format!("sessions:{}", outbound.chat_id);
+                                let msg = serde_json::json!({
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": &outbound.content,
+                                    "session_key": &outbound.chat_id,
+                                    "channel": &outbound.channel,
+                                    "timestamp": chrono::Utc::now().to_rfc3339()
+                                });
+                                let bc = bc.clone();
+                                let chat_id = outbound.chat_id.clone();
+                                tokio::spawn(async move {
+                                    bc.publish(&topic, msg).await;
+                                    bc.publish("sessions", serde_json::json!({
+                                        "type": "message_added",
+                                        "session_key": &chat_id
+                                    })).await;
+                                });
                             }
                         }
                         None => {
@@ -351,9 +483,10 @@ async fn run_with_channels(args: GatewayArgs) -> anyhow::Result<()> {
         }
     });
 
-    info!(channels = started_count, "gateway running");
+    let api_status = if config.gateway.api_enabled { " + API" } else { "" };
+    info!(channels = started_count, api = config.gateway.api_enabled, "gateway running");
     eprintln!(
-        "gateway running ({started_count} channel{}) -- press Ctrl+C to stop",
+        "gateway running ({started_count} channel{}{api_status}) -- press Ctrl+C to stop",
         if started_count == 1 { "" } else { "s" }
     );
 
@@ -407,8 +540,103 @@ async fn run_with_channels(args: GatewayArgs) -> anyhow::Result<()> {
     let _ = dispatch_handle.await;
     let _ = agent_handle.await;
 
+    // 6. Await API server (if running).
+    if let Some(h) = api_handle {
+        let _ = h.await;
+    }
+
     info!("gateway shutdown complete");
     Ok(())
+}
+
+/// Bridges [`TopicBroadcaster`] to the [`WebPublisher`] trait so the
+/// [`WebChannel`] can publish messages to WebSocket/SSE subscribers.
+#[cfg(all(feature = "api", feature = "channels"))]
+struct BroadcasterPublisher {
+    broadcaster: Arc<TopicBroadcaster>,
+}
+
+#[cfg(all(feature = "api", feature = "channels"))]
+#[async_trait::async_trait]
+impl WebPublisher for BroadcasterPublisher {
+    async fn publish(&self, topic: &str, message: serde_json::Value) {
+        self.broadcaster.publish(topic, message).await;
+    }
+}
+
+/// Build an [`ApiState`] from an [`AppContext`] by extracting shared Arc
+/// references and wrapping them in bridge implementations.
+///
+/// The `broadcaster` parameter is the shared [`TopicBroadcaster`] that is
+/// also passed to the outbound dispatch loop for publishing events.
+///
+/// Must be called BEFORE `ctx.into_agent_loop()`, which consumes the context.
+#[cfg(all(feature = "api", feature = "channels"))]
+fn build_api_state(
+    ctx: &AppContext<NativePlatform>,
+    config: &clawft_types::config::Config,
+    broadcaster: Arc<TopicBroadcaster>,
+) -> ApiState {
+    use clawft_services::api::auth::TokenStore;
+
+    let tool_bridge = ToolBridge::new(ctx.tools_arc());
+    let session_bridge = SessionBridge::new(ctx.sessions().clone());
+    let bus_bridge = BusBridge::new(ctx.bus().clone());
+    let skill_bridge = SkillBridge::new(ctx.skills().clone());
+    let memory_bridge = MemoryBridge::new(ctx.memory().clone());
+    let config_bridge = ConfigBridge::new(config.clone());
+    let channel_bridge =
+        ChannelBridge::from_config(&config.channels, config.gateway.api_enabled);
+
+    // Discover agents from the 3-level hierarchy (workspace > user > builtin).
+    let user_agents_dir = dirs::home_dir().map(|h| h.join(".clawft").join("agents"));
+    let workspace_agents_dir = {
+        let ws = config.workspace_path();
+        let d = ws.join("agents");
+        if d.is_dir() { Some(d) } else { None }
+    };
+    let agent_bridge = match clawft_core::agent::agents::AgentRegistry::discover(
+        workspace_agents_dir.as_deref(),
+        user_agents_dir.as_deref(),
+        vec![],
+    ) {
+        Ok(registry) => {
+            let infos: Vec<AgentInfo> = registry
+                .list()
+                .into_iter()
+                .map(|def| AgentInfo {
+                    name: def.name.clone(),
+                    description: def.description.clone(),
+                    model: def.model.clone().unwrap_or_else(|| {
+                        config.agents.defaults.model.clone()
+                    }),
+                    skills: def.skills.clone(),
+                })
+                .collect();
+            tracing::info!(count = infos.len(), "discovered agents for API");
+            AgentBridge::new(infos)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "agent discovery failed, API will show empty list");
+            AgentBridge::empty()
+        }
+    };
+
+    let voice_bridge = VoiceBridge::new(config.voice.clone(), config.providers.clone());
+
+    ApiState {
+        tools: Arc::new(tool_bridge),
+        sessions: Arc::new(session_bridge),
+        agents: Arc::new(agent_bridge),
+        bus: Arc::new(bus_bridge),
+        auth: Arc::new(TokenStore::new()),
+        skills: Arc::new(skill_bridge),
+        memory: Arc::new(memory_bridge),
+        config: Arc::new(config_bridge),
+        channels: Arc::new(channel_bridge),
+        voice: Arc::new(voice_bridge),
+        broadcaster,
+    }
 }
 
 #[cfg(test)]

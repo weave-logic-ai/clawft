@@ -1,0 +1,70 @@
+---
+title: "Application Framework"
+description: "AppManifest structure, agent/tool/service specs, app lifecycle management, and CLI commands for WeftOS applications."
+---
+
+The application framework provides manifest-based packaging and lifecycle management for agent applications via `weftapp.toml`.
+
+**Source**: `crates/clawft-kernel/src/app.rs` (~980 lines)
+
+## AppManifest
+
+```rust
+pub struct AppManifest {
+    pub name: String,
+    pub version: String,
+    pub description: Option<String>,
+    pub agents: Vec<AgentSpec>,
+    pub services: Vec<ServiceSpec>,
+    pub tools: Vec<ToolSpec>,
+    pub capabilities: AppCapabilities,
+    pub hooks: AppHooks,
+}
+```
+
+### Component Specs
+
+```rust
+pub struct AgentSpec {
+    pub name: String,
+    pub agent_type: String,
+    pub capabilities: AgentCapabilities,
+    pub resource_limits: ResourceLimits,
+}
+
+pub struct ToolSpec {
+    pub name: String,
+    pub source: ToolSource,  // Native, Wasm { module_path }, Api { endpoint }
+    pub description: String,
+}
+```
+
+## App Lifecycle
+
+```rust
+pub enum AppState {
+    Installed, Starting, Running, Stopping, Stopped, Failed,
+}
+```
+
+## AppManager API
+
+```rust
+impl AppManager {
+    pub fn install(&self, manifest: AppManifest) -> Result<(), AppError>;
+    pub fn start(&self, name: &str) -> Result<(), AppError>;
+    pub fn stop(&self, name: &str) -> Result<(), AppError>;
+    pub fn uninstall(&self, name: &str) -> Result<(), AppError>;
+    pub fn list(&self) -> Vec<(String, InstalledApp)>;
+}
+```
+
+## Agent Spawning
+
+When an app starts, the AppManager creates `SpawnRequest` entries from each `AgentSpec`, spawns through the `AgentSupervisor`, registers services, loads tools, and registers under `/apps/{name}`.
+
+## CLI
+
+```bash
+weft app list | install <manifest> | start <name> | stop <name> | uninstall <name>
+```

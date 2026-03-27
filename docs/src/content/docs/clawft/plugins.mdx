@@ -1,0 +1,232 @@
+---
+title: "Plugin System"
+description: "Plugin system architecture, six extension points, WASM sandbox, built-in plugins, and how to write custom plugins."
+---
+
+## Overview
+
+The clawft plugin system provides six core extension points through the `clawft-plugin` crate, plus runtime WASM sandboxing, skill hot-reload, autonomous skill creation, slash-command integration, and MCP tool exposure.
+
+| Extension Point | Trait | Purpose |
+|----------------|-------|---------|
+| Tools | `Tool` | Agent tool execution (web search, file I/O, etc.) |
+| Channels | `ChannelAdapter` | External platform message handling |
+| Pipeline Stages | `PipelineStage` | Custom processing stages in the agent pipeline |
+| Skills | `Skill` | High-level agent capabilities with tools and instructions |
+| Memory Backends | `MemoryBackend` | Pluggable memory storage (vector, KV, graph) |
+| Voice Handlers | `VoiceHandler` | Voice/audio processing |
+
+## Plugin Manifest
+
+Every plugin declares its capabilities, permissions, and resource limits through a `clawft.plugin.json` manifest file:
+
+```json
+{
+  "name": "my-plugin",
+  "version": "0.1.0",
+  "capabilities": ["tool"],
+  "permissions": {
+    "network": false,
+    "filesystem": false,
+    "env_vars": []
+  },
+  "resources": {
+    "max_memory_mb": 64,
+    "max_cpu_seconds": 10
+  }
+}
+```
+
+The `PluginManifest` struct in `clawft-plugin` validates and parses this file.
+
+## Plugin Traits
+
+### Tool
+
+```rust
+#[async_trait]
+pub trait Tool: Send + Sync {
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
+    fn parameters_schema(&self) -> serde_json::Value;
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        ctx: &dyn ToolContext,
+    ) -> Result<serde_json::Value, PluginError>;
+}
+```
+
+### ChannelAdapter
+
+```rust
+#[async_trait]
+pub trait ChannelAdapter: Send + Sync {
+    fn name(&self) -> &str;
+    async fn start(&mut self, host: Arc<dyn ChannelAdapterHost>) -> Result<(), PluginError>;
+    async fn stop(&mut self) -> Result<(), PluginError>;
+    async fn send(&self, payload: MessagePayload) -> Result<(), PluginError>;
+}
+```
+
+### PipelineStage
+
+```rust
+#[async_trait]
+pub trait PipelineStage: Send + Sync {
+    fn stage_type(&self) -> PipelineStageType;
+    fn name(&self) -> &str;
+    async fn process(
+        &self,
+        input: serde_json::Value,
+    ) -> Result<serde_json::Value, PluginError>;
+}
+```
+
+### Skill
+
+```rust
+#[async_trait]
+pub trait Skill: Send + Sync {
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
+    fn tools(&self) -> Vec<Arc<dyn Tool>>;
+    fn system_prompt(&self) -> Option<String>;
+}
+```
+
+### MemoryBackend
+
+```rust
+#[async_trait]
+pub trait MemoryBackend: Send + Sync {
+    async fn store(&self, key: &str, value: &[u8]) -> Result<(), PluginError>;
+    async fn retrieve(&self, key: &str) -> Result<Option<Vec<u8>>, PluginError>;
+    async fn delete(&self, key: &str) -> Result<(), PluginError>;
+    async fn search(&self, query: &str, limit: usize) -> Result<Vec<String>, PluginError>;
+}
+```
+
+## Built-in Plugin Crates
+
+Nine plugin crates extend the framework:
+
+| Crate | Purpose | Key Dependencies |
+|-------|---------|-----------------|
+| `clawft-plugin-git` | 7 git tools (status, diff, log, commit, branch, checkout, blame) | git2 |
+| `clawft-plugin-cargo` | 5 cargo subcommands (build, test, check, clippy, fmt) | (subprocess) |
+| `clawft-plugin-oauth2` | OAuth2 auth flows + authenticated REST tools | reqwest |
+| `clawft-plugin-treesitter` | AST analysis (parse, query, symbols, patterns) | tree-sitter |
+| `clawft-plugin-browser` | CDP browser automation (navigate, screenshot, eval, interact) | tokio |
+| `clawft-plugin-calendar` | Calendar CRUD (create, read, update, delete, list) | chrono |
+| `clawft-plugin-containers` | Docker/Podman lifecycle (build, run, stop, logs, list) | tokio |
+| `clawft-security` | 57 audit checks across 10 categories; `weft security scan` | clawft-types |
+
+All plugin crates depend on `clawft-plugin` for the `Tool` trait.
+
+## WASM Sandbox
+
+Feature gate: `wasm-plugins`
+
+The WASM plugin host uses wasmtime 29 with the WIT component model to execute untrusted plugin code in a sandboxed environment.
+
+### Resource Limits
+
+| Resource | Default | Configurable |
+|----------|---------|-------------|
+| Fuel (CPU budget) | 1,000,000,000 instructions | Yes |
+| Memory | 16 MB | Yes |
+| Binary size | 300 KB max | Yes |
+| Wall-clock timeout | Epoch interruption | Yes |
+
+### Host Functions
+
+Five host functions are exposed to WASM plugins, each gated by the plugin's declared permissions:
+
+| Function | Permission Gate | Behavior |
+|----------|----------------|----------|
+| `http-request` | `permissions.network` | Validates URL against allowlist; rejects private IPs (SSRF check). Rate-limited. |
+| `read-file` | `permissions.filesystem` | Canonicalizes path; rejects symlinks outside allowed directories. |
+| `write-file` | `permissions.filesystem` | Same canonicalization and symlink rejection. |
+| `get-env` | `permissions.env_vars` | Returns only explicitly listed environment variables. |
+| `log` | Always available | Rate-limited to prevent log flooding. |
+
+All host function calls are audit-logged. Fuel metering tracks instruction count (traps on exhaustion), and epoch interruption provides wall-clock timeout as a secondary safeguard.
+
+## Plugin Permission System
+
+### PluginPermissions
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `network` | `Vec<String>` | URL allowlist for `http-request` |
+| `filesystem` | `Vec<PathBuf>` | Allowed directory paths for file access |
+| `env_vars` | `Vec<String>` | Permitted environment variable names |
+| `shell` | `bool` | Whether shell execution is allowed |
+
+### Permission Diff
+
+When a plugin version upgrade requests new permissions, `PermissionDiff` computes exactly which permissions are new. Only new permissions require user approval. The `PermissionStore` persists approved permissions per plugin.
+
+### PermissionApprover Trait
+
+Abstracts the user consent flow. Implementations can prompt interactively (CLI) or through a UI. The approver receives only the diff of new permissions.
+
+## Skill Loader
+
+Skills are discovered in priority order (first match wins):
+
+1. **Workspace** -- `./skills/` in the current project
+2. **User (managed)** -- `~/.clawft/skills/`
+3. **Builtin** -- bundled skills shipped with the binary
+
+WASM-based skills are automatically registered when discovered. The loader parses the skill manifest, validates permissions, and registers declared tools.
+
+## Skill Hot-Reload
+
+The hot-reload system uses the `notify` crate to watch skill directories:
+
+1. File watcher detects a change
+2. Debounce timer prevents rapid successive reloads
+3. New skill version is loaded and validated alongside the old version
+4. Atomic swap: the new version replaces the old one; in-flight calls complete on the old version
+5. Skill precedence is re-evaluated
+
+## Slash-Command Framework
+
+The `SlashCommandRegistry` provides a unified command system:
+
+- Skills with `user-invocable: true` contribute slash commands to `/help` output
+- Collision detection prevents two skills from registering the same command name
+- Commands are dispatched to the owning skill's handler
+
+## MCP Skill Exposure
+
+Skills are automatically exposed as MCP tools via `SkillToolProvider`:
+
+- Skills appear in `tools/list` responses with auto-generated JSON Schema
+- `tools/call` requests are routed through `skill.execute_tool()`
+- Hot-reload updates the MCP tool listing automatically
+
+## PluginHost Unification
+
+The unified `PluginHost` manages all plugin types through a single lifecycle controller:
+
+- `ChannelAdapterShim` wraps existing `Channel` implementations for backward compatibility
+- `start_all()` and `stop_all()` operate concurrently across all registered plugins
+- `SoulConfig` injects `SOUL.md` content into plugin contexts for personality propagation
+
+## Autonomous Skill Creation
+
+The system can detect repeated task patterns and auto-generate skills. When a pattern repeats beyond a configurable threshold (default 3), the agent generates a `SKILL.md`, installs it in pending state, and prompts for user approval. This feature is disabled by default:
+
+```json
+{
+  "skills": {
+    "autonomous": {
+      "enabled": true,
+      "pattern_threshold": 3
+    }
+  }
+}
+```

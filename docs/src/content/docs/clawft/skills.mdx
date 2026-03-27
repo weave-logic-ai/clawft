@@ -1,0 +1,240 @@
+---
+title: "Skills & Agents"
+description: "Define reusable prompt bundles (skills) and named agent personas with custom system prompts, tool constraints, and inter-agent communication."
+---
+
+## Skills
+
+A **skill** is a reusable LLM instruction bundle with metadata. Skills package a prompt template, variable declarations, and tool permissions into a single unit that can be activated on demand.
+
+### SKILL.md Format
+
+The preferred format is a single `SKILL.md` file with YAML frontmatter and a markdown body:
+
+```markdown
+---
+name: research
+description: Deep research on a topic
+version: 1.0.0
+variables:
+  - topic
+  - depth
+allowed-tools:
+  - WebSearch
+  - Read
+  - Grep
+user-invocable: true
+argument-hint: Search query or topic
+---
+
+You are a research assistant. Given a {{topic}}, perform deep research
+at the requested {{depth}} level. Use WebSearch for current information
+and Read/Grep for local files.
+```
+
+### Frontmatter Fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | yes | Skill identifier (must match directory name) |
+| `description` | no | Human-readable summary |
+| `version` | no | Semantic version string |
+| `variables` | no | Template variable names used in the body |
+| `allowed-tools` | no | Tool allowlist (empty = all tools allowed) |
+| `user-invocable` | no | Whether users can invoke via `/use` (default: false) |
+| `disable-model-invocation` | no | Block LLM from invoking this skill (default: false) |
+| `argument-hint` | no | Hint text for the slash-command argument |
+
+Both hyphenated (`allowed-tools`) and underscored (`allowed_tools`) field names are accepted.
+
+### Legacy Format
+
+The older format uses `skill.json` + `prompt.md`:
+
+```
+my-skill/
+  skill.json
+  prompt.md
+```
+
+When both `SKILL.md` and `skill.json` exist, `SKILL.md` takes precedence.
+
+### Discovery Chain
+
+Skills are loaded from three levels (highest priority first):
+
+1. **Workspace** -- `.clawft/skills/` in the project root
+2. **User** -- `~/.clawft/skills/`
+3. **Builtin** -- compiled into the binary
+
+When the same skill name appears at multiple levels, the higher-priority source wins.
+
+### CLI Commands
+
+```bash
+weft skills list                        # list all discovered skills
+weft skills show research               # show skill details
+weft skills install /path/to/my-skill   # install to ~/.clawft/skills/
+weft skills remove my-skill             # remove a user-installed skill
+```
+
+### Interactive Slash Commands
+
+In a `weft agent` session:
+
+```
+/skills              -- list available skills
+/use research        -- activate a skill
+/use                 -- deactivate the current skill
+/status              -- show current agent, model, and active skill
+```
+
+### Hot-Reload
+
+The skill system watches for filesystem changes. Modified skills are atomically swapped so in-flight invocations complete with the old definition while new invocations use the updated version. No restart required.
+
+### MCP Exposure
+
+Skills are automatically exposed as MCP tools via `SkillToolProvider`. Any MCP client connected to `weft mcp-server` can invoke skills as tools.
+
+### Security
+
+- **SEC-SKILL-01**: YAML nesting depth limited to 10 levels
+- **SEC-SKILL-02**: Directory names validated against path traversal
+- **SEC-SKILL-03**: When skill and agent both declare `allowed_tools`, the effective list is their intersection
+- **SEC-SKILL-05**: Workspace skills not loaded by default; pass `--trust-project-skills` to enable
+- **SEC-SKILL-06**: Prompt injection tokens (`<system>`, `<|im_start|>`, `<<SYS>>`, etc.) are stripped
+- **SEC-SKILL-07**: SKILL.md files limited to 50 KB
+
+---
+
+## Agents
+
+An **agent** is a predefined persona that bundles a system prompt, model selection, tool constraints, and skill activations into a named definition.
+
+### Agent Definition Format
+
+Agents are YAML or JSON files in a named directory:
+
+```yaml
+# ~/.clawft/agents/researcher/agent.yaml
+name: researcher
+description: Deep research agent with web access
+model: anthropic/claude-sonnet-4-20250514
+system_prompt: |
+  You are a meticulous research assistant. Always cite sources
+  and verify claims across multiple references.
+skills:
+  - research
+allowed_tools:
+  - WebSearch
+  - Read
+  - Grep
+max_turns: 20
+variables:
+  output_format: markdown
+  citation_style: APA
+```
+
+### Agent Fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | yes | Unique agent identifier |
+| `description` | yes | Human-readable summary |
+| `model` | no | LLM model override |
+| `system_prompt` | no | System prompt prepended to every LLM call |
+| `skills` | no | Skills to activate |
+| `allowed_tools` | no | Tool allowlist (empty = all tools) |
+| `max_turns` | no | Maximum tool-loop turns |
+| `variables` | no | Named variables for template expansion |
+
+### Discovery Chain
+
+Same 3-level priority as skills:
+
+1. **Workspace** -- `.clawft/agents/`
+2. **User** -- `~/.clawft/agents/`
+3. **Builtin** -- compiled into the binary
+
+### Template Variables
+
+Agent prompts and skill instructions support substitution:
+
+| Syntax | Replaced With |
+|--------|---------------|
+| `$ARGUMENTS` | Full argument string passed to the agent |
+| `${1}`, `${2}` | Positional arguments (1-based, space-separated) |
+| `${NAME}` | Named variable from the agent's `variables` map |
+
+Missing variables are replaced with an empty string.
+
+### CLI Commands
+
+```bash
+weft agents list                  # list all agents
+weft agents show researcher       # show agent details
+weft agents use researcher        # select an agent
+```
+
+In interactive mode:
+
+```
+/agent researcher    -- switch to an agent
+/agent               -- show the current agent
+```
+
+### Security
+
+- Directory names validated against path traversal
+- Model strings validated against shell metacharacters
+- Agent files limited to 10 KB
+- Tool allowlists intersected between agent and skill
+
+### Per-Agent Workspaces
+
+Each agent can have an isolated workspace at `~/.clawft/agents/<id>/`:
+
+| Path | Purpose |
+|------|---------|
+| `SOUL.md` | Agent personality and persistent memory |
+| `sessions/` | Session store scoped to this agent |
+| `skills/` | Skill overrides |
+| `config.toml` | Agent-specific configuration |
+
+Configuration merges in three levels: **global** -> **agent** -> **workspace**.
+
+---
+
+## Inter-Agent Communication
+
+Agents can exchange messages through the `AgentBus`:
+
+- **InterAgentMessage** -- Typed message with `from_agent`, `to_agent`, `task`, and `payload`
+- **Per-agent inboxes** -- Each agent has a bounded channel for incoming messages
+- **SwarmCoordinator** -- Provides `dispatch_subtask` (one agent) and `broadcast_task` (all agents)
+- **TTL enforcement** -- Messages carry time-to-live; expired messages are dropped
+
+## Multi-Agent Routing
+
+When multiple agents are defined, inbound messages are dispatched via a routing table with first-match-wins semantics. Routes can match on keywords, channels, or sender patterns. A catch-all route handles unmatched messages.
+
+## Autonomous Skill Creation
+
+Agents can detect repeated prompt patterns and auto-generate skills:
+
+1. Pattern repeats beyond threshold (default 3)
+2. Agent generates `SKILL.md` with inferred variables
+3. Skill installed in pending state
+4. User approval required before activation
+
+Disabled by default:
+
+```json
+{
+  "skills": {
+    "auto_create": true,
+    "auto_create_threshold": 3
+  }
+}
+```

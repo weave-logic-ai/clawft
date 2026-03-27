@@ -1,0 +1,123 @@
+---
+title: "Capabilities and RBAC"
+description: "Agent capability model with IpcScope, ToolPermissions, SandboxPolicy, ResourceLimits, and the CapabilityChecker flow."
+---
+
+WeftOS enforces a capability-based access control model for all kernel-managed agents. Each agent process is assigned an `AgentCapabilities` struct at spawn time that defines its IPC scope, tool permissions, sandbox policy, and resource limits.
+
+**Source**: `crates/clawft-kernel/src/capability.rs` (~980 lines, 24 tests)
+
+## AgentCapabilities
+
+```rust
+pub struct AgentCapabilities {
+    pub ipc_scope: IpcScope,
+    pub tool_permissions: ToolPermissions,
+    pub sandbox_policy: SandboxPolicy,
+    pub resource_limits: ResourceLimits,
+}
+```
+
+## IpcScope
+
+```rust
+pub enum IpcScope {
+    All,                    // Communicate with all agents
+    ParentOnly,             // Only communicate with parent
+    Restricted(Vec<u64>),   // Only communicate with listed PIDs
+    Topic(Vec<String>),     // Only pub/sub to listed topics
+    None,                   // No IPC allowed
+}
+```
+
+### Scope Enforcement Matrix
+
+| Scope | `Process(pid)` | `Topic(name)` | `Broadcast` | `Service(name)` |
+|-------|:--------------:|:--------------:|:-----------:|:----------------:|
+| `All` | Permit | Permit | Permit | Permit |
+| `ParentOnly` | Only if parent | Deny | Deny | Deny |
+| `Restricted(pids)` | Only if in list | Deny | Deny | Deny |
+| `Topic(topics)` | Deny | Only if in list | Deny | Deny |
+| `None` | Deny | Deny | Deny | Deny |
+
+## ToolPermissions
+
+```rust
+pub struct ToolPermissions {
+    pub allow: Vec<String>,  // Empty = all allowed
+    pub deny: Vec<String>,   // Checked before allow
+}
+```
+
+Deny takes precedence over allow.
+
+## SandboxPolicy
+
+```rust
+pub enum SandboxPolicy {
+    None,        // Full access
+    Strict,      // Minimal permissions
+    Permissive,  // Some restrictions relaxed
+}
+```
+
+## ResourceLimits
+
+```rust
+pub struct ResourceLimits {
+    pub max_memory_bytes: u64,    // Default: 256 MiB
+    pub max_cpu_time_ms: u64,     // Default: 300,000 (5 min)
+    pub max_tool_calls: u64,      // Default: 1,000
+    pub max_messages: u64,        // Default: 5,000
+}
+```
+
+## CapabilityChecker Flow
+
+```
+Agent attempts action
+  |
+  +---> IPC check: validate IpcScope against target
+  |       All -> Permit
+  |       ParentOnly -> check parent PID
+  |       Restricted(pids) -> check target in list
+  |       Topic(topics) -> check topic in list
+  |       None -> Deny
+  |
+  +---> Tool check: validate ToolPermissions
+  |       tool in deny list -> Deny
+  |       allow list empty -> Permit
+  |       tool in allow list -> Permit
+  |       tool not in allow list -> Deny
+  |
+  +---> Resource check: compare usage to limits
+          messages_sent >= max_messages -> Deny
+          tool_calls >= max_tool_calls -> Deny
+          within limits -> Permit
+```
+
+## Capability Elevation
+
+```rust
+pub struct CapabilityElevationRequest {
+    pub pid: Pid,
+    pub requested_scope: IpcScope,
+    pub requested_tools: Vec<String>,
+    pub reason: String,
+}
+
+pub enum ElevationResult {
+    Granted(AgentCapabilities),
+    Denied(String),
+}
+```
+
+Elevation requests are subject to governance gate checks when `exochain` is enabled.
+
+## Browser Defaults
+
+In browser environments, the kernel applies restricted defaults:
+- `IpcScope::Restricted` with safe targets
+- `SandboxPolicy::Strict` (no filesystem or network)
+- Lower resource ceilings (64 MiB memory, 60s CPU)
+- Explicit tool allow-list

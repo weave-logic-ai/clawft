@@ -1,0 +1,32 @@
+{
+  "title": "WeftOS",
+  "description": "Kernel operating system",
+  "root": true,
+  "pages": [
+    "index",
+    "architecture",
+    "kernel-phases",
+    "---",
+    "boot-sequence",
+    "process-table",
+    "ipc",
+    "capabilities",
+    "---",
+    "exochain",
+    "governance",
+    "---",
+    "wasm-sandbox",
+    "containers",
+    "app-framework",
+    "---",
+    "mesh-networking",
+    "discovery",
+    "clustering",
+    "---",
+    "security",
+    "ecc",
+    "---",
+    "decisions",
+    "kernel-guide"
+  ]
+}

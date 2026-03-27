@@ -1,0 +1,131 @@
+---
+title: "Process Table"
+description: "PID allocation, process state machine, ProcessEntry fields, resource tracking, and agent supervisor integration in WeftOS."
+---
+
+The WeftOS process table tracks all kernel-managed agents using PIDs (process identifiers). It provides lock-free concurrent access via `DashMap`, allowing multiple kernel subsystems to query and update process state without contention.
+
+**Source**: `crates/clawft-kernel/src/process.rs` (~470 lines, 22 tests)
+
+## PID Allocation
+
+PIDs are monotonically increasing 64-bit integers that are never reused:
+
+```rust
+pub type Pid = u64;
+
+pub struct ProcessTable {
+    entries: DashMap<Pid, ProcessEntry>,
+    next_pid: AtomicU64,
+    max_processes: u32,
+}
+```
+
+If the table reaches `max_processes`, the next spawn attempt returns `KernelError::ProcessLimitExceeded`.
+
+## ProcessState State Machine
+
+```rust
+pub enum ProcessState {
+    Starting,       // Process is initializing
+    Running,        // Process is actively running
+    Suspended,      // Process has been paused
+    Stopping,       // Process is in the process of stopping
+    Exited(i32),    // Process has exited with a status code
+}
+```
+
+Valid transitions:
+
+```
+Starting ------> Running ------> Suspended
+    |               |                |
+    |               |                +----> Running (resume)
+    |               |                +----> Stopping
+    |               |                +----> Exited(code)
+    |               +----> Stopping
+    |               +----> Exited(code)
+    +----> Exited(code)
+
+Stopping --------> Exited(code)
+Exited ----------> (terminal)
+```
+
+The `can_transition_to()` method enforces these transitions:
+
+```rust
+impl ProcessState {
+    pub fn can_transition_to(&self, next: &ProcessState) -> bool {
+        matches!(
+            (self, next),
+            (Starting, Running) | (Starting, Exited(_))
+            | (Running, Suspended) | (Running, Stopping) | (Running, Exited(_))
+            | (Suspended, Running) | (Suspended, Stopping) | (Suspended, Exited(_))
+            | (Stopping, Exited(_))
+        )
+    }
+}
+```
+
+## ProcessEntry Fields
+
+```rust
+pub struct ProcessEntry {
+    pub pid: Pid,
+    pub name: String,
+    pub state: ProcessState,
+    pub capabilities: AgentCapabilities,
+    pub resource_usage: ResourceUsage,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub cancel_token: CancellationToken,
+}
+```
+
+The `CancellationToken` enables cooperative shutdown -- when a process is stopped, its token is cancelled and the agent loop exits gracefully.
+
+## Resource Tracking
+
+```rust
+pub struct ResourceUsage {
+    pub messages_sent: u64,
+    pub tool_calls: u64,
+    pub cpu_time_ms: u64,
+}
+```
+
+Resource counters are checked against the process's `ResourceLimits`. When a limit is exceeded, the kernel can suspend or terminate the agent.
+
+## ProcessTable Public API
+
+```rust
+impl ProcessTable {
+    pub fn new(max: u32) -> Self;
+    pub fn spawn(&self, name: String, capabilities: AgentCapabilities) -> KernelResult<Pid>;
+    pub fn get(&self, pid: Pid) -> Option<ProcessEntry>;
+    pub fn set_state(&self, pid: Pid, state: ProcessState) -> KernelResult<()>;
+    pub fn remove(&self, pid: Pid) -> KernelResult<ProcessEntry>;
+    pub fn list(&self) -> Vec<(Pid, ProcessEntry)>;
+    pub fn count(&self) -> usize;
+}
+```
+
+## Agent Supervisor Integration
+
+The `AgentSupervisor` (`crates/clawft-kernel/src/supervisor.rs`, ~800 lines, 35 tests) wraps the ProcessTable:
+
+```rust
+pub struct SpawnRequest {
+    pub name: String,
+    pub agent_type: String,
+    pub capabilities: AgentCapabilities,
+    pub resource_limits: ResourceLimits,
+    pub backend: Option<SpawnBackend>,  // K2.1
+}
+
+pub enum SpawnBackend {
+    Native, Wasm, Container, Tee, Remote,
+}
+```
+
+The supervisor allocates a PID, creates an IPC inbox, registers with A2ARouter, starts the agent work loop, and logs lifecycle events to the chain.

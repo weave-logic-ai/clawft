@@ -1,0 +1,82 @@
+---
+title: "clawft Overview"
+description: "An AI-native development framework written in Rust for building multi-channel, tool-augmented LLM assistants."
+---
+
+## What is clawft?
+
+clawft is a modular Rust framework for building AI assistants with multi-channel messaging and tool integration. The CLI binary `weft` provides an interactive agent REPL, a multi-channel gateway (Telegram, Slack, Discord, and eight more), management commands for sessions, memory, cron jobs, and a full MCP (Model Context Protocol) server.
+
+The workspace contains 18 crates organized in a strict dependency hierarchy that enforces separation of concerns -- shared types at the bottom, platform abstraction above them, then the core engine, with tools, channels, services, plugins, and the CLI at the top. A WASM crate provides a browser-compatible entrypoint.
+
+## Key Features
+
+- **Multi-provider LLM routing** -- Nine built-in providers (OpenAI, Anthropic, Groq, DeepSeek, Mistral, Together, OpenRouter, Gemini, xAI) with prefix-based routing, automatic retry, and environment-driven API keys.
+- **6-stage processing pipeline** -- Classify, route, assemble context, transport to LLM, score quality, and feed learning signals. Every stage is trait-based and replaceable.
+- **11 communication channels** -- Telegram, Slack, Discord, Email, WhatsApp, Signal, Matrix, IRC, Google Chat, Microsoft Teams, and Discord Resume. All share one trait interface and lifecycle.
+- **Built-in tool system** -- File I/O, shell execution, memory, web search/fetch, messaging, and subprocess spawning -- all workspace-sandboxed with security policies.
+- **Plugin architecture** -- Six extension points (Tool, Channel, Pipeline, Skill, Memory, Voice), WASM sandbox (wasmtime), hot-reload, permission system, and slash-command registry.
+- **MCP integration** -- Serve tools to external MCP clients or consume tools from external MCP servers. Internal-only mode for infrastructure servers with skill-based per-turn filtering.
+- **WASM / browser target** -- The `clawft-wasm` crate compiles to WebAssembly for in-browser operation using only the types layer.
+- **Skills and agents** -- Reusable prompt bundles (SKILL.md) and named agent personas (agent.yaml) with template variables, tool allowlists, and three-level discovery (workspace, user, builtin).
+- **Security-first** -- Workspace containment, command allowlists, SSRF protection, permission-gated tool access, WASM fuel metering, prompt injection stripping, and 57-check security auditor.
+
+## Quick Install
+
+Build from source using Cargo:
+
+```bash
+git clone https://github.com/clawft/clawft.git
+cd clawft
+cargo build --release --bin weft
+```
+
+Or use the project build script:
+
+```bash
+scripts/build.sh native
+```
+
+The resulting binary is at `target/release/weft`.
+
+For Docker deployment:
+
+```bash
+docker pull ghcr.io/clawft/clawft:latest
+docker run --rm -it ghcr.io/clawft/clawft:latest --version
+```
+
+## First Run
+
+Set an API key for any supported provider:
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+Start an interactive session:
+
+```bash
+weft agent
+```
+
+Send a single message:
+
+```bash
+weft agent -m "Summarize the Rust async ecosystem"
+```
+
+## Documentation Sections
+
+- [Getting Started](/docs/clawft/getting-started) -- Installation, first conversation, key concepts
+- [Architecture](/docs/clawft/architecture) -- Crate structure, pipeline, message flow
+- [CLI Reference](/docs/clawft/cli-reference) -- Complete command-line reference for `weft`
+- [Configuration](/docs/clawft/configuration) -- Config file format, environment variables, all keys
+- [Plugins](/docs/clawft/plugins) -- Plugin system, built-in plugins, WASM sandbox
+- [Providers](/docs/clawft/providers) -- LLM provider configuration, routing, custom providers
+- [Channels](/docs/clawft/channels) -- Communication channels setup and custom channels
+- [Tools](/docs/clawft/tools) -- Built-in tools, MCP tools, custom tool providers
+- [Skills](/docs/clawft/skills) -- Skills, agents, slash commands, inter-agent communication
+- [Browser Mode](/docs/clawft/browser) -- WASM build, browser quickstart, test harness
+- [Deployment](/docs/clawft/deployment) -- Docker, WASM, CI/CD pipeline
+- [Security](/docs/clawft/security) -- Security model, command policies, SSRF protection, WASM sandbox

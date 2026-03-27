@@ -1,0 +1,55 @@
+---
+title: "Security Model"
+description: "Capability-based access control, dual-layer governance gate, transport encryption, post-quantum protection, rate limiting, and browser sandboxing."
+---
+
+WeftOS implements defense-in-depth security across multiple layers.
+
+## Capability-Based Access Control
+
+Every agent has `AgentCapabilities` restricting IPC scope, tool permissions, sandbox policy, and resource limits. See [Capabilities](/docs/weftos/capabilities).
+
+## Dual-Layer Governance Gate
+
+Every action passes through two independent gate checks (Symposium D7):
+1. **Routing gate** (A2ARouter): Prevents unauthorized messages from reaching inboxes
+2. **Handler gate** (agent_loop): Prevents unauthorized command execution
+
+See [Governance](/docs/weftos/governance).
+
+## Transport Encryption (Noise Protocol)
+
+All inter-node traffic uses Noise Protocol:
+- **XX pattern**: First contact, mutual authentication, 2 RTT
+- **IK pattern**: Known peers, 1 RTT
+- Forward secrecy, no PKI required
+
+## Post-Quantum Protection
+
+### ML-KEM-768 (Key Encapsulation)
+
+After Noise handshake, ML-KEM-768 upgrade combines X25519 + ML-KEM-768 via HKDF for quantum resistance.
+
+### ML-DSA-65 (Digital Signatures)
+
+Cross-node chain events carry dual signatures (Ed25519 + ML-DSA-65). Both must verify.
+
+## Message Size Limits
+
+16 MiB maximum enforced in wire framing and IPC serialization.
+
+## Rate Limiting
+
+Resource limits provide implicit rate limiting: `max_messages`, `max_tool_calls`, fuel metering for WASM.
+
+## Peer Capability Validation
+
+`WeftHandshake` carries `governance_genesis_hash` (must match), capabilities bitmap, and `kem_supported` flag.
+
+## Browser Sandboxing
+
+`SandboxPolicy::Strict` by default. No filesystem or network. Lower resource ceilings. Explicit tool allow-list.
+
+## Chain Integrity
+
+SHAKE-256 hash linking, Ed25519 + ML-DSA-65 dual signing, witness chain verification. `governance.genesis` serves as cluster trust root.

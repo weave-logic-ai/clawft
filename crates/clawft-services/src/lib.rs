@@ -13,3 +13,5 @@ pub mod heartbeat;
 pub mod mcp;
 #[cfg(feature = "rvf")]
 pub mod rvf_tools;
+#[cfg(feature = "api")]
+pub mod api;

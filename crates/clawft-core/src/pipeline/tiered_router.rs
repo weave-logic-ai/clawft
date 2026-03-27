@@ -402,10 +402,8 @@ impl TieredRouter {
             }
             TierSelectionStrategy::Random => {
                 // Use a simple hash-based selection to avoid needing the rand crate.
-                let seed = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0);
+                // `runtime::now_millis()` is safe on both native and browser WASM.
+                let seed = crate::runtime::now_millis();
                 let idx = (seed as usize) % available.len();
                 available[idx].clone()
             }

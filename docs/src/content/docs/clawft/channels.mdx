@@ -1,0 +1,249 @@
+---
+title: "Channels"
+description: "Communication channel setup for Telegram, Slack, Discord, and other platforms, plus custom channel development."
+---
+
+## Overview
+
+Channels are bidirectional bridges between external chat platforms and the agent pipeline. Each channel receives inbound messages from users and delivers outbound messages produced by agents.
+
+clawft ships with eleven channel plugins:
+
+| Channel | Transport | Threading | Media | Feature Gate |
+|---------|-----------|-----------|-------|--------------|
+| Telegram | HTTP long polling (Bot API) | No | Yes | `telegram` |
+| Slack | WebSocket (Socket Mode) | Yes | Yes | `slack` |
+| Discord | WebSocket (Gateway v10) | Yes | Yes | `discord` |
+| Email | IMAP + SMTP | Yes | Yes | `email` |
+| WhatsApp | WhatsApp Business API (webhook) | No | Yes | `whatsapp` |
+| Signal | Signal CLI / signald bridge | No | Yes | `signal` |
+| Matrix | Matrix client-server API | Yes | No | `matrix` |
+| IRC | TCP / TLS (RFC 2812) | No | No | `irc` |
+| Google Chat | Google Chat API (webhook / SA) | Yes | No | `google-chat` |
+| Microsoft Teams | Bot Framework / Graph API | Yes | Yes | `teams` |
+| Discord Resume | WebSocket (Gateway v10, resume) | Yes | Yes | `discord-resume` |
+
+All channels share the same trait-based interface and lifecycle.
+
+## Architecture
+
+The channel system is built on three core traits:
+
+**`ChannelFactory`** -- Creates a `Channel` from a JSON config section.
+
+**`Channel`** -- The plugin itself, handling both receiving and sending:
+
+```rust
+pub trait Channel: Send + Sync {
+    fn name(&self) -> &str;
+    fn metadata(&self) -> ChannelMetadata;
+    fn status(&self) -> ChannelStatus;
+    fn is_allowed(&self, sender_id: &str) -> bool;
+    async fn start(&self, host: Arc<dyn ChannelHost>, cancel: CancellationToken)
+        -> Result<(), ChannelError>;
+    async fn send(&self, msg: &OutboundMessage) -> Result<MessageId, ChannelError>;
+}
+```
+
+**`ChannelHost`** -- Bridge back to the agent pipeline for delivering inbound messages and registering commands.
+
+### Lifecycle
+
+`PluginHost` orchestrates channels:
+
+1. **Register factories** -- `register_factory(Arc<dyn ChannelFactory>)`
+2. **Initialize** -- `init_channel(name, config)` calls the factory
+3. **Start** -- `start_channel(name)` spawns a tokio task with a `CancellationToken`
+4. **Route outbound** -- `send_to_channel(msg)` dispatches to the correct channel
+5. **Stop** -- `stop_channel(name)` cancels the token and awaits completion
+
+### Channel Status
+
+| Status | Meaning |
+|--------|---------|
+| `Stopped` | Not yet started or cleanly shut down |
+| `Starting` | Connecting / authenticating |
+| `Running` | Processing messages |
+| `Error(s)` | Encountered an error (may auto-retry) |
+| `Stopping` | Shutting down |
+
+```bash
+weft channels status
+```
+
+## Telegram Setup
+
+### Create a Bot
+
+1. Open Telegram and search for **@BotFather**
+2. Send `/newbot` and follow the prompts
+3. Copy the bot token (format: `123456789:ABCdef...`)
+
+### Configure
+
+```json
+{
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "token": "123456789:ABCdef-your-bot-token",
+      "allow_from": []
+    }
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `token` | string | Bot token from BotFather |
+| `allow_from` | string[] | User IDs permitted to interact. Empty = all. |
+| `proxy` | string/null | HTTP or SOCKS5 proxy URL |
+
+The channel uses HTTP long polling (`getUpdates`) with a 30-second timeout. On error, it backs off for 5 seconds before retrying.
+
+## Slack Setup
+
+### Create and Configure
+
+1. Create a Slack App at [api.slack.com/apps](https://api.slack.com/apps)
+2. Enable **Socket Mode** and generate an app-level token (`xapp-...`)
+3. Add Bot Token Scopes: `chat:write`, `app_mentions:read`, `channels:read`, `im:read`, `im:write`
+4. Subscribe to events: `message.im`, `app_mention`
+5. Install the app and copy the Bot User OAuth Token (`xoxb-...`)
+
+```json
+{
+  "channels": {
+    "slack": {
+      "enabled": true,
+      "bot_token": "xoxb-your-bot-token",
+      "app_token": "xapp-your-app-level-token",
+      "group_policy": "mention",
+      "dm": { "enabled": true, "policy": "open" }
+    }
+  }
+}
+```
+
+### Group Policies
+
+| Policy | Behavior |
+|--------|----------|
+| `"mention"` | Responds only when @mentioned (default) |
+| `"open"` | Responds to all messages in channels |
+| `"allowlist"` | Responds only in channels listed in `group_allow_from` |
+
+## Discord Setup
+
+### Create and Configure
+
+1. Create a Discord Application at [discord.com/developers/applications](https://discord.com/developers/applications)
+2. Add a Bot and copy the token
+3. Enable **Message Content Intent** under Privileged Gateway Intents
+4. Generate an invite URL with `bot` scope and Send Messages + Read Message History permissions
+
+```json
+{
+  "channels": {
+    "discord": {
+      "enabled": true,
+      "token": "your-bot-token",
+      "allow_from": [],
+      "intents": 37377
+    }
+  }
+}
+```
+
+The default intents value `37377` enables GUILDS (1) + GUILD_MESSAGES (512) + DIRECT_MESSAGES (4096) + MESSAGE_CONTENT (32768).
+
+## Multi-Channel Gateway
+
+Run multiple channels simultaneously:
+
+```json
+{
+  "channels": {
+    "telegram": { "enabled": true, "token": "..." },
+    "slack": { "enabled": true, "bot_token": "...", "app_token": "..." },
+    "discord": { "enabled": true, "token": "..." }
+  }
+}
+```
+
+```bash
+weft gateway
+```
+
+Each channel runs in its own tokio task with independent connection management and error recovery.
+
+### Outbound Message Routing
+
+When an agent produces an `OutboundMessage`, it specifies the target `channel` and `chat_id`. The `MarkdownDispatcher` converts CommonMark content to the channel's native format (HTML for Telegram, mrkdwn for Slack, passthrough for Discord), then `PluginHost::send_to_channel()` delivers it.
+
+### Allow-Lists
+
+Each channel supports an allow-list restricting which users can interact. When empty, all users are permitted. Checks happen at the channel level before messages reach the pipeline.
+
+## Creating Custom Channels
+
+### Implement ChannelFactory
+
+```rust
+pub struct MyChannelFactory;
+
+impl ChannelFactory for MyChannelFactory {
+    fn channel_name(&self) -> &str { "my_channel" }
+
+    fn build(&self, config: &serde_json::Value)
+        -> Result<Arc<dyn Channel>, ChannelError>
+    {
+        let token = config.get("token")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ChannelError::Other("missing 'token'".into()))?;
+        Ok(Arc::new(MyChannel::new(token.to_owned())))
+    }
+}
+```
+
+### Implement Channel
+
+The key methods are `start()` for the inbound receive loop and `send()` for outbound messages. Use `tokio::select!` with the `CancellationToken` for clean shutdown:
+
+```rust
+async fn start(&self, host: Arc<dyn ChannelHost>, cancel: CancellationToken)
+    -> Result<(), ChannelError>
+{
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            msg = receive_next_message(&self.token) => {
+                let inbound = InboundMessage { /* ... */ };
+                let _ = host.deliver_inbound(inbound).await;
+            }
+        }
+    }
+    Ok(())
+}
+```
+
+### Register the Factory
+
+```rust
+plugin_host.register_factory(Arc::new(MyChannelFactory)).await;
+plugin_host.init_channel("my_channel", &config).await?;
+plugin_host.start_channel("my_channel").await?;
+```
+
+### Checklist
+
+Before shipping a custom channel:
+
+- `ChannelFactory::build()` validates all required config fields
+- `Channel::start()` respects the `CancellationToken`
+- `Channel::start()` handles reconnection on connection drops
+- `Channel::is_allowed()` enforces the allow-list
+- Bot messages are filtered to prevent loops
+- `Channel::send()` returns a meaningful `MessageId`
+- Error states are reported via `ChannelStatus::Error`
+- A `MarkdownConverter` is registered if the platform does not use standard Markdown

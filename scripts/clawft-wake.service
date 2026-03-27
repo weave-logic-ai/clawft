@@ -1,0 +1,13 @@
+[Unit]
+Description=Clawft Wake Word Daemon
+After=sound.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/weft voice wake --daemon
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target

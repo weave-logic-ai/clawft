@@ -14,11 +14,14 @@
 //! The current user message is **not** added here; the caller appends it.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
+#[cfg(feature = "native")]
+use std::path::PathBuf;
+#[cfg(feature = "native")]
 use std::time::SystemTime;
 
-use tokio::sync::Mutex;
+use crate::runtime::Mutex;
 use tracing::{debug, warn};
 
 use clawft_platform::Platform;
@@ -31,6 +34,7 @@ use super::memory::MemoryStore;
 use super::skills::SkillsLoader;
 
 /// Cached bootstrap file entry with modification-time tracking.
+#[cfg(feature = "native")]
 #[derive(Debug, Clone)]
 struct CachedFile {
     content: String,
@@ -42,7 +46,13 @@ struct CachedFile {
 /// Uses `tokio::sync::Mutex` because the cache is checked/updated
 /// inside async `build_system_prompt()`. The critical section is
 /// short (one HashMap lookup + optional fs::metadata call).
+#[cfg(feature = "native")]
 type BootstrapCache = Arc<Mutex<HashMap<PathBuf, CachedFile>>>;
+
+/// On browser, mtime-based caching is not available, so we use a
+/// simple empty struct as a no-op placeholder.
+#[cfg(not(feature = "native"))]
+type BootstrapCache = Arc<Mutex<()>>;
 
 // Re-export the canonical LlmMessage from pipeline::traits so that
 // consumers of context.rs use the same type as the rest of the pipeline.
@@ -89,7 +99,12 @@ impl<P: Platform> ContextBuilder<P> {
             memory,
             skills,
             platform,
-            bootstrap_cache: Arc::new(Mutex::new(HashMap::new())),
+            bootstrap_cache: {
+                #[cfg(feature = "native")]
+                { Arc::new(Mutex::new(HashMap::new())) }
+                #[cfg(not(feature = "native"))]
+                { Arc::new(Mutex::new(())) }
+            },
         }
     }
 
@@ -98,6 +113,7 @@ impl<P: Platform> ContextBuilder<P> {
     ///
     /// Returns `Some(content)` if the file exists and is non-empty,
     /// `None` otherwise.
+    #[cfg(feature = "native")]
     async fn load_cached_file(
         platform: &Arc<P>,
         cache: &BootstrapCache,
@@ -135,6 +151,22 @@ impl<P: Platform> ContextBuilder<P> {
                 }
                 Some(content)
             }
+            _ => None,
+        }
+    }
+
+    /// Load a bootstrap file (browser version without mtime caching).
+    ///
+    /// On browser/WASM, `tokio::fs::metadata` is not available, so we
+    /// skip the mtime cache and read directly through the platform.
+    #[cfg(not(feature = "native"))]
+    async fn load_cached_file(
+        platform: &Arc<P>,
+        _cache: &BootstrapCache,
+        file_path: &Path,
+    ) -> Option<String> {
+        match platform.fs().read_to_string(file_path).await {
+            Ok(content) if !content.trim().is_empty() => Some(content),
             _ => None,
         }
     }

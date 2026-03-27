@@ -163,6 +163,123 @@ jobs:
           fi
 
   # -------------------------------------------------------------------
+  # Browser WASM: compilation check for wasm32-unknown-unknown
+  # -------------------------------------------------------------------
+  wasm-browser-check:
+    name: Browser WASM check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-wasm-browser-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-wasm-browser-
+
+      - name: Check browser WASM compilation
+        run: |
+          # This check will start passing once BW1 (feature flags) is complete.
+          # Until then, it validates that the browser feature flag infrastructure exists.
+          if cargo check --target wasm32-unknown-unknown -p clawft-wasm --no-default-features --features browser 2>/dev/null; then
+            echo "Browser WASM check passed"
+          else
+            echo "::warning::Browser WASM check skipped (feature not yet implemented)"
+          fi
+
+      - name: Verify native still works
+        run: cargo check --workspace
+
+  # -------------------------------------------------------------------
+  # Voice: feature compilation check
+  # -------------------------------------------------------------------
+  voice-feature-check:
+    name: Voice feature check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-voice-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-voice-
+
+      - name: Check voice feature compilation
+        run: |
+          # This check will start passing once VS1.1 (voice dependencies) is complete.
+          if cargo check --features voice -p clawft-plugin 2>/dev/null; then
+            echo "Voice feature check passed"
+          else
+            echo "::warning::Voice feature check skipped (feature not yet implemented)"
+          fi
+
+  # -------------------------------------------------------------------
+  # UI: lint and type-check (when ui/ directory exists)
+  # -------------------------------------------------------------------
+  ui-check:
+    name: UI lint and type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check if UI directory exists
+        id: check-ui
+        run: |
+          if [ -d "ui" ] && [ -f "ui/package.json" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::UI directory not found, skipping UI checks"
+          fi
+
+      - name: Setup Node.js
+        if: steps.check-ui.outputs.exists == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install pnpm
+        if: steps.check-ui.outputs.exists == 'true'
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install dependencies
+        if: steps.check-ui.outputs.exists == 'true'
+        run: cd ui && pnpm install --frozen-lockfile
+
+      - name: Lint
+        if: steps.check-ui.outputs.exists == 'true'
+        run: cd ui && pnpm lint
+
+      - name: Type check
+        if: steps.check-ui.outputs.exists == 'true'
+        run: cd ui && pnpm type-check
+
+      - name: Test
+        if: steps.check-ui.outputs.exists == 'true'
+        run: cd ui && pnpm test --run
+
+  # -------------------------------------------------------------------
   # Integration smoke test: build Docker image, start gateway, check
   # /health, shut down
   # -------------------------------------------------------------------

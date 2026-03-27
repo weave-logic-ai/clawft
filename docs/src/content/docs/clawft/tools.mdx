@@ -1,0 +1,241 @@
+---
+title: "Tool System"
+description: "Built-in tool reference, MCP tool integration, custom tool providers, and tool security policies."
+---
+
+## Tool Trait
+
+All tools implement the following interface defined in `clawft-core`:
+
+```rust
+#[async_trait]
+pub trait Tool: Send + Sync {
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
+    fn parameters(&self) -> serde_json::Value; // JSON Schema
+    async fn execute(&self, args: serde_json::Value)
+        -> Result<serde_json::Value, ToolError>;
+}
+```
+
+### ToolError Variants
+
+| Variant | Description |
+|---------|-------------|
+| `NotFound` | Tool name not in the registry |
+| `InvalidArgs` | Arguments do not satisfy the schema |
+| `ExecutionFailed` | Runtime error during execution |
+| `PermissionDenied` | Blocked by a safety check |
+| `FileNotFound` | Required file does not exist |
+| `InvalidPath` | Path escapes the allowed workspace |
+| `Timeout` | Execution exceeded the time limit |
+
+## Tool Call Lifecycle
+
+1. The LLM responds with `tool_calls` in its message
+2. Each call is matched by name in the `ToolRegistry`
+3. The tool executes with the provided arguments
+4. Results are truncated to **64 KB** and sent back as tool-result messages
+5. The LLM decides whether to issue more calls or produce a final answer
+6. The loop continues until no tool calls remain or `max_tool_iterations` (default 20) is reached
+
+## Built-in Tools
+
+### read_file
+
+Read file contents within the workspace.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | yes | File path relative to workspace |
+
+Paths are canonicalized and verified to remain within the workspace boundary.
+
+### write_file
+
+Write content to a file, creating it and parent directories if needed.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | yes | File path relative to workspace |
+| `content` | string | yes | Content to write |
+
+### edit_file
+
+Replace the first occurrence of `old_text` with `new_text`. Exactly one match is required.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | yes | File path relative to workspace |
+| `old_text` | string | yes | Text to find and replace |
+| `new_text` | string | yes | Replacement text |
+
+### list_directory
+
+List directory contents (immediate children, sorted alphabetically).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | yes | Directory path relative to workspace |
+
+### exec_shell
+
+Execute a shell command via `sh -c` in the workspace directory.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `command` | string | yes | Shell command to execute |
+| `timeout` | number | no | Timeout in seconds (default: 30, max: 300) |
+
+Commands are validated against a configurable security policy. See [Security](/docs/clawft/security) for details.
+
+### memory_read
+
+Read from `MEMORY.md` with optional paragraph-level search.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | no | Search query to filter paragraphs |
+
+### memory_write
+
+Write to `MEMORY.md` in append or overwrite mode.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `content` | string | yes | Content to write |
+| `mode` | string | no | `"append"` (default) or `"overwrite"` |
+
+### web_search
+
+Search the web using a configured search API endpoint.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | yes | Search query |
+| `num_results` | integer | no | Max results (default: 5) |
+
+Requires `tools.web_search.endpoint` to be configured.
+
+### web_fetch
+
+Fetch content from a URL with SSRF protection.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `url` | string | yes | URL to fetch (`http://` or `https://`) |
+| `method` | string | no | HTTP method (default: `"GET"`) |
+| `headers` | object | no | HTTP headers as key-value pairs |
+
+Response bodies larger than 10 MB are truncated. Private networks, loopback addresses, and cloud metadata endpoints are blocked by default.
+
+### message
+
+Send a message to a specific channel and chat via the internal MessageBus.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `channel` | string | yes | Target channel (e.g., `"telegram"`) |
+| `chat_id` | string | yes | Target chat ID |
+| `content` | string | yes | Message content |
+
+### spawn
+
+Spawn a subprocess with a concurrency limit of 5.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `command` | string | yes | Command to execute |
+| `args` | string[] | no | Command arguments |
+| `description` | string | no | Human-readable description |
+| `timeout` | number | no | Timeout in seconds (default: 60) |
+
+## MCP Tools
+
+External tools can be integrated through MCP (Model Context Protocol) servers configured in `tools.mcp_servers`.
+
+### Configuration
+
+```json
+{
+  "tools": {
+    "mcp_servers": {
+      "my_server": {
+        "command": "npx",
+        "args": ["-y", "my-mcp-server"],
+        "internal_only": false
+      }
+    }
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `command` | string | `""` | Command to spawn (stdio transport) |
+| `args` | string[] | `[]` | Arguments |
+| `env` | object | `{}` | Environment variables |
+| `url` | string | `""` | URL endpoint (HTTP transport) |
+| `internal_only` | boolean | `true` | When true, tools are not registered in the ToolRegistry |
+
+### Internal-Only Servers
+
+By default, `internal_only` is `true`. The MCP session is created but tools are not registered in the `ToolRegistry` -- they are not directly exposed to the LLM. This is recommended for infrastructure servers whose capabilities should be scoped through skills.
+
+### Skill-Based Tool Filtering
+
+Internal MCP tools can be surfaced on specific turns through skills. When a skill declares `allowed_tools`, the agent calls `ToolRegistry::schemas_for_tools()` with glob patterns:
+
+```json
+["claude-flow__memory_*", "read_file", "write_file"]
+```
+
+### Naming Convention
+
+MCP tools use namespaced names: `{server_name}__{tool_name}` (e.g., `web__search`).
+
+### Transport
+
+- **Stdio** -- If `command` is set, a child process is spawned
+- **HTTP** -- If `url` is set and `command` is empty, HTTP requests are used
+
+## Custom Tool Providers
+
+The `ToolProvider` trait provides a pluggable interface for serving tools over MCP:
+
+```rust
+pub trait ToolProvider: Send + Sync {
+    fn namespace(&self) -> &str;
+    fn list_tools(&self) -> Vec<ToolDefinition>;
+    fn call_tool(&self, name: &str, args: Value) -> Result<Value>;
+}
+```
+
+Register providers with `McpServerShell` via `shell.register_provider(Box::new(my_provider))`. Multiple providers compose using `CompositeToolProvider` with `{namespace}__{tool}` prefix routing.
+
+## Tool Registration Order
+
+1. `register_all()` -- registers all built-in tools (sandboxed to workspace)
+2. `register_mcp_tools()` -- discovers and registers tools from MCP servers
+3. `MessageTool` -- registered separately (requires MessageBus reference)
+
+If a tool is registered with an existing name, it replaces the previous one.
+
+## Security
+
+### Workspace Containment
+
+All file tools enforce path containment:
+
+1. Path is joined to the workspace directory
+2. Result is canonicalized (resolving symlinks and `..`)
+3. Canonical path must start with canonical workspace directory
+4. Violation returns `InvalidPath` error
+
+### Output Truncation
+
+Tool results are truncated to 64 KB before being passed back to the LLM. The `web_fetch` tool additionally enforces a 10 MB body limit.
+
+### Concurrency Limits
+
+`spawn` allows maximum 5 concurrent subprocesses. `exec_shell` enforces a configurable timeout (default 30s, max 300s).

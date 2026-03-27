@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use crate::runtime::RwLock;
 use tracing::{debug, warn};
 
 use clawft_platform::Platform;
@@ -164,6 +164,8 @@ fn parse_skill_md(content: &str, fallback_name: &str) -> std::result::Result<Ski
 /// [`load_all`](SkillsLoader::load_all) acquire write locks.
 pub struct SkillsLoader<P: Platform> {
     skills_dir: PathBuf,
+    /// Additional directories to scan for skills (e.g. project-level `skills/`).
+    extra_dirs: Vec<PathBuf>,
     skills: Arc<RwLock<HashMap<String, Skill>>>,
     platform: Arc<P>,
 }
@@ -202,9 +204,22 @@ impl<P: Platform> SkillsLoader<P> {
 
         Ok(Self {
             skills_dir,
+            extra_dirs: Vec::new(),
             skills: Arc::new(RwLock::new(HashMap::new())),
             platform,
         })
+    }
+
+    /// Add an extra directory to scan for skills.
+    ///
+    /// Skills from extra directories are merged with the primary
+    /// `skills_dir`. If the same skill name appears in multiple
+    /// directories, the primary directory takes precedence.
+    pub fn add_extra_dir(&mut self, dir: PathBuf) {
+        if !self.extra_dirs.contains(&dir) {
+            debug!(path = %dir.display(), "adding extra skills directory");
+            self.extra_dirs.push(dir);
+        }
     }
 
     /// Create a skills loader with an explicit directory (for testing).
@@ -212,6 +227,7 @@ impl<P: Platform> SkillsLoader<P> {
     pub(crate) fn with_dir(skills_dir: PathBuf, platform: Arc<P>) -> Self {
         Self {
             skills_dir,
+            extra_dirs: Vec::new(),
             skills: Arc::new(RwLock::new(HashMap::new())),
             platform,
         }
@@ -228,25 +244,37 @@ impl<P: Platform> SkillsLoader<P> {
     /// Returns an empty list if the skills directory does not exist.
     /// Propagates I/O errors for other failures.
     pub async fn list_skills(&self) -> Result<Vec<String>> {
-        if !self.platform.fs().exists(&self.skills_dir).await {
-            return Ok(Vec::new());
-        }
-
-        let entries = self
-            .platform
-            .fs()
-            .list_dir(&self.skills_dir)
-            .await
-            .map_err(ClawftError::Io)?;
-
         let mut names = Vec::new();
-        for entry in entries {
-            let has_skill_json = self.platform.fs().exists(&entry.join("skill.json")).await;
-            let has_skill_md = self.platform.fs().exists(&entry.join("SKILL.md")).await;
-            if (has_skill_json || has_skill_md)
-                && let Some(name) = entry.file_name()
-            {
-                names.push(name.to_string_lossy().into_owned());
+        let mut seen = std::collections::HashSet::new();
+
+        // Scan all directories: primary first, then extras.
+        let mut dirs_to_scan = vec![self.skills_dir.clone()];
+        dirs_to_scan.extend(self.extra_dirs.iter().cloned());
+
+        for dir in &dirs_to_scan {
+            if !self.platform.fs().exists(dir).await {
+                continue;
+            }
+
+            let entries = match self.platform.fs().list_dir(dir).await {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!(dir = %dir.display(), error = %e, "failed to list skills dir");
+                    continue;
+                }
+            };
+
+            for entry in entries {
+                let has_skill_json = self.platform.fs().exists(&entry.join("skill.json")).await;
+                let has_skill_md = self.platform.fs().exists(&entry.join("SKILL.md")).await;
+                if (has_skill_json || has_skill_md)
+                    && let Some(name) = entry.file_name()
+                {
+                    let name = name.to_string_lossy().into_owned();
+                    if seen.insert(name.clone()) {
+                        names.push(name);
+                    }
+                }
             }
         }
 
@@ -265,21 +293,28 @@ impl<P: Platform> SkillsLoader<P> {
     /// Returns [`ClawftError::PluginLoadFailed`] if neither format can
     /// be loaded.
     pub async fn load_skill(&self, name: &str) -> Result<Skill> {
-        let skill_dir = self.skills_dir.join(name);
-        let skill_json_path = skill_dir.join("skill.json");
-        let skill_md_path = skill_dir.join("SKILL.md");
+        // Search primary dir first, then extra dirs.
+        let mut dirs_to_search = vec![self.skills_dir.clone()];
+        dirs_to_search.extend(self.extra_dirs.iter().cloned());
 
-        let skill = if self.platform.fs().exists(&skill_json_path).await {
-            self.load_skill_json(name, &skill_dir).await?
-        } else if self.platform.fs().exists(&skill_md_path).await {
-            self.load_skill_md(name, &skill_md_path).await?
-        } else {
-            return Err(ClawftError::PluginLoadFailed {
-                plugin: format!(
-                    "skill/{name}: neither skill.json nor SKILL.md found"
-                ),
-            });
-        };
+        let mut skill: Option<Skill> = None;
+        for dir in &dirs_to_search {
+            let skill_dir = dir.join(name);
+            let skill_json_path = skill_dir.join("skill.json");
+            let skill_md_path = skill_dir.join("SKILL.md");
+
+            if self.platform.fs().exists(&skill_json_path).await {
+                skill = Some(self.load_skill_json(name, &skill_dir).await?);
+                break;
+            } else if self.platform.fs().exists(&skill_md_path).await {
+                skill = Some(self.load_skill_md(name, &skill_md_path).await?);
+                break;
+            }
+        }
+
+        let skill = skill.ok_or_else(|| ClawftError::PluginLoadFailed {
+            plugin: format!("skill/{name}: neither skill.json nor SKILL.md found"),
+        })?;
 
         // Cache the loaded skill
         {

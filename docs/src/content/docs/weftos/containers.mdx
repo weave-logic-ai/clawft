@@ -1,0 +1,56 @@
+---
+title: "Container Integration"
+description: "ContainerManager lifecycle, ContainerConfig validation, ContainerState state machine, health check propagation, and port mapping."
+---
+
+WeftOS provides container integration for managing sidecar services (databases, caches, external APIs) alongside agent processes.
+
+**Source**: `crates/clawft-kernel/src/container.rs` (~600 lines)
+**Feature**: `containers`
+
+## ContainerConfig
+
+```rust
+pub struct ContainerConfig {
+    pub docker_socket: String,           // Default: "unix:///var/run/docker.sock"
+    pub network_name: String,            // Default: "weftos"
+    pub default_restart_policy: RestartPolicy,
+    pub health_check_interval_secs: u64,
+}
+```
+
+## ContainerState
+
+```rust
+pub enum ContainerState { Created, Running, Stopped, Failed }
+```
+
+## Port Mapping and Volumes
+
+```rust
+pub struct PortMapping {
+    pub host_port: u16,
+    pub container_port: u16,
+    pub protocol: String,
+}
+
+pub struct VolumeMount {
+    pub host_path: String,
+    pub container_path: String,
+    pub read_only: bool,
+}
+
+pub enum RestartPolicy {
+    Never,
+    Always,
+    OnFailure { max_retries: u32 },
+}
+```
+
+## Health Check Propagation
+
+Each container is wrapped in a `ContainerService` implementing `SystemService`, making health visible through the standard kernel health system. Running maps to Healthy, Created to Degraded, Stopped/Failed to Unhealthy.
+
+## Service Registration
+
+Containers are registered in the kernel's `ServiceRegistry` and resource tree under `/kernel/services/{container_name}`.

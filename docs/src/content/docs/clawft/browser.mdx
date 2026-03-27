@@ -1,0 +1,195 @@
+---
+title: "Browser Mode"
+description: "Run clawft in the browser via WebAssembly, including build instructions, API reference, and deployment."
+---
+
+## Overview
+
+The `clawft-wasm` crate provides a browser-compatible entrypoint for clawft. It compiles to WebAssembly and exposes a JavaScript API for initializing the framework, sending messages, and managing configuration from within a web page.
+
+The WASM crate depends only on `clawft-types`, keeping the binary size minimal. The `Platform` trait is designed for this target -- `process()` returns `None`, HTTP uses the fetch API, and the filesystem uses WASI or in-memory backends.
+
+## Architecture
+
+```
+Browser JavaScript
+    |
+    v
+clawft-wasm (wasm-bindgen exports)
+    |
+    +-- init(config_json)      -- Initialize the framework
+    +-- send_message(text)     -- Send a message to the agent
+    +-- set_env(key, value)    -- Set environment variables
+    |
+    v
+clawft-types (shared type definitions)
+```
+
+The WASM module is loaded via `wasm-bindgen` and provides three primary exports: `init`, `send_message`, and `set_env`.
+
+## Build the WASM Module
+
+```bash
+cd crates/clawft-wasm
+wasm-pack build --target web --no-default-features --features browser \
+  -- --no-default-features --features browser
+```
+
+This produces `pkg/clawft_wasm.js` and `pkg/clawft_wasm_bg.wasm`.
+
+Alternatively, use the build script:
+
+```bash
+scripts/build.sh browser
+```
+
+For WASI targets:
+
+```bash
+scripts/build.sh wasi
+```
+
+## Quickstart
+
+### Create a Minimal HTML Page
+
+Create `test.html` alongside the `pkg/` directory:
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>clawft-wasm test</title>
+</head>
+<body>
+  <pre id="output">Loading...</pre>
+  <script type="module">
+    import init_wasm, { init, send_message, set_env }
+      from "./pkg/clawft_wasm.js";
+
+    const output = document.getElementById("output");
+
+    async function run() {
+      await init_wasm();
+      output.textContent = "WASM loaded.\n";
+
+      const config = {
+        providers: {
+          anthropic: {
+            apiKey: "YOUR_API_KEY_HERE",
+            browserDirect: true
+          }
+        },
+        agents: {
+          defaults: {
+            model: "anthropic/claude-sonnet-4-20250514",
+            maxTokens: 4096
+          }
+        }
+      };
+
+      await init(JSON.stringify(config));
+      output.textContent += "Initialized.\n";
+
+      set_env("ANTHROPIC_API_KEY", "YOUR_API_KEY_HERE");
+
+      const response = await send_message("Hello from the browser!");
+      output.textContent += "Response: " + response + "\n";
+    }
+
+    run().catch(err => {
+      output.textContent = "Error: " + err;
+    });
+  </script>
+</body>
+</html>
+```
+
+### Serve and Open
+
+```bash
+npx serve crates/clawft-wasm/ --listen 8080
+```
+
+Open `http://localhost:8080/test.html` in a browser.
+
+## Configuration
+
+The config JSON mirrors the native `config.json` structure. Key fields for browser use:
+
+```json
+{
+  "providers": {
+    "anthropic": {
+      "apiKey": "sk-ant-...",
+      "browserDirect": true
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": "anthropic/claude-sonnet-4-20250514",
+      "maxTokens": 4096,
+      "temperature": 0.7
+    }
+  }
+}
+```
+
+- **`browserDirect`** -- Set to `true` for providers whose APIs support browser CORS. For others, configure a CORS proxy via `corsProxy`.
+- **`apiKey`** -- In production, inject this at runtime rather than hardcoding.
+
+## Test Harness
+
+The built-in test harness at `www/index.html` provides:
+
+- A JSON config editor
+- An "Initialize" button
+- Message display with user/assistant/error/system styling
+- Console timing for load, init, and message latency
+
+```bash
+npx serve crates/clawft-wasm/www --listen 8080
+```
+
+## WASM Size Budget
+
+The CI pipeline enforces size constraints:
+
+| Metric | Limit |
+|--------|-------|
+| Raw WASM binary | < 300 KB |
+| Gzipped WASM binary | < 120 KB |
+
+The `release-wasm` profile uses `opt-level = "z"` for aggressive size optimization. The CI job installs `binaryen` for `wasm-opt` post-processing.
+
+## Platform Limitations
+
+The WASM target has several constraints compared to native:
+
+- **No process spawning** -- `Platform::process()` returns `None`
+- **No filesystem** (unless WASI) -- File tools use in-memory backends
+- **HTTP via fetch API** -- Subject to browser CORS policies
+- **No tokio runtime** -- Uses browser event loop via `wasm-bindgen-futures`
+
+## Deployment
+
+### Static Hosting
+
+The WASM module and JavaScript wrapper can be served from any static file host (S3, CloudFront, Vercel, Netlify, GitHub Pages).
+
+Required files:
+- `clawft_wasm.js` -- JavaScript bindings
+- `clawft_wasm_bg.wasm` -- WebAssembly binary
+
+### CDN Considerations
+
+Set appropriate `Content-Type` headers:
+- `.wasm` files: `application/wasm`
+- `.js` files: `application/javascript`
+
+Enable gzip or brotli compression for the WASM binary.
+
+### Security
+
+Never embed API keys in client-side JavaScript for production deployments. Use a backend proxy to inject credentials server-side, or require users to provide their own keys at runtime.

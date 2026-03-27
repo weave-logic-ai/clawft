@@ -1,0 +1,297 @@
+---
+title: "ECC Cognitive Substrate"
+description: "Ephemeral Causal Cognition: causal DAG, cognitive tick, cross-references, HNSW vector search, impulse queue, calibration, and the three operating modes."
+---
+
+The Ephemeral Causal Cognition (ECC) substrate is the cognitive layer of WeftOS. It implements a distributed nervous system where every kernel instance is a node -- from embedded sensor devices to GPU servers -- all running the same `Kernel<P: Platform>`, differentiated by boot-time calibration.
+
+**Feature**: `ecc`
+**Source**: 6 modules in `crates/clawft-kernel/src/` (83 tests)
+**Phase**: K3c
+
+## What is ECC
+
+ECC provides the kernel with causal reasoning, semantic search, adaptive processing, and cross-structure linking. It is not an optional analytics add-on -- it is the foundation for WeftOS as a cognitive platform where agents reason about cause and effect, detect novelty, and maintain coherent world models.
+
+The ECC substrate implements a **forest of trees** architecture (Symposium D2): multiple domain-specific structures (ExoChain, Resource Tree, HNSW Index, Causal Graph) linked by CrossRefs and Impulses. Each structure uses data structures appropriate to its domain.
+
+## Three Operating Modes
+
+The same cognitive engine operates in three modes that compose into a continuous loop:
+
+### Mode 1: Act (Real-Time)
+
+Agents produce actions in real-time. The engines process each contribution within the cognitive tick: causal graph updates, belief tracking, coherence scoring, and affect modulation. The ExoChain records every committed action with full provenance.
+
+### Mode 2: Analyze (Post-Hoc)
+
+Given an existing corpus (transcripts, PR history, sprint commits), run the engines in read-only mode to reconstruct contribution trees, infer goals, map coherence, and identify gaps.
+
+### Mode 3: Generate (Goal-Directed)
+
+Set a goal, spawn expert agent-processes, and let them converse toward the desired output. The conversation IS the development process, with full causal provenance.
+
+### Composition
+
+```
+GENERATE --> ANALYZE --> ACT --> GENERATE --> ...
+```
+
+Each transition is a causal edge. Training material falls out naturally -- every scored witness entry is a training sample.
+
+## CausalGraph
+
+**Source**: `crates/clawft-kernel/src/causal.rs` (~700 lines, 22 tests)
+
+A concurrent, lock-free DAG where nodes represent events/observations and edges encode causal relationships with weights and provenance.
+
+```rust
+pub type NodeId = u64;  // Local to causal module
+
+pub enum CausalEdgeType {
+    Causes,        // A directly causes B
+    Inhibits,      // A suppresses B
+    Correlates,    // Statistical correlation
+    Enables,       // A is a precondition for B
+    Follows,       // A temporally follows B
+    Contradicts,   // A provides evidence against B
+    TriggeredBy,   // Created by a ClawStage trigger
+    EvidenceFor,   // A supports B
+}
+
+pub struct CausalEdge {
+    pub source: NodeId,
+    pub target: NodeId,
+    pub edge_type: CausalEdgeType,
+    pub weight: f64,
+    pub provenance: String,
+}
+```
+
+**API**: `add_node`, `get_node`, `remove_node`, `link`, `unlink`, `get_forward_edges`, `get_reverse_edges`, `traverse_forward`, `traverse_reverse`, `find_path`
+
+Built on `DashMap` for safe concurrent access from multiple agent threads. BFS traversal for path finding.
+
+## CognitiveTick
+
+**Source**: `crates/clawft-kernel/src/cognitive_tick.rs` (~550 lines, 20 tests)
+
+The heartbeat of the ECC substrate. Drives cognitive processing at a configurable interval with adaptive adjustment.
+
+```rust
+pub struct CognitiveTickConfig {
+    pub tick_interval_ms: u32,       // Default: 50
+    pub tick_budget_ratio: f32,      // Default: 0.3 (30% of interval for compute)
+    pub calibration_ticks: u32,      // Default: 100
+    pub adaptive_tick: bool,         // Default: true
+    pub adaptive_window_s: u32,      // Default: 30
+}
+
+pub struct CognitiveTickStats {
+    pub tick_count: u64,
+    pub current_interval_ms: u32,
+    pub avg_compute_us: u64,
+    pub max_compute_us: u64,
+    pub drift_detected: bool,
+}
+```
+
+Implements `SystemService` (name: `ecc.cognitive_tick`). The tick interval is self-calibrated at boot, auto-adjusted at runtime, and advertised to peers as a cluster capability (Symposium D3).
+
+## CrossRefStore
+
+**Source**: `crates/clawft-kernel/src/crossref.rs` (~425 lines, 12 tests)
+
+Universal cross-references between the forest structures.
+
+```rust
+pub enum StructureTag {
+    ExoChain,       // 0x01
+    ResourceTree,   // 0x02
+    CausalGraph,    // 0x03
+    HnswIndex,      // 0x04
+    Custom(u8),     // 0x10+
+}
+
+pub struct UniversalNodeId {
+    pub structure: StructureTag,
+    pub local_id: String,
+    pub hash: [u8; 32],  // BLAKE3
+}
+```
+
+`UniversalNodeId` uses BLAKE3 hashing (Symposium D6: new ECC code uses BLAKE3; existing ExoChain keeps SHAKE-256 until K6 migration).
+
+```rust
+pub enum CrossRefType {
+    DerivedFrom,
+    References,
+    Contradicts,
+    Supersedes,
+    Custom(String),
+}
+```
+
+**API**: `insert`, `get_forward`, `get_reverse`, `get_all`, `by_type`
+
+Concurrent forward/reverse index enables grafting (linking) and shaking (pruning) across any pair of structures.
+
+## HnswService
+
+**Source**: `crates/clawft-kernel/src/hnsw_service.rs` (~280 lines, 11 tests)
+
+Thread-safe kernel wrapper around `clawft_core::embeddings::hnsw_store::HnswStore`.
+
+```rust
+pub struct HnswServiceConfig {
+    pub ef_search: usize,           // Default: 100
+    pub ef_construction: usize,     // Default: 200
+    pub default_dimensions: usize,  // Default: 384
+}
+
+pub struct HnswSearchResult {
+    pub id: String,
+    pub score: f64,  // Cosine similarity
+}
+```
+
+Implements `SystemService` (name: `ecc.hnsw`). **API**: `insert`, `search`, `len`, `clear`, `insert_count`, `search_count`.
+
+## ImpulseQueue
+
+**Source**: `crates/clawft-kernel/src/impulse.rs` (~320 lines, 8 tests)
+
+Ephemeral causal events that flow between the four ECC structures.
+
+```rust
+pub enum ImpulseType {
+    BeliefUpdate,      // causal -> hnsw (new embedding needed)
+    CoherenceAlert,    // spectral -> causal (graph incoherent)
+    NoveltyDetected,   // hnsw -> causal (new cluster found)
+    EdgeConfirmed,     // cloud -> edge (validated)
+    EmbeddingRefined,  // cloud -> edge (better embedding)
+    Custom(u8),
+}
+```
+
+**API**: `emit`, `drain_ready`, `pending_count`, `clear`
+
+HLC-sorted for causal ordering. Structure tags are raw `u8` values matching `StructureTag::as_u8()`.
+
+## EccCalibration
+
+**Source**: `crates/clawft-kernel/src/calibration.rs` (~410 lines, 10 tests)
+
+Boot-time benchmarking that determines hardware capability:
+
+```rust
+pub struct EccCalibrationConfig {
+    pub calibration_ticks: u32,       // Default: 30
+    pub tick_interval_ms: u32,        // Default: 50
+    pub tick_budget_ratio: f32,       // Default: 0.3
+    pub vector_dimensions: usize,     // Default: 384
+}
+```
+
+Measures HNSW insert/search latency, causal edge creation latency, and BLAKE3 hashing speed. Returns p50/p95 timings that auto-tune the cognitive tick interval.
+
+One feature flag, boot decides (Symposium D8): compile-time `--features ecc` includes all modules; boot-time calibration determines what is active.
+
+## Cluster Advertisement
+
+`NodeEccCapability` in `cluster.rs` advertises ECC capabilities to peers:
+
+```rust
+pub struct NodeEccCapability {
+    pub tick_interval_ms: u32,
+    pub hnsw_dimensions: usize,
+    pub causal_node_count: u64,
+}
+```
+
+This enables heterogeneous swarms where a glasses node (50ms tick) and a server node (10ms tick) participate in the same nervous system.
+
+## Resource Tree Namespaces
+
+6 namespaces under `/kernel/services/ecc/`:
+- `/kernel/services/ecc/causal`
+- `/kernel/services/ecc/hnsw`
+- `/kernel/services/ecc/crossref`
+- `/kernel/services/ecc/impulse`
+- `/kernel/services/ecc/tick`
+- `/kernel/services/ecc/calibration`
+
+## CLI Commands
+
+```bash
+weaver ecc status          # Show ECC subsystem status
+weaver ecc calibrate       # Run calibration benchmark
+weaver ecc search <query>  # HNSW vector search
+weaver ecc causal          # Display causal graph info
+weaver ecc crossrefs       # List cross-references
+weaver ecc tick            # Show cognitive tick stats
+```
+
+## Built-in Tools
+
+7 ECC tools in the tool catalog (behind `ecc` feature):
+
+| Tool | Description |
+|------|-------------|
+| `ecc.status` | ECC subsystem status |
+| `ecc.calibrate` | Run calibration |
+| `ecc.search` | HNSW search |
+| `ecc.causal.add` | Add causal node |
+| `ecc.causal.link` | Create causal edge |
+| `ecc.crossref.add` | Add cross-reference |
+| `ecc.impulse.emit` | Emit an impulse |
+
+## WeaverEngine
+
+**Source**: `crates/clawft-kernel/src/weaver.rs` (~4,800 lines, 126 tests)
+
+The WeaverEngine is a `SystemService` that drives iterative causal modeling over data sources. It runs a HYPOTHESIZE-OBSERVE-EVALUATE-ADJUST loop within the cognitive tick, maintaining confidence scores and self-improvement tracking via a meta-Loom.
+
+### Capabilities
+
+- **Modeling sessions**: Start, stop, resume domain-specific modeling sessions
+- **Data ingestion**: Git history, file trees, CI pipelines, issue trackers, documentation, SPARC plans, and custom streams (7 source types)
+- **Confidence evaluation**: Edge coverage scoring, orphan detection, gap suggestions
+- **Confidence history**: Ring-buffer of snapshots with trend analysis (improving/stable/declining)
+- **Strategy tracking**: Records which analysis strategies improved confidence, recommends effective strategies
+- **Model export/import**: `ExportedModel` serialization with causal nodes/edges for edge device deployment
+- **Model diff**: `diff_models()` compares two exported models, producing `ModelDiff` with node/edge/confidence deltas
+- **Model merge**: `merge_models()` stitches models from different sessions, resolving conflicts by higher confidence
+- **Meta-Loom**: `MetaLoomEvent` and `MetaDecisionType` track the Weaver's own evolution
+- **WeaverKnowledgeBase**: Cross-domain pattern library with `save_to_file()`/`load_from_file()`, `learn_pattern()`/`find_patterns()` persistence
+- **Tick interval recommendation**: Analyzes change frequency to suggest optimal tick intervals
+- **Git polling**: Incremental commit detection via `GitPoller`
+- **File watching**: mtime-based change detection via `FileWatcher`
+
+### Embedding Providers
+
+**Source**: `crates/clawft-kernel/src/embedding.rs` and `embedding_onnx.rs` (62 tests)
+
+| Provider | Dimensions | Use Case |
+|----------|-----------|----------|
+| `MockEmbeddingProvider` | configurable | Deterministic SHA-256 hash vectors for testing |
+| `LlmEmbeddingProvider` | 384 (default) | LLM API embeddings with mock fallback |
+| `OnnxEmbeddingProvider` | 384 | all-MiniLM-L6-v2 with hash fallback |
+| `SentenceTransformerProvider` | 384 | Markdown-aware, sentence-splitting, mean pooling |
+| `AstEmbeddingProvider` | 256 | Hybrid structural+semantic for Rust code |
+
+### CLI Commands
+
+```bash
+weaver ecc session start --domain my-project --git .
+weaver ecc source add --domain my-project --type ci_pipeline
+weaver ecc confidence --domain my-project --verbose
+weaver ecc export --domain my-project --output weave-model.json
+weaver ecc stitch --source frontend --target backend
+weaver ecc meta --domain my-project
+weaver ecc meta export-kb --output weaver-kb.json
+```
+
+### IPC Protocol
+
+`WeaverCommand` (13 variants) and `WeaverResponse` for communication with CLI and agents via `KernelMessage`.
