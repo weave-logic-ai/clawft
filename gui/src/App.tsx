@@ -2,8 +2,9 @@ import { useState } from 'react';
 import { useKernelWs } from './hooks/useKernelWs';
 import { Dashboard } from './views/Dashboard';
 import { AdminForms } from './views/AdminForms';
+import { KnowledgeGraph } from './views/KnowledgeGraph';
 
-type View = 'dashboard' | 'admin';
+type View = 'dashboard' | 'admin' | 'graph';
 
 function App() {
   const [view, setView] = useState<View>('dashboard');
@@ -37,12 +38,24 @@ function App() {
           >
             Admin
           </button>
+          <button
+            onClick={() => setView('graph')}
+            className={`px-3 py-1 text-sm rounded ${
+              view === 'graph'
+                ? 'bg-gray-700 text-white'
+                : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800'
+            }`}
+          >
+            Knowledge Graph
+          </button>
         </nav>
       </header>
 
       {/* Content */}
-      <main className="flex-1 px-6 py-6 max-w-5xl w-full mx-auto">
-        {view === 'dashboard' ? <Dashboard ws={ws} /> : <AdminForms ws={ws} />}
+      <main className={`flex-1 px-6 py-6 ${view === 'graph' ? 'max-w-7xl' : 'max-w-5xl'} w-full mx-auto`}>
+        {view === 'dashboard' && <Dashboard ws={ws} />}
+        {view === 'admin' && <AdminForms ws={ws} />}
+        {view === 'graph' && <KnowledgeGraph />}
       </main>
 
       {/* Footer */}
