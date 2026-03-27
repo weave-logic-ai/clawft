@@ -4,7 +4,7 @@
 //! via [`MeshIpcEnvelope`], and the local [`A2ARouter`] so that a
 //! `RemoteNode` message target actually delivers across the network.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use dashmap::DashMap;
 use tracing::{debug, warn};
@@ -12,7 +12,10 @@ use tracing::{debug, warn};
 use crate::a2a::A2ARouter;
 use crate::error::{KernelError, KernelResult};
 use crate::ipc::{KernelMessage, MessageTarget};
+use crate::mesh_chain::{ChainSyncRequest, ChainSyncResponse};
+use crate::mesh_heartbeat::{HeartbeatConfig, HeartbeatTracker};
 use crate::mesh_ipc::MeshIpcEnvelope;
+use crate::mesh_kad::KademliaTable;
 
 /// A handle to a connected peer, holding the sender half of an mpsc
 /// channel whose receiver is read by a background write loop.
@@ -23,6 +26,16 @@ pub struct PeerConnection {
     pub connected_at: chrono::DateTime<chrono::Utc>,
     /// Sender for outbound serialized messages.
     pub sender: tokio::sync::mpsc::Sender<Vec<u8>>,
+}
+
+/// Discovery state for mesh peer lookup and health tracking.
+pub struct DiscoveryState {
+    /// Kademlia routing table for peer lookup.
+    pub kademlia: Mutex<KademliaTable>,
+    /// Known peer addresses: node_id -> socket addr string.
+    pub peer_addresses: DashMap<String, String>,
+    /// Heartbeat tracker for failure detection.
+    pub heartbeat: Mutex<HeartbeatTracker>,
 }
 
 /// The mesh runtime orchestrates transport, connections, and message bridging.
@@ -39,6 +52,8 @@ pub struct MeshRuntime {
     peers: DashMap<String, PeerConnection>,
     /// Reference to the local A2A router for injecting remote messages.
     local_router: Option<Arc<A2ARouter>>,
+    /// Optional discovery state (Kademlia + heartbeat).
+    discovery: Option<DiscoveryState>,
 }
 
 impl MeshRuntime {
@@ -48,6 +63,24 @@ impl MeshRuntime {
             node_id,
             peers: DashMap::new(),
             local_router: None,
+            discovery: None,
+        }
+    }
+
+    /// Create a mesh runtime with discovery state initialized.
+    ///
+    /// The `kademlia_id` is used as the local key in the Kademlia routing
+    /// table. Heartbeat tracking starts with default configuration.
+    pub fn with_discovery(node_id: String, kademlia_id: [u8; 32]) -> Self {
+        Self {
+            node_id,
+            peers: DashMap::new(),
+            local_router: None,
+            discovery: Some(DiscoveryState {
+                kademlia: Mutex::new(KademliaTable::new(kademlia_id)),
+                peer_addresses: DashMap::new(),
+                heartbeat: Mutex::new(HeartbeatTracker::new(HeartbeatConfig::default())),
+            }),
         }
     }
 
@@ -172,6 +205,124 @@ impl MeshRuntime {
             warn!(peer = %node_id, "disconnect_peer: peer not found");
         }
     }
+
+    // ── Discovery integration ─────────────────────────────────────
+
+    /// Register a peer's network address for future connection.
+    ///
+    /// Stored in the discovery state's address map. If discovery is not
+    /// initialized this is a no-op.
+    pub fn register_peer_address(&self, node_id: &str, addr: &str) {
+        if let Some(ref disc) = self.discovery {
+            disc.peer_addresses
+                .insert(node_id.to_string(), addr.to_string());
+        }
+    }
+
+    /// Return known peers from the discovery address map.
+    ///
+    /// Each entry is `(node_id, address)`. Returns an empty vec if
+    /// discovery is not initialized.
+    pub fn discover_peers(&self) -> Vec<(String, String)> {
+        match self.discovery.as_ref() {
+            Some(disc) => disc
+                .peer_addresses
+                .iter()
+                .map(|entry| (entry.key().clone(), entry.value().clone()))
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Record a heartbeat from the given peer (marks it alive).
+    ///
+    /// If the peer is not yet tracked by the heartbeat system it will
+    /// be added automatically.
+    pub fn record_heartbeat(&self, node_id: &str) {
+        if let Some(ref disc) = self.discovery {
+            let mut hb = disc.heartbeat.lock().unwrap();
+            if hb.peer_state(node_id).is_none() {
+                hb.add_peer(node_id.to_string());
+            }
+            hb.record_alive(node_id);
+        }
+    }
+
+    /// Return node IDs of peers that heartbeat considers suspect or dead.
+    pub fn check_peer_health(&self) -> Vec<String> {
+        match self.discovery.as_ref() {
+            Some(disc) => {
+                let hb = disc.heartbeat.lock().unwrap();
+                let mut unhealthy: Vec<String> = hb
+                    .suspect_peers()
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                unhealthy.extend(
+                    hb.dead_peers()
+                        .into_iter()
+                        .map(|s| s.to_string()),
+                );
+                unhealthy
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Disconnect peers that the heartbeat tracker considers dead.
+    pub fn remove_dead_peers(&self) {
+        if let Some(ref disc) = self.discovery {
+            let dead: Vec<String> = {
+                let hb = disc.heartbeat.lock().unwrap();
+                hb.dead_peers()
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect()
+            };
+            for node_id in &dead {
+                self.disconnect_peer(node_id);
+                disc.peer_addresses.remove(node_id.as_str());
+            }
+        }
+    }
+
+    /// Mutable access to discovery state (for tests and setup code).
+    pub fn discovery_mut(&mut self) -> Option<&mut DiscoveryState> {
+        self.discovery.as_mut()
+    }
+
+    /// Shared access to discovery state.
+    pub fn discovery(&self) -> Option<&DiscoveryState> {
+        self.discovery.as_ref()
+    }
+
+    // ── Chain sync stubs ──────────────────────────────────────────
+
+    /// Build a serialized [`ChainSyncRequest`] for sending to a peer.
+    ///
+    /// The request asks for chain events starting after `from_seq`.
+    /// This is a stub — the actual chain integration will replay
+    /// received events into the local chain manager.
+    pub fn build_chain_sync_request(&self, from_seq: u64) -> Vec<u8> {
+        let req = ChainSyncRequest {
+            chain_id: 0,
+            after_sequence: from_seq,
+            after_hash: String::new(),
+            max_events: 256,
+        };
+        serde_json::to_vec(&req).unwrap_or_default()
+    }
+
+    /// Handle an incoming chain sync response.
+    ///
+    /// Deserializes the data and returns the number of events contained.
+    /// This is a stub — the actual implementation will replay events
+    /// into the local chain manager.
+    pub fn handle_chain_sync_response(&self, data: &[u8]) -> KernelResult<usize> {
+        let resp: ChainSyncResponse = serde_json::from_slice(data)
+            .map_err(|e| KernelError::Mesh(format!("chain sync deserialize error: {e}")))?;
+        Ok(resp.events.len())
+    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────
@@ -181,6 +332,7 @@ mod tests {
     use super::*;
     use crate::capability::{AgentCapabilities, CapabilityChecker};
     use crate::ipc::{KernelMessage, MessagePayload, MessageTarget};
+    use crate::mesh_heartbeat::HeartbeatState;
     use crate::mesh_ipc::MeshIpcEnvelope;
     use crate::process::{ProcessEntry, ProcessState, ProcessTable, ResourceUsage};
     use crate::topic::TopicRouter;
@@ -408,5 +560,244 @@ mod tests {
         let rt = MeshRuntime::new("local".into());
         rt.disconnect_peer("ghost"); // should not panic
         assert_eq!(rt.peer_count(), 0);
+    }
+
+    // ── Test 13: two-node message exchange ──────────────────────
+
+    #[tokio::test]
+    async fn two_nodes_exchange_messages() {
+        // Create two MeshRuntime instances with different node IDs.
+        let (router_b, pid_b, mut inbox_b) = make_router_with_process();
+
+        let rt_a = MeshRuntime::new("node-a".into());
+        let mut rt_b = MeshRuntime::new("node-b".into());
+        rt_b.set_local_router(router_b);
+
+        // Create channels to simulate network transport.
+        let (a_to_b_tx, mut a_to_b_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+        let (b_to_a_tx, mut b_to_a_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+
+        // Each node knows the other as a peer.
+        rt_a.add_peer("node-b".into(), a_to_b_tx);
+        rt_b.add_peer("node-a".into(), b_to_a_tx);
+
+        // Node A sends a message targeting a process on node B.
+        let msg_a = KernelMessage::text(
+            pid_b,
+            MessageTarget::RemoteNode {
+                node_id: "node-b".into(),
+                target: Box::new(MessageTarget::Process(pid_b)),
+            },
+            "hello-from-a",
+        );
+        rt_a.route_to_remote("node-b", msg_a).await.unwrap();
+
+        // Simulate the wire: read from a_to_b channel, inject into rt_b.
+        let wire_bytes = a_to_b_rx.recv().await.unwrap();
+        rt_b.handle_incoming(&wire_bytes).await.unwrap();
+
+        // The message should be in node B's local inbox.
+        let delivered = inbox_b.try_recv().unwrap();
+        match &delivered.payload {
+            MessagePayload::Text(s) => assert_eq!(s, "hello-from-a"),
+            other => panic!("expected Text, got: {other:?}"),
+        }
+
+        // Node B replies back to node A (we just verify send succeeds).
+        let msg_b = KernelMessage::text(0, MessageTarget::Broadcast, "reply-from-b");
+        rt_b.route_to_remote("node-a", msg_b).await.unwrap();
+
+        let reply_bytes = b_to_a_rx.recv().await.unwrap();
+        let reply_env = MeshIpcEnvelope::from_bytes(&reply_bytes).unwrap();
+        assert_eq!(reply_env.source_node, "node-b");
+        assert_eq!(reply_env.dest_node, "node-a");
+    }
+
+    // ── Test 14: discover_peers returns registered addresses ─────
+
+    #[test]
+    fn discover_peers_returns_registered_addresses() {
+        let rt = MeshRuntime::with_discovery("node-x".into(), [0u8; 32]);
+        rt.register_peer_address("peer-1", "10.0.0.1:9470");
+        rt.register_peer_address("peer-2", "10.0.0.2:9470");
+        rt.register_peer_address("peer-3", "10.0.0.3:9470");
+
+        let mut peers = rt.discover_peers();
+        peers.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(peers.len(), 3);
+        assert_eq!(peers[0], ("peer-1".into(), "10.0.0.1:9470".into()));
+        assert_eq!(peers[1], ("peer-2".into(), "10.0.0.2:9470".into()));
+        assert_eq!(peers[2], ("peer-3".into(), "10.0.0.3:9470".into()));
+    }
+
+    // ── Test 15: heartbeat tracking detects suspect peer ─────────
+
+    #[test]
+    fn heartbeat_tracking_detects_dead_peer() {
+        let mut rt = MeshRuntime::with_discovery("local".into(), [0u8; 32]);
+
+        // Configure heartbeat with zero suspect timeout for instant transition.
+        {
+            let disc = rt.discovery_mut().unwrap();
+            let mut hb = disc.heartbeat.lock().unwrap();
+            *hb = HeartbeatTracker::new(crate::mesh_heartbeat::HeartbeatConfig {
+                suspect_timeout: std::time::Duration::from_secs(0),
+                ..crate::mesh_heartbeat::HeartbeatConfig::default()
+            });
+            hb.add_peer("healthy".into());
+            hb.add_peer("dying".into());
+        }
+
+        // Record heartbeat for healthy peer.
+        rt.record_heartbeat("healthy");
+
+        // Simulate misses for dying peer -> suspect -> dead.
+        {
+            let disc = rt.discovery_mut().unwrap();
+            let mut hb = disc.heartbeat.lock().unwrap();
+            hb.record_miss("dying");
+            hb.record_miss("dying");
+        }
+
+        let unhealthy = rt.check_peer_health();
+        assert!(unhealthy.contains(&"dying".to_string()));
+        assert!(!unhealthy.contains(&"healthy".to_string()));
+    }
+
+    // ── Test 16: remove_dead_peers cleans connections ────────────
+
+    #[test]
+    fn remove_dead_peers_cleans_connections() {
+        let mut rt = MeshRuntime::with_discovery("local".into(), [0u8; 32]);
+
+        // Add a peer connection.
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        rt.add_peer("dead-peer".into(), tx);
+        rt.register_peer_address("dead-peer", "10.0.0.99:9470");
+
+        // Force the peer into Dead state.
+        {
+            let disc = rt.discovery_mut().unwrap();
+            let mut hb = disc.heartbeat.lock().unwrap();
+            *hb = HeartbeatTracker::new(crate::mesh_heartbeat::HeartbeatConfig {
+                suspect_timeout: std::time::Duration::from_secs(0),
+                ..crate::mesh_heartbeat::HeartbeatConfig::default()
+            });
+            hb.add_peer("dead-peer".into());
+            hb.record_miss("dead-peer");
+            hb.record_miss("dead-peer");
+            assert_eq!(
+                hb.peer_state("dead-peer"),
+                Some(HeartbeatState::Dead)
+            );
+        }
+
+        assert_eq!(rt.peer_count(), 1);
+        rt.remove_dead_peers();
+        assert_eq!(rt.peer_count(), 0);
+        assert!(rt.discover_peers().is_empty());
+    }
+
+    // ── Test 17: Kademlia routing finds closest peers ────────────
+
+    #[test]
+    fn kademlia_routing_finds_closest_peers() {
+        let mut rt = MeshRuntime::with_discovery("local".into(), [0u8; 32]);
+
+        let disc = rt.discovery_mut().unwrap();
+        let mut kad = disc.kademlia.lock().unwrap();
+        // Insert peers with different XOR distances from the local key [0;32].
+        for i in 1..=5u8 {
+            let mut peer_key = [0u8; 32];
+            peer_key[0] = i;
+            kad.add_peer(
+                peer_key,
+                crate::mesh_kad::DhtEntry {
+                    key: format!("peer-{i}"),
+                    node_id: format!("peer-{i}"),
+                    address: format!("10.0.0.{i}:9470"),
+                    platform: "linux".into(),
+                    last_seen: 1000,
+                    governance_genesis_prefix: "0000000000000000".into(),
+                },
+            );
+        }
+
+        // Find the 3 closest to the local key.
+        let closest = kad.find_closest(&[0u8; 32], 3);
+        assert_eq!(closest.len(), 3);
+        // The closest by XOR distance to [0;32] should be the ones with
+        // the smallest first byte, which maps to node_id strings that
+        // start with the smallest byte values.
+    }
+
+    // ── Test 18: with_discovery initializes state ────────────────
+
+    #[test]
+    fn with_discovery_initializes_state() {
+        let rt = MeshRuntime::with_discovery("disc-node".into(), [0xAB; 32]);
+        assert_eq!(rt.node_id(), "disc-node");
+        assert!(rt.discovery().is_some());
+
+        let disc = rt.discovery().unwrap();
+        assert_eq!(*disc.kademlia.lock().unwrap().local_key(), [0xAB; 32]);
+        assert_eq!(disc.heartbeat.lock().unwrap().peer_count(), 0);
+    }
+
+    // ── Test 19: discover_peers empty without discovery ──────────
+
+    #[test]
+    fn discover_peers_empty_without_discovery() {
+        let rt = MeshRuntime::new("plain-node".into());
+        assert!(rt.discover_peers().is_empty());
+        // These should be safe no-ops.
+        rt.register_peer_address("x", "y");
+        rt.record_heartbeat("x");
+        assert!(rt.check_peer_health().is_empty());
+    }
+
+    // ── Test 20: chain sync request round-trip ───────────────────
+
+    #[test]
+    fn chain_sync_request_round_trip() {
+        let rt = MeshRuntime::new("sync-node".into());
+        let bytes = rt.build_chain_sync_request(42);
+
+        let req: crate::mesh_chain::ChainSyncRequest =
+            serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(req.chain_id, 0);
+        assert_eq!(req.after_sequence, 42);
+        assert_eq!(req.max_events, 256);
+    }
+
+    // ── Test 21: chain sync response handling ────────────────────
+
+    #[test]
+    fn chain_sync_response_handling() {
+        let rt = MeshRuntime::new("sync-node".into());
+
+        let resp = crate::mesh_chain::ChainSyncResponse {
+            chain_id: 0,
+            events: vec![
+                serde_json::json!({"type": "write"}),
+                serde_json::json!({"type": "delete"}),
+            ],
+            has_more: false,
+            tip_sequence: 100,
+            tip_hash: "abc".into(),
+        };
+        let data = serde_json::to_vec(&resp).unwrap();
+
+        let count = rt.handle_chain_sync_response(&data).unwrap();
+        assert_eq!(count, 2);
+    }
+
+    // ── Test 22: chain sync response malformed errors ────────────
+
+    #[test]
+    fn chain_sync_response_malformed_errors() {
+        let rt = MeshRuntime::new("sync-node".into());
+        let err = rt.handle_chain_sync_response(b"bad json").unwrap_err();
+        assert!(err.to_string().contains("chain sync deserialize"));
     }
 }
