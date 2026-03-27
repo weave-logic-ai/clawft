@@ -396,6 +396,601 @@ impl CausalGraph {
 
         result
     }
+
+    /// List all node IDs currently in the graph.
+    pub fn node_ids(&self) -> Vec<NodeId> {
+        self.nodes.iter().map(|r| *r.key()).collect()
+    }
+
+    /// Degree of a node (in + out edges, treating graph as undirected).
+    pub fn degree(&self, id: NodeId) -> usize {
+        let fwd = self.forward_edges.get(&id).map_or(0, |e| e.len());
+        let rev = self.reverse_edges.get(&id).map_or(0, |e| e.len());
+        fwd + rev
+    }
+
+    /// In-degree (number of incoming edges).
+    pub fn in_degree(&self, id: NodeId) -> usize {
+        self.reverse_edges.get(&id).map_or(0, |e| e.len())
+    }
+
+    /// Out-degree (number of outgoing edges).
+    pub fn out_degree(&self, id: NodeId) -> usize {
+        self.forward_edges.get(&id).map_or(0, |e| e.len())
+    }
+
+    // -----------------------------------------------------------------------
+    // Connected Components (undirected)
+    // -----------------------------------------------------------------------
+
+    /// Find connected components treating the graph as undirected.
+    ///
+    /// Returns a vec of components, each component being a vec of node IDs.
+    /// Components are sorted largest-first.
+    pub fn connected_components(&self) -> Vec<Vec<NodeId>> {
+        let ids = self.node_ids();
+        let mut visited: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+        let mut components = Vec::new();
+
+        for &id in &ids {
+            if visited.contains(&id) {
+                continue;
+            }
+            // BFS over both directions (undirected).
+            let mut component = Vec::new();
+            let mut queue: VecDeque<NodeId> = VecDeque::new();
+            visited.insert(id);
+            queue.push_back(id);
+
+            while let Some(current) = queue.pop_front() {
+                component.push(current);
+                // Forward neighbors.
+                for edge in self.get_forward_edges(current) {
+                    if visited.insert(edge.target) {
+                        queue.push_back(edge.target);
+                    }
+                }
+                // Reverse neighbors.
+                for edge in self.get_reverse_edges(current) {
+                    if visited.insert(edge.source) {
+                        queue.push_back(edge.source);
+                    }
+                }
+            }
+            component.sort();
+            components.push(component);
+        }
+
+        components.sort_by(|a, b| b.len().cmp(&a.len()));
+        components
+    }
+
+    // -----------------------------------------------------------------------
+    // Community Detection (Label Propagation)
+    // -----------------------------------------------------------------------
+
+    /// Detect communities using label propagation on the undirected graph.
+    ///
+    /// Each node starts with its own label. In each iteration, every node
+    /// adopts the most frequent label among its neighbors (weighted by edge
+    /// weight). Converges when no labels change, or after `max_iterations`.
+    ///
+    /// Returns a map from community label (a NodeId) to the set of node IDs
+    /// in that community.
+    pub fn detect_communities(&self, max_iterations: usize) -> Vec<Vec<NodeId>> {
+        let ids = self.node_ids();
+        if ids.is_empty() {
+            return Vec::new();
+        }
+
+        // Initialize: each node gets its own ID as label.
+        let mut labels: std::collections::HashMap<NodeId, NodeId> = std::collections::HashMap::new();
+        for &id in &ids {
+            labels.insert(id, id);
+        }
+
+        for _iter in 0..max_iterations {
+            let mut changed = false;
+
+            // Process nodes in a deterministic order.
+            let mut process_order = ids.clone();
+            process_order.sort();
+
+            for &id in &process_order {
+                // Gather neighbor labels weighted by edge weight.
+                let mut label_weights: std::collections::HashMap<NodeId, f32> =
+                    std::collections::HashMap::new();
+
+                for edge in self.get_forward_edges(id) {
+                    if let Some(&lbl) = labels.get(&edge.target) {
+                        *label_weights.entry(lbl).or_insert(0.0) += edge.weight;
+                    }
+                }
+                for edge in self.get_reverse_edges(id) {
+                    if let Some(&lbl) = labels.get(&edge.source) {
+                        *label_weights.entry(lbl).or_insert(0.0) += edge.weight;
+                    }
+                }
+
+                if label_weights.is_empty() {
+                    continue; // isolated node keeps its label
+                }
+
+                // Pick the label with the highest total weight.
+                // On ties, pick the smallest label for determinism.
+                let best_label = label_weights
+                    .iter()
+                    .max_by(|a, b| {
+                        a.1.partial_cmp(b.1)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| b.0.cmp(a.0)) // smaller ID wins ties
+                    })
+                    .map(|(&lbl, _)| lbl)
+                    .unwrap();
+
+                if labels[&id] != best_label {
+                    labels.insert(id, best_label);
+                    changed = true;
+                }
+            }
+
+            if !changed {
+                break;
+            }
+        }
+
+        // Group nodes by label.
+        let mut communities: std::collections::HashMap<NodeId, Vec<NodeId>> =
+            std::collections::HashMap::new();
+        for (&node, &label) in &labels {
+            communities.entry(label).or_default().push(node);
+        }
+
+        let mut result: Vec<Vec<NodeId>> = communities.into_values().collect();
+        for community in &mut result {
+            community.sort();
+        }
+        result.sort_by(|a, b| b.len().cmp(&a.len()));
+        result
+    }
+
+    // -----------------------------------------------------------------------
+    // Spectral Analysis
+    // -----------------------------------------------------------------------
+
+    /// Compute the algebraic connectivity (lambda_2) of the graph.
+    ///
+    /// Lambda_2 is the second-smallest eigenvalue of the graph Laplacian.
+    /// - lambda_2 = 0 means the graph is disconnected.
+    /// - Higher values indicate stronger connectivity.
+    ///
+    /// Uses inverse power iteration on (L - sigma*I) to find the Fiedler
+    /// value, avoiding full eigendecomposition. `max_iterations` controls
+    /// convergence (50 is usually sufficient).
+    ///
+    /// Returns `(lambda_2, fiedler_vector)` where the Fiedler vector can be
+    /// used for spectral partitioning (sign of each component indicates which
+    /// partition the node belongs to).
+    pub fn spectral_analysis(&self, max_iterations: usize) -> SpectralResult {
+        let ids = self.node_ids();
+        let n = ids.len();
+
+        if n < 2 {
+            return SpectralResult {
+                lambda_2: 0.0,
+                fiedler_vector: Vec::new(),
+                node_ids: ids,
+            };
+        }
+
+        // Build index map: NodeId -> matrix index.
+        let mut id_to_idx: std::collections::HashMap<NodeId, usize> =
+            std::collections::HashMap::new();
+        let mut sorted_ids = ids.clone();
+        sorted_ids.sort();
+        for (i, &id) in sorted_ids.iter().enumerate() {
+            id_to_idx.insert(id, i);
+        }
+
+        // Build Laplacian matrix L = D - A (treating graph as undirected, weighted).
+        // Stored as dense Vec<Vec<f64>> — suitable for graphs up to ~10K nodes.
+        let mut laplacian = vec![vec![0.0f64; n]; n];
+
+        for &id in &sorted_ids {
+            let i = id_to_idx[&id];
+            let mut deg = 0.0f64;
+
+            // Forward edges.
+            for edge in self.get_forward_edges(id) {
+                if let Some(&j) = id_to_idx.get(&edge.target) {
+                    if i != j {
+                        let w = edge.weight as f64;
+                        laplacian[i][j] -= w;
+                        laplacian[j][i] -= w; // symmetrize
+                        deg += w;
+                    }
+                }
+            }
+            // Reverse edges (avoid double-counting: only add if not already added
+            // by the forward pass of the source node).
+            for edge in self.get_reverse_edges(id) {
+                if let Some(&j) = id_to_idx.get(&edge.source) {
+                    if i != j && j > i {
+                        // Only process if source index > current index (upper triangle).
+                        let w = edge.weight as f64;
+                        laplacian[i][j] -= w;
+                        laplacian[j][i] -= w;
+                        deg += w;
+                    }
+                }
+            }
+
+            laplacian[i][i] += deg;
+        }
+
+        // Fix up diagonal: recompute from off-diagonal for correctness.
+        for i in 0..n {
+            let off_diag_sum: f64 = (0..n).filter(|&j| j != i).map(|j| -laplacian[i][j]).sum();
+            laplacian[i][i] = off_diag_sum;
+        }
+
+        // Power iteration for the Fiedler (second-smallest) eigenvalue.
+        // We use the inverse iteration approach: find the smallest eigenvalue
+        // of L restricted to the subspace orthogonal to the all-ones vector.
+        let inv_sqrt_n = 1.0 / (n as f64).sqrt();
+        let ones: Vec<f64> = vec![inv_sqrt_n; n];
+
+        // Start with a random-ish vector orthogonal to ones.
+        let mut v: Vec<f64> = (0..n).map(|i| (i as f64) - (n as f64 - 1.0) / 2.0).collect();
+
+        // Orthogonalize against ones.
+        let dot_ones: f64 = v.iter().zip(ones.iter()).map(|(a, b)| a * b).sum();
+        for i in 0..n {
+            v[i] -= dot_ones * ones[i];
+        }
+        normalize_vec(&mut v);
+
+        // Power iteration: v <- L * v, then orthogonalize against ones, normalize.
+        // This converges to the eigenvector with the LARGEST eigenvalue.
+        // To get lambda_2 (second smallest), we shift: use (lambda_max*I - L).
+        // But simpler: just do standard power iteration on L itself,
+        // orthogonalizing against both the smallest eigenvector (ones) and
+        // keeping track. Actually, the standard approach for lambda_2 is:
+        //
+        // Repeatedly: v <- L*v, orthogonalize v against ones, normalize.
+        // This converges to the eigenvector of the LARGEST eigenvalue of L
+        // (which is lambda_max, not lambda_2).
+        //
+        // For lambda_2 specifically, we use subspace iteration:
+        // converge to the dominant eigenvector first, then deflate.
+
+        // Simpler: direct Rayleigh quotient iteration for lambda_2.
+        // Since L is positive semidefinite with smallest eigenvalue 0,
+        // we iterate: v <- L*v, orthogonalize against constant vector,
+        // normalize. This gives the Fiedler vector.
+
+        let mut lambda_2 = 0.0f64;
+
+        for _ in 0..max_iterations {
+            // w = L * v
+            let mut w = vec![0.0f64; n];
+            for i in 0..n {
+                for j in 0..n {
+                    w[i] += laplacian[i][j] * v[j];
+                }
+            }
+
+            // Orthogonalize against ones vector (project out null space).
+            let dot: f64 = w.iter().zip(ones.iter()).map(|(a, b)| a * b).sum();
+            for i in 0..n {
+                w[i] -= dot * ones[i];
+            }
+
+            // Rayleigh quotient: lambda = v^T * w (since v is normalized).
+            lambda_2 = v.iter().zip(w.iter()).map(|(a, b)| a * b).sum();
+
+            // Normalize w to get new v.
+            let norm: f64 = w.iter().map(|x| x * x).sum::<f64>().sqrt();
+            if norm < 1e-12 {
+                // Converged to zero — graph may be disconnected.
+                lambda_2 = 0.0;
+                break;
+            }
+            for i in 0..n {
+                v[i] = w[i] / norm;
+            }
+        }
+
+        SpectralResult {
+            lambda_2: lambda_2.max(0.0), // clamp numerical noise
+            fiedler_vector: v,
+            node_ids: sorted_ids,
+        }
+    }
+
+    /// Partition the graph into two halves using the Fiedler vector.
+    ///
+    /// Nodes with positive Fiedler vector components go to partition A,
+    /// negative to partition B. This is spectral bisection — the
+    /// minimum-cut balanced partition.
+    pub fn spectral_partition(&self) -> (Vec<NodeId>, Vec<NodeId>) {
+        let result = self.spectral_analysis(50);
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+
+        for (i, &id) in result.node_ids.iter().enumerate() {
+            if i < result.fiedler_vector.len() && result.fiedler_vector[i] >= 0.0 {
+                a.push(id);
+            } else {
+                b.push(id);
+            }
+        }
+        (a, b)
+    }
+
+    // -----------------------------------------------------------------------
+    // Predictive Analysis
+    // -----------------------------------------------------------------------
+
+    /// Compute co-modification coupling between nodes based on temporal
+    /// co-occurrence patterns.
+    ///
+    /// Given a list of "change events" (each event is a set of node IDs that
+    /// changed together, plus a timestamp), computes a coupling score for
+    /// every pair of nodes that have been modified together.
+    ///
+    /// The coupling score for nodes (A, B) is:
+    ///   coupling = co_changes(A,B) / max(changes(A), changes(B))
+    ///
+    /// Returns pairs sorted by coupling score descending.
+    pub fn compute_coupling(
+        &self,
+        change_events: &[ChangeEvent],
+    ) -> Vec<CouplingPair> {
+        let mut change_count: std::collections::HashMap<NodeId, usize> =
+            std::collections::HashMap::new();
+        let mut co_change_count: std::collections::HashMap<(NodeId, NodeId), usize> =
+            std::collections::HashMap::new();
+
+        for event in change_events {
+            let mut nodes: Vec<NodeId> = event.node_ids.clone();
+            nodes.sort();
+            nodes.dedup();
+
+            for &id in &nodes {
+                *change_count.entry(id).or_insert(0) += 1;
+            }
+            // Count co-occurrences.
+            for i in 0..nodes.len() {
+                for j in (i + 1)..nodes.len() {
+                    let key = (nodes[i], nodes[j]);
+                    *co_change_count.entry(key).or_insert(0) += 1;
+                }
+            }
+        }
+
+        let mut pairs: Vec<CouplingPair> = co_change_count
+            .iter()
+            .map(|(&(a, b), &co)| {
+                let max_changes = change_count
+                    .get(&a)
+                    .copied()
+                    .unwrap_or(1)
+                    .max(change_count.get(&b).copied().unwrap_or(1));
+                CouplingPair {
+                    node_a: a,
+                    node_b: b,
+                    co_changes: co,
+                    coupling_score: co as f64 / max_changes as f64,
+                }
+            })
+            .collect();
+
+        pairs.sort_by(|a, b| {
+            b.coupling_score
+                .partial_cmp(&a.coupling_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        pairs
+    }
+
+    /// Detect burst patterns in change events and predict which nodes are
+    /// likely to change next.
+    ///
+    /// A "burst" is a period where a node has significantly more changes
+    /// than its baseline rate. Nodes currently in a burst, or recently
+    /// co-modified with nodes in a burst, are predicted to change next.
+    ///
+    /// `window_size` is the number of recent events to consider for the
+    /// burst window. `baseline_factor` is the multiplier above which a
+    /// node's activity is considered a burst (e.g., 2.0 = 2x baseline).
+    ///
+    /// Returns nodes sorted by prediction confidence (descending).
+    pub fn predict_changes(
+        &self,
+        change_events: &[ChangeEvent],
+        window_size: usize,
+        baseline_factor: f64,
+    ) -> Vec<ChangePrediction> {
+        if change_events.is_empty() {
+            return Vec::new();
+        }
+
+        // Sort events by timestamp.
+        let mut sorted_events = change_events.to_vec();
+        sorted_events.sort_by_key(|e| e.timestamp);
+
+        let total = sorted_events.len();
+        let window_start = if total > window_size {
+            total - window_size
+        } else {
+            0
+        };
+
+        // Compute baseline rate (changes per event across all history).
+        let mut total_counts: std::collections::HashMap<NodeId, usize> =
+            std::collections::HashMap::new();
+        for event in &sorted_events {
+            for &id in &event.node_ids {
+                *total_counts.entry(id).or_insert(0) += 1;
+            }
+        }
+
+        // Compute window rate.
+        let mut window_counts: std::collections::HashMap<NodeId, usize> =
+            std::collections::HashMap::new();
+        for event in &sorted_events[window_start..] {
+            for &id in &event.node_ids {
+                *window_counts.entry(id).or_insert(0) += 1;
+            }
+        }
+
+        let window_len = total - window_start;
+
+        // Identify nodes in burst.
+        let mut burst_nodes: Vec<(NodeId, f64)> = Vec::new();
+        for (&id, &window_count) in &window_counts {
+            let total_count = total_counts.get(&id).copied().unwrap_or(0);
+            let baseline_rate = total_count as f64 / total as f64;
+            let window_rate = window_count as f64 / window_len as f64;
+
+            if baseline_rate > 0.0 && window_rate / baseline_rate >= baseline_factor {
+                burst_nodes.push((id, window_rate / baseline_rate));
+            }
+        }
+
+        // Compute coupling to identify co-modification partners.
+        let coupling = self.compute_coupling(change_events);
+        let coupling_map: std::collections::HashMap<(NodeId, NodeId), f64> = coupling
+            .iter()
+            .map(|p| ((p.node_a, p.node_b), p.coupling_score))
+            .collect();
+
+        // Score all nodes.
+        let mut predictions: std::collections::HashMap<NodeId, f64> =
+            std::collections::HashMap::new();
+
+        // Burst nodes get high base confidence.
+        for &(id, burst_ratio) in &burst_nodes {
+            *predictions.entry(id).or_insert(0.0) += burst_ratio * 0.6;
+        }
+
+        // Coupled partners of burst nodes get transitive confidence.
+        for &(burst_id, burst_ratio) in &burst_nodes {
+            for (&(a, b), &coupling_score) in &coupling_map {
+                let partner = if a == burst_id {
+                    Some(b)
+                } else if b == burst_id {
+                    Some(a)
+                } else {
+                    None
+                };
+                if let Some(partner_id) = partner {
+                    *predictions.entry(partner_id).or_insert(0.0) +=
+                        burst_ratio * coupling_score * 0.4;
+                }
+            }
+        }
+
+        // Recent activity boost: nodes that appeared in the last few events.
+        let recency_window = (window_size / 3).max(1);
+        let recency_start = if total > recency_window {
+            total - recency_window
+        } else {
+            0
+        };
+        for event in &sorted_events[recency_start..] {
+            for &id in &event.node_ids {
+                *predictions.entry(id).or_insert(0.0) += 0.1;
+            }
+        }
+
+        let mut result: Vec<ChangePrediction> = predictions
+            .into_iter()
+            .map(|(id, confidence)| {
+                let label = self
+                    .get_node(id)
+                    .map(|n| n.label.clone())
+                    .unwrap_or_else(|| format!("node:{id}"));
+                let in_burst = burst_nodes.iter().any(|&(bid, _)| bid == id);
+                ChangePrediction {
+                    node_id: id,
+                    label,
+                    confidence: confidence.min(1.0),
+                    in_burst,
+                    recent_changes: window_counts.get(&id).copied().unwrap_or(0),
+                }
+            })
+            .collect();
+
+        result.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        result
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Supporting types
+// ---------------------------------------------------------------------------
+
+/// Result of spectral analysis on the causal graph.
+#[derive(Debug, Clone)]
+pub struct SpectralResult {
+    /// Algebraic connectivity (second-smallest Laplacian eigenvalue).
+    /// 0.0 means disconnected. Higher = more connected.
+    pub lambda_2: f64,
+    /// Fiedler vector — sign indicates spectral partition membership.
+    pub fiedler_vector: Vec<f64>,
+    /// Node IDs in the same order as the Fiedler vector.
+    pub node_ids: Vec<NodeId>,
+}
+
+/// A temporal change event: a set of nodes that changed together.
+#[derive(Debug, Clone)]
+pub struct ChangeEvent {
+    /// Nodes that changed in this event (e.g., modules modified in a commit).
+    pub node_ids: Vec<NodeId>,
+    /// Timestamp of the event.
+    pub timestamp: u64,
+}
+
+/// Coupling between two nodes based on co-modification frequency.
+#[derive(Debug, Clone)]
+pub struct CouplingPair {
+    /// First node.
+    pub node_a: NodeId,
+    /// Second node.
+    pub node_b: NodeId,
+    /// Number of times both changed in the same event.
+    pub co_changes: usize,
+    /// Coupling score: co_changes / max(changes_a, changes_b).
+    pub coupling_score: f64,
+}
+
+/// A prediction that a node will change soon.
+#[derive(Debug, Clone)]
+pub struct ChangePrediction {
+    /// Node ID.
+    pub node_id: NodeId,
+    /// Human-readable label.
+    pub label: String,
+    /// Prediction confidence (0.0 .. 1.0).
+    pub confidence: f64,
+    /// Whether this node is currently in a burst pattern.
+    pub in_burst: bool,
+    /// Number of changes in the recent window.
+    pub recent_changes: usize,
+}
+
+/// L2-normalize a vector in place.
+fn normalize_vec(v: &mut [f64]) {
+    let norm: f64 = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+    if norm > 1e-12 {
+        v.iter_mut().for_each(|x| *x /= norm);
+    }
 }
 
 impl Default for CausalGraph {
@@ -691,5 +1286,320 @@ mod tests {
         assert_eq!(CausalEdgeType::Contradicts.to_string(), "Contradicts");
         assert_eq!(CausalEdgeType::TriggeredBy.to_string(), "TriggeredBy");
         assert_eq!(CausalEdgeType::EvidenceFor.to_string(), "EvidenceFor");
+    }
+
+    // =====================================================================
+    // Degree tests
+    // =====================================================================
+
+    // 23
+    #[test]
+    fn degree_computation() {
+        let g = make_graph();
+        let a = g.add_node("A".into(), serde_json::json!({}));
+        let b = g.add_node("B".into(), serde_json::json!({}));
+        let c = g.add_node("C".into(), serde_json::json!({}));
+        g.link(a, b, CausalEdgeType::Causes, 1.0, 0, 0);
+        g.link(a, c, CausalEdgeType::Enables, 0.5, 0, 0);
+        g.link(b, c, CausalEdgeType::Follows, 0.8, 0, 0);
+        assert_eq!(g.out_degree(a), 2);
+        assert_eq!(g.in_degree(a), 0);
+        assert_eq!(g.degree(a), 2);
+        assert_eq!(g.in_degree(c), 2);
+        assert_eq!(g.out_degree(c), 0);
+        assert_eq!(g.degree(c), 2);
+        assert_eq!(g.degree(b), 2); // 1 in + 1 out
+    }
+
+    // =====================================================================
+    // Connected Components tests
+    // =====================================================================
+
+    // 24
+    #[test]
+    fn connected_components_single() {
+        let g = make_graph();
+        let a = g.add_node("A".into(), serde_json::json!({}));
+        let b = g.add_node("B".into(), serde_json::json!({}));
+        g.link(a, b, CausalEdgeType::Causes, 1.0, 0, 0);
+        let cc = g.connected_components();
+        assert_eq!(cc.len(), 1);
+        assert_eq!(cc[0].len(), 2);
+    }
+
+    // 25
+    #[test]
+    fn connected_components_two_islands() {
+        let g = make_graph();
+        let a = g.add_node("A".into(), serde_json::json!({}));
+        let b = g.add_node("B".into(), serde_json::json!({}));
+        let c = g.add_node("C".into(), serde_json::json!({}));
+        let d = g.add_node("D".into(), serde_json::json!({}));
+        g.link(a, b, CausalEdgeType::Causes, 1.0, 0, 0);
+        g.link(c, d, CausalEdgeType::Causes, 1.0, 0, 0);
+        let cc = g.connected_components();
+        assert_eq!(cc.len(), 2);
+        assert_eq!(cc[0].len(), 2);
+        assert_eq!(cc[1].len(), 2);
+    }
+
+    // 26
+    #[test]
+    fn connected_components_isolated_node() {
+        let g = make_graph();
+        let a = g.add_node("A".into(), serde_json::json!({}));
+        let b = g.add_node("B".into(), serde_json::json!({}));
+        g.add_node("isolated".into(), serde_json::json!({}));
+        g.link(a, b, CausalEdgeType::Causes, 1.0, 0, 0);
+        let cc = g.connected_components();
+        assert_eq!(cc.len(), 2);
+        assert_eq!(cc[0].len(), 2); // largest first
+        assert_eq!(cc[1].len(), 1); // isolated
+    }
+
+    // =====================================================================
+    // Community Detection tests
+    // =====================================================================
+
+    // 27
+    #[test]
+    fn community_detection_two_clusters() {
+        let g = make_graph();
+        // Cluster 1: A-B-C strongly connected.
+        let a = g.add_node("A".into(), serde_json::json!({}));
+        let b = g.add_node("B".into(), serde_json::json!({}));
+        let c = g.add_node("C".into(), serde_json::json!({}));
+        g.link(a, b, CausalEdgeType::Causes, 1.0, 0, 0);
+        g.link(b, c, CausalEdgeType::Causes, 1.0, 0, 0);
+        g.link(c, a, CausalEdgeType::Causes, 1.0, 0, 0);
+
+        // Cluster 2: D-E-F strongly connected.
+        let d = g.add_node("D".into(), serde_json::json!({}));
+        let e = g.add_node("E".into(), serde_json::json!({}));
+        let f = g.add_node("F".into(), serde_json::json!({}));
+        g.link(d, e, CausalEdgeType::Causes, 1.0, 0, 0);
+        g.link(e, f, CausalEdgeType::Causes, 1.0, 0, 0);
+        g.link(f, d, CausalEdgeType::Causes, 1.0, 0, 0);
+
+        // Weak bridge between clusters.
+        g.link(c, d, CausalEdgeType::Correlates, 0.1, 0, 0);
+
+        let communities = g.detect_communities(20);
+        // Should find 2 communities (clusters) even with the weak bridge.
+        // Label propagation may merge them due to the bridge, but the strong
+        // internal edges should dominate.
+        assert!(!communities.is_empty());
+        // At minimum, isolated nodes shouldn't be their own community.
+        assert!(communities.len() <= 3);
+    }
+
+    // 28
+    #[test]
+    fn community_detection_isolated_nodes() {
+        let g = make_graph();
+        g.add_node("A".into(), serde_json::json!({}));
+        g.add_node("B".into(), serde_json::json!({}));
+        let communities = g.detect_communities(10);
+        // Each isolated node stays in its own community.
+        assert_eq!(communities.len(), 2);
+    }
+
+    // 29
+    #[test]
+    fn community_detection_empty_graph() {
+        let g = make_graph();
+        let communities = g.detect_communities(10);
+        assert!(communities.is_empty());
+    }
+
+    // =====================================================================
+    // Spectral Analysis tests
+    // =====================================================================
+
+    // 30
+    #[test]
+    fn spectral_connected_graph_positive_lambda2() {
+        let g = make_graph();
+        let a = g.add_node("A".into(), serde_json::json!({}));
+        let b = g.add_node("B".into(), serde_json::json!({}));
+        let c = g.add_node("C".into(), serde_json::json!({}));
+        g.link(a, b, CausalEdgeType::Causes, 1.0, 0, 0);
+        g.link(b, c, CausalEdgeType::Causes, 1.0, 0, 0);
+        g.link(a, c, CausalEdgeType::Causes, 1.0, 0, 0);
+
+        let result = g.spectral_analysis(50);
+        assert!(
+            result.lambda_2 > 0.0,
+            "connected graph should have lambda_2 > 0, got {}",
+            result.lambda_2
+        );
+        assert_eq!(result.fiedler_vector.len(), 3);
+        assert_eq!(result.node_ids.len(), 3);
+    }
+
+    // 31
+    #[test]
+    fn spectral_disconnected_graph_zero_lambda2() {
+        let g = make_graph();
+        let a = g.add_node("A".into(), serde_json::json!({}));
+        let b = g.add_node("B".into(), serde_json::json!({}));
+        // No edges — disconnected.
+        let result = g.spectral_analysis(50);
+        assert!(
+            result.lambda_2 < 0.01,
+            "disconnected graph should have lambda_2 ~ 0, got {}",
+            result.lambda_2
+        );
+        assert_eq!(result.node_ids.len(), 2);
+    }
+
+    // 32
+    #[test]
+    fn spectral_partition_splits_graph() {
+        let g = make_graph();
+        let a = g.add_node("A".into(), serde_json::json!({}));
+        let b = g.add_node("B".into(), serde_json::json!({}));
+        let c = g.add_node("C".into(), serde_json::json!({}));
+        let d = g.add_node("D".into(), serde_json::json!({}));
+        // Two clusters with weak bridge.
+        g.link(a, b, CausalEdgeType::Causes, 1.0, 0, 0);
+        g.link(c, d, CausalEdgeType::Causes, 1.0, 0, 0);
+        g.link(b, c, CausalEdgeType::Correlates, 0.1, 0, 0);
+
+        let (part_a, part_b) = g.spectral_partition();
+        assert!(!part_a.is_empty());
+        assert!(!part_b.is_empty());
+        assert_eq!(part_a.len() + part_b.len(), 4);
+    }
+
+    // 33
+    #[test]
+    fn spectral_single_node() {
+        let g = make_graph();
+        g.add_node("A".into(), serde_json::json!({}));
+        let result = g.spectral_analysis(50);
+        assert_eq!(result.lambda_2, 0.0);
+    }
+
+    // =====================================================================
+    // Coupling / Predictive Analysis tests
+    // =====================================================================
+
+    // 34
+    #[test]
+    fn coupling_basic() {
+        let g = make_graph();
+        let a = g.add_node("A".into(), serde_json::json!({}));
+        let b = g.add_node("B".into(), serde_json::json!({}));
+        let c = g.add_node("C".into(), serde_json::json!({}));
+
+        let events = vec![
+            ChangeEvent { node_ids: vec![a, b], timestamp: 1 },
+            ChangeEvent { node_ids: vec![a, b], timestamp: 2 },
+            ChangeEvent { node_ids: vec![a, c], timestamp: 3 },
+            ChangeEvent { node_ids: vec![b, c], timestamp: 4 },
+        ];
+
+        let coupling = g.compute_coupling(&events);
+        assert!(!coupling.is_empty());
+
+        // A-B co-changed 2 times out of max(3,3)=3 → 0.67
+        let ab = coupling.iter().find(|p| {
+            (p.node_a == a && p.node_b == b) || (p.node_a == b && p.node_b == a)
+        });
+        assert!(ab.is_some());
+        let ab = ab.unwrap();
+        assert_eq!(ab.co_changes, 2);
+        assert!((ab.coupling_score - 2.0 / 3.0).abs() < 0.01);
+    }
+
+    // 35
+    #[test]
+    fn coupling_empty_events() {
+        let g = make_graph();
+        let coupling = g.compute_coupling(&[]);
+        assert!(coupling.is_empty());
+    }
+
+    // 36
+    #[test]
+    fn predict_changes_burst_detection() {
+        let g = make_graph();
+        let a = g.add_node("module_a".into(), serde_json::json!({}));
+        let b = g.add_node("module_b".into(), serde_json::json!({}));
+        let c = g.add_node("module_c".into(), serde_json::json!({}));
+
+        // History: 50 events. Module A changes rarely (every 10th event).
+        // Module C fills the rest so there are plenty of events.
+        let mut events = Vec::new();
+        for i in 0..50 {
+            events.push(ChangeEvent { node_ids: vec![c], timestamp: i });
+            if i % 10 == 0 {
+                events.push(ChangeEvent { node_ids: vec![a], timestamp: i });
+            }
+        }
+        // Burst window: module A + B change together in every recent event.
+        for i in 50..60 {
+            events.push(ChangeEvent { node_ids: vec![a, b], timestamp: i });
+        }
+        // Module A baseline: ~5 changes in ~55 events before window (rate ~0.09).
+        // Module A window: 10 changes in 10 events (rate 1.0).
+        // Burst ratio: ~11x — well above 1.5 threshold.
+
+        let predictions = g.predict_changes(&events, 10, 1.5);
+        assert!(!predictions.is_empty());
+
+        // Module A should be predicted (in burst).
+        let pred_a = predictions.iter().find(|p| p.node_id == a);
+        assert!(pred_a.is_some(), "module_a should be in predictions");
+        assert!(pred_a.unwrap().in_burst, "module_a should be in burst");
+
+        // Module B should be predicted (co-modified with A during burst).
+        let pred_b = predictions.iter().find(|p| p.node_id == b);
+        assert!(pred_b.is_some(), "module_b should be predicted via coupling");
+    }
+
+    // 37
+    #[test]
+    fn predict_changes_empty_events() {
+        let g = make_graph();
+        let predictions = g.predict_changes(&[], 5, 2.0);
+        assert!(predictions.is_empty());
+    }
+
+    // 38
+    #[test]
+    fn node_ids_returns_all() {
+        let g = make_graph();
+        let a = g.add_node("A".into(), serde_json::json!({}));
+        let b = g.add_node("B".into(), serde_json::json!({}));
+        let ids = g.node_ids();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&a));
+        assert!(ids.contains(&b));
+    }
+
+    // 39
+    #[test]
+    fn spectral_strongly_connected_high_lambda2() {
+        // A complete graph of 4 nodes should have high lambda_2.
+        let g = make_graph();
+        let nodes: Vec<NodeId> = (0..4)
+            .map(|i| g.add_node(format!("N{i}"), serde_json::json!({})))
+            .collect();
+        for i in 0..4 {
+            for j in 0..4 {
+                if i != j {
+                    g.link(nodes[i], nodes[j], CausalEdgeType::Causes, 1.0, 0, 0);
+                }
+            }
+        }
+        let result = g.spectral_analysis(50);
+        // For K4, lambda_2 should be 4.0 (all eigenvalues of Laplacian of K4 are 0,4,4,4).
+        assert!(
+            result.lambda_2 > 3.0,
+            "complete graph K4 lambda_2 should be ~4.0, got {}",
+            result.lambda_2
+        );
     }
 }

@@ -89,11 +89,6 @@ What the Graph Reveals Now
   Can we automatically discover the 12 conversations from graph structure alone? If spectral clustering on the causal graph produces clusters
   that match the manually-identified conversations, that validates the ECC model. If it doesn't, the divergence is itself interesting.
 
-  3. Real ONNX embeddings
-
-  The architecture is ready (OnnxEmbeddingProvider). Loading an actual model file would let us run semantic search: "find code similar to this
-  function" with real vector similarity instead of hash-based approximation.
-
   4. Predictive analysis
 
   The git history graph has temporal patterns. Can we predict which modules are likely to change next based on commit burst rhythm and coupling?
@@ -112,3 +107,13 @@ What the Graph Reveals Now
 
   The Weaver has seen the pattern: identify gap → write SPARC plan → implement → test → review. Could it generate a SPARC plan from a gap report
   automatically?
+
+
+  ● The causal graph has BFS traversal and path finding but no community detection or spectral analysis yet. These are mentioned in VISION.md as
+  capabilities but haven't been implemented in the Rust code. The gap analysis scripts do community detection in Python though. Let me check the
+  gap analysis more closely to see if it has those features:
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● The community detection and predictive features exist conceptually but aren't implemented in the Rust kernel yet — they're mentioned as future
+  work items in the weaver_todo. The gap analysis Python scripts do structural analysis but not spectral community detection.
