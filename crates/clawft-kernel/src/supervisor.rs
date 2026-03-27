@@ -37,6 +37,10 @@ pub enum RestartStrategy {
     OneForAll,
     /// Restart the failed child and all children started after it.
     RestForOne,
+    /// Do not restart -- let the agent stay dead.
+    Permanent,
+    /// Restart only if the agent exited abnormally (non-zero exit code).
+    Transient,
 }
 
 #[cfg(feature = "os-patterns")]
@@ -121,6 +125,41 @@ impl RestartTracker {
         self.backoff_ms = self.next_backoff_ms();
         self.last_restart = Some(std::time::Instant::now());
         self.restart_count <= budget.max_restarts
+    }
+
+    /// Check whether the restart budget is exhausted.
+    pub fn is_exhausted(&self, budget: &RestartBudget) -> bool {
+        // If the window hasn't expired, check the count.
+        let now = std::time::Instant::now();
+        if now.duration_since(self.window_start).as_secs() > budget.within_secs {
+            // Window expired -- budget would reset on next record_restart.
+            return false;
+        }
+        self.restart_count >= budget.max_restarts
+    }
+
+    /// Number of restarts remaining in the current window.
+    ///
+    /// Returns 0 if the budget is already exhausted. Returns
+    /// `max_restarts` if the window has expired (it would reset
+    /// on the next `record_restart`).
+    pub fn remaining(&self, budget: &RestartBudget) -> u32 {
+        let now = std::time::Instant::now();
+        if now.duration_since(self.window_start).as_secs() > budget.within_secs {
+            return budget.max_restarts;
+        }
+        budget.max_restarts.saturating_sub(self.restart_count)
+    }
+
+    /// Determine whether a process should be restarted based on the
+    /// strategy and exit code.
+    pub fn should_restart(strategy: &RestartStrategy, exit_code: i32) -> bool {
+        match strategy {
+            RestartStrategy::Permanent => false,
+            RestartStrategy::Transient => exit_code != 0,
+            // OneForOne, OneForAll, RestForOne always restart
+            _ => true,
+        }
     }
 }
 
@@ -298,6 +337,18 @@ pub struct AgentSupervisor<P: Platform> {
     tree_manager: Option<Arc<crate::tree_manager::TreeManager>>,
     #[cfg(feature = "exochain")]
     chain_manager: Option<Arc<crate::chain::ChainManager>>,
+    /// Monitor registry for process links and monitors (os-patterns).
+    #[cfg(feature = "os-patterns")]
+    monitor_registry: Arc<crate::monitor::MonitorRegistry>,
+    /// Per-supervisor restart strategy (os-patterns).
+    #[cfg(feature = "os-patterns")]
+    restart_strategy: RestartStrategy,
+    /// Per-supervisor restart budget (os-patterns).
+    #[cfg(feature = "os-patterns")]
+    restart_budget: RestartBudget,
+    /// Per-PID restart trackers (os-patterns).
+    #[cfg(feature = "os-patterns")]
+    restart_trackers: Arc<DashMap<Pid, RestartTracker>>,
     _platform: PhantomData<P>,
 }
 
@@ -326,6 +377,14 @@ impl<P: Platform> AgentSupervisor<P> {
             tree_manager: None,
             #[cfg(feature = "exochain")]
             chain_manager: None,
+            #[cfg(feature = "os-patterns")]
+            monitor_registry: Arc::new(crate::monitor::MonitorRegistry::new()),
+            #[cfg(feature = "os-patterns")]
+            restart_strategy: RestartStrategy::default(),
+            #[cfg(feature = "os-patterns")]
+            restart_budget: RestartBudget::default(),
+            #[cfg(feature = "os-patterns")]
+            restart_trackers: Arc::new(DashMap::new()),
             _platform: PhantomData,
         }
     }
@@ -367,6 +426,169 @@ impl<P: Platform> AgentSupervisor<P> {
         self.tree_manager = tree_manager;
         self.chain_manager = chain_manager;
         self
+    }
+
+    /// Configure the restart strategy and budget for this supervisor.
+    #[cfg(feature = "os-patterns")]
+    pub fn with_restart_config(
+        mut self,
+        strategy: RestartStrategy,
+        budget: RestartBudget,
+    ) -> Self {
+        self.restart_strategy = strategy;
+        self.restart_budget = budget;
+        self
+    }
+
+    /// Get the monitor registry (os-patterns).
+    #[cfg(feature = "os-patterns")]
+    pub fn monitor_registry(&self) -> &Arc<crate::monitor::MonitorRegistry> {
+        &self.monitor_registry
+    }
+
+    /// Get the restart strategy.
+    #[cfg(feature = "os-patterns")]
+    pub fn restart_strategy(&self) -> &RestartStrategy {
+        &self.restart_strategy
+    }
+
+    /// Get the restart budget.
+    #[cfg(feature = "os-patterns")]
+    pub fn restart_budget(&self) -> &RestartBudget {
+        &self.restart_budget
+    }
+
+    /// Notify the supervisor that a process has exited.
+    ///
+    /// Processes link/monitor signals via the [`MonitorRegistry`] and
+    /// applies the configured [`RestartStrategy`] to determine whether
+    /// the exited process (or siblings) should be restarted.
+    ///
+    /// Returns a list of `(old_pid, new_spawn_result)` for any restarts
+    /// that were performed, or an empty vec if no restarts occurred.
+    #[cfg(feature = "os-patterns")]
+    pub fn handle_exit(
+        &self,
+        pid: Pid,
+        exit_code: i32,
+    ) -> Vec<(Pid, SpawnResult)> {
+        use crate::monitor::ExitReason;
+
+        let reason = if exit_code == 0 {
+            ExitReason::Normal
+        } else {
+            ExitReason::Crash(format!("exit code {exit_code}"))
+        };
+
+        // Deliver link/monitor signals
+        let (_link_signals, _down_signals) =
+            self.monitor_registry.process_exited(pid, &reason);
+
+        let mut restarts = Vec::new();
+
+        // Determine whether to restart based on strategy
+        if !RestartTracker::should_restart(&self.restart_strategy, exit_code) {
+            debug!(pid, exit_code, strategy = ?self.restart_strategy, "not restarting per strategy");
+            return restarts;
+        }
+
+        // Check budget via per-PID tracker
+        let mut tracker = self
+            .restart_trackers
+            .entry(pid)
+            .or_insert_with(RestartTracker::new);
+
+        let within_budget = tracker.record_restart(&self.restart_budget);
+        let backoff_ms = tracker.backoff_ms;
+        drop(tracker);
+
+        if !within_budget {
+            warn!(
+                pid,
+                "restart budget exhausted for pid, escalating"
+            );
+            return restarts;
+        }
+
+        info!(
+            pid,
+            backoff_ms,
+            strategy = ?self.restart_strategy,
+            "scheduling restart after backoff"
+        );
+
+        // Log restart event to chain
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "supervisor",
+                "agent.self_heal_restart",
+                Some(serde_json::json!({
+                    "pid": pid,
+                    "exit_code": exit_code,
+                    "strategy": format!("{:?}", self.restart_strategy),
+                    "backoff_ms": backoff_ms,
+                })),
+            );
+        }
+
+        // Apply strategy
+        match self.restart_strategy {
+            RestartStrategy::OneForOne | RestartStrategy::Transient => {
+                // Restart only the failed process
+                if let Ok(result) = self.restart(pid) {
+                    restarts.push((pid, result));
+                }
+            }
+            RestartStrategy::OneForAll => {
+                // Restart the failed process and all siblings
+                let siblings: Vec<ProcessEntry> = self
+                    .process_table
+                    .list()
+                    .into_iter()
+                    .filter(|e| e.pid != 0 && e.pid != pid && e.state == ProcessState::Running)
+                    .collect();
+
+                for sibling in &siblings {
+                    if let Ok(result) = self.restart(sibling.pid) {
+                        restarts.push((sibling.pid, result));
+                    }
+                }
+                if let Ok(result) = self.restart(pid) {
+                    restarts.push((pid, result));
+                }
+            }
+            RestartStrategy::RestForOne => {
+                // Restart the failed process and all processes started after it
+                let mut all: Vec<ProcessEntry> = self
+                    .process_table
+                    .list()
+                    .into_iter()
+                    .filter(|e| e.pid != 0 && e.state == ProcessState::Running)
+                    .collect();
+                all.sort_by_key(|e| e.pid);
+
+                let after: Vec<Pid> = all
+                    .iter()
+                    .filter(|e| e.pid > pid)
+                    .map(|e| e.pid)
+                    .collect();
+
+                for sibling_pid in &after {
+                    if let Ok(result) = self.restart(*sibling_pid) {
+                        restarts.push((*sibling_pid, result));
+                    }
+                }
+                if let Ok(result) = self.restart(pid) {
+                    restarts.push((pid, result));
+                }
+            }
+            RestartStrategy::Permanent => {
+                // Never restart -- already handled above via should_restart
+            }
+        }
+
+        restarts
     }
 
     /// Spawn a new supervised agent process.
@@ -1828,6 +2050,287 @@ mod tests {
             let results = check_resource_usage(&usage, &limits);
             assert_eq!(results.len(), 1);
             assert!(matches!(&results[0], ResourceCheckResult::Exceeded { resource, .. } if resource == "cpu_time"));
+        }
+
+        // ── Sprint 10 W1: Self-healing tests ────────────────────
+
+        #[test]
+        fn restart_strategy_permanent_serde_roundtrip() {
+            let strategy = RestartStrategy::Permanent;
+            let json = serde_json::to_string(&strategy).unwrap();
+            let restored: RestartStrategy = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored, RestartStrategy::Permanent);
+        }
+
+        #[test]
+        fn restart_strategy_transient_serde_roundtrip() {
+            let strategy = RestartStrategy::Transient;
+            let json = serde_json::to_string(&strategy).unwrap();
+            let restored: RestartStrategy = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored, RestartStrategy::Transient);
+        }
+
+        #[test]
+        fn should_restart_permanent_never_restarts() {
+            assert!(!RestartTracker::should_restart(&RestartStrategy::Permanent, 0));
+            assert!(!RestartTracker::should_restart(&RestartStrategy::Permanent, 1));
+            assert!(!RestartTracker::should_restart(&RestartStrategy::Permanent, -1));
+        }
+
+        #[test]
+        fn should_restart_transient_only_on_abnormal() {
+            // Normal exit (0) should NOT restart
+            assert!(!RestartTracker::should_restart(&RestartStrategy::Transient, 0));
+            // Abnormal exits should restart
+            assert!(RestartTracker::should_restart(&RestartStrategy::Transient, 1));
+            assert!(RestartTracker::should_restart(&RestartStrategy::Transient, -1));
+            assert!(RestartTracker::should_restart(&RestartStrategy::Transient, 42));
+        }
+
+        #[test]
+        fn should_restart_one_for_one_always() {
+            assert!(RestartTracker::should_restart(&RestartStrategy::OneForOne, 0));
+            assert!(RestartTracker::should_restart(&RestartStrategy::OneForOne, 1));
+        }
+
+        #[test]
+        fn should_restart_one_for_all_always() {
+            assert!(RestartTracker::should_restart(&RestartStrategy::OneForAll, 0));
+            assert!(RestartTracker::should_restart(&RestartStrategy::OneForAll, -1));
+        }
+
+        #[test]
+        fn should_restart_rest_for_one_always() {
+            assert!(RestartTracker::should_restart(&RestartStrategy::RestForOne, 0));
+            assert!(RestartTracker::should_restart(&RestartStrategy::RestForOne, 1));
+        }
+
+        #[test]
+        fn tracker_is_exhausted_when_at_max() {
+            let mut tracker = RestartTracker::new();
+            let budget = RestartBudget {
+                max_restarts: 3,
+                within_secs: 60,
+            };
+
+            assert!(!tracker.is_exhausted(&budget));
+
+            tracker.record_restart(&budget); // 1
+            tracker.record_restart(&budget); // 2
+            assert!(!tracker.is_exhausted(&budget));
+
+            tracker.record_restart(&budget); // 3 == max
+            assert!(tracker.is_exhausted(&budget));
+        }
+
+        #[test]
+        fn tracker_remaining_decreases() {
+            let mut tracker = RestartTracker::new();
+            let budget = RestartBudget {
+                max_restarts: 5,
+                within_secs: 60,
+            };
+
+            assert_eq!(tracker.remaining(&budget), 5);
+            tracker.record_restart(&budget);
+            assert_eq!(tracker.remaining(&budget), 4);
+            tracker.record_restart(&budget);
+            assert_eq!(tracker.remaining(&budget), 3);
+        }
+
+        #[test]
+        fn tracker_remaining_saturates_at_zero() {
+            let mut tracker = RestartTracker::new();
+            let budget = RestartBudget {
+                max_restarts: 2,
+                within_secs: 60,
+            };
+
+            tracker.record_restart(&budget); // 1
+            tracker.record_restart(&budget); // 2
+            assert_eq!(tracker.remaining(&budget), 0);
+            tracker.record_restart(&budget); // 3 (over budget)
+            assert_eq!(tracker.remaining(&budget), 0);
+        }
+
+        #[test]
+        fn tracker_backoff_sequence_matches_spec() {
+            // Verify the exact sequence: 100, 200, 400, 800, 1600, 3200, ...
+            let mut tracker = RestartTracker::new();
+            let budget = RestartBudget {
+                max_restarts: 20,
+                within_secs: 600,
+            };
+
+            let expected = [100, 200, 400, 800, 1600, 3200, 6400, 12800, 25600, 30000];
+            for &exp in &expected {
+                tracker.record_restart(&budget);
+                assert_eq!(
+                    tracker.backoff_ms, exp,
+                    "restart #{}: expected {}ms, got {}ms",
+                    tracker.restart_count, exp, tracker.backoff_ms
+                );
+            }
+        }
+
+        #[test]
+        fn handle_exit_permanent_no_restart() {
+            let sup = make_supervisor_with_strategy(
+                RestartStrategy::Permanent,
+                RestartBudget::default(),
+            );
+            let result = sup.spawn(simple_request("perm-agent")).unwrap();
+            sup.process_table()
+                .update_state(result.pid, ProcessState::Running)
+                .unwrap();
+
+            // Mark as exited
+            let _ = sup.process_table().update_state(result.pid, ProcessState::Exited(1));
+
+            let restarts = sup.handle_exit(result.pid, 1);
+            assert!(restarts.is_empty(), "Permanent strategy should never restart");
+        }
+
+        #[test]
+        fn handle_exit_transient_normal_no_restart() {
+            let sup = make_supervisor_with_strategy(
+                RestartStrategy::Transient,
+                RestartBudget::default(),
+            );
+            let result = sup.spawn(simple_request("trans-agent")).unwrap();
+            sup.process_table()
+                .update_state(result.pid, ProcessState::Running)
+                .unwrap();
+
+            let _ = sup.process_table().update_state(result.pid, ProcessState::Exited(0));
+
+            let restarts = sup.handle_exit(result.pid, 0);
+            assert!(
+                restarts.is_empty(),
+                "Transient should not restart on normal exit (code 0)"
+            );
+        }
+
+        #[test]
+        fn handle_exit_transient_abnormal_restarts() {
+            let sup = make_supervisor_with_strategy(
+                RestartStrategy::Transient,
+                RestartBudget { max_restarts: 5, within_secs: 60 },
+            );
+            let result = sup.spawn(simple_request("trans-crash")).unwrap();
+            sup.process_table()
+                .update_state(result.pid, ProcessState::Running)
+                .unwrap();
+
+            let _ = sup.process_table().update_state(result.pid, ProcessState::Exited(1));
+
+            let restarts = sup.handle_exit(result.pid, 1);
+            assert_eq!(restarts.len(), 1, "Transient should restart on abnormal exit");
+            assert_eq!(restarts[0].0, result.pid);
+        }
+
+        #[test]
+        fn handle_exit_one_for_one_restarts_only_failed() {
+            let sup = make_supervisor_with_strategy(
+                RestartStrategy::OneForOne,
+                RestartBudget { max_restarts: 10, within_secs: 60 },
+            );
+            let r1 = sup.spawn(simple_request("ofo-a")).unwrap();
+            let r2 = sup.spawn(simple_request("ofo-b")).unwrap();
+            sup.process_table().update_state(r1.pid, ProcessState::Running).unwrap();
+            sup.process_table().update_state(r2.pid, ProcessState::Running).unwrap();
+
+            let _ = sup.process_table().update_state(r1.pid, ProcessState::Exited(1));
+
+            let restarts = sup.handle_exit(r1.pid, 1);
+            // Only r1 should be restarted
+            assert_eq!(restarts.len(), 1);
+            assert_eq!(restarts[0].0, r1.pid);
+
+            // r2 should still be running
+            let r2_entry = sup.inspect(r2.pid).unwrap();
+            assert_eq!(r2_entry.state, ProcessState::Running);
+        }
+
+        #[test]
+        fn handle_exit_budget_exhausted_no_restart() {
+            let sup = make_supervisor_with_strategy(
+                RestartStrategy::OneForOne,
+                RestartBudget { max_restarts: 1, within_secs: 60 },
+            );
+
+            // First agent and restart
+            let r1 = sup.spawn(simple_request("budget-a")).unwrap();
+            sup.process_table().update_state(r1.pid, ProcessState::Running).unwrap();
+            let _ = sup.process_table().update_state(r1.pid, ProcessState::Exited(1));
+
+            let restarts1 = sup.handle_exit(r1.pid, 1);
+            assert_eq!(restarts1.len(), 1, "first restart should succeed");
+
+            // Second crash of same PID -- budget exhausted
+            // Need to mark new process as exited too
+            let new_pid = restarts1[0].1.pid;
+            sup.process_table().update_state(new_pid, ProcessState::Running).unwrap();
+            let _ = sup.process_table().update_state(r1.pid, ProcessState::Exited(1));
+
+            let restarts2 = sup.handle_exit(r1.pid, 1);
+            assert!(restarts2.is_empty(), "budget should be exhausted after 1 restart");
+        }
+
+        #[test]
+        fn handle_exit_links_notify_monitor_registry() {
+            let sup = make_supervisor_with_strategy(
+                RestartStrategy::Permanent, // Don't restart, just test notification
+                RestartBudget::default(),
+            );
+            let r1 = sup.spawn(simple_request("linked-a")).unwrap();
+            let r2 = sup.spawn(simple_request("linked-b")).unwrap();
+
+            // Link r1 and r2
+            sup.monitor_registry().link(r1.pid, r2.pid);
+
+            // Also set up a monitor
+            let _ref_id = sup.monitor_registry().monitor(r2.pid, r1.pid);
+
+            sup.process_table().update_state(r1.pid, ProcessState::Running).unwrap();
+            let _ = sup.process_table().update_state(r1.pid, ProcessState::Exited(1));
+
+            // handle_exit should process links and monitors
+            let _restarts = sup.handle_exit(r1.pid, 1);
+
+            // After exit, r1 should no longer be linked to r2
+            assert!(!sup.monitor_registry().is_linked(r1.pid, r2.pid));
+            // Monitor on r1 should be cleaned up
+            assert!(sup.monitor_registry().get_monitors(r1.pid).is_empty());
+        }
+
+        #[test]
+        fn supervisor_with_restart_config_builder() {
+            let process_table = Arc::new(ProcessTable::new(16));
+            let bus = Arc::new(clawft_core::bus::MessageBus::new());
+            let ipc = Arc::new(KernelIpc::new(bus));
+
+            let sup: AgentSupervisor<clawft_platform::NativePlatform> =
+                AgentSupervisor::new(process_table, ipc, AgentCapabilities::default())
+                    .with_restart_config(
+                        RestartStrategy::RestForOne,
+                        RestartBudget { max_restarts: 3, within_secs: 30 },
+                    );
+
+            assert_eq!(*sup.restart_strategy(), RestartStrategy::RestForOne);
+            assert_eq!(sup.restart_budget().max_restarts, 3);
+            assert_eq!(sup.restart_budget().within_secs, 30);
+        }
+
+        fn make_supervisor_with_strategy(
+            strategy: RestartStrategy,
+            budget: RestartBudget,
+        ) -> AgentSupervisor<clawft_platform::NativePlatform> {
+            let process_table = Arc::new(ProcessTable::new(32));
+            let bus = Arc::new(clawft_core::bus::MessageBus::new());
+            let ipc = Arc::new(KernelIpc::new(bus));
+            AgentSupervisor::new(process_table, ipc, AgentCapabilities::default())
+                .with_restart_config(strategy, budget)
         }
     }
 

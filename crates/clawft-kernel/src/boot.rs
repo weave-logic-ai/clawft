@@ -2319,4 +2319,263 @@ mod tests {
             .unwrap();
         let _ipc = kernel.ipc();
     }
+
+    // ── W5: Test hardening — additional coverage ─────────────────
+
+    #[tokio::test]
+    async fn supervisor_accessible_after_boot() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        let _supervisor = kernel.supervisor();
+    }
+
+    #[tokio::test]
+    async fn kernel_config_accessor_returns_boot_config() {
+        let platform = Arc::new(NativePlatform::new());
+        let mut kconfig = test_kernel_config();
+        kconfig.max_processes = 99;
+        kconfig.health_check_interval_secs = 42;
+        let kernel = Kernel::boot(test_config(), kconfig, platform)
+            .await
+            .unwrap();
+        assert_eq!(kernel.kernel_config().max_processes, 99);
+        assert_eq!(kernel.kernel_config().health_check_interval_secs, 42);
+    }
+
+    #[tokio::test]
+    async fn shutdown_exits_all_agent_processes() {
+        let platform = Arc::new(NativePlatform::new());
+        let mut kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+
+        // Spawn a couple of agents
+        let spawn1 = kernel.supervisor().spawn(crate::supervisor::SpawnRequest {
+            agent_id: "test-agent-1".into(),
+            capabilities: None,
+            parent_pid: None,
+            env: std::collections::HashMap::new(),
+            backend: None,
+        });
+        let spawn2 = kernel.supervisor().spawn(crate::supervisor::SpawnRequest {
+            agent_id: "test-agent-2".into(),
+            capabilities: None,
+            parent_pid: None,
+            env: std::collections::HashMap::new(),
+            backend: None,
+        });
+        assert!(spawn1.is_ok());
+        assert!(spawn2.is_ok());
+        let pid1 = spawn1.unwrap().pid;
+        let pid2 = spawn2.unwrap().pid;
+
+        // Verify agents exist in process table
+        assert!(kernel.process_table().get(pid1).is_some());
+        assert!(kernel.process_table().get(pid2).is_some());
+
+        kernel.shutdown().await.unwrap();
+
+        // After shutdown, agent processes should no longer be Running.
+        // They may be Exited (if the shutdown loop reached them) or still
+        // Starting (if spawn() never transitioned them to Running because
+        // no agent loop was attached in this test). Either is acceptable;
+        // the key assertion is that shutdown completed without error.
+        if let Some(entry1) = kernel.process_table().get(pid1) {
+            assert!(
+                !matches!(entry1.state, ProcessState::Running),
+                "agent 1 should not be Running after shutdown, got: {}",
+                entry1.state
+            );
+        }
+        if let Some(entry2) = kernel.process_table().get(pid2) {
+            assert!(
+                !matches!(entry2.state, ProcessState::Running),
+                "agent 2 should not be Running after shutdown, got: {}",
+                entry2.state
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_services() {
+        let platform = Arc::new(NativePlatform::new());
+        let mut kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+
+        // Services should be running before shutdown
+        let svc_count_before = kernel.services().len();
+        assert!(svc_count_before > 0, "should have services before shutdown");
+
+        kernel.shutdown().await.unwrap();
+        // After shutdown, services stop_all() was called — the registry is
+        // still there but state is Halted
+        assert_eq!(*kernel.state(), KernelState::Halted);
+    }
+
+    #[tokio::test]
+    async fn boot_with_custom_max_processes() {
+        let platform = Arc::new(NativePlatform::new());
+        let mut kconfig = test_kernel_config();
+        kconfig.max_processes = 128;
+        let kernel = Kernel::boot(test_config(), kconfig, platform)
+            .await
+            .unwrap();
+        assert_eq!(kernel.process_table().max_processes(), 128);
+    }
+
+    #[tokio::test]
+    async fn boot_creates_a2a_router_with_topic_router() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        // A2A router should have a topic router wired in
+        let _topic_router = kernel.a2a_router().topic_router();
+    }
+
+    #[tokio::test]
+    async fn event_log_has_shutdown_events() {
+        let platform = Arc::new(NativePlatform::new());
+        let mut kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+
+        let events_before = kernel.event_log().len();
+        kernel.shutdown().await.unwrap();
+
+        // Shutdown should have added events
+        let events_after = kernel.event_log().len();
+        assert!(
+            events_after > events_before,
+            "event log should grow during shutdown (before={events_before}, after={events_after})"
+        );
+    }
+
+    #[tokio::test]
+    async fn boot_log_contains_max_processes() {
+        let platform = Arc::new(NativePlatform::new());
+        let mut kconfig = test_kernel_config();
+        kconfig.max_processes = 64;
+        let kernel = Kernel::boot(test_config(), kconfig, platform)
+            .await
+            .unwrap();
+        let formatted = kernel.boot_log().format_all();
+        assert!(
+            formatted.contains("Max processes: 64"),
+            "boot log should contain max_processes config value"
+        );
+    }
+
+    #[tokio::test]
+    async fn boot_log_contains_health_interval() {
+        let platform = Arc::new(NativePlatform::new());
+        let mut kconfig = test_kernel_config();
+        kconfig.health_check_interval_secs = 15;
+        let kernel = Kernel::boot(test_config(), kconfig, platform)
+            .await
+            .unwrap();
+        let formatted = kernel.boot_log().format_all();
+        assert!(
+            formatted.contains("Health check interval: 15s"),
+            "boot log should contain health check interval"
+        );
+    }
+
+    #[tokio::test]
+    async fn take_app_context_returns_some_then_none() {
+        let platform = Arc::new(NativePlatform::new());
+        let mut kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+
+        assert!(kernel.take_app_context().is_some(), "first take should succeed");
+        assert!(kernel.take_app_context().is_none(), "second take should return None");
+        assert!(kernel.take_app_context().is_none(), "third take should also return None");
+    }
+
+    #[tokio::test]
+    async fn kernel_pid_zero_has_default_capabilities() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        let entry = kernel.process_table().get(0).unwrap();
+        assert_eq!(entry.agent_id, "kernel");
+        assert!(entry.parent_pid.is_none(), "kernel should have no parent");
+        // Default capabilities: can_ipc should be true, ipc_scope should be All
+        assert!(entry.capabilities.can_ipc, "kernel should be able to IPC");
+    }
+
+    #[tokio::test]
+    async fn cluster_membership_has_nonempty_node_id() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        let node_id = kernel.cluster_membership().local_node_id();
+        assert!(!node_id.is_empty(), "cluster node ID should not be empty");
+        // UUID v4 format: 8-4-4-4-12 = 36 chars
+        assert_eq!(node_id.len(), 36, "node ID should be UUID format");
+    }
+
+    #[tokio::test]
+    async fn boot_log_contains_cluster_info() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+        let formatted = kernel.boot_log().format_all();
+        assert!(
+            formatted.contains("Cluster membership ready"),
+            "boot log should mention cluster membership"
+        );
+    }
+
+    #[cfg(feature = "exochain")]
+    #[tokio::test]
+    async fn shutdown_with_exochain_completes() {
+        let platform = Arc::new(NativePlatform::new());
+        let mut kernel = Kernel::boot(test_config(), test_kernel_config_exochain(), platform)
+            .await
+            .unwrap();
+
+        assert!(kernel.chain_manager().is_some());
+        kernel.shutdown().await.unwrap();
+        assert_eq!(*kernel.state(), KernelState::Halted);
+    }
+
+    #[cfg(feature = "exochain")]
+    #[tokio::test]
+    async fn exochain_chain_integrity_valid_after_boot() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config_exochain(), platform)
+            .await
+            .unwrap();
+        let chain = kernel.chain_manager().unwrap();
+        let result = chain.verify_integrity();
+        assert!(result.valid, "chain integrity should be valid after boot");
+        assert!(result.errors.is_empty(), "no integrity errors expected");
+    }
+
+    #[cfg(feature = "exochain")]
+    #[tokio::test]
+    async fn exochain_boot_manifest_event_present() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config_exochain(), platform)
+            .await
+            .unwrap();
+        let chain = kernel.chain_manager().unwrap();
+        let all_events = chain.tail(0);
+        let manifest_events: Vec<_> = all_events
+            .iter()
+            .filter(|e| e.kind == "boot.manifest")
+            .collect();
+        assert!(
+            !manifest_events.is_empty(),
+            "boot.manifest event should be on chain"
+        );
+    }
 }

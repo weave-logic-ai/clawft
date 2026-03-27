@@ -993,6 +993,102 @@ fn normalize_vec(v: &mut [f64]) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Persistence
+// ---------------------------------------------------------------------------
+
+/// Serializable snapshot of a [`CausalGraph`] for JSON persistence.
+#[derive(Serialize, Deserialize)]
+struct CausalGraphSnapshot {
+    next_node_id: u64,
+    nodes: Vec<CausalNode>,
+    forward_edges: std::collections::HashMap<NodeId, Vec<CausalEdge>>,
+}
+
+impl CausalGraph {
+    /// Serialize the entire graph to a JSON writer.
+    pub fn save_to_writer<W: std::io::Write>(&self, writer: W) -> Result<(), std::io::Error> {
+        let snapshot = self.to_snapshot();
+        serde_json::to_writer_pretty(writer, &snapshot)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+    }
+
+    /// Deserialize a graph from a JSON reader.
+    pub fn load_from_reader<R: std::io::Read>(reader: R) -> Result<Self, std::io::Error> {
+        let snapshot: CausalGraphSnapshot = serde_json::from_reader(reader)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        Ok(Self::from_snapshot(snapshot))
+    }
+
+    /// Save the graph to a file path.
+    pub fn save_to_file(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::File::create(path)?;
+        let writer = std::io::BufWriter::new(file);
+        self.save_to_writer(writer)
+    }
+
+    /// Load a graph from a file path.
+    pub fn load_from_file(path: &std::path::Path) -> Result<Self, std::io::Error> {
+        let file = std::fs::File::open(path)?;
+        let reader = std::io::BufReader::new(file);
+        Self::load_from_reader(reader)
+    }
+
+    fn to_snapshot(&self) -> CausalGraphSnapshot {
+        let nodes: Vec<CausalNode> = self.nodes.iter().map(|r| r.value().clone()).collect();
+        let mut forward_edges = std::collections::HashMap::new();
+        for entry in self.forward_edges.iter() {
+            if !entry.value().is_empty() {
+                forward_edges.insert(*entry.key(), entry.value().clone());
+            }
+        }
+        CausalGraphSnapshot {
+            next_node_id: self.next_node_id.load(Ordering::SeqCst),
+            nodes,
+            forward_edges,
+        }
+    }
+
+    fn from_snapshot(snapshot: CausalGraphSnapshot) -> Self {
+        let graph = Self {
+            nodes: DashMap::new(),
+            forward_edges: DashMap::new(),
+            reverse_edges: DashMap::new(),
+            next_node_id: AtomicU64::new(snapshot.next_node_id),
+            node_count: AtomicU64::new(0),
+            edge_count: AtomicU64::new(0),
+        };
+
+        // Restore nodes.
+        for node in &snapshot.nodes {
+            graph.nodes.insert(node.id, node.clone());
+            graph.forward_edges.insert(node.id, Vec::new());
+            graph.reverse_edges.insert(node.id, Vec::new());
+        }
+        graph.node_count.store(snapshot.nodes.len() as u64, Ordering::SeqCst);
+
+        // Restore edges from forward_edges map.
+        let mut total_edges: u64 = 0;
+        for (source_id, edges) in &snapshot.forward_edges {
+            for edge in edges {
+                if let Some(mut fwd) = graph.forward_edges.get_mut(source_id) {
+                    fwd.push(edge.clone());
+                }
+                if let Some(mut rev) = graph.reverse_edges.get_mut(&edge.target) {
+                    rev.push(edge.clone());
+                }
+                total_edges += 1;
+            }
+        }
+        graph.edge_count.store(total_edges, Ordering::SeqCst);
+
+        graph
+    }
+}
+
 impl Default for CausalGraph {
     fn default() -> Self {
         Self::new()
@@ -1601,5 +1697,162 @@ mod tests {
             "complete graph K4 lambda_2 should be ~4.0, got {}",
             result.lambda_2
         );
+    }
+
+    // ── Persistence tests ────────────────────────────────────────────
+
+    fn tmp_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "causal_test_{name}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    // 40
+    #[test]
+    fn persist_empty_graph_roundtrip() {
+        let g = make_graph();
+        let path = tmp_path("empty");
+        g.save_to_file(&path).unwrap();
+        let loaded = CausalGraph::load_from_file(&path).unwrap();
+        assert_eq!(loaded.node_count(), 0);
+        assert_eq!(loaded.edge_count(), 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // 41
+    #[test]
+    fn persist_nodes_and_edges_roundtrip() {
+        let g = make_graph();
+        let a = g.add_node("Alpha".into(), serde_json::json!({"role": "source"}));
+        let b = g.add_node("Beta".into(), serde_json::json!({"role": "target"}));
+        let c = g.add_node("Gamma".into(), serde_json::json!({}));
+        g.link(a, b, CausalEdgeType::Causes, 0.9, 100, 1);
+        g.link(b, c, CausalEdgeType::Enables, 0.5, 200, 2);
+        g.link(a, c, CausalEdgeType::Inhibits, 0.3, 300, 3);
+
+        let path = tmp_path("nodes_edges");
+        g.save_to_file(&path).unwrap();
+        let loaded = CausalGraph::load_from_file(&path).unwrap();
+
+        assert_eq!(loaded.node_count(), 3);
+        assert_eq!(loaded.edge_count(), 3);
+
+        // Verify node data.
+        let na = loaded.get_node(a).unwrap();
+        assert_eq!(na.label, "Alpha");
+        assert_eq!(na.metadata["role"], "source");
+
+        let nb = loaded.get_node(b).unwrap();
+        assert_eq!(nb.label, "Beta");
+
+        // Verify edges.
+        let fwd_a = loaded.get_forward_edges(a);
+        assert_eq!(fwd_a.len(), 2);
+        assert!(fwd_a.iter().any(|e| e.target == b && e.edge_type == CausalEdgeType::Causes));
+        assert!(fwd_a.iter().any(|e| e.target == c && e.edge_type == CausalEdgeType::Inhibits));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // 42
+    #[test]
+    fn persist_node_metadata_survives() {
+        let g = make_graph();
+        let id = g.add_node("rich".into(), serde_json::json!({
+            "tags": ["a", "b"],
+            "count": 42,
+            "nested": {"x": true}
+        }));
+
+        let path = tmp_path("metadata");
+        g.save_to_file(&path).unwrap();
+        let loaded = CausalGraph::load_from_file(&path).unwrap();
+        let node = loaded.get_node(id).unwrap();
+        assert_eq!(node.metadata["tags"][0], "a");
+        assert_eq!(node.metadata["count"], 42);
+        assert_eq!(node.metadata["nested"]["x"], true);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // 43
+    #[test]
+    fn persist_edge_types_and_weights() {
+        let g = make_graph();
+        let a = g.add_node("A".into(), serde_json::json!({}));
+        let b = g.add_node("B".into(), serde_json::json!({}));
+        g.link(a, b, CausalEdgeType::Contradicts, 0.77, 555, 10);
+
+        let path = tmp_path("edge_types");
+        g.save_to_file(&path).unwrap();
+        let loaded = CausalGraph::load_from_file(&path).unwrap();
+        let edges = loaded.get_forward_edges(a);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].edge_type, CausalEdgeType::Contradicts);
+        assert!((edges[0].weight - 0.77).abs() < 0.001);
+        assert_eq!(edges[0].timestamp, 555);
+        assert_eq!(edges[0].chain_seq, 10);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // 44
+    #[test]
+    fn persist_next_node_id_preserved() {
+        let g = make_graph();
+        let _a = g.add_node("A".into(), serde_json::json!({}));
+        let _b = g.add_node("B".into(), serde_json::json!({}));
+        let _c = g.add_node("C".into(), serde_json::json!({}));
+        // next_node_id should be 4 now (started at 1, added 3 nodes).
+
+        let path = tmp_path("next_id");
+        g.save_to_file(&path).unwrap();
+        let loaded = CausalGraph::load_from_file(&path).unwrap();
+
+        // Adding a new node should get id >= 4, not collide with existing.
+        let new_id = loaded.add_node("D".into(), serde_json::json!({}));
+        assert!(new_id >= 4, "new node should get id >= 4, got {new_id}");
+        assert!(loaded.get_node(new_id).is_some());
+        assert_eq!(loaded.node_count(), 4);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // 45
+    #[test]
+    fn persist_writer_reader_roundtrip() {
+        let g = make_graph();
+        let a = g.add_node("X".into(), serde_json::json!({}));
+        let b = g.add_node("Y".into(), serde_json::json!({}));
+        g.link(a, b, CausalEdgeType::Follows, 1.0, 0, 0);
+
+        let mut buf = Vec::new();
+        g.save_to_writer(&mut buf).unwrap();
+
+        let loaded = CausalGraph::load_from_reader(buf.as_slice()).unwrap();
+        assert_eq!(loaded.node_count(), 2);
+        assert_eq!(loaded.edge_count(), 1);
+        let edges = loaded.get_forward_edges(a);
+        assert_eq!(edges[0].edge_type, CausalEdgeType::Follows);
+    }
+
+    // 46
+    #[test]
+    fn persist_reverse_edges_rebuilt() {
+        let g = make_graph();
+        let a = g.add_node("A".into(), serde_json::json!({}));
+        let b = g.add_node("B".into(), serde_json::json!({}));
+        g.link(a, b, CausalEdgeType::Causes, 1.0, 0, 0);
+
+        let path = tmp_path("reverse");
+        g.save_to_file(&path).unwrap();
+        let loaded = CausalGraph::load_from_file(&path).unwrap();
+
+        // Reverse edges should be rebuilt from forward edges.
+        let rev = loaded.get_reverse_edges(b);
+        assert_eq!(rev.len(), 1);
+        assert_eq!(rev[0].source, a);
+        let _ = std::fs::remove_file(&path);
     }
 }

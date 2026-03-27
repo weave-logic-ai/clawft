@@ -51,6 +51,8 @@ pub mod cognitive_tick;
 #[cfg(feature = "ecc")]
 pub mod crossref;
 #[cfg(feature = "ecc")]
+pub mod democritus;
+#[cfg(feature = "ecc")]
 pub mod embedding;
 #[cfg(feature = "ecc")]
 pub mod embedding_onnx;
@@ -58,6 +60,8 @@ pub mod embedding_onnx;
 pub mod hnsw_service;
 #[cfg(feature = "ecc")]
 pub mod impulse;
+#[cfg(feature = "ecc")]
+pub mod persistence;
 #[cfg(feature = "ecc")]
 pub mod weaver;
 
@@ -188,6 +192,8 @@ pub use causal::{
 pub use cognitive_tick::{CognitiveTick, CognitiveTickConfig, CognitiveTickStats};
 #[cfg(feature = "ecc")]
 pub use crossref::{CrossRef, CrossRefStore, CrossRefType, StructureTag, UniversalNodeId};
+#[cfg(feature = "ecc")]
+pub use democritus::{DemocritusConfig, DemocritusLoop, DemocritusTickResult};
 #[cfg(feature = "exochain")]
 pub use gate::{CapabilityGate, GateBackend, GateDecision, GovernanceGate};
 #[cfg(feature = "exochain")]
@@ -221,6 +227,8 @@ pub use hnsw_service::{HnswSearchResult, HnswService, HnswServiceConfig};
 pub use impulse::{ImpulseQueue, ImpulseType};
 #[cfg(feature = "ecc")]
 pub use artifact_store::{ArtifactBackend, ArtifactStore, ArtifactType, StoredArtifact};
+#[cfg(feature = "ecc")]
+pub use persistence::PersistenceConfig;
 #[cfg(feature = "ecc")]
 pub use embedding::{
     select_embedding_provider, EmbeddingError, EmbeddingProvider, LlmEmbeddingConfig,
