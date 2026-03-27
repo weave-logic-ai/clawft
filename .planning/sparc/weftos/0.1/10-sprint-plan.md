@@ -1,9 +1,9 @@
-# Sprint 10: Operational Hardening + K8 GUI Layer
+# Sprint 10: Operational Hardening + K8 GUI + Client Pipeline
 
 **Document ID**: 10
-**Workstream**: W-KERNEL + W-GUI + W-PRODUCT
-**Duration**: 6 weeks (Weeks 1-6)
-**Goal**: Take WeftOS from "demo kernel" to "deployable product" — self-healing, persistence, observability, mesh runtime, and the K8 GUI layer for system visualization and client onboarding
+**Workstream**: W-KERNEL + W-GUI + W-PRODUCT + W-ASSESSOR + W-WEB
+**Duration**: 6 weeks
+**Goal**: Take WeftOS from "demo kernel" to "deployable product with paying clients" — self-healing, persistence, observability, mesh runtime, K8 GUI, AI assessor client-ready, weavelogic.ai refresh, and the full DEMOCRITUS cognitive loop running end-to-end
 **Depends on**: All prior phases (K0-K6, 08a-09d plans)
 **Date**: 2026-03-27
 **Priority**: P0
@@ -14,250 +14,347 @@
 
 ### Strategic Context
 
-WeftOS has a complete architecture: 22 crates, 175K+ lines of Rust, 3,970+ tests,
-all kernel layers K0-K6 implemented. The single-node kernel boots, agents
-communicate, governance enforces, the chain signs, and the Weaver analyzes.
+WeftOS: 22 crates, 175K+ lines of Rust, 3,970+ tests, kernel layers K0-K6
+complete. Single-node kernel boots, agents communicate, governance enforces,
+chain signs, Weaver analyzes. Spectral analysis, community detection, and
+predictive change analysis shipped. ONNX embeddings working.
 
-What's missing is the operational layer that makes it trustworthy for real use,
-and the GUI layer that makes it visible and sellable.
+**What's missing**: operational hardening + client-facing tools + web presence.
 
-**The product thesis**: WeftOS is sold as a tool to understand other systems —
-codebases, infrastructure, processes — document them deeply via knowledge graph,
-and plan automation/AI/agentic workflows. The Weaver's self-analysis capability
-IS the product, applied to client environments.
+**The product thesis**: WeftOS is sold as a tool to understand other systems,
+document them via knowledge graph, and plan automation. The AI Assessor is the
+first client-facing product. Consulting revenue funds the product roadmap.
 
-**The K8 thesis**: Every OS needs a way to see what it's doing. K8 is the
-graphical layer — a web-based (and optionally native) dashboard that shows
-processes, chain state, knowledge graph, governance decisions, and mesh topology.
-This is also the client-facing onboarding experience: walk through questions,
-build the knowledge graph conversationally, see the analysis visualized.
+### Decision Resolutions (Included in This Sprint)
 
-### What This Sprint Delivers
+| Decision | Resolution | Sprint 10 Action |
+|----------|------------|------------------|
+| **ecc:D5 — DEMOCRITUS continuous nervous system** | IMPLEMENT | Wire the full cognitive loop: Sense→Embed→Search→Update→Commit runs continuously via CognitiveTick. Not a 100% match to original spec but achieves the same result — the ECC substrate operates as a continuous nervous system, not batch. |
+| **k2:D10 — WASM-compiled shell** | IMPLEMENT | Wasmtime activation (K4 AC-5) enables this. Shell commands compile to WASM, run in sandbox, chain-logged. |
+| **k3:D3 — 25 remaining tools** | IMPLEMENT (incremental) | Ship 10 highest-priority tools this sprint. Remaining 15 in Sprint 11. |
+| **k3:D9 — CA chain for tool signing** | IMPLEMENT (minimal) | Ed25519 tool signing on chain entries. Full PKI/CA chain deferred to post-1.0 but the signing path works. |
+
+### Track Overview
 
 | Track | Deliverable | Priority |
 |-------|-------------|----------|
 | **W1: Self-Healing** | 08a restart strategies, process links, reconciliation, probes | P0 |
-| **W2: Persistence** | ExoChain, tree, causal graph survive restart | P0 |
+| **W2: Persistence** | ExoChain, tree, causal graph, HNSW survive restart | P0 |
 | **W3: Observability** | 08b dead letter queue, metrics, logging, timers | P0 |
 | **W4: Mesh Runtime** | Wire transports → A2A bridge; two nodes communicate | P1 |
-| **W5: Test Hardening** | a2a.rs, daemon, boot path coverage | P1 |
-| **W6: K8 GUI Layer** | Web dashboard, knowledge graph viz, chain explorer | P1 |
+| **W5: Test Hardening** | a2a.rs, daemon, boot path coverage; 200+ new tests | P1 |
+| **W6: K8 GUI Layer** | Web dashboard, knowledge graph viz, chain explorer (prototype OK) | P1 |
 | **W7: Deployment** | Docker, install guide, feature gate docs | P1 |
-| **W8: Client Onboarding** | Conversational discovery flow, external codebase analysis | P2 |
+| **W8: AI Assessor** | Client-ready assessment tool (x-ref: `agentic_ai_assessor`) | P0 |
+| **W9: Web & Marketing** | weavelogic.ai revision, SEO, WeftOS docs site, content | P1 |
+| **W10: DEMOCRITUS Loop** | ECC continuous cognitive loop end-to-end | P1 |
 
 ---
 
 ## P — Pseudocode
 
-### Week 1: Self-Healing + Persistence Foundation
+### Week 1: Self-Healing + Persistence + Assessor Activation
 
 ```
-PARALLEL:
-  Track W1 (Self-Healing):
+PARALLEL — KERNEL (W1 + W2):
+  Self-Healing:
     - Implement RestartStrategy enum (OneForOne, OneForAll, RestForOne)
     - Add restart budget (max_restarts, window_secs) to AgentSupervisor
     - Implement exponential backoff on repeated failures
     - Add ProcessLink and ProcessMonitor to process.rs
     - Chain-log all restart events
 
-  Track W2 (Persistence):
-    - Add SQLite backend for ExoChain persistence (or RocksDB if perf needed)
+  Persistence:
+    - Add SQLite backend for ExoChain persistence
     - Implement causal graph save/load to disk (JSON-lines or bincode)
     - Implement HNSW index persistence
-    - Tree manager checkpoint-to-disk on shutdown already exists — verify it works
-    - Write recovery test: boot → add data → shutdown → boot → verify data
+    - Verify tree manager checkpoint-to-disk
+    - Write recovery test: boot → add data → shutdown → boot → verify
 
-  Track W5 (Tests):
-    - Add 20+ tests to a2a.rs (message routing, topic pub/sub, service resolution)
-    - Add 10+ tests to boot.rs (error paths, partial boot recovery)
+  Close Phases:
+    - K3 (1 remaining criterion)
+    - K4 (2 remaining criteria — includes Wasmtime activation for D10)
+    - K5 (1 remaining criterion)
 
-CLOSE:
-  - K3 (1 remaining criterion)
-  - K4 (2 remaining criteria)
-  - K5 (1 remaining criterion)
+PARALLEL — ASSESSOR (W8):
+  x-ref: /claw/root/weavelogic/projects/agentic_ai_assessor/
+
+  Wire Conversational Mode (3-4 days):
+    - Connect OpenRouter API to DCTE engine
+    - LLM-generated adaptive questions based on response state
+    - Response parsing → DSTE domain state updates
+    - Fallback to wizard mode when LLM unavailable
+    - Session persistence across page reloads
+
+  Seed Priority Verticals (2 days):
+    - Law firms (100-500 attorneys)
+    - Accounting/advisory firms (200-500 employees)
+    - Healthcare operations / medical groups
+    - Mid-market SaaS (50-200 employees)
+    - Manufacturing / supply chain (500-2000 employees)
+    - Benchmark data, questionnaire templates, domain weight overrides
+
+PARALLEL — TESTS (W5):
+  - Add 20+ tests to a2a.rs (routing, topics, service resolution)
+  - Add 10+ tests to boot.rs (error paths, partial recovery)
 ```
 
-### Week 2: Observability + Mesh Glue Begins
+### Week 2: Observability + Mesh Glue + Deliverable Generation
 
 ```
-PARALLEL:
-  Track W3 (Observability):
-    - Implement DeadLetterQueue with capture, query, retry
-    - Implement ReliableDelivery with ack tracking + retry + backoff
-    - Activate MetricsRegistry (os-patterns module exists — validate + integrate)
-    - Activate LogService (os-patterns module exists — validate + integrate)
+PARALLEL — KERNEL (W3 + W4):
+  Observability:
+    - DeadLetterQueue with capture, query, retry
+    - ReliableDelivery with ack tracking + retry + backoff
+    - Activate MetricsRegistry (os-patterns — validate + integrate)
+    - Activate LogService (os-patterns — validate + integrate)
     - Activate TimerService (os-patterns — validate + integrate)
-    - Wire metrics into boot.rs: register kernel metrics on startup
+    - Wire metrics into boot.rs
 
-  Track W4 (Mesh Runtime):
-    - Create MeshRuntime struct that:
-      1. Binds a MeshTransport listener (TCP or WS)
-      2. Accepts incoming connections
-      3. Performs handshake (Noise or plaintext for dev)
-      4. Spawns per-connection frame reader
-      5. Dispatches incoming MeshFrame by type
-    - Implement the A2A bridge:
-      - RemoteNode handler in a2a.rs wraps KernelMessage in MeshIpcEnvelope
-      - Incoming MeshIpcEnvelope unwraps and injects into local A2A router
+  Mesh Runtime:
+    - Create MeshRuntime struct (bind, accept, handshake, dispatch)
+    - Implement A2A bridge:
+      - RemoteNode handler wraps KernelMessage → MeshIpcEnvelope
+      - Incoming MeshIpcEnvelope → inject into local A2A router
 
-  Track W1 (continued):
-    - Implement ReconciliationController (desired vs actual state)
-    - Implement liveness + readiness probes
-    - Add continuous resource enforcement (CPU, memory, message count)
+  Self-Healing (continued):
+    - ReconciliationController (desired vs actual state)
+    - Liveness + readiness probes
+    - Continuous resource enforcement
+
+PARALLEL — ASSESSOR (W8):
+  Deliverable Generation (5-7 days):
+    - HTML template: 2-year strategic roadmap
+    - HTML template: executive slide deck
+    - HTML template: comprehensive study document
+    - Puppeteer/Playwright PDF rendering pipeline
+    - pptxgenjs PPTX generation
+    - End-to-end: intake → scoring → report → PDF
+
+  Admin Meeting Flow (3-4 days):
+    - Discovery meeting scheduler UI
+    - Pre-meeting context aggregation from assessment state
+    - Auto-generated meeting agenda + targeted questions
+    - Transcript upload and processing into CMVG graph
+
+PARALLEL — DEMOCRITUS (W10):
+  Wire ECC continuous loop (ecc:D5):
+    - CognitiveTick runs the DEMOCRITUS cycle continuously:
+      1. SENSE: Gather new data (git commits, file changes, IPC events)
+      2. EMBED: Convert to vectors via EmbeddingProvider (ONNX when available)
+      3. SEARCH: HNSW nearest-neighbor for similar past patterns
+      4. UPDATE: Add causal edges (Causes, Enables, Correlates) to graph
+      5. COMMIT: Chain-log the tick result as an ExoChain event
+    - Each tick budget-aware (calibration.rs sets pace for hardware)
+    - ImpulseQueue feeds events between ticks
+    - CrossRefStore links ECC nodes to kernel entities (PIDs, services)
+    - Weaver registers as tick consumer for continuous analysis
+    - Test: boot kernel → make changes → verify graph grows automatically
 ```
 
-### Week 3: Mesh Completion + K8 GUI Design Sprint
+### Week 3: Mesh Completion + K8 GUI Design + Web Audit
 
 ```
-PARALLEL:
-  Track W4 (Mesh — continued):
-    - Wire mDNS discovery into MeshRuntime (LAN auto-discovery)
+PARALLEL — KERNEL (W4):
+  Mesh Completion:
+    - Wire mDNS discovery into MeshRuntime
     - Wire Kademlia for WAN peer lookup
     - Implement chain sync protocol (incremental replication)
-    - Test: two nodes boot, discover each other, exchange messages
+    - Test: two nodes boot, discover, exchange messages
 
-  Track W6 (K8 GUI — Design Phase):
-    - Produce wireframes/mockups for 5 core views:
-      1. DASHBOARD: System overview — node health, agent count, chain height,
-         ECC confidence, mesh peers, resource usage
-      2. PROCESS EXPLORER: Live process table with state, PID, capabilities,
-         resource usage, parent/child relationships (like Activity Monitor)
-      3. CHAIN VIEWER: ExoChain event timeline — filterable by event type,
-         agent, governance branch. Click to see full event + signatures
-      4. KNOWLEDGE GRAPH: Interactive causal graph visualization —
-         nodes as circles, edges as typed arrows, community coloring,
-         search by label, click to inspect. Fiedler partition overlay.
-         This IS the client-facing analysis view.
-      5. GOVERNANCE CONSOLE: Live governance decisions, effect vector
-         scores, rule evaluation trace, appeal history
+PARALLEL — K8 GUI (W6 — Design Phase):
+  Wireframes/mockups for 5 core views:
+    1. DASHBOARD: node health, agent count, chain height, ECC confidence,
+       mesh peers, DEMOCRITUS tick rate, resource usage
+    2. PROCESS EXPLORER: live process table (PID, state, capabilities,
+       parent/child, resource usage) — like Activity Monitor
+    3. CHAIN VIEWER: ExoChain event timeline, filterable by type/agent/branch,
+       click to inspect full event + dual signatures
+    4. KNOWLEDGE GRAPH: interactive causal graph (Cytoscape.js), community
+       coloring, spectral partition overlay, search, temporal playback,
+       lambda_2 coherence gauge — THIS is the client analysis view
+    5. GOVERNANCE CONSOLE: live decisions, effect vectors, rule trace, appeals
 
-    - Platform decisions:
-      - Web: Leptos (Rust-native WASM) vs React (ecosystem) vs Svelte (lightweight)
-      - Desktop: Tauri (Rust + web) vs terminal TUI (ratatui)
-      - Recommendation: Leptos for tight Rust integration, compiles to WASM,
-        single binary with embedded static assets
+  Platform decision (prototype first, refine later):
+    - Prototype: Plain HTML + vanilla JS + WebSocket (embed in binary)
+    - Production (Sprint 11): Leptos or framework TBD based on prototype learnings
+    - Graph viz: Cytoscape.js (typed edges, community coloring, 10K+ nodes)
 
-    - Knowledge Graph viz library evaluation:
-      - D3.js force-directed (proven, flexible)
-      - Cytoscape.js (graph-specific, good for large graphs)
-      - vis.js Network (simpler, fast setup)
-      - Recommendation: Cytoscape.js — built for graph data, supports
-        compound nodes, typed edges, community coloring, search
+PARALLEL — OBSERVABILITY (W3 continued):
+  - Config service (store/retrieve with change notifications)
+  - Auth agent (credential management, scoped tokens)
+  - Tree views (filtered by capabilities)
 
-  Track W3 (Observability — continued):
-    - Config service (store/retrieve with change notifications)
-    - Auth agent (credential management, scoped tokens)
-    - Tree views (filtered by capabilities)
+PARALLEL — WEB & MARKETING (W9):
+  weavelogic.ai Full Review:
+    - Content audit: what's current, what's stale, what's missing
+    - SEO analysis: keyword research (AI governance, AI assessment,
+      fractional CTO, automation consulting), competitor SERP analysis
+    - Site structure revision:
+      - Home: value prop, CTA for AI assessment
+      - Services: assessment packages ($500/$2,500/$7,500), fractional CTO
+      - WeftOS: technical overview, link to docs site
+      - Case studies: Weaver self-analysis as proof point
+      - Blog: origin story series launch pad
+    - SEO implementation: meta tags, structured data, sitemap, robots.txt
+    - WeftOS documentation: link Fumadocs site from weavelogic.ai/docs
+    - Analytics: set up tracking for conversion funnel
+    - CTA optimization: "Book a discovery call" / "Run a free AI scan"
+
+  Note: weavelogic.ai revision is iterative — deploy improvements weekly,
+  not a big-bang redesign. SEO results take 4-8 weeks to compound.
+
+PARALLEL — TOOLS (D3 + D10):
+  Implement 10 priority tools from the 25 remaining:
+    - Focus on tools needed for assessor + client analysis workflows
+    - fs.analyze, git.history, doc.parse, net.scan, config.read,
+      env.detect, api.probe, metrics.collect, report.generate, kv.store
+  Wire WASM-compiled shell (D10):
+    - Shell commands → WASM compilation → sandbox execution → chain-log
+    - Depends on Wasmtime activation from K4 closure in Week 1
 ```
 
-### Week 4: K8 GUI Prototype + Integration Testing
+### Week 4: K8 GUI Prototype + Assessor Dogfood + Integration
 
 ```
-PARALLEL:
-  Track W6 (K8 GUI — Build Phase):
-    - Scaffold the web application
-    - Implement Dashboard view with real-time kernel data
-    - Implement Process Explorer with live updates
-    - Implement Chain Viewer with event timeline
-    - Wire kernel → GUI data flow:
-      - Option A: WebSocket from kernel to browser
-      - Option B: REST API polling
-      - Option C: Kernel serves embedded static assets + WS endpoint
-      - Recommendation: C — single binary, no separate server
+PARALLEL — K8 GUI (W6 — Build Phase):
+  Scaffold web application (HTML + JS + WebSocket):
+    - Dashboard view with real-time kernel data
+    - Process Explorer with live updates
+    - Chain Viewer with event timeline
+    - Kernel serves embedded static assets + WS endpoint (single binary)
 
-  Track W8 (Client Onboarding — Design):
-    - Design the conversational discovery flow:
-      1. User installs lightweight WeftOS node
-      2. Node presents a chat-like interface (web-based)
-      3. Scripted questions gather environment info:
-         - What tools/platforms are you using?
-         - What are your main workflows?
-         - What are your biggest pain points?
-         - What systems generate the most manual work?
-      4. Answers build knowledge graph nodes in real-time
-      5. If permission granted: scan git repos, analyze documentation,
-         map infrastructure
-      6. Weaver runs analysis → produces gap report, coupling analysis,
-         causal patterns, prediction of next problems
-      7. Visual presentation of findings in Knowledge Graph view
-    - This is the Weave-NN vision realized: the knowledge graph as a
-      formal contract between the AI system and the human planners
+PARALLEL — ASSESSOR DOGFOOD (W8):
+  First Real Assessment:
+    - Run end-to-end on a test client (or self-assessment):
+      intake → conversational questions → domain scoring → meeting →
+      transcript → knowledge graph → gap report → roadmap → PDF
+    - Wire Weaver analysis into assessment:
+      - Client git repo → Weaver → coupling + predictions
+      - Feed results into CMVG knowledge graph
+    - Knowledge graph browser (reuse K8 Cytoscape.js)
+    - Identify gaps from dogfood experience
 
-  Track W5 (Test Hardening — continued):
-    - Add daemon tests for clawft-weave (target: 30+ tests)
-    - End-to-end integration test: boot → spawn agent → send message →
-      receive response → governance check → chain event → shutdown
+PARALLEL — MESH HARDENING (W4):
+  - SWIM heartbeat-based failure detection
+  - Service advertisement across mesh
+  - Chain state replication test (two nodes, split-brain recovery)
 
-  Track W4 (Mesh — hardening):
-    - Heartbeat-based failure detection (SWIM protocol activation)
-    - Service advertisement across mesh
-    - Chain state replication test (two nodes, split-brain recovery)
+PARALLEL — TESTS (W5):
+  - Daemon tests for clawft-weave (target: 30+ new)
+  - End-to-end integration: boot → spawn → message → governance → chain → shutdown
+  - DEMOCRITUS loop test: boot → changes → verify graph grows continuously
+
+PARALLEL — TOOL SIGNING (D9):
+  - Ed25519 signing of tool entries on ExoChain
+  - Verification at tool load time
+  - Chain event for tool registration with signature
+  - Test: signed tool loads, unsigned tool rejected in strict mode
 ```
 
-### Week 5: K8 Knowledge Graph View + External Analysis
+### Week 5: Knowledge Graph View + External Analysis + Web Deploy
 
 ```
-PARALLEL:
-  Track W6 (K8 GUI — Knowledge Graph):
-    - Implement interactive knowledge graph visualization
-    - Community coloring from label propagation results
+PARALLEL — K8 GUI (W6 — Knowledge Graph):
+  Interactive knowledge graph visualization:
+    - Community coloring from label propagation
     - Spectral partition overlay toggle
     - Node inspection panel (metadata, edges, causal chain)
-    - Search and filter
-    - Temporal playback: show graph evolution over time
-    - Lambda_2 health indicator: "graph coherence" gauge
+    - Search and filter by label, type, community
+    - Temporal playback: graph evolution over time
+    - Lambda_2 coherence gauge
+    - Prediction overlay: highlight nodes predicted to change
 
-  Track W8 (Client Onboarding — Prototype):
-    - Implement git-based codebase analysis for external repos:
-      - Clone target repo
-      - Run Weaver: git history ingestion, module dependency mapping
-      - Compute coupling, burst patterns, change predictions
-      - Generate gap report
-    - Test on 2-3 real projects:
-      - Mentra (glasses firmware) — fast embedded data
-      - ClawStage (multiplayer) — conversational patterns
-      - A public open-source project (test with unfamiliar codebase)
-    - Validate: does the causal analysis find real patterns in projects
-      the Weaver has never seen before?
+PARALLEL — EXTERNAL ANALYSIS (W8):
+  Test Weaver on external projects:
+    - Mentra (glasses firmware) — edge, ARM64, sensor code
+    - ClawStage (multiplayer) — conversational, real-time
+    - 1 public open-source project (unfamiliar codebase)
+    - Validate: does causal analysis find real patterns?
+    - Cross-project knowledge transfer via WeaverKnowledgeBase
 
-  Track W7 (Deployment):
-    - Dockerfile (multi-stage: build + runtime)
-    - docker-compose.yml (single node + multi-node configs)
-    - Installation guide (cargo install + from source + Docker)
-    - Feature gate reference documentation
-    - Configuration reference (weave.toml schema)
+PARALLEL — DEPLOYMENT (W7):
+  - Dockerfile (multi-stage: build + runtime)
+  - docker-compose.yml (single node + multi-node)
+  - Installation guide (cargo install, source, Docker)
+  - Feature gate reference documentation
+  - Configuration reference (weave.toml schema)
+
+PARALLEL — WEB (W9 continued):
+  - Deploy weavelogic.ai revisions (iterative, not big-bang)
+  - Deploy Fumadocs WeftOS documentation site
+  - First blog post: "The Software That Analyzed Its Own Birth"
+  - LinkedIn content launch (3-4 posts from GTM plan)
+  - Assessment landing page with intake CTA
+
+PARALLEL — ASSESSOR (W8 continued):
+  - Assessment Knowledge Agent (semantic search over CMVG graph)
+  - Causal path tracing ("why is this a gap?")
+  - Source attribution for all findings
+  - Cross-assessment anonymized pattern matching (foundation)
 ```
 
-### Week 6: Polish + Gate Validation + Documentation
+### Week 6: Polish + Gate Validation + Buffer
 
 ```
-PARALLEL:
-  Track W6 (K8 GUI — Polish):
-    - Governance Console view
-    - Mobile-responsive layout
-    - Dark/light theme
-    - Performance optimization for large graphs (1000+ nodes)
-    - Embedded help / tooltips
+PARALLEL — K8 GUI POLISH (W6):
+  - Governance Console view (if time; prototype OK)
+  - Mobile-responsive layout
+  - Dark/light theme
+  - Performance test with 1000+ node graph
+  - Embedded help / tooltips
 
-  Track W7 (Documentation):
-    - Operational runbook (monitoring, debugging, recovery)
-    - Security model documentation (threat model, trust boundaries)
-    - API reference generation (rustdoc hosted)
-    - Deploy Fumadocs site
+PARALLEL — DOCUMENTATION (W7):
+  - Operational runbook (monitoring, debugging, recovery)
+  - Security model documentation (threat model, trust boundaries)
+  - API reference (rustdoc, hosted)
+  - Assessor user guide (admin + client workflows)
 
-  GATE VALIDATION:
-    - All 08a exit criteria checked (29 items)
-    - All 08b core exit criteria checked (~22 items)
-    - 08c config + auth checked (~14 items)
-    - Mesh: two-node communication demonstrated
-    - K8 GUI: 5 views functional with real kernel data
-    - 200+ new tests added this sprint
-    - Clippy clean, all feature gates verified
-    - External codebase analysis produces meaningful results
+PARALLEL — WEB (W9):
+  - SEO refinement based on first 3 weeks of data
+  - Second blog post: "Why AI Agents Need Constitutional Governance"
+  - LinkedIn outreach continuation
+  - Conversion funnel analysis
 
-  BUFFER:
-    - Overflow from any track
-    - Bug fixes discovered during integration
+GATE VALIDATION:
+  WeftOS Kernel:
+    - [ ] 08a exit criteria: crashed agent auto-restarts within 1 second
+    - [ ] 08b core: DLQ captures failed messages, metrics visible
+    - [ ] 08c subset: config service + auth agent operational
+    - [ ] Persistence: kernel state survives clean restart
+    - [ ] Mesh: two nodes discover + exchange message on LAN
+    - [ ] DEMOCRITUS: ECC loop runs continuously, graph grows with activity
+    - [ ] D10: WASM shell command executes in sandbox
+    - [ ] D3: 10 new tools functional
+    - [ ] D9: tool signing verifies on load
+    - [ ] 200+ new tests added this sprint
+    - [ ] Clippy clean, all feature gates verified
+
+  K8 GUI:
+    - [ ] Dashboard loads in browser with real kernel data
+    - [ ] Knowledge Graph renders causal graph interactively
+    - [ ] Process Explorer shows live process table
+    - [ ] Note: prototype quality acceptable — production polish is Sprint 11
+
+  AI Assessor:
+    - [ ] Conversational intake produces domain scores via LLM
+    - [ ] PDF report generates from assessment data
+    - [ ] Admin can schedule + run discovery meeting workflow
+    - [ ] 5 industry verticals seeded with benchmarks
+    - [ ] Knowledge graph browser shows assessment causal model
+    - [ ] External codebase analysis produces gap report for 1+ project
+
+  Web & Marketing:
+    - [ ] weavelogic.ai updated with current services + WeftOS link
+    - [ ] SEO fundamentals in place (meta, structured data, sitemap)
+    - [ ] Fumadocs site deployed and linked
+    - [ ] 2+ blog posts published
+    - [ ] Assessment intake CTA live on weavelogic.ai
+
+BUFFER:
+  - Overflow from any track
+  - Bug fixes from integration / dogfood
+  - Client feedback incorporation (if first assessment sold by Week 4-5)
 ```
 
 ---
@@ -266,31 +363,52 @@ PARALLEL:
 
 ### K8: The GUI Layer
 
-K8 is the seventh kernel layer: the human interface to WeftOS. It does not add
-new kernel capabilities — it makes existing capabilities visible and interactive.
+K8 is the seventh kernel layer: the human interface to WeftOS.
 
 ```
 K8: GUI / Human Interface
-  ├── Dashboard (system overview, health gauges)
+  ├── Dashboard (system overview, health gauges, DEMOCRITUS tick rate)
   ├── Process Explorer (live process table)
-  ├── Chain Viewer (ExoChain event timeline)
-  ├── Knowledge Graph (interactive causal graph visualization)
-  ├── Governance Console (live decision trace)
-  └── Onboarding Flow (conversational discovery → knowledge graph)
+  ├── Chain Viewer (ExoChain event timeline + dual signatures)
+  ├── Knowledge Graph (interactive causal graph, communities, predictions)
+  ├── Governance Console (live decision trace, effect vectors)
+  └── Onboarding Flow (conversational discovery → graph building)
 
 K6: Mesh Networking
 K5: Application Framework
 K4: Container Integration
-K3c: ECC Cognitive Substrate
+K3c: ECC Cognitive Substrate (DEMOCRITUS continuous loop)
 K3: WASM Tool Sandbox / Governance
 K2: Agent-to-Agent IPC
 K1: Process Management / Supervisor
 K0: Boot / Config / Daemon
 ```
 
-### Knowledge Graph as Client Contract
+### DEMOCRITUS Continuous Loop (ecc:D5)
 
-The Weave-NN insight, realized in WeftOS:
+The ECC cognitive substrate operates as a continuous nervous system:
+
+```
+┌──────────────────────────────────────────────────┐
+│                 DEMOCRITUS LOOP                   │
+│           (runs every CognitiveTick)              │
+│                                                   │
+│  SENSE ────→ EMBED ────→ SEARCH ────→ UPDATE ──→ COMMIT
+│    │           │           │            │           │
+│  git poll   ONNX/hash   HNSW ANN    causal      ExoChain
+│  file watch  vectors     neighbors   edges        event
+│  IPC events                          (typed)      (signed)
+│  impulses                                         │
+│    │                                              │
+│    └──────── ImpulseQueue ←──── CrossRefStore ←───┘
+│              (ephemeral)         (persistent)
+└──────────────────────────────────────────────────┘
+
+Budget-aware: calibration.rs sets tick interval for hardware.
+On a Pi: ~3-10ms per tick. On a cloud VM: sub-millisecond.
+```
+
+### Knowledge Graph as Client Contract
 
 ```
 CLIENT ENVIRONMENT                      WEFTOS ANALYSIS
@@ -299,60 +417,93 @@ Git repos ───────────────────────�
                                       ↓
 Documentation ─────────────────────→ Semantic embeddings (HNSW)
                                       ↓
-Conversations (discovery calls) ──→ Causal graph nodes
+Conversations (discovery calls) ──→ Causal graph nodes (via Assessor)
                                       ↓
 Infrastructure scans ──────────────→ System topology nodes
                                       ↓
-                                    KNOWLEDGE GRAPH
+                                    KNOWLEDGE GRAPH (CMVG)
+                                      │
+                     ┌────────────────┼────────────────┐
+                     ↓                ↓                ↓
+               Causal Analysis   Predictions     Communities
+               (what caused      (what will      (natural
+                what)             change next)    clusters)
+                     ↓                ↓                ↓
+                     └────────────────┼────────────────┘
                                       ↓
-                              ┌───────┴────────┐
-                              ↓                ↓
-                        Causal Analysis    Predictions
-                        (what caused       (what will
-                         what)              change next)
-                              ↓                ↓
-                              └───────┬────────┘
-                                      ↓
-                              Client Report
-                              (gaps, coupling,
-                               automation opportunities,
-                               2-year roadmap)
+                              Client Deliverables
+                              (via AI Assessor)
+                              ├── Gap report
+                              ├── Coupling analysis
+                              ├── 2-year roadmap
+                              ├── Executive deck
+                              └── Comprehensive study
 ```
 
-This graph becomes the formal contract: both the AI system and the human
-planners reference the same causal model. Updates to the graph from either
-side are chain-logged and tamper-evident.
+### Assessor ↔ WeftOS Integration
 
-### Iterative Hardening Strategy
+```
+AI Assessor (Next.js + Express)        WeftOS Kernel (Rust)
+┌─────────────────────────┐           ┌──────────────────────────┐
+│ DCTE (conversation)     │           │ Weaver (codebase analysis)│
+│ DSTE (domain scoring)   │──────────→│ CausalGraph (typed edges) │
+│ RSTE (coherence)        │  CMVG     │ HNSW (semantic search)    │
+│ ENGMT (stakeholders)    │  graph    │ ExoChain (provenance)     │
+│ SCEN (lifecycle)        │  sync     │ SpectralAnalysis (lambda2)│
+│ SCORING (cross-engine)  │           │ Predictions (burst/couple)│
+└─────────────────────────┘           └──────────────────────────┘
+         │                                       │
+         └──────── K8 GUI (shared view) ─────────┘
+                   Cytoscape.js graph
+                   Assessment + analysis unified
+```
 
-Each real project stress-tests different WeftOS capabilities:
+### weavelogic.ai Site Architecture
 
-| Project | What It Tests | Unique Pressure |
+```
+weavelogic.ai
+├── / (home)
+│   ├── Value prop: "Understand your systems. Plan your automation."
+│   ├── CTA: "Book a Discovery Call" / "Run a Free AI Scan"
+│   └── Social proof: Weaver self-analysis visualization
+│
+├── /services
+│   ├── AI Readiness Scan ($500)
+│   ├── Guided AI Discovery ($2,500)
+│   ├── Full AI Assessment ($7,500)
+│   ├── Fractional CTO ($10-15K/month)
+│   └── ROI guarantee: "$50K+ or assessment is free"
+│
+├── /weftos
+│   ├── Technical overview
+│   ├── Architecture diagram (K0-K8 layers)
+│   └── Link to docs.weavelogic.ai (Fumadocs)
+│
+├── /blog
+│   ├── "The Software That Analyzed Its Own Birth"
+│   ├── "Why AI Agents Need Constitutional Governance"
+│   └── (origin story series from GTM plan)
+│
+├── /case-studies
+│   └── Weaver self-analysis as proof point
+│
+└── docs.weavelogic.ai (Fumadocs — separate subdomain)
+    ├── Getting started
+    ├── Architecture reference
+    ├── Feature gate guide
+    ├── Configuration reference
+    └── API docs (rustdoc)
+```
+
+### Iterative Hardening Through Real Projects
+
+| Project | What It Tests | Sprint 10 Action |
 |---------|---------------|-----------------|
-| **clawft itself** | Self-analysis, Weaver, ECC | Recursive proof (already done) |
-| **Mentra glasses** | Edge deployment, ARM64, mesh, fast data (video/audio/IMU) | Latency, memory constraints, sensor fusion |
-| **ClawStage** | Multi-agent conversation, multiplayer, real-time | Concurrency, IPC throughput, topic routing |
-| **Client engagements** | External codebase analysis, onboarding flow | Unfamiliar codebases, knowledge graph quality |
-
-Run `weftos init` on each project. The Weaver should transfer learned patterns
-(via WeaverKnowledgeBase) from clawft to new projects.
-
-### Technology Choices (K8 GUI)
-
-**Recommended stack:**
-
-| Component | Choice | Rationale |
-|-----------|--------|-----------|
-| Framework | **Leptos** (Rust → WASM) | Same language as kernel, compiles to single binary, SSR capable |
-| Graph viz | **Cytoscape.js** | Purpose-built for graph data, handles 10K+ nodes, typed edges, community coloring |
-| Charting | **Chart.js** or **Plotly.js** | Lightweight, works with Leptos via JS interop |
-| Transport | **WebSocket** from kernel | Real-time push for live process/chain/metric updates |
-| Packaging | **Embedded static assets** | `include_dir!()` macro — single `weft` binary serves the GUI |
-| Desktop | **Tauri** (optional later) | Same web frontend wrapped in native window, if needed |
-
-**Alternative if Leptos is too much scope:** Plain HTML + vanilla JS + WebSocket.
-Ship a static `index.html` embedded in the binary. No build tooling needed.
-This could be the Week 3-4 prototype, with Leptos as the Week 5-6 production version.
+| **clawft itself** | Recursive self-analysis | Already done — reference case |
+| **Mentra glasses** | Edge, ARM64, fast data | Run `weftos init`, test Weaver cross-project |
+| **ClawStage** | Multiplayer, real-time IPC | Test topic routing, concurrency |
+| **Client engagements** | Unfamiliar codebases | First assessment dogfood (Week 4) |
+| **weavelogic.ai** | Web presence, SEO | Week 3-6 iterative deployment |
 
 ---
 
@@ -362,33 +513,26 @@ This could be the Week 3-4 prototype, with Leptos as the Week 5-6 production ver
 
 | Risk | Mitigation |
 |------|------------|
-| K8 GUI scope creep — "one more view" | Hard limit: 5 views in Sprint 10. Everything else is Sprint 11. |
-| Leptos learning curve | Fallback: plain HTML + JS prototype first. Leptos if time allows. |
-| Mesh runtime integration harder than estimated | Prioritize single-hop message delivery first. Multi-hop, chain sync, DHT can be Sprint 11. |
-| Persistence layer takes longer than expected | SQLite is the safe choice. RocksDB only if SQLite perf is insufficient. |
-| External codebase analysis quality is poor | Start with git history only (proven on clawft). Add doc analysis incrementally. |
-| 6 weeks isn't enough | Weeks 1-4 are the MVP. Weeks 5-6 are polish. Can ship at Week 4 if needed. |
+| Assessor + kernel + web = too much scope | Assessor is the revenue path — prioritize over K8 GUI polish |
+| K8 GUI scope creep | Hard limit: prototype quality in Sprint 10. Production in Sprint 11 |
+| Leptos learning curve | Prototype in plain HTML+JS. Framework decision after prototype |
+| Mesh runtime harder than estimated | Single-hop first. Multi-hop/DHT/chain-sync in Sprint 11 |
+| Persistence takes longer | SQLite is the safe choice |
+| SEO takes time to compound | Start Week 3, iterate weekly. Results expected Week 8-12 |
+| DEMOCRITUS loop performance | Budget-aware by design. Degrade gracefully if tick budget exceeded |
+| First client assessment reveals gaps | That's the point — dogfood feedback shapes Sprint 11 |
 
-### Sprint 10 Exit Criteria (Minimum)
+### What Produces Only Test Results (Acceptable)
 
-- [ ] Crashed agent auto-restarts within 1 second
-- [ ] Kernel state survives clean restart (chain, tree, graph persisted)
-- [ ] `weave status` shows live metrics (process count, chain height, memory)
-- [ ] Two nodes on same LAN discover each other and exchange a message
-- [ ] K8 Dashboard loads in a browser showing real kernel data
-- [ ] K8 Knowledge Graph view renders the clawft causal graph interactively
-- [ ] External codebase analysis produces a gap report for a new project
-- [ ] 200+ new tests added
-- [ ] Docker image builds and boots a working kernel
+Some tracks may only produce prototypes or test artifacts this sprint. That's OK:
 
-### Sprint 10 Stretch Goals
-
-- [ ] K8 Chain Viewer with event timeline and signature verification
-- [ ] K8 Governance Console with live decision trace
-- [ ] Conversational onboarding flow (chat-like discovery interface)
-- [ ] Mentra project analyzed by Weaver (cross-project knowledge transfer)
-- [ ] ClawStage integration test (multiplayer agent conversation)
-- [ ] Tauri desktop wrapper for K8 GUI
+| Track | Minimum Acceptable Outcome |
+|-------|---------------------------|
+| K8 GUI | Working prototype in plain HTML+JS. Not production-polished. |
+| DEMOCRITUS loop | Continuous tick running, graph growing. May not be fully tuned. |
+| Mesh runtime | Two nodes exchange one message on LAN. Not production-hardened. |
+| weavelogic.ai | Revised content deployed. SEO planted. Not yet ranking. |
+| External analysis | Gap report generated for 1 external project. Quality TBD. |
 
 ---
 
@@ -397,26 +541,46 @@ This could be the Week 3-4 prototype, with Leptos as the Week 5-6 production ver
 ### Definition of Done
 
 Sprint 10 is complete when:
-1. Self-healing works (08a criteria validated)
-2. Observability works (08b core criteria validated)
-3. Data survives restart (persistence layer verified)
-4. Two-node mesh demonstrated
-5. K8 GUI shows 3+ views with real data (Dashboard, Process, Knowledge Graph)
-6. External codebase analysis works on at least 1 project outside clawft
-7. Docker deployment documented and tested
-8. All new code has tests, clippy passes, feature gates verified
+
+**Kernel "It Runs":**
+1. Self-healing: crashed agent auto-restarts (08a)
+2. Observability: DLQ, metrics, logging operational (08b core)
+3. Persistence: kernel state survives restart
+4. Mesh: two-node LAN communication demonstrated
+5. DEMOCRITUS: ECC loop runs continuously
+6. D10: WASM shell command executes
+7. D3: 10 new tools functional
+8. D9: tool signing on ExoChain
+9. 200+ new tests
+
+**Client-Facing:**
+10. Assessor: conversational intake → scoring → PDF report works
+11. Assessor: 5 industry verticals seeded
+12. Assessor: admin meeting workflow operational
+13. K8 GUI: 3+ views with real data (prototype quality OK)
+14. External codebase analysis works on 1+ project
+
+**Web & Marketing:**
+15. weavelogic.ai revised with services + WeftOS + CTA
+16. SEO fundamentals deployed
+17. Fumadocs site live
+18. 2+ blog posts published
+19. Assessment intake CTA on weavelogic.ai
 
 ### What Ships After Sprint 10
 
 | Item | Sprint |
 |------|--------|
-| K8 GUI: remaining views (Governance Console, advanced Chain Viewer) | Sprint 11 |
-| Full mesh: multi-hop routing, DHT, chain replication | Sprint 11 |
-| 25 remaining WASM tools | Sprint 11 |
-| Conversational onboarding flow (production) | Sprint 11 |
-| Tauri desktop packaging | Sprint 11 |
-| Open source launch preparation | Sprint 11 |
-| WASM-compiled shell (D10) | Sprint 12 |
+| K8 GUI production build (Leptos or framework TBD) | Sprint 11 |
+| Full mesh (multi-hop, DHT, chain replication) | Sprint 11 |
+| Remaining 15 WASM tools | Sprint 11 |
+| Conversational onboarding (production) | Sprint 11 |
+| Tauri desktop wrapper | Sprint 11 |
+| Open source launch prep (README, HN, community) | Sprint 11 |
+| Full 37-vertical assessor content | Sprint 11 |
+| Cloud infrastructure scanner agents | Sprint 11 |
+| Live meeting intelligence (real-time agent in calls) | Sprint 12 |
 | Blockchain anchoring (D12) | Post-1.0 |
 | ZK proofs (D13) | Post-1.0 |
 | Trajectory learning (D17) | Post-1.0 |
+| Full PKI/CA chain (D9 full) | Post-1.0 |
