@@ -312,12 +312,14 @@ pub use mesh_artifact::{ArtifactAnnouncement, ArtifactExchange, ArtifactRequest,
 #[cfg(feature = "mesh")]
 pub use mesh_log::{LogAggregator, LogQuery as MeshLogQuery, RemoteLogEntry};
 #[cfg(feature = "mesh")]
-pub use mesh_runtime::{MeshRuntime, PeerConnection};
+pub use mesh_runtime::{DiscoveryState, MeshRuntime, PeerConnection};
+#[cfg(feature = "os-patterns")]
 pub use auth_service::{
-    AuditEntry, AuthService, CredentialGrant, CredentialRequest, CredentialType, IssuedToken,
-    StoredCredential as AuthStoredCredential,
+    AuditEntry, AuthService, AuthToken, CredentialGrant, CredentialRequest, CredentialType,
+    HashedCredential, IssuedToken, StoredCredential as AuthStoredCredential,
 };
-pub use config_service::{ConfigChange, ConfigService, SecretRef};
+#[cfg(feature = "os-patterns")]
+pub use config_service::{ConfigChange, ConfigEntry, ConfigService, ConfigValue, SecretRef};
 pub use tree_view::{AgentTreeView, TreeScope};
 pub use process::{Pid, ProcessEntry, ProcessState, ProcessTable, ResourceUsage};
 pub use service::{
