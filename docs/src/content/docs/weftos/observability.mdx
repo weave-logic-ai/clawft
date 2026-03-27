@@ -1,0 +1,144 @@
+---
+title: "Observability"
+description: "Dead letter queue, metrics registry, log service, and timer service for kernel-wide monitoring and diagnostics."
+---
+
+WeftOS provides four observability services wired into the kernel boot sequence. They are registered as `SystemService` instances with start/stop lifecycle, gated behind the `os-patterns` feature.
+
+**Feature**: `os-patterns`
+**Phase**: K1/K5
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────┐
+│                 Kernel Boot                      │
+│  ┌──────────────┐  ┌──────────────┐             │
+│  │ MetricsRegistry│  │  LogService  │             │
+│  └──────────────┘  └──────────────┘             │
+│  ┌──────────────┐  ┌──────────────┐             │
+│  │ TimerService  │  │DeadLetterQueue│             │
+│  └──────────────┘  └──────────────┘             │
+└─────────────────────────────────────────────────┘
+```
+
+All four services are initialized during boot and accessible via `kernel.metrics_registry()`, `kernel.log_service()`, `kernel.timer_service()`, and `kernel.dead_letter_queue()`.
+
+## Dead Letter Queue
+
+Captures messages that could not be delivered (target not found, inbox full, routing failure). Essential for diagnosing message loss in multi-agent systems.
+
+**Source**: `crates/clawft-kernel/src/dead_letter.rs`
+
+```rust
+pub struct DeadLetterQueue {
+    entries: RwLock<VecDeque<DeadLetter>>,
+    max_size: usize,
+}
+```
+
+### Failure Reasons
+
+```rust
+pub enum DeadLetterReason {
+    TargetNotFound,
+    InboxFull,
+    RoutingError(String),
+    Timeout,
+    SerializationError(String),
+    PermissionDenied,
+    ServiceUnavailable(String),
+    Custom(String),
+}
+```
+
+### Query API
+
+| Method | Description |
+|--------|-------------|
+| `intake(message, reason)` | Capture a failed message |
+| `query_by_target(pid)` | Find dead letters for a specific agent |
+| `query_by_reason(name)` | Filter by failure reason |
+| `query_by_time_range(start, end)` | Time-windowed queries |
+| `take_for_retry(msg_id)` | Remove and return for retry |
+| `re_add(letter)` | Return a letter after failed retry |
+| `snapshot()` | Get all entries (read-only) |
+
+## Metrics Registry
+
+Three metric types: counters, gauges, and histograms. Thread-safe via atomics and locks.
+
+**Source**: `crates/clawft-kernel/src/metrics.rs`
+
+### Built-in Metrics
+
+Created automatically via `MetricsRegistry::with_builtins()`:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `kernel.process_count` | Gauge | Active processes |
+| `kernel.chain_height` | Gauge | ExoChain block count |
+| `kernel.uptime_secs` | Gauge | Seconds since boot |
+| `kernel.messages_delivered` | Counter | Total IPC messages |
+| `kernel.messages_failed` | Counter | Failed deliveries |
+
+### API
+
+```rust
+// Counters
+registry.counter_inc("name");
+registry.counter_add("name", 5);
+registry.counter_get("name") -> u64;
+
+// Gauges
+registry.gauge_set("name", 42);
+registry.gauge_inc("name", 1);
+registry.gauge_get("name") -> i64;
+
+// Histograms
+registry.histogram_register("name", &[1.0, 5.0, 10.0, 50.0]);
+registry.histogram_record("name", 7.3);
+registry.histogram_percentile("name", 0.99) -> Option<f64>;
+
+// Export
+registry.snapshot_all() -> Vec<MetricSnapshot>;
+registry.list_names() -> Vec<String>;
+```
+
+## Log Service
+
+Structured kernel-level logging with per-agent attribution, trace correlation, and queryable history.
+
+**Source**: `crates/clawft-kernel/src/log_service.rs`
+
+```rust
+pub struct LogEntry {
+    pub timestamp: SystemTime,
+    pub level: LogLevel,
+    pub message: String,
+    pub pid: Option<Pid>,
+    pub service: Option<String>,
+    pub trace_id: Option<String>,
+    pub fields: HashMap<String, serde_json::Value>,
+}
+```
+
+Builder pattern:
+
+```rust
+LogEntry::new(LogLevel::Info, "agent spawned")
+    .with_pid(pid)
+    .with_service("supervisor")
+    .with_trace_id("req-123")
+    .with_field("strategy", json!("OneForOne"))
+```
+
+Queryable via `LogQuery` with filters for level, PID, service, time range, and limit.
+
+## Timer Service
+
+Provides named timers for scheduling periodic and one-shot kernel operations.
+
+**Source**: `crates/clawft-kernel/src/timer.rs`
+
+Used internally by the cognitive tick, persistence auto-save, and mesh heartbeat intervals.

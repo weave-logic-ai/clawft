@@ -280,6 +280,14 @@ The WeaverEngine is a `SystemService` that drives iterative causal modeling over
 | `SentenceTransformerProvider` | 384 | Markdown-aware, sentence-splitting, mean pooling |
 | `AstEmbeddingProvider` | 256 | Hybrid structural+semantic for Rust code |
 
+### DEMOCRITUS Cognitive Loop
+
+The DEMOCRITUS loop (`democritus.rs`) is the integration layer that runs on every cognitive tick: **Sense → Embed → Search → Update → Commit**. It drains the ImpulseQueue, embeds events via the configured provider, queries HNSW for correlated neighbors, updates the CausalGraph with inferred edges, and registers CrossRefs. See the dedicated [DEMOCRITUS page](/docs/weftos/democritus) for configuration, tuning, and API details.
+
+### Persistence
+
+CausalGraph and HNSW state can be saved to and restored from disk via the persistence coordinator. See [Persistence](/docs/weftos/persistence) for file layout, API, and recovery behavior.
+
 ### CLI Commands
 
 ```bash

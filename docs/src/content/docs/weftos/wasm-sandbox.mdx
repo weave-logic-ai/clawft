@@ -60,9 +60,75 @@ All phases are chain-logged when `exochain` is enabled.
 
 By default, WASM modules have no access to filesystem, network, environment variables, or system clock unless explicitly configured via `WasiFsScope`.
 
-## Tool Signing
+## Extended Tool Catalog (Sprint 10)
 
-`ToolSigningAuthority` provides Ed25519 signing for tool provenance. `compute_module_hash()` and `verify_tool_signature()` ensure tool integrity.
+10 additional tools in `tools_extended.rs`:
+
+| Tool | Category | Description |
+|------|----------|-------------|
+| `fs.analyze` | Filesystem | Directory structure analysis |
+| `git.log` | System | Git history retrieval |
+| `doc.parse` | System | Markdown/document parsing |
+| `config.read` | System | Configuration file reading |
+| `env.detect` | System | Environment detection |
+| `metrics.snapshot` | Observability | Kernel metrics snapshot |
+| `kv.get` | Config | Read from ConfigService |
+| `kv.set` | Config | Write to ConfigService |
+| `report.template` | System | Report generation templates |
+| `health.check` | System | Service health checks |
+
+Stateless tools are registered via `register_stateless_tools()`. Tools requiring kernel services (metrics, kv, health) use `register_extended_tools()` with injected `Arc` references.
+
+## Tool Signing (D9)
+
+Ed25519 signing for tool provenance and integrity verification.
+
+```rust
+pub struct ToolSignature {
+    pub tool_hash: String,      // SHA-256 of tool module bytes
+    pub signer_id: String,      // Identity of the signer
+    pub signature: Vec<u8>,     // Ed25519 signature
+}
+```
+
+### Signature Verification
+
+```rust
+// Register a signed tool
+registry.register_signed("my-tool", module_bytes, signature)?;
+
+// Enforce signature requirement
+registry.set_require_signatures(true);
+
+// Manage trusted keys
+registry.add_trusted_key(public_key);
+```
+
+When `require_signatures` is enabled, unsigned tools are rejected at registration. Each signature is verified against all trusted keys.
+
+**Chain constant**: `EVENT_KIND_TOOL_SIGNED` logs signing events to ExoChain.
+
+## WASM Shell Execution (D10)
+
+Shell commands compiled to WASM for sandboxed execution:
+
+```rust
+pub struct ShellCommand {
+    pub command: String,
+    pub args: Vec<String>,
+}
+
+pub struct ShellResult {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub duration_ms: u64,
+}
+```
+
+`execute_shell()` dispatches to built-in commands (`echo`, `true`, `false`) within the sandbox. Wall-clock timing is recorded. The `shell.exec` tool is registered in the builtin catalog.
+
+**Chain constant**: `EVENT_KIND_SHELL_EXEC` logs shell executions to ExoChain.
 
 ## CompiledModuleCache
 

@@ -1,0 +1,98 @@
+---
+title: "Persistence"
+description: "Unified persistence coordinator for saving and restoring CausalGraph, HNSW index, and ExoChain state to disk."
+---
+
+The persistence layer provides a single entry point for saving and restoring all kernel subsystems to a local data directory. No external database is required — all state is stored as JSON files.
+
+**Source**: `crates/clawft-kernel/src/persistence.rs`
+**Phase**: K3c/K3
+
+## Configuration
+
+```rust
+pub struct PersistenceConfig {
+    pub data_dir: PathBuf,                    // Default: ".weftos/state"
+    pub auto_save_interval_secs: Option<u64>, // Future: background timer
+}
+```
+
+## File Layout
+
+```
+.weftos/state/
+├── causal_graph.json   # CausalGraph nodes + edges
+├── hnsw_index.json     # HNSW vectors + metadata
+└── exochain.jsonl      # ExoChain events (line-delimited JSON)
+```
+
+## API
+
+### Save Operations
+
+```rust
+// Save individual components
+save_causal_graph(&config, &graph)?;
+save_hnsw(&config, &hnsw)?;
+
+// Save everything at once (creates data_dir if needed)
+save_all(&config, &graph, &hnsw)?;
+```
+
+### Load Operations
+
+```rust
+// Load individual components (returns empty instance if file missing)
+let graph = load_causal_graph(&config)?;
+let hnsw = load_hnsw(&config)?;
+
+// Load everything
+let (graph, hnsw) = load_all(&config)?;
+```
+
+All load functions return fresh empty instances when no saved state exists, making cold boot and warm restart use the same code path.
+
+## CausalGraph Serialization
+
+The CausalGraph serializes its full internal state:
+- All nodes with labels, metadata, timestamps
+- All edges with type, weight, tick, and depth
+- The `next_node_id` counter for deterministic ID assignment
+
+Format: Single JSON object with `nodes`, `edges`, and `next_node_id` fields.
+
+## HNSW Index Serialization
+
+The HNSW service serializes:
+- All vectors with their string keys
+- Associated metadata (arbitrary JSON per vector)
+- Index configuration (M, ef_construction, dimensions)
+
+On reload, the HNSW graph structure is rebuilt from the stored vectors.
+
+## Recovery Behavior
+
+| Scenario | Behavior |
+|----------|----------|
+| No state directory | `load_all` returns empty instances |
+| Partial state (graph exists, HNSW missing) | Loads what exists, defaults the rest |
+| Corrupted JSON | Returns `io::Error` — caller decides recovery |
+| Concurrent access | Not currently locked — single-writer assumed |
+
+## Integration with Boot
+
+Persistence is typically invoked during kernel shutdown (save) and boot (restore):
+
+```rust
+// On boot
+let config = PersistenceConfig::default();
+let (graph, hnsw) = load_all(&config)?;
+let kernel = Kernel::boot_with_state(graph, hnsw);
+
+// On shutdown
+save_all(&config, kernel.causal_graph(), kernel.hnsw())?;
+```
+
+## Testing
+
+12+ roundtrip tests verify save/load for CausalGraph and HNSW, including empty state, populated state, and path configuration.

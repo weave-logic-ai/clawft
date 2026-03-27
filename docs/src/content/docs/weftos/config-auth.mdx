@@ -1,0 +1,144 @@
+---
+title: "Config & Auth Services"
+description: "ConfigService for typed namespaced configuration and AuthService for SHA-256 credential hashing with scoped tokens."
+---
+
+Two kernel services provide configuration management and authentication for WeftOS agents and system components.
+
+**Source**: `crates/clawft-kernel/src/config_service.rs`, `auth_service.rs`
+**Phase**: K5
+
+## ConfigService
+
+Typed, namespaced key-value configuration with change notification and secret storage.
+
+### Config Values
+
+```rust
+pub enum ConfigValue {
+    Text(String),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Json(serde_json::Value),
+}
+```
+
+Each value is stored as a `ConfigEntry` with metadata:
+
+```rust
+pub struct ConfigEntry {
+    pub namespace: String,
+    pub key: String,
+    pub value: ConfigValue,
+    pub updated_at: SystemTime,
+    pub version: u64,
+}
+```
+
+### API
+
+```rust
+let config = ConfigService::new(encryption_key);
+
+// Typed storage
+config.set_typed("mesh", "heartbeat_interval_ms", ConfigValue::Int(5000));
+config.get_typed("mesh", "heartbeat_interval_ms") -> Option<ConfigEntry>;
+config.list("mesh") -> Vec<ConfigEntry>;
+config.delete_typed("mesh", "heartbeat_interval_ms");
+
+// JSON storage (legacy)
+config.set("mesh", "peers", json!(["node-a", "node-b"]));
+config.get("mesh", "peers") -> Option<Value>;
+config.list_keys("mesh") -> Vec<String>;
+
+// Secrets (encrypted at rest)
+config.set_secret("api", "openai_key", "sk-...");
+config.get_secret("api", "openai_key") -> Option<String>;
+
+// Change notifications
+let changes = config.subscribe("mesh");
+// Poll changes: changes.read().unwrap()
+```
+
+### Change Tracking
+
+Every mutation emits a `ConfigChange`:
+
+```rust
+pub struct ConfigChange {
+    pub namespace: String,
+    pub key: String,
+    pub old_value: Option<serde_json::Value>,
+    pub new_value: Option<serde_json::Value>,
+    pub timestamp: SystemTime,
+}
+```
+
+Subscribers receive changes via `Arc<RwLock<Vec<ConfigChange>>>`.
+
+## AuthService
+
+SHA-256 credential hashing with scoped, time-limited tokens. Raw credentials are **never** stored.
+
+### Credential Model
+
+```rust
+pub enum CredentialType {
+    Password,
+    ApiKey,
+    Certificate,
+    Token,
+}
+
+pub struct HashedCredential {
+    pub hash: String,       // SHA-256 hex
+    pub credential_type: CredentialType,
+    pub scopes: Vec<String>,
+}
+```
+
+### Token Issuance
+
+```rust
+pub struct AuthToken {
+    pub token_id: String,
+    pub subject: String,
+    pub scopes: Vec<String>,
+    pub issued_at: SystemTime,
+    pub expires_at: SystemTime,
+}
+```
+
+Tokens are scoped — each token carries a list of allowed scopes (e.g., `["mesh:read", "config:write"]`). Operations check `token.scopes` before proceeding.
+
+### API
+
+```rust
+let auth = AuthService::new();
+
+// Register credentials (stores SHA-256 hash only)
+auth.register("admin", CredentialRequest {
+    credential: "secret123",
+    credential_type: CredentialType::Password,
+    scopes: vec!["admin".into()],
+});
+
+// Authenticate → returns token
+let token = auth.authenticate("admin", "secret123")?;
+
+// Validate and check scope
+auth.validate(&token.token_id)?;
+auth.check_scope(&token.token_id, "admin") -> bool;
+
+// Revoke
+auth.revoke(&token.token_id);
+```
+
+### Security Properties
+
+- Credentials hashed with SHA-256 before storage (never raw)
+- Tokens include expiry timestamps, checked on every validation
+- Scope-based access control (not role-based)
+- Revocation is immediate (token removed from registry)
+- 10 tests covering hash verification, expiry, scope checking, revocation
