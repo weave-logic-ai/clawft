@@ -81,6 +81,40 @@ export interface KernelSnapshot {
   health: HealthStatus;
 }
 
+/** Causal graph node */
+export interface CausalNode {
+  id: number;
+  label: string;
+  metadata: Record<string, unknown>;
+  community?: number;
+}
+
+/** Causal graph edge */
+export type CausalEdgeType =
+  | 'Causes'
+  | 'Enables'
+  | 'Correlates'
+  | 'Follows'
+  | 'Inhibits'
+  | 'Contradicts'
+  | 'TriggeredBy'
+  | 'EvidenceFor';
+
+export interface CausalEdge {
+  source: number;
+  target: number;
+  edge_type: CausalEdgeType;
+  weight: number;
+}
+
+/** Full causal graph payload */
+export interface GraphData {
+  nodes: CausalNode[];
+  edges: CausalEdge[];
+  lambda_2: number;
+  communities: number[][];
+}
+
 /** Command envelope sent TO the kernel */
 export interface KernelCommand {
   kind: string;
