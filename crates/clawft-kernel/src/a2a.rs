@@ -34,6 +34,11 @@ use crate::topic::TopicRouter;
 #[cfg(feature = "exochain")]
 use crate::chain::ChainManager;
 
+#[cfg(feature = "mesh")]
+use crate::mesh_ipc::MeshIpcEnvelope;
+#[cfg(feature = "mesh")]
+use crate::mesh_runtime::MeshRuntime;
+
 /// Default inbox channel capacity per agent.
 const DEFAULT_INBOX_CAPACITY: usize = 1024;
 
@@ -87,6 +92,14 @@ pub struct A2ARouter {
     /// in `Arc`). `with_gate()` and `set_gate()` both target this field.
     #[cfg(feature = "exochain")]
     gate: std::sync::OnceLock<Arc<dyn crate::gate::GateBackend>>,
+
+    /// Dead letter queue for undeliverable messages (os-patterns).
+    #[cfg(feature = "os-patterns")]
+    dead_letter_queue: std::sync::OnceLock<Arc<crate::dead_letter::DeadLetterQueue>>,
+
+    /// Optional mesh runtime for cross-node message delivery (K6).
+    #[cfg(feature = "mesh")]
+    mesh_runtime: std::sync::OnceLock<Arc<MeshRuntime>>,
 }
 
 impl A2ARouter {
@@ -105,6 +118,10 @@ impl A2ARouter {
             pending_requests: DashMap::new(),
             #[cfg(feature = "exochain")]
             gate: std::sync::OnceLock::new(),
+            #[cfg(feature = "os-patterns")]
+            dead_letter_queue: std::sync::OnceLock::new(),
+            #[cfg(feature = "mesh")]
+            mesh_runtime: std::sync::OnceLock::new(),
         }
     }
 
@@ -133,6 +150,36 @@ impl A2ARouter {
     #[cfg(feature = "exochain")]
     pub fn set_gate(&self, gate: Arc<dyn crate::gate::GateBackend>) {
         let _ = self.gate.set(gate);
+    }
+
+    /// Set the dead letter queue after construction (for boot wiring).
+    ///
+    /// Like `set_gate()`, uses `OnceLock` for interior mutability so
+    /// the DLQ can be attached after the router is wrapped in `Arc`.
+    #[cfg(feature = "os-patterns")]
+    pub fn set_dead_letter_queue(&self, dlq: Arc<crate::dead_letter::DeadLetterQueue>) {
+        let _ = self.dead_letter_queue.set(dlq);
+    }
+
+    /// Get the dead letter queue (if configured).
+    #[cfg(feature = "os-patterns")]
+    pub fn dead_letter_queue(&self) -> Option<&Arc<crate::dead_letter::DeadLetterQueue>> {
+        self.dead_letter_queue.get()
+    }
+
+    /// Attach the mesh runtime for cross-node message delivery (K6).
+    ///
+    /// Uses `OnceLock` so the runtime can be attached after the router
+    /// is already wrapped in `Arc`.
+    #[cfg(feature = "mesh")]
+    pub fn set_mesh_runtime(&self, runtime: Arc<MeshRuntime>) {
+        let _ = self.mesh_runtime.set(runtime);
+    }
+
+    /// Get the mesh runtime (if configured).
+    #[cfg(feature = "mesh")]
+    pub fn mesh_runtime(&self) -> Option<&Arc<MeshRuntime>> {
+        self.mesh_runtime.get()
     }
 
     /// Get the service registry (if configured).
@@ -281,40 +328,90 @@ impl A2ARouter {
                 Ok(())
             }
             MessageTarget::RemoteNode { node_id, .. } => {
-                debug!(from, node_id, "remote node routing not yet implemented (K6)");
-                Err(KernelError::Mesh(format!(
-                    "remote routing to node '{node_id}' not yet implemented"
-                )))
+                #[cfg(feature = "mesh")]
+                {
+                    if let Some(runtime) = self.mesh_runtime.get() {
+                        let node_id = node_id.clone();
+                        debug!(from, %node_id, "routing message to remote node via mesh");
+                        let envelope = MeshIpcEnvelope::new(
+                            runtime.node_id().to_string(),
+                            node_id.clone(),
+                            msg,
+                        );
+                        runtime
+                            .send_to_peer(&node_id, envelope)
+                            .await
+                            .map_err(|e| KernelError::Mesh(format!(
+                                "failed to send to remote node '{node_id}': {e}"
+                            )))
+                    } else {
+                        debug!(from, %node_id, "remote node routing: no mesh runtime attached");
+                        Err(KernelError::Mesh(format!(
+                            "remote routing to node '{node_id}' not yet implemented"
+                        )))
+                    }
+                }
+                #[cfg(not(feature = "mesh"))]
+                {
+                    debug!(from, %node_id, "remote node routing not available (mesh feature disabled)");
+                    Err(KernelError::Mesh(format!(
+                        "remote routing to node '{node_id}' not yet implemented"
+                    )))
+                }
             }
         }
     }
 
     /// Deliver a message to a specific PID's inbox.
     ///
-    /// If the inbox does not exist or is full, the message is dropped
-    /// with a warning.
+    /// If the inbox does not exist or is full, the message is routed to
+    /// the dead letter queue (when os-patterns is enabled) and an error
+    /// is returned.
     async fn deliver_to_inbox(&self, pid: Pid, msg: KernelMessage) -> KernelResult<()> {
         // Clone the sender so we release the DashMap read lock before
         // any potential remove() call (which needs a write lock on the
         // same shard — holding both would deadlock).
-        let tx = self
-            .inboxes
-            .get(&pid)
-            .ok_or(KernelError::Ipc(format!("no inbox for PID {pid}")))?
-            .clone();
+        let tx = match self.inboxes.get(&pid) {
+            Some(tx) => tx.clone(),
+            None => {
+                warn!(pid, "no inbox for PID, dead-lettering");
+                #[cfg(feature = "os-patterns")]
+                if let Some(dlq) = self.dead_letter_queue.get() {
+                    dlq.intake(
+                        msg,
+                        crate::dead_letter::DeadLetterReason::TargetNotFound { pid },
+                    );
+                }
+                return Err(KernelError::Ipc(format!("no inbox for PID {pid}")));
+            }
+        };
 
         match tx.try_send(msg) {
             Ok(()) => {
                 debug!(pid, "message delivered to inbox");
                 Ok(())
             }
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                warn!(pid, "inbox full, message dropped");
+            Err(mpsc::error::TrySendError::Full(rejected_msg)) => {
+                warn!(pid, "inbox full, dead-lettering");
+                #[cfg(feature = "os-patterns")]
+                if let Some(dlq) = self.dead_letter_queue.get() {
+                    dlq.intake(
+                        rejected_msg,
+                        crate::dead_letter::DeadLetterReason::InboxFull { pid },
+                    );
+                }
                 Err(KernelError::Ipc(format!("inbox full for PID {pid}")))
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                warn!(pid, "inbox closed, removing");
+            Err(mpsc::error::TrySendError::Closed(rejected_msg)) => {
+                warn!(pid, "inbox closed, removing and dead-lettering");
                 self.inboxes.remove(&pid);
+                #[cfg(feature = "os-patterns")]
+                if let Some(dlq) = self.dead_letter_queue.get() {
+                    dlq.intake(
+                        rejected_msg,
+                        crate::dead_letter::DeadLetterReason::AgentExited { pid },
+                    );
+                }
                 Err(KernelError::Ipc(format!("inbox closed for PID {pid}")))
             }
         }

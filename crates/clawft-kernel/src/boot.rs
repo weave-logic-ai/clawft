@@ -99,6 +99,15 @@ pub struct Kernel<P: Platform> {
     ecc_calibration: Option<crate::calibration::EccCalibration>,
     #[cfg(feature = "exochain")]
     governance_gate: Option<Arc<dyn crate::gate::GateBackend>>,
+    // ── os-patterns observability modules ────────────────────────
+    #[cfg(feature = "os-patterns")]
+    metrics_registry: Option<Arc<crate::metrics::MetricsRegistry>>,
+    #[cfg(feature = "os-patterns")]
+    log_service: Option<Arc<crate::log_service::LogService>>,
+    #[cfg(feature = "os-patterns")]
+    timer_service: Option<Arc<crate::timer::TimerService>>,
+    #[cfg(feature = "os-patterns")]
+    dead_letter_queue: Option<Arc<crate::dead_letter::DeadLetterQueue>>,
 }
 
 impl<P: Platform> Kernel<P> {
@@ -1121,6 +1130,55 @@ impl<P: Platform> Kernel<P> {
             )
         };
 
+        // 8g. Initialize os-patterns observability modules
+        #[cfg(feature = "os-patterns")]
+        let (metrics_registry, log_svc, timer_svc, dead_letter_queue) = {
+            use crate::dead_letter::DeadLetterQueue;
+            use crate::log_service::LogService;
+            use crate::metrics::MetricsRegistry;
+            use crate::timer::TimerService;
+
+            boot_log.push(BootEvent::info(
+                BootPhase::Services,
+                "Initializing os-patterns observability modules",
+            ));
+
+            // MetricsRegistry with built-in + boot-specific gauges
+            let registry = Arc::new(MetricsRegistry::with_builtins());
+            // Seed additional kernel gauges requested by W3
+            registry.gauge_set("kernel.process.count", process_table.len() as i64);
+            registry.gauge_set("kernel.agent.count", 0);
+            registry.gauge_set("kernel.ipc.messages_sent", 0);
+            registry.counter_add("kernel.ipc.messages_failed", 0);
+            registry.gauge_set("kernel.chain.height", 0);
+            registry.gauge_set("kernel.uptime_secs", 0);
+
+            boot_log.push(BootEvent::info(
+                BootPhase::Services,
+                "MetricsRegistry ready (built-in + kernel gauges)",
+            ));
+
+            // LogService (ring-buffer structured logs)
+            let log_svc = Arc::new(LogService::with_default_capacity());
+            boot_log.push(BootEvent::info(BootPhase::Services, "LogService ready"));
+
+            // TimerService (sub-second precision timers)
+            let timer_svc = Arc::new(TimerService::new());
+            boot_log.push(BootEvent::info(BootPhase::Services, "TimerService ready"));
+
+            // DeadLetterQueue (undeliverable message sink)
+            let dlq = Arc::new(DeadLetterQueue::with_default_capacity());
+            boot_log.push(BootEvent::info(
+                BootPhase::Services,
+                "DeadLetterQueue ready",
+            ));
+
+            // Wire DLQ into the A2A router
+            a2a_router.set_dead_letter_queue(Arc::clone(&dlq));
+
+            (Some(registry), Some(log_svc), Some(timer_svc), Some(dlq))
+        };
+
         let elapsed = boot_time.elapsed();
         boot_log.push(BootEvent::info(
             BootPhase::Ready,
@@ -1194,6 +1252,14 @@ impl<P: Platform> Kernel<P> {
             ecc_calibration,
             #[cfg(feature = "exochain")]
             governance_gate,
+            #[cfg(feature = "os-patterns")]
+            metrics_registry,
+            #[cfg(feature = "os-patterns")]
+            log_service: log_svc,
+            #[cfg(feature = "os-patterns")]
+            timer_service: timer_svc,
+            #[cfg(feature = "os-patterns")]
+            dead_letter_queue,
         })
     }
 
@@ -1426,6 +1492,30 @@ impl<P: Platform> Kernel<P> {
     #[cfg(feature = "exochain")]
     pub fn governance_gate(&self) -> Option<&Arc<dyn crate::gate::GateBackend>> {
         self.governance_gate.as_ref()
+    }
+
+    /// Get the os-patterns metrics registry (if os-patterns feature enabled).
+    #[cfg(feature = "os-patterns")]
+    pub fn metrics_registry(&self) -> Option<&Arc<crate::metrics::MetricsRegistry>> {
+        self.metrics_registry.as_ref()
+    }
+
+    /// Get the os-patterns log service (if os-patterns feature enabled).
+    #[cfg(feature = "os-patterns")]
+    pub fn log_service(&self) -> Option<&Arc<crate::log_service::LogService>> {
+        self.log_service.as_ref()
+    }
+
+    /// Get the os-patterns timer service (if os-patterns feature enabled).
+    #[cfg(feature = "os-patterns")]
+    pub fn timer_service(&self) -> Option<&Arc<crate::timer::TimerService>> {
+        self.timer_service.as_ref()
+    }
+
+    /// Get the os-patterns dead letter queue (if os-patterns feature enabled).
+    #[cfg(feature = "os-patterns")]
+    pub fn dead_letter_queue(&self) -> Option<&Arc<crate::dead_letter::DeadLetterQueue>> {
+        self.dead_letter_queue.as_ref()
     }
 
     /// Take ownership of the AppContext for agent loop consumption.
@@ -2576,6 +2666,155 @@ mod tests {
         assert!(
             !manifest_events.is_empty(),
             "boot.manifest event should be on chain"
+        );
+    }
+
+    // ── os-patterns observability wiring tests (W3) ─────────────────
+
+    #[tokio::test]
+    #[cfg(feature = "os-patterns")]
+    async fn boot_creates_metrics_registry() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+
+        let registry = kernel.metrics_registry();
+        assert!(registry.is_some(), "MetricsRegistry should be created at boot");
+        // Verify a built-in gauge was seeded
+        let r = registry.unwrap();
+        let val = r.gauge_get("kernel.process.count");
+        assert!(val >= 1, "kernel.process.count gauge should be seeded");
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "os-patterns")]
+    async fn boot_creates_log_service() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+
+        assert!(
+            kernel.log_service().is_some(),
+            "LogService should be created at boot"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "os-patterns")]
+    async fn boot_creates_timer_service() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+
+        assert!(
+            kernel.timer_service().is_some(),
+            "TimerService should be created at boot"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "os-patterns")]
+    async fn boot_creates_dead_letter_queue() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+
+        let dlq = kernel.dead_letter_queue();
+        assert!(dlq.is_some(), "DeadLetterQueue should be created at boot");
+        assert!(dlq.unwrap().is_empty(), "DLQ should start empty");
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "os-patterns")]
+    async fn kernel_metrics_accessor_returns_registry() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+
+        let registry = kernel.metrics_registry().unwrap();
+        // Verify counter_inc works on built-in metric
+        registry.counter_inc(crate::metrics::METRIC_MESSAGES_SENT);
+        assert_eq!(registry.counter_get(crate::metrics::METRIC_MESSAGES_SENT), 1);
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "os-patterns")]
+    async fn dlq_accessible_via_kernel_accessor() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+
+        let dlq = kernel.dead_letter_queue().unwrap();
+        assert_eq!(dlq.capacity(), crate::dead_letter::DEFAULT_DLQ_CAPACITY);
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "os-patterns")]
+    async fn failed_a2a_send_routes_to_dlq() {
+        use crate::ipc::{KernelMessage, MessageTarget};
+
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+
+        // Register a sender agent
+        let sender_entry = ProcessEntry {
+            pid: 0,
+            agent_id: "dlq-sender".to_owned(),
+            state: ProcessState::Running,
+            capabilities: AgentCapabilities::default(),
+            resource_usage: ResourceUsage::default(),
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+            parent_pid: None,
+        };
+        let sender_pid = kernel.process_table().insert(sender_entry).unwrap();
+        kernel.a2a_router().create_inbox(sender_pid);
+
+        // Send to a PID that has no inbox (PID 9999 doesn't exist)
+        let msg = KernelMessage::text(
+            sender_pid,
+            MessageTarget::Process(9999),
+            "dead letter test",
+        );
+        let result = kernel.a2a_router().send(msg).await;
+        assert!(result.is_err(), "send to unknown PID should fail");
+
+        // Verify the message landed in the DLQ
+        let dlq = kernel.dead_letter_queue().unwrap();
+        assert_eq!(dlq.len(), 1, "DLQ should contain 1 dead letter");
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "os-patterns")]
+    async fn kernel_metrics_gauge_seeded_at_boot() {
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(test_config(), test_kernel_config(), platform)
+            .await
+            .unwrap();
+
+        let registry = kernel.metrics_registry().unwrap();
+        // kernel.process.count should reflect at least the kernel PID 0
+        assert!(
+            registry.gauge_get("kernel.process.count") >= 1,
+            "kernel.process.count should be >= 1 at boot"
+        );
+        // Verify additional gauges exist (they were set to 0, so gauge_get returns 0 not None)
+        assert_eq!(
+            registry.gauge_get("kernel.uptime_secs"),
+            0,
+            "kernel.uptime_secs gauge should exist and be 0 at boot"
+        );
+        assert_eq!(
+            registry.gauge_get("kernel.chain.height"),
+            0,
+            "kernel.chain.height gauge should exist and be 0 at boot"
         );
     }
 }

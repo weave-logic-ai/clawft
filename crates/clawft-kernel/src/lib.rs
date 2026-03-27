@@ -160,6 +160,8 @@ pub mod mesh_kad;
 pub mod mesh_artifact;
 #[cfg(feature = "mesh")]
 pub mod mesh_log;
+#[cfg(feature = "mesh")]
+pub mod mesh_runtime;
 
 // Re-export key types at the crate level for convenience.
 pub use a2a::A2ARouter;
@@ -309,6 +311,8 @@ pub use mesh_kad::{
 pub use mesh_artifact::{ArtifactAnnouncement, ArtifactExchange, ArtifactRequest, ArtifactResponse};
 #[cfg(feature = "mesh")]
 pub use mesh_log::{LogAggregator, LogQuery as MeshLogQuery, RemoteLogEntry};
+#[cfg(feature = "mesh")]
+pub use mesh_runtime::{MeshRuntime, PeerConnection};
 pub use auth_service::{
     AuditEntry, AuthService, CredentialGrant, CredentialRequest, CredentialType, IssuedToken,
     StoredCredential as AuthStoredCredential,
