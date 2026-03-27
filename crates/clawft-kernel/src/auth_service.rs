@@ -4,12 +4,14 @@
 //! never hold raw secrets. Instead, agents request scoped, time-limited tokens
 //! via IPC. All credential access is audited.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use crate::error::KernelError;
@@ -124,20 +126,72 @@ pub enum CredentialGrant {
 // AuthService
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// HashedCredential — SHA-256 hashed agent credentials
+// ---------------------------------------------------------------------------
+
+/// A hashed credential for agent authentication.
+///
+/// Raw credentials are **never** stored. Only the SHA-256 hash is kept.
+#[derive(Debug, Clone)]
+pub struct HashedCredential {
+    /// Agent identity this credential belongs to.
+    pub agent_id: String,
+    /// SHA-256 hash of the raw credential.
+    pub hash: Vec<u8>,
+    /// When the credential was created.
+    pub created_at: DateTime<Utc>,
+    /// Scopes this credential grants.
+    pub scopes: Vec<String>,
+}
+
+/// A scoped authentication token issued after successful authentication.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthToken {
+    /// Unique token identifier.
+    pub token_id: String,
+    /// Agent identity this token was issued to.
+    pub agent_id: String,
+    /// Scopes granted by this token.
+    pub scopes: Vec<String>,
+    /// When the token expires.
+    pub expires_at: DateTime<Utc>,
+    /// When the token was issued.
+    pub created_at: DateTime<Utc>,
+}
+
+impl AuthToken {
+    /// Check whether the token has expired.
+    pub fn is_expired(&self) -> bool {
+        Utc::now() > self.expires_at
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AuthService
+// ---------------------------------------------------------------------------
+
 /// Centralized credential management service (Factotum pattern).
 ///
 /// - Credentials are registered once, encrypted at rest.
 /// - Agents request scoped tokens; raw credentials are never exposed.
 /// - Token issuance and access are audited.
+/// - SHA-256 hashed credentials support agent authentication.
 pub struct AuthService {
-    /// Registered credentials.
+    /// Registered credentials (encrypted, name-based).
     credentials: DashMap<String, StoredCredential>,
-    /// Active tokens.
+    /// SHA-256 hashed credentials (agent-id-based).
+    hashed_credentials: DashMap<String, HashedCredential>,
+    /// Active tokens (token-based credential access).
     active_tokens: DashMap<String, IssuedToken>,
+    /// Active auth tokens (from `authenticate`).
+    auth_tokens: DashMap<String, AuthToken>,
     /// Audit log.
     audit_log: std::sync::RwLock<Vec<AuditEntry>>,
     /// Encryption key for credentials.
     encryption_key: [u8; 32],
+    /// Monotonic token counter.
+    token_counter: AtomicU64,
 }
 
 /// An audit log entry.
@@ -160,9 +214,12 @@ impl AuthService {
     pub fn new(encryption_key: [u8; 32]) -> Self {
         Self {
             credentials: DashMap::new(),
+            hashed_credentials: DashMap::new(),
             active_tokens: DashMap::new(),
+            auth_tokens: DashMap::new(),
             audit_log: std::sync::RwLock::new(Vec::new()),
             encryption_key,
+            token_counter: AtomicU64::new(0),
         }
     }
 
@@ -304,6 +361,109 @@ impl AuthService {
             .iter()
             .filter(|t| !t.value().is_expired())
             .count()
+    }
+
+    // ── SHA-256 hashed credential operations ─────────────────────
+
+    /// Compute the SHA-256 hash of a raw credential.
+    fn sha256_hash(data: &[u8]) -> Vec<u8> {
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        hasher.finalize().to_vec()
+    }
+
+    /// Register a hashed credential for an agent.
+    ///
+    /// The raw credential is **never stored**; only its SHA-256 hash is kept.
+    pub fn register_hashed_credential(
+        &self,
+        agent_id: &str,
+        raw_credential: &[u8],
+        scopes: Vec<String>,
+    ) -> Result<(), KernelError> {
+        if self.hashed_credentials.contains_key(agent_id) {
+            return Err(KernelError::Service(format!(
+                "hashed credential already registered for agent: {agent_id}"
+            )));
+        }
+
+        let hash = Self::sha256_hash(raw_credential);
+        self.hashed_credentials.insert(
+            agent_id.to_string(),
+            HashedCredential {
+                agent_id: agent_id.to_string(),
+                hash,
+                created_at: Utc::now(),
+                scopes,
+            },
+        );
+
+        info!(agent_id, "hashed credential registered");
+        Ok(())
+    }
+
+    /// Authenticate an agent by verifying its raw credential against the stored hash.
+    ///
+    /// On success, issues a scoped [`AuthToken`] valid for one hour.
+    pub fn authenticate(
+        &self,
+        agent_id: &str,
+        raw_credential: &[u8],
+    ) -> Result<AuthToken, KernelError> {
+        let cred = self
+            .hashed_credentials
+            .get(agent_id)
+            .ok_or_else(|| KernelError::Service(format!("no credential for agent: {agent_id}")))?;
+
+        let provided_hash = Self::sha256_hash(raw_credential);
+        if cred.hash != provided_hash {
+            self.audit("authenticate.failed", agent_id, agent_id, false);
+            warn!(agent_id, "authentication failed — hash mismatch");
+            return Err(KernelError::Service("authentication failed".into()));
+        }
+
+        let seq = self.token_counter.fetch_add(1, Ordering::Relaxed);
+        let token = AuthToken {
+            token_id: format!("auth-{}-{seq}", uuid::Uuid::new_v4()),
+            agent_id: agent_id.to_string(),
+            scopes: cred.scopes.clone(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            created_at: Utc::now(),
+        };
+
+        self.auth_tokens
+            .insert(token.token_id.clone(), token.clone());
+        self.audit("authenticate.success", agent_id, agent_id, true);
+
+        info!(agent_id, token_id = %token.token_id, "agent authenticated");
+        Ok(token)
+    }
+
+    /// Validate an auth token. Returns `Err` if expired or not found.
+    pub fn validate_auth_token(&self, token_id: &str) -> Result<AuthToken, KernelError> {
+        let token = self
+            .auth_tokens
+            .get(token_id)
+            .ok_or_else(|| KernelError::Service("auth token not found".into()))?;
+
+        if token.is_expired() {
+            return Err(KernelError::Service("auth token expired".into()));
+        }
+
+        Ok(token.clone())
+    }
+
+    /// Revoke an auth token. Returns `true` if it existed.
+    pub fn revoke_auth_token(&self, token_id: &str) -> bool {
+        self.auth_tokens.remove(token_id).is_some()
+    }
+
+    /// Check whether an auth token has a specific scope.
+    pub fn check_scope(&self, token_id: &str, required_scope: &str) -> bool {
+        self.auth_tokens
+            .get(token_id)
+            .map(|t| !t.is_expired() && t.scopes.contains(&required_scope.to_string()))
+            .unwrap_or(false)
     }
 
     // ── Audit ─────────────────────────────────────────────────────
@@ -540,5 +700,124 @@ mod tests {
         svc.start().await.unwrap();
         assert_eq!(svc.health_check().await, HealthStatus::Healthy);
         svc.stop().await.unwrap();
+    }
+
+    // ── SHA-256 hashed credential tests ──────────────────────────
+
+    #[test]
+    fn register_and_authenticate_success() {
+        let svc = AuthService::new_default();
+        svc.register_hashed_credential("agent-1", b"my_password", vec!["read".into()])
+            .unwrap();
+        let token = svc.authenticate("agent-1", b"my_password").unwrap();
+        assert_eq!(token.agent_id, "agent-1");
+        assert!(!token.token_id.is_empty());
+        assert_eq!(token.scopes, vec!["read".to_string()]);
+    }
+
+    #[test]
+    fn authenticate_wrong_credential_fails() {
+        let svc = AuthService::new_default();
+        svc.register_hashed_credential("agent-2", b"correct", vec![]).unwrap();
+        let result = svc.authenticate("agent-2", b"wrong");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("failed"), "got: {err}");
+    }
+
+    #[test]
+    fn authenticate_issues_token_with_scopes() {
+        let svc = AuthService::new_default();
+        svc.register_hashed_credential(
+            "scoped-agent",
+            b"secret",
+            vec!["read".into(), "write".into()],
+        )
+        .unwrap();
+        let token = svc.authenticate("scoped-agent", b"secret").unwrap();
+        assert_eq!(token.scopes, vec!["read".to_string(), "write".to_string()]);
+    }
+
+    #[test]
+    fn validate_auth_token_succeeds() {
+        let svc = AuthService::new_default();
+        svc.register_hashed_credential("v-agent", b"pass", vec![]).unwrap();
+        let token = svc.authenticate("v-agent", b"pass").unwrap();
+        let validated = svc.validate_auth_token(&token.token_id).unwrap();
+        assert_eq!(validated.agent_id, "v-agent");
+    }
+
+    #[test]
+    fn validate_expired_auth_token_fails() {
+        let svc = AuthService::new_default();
+        svc.register_hashed_credential("exp-agent", b"pass", vec![]).unwrap();
+        let token = svc.authenticate("exp-agent", b"pass").unwrap();
+
+        // Manually insert an expired token.
+        let expired = AuthToken {
+            token_id: "expired-tok".to_string(),
+            agent_id: "exp-agent".to_string(),
+            scopes: vec![],
+            expires_at: Utc::now() - chrono::Duration::hours(1),
+            created_at: Utc::now() - chrono::Duration::hours(2),
+        };
+        svc.auth_tokens.insert("expired-tok".into(), expired);
+
+        // The real token should be valid.
+        assert!(svc.validate_auth_token(&token.token_id).is_ok());
+        // The expired token should fail.
+        let result = svc.validate_auth_token("expired-tok");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("expired"));
+    }
+
+    #[test]
+    fn revoke_auth_token_works() {
+        let svc = AuthService::new_default();
+        svc.register_hashed_credential("rev-agent", b"pass", vec![]).unwrap();
+        let token = svc.authenticate("rev-agent", b"pass").unwrap();
+        assert!(svc.revoke_auth_token(&token.token_id));
+        assert!(svc.validate_auth_token(&token.token_id).is_err());
+        // Second revoke returns false.
+        assert!(!svc.revoke_auth_token(&token.token_id));
+    }
+
+    #[test]
+    fn check_scope_with_matching_scope() {
+        let svc = AuthService::new_default();
+        svc.register_hashed_credential("sc-agent", b"cred", vec!["admin".into(), "read".into()])
+            .unwrap();
+        let token = svc.authenticate("sc-agent", b"cred").unwrap();
+        assert!(svc.check_scope(&token.token_id, "admin"));
+        assert!(svc.check_scope(&token.token_id, "read"));
+    }
+
+    #[test]
+    fn check_scope_with_missing_scope_fails() {
+        let svc = AuthService::new_default();
+        svc.register_hashed_credential("sc-agent2", b"cred", vec!["read".into()])
+            .unwrap();
+        let token = svc.authenticate("sc-agent2", b"cred").unwrap();
+        assert!(!svc.check_scope(&token.token_id, "write"));
+        assert!(!svc.check_scope(&token.token_id, "admin"));
+    }
+
+    #[test]
+    fn raw_credentials_never_stored_in_hash() {
+        let svc = AuthService::new_default();
+        let raw = b"super_secret_password";
+        svc.register_hashed_credential("hash-check", raw, vec![]).unwrap();
+
+        let cred = svc.hashed_credentials.get("hash-check").unwrap();
+        // The hash must not equal the raw input.
+        assert_ne!(cred.hash.as_slice(), raw.as_slice());
+        // The hash should be 32 bytes (SHA-256).
+        assert_eq!(cred.hash.len(), 32);
+    }
+
+    #[test]
+    fn check_scope_on_nonexistent_token_returns_false() {
+        let svc = AuthService::new_default();
+        assert!(!svc.check_scope("no-such-token", "read"));
     }
 }

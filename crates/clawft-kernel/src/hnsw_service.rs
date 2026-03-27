@@ -135,6 +135,34 @@ impl HnswService {
     pub fn config(&self) -> &HnswServiceConfig {
         &self.config
     }
+
+    /// Persist the HNSW store to a JSON file.
+    ///
+    /// Delegates to the underlying [`HnswStore::save`]. The HNSW index
+    /// graph is not serialized; it will be rebuilt on load.
+    pub fn save_to_file(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
+        let store = self.store.lock().expect("HnswStore lock poisoned");
+        store.save(path)
+    }
+
+    /// Load an HNSW store from a JSON file and create a new service.
+    ///
+    /// Delegates to [`HnswStore::load`]. The HNSW index is rebuilt
+    /// from the saved entries. Counters start at zero.
+    pub fn load_from_file(path: &std::path::Path) -> Result<Self, std::io::Error> {
+        let store = HnswStore::load(path)?;
+        let config = HnswServiceConfig {
+            ef_search: 100,  // store doesn't expose params after load; use defaults
+            ef_construction: 200,
+            default_dimensions: 384,
+        };
+        Ok(Self {
+            store: Mutex::new(store),
+            config,
+            insert_count: AtomicU64::new(0),
+            search_count: AtomicU64::new(0),
+        })
+    }
 }
 
 // ── SystemService impl ──────────────────────────────────────────────────
@@ -276,5 +304,50 @@ mod tests {
         let health = svc.health_check().await;
         assert_eq!(health, HealthStatus::Healthy);
         svc.stop().await.unwrap();
+    }
+
+    // ── Persistence tests ────────────────────────────────────────────
+
+    fn tmp_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "hnsw_test_{name}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn persist_empty_index() {
+        let svc = make_service();
+        let path = tmp_path("empty");
+        svc.save_to_file(&path).unwrap();
+        let loaded = HnswService::load_from_file(&path).unwrap();
+        assert!(loaded.is_empty());
+        assert_eq!(loaded.len(), 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn persist_index_with_vectors_search_matches() {
+        let svc = make_service();
+        svc.insert("a".into(), vec![1.0, 0.0, 0.0], serde_json::json!({"tag": "first"}));
+        svc.insert("b".into(), vec![0.0, 1.0, 0.0], serde_json::json!({"tag": "second"}));
+        svc.insert("c".into(), vec![0.0, 0.0, 1.0], serde_json::json!({"tag": "third"}));
+
+        let path = tmp_path("vectors");
+        svc.save_to_file(&path).unwrap();
+        let loaded = HnswService::load_from_file(&path).unwrap();
+
+        assert_eq!(loaded.len(), 3);
+
+        // Search should return the same nearest neighbor.
+        let results = loaded.search(&[1.0, 0.0, 0.0], 1);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "a");
+        assert!((results[0].score - 1.0).abs() < 0.01);
+
+        let _ = std::fs::remove_file(&path);
     }
 }

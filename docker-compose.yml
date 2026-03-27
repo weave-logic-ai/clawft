@@ -1,0 +1,27 @@
+version: '3.8'
+services:
+  weftos-node:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - weftos-data:/data
+    environment:
+      - WEFTOS_DATA_DIR=/data
+      - RUST_LOG=info
+
+  # Optional: second node for mesh testing
+  weftos-node-2:
+    build: .
+    ports:
+      - "8081:8080"
+    volumes:
+      - weftos-data-2:/data
+    environment:
+      - WEFTOS_DATA_DIR=/data
+      - WEFTOS_SEED_PEERS=weftos-node:8080
+      - RUST_LOG=info
+
+volumes:
+  weftos-data:
+  weftos-data-2:

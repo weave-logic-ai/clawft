@@ -1,0 +1,104 @@
+---
+title: "DEMOCRITUS Cognitive Loop"
+description: "Continuous nervous system loop: Sense → Embed → Search → Update → Commit. Integrates ImpulseQueue, HNSW, CausalGraph, and CrossRefStore on every cognitive tick."
+---
+
+DEMOCRITUS is the nervous system of WeftOS — a continuous cognitive loop that runs on every `CognitiveTick`, integrating all ECC subsystems into a unified perception-reasoning-action cycle.
+
+**Feature**: `ecc`
+**Source**: `crates/clawft-kernel/src/democritus.rs`
+**Decision**: ECC D5
+
+## The Five Phases
+
+```
+SENSE → EMBED → SEARCH → UPDATE → COMMIT
+```
+
+### 1. SENSE
+
+Drains the `ImpulseQueue` for new events (up to `max_impulses_per_tick`). Each impulse represents an external or internal event — agent messages, chain commits, sensor data, user input.
+
+### 2. EMBED
+
+Converts each impulse into a vector embedding via the configured `EmbeddingProvider`. Supports ONNX real embeddings (`onnx-embeddings` feature) or hash-based fallback.
+
+### 3. SEARCH
+
+Queries the HNSW index for the `search_k` nearest neighbors of each new embedding. Neighbors above the `correlation_threshold` (cosine similarity) are considered correlated events.
+
+### 4. UPDATE
+
+For each correlated pair, adds a causal edge to the `CausalGraph` (type: `Correlates`) and registers a `CrossRef` in the `CrossRefStore` linking the two structures.
+
+### 5. COMMIT
+
+Logs tick statistics and updates atomic counters. The loop yields until the next `CognitiveTick`.
+
+## Configuration
+
+```rust
+pub struct DemocritusConfig {
+    pub max_impulses_per_tick: usize,  // Default: 64
+    pub search_k: usize,              // Default: 5
+    pub correlation_threshold: f32,    // Default: 0.7
+    pub tick_budget_us: u64,           // Default: 15,000 (15ms)
+}
+```
+
+The `tick_budget_us` enforces a wall-clock cap — if a tick exceeds this budget, it stops early and reports `budget_exceeded: true` in the result.
+
+## Tick Result
+
+Each tick returns a `DemocritusTickResult`:
+
+```rust
+pub struct DemocritusTickResult {
+    pub impulses_sensed: usize,
+    pub embeddings_produced: usize,
+    pub searches_performed: usize,
+    pub edges_added: usize,
+    pub crossrefs_added: usize,
+    pub budget_exceeded: bool,
+    pub duration_us: u64,
+}
+```
+
+## Lifetime Statistics
+
+```rust
+loop.total_ticks()       -> u64
+loop.total_nodes_added() -> u64
+loop.total_edges_added() -> u64
+```
+
+## Subsystem Integration
+
+```
+┌──────────────────────────────────────────┐
+│              DemocritusLoop              │
+│                                          │
+│  ImpulseQueue ──→ EmbeddingProvider      │
+│                        │                 │
+│                    HnswService           │
+│                        │                 │
+│                   CausalGraph            │
+│                        │                 │
+│                  CrossRefStore           │
+└──────────────────────────────────────────┘
+```
+
+All subsystem references are `Arc`-wrapped for safe concurrent access. The loop itself is registered as a `CognitiveTick` consumer — it runs automatically each tick cycle without external scheduling.
+
+## Tuning
+
+| Parameter | Effect of Increase | Trade-off |
+|-----------|--------------------|-----------|
+| `max_impulses_per_tick` | Process more events per cycle | Higher latency per tick |
+| `search_k` | More neighbor comparisons | Better correlation detection, slower |
+| `correlation_threshold` | (Lower) More edges created | Noisier causal graph |
+| `tick_budget_us` | Allow longer ticks | More throughput, higher tail latency |
+
+## Testing
+
+10+ tests cover tick lifecycle, impulse draining, embedding production, HNSW search integration, edge creation, cross-ref registration, and budget enforcement.

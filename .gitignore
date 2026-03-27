@@ -8,3 +8,5 @@ crates/clawft-wasm/www/pkg/
 
 # WeftOS runtime state
 .weftos/
+gui/node_modules/
+gui/dist/

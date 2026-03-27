@@ -1,0 +1,5 @@
+target/
+.git/
+.weftos/
+gui/node_modules/
+*.onnx

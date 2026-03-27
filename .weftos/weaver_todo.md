@@ -64,3 +64,105 @@ Last updated: 2026-03-26 (after graph ingestion)
 - [x] `weftos init` creates `.weftos/` + `weave.toml`
 - [x] 12 WeftOS agents defined (`agents/weftos/`)
 - [x] `weave init` installs agents + skills to `.claude/`
+
+What the Graph Reveals Now
+
+  Growth: Kernel grew 14.5% since mid-session analysis. The Weaver subsystem (6,571 lines) is now larger than 7 of the 22 workspace crates — it's
+   become a major subsystem in its own right.
+
+  The Bridge: process.rs (degree 26) is the single module connecting mesh, exochain, and os-patterns into a coherent kernel. If it breaks, three
+  feature domains disconnect.
+
+  Stale Feedback Loop: 12 decisions show as "pending" in the graph even though sprint 09b resolved them. The ingestion pipeline reads the
+  original symposium markdown, not the updated resolution docs. This is the Weaver's first self-identified bug — it can see its own data is
+  stale.
+
+  Where the Conversation Goes
+
+  1. Fix the Weaver's own feedback loop
+
+  The Weaver discovered it has stale data. This is the meta-Loom in action — it should update its own decision graph when resolutions are
+  committed. This is a live test of the self-improvement cycle.
+
+  2. Community detection on the graph
+
+  Can we automatically discover the 12 conversations from graph structure alone? If spectral clustering on the causal graph produces clusters
+  that match the manually-identified conversations, that validates the ECC model. If it doesn't, the divergence is itself interesting.
+
+  4. Predictive analysis
+
+  The git history graph has temporal patterns. Can we predict which modules are likely to change next based on commit burst rhythm and coupling?
+
+  5. Cross-project test
+
+  Run weftos init on the mentra project (the glasses firmware) and see what the Weaver discovers about a completely different domain. The
+  WeaverKnowledgeBase should then carry "Rust project" patterns learned from clawft into the mentra analysis.
+
+  6. Technical debt as a graph metric
+
+  Define: debt_score = (fan_out * lines) / (tests * recency). High fan-out, large, poorly tested, old modules have the highest debt. The graph
+  can compute this across every module.
+
+  7. Automated SPARC plan generation
+
+  The Weaver has seen the pattern: identify gap → write SPARC plan → implement → test → review. Could it generate a SPARC plan from a gap report
+  automatically?
+
+
+  ● The causal graph has BFS traversal and path finding but no community detection or spectral analysis yet. These are mentioned in VISION.md as
+  capabilities but haven't been implemented in the Rust code. The gap analysis scripts do community detection in Python though. Let me check the
+  gap analysis more closely to see if it has those features:
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● The community detection and predictive features exist conceptually but aren't implemented in the Rust kernel yet — they're mentioned as future
+  work items in the weaver_todo. The gap analysis Python scripts do structural analysis but not spectral community detection.
+
+## Sprint 10 Deliverables (2026-03-27)
+
+### Kernel Hardening
+- [x] RestartStrategy (OneForOne, OneForAll, RestForOne, Permanent, Transient) + budget + backoff
+- [x] ProcessLink/ProcessMonitor integration with supervisor
+- [x] CausalGraph persistence (JSON save/load)
+- [x] HNSW index persistence
+- [x] PersistenceConfig coordinator
+- [x] DemocritusLoop continuous cognitive cycle (ecc:D5 resolved)
+- [x] DeadLetterQueue wired into A2A router
+- [x] MetricsRegistry wired into boot with kernel gauges
+- [x] LogService + TimerService wired into boot
+- [x] ConfigService with typed values + change notifications
+- [x] AuthService with SHA-256 hashed credentials + scoped tokens
+- [x] MeshRuntime with A2A bridge (RemoteNode → peer delivery)
+- [x] Mesh discovery (Kademlia + heartbeat + peer address registry)
+- [x] Chain sync request/response stubs
+- [x] 10 new WASM tools (fs.analyze, git.log, doc.parse, etc.)
+
+### K8 GUI
+- [x] React 19 + TypeScript + Vite + Tailwind scaffold
+- [x] Dashboard view (metrics, processes, chain events, health)
+- [x] Admin Forms view (5 CRUD forms: spawn/stop/config/chain/service)
+- [x] Knowledge Graph view (Cytoscape.js, community coloring, search, lambda_2)
+- [x] NodeDetail panel (edges, metadata, community)
+- [x] WebSocket hook with mock kernel data
+
+### Testing
+- [x] 20+ A2A router tests
+- [x] 16+ boot path tests
+- [x] 18+ supervisor restart tests
+- [x] 12+ persistence roundtrip tests
+- [x] 12+ DEMOCRITUS loop tests
+- [x] 10+ mesh runtime tests
+- [x] 16+ extended tools tests
+- [x] 8+ config/auth service tests
+- [x] 8 E2E integration tests
+- [x] Total: 1,580+ tests (up from 613)
+
+### Documentation + Deployment
+- [x] INSTALL.md
+- [x] FEATURE_GATES.md
+- [x] CONFIGURATION.md
+- [x] external-analysis-results.md (ruvector: 109 crates validated)
+- [x] docker-compose.yml (2-node mesh)
+- [x] .dockerignore
+- [x] Sprint 10 plan + product ROADMAP.md
+- [x] GTM synthesis document

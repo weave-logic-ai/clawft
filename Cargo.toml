@@ -126,6 +126,10 @@ ciborium = "0.2"
 # HNSW approximate nearest neighbor search
 instant-distance = "0.6"
 
+# ONNX Runtime (embedding inference)
+ort = { version = "2.0.0-rc.12", default-features = false }
+ndarray = "0.16"
+
 # BLAKE3 hashing (ECC cognitive substrate)
 blake3 = "1.5"
 

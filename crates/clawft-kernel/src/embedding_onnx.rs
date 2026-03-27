@@ -8,6 +8,8 @@
 //! - [`AstEmbeddingProvider`] -- hybrid structural + semantic embedder for Rust code.
 
 use std::path::PathBuf;
+#[cfg(feature = "onnx-embeddings")]
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -95,9 +97,12 @@ pub struct OnnxEmbeddingProvider {
     /// Max input tokens.
     max_tokens: usize,
     /// Fallback provider used when runtime is not available.
-    /// Retained for future use when `ort` crate is wired in.
     #[allow(dead_code)]
     fallback: MockEmbeddingProvider,
+    /// ONNX runtime session (only present when `onnx-embeddings` feature is active
+    /// and model was loaded successfully).
+    #[cfg(feature = "onnx-embeddings")]
+    session: Option<Arc<ort::Session>>,
 }
 
 impl OnnxEmbeddingProvider {
@@ -114,19 +119,26 @@ impl OnnxEmbeddingProvider {
     /// disabled, the provider transparently falls back to token-hashing.
     pub fn new(model_path: impl Into<PathBuf>) -> Self {
         let model_path = model_path.into();
-        let runtime_available = Self::try_load_runtime(&model_path);
+        #[cfg(feature = "onnx-embeddings")]
+        let session = Self::try_load_session(&model_path);
+        #[cfg(feature = "onnx-embeddings")]
+        let runtime_available = session.is_some();
+        #[cfg(not(feature = "onnx-embeddings"))]
+        let runtime_available = false;
 
         Self {
-            model_path,
-            dimensions: Self::DEFAULT_DIMS,
             model_name: if runtime_available {
                 Self::MODEL_NAME.to_string()
             } else {
                 format!("{}-hash-fallback", Self::MODEL_NAME)
             },
+            model_path,
+            dimensions: Self::DEFAULT_DIMS,
             runtime_available,
             max_tokens: Self::DEFAULT_MAX_TOKENS,
             fallback: MockEmbeddingProvider::new(Self::DEFAULT_DIMS),
+            #[cfg(feature = "onnx-embeddings")]
+            session,
         }
     }
 
@@ -137,31 +149,48 @@ impl OnnxEmbeddingProvider {
         max_tokens: usize,
     ) -> Self {
         let model_path = model_path.into();
-        let runtime_available = Self::try_load_runtime(&model_path);
+        #[cfg(feature = "onnx-embeddings")]
+        let session = Self::try_load_session(&model_path);
+        #[cfg(feature = "onnx-embeddings")]
+        let runtime_available = session.is_some();
+        #[cfg(not(feature = "onnx-embeddings"))]
+        let runtime_available = false;
 
         Self {
-            model_path,
-            dimensions,
             model_name: if runtime_available {
                 Self::MODEL_NAME.to_string()
             } else {
                 format!("{}-hash-fallback", Self::MODEL_NAME)
             },
+            model_path,
+            dimensions,
             runtime_available,
             max_tokens,
             fallback: MockEmbeddingProvider::new(dimensions),
+            #[cfg(feature = "onnx-embeddings")]
+            session,
         }
     }
 
-    /// Attempt to initialise the ONNX runtime session.
-    ///
-    /// Currently always returns `false` because the `ort` crate is not yet
-    /// wired in.  When `onnx-embeddings` becomes available, this will load
-    /// the session from `model_path`.
-    fn try_load_runtime(_model_path: &PathBuf) -> bool {
-        // Future: when `ort` crate is available:
-        //   ort::Session::builder()?.with_model_from_file(model_path).ok().is_some()
-        false
+    /// Attempt to load an ONNX runtime session from the model path.
+    #[cfg(feature = "onnx-embeddings")]
+    fn try_load_session(model_path: &PathBuf) -> Option<Arc<ort::Session>> {
+        if !model_path.exists() {
+            tracing::debug!("ONNX model not found at {}, using hash fallback", model_path.display());
+            return None;
+        }
+        match ort::Session::builder()
+            .and_then(|builder| builder.commit_from_file(model_path))
+        {
+            Ok(session) => {
+                tracing::info!("ONNX session loaded from {}", model_path.display());
+                Some(Arc::new(session))
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load ONNX session: {e}, using hash fallback");
+                None
+            }
+        }
     }
 
     /// Whether the real ONNX runtime is active (vs. fallback).
@@ -188,27 +217,121 @@ impl OnnxEmbeddingProvider {
         }
         tokens_to_embedding(&tokens, self.dimensions)
     }
+
+    /// Run real ONNX inference on the input text.
+    ///
+    /// Performs simple whitespace tokenization into token IDs (vocabulary-free
+    /// hashing to simulate subword tokenization), builds the input tensors
+    /// (input_ids, attention_mask, token_type_ids), and runs the model.
+    /// Mean-pools the last hidden state to produce a fixed-size embedding.
+    #[cfg(feature = "onnx-embeddings")]
+    fn onnx_embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
+        use ndarray::Array2;
+
+        let session = self.session.as_ref().ok_or_else(|| {
+            EmbeddingError::BackendError("ONNX session not loaded".to_string())
+        })?;
+
+        // Simple tokenization: hash each whitespace token to a vocab ID.
+        // Real tokenization would use a sentencepiece/BPE tokenizer, but
+        // this approach produces valid input tensors for the model.
+        let tokens = simple_tokenize(text, self.max_tokens);
+        let seq_len = tokens.len().max(1) + 2; // +2 for [CLS] and [SEP]
+
+        // Build input tensors as i64 arrays.
+        let mut input_ids = vec![101i64]; // [CLS] = 101
+        for token in &tokens {
+            // Hash token to a vocab range [1000, 30000)
+            let mut hasher = Sha256::new();
+            hasher.update(token.as_bytes());
+            let hash = hasher.finalize();
+            let id = 1000 + (u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]]) % 29000) as i64;
+            input_ids.push(id);
+        }
+        input_ids.push(102); // [SEP] = 102
+
+        let attention_mask = vec![1i64; seq_len];
+        let token_type_ids = vec![0i64; seq_len];
+
+        let input_ids_arr = Array2::from_shape_vec((1, seq_len), input_ids)
+            .map_err(|e| EmbeddingError::BackendError(format!("shape error: {e}")))?;
+        let attention_mask_arr = Array2::from_shape_vec((1, seq_len), attention_mask)
+            .map_err(|e| EmbeddingError::BackendError(format!("shape error: {e}")))?;
+        let token_type_ids_arr = Array2::from_shape_vec((1, seq_len), token_type_ids)
+            .map_err(|e| EmbeddingError::BackendError(format!("shape error: {e}")))?;
+
+        let inputs = ort::inputs![
+            "input_ids" => input_ids_arr,
+            "attention_mask" => attention_mask_arr,
+            "token_type_ids" => token_type_ids_arr,
+        ].map_err(|e| EmbeddingError::BackendError(format!("input error: {e}")))?;
+
+        let outputs = session.run(inputs)
+            .map_err(|e| EmbeddingError::BackendError(format!("inference error: {e}")))?;
+
+        // Extract the last_hidden_state output and mean-pool across the sequence.
+        // Output shape: (1, seq_len, hidden_dim)
+        let output_tensor = outputs.get("last_hidden_state")
+            .or_else(|| outputs.iter().next().map(|(_, v)| v))
+            .ok_or_else(|| EmbeddingError::BackendError("no output tensor".to_string()))?;
+
+        let tensor = output_tensor
+            .try_extract_tensor::<f32>()
+            .map_err(|e| EmbeddingError::BackendError(format!("extract error: {e}")))?;
+
+        let shape = tensor.shape();
+        if shape.len() < 2 {
+            return Err(EmbeddingError::BackendError(
+                format!("unexpected output shape: {shape:?}"),
+            ));
+        }
+        let hidden_dim = *shape.last().unwrap();
+        let seq = shape[1];
+
+        // Mean pooling across sequence dimension.
+        let mut embedding = vec![0.0f32; hidden_dim];
+        let data = tensor.as_slice().ok_or_else(|| {
+            EmbeddingError::BackendError("tensor not contiguous".to_string())
+        })?;
+
+        for s in 0..seq {
+            for d in 0..hidden_dim {
+                embedding[d] += data[s * hidden_dim + d];
+            }
+        }
+        let seq_f = seq as f32;
+        for val in &mut embedding {
+            *val /= seq_f;
+        }
+
+        // L2 normalize.
+        l2_normalize(&mut embedding);
+
+        // Truncate or pad to expected dimensions.
+        embedding.truncate(self.dimensions);
+        while embedding.len() < self.dimensions {
+            embedding.push(0.0);
+        }
+
+        Ok(embedding)
+    }
 }
 
 #[async_trait]
 impl EmbeddingProvider for OnnxEmbeddingProvider {
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
+        #[cfg(feature = "onnx-embeddings")]
         if self.runtime_available {
-            // Future: run ONNX inference here.
-            //   let input = self.tokenize_for_onnx(text);
-            //   let outputs = self.session.run(inputs)?;
-            //   return Ok(outputs[0].try_extract_tensor()?.to_vec());
-            Err(EmbeddingError::BackendError(
-                "ONNX runtime path reached but no session available".to_string(),
-            ))
-        } else {
-            Ok(self.hash_embed(text))
+            return self.onnx_embed(text);
         }
+        Ok(self.hash_embed(text))
     }
 
     async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
-        // Batch: process each text (future: run as single ONNX batch).
-        let results: Vec<Vec<f32>> = texts.iter().map(|t| self.hash_embed(t)).collect();
+        let mut results = Vec::with_capacity(texts.len());
+        for text in texts {
+            results.push(self.embed(text).await?);
+        }
         Ok(results)
     }
 

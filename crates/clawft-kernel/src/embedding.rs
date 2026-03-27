@@ -313,15 +313,61 @@ impl EmbeddingProvider for LlmEmbeddingProvider {
 /// Select the best available embedding provider based on configuration.
 ///
 /// Priority order:
-/// 1. LLM API if llm_embedding config is present
-/// 2. Mock (fallback, for testing or when no backend available)
+/// 1. ONNX local model if `onnx_model_path` points to a valid `.onnx` file
+/// 2. LLM API if llm_embedding config is present
+/// 3. Mock (fallback, for testing or when no backend available)
 pub fn select_embedding_provider(
     llm_config: Option<LlmEmbeddingConfig>,
 ) -> Box<dyn EmbeddingProvider> {
+    // Try ONNX first: check standard model locations.
+    let onnx_paths = onnx_model_search_paths();
+    for path in &onnx_paths {
+        if path.exists() {
+            let provider = crate::embedding_onnx::OnnxEmbeddingProvider::new(path);
+            if provider.is_runtime_available() {
+                tracing::info!("Using ONNX embedding provider from {}", path.display());
+                return Box::new(provider);
+            }
+        }
+    }
+
     if let Some(config) = llm_config {
         return Box::new(LlmEmbeddingProvider::new(config));
     }
     Box::new(MockEmbeddingProvider::new(64))
+}
+
+/// Standard search paths for the ONNX embedding model.
+///
+/// Looks in (in order):
+/// 1. `.weftos/models/all-MiniLM-L6-v2.onnx` (project-local)
+/// 2. `$HOME/.weftos/models/all-MiniLM-L6-v2.onnx` (user-global)
+/// 3. `$WEFTOS_MODEL_PATH` environment variable
+fn onnx_model_search_paths() -> Vec<std::path::PathBuf> {
+    let model_name = "all-MiniLM-L6-v2.onnx";
+    let mut paths = Vec::new();
+
+    // Project-local.
+    paths.push(std::path::PathBuf::from(format!(".weftos/models/{model_name}")));
+
+    // User-global.
+    if let Some(home) = dirs_home() {
+        paths.push(home.join(format!(".weftos/models/{model_name}")));
+    }
+
+    // Env override.
+    if let Ok(env_path) = std::env::var("WEFTOS_MODEL_PATH") {
+        paths.push(std::path::PathBuf::from(env_path));
+    }
+
+    paths
+}
+
+/// Get the user's home directory.
+fn dirs_home() -> Option<std::path::PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(std::path::PathBuf::from)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────

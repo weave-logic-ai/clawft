@@ -51,6 +51,8 @@ pub mod cognitive_tick;
 #[cfg(feature = "ecc")]
 pub mod crossref;
 #[cfg(feature = "ecc")]
+pub mod democritus;
+#[cfg(feature = "ecc")]
 pub mod embedding;
 #[cfg(feature = "ecc")]
 pub mod embedding_onnx;
@@ -58,6 +60,8 @@ pub mod embedding_onnx;
 pub mod hnsw_service;
 #[cfg(feature = "ecc")]
 pub mod impulse;
+#[cfg(feature = "ecc")]
+pub mod persistence;
 #[cfg(feature = "ecc")]
 pub mod weaver;
 
@@ -156,6 +160,8 @@ pub mod mesh_kad;
 pub mod mesh_artifact;
 #[cfg(feature = "mesh")]
 pub mod mesh_log;
+#[cfg(feature = "mesh")]
+pub mod mesh_runtime;
 
 // Re-export key types at the crate level for convenience.
 pub use a2a::A2ARouter;
@@ -180,11 +186,16 @@ pub use chain::{
 #[cfg(feature = "ecc")]
 pub use calibration::{EccCalibration, EccCalibrationConfig};
 #[cfg(feature = "ecc")]
-pub use causal::{CausalEdgeType, CausalGraph};
+pub use causal::{
+    CausalEdge, CausalEdgeType, CausalGraph, CausalNode, ChangeEvent, ChangePrediction,
+    CouplingPair, SpectralResult,
+};
 #[cfg(feature = "ecc")]
 pub use cognitive_tick::{CognitiveTick, CognitiveTickConfig, CognitiveTickStats};
 #[cfg(feature = "ecc")]
 pub use crossref::{CrossRef, CrossRefStore, CrossRefType, StructureTag, UniversalNodeId};
+#[cfg(feature = "ecc")]
+pub use democritus::{DemocritusConfig, DemocritusLoop, DemocritusTickResult};
 #[cfg(feature = "exochain")]
 pub use gate::{CapabilityGate, GateBackend, GateDecision, GovernanceGate};
 #[cfg(feature = "exochain")]
@@ -218,6 +229,8 @@ pub use hnsw_service::{HnswSearchResult, HnswService, HnswServiceConfig};
 pub use impulse::{ImpulseQueue, ImpulseType};
 #[cfg(feature = "ecc")]
 pub use artifact_store::{ArtifactBackend, ArtifactStore, ArtifactType, StoredArtifact};
+#[cfg(feature = "ecc")]
+pub use persistence::PersistenceConfig;
 #[cfg(feature = "ecc")]
 pub use embedding::{
     select_embedding_provider, EmbeddingError, EmbeddingProvider, LlmEmbeddingConfig,
@@ -298,11 +311,15 @@ pub use mesh_kad::{
 pub use mesh_artifact::{ArtifactAnnouncement, ArtifactExchange, ArtifactRequest, ArtifactResponse};
 #[cfg(feature = "mesh")]
 pub use mesh_log::{LogAggregator, LogQuery as MeshLogQuery, RemoteLogEntry};
+#[cfg(feature = "mesh")]
+pub use mesh_runtime::{DiscoveryState, MeshRuntime, PeerConnection};
+#[cfg(feature = "os-patterns")]
 pub use auth_service::{
-    AuditEntry, AuthService, CredentialGrant, CredentialRequest, CredentialType, IssuedToken,
-    StoredCredential as AuthStoredCredential,
+    AuditEntry, AuthService, AuthToken, CredentialGrant, CredentialRequest, CredentialType,
+    HashedCredential, IssuedToken, StoredCredential as AuthStoredCredential,
 };
-pub use config_service::{ConfigChange, ConfigService, SecretRef};
+#[cfg(feature = "os-patterns")]
+pub use config_service::{ConfigChange, ConfigEntry, ConfigService, ConfigValue, SecretRef};
 pub use tree_view::{AgentTreeView, TreeScope};
 pub use process::{Pid, ProcessEntry, ProcessState, ProcessTable, ResourceUsage};
 pub use service::{

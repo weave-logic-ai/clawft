@@ -1,16 +1,16 @@
 {
-  "generated_at": "2026-03-26T20:28:39.432495+00:00",
+  "generated_at": "2026-03-27T13:55:51.233439+00:00",
   "summary": {
-    "total_modules": 178,
+    "total_modules": 183,
     "total_crates": 22,
-    "total_commits": 102,
+    "total_commits": 128,
     "total_decisions": 59,
     "total_commitments": 22,
     "total_phases": 11,
-    "orphan_module_count": 116,
-    "untested_module_count": 178,
-    "pending_decision_count": 23,
-    "pending_commitment_count": 14,
+    "orphan_module_count": 112,
+    "untested_module_count": 183,
+    "pending_decision_count": 11,
+    "pending_commitment_count": 9,
     "feature_gate_island_count": 6
   },
   "top_gaps": [
@@ -41,147 +41,101 @@
     {
       "rank": 4,
       "severity": "high",
-      "area": "Blocked decision: decision:k2:D11",
-      "detail": "Enable post-quantum signing immediately",
-      "impact": "Blocks 1 downstream items",
-      "recommendation": "Unblock decision:k2:D11 \u2014 resolve blocking dependency"
-    },
-    {
-      "rank": 5,
-      "severity": "high",
-      "area": "Blocked commitment: commitment:k2:C6",
-      "detail": "Enable post-quantum dual signing (DualKey)",
-      "impact": "Phase K2.1 cannot complete",
-      "recommendation": "Resolve blocker for commitment"
-    },
-    {
-      "rank": 6,
-      "severity": "high",
       "area": "High fan-out, low test: module:clawft-kernel/boot",
-      "detail": "19 outgoing uses, 0 incoming, only 2 tests",
+      "detail": "23 outgoing uses, 0 incoming, only 4 tests",
       "impact": "Single point of failure with insufficient test coverage",
       "recommendation": "Add comprehensive tests to module:clawft-kernel/boot"
     },
     {
-      "rank": 7,
+      "rank": 5,
       "severity": "medium",
-      "area": "Pending decision with dependents: decision:k2:D8",
-      "detail": "ExoChain-stored immutable API contracts",
-      "impact": "Blocks 2 downstream items: commitment:k2:C3, module:clawft-kernel/chain",
-      "recommendation": "Convene panel to resolve decision"
+      "area": "Untested module: module:clawft-kernel/weaver",
+      "detail": "4957 lines, 0 tests, category K3c",
+      "impact": "No regression safety net for significant code",
+      "recommendation": "Add tests to crates/clawft-kernel/src/weaver.rs"
     },
     {
-      "rank": 8,
-      "severity": "medium",
-      "area": "Pending decision with dependents: decision:k2:D10",
-      "detail": "WASM-compiled shell with container sandbox",
-      "impact": "Blocks 2 downstream items: commitment:k2:C5, module:clawft-kernel/wasm_runner",
-      "recommendation": "Convene panel to resolve decision"
-    },
-    {
-      "rank": 9,
-      "severity": "medium",
-      "area": "Pending decision with dependents: decision:k2:D20",
-      "detail": "Configurable N-dimensional effect algebra",
-      "impact": "Blocks 2 downstream items: commitment:k2:C9, module:clawft-kernel/governance",
-      "recommendation": "Convene panel to resolve decision"
-    },
-    {
-      "rank": 10,
-      "severity": "medium",
-      "area": "Pending decision with dependents: decision:k3:D1",
-      "detail": "Hierarchical ToolRegistry with kernel base + per-agent overlays",
-      "impact": "Blocks 2 downstream items: commitment:k3:AC-1, module:clawft-kernel/wasm_runner",
-      "recommendation": "Convene panel to resolve decision"
-    },
-    {
-      "rank": 11,
-      "severity": "medium",
-      "area": "Pending decision with dependents: decision:k3:D2",
-      "detail": "Context-based gate actions: generic tool.exec with rich context",
-      "impact": "Blocks 2 downstream items: commitment:k3:AC-2, module:clawft-kernel/agent_loop",
-      "recommendation": "Convene panel to resolve decision"
-    },
-    {
-      "rank": 12,
-      "severity": "medium",
-      "area": "Pending decision with dependents: decision:k3:D4",
-      "detail": "Wasmtime integration in K4 alongside container runtime",
-      "impact": "Blocks 2 downstream items: commitment:k3:AC-5, module:clawft-kernel/wasm_runner",
-      "recommendation": "Convene panel to resolve decision"
-    },
-    {
-      "rank": 13,
-      "severity": "medium",
-      "area": "Pending decision with dependents: decision:k3:D12",
-      "detail": "Multi-layer sandboxing: governance + environment + sudo override",
-      "impact": "Blocks 2 downstream items: commitment:k3:AC-3, module:clawft-kernel/wasm_runner",
-      "recommendation": "Convene panel to resolve decision"
-    },
-    {
-      "rank": 14,
-      "severity": "medium",
-      "area": "Pending decision with dependents: decision:k2:D12",
-      "detail": "Chain-agnostic blockchain anchoring trait",
-      "impact": "Blocks 1 downstream items: commitment:k2:C7",
-      "recommendation": "Convene panel to resolve decision"
-    },
-    {
-      "rank": 15,
-      "severity": "medium",
-      "area": "Pending decision with dependents: decision:k3:D3",
-      "detail": "Implement all 25 remaining tools in K4",
-      "impact": "Blocks 1 downstream items: commitment:k3:AC-4",
-      "recommendation": "Convene panel to resolve decision"
-    },
-    {
-      "rank": 16,
-      "severity": "medium",
-      "area": "Pending decision with dependents: decision:k3:D7",
-      "detail": "Tree metadata for version history",
-      "impact": "Blocks 1 downstream items: commitment:k3:AC-6",
-      "recommendation": "Convene panel to resolve decision"
-    },
-    {
-      "rank": 17,
-      "severity": "medium",
-      "area": "Pending decision with dependents: decision:k3:D9",
-      "detail": "Central authority + CA chain for tool signing",
-      "impact": "Blocks 1 downstream items: commitment:k3:AC-7",
-      "recommendation": "Convene panel to resolve decision"
-    },
-    {
-      "rank": 18,
-      "severity": "medium",
-      "area": "Pending decision with dependents: decision:k3:D10",
-      "detail": "Separate ServiceApi and BuiltinTool concepts",
-      "impact": "Blocks 1 downstream items: module:clawft-kernel/service",
-      "recommendation": "Convene panel to resolve decision"
-    },
-    {
-      "rank": 19,
+      "rank": 6,
       "severity": "medium",
       "area": "Untested module: module:clawft-kernel/wasm_runner",
-      "detail": "4423 lines, 0 tests, category K3",
+      "detail": "4547 lines, 0 tests, category K3",
       "impact": "No regression safety net for significant code",
       "recommendation": "Add tests to crates/clawft-kernel/src/wasm_runner.rs"
     },
     {
-      "rank": 20,
+      "rank": 7,
       "severity": "medium",
       "area": "Untested module: module:clawft-kernel/chain",
-      "detail": "2814 lines, 0 tests, category K5",
+      "detail": "2985 lines, 0 tests, category K5",
       "impact": "No regression safety net for significant code",
       "recommendation": "Add tests to crates/clawft-kernel/src/chain.rs"
+    },
+    {
+      "rank": 8,
+      "severity": "medium",
+      "area": "Untested module: module:clawft-kernel/boot",
+      "detail": "2820 lines, 0 tests, category K1",
+      "impact": "No regression safety net for significant code",
+      "recommendation": "Add tests to crates/clawft-kernel/src/boot.rs"
+    },
+    {
+      "rank": 9,
+      "severity": "medium",
+      "area": "Untested module: module:clawft-kernel/supervisor",
+      "detail": "2424 lines, 0 tests, category K1",
+      "impact": "No regression safety net for significant code",
+      "recommendation": "Add tests to crates/clawft-kernel/src/supervisor.rs"
+    },
+    {
+      "rank": 10,
+      "severity": "low",
+      "area": "Isolated feature gate: rvf",
+      "detail": "4 modules, 2265 lines, no cross-gate connections",
+      "impact": "Integration risk \u2014 may not compose well with other features",
+      "recommendation": "Verify integration points with other feature gates"
+    },
+    {
+      "rank": 11,
+      "severity": "low",
+      "area": "Isolated feature gate: vector-memory",
+      "detail": "4 modules, 1959 lines, no cross-gate connections",
+      "impact": "Integration risk \u2014 may not compose well with other features",
+      "recommendation": "Verify integration points with other feature gates"
+    },
+    {
+      "rank": 12,
+      "severity": "low",
+      "area": "Isolated feature gate: voice",
+      "detail": "4 modules, 635 lines, no cross-gate connections",
+      "impact": "Integration risk \u2014 may not compose well with other features",
+      "recommendation": "Verify integration points with other feature gates"
     }
   ],
   "orphan_modules": [
     {
+      "id": "module:clawft-kernel/weaver",
+      "crate": "clawft-kernel",
+      "file": "crates/clawft-kernel/src/weaver.rs",
+      "lines": 4957,
+      "test_count": 122,
+      "feature_gate": "ecc",
+      "category": "K3c"
+    },
+    {
       "id": "module:clawft-kernel/boot",
       "crate": "clawft-kernel",
       "file": "crates/clawft-kernel/src/boot.rs",
-      "lines": 1953,
-      "test_count": 2,
+      "lines": 2820,
+      "test_count": 4,
+      "feature_gate": null,
+      "category": "K1"
+    },
+    {
+      "id": "module:clawft-kernel/a2a",
+      "crate": "clawft-kernel",
+      "file": "crates/clawft-kernel/src/a2a.rs",
+      "lines": 2055,
+      "test_count": 7,
       "feature_gate": null,
       "category": "K1"
     },
@@ -200,6 +154,15 @@
       "file": "crates/clawft-kernel/src/app.rs",
       "lines": 1847,
       "test_count": 42,
+      "feature_gate": null,
+      "category": "K1"
+    },
+    {
+      "id": "module:clawft-kernel/agent_loop",
+      "crate": "clawft-kernel",
+      "file": "crates/clawft-kernel/src/agent_loop.rs",
+      "lines": 1831,
+      "test_count": 0,
       "feature_gate": null,
       "category": "K1"
     },
@@ -231,31 +194,13 @@
       "category": "K1"
     },
     {
-      "id": "module:clawft-kernel/a2a",
+      "id": "module:clawft-kernel/tools_extended",
       "crate": "clawft-kernel",
-      "file": "crates/clawft-kernel/src/a2a.rs",
-      "lines": 1452,
-      "test_count": 1,
+      "file": "crates/clawft-kernel/src/tools_extended.rs",
+      "lines": 1429,
+      "test_count": 16,
       "feature_gate": null,
       "category": "K1"
-    },
-    {
-      "id": "module:clawft-kernel/agent_loop",
-      "crate": "clawft-kernel",
-      "file": "crates/clawft-kernel/src/agent_loop.rs",
-      "lines": 1412,
-      "test_count": 0,
-      "feature_gate": null,
-      "category": "K1"
-    },
-    {
-      "id": "module:clawft-kernel/weaver",
-      "crate": "clawft-kernel",
-      "file": "crates/clawft-kernel/src/weaver.rs",
-      "lines": 1369,
-      "test_count": 27,
-      "feature_gate": "ecc",
-      "category": "K3c"
     },
     {
       "id": "module:clawft-services/rvf_tools",
@@ -265,6 +210,15 @@
       "test_count": 9,
       "feature_gate": "rvf",
       "category": "K1"
+    },
+    {
+      "id": "module:clawft-kernel/embedding_onnx",
+      "crate": "clawft-kernel",
+      "file": "crates/clawft-kernel/src/embedding_onnx.rs",
+      "lines": 1205,
+      "test_count": 27,
+      "feature_gate": "ecc",
+      "category": "K3c"
     },
     {
       "id": "module:clawft-types/canvas",
@@ -303,6 +257,15 @@
       "category": "K1"
     },
     {
+      "id": "module:clawft-kernel/auth_service",
+      "crate": "clawft-kernel",
+      "file": "crates/clawft-kernel/src/auth_service.rs",
+      "lines": 823,
+      "test_count": 21,
+      "feature_gate": null,
+      "category": "K1"
+    },
+    {
       "id": "module:clawft-kernel/mesh_process",
       "crate": "clawft-kernel",
       "file": "crates/clawft-kernel/src/mesh_process.rs",
@@ -310,6 +273,15 @@
       "test_count": 20,
       "feature_gate": "mesh",
       "category": "K6"
+    },
+    {
+      "id": "module:clawft-kernel/democritus",
+      "crate": "clawft-kernel",
+      "file": "crates/clawft-kernel/src/democritus.rs",
+      "lines": 774,
+      "test_count": 1,
+      "feature_gate": "ecc",
+      "category": "K3c"
     },
     {
       "id": "module:clawft-plugin/traits",
@@ -328,15 +300,6 @@
       "test_count": 9,
       "feature_gate": null,
       "category": "K1"
-    },
-    {
-      "id": "module:clawft-kernel/mesh_kad",
-      "crate": "clawft-kernel",
-      "file": "crates/clawft-kernel/src/mesh_kad.rs",
-      "lines": 714,
-      "test_count": 23,
-      "feature_gate": "mesh",
-      "category": "K6"
     },
     {
       "id": "module:clawft-llm/browser_transport",
@@ -391,15 +354,6 @@
       "test_count": 11,
       "feature_gate": null,
       "category": "K1"
-    },
-    {
-      "id": "module:clawft-kernel/metrics",
-      "crate": "clawft-kernel",
-      "file": "crates/clawft-kernel/src/metrics.rs",
-      "lines": 630,
-      "test_count": 19,
-      "feature_gate": "os-patterns",
-      "category": "K8"
     },
     {
       "id": "module:clawft-core/json_repair",
@@ -465,15 +419,6 @@
       "category": "K6"
     },
     {
-      "id": "module:clawft-kernel/auth_service",
-      "crate": "clawft-kernel",
-      "file": "crates/clawft-kernel/src/auth_service.rs",
-      "lines": 544,
-      "test_count": 11,
-      "feature_gate": null,
-      "category": "K1"
-    },
-    {
       "id": "module:clawft-tools/memory_tool",
       "crate": "clawft-tools",
       "file": "crates/clawft-tools/src/memory_tool.rs",
@@ -492,38 +437,11 @@
       "category": "K1"
     },
     {
-      "id": "module:clawft-kernel/mesh_heartbeat",
-      "crate": "clawft-kernel",
-      "file": "crates/clawft-kernel/src/mesh_heartbeat.rs",
-      "lines": 497,
-      "test_count": 16,
-      "feature_gate": "mesh",
-      "category": "K6"
-    },
-    {
-      "id": "module:clawft-kernel/log_service",
-      "crate": "clawft-kernel",
-      "file": "crates/clawft-kernel/src/log_service.rs",
-      "lines": 493,
-      "test_count": 16,
-      "feature_gate": "os-patterns",
-      "category": "K8"
-    },
-    {
       "id": "module:clawft-kernel/named_pipe",
       "crate": "clawft-kernel",
       "file": "crates/clawft-kernel/src/named_pipe.rs",
       "lines": 473,
       "test_count": 12,
-      "feature_gate": "os-patterns",
-      "category": "K8"
-    },
-    {
-      "id": "module:clawft-kernel/timer",
-      "crate": "clawft-kernel",
-      "file": "crates/clawft-kernel/src/timer.rs",
-      "lines": 472,
-      "test_count": 16,
       "feature_gate": "os-patterns",
       "category": "K8"
     },
@@ -573,15 +491,6 @@
       "category": "K1"
     },
     {
-      "id": "module:clawft-kernel/config_service",
-      "crate": "clawft-kernel",
-      "file": "crates/clawft-kernel/src/config_service.rs",
-      "lines": 447,
-      "test_count": 11,
-      "feature_gate": null,
-      "category": "K1"
-    },
-    {
       "id": "module:clawft-types/cron",
       "crate": "clawft-types",
       "file": "crates/clawft-types/src/cron.rs",
@@ -616,15 +525,6 @@
       "test_count": 14,
       "feature_gate": "os-patterns",
       "category": "K8"
-    },
-    {
-      "id": "module:clawft-kernel/mesh_chain",
-      "crate": "clawft-kernel",
-      "file": "crates/clawft-kernel/src/mesh_chain.rs",
-      "lines": 433,
-      "test_count": 16,
-      "feature_gate": "mesh",
-      "category": "K6"
     },
     {
       "id": "module:clawft-core/memory_bootstrap",
@@ -697,15 +597,6 @@
       "test_count": 12,
       "feature_gate": "mesh",
       "category": "K6"
-    },
-    {
-      "id": "module:clawft-kernel/monitor",
-      "crate": "clawft-kernel",
-      "file": "crates/clawft-kernel/src/monitor.rs",
-      "lines": 369,
-      "test_count": 15,
-      "feature_gate": "os-patterns",
-      "category": "K8"
     },
     {
       "id": "module:clawft-platform/config_loader",
@@ -1023,6 +914,15 @@
       "category": "K1"
     },
     {
+      "id": "module:clawft-kernel/persistence",
+      "crate": "clawft-kernel",
+      "file": "crates/clawft-kernel/src/persistence.rs",
+      "lines": 173,
+      "test_count": 3,
+      "feature_gate": "ecc",
+      "category": "K3c"
+    },
+    {
       "id": "module:clawft-platform/process",
       "crate": "clawft-platform",
       "file": "crates/clawft-platform/src/process.rs",
@@ -1077,6 +977,15 @@
       "category": "K1"
     },
     {
+      "id": "module:weftos/init",
+      "crate": "weftos",
+      "file": "crates/weftos/src/init.rs",
+      "lines": 145,
+      "test_count": 0,
+      "feature_gate": null,
+      "category": "K1"
+    },
+    {
       "id": "module:clawft-cli/completions",
       "crate": "clawft-cli",
       "file": "crates/clawft-cli/src/completions.rs",
@@ -1109,15 +1018,6 @@
       "file": "crates/clawft-plugin-cargo/src/operations.rs",
       "lines": 140,
       "test_count": 4,
-      "feature_gate": null,
-      "category": "K1"
-    },
-    {
-      "id": "module:weftos/init",
-      "crate": "weftos",
-      "file": "crates/weftos/src/init.rs",
-      "lines": 140,
-      "test_count": 0,
       "feature_gate": null,
       "category": "K1"
     },
@@ -1223,10 +1123,19 @@
   ],
   "untested_modules": [
     {
+      "id": "module:clawft-kernel/weaver",
+      "crate": "clawft-kernel",
+      "file": "crates/clawft-kernel/src/weaver.rs",
+      "lines": 4957,
+      "test_count": 122,
+      "feature_gate": "ecc",
+      "category": "K3c"
+    },
+    {
       "id": "module:clawft-kernel/wasm_runner",
       "crate": "clawft-kernel",
       "file": "crates/clawft-kernel/src/wasm_runner.rs",
-      "lines": 4423,
+      "lines": 4547,
       "test_count": 93,
       "feature_gate": null,
       "category": "K3"
@@ -1235,8 +1144,8 @@
       "id": "module:clawft-kernel/chain",
       "crate": "clawft-kernel",
       "file": "crates/clawft-kernel/src/chain.rs",
-      "lines": 2814,
-      "test_count": 49,
+      "lines": 2985,
+      "test_count": 60,
       "feature_gate": "exochain",
       "category": "K5"
     },
@@ -1244,8 +1153,26 @@
       "id": "module:clawft-kernel/boot",
       "crate": "clawft-kernel",
       "file": "crates/clawft-kernel/src/boot.rs",
-      "lines": 1953,
-      "test_count": 2,
+      "lines": 2820,
+      "test_count": 4,
+      "feature_gate": null,
+      "category": "K1"
+    },
+    {
+      "id": "module:clawft-kernel/supervisor",
+      "crate": "clawft-kernel",
+      "file": "crates/clawft-kernel/src/supervisor.rs",
+      "lines": 2424,
+      "test_count": 66,
+      "feature_gate": null,
+      "category": "K1"
+    },
+    {
+      "id": "module:clawft-kernel/a2a",
+      "crate": "clawft-kernel",
+      "file": "crates/clawft-kernel/src/a2a.rs",
+      "lines": 2055,
+      "test_count": 7,
       "feature_gate": null,
       "category": "K1"
     },
@@ -1259,6 +1186,24 @@
       "category": "K5"
     },
     {
+      "id": "module:clawft-kernel/governance",
+      "crate": "clawft-kernel",
+      "file": "crates/clawft-kernel/src/governance.rs",
+      "lines": 1875,
+      "test_count": 67,
+      "feature_gate": null,
+      "category": "K1"
+    },
+    {
+      "id": "module:clawft-kernel/causal",
+      "crate": "clawft-kernel",
+      "file": "crates/clawft-kernel/src/causal.rs",
+      "lines": 1858,
+      "test_count": 46,
+      "feature_gate": "ecc",
+      "category": "K3c"
+    },
+    {
       "id": "module:clawft-kernel/app",
       "crate": "clawft-kernel",
       "file": "crates/clawft-kernel/src/app.rs",
@@ -1268,11 +1213,11 @@
       "category": "K1"
     },
     {
-      "id": "module:clawft-kernel/supervisor",
+      "id": "module:clawft-kernel/agent_loop",
       "crate": "clawft-kernel",
-      "file": "crates/clawft-kernel/src/supervisor.rs",
-      "lines": 1833,
-      "test_count": 40,
+      "file": "crates/clawft-kernel/src/agent_loop.rs",
+      "lines": 1831,
+      "test_count": 0,
       "feature_gate": null,
       "category": "K1"
     },
@@ -1283,15 +1228,6 @@
       "lines": 1777,
       "test_count": 35,
       "feature_gate": "wasm-plugins",
-      "category": "K1"
-    },
-    {
-      "id": "module:clawft-kernel/governance",
-      "crate": "clawft-kernel",
-      "file": "crates/clawft-kernel/src/governance.rs",
-      "lines": 1682,
-      "test_count": 56,
-      "feature_gate": null,
       "category": "K1"
     },
     {
@@ -1313,31 +1249,22 @@
       "category": "K1"
     },
     {
-      "id": "module:clawft-kernel/a2a",
+      "id": "module:clawft-kernel/tools_extended",
       "crate": "clawft-kernel",
-      "file": "crates/clawft-kernel/src/a2a.rs",
-      "lines": 1452,
-      "test_count": 1,
+      "file": "crates/clawft-kernel/src/tools_extended.rs",
+      "lines": 1429,
+      "test_count": 16,
       "feature_gate": null,
       "category": "K1"
     },
     {
-      "id": "module:clawft-kernel/agent_loop",
+      "id": "module:clawft-kernel/container",
       "crate": "clawft-kernel",
-      "file": "crates/clawft-kernel/src/agent_loop.rs",
-      "lines": 1412,
-      "test_count": 0,
+      "file": "crates/clawft-kernel/src/container.rs",
+      "lines": 1346,
+      "test_count": 38,
       "feature_gate": null,
-      "category": "K1"
-    },
-    {
-      "id": "module:clawft-kernel/weaver",
-      "crate": "clawft-kernel",
-      "file": "crates/clawft-kernel/src/weaver.rs",
-      "lines": 1369,
-      "test_count": 27,
-      "feature_gate": "ecc",
-      "category": "K3c"
+      "category": "K4"
     },
     {
       "id": "module:clawft-services/rvf_tools",
@@ -1358,29 +1285,29 @@
       "category": "K1"
     },
     {
+      "id": "module:clawft-kernel/service",
+      "crate": "clawft-kernel",
+      "file": "crates/clawft-kernel/src/service.rs",
+      "lines": 1254,
+      "test_count": 35,
+      "feature_gate": null,
+      "category": "K1"
+    },
+    {
+      "id": "module:clawft-kernel/embedding_onnx",
+      "crate": "clawft-kernel",
+      "file": "crates/clawft-kernel/src/embedding_onnx.rs",
+      "lines": 1205,
+      "test_count": 27,
+      "feature_gate": "ecc",
+      "category": "K3c"
+    },
+    {
       "id": "module:clawft-kernel/capability",
       "crate": "clawft-kernel",
       "file": "crates/clawft-kernel/src/capability.rs",
       "lines": 1201,
       "test_count": 50,
-      "feature_gate": null,
-      "category": "K1"
-    },
-    {
-      "id": "module:clawft-kernel/container",
-      "crate": "clawft-kernel",
-      "file": "crates/clawft-kernel/src/container.rs",
-      "lines": 1129,
-      "test_count": 24,
-      "feature_gate": null,
-      "category": "K4"
-    },
-    {
-      "id": "module:clawft-kernel/service",
-      "crate": "clawft-kernel",
-      "file": "crates/clawft-kernel/src/service.rs",
-      "lines": 1059,
-      "test_count": 22,
       "feature_gate": null,
       "category": "K1"
     },
@@ -1439,6 +1366,15 @@
       "category": "K1"
     },
     {
+      "id": "module:clawft-kernel/auth_service",
+      "crate": "clawft-kernel",
+      "file": "crates/clawft-kernel/src/auth_service.rs",
+      "lines": 823,
+      "test_count": 21,
+      "feature_gate": null,
+      "category": "K1"
+    },
+    {
       "id": "module:clawft-kernel/gate",
       "crate": "clawft-kernel",
       "file": "crates/clawft-kernel/src/gate.rs",
@@ -1457,6 +1393,15 @@
       "category": "K1"
     },
     {
+      "id": "module:clawft-kernel/mesh_runtime",
+      "crate": "clawft-kernel",
+      "file": "crates/clawft-kernel/src/mesh_runtime.rs",
+      "lines": 803,
+      "test_count": 15,
+      "feature_gate": "mesh",
+      "category": "K6"
+    },
+    {
       "id": "module:clawft-kernel/mesh_process",
       "crate": "clawft-kernel",
       "file": "crates/clawft-kernel/src/mesh_process.rs",
@@ -1464,6 +1409,15 @@
       "test_count": 20,
       "feature_gate": "mesh",
       "category": "K6"
+    },
+    {
+      "id": "module:clawft-kernel/democritus",
+      "crate": "clawft-kernel",
+      "file": "crates/clawft-kernel/src/democritus.rs",
+      "lines": 774,
+      "test_count": 1,
+      "feature_gate": "ecc",
+      "category": "K3c"
     },
     {
       "id": "module:clawft-plugin/traits",
@@ -1511,15 +1465,6 @@
       "category": "K1"
     },
     {
-      "id": "module:clawft-kernel/causal",
-      "crate": "clawft-kernel",
-      "file": "crates/clawft-kernel/src/causal.rs",
-      "lines": 695,
-      "test_count": 22,
-      "feature_gate": "ecc",
-      "category": "K3c"
-    },
-    {
       "id": "module:clawft-kernel/mesh_noise",
       "crate": "clawft-kernel",
       "file": "crates/clawft-kernel/src/mesh_noise.rs",
@@ -1527,6 +1472,15 @@
       "test_count": 19,
       "feature_gate": "mesh",
       "category": "K6"
+    },
+    {
+      "id": "module:clawft-kernel/config_service",
+      "crate": "clawft-kernel",
+      "file": "crates/clawft-kernel/src/config_service.rs",
+      "lines": 686,
+      "test_count": 19,
+      "feature_gate": null,
+      "category": "K1"
     },
     {
       "id": "module:clawft-plugin/manifest",
@@ -1610,6 +1564,15 @@
       "category": "K1"
     },
     {
+      "id": "module:clawft-kernel/embedding",
+      "crate": "clawft-kernel",
+      "file": "crates/clawft-kernel/src/embedding.rs",
+      "lines": 578,
+      "test_count": 10,
+      "feature_gate": "ecc",
+      "category": "K3c"
+    },
+    {
       "id": "module:clawft-kernel/environment",
       "crate": "clawft-kernel",
       "file": "crates/clawft-kernel/src/environment.rs",
@@ -1671,15 +1634,6 @@
       "test_count": 24,
       "feature_gate": "mesh",
       "category": "K6"
-    },
-    {
-      "id": "module:clawft-kernel/auth_service",
-      "crate": "clawft-kernel",
-      "file": "crates/clawft-kernel/src/auth_service.rs",
-      "lines": 544,
-      "test_count": 11,
-      "feature_gate": null,
-      "category": "K1"
     },
     {
       "id": "module:clawft-kernel/cognitive_tick",
@@ -1832,15 +1786,6 @@
       "lines": 452,
       "test_count": 9,
       "feature_gate": "wasm-plugins",
-      "category": "K1"
-    },
-    {
-      "id": "module:clawft-kernel/config_service",
-      "crate": "clawft-kernel",
-      "file": "crates/clawft-kernel/src/config_service.rs",
-      "lines": 447,
-      "test_count": 11,
-      "feature_gate": null,
       "category": "K1"
     },
     {
@@ -2060,6 +2005,15 @@
       "category": "K1"
     },
     {
+      "id": "module:clawft-kernel/hnsw_service",
+      "crate": "clawft-kernel",
+      "file": "crates/clawft-kernel/src/hnsw_service.rs",
+      "lines": 353,
+      "test_count": 12,
+      "feature_gate": "ecc",
+      "category": "K3c"
+    },
+    {
       "id": "module:clawft-platform/config_loader",
       "crate": "clawft-platform",
       "file": "crates/clawft-platform/src/config_loader.rs",
@@ -2220,15 +2174,6 @@
       "test_count": 29,
       "feature_gate": null,
       "category": "K1"
-    },
-    {
-      "id": "module:clawft-kernel/hnsw_service",
-      "crate": "clawft-kernel",
-      "file": "crates/clawft-kernel/src/hnsw_service.rs",
-      "lines": 280,
-      "test_count": 10,
-      "feature_gate": "ecc",
-      "category": "K3c"
     },
     {
       "id": "module:clawft-core/agent_routing",
@@ -2429,15 +2374,6 @@
       "category": "K1"
     },
     {
-      "id": "module:clawft-kernel/embedding",
-      "crate": "clawft-kernel",
-      "file": "crates/clawft-kernel/src/embedding.rs",
-      "lines": 215,
-      "test_count": 3,
-      "feature_gate": "ecc",
-      "category": "K3c"
-    },
-    {
       "id": "module:clawft-plugin-containers/types",
       "crate": "clawft-plugin-containers",
       "file": "crates/clawft-plugin-containers/src/types.rs",
@@ -2537,6 +2473,15 @@
       "category": "K1"
     },
     {
+      "id": "module:clawft-kernel/persistence",
+      "crate": "clawft-kernel",
+      "file": "crates/clawft-kernel/src/persistence.rs",
+      "lines": 173,
+      "test_count": 3,
+      "feature_gate": "ecc",
+      "category": "K3c"
+    },
+    {
       "id": "module:clawft-platform/process",
       "crate": "clawft-platform",
       "file": "crates/clawft-platform/src/process.rs",
@@ -2627,6 +2572,15 @@
       "category": "K1"
     },
     {
+      "id": "module:weftos/init",
+      "crate": "weftos",
+      "file": "crates/weftos/src/init.rs",
+      "lines": 145,
+      "test_count": 0,
+      "feature_gate": null,
+      "category": "K1"
+    },
+    {
       "id": "module:clawft-cli/completions",
       "crate": "clawft-cli",
       "file": "crates/clawft-cli/src/completions.rs",
@@ -2668,15 +2622,6 @@
       "file": "crates/clawft-plugin-cargo/src/operations.rs",
       "lines": 140,
       "test_count": 4,
-      "feature_gate": null,
-      "category": "K1"
-    },
-    {
-      "id": "module:weftos/init",
-      "crate": "weftos",
-      "file": "crates/weftos/src/init.rs",
-      "lines": 140,
-      "test_count": 0,
       "feature_gate": null,
       "category": "K1"
     },
@@ -2827,24 +2772,9 @@
   ],
   "decision_bottlenecks": [
     {
-      "id": "decision:k2:D8",
-      "title": "ExoChain-stored immutable API contracts",
-      "status": "pending",
-      "symposium": "k2",
-      "panel": "Governance",
-      "commitments": [
-        "C3"
-      ],
-      "downstream_count": 2,
-      "downstream": [
-        "commitment:k2:C3",
-        "module:clawft-kernel/chain"
-      ]
-    },
-    {
       "id": "decision:k2:D10",
       "title": "WASM-compiled shell with container sandbox",
-      "status": "pending",
+      "status": "deferred",
       "symposium": "k2",
       "panel": "Governance",
       "commitments": [
@@ -2857,90 +2787,9 @@
       ]
     },
     {
-      "id": "decision:k2:D20",
-      "title": "Configurable N-dimensional effect algebra",
-      "status": "pending",
-      "symposium": "k2",
-      "panel": "IPC",
-      "commitments": [
-        "C9"
-      ],
-      "downstream_count": 2,
-      "downstream": [
-        "commitment:k2:C9",
-        "module:clawft-kernel/governance"
-      ]
-    },
-    {
-      "id": "decision:k3:D1",
-      "title": "Hierarchical ToolRegistry with kernel base + per-agent overlays",
-      "status": "pending",
-      "symposium": "k3",
-      "panel": "Kernel Auditor",
-      "commitments": [],
-      "downstream_count": 2,
-      "downstream": [
-        "commitment:k3:AC-1",
-        "module:clawft-kernel/wasm_runner"
-      ]
-    },
-    {
-      "id": "decision:k3:D2",
-      "title": "Context-based gate actions: generic tool.exec with rich context",
-      "status": "pending",
-      "symposium": "k3",
-      "panel": "Services Architect",
-      "commitments": [],
-      "downstream_count": 2,
-      "downstream": [
-        "commitment:k3:AC-2",
-        "module:clawft-kernel/agent_loop"
-      ]
-    },
-    {
-      "id": "decision:k3:D4",
-      "title": "Wasmtime integration in K4 alongside container runtime",
-      "status": "pending",
-      "symposium": "k3",
-      "panel": "Integration Architect",
-      "commitments": [],
-      "downstream_count": 2,
-      "downstream": [
-        "commitment:k3:AC-5",
-        "module:clawft-kernel/wasm_runner"
-      ]
-    },
-    {
-      "id": "decision:k3:D12",
-      "title": "Multi-layer sandboxing: governance + environment + sudo override",
-      "status": "pending",
-      "symposium": "k3",
-      "panel": "Research Analyst",
-      "commitments": [],
-      "downstream_count": 2,
-      "downstream": [
-        "commitment:k3:AC-3",
-        "module:clawft-kernel/wasm_runner"
-      ]
-    },
-    {
-      "id": "decision:k2:D11",
-      "title": "Enable post-quantum signing immediately",
-      "status": "blocked",
-      "symposium": "k2",
-      "panel": "Crypto",
-      "commitments": [
-        "C6"
-      ],
-      "downstream_count": 1,
-      "downstream": [
-        "commitment:k2:C6"
-      ]
-    },
-    {
       "id": "decision:k2:D12",
       "title": "Chain-agnostic blockchain anchoring trait",
-      "status": "pending",
+      "status": "deferred",
       "symposium": "k2",
       "panel": "Crypto",
       "commitments": [
@@ -2954,7 +2803,7 @@
     {
       "id": "decision:k3:D3",
       "title": "Implement all 25 remaining tools in K4",
-      "status": "pending",
+      "status": "deferred",
       "symposium": "k3",
       "panel": "Research Analyst",
       "commitments": [],
@@ -2964,21 +2813,9 @@
       ]
     },
     {
-      "id": "decision:k3:D7",
-      "title": "Tree metadata for version history",
-      "status": "pending",
-      "symposium": "k3",
-      "panel": "Services Architect",
-      "commitments": [],
-      "downstream_count": 1,
-      "downstream": [
-        "commitment:k3:AC-6"
-      ]
-    },
-    {
       "id": "decision:k3:D9",
       "title": "Central authority + CA chain for tool signing",
-      "status": "pending",
+      "status": "deferred",
       "symposium": "k3",
       "panel": "Research Analyst",
       "commitments": [],
@@ -2988,21 +2825,9 @@
       ]
     },
     {
-      "id": "decision:k3:D10",
-      "title": "Separate ServiceApi and BuiltinTool concepts",
-      "status": "pending",
-      "symposium": "k3",
-      "panel": "Integration Architect",
-      "commitments": [],
-      "downstream_count": 1,
-      "downstream": [
-        "module:clawft-kernel/service"
-      ]
-    },
-    {
       "id": "decision:k2:D13",
       "title": "Zero-knowledge proofs as foundational capability",
-      "status": "pending",
+      "status": "deferred",
       "symposium": "k2",
       "panel": "Crypto",
       "commitments": [],
@@ -3012,17 +2837,7 @@
     {
       "id": "decision:k2:D17",
       "title": "Layered routing: tiny-dancer learned + governance enforced",
-      "status": "pending",
-      "symposium": "k2",
-      "panel": "Strategy",
-      "commitments": [],
-      "downstream_count": 0,
-      "downstream": []
-    },
-    {
-      "id": "decision:k2:D18",
-      "title": "SONA at K5, training data pipeline from K3 forward",
-      "status": "pending",
+      "status": "deferred",
       "symposium": "k2",
       "panel": "Strategy",
       "commitments": [],
@@ -3032,29 +2847,9 @@
     {
       "id": "decision:k3:D5",
       "title": "Disk-persisted compiled module cache",
-      "status": "pending",
+      "status": "deferred",
       "symposium": "k3",
       "panel": "Integration Architect",
-      "commitments": [],
-      "downstream_count": 0,
-      "downstream": []
-    },
-    {
-      "id": "decision:k3:D6",
-      "title": "Configurable WASI with read-only sandbox default",
-      "status": "pending",
-      "symposium": "k3",
-      "panel": "Research Analyst",
-      "commitments": [],
-      "downstream_count": 0,
-      "downstream": []
-    },
-    {
-      "id": "decision:k3:D8",
-      "title": "Informational revocation; governance gate handles enforcement",
-      "status": "pending",
-      "symposium": "k3",
-      "panel": "Services Architect",
       "commitments": [],
       "downstream_count": 0,
       "downstream": []
@@ -3082,7 +2877,7 @@
     {
       "id": "decision:k3:D14",
       "title": "tiny-dancer scoring for native vs WASM routing",
-      "status": "pending",
+      "status": "deferred",
       "symposium": "k3",
       "panel": "RUV Expert",
       "commitments": [],
@@ -3102,12 +2897,6 @@
   ],
   "pending_commitments": [
     {
-      "id": "commitment:k2:C2",
-      "description": "Define ServiceApi internal surface trait",
-      "status": "pending",
-      "phase": "K3"
-    },
-    {
       "id": "commitment:k2:C3",
       "description": "Chain-anchored service contracts",
       "status": "pending",
@@ -3126,12 +2915,6 @@
       "phase": "K3/K4"
     },
     {
-      "id": "commitment:k2:C6",
-      "description": "Enable post-quantum dual signing (DualKey)",
-      "status": "blocked",
-      "phase": "K2.1"
-    },
-    {
       "id": "commitment:k2:C7",
       "description": "ChainAnchor trait for blockchain anchoring",
       "status": "pending",
@@ -3142,24 +2925,6 @@
       "description": "Configurable N-dimensional EffectVector",
       "status": "pending",
       "phase": "K3"
-    },
-    {
-      "id": "commitment:k3:AC-1",
-      "description": "Hierarchical ToolRegistry with Arc-shared base",
-      "status": "pending",
-      "phase": "K4"
-    },
-    {
-      "id": "commitment:k3:AC-2",
-      "description": "Enriched gate context (tool name + effect vector)",
-      "status": "pending",
-      "phase": "K4"
-    },
-    {
-      "id": "commitment:k3:AC-3",
-      "description": "Multi-layer FsReadFileTool sandboxing",
-      "status": "pending",
-      "phase": "K4"
     },
     {
       "id": "commitment:k3:AC-4",
@@ -3188,91 +2953,96 @@
   ],
   "cold_zones": [
     {
-      "tag": "mesh-networking",
-      "commit_count": 9,
-      "latest_commit_date": "2026-03-26T18:30:09+00:00",
-      "latest_subject": "docs: update K6 decisions with K6b agency model notes"
-    },
-    {
       "tag": "app-lifecycle",
       "commit_count": 10,
       "latest_commit_date": "2026-03-25T21:55:22+00:00",
       "latest_subject": "feat: implement K5 MVP skills (prompt-log, skill-vetting, discord)"
     },
     {
-      "tag": "agents",
+      "tag": "mesh-networking",
       "commit_count": 11,
-      "latest_commit_date": "2026-03-26T17:18:29+00:00",
+      "latest_commit_date": "2026-03-27T12:48:03+00:00",
+      "latest_subject": "docs: update K6 decisions with K6b agency model notes"
+    },
+    {
+      "tag": "agents",
+      "commit_count": 12,
+      "latest_commit_date": "2026-03-26T22:53:34+00:00",
       "latest_subject": "feat: complete Phase 3D-3I -- skills, agents, workspaces, MCP server, delegation, RVF, WASM optimization"
     },
     {
       "tag": "governance",
-      "commit_count": 11,
-      "latest_commit_date": "2026-03-26T17:18:29+00:00",
+      "commit_count": 12,
+      "latest_commit_date": "2026-03-26T21:42:28+00:00",
       "latest_subject": "feat(kernel): Phase K6a -- cluster, environment, and governance types"
     },
     {
-      "tag": "planning",
-      "commit_count": 11,
-      "latest_commit_date": "2026-03-26T15:59:37+00:00",
-      "latest_subject": "Planning for next sprint complete."
-    },
-    {
-      "tag": "testing",
-      "commit_count": 13,
-      "latest_commit_date": "2026-03-26T18:30:09+00:00",
-      "latest_subject": "01-tiered-router is all set, time for testing"
-    },
-    {
       "tag": "container-runtime",
-      "commit_count": 13,
-      "latest_commit_date": "2026-03-26T03:13:56+00:00",
+      "commit_count": 14,
+      "latest_commit_date": "2026-03-26T21:42:28+00:00",
       "latest_subject": "feat: complete Wave 4 -- Elements 04/07/08/10 full vision"
     },
     {
       "tag": "security",
-      "commit_count": 15,
-      "latest_commit_date": "2026-03-26T18:30:09+00:00",
+      "commit_count": 16,
+      "latest_commit_date": "2026-03-27T12:48:03+00:00",
       "latest_subject": "01-tiered-router is all set, time for testing"
     },
     {
-      "tag": "ecc",
+      "tag": "planning",
       "commit_count": 16,
-      "latest_commit_date": "2026-03-26T20:08:46+00:00",
-      "latest_subject": "rename: weave -> weaver (avoid conflict with TeX weave tool)"
+      "latest_commit_date": "2026-03-27T03:00:58+00:00",
+      "latest_subject": "Planning for next sprint complete."
+    },
+    {
+      "tag": "testing",
+      "commit_count": 19,
+      "latest_commit_date": "2026-03-27T13:14:06+00:00",
+      "latest_subject": "01-tiered-router is all set, time for testing"
     },
     {
       "tag": "process-mgmt",
-      "commit_count": 17,
-      "latest_commit_date": "2026-03-26T18:30:09+00:00",
+      "commit_count": 19,
+      "latest_commit_date": "2026-03-27T03:42:07+00:00",
       "latest_subject": "Phase 1 and 2 development done."
     },
     {
       "tag": "exochain",
-      "commit_count": 19,
-      "latest_commit_date": "2026-03-26T14:46:19+00:00",
+      "commit_count": 20,
+      "latest_commit_date": "2026-03-26T21:42:28+00:00",
       "latest_subject": "feat: WeftOS SPARC architecture plans (14 docs, ADR-028)"
     },
     {
       "tag": "service-framework",
-      "commit_count": 20,
-      "latest_commit_date": "2026-03-26T18:30:09+00:00",
+      "commit_count": 23,
+      "latest_commit_date": "2026-03-27T12:48:03+00:00",
       "latest_subject": "feat: K4 ClawHub install/publish + M6 docs + sprint documentation overhaul"
     },
     {
       "tag": "wasm-sandbox",
-      "commit_count": 28,
-      "latest_commit_date": "2026-03-26T17:18:29+00:00",
+      "commit_count": 29,
+      "latest_commit_date": "2026-03-26T21:42:28+00:00",
       "latest_subject": "Phase 1 and 2 development done."
     },
     {
+      "tag": "ecc",
+      "commit_count": 31,
+      "latest_commit_date": "2026-03-27T01:40:29+00:00",
+      "latest_subject": "rename: weave -> weaver (avoid conflict with TeX weave tool)"
+    },
+    {
       "tag": "documentation",
-      "commit_count": 76,
-      "latest_commit_date": "2026-03-26T20:08:46+00:00",
+      "commit_count": 96,
+      "latest_commit_date": "2026-03-27T13:24:21+00:00",
       "latest_subject": "Phase 1 and 2 development done."
     }
   ],
   "untagged_commits": [
+    {
+      "id": "commit:51635a2",
+      "date": "2026-03-27T03:45:51+00:00",
+      "subject": "data: refresh knowledge graph \u2014 122 commits, 182 modules, 500 edges"
+    },
     {
       "id": "commit:7c66aa3",
       "date": "2026-03-26T18:39:32+00:00",
@@ -3386,7 +3156,7 @@
     {
       "feature_gate": "exochain",
       "module_count": 3,
-      "total_lines": 5565,
+      "total_lines": 5736,
       "cross_gate_connections": 1,
       "connected_to": [
         "default"
@@ -3425,8 +3195,8 @@
     },
     {
       "feature_gate": "ecc",
-      "module_count": 9,
-      "total_lines": 4675,
+      "module_count": 12,
+      "total_lines": 12014,
       "cross_gate_connections": 1,
       "connected_to": [
         "default"
@@ -3435,8 +3205,8 @@
     },
     {
       "feature_gate": "mesh",
-      "module_count": 20,
-      "total_lines": 7762,
+      "module_count": 21,
+      "total_lines": 8565,
       "cross_gate_connections": 1,
       "connected_to": [
         "default"
@@ -3445,8 +3215,8 @@
     },
     {
       "feature_gate": "default",
-      "module_count": 110,
-      "total_lines": 56494,
+      "module_count": 111,
+      "total_lines": 61655,
       "cross_gate_connections": 8,
       "connected_to": [
         "browser",
@@ -3468,16 +3238,16 @@
       "lines": 457,
       "test_count": 16,
       "outgoing_uses": 2,
-      "incoming_uses": 23,
+      "incoming_uses": 24,
       "fan_out_risk": false,
       "single_point_of_failure": true
     },
     {
       "id": "module:clawft-kernel/boot",
       "crate": "clawft-kernel",
-      "lines": 1953,
-      "test_count": 2,
-      "outgoing_uses": 19,
+      "lines": 2820,
+      "test_count": 4,
+      "outgoing_uses": 23,
       "incoming_uses": 0,
       "fan_out_risk": true,
       "single_point_of_failure": false
@@ -3488,7 +3258,7 @@
       "lines": 1201,
       "test_count": 50,
       "outgoing_uses": 2,
-      "incoming_uses": 12,
+      "incoming_uses": 13,
       "fan_out_risk": false,
       "single_point_of_failure": true
     },
@@ -3498,17 +3268,17 @@
       "lines": 806,
       "test_count": 32,
       "outgoing_uses": 2,
-      "incoming_uses": 12,
+      "incoming_uses": 13,
       "fan_out_risk": false,
       "single_point_of_failure": true
     },
     {
       "id": "module:clawft-kernel/service",
       "crate": "clawft-kernel",
-      "lines": 1059,
-      "test_count": 22,
+      "lines": 1254,
+      "test_count": 35,
       "outgoing_uses": 2,
-      "incoming_uses": 12,
+      "incoming_uses": 13,
       "fan_out_risk": false,
       "single_point_of_failure": true
     },
@@ -3518,7 +3288,7 @@
       "lines": 135,
       "test_count": 0,
       "outgoing_uses": 1,
-      "incoming_uses": 11,
+      "incoming_uses": 12,
       "fan_out_risk": false,
       "single_point_of_failure": true
     },
@@ -3533,12 +3303,42 @@
       "single_point_of_failure": true
     },
     {
+      "id": "module:clawft-kernel/mesh_runtime",
+      "crate": "clawft-kernel",
+      "lines": 803,
+      "test_count": 15,
+      "outgoing_uses": 9,
+      "incoming_uses": 1,
+      "fan_out_risk": true,
+      "single_point_of_failure": false
+    },
+    {
       "id": "module:clawft-kernel/a2a",
       "crate": "clawft-kernel",
-      "lines": 1452,
-      "test_count": 1,
-      "outgoing_uses": 7,
+      "lines": 2055,
+      "test_count": 7,
+      "outgoing_uses": 9,
       "incoming_uses": 0,
+      "fan_out_risk": true,
+      "single_point_of_failure": false
+    },
+    {
+      "id": "module:clawft-kernel/hnsw_service",
+      "crate": "clawft-kernel",
+      "lines": 353,
+      "test_count": 12,
+      "outgoing_uses": 2,
+      "incoming_uses": 5,
+      "fan_out_risk": false,
+      "single_point_of_failure": true
+    },
+    {
+      "id": "module:clawft-kernel/supervisor",
+      "crate": "clawft-kernel",
+      "lines": 2424,
+      "test_count": 66,
+      "outgoing_uses": 5,
+      "incoming_uses": 2,
       "fan_out_risk": true,
       "single_point_of_failure": false
     },
@@ -3555,7 +3355,7 @@
     {
       "id": "module:clawft-kernel/agent_loop",
       "crate": "clawft-kernel",
-      "lines": 1412,
+      "lines": 1831,
       "test_count": 0,
       "outgoing_uses": 6,
       "incoming_uses": 0,
@@ -3563,20 +3363,20 @@
       "single_point_of_failure": false
     },
     {
-      "id": "module:clawft-kernel/supervisor",
+      "id": "module:clawft-kernel/topic",
       "crate": "clawft-kernel",
-      "lines": 1833,
-      "test_count": 40,
-      "outgoing_uses": 4,
-      "incoming_uses": 2,
+      "lines": 367,
+      "test_count": 11,
+      "outgoing_uses": 2,
+      "incoming_uses": 4,
       "fan_out_risk": false,
       "single_point_of_failure": false
     },
     {
       "id": "module:clawft-kernel/weaver",
       "crate": "clawft-kernel",
-      "lines": 1369,
-      "test_count": 27,
+      "lines": 4957,
+      "test_count": 122,
       "outgoing_uses": 6,
       "incoming_uses": 0,
       "fan_out_risk": true,
@@ -3623,6 +3423,36 @@
       "single_point_of_failure": true
     },
     {
+      "id": "module:clawft-kernel/causal",
+      "crate": "clawft-kernel",
+      "lines": 1858,
+      "test_count": 46,
+      "outgoing_uses": 0,
+      "incoming_uses": 5,
+      "fan_out_risk": false,
+      "single_point_of_failure": true
+    },
+    {
+      "id": "module:clawft-kernel/config_service",
+      "crate": "clawft-kernel",
+      "lines": 686,
+      "test_count": 19,
+      "outgoing_uses": 4,
+      "incoming_uses": 1,
+      "fan_out_risk": false,
+      "single_point_of_failure": false
+    },
+    {
+      "id": "module:clawft-kernel/democritus",
+      "crate": "clawft-kernel",
+      "lines": 774,
+      "test_count": 1,
+      "outgoing_uses": 5,
+      "incoming_uses": 0,
+      "fan_out_risk": true,
+      "single_point_of_failure": false
+    },
+    {
       "id": "module:clawft-kernel/gate",
       "crate": "clawft-kernel",
       "lines": 809,
@@ -3633,12 +3463,12 @@
       "single_point_of_failure": false
     },
     {
-      "id": "module:clawft-kernel/hnsw_service",
+      "id": "module:clawft-kernel/governance",
       "crate": "clawft-kernel",
-      "lines": 280,
-      "test_count": 10,
-      "outgoing_uses": 2,
-      "incoming_uses": 3,
+      "lines": 1875,
+      "test_count": 67,
+      "outgoing_uses": 1,
+      "incoming_uses": 4,
       "fan_out_risk": false,
       "single_point_of_failure": false
     },
@@ -3653,16 +3483,6 @@
       "single_point_of_failure": true
     },
     {
-      "id": "module:clawft-kernel/topic",
-      "crate": "clawft-kernel",
-      "lines": 367,
-      "test_count": 11,
-      "outgoing_uses": 2,
-      "incoming_uses": 3,
-      "fan_out_risk": false,
-      "single_point_of_failure": false
-    },
-    {
       "id": "module:clawft-kernel/app",
       "crate": "clawft-kernel",
       "lines": 1847,
@@ -3675,18 +3495,8 @@
     {
       "id": "module:clawft-kernel/auth_service",
       "crate": "clawft-kernel",
-      "lines": 544,
-      "test_count": 11,
-      "outgoing_uses": 4,
-      "incoming_uses": 0,
-      "fan_out_risk": false,
-      "single_point_of_failure": false
-    },
-    {
-      "id": "module:clawft-kernel/config_service",
-      "crate": "clawft-kernel",
-      "lines": 447,
-      "test_count": 11,
+      "lines": 823,
+      "test_count": 21,
       "outgoing_uses": 4,
       "incoming_uses": 0,
       "fan_out_risk": false,
@@ -3703,10 +3513,10 @@
       "single_point_of_failure": false
     },
     {
-      "id": "module:clawft-kernel/governance",
+      "id": "module:clawft-kernel/mesh_ipc",
       "crate": "clawft-kernel",
-      "lines": 1682,
-      "test_count": 56,
+      "lines": 439,
+      "test_count": 16,
       "outgoing_uses": 1,
       "incoming_uses": 3,
       "fan_out_risk": false,
@@ -3723,12 +3533,32 @@
       "single_point_of_failure": false
     },
     {
+      "id": "module:clawft-kernel/tools_extended",
+      "crate": "clawft-kernel",
+      "lines": 1429,
+      "test_count": 16,
+      "outgoing_uses": 4,
+      "incoming_uses": 0,
+      "fan_out_risk": false,
+      "single_point_of_failure": false
+    },
+    {
       "id": "module:clawft-kernel/tree_manager",
       "crate": "clawft-kernel",
       "lines": 1942,
       "test_count": 31,
       "outgoing_uses": 4,
       "incoming_uses": 0,
+      "fan_out_risk": false,
+      "single_point_of_failure": false
+    },
+    {
+      "id": "module:clawft-kernel/wasm_runner",
+      "crate": "clawft-kernel",
+      "lines": 4547,
+      "test_count": 93,
+      "outgoing_uses": 1,
+      "incoming_uses": 3,
       "fan_out_risk": false,
       "single_point_of_failure": false
     },
@@ -3783,10 +3613,20 @@
       "single_point_of_failure": false
     },
     {
-      "id": "module:clawft-kernel/causal",
+      "id": "module:clawft-kernel/embedding",
       "crate": "clawft-kernel",
-      "lines": 695,
-      "test_count": 22,
+      "lines": 578,
+      "test_count": 10,
+      "outgoing_uses": 0,
+      "incoming_uses": 3,
+      "fan_out_risk": false,
+      "single_point_of_failure": false
+    },
+    {
+      "id": "module:clawft-kernel/impulse",
+      "crate": "clawft-kernel",
+      "lines": 318,
+      "test_count": 8,
       "outgoing_uses": 0,
       "incoming_uses": 3,
       "fan_out_risk": false,
@@ -3885,55 +3725,47 @@
   ],
   "cross_graph": {
     "crate_activity": {
-      "clawft-cli": {
-        "commit_count": 380,
-        "last_commit": "2026-03-01T15:33:27-05:00"
+      "clawft-plugin": {
+        "commit_count": 165,
+        "last_commit": "2026-02-25T20:15:23-05:00"
+      },
+      "clawft-platform": {
+        "commit_count": 95,
+        "last_commit": "2026-02-25T20:15:23-05:00"
       },
       "clawft-plugin-browser": {
         "commit_count": 2,
         "last_commit": "2026-02-20T00:30:48-05:00"
       },
-      "exo-resource-tree": {
-        "commit_count": 80,
-        "last_commit": "2026-03-25T21:34:23+00:00"
-      },
-      "clawft-channels": {
-        "commit_count": 240,
-        "last_commit": "2026-03-01T01:48:27-05:00"
-      },
-      "weftos": {
-        "commit_count": 6,
-        "last_commit": "2026-03-26T18:39:32+00:00"
-      },
-      "clawft-plugin-oauth2": {
-        "commit_count": 6,
-        "last_commit": "2026-02-20T00:03:50-05:00"
+      "clawft-kernel": {
+        "commit_count": 15663,
+        "last_commit": "2026-03-27T12:48:03+00:00"
       },
       "clawft-services": {
         "commit_count": 170,
         "last_commit": "2026-03-25T16:46:45+00:00"
       },
-      "clawft-plugin-calendar": {
-        "commit_count": 2,
-        "last_commit": "2026-02-20T00:30:48-05:00"
+      "clawft-wasm": {
+        "commit_count": 260,
+        "last_commit": "2026-03-01T01:48:27-05:00"
       },
-      "clawft-plugin-containers": {
-        "commit_count": 6,
-        "last_commit": "2026-02-20T00:30:48-05:00"
+      "clawft-llm": {
+        "commit_count": 410,
+        "last_commit": "2026-02-25T20:15:23-05:00"
       },
       "clawft-core": {
         "commit_count": 3618,
         "last_commit": "2026-03-01T01:48:27-05:00"
       },
-      "clawft-plugin": {
-        "commit_count": 165,
+      "clawft-tools": {
+        "commit_count": 675,
         "last_commit": "2026-02-25T20:15:23-05:00"
       },
-      "clawft-types": {
-        "commit_count": 770,
-        "last_commit": "2026-03-03T00:21:55-05:00"
+      "clawft-plugin-containers": {
+        "commit_count": 6,
+        "last_commit": "2026-02-20T00:30:48-05:00"
       },
-      "clawft-plugin-cargo": {
+      "clawft-plugin-git": {
         "commit_count": 6,
         "last_commit": "2026-02-20T00:03:50-05:00"
       },
@@ -3941,45 +3773,53 @@
         "commit_count": 366,
         "last_commit": "2026-03-26T17:10:32+00:00"
       },
-      "clawft-wasm": {
-        "commit_count": 260,
-        "last_commit": "2026-03-01T01:48:27-05:00"
-      },
-      "clawft-kernel": {
-        "commit_count": 12096,
-        "last_commit": "2026-03-26T18:30:09+00:00"
-      },
-      "clawft-plugin-git": {
+      "clawft-plugin-oauth2": {
         "commit_count": 6,
         "last_commit": "2026-02-20T00:03:50-05:00"
       },
-      "clawft-tools": {
-        "commit_count": 675,
-        "last_commit": "2026-02-25T20:15:23-05:00"
+      "clawft-channels": {
+        "commit_count": 240,
+        "last_commit": "2026-03-01T01:48:27-05:00"
       },
-      "clawft-llm": {
-        "commit_count": 410,
-        "last_commit": "2026-02-25T20:15:23-05:00"
+      "exo-resource-tree": {
+        "commit_count": 80,
+        "last_commit": "2026-03-25T21:34:23+00:00"
       },
-      "clawft-platform": {
-        "commit_count": 95,
-        "last_commit": "2026-02-25T20:15:23-05:00"
+      "clawft-cli": {
+        "commit_count": 380,
+        "last_commit": "2026-03-01T15:33:27-05:00"
+      },
+      "clawft-plugin-cargo": {
+        "commit_count": 6,
+        "last_commit": "2026-02-20T00:03:50-05:00"
+      },
+      "clawft-types": {
+        "commit_count": 770,
+        "last_commit": "2026-03-03T00:21:55-05:00"
       },
       "clawft-plugin-treesitter": {
         "commit_count": 6,
+        "last_commit": "2026-02-20T00:30:48-05:00"
+      },
+      "weftos": {
+        "commit_count": 8,
+        "last_commit": "2026-03-26T22:53:34+00:00"
+      },
+      "clawft-plugin-calendar": {
+        "commit_count": 2,
         "last_commit": "2026-02-20T00:30:48-05:00"
       }
     },
     "phase_balance": {
       "k2": {
         "total_decisions": 22,
-        "pending_decisions": 8,
-        "implementation_ratio": 0.64
+        "pending_decisions": 4,
+        "implementation_ratio": 0.82
       },
       "k3": {
         "total_decisions": 14,
-        "pending_decisions": 14,
-        "implementation_ratio": 0.0
+        "pending_decisions": 6,
+        "implementation_ratio": 0.57
       },
       "ecc": {
         "total_decisions": 8,
@@ -3994,120 +3834,6 @@
     },
     "unimplemented_decisions": [
       {
-        "decision": "decision:k2:D8",
-        "title": "ExoChain-stored immutable API contracts",
-        "symposium": "k2",
-        "status": "pending"
-      },
-      {
-        "decision": "decision:k2:D10",
-        "title": "WASM-compiled shell with container sandbox",
-        "symposium": "k2",
-        "status": "pending"
-      },
-      {
-        "decision": "decision:k2:D12",
-        "title": "Chain-agnostic blockchain anchoring trait",
-        "symposium": "k2",
-        "status": "pending"
-      },
-      {
-        "decision": "decision:k2:D13",
-        "title": "Zero-knowledge proofs as foundational capability",
-        "symposium": "k2",
-        "status": "pending"
-      },
-      {
-        "decision": "decision:k2:D17",
-        "title": "Layered routing: tiny-dancer learned + governance enforced",
-        "symposium": "k2",
-        "status": "pending"
-      },
-      {
-        "decision": "decision:k2:D18",
-        "title": "SONA at K5, training data pipeline from K3 forward",
-        "symposium": "k2",
-        "status": "pending"
-      },
-      {
-        "decision": "decision:k2:D20",
-        "title": "Configurable N-dimensional effect algebra",
-        "symposium": "k2",
-        "status": "pending"
-      },
-      {
-        "decision": "decision:k3:D1",
-        "title": "Hierarchical ToolRegistry with kernel base + per-agent overlays",
-        "symposium": "k3",
-        "status": "pending"
-      },
-      {
-        "decision": "decision:k3:D2",
-        "title": "Context-based gate actions: generic tool.exec with rich context",
-        "symposium": "k3",
-        "status": "pending"
-      },
-      {
-        "decision": "decision:k3:D3",
-        "title": "Implement all 25 remaining tools in K4",
-        "symposium": "k3",
-        "status": "pending"
-      },
-      {
-        "decision": "decision:k3:D4",
-        "title": "Wasmtime integration in K4 alongside container runtime",
-        "symposium": "k3",
-        "status": "pending"
-      },
-      {
-        "decision": "decision:k3:D5",
-        "title": "Disk-persisted compiled module cache",
-        "symposium": "k3",
-        "status": "pending"
-      },
-      {
-        "decision": "decision:k3:D6",
-        "title": "Configurable WASI with read-only sandbox default",
-        "symposium": "k3",
-        "status": "pending"
-      },
-      {
-        "decision": "decision:k3:D7",
-        "title": "Tree metadata for version history",
-        "symposium": "k3",
-        "status": "pending"
-      },
-      {
-        "decision": "decision:k3:D8",
-        "title": "Informational revocation; governance gate handles enforcement",
-        "symposium": "k3",
-        "status": "pending"
-      },
-      {
-        "decision": "decision:k3:D9",
-        "title": "Central authority + CA chain for tool signing",
-        "symposium": "k3",
-        "status": "pending"
-      },
-      {
-        "decision": "decision:k3:D10",
-        "title": "Separate ServiceApi and BuiltinTool concepts",
-        "symposium": "k3",
-        "status": "pending"
-      },
-      {
-        "decision": "decision:k3:D12",
-        "title": "Multi-layer sandboxing: governance + environment + sudo override",
-        "symposium": "k3",
-        "status": "pending"
-      },
-      {
-        "decision": "decision:k3:D14",
-        "title": "tiny-dancer scoring for native vs WASM routing",
-        "symposium": "k3",
-        "status": "pending"
-      },
-      {
         "decision": "decision:ecc:D5",
         "title": "DEMOCRITUS as continuous nervous system operation",
         "symposium": "ecc",
@@ -4117,16 +3843,16 @@
   },
   "conversation_health": {
     "C1: Kernel Architecture": {
-      "module_count": 24,
-      "total_lines": 24564,
-      "total_tests": 518,
+      "module_count": 25,
+      "total_lines": 29720,
+      "total_tests": 624,
       "untested_modules": 2,
       "test_coverage_ratio": 0.92,
       "decision_count": 22,
-      "pending_decisions": 8,
-      "decision_completion_ratio": 0.64,
-      "commit_count": 29,
-      "composite_health": 0.78,
+      "pending_decisions": 4,
+      "decision_completion_ratio": 0.82,
+      "commit_count": 32,
+      "composite_health": 0.87,
       "needs_attention": false
     },
     "C2: Symposium Decisions": {
@@ -4136,11 +3862,11 @@
       "untested_modules": 0,
       "test_coverage_ratio": null,
       "decision_count": 59,
-      "pending_decisions": 23,
-      "decision_completion_ratio": 0.61,
+      "pending_decisions": 11,
+      "decision_completion_ratio": 0.81,
       "commit_count": 0,
-      "composite_health": 0.61,
-      "needs_attention": true
+      "composite_health": 0.81,
+      "needs_attention": false
     },
     "C3: SPARC Planning": {
       "module_count": 0,
@@ -4156,81 +3882,81 @@
       "needs_attention": false
     },
     "C4: Mesh Networking": {
-      "module_count": 20,
-      "total_lines": 7762,
-      "total_tests": 224,
+      "module_count": 21,
+      "total_lines": 8565,
+      "total_tests": 239,
       "untested_modules": 1,
       "test_coverage_ratio": 0.95,
       "decision_count": 15,
       "pending_decisions": 0,
       "decision_completion_ratio": 1.0,
-      "commit_count": 9,
+      "commit_count": 11,
       "composite_health": 0.97,
       "needs_attention": false
     },
     "C5: ECC Cognitive Substrate": {
-      "module_count": 9,
-      "total_lines": 4675,
-      "total_tests": 119,
+      "module_count": 12,
+      "total_lines": 12014,
+      "total_tests": 278,
       "untested_modules": 0,
       "test_coverage_ratio": 1.0,
       "decision_count": 8,
       "pending_decisions": 1,
       "decision_completion_ratio": 0.88,
-      "commit_count": 16,
+      "commit_count": 31,
       "composite_health": 0.94,
       "needs_attention": false
     },
     "C6: ExoChain Provenance": {
       "module_count": 3,
-      "total_lines": 5565,
-      "total_tests": 92,
+      "total_lines": 5736,
+      "total_tests": 103,
       "untested_modules": 0,
       "test_coverage_ratio": 1.0,
       "decision_count": 22,
-      "pending_decisions": 8,
-      "decision_completion_ratio": 0.64,
-      "commit_count": 19,
-      "composite_health": 0.82,
+      "pending_decisions": 4,
+      "decision_completion_ratio": 0.82,
+      "commit_count": 20,
+      "composite_health": 0.91,
       "needs_attention": false
     },
     "C7: Governance Constitution": {
       "module_count": 3,
-      "total_lines": 5565,
-      "total_tests": 92,
+      "total_lines": 5736,
+      "total_tests": 103,
       "untested_modules": 0,
       "test_coverage_ratio": 1.0,
       "decision_count": 22,
-      "pending_decisions": 8,
-      "decision_completion_ratio": 0.64,
-      "commit_count": 11,
-      "composite_health": 0.82,
+      "pending_decisions": 4,
+      "decision_completion_ratio": 0.82,
+      "commit_count": 12,
+      "composite_health": 0.91,
       "needs_attention": false
     },
     "C8: Tool Lifecycle": {
-      "module_count": 24,
-      "total_lines": 24564,
-      "total_tests": 518,
+      "module_count": 25,
+      "total_lines": 29720,
+      "total_tests": 624,
       "untested_modules": 2,
       "test_coverage_ratio": 0.92,
       "decision_count": 14,
-      "pending_decisions": 14,
-      "decision_completion_ratio": 0.0,
-      "commit_count": 28,
-      "composite_health": 0.46,
-      "needs_attention": true
+      "pending_decisions": 6,
+      "decision_completion_ratio": 0.57,
+      "commit_count": 29,
+      "composite_health": 0.74,
+      "needs_attention": false
     },
     "C9: Agent Architecture": {
-      "module_count": 24,
-      "total_lines": 24564,
-      "total_tests": 518,
+      "module_count": 25,
+      "total_lines": 29720,
+      "total_tests": 624,
       "untested_modules": 2,
       "test_coverage_ratio": 0.92,
       "decision_count": 22,
-      "pending_decisions": 8,
-      "decision_completion_ratio": 0.64,
-      "commit_count": 11,
-      "composite_health": 0.78,
+      "pending_decisions": 4,
+      "decision_completion_ratio": 0.82,
+      "commit_count": 12,
+      "composite_health": 0.87,
       "needs_attention": false
     },
     "C10: OS Pattern Library": {
@@ -4242,7 +3968,7 @@
       "decision_count": 0,
       "pending_decisions": 0,
       "decision_completion_ratio": null,
-      "commit_count": 17,
+      "commit_count": 19,
       "composite_health": 1.0,
       "needs_attention": false
     },

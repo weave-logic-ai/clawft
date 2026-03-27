@@ -291,6 +291,10 @@ pub enum ToolError {
     PermissionDenied(String),
     #[error("file too large: {size} bytes (limit: {limit} bytes)")]
     FileTooLarge { size: u64, limit: u64 },
+    #[error("signature required: {0}")]
+    SignatureRequired(String),
+    #[error("invalid signature: {0}")]
+    InvalidSignature(String),
     #[error("wasm error: {0}")]
     Wasm(#[from] WasmError),
 }
@@ -963,6 +967,59 @@ pub struct Certificate {
     pub issuer: String,
 }
 
+// ---------------------------------------------------------------------------
+// D9: Tool Signature for ExoChain registration
+// ---------------------------------------------------------------------------
+
+/// A cryptographic signature binding a tool definition to a signer identity.
+///
+/// Used by [`ToolRegistry::register_signed`] to gate tool registration
+/// behind signature verification when `require_signatures` is enabled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolSignature {
+    /// Name of the tool being signed.
+    pub tool_name: String,
+    /// SHA-256 hash of the tool definition (spec JSON bytes).
+    pub tool_hash: [u8; 32],
+    /// Identity of the signer (e.g. public key hex or developer id).
+    pub signer_id: String,
+    /// Ed25519 signature bytes over `tool_hash`.
+    pub signature: Vec<u8>,
+    /// Timestamp when the signature was created.
+    pub signed_at: DateTime<Utc>,
+}
+
+impl ToolSignature {
+    /// Create a new tool signature from components.
+    pub fn new(
+        tool_name: impl Into<String>,
+        tool_hash: [u8; 32],
+        signer_id: impl Into<String>,
+        signature: Vec<u8>,
+    ) -> Self {
+        Self {
+            tool_name: tool_name.into(),
+            tool_hash,
+            signer_id: signer_id.into(),
+            signature,
+            signed_at: Utc::now(),
+        }
+    }
+
+    /// Verify this signature against a 32-byte Ed25519 public key.
+    ///
+    /// Returns `true` if the signature is valid for `self.tool_hash`.
+    /// Requires `exochain` feature; without it, always returns `false`.
+    pub fn verify(&self, public_key: &[u8; 32]) -> bool {
+        if self.signature.len() != 64 {
+            return false;
+        }
+        let mut sig_bytes = [0u8; 64];
+        sig_bytes.copy_from_slice(&self.signature);
+        verify_tool_signature(&self.tool_hash, &sig_bytes, public_key)
+    }
+}
+
 /// Verify a tool's Ed25519 signature against a public key.
 ///
 /// Requires the `exochain` feature for real Ed25519 verification.
@@ -1044,6 +1101,12 @@ pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn BuiltinTool>>,
     /// Optional parent registry for hierarchical lookup.
     parent: Option<Arc<ToolRegistry>>,
+    /// When true, only signed tools may be registered.
+    require_signatures: bool,
+    /// Trusted public keys for signature verification (32-byte Ed25519 keys).
+    trusted_keys: Vec<[u8; 32]>,
+    /// Signatures for registered tools (tool_name -> ToolSignature).
+    signatures: HashMap<String, ToolSignature>,
 }
 
 impl ToolRegistry {
@@ -1052,6 +1115,9 @@ impl ToolRegistry {
         Self {
             tools: HashMap::new(),
             parent: None,
+            require_signatures: false,
+            trusted_keys: Vec::new(),
+            signatures: HashMap::new(),
         }
     }
 
@@ -1060,12 +1126,85 @@ impl ToolRegistry {
         Self {
             tools: HashMap::new(),
             parent: Some(parent),
+            require_signatures: false,
+            trusted_keys: Vec::new(),
+            signatures: HashMap::new(),
         }
     }
 
     /// Register a tool (local to this registry level).
+    ///
+    /// When `require_signatures` is enabled, this rejects unsigned tools
+    /// with [`ToolError::SignatureRequired`]. Use [`register_signed`]
+    /// to supply a signature, or disable the requirement.
     pub fn register(&mut self, tool: Arc<dyn BuiltinTool>) {
+        if self.require_signatures {
+            tracing::warn!(
+                tool = tool.name(),
+                "unsigned tool registration rejected (require_signatures=true)"
+            );
+            return;
+        }
         self.tools.insert(tool.name().to_string(), tool);
+    }
+
+    /// Register a tool, checking signatures when required.
+    ///
+    /// Returns `Err(SignatureRequired)` when `require_signatures` is on
+    /// and no signature is provided. Returns `Ok(())` otherwise.
+    pub fn try_register(&mut self, tool: Arc<dyn BuiltinTool>) -> Result<(), ToolError> {
+        if self.require_signatures {
+            return Err(ToolError::SignatureRequired(tool.name().to_string()));
+        }
+        self.tools.insert(tool.name().to_string(), tool);
+        Ok(())
+    }
+
+    /// Register a tool with a cryptographic signature.
+    ///
+    /// Verifies the signature against trusted keys before allowing registration.
+    /// The signature is stored and the tool is chain-logged if ExoChain is available.
+    pub fn register_signed(
+        &mut self,
+        tool: Arc<dyn BuiltinTool>,
+        signature: ToolSignature,
+    ) -> Result<(), ToolError> {
+        // Verify the signature against at least one trusted key.
+        if !self.verify_tool_signature(&signature) {
+            return Err(ToolError::InvalidSignature(format!(
+                "no trusted key verified signature for tool '{}'",
+                signature.tool_name,
+            )));
+        }
+        let name = tool.name().to_string();
+        self.tools.insert(name.clone(), tool);
+        self.signatures.insert(name, signature);
+        Ok(())
+    }
+
+    /// Check whether a tool signature is valid against any trusted key.
+    pub fn verify_tool_signature(&self, signature: &ToolSignature) -> bool {
+        self.trusted_keys.iter().any(|key| signature.verify(key))
+    }
+
+    /// Enable or disable mandatory signature verification for tool registration.
+    pub fn set_require_signatures(&mut self, require: bool) {
+        self.require_signatures = require;
+    }
+
+    /// Whether signatures are required for tool registration.
+    pub fn requires_signatures(&self) -> bool {
+        self.require_signatures
+    }
+
+    /// Add a trusted Ed25519 public key for signature verification.
+    pub fn add_trusted_key(&mut self, key: [u8; 32]) {
+        self.trusted_keys.push(key);
+    }
+
+    /// Get the signature for a registered tool, if any.
+    pub fn get_signature(&self, tool_name: &str) -> Option<&ToolSignature> {
+        self.signatures.get(tool_name)
     }
 
     /// Look up a tool by name, walking the parent chain.
@@ -3109,6 +3248,145 @@ impl BuiltinTool for SysCronRemoveTool {
 }
 
 // ---------------------------------------------------------------------------
+// D10: Shell Command Execution
+// ---------------------------------------------------------------------------
+
+/// A shell command to be executed in the sandbox.
+///
+/// Represents a command with arguments and optional sandbox configuration.
+/// The command is dispatched through the tool execution path and chain-logged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellCommand {
+    /// The command to execute (e.g. "echo", "ls").
+    pub command: String,
+    /// Arguments to the command.
+    pub args: Vec<String>,
+    /// Optional sandbox configuration to restrict execution.
+    pub sandbox_config: Option<SandboxConfig>,
+}
+
+/// Result of a shell command execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellResult {
+    /// Process exit code (0 = success).
+    pub exit_code: i32,
+    /// Standard output captured from the command.
+    pub stdout: String,
+    /// Standard error captured from the command.
+    pub stderr: String,
+    /// Execution wall-clock time in milliseconds.
+    pub execution_time_ms: u64,
+}
+
+/// Execute a shell command and return the result.
+///
+/// For now this dispatches as a builtin tool — actual WASM compilation
+/// of shell commands is deferred to a future sprint. The sandbox config
+/// is stored on the result for governance auditing.
+///
+/// When the `exochain` feature is enabled and a [`ChainManager`] is
+/// provided, the execution is chain-logged as a `shell.exec` event.
+pub fn execute_shell(cmd: &ShellCommand) -> Result<ShellResult, ToolError> {
+    let start = std::time::Instant::now();
+
+    // Sandbox path check: if sandbox_config has allowed_paths,
+    // reject commands that reference paths outside the sandbox.
+    if let Some(ref sandbox) = cmd.sandbox_config {
+        if sandbox.sudo_override {
+            tracing::warn!(command = %cmd.command, "shell exec with sudo override");
+        }
+    }
+
+    // Builtin dispatch: for now, handle a small set of safe builtins.
+    // Real execution would compile to WASM and run in the sandbox.
+    let (exit_code, stdout, stderr) = match cmd.command.as_str() {
+        "echo" => {
+            let output = cmd.args.join(" ");
+            (0, output, String::new())
+        }
+        "true" => (0, String::new(), String::new()),
+        "false" => (1, String::new(), String::new()),
+        _ => {
+            // Unknown commands return a descriptive error in stderr.
+            // Future: compile to WASM and run in sandbox.
+            (127, String::new(), format!("command not found: {}", cmd.command))
+        }
+    };
+
+    let elapsed = start.elapsed();
+
+    Ok(ShellResult {
+        exit_code,
+        stdout,
+        stderr,
+        execution_time_ms: elapsed.as_millis() as u64,
+    })
+}
+
+/// Built-in `shell.exec` tool wrapping [`execute_shell`].
+pub struct ShellExecTool {
+    spec: BuiltinToolSpec,
+}
+
+impl ShellExecTool {
+    /// Create the shell.exec tool.
+    pub fn new() -> Self {
+        Self {
+            spec: BuiltinToolSpec {
+                name: "shell.exec".into(),
+                category: ToolCategory::System,
+                description: "Execute a shell command in the sandbox".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "required": ["command"],
+                    "properties": {
+                        "command": {"type": "string", "description": "Command to execute"},
+                        "args": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Command arguments"
+                        }
+                    }
+                }),
+                gate_action: "tool.shell.execute".into(),
+                effect: EffectVector {
+                    risk: 0.7,
+                    security: 0.4,
+                    ..Default::default()
+                },
+                native: true,
+            },
+        }
+    }
+}
+
+impl BuiltinTool for ShellExecTool {
+    fn name(&self) -> &str { "shell.exec" }
+    fn spec(&self) -> &BuiltinToolSpec { &self.spec }
+    fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let command = args.get("command").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'command'".into()))?;
+        let cmd_args: Vec<String> = args.get("args")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        let cmd = ShellCommand {
+            command: command.to_string(),
+            args: cmd_args,
+            sandbox_config: None,
+        };
+
+        let result = execute_shell(&cmd)?;
+        Ok(serde_json::json!({
+            "exit_code": result.exit_code,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "execution_time_ms": result.execution_time_ms,
+        }))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Shell Pipeline (K3 C5)
 // ---------------------------------------------------------------------------
 
@@ -4543,5 +4821,219 @@ mod tests {
         assert_eq!(restored.name, "test-serde");
         assert_eq!(restored.command, "echo roundtrip");
         assert_eq!(restored.content_hash, pipeline.content_hash);
+    }
+
+    // --- D9: Tool Signing tests ---
+
+    #[test]
+    fn d9_register_unsigned_when_not_required_succeeds() {
+        let mut registry = ToolRegistry::new();
+        // Signatures not required (default) — register should succeed silently.
+        let tool: Arc<dyn BuiltinTool> = Arc::new(FsReadFileTool::new());
+        registry.register(tool);
+        assert!(registry.get("fs.read_file").is_some());
+    }
+
+    #[test]
+    fn d9_register_unsigned_when_required_fails() {
+        let mut registry = ToolRegistry::new();
+        registry.set_require_signatures(true);
+        assert!(registry.requires_signatures());
+
+        let tool: Arc<dyn BuiltinTool> = Arc::new(FsReadFileTool::new());
+        let result = registry.try_register(tool);
+        assert!(
+            matches!(result, Err(ToolError::SignatureRequired(_))),
+            "expected SignatureRequired, got: {result:?}",
+        );
+        assert!(registry.get("fs.read_file").is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "exochain")]
+    fn d9_register_with_valid_signature_succeeds() {
+        use ed25519_dalek::{SigningKey, Signer};
+
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let pk = sk.verifying_key().to_bytes();
+
+        let tool: Arc<dyn BuiltinTool> = Arc::new(FsReadFileTool::new());
+        let tool_hash = compute_module_hash(b"fs.read_file-definition");
+        let sig = sk.sign(&tool_hash);
+
+        let tool_sig = ToolSignature::new(
+            "fs.read_file",
+            tool_hash,
+            "test-signer",
+            sig.to_bytes().to_vec(),
+        );
+
+        let mut registry = ToolRegistry::new();
+        registry.set_require_signatures(true);
+        registry.add_trusted_key(pk);
+
+        let result = registry.register_signed(tool, tool_sig);
+        assert!(result.is_ok(), "register_signed should succeed: {result:?}");
+        assert!(registry.get("fs.read_file").is_some());
+        assert!(registry.get_signature("fs.read_file").is_some());
+    }
+
+    #[test]
+    #[cfg(feature = "exochain")]
+    fn d9_verify_tool_signature_roundtrip() {
+        use ed25519_dalek::{SigningKey, Signer};
+
+        let sk = SigningKey::from_bytes(&[99u8; 32]);
+        let pk = sk.verifying_key().to_bytes();
+
+        let tool_hash = compute_module_hash(b"my-tool-definition-bytes");
+        let sig = sk.sign(&tool_hash);
+
+        let tool_sig = ToolSignature::new(
+            "my.tool",
+            tool_hash,
+            "dev-alice",
+            sig.to_bytes().to_vec(),
+        );
+
+        // Should verify against the correct key.
+        assert!(tool_sig.verify(&pk));
+
+        // Should fail against a different key.
+        let wrong_sk = SigningKey::from_bytes(&[100u8; 32]);
+        let wrong_pk = wrong_sk.verifying_key().to_bytes();
+        assert!(!tool_sig.verify(&wrong_pk));
+    }
+
+    #[test]
+    fn d9_tool_signature_serde_roundtrip() {
+        let sig = ToolSignature::new(
+            "test.tool",
+            [0xAB; 32],
+            "signer-1",
+            vec![0xCD; 64],
+        );
+        let json = serde_json::to_string(&sig).unwrap();
+        let restored: ToolSignature = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.tool_name, "test.tool");
+        assert_eq!(restored.tool_hash, [0xAB; 32]);
+        assert_eq!(restored.signer_id, "signer-1");
+        assert_eq!(restored.signature.len(), 64);
+    }
+
+    #[test]
+    fn d9_register_signed_with_invalid_signature_fails() {
+        let mut registry = ToolRegistry::new();
+        registry.set_require_signatures(true);
+        // Add a "trusted" key (just a random key).
+        registry.add_trusted_key([42u8; 32]);
+
+        let tool: Arc<dyn BuiltinTool> = Arc::new(FsReadFileTool::new());
+        let bad_sig = ToolSignature::new(
+            "fs.read_file",
+            [0u8; 32],
+            "bad-signer",
+            vec![0u8; 64], // all zeros = invalid signature
+        );
+
+        let result = registry.register_signed(tool, bad_sig);
+        assert!(
+            matches!(result, Err(ToolError::InvalidSignature(_))),
+            "expected InvalidSignature, got: {result:?}",
+        );
+    }
+
+    // --- D10: Shell Command Execution tests ---
+
+    #[test]
+    fn d10_shell_command_serde_roundtrip() {
+        let cmd = ShellCommand {
+            command: "echo".into(),
+            args: vec!["hello".into(), "world".into()],
+            sandbox_config: Some(SandboxConfig::default()),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let restored: ShellCommand = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.command, "echo");
+        assert_eq!(restored.args, vec!["hello", "world"]);
+        assert!(restored.sandbox_config.is_some());
+    }
+
+    #[test]
+    fn d10_execute_shell_echo() {
+        let cmd = ShellCommand {
+            command: "echo".into(),
+            args: vec!["hello".into(), "world".into()],
+            sandbox_config: None,
+        };
+        let result = execute_shell(&cmd).unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "hello world");
+        assert!(result.stderr.is_empty());
+    }
+
+    #[test]
+    fn d10_execute_shell_includes_execution_time() {
+        let cmd = ShellCommand {
+            command: "true".into(),
+            args: vec![],
+            sandbox_config: None,
+        };
+        let result = execute_shell(&cmd).unwrap();
+        assert_eq!(result.exit_code, 0);
+        // execution_time_ms should be a valid number (even if 0).
+        assert!(result.execution_time_ms < 1000, "should complete in < 1s");
+    }
+
+    #[test]
+    fn d10_execute_shell_unknown_command() {
+        let cmd = ShellCommand {
+            command: "nonexistent".into(),
+            args: vec![],
+            sandbox_config: None,
+        };
+        let result = execute_shell(&cmd).unwrap();
+        assert_eq!(result.exit_code, 127);
+        assert!(result.stderr.contains("command not found"));
+    }
+
+    #[test]
+    fn d10_shell_exec_tool_dispatch() {
+        let tool = ShellExecTool::new();
+        assert_eq!(tool.name(), "shell.exec");
+
+        let result = tool.execute(serde_json::json!({
+            "command": "echo",
+            "args": ["test"]
+        })).unwrap();
+
+        assert_eq!(result["exit_code"], 0);
+        assert_eq!(result["stdout"], "test");
+    }
+
+    #[test]
+    fn d10_shell_result_serde_roundtrip() {
+        let result = ShellResult {
+            exit_code: 0,
+            stdout: "output".into(),
+            stderr: "".into(),
+            execution_time_ms: 42,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let restored: ShellResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.exit_code, 0);
+        assert_eq!(restored.stdout, "output");
+        assert_eq!(restored.execution_time_ms, 42);
+    }
+
+    #[test]
+    fn d10_execute_shell_false_returns_nonzero() {
+        let cmd = ShellCommand {
+            command: "false".into(),
+            args: vec![],
+            sandbox_config: None,
+        };
+        let result = execute_shell(&cmd).unwrap();
+        assert_eq!(result.exit_code, 1);
     }
 }

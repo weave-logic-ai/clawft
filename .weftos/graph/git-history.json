@@ -1,8 +1,315 @@
 {
   "domain": "clawft-weftos",
   "source": "git-history",
-  "generated_at": "2026-03-26T23:00:14.600278+00:00",
+  "generated_at": "2026-03-27T13:55:42.304798+00:00",
   "nodes": [
+    {
+      "id": "commit:e0759d6",
+      "type": "commit",
+      "hash": "e0759d67fdf52daeb7570aaa86eec33c481ef891",
+      "author": "aepod",
+      "date": "2026-03-27T13:24:21+00:00",
+      "subject": "feat: Sprint 10 Week 5 — external codebase analysis validated",
+      "files": [
+        "docs/weftos/external-analysis-results.md"
+      ],
+      "tags": [
+        "documentation"
+      ]
+    },
+    {
+      "id": "commit:2fa8840",
+      "type": "commit",
+      "hash": "2fa8840817e9d11f2717ed0d5489c0aa8fb3ec28",
+      "author": "aepod",
+      "date": "2026-03-27T13:22:40+00:00",
+      "subject": "feat: Sprint 10 Week 5 — knowledge graph viz, deployment docs",
+      "files": [
+        "docs/weftos/CONFIGURATION.md",
+        "docs/weftos/FEATURE_GATES.md",
+        "docs/weftos/INSTALL.md",
+        "gui/package-lock.json",
+        "gui/package.json",
+        "gui/src/App.tsx",
+        "gui/src/components/NodeDetail.tsx",
+        "gui/src/types/kernel.ts",
+        "gui/src/views/KnowledgeGraph.tsx"
+      ],
+      "tags": [
+        "documentation"
+      ]
+    },
+    {
+      "id": "commit:e1a6851",
+      "type": "commit",
+      "hash": "e1a68516f420d7403c315e53d32c45a8126e98b9",
+      "author": "aepod",
+      "date": "2026-03-27T13:14:06+00:00",
+      "subject": "feat: Sprint 10 Week 4 — K8 GUI prototype, E2E tests, Docker packaging",
+      "files": [
+        ".dockerignore",
+        ".gitignore",
+        "crates/clawft-kernel/tests/e2e_integration.rs",
+        "docker-compose.yml",
+        "gui/eslint.config.js",
+        "gui/index.html",
+        "gui/package-lock.json",
+        "gui/package.json",
+        "gui/public/favicon.svg",
+        "gui/public/icons.svg",
+        "gui/src/App.css",
+        "gui/src/App.tsx",
+        "gui/src/assets/hero.png",
+        "gui/src/assets/react.svg",
+        "gui/src/assets/vite.svg",
+        "gui/src/components/FormField.tsx",
+        "gui/src/components/MetricsPanel.tsx",
+        "gui/src/components/ProcessTable.tsx",
+        "gui/src/hooks/useKernelWs.ts",
+        "gui/src/index.css",
+        "gui/src/main.tsx",
+        "gui/src/types/kernel.ts",
+        "gui/src/views/AdminForms.tsx",
+        "gui/src/views/Dashboard.tsx",
+        "gui/tsconfig.app.json",
+        "gui/tsconfig.json",
+        "gui/tsconfig.node.json",
+        "gui/vite.config.ts"
+      ],
+      "tags": [
+        "documentation",
+        "testing"
+      ]
+    },
+    {
+      "id": "commit:f4557df",
+      "type": "commit",
+      "hash": "f4557dfcc4be263abe5d6982b492b206fb2262c8",
+      "author": "aepod",
+      "date": "2026-03-27T12:48:03+00:00",
+      "subject": "feat: Sprint 10 Week 3 — config/auth services, mesh discovery, 10 tools",
+      "files": [
+        "crates/clawft-kernel/src/auth_service.rs",
+        "crates/clawft-kernel/src/config_service.rs",
+        "crates/clawft-kernel/src/lib.rs",
+        "crates/clawft-kernel/src/mesh_runtime.rs",
+        "crates/clawft-kernel/src/tools_extended.rs"
+      ],
+      "tags": [
+        "mesh-networking",
+        "security",
+        "service-framework"
+      ]
+    },
+    {
+      "id": "commit:8e943e3",
+      "type": "commit",
+      "hash": "8e943e328d00b1c97e712daa3ef92a6703984279",
+      "author": "aepod",
+      "date": "2026-03-27T03:56:02+00:00",
+      "subject": "feat: Sprint 10 Week 2 — observability wiring + mesh runtime glue",
+      "files": [
+        "crates/clawft-kernel/src/a2a.rs",
+        "crates/clawft-kernel/src/boot.rs",
+        "crates/clawft-kernel/src/lib.rs",
+        "crates/clawft-kernel/src/mesh_runtime.rs"
+      ],
+      "tags": [
+        "mesh-networking"
+      ]
+    },
+    {
+      "id": "commit:51635a2",
+      "type": "commit",
+      "hash": "51635a23201101e2ea3594dd0df2a12ff73754a8",
+      "author": "aepod",
+      "date": "2026-03-27T03:45:51+00:00",
+      "subject": "data: refresh knowledge graph — 122 commits, 182 modules, 500 edges",
+      "files": [
+        ".weftos/analysis/gap-report.json",
+        ".weftos/graph/git-history.json",
+        ".weftos/graph/module-deps.json"
+      ],
+      "tags": []
+    },
+    {
+      "id": "commit:08d10c0",
+      "type": "commit",
+      "hash": "08d10c08fc6ff9209f683020149d825b15ba2bae",
+      "author": "aepod",
+      "date": "2026-03-27T03:42:07+00:00",
+      "subject": "feat: Sprint 10 Week 1 — self-healing, persistence, tests, DEMOCRITUS",
+      "files": [
+        "crates/clawft-kernel/src/a2a.rs",
+        "crates/clawft-kernel/src/boot.rs",
+        "crates/clawft-kernel/src/causal.rs",
+        "crates/clawft-kernel/src/democritus.rs",
+        "crates/clawft-kernel/src/hnsw_service.rs",
+        "crates/clawft-kernel/src/lib.rs",
+        "crates/clawft-kernel/src/persistence.rs",
+        "crates/clawft-kernel/src/supervisor.rs"
+      ],
+      "tags": [
+        "process-mgmt",
+        "service-framework",
+        "testing"
+      ]
+    },
+    {
+      "id": "commit:52e3604",
+      "type": "commit",
+      "hash": "52e3604037bbc0ab66428f37ae790cc421e4bb2b",
+      "author": "aepod",
+      "date": "2026-03-27T03:00:58+00:00",
+      "subject": "plan: comprehensive product roadmap + Sprint 10 K8 forms-first",
+      "files": [
+        ".planning/ROADMAP.md",
+        ".planning/sparc/weftos/0.1/10-sprint-plan.md"
+      ],
+      "tags": [
+        "documentation",
+        "planning"
+      ]
+    },
+    {
+      "id": "commit:f9bce9b",
+      "type": "commit",
+      "hash": "f9bce9b9ab490a7f7a9fbe37a570b4d878c44e61",
+      "author": "aepod",
+      "date": "2026-03-27T02:53:23+00:00",
+      "subject": "plan: Sprint 10 v3 — align K8 with GUI spec, Tauri 2.0",
+      "files": [
+        ".planning/sparc/weftos/0.1/10-sprint-plan.md"
+      ],
+      "tags": [
+        "documentation",
+        "planning",
+        "testing"
+      ]
+    },
+    {
+      "id": "commit:88f03cf",
+      "type": "commit",
+      "hash": "88f03cf8ef5b85c2bb0772ea854da771311c535a",
+      "author": "aepod",
+      "date": "2026-03-27T02:50:54+00:00",
+      "subject": "plan: Sprint 10 v2 — unified kernel + assessor + web + DEMOCRITUS",
+      "files": [
+        ".planning/sparc/weftos/0.1/10-sprint-plan.md"
+      ],
+      "tags": [
+        "documentation",
+        "planning"
+      ]
+    },
+    {
+      "id": "commit:3923aee",
+      "type": "commit",
+      "hash": "3923aee4485d6900fee8e2bcf58cf9855ab335dc",
+      "author": "aepod",
+      "date": "2026-03-27T02:20:43+00:00",
+      "subject": "plan: Sprint 10 — operational hardening + K8 GUI layer",
+      "files": [
+        ".planning/sparc/weftos/0.1/10-sprint-plan.md"
+      ],
+      "tags": [
+        "documentation",
+        "planning"
+      ]
+    },
+    {
+      "id": "commit:646819f",
+      "type": "commit",
+      "hash": "646819f7d1c38fcf8559b27feca78943cf01c7c8",
+      "author": "aepod",
+      "date": "2026-03-27T01:40:29+00:00",
+      "subject": "feat: spectral analysis, community detection, and predictive change analysis",
+      "files": [
+        ".weftos/weaver_todo.md",
+        "crates/clawft-kernel/src/causal.rs",
+        "crates/clawft-kernel/src/lib.rs"
+      ],
+      "tags": [
+        "documentation",
+        "ecc",
+        "testing"
+      ]
+    },
+    {
+      "id": "commit:2e04c9a",
+      "type": "commit",
+      "hash": "2e04c9adea99cc9cf083378d4bea74d770f2e915",
+      "author": "aepod",
+      "date": "2026-03-27T01:16:03+00:00",
+      "subject": "feat: ONNX embeddings + decision feedback loop fix + graph refresh",
+      "files": [
+        ".weftos/analysis/gap-report.json",
+        ".weftos/graph/decisions.json",
+        ".weftos/graph/git-history.json",
+        ".weftos/graph/module-deps.json",
+        ".weftos/weaver_todo.md",
+        "Cargo.lock",
+        "Cargo.toml",
+        "crates/clawft-kernel/Cargo.toml",
+        "crates/clawft-kernel/src/embedding.rs",
+        "crates/clawft-kernel/src/embedding_onnx.rs",
+        "scripts/download-model.sh",
+        "scripts/weaver/_decisions_data.py"
+      ],
+      "tags": [
+        "documentation",
+        "ecc"
+      ]
+    },
+    {
+      "id": "commit:ebf9f9e",
+      "type": "commit",
+      "hash": "ebf9f9e122445b9881530534fe40a552d8555cf1",
+      "author": "aepod",
+      "date": "2026-03-27T00:23:06+00:00",
+      "subject": "docs: VISION.md — the complete arc from agency to cognitive OS",
+      "files": [
+        "docs/weftos/VISION.md"
+      ],
+      "tags": [
+        "documentation",
+        "ecc"
+      ]
+    },
+    {
+      "id": "commit:769ee86",
+      "type": "commit",
+      "hash": "769ee8659db4d3776bc7fb427fe5530fe28738c8",
+      "author": "aepod",
+      "date": "2026-03-26T23:59:00+00:00",
+      "subject": "feat: session log ingestion — 29,029 nodes from 88 conversation files",
+      "files": [
+        ".weftos/graph/session-logs.json",
+        "scripts/weaver/ingest-sessions.py",
+        "scripts/weaver/ingest-sessions.sh"
+      ],
+      "tags": [
+        "ecc"
+      ]
+    },
+    {
+      "id": "commit:da5cec4",
+      "type": "commit",
+      "hash": "da5cec4b8331add636705984562650c355156c1f",
+      "author": "aepod",
+      "date": "2026-03-26T23:06:22+00:00",
+      "subject": "docs: Weaver v2 analysis — post-sprint reassessment",
+      "files": [
+        ".weftos/graph/decisions.json",
+        ".weftos/graph/git-history.json",
+        ".weftos/graph/module-deps.json",
+        "docs/weftos/weaver-analysis-v2.md"
+      ],
+      "tags": [
+        "documentation",
+        "ecc"
+      ]
+    },
     {
       "id": "commit:2a2bf9c",
       "type": "commit",
@@ -4711,78 +5018,168 @@
     },
     {
       "from": "commit:2a2bf9c",
-      "to": "commit:d866bf5",
+      "to": "commit:da5cec4",
+      "type": "Follows",
+      "weight": 1.0
+    },
+    {
+      "from": "commit:da5cec4",
+      "to": "commit:769ee86",
+      "type": "Follows",
+      "weight": 1.0
+    },
+    {
+      "from": "commit:769ee86",
+      "to": "commit:ebf9f9e",
+      "type": "Follows",
+      "weight": 1.0
+    },
+    {
+      "from": "commit:ebf9f9e",
+      "to": "commit:2e04c9a",
+      "type": "Follows",
+      "weight": 1.0
+    },
+    {
+      "from": "commit:2e04c9a",
+      "to": "commit:646819f",
+      "type": "Follows",
+      "weight": 1.0
+    },
+    {
+      "from": "commit:646819f",
+      "to": "commit:3923aee",
+      "type": "Follows",
+      "weight": 1.0
+    },
+    {
+      "from": "commit:3923aee",
+      "to": "commit:88f03cf",
+      "type": "Follows",
+      "weight": 1.0
+    },
+    {
+      "from": "commit:88f03cf",
+      "to": "commit:f9bce9b",
+      "type": "Follows",
+      "weight": 1.0
+    },
+    {
+      "from": "commit:f9bce9b",
+      "to": "commit:52e3604",
+      "type": "Follows",
+      "weight": 1.0
+    },
+    {
+      "from": "commit:52e3604",
+      "to": "commit:08d10c0",
+      "type": "Follows",
+      "weight": 1.0
+    },
+    {
+      "from": "commit:08d10c0",
+      "to": "commit:51635a2",
+      "type": "Follows",
+      "weight": 1.0
+    },
+    {
+      "from": "commit:51635a2",
+      "to": "commit:8e943e3",
+      "type": "Follows",
+      "weight": 1.0
+    },
+    {
+      "from": "commit:8e943e3",
+      "to": "commit:f4557df",
+      "type": "Follows",
+      "weight": 1.0
+    },
+    {
+      "from": "commit:f4557df",
+      "to": "commit:e1a6851",
+      "type": "Follows",
+      "weight": 1.0
+    },
+    {
+      "from": "commit:e1a6851",
+      "to": "commit:2fa8840",
+      "type": "Follows",
+      "weight": 1.0
+    },
+    {
+      "from": "commit:2fa8840",
+      "to": "commit:e0759d6",
+      "type": "Follows",
+      "weight": 1.0
+    },
+    {
+      "from": "commit:2fa8840",
+      "to": "commit:e1a6851",
       "type": "Enables",
       "weight": 0.7
     },
     {
-      "from": "commit:2a2bf9c",
-      "to": "commit:e6d2c0c",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:e6d2c0c",
-      "to": "commit:506e7be",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:506e7be",
+      "from": "commit:e1a6851",
       "to": "commit:6441d9f",
       "type": "Enables",
       "weight": 0.7
     },
     {
       "from": "commit:6441d9f",
+      "to": "commit:67bdd30",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:67bdd30",
+      "to": "commit:69c6112",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:69c6112",
+      "to": "commit:0fb580a",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:f4557df",
       "to": "commit:980be90",
       "type": "Enables",
       "weight": 0.7
     },
     {
-      "from": "commit:2a2bf9c",
-      "to": "commit:7c66aa3",
+      "from": "commit:f4557df",
+      "to": "commit:8e943e3",
       "type": "Enables",
       "weight": 0.7
     },
     {
-      "from": "commit:2a2bf9c",
-      "to": "commit:de6a0d2",
+      "from": "commit:8e943e3",
+      "to": "commit:08d10c0",
       "type": "Enables",
       "weight": 0.7
     },
     {
-      "from": "commit:2a2bf9c",
-      "to": "commit:abb30b5",
+      "from": "commit:08d10c0",
+      "to": "commit:646819f",
       "type": "Enables",
       "weight": 0.7
     },
     {
-      "from": "commit:e6d2c0c",
+      "from": "commit:646819f",
       "to": "commit:656a7e7",
       "type": "Enables",
       "weight": 0.7
     },
     {
       "from": "commit:656a7e7",
-      "to": "commit:506e7be",
+      "to": "commit:6441d9f",
       "type": "Enables",
       "weight": 0.7
     },
     {
       "from": "commit:6441d9f",
-      "to": "commit:355e0e7",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:355e0e7",
-      "to": "commit:9700f09",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:656a7e7",
       "to": "commit:980be90",
       "type": "Enables",
       "weight": 0.7
@@ -4790,42 +5187,6 @@
     {
       "from": "commit:980be90",
       "to": "commit:de6a0d2",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:de6a0d2",
-      "to": "commit:b724507",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:b724507",
-      "to": "commit:1de2fdc",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:1de2fdc",
-      "to": "commit:1827186",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:1827186",
-      "to": "commit:4735921",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:4735921",
-      "to": "commit:9a79dfb",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:656a7e7",
-      "to": "commit:6441d9f",
       "type": "Enables",
       "weight": 0.7
     },
@@ -4856,6 +5217,12 @@
     {
       "from": "commit:c6b8bb1",
       "to": "commit:1827186",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:1827186",
+      "to": "commit:4735921",
       "type": "Enables",
       "weight": 0.7
     },
@@ -4920,44 +5287,68 @@
       "weight": 0.7
     },
     {
-      "from": "commit:6441d9f",
-      "to": "commit:67bdd30",
+      "from": "commit:08d10c0",
+      "to": "commit:de6a0d2",
       "type": "Enables",
       "weight": 0.7
     },
     {
-      "from": "commit:67bdd30",
-      "to": "commit:69c6112",
+      "from": "commit:de6a0d2",
+      "to": "commit:624edcf",
       "type": "Enables",
       "weight": 0.7
     },
     {
-      "from": "commit:69c6112",
-      "to": "commit:0fb580a",
+      "from": "commit:624edcf",
+      "to": "commit:2a1a877",
       "type": "Enables",
       "weight": 0.7
     },
     {
-      "from": "commit:6441d9f",
-      "to": "commit:769207e",
+      "from": "commit:f538167",
+      "to": "commit:6124391",
       "type": "Enables",
       "weight": 0.7
     },
     {
-      "from": "commit:6441d9f",
-      "to": "commit:d866bf5",
+      "from": "commit:6124391",
+      "to": "commit:c6b8bb1",
       "type": "Enables",
       "weight": 0.7
     },
     {
-      "from": "commit:d866bf5",
-      "to": "commit:12ab016",
+      "from": "commit:c6b8bb1",
+      "to": "commit:1de2fdc",
       "type": "Enables",
       "weight": 0.7
     },
     {
-      "from": "commit:6441d9f",
-      "to": "commit:9700f09",
+      "from": "commit:1de2fdc",
+      "to": "commit:327053d",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:327053d",
+      "to": "commit:1827186",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:1827186",
+      "to": "commit:ef242ea",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:ef242ea",
+      "to": "commit:792a769",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:08d10c0",
+      "to": "commit:6441d9f",
       "type": "Enables",
       "weight": 0.7
     },
@@ -5016,97 +5407,43 @@
       "weight": 0.7
     },
     {
-      "from": "commit:327053d",
-      "to": "commit:1827186",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
       "from": "commit:ef242ea",
       "to": "commit:d7925c9",
       "type": "Enables",
       "weight": 0.7
     },
     {
-      "from": "commit:6441d9f",
-      "to": "commit:de6a0d2",
+      "from": "commit:51635a2",
+      "to": "commit:2e04c9a",
       "type": "Enables",
       "weight": 0.7
     },
     {
-      "from": "commit:de6a0d2",
-      "to": "commit:8331fad",
+      "from": "commit:2e04c9a",
+      "to": "commit:57f6a9e",
       "type": "Enables",
       "weight": 0.7
     },
     {
-      "from": "commit:8331fad",
+      "from": "commit:2e04c9a",
+      "to": "commit:da5cec4",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:da5cec4",
+      "to": "commit:9700f09",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:646819f",
       "to": "commit:b724507",
       "type": "Enables",
       "weight": 0.7
     },
     {
-      "from": "commit:d19fa65",
-      "to": "commit:1827186",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:de6a0d2",
-      "to": "commit:2d48046",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:2d48046",
-      "to": "commit:ef242ea",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:ef242ea",
-      "to": "commit:ce68a33",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:de6a0d2",
-      "to": "commit:a21ece8",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:a21ece8",
-      "to": "commit:9a1839f",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:9a1839f",
-      "to": "commit:d19fa65",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:d19fa65",
-      "to": "commit:ef242ea",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:ef242ea",
-      "to": "commit:aba070c",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:980be90",
-      "to": "commit:2a1a877",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:2a1a877",
+      "from": "commit:08d10c0",
       "to": "commit:6124391",
       "type": "Enables",
       "weight": 0.7
@@ -5118,26 +5455,8 @@
       "weight": 0.7
     },
     {
-      "from": "commit:c6b8bb1",
-      "to": "commit:1de2fdc",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:1827186",
-      "to": "commit:9a79dfb",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
       "from": "commit:980be90",
       "to": "commit:6124391",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:6124391",
-      "to": "commit:c6b8bb1",
       "type": "Enables",
       "weight": 0.7
     },
@@ -5154,44 +5473,86 @@
       "weight": 0.7
     },
     {
-      "from": "commit:1827186",
-      "to": "commit:ef242ea",
+      "from": "commit:1de2fdc",
+      "to": "commit:1827186",
       "type": "Enables",
       "weight": 0.7
     },
     {
-      "from": "commit:2a1a877",
-      "to": "commit:5b27d31",
+      "from": "commit:52e3604",
+      "to": "commit:f9bce9b",
       "type": "Enables",
       "weight": 0.7
     },
     {
-      "from": "commit:5b27d31",
-      "to": "commit:f538167",
+      "from": "commit:f9bce9b",
+      "to": "commit:88f03cf",
       "type": "Enables",
       "weight": 0.7
     },
     {
-      "from": "commit:b724507",
-      "to": "commit:ef242ea",
+      "from": "commit:88f03cf",
+      "to": "commit:3923aee",
       "type": "Enables",
       "weight": 0.7
     },
     {
-      "from": "commit:ef242ea",
-      "to": "commit:31ddb2d",
+      "from": "commit:646819f",
+      "to": "commit:2e04c9a",
       "type": "Enables",
       "weight": 0.7
     },
     {
-      "from": "commit:ca5b11a",
-      "to": "commit:b724507",
+      "from": "commit:2e04c9a",
+      "to": "commit:e6d2c0c",
       "type": "Enables",
       "weight": 0.7
     },
     {
-      "from": "commit:b724507",
-      "to": "commit:07ffbd9",
+      "from": "commit:e6d2c0c",
+      "to": "commit:656a7e7",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:656a7e7",
+      "to": "commit:506e7be",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:506e7be",
+      "to": "commit:6441d9f",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:6441d9f",
+      "to": "commit:355e0e7",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:355e0e7",
+      "to": "commit:9700f09",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:da5cec4",
+      "to": "commit:6441d9f",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:6441d9f",
+      "to": "commit:9700f09",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:2e04c9a",
+      "to": "commit:7c66aa3",
       "type": "Enables",
       "weight": 0.7
     },
@@ -5222,6 +5583,12 @@
     {
       "from": "commit:7d74ddd",
       "to": "commit:d19fa65",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:d19fa65",
+      "to": "commit:1827186",
       "type": "Enables",
       "weight": 0.7
     },
@@ -5342,6 +5709,222 @@
     {
       "from": "commit:9d152b5",
       "to": "commit:0a4108c",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:2e04c9a",
+      "to": "commit:656a7e7",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:656a7e7",
+      "to": "commit:980be90",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:de6a0d2",
+      "to": "commit:b724507",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:b724507",
+      "to": "commit:1de2fdc",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:4735921",
+      "to": "commit:9a79dfb",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:2e04c9a",
+      "to": "commit:6441d9f",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:2e04c9a",
+      "to": "commit:9700f09",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:2a2bf9c",
+      "to": "commit:d866bf5",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:2a2bf9c",
+      "to": "commit:e6d2c0c",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:e6d2c0c",
+      "to": "commit:506e7be",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:2a2bf9c",
+      "to": "commit:7c66aa3",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:2a2bf9c",
+      "to": "commit:de6a0d2",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:2a2bf9c",
+      "to": "commit:abb30b5",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:6441d9f",
+      "to": "commit:769207e",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:6441d9f",
+      "to": "commit:d866bf5",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:d866bf5",
+      "to": "commit:12ab016",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:6441d9f",
+      "to": "commit:de6a0d2",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:de6a0d2",
+      "to": "commit:8331fad",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:8331fad",
+      "to": "commit:b724507",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:de6a0d2",
+      "to": "commit:2d48046",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:2d48046",
+      "to": "commit:ef242ea",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:ef242ea",
+      "to": "commit:ce68a33",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:de6a0d2",
+      "to": "commit:a21ece8",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:a21ece8",
+      "to": "commit:9a1839f",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:9a1839f",
+      "to": "commit:d19fa65",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:d19fa65",
+      "to": "commit:ef242ea",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:ef242ea",
+      "to": "commit:aba070c",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:980be90",
+      "to": "commit:2a1a877",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:2a1a877",
+      "to": "commit:6124391",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:1827186",
+      "to": "commit:9a79dfb",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:2a1a877",
+      "to": "commit:5b27d31",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:5b27d31",
+      "to": "commit:f538167",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:b724507",
+      "to": "commit:ef242ea",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:ef242ea",
+      "to": "commit:31ddb2d",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:ca5b11a",
+      "to": "commit:b724507",
+      "type": "Enables",
+      "weight": 0.7
+    },
+    {
+      "from": "commit:b724507",
+      "to": "commit:07ffbd9",
       "type": "Enables",
       "weight": 0.7
     },
@@ -5540,36 +6123,6 @@
     {
       "from": "commit:6f787a7",
       "to": "commit:ceef8b7",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:de6a0d2",
-      "to": "commit:624edcf",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:624edcf",
-      "to": "commit:2a1a877",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:f538167",
-      "to": "commit:6124391",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:1de2fdc",
-      "to": "commit:327053d",
-      "type": "Enables",
-      "weight": 0.7
-    },
-    {
-      "from": "commit:ef242ea",
-      "to": "commit:792a769",
       "type": "Enables",
       "weight": 0.7
     },
@@ -8184,8 +8737,206 @@
       "weight": 0.5
     },
     {
+      "from": "commit:656a7e7",
+      "to": "commit:da5cec4",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
       "from": "commit:e6d2c0c",
       "to": "commit:2a2bf9c",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:e6d2c0c",
+      "to": "commit:da5cec4",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:e6d2c0c",
+      "to": "commit:ebf9f9e",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:2a2bf9c",
+      "to": "commit:da5cec4",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:2a2bf9c",
+      "to": "commit:ebf9f9e",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:2a2bf9c",
+      "to": "commit:2e04c9a",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:da5cec4",
+      "to": "commit:ebf9f9e",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:da5cec4",
+      "to": "commit:2e04c9a",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:da5cec4",
+      "to": "commit:646819f",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:ebf9f9e",
+      "to": "commit:2e04c9a",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:ebf9f9e",
+      "to": "commit:646819f",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:ebf9f9e",
+      "to": "commit:3923aee",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:2e04c9a",
+      "to": "commit:646819f",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:2e04c9a",
+      "to": "commit:3923aee",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:2e04c9a",
+      "to": "commit:88f03cf",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:646819f",
+      "to": "commit:3923aee",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:646819f",
+      "to": "commit:88f03cf",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:646819f",
+      "to": "commit:f9bce9b",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:3923aee",
+      "to": "commit:88f03cf",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:3923aee",
+      "to": "commit:f9bce9b",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:3923aee",
+      "to": "commit:52e3604",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:88f03cf",
+      "to": "commit:f9bce9b",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:88f03cf",
+      "to": "commit:52e3604",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:88f03cf",
+      "to": "commit:e1a6851",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:f9bce9b",
+      "to": "commit:52e3604",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:f9bce9b",
+      "to": "commit:e1a6851",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:f9bce9b",
+      "to": "commit:2fa8840",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:52e3604",
+      "to": "commit:e1a6851",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:52e3604",
+      "to": "commit:2fa8840",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:52e3604",
+      "to": "commit:e0759d6",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:e1a6851",
+      "to": "commit:2fa8840",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:e1a6851",
+      "to": "commit:e0759d6",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:2fa8840",
+      "to": "commit:e0759d6",
       "type": "Correlates",
       "weight": 0.5
     },
@@ -8418,8 +9169,26 @@
       "weight": 0.5
     },
     {
+      "from": "commit:f7be7a5",
+      "to": "commit:08d10c0",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
       "from": "commit:980be90",
       "to": "commit:6441d9f",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:980be90",
+      "to": "commit:08d10c0",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:6441d9f",
+      "to": "commit:08d10c0",
       "type": "Correlates",
       "weight": 0.5
     },
@@ -8988,6 +9757,24 @@
       "weight": 0.5
     },
     {
+      "from": "commit:d19fa65",
+      "to": "commit:f4557df",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:de6a0d2",
+      "to": "commit:f4557df",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:980be90",
+      "to": "commit:f4557df",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
       "from": "commit:2df5953",
       "to": "commit:ecd759c",
       "type": "Correlates",
@@ -9162,6 +9949,60 @@
       "weight": 0.5
     },
     {
+      "from": "commit:980be90",
+      "to": "commit:646819f",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:ca5b11a",
+      "to": "commit:646819f",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:ca5b11a",
+      "to": "commit:f9bce9b",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:6441d9f",
+      "to": "commit:646819f",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:6441d9f",
+      "to": "commit:f9bce9b",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:646819f",
+      "to": "commit:08d10c0",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:646819f",
+      "to": "commit:e1a6851",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:f9bce9b",
+      "to": "commit:08d10c0",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:08d10c0",
+      "to": "commit:e1a6851",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
       "from": "commit:69c6112",
       "to": "commit:24dcce2",
       "type": "Correlates",
@@ -9300,8 +10141,44 @@
       "weight": 0.5
     },
     {
+      "from": "commit:12ab016",
+      "to": "commit:3923aee",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
       "from": "commit:38739bb",
       "to": "commit:769207e",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:38739bb",
+      "to": "commit:3923aee",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:38739bb",
+      "to": "commit:88f03cf",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:769207e",
+      "to": "commit:3923aee",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:769207e",
+      "to": "commit:88f03cf",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:769207e",
+      "to": "commit:f9bce9b",
       "type": "Correlates",
       "weight": 0.5
     },
@@ -9786,6 +10663,24 @@
       "weight": 0.5
     },
     {
+      "from": "commit:de6a0d2",
+      "to": "commit:08d10c0",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:6441d9f",
+      "to": "commit:f4557df",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:08d10c0",
+      "to": "commit:f4557df",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
       "from": "commit:412c892",
       "to": "commit:1827186",
       "type": "Correlates",
@@ -10152,8 +11047,38 @@
       "weight": 0.5
     },
     {
+      "from": "commit:de6a0d2",
+      "to": "commit:8e943e3",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
       "from": "commit:12ab016",
       "to": "commit:980be90",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:12ab016",
+      "to": "commit:8e943e3",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:12ab016",
+      "to": "commit:f4557df",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:980be90",
+      "to": "commit:8e943e3",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:8e943e3",
+      "to": "commit:f4557df",
       "type": "Correlates",
       "weight": 0.5
     },
@@ -10348,31 +11273,67 @@
       "to": "commit:6441d9f",
       "type": "Correlates",
       "weight": 0.5
+    },
+    {
+      "from": "commit:e6d2c0c",
+      "to": "commit:769ee86",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:2a2bf9c",
+      "to": "commit:769ee86",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:da5cec4",
+      "to": "commit:769ee86",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:769ee86",
+      "to": "commit:ebf9f9e",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:769ee86",
+      "to": "commit:2e04c9a",
+      "type": "Correlates",
+      "weight": 0.5
+    },
+    {
+      "from": "commit:769ee86",
+      "to": "commit:646819f",
+      "type": "Correlates",
+      "weight": 0.5
     }
   ],
   "stats": {
-    "total_commits": 112,
-    "total_nodes": 112,
-    "total_edges": 1051,
+    "total_commits": 128,
+    "total_nodes": 128,
+    "total_edges": 1160,
     "date_range": {
       "from": "2026-02-17T06:48:38-05:00",
-      "to": "2026-03-26T22:53:34+00:00"
+      "to": "2026-03-27T13:24:21+00:00"
     },
     "tags": {
-      "documentation": 85,
+      "documentation": 96,
+      "ecc": 31,
       "wasm-sandbox": 29,
-      "ecc": 26,
-      "service-framework": 21,
+      "service-framework": 23,
       "exochain": 20,
-      "process-mgmt": 18,
-      "testing": 15,
-      "security": 15,
+      "testing": 19,
+      "process-mgmt": 19,
+      "security": 16,
+      "planning": 16,
       "container-runtime": 14,
       "agents": 12,
       "governance": 12,
-      "planning": 12,
-      "app-lifecycle": 10,
-      "mesh-networking": 9
+      "mesh-networking": 11,
+      "app-lifecycle": 10
     }
   }
 }

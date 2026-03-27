@@ -34,6 +34,11 @@ use crate::topic::TopicRouter;
 #[cfg(feature = "exochain")]
 use crate::chain::ChainManager;
 
+#[cfg(feature = "mesh")]
+use crate::mesh_ipc::MeshIpcEnvelope;
+#[cfg(feature = "mesh")]
+use crate::mesh_runtime::MeshRuntime;
+
 /// Default inbox channel capacity per agent.
 const DEFAULT_INBOX_CAPACITY: usize = 1024;
 
@@ -87,6 +92,14 @@ pub struct A2ARouter {
     /// in `Arc`). `with_gate()` and `set_gate()` both target this field.
     #[cfg(feature = "exochain")]
     gate: std::sync::OnceLock<Arc<dyn crate::gate::GateBackend>>,
+
+    /// Dead letter queue for undeliverable messages (os-patterns).
+    #[cfg(feature = "os-patterns")]
+    dead_letter_queue: std::sync::OnceLock<Arc<crate::dead_letter::DeadLetterQueue>>,
+
+    /// Optional mesh runtime for cross-node message delivery (K6).
+    #[cfg(feature = "mesh")]
+    mesh_runtime: std::sync::OnceLock<Arc<MeshRuntime>>,
 }
 
 impl A2ARouter {
@@ -105,6 +118,10 @@ impl A2ARouter {
             pending_requests: DashMap::new(),
             #[cfg(feature = "exochain")]
             gate: std::sync::OnceLock::new(),
+            #[cfg(feature = "os-patterns")]
+            dead_letter_queue: std::sync::OnceLock::new(),
+            #[cfg(feature = "mesh")]
+            mesh_runtime: std::sync::OnceLock::new(),
         }
     }
 
@@ -133,6 +150,36 @@ impl A2ARouter {
     #[cfg(feature = "exochain")]
     pub fn set_gate(&self, gate: Arc<dyn crate::gate::GateBackend>) {
         let _ = self.gate.set(gate);
+    }
+
+    /// Set the dead letter queue after construction (for boot wiring).
+    ///
+    /// Like `set_gate()`, uses `OnceLock` for interior mutability so
+    /// the DLQ can be attached after the router is wrapped in `Arc`.
+    #[cfg(feature = "os-patterns")]
+    pub fn set_dead_letter_queue(&self, dlq: Arc<crate::dead_letter::DeadLetterQueue>) {
+        let _ = self.dead_letter_queue.set(dlq);
+    }
+
+    /// Get the dead letter queue (if configured).
+    #[cfg(feature = "os-patterns")]
+    pub fn dead_letter_queue(&self) -> Option<&Arc<crate::dead_letter::DeadLetterQueue>> {
+        self.dead_letter_queue.get()
+    }
+
+    /// Attach the mesh runtime for cross-node message delivery (K6).
+    ///
+    /// Uses `OnceLock` so the runtime can be attached after the router
+    /// is already wrapped in `Arc`.
+    #[cfg(feature = "mesh")]
+    pub fn set_mesh_runtime(&self, runtime: Arc<MeshRuntime>) {
+        let _ = self.mesh_runtime.set(runtime);
+    }
+
+    /// Get the mesh runtime (if configured).
+    #[cfg(feature = "mesh")]
+    pub fn mesh_runtime(&self) -> Option<&Arc<MeshRuntime>> {
+        self.mesh_runtime.get()
     }
 
     /// Get the service registry (if configured).
@@ -281,40 +328,90 @@ impl A2ARouter {
                 Ok(())
             }
             MessageTarget::RemoteNode { node_id, .. } => {
-                debug!(from, node_id, "remote node routing not yet implemented (K6)");
-                Err(KernelError::Mesh(format!(
-                    "remote routing to node '{node_id}' not yet implemented"
-                )))
+                #[cfg(feature = "mesh")]
+                {
+                    if let Some(runtime) = self.mesh_runtime.get() {
+                        let node_id = node_id.clone();
+                        debug!(from, %node_id, "routing message to remote node via mesh");
+                        let envelope = MeshIpcEnvelope::new(
+                            runtime.node_id().to_string(),
+                            node_id.clone(),
+                            msg,
+                        );
+                        runtime
+                            .send_to_peer(&node_id, envelope)
+                            .await
+                            .map_err(|e| KernelError::Mesh(format!(
+                                "failed to send to remote node '{node_id}': {e}"
+                            )))
+                    } else {
+                        debug!(from, %node_id, "remote node routing: no mesh runtime attached");
+                        Err(KernelError::Mesh(format!(
+                            "remote routing to node '{node_id}' not yet implemented"
+                        )))
+                    }
+                }
+                #[cfg(not(feature = "mesh"))]
+                {
+                    debug!(from, %node_id, "remote node routing not available (mesh feature disabled)");
+                    Err(KernelError::Mesh(format!(
+                        "remote routing to node '{node_id}' not yet implemented"
+                    )))
+                }
             }
         }
     }
 
     /// Deliver a message to a specific PID's inbox.
     ///
-    /// If the inbox does not exist or is full, the message is dropped
-    /// with a warning.
+    /// If the inbox does not exist or is full, the message is routed to
+    /// the dead letter queue (when os-patterns is enabled) and an error
+    /// is returned.
     async fn deliver_to_inbox(&self, pid: Pid, msg: KernelMessage) -> KernelResult<()> {
         // Clone the sender so we release the DashMap read lock before
         // any potential remove() call (which needs a write lock on the
         // same shard — holding both would deadlock).
-        let tx = self
-            .inboxes
-            .get(&pid)
-            .ok_or(KernelError::Ipc(format!("no inbox for PID {pid}")))?
-            .clone();
+        let tx = match self.inboxes.get(&pid) {
+            Some(tx) => tx.clone(),
+            None => {
+                warn!(pid, "no inbox for PID, dead-lettering");
+                #[cfg(feature = "os-patterns")]
+                if let Some(dlq) = self.dead_letter_queue.get() {
+                    dlq.intake(
+                        msg,
+                        crate::dead_letter::DeadLetterReason::TargetNotFound { pid },
+                    );
+                }
+                return Err(KernelError::Ipc(format!("no inbox for PID {pid}")));
+            }
+        };
 
         match tx.try_send(msg) {
             Ok(()) => {
                 debug!(pid, "message delivered to inbox");
                 Ok(())
             }
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                warn!(pid, "inbox full, message dropped");
+            Err(mpsc::error::TrySendError::Full(rejected_msg)) => {
+                warn!(pid, "inbox full, dead-lettering");
+                #[cfg(feature = "os-patterns")]
+                if let Some(dlq) = self.dead_letter_queue.get() {
+                    dlq.intake(
+                        rejected_msg,
+                        crate::dead_letter::DeadLetterReason::InboxFull { pid },
+                    );
+                }
                 Err(KernelError::Ipc(format!("inbox full for PID {pid}")))
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                warn!(pid, "inbox closed, removing");
+            Err(mpsc::error::TrySendError::Closed(rejected_msg)) => {
+                warn!(pid, "inbox closed, removing and dead-lettering");
                 self.inboxes.remove(&pid);
+                #[cfg(feature = "os-patterns")]
+                if let Some(dlq) = self.dead_letter_queue.get() {
+                    dlq.intake(
+                        rejected_msg,
+                        crate::dead_letter::DeadLetterReason::AgentExited { pid },
+                    );
+                }
                 Err(KernelError::Ipc(format!("inbox closed for PID {pid}")))
             }
         }
@@ -452,11 +549,11 @@ impl A2ARouter {
     /// request, the response is delivered to the waiting future and
     /// `true` is returned. Otherwise returns `false`.
     pub fn try_complete_request(&self, msg: KernelMessage) -> bool {
-        if let Some(ref corr_id) = msg.correlation_id {
-            if let Some((_, pending)) = self.pending_requests.remove(corr_id) {
-                let _ = pending.response_tx.send(msg);
-                return true;
-            }
+        if let Some(ref corr_id) = msg.correlation_id
+            && let Some((_, pending)) = self.pending_requests.remove(corr_id)
+        {
+            let _ = pending.response_tx.send(msg);
+            return true;
         }
         false
     }
@@ -1448,5 +1545,511 @@ mod tests {
         let msg = KernelMessage::text(pids[0], MessageTarget::Process(pids[1]), "deferred");
         router.send(msg).await.unwrap(); // should succeed (defer = deliver)
         assert!(receivers[1].try_recv().is_ok());
+    }
+
+    // ── W5: Test hardening — additional coverage ─────────────────
+
+    #[tokio::test]
+    async fn multiple_messages_queued_in_order() {
+        let (router, pids, mut receivers) = setup_router(2);
+
+        for i in 0..5 {
+            let msg = KernelMessage::text(
+                pids[0],
+                MessageTarget::Process(pids[1]),
+                &format!("msg-{i}"),
+            );
+            router.send(msg).await.unwrap();
+        }
+
+        // Messages should arrive in FIFO order
+        for i in 0..5 {
+            let received = receivers[1].try_recv().unwrap();
+            let expected = format!("msg-{i}");
+            assert!(
+                matches!(received.payload, MessagePayload::Text(ref t) if t == &expected),
+                "expected '{expected}' but got {:?}",
+                received.payload,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_stops_topic_delivery() {
+        let (router, pids, mut receivers) = setup_router(3);
+
+        router.topic_router().subscribe(pids[1], "events");
+        router.topic_router().subscribe(pids[2], "events");
+
+        // Unsubscribe pids[1]
+        router.topic_router().unsubscribe(pids[1], "events");
+
+        let msg = KernelMessage::text(
+            pids[0],
+            MessageTarget::Topic("events".into()),
+            "after-unsub",
+        );
+        router.send(msg).await.unwrap();
+
+        // pids[1] should NOT receive (unsubscribed)
+        assert!(receivers[1].try_recv().is_err(), "unsubscribed agent should not receive");
+
+        // pids[2] should still receive
+        let received = receivers[2].try_recv().unwrap();
+        assert!(matches!(
+            received.payload,
+            MessagePayload::Text(ref t) if t == "after-unsub"
+        ));
+    }
+
+    #[tokio::test]
+    async fn publish_to_empty_topic_succeeds() {
+        let (router, pids, _receivers) = setup_router(2);
+
+        // Publish to a topic with no subscribers — should succeed with no error
+        let msg = KernelMessage::text(
+            pids[0],
+            MessageTarget::Topic("empty-topic".into()),
+            "nobody-listening",
+        );
+        let result = router.send(msg).await;
+        assert!(result.is_ok(), "publish to empty topic should succeed");
+    }
+
+    #[tokio::test]
+    async fn broadcast_with_zero_other_agents() {
+        let (router, pids, mut receivers) = setup_router(1);
+
+        let msg = KernelMessage::text(pids[0], MessageTarget::Broadcast, "alone");
+        let result = router.send(msg).await;
+        assert!(result.is_ok(), "broadcast with only sender should succeed");
+
+        // Sender should not receive their own broadcast
+        assert!(receivers[0].try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn ipc_scope_restricted_allows_listed_pids() {
+        let table = Arc::new(ProcessTable::new(64));
+
+        use crate::capability::IpcScope;
+        // Create target first so we know its PID for the restricted list
+        let target_entry = ProcessEntry {
+            pid: 0,
+            agent_id: "target".to_owned(),
+            state: ProcessState::Running,
+            capabilities: AgentCapabilities::default(),
+            resource_usage: ResourceUsage::default(),
+            cancel_token: CancellationToken::new(),
+            parent_pid: None,
+        };
+        let target_pid = table.insert(target_entry).unwrap();
+
+        // Create sender with restricted IPC scope that includes the target
+        let sender_entry = ProcessEntry {
+            pid: 0,
+            agent_id: "restricted-sender".to_owned(),
+            state: ProcessState::Running,
+            capabilities: AgentCapabilities {
+                ipc_scope: IpcScope::Restricted(vec![target_pid]),
+                ..Default::default()
+            },
+            resource_usage: ResourceUsage::default(),
+            cancel_token: CancellationToken::new(),
+            parent_pid: None,
+        };
+        let sender_pid = table.insert(sender_entry).unwrap();
+
+        let checker = Arc::new(CapabilityChecker::new(table.clone()));
+        let topic_router = Arc::new(TopicRouter::new(table.clone()));
+        let router = A2ARouter::new(table, checker, topic_router);
+        let _rx_sender = router.create_inbox(sender_pid);
+        let mut rx_target = router.create_inbox(target_pid);
+
+        let msg = KernelMessage::text(
+            sender_pid,
+            MessageTarget::Process(target_pid),
+            "allowed",
+        );
+        let result = router.send(msg).await;
+        assert!(result.is_ok(), "restricted sender should reach allowed PID");
+
+        let received = rx_target.try_recv().unwrap();
+        assert!(matches!(
+            received.payload,
+            MessagePayload::Text(ref t) if t == "allowed"
+        ));
+    }
+
+    #[tokio::test]
+    async fn ipc_scope_restricted_blocks_unlisted_pids() {
+        let table = Arc::new(ProcessTable::new(64));
+
+        use crate::capability::IpcScope;
+        let target_entry = ProcessEntry {
+            pid: 0,
+            agent_id: "target".to_owned(),
+            state: ProcessState::Running,
+            capabilities: AgentCapabilities::default(),
+            resource_usage: ResourceUsage::default(),
+            cancel_token: CancellationToken::new(),
+            parent_pid: None,
+        };
+        let target_pid = table.insert(target_entry).unwrap();
+
+        // Restricted to PID 999 (not the target)
+        let sender_entry = ProcessEntry {
+            pid: 0,
+            agent_id: "restricted-sender".to_owned(),
+            state: ProcessState::Running,
+            capabilities: AgentCapabilities {
+                ipc_scope: IpcScope::Restricted(vec![999]),
+                ..Default::default()
+            },
+            resource_usage: ResourceUsage::default(),
+            cancel_token: CancellationToken::new(),
+            parent_pid: None,
+        };
+        let sender_pid = table.insert(sender_entry).unwrap();
+
+        let checker = Arc::new(CapabilityChecker::new(table.clone()));
+        let topic_router = Arc::new(TopicRouter::new(table.clone()));
+        let router = A2ARouter::new(table, checker, topic_router);
+        let _rx_sender = router.create_inbox(sender_pid);
+        let _rx_target = router.create_inbox(target_pid);
+
+        let msg = KernelMessage::text(
+            sender_pid,
+            MessageTarget::Process(target_pid),
+            "blocked",
+        );
+        let result = router.send(msg).await;
+        assert!(result.is_err(), "restricted sender should be blocked from unlisted PID");
+    }
+
+    #[test]
+    fn create_inbox_returns_receiver() {
+        let table = Arc::new(ProcessTable::new(64));
+        let checker = Arc::new(CapabilityChecker::new(table.clone()));
+        let topic_router = Arc::new(TopicRouter::new(table.clone()));
+        let router = A2ARouter::new(table, checker, topic_router);
+
+        let rx = router.create_inbox(10);
+        assert!(router.has_inbox(10));
+        assert_eq!(router.inbox_count(), 1);
+        drop(rx);
+    }
+
+    #[test]
+    fn create_inbox_replaces_existing() {
+        let table = Arc::new(ProcessTable::new(64));
+        let checker = Arc::new(CapabilityChecker::new(table.clone()));
+        let topic_router = Arc::new(TopicRouter::new(table.clone()));
+        let router = A2ARouter::new(table, checker, topic_router);
+
+        let _rx1 = router.create_inbox(10);
+        assert_eq!(router.inbox_count(), 1);
+
+        // Replace — old receiver is invalidated
+        let _rx2 = router.create_inbox(10);
+        assert_eq!(router.inbox_count(), 1);
+        assert!(router.has_inbox(10));
+    }
+
+    #[test]
+    fn remove_nonexistent_inbox_is_noop() {
+        let table = Arc::new(ProcessTable::new(64));
+        let checker = Arc::new(CapabilityChecker::new(table.clone()));
+        let topic_router = Arc::new(TopicRouter::new(table.clone()));
+        let router = A2ARouter::new(table, checker, topic_router);
+
+        // Should not panic
+        router.remove_inbox(999);
+        assert_eq!(router.inbox_count(), 0);
+    }
+
+    #[test]
+    fn inbox_count_tracks_multiple_inboxes() {
+        let table = Arc::new(ProcessTable::new(64));
+        let checker = Arc::new(CapabilityChecker::new(table.clone()));
+        let topic_router = Arc::new(TopicRouter::new(table.clone()));
+        let router = A2ARouter::new(table, checker, topic_router);
+
+        let _rx1 = router.create_inbox(1);
+        let _rx2 = router.create_inbox(2);
+        let _rx3 = router.create_inbox(3);
+        assert_eq!(router.inbox_count(), 3);
+
+        router.remove_inbox(2);
+        assert_eq!(router.inbox_count(), 2);
+        assert!(!router.has_inbox(2));
+        assert!(router.has_inbox(1));
+        assert!(router.has_inbox(3));
+    }
+
+    #[tokio::test]
+    async fn send_to_kernel_target_succeeds() {
+        let (router, pids, _receivers) = setup_router(1);
+
+        let msg = KernelMessage::text(pids[0], MessageTarget::Kernel, "kernel-msg");
+        let result = router.send(msg).await;
+        assert!(result.is_ok(), "kernel target routing should succeed (even if no-op)");
+    }
+
+    #[tokio::test]
+    async fn send_to_remote_node_fails() {
+        let (router, pids, _receivers) = setup_router(1);
+
+        let msg = KernelMessage::text(
+            pids[0],
+            MessageTarget::RemoteNode {
+                node_id: "remote-1".into(),
+                target: Box::new(MessageTarget::Process(42)),
+            },
+            "remote-msg",
+        );
+        let result = router.send(msg).await;
+        assert!(result.is_err(), "remote node routing should fail (not yet implemented)");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("remote routing"), "expected remote routing error, got: {err_msg}");
+    }
+
+    #[tokio::test]
+    async fn suspended_process_can_still_send() {
+        let table = Arc::new(ProcessTable::new(64));
+
+        let sender_entry = ProcessEntry {
+            pid: 0,
+            agent_id: "suspended-sender".to_owned(),
+            state: ProcessState::Suspended,
+            capabilities: AgentCapabilities::default(),
+            resource_usage: ResourceUsage::default(),
+            cancel_token: CancellationToken::new(),
+            parent_pid: None,
+        };
+        let sender_pid = table.insert(sender_entry).unwrap();
+
+        let target_entry = ProcessEntry {
+            pid: 0,
+            agent_id: "target".to_owned(),
+            state: ProcessState::Running,
+            capabilities: AgentCapabilities::default(),
+            resource_usage: ResourceUsage::default(),
+            cancel_token: CancellationToken::new(),
+            parent_pid: None,
+        };
+        let target_pid = table.insert(target_entry).unwrap();
+
+        let checker = Arc::new(CapabilityChecker::new(table.clone()));
+        let topic_router = Arc::new(TopicRouter::new(table.clone()));
+        let router = A2ARouter::new(table, checker, topic_router);
+        let _rx_sender = router.create_inbox(sender_pid);
+        let mut rx_target = router.create_inbox(target_pid);
+
+        let msg = KernelMessage::text(sender_pid, MessageTarget::Process(target_pid), "from-suspended");
+        let result = router.send(msg).await;
+        assert!(result.is_ok(), "suspended process should be allowed to send");
+
+        let received = rx_target.try_recv().unwrap();
+        assert!(matches!(
+            received.payload,
+            MessagePayload::Text(ref t) if t == "from-suspended"
+        ));
+    }
+
+    #[tokio::test]
+    async fn topic_multiple_subscribers_receive_same_message() {
+        let (router, pids, mut receivers) = setup_router(5);
+
+        // Subscribe pids[1..5] to the topic
+        for &pid in &pids[1..] {
+            router.topic_router().subscribe(pid, "news");
+        }
+
+        let msg = KernelMessage::text(
+            pids[0],
+            MessageTarget::Topic("news".into()),
+            "breaking",
+        );
+        router.send(msg).await.unwrap();
+
+        // All subscribers should receive the same payload
+        for (i, rx) in receivers[1..].iter_mut().enumerate() {
+            let received = rx.try_recv().unwrap_or_else(|_| {
+                panic!("subscriber {} (pid {}) should have received message", i + 1, pids[i + 1])
+            });
+            assert!(matches!(
+                received.payload,
+                MessagePayload::Text(ref t) if t == "breaking"
+            ));
+            assert_eq!(received.from, pids[0]);
+        }
+    }
+
+    #[tokio::test]
+    async fn broadcast_skips_scope_restricted_targets() {
+        let table = Arc::new(ProcessTable::new(64));
+
+        use crate::capability::IpcScope;
+        // Sender with restricted scope (empty list = nobody allowed)
+        let sender_entry = ProcessEntry {
+            pid: 0,
+            agent_id: "restricted-broadcaster".to_owned(),
+            state: ProcessState::Running,
+            capabilities: AgentCapabilities {
+                ipc_scope: IpcScope::Restricted(vec![]),
+                ..Default::default()
+            },
+            resource_usage: ResourceUsage::default(),
+            cancel_token: CancellationToken::new(),
+            parent_pid: None,
+        };
+        let sender_pid = table.insert(sender_entry).unwrap();
+
+        let target_entry = ProcessEntry {
+            pid: 0,
+            agent_id: "target".to_owned(),
+            state: ProcessState::Running,
+            capabilities: AgentCapabilities::default(),
+            resource_usage: ResourceUsage::default(),
+            cancel_token: CancellationToken::new(),
+            parent_pid: None,
+        };
+        let target_pid = table.insert(target_entry).unwrap();
+
+        let checker = Arc::new(CapabilityChecker::new(table.clone()));
+        let topic_router = Arc::new(TopicRouter::new(table.clone()));
+        let router = A2ARouter::new(table, checker, topic_router);
+        let _rx_sender = router.create_inbox(sender_pid);
+        let mut rx_target = router.create_inbox(target_pid);
+
+        let msg = KernelMessage::text(sender_pid, MessageTarget::Broadcast, "restricted-broadcast");
+        let result = router.send(msg).await;
+        assert!(result.is_ok(), "broadcast itself should succeed even if all targets are blocked");
+
+        // Target should NOT receive (scope blocks it)
+        assert!(rx_target.try_recv().is_err(), "restricted broadcast should not reach any target");
+    }
+
+    #[test]
+    fn service_registry_accessor() {
+        let table = Arc::new(ProcessTable::new(64));
+        let checker = Arc::new(CapabilityChecker::new(table.clone()));
+        let topic_router = Arc::new(TopicRouter::new(table.clone()));
+
+        let router = A2ARouter::new(table.clone(), checker.clone(), topic_router.clone());
+        assert!(router.service_registry().is_none(), "no registry by default");
+
+        let registry = Arc::new(crate::service::ServiceRegistry::new());
+        let router = router.with_service_registry(registry);
+        assert!(router.service_registry().is_some(), "registry should be present after with_service_registry");
+    }
+
+    #[test]
+    fn topic_router_accessor() {
+        let table = Arc::new(ProcessTable::new(64));
+        let checker = Arc::new(CapabilityChecker::new(table.clone()));
+        let topic_router = Arc::new(TopicRouter::new(table.clone()));
+        let expected = Arc::clone(&topic_router);
+
+        let router = A2ARouter::new(table, checker, topic_router);
+        assert!(Arc::ptr_eq(router.topic_router(), &expected));
+    }
+
+    #[tokio::test]
+    async fn json_payload_routes() {
+        let (router, pids, mut receivers) = setup_router(2);
+
+        let msg = KernelMessage::new(
+            pids[0],
+            MessageTarget::Process(pids[1]),
+            MessagePayload::Json(serde_json::json!({"key": "value"})),
+        );
+        router.send(msg).await.unwrap();
+
+        let received = receivers[1].try_recv().unwrap();
+        assert!(matches!(
+            received.payload,
+            MessagePayload::Json(ref v) if v["key"] == "value"
+        ));
+    }
+
+    #[tokio::test]
+    async fn signal_payload_routes() {
+        use crate::ipc::KernelSignal;
+        let (router, pids, mut receivers) = setup_router(2);
+
+        let msg = KernelMessage::signal(
+            pids[0],
+            MessageTarget::Process(pids[1]),
+            KernelSignal::Shutdown,
+        );
+        router.send(msg).await.unwrap();
+
+        let received = receivers[1].try_recv().unwrap();
+        assert!(matches!(
+            received.payload,
+            MessagePayload::Signal(KernelSignal::Shutdown)
+        ));
+    }
+
+    #[tokio::test]
+    async fn request_to_nonexistent_target_cleans_up_pending() {
+        let table = Arc::new(ProcessTable::new(64));
+
+        let sender_entry = ProcessEntry {
+            pid: 0,
+            agent_id: "sender".to_owned(),
+            state: ProcessState::Running,
+            capabilities: AgentCapabilities::default(),
+            resource_usage: ResourceUsage::default(),
+            cancel_token: CancellationToken::new(),
+            parent_pid: None,
+        };
+        let sender_pid = table.insert(sender_entry).unwrap();
+
+        // Create target in process table but no inbox
+        let target_entry = ProcessEntry {
+            pid: 0,
+            agent_id: "no-inbox-target".to_owned(),
+            state: ProcessState::Running,
+            capabilities: AgentCapabilities::default(),
+            resource_usage: ResourceUsage::default(),
+            cancel_token: CancellationToken::new(),
+            parent_pid: None,
+        };
+        let target_pid = table.insert(target_entry).unwrap();
+
+        let checker = Arc::new(CapabilityChecker::new(table.clone()));
+        let topic_router = Arc::new(TopicRouter::new(table.clone()));
+        let router = A2ARouter::new(table, checker, topic_router);
+        let _rx_sender = router.create_inbox(sender_pid);
+        // Intentionally no inbox for target
+
+        let msg = KernelMessage::text(sender_pid, MessageTarget::Process(target_pid), "request");
+        let result = router.request(msg, Duration::from_millis(100)).await;
+        assert!(result.is_err(), "request to PID without inbox should fail");
+        assert_eq!(router.pending_request_count(), 0, "pending request should be cleaned up on send failure");
+    }
+
+    #[tokio::test]
+    async fn service_method_not_found_returns_error() {
+        let (router, pids, _receivers, _registry) = setup_router_with_registry(2);
+
+        let msg = KernelMessage::text(
+            pids[0],
+            MessageTarget::ServiceMethod {
+                service: "nonexistent-svc".into(),
+                method: "do_thing".into(),
+            },
+            "call",
+        );
+        let result = router.send(msg).await;
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("service not found"),
+            "expected 'service not found' for missing ServiceMethod target, got: {err_msg}"
+        );
     }
 }

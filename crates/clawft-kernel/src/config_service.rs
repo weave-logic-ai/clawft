@@ -1,8 +1,9 @@
 //! Configuration and secrets service (K5-G1).
 //!
 //! Provides [`ConfigService`] for runtime configuration management with
-//! change notification, and encrypted secret storage. Backed by in-memory
-//! stores (tree integration deferred to when `exochain` feature is enabled).
+//! change notification, typed values, and encrypted secret storage. Backed
+//! by in-memory stores (tree integration deferred to when `exochain`
+//! feature is enabled).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -17,6 +18,55 @@ use crate::error::KernelError;
 use crate::health::HealthStatus;
 use crate::process::Pid;
 use crate::service::{ServiceType, SystemService};
+
+// ---------------------------------------------------------------------------
+// ConfigValue — typed configuration values
+// ---------------------------------------------------------------------------
+
+/// A typed configuration value.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ConfigValue {
+    /// Plain text.
+    Text(String),
+    /// 64-bit signed integer.
+    Integer(i64),
+    /// 64-bit floating point.
+    Float(f64),
+    /// Boolean flag.
+    Boolean(bool),
+    /// Arbitrary JSON blob.
+    Json(serde_json::Value),
+}
+
+impl ConfigValue {
+    /// Convert to a `serde_json::Value` representation.
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            ConfigValue::Text(s) => serde_json::Value::String(s.clone()),
+            ConfigValue::Integer(n) => serde_json::json!(n),
+            ConfigValue::Float(f) => serde_json::json!(f),
+            ConfigValue::Boolean(b) => serde_json::json!(b),
+            ConfigValue::Json(v) => v.clone(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ConfigEntry
+// ---------------------------------------------------------------------------
+
+/// A stored configuration entry with metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigEntry {
+    /// Configuration key.
+    pub key: String,
+    /// Configuration namespace.
+    pub namespace: String,
+    /// Typed value.
+    pub value: ConfigValue,
+    /// When the entry was last updated.
+    pub updated_at: DateTime<Utc>,
+}
 
 // ---------------------------------------------------------------------------
 // ConfigChange
@@ -68,6 +118,8 @@ pub struct SecretRef {
 pub struct ConfigService {
     /// Config store: "namespace/key" -> value.
     configs: DashMap<String, serde_json::Value>,
+    /// Typed config entries: "namespace/key" -> ConfigEntry.
+    entries: DashMap<String, ConfigEntry>,
     /// Secret store: "namespace/key" -> encrypted bytes.
     secrets: DashMap<String, Vec<u8>>,
     /// Secret metadata: "namespace/key" -> SecretRef.
@@ -87,6 +139,7 @@ impl ConfigService {
     pub fn new(encryption_key: [u8; 32]) -> Self {
         Self {
             configs: DashMap::new(),
+            entries: DashMap::new(),
             secrets: DashMap::new(),
             secret_refs: DashMap::new(),
             subscribers: DashMap::new(),
@@ -172,6 +225,88 @@ impl ConfigService {
             .filter(|e| e.key().starts_with(&prefix))
             .map(|e| e.key()[prefix.len()..].to_string())
             .collect()
+    }
+
+    // ── Typed config operations ──────────────────────────────────
+
+    /// Store a typed configuration value.
+    pub fn set_typed(
+        &self,
+        namespace: &str,
+        key: &str,
+        value: ConfigValue,
+        changed_by: Pid,
+    ) -> Result<(), KernelError> {
+        let config_key = format!("{namespace}/{key}");
+        let json_value = value.to_json();
+
+        // Also store in the legacy JSON map for backward compatibility.
+        let old_value = self.configs.get(&config_key).map(|v| v.value().clone());
+        self.configs.insert(config_key.clone(), json_value.clone());
+
+        let entry = ConfigEntry {
+            key: key.to_string(),
+            namespace: namespace.to_string(),
+            value,
+            updated_at: Utc::now(),
+        };
+        self.entries.insert(config_key, entry);
+
+        let change = ConfigChange {
+            namespace: namespace.to_string(),
+            key: key.to_string(),
+            old_value,
+            new_value: Some(json_value),
+            changed_by,
+            timestamp: Utc::now(),
+        };
+        self.notify_subscribers(namespace, &change);
+
+        if let Ok(mut log) = self.change_log.write() {
+            log.push(change);
+        }
+        self.set_count.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Retrieve a typed configuration entry.
+    pub fn get_typed(&self, namespace: &str, key: &str) -> Option<ConfigEntry> {
+        let config_key = format!("{namespace}/{key}");
+        self.entries.get(&config_key).map(|e| e.value().clone())
+    }
+
+    /// List all typed entries in a namespace.
+    pub fn list(&self, namespace: &str) -> Vec<ConfigEntry> {
+        let prefix = format!("{namespace}/");
+        self.entries
+            .iter()
+            .filter(|e| e.key().starts_with(&prefix))
+            .map(|e| e.value().clone())
+            .collect()
+    }
+
+    /// Delete a typed configuration entry. Returns `true` if it existed.
+    pub fn delete_typed(
+        &self,
+        namespace: &str,
+        key: &str,
+        changed_by: Pid,
+    ) -> bool {
+        let config_key = format!("{namespace}/{key}");
+        let removed = self.entries.remove(&config_key).is_some();
+        // Also remove from legacy store.
+        let old_value = self.configs.remove(&config_key).map(|(_, v)| v);
+
+        let change = ConfigChange {
+            namespace: namespace.to_string(),
+            key: key.to_string(),
+            old_value,
+            new_value: None,
+            changed_by,
+            timestamp: Utc::now(),
+        };
+        self.notify_subscribers(namespace, &change);
+        removed
     }
 
     // ── Subscription ──────────────────────────────────────────────
@@ -443,5 +578,109 @@ mod tests {
         svc.start().await.unwrap();
         assert_eq!(svc.health_check().await, HealthStatus::Healthy);
         svc.stop().await.unwrap();
+    }
+
+    // ── Typed config value tests ─────────────────────────────────
+
+    #[test]
+    fn typed_set_get_roundtrip() {
+        let svc = ConfigService::new_default();
+        svc.set_typed("app", "name", ConfigValue::Text("myapp".into()), pid(1))
+            .unwrap();
+        let entry = svc.get_typed("app", "name").unwrap();
+        assert_eq!(entry.value, ConfigValue::Text("myapp".into()));
+        assert_eq!(entry.namespace, "app");
+        assert_eq!(entry.key, "name");
+    }
+
+    #[test]
+    fn typed_get_nonexistent_returns_none() {
+        let svc = ConfigService::new_default();
+        assert!(svc.get_typed("app", "missing").is_none());
+    }
+
+    #[test]
+    fn typed_list_returns_all_in_namespace() {
+        let svc = ConfigService::new_default();
+        svc.set_typed("db", "host", ConfigValue::Text("localhost".into()), pid(1))
+            .unwrap();
+        svc.set_typed("db", "port", ConfigValue::Integer(5432), pid(1))
+            .unwrap();
+        svc.set_typed("cache", "ttl", ConfigValue::Integer(60), pid(1))
+            .unwrap();
+
+        let mut entries = svc.list("db");
+        entries.sort_by(|a, b| a.key.cmp(&b.key));
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].key, "host");
+        assert_eq!(entries[1].key, "port");
+    }
+
+    #[test]
+    fn typed_delete_removes_entry() {
+        let svc = ConfigService::new_default();
+        svc.set_typed("ns", "k", ConfigValue::Boolean(true), pid(1)).unwrap();
+        assert!(svc.delete_typed("ns", "k", pid(1)));
+        assert!(svc.get_typed("ns", "k").is_none());
+        // Second delete returns false.
+        assert!(!svc.delete_typed("ns", "k", pid(1)));
+    }
+
+    #[test]
+    fn typed_subscribe_receives_change_notification() {
+        let svc = ConfigService::new_default();
+        let sub = svc.subscribe("typed-ns");
+        svc.set_typed("typed-ns", "flag", ConfigValue::Boolean(true), pid(1))
+            .unwrap();
+        let changes = sub.read().unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].key, "flag");
+        assert_eq!(changes[0].new_value, Some(serde_json::json!(true)));
+    }
+
+    #[test]
+    fn typed_set_updates_existing_value() {
+        let svc = ConfigService::new_default();
+        svc.set_typed("app", "level", ConfigValue::Integer(1), pid(1)).unwrap();
+        svc.set_typed("app", "level", ConfigValue::Integer(2), pid(1)).unwrap();
+        let entry = svc.get_typed("app", "level").unwrap();
+        assert_eq!(entry.value, ConfigValue::Integer(2));
+    }
+
+    #[test]
+    fn typed_namespace_isolation() {
+        let svc = ConfigService::new_default();
+        svc.set_typed("alpha", "key", ConfigValue::Text("a".into()), pid(1)).unwrap();
+        svc.set_typed("beta", "key", ConfigValue::Text("b".into()), pid(1)).unwrap();
+
+        let a = svc.get_typed("alpha", "key").unwrap();
+        let b = svc.get_typed("beta", "key").unwrap();
+        assert_eq!(a.value, ConfigValue::Text("a".into()));
+        assert_eq!(b.value, ConfigValue::Text("b".into()));
+
+        // list returns only matching namespace.
+        assert_eq!(svc.list("alpha").len(), 1);
+        assert_eq!(svc.list("beta").len(), 1);
+        assert_eq!(svc.list("gamma").len(), 0);
+    }
+
+    #[test]
+    fn typed_all_value_variants() {
+        let svc = ConfigService::new_default();
+
+        svc.set_typed("t", "text", ConfigValue::Text("hello".into()), pid(1)).unwrap();
+        svc.set_typed("t", "int", ConfigValue::Integer(42), pid(1)).unwrap();
+        svc.set_typed("t", "float", ConfigValue::Float(3.14), pid(1)).unwrap();
+        svc.set_typed("t", "bool", ConfigValue::Boolean(false), pid(1)).unwrap();
+        svc.set_typed("t", "json", ConfigValue::Json(serde_json::json!({"a": 1})), pid(1)).unwrap();
+
+        assert_eq!(svc.get_typed("t", "text").unwrap().value, ConfigValue::Text("hello".into()));
+        assert_eq!(svc.get_typed("t", "int").unwrap().value, ConfigValue::Integer(42));
+        assert_eq!(svc.get_typed("t", "float").unwrap().value, ConfigValue::Float(3.14));
+        assert_eq!(svc.get_typed("t", "bool").unwrap().value, ConfigValue::Boolean(false));
+        assert_eq!(
+            svc.get_typed("t", "json").unwrap().value,
+            ConfigValue::Json(serde_json::json!({"a": 1}))
+        );
     }
 }

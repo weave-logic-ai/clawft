@@ -48,7 +48,7 @@ mesh = [
     "dep:futures-util",
 ]
 ecc = ["clawft-core/vector-memory", "dep:blake3"]
-onnx-embeddings = []  # Future: add dep:ort when ONNX Runtime is available
+onnx-embeddings = ["dep:ort", "dep:ndarray"]
 wasm-sandbox = ["dep:wasmtime", "dep:wasmtime-wasi"]
 os-patterns = ["exochain"]
 containers = []
@@ -78,6 +78,8 @@ rand = { workspace = true, optional = true }
 wasmtime = { workspace = true, optional = true }
 wasmtime-wasi = { workspace = true, optional = true }
 blake3 = { workspace = true, optional = true }
+ort = { workspace = true, optional = true }
+ndarray = { workspace = true, optional = true }
 tokio-tungstenite = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 sha2 = { workspace = true }

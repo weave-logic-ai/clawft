@@ -18,7 +18,7 @@ import sys
 
 
 def build_data():
-    return {
+    data = {
         "symposiums": [
             _k2_symposium(),
             _k3_symposium(),
@@ -29,6 +29,76 @@ def build_data():
         "decision_module_links": _decision_module_links(),
         "symposium_gap_links": _symposium_gap_links(),
     }
+    # Apply resolutions from Sprint 09b decision triage.
+    _apply_09b_resolutions(data)
+    return data
+
+
+def _apply_09b_resolutions(data):
+    """Update decision and commitment statuses based on Sprint 09b triage.
+
+    Source: .planning/sparc/weftos/0.1/09b-decision-triage.md
+    Date: 2026-03-26
+
+    The original symposium data captures statuses at symposium time. This
+    overlay applies the resolutions discovered during Sprint 09b, fixing the
+    stale feedback loop where 12+ decisions showed as "pending" even though
+    they had been resolved.
+    """
+    # Decision status overrides: (symposium_id, decision_id) -> new_status
+    decision_overrides = {
+        # Tier 1 HIGH - Already implemented or implemented this sprint
+        ("k3", "D1"):  "implemented",  # ToolRegistry hierarchical already in code
+        ("k3", "D2"):  "implemented",  # GovernanceRequest::with_tool_context() added
+        ("k3", "D12"): "implemented",  # SandboxLayer multi-layer added
+        ("k2", "D11"): "implemented",  # dual_sign() already in chain.rs
+        ("k3", "D8"):  "implemented",  # Revocation constants added
+
+        # Tier 2 MEDIUM - Scheduled for Sprint 10
+        ("k3", "D4"):  "scheduled",    # Wasmtime integration Sprint 10
+        ("k3", "D6"):  "scheduled",    # WASI sandbox config bundled with D4
+        ("k3", "D7"):  "scheduled",    # TreeNodeVersion Sprint 10
+        ("k3", "D10"): "implemented",  # ServiceApi/BuiltinTool already separated
+        ("k2", "D8"):  "scheduled",    # Chain-anchored API contracts Sprint 10
+        ("k2", "D20"): "scheduled",    # N-dimensional EffectVector Sprint 10
+
+        # Tier 3 DEFERRED
+        ("k3", "D3"):  "deferred",     # 25 remaining tools -> Sprint 10+
+        ("k3", "D5"):  "deferred",     # Disk cache bundled with D4
+        ("k3", "D9"):  "deferred",     # CA chain post-1.0
+        ("k3", "D11"): "deferred",     # Routing-time gate -> K5
+        ("k3", "D13"): "deferred",     # WASM snapshots -> K6
+        ("k3", "D14"): "deferred",     # tiny-dancer scoring
+        ("k2", "D10"): "deferred",     # WASM-compiled shell
+        ("k2", "D12"): "deferred",     # Chain-agnostic blockchain anchoring
+        ("k2", "D13"): "deferred",     # ZK proofs
+        ("k2", "D17"): "deferred",     # Governance trajectory learning
+
+        # Superseded
+        ("k2", "D18"): "superseded",   # SONA superseded by Weaver ECC
+    }
+
+    # Commitment status overrides
+    commitment_overrides = {
+        ("k2", "C2"): "implemented",  # ServiceApi trait exists
+        ("k2", "C6"): "implemented",  # dual_sign() in chain.rs
+        ("k3", "AC-1"): "implemented",
+        ("k3", "AC-2"): "implemented",
+        ("k3", "AC-3"): "implemented",
+    }
+
+    for symposium in data["symposiums"]:
+        sid = symposium["id"]
+        for decision in symposium.get("decisions", []):
+            key = (sid, decision["id"])
+            if key in decision_overrides:
+                old = decision["status"]
+                decision["status"] = decision_overrides[key]
+
+        for commitment in symposium.get("commitments", []):
+            key = (sid, commitment["id"])
+            if key in commitment_overrides:
+                commitment["status"] = commitment_overrides[key]
 
 
 def _k2_symposium():
