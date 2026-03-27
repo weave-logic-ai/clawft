@@ -163,22 +163,45 @@ PARALLEL — KERNEL (W4):
     - Test: two nodes boot, discover, exchange messages
 
 PARALLEL — K8 GUI (W6 — Design Phase):
-  Wireframes/mockups for 5 core views:
-    1. DASHBOARD: node health, agent count, chain height, ECC confidence,
-       mesh peers, DEMOCRITUS tick rate, resource usage
-    2. PROCESS EXPLORER: live process table (PID, state, capabilities,
-       parent/child, resource usage) — like Activity Monitor
-    3. CHAIN VIEWER: ExoChain event timeline, filterable by type/agent/branch,
-       click to inspect full event + dual signatures
-    4. KNOWLEDGE GRAPH: interactive causal graph (Cytoscape.js), community
-       coloring, spectral partition overlay, search, temporal playback,
-       lambda_2 coherence gauge — THIS is the client analysis view
-    5. GOVERNANCE CONSOLE: live decisions, effect vectors, rule trace, appeals
+  x-ref: docs/weftos/weftos-gui-specifications.md (full K8 spec)
 
-  Platform decision (prototype first, refine later):
-    - Prototype: Plain HTML + vanilla JS + WebSocket (embed in binary)
-    - Production (Sprint 11): Leptos or framework TBD based on prototype learnings
-    - Graph viz: Cytoscape.js (typed edges, community coloring, 10K+ nodes)
+  The K8 spec calls for Tauri 2.0 + React/TypeScript + Three.js (3D).
+  Sprint 10 targets K8.1-K8.2 from the roadmap (scaffolding + core dashboards).
+  3D ECC viz (K8.3), dynamic app loading (K8.4), and self-building (K8.5-K8.6)
+  are Sprint 11+ work.
+
+  Sprint 10 K8 deliverables:
+    K8.1 — Tauri 2.0 Scaffolding:
+      - Scaffold Tauri 2.0 project in gui/ or weftos-gui/ directory
+      - Define initial Rust ↔ TS bindings (tauri-bindgen or rspc):
+        - ServiceApi exposure (register, resolve, health)
+        - ProcessTable queries (list, inspect, state)
+        - ExoChain queries (recent events, event detail, chain height)
+        - ECC queries (causal graph nodes/edges, HNSW search, confidence)
+        - Governance queries (recent decisions, rule list, effect vectors)
+        - Mesh queries (peer list, connection status, topology)
+      - Auto-generate TypeScript types from Rust structs (ts-rs or tauri-typegen)
+      - WebSocket bridge for real-time push (process changes, chain events, ticks)
+      - Feature-gated: gui-tauri flag, kernel never depends on GUI crates
+
+    K8.2 — Core Dashboard Views (2D first, 3D deferred to Sprint 11):
+      1. DASHBOARD: system overview — node health, agent count, chain height,
+         ECC confidence, DEMOCRITUS tick rate, mesh peers, resource usage
+      2. PROCESS EXPLORER: live process table (PID, state, capabilities,
+         parent/child, resource usage) — like Activity Monitor
+      3. CHAIN VIEWER: ExoChain event timeline, filterable by type/agent/branch,
+         click to inspect full event + dual signatures
+      4. KNOWLEDGE GRAPH: interactive causal graph — React + Cytoscape.js
+         (or react-force-graph as stepping stone to Three.js),
+         community coloring, spectral partition overlay, search,
+         lambda_2 coherence gauge — THIS is the client analysis view
+      5. GOVERNANCE CONSOLE: live decisions, effect vectors, rule trace
+
+    Wireframes/mockups:
+      - Produce mockups for all 5 views before coding
+      - Evaluate: Cytoscape.js (2D graph) vs react-force-graph-3d (3D preview)
+      - Design the Rust → Tauri command layer (thin wrappers over ServiceApi)
+      - Plan: agent-generated TS component loading for Sprint 11 (K8.4)
 
 PARALLEL — OBSERVABILITY (W3 continued):
   - Config service (store/retrieve with change notifications)
@@ -515,7 +538,7 @@ weavelogic.ai
 |------|------------|
 | Assessor + kernel + web = too much scope | Assessor is the revenue path — prioritize over K8 GUI polish |
 | K8 GUI scope creep | Hard limit: prototype quality in Sprint 10. Production in Sprint 11 |
-| Leptos learning curve | Prototype in plain HTML+JS. Framework decision after prototype |
+| Tauri scaffolding scope | Sprint 10 = K8.1 scaffold + 1-2 views. Full dashboards are Sprint 11 |
 | Mesh runtime harder than estimated | Single-hop first. Multi-hop/DHT/chain-sync in Sprint 11 |
 | Persistence takes longer | SQLite is the safe choice |
 | SEO takes time to compound | Start Week 3, iterate weekly. Results expected Week 8-12 |
@@ -528,7 +551,7 @@ Some tracks may only produce prototypes or test artifacts this sprint. That's OK
 
 | Track | Minimum Acceptable Outcome |
 |-------|---------------------------|
-| K8 GUI | Working prototype in plain HTML+JS. Not production-polished. |
+| K8 GUI | Tauri scaffold + Rust↔TS bindings + 1-2 views rendering real data. Agent TS generation test. |
 | DEMOCRITUS loop | Continuous tick running, graph growing. May not be fully tuned. |
 | Mesh runtime | Two nodes exchange one message on LAN. Not production-hardened. |
 | weavelogic.ai | Revised content deployed. SEO planted. Not yet ranking. |
@@ -571,11 +594,11 @@ Sprint 10 is complete when:
 
 | Item | Sprint |
 |------|--------|
-| K8 GUI production build (Leptos or framework TBD) | Sprint 11 |
+| K8 GUI full dashboard views (K8.2 complete) + 3D ECC viz (K8.3) | Sprint 11 |
 | Full mesh (multi-hop, DHT, chain replication) | Sprint 11 |
 | Remaining 15 WASM tools | Sprint 11 |
 | Conversational onboarding (production) | Sprint 11 |
-| Tauri desktop wrapper | Sprint 11 |
+| K8.4 dynamic app loading + K8.5 self-building | Sprint 11-12 |
 | Open source launch prep (README, HN, community) | Sprint 11 |
 | Full 37-vertical assessor content | Sprint 11 |
 | Cloud infrastructure scanner agents | Sprint 11 |
