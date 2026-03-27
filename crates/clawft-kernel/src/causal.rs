@@ -461,7 +461,7 @@ impl CausalGraph {
             components.push(component);
         }
 
-        components.sort_by(|a, b| b.len().cmp(&a.len()));
+        components.sort_by_key(|b| std::cmp::Reverse(b.len()));
         components
     }
 
@@ -550,7 +550,7 @@ impl CausalGraph {
         for community in &mut result {
             community.sort();
         }
-        result.sort_by(|a, b| b.len().cmp(&a.len()));
+        result.sort_by_key(|b| std::cmp::Reverse(b.len()));
         result
     }
 
@@ -602,26 +602,26 @@ impl CausalGraph {
 
             // Forward edges.
             for edge in self.get_forward_edges(id) {
-                if let Some(&j) = id_to_idx.get(&edge.target) {
-                    if i != j {
-                        let w = edge.weight as f64;
-                        laplacian[i][j] -= w;
-                        laplacian[j][i] -= w; // symmetrize
-                        deg += w;
-                    }
+                if let Some(&j) = id_to_idx.get(&edge.target)
+                    && i != j
+                {
+                    let w = edge.weight as f64;
+                    laplacian[i][j] -= w;
+                    laplacian[j][i] -= w; // symmetrize
+                    deg += w;
                 }
             }
             // Reverse edges (avoid double-counting: only add if not already added
             // by the forward pass of the source node).
             for edge in self.get_reverse_edges(id) {
-                if let Some(&j) = id_to_idx.get(&edge.source) {
-                    if i != j && j > i {
-                        // Only process if source index > current index (upper triangle).
-                        let w = edge.weight as f64;
-                        laplacian[i][j] -= w;
-                        laplacian[j][i] -= w;
-                        deg += w;
-                    }
+                if let Some(&j) = id_to_idx.get(&edge.source)
+                    && i != j && j > i
+                {
+                    // Only process if source index > current index (upper triangle).
+                    let w = edge.weight as f64;
+                    laplacian[i][j] -= w;
+                    laplacian[j][i] -= w;
+                    deg += w;
                 }
             }
 
@@ -629,9 +629,9 @@ impl CausalGraph {
         }
 
         // Fix up diagonal: recompute from off-diagonal for correctness.
-        for i in 0..n {
-            let off_diag_sum: f64 = (0..n).filter(|&j| j != i).map(|j| -laplacian[i][j]).sum();
-            laplacian[i][i] = off_diag_sum;
+        for (i, row) in laplacian.iter_mut().enumerate().take(n) {
+            let off_diag_sum: f64 = (0..n).filter(|&j| j != i).map(|j| -row[j]).sum();
+            row[i] = off_diag_sum;
         }
 
         // Power iteration for the Fiedler (second-smallest) eigenvalue.
@@ -821,11 +821,7 @@ impl CausalGraph {
         sorted_events.sort_by_key(|e| e.timestamp);
 
         let total = sorted_events.len();
-        let window_start = if total > window_size {
-            total - window_size
-        } else {
-            0
-        };
+        let window_start = total.saturating_sub(window_size);
 
         // Compute baseline rate (changes per event across all history).
         let mut total_counts: std::collections::HashMap<NodeId, usize> =
@@ -894,11 +890,7 @@ impl CausalGraph {
 
         // Recent activity boost: nodes that appeared in the last few events.
         let recency_window = (window_size / 3).max(1);
-        let recency_start = if total > recency_window {
-            total - recency_window
-        } else {
-            0
-        };
+        let recency_start = total.saturating_sub(recency_window);
         for event in &sorted_events[recency_start..] {
             for &id in &event.node_ids {
                 *predictions.entry(id).or_insert(0.0) += 0.1;

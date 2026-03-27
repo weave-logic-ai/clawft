@@ -1,7 +1,7 @@
 {
   "domain": "clawft-weftos",
   "source": "module-dependencies",
-  "generated_at": "2026-03-27T03:45:34.487124+00:00",
+  "generated_at": "2026-03-27T13:55:43.038671+00:00",
   "nodes": [
     {
       "id": "crate:clawft-channels",
@@ -46,8 +46,8 @@
     {
       "id": "crate:clawft-kernel",
       "type": "crate",
-      "files": 69,
-      "lines": 57559,
+      "files": 70,
+      "lines": 60128,
       "dependencies": [
         "clawft-core",
         "clawft-platform",
@@ -484,7 +484,7 @@
       "type": "module",
       "crate": "clawft-kernel",
       "file": "crates/clawft-kernel/src/a2a.rs",
-      "lines": 1979,
+      "lines": 2055,
       "test_count": 7,
       "feature_gate": null,
       "category": "K1"
@@ -534,8 +534,8 @@
       "type": "module",
       "crate": "clawft-kernel",
       "file": "crates/clawft-kernel/src/auth_service.rs",
-      "lines": 544,
-      "test_count": 11,
+      "lines": 823,
+      "test_count": 21,
       "feature_gate": null,
       "category": "K1"
     },
@@ -544,7 +544,7 @@
       "type": "module",
       "crate": "clawft-kernel",
       "file": "crates/clawft-kernel/src/boot.rs",
-      "lines": 2671,
+      "lines": 2820,
       "test_count": 4,
       "feature_gate": null,
       "category": "K1"
@@ -624,8 +624,8 @@
       "type": "module",
       "crate": "clawft-kernel",
       "file": "crates/clawft-kernel/src/config_service.rs",
-      "lines": 447,
-      "test_count": 11,
+      "lines": 686,
+      "test_count": 19,
       "feature_gate": null,
       "category": "K1"
     },
@@ -954,8 +954,8 @@
       "type": "module",
       "crate": "clawft-kernel",
       "file": "crates/clawft-kernel/src/mesh_runtime.rs",
-      "lines": 408,
-      "test_count": 6,
+      "lines": 803,
+      "test_count": 15,
       "feature_gate": "mesh",
       "category": "K6"
     },
@@ -1108,6 +1108,16 @@
       "test_count": 16,
       "feature_gate": "os-patterns",
       "category": "K8"
+    },
+    {
+      "id": "module:clawft-kernel/tools_extended",
+      "type": "module",
+      "crate": "clawft-kernel",
+      "file": "crates/clawft-kernel/src/tools_extended.rs",
+      "lines": 1429,
+      "test_count": 16,
+      "feature_gate": null,
+      "category": "K1"
     },
     {
       "id": "module:clawft-kernel/topic",
@@ -2657,9 +2667,9 @@
     },
     {
       "from": "module:clawft-kernel/auth_service",
-      "to": "tests:auth_service:11",
+      "to": "tests:auth_service:21",
       "type": "EvidenceFor",
-      "weight": 0.83
+      "weight": 1.0
     },
     {
       "from": "module:clawft-kernel/boot",
@@ -2735,9 +2745,9 @@
     },
     {
       "from": "module:clawft-kernel/config_service",
-      "to": "tests:config_service:11",
+      "to": "tests:config_service:19",
       "type": "EvidenceFor",
-      "weight": 0.83
+      "weight": 1.0
     },
     {
       "from": "module:clawft-kernel/console",
@@ -3071,9 +3081,9 @@
     },
     {
       "from": "module:clawft-kernel/mesh_runtime",
-      "to": "tests:mesh_runtime:6",
+      "to": "tests:mesh_runtime:15",
       "type": "EvidenceFor",
-      "weight": 0.68
+      "weight": 0.95
     },
     {
       "from": "module:clawft-kernel/mesh_service",
@@ -3234,6 +3244,12 @@
     {
       "from": "module:clawft-kernel/timer",
       "to": "tests:timer:16",
+      "type": "EvidenceFor",
+      "weight": 0.98
+    },
+    {
+      "from": "module:clawft-kernel/tools_extended",
+      "to": "tests:tools_extended:16",
       "type": "EvidenceFor",
       "weight": 0.98
     },
@@ -3941,6 +3957,18 @@
     },
     {
       "from": "module:clawft-kernel/a2a",
+      "to": "module:clawft-kernel/mesh_ipc",
+      "type": "Uses",
+      "weight": 0.9
+    },
+    {
+      "from": "module:clawft-kernel/a2a",
+      "to": "module:clawft-kernel/mesh_runtime",
+      "type": "Uses",
+      "weight": 0.9
+    },
+    {
+      "from": "module:clawft-kernel/a2a",
       "to": "module:clawft-kernel/process",
       "type": "Uses",
       "weight": 0.9
@@ -4511,7 +4539,25 @@
     },
     {
       "from": "module:clawft-kernel/mesh_runtime",
+      "to": "module:clawft-kernel/mesh_chain",
+      "type": "Uses",
+      "weight": 0.9
+    },
+    {
+      "from": "module:clawft-kernel/mesh_runtime",
+      "to": "module:clawft-kernel/mesh_heartbeat",
+      "type": "Uses",
+      "weight": 0.9
+    },
+    {
+      "from": "module:clawft-kernel/mesh_runtime",
       "to": "module:clawft-kernel/mesh_ipc",
+      "type": "Uses",
+      "weight": 0.9
+    },
+    {
+      "from": "module:clawft-kernel/mesh_runtime",
+      "to": "module:clawft-kernel/mesh_kad",
       "type": "Uses",
       "weight": 0.9
     },
@@ -4680,6 +4726,30 @@
     {
       "from": "module:clawft-kernel/timer",
       "to": "module:clawft-kernel/process",
+      "type": "Uses",
+      "weight": 0.9
+    },
+    {
+      "from": "module:clawft-kernel/tools_extended",
+      "to": "module:clawft-kernel/config_service",
+      "type": "Uses",
+      "weight": 0.9
+    },
+    {
+      "from": "module:clawft-kernel/tools_extended",
+      "to": "module:clawft-kernel/governance",
+      "type": "Uses",
+      "weight": 0.9
+    },
+    {
+      "from": "module:clawft-kernel/tools_extended",
+      "to": "module:clawft-kernel/service",
+      "type": "Uses",
+      "weight": 0.9
+    },
+    {
+      "from": "module:clawft-kernel/tools_extended",
+      "to": "module:clawft-kernel/wasm_runner",
       "type": "Uses",
       "weight": 0.9
     },
@@ -5124,11 +5194,11 @@
   ],
   "stats": {
     "total_crates": 22,
-    "total_modules": 182,
+    "total_modules": 183,
     "total_features": 14,
-    "total_nodes": 218,
-    "total_edges": 500,
-    "avg_degree": 4.6,
+    "total_nodes": 219,
+    "total_edges": 510,
+    "avg_degree": 4.7,
     "most_connected": "module:clawft-kernel/process"
   }
 }

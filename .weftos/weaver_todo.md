@@ -117,3 +117,52 @@ What the Graph Reveals Now
 
 ● The community detection and predictive features exist conceptually but aren't implemented in the Rust kernel yet — they're mentioned as future
   work items in the weaver_todo. The gap analysis Python scripts do structural analysis but not spectral community detection.
+
+## Sprint 10 Deliverables (2026-03-27)
+
+### Kernel Hardening
+- [x] RestartStrategy (OneForOne, OneForAll, RestForOne, Permanent, Transient) + budget + backoff
+- [x] ProcessLink/ProcessMonitor integration with supervisor
+- [x] CausalGraph persistence (JSON save/load)
+- [x] HNSW index persistence
+- [x] PersistenceConfig coordinator
+- [x] DemocritusLoop continuous cognitive cycle (ecc:D5 resolved)
+- [x] DeadLetterQueue wired into A2A router
+- [x] MetricsRegistry wired into boot with kernel gauges
+- [x] LogService + TimerService wired into boot
+- [x] ConfigService with typed values + change notifications
+- [x] AuthService with SHA-256 hashed credentials + scoped tokens
+- [x] MeshRuntime with A2A bridge (RemoteNode → peer delivery)
+- [x] Mesh discovery (Kademlia + heartbeat + peer address registry)
+- [x] Chain sync request/response stubs
+- [x] 10 new WASM tools (fs.analyze, git.log, doc.parse, etc.)
+
+### K8 GUI
+- [x] React 19 + TypeScript + Vite + Tailwind scaffold
+- [x] Dashboard view (metrics, processes, chain events, health)
+- [x] Admin Forms view (5 CRUD forms: spawn/stop/config/chain/service)
+- [x] Knowledge Graph view (Cytoscape.js, community coloring, search, lambda_2)
+- [x] NodeDetail panel (edges, metadata, community)
+- [x] WebSocket hook with mock kernel data
+
+### Testing
+- [x] 20+ A2A router tests
+- [x] 16+ boot path tests
+- [x] 18+ supervisor restart tests
+- [x] 12+ persistence roundtrip tests
+- [x] 12+ DEMOCRITUS loop tests
+- [x] 10+ mesh runtime tests
+- [x] 16+ extended tools tests
+- [x] 8+ config/auth service tests
+- [x] 8 E2E integration tests
+- [x] Total: 1,580+ tests (up from 613)
+
+### Documentation + Deployment
+- [x] INSTALL.md
+- [x] FEATURE_GATES.md
+- [x] CONFIGURATION.md
+- [x] external-analysis-results.md (ruvector: 109 crates validated)
+- [x] docker-compose.yml (2-node mesh)
+- [x] .dockerignore
+- [x] Sprint 10 plan + product ROADMAP.md
+- [x] GTM synthesis document

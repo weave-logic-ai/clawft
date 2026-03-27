@@ -29,9 +29,10 @@ use crate::process::{Pid, ProcessEntry, ProcessState, ProcessTable, ResourceUsag
 /// Determines what happens to sibling agents when one agent fails.
 /// Configured per AppManifest or per supervisor instance.
 #[cfg(feature = "os-patterns")]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RestartStrategy {
     /// Restart only the failed child.
+    #[default]
     OneForOne,
     /// Restart all children if one fails.
     OneForAll,
@@ -41,13 +42,6 @@ pub enum RestartStrategy {
     Permanent,
     /// Restart only if the agent exited abnormally (non-zero exit code).
     Transient,
-}
-
-#[cfg(feature = "os-patterns")]
-impl Default for RestartStrategy {
-    fn default() -> Self {
-        RestartStrategy::OneForOne
-    }
 }
 
 /// Restart budget: max N restarts within M seconds.
@@ -496,7 +490,7 @@ impl<P: Platform> AgentSupervisor<P> {
         let mut tracker = self
             .restart_trackers
             .entry(pid)
-            .or_insert_with(RestartTracker::new);
+            .or_default();
 
         let within_budget = tracker.record_restart(&self.restart_budget);
         let backoff_ms = tracker.backoff_ms;

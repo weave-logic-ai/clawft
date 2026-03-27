@@ -256,7 +256,7 @@ mod tests {
     #[test]
     fn tick_respects_interval() {
         let svc = CronService::new();
-        let job = svc.add_job("slow".into(), 3600, "check".into(), None);
+        let _job = svc.add_job("slow".into(), 3600, "check".into(), None);
 
         // First tick fires (never fired before)
         let result = svc.tick();

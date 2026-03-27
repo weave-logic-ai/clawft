@@ -1937,7 +1937,7 @@ mod tests {
     /// in a single ToolRegistry and can be dispatched through the same
     /// lookup interface.
     #[test]
-    #[cfg(all(feature = "wasm-sandbox"))]
+    #[cfg(feature = "wasm-sandbox")]
     fn integration_cross_backend_tools() {
         use crate::wasm_runner::{
             BuiltinTool, BuiltinToolSpec, ToolCategory, ToolError, ToolRegistry,

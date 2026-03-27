@@ -549,11 +549,11 @@ impl A2ARouter {
     /// request, the response is delivered to the waiting future and
     /// `true` is returned. Otherwise returns `false`.
     pub fn try_complete_request(&self, msg: KernelMessage) -> bool {
-        if let Some(ref corr_id) = msg.correlation_id {
-            if let Some((_, pending)) = self.pending_requests.remove(corr_id) {
-                let _ = pending.response_tx.send(msg);
-                return true;
-            }
+        if let Some(ref corr_id) = msg.correlation_id
+            && let Some((_, pending)) = self.pending_requests.remove(corr_id)
+        {
+            let _ = pending.response_tx.send(msg);
+            return true;
         }
         false
     }
