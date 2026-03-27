@@ -180,7 +180,10 @@ pub use chain::{
 #[cfg(feature = "ecc")]
 pub use calibration::{EccCalibration, EccCalibrationConfig};
 #[cfg(feature = "ecc")]
-pub use causal::{CausalEdgeType, CausalGraph};
+pub use causal::{
+    CausalEdge, CausalEdgeType, CausalGraph, CausalNode, ChangeEvent, ChangePrediction,
+    CouplingPair, SpectralResult,
+};
 #[cfg(feature = "ecc")]
 pub use cognitive_tick::{CognitiveTick, CognitiveTickConfig, CognitiveTickStats};
 #[cfg(feature = "ecc")]
