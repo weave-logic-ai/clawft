@@ -22,6 +22,7 @@ use comfy_table::{presets, Table};
 use clawft_kernel::{Kernel, KernelState};
 use clawft_platform::NativePlatform;
 
+#[cfg(unix)]
 use crate::client::DaemonClient;
 use crate::protocol;
 
@@ -92,7 +93,22 @@ pub enum KernelAction {
 
 /// Run the kernel subcommand.
 pub async fn run(args: KernelArgs) -> anyhow::Result<()> {
+    #[cfg(not(unix))]
+    {
+        match args.action {
+            KernelAction::Start { .. } | KernelAction::Stop { .. } | KernelAction::Restart => {
+                anyhow::bail!(
+                    "kernel daemon requires Unix (socket-based IPC). \
+                     Windows named-pipe transport is planned for v0.2. \
+                     Use `weft` for agent operations on Windows."
+                );
+            }
+            _ => {} // Status/Ps/Logs fall through to ephemeral kernel below
+        }
+    }
+
     match args.action {
+        #[cfg(unix)]
         KernelAction::Start { foreground } => {
             if foreground {
                 // Run in foreground (blocking)
@@ -105,6 +121,7 @@ pub async fn run(args: KernelArgs) -> anyhow::Result<()> {
                 crate::daemon::daemonize(args.config.as_deref())?;
             }
         }
+        #[cfg(unix)]
         KernelAction::Stop { force } => {
             let pid = read_daemon_pid()?;
             let nix_pid = nix::unistd::Pid::from_raw(pid);
@@ -128,6 +145,7 @@ pub async fn run(args: KernelArgs) -> anyhow::Result<()> {
             // Clean up stale files
             cleanup_runtime_files();
         }
+        #[cfg(unix)]
         KernelAction::Restart => {
             let pid = read_daemon_pid()?;
             let nix_pid = nix::unistd::Pid::from_raw(pid);
@@ -136,8 +154,12 @@ pub async fn run(args: KernelArgs) -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("failed to send SIGHUP to PID {pid}: {e}"))?;
             println!("SIGHUP sent to PID {pid} — daemon will restart.");
         }
+        #[cfg(not(unix))]
+        KernelAction::Start { .. } | KernelAction::Stop { .. } | KernelAction::Restart => {
+            unreachable!("handled above");
+        }
         KernelAction::Status => {
-            if let Some(mut client) = DaemonClient::connect().await {
+            if let Some(mut client) = try_daemon_connect().await {
                 let resp = client.simple_call("kernel.status").await?;
                 if resp.ok {
                     let result: protocol::KernelStatusResult =
@@ -163,7 +185,7 @@ pub async fn run(args: KernelArgs) -> anyhow::Result<()> {
             }
         }
         KernelAction::Services => {
-            if let Some(mut client) = DaemonClient::connect().await {
+            if let Some(mut client) = try_daemon_connect().await {
                 let resp = client.simple_call("kernel.services").await?;
                 if resp.ok {
                     let infos: Vec<protocol::ServiceInfo> =
@@ -182,7 +204,7 @@ pub async fn run(args: KernelArgs) -> anyhow::Result<()> {
             }
         }
         KernelAction::Ps => {
-            if let Some(mut client) = DaemonClient::connect().await {
+            if let Some(mut client) = try_daemon_connect().await {
                 let resp = client.simple_call("kernel.ps").await?;
                 if resp.ok {
                     let entries: Vec<protocol::ProcessInfo> =
@@ -201,7 +223,7 @@ pub async fn run(args: KernelArgs) -> anyhow::Result<()> {
             }
         }
         KernelAction::Attach { tail, level } => {
-            let mut client = DaemonClient::connect()
+            let mut client = try_daemon_connect()
                 .await
                 .ok_or_else(|| anyhow::anyhow!("no daemon running (use 'weaver kernel start' first)"))?;
 
@@ -242,7 +264,7 @@ pub async fn run(args: KernelArgs) -> anyhow::Result<()> {
                 tokio::time::sleep(poll_interval).await;
 
                 // Reconnect each poll (connection may be closed after response)
-                let mut poll_client = match DaemonClient::connect().await {
+                let mut poll_client = match try_daemon_connect().await {
                     Some(c) => c,
                     None => {
                         println!("\n[daemon disconnected]");
@@ -287,7 +309,7 @@ pub async fn run(args: KernelArgs) -> anyhow::Result<()> {
             }
         }
         KernelAction::Logs { count, level } => {
-            if let Some(mut client) = DaemonClient::connect().await {
+            if let Some(mut client) = try_daemon_connect().await {
                 let params = protocol::LogsParams {
                     count,
                     level: level.clone(),
@@ -343,7 +365,8 @@ fn print_daemon_status(result: &protocol::KernelStatusResult, pid: Option<u32>) 
 }
 
 /// Fetch and print cluster info from daemon (appended to status output).
-async fn print_cluster_summary(client: &mut DaemonClient) {
+async fn print_cluster_summary(client: &mut DaemonClient)
+{
     let resp = match client.simple_call("cluster.nodes").await {
         Ok(r) => r,
         Err(_) => return,
@@ -589,8 +612,39 @@ fn print_event_log<P: clawft_platform::Platform>(
     println!("({} entries)", events.len());
 }
 
-// ── Signal / PID helpers ──────────────────────────────────────────
+// ── Daemon connect helper ────────────────────────────────────────
 
+/// Try to connect to the daemon. Returns `None` on non-Unix platforms
+/// (daemon uses Unix domain sockets; Windows named-pipe transport planned for v0.2).
+#[cfg(unix)]
+async fn try_daemon_connect() -> Option<DaemonClient> {
+    DaemonClient::connect().await
+}
+
+#[cfg(not(unix))]
+async fn try_daemon_connect() -> Option<DaemonClient> {
+    // Unix socket daemon is not available on Windows.
+    // Fall through to ephemeral kernel path.
+    None
+}
+
+// On non-Unix, define a stub DaemonClient so query arms can use Option<DaemonClient>.
+#[cfg(not(unix))]
+pub(crate) struct DaemonClient;
+
+#[cfg(not(unix))]
+impl DaemonClient {
+    pub async fn call(&mut self, _request: crate::protocol::Request) -> anyhow::Result<crate::protocol::Response> {
+        anyhow::bail!("daemon not available on this platform")
+    }
+    pub async fn simple_call(&mut self, _method: &str) -> anyhow::Result<crate::protocol::Response> {
+        anyhow::bail!("daemon not available on this platform")
+    }
+}
+
+// ── Signal / PID helpers (Unix only) ────────────────────────────
+
+#[cfg(unix)]
 /// Read the daemon PID from `~/.clawft/kernel.pid` and validate the process exists.
 fn read_daemon_pid() -> anyhow::Result<i32> {
     let pid_path = protocol::pid_path();
@@ -609,6 +663,7 @@ fn read_daemon_pid() -> anyhow::Result<i32> {
     Ok(pid)
 }
 
+#[cfg(unix)]
 /// Poll until the given PID exits, returning `true` if it exited within timeout.
 fn wait_for_exit(pid: i32, timeout: std::time::Duration) -> bool {
     let nix_pid = nix::unistd::Pid::from_raw(pid);
@@ -625,6 +680,7 @@ fn wait_for_exit(pid: i32, timeout: std::time::Duration) -> bool {
     false
 }
 
+#[cfg(unix)]
 /// Remove stale PID and socket files if the daemon is no longer running.
 fn cleanup_runtime_files() {
     let pid_path = protocol::pid_path();

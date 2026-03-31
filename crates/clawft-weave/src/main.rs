@@ -12,8 +12,10 @@
 
 use clap::{Parser, Subcommand};
 
+#[cfg(unix)]
 mod client;
 mod commands;
+#[cfg(unix)]
 mod daemon;
 mod protocol;
 #[cfg(feature = "rvf-rpc")]
@@ -66,6 +68,7 @@ enum Commands {
     Ipc(commands::ipc_cmd::IpcArgs),
 
     /// Interactive kernel console (boot + REPL, or attach to running kernel).
+    #[cfg(unix)]
     Console(commands::console_cmd::ConsoleArgs),
 
     /// ECC cognitive substrate management (status, calibrate, search).
@@ -99,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Resource(args) => commands::resource_cmd::run(args).await?,
         Commands::Cron(args) => commands::cron_cmd::run(args).await?,
         Commands::Ipc(args) => commands::ipc_cmd::run(args).await?,
+        #[cfg(unix)]
         Commands::Console(args) => commands::console_cmd::run(args).await?,
         Commands::Ecc(args) => commands::ecc_cmd::run(args).await?,
         Commands::Init(args) => commands::init_cmd::run(args).await?,
