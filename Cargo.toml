@@ -33,8 +33,8 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.93"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/clawft/clawft"
-homepage = "https://github.com/clawft/clawft"
+repository = "https://github.com/weave-logic-ai/weftos"
+homepage = "https://github.com/weave-logic-ai/weftos"
 
 [workspace.dependencies]
 # Serialization
@@ -191,7 +191,7 @@ targets = [
 # Installers to generate
 installers = ["shell", "powershell", "homebrew"]
 # Homebrew tap repository
-tap = "weavelogic/homebrew-tap"
+tap = "weave-logic-ai/homebrew-tap"
 # Publish jobs to run (homebrew formula auto-published to tap repo)
 publish-jobs = ["homebrew"]
 # Enable GitHub Attestations for provenance
