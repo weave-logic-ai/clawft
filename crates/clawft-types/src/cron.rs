@@ -12,6 +12,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 /// How a cron job is scheduled.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScheduleKind {
@@ -59,6 +60,7 @@ impl Default for CronSchedule {
 }
 
 /// What action to perform when a cron job fires.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PayloadKind {
@@ -109,6 +111,7 @@ impl Default for CronPayload {
 }
 
 /// Outcome of the last job execution.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {

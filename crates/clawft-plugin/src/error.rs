@@ -6,6 +6,7 @@
 use thiserror::Error;
 
 /// Errors produced by plugin operations.
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum PluginError {
     /// Plugin failed to load (bad manifest, missing WASM module, etc.).

@@ -31,6 +31,7 @@ pub trait EncryptedChannel: Send + Sync + 'static {
 }
 
 /// Noise handshake pattern.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NoisePattern {
     /// XX pattern: mutual authentication, first contact.
@@ -156,6 +157,7 @@ pub struct KemConfig {
 }
 
 /// Result of KEM capability negotiation between two peers.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KemNegotiationResult {
     /// Both sides support KEM -- full PQ protection.

@@ -5,7 +5,7 @@
 //! [`DeadLetterQueue`] instead of being silently dropped.
 
 use std::collections::VecDeque;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,7 @@ use crate::process::Pid;
 pub const DEFAULT_DLQ_CAPACITY: usize = 10_000;
 
 /// Reason a message was dead-lettered.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DeadLetterReason {
     /// Target PID not found in ProcessTable.
@@ -75,9 +76,16 @@ pub struct DeadLetter {
 ///
 /// Bounded FIFO queue: when full, the oldest entry is evicted.
 /// Queryable by target PID, reason variant, and time range.
+///
+/// When an optional [`ChainManager`](crate::chain::ChainManager) is
+/// attached, every intake is recorded as an `ipc.dead_letter` event
+/// in the ExoChain audit trail.
 pub struct DeadLetterQueue {
     letters: RwLock<VecDeque<DeadLetter>>,
     max_size: usize,
+    /// Optional chain manager for audit logging.
+    #[cfg(feature = "exochain")]
+    chain: Option<Arc<crate::chain::ChainManager>>,
 }
 
 impl DeadLetterQueue {
@@ -86,6 +94,8 @@ impl DeadLetterQueue {
         Self {
             letters: RwLock::new(VecDeque::with_capacity(max_size.min(1024))),
             max_size,
+            #[cfg(feature = "exochain")]
+            chain: None,
         }
     }
 
@@ -94,10 +104,37 @@ impl DeadLetterQueue {
         Self::new(DEFAULT_DLQ_CAPACITY)
     }
 
+    /// Attach a chain manager for audit logging (builder pattern).
+    ///
+    /// When set, every `intake` call emits an `ipc.dead_letter` event
+    /// to the ExoChain.
+    #[cfg(feature = "exochain")]
+    pub fn with_chain(mut self, cm: Arc<crate::chain::ChainManager>) -> Self {
+        self.chain = Some(cm);
+        self
+    }
+
     /// Intake a message that could not be delivered.
     ///
     /// If the queue is at capacity, the oldest entry is evicted (FIFO).
+    /// When a [`ChainManager`](crate::chain::ChainManager) is attached,
+    /// the dead letter is recorded as an `ipc.dead_letter` chain event.
     pub fn intake(&self, message: KernelMessage, reason: DeadLetterReason) {
+        // Log to chain before moving the message into the letter.
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain {
+            use crate::chain::ChainLoggable;
+            let event = crate::chain::IpcDeadLetterEvent {
+                message_id: message.id.clone(),
+                from_pid: message.from,
+                target: format!("{:?}", message.target),
+                payload_type: message.payload.type_name().to_owned(),
+                reason: format!("{reason}"),
+                timestamp: Utc::now(),
+            };
+            cm.append_loggable(&event);
+        }
+
         let letter = DeadLetter {
             message,
             reason,
@@ -426,5 +463,41 @@ mod tests {
         let restored: DeadLetter = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.retry_count, 2);
         assert_eq!(restored.message.id, letter.message.id);
+    }
+
+    #[cfg(feature = "exochain")]
+    #[test]
+    fn intake_logs_to_chain() {
+        let cm = std::sync::Arc::new(crate::chain::ChainManager::new(0, 100));
+        let initial_len = cm.len();
+
+        let dlq = DeadLetterQueue::new(100).with_chain(cm.clone());
+        dlq.intake(
+            make_msg(0, 99),
+            DeadLetterReason::TargetNotFound { pid: 99 },
+        );
+
+        assert_eq!(dlq.len(), 1);
+        assert_eq!(cm.len(), initial_len + 1);
+
+        let events = cm.tail(1);
+        assert_eq!(events[0].source, "ipc");
+        assert_eq!(events[0].kind, "ipc.dead_letter");
+
+        let payload = events[0].payload.as_ref().unwrap();
+        assert_eq!(payload["from_pid"], 0);
+        assert!(payload["reason"].as_str().unwrap().contains("target_not_found"));
+    }
+
+    #[cfg(feature = "exochain")]
+    #[test]
+    fn intake_without_chain_does_not_log() {
+        // Without with_chain, intake should still work normally
+        let dlq = DeadLetterQueue::new(100);
+        dlq.intake(
+            make_msg(0, 1),
+            DeadLetterReason::Timeout { duration_ms: 1000 },
+        );
+        assert_eq!(dlq.len(), 1);
     }
 }

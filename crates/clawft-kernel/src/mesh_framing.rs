@@ -6,6 +6,7 @@
 use crate::mesh::{MeshError, MeshStream, MAX_MESSAGE_SIZE};
 
 /// Mesh message types for framing dispatch.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FrameType {

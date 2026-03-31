@@ -121,6 +121,7 @@ impl ChannelAdapter for ChannelAdapterShim {
                     data.len()
                 )));
             }
+            _ => return Err(PluginError::NotImplemented("unknown payload variant".into())),
         };
 
         let msg = OutboundMessage {
@@ -289,6 +290,10 @@ impl ChannelAdapterHost for ChannelAdapterHostBridge {
                     "binary payload received but not yet supported by pipeline"
                 );
                 format!("[binary: {mime_type}, {} bytes]", data.len())
+            }
+            _ => {
+                warn!(channel = channel, "unknown payload variant received");
+                "[unknown payload]".to_string()
             }
         };
 

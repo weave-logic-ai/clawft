@@ -46,6 +46,7 @@ pub struct TurnMatch {
 }
 
 /// Errors that can occur during session indexing.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum IndexError {
     /// An embedding operation failed.

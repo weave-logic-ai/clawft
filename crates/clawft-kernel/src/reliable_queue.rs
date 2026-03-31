@@ -54,6 +54,7 @@ pub struct PendingDelivery {
 }
 
 /// Result of a reliable delivery attempt.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DeliveryResult {
     /// Message was acknowledged by the receiver.

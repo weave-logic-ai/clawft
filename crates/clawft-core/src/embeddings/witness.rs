@@ -28,6 +28,7 @@ use uuid::Uuid;
 pub const GENESIS_HASH: [u8; 32] = [0u8; 32];
 
 /// The type of operation recorded in a WITNESS segment.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WitnessOperation {
     /// A new entry was stored.
@@ -107,6 +108,7 @@ impl WitnessSegment {
 }
 
 /// Errors from WITNESS chain operations.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum WitnessError {
     /// The chain is corrupted: a segment's hash does not match.

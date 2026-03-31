@@ -34,6 +34,7 @@ pub struct DesiredAgentState {
 }
 
 /// A drift event detected by the reconciler.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DriftEvent {
     /// A desired agent is not running.

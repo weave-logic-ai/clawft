@@ -36,6 +36,7 @@ const MAX_VECTORS: usize = 1024;
 // ── Message passing protocol ────────────────────────────────────────
 
 /// Request messages from the main agent to the micro-HNSW module.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MicroHnswRequest {
     /// Insert a vector with the given ID.
@@ -62,6 +63,7 @@ pub enum MicroHnswRequest {
 }
 
 /// Response messages from the micro-HNSW module to the main agent.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MicroHnswResponse {
     /// Query results: list of (id, score) pairs.

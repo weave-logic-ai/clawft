@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 /// Errors from the RVF stub store.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum RvfError {
     /// An I/O error occurred (reading/writing the store file).

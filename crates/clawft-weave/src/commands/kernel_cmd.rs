@@ -455,6 +455,7 @@ fn print_status<P: clawft_platform::Platform>(kernel: &Kernel<P>) {
         KernelState::Running => "running",
         KernelState::ShuttingDown => "shutting down",
         KernelState::Halted => "halted",
+        _ => "unknown",
     };
 
     let uptime_str = format_uptime(kernel.uptime().as_secs_f64());
@@ -581,6 +582,7 @@ fn print_event_log<P: clawft_platform::Platform>(
             clawft_kernel::LogLevel::Warn => "WARN",
             clawft_kernel::LogLevel::Debug => "DBG ",
             clawft_kernel::LogLevel::Info => "INFO",
+            _ => "??? ",
         };
         println!("{ts} [{level_tag}] {}", event.message);
     }

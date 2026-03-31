@@ -1,0 +1,303 @@
+---
+title: Block Descriptor Schema
+description: JSON Schema reference for the WeftOS Block Descriptor format with field descriptions and examples
+---
+
+# Block Descriptor Schema
+
+A Block Descriptor is a self-contained JSON document defining a renderable UI assembly. One descriptor can render to React (Tauri desktop), Terminal (Ink/xterm.js), Mentra HUD (400x240 constraint), PDF, MCP, and Shell targets.
+
+**Schema version**: 0.2.0
+**JSON Schema draft**: 2020-12
+**Schema ID**: `https://weftos.weavelogic.dev/schemas/block-descriptor/0.2.0`
+
+## Root Document
+
+The top-level object has three required fields and one optional field.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `version` | string | Yes | Schema version for forward compatibility. Must be `"0.2.0"`. |
+| `root` | string | Yes | ID of the root element in the elements map. Must be a key in `elements`. |
+| `elements` | object | Yes | Flat adjacency-list map of element ID to element definition. At least one entry required. |
+| `meta` | BlockMeta | No | Optional metadata for catalog display, governance, and rendering hints. |
+
+### Minimal Example
+
+```json
+{
+  "version": "0.2.0",
+  "root": "cpu",
+  "elements": {
+    "cpu": {
+      "type": "Metric",
+      "props": { "label": "CPU", "value": 42, "unit": "%" }
+    }
+  }
+}
+```
+
+---
+
+## BlockMeta
+
+Optional metadata attached to the descriptor.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `creator` | string | No | Who created this descriptor. Convention: `"user:<name>"` or `"agent:<agent_id>"`. |
+| `created_at` | string (date-time) | No | ISO 8601 creation timestamp. |
+| `title` | string | No | Human-readable title for catalog display. |
+| `tags` | string[] | No | Tags for catalog search and filtering. |
+| `governance_seq` | integer (>= 0) | No | ExoChain sequence number of the governance approval event for this descriptor. |
+| `target_hint` | enum | No | Preferred render target. One of: `"react"`, `"terminal"`, `"mentra-hud"`, `"pdf"`, `"mcp"`, `"shell"`, `"voice"`. Renderers may ignore this hint. |
+| `refresh_hz` | number (0.1 -- 60) | No | Suggested refresh rate for `$state` bindings, in Hertz. |
+
+### Example with Meta
+
+```json
+{
+  "version": "0.2.0",
+  "root": "status-card",
+  "meta": {
+    "creator": "agent:weaver-0",
+    "created_at": "2026-03-27T10:00:00Z",
+    "title": "System Status",
+    "tags": ["status", "dashboard"],
+    "target_hint": "mentra-hud",
+    "refresh_hz": 2
+  },
+  "elements": {
+    "status-card": {
+      "type": "Metric",
+      "props": { "label": "Health", "value": { "$state": "/kernel/health/overall" }, "unit": "%" }
+    }
+  }
+}
+```
+
+---
+
+## BlockElement
+
+Each entry in the `elements` map defines one block.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string (enum) | Yes | Block type name. Must exist in the Block Catalog. |
+| `children` | string[] | No | Ordered list of child element IDs. Only layout blocks (Column, Row, Grid, Tabs) may have children. |
+| `props` | object | No | Props specific to this block type. Values may be literals or `$state` references. |
+| `on` | object | No | Event handlers. Keys are event names (e.g., `"press"`, `"voice_select"`, `"change"`). Values are actions. |
+| `ports` | object | No | Data port bindings for inter-block communication. |
+| `layout` | LayoutHints | No | Layout hints for the block engine. |
+
+### Valid Block Types
+
+**Layout**: `Column`, `Row`, `Grid`, `Tabs`
+
+**Data Display**: `Metric`, `DataTable`, `ChainViewer`, `CausalGraph`, `DiffViewer`, `CodeEditor`
+
+**Interactive**: `Button`, `ConsolePan`, `ApprovalGate`, `TextInput`, `Markdown`
+
+**OS Capability**: `WebBrowser`, `ResourceTree`, `ServiceMap`
+
+**HUD-specific**: `StatusBar`, `RadialTopology`, `HintBar`, `ProgressBar`
+
+---
+
+## State References
+
+State references bind block props to live kernel state. They are resolved at render time via the StateStore.
+
+### StateRef
+
+A simple reference to a kernel state path.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `$state` | string | Yes | JSON Pointer path into the StateStore (e.g., `"/kernel/metrics/cpu_percent"`). Must start with `/`. |
+| `$default` | PropValue | No | Fallback value if the path is not yet available in the StateStore. |
+| `$transform` | string | No | Transform function name applied to the resolved value (e.g., `"percent"`, `"humanBytes"`, `"truncate"`). |
+
+```json
+{
+  "value": {
+    "$state": "/kernel/metrics/cpu_percent",
+    "$default": 0,
+    "$transform": "percent"
+  }
+}
+```
+
+### FormatStateRef
+
+A state reference with a format template string. The resolved value is interpolated into the template at `{v}`.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `$state` | string | Yes | JSON Pointer path into the StateStore. |
+| `format` | string | Yes | Template string where `{v}` is replaced by the resolved value. |
+
+```json
+{
+  "left": {
+    "$state": "/kernel/processes/active_count",
+    "format": "AGENTS: {v} total"
+  }
+}
+```
+
+---
+
+## PropValue
+
+A prop value can be any of the following:
+
+- **Literal**: string, number, boolean, null
+- **Array**: an array of PropValues
+- **StateRef**: a `{ "$state": "/path" }` object
+- **FormatStateRef**: a `{ "$state": "/path", "format": "..." }` object
+- **Plain object**: any object that does not contain `$state` at the top level, with nested PropValues
+
+---
+
+## BlockAction
+
+Actions are triggered by block events and routed through the Action Catalog.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `action` | string (enum) | Yes | Action type. One of: `"kernel_exec"`, `"governance_check"`, `"chain_query"`, `"ecc_search"`, `"agent_chat"`, `"navigate"`, `"open_block"`, `"close_block"`. |
+| `params` | object | No | Static parameters merged with event data at dispatch time. Values can be PropValues. |
+| `governed` | boolean | No | Whether to require a governance check before executing. Default: `true`. |
+
+### Example
+
+```json
+{
+  "on": {
+    "press": {
+      "action": "kernel_exec",
+      "params": { "command": "process.spawn coder" },
+      "governed": true
+    }
+  }
+}
+```
+
+---
+
+## PortBinding
+
+Ports enable inter-block communication via the PortBus.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `direction` | `"in"` or `"out"` | Yes | `"in"` receives data from another block's output port. `"out"` emits data for other blocks to consume. |
+| `data_type` | string | Yes | Data type hint for validation (e.g., `"number"`, `"string"`, `"ProcessEntry"`, `"ChainEvent"`). |
+| `source` | object | No | For `"in"` ports: identifies the source element and port name. Contains `element` (string) and `port` (string). |
+| `publish` | string | No | For `"out"` ports: `$state` path where data is published to the StateStore. |
+
+### Example: Wiring Two Blocks
+
+```json
+{
+  "elements": {
+    "table": {
+      "type": "DataTable",
+      "props": { "columns": [{"key": "pid", "label": "PID"}], "rows": { "$state": "/kernel/processes" } },
+      "ports": {
+        "selectedRow": { "direction": "out", "data_type": "ProcessEntry", "publish": "/ui/selected_process" }
+      }
+    },
+    "detail": {
+      "type": "Markdown",
+      "props": { "content": { "$state": "/ui/selected_process" } },
+      "ports": {
+        "input": { "direction": "in", "data_type": "ProcessEntry", "source": { "element": "table", "port": "selectedRow" } }
+      }
+    }
+  }
+}
+```
+
+---
+
+## LayoutHints
+
+Layout hints tell the block engine how to size and position a block. Interpreted differently by each renderer.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `width` | integer (1--12) | No | Width in grid units (12-column grid system). |
+| `height` | integer (>= 1) | No | Height in grid units. |
+| `x` | number | No | Absolute X position in canvas mode (pixels). |
+| `y` | number | No | Absolute Y position in canvas mode (pixels). |
+| `minWidth` | integer (>= 1) | No | Minimum width in grid units. |
+| `minHeight` | integer (>= 1) | No | Minimum height in grid units. |
+| `resizable` | boolean | No | Whether the user can resize this block. Default: `true`. |
+
+---
+
+## Complete Example
+
+A dashboard with metrics and a chain viewer:
+
+```json
+{
+  "version": "0.2.0",
+  "root": "dashboard",
+  "meta": {
+    "title": "Kernel Dashboard",
+    "creator": "agent:weaver-0",
+    "tags": ["dashboard", "monitoring"],
+    "refresh_hz": 2
+  },
+  "elements": {
+    "dashboard": {
+      "type": "Column",
+      "props": { "gap": 12 },
+      "children": ["metrics-row", "chain-view"]
+    },
+    "metrics-row": {
+      "type": "Row",
+      "props": { "gap": 16 },
+      "children": ["cpu", "mem", "chain-height"]
+    },
+    "cpu": {
+      "type": "Metric",
+      "props": {
+        "label": "CPU",
+        "value": { "$state": "/kernel/metrics/cpu_percent" },
+        "unit": "%",
+        "threshold": { "warn": 70, "crit": 90 }
+      },
+      "layout": { "width": 4 }
+    },
+    "mem": {
+      "type": "Metric",
+      "props": {
+        "label": "Memory",
+        "value": { "$state": "/kernel/metrics/mem_percent" },
+        "unit": "%",
+        "threshold": { "warn": 80, "crit": 95 }
+      },
+      "layout": { "width": 4 }
+    },
+    "chain-height": {
+      "type": "Metric",
+      "props": {
+        "label": "Chain",
+        "value": { "$state": "/kernel/chain/height" },
+        "unit": "events"
+      },
+      "layout": { "width": 4 }
+    },
+    "chain-view": {
+      "type": "ChainViewer",
+      "props": { "limit": 20 },
+      "layout": { "width": 12, "height": 6 }
+    }
+  }
+}
+```

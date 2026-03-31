@@ -108,6 +108,7 @@ pub struct ToolSpec {
 }
 
 /// Source of a tool implementation.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ToolSource {
     /// WASM module (path relative to app directory).
@@ -188,6 +189,7 @@ pub struct AppHooks {
 // ── Application Lifecycle ───────────────────────────────────────────
 
 /// Application lifecycle state.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppState {
     /// Installed but not started.
@@ -241,6 +243,7 @@ pub struct InstalledApp {
 // ── Errors ──────────────────────────────────────────────────────────
 
 /// Application framework errors.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     /// Manifest file not found.

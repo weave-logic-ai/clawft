@@ -180,8 +180,9 @@ pub use capability::{
 };
 #[cfg(feature = "exochain")]
 pub use chain::{
-    AnchorReceipt, ChainAnchor, ChainCheckpoint, ChainEvent, ChainManager, ChainStatus,
-    ChainVerifyResult, MockAnchor,
+    AnchorReceipt, ChainAnchor, ChainCheckpoint, ChainEvent, ChainLoggable, ChainManager,
+    ChainStatus, ChainVerifyResult, GovernanceDecisionEvent, IpcDeadLetterEvent, MockAnchor,
+    RestartEvent,
 };
 #[cfg(feature = "ecc")]
 pub use calibration::{EccCalibration, EccCalibrationConfig};

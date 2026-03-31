@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 // ── Temperature tier ────────────────────────────────────────────────
 
 /// Temperature tier for a stored vector.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Temperature {
     /// Full-precision `f32` in memory and on disk.
@@ -261,6 +262,7 @@ impl PqCodebook {
 // ── Quantized storage entry ─────────────────────────────────────────
 
 /// A vector stored with temperature-based quantization.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum QuantizedVector {
     /// Full-precision f32 vector (hot tier).

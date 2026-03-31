@@ -4,6 +4,7 @@
 //! adding typed [`KernelMessage`] envelopes and PID-based routing.
 //! The underlying message bus channels are reused (no new channels).
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -15,7 +16,25 @@ use clawft_core::bus::MessageBus;
 use crate::error::KernelError;
 use crate::process::Pid;
 
+/// Global atomic counter for generating internal IPC message IDs.
+///
+/// Using an atomic counter instead of `uuid::Uuid::new_v4()` eliminates
+/// the crypto-random generation overhead (~50-100ns per message) in hot
+/// IPC paths. The counter is monotonically increasing and unique within
+/// a single process lifetime, which is sufficient for internal correlation.
+static IPC_MSG_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Generate a fast, unique internal message ID using an atomic counter.
+///
+/// Format: `"ipc-{counter}"` -- lightweight string, no crypto-random overhead.
+#[inline]
+fn next_ipc_msg_id() -> String {
+    let id = IPC_MSG_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("ipc-{id}")
+}
+
 /// Target for a kernel message.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MessageTarget {
     /// Send to a specific process by PID.
@@ -49,6 +68,7 @@ pub enum MessageTarget {
 }
 
 /// Payload types for kernel messages.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MessagePayload {
     /// Plain text message.
@@ -99,6 +119,7 @@ impl MessagePayload {
 }
 
 /// Reason a process exited (used in link/monitor notifications).
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ExitReason {
     /// Normal exit (process completed successfully).
@@ -121,6 +142,7 @@ pub struct ProcessDown {
 }
 
 /// Kernel control signals.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum KernelSignal {
     /// Request a process to shut down gracefully.
@@ -192,9 +214,12 @@ pub struct KernelMessage {
 
 impl KernelMessage {
     /// Create a new kernel message.
+    ///
+    /// Uses an atomic counter for the message ID instead of UUID v4,
+    /// eliminating crypto-random generation overhead in hot IPC paths.
     pub fn new(from: Pid, target: MessageTarget, payload: MessagePayload) -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: next_ipc_msg_id(),
             from,
             target,
             payload,
@@ -212,7 +237,7 @@ impl KernelMessage {
         correlation_id: String,
     ) -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: next_ipc_msg_id(),
             from,
             target,
             payload,
@@ -230,7 +255,7 @@ impl KernelMessage {
         trace_id: String,
     ) -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: next_ipc_msg_id(),
             from,
             target,
             payload,

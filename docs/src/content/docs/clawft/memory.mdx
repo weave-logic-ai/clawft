@@ -1,0 +1,85 @@
+---
+title: "Memory"
+description: "File-based agent memory: MEMORY.md and HISTORY.md, directory resolution, platform abstraction, and context injection."
+---
+
+## Overview
+
+clawft uses file-based persistent memory following the nanobot pattern. Two markdown files store agent knowledge and session history, managed by the `MemoryStore` (~461 lines in `crates/clawft-core/src/agent/`).
+
+## Memory Files
+
+### MEMORY.md
+
+Long-term facts in append-only format. Contains knowledge the agent should remember across sessions -- user preferences, project context, learned patterns, and accumulated facts.
+
+The file is periodically consolidated to prevent unbounded growth. The agent writes to MEMORY.md via the `memory_write` tool (append or overwrite mode) and reads from it via `memory_read` (with optional paragraph-level search).
+
+### HISTORY.md
+
+Session summaries in chronological format. Contains a grep-searchable log of past sessions -- what was discussed, what actions were taken, and what outcomes resulted.
+
+HISTORY.md is written at the end of each session and provides continuity across restarts. It is not injected into the LLM context by default (to conserve tokens) but is available through the `memory_read` tool.
+
+## Directory Resolution
+
+Memory files are resolved via a fallback chain:
+
+1. `~/.clawft/workspace/memory/` (preferred)
+2. `~/.nanobot/workspace/memory/` (legacy fallback)
+
+If neither directory exists, the `.clawft` path is created on first write. This resolution happens at `MemoryStore` initialization and is consistent across all memory operations.
+
+## Platform Abstraction
+
+All memory I/O goes through the `Platform` filesystem trait (`crates/clawft-platform/`). This abstraction serves three purposes:
+
+- **WASM compatibility** -- The browser target cannot use `std::fs`. The `Platform` trait provides an async filesystem interface that can be implemented with browser-local storage or IndexedDB.
+- **WASI compatibility** -- The WASI target uses capability-based filesystem access. The platform trait maps cleanly to WASI's fd-based I/O.
+- **Testability** -- Unit tests inject a mock filesystem implementation, enabling memory operations to be tested without touching the real filesystem.
+
+## Context Injection
+
+When the `ContextBuilder` assembles messages for an LLM call, it reads MEMORY.md and injects its contents into the system prompt. This gives the agent persistent knowledge without requiring explicit memory retrieval on every turn.
+
+The injection flow:
+
+1. `ContextBuilder` calls `MemoryStore::read_memory()`
+2. If MEMORY.md exists and is non-empty, its contents are appended to the system prompt under a `## Memory` section
+3. The assembled context is passed to the pipeline
+
+This means the agent always has access to its long-term memory without needing to invoke the `memory_read` tool explicitly.
+
+## Memory Tools
+
+Two built-in tools provide explicit memory access during agent operation:
+
+### memory_read
+
+Read from MEMORY.md with optional paragraph-level search.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | no | Search query to filter paragraphs |
+
+When a query is provided, only paragraphs containing matching text are returned. Without a query, the full MEMORY.md contents are returned.
+
+### memory_write
+
+Write to MEMORY.md in append or overwrite mode.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `content` | string | yes | Content to write |
+| `mode` | string | no | `"append"` (default) or `"overwrite"` |
+
+Append mode adds content to the end of the file. Overwrite mode replaces the entire file. Append is the default and recommended mode -- it preserves history and prevents accidental data loss.
+
+## Future Directions
+
+Several memory enhancements are planned but not yet implemented:
+
+- **Context compression** -- Structured summarization of long memory files to reduce token consumption while preserving key facts.
+- **User modeling** -- Building a dialectic understanding of the user's preferences, communication style, and domain expertise (similar to Honcho's approach).
+- **Session search** -- Full-text search across HISTORY.md using the ECC cognitive substrate's HNSW index, enabling semantic retrieval of past session content.
+- **Memory consolidation** -- Automatic deduplication and summarization of MEMORY.md entries that have grown beyond a configurable threshold.

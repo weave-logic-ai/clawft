@@ -49,6 +49,7 @@ pub trait LocalTtsEngine: Send + Sync {
 // ---------------------------------------------------------------------------
 
 /// Source of an STT transcription result.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum SttSource {
     /// Result came from the local STT engine.
@@ -189,6 +190,7 @@ impl SttFallbackChain {
 // ---------------------------------------------------------------------------
 
 /// Source of a TTS synthesis result.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum TtsSource {
     /// Result came from the local TTS engine.

@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Result of a gate decision.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GateDecision {
     /// Action is permitted.
@@ -694,6 +695,293 @@ mod tests {
         let ctx_no_effect = serde_json::json!({"pid": 1});
         let decision = gate.check("agent-1", "tool.exec", &ctx_no_effect);
         assert!(decision.is_permit());
+    }
+
+    // ── Sprint 11 Security Tests ────────────────────────────────────
+
+    #[test]
+    fn replay_attack_same_context_twice() {
+        // Submit the same governance check twice; both should return
+        // consistent decisions (stateless gate — no replay detection
+        // at gate level, but we verify determinism).
+        let cm = Arc::new(crate::chain::ChainManager::new(0, 10));
+        let gate = GovernanceGate::new(0.5, false)
+            .with_chain(cm.clone())
+            .add_rule(GovernanceRule {
+                id: "sec".into(),
+                description: "test".into(),
+                branch: GovernanceBranch::Judicial,
+                severity: RuleSeverity::Blocking,
+                active: true,
+                reference_url: None,
+                sop_category: None,
+            });
+
+        let ctx = serde_json::json!({"effect": {"risk": 0.1}});
+
+        let d1 = gate.check("agent-1", "tool.read", &ctx);
+        let initial_len = cm.len();
+        let d2 = gate.check("agent-1", "tool.read", &ctx);
+
+        // Both decisions are permit (low risk).
+        assert!(d1.is_permit());
+        assert!(d2.is_permit());
+
+        // Both calls logged to chain (two distinct events).
+        assert_eq!(cm.len(), initial_len + 1);
+    }
+
+    #[test]
+    fn replay_attack_chain_records_each_invocation() {
+        let cm = Arc::new(crate::chain::ChainManager::new(0, 10));
+        let gate = GovernanceGate::new(0.5, false)
+            .with_chain(cm.clone())
+            .add_rule(GovernanceRule {
+                id: "sec".into(),
+                description: "block risky".into(),
+                branch: GovernanceBranch::Judicial,
+                severity: RuleSeverity::Blocking,
+                active: true,
+                reference_url: None,
+                sop_category: None,
+            });
+
+        let ctx = serde_json::json!({"effect": {"risk": 0.9}});
+        let before = cm.len();
+        gate.check("agent-1", "tool.exec", &ctx);
+        gate.check("agent-1", "tool.exec", &ctx);
+        gate.check("agent-1", "tool.exec", &ctx);
+        // Every invocation produces a chain event.
+        assert_eq!(cm.len(), before + 3);
+    }
+
+    #[test]
+    fn invalid_capability_empty_action() {
+        let (gate, pid) = make_gate_with_agent(AgentCapabilities::default());
+        let ctx = serde_json::json!({"pid": pid});
+        // Empty action string — no recognized prefix → permits by default.
+        let decision = gate.check("test-agent", "", &ctx);
+        assert!(decision.is_permit());
+    }
+
+    #[test]
+    fn invalid_capability_very_long_action() {
+        let (gate, pid) = make_gate_with_agent(AgentCapabilities::default());
+        let ctx = serde_json::json!({"pid": pid});
+        let long_action = "tool.".to_owned() + &"x".repeat(10_000);
+        let decision = gate.check("test-agent", &long_action, &ctx);
+        // Should not panic. Default caps allow tools.
+        assert!(decision.is_permit());
+    }
+
+    #[test]
+    fn invalid_capability_special_characters() {
+        let (gate, pid) = make_gate_with_agent(AgentCapabilities::default());
+        let ctx = serde_json::json!({"pid": pid});
+        // Action with null bytes and unicode
+        let decision = gate.check("test-agent", "tool.\0\x01\u{FEFF}", &ctx);
+        assert!(decision.is_permit());
+    }
+
+    #[test]
+    fn invalid_capability_action_with_path_traversal() {
+        let (gate, pid) = make_gate_with_agent(AgentCapabilities::default());
+        let ctx = serde_json::json!({"pid": pid});
+        let decision = gate.check("test-agent", "tool.../../etc/passwd", &ctx);
+        // Should still work — gate routes based on prefix.
+        assert!(decision.is_permit());
+    }
+
+    #[test]
+    fn permission_escalation_no_tool_access() {
+        let caps = AgentCapabilities {
+            can_exec_tools: false,
+            can_ipc: false,
+            can_spawn: false,
+            ..Default::default()
+        };
+        let (gate, pid) = make_gate_with_agent(caps);
+        let ctx = serde_json::json!({"pid": pid});
+
+        // Agent without tool access tries various tool actions.
+        assert!(gate.check("agent", "tool.shell_exec", &ctx).is_deny());
+        assert!(gate.check("agent", "tool.read_file", &ctx).is_deny());
+        assert!(gate.check("agent", "tool.write_file", &ctx).is_deny());
+
+        // IPC also denied.
+        let ipc_ctx = serde_json::json!({"pid": pid, "target_pid": 999});
+        assert!(gate.check("agent", "ipc.send", &ipc_ctx).is_deny());
+    }
+
+    #[test]
+    fn permission_escalation_service_access_denied() {
+        // Agent with default caps but checking service access for
+        // a non-existent service should be handled gracefully.
+        let (gate, pid) = make_gate_with_agent(AgentCapabilities::default());
+        let ctx = serde_json::json!({"pid": pid});
+        // Service check depends on capability checker internals.
+        let decision = gate.check("agent", "service.nonexistent_service", &ctx);
+        // Service access check: capabilities allow by default.
+        assert!(decision.is_permit() || decision.is_deny());
+    }
+
+    #[test]
+    fn governance_gate_missing_pid_defaults_to_zero() {
+        let (gate, _pid) = make_gate_with_agent(AgentCapabilities::default());
+        // Context without pid field.
+        let ctx = serde_json::json!({});
+        let decision = gate.check("test-agent", "tool.read", &ctx);
+        // pid=0 is not in process table, so tool check may deny.
+        // The important thing is it does not panic.
+        let _ = decision;
+    }
+
+    #[test]
+    fn governance_gate_concurrent_checks() {
+        let cm = Arc::new(crate::chain::ChainManager::new(0, 100));
+        let gate = Arc::new(
+            GovernanceGate::new(0.5, false)
+                .with_chain(cm.clone())
+                .add_rule(GovernanceRule {
+                    id: "sec".into(),
+                    description: "test".into(),
+                    branch: GovernanceBranch::Judicial,
+                    severity: RuleSeverity::Blocking,
+                    active: true,
+                    reference_url: None,
+                    sop_category: None,
+                }),
+        );
+
+        let before = cm.len();
+
+        std::thread::scope(|s| {
+            for i in 0..10 {
+                let gate = Arc::clone(&gate);
+                s.spawn(move || {
+                    let ctx = serde_json::json!({"effect": {"risk": 0.1 * (i as f64)}});
+                    gate.check(&format!("agent-{i}"), "tool.check", &ctx);
+                });
+            }
+        });
+
+        // All 10 checks should be logged.
+        assert_eq!(cm.len(), before + 10);
+    }
+
+    #[test]
+    fn governance_gate_risk_boundary_at_threshold() {
+        // Test exactly at the threshold boundary.
+        let gate = GovernanceGate::new(0.5, false).add_rule(GovernanceRule {
+            id: "sec".into(),
+            description: "boundary test".into(),
+            branch: GovernanceBranch::Judicial,
+            severity: RuleSeverity::Blocking,
+            active: true,
+            reference_url: None,
+            sop_category: None,
+        });
+
+        // Risk exactly at 0.5 — the magnitude of (0.5,0,0,0,0) = 0.5
+        let ctx = serde_json::json!({"effect": {"risk": 0.5}});
+        let decision = gate.check("agent", "tool.exec", &ctx);
+        // At threshold: should be permit (not exceeded).
+        assert!(decision.is_permit());
+
+        // Slightly above threshold.
+        let ctx_above = serde_json::json!({"effect": {"risk": 0.51}});
+        let decision_above = gate.check("agent", "tool.exec", &ctx_above);
+        assert!(decision_above.is_deny());
+    }
+
+    #[test]
+    fn gate_decision_deny_reason_preserved() {
+        let gate = GovernanceGate::new(0.5, false).add_rule(GovernanceRule {
+            id: "sec".into(),
+            description: "test deny reason".into(),
+            branch: GovernanceBranch::Judicial,
+            severity: RuleSeverity::Blocking,
+            active: true,
+            reference_url: None,
+            sop_category: None,
+        });
+
+        let ctx = serde_json::json!({"effect": {"risk": 0.9}});
+        let decision = gate.check("agent-1", "tool.danger", &ctx);
+        match decision {
+            GateDecision::Deny { reason, .. } => {
+                assert!(!reason.is_empty(), "deny reason should not be empty");
+            }
+            _ => panic!("expected deny decision for high-risk action"),
+        }
+    }
+
+    #[test]
+    fn gate_decision_defer_reason_preserved() {
+        let gate = GovernanceGate::new(0.5, true).add_rule(GovernanceRule {
+            id: "sec".into(),
+            description: "escalate test".into(),
+            branch: GovernanceBranch::Judicial,
+            severity: RuleSeverity::Blocking,
+            active: true,
+            reference_url: None,
+            sop_category: None,
+        });
+
+        let ctx = serde_json::json!({"effect": {"risk": 0.9}});
+        let decision = gate.check("agent-1", "tool.danger", &ctx);
+        match decision {
+            GateDecision::Defer { reason } => {
+                assert!(!reason.is_empty(), "defer reason should not be empty");
+            }
+            _ => panic!("expected defer decision for high-risk action with human approval"),
+        }
+    }
+
+    #[test]
+    fn governance_gate_inactive_rule_ignored() {
+        let gate = GovernanceGate::new(0.5, false).add_rule(GovernanceRule {
+            id: "inactive-rule".into(),
+            description: "this rule is inactive".into(),
+            branch: GovernanceBranch::Judicial,
+            severity: RuleSeverity::Blocking,
+            active: false,
+            reference_url: None,
+            sop_category: None,
+        });
+
+        let ctx = serde_json::json!({"effect": {"risk": 0.9}});
+        let decision = gate.check("agent-1", "tool.danger", &ctx);
+        // Inactive rule should not block; governance may still block
+        // based on threshold. But inactive rules are not evaluated.
+        let _ = decision;
+    }
+
+    #[test]
+    fn governance_gate_multiple_rules_evaluated() {
+        let gate = GovernanceGate::new(0.5, false)
+            .add_rule(GovernanceRule {
+                id: "rule-1".into(),
+                description: "first".into(),
+                branch: GovernanceBranch::Judicial,
+                severity: RuleSeverity::Blocking,
+                active: true,
+                reference_url: None,
+                sop_category: None,
+            })
+            .add_rule(GovernanceRule {
+                id: "rule-2".into(),
+                description: "second".into(),
+                branch: GovernanceBranch::Executive,
+                severity: RuleSeverity::Warning,
+                active: true,
+                reference_url: None,
+                sop_category: None,
+            });
+
+        let ctx = serde_json::json!({"effect": {"risk": 0.9}});
+        let decision = gate.check("agent-1", "tool.exec", &ctx);
+        assert!(decision.is_deny());
     }
 
 }

@@ -20,6 +20,7 @@ use clawft_types::routing::UserPermissions;
 ///
 /// Covers the common failure modes: unknown tool, bad arguments,
 /// runtime failures, permission issues, and timeouts.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
     /// The requested tool was not found in the registry.

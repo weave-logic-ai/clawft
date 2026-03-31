@@ -502,7 +502,7 @@ mod tests {
             _body: Option<&[u8]>,
         ) -> Result<clawft_platform::http::HttpResponse, Box<dyn std::error::Error + Send + Sync>>
         {
-            unimplemented!()
+            Err("MockHttp::request not implemented — use a real HTTP client for integration tests".into())
         }
     }
 

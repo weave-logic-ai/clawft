@@ -144,6 +144,7 @@ pub fn cron_list(_config: &Config) -> anyhow::Result<()> {
                     None => "-".into(),
                 }
             }
+            _ => "[unknown schedule]".into(),
         };
 
         let enabled_str = if job.enabled { "yes" } else { "no" };

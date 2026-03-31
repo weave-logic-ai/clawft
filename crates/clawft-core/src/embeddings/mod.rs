@@ -30,6 +30,7 @@ use async_trait::async_trait;
 use std::fmt;
 
 /// Errors that can occur during embedding generation.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum EmbeddingError {
     /// The input text could not be processed.

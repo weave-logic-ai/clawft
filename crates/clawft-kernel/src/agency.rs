@@ -20,6 +20,7 @@ use crate::capability::AgentCapabilities;
 use crate::process::Pid;
 
 /// Agent role in the OS hierarchy.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AgentRole {
     /// Superuser agent (user 1). Unlimited capabilities and agency.
@@ -258,6 +259,7 @@ impl Default for AgentResources {
 }
 
 /// Agent priority level for scheduling.
+#[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum AgentPriority {
     /// Low priority.
@@ -298,6 +300,7 @@ impl Default for AgentInterface {
 }
 
 /// Interface protocol.
+#[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InterfaceProtocol {
     /// Inter-process communication via kernel IPC.
@@ -312,6 +315,7 @@ pub enum InterfaceProtocol {
 }
 
 /// Response delivery mode.
+#[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResponseMode {
     /// Reply directly to the sender.
@@ -367,6 +371,7 @@ impl Default for AgentHealth {
 }
 
 /// Agent restart policy.
+#[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentRestartPolicy {
     /// Never restart.

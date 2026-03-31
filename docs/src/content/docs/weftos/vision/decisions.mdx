@@ -1,0 +1,158 @@
+---
+title: Technology Decisions
+description: Key technology decisions with rationale from the Sprint 11 architecture review
+---
+
+# Technology Decisions
+
+This page documents 15 key technology decisions made during the Sprint 11 architecture review. Each decision includes the rationale and the domain area it affects.
+
+---
+
+## TD-1: No dockview; use CSS Grid + Lego engine
+
+**Domain**: GUI Architecture
+
+**Decision**: The GUI uses a custom CSS Grid-based Lego block engine rather than a docking panel library like dockview.
+
+**Rationale**: Two layout systems would conflict. Block descriptors need JSON-driven rendering, not panel arrangement. The Lego engine renders from JSON descriptors, which is required for multi-target rendering (React, Terminal, HUD).
+
+---
+
+## TD-2: Adopt xterm.js for ConsolePan block
+
+**Domain**: GUI / Terminal
+
+**Decision**: The embedded terminal emulator uses xterm.js.
+
+**Rationale**: xterm.js is the standard terminal emulator for the web. It is GPU-accelerated via WebGL, supports decoration overlays for inline rich output, and integrates cleanly with the block descriptor system as the ConsolePan block type.
+
+---
+
+## TD-3: CodeMirror 6 over Monaco for code editor
+
+**Domain**: GUI / Code Editing
+
+**Decision**: The CodeEditor block uses CodeMirror 6, not Monaco.
+
+**Rationale**: Monaco is 2.5MB; CodeMirror 6 is 150KB and fully modular. Since descriptors may embed multiple CodeEditor instances in a single view (e.g., a Journey step showing several files), the smaller bundle size is critical.
+
+---
+
+## TD-4: Custom block renderer, no json-render dependency
+
+**Domain**: GUI Architecture
+
+**Decision**: The block rendering engine follows the json-render pattern but is a custom implementation with no external dependency.
+
+**Rationale**: Full control is needed over `$state` resolution, governance gating of actions, multi-target rendering (React, Terminal, Mentra HUD), and the PortBus inter-block communication system.
+
+---
+
+## TD-5: Dual-channel GUI connection (Tauri invoke + events)
+
+**Domain**: GUI / Backend Communication
+
+**Decision**: The GUI uses two communication channels with the Rust backend: Tauri `invoke` for commands (request/response) and Tauri events for state push (pub/sub).
+
+**Rationale**: Type-safe request/response via `invoke` keeps command semantics clean. Pub-sub via events handles real-time state updates (metrics, chain events, process table changes). Mixing both patterns on a single channel would conflate the semantics.
+
+---
+
+## TD-6: Zustand for frontend state management
+
+**Domain**: GUI / State Management
+
+**Decision**: The frontend uses Zustand with `$state` path resolution.
+
+**Rationale**: Zustand is lightweight and supports path-based access to nested state, which maps directly to the `$state` JSON Pointer references in block descriptors. It integrates cleanly with the Tauri event listener for real-time state updates.
+
+---
+
+## TD-7: WeftOS runs cloud/companion, NOT on Mentra glasses
+
+**Domain**: Mentra Integration
+
+**Decision**: WeftOS runs cloud-side or on a companion device (phone/laptop). The Mentra glasses are a thin rendering terminal.
+
+**Rationale**: The BES2700 SoC has 8MB PSRAM. The WeftOS kernel requires 50-200MB minimum. The glasses capture voice, render pre-computed display frames, and communicate over BLE/WiFi. All computation happens off-device.
+
+---
+
+## TD-8: WebSocket + A2UI streaming protocol for Mentra transport
+
+**Domain**: Mentra Integration
+
+**Decision**: Communication between the WeftOS kernel and the Mentra AppServer uses WebSocket with the A2UI streaming protocol.
+
+**Rationale**: WebSocket provides bidirectional communication. The A2UI protocol handles incremental state updates via `updateDataModel` messages, which is required for real-time HUD updates within the latency budget.
+
+---
+
+## TD-9: JSON descriptor format as the Mentra integration contract
+
+**Domain**: Mentra Integration / GUI Architecture
+
+**Decision**: The same JSON block descriptor format used by the React GUI is the integration contract for the Mentra HUD.
+
+**Rationale**: One descriptor, multiple renderers. The React renderer produces a full desktop GUI. The Terminal renderer produces ASCII output. The Mentra HUD renderer applies constraint-driven layout (400x240, monochrome, voice-only). No separate Mentra-specific data format is needed.
+
+---
+
+## TD-10: Replace dense Laplacian with sparse Lanczos for spectral analysis
+
+**Domain**: Algorithms / ECC
+
+**Decision**: The spectral analysis implementation will migrate from dense O(k*n^2) Laplacian to sparse Lanczos O(k*m) at v0.2.
+
+**Rationale**: 200x speedup at 10K nodes. The current dense implementation has a 5-second wall time at 10K nodes, which is unacceptable for real-time use. Sparse Lanczos enables per-tick spectral analysis for structural health monitoring.
+
+---
+
+## TD-11: Keep LPA for community detection; add Louvain/Leiden as offline alternative
+
+**Domain**: Algorithms / ECC
+
+**Decision**: Label Propagation Algorithm (LPA) remains the primary community detection method. Louvain/Leiden will be added as an offline alternative at v0.3.
+
+**Rationale**: LPA is already O(k*m) with 5-10 iteration convergence, which fits the per-tick budget. Louvain/Leiden improve quality for GUI visualization and deep analysis but are not needed for real-time operation.
+
+---
+
+## TD-12: blake3 as fallback hash when rvf-crypto is feature-gated off
+
+**Domain**: Cryptography / Build System
+
+**Decision**: When the `rvf-crypto` dependency is not available (feature-gated off), `blake3` serves as the fallback hash function.
+
+**Rationale**: blake3 is already a workspace dependency, faster than SHA256, and used by the ECC cognitive substrate. This avoids adding a new dependency while maintaining hash chain integrity for builds without the full cryptographic stack.
+
+---
+
+## TD-13: Standardize on wasip2 for CI/release
+
+**Domain**: Build System / WASM
+
+**Decision**: CI and release builds standardize on `wasm32-wasip2`. The `wasip1` target is retained as a secondary option in the build script.
+
+**Rationale**: wasip2 is forward-looking and supports the component model. wasip1 remains available for backward compatibility with existing WASM runtimes that have not adopted wasip2.
+
+---
+
+## TD-14: Add insta + proptest to workspace dev-dependencies
+
+**Domain**: Testing Infrastructure
+
+**Decision**: The `insta` (snapshot testing) and `proptest` (property-based testing) crates are added as workspace dev-dependencies.
+
+**Rationale**: The codebase has zero snapshot tests, zero property-based tests, and zero fuzz harnesses. Both crates are standard Rust testing infrastructure. Snapshot tests prevent silent wire format breakage. Property-based tests catch invariant violations that human-written tests miss.
+
+---
+
+## TD-15: No Tokio runtime replacement; audit cancel-safety within Tokio
+
+**Domain**: Runtime / Async
+
+**Decision**: The async runtime remains Tokio. No migration to an alternative runtime will be undertaken.
+
+**Rationale**: The migration cost to replace Tokio is extreme -- every async dependency in the workspace would need evaluation. The identified risks (cancel-safety issues) are addressable through targeted audit of cancellation points within the existing Tokio runtime, without a wholesale replacement.

@@ -89,6 +89,7 @@ pub struct DelegationRule {
 /// Serializes to snake_case (`"local"`, `"claude"`, `"flow"`, `"auto"`).
 /// For backward compatibility, old PascalCase values (`"Local"`, `"Claude"`,
 /// `"Flow"`, `"Auto"`) are accepted on deserialization via serde aliases.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DelegationTarget {

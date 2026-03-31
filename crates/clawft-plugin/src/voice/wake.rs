@@ -66,6 +66,7 @@ impl Default for WakeWordConfig {
 }
 
 /// Events emitted by the wake word detector.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum WakeWordEvent {

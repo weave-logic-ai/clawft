@@ -23,6 +23,7 @@ pub struct DiscoveredPeer {
 }
 
 /// How a peer was discovered.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DiscoverySource {
     /// Static seed peer from configuration.
@@ -51,6 +52,7 @@ pub trait DiscoveryBackend: Send + Sync + 'static {
 }
 
 /// Discovery errors.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum DiscoveryError {
     #[error("discovery backend error: {0}")]

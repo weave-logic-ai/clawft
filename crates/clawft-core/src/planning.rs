@@ -41,6 +41,7 @@ const DEFAULT_STEP_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_NO_OP_LIMIT: u32 = 3;
 
 /// Planning strategy.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanningStrategy {
@@ -107,6 +108,7 @@ impl Default for PlanningConfig {
 }
 
 /// Reason a planning session was terminated.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminationReason {

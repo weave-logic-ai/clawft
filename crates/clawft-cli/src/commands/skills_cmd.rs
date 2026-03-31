@@ -185,6 +185,7 @@ fn skills_list(
         let format = match skill.format {
             SkillFormat::SkillMd => "SKILL.md",
             SkillFormat::Legacy => "legacy",
+            _ => "unknown",
         };
         let desc = truncate(&skill.description, 50);
         table.add_row([&skill.name, source, format, &desc]);
@@ -217,6 +218,7 @@ fn skills_show(registry: &SkillRegistry, name: &str) -> anyhow::Result<()> {
         match skill.format {
             SkillFormat::SkillMd => "SKILL.md",
             SkillFormat::Legacy => "legacy (skill.json)",
+            _ => "unknown",
         }
     );
 

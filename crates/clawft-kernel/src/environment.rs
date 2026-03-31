@@ -23,6 +23,7 @@ use tracing::debug;
 pub type EnvironmentId = String;
 
 /// Environment class determines base governance rules.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EnvironmentClass {
     /// Full autonomy. Agents can experiment freely.
@@ -149,6 +150,7 @@ impl Default for GovernanceBranches {
 }
 
 /// Audit trail detail level.
+#[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuditLevel {
     /// One summary record per agent session.
@@ -161,6 +163,7 @@ pub enum AuditLevel {
 }
 
 /// SONA learning mode.
+#[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LearningMode {
     /// High entropy: try novel approaches, learn from failures.
@@ -197,6 +200,7 @@ pub struct Environment {
 }
 
 /// Environment management errors.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum EnvironmentError {
     /// Environment already exists.

@@ -12,7 +12,9 @@
 //!
 //! This module is gated behind the `vector-memory` feature flag.
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use instant_distance::{Builder, HnswMap, Point, Search};
 use serde::{Deserialize, Serialize};
@@ -33,17 +35,31 @@ const DEFAULT_EF_SEARCH: usize = 100;
 /// Default ef_construction parameter for building the HNSW graph.
 const DEFAULT_EF_CONSTRUCTION: usize = 200;
 
+/// Default number of inserts before a full HNSW rebuild is triggered.
+///
+/// Below this threshold, new entries are searched via brute-force and
+/// merged with the stale HNSW results, avoiding expensive full rebuilds.
+const DEFAULT_REBUILD_THRESHOLD: usize = 100;
+
 // ── Point wrapper ──────────────────────────────────────────────────────
 
 /// Wrapper around an embedding vector that implements [`Point`].
 ///
 /// Distance is `1.0 - cosine_similarity`, so that closer points have
 /// smaller distances (as expected by the HNSW algorithm).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Uses `Arc<[f32]>` internally so that constructing points from
+/// stored entries is a cheap pointer copy instead of a full
+/// allocation+copy of the embedding vector.
+#[derive(Debug, Clone)]
 struct EmbeddingPoint {
-    embedding: Vec<f32>,
+    embedding: Arc<[f32]>,
 }
 
+/// Serialization helper: `Arc<[f32]>` does not implement Serialize/Deserialize
+/// directly, but `EmbeddingPoint` is only serialized indirectly via
+/// `HnswEntry` (which owns `Vec<f32>`), so the derives are not needed.
+/// We keep manual impls for the snapshot path which no longer uses EmbeddingPoint.
 impl Point for EmbeddingPoint {
     fn distance(&self, other: &Self) -> f32 {
         1.0 - cosine_similarity(&self.embedding, &other.embedding)
@@ -53,14 +69,47 @@ impl Point for EmbeddingPoint {
 // ── Entry ──────────────────────────────────────────────────────────────
 
 /// A single entry stored in the HNSW store.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The embedding is stored as `Arc<[f32]>` so that building HNSW
+/// index points is a cheap `Arc::clone` (pointer copy) rather than
+/// a full allocation+copy of the vector.
+#[derive(Debug, Clone)]
 pub struct HnswEntry {
     /// Unique identifier for this entry.
     pub id: String,
-    /// The embedding vector.
-    pub embedding: Vec<f32>,
+    /// The embedding vector (shared via Arc for cheap cloning).
+    pub embedding: Arc<[f32]>,
     /// Arbitrary metadata.
     pub metadata: serde_json::Value,
+}
+
+/// Serde support: serialize `Arc<[f32]>` as a plain `Vec<f32>`.
+impl Serialize for HnswEntry {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("HnswEntry", 3)?;
+        s.serialize_field("id", &self.id)?;
+        s.serialize_field("embedding", &*self.embedding)?;
+        s.serialize_field("metadata", &self.metadata)?;
+        s.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for HnswEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            id: String,
+            embedding: Vec<f32>,
+            metadata: serde_json::Value,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        Ok(HnswEntry {
+            id: raw.id,
+            embedding: Arc::from(raw.embedding),
+            metadata: raw.metadata,
+        })
+    }
 }
 
 /// A query result from the HNSW store.
@@ -102,6 +151,8 @@ struct StoreSnapshot {
 pub struct HnswStore {
     /// All entries (source of truth).
     entries: Vec<HnswEntry>,
+    /// O(1) lookup from entry ID to its position in `entries`.
+    id_index: HashMap<String, usize>,
     /// The HNSW index, rebuilt when entries change above the threshold.
     index: Option<HnswMap<EmbeddingPoint, usize>>,
     /// ef_search parameter for queries.
@@ -110,6 +161,16 @@ pub struct HnswStore {
     ef_construction: usize,
     /// Whether the index is stale (entries changed since last build).
     dirty: bool,
+    /// Number of entries at the time the HNSW index was last built.
+    ///
+    /// Entries from `index_built_len..entries.len()` are "new" and must
+    /// be scanned via brute-force when the index is stale but below the
+    /// rebuild threshold.
+    index_built_len: usize,
+    /// Number of inserts (and deletes) since the last HNSW rebuild.
+    inserts_since_rebuild: usize,
+    /// How many mutations before a full rebuild is triggered automatically.
+    rebuild_threshold: usize,
 }
 
 impl HnswStore {
@@ -117,10 +178,14 @@ impl HnswStore {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            id_index: HashMap::new(),
             index: None,
             ef_search: DEFAULT_EF_SEARCH,
             ef_construction: DEFAULT_EF_CONSTRUCTION,
             dirty: false,
+            index_built_len: 0,
+            inserts_since_rebuild: 0,
+            rebuild_threshold: DEFAULT_REBUILD_THRESHOLD,
         }
     }
 
@@ -128,11 +193,22 @@ impl HnswStore {
     pub fn with_params(ef_search: usize, ef_construction: usize) -> Self {
         Self {
             entries: Vec::new(),
+            id_index: HashMap::new(),
             index: None,
             ef_search,
             ef_construction,
             dirty: false,
+            index_built_len: 0,
+            inserts_since_rebuild: 0,
+            rebuild_threshold: DEFAULT_REBUILD_THRESHOLD,
         }
+    }
+
+    /// Set the rebuild threshold (number of mutations before automatic
+    /// full HNSW rebuild). Returns `&mut Self` for chaining.
+    pub fn set_rebuild_threshold(&mut self, threshold: usize) -> &mut Self {
+        self.rebuild_threshold = threshold;
+        self
     }
 
     /// Insert an entry into the store.
@@ -145,19 +221,35 @@ impl HnswStore {
         embedding: Vec<f32>,
         metadata: serde_json::Value,
     ) {
-        // Remove existing entry with the same ID (upsert).
-        self.entries.retain(|e| e.id != id);
+        // Remove existing entry with the same ID (upsert) in O(1).
+        if let Some(old_pos) = self.id_index.remove(&id) {
+            self.entries.swap_remove(old_pos);
+            // If swap_remove moved the last element into old_pos, update its index.
+            if old_pos < self.entries.len() {
+                let moved_id = self.entries[old_pos].id.clone();
+                self.id_index.insert(moved_id, old_pos);
+            }
+        }
+        let new_pos = self.entries.len();
+        self.id_index.insert(id.clone(), new_pos);
         self.entries.push(HnswEntry {
             id,
-            embedding,
+            embedding: Arc::from(embedding),
             metadata,
         });
         self.dirty = true;
+        self.inserts_since_rebuild += 1;
     }
 
     /// Query the store for the top-k most similar entries.
     ///
     /// Returns results sorted by descending cosine similarity.
+    ///
+    /// When the index is stale but the number of mutations since the last
+    /// rebuild is below [`rebuild_threshold`], the query uses a hybrid
+    /// strategy: HNSW search over the previously-indexed entries plus a
+    /// brute-force scan over entries added since the last rebuild. This
+    /// avoids the O(n log n) cost of a full HNSW rebuild on every insert.
     pub fn query(
         &mut self,
         query_embedding: &[f32],
@@ -172,8 +264,10 @@ impl HnswStore {
             return self.brute_force_query(query_embedding, top_k);
         }
 
-        // Rebuild the HNSW index if stale.
-        if self.dirty || self.index.is_none() {
+        // Decide whether to do a full rebuild or use hybrid search.
+        if self.index.is_none()
+            || (self.dirty && self.inserts_since_rebuild >= self.rebuild_threshold)
+        {
             self.rebuild_index();
         }
 
@@ -183,45 +277,77 @@ impl HnswStore {
         };
 
         let query_point = EmbeddingPoint {
-            embedding: query_embedding.to_vec(),
+            embedding: Arc::from(query_embedding),
         };
         let mut search = Search::default();
 
+        // Collect HNSW results. Ask for more than top_k so we have room
+        // to merge with brute-force results from new entries.
         let mut results: Vec<HnswQueryResult> = index
             .search(&query_point, &mut search)
             .take(top_k)
-            .map(|item| {
+            .filter_map(|item| {
                 let idx = *item.value;
-                let entry = &self.entries[idx];
-                HnswQueryResult {
-                    id: entry.id.clone(),
-                    score: cosine_similarity(query_embedding, &entry.embedding),
-                    metadata: entry.metadata.clone(),
+                // Guard: the index was built with index_built_len entries.
+                // After deletes + swap_remove, an index value may point
+                // beyond the current entries vec.
+                if idx < self.entries.len() {
+                    let entry = &self.entries[idx];
+                    Some(HnswQueryResult {
+                        id: entry.id.clone(),
+                        score: cosine_similarity(query_embedding, &entry.embedding),
+                        metadata: entry.metadata.clone(),
+                    })
+                } else {
+                    None
                 }
             })
             .collect();
 
-        // The HNSW iterator returns by ascending distance, so results
-        // are already roughly ordered. Re-sort by descending score for
-        // consistency with brute-force.
+        // If the index is stale (dirty but below rebuild threshold),
+        // brute-force scan entries added after the last rebuild and merge.
+        if self.dirty && self.index_built_len < self.entries.len() {
+            for entry in &self.entries[self.index_built_len..] {
+                let score =
+                    cosine_similarity(query_embedding, &entry.embedding);
+                results.push(HnswQueryResult {
+                    id: entry.id.clone(),
+                    score,
+                    metadata: entry.metadata.clone(),
+                });
+            }
+        }
+
+        // Sort by descending score and truncate.
         results.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
+        // Deduplicate (an entry could appear from both HNSW and brute-force
+        // if index_built_len entries were modified via upsert).
+        results.dedup_by(|a, b| a.id == b.id);
+
+        results.truncate(top_k);
         results
     }
 
     /// Delete an entry by ID. Returns `true` if removed.
     pub fn delete(&mut self, id: &str) -> bool {
-        let before = self.entries.len();
-        self.entries.retain(|e| e.id != id);
-        let removed = self.entries.len() < before;
-        if removed {
+        if let Some(pos) = self.id_index.remove(id) {
+            self.entries.swap_remove(pos);
+            // If swap_remove moved the last element into pos, update its index.
+            if pos < self.entries.len() {
+                let moved_id = self.entries[pos].id.clone();
+                self.id_index.insert(moved_id, pos);
+            }
             self.dirty = true;
+            self.inserts_since_rebuild += 1;
+            true
+        } else {
+            false
         }
-        removed
     }
 
     /// Return the number of entries in the store.
@@ -236,7 +362,7 @@ impl HnswStore {
 
     /// Get an entry by ID.
     pub fn get(&self, id: &str) -> Option<&HnswEntry> {
-        self.entries.iter().find(|e| e.id == id)
+        self.id_index.get(id).map(|&pos| &self.entries[pos])
     }
 
     /// Persist the store to a JSON file.
@@ -280,12 +406,22 @@ impl HnswStore {
             "loaded HnswStore from disk"
         );
 
+        let mut id_index: HashMap<String, usize> =
+            HashMap::with_capacity(snapshot.entries.len());
+        for (i, e) in snapshot.entries.iter().enumerate() {
+            id_index.insert(e.id.clone(), i);
+        }
+
         let mut store = Self {
             entries: snapshot.entries,
+            id_index,
             index: None,
             ef_search: snapshot.ef_search,
             ef_construction: snapshot.ef_construction,
             dirty: true,
+            index_built_len: 0,
+            inserts_since_rebuild: 0,
+            rebuild_threshold: DEFAULT_REBUILD_THRESHOLD,
         };
 
         // Pre-build the index if above threshold.
@@ -296,13 +432,17 @@ impl HnswStore {
         Ok(store)
     }
 
-    /// Force a rebuild of the HNSW index.
+    /// Force a full rebuild of the HNSW index.
     ///
-    /// Called automatically on query when the index is stale.
+    /// This is called automatically when `inserts_since_rebuild` reaches
+    /// the `rebuild_threshold`, or when no index exists yet. You can also
+    /// call it explicitly via [`force_rebuild`](Self::force_rebuild).
     pub fn rebuild_index(&mut self) {
         if self.entries.is_empty() {
             self.index = None;
             self.dirty = false;
+            self.index_built_len = 0;
+            self.inserts_since_rebuild = 0;
             return;
         }
 
@@ -310,7 +450,7 @@ impl HnswStore {
             .entries
             .iter()
             .map(|e| EmbeddingPoint {
-                embedding: e.embedding.clone(),
+                embedding: Arc::clone(&e.embedding),
             })
             .collect();
 
@@ -330,6 +470,14 @@ impl HnswStore {
 
         self.index = Some(map);
         self.dirty = false;
+        self.index_built_len = self.entries.len();
+        self.inserts_since_rebuild = 0;
+    }
+
+    /// Explicitly request a full HNSW rebuild regardless of the current
+    /// mutation count. Useful after a batch of inserts.
+    pub fn force_rebuild(&mut self) {
+        self.rebuild_index();
     }
 
     /// Brute-force cosine similarity search (fallback for small datasets).
@@ -455,7 +603,7 @@ mod tests {
         assert_eq!(store.len(), 1);
         let entry = store.get("doc1").unwrap();
         assert_eq!(entry.metadata["v"], 2);
-        assert_eq!(entry.embedding, vec![0.0, 1.0]);
+        assert_eq!(&*entry.embedding, &[0.0, 1.0]);
     }
 
     #[test]
@@ -615,7 +763,7 @@ mod tests {
         }
 
         // Query for the first entry's embedding.
-        let target = store.get("d0").unwrap().embedding.clone();
+        let target = Arc::clone(&store.get("d0").unwrap().embedding);
         let results = store.query(&target, 1);
 
         assert_eq!(results.len(), 1);

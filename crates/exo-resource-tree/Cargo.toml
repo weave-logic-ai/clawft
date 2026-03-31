@@ -1,6 +1,6 @@
 [package]
 name = "exo-resource-tree"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -13,7 +13,7 @@ categories = ["data-structures"]
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-rvf-crypto = { workspace = true }
+sha3 = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }

@@ -1,5 +1,10 @@
 # Weaver TODO
 
+
+
+
+
+-------- ###Previous Sprints### ---------
 Items discovered during the initial codebase analysis that need implementation.
 Last updated: 2026-03-26 (after graph ingestion)
 

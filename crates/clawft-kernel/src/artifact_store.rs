@@ -25,6 +25,7 @@ use crate::service::{ServiceType, SystemService};
 // ---------------------------------------------------------------------------
 
 /// The kind of content stored in the artifact.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ArtifactType {
     /// WebAssembly module (.wasm).
@@ -71,6 +72,7 @@ pub struct StoredArtifact {
 // ---------------------------------------------------------------------------
 
 /// Storage backend for artifact data.
+#[non_exhaustive]
 pub enum ArtifactBackend {
     /// In-memory storage (for tests / embedded use).
     Memory(DashMap<String, Vec<u8>>),

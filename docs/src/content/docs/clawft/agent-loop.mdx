@@ -1,0 +1,141 @@
+---
+title: "Agent Loop"
+description: "The AgentLoop architecture: message processing cycle, tool execution, auto-delegation, and integration with the 6-stage pipeline."
+---
+
+## Overview
+
+The `AgentLoop` (in `crates/clawft-core/src/agent/loop_core.rs`, ~2,235 lines) is the heart of the clawft agent runtime. It implements the consume-process-respond cycle that turns inbound messages into LLM-augmented responses with tool use.
+
+## Message Processing Flow
+
+```text
+Inbound Message (from MessageBus)
+  |
+  v
+Session lookup / creation
+  |
+  v
+ContextBuilder.build_messages()
+  |
+  v
+Pipeline execution (Classifier -> Router -> Assembler -> Transport -> Scorer -> Learner)
+  |
+  v
+Tool execution loop (up to max_tool_iterations)
+  |  - Extract tool calls from LLM response
+  |  - Execute each tool via ToolRegistry
+  |  - Append tool results to context
+  |  - Re-invoke LLM if stop_reason == ToolUse
+  |
+  v
+Outbound Message (dispatched to MessageBus)
+```
+
+### Step-by-step
+
+1. **Inbound** -- A channel plugin (Telegram, Slack, Web, etc.) receives an external message and publishes an `InboundMessage` to the `MessageBus`.
+2. **Session** -- The agent loop retrieves or creates a `Session` keyed by `"{channel}:{chat_id}"`. Sessions are JSONL-backed and persist across restarts.
+3. **Context** -- `ContextBuilder` assembles the full message list for the LLM call:
+   - System prompt (base + active skill instructions + memory injection)
+   - Conversation history from the session
+   - The new user message
+4. **Pipeline** -- The assembled request flows through all 6 pipeline stages. See [Pipeline](/docs/clawft/pipeline) for detail on each stage.
+5. **Tool Loop** -- If the LLM response has `stop_reason == ToolUse`, the agent enters the tool execution loop (described below).
+6. **Outbound** -- The final text response is wrapped in an `OutboundMessage` and dispatched back to the originating channel via the `MessageBus`.
+
+## Tool Execution Loop
+
+When the LLM returns tool calls, the agent enters an iterative loop:
+
+```text
+LLM Response (stop_reason = ToolUse)
+  |
+  v
+For each tool_call in response:
+  1. Look up tool in ToolRegistry
+  2. Validate arguments against JSON Schema
+  3. Execute tool asynchronously
+  4. Truncate result to 64 KB
+  5. Append tool result message to context
+  |
+  v
+Re-invoke pipeline with extended context
+  |
+  v
+If stop_reason == ToolUse AND iterations < max_tool_iterations:
+  -> repeat
+Else:
+  -> emit final response
+```
+
+Key parameters:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `max_tool_iterations` | 25 | Maximum rounds of tool calls per message |
+| Tool result cap | 64 KB | Maximum size of a single tool result |
+| Concurrent subprocesses | 5 | Maximum `spawn` tool concurrency |
+
+### Hallucination Detection
+
+The loop tracks tool calls that reference tool names not present in the `ToolRegistry`. Repeated hallucinated calls are detected and the loop is terminated early to avoid wasting tokens.
+
+## Auto-Delegation
+
+Before pipeline execution, the agent checks inbound messages against delegation patterns. If a message matches keywords like "swarm", "orchestrate", "deploy", or similar complex-task indicators, the agent routes the request to the delegation tool (`delegate_tool`) rather than processing it through the standard LLM pipeline.
+
+This enables hierarchical agent architectures where a top-level agent delegates subtasks to specialized sub-agents.
+
+## Voice Mode
+
+When `voice_mode` is enabled in configuration, the agent injects a voice-mode system prompt that instructs the LLM to respond in natural conversational language suitable for text-to-speech. This affects the `ContextBuilder` stage, not the pipeline itself.
+
+## Context Assembly
+
+The `ContextBuilder` (`crates/clawft-core/src/agent/context.rs`) builds the LLM message list from multiple sources:
+
+| Source | Priority | Description |
+|--------|----------|-------------|
+| Base system prompt | Always included | The agent's core personality and instructions |
+| Active skill instructions | When a skill is active | Injected after the system prompt |
+| MEMORY.md contents | When memory exists | Long-term facts the agent should know |
+| Conversation history | From session | Previous turns in the conversation |
+| User message | Current turn | The inbound message being processed |
+
+The context is assembled within a token budget. The `TokenBudgetAssembler` (pipeline stage 3) handles truncation when the context exceeds model limits, dropping middle messages first to preserve the system prompt and recent turns.
+
+## Bootstrap Sequence
+
+The agent loop is created through the `AppContext` bootstrap:
+
+```text
+AppContext::new(config, platform)
+    |
+    +-- Create MessageBus
+    +-- Initialize SessionManager
+    +-- Initialize MemoryStore
+    +-- Initialize SkillsLoader
+    +-- Create ContextBuilder
+    +-- Create empty ToolRegistry
+    +-- Wire default Level 0 Pipeline
+    |
+    +-- tools_mut().register()     -- Register built-in tools
+    +-- enable_live_llm()          -- Replace stub with ClawftLlmAdapter
+    +-- set_pipeline()             -- Inject custom pipeline (optional)
+    |
+    +-- into_agent_loop()
+    +-- AgentLoop::run()
+```
+
+## Running on WeftOS
+
+When clawft agents run on the WeftOS kernel, the agent loop gains additional capabilities:
+
+- **PID Tracking** -- Every agent process is registered in the kernel's ProcessTable with a unique PID. The supervisor manages lifecycle (spawn, stop, restart).
+- **Governance** -- All agent actions pass through the dual-layer governance gate: CapabilityGate (RBAC) and optional TileZeroGate (three-branch constitutional governance with effect vectors).
+- **ExoChain Provenance** -- Tool executions, message sends, and state changes are chain-logged with Ed25519 + ML-DSA-65 signatures for tamper-evident auditing.
+- **ECC Cognitive Substrate** -- Causal DAG tracking, HNSW semantic search, DEMOCRITUS tick loop, and spectral analysis of the agent's decision graph.
+- **WASM Sandboxing** -- Tools can execute in Wasmtime sandboxes with deterministic, capability-constrained execution.
+- **Mesh Networking** -- Multi-node agent coordination via encrypted P2P mesh with Noise protocol handshake and cluster state synchronization.
+- **Self-Healing** -- Supervisor restart strategies and dead-letter queues for failed agent processes.

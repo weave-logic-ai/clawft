@@ -48,6 +48,7 @@ pub struct ChainBridgeEvent {
 }
 
 /// Fork detection result.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChainForkStatus {
     /// Chains are in sync (same head).
@@ -142,6 +143,7 @@ pub fn sync_strategy(local_seq: u64, remote_seq: u64) -> ChainSyncStrategy {
 }
 
 /// Strategy for catching up a behind peer.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChainSyncStrategy {
     /// Peer is fully in sync.
@@ -166,6 +168,7 @@ pub struct SyncFrame {
 }
 
 /// Discriminator for QUIC sync streams.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum SyncStreamType {
@@ -180,6 +183,7 @@ pub enum SyncStreamType {
 }
 
 /// Payload type within a sync frame.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum SyncPayloadType {

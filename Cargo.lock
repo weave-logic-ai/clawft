@@ -766,6 +766,7 @@ dependencies = [
  "exo-resource-tree",
  "futures",
  "futures-util",
+ "insta",
  "ndarray",
  "ort",
  "parking_lot",
@@ -780,6 +781,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.24.0",
@@ -1139,6 +1141,17 @@ dependencies = [
  "crossterm",
  "unicode-segmentation",
  "unicode-width",
+]
+
+[[package]]
+name = "console"
+version = "0.16.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d64e8af5551369d19cf50138de61f1c42074ab970f74e99be916646777f8fc87"
+dependencies = [
+ "encode_unicode",
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1628,6 +1641,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
+name = "encode_unicode"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
+
+[[package]]
 name = "encoding_rs"
 version = "0.8.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1698,9 +1717,9 @@ name = "exo-resource-tree"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "rvf-crypto",
  "serde",
  "serde_json",
+ "sha3",
  "thiserror 2.0.18",
  "tracing",
  "uuid",
@@ -2478,6 +2497,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e05c02b5e89bff3b946cedeca278abc628fe811e604f027c45a8aa3cf793d0eb"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "insta"
+version = "1.47.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f40e41efb5f592d3a0764f818e2f08e5e21c4f368126f74f37c81bd4af7a0c6"
+dependencies = [
+ "console",
+ "once_cell",
+ "serde",
+ "similar",
+ "tempfile",
 ]
 
 [[package]]

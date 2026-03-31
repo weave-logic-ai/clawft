@@ -101,6 +101,34 @@ impl HnswService {
             .collect()
     }
 
+    /// Batch search: acquire the lock once, perform all queries, release.
+    ///
+    /// This avoids per-query mutex acquisition overhead when processing
+    /// multiple embeddings in a single tick (e.g., DEMOCRITUS loop).
+    pub fn search_batch(
+        &self,
+        queries: &[&[f32]],
+        top_k: usize,
+    ) -> Vec<Vec<HnswSearchResult>> {
+        let mut store = self.store.lock().expect("HnswStore lock poisoned");
+        self.search_count
+            .fetch_add(queries.len() as u64, Ordering::Relaxed);
+        queries
+            .iter()
+            .map(|query| {
+                store
+                    .query(query, top_k)
+                    .into_iter()
+                    .map(|r| HnswSearchResult {
+                        id: r.id,
+                        score: r.score,
+                        metadata: r.metadata,
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
     /// Return the number of entries currently in the store.
     pub fn len(&self) -> usize {
         let store = self.store.lock().expect("HnswStore lock poisoned");

@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Phase of the boot sequence.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BootPhase {
     /// Pre-boot initialization.
@@ -52,6 +53,7 @@ impl std::fmt::Display for BootPhase {
 }
 
 /// Log level for boot events.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LogLevel {
     /// Debug-level messages (not shown in normal boot output).

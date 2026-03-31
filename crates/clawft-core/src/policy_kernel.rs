@@ -76,6 +76,7 @@ impl Default for PolicyKernelState {
 // ── Errors ──────────────────────────────────────────────────────────
 
 /// Errors from policy kernel persistence.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum PolicyKernelError {
     /// An I/O error occurred.

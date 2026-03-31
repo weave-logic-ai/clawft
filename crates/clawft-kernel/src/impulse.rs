@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Discriminant for the kind of causal event being signalled.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ImpulseType {
     /// causal -> hnsw (new embedding needed)

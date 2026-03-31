@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Controls how the router picks among multiple models in a single tier.
 /// Serializes/deserializes as snake_case strings (e.g., `"preference_order"`).
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TierSelectionStrategy {

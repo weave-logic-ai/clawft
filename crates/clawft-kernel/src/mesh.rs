@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 /// Mesh networking errors.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum MeshError {
     /// A transport-level failure (connection reset, DNS, etc.).

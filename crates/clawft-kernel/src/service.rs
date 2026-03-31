@@ -17,6 +17,7 @@ use crate::health::HealthStatus;
 use crate::process::Pid;
 
 /// Type of system service.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ServiceType {
     /// Core kernel service (message bus, process table, etc.).
@@ -49,6 +50,7 @@ impl std::fmt::Display for ServiceType {
 ///
 /// A service can be backed by an in-kernel agent (most common),
 /// an external system (Redis, HTTP endpoint), or a container.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ServiceEndpoint {
     /// Backed by an in-kernel agent (route to its inbox).
@@ -69,6 +71,7 @@ pub enum ServiceEndpoint {
 ///
 /// Controls how much of a service's activity is recorded in the
 /// ExoChain. The default is `Full` -- every call is witnessed.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ServiceAuditLevel {
     /// Witness every call (default, per D9).
@@ -540,6 +543,28 @@ impl McpAdapter {
                 })
             })
             .collect()
+    }
+}
+
+// ── Registry trait implementation ────────────────────────────────────
+
+impl clawft_types::Registry for ServiceRegistry {
+    type Value = Arc<dyn SystemService>;
+
+    fn get(&self, key: &str) -> Option<Self::Value> {
+        self.services.get(key).map(|s| s.value().clone())
+    }
+
+    fn list_keys(&self) -> Vec<String> {
+        self.services.iter().map(|e| e.key().clone()).collect()
+    }
+
+    fn contains(&self, key: &str) -> bool {
+        self.services.contains_key(key)
+    }
+
+    fn count(&self) -> usize {
+        self.services.len()
     }
 }
 

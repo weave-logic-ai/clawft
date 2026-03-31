@@ -1,0 +1,316 @@
+---
+title: Contributing
+description: Development setup, build instructions, code style, and how to add tools, channels, and providers
+---
+
+# Contributing
+
+## Development Setup
+
+### Prerequisites
+
+- **Rust 1.93+** (edition 2024) -- install via [rustup](https://rustup.rs/)
+- **Cargo** (ships with rustup)
+- **wasm32-unknown-unknown target** (optional, for WASM builds)
+
+### Getting Started
+
+```bash
+git clone https://github.com/weave-logic-ai/clawft.git
+cd clawft
+scripts/build.sh check
+scripts/build.sh test
+```
+
+Verify everything passes before making any changes:
+
+```bash
+scripts/build.sh clippy
+cargo fmt --all -- --check
+```
+
+### Editor Setup
+
+Any editor with rust-analyzer support works well. Recommended settings:
+
+- Enable `clippy` as the check command in rust-analyzer.
+- Enable format-on-save using `rustfmt`.
+
+---
+
+## Project Structure
+
+The workspace is organized into 22 crates with clear dependency boundaries:
+
+```
+clawft/
+  Cargo.toml                # Workspace root
+  crates/
+    clawft-types/           # Core types: Config, events, errors
+    clawft-platform/        # Platform abstraction (fs, http, env, process)
+    clawft-core/            # Agent engine: loop, bus, pipeline, sessions, memory, security
+    clawft-kernel/          # Kernel: boot, governance, ECC, mesh, ExoChain, Weaver
+    clawft-llm/             # LLM provider abstraction and routing
+    clawft-tools/           # Tool implementations (file, shell, memory, web, spawn)
+    clawft-channels/        # Channel plugins (Telegram, Slack, Discord)
+    clawft-services/        # Background services (cron, heartbeat, MCP)
+    clawft-cli/             # CLI binary (weft)
+    clawft-wasm/            # WASM entrypoint
+    clawft-weave/           # Daemon binary (weaver)
+    clawft-security/        # Security primitives
+    clawft-plugin/          # Plugin SDK
+    clawft-plugin-*/        # First-party plugins (git, cargo, browser, etc.)
+    exo-resource-tree/      # Merkle-hashed resource tree
+    weftos/                 # Facade crate
+  docs/                     # Documentation
+  scripts/                  # Build and utility scripts
+```
+
+### Key Architectural Patterns
+
+- **`Platform` trait** (`clawft-platform`): Abstracts filesystem, HTTP, environment variables, and process spawning so that the same codebase runs on native and WASM targets.
+- **`Tool` trait** (`clawft-core`): Extensible function-calling interface for the agent. Each tool declares its name, description, JSON Schema parameters, and an async `execute` method.
+- **`Channel` / `ChannelFactory` traits** (`clawft-channels`): Plugin system for chat platforms.
+- **`Provider` trait** (`clawft-llm`): Unified interface for LLM completions.
+- **Feature gates**: The workspace uses Cargo feature flags to gate optional subsystems (`ecc`, `exochain`, `mesh`, `os-patterns`, `tilezero`, `governance`).
+
+---
+
+## Building and Testing
+
+### Unified Build Script (Recommended)
+
+The `scripts/build.sh` script provides subcommands for all build workflows:
+
+```bash
+scripts/build.sh native          # Release CLI binary
+scripts/build.sh native-debug    # Debug build (fast iteration)
+scripts/build.sh test            # Run all tests
+scripts/build.sh check           # Fast compile check (no codegen)
+scripts/build.sh clippy          # Clippy with -D warnings
+scripts/build.sh gate            # Full 11-check phase gate
+scripts/build.sh all             # Build everything (native + WASI + browser + UI)
+scripts/build.sh --help          # See all commands and options
+```
+
+The `gate` subcommand runs all checks from the phase gate protocol and reports PASS/FAIL per check. **Always run `gate` before committing.**
+
+### Running Tests
+
+```bash
+# All workspace tests
+scripts/build.sh test
+
+# Specific crate
+cargo test -p clawft-core
+
+# Single test by name
+cargo test -p clawft-core -- test_name
+```
+
+### Linting and Formatting
+
+Zero warnings are required. All code must be formatted with `rustfmt`:
+
+```bash
+# Lint
+scripts/build.sh clippy
+
+# Check formatting
+cargo fmt --all -- --check
+
+# Apply formatting
+cargo fmt --all
+```
+
+### Pre-Commit Checklist
+
+The fastest way to run all checks:
+
+```bash
+scripts/build.sh gate
+```
+
+---
+
+## Code Style Guidelines
+
+### General Rules
+
+- **Files under 500 lines.** Split large files into submodules.
+- **No hardcoded secrets.** API keys come from environment variables.
+- **All public APIs return `Result`.** Use `thiserror` enums for error types.
+- **Async-first.** Use Tokio and `async-trait` for async interfaces.
+- **Use `tracing` for logging.** Not `println!` or `eprintln!`.
+- **Workspace dependencies.** Declare shared dependencies once in the root `Cargo.toml` `[workspace.dependencies]` section.
+
+### Naming Conventions
+
+- Types: `PascalCase` (`ToolRegistry`, `ChannelMetadata`)
+- Functions and methods: `snake_case` (`register_all`, `route`)
+- Constants: `SCREAMING_SNAKE_CASE`
+- Crate names: `clawft-{module}` (e.g., `clawft-core`, `clawft-llm`)
+
+### Error Handling
+
+Define error enums with `thiserror` in each crate:
+
+```rust
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum MyError {
+    #[error("not found: {0}")]
+    NotFound(String),
+
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
+
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+```
+
+### Testing
+
+Write tests alongside code in `#[cfg(test)] mod tests` blocks:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_valid_config() {
+        let config: Config = serde_json::from_str(r#"{"name": "test"}"#).unwrap();
+        assert_eq!(config.name, "test");
+    }
+
+    #[tokio::test]
+    async fn execute_tool() {
+        let tool = MyTool::new();
+        let result = tool.execute(serde_json::json!({"key": "value"})).await;
+        assert!(result.is_ok());
+    }
+}
+```
+
+### Documentation
+
+Document all public items. Include examples for complex APIs:
+
+```rust
+/// Route a model name to its provider.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let router = ProviderRouter::with_builtins();
+/// let (provider, model) = router.route("openai/gpt-4o").unwrap();
+/// assert_eq!(provider.name(), "openai");
+/// ```
+pub fn route(&self, model: &str) -> Option<(&dyn Provider, String)> {
+    // ...
+}
+```
+
+---
+
+## Adding Tools
+
+Tools extend the agent's capabilities through LLM function calling.
+
+### Step 1: Create the Tool Module
+
+Create a new file in `crates/clawft-tools/src/`:
+
+```rust
+use std::sync::Arc;
+use async_trait::async_trait;
+use serde_json::{json, Value};
+use clawft_core::tools::registry::{Tool, ToolError};
+use clawft_platform::Platform;
+
+pub struct MyTool<P: Platform> {
+    platform: Arc<P>,
+}
+
+#[async_trait]
+impl<P: Platform + 'static> Tool for MyTool<P> {
+    fn name(&self) -> &str { "my_tool" }
+    fn description(&self) -> &str { "A short description of what this tool does." }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "input": { "type": "string", "description": "The input to process" }
+            },
+            "required": ["input"]
+        })
+    }
+
+    async fn execute(&self, args: Value) -> Result<Value, ToolError> {
+        let input = args.get("input").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'input'".into()))?;
+        Ok(json!({ "result": input }))
+    }
+}
+```
+
+### Step 2: Export and Register
+
+Add the module to `crates/clawft-tools/src/lib.rs` and register it in the `register_all` function.
+
+### Step 3: Write Tests
+
+At a minimum, test: `name()` returns the expected identifier, `parameters()` returns valid JSON Schema, `execute()` succeeds with valid arguments, and `execute()` returns appropriate errors for invalid arguments.
+
+---
+
+## Adding Channels
+
+Channels connect the agent to chat platforms. Implement `ChannelFactory` (builds a `Channel` from JSON config) and `Channel` (handles start/stop lifecycle and bidirectional messaging). Register the factory with the `PluginHost`.
+
+---
+
+## Adding LLM Providers
+
+**Option A (most common)**: If the provider exposes an OpenAI-compatible endpoint, add a `ProviderConfig` entry to the `builtin_providers()` function in `crates/clawft-llm/src/config.rs`. No new code required.
+
+**Option B**: Users can add providers at runtime via configuration without modifying the codebase.
+
+**Option C**: For non-OpenAI-compatible APIs, implement the `Provider` trait directly.
+
+---
+
+## WASM Target
+
+Install the target and build:
+
+```bash
+rustup target add wasm32-unknown-unknown
+scripts/build.sh browser
+```
+
+When adding new features, ensure they work behind the `Platform` trait rather than calling native APIs directly. Use `#[cfg(not(target_arch = "wasm32"))]` for native-only functionality.
+
+---
+
+## Release Process
+
+### Release Build
+
+```bash
+scripts/build.sh native
+```
+
+The release profile is tuned for minimal binary size (`opt-level = "z"`, LTO, strip, single codegen unit, abort on panic).
+
+### Release Checklist
+
+1. All tests pass: `scripts/build.sh test`
+2. No clippy warnings: `scripts/build.sh clippy`
+3. Formatting is clean: `cargo fmt --all -- --check`
+4. Release build succeeds: `scripts/build.sh native`
+5. Full gate passes: `scripts/build.sh gate`

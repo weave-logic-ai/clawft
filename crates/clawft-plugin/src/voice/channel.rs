@@ -16,6 +16,7 @@ use crate::message::MessagePayload;
 use crate::traits::{CancellationToken, ChannelAdapter, ChannelAdapterHost};
 
 /// Voice channel status for WebSocket reporting.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VoiceStatus {

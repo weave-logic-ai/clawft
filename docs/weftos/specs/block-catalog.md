@@ -1,0 +1,910 @@
+# WeftOS Block Catalog Specification
+
+**Version**: 0.2.0
+**Date**: 2026-03-27
+**Source**: Sprint 11 Symposium Track 4 (UI/UX Design Summit)
+**Status**: Formal specification -- implementable
+
+---
+
+## Overview
+
+The Block Catalog defines every built-in block type available in WeftOS. Each block has:
+
+- A **Zod schema** constraining its props (used by the Weaver to generate valid descriptors)
+- A **Block Registry** entry mapping the type name to renderer implementations
+- Defined **input/output ports** for inter-block communication
+- Defined **actions** it can trigger
+- **Rendering notes** describing behavior on each target (Web, Terminal, HUD)
+
+The Weaver generates JSON descriptors validated against these schemas. A descriptor that passes schema validation is guaranteed to be renderable on all supported targets.
+
+### Rendering Targets
+
+| Target | Renderer | Context |
+|--------|----------|---------|
+| Web (React) | `@weftos/react-renderer` | Main Tauri GUI desktop app |
+| Terminal | Ink / xterm.js inline | ConsolePan rich output, CLI mode |
+| Mentra HUD | Constraint engine (400x240, mono) | Smart glasses display |
+| Shell | Plain text formatter | Pure SSH / headless mode |
+
+### Conventions
+
+- All `$state` paths begin with `/` and follow JSON Pointer syntax (RFC 6901).
+- Props marked with `StateRef` accept either a literal value or a `{ "$state": "/path" }` reference.
+- Default sizes are in 12-column grid units.
+
+---
+
+## Layout Blocks (4)
+
+### 1. Column
+
+Vertical stack of children. The fundamental top-to-bottom layout container.
+
+| Field | Value |
+|-------|-------|
+| Type | `Column` |
+| Has children | Yes |
+| Default size | width: 12, height: auto |
+
+**Props Schema**:
+
+| Prop | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `gap` | number | No | 8 | Vertical gap between children in pixels |
+
+**Ports**: None
+**Actions**: None
+
+**Rendering Notes**:
+- Web: CSS flexbox `flex-direction: column`
+- Terminal: Newline-separated children, each rendered sequentially
+- HUD: Stacked lines, each child gets proportional line allocation
+
+**Example Descriptor**:
+```json
+{
+  "version": "0.2.0",
+  "root": "main",
+  "elements": {
+    "main": {
+      "type": "Column",
+      "props": { "gap": 12 },
+      "children": ["child-a", "child-b"]
+    },
+    "child-a": { "type": "Metric", "props": { "label": "CPU", "value": 42, "unit": "%" } },
+    "child-b": { "type": "Metric", "props": { "label": "Mem", "value": 78, "unit": "%" } }
+  }
+}
+```
+
+---
+
+### 2. Row
+
+Horizontal layout of children. Wraps when overflow occurs if `wrap` is true.
+
+| Field | Value |
+|-------|-------|
+| Type | `Row` |
+| Has children | Yes |
+| Default size | width: 12, height: auto |
+
+**Props Schema**:
+
+| Prop | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `gap` | number | No | 8 | Horizontal gap between children in pixels |
+| `wrap` | boolean | No | false | Whether children wrap to next line on overflow |
+
+**Ports**: None
+**Actions**: None
+
+**Rendering Notes**:
+- Web: CSS flexbox `flex-direction: row`
+- Terminal: Columns side-by-side (using terminal column widths), falls back to vertical if insufficient width
+- HUD: Side-by-side text segments separated by `|`
+
+**Example Descriptor**:
+```json
+{
+  "version": "0.2.0",
+  "root": "row",
+  "elements": {
+    "row": {
+      "type": "Row",
+      "props": { "gap": 16, "wrap": true },
+      "children": ["m1", "m2", "m3"]
+    },
+    "m1": { "type": "Metric", "props": { "label": "CPU", "value": { "$state": "/kernel/metrics/cpu_percent" }, "unit": "%" } },
+    "m2": { "type": "Metric", "props": { "label": "Mem", "value": { "$state": "/kernel/metrics/mem_percent" }, "unit": "%" } },
+    "m3": { "type": "Metric", "props": { "label": "Chain", "value": { "$state": "/kernel/chain/height" } } }
+  }
+}
+```
+
+---
+
+### 3. Grid
+
+CSS grid layout for complex multi-row, multi-column arrangements.
+
+| Field | Value |
+|-------|-------|
+| Type | `Grid` |
+| Has children | Yes |
+| Default size | width: 12, height: auto |
+
+**Props Schema**:
+
+| Prop | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `columns` | number | Yes | -- | Number of columns in the grid |
+| `gap` | number | No | 8 | Gap between grid cells in pixels |
+
+**Ports**: None
+**Actions**: None
+
+**Rendering Notes**:
+- Web: CSS Grid with `grid-template-columns: repeat(N, 1fr)`
+- Terminal: Table-style layout with fixed column widths
+- HUD: Not supported; falls back to Column layout
+
+**Example Descriptor**:
+```json
+{
+  "version": "0.2.0",
+  "root": "grid",
+  "elements": {
+    "grid": {
+      "type": "Grid",
+      "props": { "columns": 3, "gap": 12 },
+      "children": ["a", "b", "c", "d", "e", "f"]
+    },
+    "a": { "type": "Metric", "props": { "label": "A", "value": 1 } },
+    "b": { "type": "Metric", "props": { "label": "B", "value": 2 } },
+    "c": { "type": "Metric", "props": { "label": "C", "value": 3 } },
+    "d": { "type": "Metric", "props": { "label": "D", "value": 4 } },
+    "e": { "type": "Metric", "props": { "label": "E", "value": 5 } },
+    "f": { "type": "Metric", "props": { "label": "F", "value": 6 } }
+  }
+}
+```
+
+---
+
+### 4. Tabs
+
+Tabbed container. Each child corresponds to one tab, ordered by `labels`.
+
+| Field | Value |
+|-------|-------|
+| Type | `Tabs` |
+| Has children | Yes (one per tab) |
+| Default size | width: 12, height: 6 |
+
+**Props Schema**:
+
+| Prop | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `labels` | string[] | Yes | -- | Tab labels, one per child |
+| `activeTab` | number | No | 0 | Zero-based index of the initially active tab |
+
+**Ports**: None
+**Actions**: None
+
+**Rendering Notes**:
+- Web: Tab bar at top, content area below; only active tab rendered
+- Terminal: `[Tab1] Tab2 Tab3` header with active tab highlighted; content below
+- HUD: Not supported; renders only the active tab content with no tab bar
+
+**Example Descriptor**:
+```json
+{
+  "version": "0.2.0",
+  "root": "tabs",
+  "elements": {
+    "tabs": {
+      "type": "Tabs",
+      "props": { "labels": ["Processes", "Chain", "Console"], "activeTab": 0 },
+      "children": ["procs", "chain", "console"]
+    },
+    "procs": { "type": "DataTable", "props": { "columns": [{"key": "pid", "label": "PID"}, {"key": "state", "label": "State"}], "rows": { "$state": "/kernel/processes" } } },
+    "chain": { "type": "ChainViewer", "props": { "limit": 20 } },
+    "console": { "type": "ConsolePan", "props": {} }
+  }
+}
+```
+
+---
+
+## Data Display Blocks (6)
+
+### 5. Metric
+
+Single-value gauge displaying a labeled numeric or string value with optional unit and threshold coloring.
+
+| Field | Value |
+|-------|-------|
+| Type | `Metric` |
+| Has children | No |
+| Default size | width: 3, height: 2 |
+
+**Props Schema**:
+
+| Prop | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `label` | string | Yes | -- | Human-readable label |
+| `value` | number or StateRef | Yes | -- | The metric value |
+| `unit` | string | No | -- | Unit suffix (e.g., "%", "MB", "events") |
+| `threshold` | object | No | -- | Warning/critical thresholds |
+| `threshold.warn` | number | No | -- | Value above which the display turns yellow |
+| `threshold.crit` | number | No | -- | Value above which the display turns red |
+
+**Ports**:
+| Port | Direction | Data Type | Description |
+|------|-----------|-----------|-------------|
+| `value` | out | number | Emits current resolved value for downstream blocks |
+
+**Actions**: None
+
+**Rendering Notes**:
+- Web: Card with large value text, label above, unit suffix, color-coded border
+- Terminal: `CPU: 42%` or `CPU: [========  ] 42%` (bar if threshold defined)
+- HUD: Single line: `CPU: 42%` or with bar: `CPU: [========  ] 42%`
+
+**Example Descriptor**:
+```json
+{
+  "version": "0.2.0",
+  "root": "cpu",
+  "elements": {
+    "cpu": {
+      "type": "Metric",
+      "props": {
+        "label": "CPU",
+        "value": { "$state": "/kernel/metrics/cpu_percent" },
+        "unit": "%",
+        "threshold": { "warn": 70, "crit": 90 }
+      }
+    }
+  }
+}
+```
+
+---
+
+### 6. DataTable
+
+Tabular data display with optional sorting and row selection.
+
+| Field | Value |
+|-------|-------|
+| Type | `DataTable` |
+| Has children | No |
+| Default size | width: 12, height: 6 |
+
+**Props Schema**:
+
+| Prop | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `columns` | array of {key, label} | Yes | -- | Column definitions |
+| `rows` | StateRef | Yes | -- | $state path to array of row objects |
+| `sortable` | boolean | No | false | Whether columns are sortable by click |
+
+**Ports**:
+| Port | Direction | Data Type | Description |
+|------|-----------|-----------|-------------|
+| `selectedRow` | out | object | Emits the currently selected row object |
+| `filter` | in | string | Receives a filter string to narrow visible rows |
+
+**Actions**: None
+
+**Rendering Notes**:
+- Web: HTML table with striped rows, click-to-select, sortable column headers
+- Terminal: ASCII table with column alignment
+- HUD: Fixed-width columns, max 4 columns visible, truncated to 8 rows
+
+**Example Descriptor**:
+```json
+{
+  "version": "0.2.0",
+  "root": "procs",
+  "elements": {
+    "procs": {
+      "type": "DataTable",
+      "props": {
+        "columns": [
+          { "key": "pid", "label": "PID" },
+          { "key": "agent_id", "label": "Agent" },
+          { "key": "state", "label": "State" },
+          { "key": "cpu_percent", "label": "CPU" }
+        ],
+        "rows": { "$state": "/kernel/processes" },
+        "sortable": true
+      }
+    }
+  }
+}
+```
+
+---
+
+### 7. ChainViewer
+
+ExoChain event log viewer. Displays recent chain events with filtering.
+
+| Field | Value |
+|-------|-------|
+| Type | `ChainViewer` |
+| Has children | No |
+| Default size | width: 12, height: 6 |
+
+**Props Schema**:
+
+| Prop | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `fromSeq` | number | No | (latest) | Starting sequence number |
+| `limit` | number | No | 50 | Maximum events to display |
+| `filter` | string | No | -- | Filter string for event kind or source |
+
+**Ports**:
+| Port | Direction | Data Type | Description |
+|------|-----------|-----------|-------------|
+| `selectedEvent` | out | ChainEvent | Emits the currently selected chain event |
+
+**Actions**: None
+
+**Rendering Notes**:
+- Web: Scrollable list with expandable event detail. Color-coded by event kind.
+- Terminal: One line per event: `#1042 shell.exec process.spawn coder [PERMIT] 12ms`
+- HUD: Compact list, 1 line per event, max 6 visible
+
+**Example Descriptor**:
+```json
+{
+  "version": "0.2.0",
+  "root": "chain",
+  "elements": {
+    "chain": {
+      "type": "ChainViewer",
+      "props": { "limit": 10, "filter": "wasm" }
+    }
+  }
+}
+```
+
+---
+
+### 8. CausalGraph
+
+Force-directed (or radial/tree) visualization of the ECC causal graph.
+
+| Field | Value |
+|-------|-------|
+| Type | `CausalGraph` |
+| Has children | No |
+| Default size | width: 12, height: 8 |
+
+**Props Schema**:
+
+| Prop | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `depth` | number | No | 3 | Graph traversal depth from root nodes |
+| `query` | string | No | -- | HNSW semantic query to select root nodes |
+| `layout` | "force" or "tree" or "radial" | No | "force" | Graph layout algorithm |
+
+**Ports**:
+| Port | Direction | Data Type | Description |
+|------|-----------|-----------|-------------|
+| `selectedNode` | out | CausalNode | Emits the currently selected graph node |
+| `highlight` | in | string[] | Receives node IDs to highlight |
+
+**Actions**: None
+
+**Rendering Notes**:
+- Web: Interactive force-directed graph (d3-force or R3F for 3D). Drag, zoom, tooltips.
+- Terminal: ASCII adjacency list with indentation
+- HUD: Linearized causal chain (numbered list of events), max 6 visible. Uses radial layout if `layout` is "radial".
+
+**Example Descriptor**:
+```json
+{
+  "version": "0.2.0",
+  "root": "graph",
+  "elements": {
+    "graph": {
+      "type": "CausalGraph",
+      "props": {
+        "depth": 3,
+        "query": "auth failure",
+        "layout": "radial"
+      }
+    }
+  }
+}
+```
+
+---
+
+### 9. DiffViewer
+
+Side-by-side or unified diff display for code changes.
+
+| Field | Value |
+|-------|-------|
+| Type | `DiffViewer` |
+| Has children | No |
+| Default size | width: 12, height: 8 |
+
+**Props Schema**:
+
+| Prop | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `left` | string or StateRef | Yes | -- | Left (before) content |
+| `right` | string or StateRef | Yes | -- | Right (after) content |
+| `language` | string | No | "text" | Syntax highlighting language |
+
+**Ports**:
+| Port | Direction | Data Type | Description |
+|------|-----------|-----------|-------------|
+| `selectedHunk` | out | DiffHunk | Emits the currently selected diff hunk |
+
+**Actions**: None
+
+**Rendering Notes**:
+- Web: Side-by-side diff with syntax highlighting (CodeMirror merge view)
+- Terminal: Unified diff format with ANSI color (green/red)
+- HUD: Not rendered; falls back to summary text: "N files changed, +A/-D lines"
+
+**Example Descriptor**:
+```json
+{
+  "version": "0.2.0",
+  "root": "diff",
+  "elements": {
+    "diff": {
+      "type": "DiffViewer",
+      "props": {
+        "left": { "$state": "/journey/diff/tool_signing/before" },
+        "right": { "$state": "/journey/diff/tool_signing/after" },
+        "language": "rust"
+      }
+    }
+  }
+}
+```
+
+---
+
+### 10. CodeEditor
+
+Source code editor/viewer powered by CodeMirror 6.
+
+| Field | Value |
+|-------|-------|
+| Type | `CodeEditor` |
+| Has children | No |
+| Default size | width: 12, height: 8 |
+
+**Props Schema**:
+
+| Prop | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `value` | string or StateRef | Yes | -- | Source code content |
+| `language` | string | Yes | -- | Syntax highlighting language |
+| `readOnly` | boolean | No | false | Whether editing is disabled |
+
+**Ports**:
+| Port | Direction | Data Type | Description |
+|------|-----------|-----------|-------------|
+| `content` | out | string | Emits current editor content on change |
+| `cursor` | out | {line, col} | Emits cursor position on move |
+
+**Actions**: None
+
+**Rendering Notes**:
+- Web: CodeMirror 6 instance with theme, line numbers, folding
+- Terminal: Syntax-highlighted text (read-only); no editing in terminal mode
+- HUD: Not rendered; falls back to file name and line count summary
+
+**Example Descriptor**:
+```json
+{
+  "version": "0.2.0",
+  "root": "editor",
+  "elements": {
+    "editor": {
+      "type": "CodeEditor",
+      "props": {
+        "value": { "$state": "/journey/files/auth_validate_rs" },
+        "language": "rust",
+        "readOnly": true
+      }
+    }
+  }
+}
+```
+
+---
+
+## Interactive Blocks (5)
+
+### 11. Button
+
+Action trigger. Clicking (or voice-activating on HUD) dispatches a configured action.
+
+| Field | Value |
+|-------|-------|
+| Type | `Button` |
+| Has children | No |
+| Default size | width: 2, height: 1 |
+
+**Props Schema**:
+
+| Prop | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `label` | string | Yes | -- | Button text |
+| `variant` | "primary" or "secondary" or "danger" | No | "primary" | Visual variant |
+| `disabled` | boolean | No | false | Whether the button is disabled |
+
+**Ports**: None
+
+**Actions**: Configured via the `on.press` event handler in the descriptor.
+
+**Rendering Notes**:
+- Web: Styled button element, color per variant
+- Terminal: `[Spawn Coder]` clickable text (if terminal supports hyperlinks) or labeled action
+- HUD: Listed in the hint bar at bottom of screen as a voice command
+
+**Example Descriptor**:
+```json
+{
+  "version": "0.2.0",
+  "root": "btn",
+  "elements": {
+    "btn": {
+      "type": "Button",
+      "props": { "label": "Spawn Coder", "variant": "primary" },
+      "on": {
+        "press": {
+          "action": "kernel_exec",
+          "params": { "command": "process.spawn coder" }
+        }
+      }
+    }
+  }
+}
+```
+
+---
+
+### 12. ConsolePan
+
+Embedded WeftOS terminal emulator. xterm.js-backed in Web mode. Full ShellAdapter integration.
+
+| Field | Value |
+|-------|-------|
+| Type | `ConsolePan` |
+| Has children | No |
+| Default size | width: 12, height: 6 |
+
+**Props Schema**:
+
+| Prop | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `initialCommand` | string | No | -- | Command to execute on mount |
+| `contextService` | string | No | -- | Pre-scoped service namespace (e.g., "ecc" makes all commands default to ecc.*) |
+
+**Ports**:
+| Port | Direction | Data Type | Description |
+|------|-----------|-----------|-------------|
+| `lastOutput` | out | ShellResult | Emits the result of the last executed command |
+| `inject` | in | string | Receives a command string to execute programmatically |
+
+**Actions**: Commands entered by the user dispatch `kernel_exec` actions internally.
+
+**Rendering Notes**:
+- Web: xterm.js instance with WebGL addon, ANSI color, tab completion
+- Terminal: Passthrough (already in a terminal context); commands pipe to ShellAdapter
+- HUD: Not directly rendered; voice commands route through the same ShellAdapter pipeline
+
+**Example Descriptor**:
+```json
+{
+  "version": "0.2.0",
+  "root": "console",
+  "elements": {
+    "console": {
+      "type": "ConsolePan",
+      "props": { "initialCommand": "kernel.status" }
+    }
+  }
+}
+```
+
+---
+
+### 13. ApprovalGate
+
+Governance approval widget. Displays an action's EffectVector and allows approve/deny.
+
+| Field | Value |
+|-------|-------|
+| Type | `ApprovalGate` |
+| Has children | No |
+| Default size | width: 6, height: 4 |
+
+**Props Schema**:
+
+| Prop | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `action` | string | Yes | -- | The action being gated (e.g., "process.spawn coder") |
+| `effect_vector` | StateRef | Yes | -- | $state path to the computed EffectVector |
+
+**Ports**:
+| Port | Direction | Data Type | Description |
+|------|-----------|-----------|-------------|
+| `decision` | out | "permit" or "deny" | Emits the user's governance decision |
+
+**Actions**: On approve/deny, dispatches `governance_check` action.
+
+**Rendering Notes**:
+- Web: Card showing EffectVector radar chart, risk score, approve/deny buttons
+- Terminal: Text EffectVector + `[APPROVE] [DENY]` prompt
+- HUD: Summary line + voice commands "approve" / "deny"
+
+**Example Descriptor**:
+```json
+{
+  "version": "0.2.0",
+  "root": "gate",
+  "elements": {
+    "gate": {
+      "type": "ApprovalGate",
+      "props": {
+        "action": "config.set max_agents 100",
+        "effect_vector": { "$state": "/kernel/governance/pending/0/effect_vector" }
+      }
+    }
+  }
+}
+```
+
+---
+
+### 14. TextInput
+
+Form input field for user text entry.
+
+| Field | Value |
+|-------|-------|
+| Type | `TextInput` |
+| Has children | No |
+| Default size | width: 6, height: 1 |
+
+**Props Schema**:
+
+| Prop | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `label` | string | Yes | -- | Field label |
+| `placeholder` | string | No | -- | Placeholder text |
+| `value` | string or StateRef | No | "" | Initial/bound value |
+
+**Ports**:
+| Port | Direction | Data Type | Description |
+|------|-----------|-----------|-------------|
+| `value` | out | string | Emits current input value on change |
+
+**Actions**: None (data flows via ports).
+
+**Rendering Notes**:
+- Web: Styled input element with label
+- Terminal: Inline prompt: `Label: [____]`
+- HUD: Not interactive (voice input only); renders as a display of current value
+
+**Example Descriptor**:
+```json
+{
+  "version": "0.2.0",
+  "root": "input",
+  "elements": {
+    "input": {
+      "type": "TextInput",
+      "props": { "label": "Search", "placeholder": "Semantic query..." }
+    }
+  }
+}
+```
+
+---
+
+### 15. Markdown
+
+Rich text / narrative display. Renders Markdown content.
+
+| Field | Value |
+|-------|-------|
+| Type | `Markdown` |
+| Has children | No |
+| Default size | width: 12, height: auto |
+
+**Props Schema**:
+
+| Prop | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `content` | string or StateRef | Yes | -- | Markdown text to render |
+| `allowHtml` | boolean | No | false | Whether embedded HTML is allowed (security consideration) |
+
+**Ports**: None
+**Actions**: None
+
+**Rendering Notes**:
+- Web: react-markdown with syntax highlighting for code blocks
+- Terminal: Rendered via `marked-terminal` or plain text with basic formatting
+- HUD: Plain text only, headings uppercased, code blocks ignored
+
+**Example Descriptor**:
+```json
+{
+  "version": "0.2.0",
+  "root": "md",
+  "elements": {
+    "md": {
+      "type": "Markdown",
+      "props": { "content": "## Sprint 10 Complete\n\nAll exit criteria met. **14/19** tasks finished." }
+    }
+  }
+}
+```
+
+---
+
+## OS Capability Blocks (3)
+
+### 16. WebBrowser
+
+Embedded WebView for browsing URLs. Uses Tauri's native WebView.
+
+| Field | Value |
+|-------|-------|
+| Type | `WebBrowser` |
+| Has children | No |
+| Default size | width: 12, height: 8 |
+
+**Props Schema**:
+
+| Prop | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `url` | string | Yes | -- | Initial URL to load |
+| `allowNavigation` | boolean | No | true | Whether the user can navigate away from the initial URL |
+
+**Ports**:
+| Port | Direction | Data Type | Description |
+|------|-----------|-----------|-------------|
+| `currentUrl` | out | string | Emits the current URL after navigation |
+
+**Actions**: None
+
+**Rendering Notes**:
+- Web: Tauri WebView with address bar, back/forward
+- Terminal: Not rendered; shows URL as a hyperlink
+- HUD: Not rendered; shows URL text only
+
+**Example Descriptor**:
+```json
+{
+  "version": "0.2.0",
+  "root": "browser",
+  "elements": {
+    "browser": {
+      "type": "WebBrowser",
+      "props": { "url": "http://localhost:3000", "allowNavigation": true }
+    }
+  }
+}
+```
+
+---
+
+### 17. ResourceTree
+
+File/asset browser for the project's ExoResourceTree.
+
+| Field | Value |
+|-------|-------|
+| Type | `ResourceTree` |
+| Has children | No |
+| Default size | width: 4, height: 8 |
+
+**Props Schema**:
+
+| Prop | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `rootPath` | string | No | "/" | Root path to display |
+| `filter` | string | No | -- | Glob filter for visible entries |
+
+**Ports**:
+| Port | Direction | Data Type | Description |
+|------|-----------|-----------|-------------|
+| `selectedPath` | out | string | Emits the path of the selected file/directory |
+
+**Actions**: None
+
+**Rendering Notes**:
+- Web: Tree view with expand/collapse, file icons, click-to-select
+- Terminal: Indented tree listing (like `tree` command)
+- HUD: Flat list of top-level entries, max 8 visible
+
+**Example Descriptor**:
+```json
+{
+  "version": "0.2.0",
+  "root": "tree",
+  "elements": {
+    "tree": {
+      "type": "ResourceTree",
+      "props": { "rootPath": "/src", "filter": "*.rs" }
+    }
+  }
+}
+```
+
+---
+
+### 18. ServiceMap
+
+2D or 3D mesh topology visualization showing services and their connections.
+
+| Field | Value |
+|-------|-------|
+| Type | `ServiceMap` |
+| Has children | No |
+| Default size | width: 12, height: 8 |
+
+**Props Schema**:
+
+| Prop | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `layout` | "force" or "hierarchical" | No | "force" | Layout algorithm |
+| `showScores` | boolean | No | false | Whether to display health scores on nodes |
+
+**Ports**:
+| Port | Direction | Data Type | Description |
+|------|-----------|-----------|-------------|
+| `selectedService` | out | ServiceEntry | Emits the currently selected service node |
+
+**Actions**: None
+
+**Rendering Notes**:
+- Web: D3 force-directed graph or hierarchical tree, color-coded by health
+- Terminal: ASCII box-and-arrow diagram
+- HUD: Radial topology view (same layout as RadialTopology block)
+
+**Example Descriptor**:
+```json
+{
+  "version": "0.2.0",
+  "root": "map",
+  "elements": {
+    "map": {
+      "type": "ServiceMap",
+      "props": { "layout": "hierarchical", "showScores": true }
+    }
+  }
+}
+```
+
+---
+
+## Nesting Rules
+
+1. Only layout blocks (`Column`, `Row`, `Grid`, `Tabs`) may have `children`.
+2. Maximum nesting depth: **6 levels**. Prevents pathological recursion in agent-generated descriptors.
+3. A child block cannot reference its ancestor's ports (prevents circular data flow).
+4. Any block can serve as the root of its own descriptor (composability -- a saved assembly becomes a reusable block).
+
+## Validation
+
+All descriptors MUST pass validation against `block-descriptor-schema.json` (JSON Schema draft 2020-12) before rendering. Additionally, each block's `props` must pass the block-type-specific Zod schema. A descriptor that passes both levels of validation is guaranteed renderable on all supported targets.

@@ -1166,6 +1166,9 @@ impl TreeManager {
                 // Move and scoring updates are recorded but not yet applied
                 // in K6.0 — full support arrives in K6.4.
             }
+            _ => {
+                // Future MutationEvent variants -- record but do not apply.
+            }
         }
 
         // Record the mutation

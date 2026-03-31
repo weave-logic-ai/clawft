@@ -7,6 +7,7 @@ use crate::model::{ResourceId, ResourceKind};
 use crate::scoring::NodeScoring;
 
 /// A mutation event in the resource tree DAG.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MutationEvent {
     /// A new resource node was created.

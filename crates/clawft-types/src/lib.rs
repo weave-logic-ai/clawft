@@ -26,6 +26,8 @@ pub mod secret;
 pub mod security;
 pub mod session;
 pub mod skill;
+pub mod registry;
 pub mod workspace;
 
 pub use error::{ChannelError, ClawftError, Result};
+pub use registry::Registry;

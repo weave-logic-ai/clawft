@@ -1,0 +1,4 @@
+{
+  "title": "Guides",
+  "pages": ["configuration", "feature-flags", "integration-patterns", "kernel-modules", "deployment-docker", "gui"]
+}

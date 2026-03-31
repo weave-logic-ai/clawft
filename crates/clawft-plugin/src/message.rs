@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Supports text, structured data, and binary payloads. The `Binary`
 /// variant is reserved for voice/audio data (Workstream G).
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MessagePayload {

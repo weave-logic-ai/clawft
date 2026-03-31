@@ -217,6 +217,13 @@ pub fn apply_os_sandbox(policy: &SandboxPolicy) -> Result<(), String> {
                 Ok(())
             }
         }
+        _ => {
+            tracing::warn!(
+                agent = %policy.agent_id,
+                "unknown sandbox type variant; falling back to WASM sandbox"
+            );
+            Ok(())
+        }
     }
 }
 

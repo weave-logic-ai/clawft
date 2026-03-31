@@ -1,0 +1,21 @@
+---
+source: crates/clawft-kernel/tests/golden_snapshots.rs
+expression: json
+---
+{
+  "from": 2,
+  "id": "msg-00000000-0000-0000-0000-000000000005",
+  "payload": {
+    "Json": {
+      "token": "jwt-xyz"
+    }
+  },
+  "target": {
+    "ServiceMethod": {
+      "method": "validate_token",
+      "service": "auth-service"
+    }
+  },
+  "timestamp": "2025-01-01T00:00:00Z",
+  "trace_id": "trace-ghi-789"
+}

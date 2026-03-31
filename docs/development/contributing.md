@@ -11,7 +11,7 @@
 ### Getting Started
 
 ```bash
-git clone https://github.com/clawft/clawft.git
+git clone https://github.com/weave-logic-ai/clawft.git
 cd clawft
 cargo build --workspace
 cargo test --workspace
@@ -866,4 +866,4 @@ my-feature = ["dep:some-crate"]
 
 ---
 
-*clawft is developed and maintained as part of the [clawft](https://github.com/clawft/clawft) project.*
+*clawft is developed and maintained as part of the [clawft](https://github.com/weave-logic-ai/clawft) project.*

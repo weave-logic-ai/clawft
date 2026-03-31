@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::process::Pid;
 
 /// Why a process exited.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExitReason {
     /// Normal completion (exit code 0).

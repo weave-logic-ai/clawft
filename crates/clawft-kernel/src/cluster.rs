@@ -22,6 +22,7 @@ use tracing::{debug, warn};
 pub type NodeId = String;
 
 /// Node platform type.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodePlatform {
     /// Native binary on a cloud VM or bare metal server.
@@ -49,6 +50,7 @@ impl std::fmt::Display for NodePlatform {
 }
 
 /// Node health state.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeState {
     /// Node is joining the cluster.
@@ -271,6 +273,7 @@ impl NodeIdentity {
 }
 
 /// Cluster membership errors.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum ClusterError {
     /// Node already in the cluster.

@@ -15,6 +15,7 @@ use std::collections::HashSet;
 // ── Command Policy ──────────────────────────────────────────────────────
 
 /// Whether the command policy operates in allowlist or denylist mode.
+#[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum PolicyMode {
     /// Only commands whose basename appears in the allowlist are permitted.
@@ -25,6 +26,7 @@ pub enum PolicyMode {
 }
 
 /// Errors returned when a command fails policy validation.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandPolicyError {
     /// The command's executable is not on the allowlist.

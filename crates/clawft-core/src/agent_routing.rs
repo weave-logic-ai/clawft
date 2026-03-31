@@ -18,6 +18,7 @@ use clawft_types::agent_routing::{AgentRoute, AgentRoutingConfig};
 use clawft_types::event::InboundMessage;
 
 /// Result of routing an inbound message to an agent.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoutingResult {
     /// Message routed to a specific agent by rule match.

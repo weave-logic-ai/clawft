@@ -191,6 +191,7 @@ impl Default for RegistryQueryService {
 ///
 /// Implements the standard closed/open/half-open pattern to prevent
 /// cascading failures when a remote node becomes unreachable.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum CircuitState {
     /// Normal operation -- requests flow through.

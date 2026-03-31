@@ -7,6 +7,7 @@
 use crate::process::ProcessState;
 
 /// Kernel-level errors.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum KernelError {
     /// Process not found in the process table.

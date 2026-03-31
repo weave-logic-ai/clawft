@@ -63,6 +63,7 @@ pub struct PingResponse {
 }
 
 /// Node health state from heartbeat monitoring.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeartbeatState {
     /// Node is healthy (responding to pings).

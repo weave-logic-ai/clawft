@@ -47,12 +47,12 @@ Each release publishes the following artifacts:
 ### From GitHub
 
 Download binaries from the
-[Releases page](https://github.com/clawft/clawft/releases):
+[Releases page](https://github.com/weave-logic-ai/clawft/releases):
 
 ```bash
 # Example: download the latest Linux x86_64 binary
 curl -L -o weft \
-  https://github.com/clawft/clawft/releases/latest/download/weft-linux-x86_64
+  https://github.com/weave-logic-ai/clawft/releases/latest/download/weft-linux-x86_64
 chmod +x weft
 ```
 
@@ -63,7 +63,7 @@ download:
 
 ```bash
 curl -L -o checksums.txt \
-  https://github.com/clawft/clawft/releases/latest/download/checksums.txt
+  https://github.com/weave-logic-ai/clawft/releases/latest/download/checksums.txt
 
 sha256sum -c checksums.txt --ignore-missing
 ```
@@ -116,7 +116,7 @@ See the [Docker Deployment Guide](docker.md) for full usage instructions.
 ### Build Steps
 
 ```bash
-git clone https://github.com/clawft/clawft.git
+git clone https://github.com/weave-logic-ai/clawft.git
 cd clawft
 scripts/build.sh native    # Or: cargo build --release
 ```

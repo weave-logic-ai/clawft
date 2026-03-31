@@ -170,4 +170,257 @@ mod tests {
         // Cleanup.
         let _ = std::fs::remove_dir_all(&cfg.data_dir);
     }
+
+    // ── Corrupt file recovery ───────────────────────────────────────
+
+    #[test]
+    fn corrupt_causal_graph_file_returns_error() {
+        let cfg = tmp_config();
+        std::fs::create_dir_all(&cfg.data_dir).unwrap();
+
+        // Write garbage bytes to the causal graph file.
+        std::fs::write(cfg.causal_graph_path(), b"{{{{not json at all!").unwrap();
+
+        let result = load_causal_graph(&cfg);
+        assert!(result.is_err(), "loading corrupt causal graph should fail");
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+
+        let _ = std::fs::remove_dir_all(&cfg.data_dir);
+    }
+
+    #[test]
+    fn corrupt_hnsw_file_returns_error() {
+        let cfg = tmp_config();
+        std::fs::create_dir_all(&cfg.data_dir).unwrap();
+
+        // Write garbage bytes to the HNSW file.
+        std::fs::write(cfg.hnsw_index_path(), b"\x00\x01\x02binary garbage").unwrap();
+
+        let result = load_hnsw(&cfg);
+        assert!(result.is_err(), "loading corrupt HNSW index should fail");
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+
+        let _ = std::fs::remove_dir_all(&cfg.data_dir);
+    }
+
+    #[test]
+    fn truncated_json_returns_error() {
+        let cfg = tmp_config();
+        std::fs::create_dir_all(&cfg.data_dir).unwrap();
+
+        // Write truncated but plausible JSON.
+        std::fs::write(cfg.causal_graph_path(), b"{\"next_node_id\":5,\"nodes\":").unwrap();
+
+        let result = load_causal_graph(&cfg);
+        assert!(result.is_err(), "loading truncated JSON should fail");
+
+        let _ = std::fs::remove_dir_all(&cfg.data_dir);
+    }
+
+    #[test]
+    fn empty_file_returns_error() {
+        let cfg = tmp_config();
+        std::fs::create_dir_all(&cfg.data_dir).unwrap();
+
+        // Write zero-length file.
+        std::fs::write(cfg.causal_graph_path(), b"").unwrap();
+
+        let result = load_causal_graph(&cfg);
+        assert!(result.is_err(), "loading empty file should fail");
+
+        let _ = std::fs::remove_dir_all(&cfg.data_dir);
+    }
+
+    // ── Concurrent write handling ───────────────────────────────────
+
+    #[test]
+    fn concurrent_saves_do_not_corrupt() {
+        let cfg = tmp_config();
+        std::fs::create_dir_all(&cfg.data_dir).unwrap();
+
+        let graph = CausalGraph::new();
+        for i in 0..100 {
+            graph.add_node(format!("node-{i}"), serde_json::json!({"i": i}));
+        }
+        let hnsw = HnswService::new(HnswServiceConfig::default());
+        for i in 0..50 {
+            hnsw.insert(format!("v{i}"), vec![i as f32, 0.0, 0.0], serde_json::json!({}));
+        }
+
+        // Save from two threads simultaneously.
+        let cfg1 = cfg.clone();
+        let cfg2 = cfg.clone();
+        let graph_ref = &graph;
+        let hnsw_ref = &hnsw;
+
+        std::thread::scope(|s| {
+            let h1 = s.spawn(|| save_all(&cfg1, graph_ref, hnsw_ref));
+            let h2 = s.spawn(|| save_all(&cfg2, graph_ref, hnsw_ref));
+
+            // Both saves should succeed (last-writer-wins on file I/O).
+            h1.join().unwrap().unwrap();
+            h2.join().unwrap().unwrap();
+        });
+
+        // The resulting files should be loadable.
+        let (loaded_graph, loaded_hnsw) = load_all(&cfg).unwrap();
+        assert_eq!(loaded_graph.node_count(), 100);
+        assert_eq!(loaded_hnsw.len(), 50);
+
+        let _ = std::fs::remove_dir_all(&cfg.data_dir);
+    }
+
+    // ── Disk-full / read-only simulation ────────────────────────────
+
+    #[test]
+    fn save_to_nonexistent_deep_path_creates_dirs() {
+        let cfg = PersistenceConfig {
+            data_dir: std::env::temp_dir()
+                .join(format!("weftos_deep_{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()))
+                .join("a")
+                .join("b")
+                .join("c"),
+            auto_save_interval_secs: None,
+        };
+
+        let graph = CausalGraph::new();
+        let hnsw = HnswService::new(HnswServiceConfig::default());
+
+        // save_all creates intermediate directories.
+        save_all(&cfg, &graph, &hnsw).unwrap();
+        assert!(cfg.causal_graph_path().exists());
+
+        let _ = std::fs::remove_dir_all(
+            cfg.data_dir.parent().unwrap().parent().unwrap().parent().unwrap(),
+        );
+    }
+
+    #[test]
+    fn save_to_readonly_dir_fails() {
+        // Create a directory, then make it read-only.
+        let base = std::env::temp_dir().join(format!(
+            "weftos_ro_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+
+        // Set directory permissions to read-only.
+        let mut perms = std::fs::metadata(&base).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(true);
+        std::fs::set_permissions(&base, perms.clone()).unwrap();
+
+        let cfg = PersistenceConfig {
+            data_dir: base.join("state"),
+            auto_save_interval_secs: None,
+        };
+
+        let graph = CausalGraph::new();
+        let hnsw = HnswService::new(HnswServiceConfig::default());
+
+        let result = save_all(&cfg, &graph, &hnsw);
+        assert!(result.is_err(), "saving to read-only dir should fail");
+
+        // Restore permissions for cleanup.
+        perms.set_readonly(false);
+        let _ = std::fs::set_permissions(&base, perms);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ── Large data roundtrip ────────────────────────────────────────
+
+    #[test]
+    fn save_load_roundtrip_large_graph() {
+        let cfg = tmp_config();
+
+        let graph = CausalGraph::new();
+        let mut node_ids = Vec::with_capacity(1000);
+        for i in 0..1000 {
+            let nid = graph.add_node(
+                format!("node-{i}"),
+                serde_json::json!({"index": i, "data": "x".repeat(50)}),
+            );
+            node_ids.push(nid);
+        }
+
+        // Create edges between consecutive nodes.
+        for window in node_ids.windows(2) {
+            graph.link(
+                window[0],
+                window[1],
+                crate::causal::CausalEdgeType::Follows,
+                0.8,
+                window[0],
+                0,
+            );
+        }
+
+        let hnsw = HnswService::new(HnswServiceConfig::default());
+        for i in 0..1000 {
+            hnsw.insert(
+                format!("vec-{i}"),
+                vec![i as f32, (i * 2) as f32, (i * 3) as f32],
+                serde_json::json!({"i": i}),
+            );
+        }
+
+        save_all(&cfg, &graph, &hnsw).unwrap();
+
+        let (loaded_graph, loaded_hnsw) = load_all(&cfg).unwrap();
+        assert_eq!(loaded_graph.node_count(), 1000);
+        assert_eq!(loaded_graph.edge_count(), 999);
+        assert_eq!(loaded_hnsw.len(), 1000);
+
+        let _ = std::fs::remove_dir_all(&cfg.data_dir);
+    }
+
+    #[test]
+    fn save_load_roundtrip_preserves_node_data() {
+        let cfg = tmp_config();
+
+        let graph = CausalGraph::new();
+        let nid = graph.add_node(
+            "important-node".into(),
+            serde_json::json!({"key": "value", "nested": {"a": [1,2,3]}}),
+        );
+
+        let hnsw = HnswService::new(HnswServiceConfig::default());
+
+        save_all(&cfg, &graph, &hnsw).unwrap();
+
+        let (loaded_graph, _) = load_all(&cfg).unwrap();
+        assert_eq!(loaded_graph.node_count(), 1);
+        // Verify the node data is intact by checking we can retrieve by ID.
+        let nodes = loaded_graph.get_node(nid);
+        assert!(nodes.is_some(), "loaded graph should contain the saved node");
+        assert_eq!(nodes.unwrap().label, "important-node");
+
+        let _ = std::fs::remove_dir_all(&cfg.data_dir);
+    }
+
+    #[test]
+    fn double_save_load_is_idempotent() {
+        let cfg = tmp_config();
+
+        let graph = CausalGraph::new();
+        graph.add_node("A".into(), serde_json::json!({}));
+        let hnsw = HnswService::new(HnswServiceConfig::default());
+
+        save_all(&cfg, &graph, &hnsw).unwrap();
+        save_all(&cfg, &graph, &hnsw).unwrap();
+
+        let (loaded, _) = load_all(&cfg).unwrap();
+        assert_eq!(loaded.node_count(), 1);
+
+        let _ = std::fs::remove_dir_all(&cfg.data_dir);
+    }
 }

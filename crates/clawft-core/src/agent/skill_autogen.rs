@@ -231,6 +231,7 @@ pub struct SkillCandidate {
 }
 
 /// State of a skill candidate in the approval pipeline.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CandidateState {
     /// Awaiting user review and approval.

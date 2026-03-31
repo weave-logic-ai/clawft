@@ -15,6 +15,7 @@ use crate::embeddings::Embedder;
 use crate::embeddings::rvf_stub::{RvfError, RvfStore};
 
 /// Errors that can occur during memory bootstrap.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum BootstrapError {
     /// An I/O error occurred reading files.

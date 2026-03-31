@@ -1,6 +1,7 @@
 [package]
 name = "clawft-weave"
-version = "0.1.0"
+version.workspace = true
+publish = false
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -13,6 +14,9 @@ categories = ["command-line-utilities"]
 [[bin]]
 name = "weaver"
 path = "src/main.rs"
+
+[package.metadata.dist]
+dist = true
 
 [features]
 default = []

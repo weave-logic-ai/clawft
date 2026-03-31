@@ -24,8 +24,12 @@ members = [
     "crates/exo-resource-tree",
     "crates/weftos",
 ]
+exclude = [
+    "gui/src-tauri",
+]
 
 [workspace.package]
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.93"
 license = "MIT OR Apache-2.0"
@@ -76,6 +80,7 @@ futures-util = "0.3"
 # Crypto
 hmac = "0.12"
 sha2 = "0.10"
+sha3 = { version = "0.10", default-features = false, features = ["std"] }
 
 # Scheduling
 cron = "0.15"
@@ -165,8 +170,44 @@ clawft-kernel = { path = "crates/clawft-kernel", default-features = false }
 exo-resource-tree = { path = "crates/exo-resource-tree" }
 weftos = { path = "crates/weftos", default-features = false }
 
+# Testing
+insta = { version = "1.39", features = ["json"] }
+tempfile = "3"
+
+# cargo-dist configuration
+[workspace.metadata.dist]
+# The preferred cargo-dist version to use in CI
+cargo-dist-version = "0.31.0"
+# CI backends to support
+ci = "github"
+# Target platforms for binary builds
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+# Installers to generate
+installers = ["shell", "powershell", "homebrew"]
+# Homebrew tap repository
+tap = "weavelogic/homebrew-tap"
+# Publish jobs to run (homebrew formula auto-published to tap repo)
+publish-jobs = ["homebrew"]
+# Enable GitHub Attestations for provenance
+github-attestations = true
+# Create a GitHub Release on tag push
+create-release = true
+# Archive format per platform (tar.gz for Unix, zip for Windows)
+unix-archive = ".tar.gz"
+windows-archive = ".zip"
+# Include in archives
+include = ["LICENSE*", "README.md"]
+# Do not auto-include workspace crates — we mark distributable ones explicitly
+auto-includes = false
+
 [profile.release]
-opt-level = "z"
+opt-level = 3
 lto = true
 strip = true
 codegen-units = 1

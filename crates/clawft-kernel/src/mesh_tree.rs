@@ -50,6 +50,7 @@ pub struct TreeNodeDiff {
 }
 
 /// Type of tree diff entry.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TreeDiffType {
     /// Node was added.
@@ -100,6 +101,7 @@ pub fn compare_tree_roots(local_hash: &str, remote_hash: &str) -> TreeSyncAction
 }
 
 /// Sync action based on tree root comparison.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TreeSyncAction {
     /// Trees are identical.

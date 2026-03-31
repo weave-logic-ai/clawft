@@ -1,0 +1,204 @@
+---
+title: Your First Project
+description: Step-by-step tutorial for initializing, configuring, booting, and inspecting a WeftOS project.
+---
+
+# Your First WeftOS Project
+
+This tutorial walks through the complete workflow of creating a WeftOS-managed
+project from scratch: initialization, configuration, booting the kernel, and
+inspecting its state.
+
+## Step 1: Initialize the Project
+
+Navigate to an existing project directory (or create a new one) and run
+`weftos init`:
+
+```bash
+mkdir ~/my-first-weftos-project
+cd ~/my-first-weftos-project
+git init
+weftos init
+```
+
+This creates two artifacts:
+
+- **`weave.toml`** -- the project configuration file that controls tick rate,
+  source scanning, embedding backend, governance policy, and mesh settings.
+- **`.weftos/`** -- the runtime state directory for chain checkpoints, resource
+  tree state, kernel logs, and analysis artifacts.
+
+The `.weftos/` directory is automatically added to `.gitignore`.
+
+## Step 2: Review the Configuration
+
+Open `weave.toml` to see the generated defaults:
+
+```toml
+[domain]
+name = "my-first-weftos-project"
+
+[kernel]
+max_processes = 64
+
+[tick]
+interval_ms = 50
+adaptive = true
+
+[sources.files]
+root = "."
+patterns = ["**/*.rs"]
+
+[embedding]
+provider = "mock-sha256"
+dimensions = 384
+batch_size = 16
+```
+
+Key sections:
+
+- **`[domain]`** -- project identity. The `name` is auto-detected from the
+  directory name, and `language` is inferred from project files.
+- **`[kernel]`** -- process table limits and health check intervals.
+- **`[tick]`** -- cognitive tick loop timing. The `adaptive` flag allows the
+  kernel to self-calibrate based on measured latency.
+- **`[sources]`** -- where the kernel scans for files to index.
+- **`[embedding]`** -- the embedding backend. `mock-sha256` provides
+  deterministic hash-based vectors for development. Switch to
+  `onnx-embeddings` for real neural embeddings.
+
+For the full field reference, see the
+[configuration guide](/weftos/guides/configuration).
+
+## Step 3: Boot the Kernel
+
+Start the kernel in the foreground:
+
+```bash
+weftos boot
+```
+
+You should see output like:
+
+```
+Booting WeftOS in /home/user/my-first-weftos-project...
+WeftOS running
+  State: Running
+  Services: 3
+  Processes: 0
+
+Press Ctrl+C to stop.
+```
+
+The kernel is now running with the default services: health monitoring, cron
+scheduling, and the service registry.
+
+## Step 4: Check Status
+
+Open a second terminal and check the kernel state:
+
+```bash
+cd ~/my-first-weftos-project
+weftos status
+```
+
+Output:
+
+```
+WeftOS initialized in current directory
+  Config: weave.toml
+  Runtime: .weftos/
+```
+
+For more detailed information, use the `weave` CLI:
+
+```bash
+# Kernel state, uptime, process/service counts
+weave kernel status
+
+# List registered services
+weave kernel services
+
+# Show the process table (empty at first)
+weave kernel ps
+```
+
+## Step 5: Use the Kernel Management CLI
+
+The `weave` CLI provides full lifecycle control. With the kernel running in
+another terminal (or as a daemon), try these commands:
+
+```bash
+# Start as a background daemon instead of foreground
+weave kernel start
+
+# Stream live kernel logs
+weave kernel attach
+
+# Show the last 50 log entries
+weave kernel logs -n 50
+
+# Stop the daemon gracefully
+weave kernel stop
+
+# Restart
+weave kernel restart
+```
+
+## Step 6: Enable More Features
+
+The default build includes only the `native` feature set (process table, agent
+supervision, IPC). To unlock the full kernel, rebuild with additional features:
+
+```bash
+# Add cognitive substrate + audit trail + self-healing
+scripts/build.sh native --features ecc,exochain,os-patterns
+```
+
+After rebuilding, `weftos boot` will start additional services:
+
+- **ECC** -- causal graph, HNSW vector memory, cognitive tick loop
+- **ExoChain** -- append-only hash-linked audit trail
+- **OS Patterns** -- self-healing, dead-letter queue, structured metrics
+
+For multi-node deployments, add mesh networking:
+
+```bash
+scripts/build.sh native --features ecc,exochain,os-patterns,mesh,cluster
+```
+
+Then configure mesh settings in `weave.toml`:
+
+```toml
+[mesh]
+enabled = true
+bind_address = "0.0.0.0:9470"
+seed_peers = ["192.168.1.10:9470"]
+```
+
+## Project Structure
+
+After initialization and a boot cycle, your project looks like this:
+
+```
+my-first-weftos-project/
+  weave.toml          # WeftOS configuration
+  .weftos/            # Runtime state (gitignored)
+    chain/            # Chain checkpoints
+    tree/             # Resource tree state
+    logs/             # Kernel logs
+    artifacts/        # Build/analysis artifacts
+  .gitignore          # Includes .weftos/ entry
+  ... your code ...
+```
+
+## Next Steps
+
+- [Configuration Reference](/weftos/guides/configuration) -- tune every
+  `weave.toml` field
+- [Feature Flags](/weftos/guides/feature-flags) -- understand compile-time
+  feature flags across all 22 crates
+- [Kernel Modules](/weftos/guides/kernel-modules) -- per-module reference for the
+  25 kernel source files
+- [Integration Patterns](/weftos/guides/integration-patterns) -- how to add new
+  subsystems that integrate with ExoChain, resource tree, and governance

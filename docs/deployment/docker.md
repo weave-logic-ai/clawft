@@ -24,7 +24,7 @@ Clone the repository and build a static musl binary, then build the Docker
 image:
 
 ```bash
-git clone https://github.com/clawft/clawft.git
+git clone https://github.com/weave-logic-ai/clawft.git
 cd clawft
 
 # Build the static binary (requires musl target)

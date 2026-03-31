@@ -134,6 +134,7 @@ seed_peers = []
     )
 }
 
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum InitError {
     #[error("io error: {0}")]

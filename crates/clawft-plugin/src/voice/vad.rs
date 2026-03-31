@@ -1,6 +1,7 @@
 //! Voice Activity Detection using Silero VAD.
 
 /// VAD processing result.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum VadEvent {
     /// Speech started at this sample offset.

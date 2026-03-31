@@ -31,6 +31,7 @@ pub struct LlmResponse {
 }
 
 /// A single block of content in an LLM response.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
@@ -51,6 +52,7 @@ pub enum ContentBlock {
 }
 
 /// The reason a model stopped generating tokens.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StopReason {

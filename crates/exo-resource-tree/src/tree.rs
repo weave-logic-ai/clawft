@@ -2,7 +2,21 @@
 
 use std::collections::HashMap;
 
-use rvf_crypto::hash::shake256_256;
+use sha3::{
+    digest::{ExtendableOutput, Update, XofReader},
+    Shake256,
+};
+
+/// Compute 256-bit (32-byte) SHAKE-256 hash.
+/// Inlined from rvf-crypto to remove the external path dependency.
+fn shake256_256(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Shake256::default();
+    hasher.update(data);
+    let mut reader = hasher.finalize_xof();
+    let mut output = [0u8; 32];
+    reader.read(&mut output);
+    output
+}
 
 use crate::error::{TreeError, TreeResult};
 use crate::model::{ResourceId, ResourceKind, ResourceNode};

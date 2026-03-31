@@ -45,6 +45,7 @@ pub struct PluginManifest {
 }
 
 /// Plugin capability types.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginCapability {

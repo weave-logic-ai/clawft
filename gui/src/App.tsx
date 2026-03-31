@@ -3,8 +3,9 @@ import { useKernelWs } from './hooks/useKernelWs';
 import { Dashboard } from './views/Dashboard';
 import { AdminForms } from './views/AdminForms';
 import { KnowledgeGraph } from './views/KnowledgeGraph';
+import { ComponentGenerator } from './views/ComponentGenerator';
 
-type View = 'dashboard' | 'admin' | 'graph';
+type View = 'dashboard' | 'admin' | 'graph' | 'generate';
 
 function App() {
   const [view, setView] = useState<View>('dashboard');
@@ -48,6 +49,16 @@ function App() {
           >
             Knowledge Graph
           </button>
+          <button
+            onClick={() => setView('generate')}
+            className={`px-3 py-1 text-sm rounded ${
+              view === 'generate'
+                ? 'bg-indigo-600 text-white'
+                : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800'
+            }`}
+          >
+            Generate
+          </button>
         </nav>
       </header>
 
@@ -56,11 +67,12 @@ function App() {
         {view === 'dashboard' && <Dashboard ws={ws} />}
         {view === 'admin' && <AdminForms ws={ws} />}
         {view === 'graph' && <KnowledgeGraph />}
+        {view === 'generate' && <ComponentGenerator />}
       </main>
 
       {/* Footer */}
       <footer className="border-t border-gray-800 px-6 py-2 text-xs text-gray-500 text-center">
-        WeftOS K8 GUI Prototype &middot; Mock data &middot; Tauri 2.0 wrapper pending
+        WeftOS K8 GUI v0.1.0 &middot; {window.__TAURI_INTERNALS__ ? 'Tauri Desktop' : 'Browser Mode'}
       </footer>
     </div>
   );

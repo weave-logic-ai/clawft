@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Identifies which forest structure a node belongs to.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StructureTag {
     /// ExoChain ledger (0x01).
@@ -119,6 +120,7 @@ impl fmt::Debug for UniversalNodeId {
 // ---------------------------------------------------------------------------
 
 /// The semantic relationship carried by a [`CrossRef`].
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CrossRefType {
     /// Source was triggered by target (0x01).

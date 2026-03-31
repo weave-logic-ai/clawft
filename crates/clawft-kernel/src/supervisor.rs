@@ -28,6 +28,7 @@ use crate::process::{Pid, ProcessEntry, ProcessState, ProcessTable, ResourceUsag
 ///
 /// Determines what happens to sibling agents when one agent fails.
 /// Configured per AppManifest or per supervisor instance.
+#[non_exhaustive]
 #[cfg(feature = "os-patterns")]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RestartStrategy {
@@ -167,6 +168,7 @@ impl Default for RestartTracker {
 // ── K1-G3: Resource enforcement types ───────────────────────────
 
 /// Result of a resource limit check.
+#[non_exhaustive]
 #[cfg(feature = "os-patterns")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResourceCheckResult {
@@ -230,6 +232,7 @@ pub fn check_resource_usage(
 /// is implemented in K0-K2; other variants are defined to crystallize the
 /// API surface (see Symposium decisions D2, D3, C1, C8) and will return
 /// [`KernelError::BackendNotAvailable`] until their respective K-phases.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SpawnBackend {
     /// Tokio task with agent_loop (K0-K2, default).

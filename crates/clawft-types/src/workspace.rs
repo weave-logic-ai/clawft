@@ -118,6 +118,28 @@ impl WorkspaceRegistry {
     }
 }
 
+// ── Registry trait implementation ────────────────────────────────────
+
+impl crate::Registry for WorkspaceRegistry {
+    type Value = WorkspaceEntry;
+
+    fn get(&self, key: &str) -> Option<Self::Value> {
+        self.find_by_name(key).cloned()
+    }
+
+    fn list_keys(&self) -> Vec<String> {
+        self.workspaces.iter().map(|e| e.name.clone()).collect()
+    }
+
+    fn count(&self) -> usize {
+        self.workspaces.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.workspaces.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

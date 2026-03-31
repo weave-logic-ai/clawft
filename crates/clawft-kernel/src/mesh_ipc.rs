@@ -101,6 +101,7 @@ impl MeshIpcEnvelope {
 }
 
 /// Mesh IPC errors.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum MeshIpcError {
     #[error("serialization error: {0}")]

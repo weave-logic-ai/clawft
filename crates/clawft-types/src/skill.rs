@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// How the skill was loaded.
+#[non_exhaustive]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SkillFormat {
     /// Legacy: `skill.json` + `prompt.md`.

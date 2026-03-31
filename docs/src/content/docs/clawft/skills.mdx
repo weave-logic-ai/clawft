@@ -7,6 +7,8 @@ description: "Define reusable prompt bundles (skills) and named agent personas w
 
 A **skill** is a reusable LLM instruction bundle with metadata. Skills package a prompt template, variable declarations, and tool permissions into a single unit that can be activated on demand.
 
+The `SkillsV2Registry` (in `crates/clawft-core/src/agent/skills_v2.rs`, ~1,430 lines) manages the skill lifecycle: YAML frontmatter parsing, three-level discovery, security validation, hot-reload, and auto-generation.
+
 ### SKILL.md Format
 
 The preferred format is a single `SKILL.md` file with YAML frontmatter and a markdown body:
@@ -47,6 +49,8 @@ and Read/Grep for local files.
 
 Both hyphenated (`allowed-tools`) and underscored (`allowed_tools`) field names are accepted.
 
+**Comparison with Hermes**: Hermes uses a similar skill-as-markdown pattern but lacks hot-reload, auto-generation, and the three-level priority chain. clawft's SKILL.md format is wire-compatible with Hermes skills -- the frontmatter fields map directly.
+
 ### Legacy Format
 
 The older format uses `skill.json` + `prompt.md`:
@@ -63,11 +67,11 @@ When both `SKILL.md` and `skill.json` exist, `SKILL.md` takes precedence.
 
 Skills are loaded from three levels (highest priority first):
 
-1. **Workspace** -- `.clawft/skills/` in the project root
-2. **User** -- `~/.clawft/skills/`
-3. **Builtin** -- compiled into the binary
+1. **Workspace skills** -- `.clawft/skills/` in the project root (highest priority)
+2. **User skills** -- `~/.clawft/skills/` in the user's home directory
+3. **Built-in skills** -- compiled into the binary (lowest priority)
 
-When the same skill name appears at multiple levels, the higher-priority source wins.
+When the same skill name appears at multiple levels, the higher-priority source wins. This allows workspace-specific overrides of user or built-in skills without modifying the originals.
 
 ### CLI Commands
 
@@ -91,20 +95,52 @@ In a `weft agent` session:
 
 ### Hot-Reload
 
-The skill system watches for filesystem changes. Modified skills are atomically swapped so in-flight invocations complete with the old definition while new invocations use the updated version. No restart required.
+The `SkillWatcher` (~555 lines) monitors skill directories for filesystem changes using platform-native file watchers. Modified skills are atomically swapped so in-flight invocations complete with the old definition while new invocations use the updated version. No restart required.
+
+The watcher covers all three discovery levels and handles:
+- New skill files appearing in a watched directory
+- Modifications to existing SKILL.md files
+- Deletion of skill files (skill is removed from the registry)
+
+### Skill Auto-Generation
+
+When `skill_autogen.enabled = true`, the `SkillAutogen` module (~638 lines) detects repeated tool call patterns during agent operation. The flow:
+
+1. The module tracks sequences of tool calls across messages.
+2. When the same tool-call pattern appears at least `threshold` times (default: 3), the module generates a skill candidate.
+3. The candidate is written to `~/.clawft/skills/` with `status: pending` in the frontmatter.
+4. The user must approve the skill before it becomes active.
+
+Auto-generated skills have minimal permissions by default:
+- No shell access
+- No network access
+- Filesystem limited to the workspace directory
+
+Configuration:
+
+```json
+{
+  "skills": {
+    "auto_create": true,
+    "auto_create_threshold": 3
+  }
+}
+```
 
 ### MCP Exposure
 
 Skills are automatically exposed as MCP tools via `SkillToolProvider`. Any MCP client connected to `weft mcp-server` can invoke skills as tools.
 
-### Security
+### Security Validation
 
-- **SEC-SKILL-01**: YAML nesting depth limited to 10 levels
+Skills undergo multiple security checks before loading:
+
+- **SEC-SKILL-01**: YAML nesting depth limited to 10 levels (prevents deeply nested YAML bombs)
 - **SEC-SKILL-02**: Directory names validated against path traversal
 - **SEC-SKILL-03**: When skill and agent both declare `allowed_tools`, the effective list is their intersection
 - **SEC-SKILL-05**: Workspace skills not loaded by default; pass `--trust-project-skills` to enable
-- **SEC-SKILL-06**: Prompt injection tokens (`<system>`, `<|im_start|>`, `<<SYS>>`, etc.) are stripped
-- **SEC-SKILL-07**: SKILL.md files limited to 50 KB
+- **SEC-SKILL-06**: Prompt injection tokens (`<system>`, `<|im_start|>`, `<<SYS>>`, etc.) are stripped from skill instructions
+- **SEC-SKILL-07**: SKILL.md files limited to 50 KB (`MAX_SKILL_MD_SIZE`)
 
 ---
 

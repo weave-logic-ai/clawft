@@ -1,0 +1,311 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://weftos.weavelogic.dev/schemas/block-descriptor/0.2.0",
+  "title": "WeftOS Block Descriptor",
+  "description": "Self-contained JSON document defining a renderable UI assembly. One descriptor can render to React (Tauri desktop), Terminal (Ink/xterm.js), Mentra HUD (400x240 constraint), PDF, MCP, and Shell targets.",
+  "type": "object",
+  "required": ["version", "root", "elements"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "0.2.0",
+      "description": "Schema version for forward compatibility."
+    },
+    "root": {
+      "type": "string",
+      "minLength": 1,
+      "description": "ID of the root element in the elements map. Must be a key in 'elements'."
+    },
+    "elements": {
+      "type": "object",
+      "minProperties": 1,
+      "description": "Flat adjacency-list map of element ID to element definition. IDs must be non-empty strings.",
+      "additionalProperties": {
+        "$ref": "#/$defs/BlockElement"
+      }
+    },
+    "meta": {
+      "$ref": "#/$defs/BlockMeta"
+    }
+  },
+  "$defs": {
+    "BlockMeta": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "creator": {
+          "type": "string",
+          "description": "Who created this descriptor. Convention: 'user:<name>' or 'agent:<agent_id>'."
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 creation timestamp."
+        },
+        "title": {
+          "type": "string",
+          "description": "Human-readable title for catalog display."
+        },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Tags for catalog search and filtering."
+        },
+        "governance_seq": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "ExoChain sequence number of the governance approval event for this descriptor."
+        },
+        "target_hint": {
+          "type": "string",
+          "enum": ["react", "terminal", "mentra-hud", "pdf", "mcp", "shell", "voice"],
+          "description": "Preferred render target. Renderers may ignore this hint if they handle the descriptor natively."
+        },
+        "refresh_hz": {
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 60,
+          "description": "Suggested refresh rate for $state bindings, in Hertz."
+        }
+      }
+    },
+
+    "BlockElement": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Block type name. Must exist in the Block Catalog.",
+          "enum": [
+            "Column", "Row", "Grid", "Tabs",
+            "Metric", "DataTable", "ChainViewer", "CausalGraph",
+            "DiffViewer", "CodeEditor",
+            "Button", "ConsolePan", "ApprovalGate", "TextInput", "Markdown",
+            "WebBrowser", "ResourceTree", "ServiceMap",
+            "StatusBar", "RadialTopology", "HintBar", "ProgressBar"
+          ]
+        },
+        "children": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Ordered list of child element IDs. Only layout blocks (Column, Row, Grid, Tabs) may have children."
+        },
+        "props": {
+          "type": "object",
+          "description": "Props specific to this block type. Values may be literals or $state references.",
+          "additionalProperties": {
+            "$ref": "#/$defs/PropValue"
+          }
+        },
+        "on": {
+          "type": "object",
+          "description": "Event handlers. Keys are event names (e.g., 'press', 'voice_select', 'change'). Values are actions.",
+          "additionalProperties": {
+            "$ref": "#/$defs/BlockAction"
+          }
+        },
+        "ports": {
+          "type": "object",
+          "description": "Data port bindings for inter-block communication.",
+          "additionalProperties": {
+            "$ref": "#/$defs/PortBinding"
+          }
+        },
+        "layout": {
+          "$ref": "#/$defs/LayoutHints"
+        }
+      }
+    },
+
+    "PropValue": {
+      "description": "A prop value: literal (string, number, boolean, null, array, object) or a $state reference.",
+      "oneOf": [
+        { "type": "string" },
+        { "type": "number" },
+        { "type": "boolean" },
+        { "type": "null" },
+        {
+          "type": "array",
+          "items": { "$ref": "#/$defs/PropValue" }
+        },
+        {
+          "$ref": "#/$defs/StateRef"
+        },
+        {
+          "$ref": "#/$defs/FormatStateRef"
+        },
+        {
+          "type": "object",
+          "not": {
+            "anyOf": [
+              { "required": ["$state"] },
+              { "required": ["$state", "format"] }
+            ]
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/PropValue"
+          }
+        }
+      ]
+    },
+
+    "StateRef": {
+      "type": "object",
+      "required": ["$state"],
+      "additionalProperties": false,
+      "description": "Reference to kernel state, resolved at render time via the StateStore.",
+      "properties": {
+        "$state": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "JSON Pointer path into the StateStore (e.g., '/kernel/metrics/cpu_percent'). Must start with '/'."
+        },
+        "$default": {
+          "$ref": "#/$defs/PropValue",
+          "description": "Fallback value if the path is not yet available in the StateStore."
+        },
+        "$transform": {
+          "type": "string",
+          "description": "Transform function name applied to the resolved value (e.g., 'percent', 'humanBytes', 'truncate')."
+        }
+      }
+    },
+
+    "FormatStateRef": {
+      "type": "object",
+      "required": ["$state", "format"],
+      "additionalProperties": false,
+      "description": "State reference with a format template string. The resolved value is interpolated into the template at {v}.",
+      "properties": {
+        "$state": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "JSON Pointer path into the StateStore."
+        },
+        "format": {
+          "type": "string",
+          "description": "Template string where {v} is replaced by the resolved value."
+        }
+      }
+    },
+
+    "BlockAction": {
+      "type": "object",
+      "required": ["action"],
+      "additionalProperties": false,
+      "description": "An action triggered by a block event. Routed through the Action Catalog.",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "kernel_exec",
+            "governance_check",
+            "chain_query",
+            "ecc_search",
+            "agent_chat",
+            "navigate",
+            "open_block",
+            "close_block"
+          ],
+          "description": "Action type from the Action Catalog."
+        },
+        "params": {
+          "type": "object",
+          "description": "Static parameters merged with event data at dispatch time.",
+          "additionalProperties": {
+            "$ref": "#/$defs/PropValue"
+          }
+        },
+        "governed": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether to require a governance check before executing this action."
+        }
+      }
+    },
+
+    "PortBinding": {
+      "type": "object",
+      "required": ["direction", "data_type"],
+      "additionalProperties": false,
+      "description": "Declares a data port for inter-block communication via the PortBus.",
+      "properties": {
+        "direction": {
+          "type": "string",
+          "enum": ["in", "out"],
+          "description": "'in' receives data from another block's output port. 'out' emits data for other blocks to consume."
+        },
+        "data_type": {
+          "type": "string",
+          "description": "Data type hint for validation (e.g., 'number', 'string', 'ProcessEntry', 'ChainEvent')."
+        },
+        "source": {
+          "type": "object",
+          "required": ["element", "port"],
+          "additionalProperties": false,
+          "description": "For 'in' ports: identifies the source element and port name.",
+          "properties": {
+            "element": {
+              "type": "string",
+              "description": "Source element ID within the same descriptor."
+            },
+            "port": {
+              "type": "string",
+              "description": "Port name on the source element."
+            }
+          }
+        },
+        "publish": {
+          "type": "string",
+          "description": "For 'out' ports: $state path where data is published to the StateStore."
+        }
+      }
+    },
+
+    "LayoutHints": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Layout hints for the block engine. Interpreted differently by each renderer.",
+      "properties": {
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12,
+          "description": "Width in grid units (12-column grid system)."
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Height in grid units."
+        },
+        "x": {
+          "type": "number",
+          "description": "Absolute X position in canvas mode (pixels)."
+        },
+        "y": {
+          "type": "number",
+          "description": "Absolute Y position in canvas mode (pixels)."
+        },
+        "minWidth": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Minimum width in grid units."
+        },
+        "minHeight": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Minimum height in grid units."
+        },
+        "resizable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether the user can resize this block."
+        }
+      }
+    }
+  }
+}

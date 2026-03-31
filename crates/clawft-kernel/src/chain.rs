@@ -1716,6 +1716,167 @@ impl ChainAnchor for MockAnchor {
     }
 }
 
+// ── ChainLoggable trait ─────────────────────────────────────────────
+
+/// Trait for types that can be logged to the ExoChain audit trail.
+///
+/// Implementors define how they map to a chain event kind string and
+/// a JSON payload. The [`ChainManager::append_loggable`] convenience
+/// method uses these to append an event without the caller needing to
+/// hand-craft the source/kind/payload triple.
+pub trait ChainLoggable {
+    /// The source subsystem (e.g. "supervisor", "governance", "ipc").
+    fn chain_event_source(&self) -> &str;
+
+    /// The event kind string (e.g. "agent.restart", "governance.deny").
+    fn chain_event_kind(&self) -> &str;
+
+    /// Build the JSON payload for the chain event.
+    fn chain_event_payload(&self) -> serde_json::Value;
+}
+
+impl ChainManager {
+    /// Append an event from any [`ChainLoggable`] implementor.
+    pub fn append_loggable(&self, event: &dyn ChainLoggable) -> ChainEvent {
+        self.append(
+            event.chain_event_source(),
+            event.chain_event_kind(),
+            Some(event.chain_event_payload()),
+        )
+    }
+}
+
+// ── ChainLoggable implementations ───────────────────────────────────
+
+/// A restart event suitable for chain logging.
+///
+/// Created by the supervisor after successfully restarting an agent.
+pub struct RestartEvent {
+    /// The agent identifier that was restarted.
+    pub agent_id: String,
+    /// PID of the process that crashed / was stopped.
+    pub old_pid: u64,
+    /// PID of the newly spawned replacement process.
+    pub new_pid: u64,
+    /// Exit code that triggered the restart.
+    pub exit_code: i32,
+    /// Restart strategy that was applied.
+    pub strategy: String,
+    /// Backoff delay in milliseconds before the restart was attempted.
+    pub backoff_ms: u64,
+    /// Timestamp of the restart.
+    pub timestamp: DateTime<Utc>,
+}
+
+impl ChainLoggable for RestartEvent {
+    fn chain_event_source(&self) -> &str {
+        "supervisor"
+    }
+
+    fn chain_event_kind(&self) -> &str {
+        "supervisor.restart"
+    }
+
+    fn chain_event_payload(&self) -> serde_json::Value {
+        serde_json::json!({
+            "agent_id": self.agent_id,
+            "old_pid": self.old_pid,
+            "new_pid": self.new_pid,
+            "exit_code": self.exit_code,
+            "strategy": self.strategy,
+            "backoff_ms": self.backoff_ms,
+            "timestamp": self.timestamp.to_rfc3339(),
+        })
+    }
+}
+
+/// A governance decision event suitable for chain logging.
+///
+/// Captures the result of `GovernanceEngine::evaluate` for audit.
+pub struct GovernanceDecisionEvent {
+    /// Agent that made the request.
+    pub agent_id: String,
+    /// Action that was evaluated.
+    pub action: String,
+    /// The governance decision outcome.
+    pub decision: String,
+    /// Effect vector magnitude.
+    pub effect_magnitude: f64,
+    /// Whether the risk threshold was exceeded.
+    pub threshold_exceeded: bool,
+    /// Rules that were evaluated.
+    pub evaluated_rules: Vec<String>,
+    /// Timestamp of the evaluation.
+    pub timestamp: DateTime<Utc>,
+}
+
+impl ChainLoggable for GovernanceDecisionEvent {
+    fn chain_event_source(&self) -> &str {
+        "governance"
+    }
+
+    fn chain_event_kind(&self) -> &str {
+        match self.decision.as_str() {
+            "Permit" => "governance.permit",
+            "PermitWithWarning" => "governance.warn",
+            "EscalateToHuman" => "governance.defer",
+            "Deny" => "governance.deny",
+            _ => "governance.unknown",
+        }
+    }
+
+    fn chain_event_payload(&self) -> serde_json::Value {
+        serde_json::json!({
+            "agent_id": self.agent_id,
+            "action": self.action,
+            "decision": self.decision,
+            "effect_magnitude": self.effect_magnitude,
+            "threshold_exceeded": self.threshold_exceeded,
+            "evaluated_rules": self.evaluated_rules,
+            "timestamp": self.timestamp.to_rfc3339(),
+        })
+    }
+}
+
+/// An IPC dead-letter event suitable for chain logging.
+///
+/// Captures when a message is routed to the dead letter queue.
+pub struct IpcDeadLetterEvent {
+    /// Original message ID.
+    pub message_id: String,
+    /// Sender PID.
+    pub from_pid: u64,
+    /// Target description (formatted from MessageTarget).
+    pub target: String,
+    /// Payload type name.
+    pub payload_type: String,
+    /// Reason delivery failed.
+    pub reason: String,
+    /// Timestamp of the dead-lettering.
+    pub timestamp: DateTime<Utc>,
+}
+
+impl ChainLoggable for IpcDeadLetterEvent {
+    fn chain_event_source(&self) -> &str {
+        "ipc"
+    }
+
+    fn chain_event_kind(&self) -> &str {
+        "ipc.dead_letter"
+    }
+
+    fn chain_event_payload(&self) -> serde_json::Value {
+        serde_json::json!({
+            "message_id": self.message_id,
+            "from_pid": self.from_pid,
+            "target": self.target,
+            "payload_type": self.payload_type,
+            "reason": self.reason,
+            "timestamp": self.timestamp.to_rfc3339(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2993,5 +3154,125 @@ mod tests {
         let cm = ChainManager::new(0, 1000);
         let events = cm.tail(1);
         assert_eq!(events[0].prev_hash, [0u8; 32]);
+    }
+
+    // ── ChainLoggable trait tests ────────────────────────────────
+
+    #[test]
+    fn restart_event_loggable() {
+        let cm = ChainManager::new(0, 100);
+        let initial = cm.len();
+
+        let event = RestartEvent {
+            agent_id: "agent-coder".into(),
+            old_pid: 5,
+            new_pid: 12,
+            exit_code: 1,
+            strategy: "OneForOne".into(),
+            backoff_ms: 200,
+            timestamp: Utc::now(),
+        };
+
+        assert_eq!(event.chain_event_source(), "supervisor");
+        assert_eq!(event.chain_event_kind(), "supervisor.restart");
+
+        let chain_event = cm.append_loggable(&event);
+        assert_eq!(cm.len(), initial + 1);
+        assert_eq!(chain_event.source, "supervisor");
+        assert_eq!(chain_event.kind, "supervisor.restart");
+
+        let payload = chain_event.payload.unwrap();
+        assert_eq!(payload["agent_id"], "agent-coder");
+        assert_eq!(payload["old_pid"], 5);
+        assert_eq!(payload["new_pid"], 12);
+        assert_eq!(payload["exit_code"], 1);
+    }
+
+    #[test]
+    fn governance_decision_event_loggable() {
+        let cm = ChainManager::new(0, 100);
+
+        let event = GovernanceDecisionEvent {
+            agent_id: "agent-1".into(),
+            action: "tool.exec".into(),
+            decision: "Deny".into(),
+            effect_magnitude: 0.85,
+            threshold_exceeded: true,
+            evaluated_rules: vec!["security-check".into()],
+            timestamp: Utc::now(),
+        };
+
+        assert_eq!(event.chain_event_source(), "governance");
+        assert_eq!(event.chain_event_kind(), "governance.deny");
+
+        let chain_event = cm.append_loggable(&event);
+        assert_eq!(chain_event.kind, "governance.deny");
+
+        let payload = chain_event.payload.unwrap();
+        assert_eq!(payload["agent_id"], "agent-1");
+        assert_eq!(payload["action"], "tool.exec");
+        assert!(payload["threshold_exceeded"].as_bool().unwrap());
+
+        // Test other decision kinds map to correct event kinds
+        let make_event = |decision: &str| GovernanceDecisionEvent {
+            agent_id: "a".into(),
+            action: "a".into(),
+            decision: decision.into(),
+            effect_magnitude: 0.0,
+            threshold_exceeded: false,
+            evaluated_rules: vec![],
+            timestamp: Utc::now(),
+        };
+
+        assert_eq!(make_event("Permit").chain_event_kind(), "governance.permit");
+        assert_eq!(make_event("PermitWithWarning").chain_event_kind(), "governance.warn");
+        assert_eq!(make_event("EscalateToHuman").chain_event_kind(), "governance.defer");
+        assert_eq!(make_event("Deny").chain_event_kind(), "governance.deny");
+    }
+
+    #[test]
+    fn ipc_dead_letter_event_loggable() {
+        let cm = ChainManager::new(0, 100);
+
+        let event = IpcDeadLetterEvent {
+            message_id: "msg-abc".into(),
+            from_pid: 3,
+            target: "Process(99)".into(),
+            payload_type: "text".into(),
+            reason: "target_not_found(pid=99)".into(),
+            timestamp: Utc::now(),
+        };
+
+        assert_eq!(event.chain_event_source(), "ipc");
+        assert_eq!(event.chain_event_kind(), "ipc.dead_letter");
+
+        let chain_event = cm.append_loggable(&event);
+        assert_eq!(chain_event.source, "ipc");
+        assert_eq!(chain_event.kind, "ipc.dead_letter");
+
+        let payload = chain_event.payload.unwrap();
+        assert_eq!(payload["message_id"], "msg-abc");
+        assert_eq!(payload["from_pid"], 3);
+        assert_eq!(payload["reason"], "target_not_found(pid=99)");
+    }
+
+    #[test]
+    fn append_loggable_links_hashes() {
+        let cm = ChainManager::new(0, 100);
+        let hash_before = cm.last_hash();
+
+        let event = RestartEvent {
+            agent_id: "test".into(),
+            old_pid: 1,
+            new_pid: 2,
+            exit_code: 1,
+            strategy: "OneForOne".into(),
+            backoff_ms: 100,
+            timestamp: Utc::now(),
+        };
+
+        let chain_event = cm.append_loggable(&event);
+        assert_eq!(chain_event.prev_hash, hash_before);
+        assert_ne!(chain_event.hash, [0u8; 32]);
     }
 }

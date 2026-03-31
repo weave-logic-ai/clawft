@@ -1,0 +1,162 @@
+---
+title: "Pipeline"
+description: "The 6-stage pluggable processing pipeline: classification, tiered routing, context assembly, transport, scoring, and learning."
+---
+
+## Overview
+
+Every message processed by the agent flows through a 6-stage pluggable pipeline defined in `crates/clawft-core/src/pipeline/`. Each stage is a trait, making stages independently replaceable. The `PipelineRegistry` maps `TaskType` variants to specialized `Pipeline` instances; unregistered task types fall back to the default pipeline.
+
+```text
+  ChatRequest
+      |
+  [1. Classifier] -- TaskProfile (type, complexity)
+      |
+  [2. Router]     -- RoutingDecision (provider, model)
+      |
+  [3. Assembler]  -- AssembledContext (messages, token estimate)
+      |
+  [4. Transport]  -- LlmResponse
+      |
+  [5. Scorer]     -- QualityScore (overall, relevance, coherence)
+      |
+  [6. Learner]    -- Trajectory
+      |
+  LlmResponse
+```
+
+## Stage 1: Classifier
+
+**File**: `crates/clawft-core/src/pipeline/classifier.rs`
+
+Classifies incoming messages by task type using keyword pattern matching. The classifier produces a `TaskProfile` containing the detected `TaskType` and a complexity score.
+
+Task types: `CodeGeneration`, `CodeReview`, `Research`, `Creative`, `Analysis`, `Math`, `Chat` (default).
+
+The first matching keyword group wins. This is a Level 0 implementation -- no ML, no embeddings, just case-insensitive substring matching. The complexity score is derived from the task type, message length, and tool requirements.
+
+## Stage 2: Router
+
+**Files**: `crates/clawft-core/src/pipeline/router.rs`, `tiered_router.rs`
+
+Selects the LLM model based on the task classification, user permissions, and cost budgets. Two modes are available:
+
+### Static Mode
+
+Always uses the configured default model. No complexity scoring.
+
+### Tiered Mode
+
+The tiered router (`tiered_router.rs`, ~1,650 lines) implements complexity-based routing across model tiers with cost tracking and permission awareness.
+
+**Routing flow**:
+
+1. **Classify** -- The task type and complexity score arrive from Stage 1.
+2. **Score complexity** -- Refined based on task type, message length, and tool requirements.
+3. **Check permissions** -- The user's `max_tier` permission limits model selection.
+4. **Check budget** -- The cost tracker enforces daily and monthly spending limits.
+5. **Select tier** -- The complexity score maps to a tier; if the budget is exceeded, the router falls back to a lower tier.
+6. **Route** -- Returns a `RoutingDecision` with the model name, tier, and estimated cost.
+
+**Tier mapping**:
+
+| Tier | Complexity Range | Example Models | Use Case |
+|------|-----------------|----------------|----------|
+| Free | 0.0 - 0.15 | Local models | Trivial queries |
+| Standard | 0.15 - 0.40 | Haiku-class | Simple tasks |
+| Premium | 0.40 - 0.70 | Sonnet-class | Moderate complexity |
+| Elite | 0.70 - 1.0 | Opus-class | Complex reasoning |
+
+## Stage 3: Assembler
+
+**File**: `crates/clawft-core/src/pipeline/assembler.rs`
+
+Assembles the final `ChatRequest` from the context messages, selected model, tool definitions, and configuration. The `TokenBudgetAssembler` uses a `chars/4` heuristic for token estimation and drops middle messages when the context exceeds the model's token limit, preserving the system prompt and recent turns.
+
+## Stage 4: Transport
+
+**File**: `crates/clawft-core/src/pipeline/transport.rs`
+
+Sends the assembled request to the selected LLM provider via `clawft-llm`. Handles streaming (via SSE parsing), retries, and failover. The transport stage uses the `ClawftLlmAdapter` at runtime; during testing, a stub transport returns canned responses.
+
+## Stage 5: Scorer
+
+**File**: `crates/clawft-core/src/pipeline/scorer.rs` (~154 lines)
+
+Evaluates response quality after the LLM returns. Produces a `QualityScore` with overall, relevance, and coherence dimensions. These scores serve as fitness signals for the learner stage.
+
+The current implementation is `NoopScorer`, which returns a score of 1.0 for all responses. Future implementations will use response analysis heuristics and user feedback.
+
+## Stage 6: Learner
+
+**File**: `crates/clawft-core/src/pipeline/learner.rs` (~139 lines)
+
+Records trajectories (request + response + score) for adaptive learning. The current implementation is `NoopLearner`, which discards all trajectories.
+
+The planned implementation (ADR-017) will use GEPA -- Genetic Evolution of Prompt Architectures -- to evolve skill prompts using scorer output as fitness. This will enable skills to improve autonomously over time based on measured response quality.
+
+## Cost Tracking
+
+**File**: `crates/clawft-core/src/pipeline/cost_tracker.rs` (~954 lines)
+
+The cost tracker enforces per-tier budget limits with configurable daily and monthly caps. It operates in conjunction with the tiered router:
+
+- **Pre-call**: The router queries the cost tracker to check whether the estimated cost fits within the budget. If not, the router downgrades to a cheaper tier.
+- **Post-call**: After the LLM responds, the actual cost (based on token usage) is recorded against the sender's budget.
+
+Cost records are per-sender, enabling multi-tenant deployments where different users have different spending limits.
+
+## Rate Limiting
+
+**File**: `crates/clawft-core/src/pipeline/rate_limiter.rs` (~632 lines)
+
+Per-sender rate limiting prevents abuse. Configurable limits include requests per minute and requests per hour. When a sender exceeds their rate limit, the pipeline returns an error response without invoking the LLM.
+
+## Permissions
+
+**File**: `crates/clawft-core/src/pipeline/permissions.rs` (~757 lines)
+
+The permission resolver controls access to tools and model tiers. Permissions are evaluated at two points:
+
+- **Router**: The user's `max_tier` permission determines the highest model tier they can use.
+- **Tool execution**: Each tool call is checked against the user's tool permissions and the active skill's `allowed_tools` list.
+
+## Pipeline Trait Definitions
+
+**File**: `crates/clawft-core/src/pipeline/traits.rs`
+
+All six stages are defined as async traits:
+
+```rust
+#[async_trait]
+pub trait Classifier: Send + Sync {
+    async fn classify(&self, request: &ChatRequest) -> TaskProfile;
+}
+
+#[async_trait]
+pub trait Router: Send + Sync {
+    async fn route(&self, profile: &TaskProfile) -> RoutingDecision;
+}
+
+#[async_trait]
+pub trait Assembler: Send + Sync {
+    async fn assemble(&self, messages: Vec<Message>, decision: &RoutingDecision) -> ChatRequest;
+}
+
+#[async_trait]
+pub trait Transport: Send + Sync {
+    async fn send(&self, request: ChatRequest) -> LlmResponse;
+}
+
+#[async_trait]
+pub trait Scorer: Send + Sync {
+    async fn score(&self, request: &ChatRequest, response: &LlmResponse) -> QualityScore;
+}
+
+#[async_trait]
+pub trait Learner: Send + Sync {
+    async fn record(&self, trajectory: Trajectory);
+}
+```
+
+Each trait can be implemented independently and injected into the pipeline via `set_pipeline()` on the `AppContext`.

@@ -77,6 +77,7 @@ impl Default for ResourceLimits {
 }
 
 /// IPC scope defining which message targets an agent may communicate with.
+#[non_exhaustive]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum IpcScope {
     /// Agent may communicate with all other agents.
@@ -244,6 +245,7 @@ pub struct ToolPermissions {
 /// Resource type for capability limit checks.
 ///
 /// Each variant carries the current value to check against limits.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum ResourceType {
     /// Memory usage in bytes.
@@ -530,6 +532,7 @@ pub struct CapabilityElevationRequest {
 }
 
 /// Result of a capability elevation request.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum ElevationResult {
     /// Elevation granted.

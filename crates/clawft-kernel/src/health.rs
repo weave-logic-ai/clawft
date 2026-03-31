@@ -11,6 +11,7 @@ use tracing::{debug, warn};
 use crate::service::ServiceRegistry;
 
 /// Health status for a single service.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HealthStatus {
     /// Service is operating normally.
@@ -35,6 +36,7 @@ impl std::fmt::Display for HealthStatus {
 }
 
 /// Aggregated health status for the entire kernel.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OverallHealth {
     /// All services are healthy.
@@ -134,6 +136,7 @@ impl HealthSystem {
 // ── K2b-G2: Liveness and readiness probes (os-patterns) ─────────
 
 /// Result of a liveness or readiness probe.
+#[non_exhaustive]
 #[cfg(feature = "os-patterns")]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProbeResult {

@@ -17,6 +17,7 @@ use crate::error::KernelError;
 pub type Pid = u64;
 
 /// State of a kernel-managed process.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProcessState {
     /// Process is initializing.

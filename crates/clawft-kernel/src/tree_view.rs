@@ -17,6 +17,7 @@ use crate::process::Pid;
 // ---------------------------------------------------------------------------
 
 /// Defines what subtrees an agent is allowed to access.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TreeScope {
     /// Full access to the entire tree.

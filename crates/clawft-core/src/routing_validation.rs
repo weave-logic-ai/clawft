@@ -15,6 +15,7 @@ use clawft_types::routing::{ModelTierConfig, PermissionLevelConfig, RoutingConfi
 // ── ValidationSeverity ──────────────────────────────────────────────────
 
 /// Severity level for a validation diagnostic.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationSeverity {
     /// Fatal: the config is invalid and the system cannot start.

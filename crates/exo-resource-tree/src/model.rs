@@ -68,6 +68,7 @@ impl From<String> for ResourceId {
 }
 
 /// The kind of resource in the tree.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResourceKind {
     Namespace,
@@ -126,6 +127,7 @@ impl ResourceNode {
 }
 
 /// Role an agent may hold on a resource.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role {
     Owner,
@@ -136,6 +138,7 @@ pub enum Role {
 }
 
 /// An action that may be performed on a resource.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Action {
     Read,

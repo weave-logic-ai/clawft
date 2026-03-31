@@ -62,6 +62,7 @@ pub struct RoutingContext {
 }
 
 /// Errors that can occur during intelligent routing.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum RoutingError {
     /// An embedding operation failed.

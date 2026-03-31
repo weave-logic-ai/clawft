@@ -32,6 +32,7 @@ use crate::service::{ServiceType, SystemService};
 // ---------------------------------------------------------------------------
 
 /// Commands sent to the WeaverEngine via IPC.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WeaverCommand {
     /// Start a new modeling session.
@@ -92,6 +93,7 @@ pub enum WeaverCommand {
 // ---------------------------------------------------------------------------
 
 /// Responses from the WeaverEngine to CLI / agents.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WeaverResponse {
     /// Session started successfully.
@@ -123,6 +125,7 @@ pub enum WeaverResponse {
 // ---------------------------------------------------------------------------
 
 /// A data source that can be ingested by the WeaverEngine.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DataSource {
     /// Git commit history.
@@ -214,6 +217,7 @@ pub struct ConfidenceReport {
 }
 
 /// Suggestions for improving model quality.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ModelingSuggestion {
     /// Add a new data source.
@@ -321,6 +325,7 @@ pub struct MetaLoomEvent {
 }
 
 /// Classification of meta-loom decisions.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MetaDecisionType {
     /// A new data source was added.
@@ -435,6 +440,7 @@ impl WeaverKnowledgeBase {
 // ---------------------------------------------------------------------------
 
 /// Outcome of a single cognitive tick for the WeaverEngine.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum TickResult {
     /// No active session; engine is idle.
@@ -455,6 +461,7 @@ pub enum TickResult {
 // ---------------------------------------------------------------------------
 
 /// Errors produced by the WeaverEngine.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum WeaverError {
     /// I/O error reading a file.
@@ -743,6 +750,7 @@ pub struct CognitiveTickResult {
 // ---------------------------------------------------------------------------
 
 /// What triggered a confidence measurement.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ConfidenceTrigger {
     /// Every N ticks.
@@ -775,6 +783,7 @@ pub struct ConfidenceSnapshot {
 }
 
 /// Direction of a confidence trend.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TrendDirection {
     /// Confidence is improving over time.
@@ -1279,7 +1288,7 @@ impl WeaverEngine {
         let mut embeddings_created = 0usize;
 
         // Map from JSON node id (string) to causal graph NodeId.
-        let mut id_map: HashMap<String, u64> = HashMap::new();
+        let mut id_map: HashMap<String, u64> = HashMap::with_capacity(nodes.len());
 
         // Phase 1: Create nodes.
         for node in nodes {
@@ -1674,7 +1683,8 @@ impl WeaverEngine {
             budget_remaining_ms: 300_000, // 5 min default
             active: true,
             metadata: {
-                let mut m = HashMap::new();
+                let cap = if context.is_some() { 1 } else { 0 };
+                let mut m = HashMap::with_capacity(cap);
                 if let Some(ctx) = context {
                     m.insert("context".to_string(), serde_json::Value::String(ctx.to_string()));
                 }
@@ -2574,6 +2584,7 @@ pub struct MergeConflict {
 }
 
 /// How a merge conflict was resolved.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConflictResolution {
     /// Kept the value from model A.

@@ -34,6 +34,7 @@ pub const RVF_EXTENSION: &str = "rvf.json";
 // ── Segment types ───────────────────────────────────────────────────
 
 /// The type of a memory segment (mirrors rvf-types SegmentType concept).
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MemorySegmentType {
     /// A vector embedding with metadata.
@@ -107,6 +108,7 @@ pub struct SegmentFile {
 // ── Errors ──────────────────────────────────────────────────────────
 
 /// Errors from RVF segment I/O.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum RvfIoError {
     /// An I/O error occurred.

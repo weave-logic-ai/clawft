@@ -83,6 +83,7 @@ impl ConsistentHashRing {
 // ── Metadata consensus (Raft-style) ───────────────────────────────
 
 /// Role in the metadata consensus group.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConsensusRole {
     Follower,
@@ -99,6 +100,7 @@ pub struct ConsensusEntry {
 }
 
 /// Operations that can be replicated through consensus.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ConsensusOp {
     /// Register a service in the cluster.
@@ -309,6 +311,7 @@ pub struct ProcessAdvertisement {
 }
 
 /// Process status for distributed table.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProcessStatus {
     Running,

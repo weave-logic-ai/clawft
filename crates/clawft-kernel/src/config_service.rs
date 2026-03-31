@@ -24,6 +24,7 @@ use crate::service::{ServiceType, SystemService};
 // ---------------------------------------------------------------------------
 
 /// A typed configuration value.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ConfigValue {
     /// Plain text.

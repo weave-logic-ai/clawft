@@ -1,0 +1,227 @@
+---
+title: Testing Guide
+description: How to run tests, testing methodology, and where to add tests in the WeftOS codebase
+---
+
+# Testing Guide
+
+The WeftOS workspace contains over 5,000 tests across 22 crates. This guide covers how to run them, what testing methodologies are used, and where to add new tests.
+
+## Running Tests
+
+### Full Workspace
+
+```bash
+scripts/build.sh test
+```
+
+This runs all tests across every crate in the workspace.
+
+### Specific Crate
+
+```bash
+cargo test -p clawft-kernel
+cargo test -p clawft-core
+cargo test -p clawft-tools
+```
+
+### Single Test by Name
+
+```bash
+cargo test -p clawft-kernel -- test_name
+```
+
+### With Feature Flags
+
+```bash
+cargo test -p clawft-kernel --features "native,ecc,exochain"
+```
+
+---
+
+## Test Organization
+
+Tests are organized in two places:
+
+1. **Inline unit tests**: In `#[cfg(test)] mod tests` blocks alongside the code they test. This is the primary location for most tests.
+
+2. **Integration tests**: In `crates/<crate>/tests/` directories for cross-module and end-to-end tests.
+
+### Key Integration Test Files
+
+| File | What It Tests |
+|------|---------------|
+| `crates/clawft-kernel/tests/e2e_integration.rs` | Full kernel lifecycle: boot, spawn, message, shutdown |
+| `crates/clawft-kernel/tests/feature_composition.rs` | Boot under different feature flag combinations |
+
+---
+
+## Testing Methodologies
+
+WeftOS uses five testing methodologies, each suited to different types of code.
+
+### Unit Tests (Standard Assert)
+
+For code with clear input/output pairs. This is the most common type.
+
+```rust
+#[test]
+fn effect_vector_magnitude() {
+    let v = EffectVector { risk: 0.3, fairness: 0.0, privacy: 0.0, novelty: 0.0, security: 0.4 };
+    assert!((v.magnitude() - 0.5).abs() < 0.01);
+}
+```
+
+### Snapshot Tests (insta)
+
+For serialized wire formats and configuration schemas. Snapshot tests freeze the serialized form of critical data structures. Any change to serialization format causes a test failure, forcing deliberate review.
+
+**When to use**: ChainEvent JSON/CBOR serialization, A2A message envelopes, GovernanceResult JSON, ToolSignature, KernelConfig parsing.
+
+```rust
+#[test]
+fn chain_event_json_snapshot() {
+    let event = ChainEvent::new(/* ... */);
+    let json = serde_json::to_string_pretty(&event).unwrap();
+    insta::assert_snapshot!(json);
+}
+```
+
+After writing snapshot tests, review changes with `cargo insta review`.
+
+### Property-Based Tests (proptest)
+
+For code that maintains mathematical invariants. Property-based testing generates thousands of random inputs and verifies that invariants hold.
+
+**When to use**: ExoChain hash linking, ProcessState FSM transitions, EffectVector mathematics, CausalGraph acyclicity.
+
+```rust
+proptest! {
+    #[test]
+    fn chain_hash_linking(payloads in prop::collection::vec(any::<String>(), 1..100)) {
+        let chain = build_chain(payloads);
+        for i in 1..chain.len() {
+            prop_assert_eq!(chain[i].prev_hash, chain[i-1].hash);
+        }
+    }
+}
+```
+
+### Fuzz Tests (cargo-fuzz)
+
+For code that parses untrusted input. Fuzz tests feed random bytes to parsers and catch crashes or panics.
+
+**When to use**: A2A message parser, ExoChain deserialization, WASM tool boundary, config parsing, RVF codec, mesh IPC envelopes.
+
+Fuzz targets live in the `fuzz/` directory at the workspace root.
+
+### End-to-End Integration Tests
+
+For features that span multiple subsystems.
+
+**When to use**: Full kernel lifecycle (boot to shutdown), mesh protocol exchanges, governance pipeline (request to chain event), WASM tool execution with chain logging.
+
+---
+
+## Where to Add Tests
+
+Use this decision tree to determine the right methodology:
+
+```
+Is the output a serialized wire format or config schema?
+  YES --> Snapshot test (insta)
+
+Does the system have clear input/output pairs?
+  YES --> Unit test (standard assert)
+
+Can you define mathematical relations between inputs and outputs?
+  YES --> Metamorphic or property-based test
+
+Is the input from an untrusted source (network, disk, user)?
+  YES --> Fuzz test (cargo-fuzz)
+
+Does the code maintain a mathematical invariant?
+  YES --> Property-based test (proptest)
+
+Does the feature span multiple subsystems?
+  YES --> End-to-end integration test
+
+None of the above?
+  --> Unit test with mock
+```
+
+---
+
+## High-Priority Test Areas
+
+These areas have been identified as needing additional test coverage:
+
+### Persistence Layer
+
+The persistence subsystem needs tests for error paths: corrupt file recovery, concurrent save during active writes, disk-full handling, partial save (crash during write), and large dataset persistence.
+
+### Gate Security
+
+The `gate.rs` security boundary needs negative-path tests: replay attack on TileZero receipts, invalid/malformed capability strings, race conditions during capability revocation, wrong Ed25519 signatures, and boundary cases (empty capability set, wildcard capabilities).
+
+### DEMOCRITUS Loop
+
+The cognitive tick loop needs tests for resource pressure: budget exhaustion mid-tick, ImpulseQueue overflow, concurrent tick execution (reentrancy guard), embed failure recovery, and CrossRefStore consistency under concurrent access.
+
+### Wire Format Stability
+
+All network and persistence formats need snapshot tests to prevent accidental breakage: ChainEvent, A2A messages, MeshIpcEnvelope, ToolSignature, GovernanceResult, and EffectVector.
+
+---
+
+## CI Integration
+
+The build script gate command runs all checks:
+
+```bash
+scripts/build.sh gate
+```
+
+This includes compilation checks, clippy, formatting verification, and the full test suite. The gate must pass before any commit.
+
+### Feature Flag Combinations
+
+The CI tests these canonical feature combinations:
+
+| Combination | Purpose |
+|-------------|---------|
+| `native` | Minimal native build |
+| `native,exochain` | Native with chain support |
+| `native,ecc` | Native with cognitive substrate |
+| `native,os-patterns` | Native with observability |
+| `native,exochain,ecc,os-patterns` | Combined features |
+| `full` | All features enabled |
+
+---
+
+## Test Infrastructure
+
+### Dependencies
+
+```toml
+# Workspace Cargo.toml [workspace.dev-dependencies]
+insta = { version = "1.39", features = ["json", "yaml"] }
+proptest = "1.5"
+```
+
+### Fuzz Setup
+
+```bash
+cargo install cargo-fuzz
+# Fuzz targets are in fuzz/ at the workspace root
+cargo fuzz run <target> -- -max_total_time=60
+```
+
+### Writing Good Tests
+
+- Test behavior, not implementation details
+- Each test should verify one thing
+- Use descriptive test names that explain what is being verified
+- Prefer real types over mocks when the real type is cheap to construct
+- For async tests, use `#[tokio::test]`
+- Keep test setup minimal; extract shared setup into helper functions

@@ -105,6 +105,7 @@ impl InterAgentMessage {
 ///
 /// This enum provides forward-compatibility for rich content types
 /// beyond plain text.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MessagePayload {
@@ -123,6 +124,7 @@ pub enum MessagePayload {
 }
 
 /// Errors from the agent bus.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum AgentBusError {
     /// The target agent is not registered on the bus.

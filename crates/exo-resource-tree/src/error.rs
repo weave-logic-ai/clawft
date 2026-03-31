@@ -4,6 +4,7 @@ use thiserror::Error;
 
 use crate::model::ResourceId;
 
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum TreeError {
     #[error("resource not found: {id}")]

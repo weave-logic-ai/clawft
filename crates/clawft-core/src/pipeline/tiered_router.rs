@@ -407,6 +407,7 @@ impl TieredRouter {
                 let idx = (seed as usize) % available.len();
                 available[idx].clone()
             }
+            _ => available[0].clone(),
         };
 
         Some(split_provider_model(&selected))

@@ -1,9 +1,11 @@
 [package]
 name = "weftos"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "WeftOS: A portable AI kernel with process management, mesh networking, and cognitive substrate"
 keywords = ["os", "kernel", "ai", "mesh", "ecc"]
 categories = ["development-tools", "network-programming"]
@@ -11,6 +13,9 @@ categories = ["development-tools", "network-programming"]
 [[bin]]
 name = "weftos"
 path = "src/main.rs"
+
+[package.metadata.dist]
+dist = true
 
 [features]
 default = ["native"]

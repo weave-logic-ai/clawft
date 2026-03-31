@@ -46,6 +46,7 @@ impl From<CommandPolicyError> for PolicyError {
             CommandPolicyError::DangerousPattern { command, pattern } => {
                 PolicyError::DangerousPattern { command, pattern }
             }
+            _ => PolicyError::NotAllowed { command: format!("{err}") },
         }
     }
 }

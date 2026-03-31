@@ -31,6 +31,7 @@ use crate::topic::TopicRouter;
 use clawft_types::config::KernelConfig;
 
 /// Kernel lifecycle state.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KernelState {
     /// Kernel is in the process of booting.
@@ -52,6 +53,42 @@ impl std::fmt::Display for KernelState {
             KernelState::Halted => write!(f, "halted"),
         }
     }
+}
+
+// ── Feature-gated subsystem bundles ──────────────────────────────
+//
+// These group related feature-gated fields so the Kernel struct
+// has fewer conditional fields (3 instead of 18) and init code
+// is easier to read.
+
+/// Exochain subsystem: chain manager, resource tree, and governance gate.
+#[cfg(feature = "exochain")]
+pub struct ChainSubsystem {
+    pub(crate) chain_manager: Option<Arc<crate::chain::ChainManager>>,
+    pub(crate) tree_manager: Option<Arc<crate::tree_manager::TreeManager>>,
+    pub(crate) governance_gate: Option<Arc<dyn crate::gate::GateBackend>>,
+}
+
+/// ECC cognitive substrate: HNSW, causal graph, cognitive tick,
+/// cross-references, impulse queue, and boot-time calibration.
+#[cfg(feature = "ecc")]
+pub struct EccSubsystem {
+    pub(crate) hnsw: Option<Arc<crate::hnsw_service::HnswService>>,
+    pub(crate) causal: Option<Arc<crate::causal::CausalGraph>>,
+    pub(crate) tick: Option<Arc<crate::cognitive_tick::CognitiveTick>>,
+    pub(crate) crossrefs: Option<Arc<crate::crossref::CrossRefStore>>,
+    pub(crate) impulses: Option<Arc<crate::impulse::ImpulseQueue>>,
+    pub(crate) calibration: Option<crate::calibration::EccCalibration>,
+}
+
+/// OS-patterns observability: metrics, structured logging, timers,
+/// and the dead-letter queue.
+#[cfg(feature = "os-patterns")]
+pub struct ObservabilitySubsystem {
+    pub(crate) metrics_registry: Option<Arc<crate::metrics::MetricsRegistry>>,
+    pub(crate) log_service: Option<Arc<crate::log_service::LogService>>,
+    pub(crate) timer_service: Option<Arc<crate::timer::TimerService>>,
+    pub(crate) dead_letter_queue: Option<Arc<crate::dead_letter::DeadLetterQueue>>,
 }
 
 /// The WeftOS kernel.
@@ -82,32 +119,11 @@ pub struct Kernel<P: Platform> {
     boot_time: Instant,
     cluster_membership: Arc<ClusterMembership>,
     #[cfg(feature = "exochain")]
-    chain_manager: Option<Arc<crate::chain::ChainManager>>,
-    #[cfg(feature = "exochain")]
-    tree_manager: Option<Arc<crate::tree_manager::TreeManager>>,
+    chain: ChainSubsystem,
     #[cfg(feature = "ecc")]
-    ecc_hnsw: Option<Arc<crate::hnsw_service::HnswService>>,
-    #[cfg(feature = "ecc")]
-    ecc_causal: Option<Arc<crate::causal::CausalGraph>>,
-    #[cfg(feature = "ecc")]
-    ecc_tick: Option<Arc<crate::cognitive_tick::CognitiveTick>>,
-    #[cfg(feature = "ecc")]
-    ecc_crossrefs: Option<Arc<crate::crossref::CrossRefStore>>,
-    #[cfg(feature = "ecc")]
-    ecc_impulses: Option<Arc<crate::impulse::ImpulseQueue>>,
-    #[cfg(feature = "ecc")]
-    ecc_calibration: Option<crate::calibration::EccCalibration>,
-    #[cfg(feature = "exochain")]
-    governance_gate: Option<Arc<dyn crate::gate::GateBackend>>,
-    // ── os-patterns observability modules ────────────────────────
+    ecc: EccSubsystem,
     #[cfg(feature = "os-patterns")]
-    metrics_registry: Option<Arc<crate::metrics::MetricsRegistry>>,
-    #[cfg(feature = "os-patterns")]
-    log_service: Option<Arc<crate::log_service::LogService>>,
-    #[cfg(feature = "os-patterns")]
-    timer_service: Option<Arc<crate::timer::TimerService>>,
-    #[cfg(feature = "os-patterns")]
-    dead_letter_queue: Option<Arc<crate::dead_letter::DeadLetterQueue>>,
+    observability: ObservabilitySubsystem,
 }
 
 impl<P: Platform> Kernel<P> {
@@ -1235,31 +1251,27 @@ impl<P: Platform> Kernel<P> {
             boot_time,
             cluster_membership,
             #[cfg(feature = "exochain")]
-            chain_manager,
-            #[cfg(feature = "exochain")]
-            tree_manager,
+            chain: ChainSubsystem {
+                chain_manager,
+                tree_manager,
+                governance_gate,
+            },
             #[cfg(feature = "ecc")]
-            ecc_hnsw,
-            #[cfg(feature = "ecc")]
-            ecc_causal,
-            #[cfg(feature = "ecc")]
-            ecc_tick,
-            #[cfg(feature = "ecc")]
-            ecc_crossrefs,
-            #[cfg(feature = "ecc")]
-            ecc_impulses,
-            #[cfg(feature = "ecc")]
-            ecc_calibration,
-            #[cfg(feature = "exochain")]
-            governance_gate,
+            ecc: EccSubsystem {
+                hnsw: ecc_hnsw,
+                causal: ecc_causal,
+                tick: ecc_tick,
+                crossrefs: ecc_crossrefs,
+                impulses: ecc_impulses,
+                calibration: ecc_calibration,
+            },
             #[cfg(feature = "os-patterns")]
-            metrics_registry,
-            #[cfg(feature = "os-patterns")]
-            log_service: log_svc,
-            #[cfg(feature = "os-patterns")]
-            timer_service: timer_svc,
-            #[cfg(feature = "os-patterns")]
-            dead_letter_queue,
+            observability: ObservabilitySubsystem {
+                metrics_registry,
+                log_service: log_svc,
+                timer_service: timer_svc,
+                dead_letter_queue,
+            },
         })
     }
 
@@ -1286,8 +1298,8 @@ impl<P: Platform> Kernel<P> {
 
         // Checkpoint tree+chain before shutting down
         #[cfg(feature = "exochain")]
-        if let Some(ref tm) = self.tree_manager
-            && let Some(ref cm) = self.chain_manager
+        if let Some(ref tm) = self.chain.tree_manager
+            && let Some(ref cm) = self.chain.chain_manager
         {
             let stats = tm.stats();
             cm.append(
@@ -1313,7 +1325,7 @@ impl<P: Platform> Kernel<P> {
 
             // Log agent stop in tree/chain
             #[cfg(feature = "exochain")]
-            if let Some(ref tm) = self.tree_manager {
+            if let Some(ref tm) = self.chain.tree_manager {
                 let _ = tm.unregister_agent(&entry.agent_id, entry.pid, 0);
             }
 
@@ -1324,7 +1336,7 @@ impl<P: Platform> Kernel<P> {
 
         // Persist chain to RVF checkpoint (primary), JSON as fallback
         #[cfg(feature = "exochain")]
-        if let Some(ref cm) = self.chain_manager {
+        if let Some(ref cm) = self.chain.chain_manager {
             let chain_config = self.config.chain.clone().unwrap_or_default();
             if let Some(ref ckpt_path) = chain_config.effective_checkpoint_path() {
             let json_path = std::path::PathBuf::from(ckpt_path);
@@ -1344,7 +1356,7 @@ impl<P: Platform> Kernel<P> {
             }
 
             // Save tree checkpoint alongside chain
-            if let Some(ref tm) = self.tree_manager {
+            if let Some(ref tm) = self.chain.tree_manager {
                 let tree_path = json_path.with_extension("tree.json");
                 match tm.save_checkpoint(&tree_path) {
                     Ok(()) => {
@@ -1443,79 +1455,79 @@ impl<P: Platform> Kernel<P> {
     /// Get the local chain manager (when exochain feature is enabled).
     #[cfg(feature = "exochain")]
     pub fn chain_manager(&self) -> Option<&Arc<crate::chain::ChainManager>> {
-        self.chain_manager.as_ref()
+        self.chain.chain_manager.as_ref()
     }
 
     /// Get the tree manager (when exochain feature is enabled).
     #[cfg(feature = "exochain")]
     pub fn tree_manager(&self) -> Option<&Arc<crate::tree_manager::TreeManager>> {
-        self.tree_manager.as_ref()
-    }
-
-    /// Get the ECC HNSW service (if ecc feature enabled).
-    #[cfg(feature = "ecc")]
-    pub fn ecc_hnsw(&self) -> Option<&Arc<crate::hnsw_service::HnswService>> {
-        self.ecc_hnsw.as_ref()
-    }
-
-    /// Get the ECC causal graph (if ecc feature enabled).
-    #[cfg(feature = "ecc")]
-    pub fn ecc_causal(&self) -> Option<&Arc<crate::causal::CausalGraph>> {
-        self.ecc_causal.as_ref()
-    }
-
-    /// Get the ECC cognitive tick (if ecc feature enabled).
-    #[cfg(feature = "ecc")]
-    pub fn ecc_tick(&self) -> Option<&Arc<crate::cognitive_tick::CognitiveTick>> {
-        self.ecc_tick.as_ref()
-    }
-
-    /// Get the ECC calibration results (if ecc feature enabled).
-    #[cfg(feature = "ecc")]
-    pub fn ecc_calibration(&self) -> Option<&crate::calibration::EccCalibration> {
-        self.ecc_calibration.as_ref()
-    }
-
-    /// Get the ECC cross-reference store (if ecc feature enabled).
-    #[cfg(feature = "ecc")]
-    pub fn ecc_crossrefs(&self) -> Option<&Arc<crate::crossref::CrossRefStore>> {
-        self.ecc_crossrefs.as_ref()
-    }
-
-    /// Get the ECC impulse queue (if ecc feature enabled).
-    #[cfg(feature = "ecc")]
-    pub fn ecc_impulses(&self) -> Option<&Arc<crate::impulse::ImpulseQueue>> {
-        self.ecc_impulses.as_ref()
+        self.chain.tree_manager.as_ref()
     }
 
     /// Get the governance gate backend (if configured).
     #[cfg(feature = "exochain")]
     pub fn governance_gate(&self) -> Option<&Arc<dyn crate::gate::GateBackend>> {
-        self.governance_gate.as_ref()
+        self.chain.governance_gate.as_ref()
+    }
+
+    /// Get the ECC HNSW service (if ecc feature enabled).
+    #[cfg(feature = "ecc")]
+    pub fn ecc_hnsw(&self) -> Option<&Arc<crate::hnsw_service::HnswService>> {
+        self.ecc.hnsw.as_ref()
+    }
+
+    /// Get the ECC causal graph (if ecc feature enabled).
+    #[cfg(feature = "ecc")]
+    pub fn ecc_causal(&self) -> Option<&Arc<crate::causal::CausalGraph>> {
+        self.ecc.causal.as_ref()
+    }
+
+    /// Get the ECC cognitive tick (if ecc feature enabled).
+    #[cfg(feature = "ecc")]
+    pub fn ecc_tick(&self) -> Option<&Arc<crate::cognitive_tick::CognitiveTick>> {
+        self.ecc.tick.as_ref()
+    }
+
+    /// Get the ECC calibration results (if ecc feature enabled).
+    #[cfg(feature = "ecc")]
+    pub fn ecc_calibration(&self) -> Option<&crate::calibration::EccCalibration> {
+        self.ecc.calibration.as_ref()
+    }
+
+    /// Get the ECC cross-reference store (if ecc feature enabled).
+    #[cfg(feature = "ecc")]
+    pub fn ecc_crossrefs(&self) -> Option<&Arc<crate::crossref::CrossRefStore>> {
+        self.ecc.crossrefs.as_ref()
+    }
+
+    /// Get the ECC impulse queue (if ecc feature enabled).
+    #[cfg(feature = "ecc")]
+    pub fn ecc_impulses(&self) -> Option<&Arc<crate::impulse::ImpulseQueue>> {
+        self.ecc.impulses.as_ref()
     }
 
     /// Get the os-patterns metrics registry (if os-patterns feature enabled).
     #[cfg(feature = "os-patterns")]
     pub fn metrics_registry(&self) -> Option<&Arc<crate::metrics::MetricsRegistry>> {
-        self.metrics_registry.as_ref()
+        self.observability.metrics_registry.as_ref()
     }
 
     /// Get the os-patterns log service (if os-patterns feature enabled).
     #[cfg(feature = "os-patterns")]
     pub fn log_service(&self) -> Option<&Arc<crate::log_service::LogService>> {
-        self.log_service.as_ref()
+        self.observability.log_service.as_ref()
     }
 
     /// Get the os-patterns timer service (if os-patterns feature enabled).
     #[cfg(feature = "os-patterns")]
     pub fn timer_service(&self) -> Option<&Arc<crate::timer::TimerService>> {
-        self.timer_service.as_ref()
+        self.observability.timer_service.as_ref()
     }
 
     /// Get the os-patterns dead letter queue (if os-patterns feature enabled).
     #[cfg(feature = "os-patterns")]
     pub fn dead_letter_queue(&self) -> Option<&Arc<crate::dead_letter::DeadLetterQueue>> {
-        self.dead_letter_queue.as_ref()
+        self.observability.dead_letter_queue.as_ref()
     }
 
     /// Take ownership of the AppContext for agent loop consumption.

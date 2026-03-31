@@ -82,6 +82,7 @@ impl ContainerConfig {
 }
 
 /// Container lifecycle state.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContainerState {
     /// Image is being pulled.
@@ -140,6 +141,7 @@ pub struct VolumeMount {
 }
 
 /// Container restart policy.
+#[non_exhaustive]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RestartPolicy {
     /// Never restart.
@@ -210,6 +212,7 @@ pub struct ContainerHealth {
 }
 
 /// Container manager errors.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum ContainerError {
     /// Docker is not available on this system.

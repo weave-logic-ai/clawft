@@ -1,43 +1,75 @@
 ---
 title: "clawft Overview"
-description: "An AI-native development framework written in Rust for building multi-channel, tool-augmented LLM assistants."
+description: "A Rust-native agent framework for building multi-channel, tool-augmented LLM agents with tiered routing, skill auto-generation, and cost tracking."
 ---
 
 ## What is clawft?
 
-clawft is a modular Rust framework for building AI assistants with multi-channel messaging and tool integration. The CLI binary `weft` provides an interactive agent REPL, a multi-channel gateway (Telegram, Slack, Discord, and eight more), management commands for sessions, memory, cron jobs, and a full MCP (Model Context Protocol) server.
+clawft is a Rust agent framework -- the user-space agent runtime that powers WeftOS. It implements a complete agent lifecycle: message consumption, context assembly, LLM pipeline routing, tool execution, skill management, memory persistence, and multi-channel communication.
 
-The workspace contains 18 crates organized in a strict dependency hierarchy that enforces separation of concerns -- shared types at the bottom, platform abstraction above them, then the core engine, with tools, channels, services, plugins, and the CLI at the top. A WASM crate provides a browser-compatible entrypoint.
+The framework compiles to native binaries, WASM for browsers, and WASI for server-side sandboxing. The primary binary is `weft` (the CLI agent).
+
+The workspace contains 22 crates organized in a strict dependency hierarchy that enforces separation of concerns -- shared types at the bottom, platform abstraction above them, then the core engine, with tools, channels, services, plugins, and the CLI at the top. A WASM crate provides a browser-compatible entrypoint.
+
+## clawft as an Agent
+
+clawft is not a library for calling LLM APIs. It is a complete agent runtime -- the Rust-native equivalent to frameworks like Hermes (NousResearch) or OpenClaw. The `AgentLoop` at its center implements a consume-process-respond cycle with tool use:
+
+1. **Inbound** -- A message arrives from any of 11 channels (Telegram, Slack, Discord, etc.) via the `MessageBus`.
+2. **Session** -- The loop retrieves or creates a conversation session.
+3. **Context** -- `ContextBuilder` assembles the system prompt, active skill instructions, memory (MEMORY.md), and conversation history into an LLM-ready message list.
+4. **Pipeline** -- The message passes through a 6-stage pluggable pipeline: Classifier, Router, Assembler, Transport, Scorer, Learner.
+5. **Tool Loop** -- If the LLM responds with tool calls, the agent executes them, appends results, and re-invokes the LLM -- up to `max_tool_iterations` rounds.
+6. **Outbound** -- The final response is dispatched back through the `MessageBus` to the originating channel.
+
+See [Agent Loop](/docs/clawft/agent-loop) for the full architecture and [Pipeline](/docs/clawft/pipeline) for stage-by-stage detail.
+
+### Positioning
+
+| Concern | clawft | Hermes (Python) |
+|---------|--------|-----------------|
+| Language | Rust (native + WASM + WASI) | Python |
+| Pipeline | 6-stage pluggable, trait-based | Simple LLM call |
+| Tiered routing | Complexity-scored, cost-tracked, permission-aware | Keyword heuristic |
+| Skill hot-reload | Filesystem watcher, atomic swap | Not available |
+| Cost tracking | Per-tier budget enforcement with daily/monthly limits | Not available |
+| Rate limiting | Per-sender | Not available |
+| Kernel integration | PID tracking, governance, ExoChain, ECC, WASM sandbox, mesh | None |
+
+clawft's differentiator is the kernel integration layer: when running on WeftOS, agents gain ExoChain cryptographic provenance, three-branch constitutional governance, ECC cognitive substrate, WASM sandboxing, and mesh networking.
 
 ## Key Features
 
-- **Multi-provider LLM routing** -- Nine built-in providers (OpenAI, Anthropic, Groq, DeepSeek, Mistral, Together, OpenRouter, Gemini, xAI) with prefix-based routing, automatic retry, and environment-driven API keys.
 - **6-stage processing pipeline** -- Classify, route, assemble context, transport to LLM, score quality, and feed learning signals. Every stage is trait-based and replaceable.
-- **11 communication channels** -- Telegram, Slack, Discord, Email, WhatsApp, Signal, Matrix, IRC, Google Chat, Microsoft Teams, and Discord Resume. All share one trait interface and lifecycle.
-- **Built-in tool system** -- File I/O, shell execution, memory, web search/fetch, messaging, and subprocess spawning -- all workspace-sandboxed with security policies.
+- **Tiered model routing** -- Complexity-based routing across four model tiers (Free/Standard/Premium/Elite) with per-sender cost tracking and budget enforcement.
+- **Skill auto-generation** -- Detects repeated tool-call patterns and generates skill candidates after a configurable threshold (default: 3 repetitions). Requires user approval.
+- **Cost tracking** -- Per-tier budget enforcement with daily and monthly spending limits, recording both estimated and actual costs.
+- **Multi-provider LLM routing** -- Nine built-in providers (OpenAI, Anthropic, Groq, DeepSeek, Mistral, Together, OpenRouter, Gemini, xAI) with prefix-based routing, automatic retry, and environment-driven API keys.
+- **11 communication channels** -- Telegram, Slack, Discord, Email, WhatsApp, Signal, Matrix, IRC, Google Chat, Microsoft Teams, and Web. All share one trait interface and lifecycle.
+- **Built-in tool system** -- File I/O, shell execution, memory, web search/fetch, messaging, voice, and subprocess spawning -- all workspace-sandboxed with security policies.
 - **Plugin architecture** -- Six extension points (Tool, Channel, Pipeline, Skill, Memory, Voice), WASM sandbox (wasmtime), hot-reload, permission system, and slash-command registry.
-- **MCP integration** -- Serve tools to external MCP clients or consume tools from external MCP servers. Internal-only mode for infrastructure servers with skill-based per-turn filtering.
-- **WASM / browser target** -- The `clawft-wasm` crate compiles to WebAssembly for in-browser operation using only the types layer.
 - **Skills and agents** -- Reusable prompt bundles (SKILL.md) and named agent personas (agent.yaml) with template variables, tool allowlists, and three-level discovery (workspace, user, builtin).
+- **MCP integration** -- Serve tools to external MCP clients or consume tools from external MCP servers. Internal-only mode for infrastructure servers with skill-based per-turn filtering.
+- **WASM / browser target** -- The `clawft-wasm` crate compiles to WebAssembly for in-browser operation.
 - **Security-first** -- Workspace containment, command allowlists, SSRF protection, permission-gated tool access, WASM fuel metering, prompt injection stripping, and 57-check security auditor.
 
 ## Quick Install
 
-Build from source using Cargo:
+Build from source using the project build script:
 
 ```bash
 git clone https://github.com/clawft/clawft.git
 cd clawft
-cargo build --release --bin weft
-```
-
-Or use the project build script:
-
-```bash
 scripts/build.sh native
 ```
 
 The resulting binary is at `target/release/weft`.
+
+For debug builds (faster iteration):
+
+```bash
+scripts/build.sh native-debug
+```
 
 For Docker deployment:
 
@@ -70,13 +102,19 @@ weft agent -m "Summarize the Rust async ecosystem"
 
 - [Getting Started](/docs/clawft/getting-started) -- Installation, first conversation, key concepts
 - [Architecture](/docs/clawft/architecture) -- Crate structure, pipeline, message flow
-- [CLI Reference](/docs/clawft/cli-reference) -- Complete command-line reference for `weft`
-- [Configuration](/docs/clawft/configuration) -- Config file format, environment variables, all keys
-- [Plugins](/docs/clawft/plugins) -- Plugin system, built-in plugins, WASM sandbox
-- [Providers](/docs/clawft/providers) -- LLM provider configuration, routing, custom providers
-- [Channels](/docs/clawft/channels) -- Communication channels setup and custom channels
-- [Tools](/docs/clawft/tools) -- Built-in tools, MCP tools, custom tool providers
-- [Skills](/docs/clawft/skills) -- Skills, agents, slash commands, inter-agent communication
-- [Browser Mode](/docs/clawft/browser) -- WASM build, browser quickstart, test harness
-- [Deployment](/docs/clawft/deployment) -- Docker, WASM, CI/CD pipeline
-- [Security](/docs/clawft/security) -- Security model, command policies, SSRF protection, WASM sandbox
+- **Agent Runtime**
+  - [Agent Loop](/docs/clawft/agent-loop) -- The consume-process-respond cycle, auto-delegation, tool execution
+  - [Pipeline](/docs/clawft/pipeline) -- 6-stage processing pipeline, tiered routing, cost tracking
+  - [Skills](/docs/clawft/skills) -- SKILL.md format, discovery chain, auto-generation, hot-reload
+  - [Memory](/docs/clawft/memory) -- MEMORY.md / HISTORY.md, directory resolution, platform abstraction
+- **Integration**
+  - [Tools](/docs/clawft/tools) -- Built-in tools, MCP tools, custom tool providers
+  - [Channels](/docs/clawft/channels) -- Communication channels setup and custom channels
+  - [Providers](/docs/clawft/providers) -- LLM provider configuration, routing, custom providers
+  - [Plugins](/docs/clawft/plugins) -- Plugin system, built-in plugins, WASM sandbox
+- **Infrastructure**
+  - [CLI Reference](/docs/clawft/cli-reference) -- Complete command-line reference for `weft`
+  - [Configuration](/docs/clawft/configuration) -- Config file format, environment variables, all keys
+  - [Browser Mode](/docs/clawft/browser) -- WASM build, browser quickstart, test harness
+  - [Deployment](/docs/clawft/deployment) -- Docker, WASM, CI/CD pipeline
+  - [Security](/docs/clawft/security) -- Security model, command policies, SSRF protection, WASM sandbox

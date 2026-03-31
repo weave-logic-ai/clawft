@@ -94,6 +94,7 @@ pub struct TaskProfile {
 }
 
 /// Types of tasks the classifier can identify.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TaskType {
     /// General conversation / chitchat.
@@ -323,6 +324,7 @@ pub trait LearningBackend: Send + Sync {
 // ── Cost & rate-limiting traits ──────────────────────────────────────────
 
 /// Result of a budget check from [`CostTrackable::check_budget`].
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub enum BudgetResult {
     /// The request fits within budget.

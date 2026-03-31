@@ -62,6 +62,7 @@ fn default_true() -> bool {
 }
 
 /// Governance branch that owns a rule.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GovernanceBranch {
     /// Rules from SOPs, genesis protocol, weftapp.toml.
@@ -83,6 +84,7 @@ impl std::fmt::Display for GovernanceBranch {
 }
 
 /// Rule violation severity.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum RuleSeverity {
     /// Advisory -- logged but not enforced.
@@ -169,6 +171,7 @@ impl EffectVector {
 }
 
 /// Governance decision for an action.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GovernanceDecision {
     /// Action is permitted.
@@ -465,6 +468,72 @@ impl GovernanceEngine {
 
         result
     }
+
+    /// Evaluate a governance request and log the decision to the chain.
+    ///
+    /// This is the recommended entry point when a `ChainManager` is
+    /// available. It calls [`evaluate`](Self::evaluate) and records an
+    /// `ipc.dead_letter`-style audit event via [`ChainLoggable`].
+    ///
+    /// If no chain manager is provided, behaves identically to `evaluate`.
+    #[cfg(feature = "exochain")]
+    pub fn evaluate_logged(
+        &self,
+        request: &GovernanceRequest,
+        chain: Option<&crate::chain::ChainManager>,
+    ) -> GovernanceResult {
+        let result = self.evaluate(request);
+        if let Some(cm) = chain {
+            Self::chain_log_result(cm, request, &result);
+        }
+        result
+    }
+
+    /// Evaluate in an environment and log the decision to the chain.
+    #[cfg(feature = "exochain")]
+    pub fn evaluate_in_environment_logged(
+        &self,
+        request: &GovernanceRequest,
+        env: &Environment,
+        chain: Option<&crate::chain::ChainManager>,
+    ) -> GovernanceResult {
+        let result = self.evaluate_in_environment(request, env);
+        if let Some(cm) = chain {
+            Self::chain_log_result(cm, request, &result);
+        }
+        result
+    }
+
+    /// Log a governance result to the ExoChain.
+    ///
+    /// Can be called after any `evaluate` / `evaluate_in_environment`
+    /// call to record the decision in the audit trail.
+    #[cfg(feature = "exochain")]
+    pub fn chain_log_result(
+        cm: &crate::chain::ChainManager,
+        request: &GovernanceRequest,
+        result: &GovernanceResult,
+    ) {
+        use crate::chain::{ChainLoggable, GovernanceDecisionEvent};
+
+        let decision_str = match &result.decision {
+            GovernanceDecision::Permit => "Permit".to_owned(),
+            GovernanceDecision::PermitWithWarning(_) => "PermitWithWarning".to_owned(),
+            GovernanceDecision::EscalateToHuman(_) => "EscalateToHuman".to_owned(),
+            GovernanceDecision::Deny(_) => "Deny".to_owned(),
+        };
+
+        let event = GovernanceDecisionEvent {
+            agent_id: request.agent_id.clone(),
+            action: request.action.clone(),
+            decision: decision_str,
+            effect_magnitude: request.effect.magnitude(),
+            threshold_exceeded: result.threshold_exceeded,
+            evaluated_rules: result.evaluated_rules.clone(),
+            timestamp: chrono::Utc::now(),
+        };
+        cm.append_loggable(&event);
+    }
 }
 
 // ── Trajectory recording ─────────────────────────────────────
@@ -474,6 +543,7 @@ impl GovernanceEngine {
 // trajectory point is a governed decision.
 
 /// Outcome of an agent decision for trajectory scoring.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TrajectoryOutcome {
     /// Decision succeeded with a reward signal.
@@ -1870,6 +1940,128 @@ mod tests {
                 threshold_exceeded: true,
             };
             assert_eq!(escalate_result.to_rvf_task_outcome() as u8, TaskOutcome::Skipped as u8);
+        }
+    }
+
+    // ── ChainLoggable integration tests ────────────────────────
+
+    #[cfg(feature = "exochain")]
+    mod chain_logging_tests {
+        use super::*;
+        use std::sync::Arc;
+
+        #[test]
+        fn evaluate_logged_records_permit() {
+            let cm = Arc::new(crate::chain::ChainManager::new(0, 100));
+            let initial_len = cm.len();
+
+            let mut engine = GovernanceEngine::new(0.5, false);
+            engine.add_rule(GovernanceRule {
+                id: "sec".into(),
+                description: "test".into(),
+                branch: GovernanceBranch::Judicial,
+                severity: RuleSeverity::Blocking,
+                active: true,
+                reference_url: None,
+                sop_category: None,
+            });
+
+            let request = GovernanceRequest {
+                agent_id: "agent-1".into(),
+                action: "tool.read".into(),
+                effect: EffectVector { risk: 0.1, ..Default::default() },
+                context: Default::default(),
+                node_id: None,
+            };
+
+            let result = engine.evaluate_logged(&request, Some(&cm));
+            assert!(matches!(result.decision, GovernanceDecision::Permit));
+            assert_eq!(cm.len(), initial_len + 1);
+
+            let events = cm.tail(1);
+            assert_eq!(events[0].kind, "governance.permit");
+            assert_eq!(events[0].source, "governance");
+        }
+
+        #[test]
+        fn evaluate_logged_records_deny() {
+            let cm = Arc::new(crate::chain::ChainManager::new(0, 100));
+
+            let mut engine = GovernanceEngine::new(0.5, false);
+            engine.add_rule(GovernanceRule {
+                id: "sec".into(),
+                description: "test".into(),
+                branch: GovernanceBranch::Judicial,
+                severity: RuleSeverity::Blocking,
+                active: true,
+                reference_url: None,
+                sop_category: None,
+            });
+
+            let request = GovernanceRequest {
+                agent_id: "agent-1".into(),
+                action: "tool.exec".into(),
+                effect: EffectVector { risk: 0.9, ..Default::default() },
+                context: Default::default(),
+                node_id: None,
+            };
+
+            let result = engine.evaluate_logged(&request, Some(&cm));
+            assert!(matches!(result.decision, GovernanceDecision::Deny(_)));
+
+            let events = cm.tail(1);
+            assert_eq!(events[0].kind, "governance.deny");
+            let payload = events[0].payload.as_ref().unwrap();
+            assert_eq!(payload["agent_id"], "agent-1");
+            assert!(payload["threshold_exceeded"].as_bool().unwrap());
+        }
+
+        #[test]
+        fn evaluate_logged_without_chain_still_works() {
+            let engine = GovernanceEngine::new(0.5, false);
+            let request = GovernanceRequest {
+                agent_id: "agent-1".into(),
+                action: "tool.read".into(),
+                effect: EffectVector::default(),
+                context: Default::default(),
+                node_id: None,
+            };
+
+            // Passing None should not panic, just skip logging
+            let result = engine.evaluate_logged(&request, None);
+            assert!(matches!(result.decision, GovernanceDecision::Permit));
+        }
+
+        #[test]
+        fn chain_log_result_standalone() {
+            let cm = crate::chain::ChainManager::new(0, 100);
+            let initial_len = cm.len();
+
+            let mut engine = GovernanceEngine::new(0.5, true);
+            engine.add_rule(GovernanceRule {
+                id: "sec".into(),
+                description: "test".into(),
+                branch: GovernanceBranch::Judicial,
+                severity: RuleSeverity::Blocking,
+                active: true,
+                reference_url: None,
+                sop_category: None,
+            });
+
+            let request = GovernanceRequest {
+                agent_id: "agent-1".into(),
+                action: "tool.exec".into(),
+                effect: EffectVector { risk: 0.8, ..Default::default() },
+                context: Default::default(),
+                node_id: None,
+            };
+
+            let result = engine.evaluate(&request);
+            GovernanceEngine::chain_log_result(&cm, &request, &result);
+            assert_eq!(cm.len(), initial_len + 1);
+
+            let events = cm.tail(1);
+            assert_eq!(events[0].kind, "governance.defer");
         }
     }
 }

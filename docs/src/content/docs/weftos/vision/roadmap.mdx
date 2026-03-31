@@ -1,0 +1,98 @@
+---
+title: Roadmap
+description: WeftOS version roadmap from 0.1 Foundation through 1.0 Stable
+---
+
+# Roadmap
+
+WeftOS follows workspace-level lockstep semver versioning. All 22 crates share a single version. Breaking changes bump the minor version (0.1 to 0.2), non-breaking changes bump the patch (0.1.0 to 0.1.1).
+
+## Version Overview
+
+| Version | Theme | Focus |
+|---------|-------|-------|
+| **0.1.0** | Foundation | Kernel complete, CLI works, WASM builds |
+| **0.2.0** | Operational Maturity | GUI (Tauri), operational hardening, testing depth |
+| **0.3.0** | Enterprise Readiness | Plugin marketplace, multi-tenant, advanced algorithms |
+| **1.0.0** | Stable Release | Stable API, security audit, production users |
+
+---
+
+## 0.1 -- Foundation
+
+The kernel is functionally complete. All layers (K0 through K6) are operational. The CLI binary works for single-user development workflows.
+
+**What ships**:
+- Kernel with boot sequence, process management, IPC, capability-based RBAC
+- WASM tool sandbox with Ed25519 signature verification
+- ExoChain append-only hash chain with dual signatures
+- Three-branch constitutional governance engine
+- ECC cognitive substrate (causal DAG, HNSW, cognitive tick, Weaver)
+- Mesh networking (types, traits, logic -- Phase 1)
+- Application framework with container integration
+- CLI binary (`weft`) for all supported platforms
+- 7 platform targets: Linux, macOS, Windows, browser WASM, WASI, ARM64, Docker
+
+**What does not ship yet**:
+- GUI desktop application
+- Real ONNX embedding model (uses mock embeddings)
+- Actual TCP/WebSocket mesh connections (Phase 2)
+
+---
+
+## 0.2 -- Operational Maturity
+
+The GUI becomes the primary interface. Testing and optimization harden the kernel for real-world use.
+
+**What ships**:
+- Tauri desktop application with the Lego block engine
+- 18 block types rendered from JSON descriptors
+- Journey mode for guided walkthroughs (DAG-structured steps)
+- Console-to-kernel connection (Tauri invoke + events)
+- Zustand StateStore with `$state` resolution
+- Snapshot tests, property-based tests, fuzz harnesses
+- HNSW performance improvements (HashMap index, deferred rebuild)
+- Sparse Lanczos spectral analysis
+- Type extractions to `clawft-types` for GUI independence
+- ChainLoggable trait closing audit trail gaps
+- Mentra HUD specification and text-based simulator
+
+---
+
+## 0.3 -- Enterprise Readiness
+
+The system is ready for multi-user, multi-node deployments with advanced analysis capabilities.
+
+**What ships**:
+- Mesh networking Phase 2 (actual TCP/WebSocket connections)
+- WebSocket server in kernel (Mentra prerequisite)
+- Real ONNX embedding model integration
+- Louvain/Leiden community detection for deep analysis
+- Lock ordering protocol for concurrency safety
+- Plugin marketplace infrastructure
+- HNSW eviction policy (TTL/LRU pruning)
+- Mentra HUD implementation (2 views + voice commands)
+- Multi-language support via MCP bridge
+
+---
+
+## 1.0 -- Stable
+
+The public API is stable. External projects depend on WeftOS in production.
+
+**All criteria must be true**:
+- Public API stable across 2+ minor releases without breaking changes
+- Production users depending on API stability
+- Security audit completed
+- All public APIs documented
+- Migration path from every 0.x version documented
+
+---
+
+## Stability Notice
+
+WeftOS is in active development (v0.x). The API may change between minor
+versions. We follow Cargo's semver conventions for 0.x: breaking changes
+bump the minor version, non-breaking changes bump the patch. Documentation
+tracks the latest development version until 1.0, when versioned docs will
+be introduced.

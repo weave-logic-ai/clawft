@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::model::{Action, ResourceId, Role};
 
 /// Permission decision.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Decision {
     Allow,

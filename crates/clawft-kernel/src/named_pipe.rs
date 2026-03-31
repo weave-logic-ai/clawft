@@ -271,6 +271,28 @@ impl Default for NamedPipeRegistry {
     }
 }
 
+// ── Registry trait implementation ────────────────────────────────────
+
+impl clawft_types::Registry for NamedPipeRegistry {
+    type Value = PipeInfo;
+
+    fn get(&self, key: &str) -> Option<Self::Value> {
+        self.info(key)
+    }
+
+    fn list_keys(&self) -> Vec<String> {
+        self.list()
+    }
+
+    fn contains(&self, key: &str) -> bool {
+        self.exists(key)
+    }
+
+    fn count(&self) -> usize {
+        self.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

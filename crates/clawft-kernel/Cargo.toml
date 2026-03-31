@@ -1,6 +1,6 @@
 [package]
 name = "clawft-kernel"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -94,5 +94,8 @@ uuid = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true }
 serde_json = { workspace = true }
+chrono = { workspace = true }
 clawft-platform = { workspace = true }
 clawft-types = { workspace = true }
+insta = { workspace = true }
+tempfile = { workspace = true }

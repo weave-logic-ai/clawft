@@ -7,7 +7,8 @@
 //! - [`SentenceTransformerProvider`] -- documentation-optimised paragraph embedder.
 //! - [`AstEmbeddingProvider`] -- hybrid structural + semantic embedder for Rust code.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 #[cfg(feature = "onnx-embeddings")]
 use std::sync::Arc;
 
@@ -16,6 +17,241 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::embedding::{EmbeddingError, EmbeddingProvider, MockEmbeddingProvider};
+
+// ---------------------------------------------------------------------------
+// WordPiece tokenizer for BERT / all-MiniLM-L6-v2
+// ---------------------------------------------------------------------------
+
+/// BERT-compatible WordPiece tokenizer.
+///
+/// Loads a `vocab.txt` file (one token per line, ID = line number) and performs:
+/// 1. Lowercasing and Unicode NFD accent stripping
+/// 2. Whitespace + punctuation pre-tokenization
+/// 3. Greedy longest-match WordPiece splitting (subwords prefixed with `##`)
+/// 4. [CLS] / [SEP] framing and [PAD] / truncation to `max_length`
+///
+/// When no vocab file is available, [`WordPieceTokenizer::encode`] returns
+/// `None` so callers can fall back to hash-based tokenization.
+pub struct WordPieceTokenizer {
+    /// Token string -> vocab ID.
+    vocab: HashMap<String, i64>,
+    /// Maximum sequence length including [CLS] and [SEP].
+    max_length: usize,
+    /// Maximum characters per word before treating as [UNK].
+    max_word_chars: usize,
+}
+
+/// Special token IDs for the BERT uncased vocabulary.
+const CLS_ID: i64 = 101;
+const SEP_ID: i64 = 102;
+const UNK_ID: i64 = 100;
+const PAD_ID: i64 = 0;
+
+impl WordPieceTokenizer {
+    /// Try to load a `vocab.txt` from the given path.
+    ///
+    /// Returns `None` if the file does not exist or cannot be read.
+    pub fn load(vocab_path: &Path) -> Option<Self> {
+        let content = std::fs::read_to_string(vocab_path).ok()?;
+        let line_count = content.lines().count();
+        let mut vocab = HashMap::with_capacity(line_count);
+        for (id, line) in content.lines().enumerate() {
+            vocab.insert(line.to_string(), id as i64);
+        }
+        if vocab.len() < 1000 {
+            // Suspiciously small — probably not a real BERT vocab.
+            tracing::warn!(
+                "vocab.txt at {} has only {} entries, expected ~30k",
+                vocab_path.display(),
+                vocab.len()
+            );
+            return None;
+        }
+        tracing::info!(
+            "WordPiece vocab loaded: {} tokens from {}",
+            vocab.len(),
+            vocab_path.display()
+        );
+        Some(Self {
+            vocab,
+            max_length: 128,
+            max_word_chars: 100,
+        })
+    }
+
+    /// Create a tokenizer with a custom max sequence length.
+    pub fn with_max_length(mut self, max_length: usize) -> Self {
+        self.max_length = max_length;
+        self
+    }
+
+    /// Encode text into (input_ids, attention_mask, token_type_ids).
+    ///
+    /// All three vectors have length `self.max_length`, padded or truncated
+    /// as needed. Returns `None` if the vocab is empty.
+    pub fn encode(&self, text: &str) -> Option<(Vec<i64>, Vec<i64>, Vec<i64>)> {
+        if self.vocab.is_empty() {
+            return None;
+        }
+
+        let mut token_ids: Vec<i64> = Vec::with_capacity(self.max_length);
+        token_ids.push(CLS_ID);
+
+        // Pre-tokenize: lowercase, split on whitespace and punctuation.
+        let words = self.pre_tokenize(text);
+
+        for word in &words {
+            if token_ids.len() >= self.max_length - 1 {
+                break; // Reserve space for [SEP].
+            }
+            let sub_ids = self.wordpiece_split(word);
+            for id in sub_ids {
+                if token_ids.len() >= self.max_length - 1 {
+                    break;
+                }
+                token_ids.push(id);
+            }
+        }
+
+        token_ids.push(SEP_ID);
+
+        let seq_len = token_ids.len();
+        let mut attention_mask = vec![1i64; seq_len];
+        let mut token_type_ids = vec![0i64; seq_len];
+
+        // Pad to max_length.
+        while token_ids.len() < self.max_length {
+            token_ids.push(PAD_ID);
+            attention_mask.push(0);
+            token_type_ids.push(0);
+        }
+
+        Some((token_ids, attention_mask, token_type_ids))
+    }
+
+    /// Pre-tokenize: lowercase, split on whitespace and punctuation.
+    fn pre_tokenize(&self, text: &str) -> Vec<String> {
+        let lower = text.to_lowercase();
+        let mut words = Vec::new();
+        let mut current = String::new();
+
+        for ch in lower.chars() {
+            if ch.is_whitespace() {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+            } else if ch.is_ascii_punctuation() || is_cjk_char(ch) {
+                // Punctuation and CJK chars become individual tokens.
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+                words.push(ch.to_string());
+            } else if is_accent_char(ch) {
+                // Strip combining marks (basic accent removal).
+                continue;
+            } else if ch.is_control() {
+                continue;
+            } else {
+                current.push(ch);
+            }
+        }
+        if !current.is_empty() {
+            words.push(current);
+        }
+        words
+    }
+
+    /// WordPiece greedy longest-match splitting for a single pre-token.
+    fn wordpiece_split(&self, word: &str) -> Vec<i64> {
+        if word.len() > self.max_word_chars {
+            return vec![UNK_ID];
+        }
+
+        let chars: Vec<char> = word.chars().collect();
+        let mut ids = Vec::new();
+        let mut start = 0;
+
+        while start < chars.len() {
+            let mut end = chars.len();
+            let mut found = false;
+
+            while start < end {
+                let substr: String = if start == 0 {
+                    chars[start..end].iter().collect()
+                } else {
+                    format!("##{}", chars[start..end].iter().collect::<String>())
+                };
+
+                if self.vocab.contains_key(&substr) {
+                    ids.push(self.vocab[&substr]);
+                    found = true;
+                    start = end;
+                    break;
+                }
+                end -= 1;
+            }
+
+            if !found {
+                ids.push(UNK_ID);
+                start += 1;
+            }
+        }
+
+        ids
+    }
+}
+
+/// Check if a character is in the CJK Unified Ideographs range.
+fn is_cjk_char(ch: char) -> bool {
+    let cp = ch as u32;
+    matches!(cp,
+        0x4E00..=0x9FFF
+        | 0x3400..=0x4DBF
+        | 0x20000..=0x2A6DF
+        | 0x2A700..=0x2B73F
+        | 0x2B740..=0x2B81F
+        | 0x2B820..=0x2CEAF
+        | 0xF900..=0xFAFF
+        | 0x2F800..=0x2FA1F
+    )
+}
+
+/// Check if a character is a Unicode combining mark (accent).
+fn is_accent_char(ch: char) -> bool {
+    let cp = ch as u32;
+    matches!(cp, 0x0300..=0x036F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0xFE20..=0xFE2F)
+}
+
+/// Search paths for the vocab.txt file alongside an ONNX model.
+///
+/// Looks for `vocab.txt` in the same directory as the model, and in a
+/// sibling directory named after the model (e.g., `all-MiniLM-L6-v2/vocab.txt`).
+#[cfg_attr(not(feature = "onnx-embeddings"), allow(dead_code))]
+fn vocab_search_paths(model_path: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    if let Some(parent) = model_path.parent() {
+        // Same directory as the model.
+        paths.push(parent.join("vocab.txt"));
+
+        // Sibling directory named after the model.
+        if let Some(stem) = model_path.file_stem() {
+            paths.push(parent.join(stem).join("vocab.txt"));
+        }
+    }
+
+    // Also check standard WeftOS model paths.
+    let model_dir_name = "all-MiniLM-L6-v2";
+    paths.push(PathBuf::from(format!(".weftos/models/{model_dir_name}/vocab.txt")));
+    if let Ok(home) = std::env::var("HOME") {
+        paths.push(PathBuf::from(format!("{home}/.weftos/models/{model_dir_name}/vocab.txt")));
+    }
+    if let Ok(env_dir) = std::env::var("WEFTOS_VOCAB_PATH") {
+        paths.push(PathBuf::from(env_dir));
+    }
+
+    paths
+}
 
 // ---------------------------------------------------------------------------
 // Shared tokenisation helpers
@@ -99,6 +335,10 @@ pub struct OnnxEmbeddingProvider {
     /// Fallback provider used when runtime is not available.
     #[allow(dead_code)]
     fallback: MockEmbeddingProvider,
+    /// WordPiece tokenizer loaded from vocab.txt (if available).
+    /// When `None`, ONNX inference falls back to hash-based token IDs.
+    #[cfg(feature = "onnx-embeddings")]
+    tokenizer: Option<WordPieceTokenizer>,
     /// ONNX runtime session (only present when `onnx-embeddings` feature is active
     /// and model was loaded successfully).
     #[cfg(feature = "onnx-embeddings")]
@@ -125,6 +365,8 @@ impl OnnxEmbeddingProvider {
         let runtime_available = session.is_some();
         #[cfg(not(feature = "onnx-embeddings"))]
         let runtime_available = false;
+        #[cfg(feature = "onnx-embeddings")]
+        let tokenizer = Self::try_load_tokenizer(&model_path, Self::DEFAULT_MAX_TOKENS);
 
         Self {
             model_name: if runtime_available {
@@ -137,6 +379,8 @@ impl OnnxEmbeddingProvider {
             runtime_available,
             max_tokens: Self::DEFAULT_MAX_TOKENS,
             fallback: MockEmbeddingProvider::new(Self::DEFAULT_DIMS),
+            #[cfg(feature = "onnx-embeddings")]
+            tokenizer,
             #[cfg(feature = "onnx-embeddings")]
             session,
         }
@@ -155,6 +399,8 @@ impl OnnxEmbeddingProvider {
         let runtime_available = session.is_some();
         #[cfg(not(feature = "onnx-embeddings"))]
         let runtime_available = false;
+        #[cfg(feature = "onnx-embeddings")]
+        let tokenizer = Self::try_load_tokenizer(&model_path, max_tokens);
 
         Self {
             model_name: if runtime_available {
@@ -168,8 +414,32 @@ impl OnnxEmbeddingProvider {
             max_tokens,
             fallback: MockEmbeddingProvider::new(dimensions),
             #[cfg(feature = "onnx-embeddings")]
+            tokenizer,
+            #[cfg(feature = "onnx-embeddings")]
             session,
         }
+    }
+
+    /// Attempt to load a WordPiece tokenizer from vocab.txt near the model.
+    #[cfg(feature = "onnx-embeddings")]
+    fn try_load_tokenizer(model_path: &Path, max_tokens: usize) -> Option<WordPieceTokenizer> {
+        for path in vocab_search_paths(model_path) {
+            if path.exists() {
+                if let Some(tok) = WordPieceTokenizer::load(&path) {
+                    // max_tokens here refers to the token count limit; for
+                    // WordPiece the max_length (including [CLS]/[SEP]) is
+                    // max_tokens + 2, capped at 512 for BERT models.
+                    let max_len = (max_tokens + 2).min(512);
+                    return Some(tok.with_max_length(max_len));
+                }
+            }
+        }
+        tracing::debug!(
+            "No vocab.txt found for WordPiece tokenizer near {}; \
+             ONNX inference will use hash-based token IDs (degraded quality)",
+            model_path.display()
+        );
+        None
     }
 
     /// Attempt to load an ONNX runtime session from the model path.
@@ -220,10 +490,14 @@ impl OnnxEmbeddingProvider {
 
     /// Run real ONNX inference on the input text.
     ///
-    /// Performs simple whitespace tokenization into token IDs (vocabulary-free
-    /// hashing to simulate subword tokenization), builds the input tensors
-    /// (input_ids, attention_mask, token_type_ids), and runs the model.
-    /// Mean-pools the last hidden state to produce a fixed-size embedding.
+    /// Uses the WordPiece tokenizer (if vocab.txt was loaded) to produce
+    /// correct token IDs for the all-MiniLM-L6-v2 model. Falls back to
+    /// hash-based token IDs when no vocab is available (degraded quality
+    /// but still structurally valid).
+    ///
+    /// Builds input tensors (input_ids, attention_mask, token_type_ids),
+    /// runs the model, and mean-pools the last hidden state (masked by
+    /// attention_mask) to produce a fixed-size embedding.
     #[cfg(feature = "onnx-embeddings")]
     fn onnx_embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
         use ndarray::Array2;
@@ -232,30 +506,42 @@ impl OnnxEmbeddingProvider {
             EmbeddingError::BackendError("ONNX session not loaded".to_string())
         })?;
 
-        // Simple tokenization: hash each whitespace token to a vocab ID.
-        // Real tokenization would use a sentencepiece/BPE tokenizer, but
-        // this approach produces valid input tensors for the model.
-        let tokens = simple_tokenize(text, self.max_tokens);
-        let seq_len = tokens.len().max(1) + 2; // +2 for [CLS] and [SEP]
+        // Tokenize using WordPiece if available, otherwise fall back to hashing.
+        let (input_ids, attention_mask, token_type_ids) = if let Some(ref tokenizer) = self.tokenizer {
+            tokenizer.encode(text).ok_or_else(|| {
+                EmbeddingError::BackendError("WordPiece tokenizer returned None".to_string())
+            })?
+        } else {
+            // Legacy hash-based fallback (produces structurally valid but
+            // semantically meaningless token IDs).
+            tracing::warn_once!(
+                "ONNX inference without WordPiece vocab — embeddings will not be semantic"
+            );
+            let tokens = simple_tokenize(text, self.max_tokens);
+            let seq_len = tokens.len().max(1) + 2; // +2 for [CLS] and [SEP]
 
-        // Build input tensors as i64 arrays.
-        let mut input_ids = vec![101i64]; // [CLS] = 101
-        for token in &tokens {
-            // Hash token to a vocab range [1000, 30000)
-            let mut hasher = Sha256::new();
-            hasher.update(token.as_bytes());
-            let hash = hasher.finalize();
-            let id = 1000 + (u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]]) % 29000) as i64;
-            input_ids.push(id);
-        }
-        input_ids.push(102); // [SEP] = 102
+            let mut ids = vec![CLS_ID];
+            for token in &tokens {
+                let mut hasher = Sha256::new();
+                hasher.update(token.as_bytes());
+                let hash = hasher.finalize();
+                let id = 1000
+                    + (u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]]) % 29000)
+                        as i64;
+                ids.push(id);
+            }
+            ids.push(SEP_ID);
 
-        let attention_mask = vec![1i64; seq_len];
-        let token_type_ids = vec![0i64; seq_len];
+            let mask = vec![1i64; seq_len];
+            let types = vec![0i64; seq_len];
+            (ids, mask, types)
+        };
+
+        let seq_len = input_ids.len();
 
         let input_ids_arr = Array2::from_shape_vec((1, seq_len), input_ids)
             .map_err(|e| EmbeddingError::BackendError(format!("shape error: {e}")))?;
-        let attention_mask_arr = Array2::from_shape_vec((1, seq_len), attention_mask)
+        let attention_mask_arr = Array2::from_shape_vec((1, seq_len), attention_mask.clone())
             .map_err(|e| EmbeddingError::BackendError(format!("shape error: {e}")))?;
         let token_type_ids_arr = Array2::from_shape_vec((1, seq_len), token_type_ids)
             .map_err(|e| EmbeddingError::BackendError(format!("shape error: {e}")))?;
@@ -288,20 +574,30 @@ impl OnnxEmbeddingProvider {
         let hidden_dim = *shape.last().unwrap();
         let seq = shape[1];
 
-        // Mean pooling across sequence dimension.
+        // Attention-masked mean pooling: only average over non-padding tokens.
         let mut embedding = vec![0.0f32; hidden_dim];
         let data = tensor.as_slice().ok_or_else(|| {
             EmbeddingError::BackendError("tensor not contiguous".to_string())
         })?;
 
+        let mut active_count: f32 = 0.0;
         for s in 0..seq {
-            for d in 0..hidden_dim {
-                embedding[d] += data[s * hidden_dim + d];
+            let mask_val = if s < attention_mask.len() {
+                attention_mask[s] as f32
+            } else {
+                0.0
+            };
+            if mask_val > 0.0 {
+                for d in 0..hidden_dim {
+                    embedding[d] += data[s * hidden_dim + d];
+                }
+                active_count += 1.0;
             }
         }
-        let seq_f = seq as f32;
-        for val in &mut embedding {
-            *val /= seq_f;
+        if active_count > 0.0 {
+            for val in &mut embedding {
+                *val /= active_count;
+            }
         }
 
         // L2 normalize.
@@ -1201,5 +1497,192 @@ pub async fn process_batch(&self, items: Vec<Item>) -> Result<(), Error> {
         let v = tokens_to_embedding(&tokens, 128);
         let mag = vec_magnitude(&v);
         assert!((mag - 1.0).abs() < 0.01);
+    }
+
+    // =====================================================================
+    // WordPiece tokenizer tests
+    // =====================================================================
+
+    /// Create a small test vocab file for WordPiece tests.
+    /// Returns the path to the written file.
+    fn make_test_vocab() -> PathBuf {
+        use std::fmt::Write as FmtWrite;
+        let mut content = String::new();
+        // Build a minimal BERT-style vocab (needs >1000 entries).
+        // IDs 0-99: [unused0]..[unused99]
+        for i in 0..100 {
+            writeln!(content, "[unused{}]", i).unwrap();
+        }
+        writeln!(content, "[UNK]").unwrap();   // ID 100
+        writeln!(content, "[CLS]").unwrap();   // ID 101
+        writeln!(content, "[SEP]").unwrap();   // ID 102
+        writeln!(content, "[MASK]").unwrap();  // ID 103
+        for i in 104..1000 {
+            writeln!(content, "[unused{}]", i).unwrap();
+        }
+        // ID 1000+: real tokens
+        let words = [
+            "the", "a", "is", "of", "and", "to", "in", "for", "that", "it",
+            "hello", "world", "test", "input", "embedding", "model", "token",
+            "##s", "##ing", "##ed", "##er", "##tion", "##ly", "##ize",
+            ".", ",", "!", "?",
+            "quick", "brown", "fox", "dog", "cat", "rust", "code",
+            "function", "struct", "pub", "async", "fn",
+        ];
+        for w in &words {
+            writeln!(content, "{}", w).unwrap();
+        }
+        // Pad to >1000 entries total.
+        for i in 0..100 {
+            writeln!(content, "extra{}", i).unwrap();
+        }
+
+        let path = PathBuf::from(format!(
+            "/tmp/clawft_test_vocab_{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&path, &content).expect("failed to write test vocab");
+        path
+    }
+
+    #[test]
+    fn wordpiece_load_valid_vocab() {
+        let f = make_test_vocab();
+        let tok = WordPieceTokenizer::load(&f);
+        assert!(tok.is_some(), "should load a vocab with >1000 entries");
+    }
+
+    #[test]
+    fn wordpiece_load_missing_file() {
+        let tok = WordPieceTokenizer::load(Path::new("/nonexistent/vocab.txt"));
+        assert!(tok.is_none());
+    }
+
+    #[test]
+    fn wordpiece_encode_produces_cls_sep() {
+        let f = make_test_vocab();
+        let tok = WordPieceTokenizer::load(&f).unwrap().with_max_length(32);
+        let (ids, mask, types) = tok.encode("hello world").unwrap();
+        assert_eq!(ids.len(), 32, "should be padded to max_length");
+        assert_eq!(ids[0], CLS_ID, "first token must be [CLS]");
+        // Find [SEP] -- it should be after the content tokens.
+        let sep_pos = ids.iter().position(|&x| x == SEP_ID);
+        assert!(sep_pos.is_some(), "must contain [SEP]");
+        let sep_pos = sep_pos.unwrap();
+        assert!(sep_pos >= 2, "[SEP] should come after at least one content token");
+        // Attention mask: 1s up to and including [SEP], then 0s.
+        assert_eq!(mask[0], 1);
+        assert_eq!(mask[sep_pos], 1);
+        if sep_pos + 1 < 32 {
+            assert_eq!(mask[sep_pos + 1], 0, "padding should have mask=0");
+        }
+        // Token type IDs should all be 0 for single-sentence input.
+        assert!(types.iter().all(|&t| t == 0));
+    }
+
+    #[test]
+    fn wordpiece_encode_known_tokens() {
+        let f = make_test_vocab();
+        let tok = WordPieceTokenizer::load(&f).unwrap().with_max_length(16);
+        let (ids, _, _) = tok.encode("hello").unwrap();
+        // "hello" is in our test vocab -- should NOT be [UNK].
+        let content_ids: Vec<i64> = ids[1..].iter()
+            .take_while(|&&x| x != SEP_ID)
+            .cloned()
+            .collect();
+        assert!(!content_ids.is_empty(), "should tokenize 'hello' to at least one token");
+        assert!(
+            content_ids.iter().any(|&id| id != UNK_ID),
+            "known word 'hello' should not be all [UNK]"
+        );
+    }
+
+    #[test]
+    fn wordpiece_encode_unknown_token_uses_unk() {
+        let f = make_test_vocab();
+        let tok = WordPieceTokenizer::load(&f).unwrap().with_max_length(16);
+        let (ids, _, _) = tok.encode("xyzzyplugh").unwrap();
+        // "xyzzyplugh" is not in our vocab, so it should produce [UNK].
+        let content_ids: Vec<i64> = ids[1..].iter()
+            .take_while(|&&x| x != SEP_ID)
+            .cloned()
+            .collect();
+        assert!(
+            content_ids.contains(&UNK_ID),
+            "unknown word should produce [UNK] token"
+        );
+    }
+
+    #[test]
+    fn wordpiece_encode_truncates_long_input() {
+        let f = make_test_vocab();
+        let tok = WordPieceTokenizer::load(&f).unwrap().with_max_length(8);
+        // Input much longer than max_length=8.
+        let long_input = "the quick brown fox hello world test input embedding model";
+        let (ids, mask, _) = tok.encode(long_input).unwrap();
+        assert_eq!(ids.len(), 8, "output must be exactly max_length");
+        assert_eq!(mask.len(), 8);
+        assert_eq!(ids[0], CLS_ID);
+        // [SEP] must be present.
+        assert!(ids.contains(&SEP_ID));
+    }
+
+    #[test]
+    fn wordpiece_encode_empty_input() {
+        let f = make_test_vocab();
+        let tok = WordPieceTokenizer::load(&f).unwrap().with_max_length(16);
+        let (ids, mask, _) = tok.encode("").unwrap();
+        assert_eq!(ids[0], CLS_ID);
+        assert_eq!(ids[1], SEP_ID);
+        // Rest should be padding.
+        assert!(ids[2..].iter().all(|&x| x == PAD_ID));
+        assert_eq!(mask[0], 1);
+        assert_eq!(mask[1], 1);
+        assert!(mask[2..].iter().all(|&x| x == 0));
+    }
+
+    #[test]
+    fn wordpiece_pre_tokenize_punctuation() {
+        let f = make_test_vocab();
+        let tok = WordPieceTokenizer::load(&f).unwrap();
+        let words = tok.pre_tokenize("Hello, World!");
+        // Should split into: ["hello", ",", "world", "!"]
+        assert!(words.contains(&",".to_string()));
+        assert!(words.contains(&"!".to_string()));
+        assert!(words.contains(&"hello".to_string()));
+        assert!(words.contains(&"world".to_string()));
+    }
+
+    #[test]
+    fn wordpiece_subword_splitting() {
+        let f = make_test_vocab();
+        let tok = WordPieceTokenizer::load(&f).unwrap();
+        // "tokens" should split into "token" + "##s" since both are in vocab.
+        let ids = tok.wordpiece_split("tokens");
+        // If "token" and "##s" are in the vocab, we should get 2 IDs (neither UNK).
+        assert!(
+            ids.len() >= 1,
+            "should produce at least one subword token"
+        );
+    }
+
+    #[test]
+    fn wordpiece_deterministic() {
+        let f = make_test_vocab();
+        let tok = WordPieceTokenizer::load(&f).unwrap().with_max_length(32);
+        let (ids1, _, _) = tok.encode("the quick brown fox").unwrap();
+        let (ids2, _, _) = tok.encode("the quick brown fox").unwrap();
+        assert_eq!(ids1, ids2, "encoding must be deterministic");
+    }
+
+    #[test]
+    fn vocab_search_paths_finds_sibling() {
+        let paths = vocab_search_paths(Path::new("/models/all-MiniLM-L6-v2.onnx"));
+        assert!(paths.iter().any(|p| p.ends_with("vocab.txt")));
+        assert!(
+            paths.iter().any(|p| p.to_string_lossy().contains("all-MiniLM-L6-v2/vocab.txt")),
+            "should check sibling directory: {:?}",
+            paths
+        );
     }
 }

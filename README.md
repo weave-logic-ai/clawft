@@ -260,7 +260,8 @@ causality, search semantic memory, and process ephemeral signals in real-time.
 ### Install
 
 ```sh
-cargo install clawft-cli
+# From source (crate not yet published to crates.io)
+cargo install --path crates/clawft-cli
 ```
 
 ### Configure
@@ -346,7 +347,7 @@ cargo build --release --target wasm32-unknown-unknown -p clawft-wasm
 
 ## Testing
 
-843 tests across all kernel features. Zero regressions across feature combinations.
+5,040 tests across 22 crates. Zero regressions across feature combinations.
 
 ```sh
 # All tests (full features)

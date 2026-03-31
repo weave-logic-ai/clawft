@@ -10,7 +10,7 @@
 ## From Source
 
 ```bash
-git clone https://github.com/clawft/clawft
+git clone https://github.com/weave-logic-ai/clawft.git
 cd clawft
 
 # Build the CLI in release mode

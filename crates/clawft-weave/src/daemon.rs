@@ -269,6 +269,10 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                             clawft_kernel::HealthStatus::Unknown => {
                                 unhealthy_names.push(name.clone());
                             }
+                            _ => {
+                                event_log.warn("health", format!("{name}: unrecognized health status"));
+                                unhealthy_names.push(name.clone());
+                            }
                         }
                         results.push((name.clone(), status));
                     }
@@ -611,6 +615,7 @@ async fn dispatch(
                 KernelState::Running => "running",
                 KernelState::ShuttingDown => "shutting_down",
                 KernelState::Halted => "halted",
+                _ => "unknown",
             };
             let result = KernelStatusResult {
                 state: state_str.to_owned(),

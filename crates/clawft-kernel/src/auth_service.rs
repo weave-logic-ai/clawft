@@ -24,6 +24,7 @@ use crate::service::{ServiceType, SystemService};
 // ---------------------------------------------------------------------------
 
 /// Classification of a stored credential.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CredentialType {
     /// API key (e.g., OpenAI, GitHub).
@@ -114,6 +115,7 @@ pub struct CredentialRequest {
 }
 
 /// Response granting (or denying) a credential request.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CredentialGrant {
     /// Token granted.

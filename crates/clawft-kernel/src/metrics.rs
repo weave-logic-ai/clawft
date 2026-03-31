@@ -164,6 +164,7 @@ impl Histogram {
 }
 
 /// A snapshot of a single metric.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MetricSnapshot {
     /// A counter metric (monotonically increasing).

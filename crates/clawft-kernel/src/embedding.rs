@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Errors that embedding backends may produce.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum EmbeddingError {
     /// The underlying model has not been loaded yet.

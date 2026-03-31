@@ -1,0 +1,84 @@
+---
+title: What is WeftOS
+description: An introduction to WeftOS, the secure distributed AI operating system built in Rust.
+---
+
+# What is WeftOS
+
+WeftOS is a secure, ephemeral AI operating system built in Rust. It replaces the
+fragile pattern of cloud-dependent chatbots with something fundamentally
+different: a distributed kernel that gives AI agents persistent memory, verifiable
+reasoning, and constitutional governance -- running on everything from a Raspberry
+Pi to a browser tab to an air-gapped data center.
+
+The project is composed of two layers. **clawft** is the AI framework layer:
+connecting to LLM providers (OpenAI, Anthropic, Ollama, local models), managing
+conversations across channels (Telegram, Slack, Discord, CLI, WebSocket),
+executing tools in WASM sandboxes, and composing agent skills. **WeftOS** is the
+kernel layer: process management with PID allocation and capability-based RBAC,
+typed IPC with 7 target types, an append-only ExoChain for cryptographic audit
+trails, three-branch constitutional governance, encrypted mesh networking with
+post-quantum key exchange, and an application framework for packaged agent
+deployments.
+
+Underneath both sits the **ECC** (Ephemeral Causal Cognition) cognitive layer: a
+causal DAG that tracks how ideas relate, an adaptive cognitive tick that processes
+events in real-time, HNSW approximate nearest neighbor search for semantic memory,
+BLAKE3-indexed cross-references linking every structure in the kernel, and an
+impulse queue for ephemeral signals that decay rather than accumulate. ECC operates
+in three modes -- Act (real-time conversation), Analyze (post-hoc corpus
+understanding), and Generate (goal-directed planning) -- using the same engine,
+the same data structures, and the same scoring system.
+
+## Why WeftOS
+
+- **No more context windows.** A vector-indexed knowledge graph grows continuously
+  across sessions, conversations, and nodes. Sub-millisecond HNSW retrieval means
+  agents have searchable memory, not a fixed window.
+
+- **No more hallucination without accountability.** Every agent action is recorded
+  in an append-only hash chain (ExoChain) with SHAKE-256 linking and Ed25519 +
+  ML-DSA-65 dual signatures. Claims are cryptographically verifiable.
+
+- **No more trusting the cloud.** WeftOS runs entirely on your hardware. Local LLM
+  inference, Noise Protocol encryption with post-quantum ML-KEM-768 key exchange,
+  and full air-gapped support.
+
+- **No more single points of failure.** Agents form encrypted peer-to-peer mesh
+  clusters across heterogeneous devices. SWIM heartbeats detect failures in
+  seconds. Services resolve to surviving replicas automatically.
+
+- **No more uncontrolled AI.** Every privileged operation passes through a
+  three-branch constitutional governance engine (Legislative, Executive, Judicial)
+  with a 5-dimensional effect vector scoring risk, fairness, privacy, novelty, and
+  security.
+
+- **No more "works on my machine."** The same binary runs on 7 platforms: Linux,
+  macOS, Windows, browser (WASM), WASI containers, ARM64 edge devices, and cloud
+  VMs. Feature flags compile out what you don't need.
+
+## Architecture Overview
+
+```
++-------------------------------------------------------------------+
+|                         clawft                                     |
+|  AI framework: LLM providers, channels, tools, skills, agents    |
++-------------------------------------------------------------------+
+|                         WeftOS Kernel                               |
+|  Processes, IPC, governance, ExoChain, mesh networking, apps      |
++-------------------------------------------------------------------+
+|                    ECC Cognitive Substrate                          |
+|  Causal DAG, cognitive tick, HNSW memory, impulse queue           |
++-------------------------------------------------------------------+
+|                      Platform Layer                                |
+|  Native | WASI | Browser | Edge | Cloud | Air-Gapped | Docker    |
++-------------------------------------------------------------------+
+```
+
+## Next Steps
+
+- [Quickstart](/weftos/getting-started/quickstart) -- go from zero to a running
+  kernel in minutes
+- [Installation](/weftos/getting-started/installation) -- detailed installation
+  options including Docker
+- [Architecture](/weftos/architecture) -- deep dive into the kernel architecture

@@ -9,6 +9,7 @@
     "postinstall": "fumadocs-mdx"
   },
   "dependencies": {
+    "@tailwindcss/postcss": "^4.2.2",
     "fumadocs-core": "^16.7.6",
     "fumadocs-mdx": "^14.2.11",
     "fumadocs-ui": "^16.7.6",

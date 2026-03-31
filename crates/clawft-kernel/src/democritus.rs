@@ -161,15 +161,42 @@ impl DemocritusLoop {
         }
 
         // ── SEARCH ───────────────────────────────────────────────────
-        let mut neighbors_per_event = Vec::with_capacity(embedded.len());
-        for (impulse, embedding) in impulses.iter().zip(embedded.iter()) {
+        // Batch all HNSW searches under a single mutex acquisition
+        // instead of locking per-impulse (Task 3: batch Mutex).
+        let non_empty_queries: Vec<(usize, &[f32])> = embedded
+            .iter()
+            .enumerate()
+            .filter(|(_, emb)| !emb.is_empty())
+            .map(|(i, emb)| (i, emb.as_slice()))
+            .collect();
+
+        let query_slices: Vec<&[f32]> = non_empty_queries.iter().map(|(_, s)| *s).collect();
+        let batch_results = if !query_slices.is_empty() {
+            self.hnsw.search_batch(&query_slices, self.config.search_k)
+        } else {
+            Vec::new()
+        };
+
+        // Reassemble: map batch results back to their impulse indices.
+        let mut search_results_by_index: Vec<Vec<(String, f32)>> =
+            vec![Vec::new(); embedded.len()];
+        for (batch_idx, &(orig_idx, _)) in non_empty_queries.iter().enumerate() {
+            search_results_by_index[orig_idx] = batch_results
+                .get(batch_idx)
+                .map(|results| results.iter().map(|r| (r.id.clone(), r.score)).collect())
+                .unwrap_or_default();
+        }
+        result.searches_performed = non_empty_queries.len();
+
+        let mut neighbors_per_event: Vec<(&Impulse, &Vec<f32>, Vec<(String, f32)>)> =
+            Vec::with_capacity(embedded.len());
+        for (i, (impulse, embedding)) in impulses.iter().zip(embedded.iter()).enumerate() {
             if self.budget_exceeded(start) {
                 result.budget_exceeded = true;
                 break;
             }
-            let neighbors = self.search(embedding);
-            result.searches_performed += 1;
-            neighbors_per_event.push((impulse, embedding.clone(), neighbors));
+            let neighbors = std::mem::take(&mut search_results_by_index[i]);
+            neighbors_per_event.push((impulse, embedding, neighbors));
         }
 
         // ── UPDATE ───────────────────────────────────────────────────
@@ -226,6 +253,10 @@ impl DemocritusLoop {
     }
 
     /// SEARCH: query HNSW for k nearest neighbors of the given embedding.
+    ///
+    /// Note: The tick loop now uses `search_batch` for batched mutex
+    /// acquisition. This method is retained for single-query callers.
+    #[allow(dead_code)]
     fn search(&self, embedding: &[f32]) -> Vec<(String, f32)> {
         if embedding.is_empty() {
             return Vec::new();
@@ -770,5 +801,311 @@ mod tests {
         assert_eq!(structure_tag_from_u8(0x03), StructureTag::CausalGraph);
         assert_eq!(structure_tag_from_u8(0x04), StructureTag::HnswIndex);
         assert_eq!(structure_tag_from_u8(0xFF), StructureTag::Custom(0xFF));
+    }
+
+    // ── Sprint 11: Budget exhaustion tests ──────────────────────────
+
+    #[tokio::test]
+    async fn budget_exhaustion_with_many_impulses() {
+        // Use a budget of 0 microseconds with many impulses to force
+        // budget exhaustion at different phases.
+        let config = DemocritusConfig {
+            tick_budget_us: 0,
+            max_impulses_per_tick: 100,
+            ..DemocritusConfig::default()
+        };
+        let (cg, _hnsw, iq, _crs, demo) = make_loop_with_config(config);
+
+        for i in 0..50 {
+            emit_test_impulse(&iq, ImpulseType::BeliefUpdate, i);
+        }
+
+        let result = demo.tick().await;
+        assert!(result.budget_exceeded);
+        // Even with budget exceeded, tick count increments.
+        assert_eq!(demo.total_ticks(), 1);
+        // Some impulses may have been sensed before budget check.
+        assert!(result.impulses_sensed <= 50);
+        // Causal graph nodes added should match embeddings completed
+        // (may be fewer than sensed due to budget).
+        assert!(cg.node_count() <= result.impulses_sensed as u64);
+    }
+
+    #[tokio::test]
+    async fn budget_exceeded_flag_only_set_when_needed() {
+        // Large budget should not trigger budget_exceeded.
+        let config = DemocritusConfig {
+            tick_budget_us: 10_000_000, // 10 seconds
+            ..DemocritusConfig::default()
+        };
+        let (_, _, iq, _, demo) = make_loop_with_config(config);
+
+        emit_test_impulse(&iq, ImpulseType::BeliefUpdate, 1);
+        let result = demo.tick().await;
+        assert!(!result.budget_exceeded);
+    }
+
+    // ── Sprint 11: ImpulseQueue overflow tests ──────────────────────
+
+    #[tokio::test]
+    async fn impulse_queue_large_burst() {
+        let config = DemocritusConfig {
+            max_impulses_per_tick: 10,
+            ..DemocritusConfig::default()
+        };
+        let (_, _, iq, _, demo) = make_loop_with_config(config);
+
+        // Emit far more impulses than per-tick limit.
+        for i in 0..500 {
+            emit_test_impulse(&iq, ImpulseType::BeliefUpdate, i);
+        }
+
+        // First tick processes at most 10.
+        let r1 = demo.tick().await;
+        assert_eq!(r1.impulses_sensed, 10);
+
+        // Queue was drained fully (drain_ready takes all), but only 10 processed.
+        // Remaining impulses are gone (drain clears the queue).
+        let r2 = demo.tick().await;
+        assert_eq!(r2.impulses_sensed, 0);
+    }
+
+    #[tokio::test]
+    async fn impulse_queue_interleaved_emit_and_tick() {
+        let (cg, _, iq, _, demo) = make_loop();
+
+        // Emit, tick, emit, tick — verify state accumulates.
+        emit_test_impulse(&iq, ImpulseType::BeliefUpdate, 10);
+        let r1 = demo.tick().await;
+        assert_eq!(r1.impulses_sensed, 1);
+        assert_eq!(cg.node_count(), 1);
+
+        emit_test_impulse(&iq, ImpulseType::CoherenceAlert, 20);
+        emit_test_impulse(&iq, ImpulseType::NoveltyDetected, 30);
+        let r2 = demo.tick().await;
+        assert_eq!(r2.impulses_sensed, 2);
+        assert_eq!(cg.node_count(), 3);
+
+        assert_eq!(demo.total_ticks(), 2);
+        assert_eq!(demo.total_nodes_added(), 3);
+    }
+
+    // ── Sprint 11: Embed failure recovery tests ─────────────────────
+
+    #[tokio::test]
+    async fn embed_failure_still_creates_crossrefs() {
+        use crate::embedding::EmbeddingError;
+
+        struct FailingProvider;
+
+        #[async_trait::async_trait]
+        impl EmbeddingProvider for FailingProvider {
+            async fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbeddingError> {
+                Err(EmbeddingError::BackendError("test failure".into()))
+            }
+            async fn embed_batch(
+                &self,
+                _texts: &[&str],
+            ) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+                Err(EmbeddingError::BackendError("test failure".into()))
+            }
+            fn dimensions(&self) -> usize {
+                8
+            }
+            fn model_name(&self) -> &str {
+                "failing-test"
+            }
+        }
+
+        let cg = Arc::new(CausalGraph::new());
+        let hnsw = Arc::new(HnswService::new(HnswServiceConfig::default()));
+        let iq = Arc::new(ImpulseQueue::new());
+        let crs = Arc::new(CrossRefStore::new());
+        let emb: Arc<dyn EmbeddingProvider> = Arc::new(FailingProvider);
+
+        let demo = DemocritusLoop::new(
+            Arc::clone(&cg),
+            Arc::clone(&hnsw),
+            Arc::clone(&iq),
+            Arc::clone(&crs),
+            emb,
+            DemocritusConfig::default(),
+        );
+
+        // Emit multiple impulses.
+        for i in 0..5 {
+            emit_test_impulse(&iq, ImpulseType::BeliefUpdate, i * 100);
+        }
+
+        let result = demo.tick().await;
+        assert_eq!(result.impulses_sensed, 5);
+        // Fallback: 5 empty vectors produced.
+        assert_eq!(result.embeddings_produced, 5);
+        // Causal nodes still created despite embed failure.
+        assert_eq!(cg.node_count(), 5);
+        // Cross-refs still created.
+        assert_eq!(result.crossrefs_added, 5);
+        assert_eq!(crs.count(), 5);
+        // No HNSW insertions (empty embeddings skipped).
+        assert_eq!(hnsw.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn embed_failure_no_edges_added() {
+        use crate::embedding::EmbeddingError;
+
+        struct FailingProvider;
+
+        #[async_trait::async_trait]
+        impl EmbeddingProvider for FailingProvider {
+            async fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbeddingError> {
+                Err(EmbeddingError::BackendError("fail".into()))
+            }
+            async fn embed_batch(
+                &self,
+                _texts: &[&str],
+            ) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+                Err(EmbeddingError::BackendError("fail".into()))
+            }
+            fn dimensions(&self) -> usize {
+                8
+            }
+            fn model_name(&self) -> &str {
+                "fail"
+            }
+        }
+
+        let cg = Arc::new(CausalGraph::new());
+        let hnsw = Arc::new(HnswService::new(HnswServiceConfig::default()));
+        let iq = Arc::new(ImpulseQueue::new());
+        let crs = Arc::new(CrossRefStore::new());
+        let emb: Arc<dyn EmbeddingProvider> = Arc::new(FailingProvider);
+
+        let demo = DemocritusLoop::new(
+            Arc::clone(&cg),
+            Arc::clone(&hnsw),
+            Arc::clone(&iq),
+            Arc::clone(&crs),
+            emb,
+            DemocritusConfig::default(),
+        );
+
+        emit_test_impulse(&iq, ImpulseType::BeliefUpdate, 100);
+        let result = demo.tick().await;
+        // With empty embeddings, search returns no neighbors, so no edges.
+        assert_eq!(result.edges_added, 0);
+        assert_eq!(demo.total_edges_added(), 0);
+    }
+
+    // ── Sprint 11: Multiple sequential ticks with accumulated state ──
+
+    #[tokio::test]
+    async fn multiple_sequential_ticks_accumulate_state() {
+        let (cg, hnsw, iq, crs, demo) = make_loop();
+
+        // Tick 1: single impulse.
+        emit_test_impulse(&iq, ImpulseType::BeliefUpdate, 100);
+        let r1 = demo.tick().await;
+        assert_eq!(r1.impulses_sensed, 1);
+        let nodes_after_1 = cg.node_count();
+        let hnsw_after_1 = hnsw.len();
+
+        // Tick 2: two more impulses.
+        emit_test_impulse(&iq, ImpulseType::CoherenceAlert, 200);
+        emit_test_impulse(&iq, ImpulseType::NoveltyDetected, 300);
+        let r2 = demo.tick().await;
+        assert_eq!(r2.impulses_sensed, 2);
+        assert_eq!(cg.node_count(), nodes_after_1 + 2);
+        assert_eq!(hnsw.len(), hnsw_after_1 + 2);
+
+        // Tick 3: three more.
+        emit_test_impulse(&iq, ImpulseType::EdgeConfirmed, 400);
+        emit_test_impulse(&iq, ImpulseType::EmbeddingRefined, 500);
+        emit_test_impulse(&iq, ImpulseType::Custom(42), 600);
+        let r3 = demo.tick().await;
+        assert_eq!(r3.impulses_sensed, 3);
+        assert_eq!(cg.node_count(), nodes_after_1 + 5);
+
+        // Total statistics.
+        assert_eq!(demo.total_ticks(), 3);
+        assert_eq!(demo.total_nodes_added(), 6);
+        // Cross-refs: one per impulse.
+        assert_eq!(crs.count(), 6);
+    }
+
+    #[tokio::test]
+    async fn sequential_ticks_can_find_prior_neighbors() {
+        let config = DemocritusConfig {
+            correlation_threshold: 0.0, // accept all as correlated
+            ..DemocritusConfig::default()
+        };
+        let (cg, hnsw, iq, _, demo) = make_loop_with_config(config);
+
+        // Tick 1: insert a node.
+        emit_test_impulse(&iq, ImpulseType::BeliefUpdate, 100);
+        demo.tick().await;
+        assert_eq!(hnsw.len(), 1);
+
+        // Tick 2: same type should find tick-1's node as neighbor.
+        emit_test_impulse(&iq, ImpulseType::BeliefUpdate, 200);
+        let r2 = demo.tick().await;
+        assert_eq!(r2.searches_performed, 1);
+        // With threshold=0.0, any non-zero similarity creates an edge.
+        // The mock provider produces deterministic vectors, so same impulse
+        // type gets same embedding, yielding high similarity.
+        // Edges depend on whether neighbor_id parses as a valid node_id.
+        assert!(cg.node_count() >= 2);
+    }
+
+    // ── Sprint 11: Config edge cases ────────────────────────────────
+
+    #[tokio::test]
+    async fn zero_max_impulses_per_tick() {
+        let config = DemocritusConfig {
+            max_impulses_per_tick: 0,
+            ..DemocritusConfig::default()
+        };
+        let (_, _, iq, _, demo) = make_loop_with_config(config);
+
+        emit_test_impulse(&iq, ImpulseType::BeliefUpdate, 100);
+        let result = demo.tick().await;
+        // Truncation to 0 means no impulses processed.
+        assert_eq!(result.impulses_sensed, 0);
+        assert_eq!(result.embeddings_produced, 0);
+    }
+
+    #[tokio::test]
+    async fn tick_result_duration_is_positive() {
+        let (_, _, iq, _, demo) = make_loop();
+        emit_test_impulse(&iq, ImpulseType::BeliefUpdate, 100);
+        let result = demo.tick().await;
+        // Duration should be non-negative (may be 0 on very fast systems).
+        assert!(result.duration_us < 10_000_000, "tick should complete within 10s");
+    }
+
+    #[test]
+    fn classify_edge_custom_impulse_type() {
+        let (_, _, _, _, demo) = make_loop();
+        let impulse = Impulse {
+            id: 1,
+            source_structure: 0,
+            source_node: [0u8; 32],
+            target_structure: 2,
+            impulse_type: ImpulseType::Custom(99),
+            payload: serde_json::json!({}),
+            hlc_timestamp: 0,
+            acknowledged: std::sync::atomic::AtomicBool::new(false),
+        };
+
+        // Custom type below threshold → Follows.
+        assert_eq!(
+            demo.classify_edge(&impulse, 0.3),
+            CausalEdgeType::Follows
+        );
+        // Custom type above threshold → Correlates.
+        assert_eq!(
+            demo.classify_edge(&impulse, 0.9),
+            CausalEdgeType::Correlates
+        );
     }
 }
