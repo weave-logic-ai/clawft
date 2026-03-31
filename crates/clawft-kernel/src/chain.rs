@@ -1,7 +1,7 @@
 //! Local exochain manager for kernel event logging.
 //!
 //! Provides an append-only event chain with SHAKE-256 hash linking
-//! (via [`rvf_crypto`]). Each event references the hash of the
+//! (via [`weftos_rvf_crypto`]). Each event references the hash of the
 //! previous event *and* a content hash of its payload, forming
 //! an immutable, tamper-evident audit trail suitable for cross-service
 //! and cross-node verification.
@@ -30,8 +30,8 @@ use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use rvf_crypto::hash::shake256_256;
-use rvf_crypto::{
+use weftos_rvf_crypto::hash::shake256_256;
+use weftos_rvf_crypto::{
     create_witness_chain, decode_signature_footer, encode_signature_footer,
     lineage_record_to_bytes, lineage_witness_entry, sign_segment, verify_segment,
     sign_segment_ml_dsa, verify_segment_ml_dsa,
@@ -39,8 +39,8 @@ use rvf_crypto::{
     verify_witness_chain, WitnessEntry,
 };
 use rvf_types::SEGMENT_HEADER_SIZE;
-use rvf_wire::writer::{calculate_padded_size, write_segment};
-use rvf_wire::{read_segment, validate_segment};
+use weftos_rvf_wire::writer::{calculate_padded_size, write_segment};
+use weftos_rvf_wire::{read_segment, validate_segment};
 
 // ── ExoChain-specific RVF types ─────────────────────────────────────
 //
@@ -2630,7 +2630,7 @@ mod tests {
         assert_eq!(record_bytes.len(), 128); // LINEAGE_RECORD_SIZE
 
         let record: rvf_types::LineageRecord =
-            rvf_crypto::lineage_record_from_bytes(
+            weftos_rvf_crypto::lineage_record_from_bytes(
                 record_bytes.as_slice().try_into().unwrap(),
             )
             .unwrap();
@@ -2751,7 +2751,7 @@ mod tests {
         assert!(!cm.has_dual_signing());
 
         // Add ML-DSA key
-        let (ml_key, _) = rvf_crypto::MlDsa65Key::generate(b"test-seed");
+        let (ml_key, _) = weftos_rvf_crypto::MlDsa65Key::generate(b"test-seed");
         cm.set_ml_dsa_key(ml_key);
         assert!(cm.has_dual_signing());
     }
@@ -2762,7 +2762,7 @@ mod tests {
         use rand::rngs::OsRng;
 
         let ed_key = SigningKey::generate(&mut OsRng);
-        let (ml_key, ml_vk) = rvf_crypto::MlDsa65Key::generate(&ed_key.to_bytes());
+        let (ml_key, ml_vk) = weftos_rvf_crypto::MlDsa65Key::generate(&ed_key.to_bytes());
 
         let mut cm = ChainManager::new(0, 1000)
             .with_signing_key(ed_key.clone());
@@ -2800,7 +2800,7 @@ mod tests {
         assert!(dual_valid, "dual signature should be valid");
 
         // Wrong ML-DSA key should fail dual verification.
-        let (_, wrong_ml_vk) = rvf_crypto::MlDsa65Key::generate(b"wrong-seed");
+        let (_, wrong_ml_vk) = weftos_rvf_crypto::MlDsa65Key::generate(b"wrong-seed");
         let dual_wrong = ChainManager::verify_rvf_dual_signature(&path, &ed_pubkey, &wrong_ml_vk).unwrap();
         assert!(!dual_wrong, "dual signature should fail with wrong ML-DSA key");
 
@@ -2813,7 +2813,7 @@ mod tests {
         use rand::rngs::OsRng;
 
         let ed_key = SigningKey::generate(&mut OsRng);
-        let (ml_key, ml_vk) = rvf_crypto::MlDsa65Key::generate(b"checkpoint-test");
+        let (ml_key, ml_vk) = weftos_rvf_crypto::MlDsa65Key::generate(b"checkpoint-test");
 
         let mut cm = ChainManager::new(0, 1000)
             .with_signing_key(ed_key.clone());
@@ -2930,7 +2930,7 @@ mod tests {
         use rand::rngs::OsRng;
 
         let ed_key = SigningKey::generate(&mut OsRng);
-        let (ml_key, _ml_vk) = rvf_crypto::MlDsa65Key::generate(b"dual-sig-test");
+        let (ml_key, _ml_vk) = weftos_rvf_crypto::MlDsa65Key::generate(b"dual-sig-test");
 
         let mut cm = ChainManager::new(0, 1000).with_signing_key(ed_key.clone());
         cm.set_ml_dsa_key(ml_key);
@@ -2968,7 +2968,7 @@ mod tests {
         use rand::rngs::OsRng;
 
         let ed_key = SigningKey::generate(&mut OsRng);
-        let (ml_key, ml_vk) = rvf_crypto::MlDsa65Key::generate(b"verify-both");
+        let (ml_key, ml_vk) = weftos_rvf_crypto::MlDsa65Key::generate(b"verify-both");
 
         let mut cm = ChainManager::new(0, 1000).with_signing_key(ed_key.clone());
         cm.set_ml_dsa_key(ml_key);
@@ -2989,7 +2989,7 @@ mod tests {
         use rand::rngs::OsRng;
 
         let ed_key = SigningKey::generate(&mut OsRng);
-        let (ml_key, ml_vk) = rvf_crypto::MlDsa65Key::generate(b"tamper-test");
+        let (ml_key, ml_vk) = weftos_rvf_crypto::MlDsa65Key::generate(b"tamper-test");
 
         let mut cm = ChainManager::new(0, 1000).with_signing_key(ed_key.clone());
         cm.set_ml_dsa_key(ml_key);

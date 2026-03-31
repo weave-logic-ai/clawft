@@ -774,10 +774,8 @@ dependencies = [
  "ruvector-cluster",
  "ruvector-raft",
  "ruvector-replication",
- "rvf-crypto",
  "rvf-runtime",
  "rvf-types",
- "rvf-wire",
  "serde",
  "serde_json",
  "sha2",
@@ -790,6 +788,8 @@ dependencies = [
  "uuid",
  "wasmtime",
  "wasmtime-wasi",
+ "weftos-rvf-crypto",
+ "weftos-rvf-wire",
 ]
 
 [[package]]
@@ -1073,13 +1073,13 @@ dependencies = [
  "exo-resource-tree",
  "nix 0.29.0",
  "rvf-types",
- "rvf-wire",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "weftos-rvf-wire",
 ]
 
 [[package]]
@@ -1094,7 +1094,8 @@ dependencies = [
 [[package]]
 name = "cognitum-gate-tilezero"
 version = "0.1.1"
-source = "git+https://github.com/weave-logic-ai/ruvector.git?branch=perf%2Foptimization-sweep#96026578b4e66c3cb4a4eccaa10d154d1eb53769"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da5b7ca90d479824a5c134ba7eae332a24d43c28d29884bf662c52fa5416068a"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -3887,7 +3888,8 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 [[package]]
 name = "ruvector-cluster"
 version = "2.0.6"
-source = "git+https://github.com/weave-logic-ai/ruvector.git?branch=perf%2Foptimization-sweep#96026578b4e66c3cb4a4eccaa10d154d1eb53769"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0028cc832c6969de8f68b63ff0c19b9b213170324fa13054b40e490e1d83b14b"
 dependencies = [
  "async-trait",
  "bincode 2.0.1",
@@ -3907,8 +3909,9 @@ dependencies = [
 
 [[package]]
 name = "ruvector-core"
-version = "2.0.6"
-source = "git+https://github.com/weave-logic-ai/ruvector.git?branch=perf%2Foptimization-sweep#96026578b4e66c3cb4a4eccaa10d154d1eb53769"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "995bedf32161d34f205df1ac5f4f1a76f120f86eb2cd6134cda7d5ee827de415"
 dependencies = [
  "anyhow",
  "bincode 2.0.1",
@@ -3937,7 +3940,8 @@ dependencies = [
 [[package]]
 name = "ruvector-raft"
 version = "2.0.6"
-source = "git+https://github.com/weave-logic-ai/ruvector.git?branch=perf%2Foptimization-sweep#96026578b4e66c3cb4a4eccaa10d154d1eb53769"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c93eeacd8f4479de247539e85efa4fade7d90833b40b33cc0a747e068975e7f"
 dependencies = [
  "bincode 2.0.1",
  "chrono",
@@ -3957,7 +3961,8 @@ dependencies = [
 [[package]]
 name = "ruvector-replication"
 version = "2.0.6"
-source = "git+https://github.com/weave-logic-ai/ruvector.git?branch=perf%2Foptimization-sweep#96026578b4e66c3cb4a4eccaa10d154d1eb53769"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "827de296896f93aa7a41be6c7eed46e01ea1060010473c42f9b98354fdcd4e1f"
 dependencies = [
  "bincode 2.0.1",
  "chrono",
@@ -3975,19 +3980,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "rvf-crypto"
-version = "0.2.0"
-source = "git+https://github.com/weave-logic-ai/ruvector.git?branch=perf%2Foptimization-sweep#96026578b4e66c3cb4a4eccaa10d154d1eb53769"
-dependencies = [
- "ed25519-dalek",
- "rvf-types",
- "sha3",
-]
-
-[[package]]
 name = "rvf-runtime"
 version = "0.2.0"
-source = "git+https://github.com/weave-logic-ai/ruvector.git?branch=perf%2Foptimization-sweep#96026578b4e66c3cb4a4eccaa10d154d1eb53769"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e465af193e27d9c5f939519fa71065a7bab22bfb31f85d614fa9c59218f73858"
 dependencies = [
  "rvf-types",
 ]
@@ -3995,19 +3991,8 @@ dependencies = [
 [[package]]
 name = "rvf-types"
 version = "0.2.0"
-source = "git+https://github.com/weave-logic-ai/ruvector.git?branch=perf%2Foptimization-sweep#96026578b4e66c3cb4a4eccaa10d154d1eb53769"
-
-[[package]]
-name = "rvf-wire"
-version = "0.1.0"
-source = "git+https://github.com/weave-logic-ai/ruvector.git?branch=perf%2Foptimization-sweep#96026578b4e66c3cb4a4eccaa10d154d1eb53769"
-dependencies = [
- "crc32c",
- "rvf-types",
- "sha3",
- "subtle",
- "xxhash-rust",
-]
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a497b66e9a16b7e057135e1f0e34f80abaecec0a1c537f662d526ca9a9106e79"
 
 [[package]]
 name = "ryu"
@@ -5513,6 +5498,30 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "weftos-rvf-crypto"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e72ddaf6c0411631bd8c8de7e32aeee06c836f9cfca289d973593b0049d95582"
+dependencies = [
+ "ed25519-dalek",
+ "rvf-types",
+ "sha3",
+]
+
+[[package]]
+name = "weftos-rvf-wire"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a251749be321bd4968f7e5771bc85f1eb1d0837071aa66d50e43dbc9fc9acc59"
+dependencies = [
+ "crc32c",
+ "rvf-types",
+ "sha3",
+ "subtle",
+ "xxhash-rust",
 ]
 
 [[package]]

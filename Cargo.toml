@@ -119,11 +119,13 @@ wasmtime-wasi = { version = "29", default-features = false, features = ["preview
 # File-system watching
 notify = "7"
 
-# RVF (RuVector Format) -- vector storage (weave-logic-ai fork with ML-DSA dual signing)
-rvf-runtime = { git = "https://github.com/weave-logic-ai/ruvector.git", branch = "perf/optimization-sweep", default-features = false, features = ["std"] }
-rvf-types = { git = "https://github.com/weave-logic-ai/ruvector.git", branch = "perf/optimization-sweep", default-features = false, features = ["std"] }
-rvf-crypto = { git = "https://github.com/weave-logic-ai/ruvector.git", branch = "perf/optimization-sweep", default-features = false, features = ["std", "ed25519"] }
-rvf-wire = { git = "https://github.com/weave-logic-ai/ruvector.git", branch = "perf/optimization-sweep" }
+# RVF (RuVector Format) -- vector storage
+# rvf-types, rvf-runtime, rvf-wire: upstream crates.io (ruvnet)
+# weftos-rvf-crypto: our fork with ML-DSA-65 dual signing
+rvf-runtime = { version = "0.2", default-features = false, features = ["std"] }
+rvf-types = { version = "0.2", default-features = false, features = ["std"] }
+weftos-rvf-crypto = { version = "0.3", default-features = false, features = ["std", "ed25519"] }
+weftos-rvf-wire = { version = "0.2" }
 
 # CBOR codec (ExoChain payload format)
 ciborium = "0.2"
@@ -141,34 +143,34 @@ blake3 = "1.5"
 # Concurrent hash map
 dashmap = "6"
 
-# Distributed coordination (weave-logic-ai fork)
-ruvector-cluster = { git = "https://github.com/weave-logic-ai/ruvector.git", branch = "perf/optimization-sweep" }
-ruvector-raft = { git = "https://github.com/weave-logic-ai/ruvector.git", branch = "perf/optimization-sweep" }
-ruvector-replication = { git = "https://github.com/weave-logic-ai/ruvector.git", branch = "perf/optimization-sweep" }
-cognitum-gate-tilezero = { git = "https://github.com/weave-logic-ai/ruvector.git", branch = "perf/optimization-sweep" }
+# Distributed coordination (crates.io — upstream ruvnet)
+ruvector-cluster = "2.0"
+ruvector-raft = "2.0"
+ruvector-replication = "2.0"
+cognitum-gate-tilezero = "0.1"
 parking_lot = "0.12"
 futures = "0.3"
 
-# Internal crates
-clawft-types = { path = "crates/clawft-types", default-features = false }
-clawft-platform = { path = "crates/clawft-platform", default-features = false }
-clawft-core = { path = "crates/clawft-core", default-features = false }
-clawft-tools = { path = "crates/clawft-tools", default-features = false }
-clawft-channels = { path = "crates/clawft-channels" }
-clawft-llm = { path = "crates/clawft-llm", default-features = false }
-clawft-services = { path = "crates/clawft-services" }
-clawft-plugin = { path = "crates/clawft-plugin", default-features = false }
-clawft-plugin-git = { path = "crates/clawft-plugin-git" }
-clawft-plugin-cargo = { path = "crates/clawft-plugin-cargo" }
-clawft-plugin-oauth2 = { path = "crates/clawft-plugin-oauth2" }
-clawft-plugin-treesitter = { path = "crates/clawft-plugin-treesitter" }
-clawft-plugin-browser = { path = "crates/clawft-plugin-browser" }
-clawft-plugin-calendar = { path = "crates/clawft-plugin-calendar" }
-clawft-plugin-containers = { path = "crates/clawft-plugin-containers" }
-clawft-security = { path = "crates/clawft-security" }
-clawft-kernel = { path = "crates/clawft-kernel", default-features = false }
-exo-resource-tree = { path = "crates/exo-resource-tree" }
-weftos = { path = "crates/weftos", default-features = false }
+# Internal crates (version + path: version for crates.io, path for workspace)
+clawft-types = { version = "0.1.1", path = "crates/clawft-types", default-features = false }
+clawft-platform = { version = "0.1.1", path = "crates/clawft-platform", default-features = false }
+clawft-core = { version = "0.1.1", path = "crates/clawft-core", default-features = false }
+clawft-tools = { version = "0.1.1", path = "crates/clawft-tools", default-features = false }
+clawft-channels = { version = "0.1.1", path = "crates/clawft-channels" }
+clawft-llm = { version = "0.1.1", path = "crates/clawft-llm", default-features = false }
+clawft-services = { version = "0.1.1", path = "crates/clawft-services" }
+clawft-plugin = { version = "0.1.1", path = "crates/clawft-plugin", default-features = false }
+clawft-plugin-git = { version = "0.1.1", path = "crates/clawft-plugin-git" }
+clawft-plugin-cargo = { version = "0.1.1", path = "crates/clawft-plugin-cargo" }
+clawft-plugin-oauth2 = { version = "0.1.1", path = "crates/clawft-plugin-oauth2" }
+clawft-plugin-treesitter = { version = "0.1.1", path = "crates/clawft-plugin-treesitter" }
+clawft-plugin-browser = { version = "0.1.1", path = "crates/clawft-plugin-browser" }
+clawft-plugin-calendar = { version = "0.1.1", path = "crates/clawft-plugin-calendar" }
+clawft-plugin-containers = { version = "0.1.1", path = "crates/clawft-plugin-containers" }
+clawft-security = { version = "0.1.1", path = "crates/clawft-security" }
+clawft-kernel = { version = "0.1.1", path = "crates/clawft-kernel", default-features = false }
+exo-resource-tree = { version = "0.1.1", path = "crates/exo-resource-tree" }
+weftos = { version = "0.1.1", path = "crates/weftos", default-features = false }
 
 # Testing
 insta = { version = "1.39", features = ["json"] }

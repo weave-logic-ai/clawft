@@ -106,12 +106,12 @@ mod tests {
 
     /// Build an RvfFrame from the tuple returned by encode_* functions.
     ///
-    /// Uses `rvf_wire::write_segment` then `rvf_wire::read_segment` to
+    /// Uses `weftos_rvf_wire::write_segment` then `weftos_rvf_wire::read_segment` to
     /// produce a realistic frame with a valid content hash.
     fn make_frame(seg_type: u8, payload: &[u8], flags: SegmentFlags, segment_id: u64) -> RvfFrame {
-        let segment_bytes = rvf_wire::write_segment(seg_type, payload, flags, segment_id);
+        let segment_bytes = weftos_rvf_wire::write_segment(seg_type, payload, flags, segment_id);
         let (header, raw_payload) =
-            rvf_wire::read_segment(&segment_bytes).expect("write_segment output must be valid");
+            weftos_rvf_wire::read_segment(&segment_bytes).expect("write_segment output must be valid");
         RvfFrame {
             header,
             payload: raw_payload.to_vec(),
