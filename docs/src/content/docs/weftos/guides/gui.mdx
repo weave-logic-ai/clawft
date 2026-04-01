@@ -332,6 +332,118 @@ dependencies.
 
 ---
 
+## Block Engine (v0.2)
+
+Sprint 12 introduced a production-ready **Block Engine** in `gui/src/engine/`
+and `gui/src/blocks/`. The engine replaces the earlier prototype components with
+a fully recursive, registry-driven rendering system.
+
+### Core Engine (`gui/src/engine/`)
+
+- **BlockRegistry** -- Central registry mapping block type strings to React
+  components. Blocks self-register at import time. The registry supports
+  dynamic registration for agent-generated blocks.
+- **BlockRenderer** -- Recursive renderer that walks a block descriptor tree
+  and instantiates the correct component for each node. Handles nesting
+  (columns containing rows containing blocks) and error boundaries.
+- **StateStore** -- Zustand-based state management with a Tauri bridge. Kernel
+  state flows from Rust through Tauri commands into the Zustand store, and
+  React components subscribe to slices. The store supports optimistic updates
+  for responsive UI and rollback on kernel rejection.
+
+### Block Components (`gui/src/blocks/`)
+
+10 composable block types ship out of the box:
+
+| Block | Description |
+|-------|-------------|
+| **Text** | Rich text display with markdown rendering |
+| **Code** | Syntax-highlighted code blocks with copy-to-clipboard |
+| **Status** | Service/process health indicators with color coding |
+| **Table** | Sortable, filterable data tables with virtual scrolling |
+| **Tree** | Collapsible tree views for resource trees and process hierarchies |
+| **Terminal** | Embedded terminal output with ANSI color support |
+| **Button** | Action buttons wired to kernel commands via governance gate |
+| **Column** | Vertical layout container for stacking blocks |
+| **Row** | Horizontal layout container for side-by-side blocks |
+| **Grid** | CSS grid layout with configurable column/row templates |
+| **Tabs** | Tabbed container for switching between block groups |
+
+Layout blocks (Column, Row, Grid, Tabs) accept child blocks, enabling
+arbitrarily deep nesting. A dashboard is a tree of blocks described by a JSON
+descriptor -- the BlockRenderer walks the tree and produces the final UI.
+
+### Example: Composing a Dashboard
+
+```json
+{
+  "type": "Grid",
+  "props": { "columns": 2 },
+  "children": [
+    { "type": "Status", "props": { "service": "kernel.supervisor" } },
+    { "type": "Status", "props": { "service": "kernel.mesh" } },
+    {
+      "type": "Tabs",
+      "children": [
+        { "type": "Table", "props": { "label": "Processes", "source": "kernel.ps" } },
+        { "type": "Tree", "props": { "label": "Resources", "source": "kernel.tree" } }
+      ]
+    },
+    { "type": "Terminal", "props": { "source": "kernel.logs" } }
+  ]
+}
+```
+
+---
+
+## Theming System (v0.2)
+
+The GUI ships with a CSS-variable-based theming system in `gui/src/themes/`.
+
+### Built-in Themes
+
+| Theme | Description |
+|-------|-------------|
+| **ocean-dark** | Default dark theme with blue accents |
+| **midnight** | Deep dark theme for low-light environments |
+| **paper-light** | Clean light theme for daytime use |
+| **high-contrast** | WCAG AAA compliant theme for accessibility |
+
+### Architecture
+
+- **ThemeProvider** -- React context provider that applies the active theme's
+  CSS variables to the document root. Supports runtime switching without
+  page reload.
+- **CSS Variable Bridge** -- All colors, spacing, and typography are exposed as
+  `--weftos-*` CSS custom properties. Tailwind classes reference these
+  variables, so switching themes updates the entire UI instantly.
+- **ANSI Palette Mapping** -- Terminal and code blocks map ANSI color codes to
+  the active theme's palette, ensuring consistent appearance across themes.
+- **Tailwind Integration** -- The `tailwind.config.ts` extends Tailwind's
+  color palette with `--weftos-*` custom properties, so utility classes like
+  `bg-weftos-surface` and `text-weftos-primary` respond to theme changes
+  automatically.
+
+### Custom Themes
+
+Create a new theme by defining a CSS file with `--weftos-*` custom properties
+and registering it with the ThemeProvider:
+
+```typescript
+import { registerTheme } from '@/themes';
+
+registerTheme('my-theme', {
+  '--weftos-bg': '#1a1a2e',
+  '--weftos-surface': '#16213e',
+  '--weftos-primary': '#0f3460',
+  '--weftos-accent': '#e94560',
+  '--weftos-text': '#eaeaea',
+  // ... full palette
+});
+```
+
+---
+
 ## Implementation Roadmap
 
 - **K8.1**: Tauri 2.0 scaffolding + basic Rust-to-TS bindings (ServiceApi

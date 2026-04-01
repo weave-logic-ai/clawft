@@ -1,7 +1,7 @@
 # clawft Agent Framework Guide
 
-**Version**: 0.1.0
-**Date**: 2026-03-28
+**Version**: 0.2.0
+**Date**: 2026-03-31
 **Audience**: Developers building, configuring, and running agents on clawft/WeftOS
 
 ---
@@ -296,13 +296,13 @@ Assembles the final `ChatRequest` from the context messages, selected model, too
 
 Sends the assembled request to the selected LLM provider via `clawft-llm`. Handles streaming, retries, and failover.
 
-### Stage 5: Scorer (`scorer.rs`)
+### Stage 5: Scorer (`scorer.rs`) -- GEPA FitnessScorer (v0.2)
 
-Evaluates response quality after the LLM returns. Produces quality scores used as fitness signals for the learner. Currently a basic implementation (154 lines).
+Evaluates response quality after the LLM returns. The `FitnessScorer` (replacing the earlier `NoopScorer`) scores responses on 4 weighted dimensions: relevance (0.35), coherence (0.25), completeness (0.25), and conciseness (0.15). Weights are configurable. Scores feed into the learner for prompt evolution.
 
-### Stage 6: Learner (`learner.rs`)
+### Stage 6: Learner (`learner.rs`) -- GEPA TrajectoryLearner (v0.2)
 
-Records trajectories (request + response + score) for adaptive learning. Currently a no-op stub (139 lines, `NoopLearner`). The planned implementation will use GEPA (Genetic Evolution of Prompt Architectures) to evolve skill prompts using scorer output as fitness (see ADR-017).
+Records trajectories (request + response + score) for adaptive learning. The `TrajectoryLearner` (replacing the earlier `NoopLearner`) implements GEPA (Genetic Evolution of Prompt Architectures, ADR-017): trajectory collection in a ring buffer, periodic pattern extraction, and 4 prompt mutation strategies (rephrase, add examples, remove ineffective, emphasize). Mutations are proposed as skill candidates requiring approval before activation.
 
 ### Supporting Modules
 
@@ -360,6 +360,7 @@ The `clawft-llm` crate provides a unified interface for LLM APIs:
 
 - `Provider` trait defines the chat completion interface
 - `OpenAiCompatProvider` implements it for any OpenAI-compatible API (Claude, OpenAI, Hermes via OpenRouter, local models via vLLM/llama.cpp)
+- `LocalProvider` (v0.2) -- dedicated provider for local inference servers with key-optional auth, streaming, and model listing. Factory methods: `LocalProvider::ollama()`, `::vllm()`, `::llamacpp()`, `::lmstudio()`
 - `ProviderRouter` routes `"provider/model"` strings to provider instances
 - `FailoverChain` handles provider failover (retry -> fallback)
 
@@ -382,7 +383,35 @@ The `sse.rs` module provides Server-Sent Events parsing for streaming responses.
 
 ---
 
-## 12. Running Inside WeftOS
+## 12. Context Compression (v0.2)
+
+The `ContextBuilder` now supports sliding-window context compression via `crates/clawft-core/src/agent/context.rs`. When enabled, older messages beyond the sliding window are automatically summarized using first-sentence extraction, keeping the context within token budgets.
+
+### Configuration
+
+```rust
+let config = ContextCompressionConfig {
+    max_context_tokens: 8192,  // Default token budget
+    window_size: 20,           // Keep last N messages verbatim
+    summary_strategy: SummaryStrategy::FirstSentence,
+};
+
+let builder = ContextBuilder::new()
+    .with_compression(config);
+```
+
+### How It Works
+
+1. Messages within the sliding window (most recent N) are kept verbatim.
+2. Messages outside the window are summarized: the first sentence of each message is extracted as a condensed representation.
+3. The token count is estimated and messages are dropped from the middle if the total still exceeds `max_context_tokens`.
+4. The system prompt and most recent messages are always preserved.
+
+Context compression is opt-in. Without `with_compression()`, the builder behaves identically to v0.1 (no summarization, middle-drop only).
+
+---
+
+## 13. Running Inside WeftOS
 
 When clawft agents run on the WeftOS kernel, they gain additional capabilities:
 
@@ -415,7 +444,7 @@ The kernel's OS patterns provide supervisor restart strategies and dead-letter q
 
 ---
 
-## 13. Comparison with Hermes
+## 14. Comparison with Hermes
 
 Hermes (NousResearch, 18.5K stars, Python, MIT) is the closest parallel to clawft. Both implement the same agent pattern (loop, skills, memory, tools, channels).
 
@@ -437,8 +466,8 @@ Hermes (NousResearch, 18.5K stars, Python, MIT) is the closest parallel to clawf
 
 | Feature | Hermes | clawft Status |
 |---------|--------|---------------|
-| Context compression | Structured summarization | Not implemented (gap) |
-| GEPA prompt evolution | Genetic evolution of skill prompts | Stub only (ADR-017 planned) |
+| Context compression | Structured summarization | **Implemented (v0.2)**: sliding window + first-sentence summarization |
+| GEPA prompt evolution | Genetic evolution of skill prompts | **Implemented (v0.2)**: TrajectoryLearner + FitnessScorer + 4 mutation strategies |
 | User modeling | Honcho dialectic understanding | Not implemented (gap) |
 | Session search | SQLite FTS5 + LLM summary | Not implemented (ECC could serve) |
 | RL trajectories | ShareGPT JSONL + Atropos | Not implemented |

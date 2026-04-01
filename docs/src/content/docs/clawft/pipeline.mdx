@@ -79,21 +79,54 @@ Assembles the final `ChatRequest` from the context messages, selected model, too
 
 Sends the assembled request to the selected LLM provider via `clawft-llm`. Handles streaming (via SSE parsing), retries, and failover. The transport stage uses the `ClawftLlmAdapter` at runtime; during testing, a stub transport returns canned responses.
 
-## Stage 5: Scorer
+## Stage 5: Scorer (GEPA FitnessScorer)
 
-**File**: `crates/clawft-core/src/pipeline/scorer.rs` (~154 lines)
+**File**: `crates/clawft-core/src/pipeline/scorer.rs`
 
 Evaluates response quality after the LLM returns. Produces a `QualityScore` with overall, relevance, and coherence dimensions. These scores serve as fitness signals for the learner stage.
 
-The current implementation is `NoopScorer`, which returns a score of 1.0 for all responses. Future implementations will use response analysis heuristics and user feedback.
+As of v0.2, the `FitnessScorer` replaces the previous `NoopScorer`. It evaluates responses on 4 weighted dimensions:
 
-## Stage 6: Learner
+| Dimension | Weight | Measures |
+|-----------|--------|----------|
+| Relevance | 0.35 | How well the response addresses the request |
+| Coherence | 0.25 | Logical consistency and flow |
+| Completeness | 0.25 | Coverage of the request's requirements |
+| Conciseness | 0.15 | Information density without unnecessary verbosity |
 
-**File**: `crates/clawft-core/src/pipeline/learner.rs` (~139 lines)
+Weights are configurable. The overall score is the weighted sum, normalized to [0.0, 1.0]. These scores drive the learner's mutation decisions -- low-scoring trajectories trigger prompt refinement.
 
-Records trajectories (request + response + score) for adaptive learning. The current implementation is `NoopLearner`, which discards all trajectories.
+## Stage 6: Learner (GEPA TrajectoryLearner)
 
-The planned implementation (ADR-017) will use GEPA -- Genetic Evolution of Prompt Architectures -- to evolve skill prompts using scorer output as fitness. This will enable skills to improve autonomously over time based on measured response quality.
+**File**: `crates/clawft-core/src/pipeline/learner.rs`
+
+Records trajectories (request + response + score) for adaptive learning.
+
+As of v0.2, the `TrajectoryLearner` replaces the previous `NoopLearner`, implementing GEPA -- Genetic Evolution of Prompt Architectures (ADR-017). The learner operates in three phases:
+
+### Phase 1: Trajectory Collection
+
+Every pipeline execution produces a trajectory: the original request, the assembled context, the LLM response, and the fitness score. Trajectories are stored in a ring buffer (configurable size, default 1000).
+
+### Phase 2: Pattern Extraction
+
+Periodically (configurable interval, default every 50 trajectories), the learner analyzes collected trajectories to extract patterns:
+- High-scoring trajectories: what prompt structures produce good results?
+- Low-scoring trajectories: what patterns correlate with poor quality?
+- Skill-specific trends: which skills are improving or degrading?
+
+### Phase 3: Prompt Mutation
+
+Based on extracted patterns, the learner applies mutation strategies to skill prompts:
+
+| Strategy | Description |
+|----------|-------------|
+| **Rephrase** | Rewrite unclear instructions using patterns from high-scoring trajectories |
+| **Add Examples** | Insert few-shot examples extracted from successful trajectories |
+| **Remove Ineffective** | Strip instructions that correlate with low scores |
+| **Emphasize** | Strengthen instructions that correlate with high scores |
+
+Mutations are proposed as skill candidates (similar to skill auto-generation) and require approval before activation. This ensures human oversight over prompt evolution while enabling data-driven improvement.
 
 ## Cost Tracking
 

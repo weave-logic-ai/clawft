@@ -3,6 +3,7 @@
 .hive-mind
 .swarm/
 target/
+.env
 .env-keys.json
 crates/clawft-wasm/www/pkg/
 
@@ -10,3 +11,4 @@ crates/clawft-wasm/www/pkg/
 .weftos/
 gui/node_modules/
 gui/dist/
+.vercel

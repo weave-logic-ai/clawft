@@ -13,6 +13,16 @@ fundamentally different: a distributed kernel that gives AI agents persistent
 memory, verifiable reasoning, and constitutional governance — running on
 everything from a Raspberry Pi to a browser tab to an air-gapped data center.
 
+## What's New in v0.2
+
+- **Lego Block Engine** -- 10 composable GUI blocks (Text, Code, Status, Table, Tree, Terminal, Button, Column, Row, Grid, Tabs) with recursive rendering, BlockRegistry, and Zustand+Tauri state management
+- **4 Built-in Themes** -- ocean-dark, midnight, paper-light, and high-contrast (WCAG AAA). CSS variable bridge, ThemeProvider, ANSI palette mapping, Tailwind integration via `--weftos-*` custom properties
+- **Context Compression** -- Sliding-window context management with first-sentence summarization. Configurable token budget (default 8192). Opt-in via `builder.with_compression(config)`
+- **GEPA Prompt Evolution** -- Production-ready Scorer and Learner pipeline stages. FitnessScorer with 4-dimension weighted scoring. TrajectoryLearner with pattern extraction and 4 prompt mutation strategies
+- **Local LLM Support** -- OpenAI-compatible provider for Ollama, vLLM, llama.cpp, and LM Studio. Key-optional auth, streaming, model listing. Run `weft agent --model local/llama3.1` to use local inference
+
+---
+
 ## The Problems We Solve
 
 ### No more context windows

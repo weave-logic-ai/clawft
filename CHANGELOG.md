@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-03-31
+
+### Added
+
+#### Sprint 12: Block Engine, Theming, GEPA, Local LLM
+
+- **Lego Block Engine** (`gui/src/engine/`, `gui/src/blocks/`): BlockRegistry, BlockRenderer, and Zustand+Tauri StateStore. 10 composable block components (Text, Code, Status, Table, Tree, Terminal, Button, Column, Row, Grid, Tabs) with recursive rendering and JSON descriptor-driven layout.
+- **Theming System** (`gui/src/themes/`): 4 built-in themes (ocean-dark, midnight, paper-light, high-contrast with WCAG AAA compliance). CSS variable bridge via `--weftos-*` custom properties, ThemeProvider with runtime switching, ANSI palette mapping, and Tailwind integration.
+- **Context Compression** (`crates/clawft-core/src/agent/context.rs`): Sliding-window context management with configurable `max_context_tokens` (default 8192). First-sentence summarization for older messages. Opt-in via `builder.with_compression(config)`.
+- **GEPA Prompt Evolution** (`crates/clawft-core/src/pipeline/`): `TrajectoryLearner` replacing `NoopLearner` with trajectory collection, pattern extraction, and 4 prompt mutation strategies (rephrase, add examples, remove ineffective, emphasize). `FitnessScorer` replacing `NoopScorer` with 4-dimension weighted scoring (relevance, coherence, completeness, conciseness).
+- **Local LLM Provider** (`crates/clawft-llm/src/local_provider.rs`): OpenAI-compatible provider for Ollama, vLLM, llama.cpp, and LM Studio. Key-optional auth, streaming, model listing. Factory methods: `LocalProvider::ollama()`, `::vllm()`, `::llamacpp()`, `::lmstudio()`.
+
 ## [Unreleased]
 
 ### Added
@@ -202,5 +214,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Release profile with LTO, strip, single codegen unit, and abort-on-panic
 - 1,029 tests across the workspace
 
-[Unreleased]: https://github.com/clawft/clawft/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/clawft/clawft/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/clawft/clawft/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/clawft/clawft/releases/tag/v0.1.0

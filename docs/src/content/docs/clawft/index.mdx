@@ -42,9 +42,12 @@ clawft's differentiator is the kernel integration layer: when running on WeftOS,
 
 - **6-stage processing pipeline** -- Classify, route, assemble context, transport to LLM, score quality, and feed learning signals. Every stage is trait-based and replaceable.
 - **Tiered model routing** -- Complexity-based routing across four model tiers (Free/Standard/Premium/Elite) with per-sender cost tracking and budget enforcement.
+- **Context compression** (v0.2) -- Sliding-window context management with configurable `max_context_tokens` (default 8192). Older messages are automatically summarized using first-sentence extraction to stay within token budgets. Opt-in via `builder.with_compression(config)`.
+- **GEPA prompt evolution** (v0.2) -- Genetic Evolution of Prompt Architectures. The pipeline's Scorer and Learner stages are now production-ready: `FitnessScorer` evaluates responses on 4 weighted dimensions, and `TrajectoryLearner` collects trajectories, extracts patterns, and applies prompt mutation strategies (rephrase, add examples, remove ineffective, emphasize).
+- **Local LLM provider** (v0.2) -- OpenAI-compatible provider for local inference servers. Factory methods for Ollama (`LocalProvider::ollama()`), vLLM (`::vllm()`), llama.cpp (`::llamacpp()`), and LM Studio (`::lmstudio()`). Key-optional auth, streaming, and model listing. See [Quickstart](/weftos/getting-started/quickstart) for setup.
 - **Skill auto-generation** -- Detects repeated tool-call patterns and generates skill candidates after a configurable threshold (default: 3 repetitions). Requires user approval.
 - **Cost tracking** -- Per-tier budget enforcement with daily and monthly spending limits, recording both estimated and actual costs.
-- **Multi-provider LLM routing** -- Nine built-in providers (OpenAI, Anthropic, Groq, DeepSeek, Mistral, Together, OpenRouter, Gemini, xAI) with prefix-based routing, automatic retry, and environment-driven API keys.
+- **Multi-provider LLM routing** -- Nine built-in providers (OpenAI, Anthropic, Groq, DeepSeek, Mistral, Together, OpenRouter, Gemini, xAI) plus local providers, with prefix-based routing, automatic retry, and environment-driven API keys.
 - **11 communication channels** -- Telegram, Slack, Discord, Email, WhatsApp, Signal, Matrix, IRC, Google Chat, Microsoft Teams, and Web. All share one trait interface and lifecycle.
 - **Built-in tool system** -- File I/O, shell execution, memory, web search/fetch, messaging, voice, and subprocess spawning -- all workspace-sandboxed with security policies.
 - **Plugin architecture** -- Six extension points (Tool, Channel, Pipeline, Skill, Memory, Voice), WASM sandbox (wasmtime), hot-reload, permission system, and slash-command registry.

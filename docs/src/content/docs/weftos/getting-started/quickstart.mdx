@@ -160,6 +160,55 @@ my-project/
   ... your code ...
 ```
 
+## Local LLM Setup (v0.2)
+
+Starting with v0.2, clawft includes a built-in local LLM provider that works
+with any OpenAI-compatible inference server. No cloud API keys required.
+
+### Ollama (recommended for getting started)
+
+Install [Ollama](https://ollama.ai) and pull a model:
+
+```bash
+# Install Ollama
+curl -fsSL https://ollama.ai/install.sh | sh
+
+# Pull a model
+ollama pull llama3.1
+
+# Verify it's running
+curl http://localhost:11434/api/tags
+```
+
+Configure clawft to use Ollama by setting the model prefix to `local/`:
+
+```bash
+weft agent --model local/llama3.1
+```
+
+Or set it in your configuration:
+
+```toml
+# In your agent config
+[routing]
+mode = "static"
+model = "local/llama3.1"
+```
+
+### Other Local Servers
+
+The local provider supports any OpenAI-compatible server:
+
+| Server | Default URL | Setup |
+|--------|-------------|-------|
+| **Ollama** | `http://localhost:11434/v1` | `ollama serve` |
+| **vLLM** | `http://localhost:8000/v1` | `vllm serve model-name` |
+| **llama.cpp** | `http://localhost:8080/v1` | `llama-server -m model.gguf` |
+| **LM Studio** | `http://localhost:1234/v1` | Start from LM Studio UI |
+
+No API key is required for local servers (key-optional auth). The provider
+auto-detects the server type from the URL and configures itself accordingly.
+
 ## What Next
 
 - [Configuration Reference](/weftos/guides/configuration) -- every `weave.toml`
