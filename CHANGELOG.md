@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-03-31
+
+### Added
+
+#### Sprint 13: GUI Integration, Pipeline Wiring, Paperclip Patterns, HTTP API
+
+- **GUI Integration**: KernelDataProvider for live kernel state in React, ThemeSwitcher component with runtime theme selection, BudgetBlock displaying agent budget consumption
+- **Pipeline Wiring**: Config-based scorer and learner instantiation via factory functions, skill mutation pipeline with GEPA-driven prompt evolution
+- **Paperclip Patterns**: Company and OrgChart organizational models, HeartbeatScheduler for liveness monitoring, GoalTree for hierarchical objective tracking
+- **HTTP API**: `/execute`, `/govern`, and `/health` endpoints for external kernel interaction
+- **Full WASI Support**: All 10 publishable crates compile for `wasm32-wasip2` target (10/10)
+- **Windows ARM**: Re-enabled `aarch64-pc-windows-msvc` target with native-tls backend
+- **Testing**: Property-based tests, fuzz harnesses, and benchmark suites across kernel and core crates
+- **Integration Docs**: Paperclip integration guide, OpenClaw connector docs, local inference setup, cloud provider configuration, RuFlo orchestration reference
+
 ## [0.2.0] - 2026-03-31
 
 ### Added
@@ -214,6 +229,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Release profile with LTO, strip, single codegen unit, and abort-on-panic
 - 1,029 tests across the workspace
 
-[Unreleased]: https://github.com/clawft/clawft/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/clawft/clawft/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/clawft/clawft/releases/tag/v0.1.0
+[Unreleased]: https://github.com/weave-logic-ai/weftos/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/weave-logic-ai/weftos/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/weave-logic-ai/weftos/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/weave-logic-ai/weftos/releases/tag/v0.1.0
