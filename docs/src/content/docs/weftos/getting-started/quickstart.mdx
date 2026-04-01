@@ -7,33 +7,29 @@ description: Get from zero to a running WeftOS kernel in a project directory.
 
 This guide gets you from zero to a running WeftOS kernel in a project directory.
 
-## Prerequisites
+## Install
 
-- **Rust 1.93+** -- install via [rustup](https://rustup.rs/):
-
-  ```bash
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-  rustup update
-  ```
-
-- **Git**
-
-## Install from Source
+The fastest way to install WeftOS:
 
 ```bash
-git clone https://github.com/weave-logic-ai/clawft.git
-cd clawft
+# macOS / Linux
+curl -fsSL https://github.com/weave-logic-ai/weftos/releases/latest/download/clawft-cli-installer.sh | sh
 
-# Build the WeftOS binary
-scripts/build.sh native
+# Or via Homebrew
+brew install weave-logic-ai/tap/clawft-cli
+```
 
-# The binaries are in target/release/
-# - weftos  (WeftOS daemon)
-# - weave   (kernel management CLI)
-# - weft    (agent CLI)
+```powershell
+# Windows
+irm https://github.com/weave-logic-ai/weftos/releases/latest/download/clawft-cli-installer.ps1 | iex
+```
 
-# Copy to your PATH (optional)
-cp target/release/weftos target/release/weave ~/.local/bin/
+See the [installation guide](/weftos/getting-started/installation) for Docker, cargo, npm, and source builds.
+
+Verify:
+
+```bash
+weft --version
 ```
 
 ## Initialize a Project

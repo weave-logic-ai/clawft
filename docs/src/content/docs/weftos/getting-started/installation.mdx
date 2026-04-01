@@ -1,128 +1,170 @@
 ---
 title: Installation
-description: Full installation guide for WeftOS including source builds, Docker, ONNX embeddings, and debug builds.
+description: Install WeftOS from pre-built binaries, Homebrew, Docker, cargo, or npm.
 ---
 
 # WeftOS Installation Guide
 
-## Prerequisites
+## Quick Install (recommended)
 
-- Rust 1.93+ (`rustup install 1.93`)
-- Git
-- (Optional) Docker and Docker Compose
-- (Optional) Node.js 18+ for the K8 GUI
-
-## From Source
+### Shell installer (Linux / macOS)
 
 ```bash
-git clone https://github.com/weave-logic-ai/clawft.git
-cd clawft
+curl -fsSL https://github.com/weave-logic-ai/weftos/releases/latest/download/clawft-cli-installer.sh | sh
+```
 
-# Build the CLI in release mode
+### Homebrew (macOS / Linux)
+
+```bash
+brew install weave-logic-ai/tap/clawft-cli
+```
+
+### Download binary manually
+
+Pre-built binaries for all platforms are available on the [GitHub Releases](https://github.com/weave-logic-ai/weftos/releases) page.
+
+| Platform | Binary |
+|----------|--------|
+| Linux x86_64 | `clawft-cli-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux ARM64 | `clawft-cli-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS Intel | `clawft-cli-x86_64-apple-darwin.tar.gz` |
+| macOS Apple Silicon | `clawft-cli-aarch64-apple-darwin.tar.gz` |
+| Windows x86_64 | `clawft-cli-x86_64-pc-windows-msvc.zip` |
+
+### PowerShell installer (Windows)
+
+```powershell
+irm https://github.com/weave-logic-ai/weftos/releases/latest/download/clawft-cli-installer.ps1 | iex
+```
+
+## Verify
+
+```bash
+weft --version    # Should print: weft 0.1.x
+weft status       # Show configuration and defaults
+weft tools list   # Show built-in tools
+```
+
+## Other install methods
+
+### Docker
+
+```bash
+docker pull ghcr.io/weave-logic-ai/weftos:latest
+docker run --rm ghcr.io/weave-logic-ai/weftos weft --version
+```
+
+For persistent use:
+
+```bash
+docker run -d --name weftos \
+  -v weftos-data:/home/nonroot/.clawft \
+  -p 8080:8080 \
+  ghcr.io/weave-logic-ai/weftos
+```
+
+See the [Docker deployment guide](/weftos/guides/deployment-docker) for production setup.
+
+### cargo install (builds from source)
+
+Requires Rust 1.93+:
+
+```bash
+cargo install weftos
+```
+
+This installs the `weftos` daemon binary. For the `weft` CLI:
+
+```bash
+# Clone and build (weft is not published as a standalone crate)
+git clone https://github.com/weave-logic-ai/weftos.git
+cd weftos
+cargo install --path crates/clawft-cli
+```
+
+### cargo binstall (pre-built binary via cargo)
+
+```bash
+cargo binstall clawft-cli
+```
+
+### npm (WASM module for browser)
+
+```bash
+npm install @weftos/core
+```
+
+This gives you the WeftOS WASM runtime for browser-based agent applications.
+
+### Rust library (add to your project)
+
+```toml
+[dependencies]
+weftos = "0.1"
+
+# Or individual framework crates:
+clawft-core = "0.1"
+clawft-kernel = "0.1"
+clawft-types = "0.1"
+clawft-plugin = "0.1"
+```
+
+All crates are on [crates.io](https://crates.io/crates/weftos).
+
+## Three binaries
+
+WeftOS ships three binaries:
+
+| Binary | Purpose | Install via |
+|--------|---------|-------------|
+| `weft` | Agent CLI (primary user interface) | `clawft-cli` package |
+| `weaver` | Kernel operator CLI (daemon management) | `clawft-weave` package |
+| `weftos` | Kernel daemon | `weftos` package |
+
+## From source (development)
+
+```bash
+git clone https://github.com/weave-logic-ai/weftos.git
+cd weftos
+
+# Build all binaries in release mode
 scripts/build.sh native
 
-# Or build directly with cargo (not recommended for regular use):
-cargo build --release -p clawft-cli
-
-# Install the CLI binary
-cargo install --path crates/clawft-cli
-
-# Verify
-weft --version
-```
-
-### Debug Builds (faster iteration)
-
-```bash
+# Or debug mode (faster compilation)
 scripts/build.sh native-debug
-```
-
-### Build with Extra Features
-
-```bash
-# Single-node production
-scripts/build.sh native --features ecc,exochain,os-patterns
 
 # Full feature set
 scripts/build.sh native --features ecc,exochain,os-patterns,mesh,cluster,onnx-embeddings,wasm-sandbox
 ```
 
-See the [feature flags guide](/weftos/guides/feature-flags) for the complete
-feature reference.
+See the [feature flags guide](/weftos/guides/feature-flags) for the complete feature reference.
 
-## From Docker
-
-```bash
-# Start a WeftOS node with docker compose
-docker compose up weftos-node
-
-# Or build and run manually
-docker build -t weftos .
-docker run -p 8080:8080 weftos
-```
-
-For detailed Docker deployment options, see the
-[Docker deployment guide](/weftos/guides/deployment-docker).
-
-## Quick Start
+### ONNX embeddings (optional)
 
 ```bash
-# Initialize WeftOS in your project
-cd my-project
-weftos init
-
-# Start the kernel
-weave boot
-
-# Check status
-weave status
-```
-
-### K8 GUI (optional)
-
-```bash
-cd gui
-npm install
-npm run dev
-# Open http://localhost:5173
-```
-
-## ONNX Embeddings (optional)
-
-The `onnx-embeddings` feature enables real ONNX model inference for semantic
-search instead of the default mock embeddings.
-
-```bash
-# Download the default model (all-MiniLM-L6-v2)
 scripts/download-model.sh
-
-# Build with ONNX support
 scripts/build.sh native --features onnx-embeddings
 ```
 
-The model is stored in `.weftos/models/` and is not checked into git.
-
-## Compile-time Checks
-
-Before committing, run the full phase gate:
+### Compile-time checks
 
 ```bash
-scripts/build.sh gate
+scripts/build.sh gate   # 11 checks: build, test, clippy, etc.
 ```
-
-This executes 11 checks: build, test, clippy, formatting, and more.
 
 ## Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
+| `weft: command not found` after install | Add `~/.cargo/bin` to your PATH |
+| Homebrew formula not found | `brew tap weave-logic-ai/tap` first |
+| Docker permission denied | `docker login ghcr.io` or check GHCR auth |
 | `rustup` reports Rust < 1.93 | `rustup update stable` |
-| Missing `tokio` or `futures` | The `native` feature is not enabled (it is the default) |
 | ONNX model not found | Run `scripts/download-model.sh` first |
-| `scripts/build.sh` not found | You are not in the project root directory |
 
-## Next Steps
+## Next steps
 
-- [Feature Flags](/weftos/guides/feature-flags) -- all compile-time feature flags
-- [Configuration](/weftos/guides/configuration) -- runtime configuration reference
+- [Quickstart](/weftos/getting-started/quickstart) -- get a kernel running in 2 minutes
+- [Feature Flags](/weftos/guides/feature-flags) -- compile-time feature flags
+- [Configuration](/weftos/guides/configuration) -- runtime configuration
 - [First Project](/weftos/getting-started/first-project) -- create your first WeftOS project

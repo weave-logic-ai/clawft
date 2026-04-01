@@ -68,6 +68,31 @@ export default function HomePage() {
           </Link>
         </div>
 
+        {/* Install CTA */}
+        <div className="mb-12 rounded-xl border border-fd-border bg-fd-card p-6">
+          <h3 className="mb-4 text-lg font-semibold text-fd-card-foreground">Install</h3>
+          <div className="mb-4 rounded-lg bg-fd-background p-4 text-left font-mono text-sm text-fd-foreground">
+            <span className="text-fd-muted-foreground">$</span> curl -fsSL https://github.com/weave-logic-ai/weftos/releases/latest/download/clawft-cli-installer.sh | sh
+          </div>
+          <div className="flex flex-wrap justify-center gap-3 text-sm">
+            <a href="https://github.com/weave-logic-ai/weftos/releases" className="rounded-md bg-fd-primary px-4 py-2 font-medium text-fd-primary-foreground hover:opacity-90 transition-opacity">
+              GitHub Releases
+            </a>
+            <a href="https://crates.io/crates/weftos" className="rounded-md border border-fd-border px-4 py-2 font-medium text-fd-foreground hover:bg-fd-accent transition-colors">
+              crates.io
+            </a>
+            <a href="https://www.npmjs.com/package/@weftos/core" className="rounded-md border border-fd-border px-4 py-2 font-medium text-fd-foreground hover:bg-fd-accent transition-colors">
+              npm
+            </a>
+            <a href="https://github.com/weave-logic-ai/weftos/pkgs/container/weftos" className="rounded-md border border-fd-border px-4 py-2 font-medium text-fd-foreground hover:bg-fd-accent transition-colors">
+              Docker
+            </a>
+            <a href="/docs/weftos/getting-started/installation" className="rounded-md border border-fd-border px-4 py-2 font-medium text-fd-foreground hover:bg-fd-accent transition-colors">
+              All install options
+            </a>
+          </div>
+        </div>
+
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {[
             { label: 'Agent Loop', desc: '7-stage pipeline with tiered routing' },

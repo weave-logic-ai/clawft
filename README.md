@@ -1,7 +1,9 @@
 # clawft + WeftOS
 
-[![CI](https://github.com/weave-logic-ai/clawft/actions/workflows/ci.yml/badge.svg)](https://github.com/weave-logic-ai/clawft/actions/workflows/ci.yml)
-[![License](https://img.shields.io/crates/l/clawft.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/weave-logic-ai/weftos)](https://github.com/weave-logic-ai/weftos/releases)
+[![crates.io](https://img.shields.io/crates/v/weftos)](https://crates.io/crates/weftos)
+[![npm](https://img.shields.io/npm/v/@weftos/core)](https://www.npmjs.com/package/@weftos/core)
+[![License](https://img.shields.io/crates/l/weftos)](LICENSE)
 
 **AI that remembers everything, runs anywhere, trusts no one, and never stops learning.**
 
@@ -260,9 +262,20 @@ causality, search semantic memory, and process ephemeral signals in real-time.
 ### Install
 
 ```sh
-# From source (crate not yet published to crates.io)
-cargo install --path crates/clawft-cli
+# Shell installer (Linux / macOS)
+curl -fsSL https://github.com/weave-logic-ai/weftos/releases/latest/download/clawft-cli-installer.sh | sh
+
+# Or via Homebrew
+brew install weave-logic-ai/tap/clawft-cli
+
+# Or via cargo
+cargo install weftos
+
+# Or via Docker
+docker pull ghcr.io/weave-logic-ai/weftos:latest
 ```
+
+Pre-built binaries for Linux (x86_64, ARM64), macOS (Intel, Apple Silicon), and Windows are on [GitHub Releases](https://github.com/weave-logic-ai/weftos/releases). WASM module available as [`@weftos/core`](https://www.npmjs.com/package/@weftos/core) on npm. All framework crates on [crates.io](https://crates.io/crates/weftos).
 
 ### Configure
 
