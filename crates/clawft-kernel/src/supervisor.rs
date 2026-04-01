@@ -10,10 +10,12 @@ use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[cfg(any(feature = "native", feature = "os-patterns"))]
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+
+use crate::process::CancellationToken;
 
 use clawft_platform::Platform;
 
@@ -327,8 +329,11 @@ pub struct AgentSupervisor<P: Platform> {
     process_table: Arc<ProcessTable>,
     kernel_ipc: Arc<KernelIpc>,
     default_capabilities: AgentCapabilities,
+    #[cfg(feature = "native")]
     running_agents: Arc<DashMap<Pid, tokio::task::JoinHandle<()>>>,
+    #[cfg(feature = "native")]
     a2a_router: Option<Arc<crate::a2a::A2ARouter>>,
+    #[cfg(feature = "native")]
     cron_service: Option<Arc<crate::cron::CronService>>,
     #[cfg(feature = "exochain")]
     tree_manager: Option<Arc<crate::tree_manager::TreeManager>>,
@@ -367,8 +372,11 @@ impl<P: Platform> AgentSupervisor<P> {
             process_table,
             kernel_ipc,
             default_capabilities,
+            #[cfg(feature = "native")]
             running_agents: Arc::new(DashMap::new()),
+            #[cfg(feature = "native")]
             a2a_router: None,
+            #[cfg(feature = "native")]
             cron_service: None,
             #[cfg(feature = "exochain")]
             tree_manager: None,
@@ -390,6 +398,7 @@ impl<P: Platform> AgentSupervisor<P> {
     ///
     /// When set, `spawn_and_run` will create per-agent inboxes via the
     /// A2ARouter and pass the cron service handle to the agent work loop.
+    #[cfg(feature = "native")]
     pub fn with_a2a_router(
         mut self,
         a2a_router: Arc<crate::a2a::A2ARouter>,
@@ -401,11 +410,13 @@ impl<P: Platform> AgentSupervisor<P> {
     }
 
     /// Get the A2A router (if configured).
+    #[cfg(feature = "native")]
     pub fn a2a_router(&self) -> Option<&Arc<crate::a2a::A2ARouter>> {
         self.a2a_router.as_ref()
     }
 
     /// Get the cron service (if configured).
+    #[cfg(feature = "native")]
     pub fn cron_service(&self) -> Option<&Arc<crate::cron::CronService>> {
         self.cron_service.as_ref()
     }
@@ -675,6 +686,7 @@ impl<P: Platform> AgentSupervisor<P> {
     ///
     /// Returns `KernelError::ProcessTableFull` if the process table
     /// has reached its maximum capacity.
+    #[cfg(feature = "native")]
     pub fn spawn_and_run<F, Fut>(
         &self,
         request: SpawnRequest,
@@ -839,6 +851,7 @@ impl<P: Platform> AgentSupervisor<P> {
                 .update_state(pid, ProcessState::Exited(-1));
 
             // Abort the running task handle (cleanup won't run)
+            #[cfg(feature = "native")]
             if let Some((_, handle)) = self.running_agents.remove(&pid) {
                 handle.abort();
             }
@@ -984,11 +997,13 @@ impl<P: Platform> AgentSupervisor<P> {
     }
 
     /// Get the number of actively tracked running agent tasks.
+    #[cfg(feature = "native")]
     pub fn running_task_count(&self) -> usize {
         self.running_agents.len()
     }
 
     /// Abort all running agent tasks (used during forced shutdown).
+    #[cfg(feature = "native")]
     pub fn abort_all(&self) {
         for entry in self.running_agents.iter() {
             entry.value().abort();
@@ -1006,6 +1021,7 @@ impl<P: Platform> AgentSupervisor<P> {
     /// 3. Logs a chain event (when exochain is enabled)
     ///
     /// Returns a list of (pid, exit_code) for all reaped processes.
+    #[cfg(feature = "native")]
     pub async fn watchdog_sweep(&self) -> Vec<(Pid, i32)> {
         let mut reaped = Vec::new();
 
@@ -1064,6 +1080,7 @@ impl<P: Platform> AgentSupervisor<P> {
     /// 4. On timeout, aborts any remaining tasks
     ///
     /// Returns a list of (pid, exit_code) for all agents.
+    #[cfg(feature = "native")]
     pub async fn shutdown_all(&self, timeout: std::time::Duration) -> Vec<(Pid, i32)> {
         // 1. Cancel all agent tokens
         for entry in self.process_table.list() {

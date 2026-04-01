@@ -83,3 +83,9 @@ serde_yaml = { workspace = true }
 clawft-platform = { workspace = true }
 clawft-types = { workspace = true }
 temp-env = "0.3"
+criterion = { version = "0.5", features = ["html_reports"] }
+rand = { workspace = true }
+
+[[bench]]
+name = "pipeline_bench"
+harness = false

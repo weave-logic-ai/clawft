@@ -1,6 +1,7 @@
 //! WASM tool runner: compilation, execution, module cache, and hashing.
 
 use std::path::PathBuf;
+#[cfg(feature = "wasm-sandbox")]
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};

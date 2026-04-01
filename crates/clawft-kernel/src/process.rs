@@ -8,10 +8,46 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use tokio_util::sync::CancellationToken;
 
 use crate::capability::AgentCapabilities;
 use crate::error::KernelError;
+
+// Re-export CancellationToken: use tokio_util when available (native),
+// otherwise provide a minimal shim for non-async targets (WASI).
+#[cfg(feature = "native")]
+pub use tokio_util::sync::CancellationToken;
+
+#[cfg(not(feature = "native"))]
+mod cancel_shim {
+    /// Minimal CancellationToken shim for non-async (WASI) builds.
+    ///
+    /// The real token lives in `tokio_util`. This provides the same
+    /// construction + Clone API so that `ProcessEntry` compiles on all
+    /// targets. The async `cancelled()` future is intentionally absent
+    /// because WASI builds do not run an async runtime.
+    #[derive(Debug, Clone)]
+    pub struct CancellationToken {
+        _priv: (),
+    }
+
+    impl CancellationToken {
+        pub fn new() -> Self {
+            Self { _priv: () }
+        }
+
+        /// Request cancellation (no-op in shim -- no waiters).
+        pub fn cancel(&self) {}
+    }
+
+    impl Default for CancellationToken {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+}
+
+#[cfg(not(feature = "native"))]
+pub use cancel_shim::CancellationToken;
 
 /// Process identifier. Monotonically increasing, never reused.
 pub type Pid = u64;

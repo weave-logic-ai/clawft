@@ -122,16 +122,21 @@ pub use clawft_kernel::{
 };
 
 use std::path::Path;
+
+#[cfg(feature = "native")]
 use std::sync::Arc;
 
+#[cfg(feature = "native")]
 use clawft_platform::NativePlatform;
 
 /// The main WeftOS instance -- boots and manages the kernel.
+#[cfg(feature = "native")]
 pub struct WeftOs {
     kernel: clawft_kernel::Kernel<NativePlatform>,
     project_root: std::path::PathBuf,
 }
 
+#[cfg(feature = "native")]
 impl WeftOs {
     /// Boot WeftOS with default configuration.
     pub async fn boot_default() -> Result<Self, KernelError> {

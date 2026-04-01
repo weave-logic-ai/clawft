@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::types::*;
+#[cfg(feature = "wasm-sandbox")]
 use super::runner::WasmToolRunner;
+#[cfg(feature = "wasm-sandbox")]
 use crate::governance::EffectVector;
 
 // ---------------------------------------------------------------------------

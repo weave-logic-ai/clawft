@@ -61,7 +61,7 @@ impl BuiltinTool for AgentSpawnTool {
             state: crate::process::ProcessState::Running,
             capabilities: crate::capability::AgentCapabilities::default(),
             resource_usage: crate::process::ResourceUsage::default(),
-            cancel_token: tokio_util::sync::CancellationToken::new(),
+            cancel_token: crate::process::CancellationToken::new(),
             parent_pid: None,
         };
 
@@ -177,12 +177,14 @@ impl BuiltinTool for AgentInspectTool {
 }
 
 /// Built-in `agent.send` tool.
+#[cfg(feature = "native")]
 pub struct AgentSendTool {
     spec: BuiltinToolSpec,
     process_table: Arc<crate::process::ProcessTable>,
     a2a: Arc<crate::a2a::A2ARouter>,
 }
 
+#[cfg(feature = "native")]
 impl AgentSendTool {
     pub fn new(
         process_table: Arc<crate::process::ProcessTable>,
@@ -193,6 +195,7 @@ impl AgentSendTool {
     }
 }
 
+#[cfg(feature = "native")]
 impl BuiltinTool for AgentSendTool {
     fn name(&self) -> &str { "agent.send" }
     fn spec(&self) -> &BuiltinToolSpec { &self.spec }

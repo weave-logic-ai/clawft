@@ -17,8 +17,11 @@ use clawft_core::bus::MessageBus;
 use clawft_platform::Platform;
 use clawft_types::config::Config;
 
+#[cfg(feature = "native")]
 use crate::a2a::A2ARouter;
-use crate::capability::{AgentCapabilities, CapabilityChecker};
+use crate::capability::AgentCapabilities;
+#[cfg(feature = "native")]
+use crate::capability::CapabilityChecker;
 use crate::cluster::{ClusterConfig, ClusterMembership};
 use crate::console::{BootEvent, BootLog, BootPhase, KernelEventLog};
 use crate::error::{KernelError, KernelResult};
@@ -27,6 +30,7 @@ use crate::ipc::KernelIpc;
 use crate::process::{ProcessEntry, ProcessState, ProcessTable, ResourceUsage};
 use crate::service::ServiceRegistry;
 use crate::supervisor::AgentSupervisor;
+#[cfg(feature = "native")]
 use crate::topic::TopicRouter;
 use clawft_types::config::KernelConfig;
 
@@ -110,7 +114,9 @@ pub struct Kernel<P: Platform> {
     process_table: Arc<ProcessTable>,
     service_registry: Arc<ServiceRegistry>,
     ipc: Arc<KernelIpc>,
+    #[cfg(feature = "native")]
     a2a_router: Arc<A2ARouter>,
+    #[cfg(feature = "native")]
     cron_service: Arc<crate::cron::CronService>,
     health: HealthSystem,
     supervisor: AgentSupervisor<P>,
@@ -187,7 +193,7 @@ impl<P: Platform> Kernel<P> {
             state: ProcessState::Running,
             capabilities: AgentCapabilities::default(),
             resource_usage: ResourceUsage::default(),
-            cancel_token: tokio_util::sync::CancellationToken::new(),
+            cancel_token: crate::process::CancellationToken::new(),
             parent_pid: None,
         };
         process_table
@@ -200,18 +206,24 @@ impl<P: Platform> Kernel<P> {
         ));
 
         // 5a. Construct A2ARouter (per-PID inboxes, capability-checked routing)
+        #[cfg(feature = "native")]
         let capability_checker = Arc::new(CapabilityChecker::new(process_table.clone()));
+        #[cfg(feature = "native")]
         let topic_router = Arc::new(TopicRouter::new(process_table.clone()));
+        #[cfg(feature = "native")]
         let a2a_router = Arc::new(A2ARouter::new(
             process_table.clone(),
             capability_checker,
             topic_router,
         ));
 
+        #[cfg(feature = "native")]
         boot_log.push(BootEvent::info(BootPhase::Services, "A2A router ready"));
 
         // 5b. Register cron service (K0 gate requirement)
+        #[cfg(feature = "native")]
         let cron_svc = Arc::new(crate::cron::CronService::new());
+        #[cfg(feature = "native")]
         if let Err(e) = service_registry.register(cron_svc.clone()) {
             error!(error = %e, "failed to register cron service");
         } else {
@@ -1221,6 +1233,7 @@ impl<P: Platform> Kernel<P> {
         );
 
         // 9b. Wire A2ARouter and cron into supervisor
+        #[cfg(feature = "native")]
         let supervisor = supervisor.with_a2a_router(a2a_router.clone(), cron_svc.clone());
 
         // 9c. Wire exochain managers into supervisor
@@ -1242,7 +1255,9 @@ impl<P: Platform> Kernel<P> {
             process_table,
             service_registry,
             ipc,
+            #[cfg(feature = "native")]
             a2a_router,
+            #[cfg(feature = "native")]
             cron_service: cron_svc,
             health,
             supervisor,
@@ -1314,6 +1329,7 @@ impl<P: Platform> Kernel<P> {
         }
 
         // Abort all running agent tasks
+        #[cfg(feature = "native")]
         self.supervisor.abort_all();
 
         // Cancel all processes
@@ -1413,11 +1429,13 @@ impl<P: Platform> Kernel<P> {
     }
 
     /// Get the A2A router.
+    #[cfg(feature = "native")]
     pub fn a2a_router(&self) -> &Arc<A2ARouter> {
         &self.a2a_router
     }
 
     /// Get the cron service.
+    #[cfg(feature = "native")]
     pub fn cron_service(&self) -> &Arc<crate::cron::CronService> {
         &self.cron_service
     }
@@ -2783,7 +2801,7 @@ mod tests {
             state: ProcessState::Running,
             capabilities: AgentCapabilities::default(),
             resource_usage: ResourceUsage::default(),
-            cancel_token: tokio_util::sync::CancellationToken::new(),
+            cancel_token: crate::process::CancellationToken::new(),
             parent_pid: None,
         };
         let sender_pid = kernel.process_table().insert(sender_entry).unwrap();

@@ -82,8 +82,10 @@ pub mod persistence;
 #[cfg(feature = "ecc")]
 pub mod weaver;
 
+#[cfg(feature = "native")]
 pub mod a2a;
 pub mod agency;
+#[cfg(feature = "native")]
 pub mod agent_loop;
 pub mod app;
 pub mod boot;
@@ -184,6 +186,7 @@ pub mod mesh_log;
 pub mod mesh_runtime;
 
 // Re-export key types at the crate level for convenience.
+#[cfg(feature = "native")]
 pub use a2a::A2ARouter;
 pub use agency::{
     Agency, AgentHealth, AgentInterface, AgentManifest, AgentPriority, AgentResources,
@@ -380,7 +383,7 @@ pub use log_service::{LogEntry, LogQuery, LogService};
 pub use timer::{TimerEntry, TimerInfo, TimerService};
 pub use topic::{Subscription, TopicRouter};
 pub use wasm_runner::{
-    AgentInspectTool, AgentListTool, AgentResumeTool, AgentSendTool, AgentSpawnTool,
+    AgentInspectTool, AgentListTool, AgentResumeTool, AgentSpawnTool,
     AgentStopTool, AgentSuspendTool, BackendSelection, BuiltinTool, BuiltinToolSpec, Certificate,
     IpcSendTool, IpcSubscribeTool,
     CompiledModuleCache, DeployedTool, FsCopyTool, FsCreateDirTool, FsExistsTool, FsGlobTool,
@@ -391,6 +394,8 @@ pub use wasm_runner::{
     ShellPipeline, WasmToolResult, WasmToolRunner, WasmValidation, builtin_tool_catalog,
     compute_module_hash, verify_tool_signature,
 };
+#[cfg(feature = "native")]
+pub use wasm_runner::AgentSendTool;
 #[cfg(feature = "exochain")]
 pub use wasm_runner::{
     SysChainQueryTool, SysChainStatusTool, SysTreeInspectTool, SysTreeReadTool,

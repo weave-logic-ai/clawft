@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build clawft-wasm for the wasm32-wasip2 target.
+# Build WeftOS crates for the wasm32-wasip2 target.
 #
 # Usage:
 #   scripts/build-wasi.sh              # release-wasm profile (default)
@@ -10,16 +10,13 @@
 # does not support it in its target matrix, so this script (and the companion
 # release-wasi.yml workflow) handle the build independently.
 #
-# What compiles for wasip2 today (--no-default-features):
+# What compiles for wasip2 (--no-default-features):
 #   clawft-types, clawft-platform, clawft-plugin, clawft-llm,
-#   clawft-security, exo-resource-tree, clawft-wasm
+#   clawft-security, exo-resource-tree, clawft-core, clawft-kernel,
+#   weftos (lib), clawft-wasm (cdylib)
 #
-# What does NOT compile:
-#   clawft-core  -- needs futures_channel (gated behind browser feature) and
-#                   has type-inference issues in bus.rs without native or browser
-#   clawft-kernel, weftos -- depend on clawft-core
-#
-# The highest-level crate that produces a .wasm binary is clawft-wasm (cdylib).
+# The highest-level library crate is weftos (the full kernel facade).
+# The highest-level binary artefact is clawft-wasm (cdylib .wasm module).
 
 set -euo pipefail
 
@@ -73,7 +70,17 @@ WASM_FILE="target/${TARGET}/${PROFILE_DIR}/clawft_wasm.wasm"
 info "Ensuring ${TARGET} target is available..."
 rustup target add "$TARGET" 2>/dev/null || true
 
-# --- Build ---
+# --- Build weftos (full kernel facade, lib only) ---
+if [ "$PROFILE" = "dev" ]; then
+    info "Building weftos (lib) for ${TARGET} (dev profile)..."
+    cargo build --target "$TARGET" -p weftos --no-default-features --lib
+else
+    info "Building weftos (lib) for ${TARGET} (release-wasm profile)..."
+    cargo build --target "$TARGET" -p weftos --no-default-features --lib --profile release-wasm
+fi
+ok "weftos lib compiled for ${TARGET}"
+
+# --- Build clawft-wasm (cdylib binary artefact) ---
 if [ "$PROFILE" = "dev" ]; then
     info "Building clawft-wasm for ${TARGET} (dev profile)..."
     cargo build --target "$TARGET" -p clawft-wasm --no-default-features
