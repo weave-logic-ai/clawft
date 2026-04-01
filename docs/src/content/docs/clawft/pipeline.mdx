@@ -193,3 +193,43 @@ pub trait Learner: Send + Sync {
 ```
 
 Each trait can be implemented independently and injected into the pipeline via `set_pipeline()` on the `AppContext`.
+
+## Config-Based Stage Selection (v0.3)
+
+**File**: `crates/clawft-types/src/config/mod.rs` -- `PipelineConfig`
+
+As of Sprint 13, the scorer and learner stages can be selected via configuration
+instead of hard-coding the implementation. The `[pipeline]` section of the
+config file maps backend names to trait implementations:
+
+```toml
+[pipeline]
+scorer = "fitness"
+learner = "trajectory"
+```
+
+### Available Backends
+
+| Stage | Backend | Description |
+|-------|---------|-------------|
+| **Scorer** | `"noop"` (default) | No-op scorer, returns zero scores |
+| **Scorer** | `"fitness"` | GEPA FitnessScorer with 4-dimension weighted evaluation |
+| **Learner** | `"noop"` (default) | No-op learner, discards trajectories |
+| **Learner** | `"trajectory"` | GEPA TrajectoryLearner with ring buffer and mutation strategies |
+
+Both fields default to `"noop"` for backward compatibility. To enable the full
+GEPA adaptive learning loop, set both to their active implementations:
+
+```json
+{
+  "pipeline": {
+    "scorer": "fitness",
+    "learner": "trajectory"
+  }
+}
+```
+
+The `PipelineConfig` struct is part of the root `Config` and is deserialized
+alongside all other configuration sections. The pipeline builder reads
+`config.pipeline.scorer` and `config.pipeline.learner` at startup to
+instantiate the correct trait objects.

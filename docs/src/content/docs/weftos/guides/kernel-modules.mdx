@@ -519,6 +519,126 @@ A2ARouter (prevents unauthorized messages) and handler-time in agent_loop
 
 ---
 
+## Sprint 13: Paperclip Integration
+
+Sprint 13 introduced types and modules that support the Paperclip Patterns --
+an organisational model where agents mirror a company hierarchy with budgets,
+goals, and governance.
+
+### heartbeat.rs (~440 lines, 18 tests)
+
+**Purpose**: Multi-agent wake/sleep cycle management.
+
+**Key Types**:
+- `HeartbeatScheduler` -- manages periodic wake-up cycles for multiple agents
+- `HeartbeatConfig` -- per-agent config: agent_id, interval (Duration), enabled
+- `HeartbeatPhase` -- enum: `Wake`, `CheckQueue`, `Execute`, `Sleep`, `Report`
+- `HeartbeatTickResult` -- returned when an agent's interval has elapsed
+
+**Public API**:
+```rust
+HeartbeatScheduler::new() -> Self
+HeartbeatScheduler::register(config: HeartbeatConfig)
+HeartbeatScheduler::unregister(agent_id: &str) -> bool
+HeartbeatScheduler::tick(delta: Duration) -> Vec<HeartbeatTickResult>
+HeartbeatScheduler::phase(agent_id: &str) -> Option<HeartbeatPhase>
+HeartbeatScheduler::advance_phase(agent_id: &str) -> Option<HeartbeatPhase>
+HeartbeatScheduler::agent_ids() -> Vec<&str>
+HeartbeatScheduler::tick_count(agent_id: &str) -> Option<u64>
+```
+
+**Lifecycle**: Each agent cycles through 5 phases: Wake -> CheckQueue -> Execute
+-> Sleep -> Report, then back to Wake. The scheduler accumulates wall-clock
+deltas and fires wake-up events when an agent's interval elapses. Disabled
+agents are silently skipped.
+
+**Integration**: Distinct from `CronService` -- cron handles arbitrary scheduled
+jobs, while heartbeats manage the regular tick-based lifecycle of agents. The
+heartbeat scheduler is registered as a kernel service and drives the Paperclip
+agent work loop.
+
+### company.rs (clawft-types, ~300 lines, 11 tests)
+
+**Purpose**: Organisational structure types for Paperclip Patterns.
+
+**Key Types**:
+- `Company` -- id, name, description, created_at
+- `OrgRole` -- enum: `Ceo`, `Manager`, `Worker`, `Custom(String)`
+- `OrgNode` -- agent_id, role, reports_to, budget_cents, goals
+- `OrgChart` -- company_id + ordered list of OrgNodes
+
+**Public API**:
+```rust
+Company::new(id, name) -> Self
+OrgChart::new(company_id) -> Self
+OrgChart::direct_reports(agent_id: &str) -> Vec<&OrgNode>
+OrgChart::find_agent(agent_id: &str) -> Option<&OrgNode>
+```
+
+**Relationship to Paperclip**: These types model the business-level hierarchy
+(CEO -> managers -> workers) that is distinct from the OS-level `AgentRole`
+(root, supervisor, worker). An OrgChart links agents to a Company with per-node
+budgets and goal assignments.
+
+### goal.rs (clawft-types, ~305 lines, 13 tests)
+
+**Purpose**: Hierarchical goal tracking for agent alignment.
+
+**Key Types**:
+- `GoalStatus` -- enum: `Pending`, `Active`, `Complete`, `Failed`
+- `Goal` -- id, description, parent_goal, status, metrics (HashMap)
+- `GoalTree` -- flat storage of Goals with parent-child traversal
+
+**Public API**:
+```rust
+Goal::new(id, description) -> Self           // top-level goal
+Goal::child(id, description, parent_id) -> Self
+GoalTree::add(goal: Goal)
+GoalTree::find(id: &str) -> Option<&Goal>
+GoalTree::roots() -> Vec<&Goal>
+GoalTree::children(parent_id: &str) -> Vec<&Goal>
+GoalTree::descendants(parent_id: &str) -> Vec<&Goal>   // depth-first
+GoalTree::by_status(status: GoalStatus) -> Vec<&Goal>
+```
+
+**Integration**: Goals are referenced from `OrgNode.goals` and stored in the
+resource tree under `/goals/`. The GoalTree supports depth-first descendant
+traversal and status filtering for dashboards and reports.
+
+### http_api.rs (~480 lines, 12 tests) [feature: `http-api`]
+
+**Purpose**: HTTP endpoint adapter for external orchestrators (Paperclip, etc.).
+
+**Endpoints**:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/v1/execute` | Submit a task for agent execution |
+| `POST` | `/api/v1/govern` | Evaluate a governance decision |
+| `GET` | `/api/v1/health` | Liveness probe |
+
+**Key Types**:
+- `HttpApiHandler` -- transport-agnostic dispatcher backed by `GovernanceEngine`
+- `ExecuteRequest` / `ExecuteResponse` -- task submission wire types
+- `GovernRequest` / `GovernResponse` -- governance evaluation with EffectVector
+- `HealthResponse` -- version + status
+- `Route` -- enum for route matching
+- `dispatch(handler, route, body)` -- raw JSON dispatch helper
+
+**Feature Gate**: This module requires the `http-api` feature flag and is not
+included in the default build. Enable it with:
+
+```bash
+scripts/build.sh native --features http-api
+```
+
+**Governance Integration**: The `/api/v1/govern` endpoint extracts a 5D
+EffectVector (risk, fairness, privacy, novelty, security) from the request
+context and evaluates it through the GovernanceEngine. The response includes the
+decision, evaluated rules, and effect magnitude.
+
+---
+
 ## K6 Planned: Mesh Networking
 
 ### mesh_noise.rs (K6.1, planned)

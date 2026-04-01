@@ -396,6 +396,84 @@ descriptor -- the BlockRenderer walks the tree and produces the final UI.
 
 ---
 
+## Sprint 13 Additions
+
+### BudgetBlock (v0.3)
+
+**Source**: `gui/src/blocks/BudgetBlock.tsx`
+
+The BudgetBlock is a dashboard component that displays per-agent token usage,
+cost, and budget remaining. It reads from the StateStore key
+`/kernel/metrics/cost` (populated by `KernelDataProvider`) and renders:
+
+- **Total budget bar** -- color-coded progress bar (green/amber/red) showing
+  aggregate spend as a percentage of the total budget.
+- **Per-agent table** -- sortable rows showing each agent's ID, tokens consumed,
+  cost in USD, and remaining budget. Each row has a colored indicator dot
+  reflecting budget utilisation.
+
+Register the block by type name `"Budget"` in a dashboard descriptor:
+
+```json
+{ "type": "Budget", "props": { "stateKey": "/kernel/metrics/cost" } }
+```
+
+The `stateKey` prop defaults to `/kernel/metrics/cost` and can be overridden
+to point at a different cost data source.
+
+### KernelDataProvider (v0.3)
+
+**Source**: `gui/src/engine/KernelDataProvider.tsx`
+
+The KernelDataProvider replaces the earlier mock-only data flow with a real
+Tauri bridge. It wraps the application tree and polls the kernel at a
+configurable interval (default 2 seconds) via four Tauri invoke calls:
+
+| Tauri Command | StateStore Keys |
+|---------------|-----------------|
+| `kernel_status` | `/kernel/version`, `/kernel/uptime_secs`, `/kernel/health`, ... |
+| `kernel_metrics` | `/kernel/metrics/cpu_percent`, `/kernel/metrics/memory_used_mb`, ... |
+| `kernel_processes` | `/kernel/processes` |
+| `kernel_cost_metrics` | `/kernel/metrics/cost` |
+
+**Behavior modes**:
+
+- **Tauri desktop** -- polls the kernel and populates the Zustand StateStore.
+  Connection state transitions through `disconnected -> connecting -> connected`.
+  On error, an amber warning banner renders above the content.
+- **Browser / non-Tauri** -- displays a "Connect to kernel" placeholder banner.
+  Set `allowMockFallback={true}` to re-enable mock data in browser mode.
+
+Usage:
+
+```tsx
+<KernelDataProvider pollInterval={3000}>
+  <App />
+</KernelDataProvider>
+```
+
+### ThemeSwitcher (v0.3)
+
+**Source**: `gui/src/components/ThemeSwitcher.tsx`
+
+A dropdown component for switching the active WeftOS theme at runtime. It
+integrates with the ThemeProvider context and persists the user's selection:
+
+- **Tauri desktop** -- saves to kernel config via `invoke('save_config', ...)`
+- **Browser** -- saves to `localStorage` under the key `weftos-theme`
+
+The switcher lists all themes registered with `registerTheme()` and formats
+their names for display (e.g. `ocean-dark` becomes "Ocean Dark"). Drop it into
+any toolbar or settings panel:
+
+```tsx
+import { ThemeSwitcher } from '@/components/ThemeSwitcher';
+
+<ThemeSwitcher />
+```
+
+---
+
 ## Theming System (v0.2)
 
 The GUI ships with a CSS-variable-based theming system in `gui/src/themes/`.
