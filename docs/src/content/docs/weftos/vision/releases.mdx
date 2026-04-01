@@ -1,0 +1,192 @@
+---
+title: Release Notes
+description: Complete version history for WeftOS from initial development through v0.3.0.
+---
+
+# Release Notes
+
+## v0.3.0 — Sprint 13: Integration + Paperclip
+
+*2026-04-01*
+
+Sprint 13 wires everything together and adds Paperclip-inspired orchestration patterns.
+
+### GUI Integration
+- **KernelDataProvider**: Real Tauri data bridge replacing mock WebSocket — polls kernel_status, metrics, processes, cost in parallel
+- **ThemeSwitcher**: Runtime theme selection dropdown with localStorage/Tauri persistence
+- **BudgetBlock**: Per-agent cost tracking dashboard with budget bar and agent table
+
+### Agent Pipeline (end-to-end)
+- **Config-based selection**: `PipelineConfig` with `scorer = "fitness"` and `learner = "trajectory"` in config
+- **Factory functions**: `build_scorer()` / `build_learner()` replace hardcoded NoOp in bootstrap and LLM adapter
+- **Skill improvement**: `improve_skill_instructions()` uses TrajectoryLearner patterns to mutate prompts via `skill_autogen.rs`
+
+### Paperclip Patterns (Rust-native)
+- **Company/OrgChart**: `Company`, `OrgRole` (Ceo/Manager/Worker), `OrgNode`, `OrgChart` with traversal helpers
+- **HeartbeatScheduler**: Multi-agent wake/sleep cycle manager with 5-phase lifecycle (Wake→CheckQueue→Execute→Sleep→Report)
+- **GoalTree**: Hierarchical goal tracking with status filtering (Pending/Active/Complete/Failed)
+- **HTTP API**: Execute/govern/health endpoints behind `http-api` feature flag — Paperclip adapter bridge
+
+### Platform
+- **Full WASI**: All 10 publishable crates compile for `wasm32-wasip2` (kernel + facade added)
+- **Windows ARM**: Switched reqwest from rustls-tls to native-tls (removes ring dependency)
+- **Zero test failures**: Fixed democritus embedding_error assertion, updated config snapshot
+- **native-tls**: Uses OS TLS stack (SChannel/Security.framework/OpenSSL) for better cross-compilation
+
+### Testing
+- 11 property tests (scorer bounds, mutation safety, token counting monotonicity)
+- 9 fuzz tests (Config/RoutingConfig with random/malformed JSON)
+- 4 criterion benchmark groups (count_tokens, compress_context, scorer, mutation)
+- 6 context compression integration tests
+
+---
+
+## v0.2.1 — docs.rs Cross-Links
+
+*2026-04-01*
+
+- All 8 publishable crates now show the WeftOS ecosystem table on docs.rs
+- `[package.metadata.docs.rs]` with `all-features = true` for complete API surface
+- 10 crates republished to crates.io
+
+---
+
+## v0.2.0 — Sprint 12: Block Engine, Theming, Intelligence
+
+*2026-04-01*
+
+### Lego Block Engine
+- BlockRegistry, BlockRenderer, StateStore (Zustand + Tauri bridge)
+- 10 composable blocks: Text, Code, Status, Table, Tree, Terminal, Button, Column, Row, Grid, Tabs
+- JSON descriptor-driven layout with recursive rendering
+
+### Theming System
+- 4 built-in themes: ocean-dark, midnight (cyberpunk), paper-light, high-contrast (WCAG AAA)
+- CSS variable bridge via `--weftos-*` custom properties
+- ThemeProvider with runtime switching, ANSI palette mapping, Tailwind integration
+
+### Context Compression
+- Sliding-window context management (configurable max_context_tokens, default 8192)
+- First-sentence summarization for older messages
+- Opt-in: `builder.with_compression(config)`
+
+### GEPA Prompt Evolution
+- TrajectoryLearner: trajectory collection, pattern extraction, evolution triggers
+- FitnessScorer: 4-dimension weighted scoring (task_completion, efficiency, tool_accuracy, coherence)
+- 4 prompt mutation strategies: rephrase, add examples, remove ineffective, emphasize
+
+### Local LLM Provider
+- OpenAI-compatible provider for Ollama, vLLM, llama.cpp, LM Studio
+- Key-optional auth, streaming, model listing
+- Factory methods: `LocalProvider::ollama()`, `::vllm()`, `::llamacpp()`, `::lmstudio()`
+
+---
+
+## v0.1.4 — Sprint 11 Closing Release
+
+*2026-04-01*
+
+- **musl static builds**: `x86_64-unknown-linux-musl` + `aarch64-unknown-linux-musl` — statically linked, runs on any Linux
+- **WASI binary**: `clawft-wasm` for `wasm32-wasip2` (57KB raw, 24KB gzip)
+- **vendored-openssl**: Fixed musl cross-compilation (git2 crate)
+- **7 native + 2 WASM = 9 targets**
+
+## v0.1.3
+
+*2026-04-01*
+
+- Attempted 10 targets (musl + Windows ARM). musl blocked by openssl, Windows ARM by ring. Fixed in v0.1.4.
+
+## v0.1.2
+
+*2026-04-01*
+
+- Automated deploy test via `weftos-build-deploy` skill
+- Validated full release pipeline end-to-end
+
+## v0.1.1
+
+*2026-03-31*
+
+- **Fixed installer URLs**: `repository` field corrected to `weave-logic-ai/weftos`
+- **Homebrew tap**: Created `weave-logic-ai/homebrew-tap`, formula auto-publishing working
+- **HOMEBREW_TAP_TOKEN** secret configured
+- All 5 platform builds green
+
+## v0.1.0 — First Release
+
+*2026-03-31*
+
+First public release of WeftOS. 3 binaries × 5 platforms.
+
+- **weft**: Agent CLI (primary user interface) — 18 commands, 10 built-in tools
+- **weaver**: Kernel operator CLI (daemon management, kernel lifecycle)
+- **weftos**: Kernel daemon binary
+- GitHub Releases with shell + PowerShell installers
+- cargo-dist automated build pipeline
+
+---
+
+## Pre-release Development
+
+### Sprint 11 Symposium (2026-03-28 — 2026-03-31)
+
+9-track symposium producing 11 documents, 55 work items, 15 technology decisions.
+
+**P0 fixes (9/9)**: opt-level z→3, publish=false on 13 crates, version.workspace on 22 crates, HNSW O(1) lookup, unimplemented!()→Err, #[non_exhaustive] on 118 enums, CHANGELOG rebuilt (134 commits), README fixed, rvf-crypto inlined.
+
+**P1 core (8/8)**: ONNX WordPiece tokenizer, sparse Lanczos spectral analysis (200x improvement), HNSW deferred rebuild, cargo-dist configuration, Registry trait (4 implementations), ChainLoggable trait (3 audit gaps closed), feature gate coarsening (18→3 fields), wasm_runner decomposition (5,046→8 files).
+
+**Documentation**: Fumadocs unified (65+ pages), 20 ADRs, agent guide (448 lines), Hermes integration analysis, GEPA prompt evolution research.
+
+### Sprint 10 (2026-03-01 — 2026-03-27)
+
+6 weeks of kernel hardening and operational maturity.
+
+- **K8 GUI**: Tauri 2.0 wrapper, component generator, 7 Rust commands
+- **Config/auth services**: Runtime configuration, authentication, authorization
+- **Mesh discovery**: mDNS LAN discovery, static seed peers
+- **10 built-in tools**: File operations, shell execution, web fetch/search, memory, spawn
+- **Observability**: Metrics collection, health monitoring, event logging
+- **External codebase analysis**: Knowledge graph visualization
+- **Docker packaging**: Multi-arch Dockerfile, release-docker.yml
+- **E2E tests**: Playwright-based testing
+- **Tool signing**: Ed25519 signatures on tool definitions
+- **WASM shell execution**: Sandbox environment for tool execution
+
+### Sprint 9 (2026-02-25 — 2026-02-28)
+
+Spectral analysis and cognitive substrate.
+
+- **ECC cognitive substrate**: Causal DAG, HNSW semantic search, BLAKE3 cross-references
+- **DEMOCRITUS loop**: Continuous cognitive processing (Sense→Embed→Search→Update→CrossRef→Prune→Report)
+- **Spectral analysis**: Community detection, predictive change analysis
+- **Impulse queue**: Ephemeral signal processing with configurable decay
+
+### Sprints 6-8 (2026-02-19 — 2026-02-24)
+
+Kernel foundation (K0-K6).
+
+- **K0**: Boot sequence, process table, capability registry, REPL console
+- **K1**: Agent supervisor with RBAC, process lifecycle, ExoChain integration
+- **K2**: A2A IPC with topic pub/sub, inbox routing, delegation
+- **K3**: WASM sandbox with wasmtime, fuel metering, capability enforcement
+- **K4**: Container management, application framework
+- **K5**: App packaging, manifest parsing, service wiring
+- **K6**: Mesh networking (Noise protocol, heartbeat, discovery, framing)
+- **ExoChain**: Append-only hash chain with SHAKE-256 + Ed25519 + ML-DSA-65 dual signatures
+- **Governance**: Three-branch constitutional engine (Legislative/Executive/Judicial)
+- **Weaver CLI**: Kernel operator interface with daemon mode
+
+### Sprints 1-5 (2026-02-17 — 2026-02-18)
+
+Initial framework development.
+
+- **Phase 1-2**: Core agent loop, message bus, LLM provider abstraction
+- **Phase 3**: Skills, agents, workspaces, MCP server, delegation, RVF format, WASM optimization
+- **Tiered routing**: 3-tier model routing (WASM booster, Haiku, Sonnet/Opus)
+- **LLM providers**: OpenAI, Anthropic, Google Gemini, xAI, Ollama, DeepSeek, OpenRouter, Groq
+- **Channels**: CLI, Telegram, Discord, Slack, WebSocket, HTTP, MCP
+- **Plugin system**: Trait-based plugins for tools, channels, pipeline stages
+- **Platform abstraction**: Native + WASM + browser targets
+- **Security**: Tool signing, routing validation, security policy engine
