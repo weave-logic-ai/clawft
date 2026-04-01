@@ -32,11 +32,13 @@
 pub mod agent_bus;
 pub mod agent_routing;
 pub mod canvas;
+pub mod company;
 pub mod config;
 pub mod cron;
 pub mod delegation;
 pub mod error;
 pub mod event;
+pub mod goal;
 pub mod provider;
 pub mod routing;
 pub mod secret;

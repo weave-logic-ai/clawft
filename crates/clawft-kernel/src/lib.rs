@@ -103,6 +103,7 @@ pub mod error;
 pub mod gate;
 pub mod governance;
 pub mod health;
+pub mod heartbeat;
 pub mod ipc;
 pub mod process;
 pub mod service;
@@ -134,6 +135,8 @@ pub mod timer;
 // ── Content integrity & operational services (08c) ───────────────
 pub mod auth_service;
 pub mod config_service;
+#[cfg(feature = "http-api")]
+pub mod http_api;
 pub mod tree_view;
 
 // ── Mesh networking modules (K6) ──────────────────────────────

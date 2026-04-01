@@ -129,24 +129,68 @@ export async function startTauriSync(): Promise<void> {
     const poll = async () => {
       if (!syncActive) return;
       try {
-        const resp = await invoke<{ ok: boolean; data?: {
-          version: string;
-          uptime_secs: number;
-          process_count: number;
-          chain_height: number;
-          health: string;
-        } }>('kernel_status');
-        if (resp.ok && resp.data) {
-          useStateStore.getState().merge({
-            '/kernel/version': resp.data.version,
-            '/kernel/uptime_secs': resp.data.uptime_secs,
-            '/kernel/process_count': resp.data.process_count,
-            '/kernel/chain_height': resp.data.chain_height,
-            '/kernel/health': resp.data.health,
-          });
+        const [statusResp, metricsResp, processesResp, costResp] = await Promise.all([
+          invoke<{ ok: boolean; data?: {
+            version: string;
+            uptime_secs: number;
+            process_count: number;
+            chain_height: number;
+            health: string;
+          } }>('kernel_status').catch(() => null),
+          invoke<{ ok: boolean; data?: {
+            cpu_percent: number;
+            memory_used_mb: number;
+            chain_height: number;
+            process_count: number;
+            agent_count: number;
+            uptime_secs: number;
+            mesh_peer_count: number;
+          } }>('kernel_metrics').catch(() => null),
+          invoke<{ ok: boolean; data?: Array<{
+            pid: number;
+            agent_id: string;
+            state: string;
+          }> }>('kernel_processes').catch(() => null),
+          invoke<{ ok: boolean; data?: unknown }>('kernel_cost_metrics').catch(() => null),
+        ]);
+
+        const entries: Record<string, unknown> = {};
+
+        if (statusResp?.ok && statusResp.data) {
+          entries['/kernel/version'] = statusResp.data.version;
+          entries['/kernel/uptime_secs'] = statusResp.data.uptime_secs;
+          entries['/kernel/process_count'] = statusResp.data.process_count;
+          entries['/kernel/chain_height'] = statusResp.data.chain_height;
+          entries['/kernel/health'] = statusResp.data.health;
+        }
+
+        if (metricsResp?.ok && metricsResp.data) {
+          entries['/kernel/metrics/cpu_percent'] = metricsResp.data.cpu_percent;
+          entries['/kernel/metrics/memory_used_mb'] = metricsResp.data.memory_used_mb;
+          entries['/kernel/metrics/chain_height'] = metricsResp.data.chain_height;
+          entries['/kernel/metrics/process_count'] = metricsResp.data.process_count;
+          entries['/kernel/metrics/agent_count'] = metricsResp.data.agent_count;
+          entries['/kernel/metrics/uptime_secs'] = metricsResp.data.uptime_secs;
+          entries['/kernel/metrics/mesh_peer_count'] = metricsResp.data.mesh_peer_count;
+        }
+
+        if (processesResp?.ok && processesResp.data) {
+          entries['/kernel/processes'] = processesResp.data.map((p) => ({
+            pid: p.pid,
+            agent_id: p.agent_id,
+            state: p.state,
+          }));
+        }
+
+        if (costResp?.ok && costResp.data) {
+          entries['/kernel/metrics/cost'] = costResp.data;
+        }
+
+        if (Object.keys(entries).length > 0) {
+          useStateStore.getState().merge(entries);
         }
       } catch {
-        // Tauri command may not be available yet
+        // Tauri commands may not be available yet
       }
       setTimeout(poll, 2000);
     };

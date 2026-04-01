@@ -10,6 +10,17 @@ import {
 import type { WeftOSTheme } from "./types.ts";
 import { loadBuiltinTheme, BUILTIN_THEME_NAMES } from "./loader.ts";
 
+const THEME_STORAGE_KEY = "weftos-theme";
+
+/** Retrieve persisted theme name from localStorage or Tauri config. */
+function getSavedThemeName(): string | null {
+  try {
+    return localStorage.getItem(THEME_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* CSS variable mapping                                                */
 /* ------------------------------------------------------------------ */
@@ -157,9 +168,14 @@ export function ThemeProvider({
   children,
   defaultTheme = "ocean-dark",
 }: ThemeProviderProps) {
-  const [theme, setThemeState] = useState<WeftOSTheme>(
-    () => loadBuiltinTheme(defaultTheme) ?? loadBuiltinTheme("ocean-dark")!,
-  );
+  const [theme, setThemeState] = useState<WeftOSTheme>(() => {
+    const saved = getSavedThemeName();
+    if (saved) {
+      const loaded = loadBuiltinTheme(saved);
+      if (loaded) return loaded;
+    }
+    return loadBuiltinTheme(defaultTheme) ?? loadBuiltinTheme("ocean-dark")!;
+  });
 
   const setTheme = useCallback((nameOrTheme: string | WeftOSTheme) => {
     if (typeof nameOrTheme === "string") {

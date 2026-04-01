@@ -12,3 +12,4 @@ import './TableBlock';
 import './TreeBlock';
 import './TerminalBlock';
 import './ButtonBlock';
+import './BudgetBlock';

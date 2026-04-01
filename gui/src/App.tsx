@@ -4,13 +4,22 @@ import { Dashboard } from './views/Dashboard';
 import { AdminForms } from './views/AdminForms';
 import { KnowledgeGraph } from './views/KnowledgeGraph';
 import { ComponentGenerator } from './views/ComponentGenerator';
-import { BlockRenderer, useStateStore, startTauriSync } from './engine';
+import { BlockRenderer, useStateStore, startTauriSync, KernelDataProvider } from './engine';
+import { ThemeSwitcher } from './components/ThemeSwitcher';
 import type { BlockDescriptor } from './engine';
 
 // Register all built-in block types
 import './blocks';
 
 type View = 'dashboard' | 'admin' | 'graph' | 'generate' | 'blocks';
+
+// ---------------------------------------------------------------------------
+// Detect Tauri environment
+// ---------------------------------------------------------------------------
+
+function isTauri(): boolean {
+  return typeof window !== 'undefined' && !!window.__TAURI_INTERNALS__;
+}
 
 // ---------------------------------------------------------------------------
 // Demo block descriptor — shows the block engine rendering a dashboard
@@ -23,10 +32,10 @@ const DEMO_DESCRIPTOR: BlockDescriptor = {
     'main': {
       type: 'Tabs',
       props: {
-        labels: ['Overview', 'Console', 'Code', 'Tree'],
+        labels: ['Overview', 'Console', 'Code', 'Tree', 'Budget'],
         activeTab: 0,
       },
-      children: ['overview', 'console', 'code-tab', 'tree-tab'],
+      children: ['overview', 'console', 'code-tab', 'tree-tab', 'budget-tab'],
     },
     'overview': {
       type: 'Column',
@@ -103,6 +112,13 @@ const DEMO_DESCRIPTOR: BlockDescriptor = {
       type: 'ResourceTree',
       props: { rootPath: '/project' },
     },
+    'budget-tab': {
+      type: 'Budget',
+      props: {
+        title: 'Agent Budget & Cost Tracking',
+        stateKey: '/kernel/metrics/cost',
+      },
+    },
   },
 };
 
@@ -110,9 +126,12 @@ function App() {
   const [view, setView] = useState<View>('blocks');
   const ws = useKernelWs('ws://localhost:9800/ws');
   const merge = useStateStore((s) => s.merge);
+  const inTauri = isTauri();
 
-  // Pump WebSocket mock data into the StateStore so block $state refs resolve
+  // When in Tauri, use KernelDataProvider for real data (handled below).
+  // When NOT in Tauri, pump mock WebSocket data into the StateStore as fallback.
   useEffect(() => {
+    if (inTauri) return; // Real data comes from KernelDataProvider
     if (!ws.metrics) return;
     const entries: Record<string, unknown> = {
       '/kernel/metrics/cpu_percent': ws.metrics.cpu_percent,
@@ -130,51 +149,56 @@ function App() {
       '/kernel/health': ws.health,
     };
     merge(entries);
-  }, [ws.metrics, ws.processes, ws.health, merge]);
+  }, [ws.metrics, ws.processes, ws.health, merge, inTauri]);
 
-  // Start Tauri sync if available
+  // Start Tauri sync if available (legacy path — KernelDataProvider is preferred)
   useEffect(() => {
     startTauriSync();
   }, []);
 
   return (
-    <div className="min-h-screen flex flex-col">
-      {/* Header */}
-      <header className="border-b border-gray-800 px-6 py-3 flex items-center justify-between">
-        <h1 className="text-lg font-semibold tracking-tight text-gray-100">
-          WeftOS <span className="text-gray-500 font-normal">K8 GUI</span>
-        </h1>
-        <nav className="flex gap-1">
-          {(['blocks', 'dashboard', 'admin', 'graph', 'generate'] as const).map((v) => (
-            <button
-              key={v}
-              onClick={() => setView(v)}
-              className={`px-3 py-1 text-sm rounded ${
-                view === v
-                  ? v === 'blocks' ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-white'
-                  : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800'
-              }`}
-            >
-              {v === 'blocks' ? 'Block Engine' : v === 'graph' ? 'Knowledge Graph' : v.charAt(0).toUpperCase() + v.slice(1)}
-            </button>
-          ))}
-        </nav>
-      </header>
+    <KernelDataProvider>
+      <div className="min-h-screen flex flex-col">
+        {/* Header */}
+        <header className="border-b border-gray-800 px-6 py-3 flex items-center justify-between">
+          <h1 className="text-lg font-semibold tracking-tight text-gray-100">
+            WeftOS <span className="text-gray-500 font-normal">K8 GUI</span>
+          </h1>
+          <div className="flex items-center gap-4">
+            <ThemeSwitcher />
+            <nav className="flex gap-1">
+              {(['blocks', 'dashboard', 'admin', 'graph', 'generate'] as const).map((v) => (
+                <button
+                  key={v}
+                  onClick={() => setView(v)}
+                  className={`px-3 py-1 text-sm rounded ${
+                    view === v
+                      ? v === 'blocks' ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-white'
+                      : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800'
+                  }`}
+                >
+                  {v === 'blocks' ? 'Block Engine' : v === 'graph' ? 'Knowledge Graph' : v.charAt(0).toUpperCase() + v.slice(1)}
+                </button>
+              ))}
+            </nav>
+          </div>
+        </header>
 
-      {/* Content */}
-      <main className={`flex-1 px-6 py-6 ${view === 'graph' ? 'max-w-7xl' : 'max-w-5xl'} w-full mx-auto`}>
-        {view === 'blocks' && <BlockRenderer descriptor={DEMO_DESCRIPTOR} />}
-        {view === 'dashboard' && <Dashboard ws={ws} />}
-        {view === 'admin' && <AdminForms ws={ws} />}
-        {view === 'graph' && <KnowledgeGraph />}
-        {view === 'generate' && <ComponentGenerator />}
-      </main>
+        {/* Content */}
+        <main className={`flex-1 px-6 py-6 ${view === 'graph' ? 'max-w-7xl' : 'max-w-5xl'} w-full mx-auto`}>
+          {view === 'blocks' && <BlockRenderer descriptor={DEMO_DESCRIPTOR} />}
+          {view === 'dashboard' && <Dashboard ws={ws} />}
+          {view === 'admin' && <AdminForms ws={ws} />}
+          {view === 'graph' && <KnowledgeGraph />}
+          {view === 'generate' && <ComponentGenerator />}
+        </main>
 
-      {/* Footer */}
-      <footer className="border-t border-gray-800 px-6 py-2 text-xs text-gray-500 text-center">
-        WeftOS K8 GUI v0.1.0 &middot; {window.__TAURI_INTERNALS__ ? 'Tauri Desktop' : 'Browser Mode'}
-      </footer>
-    </div>
+        {/* Footer */}
+        <footer className="border-t border-gray-800 px-6 py-2 text-xs text-gray-500 text-center">
+          WeftOS K8 GUI v0.1.0 &middot; {inTauri ? 'Tauri Desktop' : 'Browser Mode'}
+        </footer>
+      </div>
+    </KernelDataProvider>
   );
 }
 

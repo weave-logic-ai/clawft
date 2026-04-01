@@ -78,6 +78,44 @@ pub struct Config {
     /// Kernel subsystem configuration (WeftOS).
     #[serde(default)]
     pub kernel: KernelConfig,
+
+    /// Pipeline stage selection (scorer, learner backends).
+    #[serde(default)]
+    pub pipeline: PipelineConfig,
+}
+
+// ── Pipeline ────────────────────────────────────────────────────────────
+
+/// Pipeline stage backend selection.
+///
+/// Allows selecting which scorer and learner implementations to use.
+/// Defaults to `"noop"` for backward compatibility.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipelineConfig {
+    /// Quality scorer backend: `"noop"` (default) or `"fitness"`.
+    #[serde(default = "default_scorer")]
+    pub scorer: String,
+
+    /// Learning backend: `"noop"` (default) or `"trajectory"`.
+    #[serde(default = "default_learner")]
+    pub learner: String,
+}
+
+fn default_scorer() -> String {
+    "noop".into()
+}
+
+fn default_learner() -> String {
+    "noop".into()
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        Self {
+            scorer: default_scorer(),
+            learner: default_learner(),
+        }
+    }
 }
 
 impl Config {

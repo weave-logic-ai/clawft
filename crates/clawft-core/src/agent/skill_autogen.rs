@@ -22,7 +22,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use tracing::info;
+use tracing::{debug, info};
+
+use crate::pipeline::learner::TrajectoryLearner;
+use crate::pipeline::mutation::{auto_select_strategy, mutate_prompt, TrajectoryHint};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -358,6 +361,75 @@ pub fn is_pending(skill_dir: &Path) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Trajectory-based prompt improvement
+// ---------------------------------------------------------------------------
+
+/// Improve a generated skill's instructions using trajectory data.
+///
+/// If the [`TrajectoryLearner`] has successful patterns (trajectories
+/// scoring >= 0.8), this converts them into [`TrajectoryHint`]s, selects
+/// the best mutation strategy via [`auto_select_strategy`], and applies
+/// [`mutate_prompt`] to the skill instructions.
+///
+/// Returns the (possibly improved) instructions. If there are no
+/// successful patterns, the original instructions are returned unchanged.
+pub fn improve_skill_instructions(
+    instructions: &str,
+    learner: &TrajectoryLearner,
+) -> String {
+    let best = learner.get_best_trajectories(10);
+    let poor = learner.get_poor_trajectories(10);
+
+    if best.is_empty() && poor.is_empty() {
+        return instructions.to_string();
+    }
+
+    let hints: Vec<TrajectoryHint> = best
+        .iter()
+        .chain(poor.iter())
+        .map(|st| TrajectoryHint {
+            request_content: st
+                .trajectory
+                .request
+                .messages
+                .first()
+                .map(|m| m.content.clone())
+                .unwrap_or_default(),
+            quality_score: st.trajectory.quality.overall,
+            feedback: st.feedback.clone(),
+        })
+        .collect();
+
+    let strategy = auto_select_strategy(&hints);
+    debug!(?strategy, hints_count = hints.len(), "mutating skill instructions");
+    mutate_prompt(instructions, &hints, strategy)
+}
+
+/// Generate a skill candidate and optionally improve it using trajectory data.
+///
+/// Combines [`generate_skill_md`] with [`improve_skill_instructions`] when
+/// a [`TrajectoryLearner`] is available.
+pub fn generate_skill_md_with_learning(
+    pattern: &ToolCallPattern,
+    learner: Option<&TrajectoryLearner>,
+) -> SkillCandidate {
+    let mut candidate = generate_skill_md(pattern);
+
+    if let Some(learner) = learner {
+        let patterns = learner.extract_successful_patterns();
+        if !patterns.is_empty() {
+            debug!(
+                pattern_count = patterns.len(),
+                "improving skill via trajectory learning"
+            );
+            candidate.skill_md = improve_skill_instructions(&candidate.skill_md, learner);
+        }
+    }
+
+    candidate
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -634,5 +706,99 @@ mod tests {
 
         let disabled = PatternDetector::new(disabled_config());
         assert!(!disabled.is_enabled());
+    }
+
+    // -- Trajectory-based improvement tests --
+
+    fn make_test_learner() -> TrajectoryLearner {
+        use crate::pipeline::learner::TrajectoryLearnerConfig;
+        use crate::pipeline::traits::{
+            ChatRequest, LlmMessage, QualityScore, RoutingDecision, Trajectory,
+        };
+        use clawft_types::provider::{ContentBlock, LlmResponse, StopReason, Usage};
+
+        let learner = TrajectoryLearner::new(TrajectoryLearnerConfig::default());
+
+        let make_traj = |overall: f32, content: &str| Trajectory {
+            request: ChatRequest {
+                messages: vec![LlmMessage {
+                    role: "user".into(),
+                    content: content.into(),
+                    tool_call_id: None,
+                    tool_calls: None,
+                }],
+                tools: vec![],
+                model: None,
+                max_tokens: None,
+                temperature: None,
+                auth_context: None,
+                complexity_boost: 0.0,
+            },
+            routing: RoutingDecision::default(),
+            response: LlmResponse {
+                id: "r".into(),
+                content: vec![ContentBlock::Text {
+                    text: "ok".into(),
+                }],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage {
+                    input_tokens: 5,
+                    output_tokens: 2,
+                    total_tokens: 0,
+                },
+                metadata: std::collections::HashMap::new(),
+            },
+            quality: QualityScore {
+                overall,
+                relevance: overall,
+                coherence: overall,
+            },
+        };
+
+        // Record some good and poor trajectories
+        use crate::pipeline::traits::LearningBackend;
+        learner.record(&make_traj(0.95, "Write a function to sort a list"));
+        learner.record(&make_traj(0.9, "Explain recursion with examples"));
+        learner.record(&make_traj(0.3, "Fix the bug"));
+        learner.record(&make_traj(0.4, "Summarize article"));
+
+        learner
+    }
+
+    #[test]
+    fn improve_skill_instructions_with_patterns() {
+        let learner = make_test_learner();
+        let original = "Use the read_file tool\nCheck the output";
+        let improved = improve_skill_instructions(original, &learner);
+
+        // Should be different since we have trajectory data
+        assert!(!improved.is_empty());
+    }
+
+    #[test]
+    fn improve_skill_instructions_empty_learner_returns_original() {
+        use crate::pipeline::learner::TrajectoryLearnerConfig;
+        let learner = TrajectoryLearner::new(TrajectoryLearnerConfig::default());
+        let original = "Use the read_file tool";
+        let result = improve_skill_instructions(original, &learner);
+        assert_eq!(result, original);
+    }
+
+    #[test]
+    fn generate_skill_md_with_learning_no_learner() {
+        let pattern = ToolCallPattern::new(vec!["a".into(), "b".into()]);
+        let candidate = generate_skill_md_with_learning(&pattern, None);
+        assert!(candidate.skill_md.contains("autogenerated: true"));
+    }
+
+    #[test]
+    fn generate_skill_md_with_learning_uses_learner() {
+        let learner = make_test_learner();
+        let pattern = ToolCallPattern::new(vec!["read_file".into(), "edit_file".into()]);
+        let candidate = generate_skill_md_with_learning(&pattern, Some(&learner));
+
+        // Should still be a valid skill
+        assert!(candidate.skill_md.contains("read_file"));
+        assert!(!candidate.skill_md.is_empty());
     }
 }

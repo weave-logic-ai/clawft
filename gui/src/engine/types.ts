@@ -31,7 +31,8 @@ export type BlockType =
   | 'StatusBar'
   | 'RadialTopology'
   | 'HintBar'
-  | 'ProgressBar';
+  | 'ProgressBar'
+  | 'Budget';
 
 // ---------------------------------------------------------------------------
 // $state reference

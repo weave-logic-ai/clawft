@@ -193,6 +193,16 @@ impl HnswService {
     }
 }
 
+impl std::fmt::Debug for HnswService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HnswService")
+            .field("config", &self.config)
+            .field("insert_count", &self.insert_count.load(Ordering::Relaxed))
+            .field("search_count", &self.search_count.load(Ordering::Relaxed))
+            .finish()
+    }
+}
+
 // ── SystemService impl ──────────────────────────────────────────────────
 
 #[async_trait]

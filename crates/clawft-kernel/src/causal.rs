@@ -1236,6 +1236,15 @@ impl CausalGraph {
     }
 }
 
+impl fmt::Debug for CausalGraph {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CausalGraph")
+            .field("node_count", &self.node_count.load(Ordering::Relaxed))
+            .field("edge_count", &self.edge_count.load(Ordering::Relaxed))
+            .finish()
+    }
+}
+
 impl Default for CausalGraph {
     fn default() -> Self {
         Self::new()

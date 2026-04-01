@@ -33,10 +33,8 @@ use crate::bus::MessageBus;
 use crate::pipeline::assembler::TokenBudgetAssembler;
 use crate::pipeline::classifier::KeywordClassifier;
 use crate::pipeline::cost_tracker::CostTracker;
-use crate::pipeline::learner::NoopLearner;
 use crate::pipeline::rate_limiter::RateLimiter;
 use crate::pipeline::router::StaticRouter;
-use crate::pipeline::scorer::NoopScorer;
 use crate::pipeline::tiered_router::TieredRouter;
 use crate::pipeline::traits::{ModelRouter, Pipeline, PipelineRegistry};
 use crate::pipeline::transport::OpenAiCompatTransport;
@@ -313,8 +311,8 @@ fn build_default_pipeline(config: &Config) -> PipelineRegistry {
         config.agents.defaults.max_tokens.max(1) as usize,
     ));
     let transport = Arc::new(OpenAiCompatTransport::new());
-    let scorer = Arc::new(NoopScorer::new());
-    let learner = Arc::new(NoopLearner::new());
+    let scorer = crate::pipeline::build_scorer(&config.pipeline);
+    let learner = crate::pipeline::build_learner(&config.pipeline);
 
     let pipeline = Pipeline {
         classifier,

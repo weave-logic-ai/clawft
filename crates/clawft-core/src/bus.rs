@@ -172,7 +172,7 @@ impl MessageBus {
 // Browser implementation (futures-channel)
 // ---------------------------------------------------------------------------
 
-#[cfg(not(feature = "native"))]
+#[cfg(feature = "browser")]
 pub struct MessageBus {
     inbound_tx: futures_util::lock::Mutex<futures_channel::mpsc::UnboundedSender<InboundMessage>>,
     inbound_rx: futures_util::lock::Mutex<futures_channel::mpsc::UnboundedReceiver<InboundMessage>>,
@@ -180,7 +180,7 @@ pub struct MessageBus {
     outbound_rx: futures_util::lock::Mutex<futures_channel::mpsc::UnboundedReceiver<OutboundMessage>>,
 }
 
-#[cfg(not(feature = "native"))]
+#[cfg(feature = "browser")]
 impl MessageBus {
     /// Create a new message bus (browser: unbounded channels).
     pub fn new() -> Self {
@@ -279,6 +279,65 @@ impl MessageBus {
         use futures_util::StreamExt;
         let mut rx = self.outbound_rx.lock().await;
         rx.next().await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// No-op fallback (neither native nor browser -- e.g. wasip2)
+// ---------------------------------------------------------------------------
+
+#[cfg(not(any(feature = "native", feature = "browser")))]
+pub struct MessageBus {
+    _private: (),
+}
+
+#[cfg(not(any(feature = "native", feature = "browser")))]
+impl MessageBus {
+    /// Create a no-op message bus (no channel backend available).
+    pub fn new() -> Self {
+        debug!("MessageBus created (no-op fallback, no channel backend)");
+        Self { _private: () }
+    }
+
+    /// Create a no-op message bus (capacity parameter ignored).
+    pub fn with_capacity(_capacity: usize) -> Self {
+        Self::new()
+    }
+
+    /// Always returns an error (no channel backend).
+    pub fn publish_inbound(&self, _msg: InboundMessage) -> Result<(), ClawftError> {
+        Err(ClawftError::Channel("no channel backend available".into()))
+    }
+
+    /// Always returns an error (no channel backend).
+    pub async fn publish_inbound_async(
+        &self,
+        _msg: InboundMessage,
+    ) -> Result<(), ClawftError> {
+        Err(ClawftError::Channel("no channel backend available".into()))
+    }
+
+    /// Always returns `None` (no channel backend).
+    pub async fn consume_inbound(&self) -> Option<InboundMessage> {
+        None
+    }
+
+    /// Always returns an error (no channel backend).
+    pub fn dispatch_outbound(&self, _msg: OutboundMessage) -> Result<(), ClawftError> {
+        Err(ClawftError::Channel("no channel backend available".into()))
+    }
+
+    /// Always returns an error (no channel backend).
+    pub async fn dispatch_outbound_async(
+        &self,
+        _msg: OutboundMessage,
+    ) -> Result<(), ClawftError> {
+        Err(ClawftError::Channel("no channel backend available".into()))
+    }
+
+    /// Always returns `None` (no channel backend).
+    pub async fn consume_outbound(&self) -> Option<OutboundMessage> {
+        None
     }
 }
 

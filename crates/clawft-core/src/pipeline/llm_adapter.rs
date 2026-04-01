@@ -33,10 +33,8 @@ use clawft_types::config::Config;
 use super::assembler::TokenBudgetAssembler;
 use super::classifier::KeywordClassifier;
 use super::cost_tracker::CostTracker;
-use super::learner::NoopLearner;
 use super::rate_limiter::RateLimiter;
 use super::router::StaticRouter;
-use super::scorer::NoopScorer;
 use super::tiered_router::TieredRouter;
 use super::traits::{ModelRouter, Pipeline, PipelineRegistry};
 use super::transport::{LlmProvider, OpenAiCompatTransport};
@@ -513,8 +511,8 @@ pub fn build_live_pipeline(config: &Config) -> PipelineRegistry {
         Arc::new(OpenAiCompatTransport::with_provider(adapter))
     };
 
-    let scorer = Arc::new(NoopScorer::new());
-    let learner = Arc::new(NoopLearner::new());
+    let scorer = super::build_scorer(&config.pipeline);
+    let learner = super::build_learner(&config.pipeline);
 
     let pipeline = Pipeline {
         classifier,
