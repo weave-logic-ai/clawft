@@ -14,6 +14,7 @@ interface Message {
 }
 
 type SandboxStatus = 'loading' | 'ready' | 'error' | 'needs-key';
+type SandboxMode = 'local' | 'llm';
 
 // ---------------------------------------------------------------------------
 // WASM loader
@@ -269,6 +270,7 @@ function keywordSearch(query: string, entries: KBEntry[], topK = 5): KBEntry[] {
 
 export default function WasmSandbox() {
   const [status, setStatus] = useState<SandboxStatus>('loading');
+  const [mode, setMode] = useState<SandboxMode>('local');
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -277,6 +279,7 @@ export default function WasmSandbox() {
   const [kbLoaded, setKbLoaded] = useState(false);
   const [kbStats, setKbStats] = useState<string>('');
   const [error, setError] = useState<string>('');
+  const [showLlmSetup, setShowLlmSetup] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const wasmRef = useRef<any>(null);
 
@@ -329,34 +332,39 @@ export default function WasmSandbox() {
     }
   }, [model]);
 
-  // Load WASM + KB on mount
+  // Load KB on mount — ready immediately in local mode
   useEffect(() => {
     let cancelled = false;
 
     (async () => {
       try {
-        // Load KB in background
         const kb = await loadKB();
         if (cancelled) return;
         setKbLoaded(true);
         setKbStats(`${kb.entries.length} segments, ${kb.manifest.dimension}-dim`);
 
-        // Check for stored key
+        // Check for stored key — if present, upgrade to LLM mode
         const stored = localStorage.getItem('clawft-api-key');
         const storedModel = localStorage.getItem('clawft-model');
         if (storedModel) setModel(storedModel);
 
         if (stored) {
           setApiKey(stored);
+          setMode('llm');
           await initWasm(stored, storedModel || model);
-          if (!cancelled) setStatus('ready');
-        } else {
-          setStatus('needs-key');
         }
+
+        if (!cancelled) setStatus('ready');
       } catch (e: any) {
         if (!cancelled) {
           setError(e.message || String(e));
-          setStatus('error');
+          // Even if WASM fails, local mode works with just the KB
+          if (kbCache) {
+            setMode('local');
+            setStatus('ready');
+          } else {
+            setStatus('error');
+          }
         }
       }
     })();
@@ -375,6 +383,8 @@ export default function WasmSandbox() {
       localStorage.setItem('clawft-api-key', apiKey);
       localStorage.setItem('clawft-model', model);
       await initWasm(apiKey, model);
+      setMode('llm');
+      setShowLlmSetup(false);
       setStatus('ready');
       setMessages([
         {
@@ -384,13 +394,26 @@ export default function WasmSandbox() {
       ]);
     } catch (e: any) {
       setError(e.message || String(e));
-      setStatus('error');
+      setStatus('ready'); // Fall back to local mode
+      setMode('local');
     }
+  };
+
+  const handleClearKey = () => {
+    localStorage.removeItem('clawft-api-key');
+    localStorage.removeItem('clawft-model');
+    wasmModule = null;
+    wasmRef.current = null;
+    setApiKey('');
+    setMode('local');
+    setMessages([]);
+    setError('');
   };
 
   const handleSend = useCallback(async () => {
     const text = input.trim();
-    if (!text || sending || !wasmRef.current) return;
+    if (!text || sending) return;
+    if (mode === 'llm' && !wasmRef.current) return;
 
     setSending(true);
     setInput('');
@@ -400,53 +423,77 @@ export default function WasmSandbox() {
       const introspecting = isIntrospectionQuery(text);
 
       // RAG: search KB for relevant context
-      let context = '';
-      if (kbCache) {
-        const hits = keywordSearch(text, kbCache.entries, 8);
-        if (hits.length > 0) {
-          context = hits
+      const hits = kbCache ? keywordSearch(text, kbCache.entries, 8) : [];
+      const context = hits.length > 0
+        ? hits
             .map((h) => {
               const meta = h.metadata as Record<string, string>;
               return `### ${meta?.title ?? 'Doc'} — ${meta?.section ?? ''}\nSource: ${meta?.doc_url ?? meta?.source ?? ''}\n${h.text}`;
             })
-            .join('\n\n');
-        }
-      }
+            .join('\n\n')
+        : '';
 
       // Gather live runtime info when the user is asking about this instance
       const runtimeInfo = introspecting
         ? gatherRuntimeInfo(wasmRef.current, kbCache, model)
         : '';
 
-      // Build the prompt with strong RAG constraints
-      const ragPrompt = context || runtimeInfo
-        ? [
-            'ROLE: You are the WeftOS documentation assistant running in a clawft WASM sandbox in the user\'s browser.',
-            '',
-            'RULES:',
-            '- Answer using the documentation excerpts and/or live runtime data provided below.',
-            '- When live runtime data is provided, you CAN and SHOULD report it — this is real data from the user\'s own WASM instance.',
-            '- If the answer is not in the excerpts or runtime data, say "I don\'t have that information in my knowledge base. Try checking the docs at /docs/" — do NOT guess.',
-            '- Quote the source link when referencing a doc page.',
-            '- Keep answers concise and factual.',
-            '- For acronyms, only use the definition from the docs — never invent expansions.',
-            '',
-            ...(runtimeInfo ? ['## Live Runtime Data (from this WASM instance)', '', runtimeInfo, ''] : []),
-            ...(context ? ['## Documentation Context', '', context, ''] : []),
-            '## Question',
-            '',
-            text,
-          ].join('\n')
-        : [
-            'ROLE: You are the WeftOS documentation assistant.',
-            'You have no relevant documentation context for this question.',
-            'Say "I don\'t have enough context to answer that accurately. Try asking about a specific WeftOS feature, or browse the docs at /docs/"',
-            '',
-            'Question: ' + text,
-          ].join('\n');
+      if (mode === 'local') {
+        // ── Local mode: pure retrieval, no LLM ──────────────────
+        let reply: string;
 
-      const reply = await wasmRef.current.send_message(ragPrompt);
-      setMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
+        if (introspecting && runtimeInfo) {
+          reply = runtimeInfo;
+        } else if (hits.length > 0) {
+          // Format KB results as a readable answer
+          reply = hits
+            .map((h) => {
+              const meta = h.metadata as Record<string, string>;
+              const title = meta?.title ?? '';
+              const section = meta?.section ?? '';
+              const source = meta?.doc_url ?? meta?.source ?? '';
+              const header = [title, section].filter(Boolean).join(' — ');
+              const link = source ? `[${header}](${source})` : header;
+              return `**${link}**\n\n${h.text}`;
+            })
+            .join('\n\n---\n\n');
+        } else {
+          reply =
+            "No matching documentation found. Try different keywords, or browse the full docs at [/docs](/docs).";
+        }
+
+        setMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
+      } else {
+        // ── LLM mode: RAG + send through WASM pipeline ──────────
+        const ragPrompt = context || runtimeInfo
+          ? [
+              'ROLE: You are the WeftOS documentation assistant running in a clawft WASM sandbox in the user\'s browser.',
+              '',
+              'RULES:',
+              '- Answer using the documentation excerpts and/or live runtime data provided below.',
+              '- When live runtime data is provided, you CAN and SHOULD report it — this is real data from the user\'s own WASM instance.',
+              '- If the answer is not in the excerpts or runtime data, say "I don\'t have that information in my knowledge base. Try checking the docs at /docs/" — do NOT guess.',
+              '- Quote the source link when referencing a doc page.',
+              '- Keep answers concise and factual.',
+              '- For acronyms, only use the definition from the docs — never invent expansions.',
+              '',
+              ...(runtimeInfo ? ['## Live Runtime Data (from this WASM instance)', '', runtimeInfo, ''] : []),
+              ...(context ? ['## Documentation Context', '', context, ''] : []),
+              '## Question',
+              '',
+              text,
+            ].join('\n')
+          : [
+              'ROLE: You are the WeftOS documentation assistant.',
+              'You have no relevant documentation context for this question.',
+              'Say "I don\'t have enough context to answer that accurately. Try asking about a specific WeftOS feature, or browse the docs at /docs/"',
+              '',
+              'Question: ' + text,
+            ].join('\n');
+
+        const reply = await wasmRef.current.send_message(ragPrompt);
+        setMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
+      }
     } catch (e: any) {
       setMessages((prev) => [
         ...prev,
@@ -455,7 +502,7 @@ export default function WasmSandbox() {
     } finally {
       setSending(false);
     }
-  }, [input, sending]);
+  }, [input, sending, mode, model]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -471,46 +518,77 @@ export default function WasmSandbox() {
   return (
     <main className="flex min-h-screen flex-col bg-fd-background">
       {/* Header */}
-      <header className="flex items-center justify-between border-b border-fd-border px-4 py-3">
-        <div className="flex items-center gap-3">
-          <Link href="/" className="text-sm text-fd-muted-foreground hover:text-fd-foreground transition-colors">
-            WeftOS
-          </Link>
-          <span className="text-fd-muted-foreground">/</span>
-          <h1 className="text-lg font-semibold text-fd-foreground">clawft sandbox</h1>
-          <span className="rounded-full bg-fd-accent px-2 py-0.5 text-xs text-fd-muted-foreground">
-            wasm
-          </span>
+      <header className="border-b border-fd-border">
+        <div className="flex items-center justify-between px-4 py-3">
+          <div className="flex items-center gap-3">
+            <Link href="/" className="text-sm text-fd-muted-foreground hover:text-fd-foreground transition-colors">
+              WeftOS
+            </Link>
+            <span className="text-fd-muted-foreground">/</span>
+            <h1 className="text-lg font-semibold text-fd-foreground">clawft sandbox</h1>
+          </div>
+          <div className="flex items-center gap-2">
+            {status === 'ready' && messages.length > 0 && (
+              <button
+                onClick={handleReset}
+                className="rounded bg-fd-accent px-2 py-1 text-xs text-fd-muted-foreground hover:bg-fd-border transition-colors"
+              >
+                New chat
+              </button>
+            )}
+            <StatusIndicator status={status} />
+          </div>
         </div>
-        <div className="flex items-center gap-2 text-xs text-fd-muted-foreground">
-          {kbLoaded && (
-            <span className="rounded bg-fd-accent px-2 py-0.5" title="RVF Knowledge Base loaded">
-              KB: {kbStats}
-            </span>
-          )}
-          {status === 'ready' && messages.length > 0 && (
-            <button
-              onClick={handleReset}
-              className="rounded bg-fd-accent px-2 py-0.5 hover:bg-fd-border transition-colors"
-              title="New conversation"
-            >
-              New chat
-            </button>
-          )}
-          <StatusIndicator status={status} />
-        </div>
+
+        {/* Status bar */}
+        {status === 'ready' && (
+          <div className="flex items-center gap-3 border-t border-fd-border bg-fd-accent/30 px-4 py-1.5 text-xs text-fd-muted-foreground">
+            {kbLoaded && (
+              <span title="RVF Knowledge Base">
+                KB: {kbStats}
+              </span>
+            )}
+            <span className="text-fd-border">|</span>
+            {mode === 'local' ? (
+              <>
+                <span>Mode: local retrieval</span>
+                <button
+                  onClick={() => setShowLlmSetup(!showLlmSetup)}
+                  className="underline hover:text-fd-foreground transition-colors"
+                >
+                  Connect LLM
+                </button>
+              </>
+            ) : (
+              <>
+                <span title={model}>Mode: LLM ({model.split('/').pop()})</span>
+                <button
+                  onClick={handleClearKey}
+                  className="underline hover:text-fd-foreground transition-colors"
+                >
+                  Disconnect
+                </button>
+              </>
+            )}
+          </div>
+        )}
       </header>
 
-      {/* API Key setup */}
-      {(status === 'needs-key' || status === 'error') && (
+      {/* LLM config panel — shown when user wants to connect a model */}
+      {status === 'ready' && mode === 'local' && messages.length === 0 && showLlmSetup && (
         <div className="mx-auto w-full max-w-xl p-6">
           <div className="rounded-xl border border-fd-border bg-fd-card p-6">
-            <h2 className="mb-2 text-lg font-semibold text-fd-card-foreground">
-              Connect to an LLM
-            </h2>
+            <div className="flex items-center justify-between mb-2">
+              <h2 className="text-lg font-semibold text-fd-card-foreground">
+                Connect an LLM (optional)
+              </h2>
+              <button onClick={() => setShowLlmSetup(false)} className="text-fd-muted-foreground hover:text-fd-foreground text-sm">
+                Close
+              </button>
+            </div>
             <p className="mb-4 text-sm text-fd-muted-foreground">
-              clawft-wasm runs entirely in your browser. Provide an API key to connect to an LLM
-              provider. Your key stays in localStorage and is sent directly to the provider.
+              Local mode works without an API key — it searches the KB and returns matching docs directly.
+              Connect an LLM for synthesized answers. Your key stays in localStorage.
             </p>
             {error && (
               <div className="mb-4 rounded-lg bg-red-500/10 p-3 text-sm text-red-400">
@@ -579,8 +657,9 @@ export default function WasmSandbox() {
                     WeftOS WASM Sandbox
                   </h2>
                   <p className="mb-6 text-sm text-fd-muted-foreground">
-                    You're running clawft in your browser via WebAssembly, connected to the full
-                    WeftOS documentation KB ({kbStats}). Ask anything.
+                    {mode === 'local'
+                      ? `Searching ${kbStats} of WeftOS documentation locally — no API key needed.`
+                      : `Running clawft-wasm with ${model.split('/').pop()}, backed by ${kbStats}.`}
                   </p>
                   <div className="flex flex-wrap justify-center gap-2">
                     {[
