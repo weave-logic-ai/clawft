@@ -1,0 +1,91 @@
+# Build RVF knowledge base artifacts and attach to GitHub Releases.
+#
+# Produces weftos-docs.rvf (the documentation knowledge base for the
+# playground tour guide) and any future RVF packages (set pieces, concept
+# graphs, learner templates).
+
+name: Release (Knowledge Base)
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - '**[0-9]+.[0-9]+.[0-9]+*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-kb:
+    name: Build & upload RVF knowledge base
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tools/build-kb/target
+          key: ${{ runner.os }}-cargo-build-kb-${{ hashFiles('tools/build-kb/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-kb-
+
+      - name: Build knowledge base tool
+        run: cargo build --release --manifest-path tools/build-kb/Cargo.toml
+
+      - name: Generate knowledge base
+        id: kb
+        run: |
+          mkdir -p docs/src/public/kb
+          tools/build-kb/target/release/build-kb \
+            --docs-dir docs/src/content/docs \
+            --output docs/src/public/kb/weftos-docs.rvf
+
+          SIZE_BYTES=$(wc -c < docs/src/public/kb/weftos-docs.rvf)
+          SIZE_KB=$(echo "scale=1; $SIZE_BYTES / 1024" | bc)
+
+          echo "## Knowledge Base" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Metric | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|--------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Size | ${SIZE_KB} KB |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Rename for release
+        id: rename
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          DEST="weftos-docs-${TAG}.rvf"
+          cp docs/src/public/kb/weftos-docs.rvf "$DEST"
+          echo "asset=$DEST" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          ASSET="${{ steps.rename.outputs.asset }}"
+
+          # Wait for the release to exist (created by release.yml)
+          for i in $(seq 1 90); do
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              echo "Release $TAG found"
+              break
+            fi
+            echo "Waiting for release $TAG to be created... ($i/90)"
+            sleep 20
+          done
+
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::Release $TAG not found after 30 minutes"
+            exit 1
+          fi
+
+          gh release upload "$TAG" "$ASSET" --clobber
+          echo "Uploaded $ASSET to release $TAG"

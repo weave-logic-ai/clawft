@@ -8,20 +8,20 @@ export default function HomePage() {
           WeftOS
         </h1>
         <p className="mb-4 text-xl text-fd-foreground/80 sm:text-2xl">
-          Full-stack AI operating system built in Rust
+          The AI framework that remembers everything.
         </p>
-        <div className="mb-6 flex flex-wrap justify-center gap-2">
-          <img src="https://img.shields.io/github/v/release/weave-logic-ai/weftos?label=release&color=blue" alt="Release" />
-          <img src="https://img.shields.io/crates/v/weftos?color=orange" alt="crates.io" />
-          <img src="https://img.shields.io/npm/v/@weftos/core?color=red" alt="npm" />
-          <img src="https://img.shields.io/badge/targets-7_platforms-green" alt="Platforms" />
-          <img src="https://img.shields.io/badge/tests-3,300+-brightgreen" alt="Tests" />
+        <p className="mb-8 text-base text-fd-muted-foreground sm:text-lg max-w-2xl mx-auto">
+          Build agents that persist knowledge across sessions, prove why they made every decision, and coordinate across machines — all in a single Rust runtime. Open source, production-tested with 3,900+ tests.
+        </p>
+
+        <div className="mb-12 flex flex-wrap justify-center gap-3">
+          <a href="/docs/clawft/getting-started" className="rounded-md bg-fd-primary px-6 py-3 font-medium text-fd-primary-foreground hover:opacity-90 transition-opacity">
+            Get Started in 5 Minutes
+          </a>
+          <a href="https://github.com/weave-logic-ai/weftos" className="rounded-md border border-fd-border px-6 py-3 font-medium text-fd-foreground hover:bg-fd-accent transition-colors">
+            View on GitHub
+          </a>
         </div>
-        <p className="mb-12 text-base text-fd-muted-foreground sm:text-lg max-w-2xl mx-auto">
-          A complete AI framework from agent runtime to distributed kernel. 22 crates,
-          181K+ lines of Rust. Agents get persistent memory, verifiable
-          reasoning, constitutional governance, and encrypted mesh networking.
-        </p>
 
         {/* Three-layer architecture */}
         <div className="grid gap-4 sm:grid-cols-3 mb-12">
@@ -33,11 +33,10 @@ export default function HomePage() {
               Layer 1 — Agent Runtime
             </div>
             <h2 className="mb-2 text-xl font-semibold text-fd-card-foreground">
-              clawft
+              Run agents anywhere
             </h2>
             <p className="text-sm text-fd-muted-foreground">
-              7-stage processing pipeline, 9 LLM providers, 11 messaging channels,
-              tiered model routing, self-improving skills, and WASM-sandboxed tools.
+              Connect to any LLM, deploy on any channel (Slack, Teams, web, CLI), and let agents learn new skills automatically. Native binaries, browser WASM, or Docker.
             </p>
           </Link>
 
@@ -49,11 +48,10 @@ export default function HomePage() {
               Layer 2 — Kernel
             </div>
             <h2 className="mb-2 text-xl font-semibold text-fd-card-foreground">
-              WeftOS
+              Manage agents like processes
             </h2>
             <p className="text-sm text-fd-muted-foreground">
-              Process management with PID tracking, ExoChain cryptographic provenance,
-              three-branch governance, encrypted P2P mesh, and self-healing supervision.
+              Every agent gets a PID, a cryptographic audit trail, and governance rules. When agents fail, the supervisor restarts them. When they misbehave, constitutional checks stop them.
             </p>
           </Link>
 
@@ -65,22 +63,25 @@ export default function HomePage() {
               Layer 3 — Cognitive
             </div>
             <h2 className="mb-2 text-xl font-semibold text-fd-card-foreground">
-              ECC
+              Give agents a brain
             </h2>
             <p className="text-sm text-fd-muted-foreground">
-              Causal knowledge graph, HNSW semantic search, spectral analysis,
-              community detection, predictive change analysis, and the DEMOCRITUS
-              continuous cognitive loop.
+              A knowledge graph that grows with every interaction. Your agents remember what they learned last week, trace cause and effect, and get smarter over time.
             </p>
           </Link>
         </div>
 
         {/* Install CTA */}
         <div className="mb-12 rounded-xl border border-fd-border bg-fd-card p-6">
+          {/* One command. Any platform. */}
           <h3 className="mb-4 text-lg font-semibold text-fd-card-foreground">Install</h3>
           <div className="mb-4 rounded-lg bg-fd-background p-4 text-left font-mono text-sm text-fd-foreground">
             <span className="text-fd-muted-foreground">$</span> curl -fsSL https://github.com/weave-logic-ai/weftos/releases/latest/download/clawft-cli-installer.sh | sh
           </div>
+          <p className="mb-4 text-sm text-fd-muted-foreground">
+            Also available via Homebrew, Docker, cargo, and PowerShell.{' '}
+            <a href="/docs/weftos/getting-started/installation" className="underline hover:text-fd-foreground transition-colors">See all install options</a>.
+          </p>
           <div className="flex flex-wrap justify-center gap-3 text-sm">
             <a href="https://github.com/weave-logic-ai/weftos/releases" className="rounded-md bg-fd-primary px-4 py-2 font-medium text-fd-primary-foreground hover:opacity-90 transition-opacity">
               GitHub Releases
@@ -100,12 +101,12 @@ export default function HomePage() {
           </div>
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-8">
           {[
-            { label: 'Agent Loop', desc: '7-stage pipeline with tiered routing' },
-            { label: 'Governance', desc: 'Constitutional AI with effect vectors' },
-            { label: 'Provenance', desc: 'Cryptographic audit trail (ExoChain)' },
-            { label: 'Mesh', desc: 'Encrypted P2P across heterogeneous nodes' },
+            { label: 'Run Anywhere', desc: '7 platforms — Linux, macOS, Windows, Docker, WASM, browser' },
+            { label: 'Trust Your Agents', desc: 'Constitutional AI that stops misbehavior before it happens' },
+            { label: 'Prove Every Decision', desc: 'Tamper-evident audit trail for every agent action' },
+            { label: 'Scale Across Machines', desc: 'Encrypted P2P coordination without central servers' },
           ].map((item) => (
             <div key={item.label} className="rounded-lg border border-fd-border p-4">
               <div className="mb-1 font-semibold text-fd-foreground">{item.label}</div>
@@ -113,6 +114,24 @@ export default function HomePage() {
             </div>
           ))}
         </div>
+
+        <div className="mb-8 flex flex-wrap justify-center gap-2">
+          <img src="https://img.shields.io/github/v/release/weave-logic-ai/weftos?label=release&color=blue" alt="Release" />
+          <img src="https://img.shields.io/crates/v/weftos?color=orange" alt="crates.io" />
+          <img src="https://img.shields.io/npm/v/@weftos/core?color=red" alt="npm" />
+          <img src="https://img.shields.io/badge/targets-7_platforms-green" alt="Platforms" />
+          <img src="https://img.shields.io/badge/tests-3,300+-brightgreen" alt="Tests" />
+        </div>
+
+        <footer className="mt-16 border-t border-fd-border pt-8 pb-8 text-center text-sm text-fd-muted-foreground">
+          <div className="flex flex-wrap justify-center gap-6">
+            <a href="https://github.com/weave-logic-ai/weftos" className="hover:text-fd-foreground transition-colors">GitHub</a>
+            <a href="/docs" className="hover:text-fd-foreground transition-colors">Documentation</a>
+            <a href="https://weavelogic.ai" className="hover:text-fd-foreground transition-colors">WeaveLogic</a>
+            <a href="https://weavelogic.ai/contact" className="hover:text-fd-foreground transition-colors">Enterprise Support</a>
+          </div>
+          <p className="mt-4">MIT / Apache-2.0 — Built by <a href="https://weavelogic.ai" className="underline hover:text-fd-foreground">WeaveLogic</a></p>
+        </footer>
       </div>
     </main>
   );
