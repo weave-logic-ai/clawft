@@ -1,0 +1,105 @@
+---
+title: Glossary
+description: Key terms, acronyms, and concepts used throughout WeftOS documentation.
+---
+
+## A
+
+**Agent Loop**
+The core execution cycle in clawft: receive message, build context, run pipeline stages, call tools, return response. See [Agent Loop](/docs/clawft/agent-loop).
+
+**AppContext**
+The top-level runtime container that holds the message bus, session manager, memory store, tool registry, and LLM adapter. Wrapped by the kernel's `Kernel<P>` struct.
+
+## B
+
+**Boot Sequence**
+The ordered startup process: K0 kernel init, K1 process table, K2 IPC, ExoChain genesis, K3 WASM sandbox, then optional ECC and mesh layers. See [Boot Sequence](/docs/weftos/boot-sequence).
+
+## C
+
+**CBOR**
+Concise Binary Object Representation. Used as the payload encoding inside RVF segments for compact binary serialization.
+
+**clawft**
+The agent runtime layer of WeftOS. Provides the LLM pipeline, tool system, skills, channels (Slack, Teams, CLI, web), and the browser WASM sandbox.
+
+## E
+
+**ECC (Ephemeral Causal Cognition)**
+The cognitive substrate layer. Maintains a causal DAG (directed acyclic graph), HNSW vector memory, impulse queue for ephemeral signals, and a cognitive tick loop that runs continuous reasoning. See [ECC](/docs/weftos/ecc).
+
+**ExoChain**
+A tamper-evident append-only hash chain (SHAKE-256) that records every significant kernel event. Provides cryptographic provenance for agent actions. See [ExoChain](/docs/weftos/exochain).
+
+## G
+
+**Gate**
+The governance enforcement point. Every agent action passes through a gate that checks capabilities, constitutional rules, and resource limits before allowing execution.
+
+**GGUF**
+A quantized model format used for local inference. WeftOS plans to support 0.5B-7B parameter GGUF models via the `ruvllm` crate for on-device agent reasoning.
+
+## H
+
+**HNSW**
+Hierarchical Navigable Small World graph. The vector search index used by ECC for nearest-neighbor retrieval over agent memory embeddings.
+
+## I
+
+**IPC (Inter-Process Communication)**
+The K2 messaging layer. Agents communicate via typed message envelopes with A2A routing, pub/sub, and cron scheduling. See [IPC](/docs/weftos/ipc).
+
+## K
+
+**K-Phases**
+The kernel build phases: K0 (boot), K1 (processes), K2 (IPC), K3 (WASM sandbox), K3c (ECC cognitive), K4 (containers), K5 (apps), K6 (mesh). See [Kernel Modules](/docs/weftos/guides/kernel-modules).
+
+**Kernel**
+The central `Kernel<P: Platform>` struct that manages the agent fleet. Wraps AppContext with process tracking, service lifecycle, IPC, health monitoring, and a boot state machine.
+
+## M
+
+**Mesh**
+The K6 peer-to-peer networking layer for cross-node agent coordination. Supports encrypted transport, discovery, and state replication without central servers.
+
+## P
+
+**PID (Process ID)**
+Every agent gets a unique PID from the kernel's process table, enabling supervision, resource limits, and lifecycle management.
+
+**Pipeline**
+The multi-stage message processing chain in clawft: context building, tool selection, LLM inference, response formatting. Configurable with custom stages.
+
+**Platform**
+The trait abstraction (`Platform`) that lets WeftOS run on native (Linux, macOS, Windows), Docker, WASI, and browser WASM with the same kernel code.
+
+## R
+
+**RVF (Rust Vector Format)**
+A binary segment format for storing embeddings, metadata, and knowledge bases. Uses 64-byte aligned segments with CBOR payloads and optional WITNESS chains for tamper evidence.
+
+**ruvector**
+The upstream ecosystem of Rust crates providing vector search, neural routing, consensus, and distributed coordination. WeftOS integrates `ruvector-cluster`, `ruvector-core`, and related crates.
+
+## S
+
+**SONA (Self-Optimizing Neural Architecture)**
+A learning system that records agent decision trajectories and uses them to improve routing and model selection over time.
+
+## W
+
+**WASI (WebAssembly System Interface)**
+The WASM runtime target for server-side deployments. WeftOS builds for `wasm32-wasip2` with HTTP, filesystem, and environment access.
+
+**WASM (WebAssembly)**
+The browser build target (`wasm32-unknown-unknown`). Enables running the full clawft agent runtime in a web browser via wasm-bindgen.
+
+**Weaver**
+The ECC cognitive modeler. Runs the HYPOTHESIZE-OBSERVE-EVALUATE-ADJUST loop on causal models within the kernel.
+
+**WeftOS**
+The complete AI agent operating system. Three layers: clawft (agent runtime), kernel (OS abstractions), and ECC (cognitive substrate).
+
+**WITNESS Chain**
+A hash chain appended to RVF segment files that proves the integrity of embedded knowledge. Each operation is cryptographically linked to the previous, creating tamper-evident provenance.

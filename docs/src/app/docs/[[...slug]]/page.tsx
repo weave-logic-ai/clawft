@@ -7,6 +7,7 @@ import {
 } from 'fumadocs-ui/page';
 import { notFound } from 'next/navigation';
 import defaultMdxComponents from 'fumadocs-ui/mdx';
+import { findNeighbour } from 'fumadocs-core/page-tree';
 import type { DocData } from 'fumadocs-mdx/runtime/types';
 
 export default async function Page(props: {
@@ -18,9 +19,21 @@ export default async function Page(props: {
 
   const data = page.data as typeof page.data & DocData;
   const MDX = data.body;
+  const neighbours = findNeighbour(source.pageTree, page.url);
+  const filePath = page.path;
 
   return (
-    <DocsPage toc={data.toc} full={page.data.full}>
+    <DocsPage
+      toc={data.toc}
+      full={page.data.full}
+      footer={{ items: neighbours }}
+      editOnGithub={{
+        owner: 'weave-logic-ai',
+        repo: 'weftos',
+        sha: 'master',
+        path: `docs/src/content/docs/${filePath}`,
+      }}
+    >
       <DocsTitle>{page.data.title}</DocsTitle>
       <DocsDescription>{page.data.description}</DocsDescription>
       <DocsBody>
