@@ -14,7 +14,7 @@ export default function HomePage() {
           <img src="https://img.shields.io/github/v/release/weave-logic-ai/weftos?label=release&color=blue" alt="Release" />
           <img src="https://img.shields.io/crates/v/weftos?color=orange" alt="crates.io" />
           <img src="https://img.shields.io/npm/v/@weftos/core?color=red" alt="npm" />
-          <img src="https://img.shields.io/badge/targets-9_platforms-green" alt="Platforms" />
+          <img src="https://img.shields.io/badge/targets-7_platforms-green" alt="Platforms" />
           <img src="https://img.shields.io/badge/tests-3,300+-brightgreen" alt="Tests" />
         </div>
         <p className="mb-12 text-base text-fd-muted-foreground sm:text-lg max-w-2xl mx-auto">
