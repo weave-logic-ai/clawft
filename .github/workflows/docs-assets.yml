@@ -1,0 +1,117 @@
+# Publish browser WASM + RVF KB to GitHub Releases as CDN-served assets.
+# Runs after the browser-wasm build completes on master, or manually.
+# The docs site fetches these at runtime via NEXT_PUBLIC_CDN_URL.
+
+name: Docs Assets Publish
+
+permissions:
+  contents: write
+
+on:
+  workflow_run:
+    workflows: ["Browser WASM"]
+    types: [completed]
+    branches: [master]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # The "release" that holds latest CDN assets (rolling, not versioned).
+  CDN_TAG: cdn-assets
+
+jobs:
+  publish-assets:
+    name: Publish WASM + KB to CDN release
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Download browser WASM artifact ──────────────────────────
+      - name: Download browser-wasm-pkg artifact
+        if: github.event_name != 'workflow_dispatch'
+        uses: actions/download-artifact@v4
+        with:
+          name: browser-wasm-pkg
+          path: browser-pkg
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build browser WASM (manual trigger)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo install wasm-bindgen-cli
+          cargo build --target wasm32-unknown-unknown --profile release-wasm \
+            -p clawft-wasm --no-default-features --features browser
+          mkdir -p browser-pkg
+          wasm-bindgen target/wasm32-unknown-unknown/release-wasm/clawft_wasm.wasm \
+            --out-dir browser-pkg --target web --no-typescript
+
+      # ── Build RVF knowledge base ────────────────────────────────
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo (build-kb)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tools/build-kb/target
+          key: ${{ runner.os }}-cargo-build-kb-${{ hashFiles('tools/build-kb/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-kb-
+
+      - name: Build knowledge base
+        run: |
+          cargo build --release --manifest-path tools/build-kb/Cargo.toml
+          tools/build-kb/target/release/build-kb \
+            --docs-dir docs/src/content/docs \
+            --output weftos-docs.rvf
+
+      # ── Package assets ──────────────────────────────────────────
+      - name: Package WASM bundle
+        run: |
+          tar -czf browser-wasm-pkg.tar.gz -C browser-pkg .
+
+      # ── Create / update CDN release ─────────────────────────────
+      - name: Ensure CDN release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh release view "$CDN_TAG" >/dev/null 2>&1; then
+            gh release create "$CDN_TAG" \
+              --title "CDN Assets (latest)" \
+              --notes "Rolling release for docs site CDN assets. Updated automatically." \
+              --prerelease
+          fi
+
+      - name: Upload assets to CDN release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$CDN_TAG" \
+            browser-wasm-pkg.tar.gz \
+            browser-pkg/clawft_wasm.js \
+            browser-pkg/clawft_wasm_bg.wasm \
+            weftos-docs.rvf \
+            --clobber
+
+      # ── Summary ─────────────────────────────────────────────────
+      - name: Summary
+        run: |
+          WASM_SIZE=$(du -h browser-pkg/clawft_wasm_bg.wasm | cut -f1)
+          JS_SIZE=$(du -h browser-pkg/clawft_wasm.js | cut -f1)
+          KB_SIZE=$(du -h weftos-docs.rvf | cut -f1)
+
+          echo "## CDN Assets Published" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Asset | Size |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| clawft_wasm_bg.wasm | $WASM_SIZE |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| clawft_wasm.js | $JS_SIZE |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| weftos-docs.rvf | $KB_SIZE |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| browser-wasm-pkg.tar.gz | $(du -h browser-wasm-pkg.tar.gz | cut -f1) |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Release: [\`$CDN_TAG\`](../../releases/tag/$CDN_TAG)" >> "$GITHUB_STEP_SUMMARY"

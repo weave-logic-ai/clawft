@@ -10,6 +10,9 @@ export default function Layout({ children }: { children: ReactNode }) {
         title: 'clawft',
         url: '/',
       }}
+      links={[
+        { text: 'Sandbox', url: '/clawft', active: 'url' },
+      ]}
     >
       {children}
     </DocsLayout>

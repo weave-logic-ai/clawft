@@ -21,6 +21,9 @@ export default function HomePage() {
           <a href="https://github.com/weave-logic-ai/weftos" className="rounded-md border border-fd-border px-6 py-3 font-medium text-fd-foreground hover:bg-fd-accent transition-colors">
             View on GitHub
           </a>
+          <a href="/clawft" className="rounded-md border border-fd-border px-6 py-3 font-medium text-fd-foreground hover:bg-fd-accent transition-colors">
+            Try in Browser
+          </a>
         </div>
 
         {/* Three-layer architecture */}
