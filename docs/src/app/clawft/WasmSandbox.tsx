@@ -28,10 +28,10 @@ let wasmModule: any = null;
 async function loadWasm() {
   if (wasmModule) return wasmModule;
 
-  // Fetch the wasm-bindgen JS glue as text, then import via blob URL.
-  // This avoids MIME-type issues when the file is proxied through a CDN
-  // that serves application/octet-stream instead of application/javascript.
-  const jsResp = await fetch('/wasm/clawft_wasm.js');
+  // Fetch the wasm-bindgen JS glue as text via our server-side proxy,
+  // then import via blob URL. The proxy handles GitHub Releases redirects
+  // and CORS, and sets correct Content-Type headers.
+  const jsResp = await fetch('/api/cdn/wasm/clawft_wasm.js');
   if (!jsResp.ok) throw new Error(`Failed to fetch clawft_wasm.js: ${jsResp.status}`);
   const jsText = await jsResp.text();
   const blob = new Blob([jsText], { type: 'application/javascript' });
@@ -39,8 +39,8 @@ async function loadWasm() {
 
   try {
     const mod = await Function('url', 'return import(url)')(blobUrl);
-    // mod.default is __wbg_init — call it with the .wasm path to instantiate.
-    await mod.default('/wasm/clawft_wasm_bg.wasm');
+    // mod.default is __wbg_init — call it with the proxy path for the .wasm binary.
+    await mod.default('/api/cdn/wasm/clawft_wasm_bg.wasm');
     wasmModule = mod;
     return wasmModule;
   } finally {
@@ -62,7 +62,7 @@ async function loadKB(): Promise<{ manifest: KBManifest; entries: KBEntry[] }> {
     import('cbor-x'),
   ]);
 
-  const resp = await fetch('/kb/weftos-docs.rvf');
+  const resp = await fetch('/api/cdn/kb/weftos-docs.rvf');
   const buf = await resp.arrayBuffer();
   kbCache = parseKnowledgeBase(buf, decode);
   return kbCache;
