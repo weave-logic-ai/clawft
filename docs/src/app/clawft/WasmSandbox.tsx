@@ -81,6 +81,103 @@ function cosine(a: Float32Array, b: Float32Array): number {
   return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
 
+// ---------------------------------------------------------------------------
+// Runtime introspection
+// ---------------------------------------------------------------------------
+
+/** Keywords that indicate the user is asking about the live WASM instance. */
+const INTROSPECTION_TRIGGERS = [
+  'this instance', 'this wasm', 'my instance', 'running instance',
+  'current instance', 'local wasm', 'inspect', 'introspect',
+  'runtime info', 'wasm info', 'wasm memory', 'wasm exports',
+  'show me this', 'from this instance', 'my sandbox', 'this sandbox',
+  'hack', 'local', 'capabilities',
+];
+
+function isIntrospectionQuery(query: string): boolean {
+  const q = query.toLowerCase();
+  return INTROSPECTION_TRIGGERS.some((t) => q.includes(t));
+}
+
+/**
+ * Gather live runtime info from the WASM module and browser environment.
+ */
+function gatherRuntimeInfo(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  wasm: any,
+  kb: { manifest: KBManifest; entries: KBEntry[] } | null,
+  model: string,
+): string {
+  const lines: string[] = ['## Live WASM Runtime State', ''];
+
+  // WASM module info
+  try {
+    const memory = wasm?.memory as WebAssembly.Memory | undefined;
+    if (memory) {
+      const pages = memory.buffer.byteLength / 65536;
+      lines.push(`**WASM Memory**: ${pages} pages (${(memory.buffer.byteLength / 1024 / 1024).toFixed(1)} MB)`);
+    }
+  } catch { /* no memory export */ }
+
+  // List exported functions
+  try {
+    const exports = Object.keys(wasm ?? {}).filter(
+      (k) => typeof wasm[k] === 'function' && !k.startsWith('__'),
+    );
+    if (exports.length > 0) {
+      lines.push(`**Exported functions**: ${exports.join(', ')}`);
+    }
+  } catch { /* ok */ }
+
+  lines.push(`**Platform**: wasm32-unknown-unknown (browser)`);
+  lines.push(`**User-Agent**: ${navigator.userAgent}`);
+  lines.push(`**LLM Model**: ${model}`);
+  lines.push(`**Connection**: browser-direct to provider API`);
+
+  // KB info
+  if (kb) {
+    lines.push('');
+    lines.push('## Knowledge Base');
+    lines.push(`**Segments**: ${kb.entries.length}`);
+    lines.push(`**Dimension**: ${kb.manifest.dimension}`);
+    lines.push(`**Embedder**: ${kb.manifest.embedder_name}`);
+    lines.push(`**Namespace**: ${kb.manifest.namespace}`);
+    lines.push(`**Agent ID**: ${kb.manifest.agent_id}`);
+    if (kb.manifest.created_at) {
+      lines.push(`**Created**: ${kb.manifest.created_at}`);
+    }
+
+    // Tag distribution
+    const tagCounts: Record<string, number> = {};
+    for (const e of kb.entries) {
+      for (const t of e.tags ?? []) {
+        tagCounts[t] = (tagCounts[t] || 0) + 1;
+      }
+    }
+    const topTags = Object.entries(tagCounts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([tag, n]) => `${tag}(${n})`)
+      .join(', ');
+    if (topTags) {
+      lines.push(`**Top tags**: ${topTags}`);
+    }
+  }
+
+  lines.push('');
+  lines.push('## Browser Environment');
+  lines.push(`**URL**: ${window.location.href}`);
+  lines.push(`**Timestamp**: ${new Date().toISOString()}`);
+  lines.push(`**WebAssembly**: ${typeof WebAssembly !== 'undefined' ? 'supported' : 'not supported'}`);
+  lines.push(`**SharedArrayBuffer**: ${typeof SharedArrayBuffer !== 'undefined' ? 'available' : 'not available'}`);
+
+  return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// KB search
+// ---------------------------------------------------------------------------
+
 /** Common stop words to exclude from scoring. */
 const STOP_WORDS = new Set([
   'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'has',
@@ -300,6 +397,8 @@ export default function WasmSandbox() {
     setMessages((prev) => [...prev, { role: 'user', content: text }]);
 
     try {
+      const introspecting = isIntrospectionQuery(text);
+
       // RAG: search KB for relevant context
       let context = '';
       if (kbCache) {
@@ -314,22 +413,26 @@ export default function WasmSandbox() {
         }
       }
 
+      // Gather live runtime info when the user is asking about this instance
+      const runtimeInfo = introspecting
+        ? gatherRuntimeInfo(wasmRef.current, kbCache, model)
+        : '';
+
       // Build the prompt with strong RAG constraints
-      const ragPrompt = context
+      const ragPrompt = context || runtimeInfo
         ? [
-            'ROLE: You are the WeftOS documentation assistant running in a clawft WASM sandbox.',
+            'ROLE: You are the WeftOS documentation assistant running in a clawft WASM sandbox in the user\'s browser.',
             '',
             'RULES:',
-            '- Answer ONLY using the documentation excerpts provided below.',
-            '- If the answer is not in the excerpts, say "I don\'t have that information in my knowledge base. Try checking the docs at /docs/" — do NOT guess or make up information.',
+            '- Answer using the documentation excerpts and/or live runtime data provided below.',
+            '- When live runtime data is provided, you CAN and SHOULD report it — this is real data from the user\'s own WASM instance.',
+            '- If the answer is not in the excerpts or runtime data, say "I don\'t have that information in my knowledge base. Try checking the docs at /docs/" — do NOT guess.',
             '- Quote the source link when referencing a doc page.',
             '- Keep answers concise and factual.',
             '- For acronyms, only use the definition from the docs — never invent expansions.',
             '',
-            '## Documentation Context',
-            '',
-            context,
-            '',
+            ...(runtimeInfo ? ['## Live Runtime Data (from this WASM instance)', '', runtimeInfo, ''] : []),
+            ...(context ? ['## Documentation Context', '', context, ''] : []),
             '## Question',
             '',
             text,
