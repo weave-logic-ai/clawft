@@ -81,26 +81,81 @@ function cosine(a: Float32Array, b: Float32Array): number {
   return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
 
+/** Common stop words to exclude from scoring. */
+const STOP_WORDS = new Set([
+  'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'has',
+  'was', 'one', 'our', 'out', 'how', 'its', 'what', 'when', 'which',
+  'this', 'that', 'with', 'from', 'have', 'will', 'does', 'about',
+  'into', 'more', 'been', 'some', 'than', 'them', 'then', 'would',
+  'make', 'like', 'just', 'over', 'such', 'also', 'most', 'show',
+]);
+
 /**
- * Simple keyword search over KB entries (BM25-lite).
- * Returns top-k entries ranked by keyword overlap.
+ * Improved keyword search with phrase matching, acronym awareness,
+ * TF weighting, and metadata boosting.
  */
 function keywordSearch(query: string, entries: KBEntry[], topK = 5): KBEntry[] {
-  const terms = query
-    .toLowerCase()
+  const queryLower = query.toLowerCase();
+  const terms = queryLower
     .split(/\W+/)
-    .filter((t) => t.length > 2);
+    .filter((t) => t.length > 2 && !STOP_WORDS.has(t));
+
+  // Extract potential acronyms from the original query (2-5 uppercase letters).
+  const acronyms = query.match(/\b[A-Z]{2,5}\b/g) || [];
 
   const scored = entries.map((entry) => {
     const text = entry.text.toLowerCase();
+    const title = ((entry.metadata as Record<string, string>)?.title ?? '').toLowerCase();
+    const section = ((entry.metadata as Record<string, string>)?.section ?? '').toLowerCase();
     let score = 0;
+
+    // 1. Exact phrase match in text (strongest signal)
+    if (terms.length >= 2 && text.includes(queryLower)) {
+      score += 10;
+    }
+
+    // 2. Multi-word substring match (e.g. "boot sequence" in text)
+    if (terms.length >= 2) {
+      const phrase = terms.join(' ');
+      if (text.includes(phrase)) score += 6;
+      if (title.includes(phrase)) score += 8;
+    }
+
+    // 3. Per-term scoring with position awareness
     for (const term of terms) {
-      if (text.includes(term)) score++;
+      const textCount = text.split(term).length - 1;
+      if (textCount > 0) {
+        // Diminishing returns for repeated matches (log scale)
+        score += 1 + Math.min(Math.log2(textCount), 2);
+      }
+      // Title/section match is a strong signal
+      if (title.includes(term)) score += 3;
+      if (section.includes(term)) score += 2;
     }
-    // Boost entries whose tags match query terms
+
+    // 4. Acronym matching (case-sensitive in original text)
+    for (const acr of acronyms) {
+      const acrLower = acr.toLowerCase();
+      // Exact acronym in text (check for word boundary)
+      const acrRegex = new RegExp(`\\b${acr}\\b`);
+      if (acrRegex.test(entry.text)) score += 5;
+      // Also check if the entry defines/explains this acronym
+      if (text.includes(`${acrLower} (`) || text.includes(`(${acrLower})`) ||
+          text.includes(`${acrLower} —`) || text.includes(`${acrLower} --`) ||
+          text.includes(`stands for`)) {
+        score += 4;
+      }
+    }
+
+    // 5. Tag match boost
     for (const tag of entry.tags ?? []) {
-      if (terms.includes(tag.toLowerCase())) score += 2;
+      const tagLower = tag.toLowerCase();
+      if (terms.includes(tagLower)) score += 3;
+      for (const acr of acronyms) {
+        if (tagLower === acr.toLowerCase()) score += 3;
+      }
     }
+
     return { entry, score };
   });
 
@@ -132,6 +187,50 @@ export default function WasmSandbox() {
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
   }, [messages]);
+
+  const initWasm = async (key: string, mdl: string) => {
+    const wasm = await loadWasm();
+    wasmRef.current = wasm;
+
+    const config = {
+      agents: {
+        defaults: {
+          model: mdl,
+          max_tokens: 2048,
+          temperature: 0.7,
+        },
+      },
+      providers: {
+        anthropic: { api_key: mdl.startsWith('anthropic/') ? key : '' },
+        openai: { api_key: mdl.startsWith('openai/') ? key : '' },
+        openrouter: {
+          api_key: mdl.startsWith('openrouter/') || !mdl.includes('/') ? key : '',
+          browser_direct: true,
+        },
+        deepseek: { api_key: mdl.startsWith('deepseek/') ? key : '' },
+        groq: { api_key: mdl.startsWith('groq/') ? key : '' },
+        gemini: { api_key: mdl.startsWith('gemini/') ? key : '' },
+        xai: { api_key: mdl.startsWith('xai/') ? key : '' },
+        custom: { api_key: '' },
+      },
+    };
+
+    await wasm.init(JSON.stringify(config));
+  };
+
+  const handleReset = useCallback(() => {
+    setMessages([]);
+    setInput('');
+    setSending(false);
+    // Reset WASM conversation history — reinitialize
+    wasmModule = null;
+    wasmRef.current = null;
+    const key = localStorage.getItem('clawft-api-key') ?? '';
+    const mdl = localStorage.getItem('clawft-model') ?? model;
+    if (key) {
+      initWasm(key, mdl).catch(() => {});
+    }
+  }, [model]);
 
   // Load WASM + KB on mount
   useEffect(() => {
@@ -171,36 +270,6 @@ export default function WasmSandbox() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const initWasm = async (key: string, mdl: string) => {
-    const wasm = await loadWasm();
-    wasmRef.current = wasm;
-
-    const config = {
-      agents: {
-        defaults: {
-          model: mdl,
-          max_tokens: 2048,
-          temperature: 0.7,
-        },
-      },
-      providers: {
-        anthropic: { api_key: mdl.startsWith('anthropic/') ? key : '' },
-        openai: { api_key: mdl.startsWith('openai/') ? key : '' },
-        openrouter: {
-          api_key: mdl.startsWith('openrouter/') || !mdl.includes('/') ? key : '',
-          browser_direct: true,
-        },
-        deepseek: { api_key: mdl.startsWith('deepseek/') ? key : '' },
-        groq: { api_key: mdl.startsWith('groq/') ? key : '' },
-        gemini: { api_key: mdl.startsWith('gemini/') ? key : '' },
-        xai: { api_key: mdl.startsWith('xai/') ? key : '' },
-        custom: { api_key: '' },
-      },
-    };
-
-    await wasm.init(JSON.stringify(config));
-  };
-
   const handleConnect = async () => {
     if (!apiKey.trim()) return;
     setStatus('loading');
@@ -234,21 +303,44 @@ export default function WasmSandbox() {
       // RAG: search KB for relevant context
       let context = '';
       if (kbCache) {
-        const hits = keywordSearch(text, kbCache.entries, 5);
+        const hits = keywordSearch(text, kbCache.entries, 8);
         if (hits.length > 0) {
           context = hits
             .map((h) => {
               const meta = h.metadata as Record<string, string>;
-              return `### ${meta?.title ?? 'Doc'} -- ${meta?.section ?? ''}\nSource: ${meta?.doc_url ?? meta?.source ?? ''}\n${h.text}`;
+              return `### ${meta?.title ?? 'Doc'} — ${meta?.section ?? ''}\nSource: ${meta?.doc_url ?? meta?.source ?? ''}\n${h.text}`;
             })
             .join('\n\n');
         }
       }
 
-      // Build the prompt with RAG context
+      // Build the prompt with strong RAG constraints
       const ragPrompt = context
-        ? `You are the WeftOS Tour Guide running in the clawft WASM sandbox. Answer using the documentation context below. Include source links when available. If unsure, say so.\n\n## Relevant Documentation\n\n${context}\n\n## User Question\n\n${text}`
-        : text;
+        ? [
+            'ROLE: You are the WeftOS documentation assistant running in a clawft WASM sandbox.',
+            '',
+            'RULES:',
+            '- Answer ONLY using the documentation excerpts provided below.',
+            '- If the answer is not in the excerpts, say "I don\'t have that information in my knowledge base. Try checking the docs at /docs/" — do NOT guess or make up information.',
+            '- Quote the source link when referencing a doc page.',
+            '- Keep answers concise and factual.',
+            '- For acronyms, only use the definition from the docs — never invent expansions.',
+            '',
+            '## Documentation Context',
+            '',
+            context,
+            '',
+            '## Question',
+            '',
+            text,
+          ].join('\n')
+        : [
+            'ROLE: You are the WeftOS documentation assistant.',
+            'You have no relevant documentation context for this question.',
+            'Say "I don\'t have enough context to answer that accurately. Try asking about a specific WeftOS feature, or browse the docs at /docs/"',
+            '',
+            'Question: ' + text,
+          ].join('\n');
 
       const reply = await wasmRef.current.send_message(ragPrompt);
       setMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
@@ -292,6 +384,15 @@ export default function WasmSandbox() {
             <span className="rounded bg-fd-accent px-2 py-0.5" title="RVF Knowledge Base loaded">
               KB: {kbStats}
             </span>
+          )}
+          {status === 'ready' && messages.length > 0 && (
+            <button
+              onClick={handleReset}
+              className="rounded bg-fd-accent px-2 py-0.5 hover:bg-fd-border transition-colors"
+              title="New conversation"
+            >
+              New chat
+            </button>
           )}
           <StatusIndicator status={status} />
         </div>
@@ -410,6 +511,7 @@ export default function WasmSandbox() {
                 </div>
               )}
             </div>
+
           </div>
 
           {/* Input */}
