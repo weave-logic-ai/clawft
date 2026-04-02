@@ -28,16 +28,24 @@ let wasmModule: any = null;
 async function loadWasm() {
   if (wasmModule) return wasmModule;
 
-  // The wasm-bindgen --target web output is an ES module.
-  // Use dynamic import() with an absolute URL to load it at runtime.
-  const origin = window.location.origin;
-  const mod = await Function('url', 'return import(url)')(
-    `${origin}/wasm/clawft_wasm.js`,
-  );
-  // mod.default is __wbg_init — call it with the .wasm URL to instantiate.
-  await mod.default(`${origin}/wasm/clawft_wasm_bg.wasm`);
-  wasmModule = mod;
-  return wasmModule;
+  // Fetch the wasm-bindgen JS glue as text, then import via blob URL.
+  // This avoids MIME-type issues when the file is proxied through a CDN
+  // that serves application/octet-stream instead of application/javascript.
+  const jsResp = await fetch('/wasm/clawft_wasm.js');
+  if (!jsResp.ok) throw new Error(`Failed to fetch clawft_wasm.js: ${jsResp.status}`);
+  const jsText = await jsResp.text();
+  const blob = new Blob([jsText], { type: 'application/javascript' });
+  const blobUrl = URL.createObjectURL(blob);
+
+  try {
+    const mod = await Function('url', 'return import(url)')(blobUrl);
+    // mod.default is __wbg_init — call it with the .wasm path to instantiate.
+    await mod.default('/wasm/clawft_wasm_bg.wasm');
+    wasmModule = mod;
+    return wasmModule;
+  } finally {
+    URL.revokeObjectURL(blobUrl);
+  }
 }
 
 // ---------------------------------------------------------------------------
