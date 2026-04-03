@@ -906,6 +906,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clawft-plugin-ci"
+version = "0.4.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_yaml",
+]
+
+[[package]]
 name = "clawft-plugin-containers"
 version = "0.4.1"
 dependencies = [
@@ -931,6 +940,14 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "clawft-plugin-npm"
+version = "0.4.1"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

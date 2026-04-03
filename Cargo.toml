@@ -18,6 +18,8 @@ members = [
     "crates/clawft-plugin-browser",
     "crates/clawft-plugin-calendar",
     "crates/clawft-plugin-containers",
+    "crates/clawft-plugin-npm",
+    "crates/clawft-plugin-ci",
     "crates/clawft-security",
     "crates/clawft-kernel",
     "crates/clawft-rpc",

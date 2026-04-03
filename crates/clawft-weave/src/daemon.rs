@@ -1771,6 +1771,92 @@ async fn dispatch(
                 "message": "Comparison queued. Results will be available via assess.status."
             }))
         }
+        // ── Assessment mesh endpoints ────────────────────────
+        "assess.mesh.status" => {
+            let k = kernel.read().await;
+
+            #[cfg(feature = "exochain")]
+            if let Some(cm) = k.chain_manager() {
+                cm.append("assessment", "assess.mesh.status", None);
+            }
+
+            k.event_log().info("assessment", "assess.mesh.status queried".to_string());
+
+            if let Some(svc) = k.assessment_service() {
+                if let Some(mc) = svc.mesh_coordinator() {
+                    let peers: Vec<crate::protocol::AssessMeshPeerInfo> = mc
+                        .peer_states()
+                        .into_iter()
+                        .map(|p| crate::protocol::AssessMeshPeerInfo {
+                            node_id: p.node_id,
+                            project_name: p.project_name,
+                            last_assessment: p.last_assessment,
+                            finding_count: p.finding_count,
+                            analyzer_count: p.analyzer_count,
+                            last_gossip: p.last_gossip,
+                        })
+                        .collect();
+                    let peer_count = peers.len();
+                    Response::success(serde_json::to_value(
+                        crate::protocol::AssessMeshStatusResult {
+                            mesh_enabled: true,
+                            node_id: Some(mc.node_id().to_string()),
+                            project_name: Some(mc.project_name().to_string()),
+                            peer_count,
+                            peers,
+                        },
+                    ).unwrap())
+                } else {
+                    Response::success(serde_json::to_value(
+                        crate::protocol::AssessMeshStatusResult {
+                            mesh_enabled: false,
+                            node_id: None,
+                            project_name: None,
+                            peer_count: 0,
+                            peers: vec![],
+                        },
+                    ).unwrap())
+                }
+            } else {
+                Response::error("assessment service not available")
+            }
+        }
+        "assess.mesh.gossip" => {
+            let k = kernel.read().await;
+
+            #[cfg(feature = "exochain")]
+            if let Some(cm) = k.chain_manager() {
+                cm.append("assessment", "assess.mesh.gossip", None);
+            }
+
+            k.event_log().info("assessment", "assess.mesh.gossip triggered".to_string());
+
+            if let Some(svc) = k.assessment_service() {
+                if let Some(mc) = svc.mesh_coordinator() {
+                    if let Some(report) = svc.get_latest() {
+                        let gossip = mc.build_gossip(&report);
+                        mc.set_pending_broadcast(gossip);
+                        Response::success(serde_json::to_value(
+                            crate::protocol::AssessMeshGossipResult {
+                                sent: true,
+                                message: "Gossip broadcast queued.".into(),
+                            },
+                        ).unwrap())
+                    } else {
+                        Response::success(serde_json::to_value(
+                            crate::protocol::AssessMeshGossipResult {
+                                sent: false,
+                                message: "No assessment report available to gossip.".into(),
+                            },
+                        ).unwrap())
+                    }
+                } else {
+                    Response::error("mesh coordination not enabled")
+                }
+            } else {
+                Response::error("assessment service not available")
+            }
+        }
         "ping" => Response::success(serde_json::json!("pong")),
         other => Response::error(format!("unknown method: {other}")),
     }

@@ -8,6 +8,7 @@
 
 pub mod analyzer;
 pub mod analyzers;
+pub mod mesh;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -221,6 +222,9 @@ pub struct AssessmentService {
     peers: Mutex<Vec<PeerInfo>>,
     /// Path to the previous report JSON for diff computation.
     previous_report_path: Mutex<Option<PathBuf>>,
+    /// Mesh coordinator for cross-project assessment exchange.
+    /// Present only when `[mesh] enabled = true` in weave.toml.
+    mesh_coordinator: Option<mesh::MeshCoordinator>,
 }
 
 impl AssessmentService {
@@ -230,7 +234,24 @@ impl AssessmentService {
             latest: Mutex::new(None),
             peers: Mutex::new(Vec::new()),
             previous_report_path: Mutex::new(None),
+            mesh_coordinator: None,
         }
+    }
+
+    /// Create a new service with mesh coordination enabled.
+    pub fn with_mesh(node_id: String, project_name: String) -> Self {
+        Self {
+            started: AtomicBool::new(false),
+            latest: Mutex::new(None),
+            peers: Mutex::new(Vec::new()),
+            previous_report_path: Mutex::new(None),
+            mesh_coordinator: Some(mesh::MeshCoordinator::new(node_id, project_name)),
+        }
+    }
+
+    /// Returns a reference to the mesh coordinator, if enabled.
+    pub fn mesh_coordinator(&self) -> Option<&mesh::MeshCoordinator> {
+        self.mesh_coordinator.as_ref()
     }
 
     /// Set the path to a previous assessment report JSON file.
@@ -418,6 +439,13 @@ impl AssessmentService {
         }
 
         *self.latest.lock().unwrap() = Some(report.clone());
+
+        // If mesh is enabled, prepare a gossip broadcast for the daemon.
+        if let Some(ref mc) = self.mesh_coordinator {
+            let gossip = mc.build_gossip(&report);
+            mc.set_pending_broadcast(gossip);
+        }
+
         debug!(
             scope = scope,
             files = report.files_scanned,
@@ -665,6 +693,13 @@ impl AssessmentService {
         }
 
         *self.latest.lock().unwrap() = Some(report.clone());
+
+        // If mesh is enabled, prepare a gossip broadcast for the daemon.
+        if let Some(ref mc) = self.mesh_coordinator {
+            let gossip = mc.build_gossip(&report);
+            mc.set_pending_broadcast(gossip);
+        }
+
         debug!(
             scope = scope,
             rounds = round,

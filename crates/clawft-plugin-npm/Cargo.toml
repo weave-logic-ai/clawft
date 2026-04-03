@@ -1,0 +1,13 @@
+[package]
+name = "clawft-plugin-npm"
+version.workspace = true
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Node.js dependency parsing plugin for WeftOS"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

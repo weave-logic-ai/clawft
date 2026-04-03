@@ -428,6 +428,36 @@ pub struct AssessCompareParams {
     pub peer: String,
 }
 
+// ── Assessment mesh result types ────────────────────────────
+
+/// Result of `assess.mesh.status`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssessMeshStatusResult {
+    pub mesh_enabled: bool,
+    pub node_id: Option<String>,
+    pub project_name: Option<String>,
+    pub peer_count: usize,
+    pub peers: Vec<AssessMeshPeerInfo>,
+}
+
+/// A single peer entry in the mesh status response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssessMeshPeerInfo {
+    pub node_id: String,
+    pub project_name: String,
+    pub last_assessment: Option<String>,
+    pub finding_count: usize,
+    pub analyzer_count: usize,
+    pub last_gossip: String,
+}
+
+/// Result of `assess.mesh.gossip`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssessMeshGossipResult {
+    pub sent: bool,
+    pub message: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
