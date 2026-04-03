@@ -1,253 +1,124 @@
-# Session Handoff: Sprint 14
+# Session Handoff: Sprint 15
 
-**Date**: 2026-04-02
-**Version**: v0.3.1 (released, all channels live)
+**Date**: 2026-04-03
+**Version**: v0.4.0 (released, all channels live)
 **Branch**: master
 
 ---
 
 ## Current State
 
-Sprints 11, 12, and 13 complete. All distribution channels live. Full WASI support.
+Sprint 14 complete. v0.4.0 released with WASM sandbox, assessment framework, CLI kernel compliance, and 28 ADRs. 23 crates, 47 ADRs, 3,900+ tests.
 
-**Completed work archived**: `.planning/development_notes/sprint-11-12/`
+**Previous sprints archived**: `.planning/development_notes/sprint-13-14/`
 
 ## What's Working
 
 | Component | Status |
 |-----------|--------|
-| 22-crate Rust workspace | Compiles, 2,600+ tests |
-| 8 native build targets | glibc x2, musl x2, macOS x2, Windows x86 + ARM (pending CI verify) |
-| 2 WASM targets | wasip2 (10/10 crates), browser (@weftos/core) |
-| crates.io | 10 crates (v0.2.1 with cross-links) |
-| npm | @weftos/core 0.1.1 |
-| Docker | ghcr.io/weave-logic-ai/weftos (distroless, multi-arch) |
-| Homebrew | weave-logic-ai/homebrew-tap (3 formulae) |
-| Docs | weftos.weavelogic.ai (Fumadocs + rustdoc API, auto-deploy on push) |
-| GUI | Block engine (11 blocks), 4 themes, KernelDataProvider, ThemeSwitcher, BudgetBlock |
-| Agent pipeline | GEPA end-to-end (config-based scorer/learner, mutation in skill_autogen) |
-| LLM providers | 11 providers including local (Ollama/vLLM/llama.cpp/LM Studio) |
-| Context compression | Sliding window, token counting, summarization (opt-in) |
-| Paperclip patterns | Company/OrgChart types, HeartbeatScheduler, GoalTree, HTTP API |
-| Testing | Property tests, fuzz harnesses, criterion benchmarks |
-| Vercel | Auto-deploy configured (root dir: docs/src) |
-
-## Skills
-
-| Skill | Trigger |
-|-------|---------|
-| `weftos-build-deploy` | "release", "deploy", "publish" |
-| `weftos-api-docs` | "rustdoc", "api docs" |
-| `weftos-docs-deploy` | "deploy docs", "docs changed" |
+| 23-crate Rust workspace | Compiles, 3,900+ tests (added clawft-rpc in Sprint 14) |
+| 7 native build targets | Linux (glibc x2, musl x2), macOS x2, Windows x86 |
+| 2 WASM targets | wasip1 (CI), browser (local build, cdn-assets) |
+| WASM sandbox | /clawft/ route with RVF KB (1,160 segments), local + LLM mode |
+| Assessment | `weft assess` CLI + AssessmentService kernel module + tree-sitter |
+| Cross-project | Peer linking (local + HTTP), comparison, tested on 2 projects |
+| CLI compliance | 32 commands use daemon-first RPC (clawft-rpc crate) |
+| 47 ADRs | docs/adr/adr-001 through adr-047, with causal graph in .weftos/memory/ |
+| Docs site | weftos.weavelogic.ai — 77 pages, prev/next nav, Edit on GitHub, glossary |
+| All distribution channels | GitHub Releases, crates.io, npm, Docker, Homebrew, WASI |
 
 ---
 
-## Sprint 13 Completed Items
+## Sprint 15 — Depth, Polish, Client Readiness
 
-### GUI Integration
-- [x] Wire block engine to real kernel data (KernelDataProvider.tsx)
-- [x] Theme persistence (localStorage + Tauri config)
-- [x] ThemeSwitcher dropdown component
-- [x] BudgetBlock: per-agent cost tracking dashboard
+### Theme
 
-### Agent Pipeline Integration
-- [x] Wire TrajectoryLearner into agent loop (factory in bootstrap.rs)
-- [x] Wire FitnessScorer into pipeline (factory in llm_adapter.rs)
-- [x] Config-based learner/scorer selection (PipelineConfig)
-- [x] Prompt mutation integration with skill_autogen.rs
-
-### Paperclip Patterns (Rust-native)
-- [x] Company/OrgChart types (12 tests)
-- [x] HeartbeatScheduler (19 tests)
-- [x] GoalTree (13 tests)
-
-### Paperclip Adapter
-- [x] HTTP API handler (execute, govern, health) behind http-api feature (12 tests)
-- [x] Paperclip adapter spec (docs/specs/paperclip-adapter-spec.md)
-- [x] Governance bridge design (effect vectors, ExoChain logging)
-
-### Testing
-- [x] Fix kernel test compilation (Debug impls on CausalGraph, HnswService)
-- [x] Fix pre-existing test failure (democritus embedding_error assertion)
-- [x] Accept updated config snapshot (PipelineConfig field)
-- [x] Property tests: 11 randomized tests (scorer bounds, mutation safety, token counting)
-- [x] Fuzz tests: 9 tests (Config/RoutingConfig with random/malformed JSON)
-- [x] Criterion benchmarks: 4 groups (count_tokens, compress_context, scorer, mutation)
-- [x] Integration tests: 6 context compression tests
-
-### Platform
-- [x] Fix clawft-core for wasip2 (bus.rs browser→explicit cfg + no-op fallback)
-- [x] Full WASI: clawft-kernel + weftos compile for wasm32-wasip2 (10/10 crates)
-- [x] Switch reqwest from rustls-tls to native-tls (removes ring dependency path)
-- [x] Re-enable aarch64-pc-windows-msvc target (pending CI verify on next tag)
-- [x] Vercel auto-deploy configured (root dir: docs/src)
+Sprint 14 built breadth (sandbox, assessment, CLI compliance, ADRs). Sprint 15 goes deep: make the assessment actually useful for client engagements, polish the sandbox into a product demo, fix CI gaps, and prepare for the first external deployment.
 
 ---
 
-## v0.3.1 Release (2026-04-02)
+### WS1: Assessment Depth (Priority: HIGH)
 
-- [x] Fixed cargo-dist: dropped `aarch64-pc-windows-msvc` (ring/cargo-xwin broken)
-- [x] Fixed docs site: added `turbopack.root` in next.config.mjs
-- [x] Fixed Vercel: moved domain from "src" project to "clawft", set Root Directory to `docs/src`
-- [x] Published to all channels: GitHub Release, crates.io (8 crates), Docker, WASI, Homebrew
-- [x] Updated platform badge from 9 → 7
+The AssessmentService currently does file counting + complexity + TODOs. Make it actually discover and map systems.
 
----
+- [ ] **Pluggable analyzer registry** — `AnalyzerRegistry` with trait-based analyzers (ADR-023)
+- [ ] **DependencyAnalyzer** — parse Cargo.toml, package.json, go.mod; track versions, detect outdated
+- [ ] **SecurityAnalyzer** — delegate to clawft-security SecurityScanner via kernel service
+- [ ] **TopologyAnalyzer** — discover services from docker-compose.yml, k8s manifests, .env files
+- [ ] **DataSourceAnalyzer** — detect database connection strings, cache configs, object store refs
+- [ ] **NetworkAnalyzer** — map egress URLs, API endpoints, webhook configs from code/config
+- [ ] **Progressive discovery** — each analyzer's findings feed into the next assessment cycle
+- [ ] **LLM assessor agent** — spawn via supervisor, analyze findings with LLM for higher-order insights
+- [ ] **Assessment diff** — compare current vs. previous assessment, surface regressions/improvements
 
-## Sprint 14 — Marketing + Playground + SOPs
+### WS2: Sandbox Polish (Priority: MEDIUM)
 
-### Work Streams (parallel via git worktrees)
+- [ ] **Fix browser WASM CI** — pin wasm-bindgen-cli version to match crate dep
+- [ ] **Playground set pieces** — guided tour scenarios (security bug, provider race, governance wall)
+- [ ] **Provenance panel** — show WITNESS chain verification on KB segments
+- [ ] **Knowledge graph visualization** — D3/React-Three-Fiber view of KB segment relationships
+- [ ] **Streaming responses** — SSE from WASM for progressive LLM output
+- [ ] **ruvllm-wasm integration** — local inference mode using ruvector's WASM routing engine
 
-#### One-Liner Install Paths (highlight on landing page + quickstart)
+### WS3: CI/CD Hardening (Priority: HIGH)
 
-```bash
-# Shell (Linux/macOS) — downloads pre-built binary
-curl -fsSL https://github.com/weave-logic-ai/weftos/releases/latest/download/clawft-cli-installer.sh | sh
+- [ ] **Fix browser WASM workflow** — pin wasm-bindgen-cli, add to release artifacts
+- [ ] **PR gates** — add `weft assess run --scope ci --format github-annotations` to pr-gates.yml
+- [ ] **Docs-assets workflow** — trigger on Browser WASM success to update cdn-assets
+- [ ] **crates.io publish** — automate crate publishing on tag (currently manual)
+- [ ] **Dependabot** — address 16 known vulnerabilities (3 high, 10 moderate, 3 low)
 
-# Homebrew
-brew install weave-logic-ai/tap/clawft-cli
+### WS4: Client Deployment Readiness (Priority: HIGH)
 
-# Docker (no install needed)
-docker run --rm -it ghcr.io/weave-logic-ai/weftos:latest weft --help
+- [ ] **SOP 3: Cross-project mesh** — implement real mesh coordination (not just artifact comparison)
+- [ ] **SOP 4: Continuous assessment triggers** — filesystem watcher, git hooks, cron scheduling
+- [ ] **SOP 5: SOP improvement loop** — agents propose SOP amendments from operational data
+- [ ] **Multi-company namespace isolation** — separate governance domains per client
+- [ ] **Assessment report dashboard** — web view of assessment results (extend /clawft/ or new route)
+- [ ] **RabbitMQ/message queue topology discovery** — analyzer for event-driven architectures
+- [ ] **Terraform/IaC analyzer** — parse infrastructure-as-code for deployment topology
 
-# Cargo (from source)
-cargo install weftos
+### WS5: Plugin Ecosystem (Priority: MEDIUM)
 
-# PowerShell (Windows)
-irm https://github.com/weave-logic-ai/weftos/releases/latest/download/clawft-cli-installer.ps1 | iex
-```
+- [ ] **clawft-plugin-npm** — Node.js dependency parsing via package.json/lock
+- [ ] **clawft-plugin-ci** — GitHub Actions / Vercel config parsing
+- [ ] **Plugin marketplace scaffold** — create-weftos-plugin CLI, registry design
+- [ ] **Rustdoc JSON-to-MDX** — converter for native Fumadocs API pages
 
-All install `weft` on PATH. Show expected output after each.
+### WS6: weavelogic.ai (Separate Project)
 
----
+*Tracked in weavelogic.ai project*
 
-#### WS1: Docs Site Rewrite (weftos.weavelogic.ai)
-SPARC plan: `.planning/weftos.weavelogic.ai/01-05`
-
-- [x] Fix `<title>` from "clawft" to "WeftOS" (`layout.tsx`)
-- [x] Rewrite hero section — benefit-driven headline + CTAs (`page.tsx`)
-- [x] Rewrite layer cards — benefits not features (`page.tsx`)
-- [x] Rewrite feature highlights — no jargon (`page.tsx`)
-- [x] Add footer with GitHub, license, WeaveLogic link (`layout.tsx`)
-- [x] Move badges below the fold (`page.tsx`)
-- [x] Create /docs index page — currently 404 (`content/docs/index.mdx`)
-- [x] Add previous/next page navigation (Fumadocs config)
-- [x] Add "Edit on GitHub" links (Fumadocs config)
-- [x] Create glossary page (`content/docs/glossary.mdx`)
-- [x] Rewrite getting-started — three-tier quickstart (Docker/curl/source)
-- [x] Add expected output blocks to all command examples
-- [x] Add troubleshooting section to getting-started
-
-#### WS2: Interactive Playground
-Plan: `.planning/weftos.weavelogic.ai/06-interactive-playground-plan.md`
-
-- [x] Build `build-kb` tool (Rust binary: MDX → chunk → embed → RVF)
-- [x] Generate weftos-docs.rvf from 68 doc pages (1,160 segments, 384-dim)
-- [x] Build browser WASM (`scripts/build.sh browser`)
-- [x] WASM + KB served via CDN (GitHub Releases cdn-assets tag) + Vercel proxy
-- [x] Create `WasmSandbox.tsx` component at `/clawft/` route (load WASM, load KB, chat UI)
-- [x] RAG prompt with keyword search, acronym awareness, hallucination guards
-- [x] CDN proxy via Vercel API route (`app/api/cdn/[...path]/route.ts`) with edge caching
-- [x] "Try in Browser" CTA on landing page + "Sandbox" link in docs nav
-- [x] Local mode — works without API key (pure KB retrieval, no LLM needed)
-- [x] ExoChain log panel — two-column layout with live audit trail
-- [x] Runtime introspection — users can inspect their own WASM instance
-- [x] "New chat" reset button
-
-#### WS3: SOPs + Assessment Foundation
-Plan: `docs/guides/weftos-deployment-sops.md` (45KB, 1,226 lines)
-
-- [x] `weft assess` CLI command (run, status, init, link, peers, compare)
-- [x] AI Assessor agent — AssessmentService kernel module (assessment.rs, 597 lines, SystemService impl)
-- [x] Validate SOP 1 against clawft project (2,986 files, 412K LOC assessed)
-- [x] Initialize WeftOS on weavelogic.ai project (2,549 files, 801K LOC assessed)
-- [x] Cross-project coordination — link/peers/compare with local + HTTP URL support
-- [x] Run SOP 2 Phase 1-2 — tree-sitter (Rust/TS symbol extraction + complexity) + git mining (commit/ci diff scopes)
-- [x] Assessment docs published: /docs/weftos/guides/assessment + deployment-sops
-
-#### WS5: CLI Kernel Compliance — All Commands Must Go Through Daemon
-
-**Rule:** Every CLI command that performs operations (file scanning, analysis, state changes,
-agent spawning, network calls) MUST go through the kernel daemon via RPC. The CLI is a thin
-client. Only pure-local display (help, completions, config show) is exempt.
-
-**Security rationale:** Bypassing the kernel means bypassing governance gates, capability
-checks, ExoChain audit logging, and sandboxing. A `weft security scan` that reads files
-directly has no audit trail, no capability restriction, and no governance oversight.
-
-**weaver (clawft-weave):** 51/52 commands PASS — only `weaver init` bypasses (runs shell script).
-
-**weft (clawft-cli):** 29/61 PASS, **32 commands BYPASS the kernel.** Offenders:
-
-| Category | Offending Commands | Issue |
-|----------|-------------------|-------|
-| **Cron** | `list`, `add`, `remove`, `enable`, `disable`, `run` | Directly reads/writes cron.jsonl — race conditions, no audit |
-| **Assess** | `run`, `init`, `link`, `compare` | Scans filesystem directly, no governance, no ExoChain logging |
-| **Security** | `scan` | Reads files directly, no capability check, no audit trail |
-| **Skills** | `list`, `show`, `install`, `remove`, `search`, `publish`, `remote-install` | Direct filesystem + network ops — no daemon gateway |
-| **Tools** | `list`, `show`, `mcp`, `search`, `deny`, `allow` | Direct registry access — no live kernel state |
-| **Agents** | `list`, `show`, `use` | Direct filesystem — no daemon agent registry |
-| **Workspace** | `create`, `list`, `load`, `status`, `delete`, `config set/get/reset` | Direct filesystem — no coordination |
-| **Other** | `onboard`, `ui`, `voice setup/test/talk`, `mcp-server` | Service management done CLI-side, not by kernel |
-
-**Remediation plan:**
-1. Add `DaemonClient` to clawft-cli (port from clawft-weave or extract to shared crate)
-2. For each bypassing command, add daemon RPC endpoint in kernel + CLI thin client
-3. Support graceful fallback: if no daemon running, print error with `weaver kernel start` hint
-4. Priority order: assess → security → cron → skills → tools → agents → workspace → other
-5. Each command migration creates ExoChain audit events for the operations it performs
-
-**Exceptions to evaluate:**
-- `weft onboard` — bootstrap problem (no daemon exists yet to talk to)
-- `weft mcp-server` — runs as a server itself, not a client
-- `weft agent` / `weft gateway` — these bootstrap their own AppContext (by design?)
-- Pure display commands (status, config show, help) — no state changes, possibly exempt
-
-#### WS4: weavelogic.ai Rewrite (separate project)
-Plan: `weavelogic.ai/docs/planning/rewrite/15-marketing-review-2026-04-02.md`
-
-*Worked on separately — see weavelogic.ai project*
-
-- [ ] Remaining TODOs: /about, /contact Calendly, ROI calculator, sitemaps, PostHog
+- [ ] /about, /contact with Calendly
+- [ ] ROI calculator
+- [ ] Sitemaps, PostHog analytics
 - [ ] Restructure /services as post-assessment flow
 - [ ] Consolidate CTAs to 2 variants
-- [ ] Fix/remove empty blog
-
-### Sprint 14 Planning Docs
-
-| Document | Location |
-|----------|----------|
-| Marketing review (weavelogic.ai) | `weavelogic.ai/docs/planning/rewrite/15-marketing-review-2026-04-02.md` |
-| Marketing review (weftos) | `.planning/weftos.weavelogic.ai/00-marketing-review-2026-04-02.md` |
-| SPARC Specification | `.planning/weftos.weavelogic.ai/01-sparc-specification.md` |
-| SPARC Pseudocode | `.planning/weftos.weavelogic.ai/02-sparc-pseudocode.md` |
-| SPARC Architecture | `.planning/weftos.weavelogic.ai/03-sparc-architecture.md` |
-| SPARC Refinement | `.planning/weftos.weavelogic.ai/04-sparc-refinement.md` |
-| SPARC Completion | `.planning/weftos.weavelogic.ai/05-sparc-completion.md` |
-| Playground plan | `.planning/weftos.weavelogic.ai/06-interactive-playground-plan.md` |
-| RVF knowledge base plan | `.planning/weftos.weavelogic.ai/07-rvf-knowledge-base-plan.md` |
-| Learner model plan | `.planning/weftos.weavelogic.ai/08-learner-model-plan.md` |
-| Assessment knowledge model | `.planning/weftos.weavelogic.ai/09-assessment-knowledge-model.md` |
-| Kolbe conative integration | `docs/research/kolbe-conative-integration.md` (790 lines) |
-| Deployment SOPs | `docs/guides/weftos-deployment-sops.md` |
 
 ---
 
-## Deferred to Sprint 15+
-- [ ] Block drag-and-drop layout editing (large GUI scope)
-- [ ] Playground set pieces (security bug, provider race, governance wall, etc.)
-- [ ] Playground Phase 2-4 (provenance panel, knowledge graph viz, governance panel)
-- [ ] `clawft-plugin-npm` (Node.js dependency parsing)
-- [ ] `clawft-plugin-ci` (GitHub Actions / Vercel config parsing)
-- [ ] Rustdoc JSON-to-MDX converter for native Fumadocs API pages
-- [ ] Plugin marketplace + create-weftos-plugin scaffolding
-- [ ] Multi-company namespace isolation
-- [ ] Security audit (1.0 gate)
-- [ ] Cross-project mesh coordination (SOP 3)
-- [ ] Continuous assessment pipeline (SOP 4)
-- [ ] SOP improvement loop (SOP 5)
+## Deferred to Sprint 16+
 
+- Block drag-and-drop layout editing (GUI)
+- Playground Phase 3-4 (governance panel, agent spawning UI)
+- Security audit (1.0 gate)
+- Post-quantum key exchange implementation (ADR-028 Phase 2)
+- BLAKE3 hash migration from SHAKE-256 (ADR-043)
+- ServiceApi trait implementation (ADR-035)
+- N-dimensional EffectVector refactor (ADR-034 C9)
+- wasip2 migration from wasip1 (ADR-044)
+- ChainAnchor blockchain integration (ADR-041)
 
+---
+
+## Known Issues
+
+| Issue | Severity | Notes |
+|-------|----------|-------|
+| Browser WASM CI fails | Medium | wasm-bindgen version mismatch; local build works, cdn-assets has working pkg |
+| 16 Dependabot alerts | Medium | 3 high, 10 moderate, 3 low — pre-existing |
+| WS5 remaining exceptions | Low | ui, voice commands still bypass daemon (accepted exceptions) |
+| Assessment service stubs | Low | Daemon RPC returns acknowledgments, not full results yet |
 
 ---
 
@@ -255,13 +126,13 @@ Plan: `weavelogic.ai/docs/planning/rewrite/15-marketing-review-2026-04-02.md`
 
 | Resource | Location |
 |----------|----------|
-| Paperclip research | `docs/research/paperclip-integration-analysis.md` |
-| Paperclip adapter spec | `docs/specs/paperclip-adapter-spec.md` |
-| Release strategy | `.planning/sparc/weftos/0.1/11-release-strategy.md` |
-| GUI design spec | `.planning/sparc/weftos/0.1/weftos-gui-design-notes.md` |
-| Theming spec | `docs/weftos/specs/theming-system.md` |
-| GEPA research | `docs/research/gepa-prompt-evolution-analysis.md` |
-| Block descriptor | `docs/weftos/specs/block-descriptor-schema.json` |
-| Web rewrite plan | `weavelogic.ai/docs/planning/rewrite/` |
-| Build-deploy skill | `.claude/skills/weftos-build-deploy/SKILL.md` |
-| Completed sprints | `.planning/development_notes/sprint-11-12/` |
+| ADR catalog (47) | `docs/adr/adr-001 through adr-047` + `docs/adr/PROPOSED.md` |
+| ADR causal graph | `.weftos/memory/adr-graph.json` |
+| Deployment SOPs | `docs/guides/weftos-deployment-sops.md` |
+| Sprint 13-14 archive | `.planning/development_notes/sprint-13-14/` |
+| WASM sandbox | `docs/src/app/clawft/WasmSandbox.tsx` |
+| Assessment service | `crates/clawft-kernel/src/assessment.rs` |
+| RPC crate | `crates/clawft-rpc/` |
+| Release notes | `CHANGELOG.md`, `docs/src/content/docs/weftos/vision/releases.mdx` |
+| Build script | `scripts/build.sh` |
+| Pull assets (dev) | `scripts/pull-assets.sh` |
