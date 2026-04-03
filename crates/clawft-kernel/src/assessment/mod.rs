@@ -23,6 +23,119 @@ use crate::service::{ServiceType, SystemService};
 
 pub use analyzer::{AnalysisContext, Analyzer, AnalyzerRegistry, AssessmentDiff};
 
+// ── Trigger configuration ──────────────────────────────────────
+
+/// Top-level configuration loaded from `.weftos/weave.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AssessmentConfig {
+    /// Project metadata for multi-company namespace isolation.
+    #[serde(default)]
+    pub project: Option<ProjectConfig>,
+    /// Assessment-specific settings.
+    #[serde(default)]
+    pub assessment: Option<AssessmentSettings>,
+}
+
+/// Project-level metadata used for namespace isolation and peer matching.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectConfig {
+    /// Human-readable project name.
+    pub name: String,
+    /// Organisation slug — only projects sharing the same org can link.
+    #[serde(default)]
+    pub org: Option<String>,
+    /// Deployment environment label (development, staging, production).
+    #[serde(default)]
+    pub environment: Option<String>,
+}
+
+/// Assessment section of weave.toml.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AssessmentSettings {
+    /// Schema version.
+    #[serde(default)]
+    pub version: Option<u32>,
+    /// Source file configuration.
+    #[serde(default)]
+    pub sources: Option<SourcesConfig>,
+    /// Trigger configuration.
+    #[serde(default)]
+    pub triggers: Option<TriggersConfig>,
+    /// Reporting options.
+    #[serde(default)]
+    pub reporting: Option<ReportingConfig>,
+}
+
+/// Source file patterns.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SourcesConfig {
+    #[serde(default)]
+    pub files: Option<FilePatterns>,
+}
+
+/// Glob patterns for file inclusion/exclusion.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FilePatterns {
+    #[serde(default)]
+    pub patterns: Vec<String>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
+}
+
+/// Trigger configuration block.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TriggersConfig {
+    /// Filesystem-watch trigger.
+    #[serde(default)]
+    pub filesystem: Option<FilesystemTrigger>,
+    /// Cron-based scheduled trigger.
+    #[serde(default)]
+    pub scheduled: Option<ScheduledTrigger>,
+}
+
+/// Filesystem watcher trigger settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FilesystemTrigger {
+    pub enabled: bool,
+    #[serde(default = "default_debounce_ms")]
+    pub debounce_ms: u64,
+    #[serde(default)]
+    pub patterns: Vec<String>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
+}
+
+fn default_debounce_ms() -> u64 {
+    2000
+}
+
+/// Scheduled (cron) trigger settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledTrigger {
+    pub enabled: bool,
+    #[serde(default = "default_cron")]
+    pub cron: String,
+    #[serde(default = "default_scope")]
+    pub scope: String,
+}
+
+fn default_cron() -> String {
+    "0 2 * * *".to_string()
+}
+
+fn default_scope() -> String {
+    "full".to_string()
+}
+
+/// Reporting configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ReportingConfig {
+    #[serde(default)]
+    pub default_format: Option<String>,
+    #[serde(default)]
+    pub save_artifacts: Option<bool>,
+}
+
 // ── Report types ────────────────────────────────────────────────
 
 /// Full assessment report produced by a scan.
@@ -300,6 +413,25 @@ impl AssessmentService {
             "assessment complete"
         );
         Ok(report)
+    }
+
+    /// Load and parse `.weftos/weave.toml` from the given project directory.
+    ///
+    /// Returns `None` if the file does not exist or cannot be parsed.
+    pub fn load_config(&self, project: &Path) -> Option<AssessmentConfig> {
+        let config_path = project.join(".weftos/weave.toml");
+        let content = std::fs::read_to_string(&config_path).ok()?;
+        match toml::from_str::<AssessmentConfig>(&content) {
+            Ok(cfg) => Some(cfg),
+            Err(e) => {
+                tracing::warn!(
+                    path = %config_path.display(),
+                    error = %e,
+                    "failed to parse assessment config"
+                );
+                None
+            }
+        }
     }
 
     /// Returns the latest assessment report, if any.
@@ -606,6 +738,62 @@ mod tests {
 
         svc.run_assessment(dir.path(), "full", "json").unwrap();
         assert!(svc.get_latest().is_some());
+    }
+
+    #[test]
+    fn load_config_parses_weave_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let weftos = dir.path().join(".weftos");
+        fs::create_dir_all(&weftos).unwrap();
+        fs::write(
+            weftos.join("weave.toml"),
+            r#"
+[project]
+name = "acme-app"
+org = "acme"
+environment = "development"
+
+[assessment]
+version = 1
+
+[assessment.triggers.filesystem]
+enabled = true
+debounce_ms = 3000
+patterns = ["**/*.rs"]
+exclude = ["target/**"]
+
+[assessment.triggers.scheduled]
+enabled = false
+cron = "0 4 * * *"
+scope = "full"
+"#,
+        )
+        .unwrap();
+
+        let svc = AssessmentService::new();
+        let cfg = svc.load_config(dir.path()).expect("should parse config");
+
+        let project = cfg.project.expect("project section");
+        assert_eq!(project.name, "acme-app");
+        assert_eq!(project.org.as_deref(), Some("acme"));
+        assert_eq!(project.environment.as_deref(), Some("development"));
+
+        let triggers = cfg.assessment.unwrap().triggers.unwrap();
+        let fs_trigger = triggers.filesystem.unwrap();
+        assert!(fs_trigger.enabled);
+        assert_eq!(fs_trigger.debounce_ms, 3000);
+        assert_eq!(fs_trigger.patterns, vec!["**/*.rs"]);
+
+        let sched = triggers.scheduled.unwrap();
+        assert!(!sched.enabled);
+        assert_eq!(sched.cron, "0 4 * * *");
+    }
+
+    #[test]
+    fn load_config_returns_none_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = AssessmentService::new();
+        assert!(svc.load_config(dir.path()).is_none());
     }
 
     #[test]

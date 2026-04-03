@@ -8,6 +8,12 @@ description: Key terms, acronyms, and concepts used throughout WeftOS documentat
 **Agent Loop**
 The core execution cycle in clawft: receive message, build context, run pipeline stages, call tools, return response. See [Agent Loop](/docs/clawft/agent-loop).
 
+**Analyzer / AnalyzerRegistry**
+Pluggable trait-based assessment analyzers. The `AnalyzerRegistry` holds registered analyzers (complexity, dependency, security, topology, data source) and runs them during `weft assess`. Custom analyzers implement the `Analyzer` trait.
+
+**AssessmentService**
+Kernel-native `SystemService` that performs codebase analysis. Uses tree-sitter for symbol extraction, pluggable analyzers for findings, and logs all operations to ExoChain. See [Assessment Workflow](/docs/weftos/guides/assessment).
+
 **AppContext**
 The top-level runtime container that holds the message bus, session manager, memory store, tool registry, and LLM adapter. Wrapped by the kernel's `Kernel<P>` struct.
 
@@ -23,6 +29,9 @@ Concise Binary Object Representation. Used as the payload encoding inside RVF se
 
 **clawft**
 The agent runtime layer of WeftOS. Provides the LLM pipeline, tool system, skills, channels (Slack, Teams, CLI, web), and the browser WASM sandbox.
+
+**clawft-rpc**
+Shared RPC crate providing `DaemonClient` for both `weft` and `weaver` CLIs. Enables daemon-first operation with graceful local fallback. Uses line-delimited JSON over Unix domain socket.
 
 ## E
 

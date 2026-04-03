@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-04-03
+
+### Added
+
+- **Pluggable Analyzer Registry**: `AnalyzerRegistry` with `Analyzer` trait for extensible assessment
+- **5 Built-in Analyzers**: ComplexityAnalyzer, DependencyAnalyzer (Cargo.toml/package.json), SecurityAnalyzer (secrets, .env, unsafe), TopologyAnalyzer (Docker, K8s), DataSourceAnalyzer (connection strings, S3, APIs)
+- **Assessment Diff**: Compare current vs. previous assessment (files added/removed, findings new/resolved)
+- **Assessment Hooks**: `weft assess hooks` — install/uninstall post-commit and pre-push git hooks
+- **Assessment Dashboard**: `/assess` route with project stats, findings list, peer comparison
+- **Assessment Config**: Load trigger configuration from `.weftos/weave.toml`
+- **Multi-project Namespace**: `[project]` section in weave.toml with org isolation
+- **PR Assessment Gate**: `weft assess --scope ci --format github-annotations` in pr-gates.yml
+- **Cargo Check Gate**: Workspace-wide `cargo check` in PR pipeline
+- **Guided Tour Prompts**: 4 categories (getting started, architecture, assessment, security)
+- **WITNESS Chain Footer**: Chain integrity display in ExoChain log panel
+- **Docs-assets Manual Dispatch**: `workflow_dispatch` with `skip_wasm` input
+
+### Fixed
+
+- **Browser WASM CI**: Pinned wasm-bindgen-cli to v0.2.108 (matches Cargo.lock)
+- **Wrong URLs**: Fixed all `github.com/clawft/clawft` → `weave-logic-ai/weftos` and `ghcr.io/clawft/clawft` → `weave-logic-ai/weftos` across 6 doc files
+- **Test badge**: Updated from 3,300+ to 3,900+ on homepage
+- **Crate count**: Updated from 22 to 23 (added clawft-rpc)
+- **Glossary**: Added entries for clawft-rpc, AssessmentService, Analyzer/AnalyzerRegistry
+
 ## [0.4.0] - 2026-04-03
 
 ### Added

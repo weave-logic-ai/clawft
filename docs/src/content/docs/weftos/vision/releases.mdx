@@ -1,9 +1,43 @@
 ---
 title: Release Notes
-description: Complete version history for WeftOS from initial development through v0.4.0.
+description: Complete version history for WeftOS from initial development through v0.4.1.
 ---
 
 # Release Notes
+
+## v0.4.1 — Sprint 15: Assessment Depth, CI Hardening, Client Readiness
+
+*2026-04-03*
+
+### Pluggable Assessment Analyzers
+
+- **AnalyzerRegistry** with trait-based extensibility
+- **5 built-in analyzers**: complexity (>500-line files, TODO/FIXME), dependency (Cargo.toml/package.json parsing), security (hardcoded secrets, .env, unsafe), topology (Docker, K8s, .env), data source (postgres://, redis://, S3, API URLs)
+- **Assessment diff**: compare current vs. previous runs, surface regressions
+- **Git hooks**: `weft assess hooks` installs post-commit or pre-push hooks
+
+### CI/CD Hardening
+
+- **PR assessment gate**: `weft assess --scope ci --format github-annotations` runs on every PR
+- **Cargo check gate**: workspace-wide compilation check in PR pipeline
+- **Browser WASM CI fixed**: pinned wasm-bindgen-cli to v0.2.108
+- **docs-assets manual dispatch**: `workflow_dispatch` with `skip_wasm` input
+
+### Client Deployment Readiness
+
+- **Assessment config**: loads triggers from `.weftos/weave.toml`
+- **Multi-project namespace**: `[project]` section with org-based isolation
+- **Assessment dashboard**: `/assess` route with project stats, findings, peer comparison
+- **Guided tour set pieces**: 4 categories of starter prompts in WASM sandbox
+
+### Documentation Fixes
+
+- Fixed all incorrect URLs (github.com/clawft/clawft → weave-logic-ai/weftos, ghcr.io same)
+- Updated test badge (3,300+ → 3,900+), crate count (22 → 23)
+- Added glossary entries: clawft-rpc, AssessmentService, Analyzer/AnalyzerRegistry
+- WITNESS chain verification footer in ExoChain log panel
+
+---
 
 ## v0.4.0 — Sprint 14: WASM Sandbox, Assessment, CLI Compliance
 

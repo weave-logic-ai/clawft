@@ -153,20 +153,31 @@ default_format = "table"
 save_artifacts = true
 ```
 
-## Findings
+## Pluggable Analyzers
 
-The assessment produces findings in these categories:
+The assessment runs a registry of pluggable analyzers. Five are built in:
 
-| Category | Severity | What it checks |
+| Analyzer | Category | What it checks |
 |----------|----------|----------------|
-| `complexity` | medium | Files exceeding 500 lines |
-| `technical-debt` | info | TODO/FIXME comments in code |
+| **ComplexityAnalyzer** | `complexity`, `technical-debt` | Files exceeding 500 lines, TODO/FIXME/HACK markers |
+| **DependencyAnalyzer** | `dependency` | Parses Cargo.toml and package.json, flags missing/wildcard versions |
+| **SecurityAnalyzer** | `security` | Hardcoded secrets, committed .env files, `unsafe` blocks in Rust |
+| **TopologyAnalyzer** | `topology` | docker-compose.yml services, Dockerfiles, Kubernetes manifests, .env files |
+| **DataSourceAnalyzer** | `data-source` | Database connection strings (postgres://, redis://, etc.), S3 refs, API base URLs |
 
-Future categories (planned):
-- `coupling` — unexpected file co-changes
-- `coverage` — percentage of code indexed in knowledge graph
-- `dependency` — new, removed, or upgraded dependencies
-- `regression` — complexity increases vs. previous assessment
+Custom analyzers implement the `Analyzer` trait and register via `AnalyzerRegistry`.
+
+## Git Hooks
+
+Install automatic assessment on every commit:
+
+```bash
+weft assess hooks                          # install post-commit hook
+weft assess hooks --hook-type pre-push     # install pre-push hook
+weft assess hooks --uninstall              # remove hook
+```
+
+## Findings
 
 ## CI Integration
 

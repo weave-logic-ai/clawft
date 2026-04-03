@@ -8,7 +8,7 @@
 
 ## Current State
 
-Sprint 14 complete. v0.4.0 released with WASM sandbox, assessment framework, CLI kernel compliance, and 28 ADRs. 23 crates, 47 ADRs, 3,900+ tests.
+Sprint 14 complete. v0.4.0 released with WASM sandbox, assessment framework, CLI kernel compliance, and 28 ADRs. 23 crates, 48 ADRs, 3,900+ tests.
 
 **Previous sprints archived**: `.planning/development_notes/sprint-13-14/`
 
@@ -23,7 +23,7 @@ Sprint 14 complete. v0.4.0 released with WASM sandbox, assessment framework, CLI
 | Assessment | `weft assess` CLI + AssessmentService kernel module + tree-sitter |
 | Cross-project | Peer linking (local + HTTP), comparison, tested on 2 projects |
 | CLI compliance | 32 commands use daemon-first RPC (clawft-rpc crate) |
-| 47 ADRs | docs/adr/adr-001 through adr-047, with causal graph in .weftos/memory/ |
+| 48 ADRs | docs/adr/adr-001 through adr-047, with causal graph in .weftos/memory/ |
 | Docs site | weftos.weavelogic.ai — 77 pages, prev/next nav, Edit on GitHub, glossary |
 | All distribution channels | GitHub Releases, crates.io, npm, Docker, Homebrew, WASI |
 

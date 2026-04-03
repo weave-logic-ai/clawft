@@ -123,7 +123,7 @@ export default function HomePage() {
           <img src="https://img.shields.io/crates/v/weftos?color=orange" alt="crates.io" />
           <img src="https://img.shields.io/npm/v/@weftos/core?color=red" alt="npm" />
           <img src="https://img.shields.io/badge/targets-7_platforms-green" alt="Platforms" />
-          <img src="https://img.shields.io/badge/tests-3,300+-brightgreen" alt="Tests" />
+          <img src="https://img.shields.io/badge/tests-3,900+-brightgreen" alt="Tests" />
         </div>
 
         <footer className="mt-16 border-t border-fd-border pt-8 pb-8 text-center text-sm text-fd-muted-foreground">

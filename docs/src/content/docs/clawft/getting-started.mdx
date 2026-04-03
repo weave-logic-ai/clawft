@@ -10,8 +10,8 @@ description: "Install clawft, configure a provider, and run your first AI assist
 Requires Rust 1.93+ (edition 2024).
 
 ```bash
-git clone https://github.com/clawft/clawft.git
-cd clawft
+git clone https://github.com/weave-logic-ai/weftos.git
+cd weftos
 cargo build --release --bin weft
 ```
 
@@ -41,8 +41,8 @@ scripts/build.sh native --features voice,channels
 Pull the pre-built image:
 
 ```bash
-docker pull ghcr.io/clawft/clawft:latest
-docker run --rm -it ghcr.io/clawft/clawft:latest --version
+docker pull ghcr.io/weave-logic-ai/weftos:latest
+docker run --rm -it ghcr.io/weave-logic-ai/weftos:latest --version
 ```
 
 The container starts in gateway mode by default. See [Deployment](/docs/clawft/deployment) for full Docker configuration.
