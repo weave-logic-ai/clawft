@@ -66,7 +66,7 @@ The AssessmentService currently does file counting + complexity + TODOs. Make it
 - [x] **PR gates** — assessment + cargo check gates added to pr-gates.yml
 - [x] **Docs-assets workflow** — manual dispatch with skip_wasm input, CDN fallback
 - [x] **crates.io publish** — automate crate publishing on tag (currently manual)
-- [ ] **Dependabot** — address 16 known vulnerabilities (3 high, 10 moderate, 3 low)
+- [x] **Dependabot** — fixed: quinn-proto, rustls-webpki, path-to-regexp, picomatch, flatted, brace-expansion. Accepted: wasmtime v29 (pinned) (3 high, 10 moderate, 3 low)
 
 ### WS4: Client Deployment Readiness (Priority: HIGH)
 
