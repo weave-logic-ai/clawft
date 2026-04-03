@@ -99,6 +99,9 @@ enum Commands {
     /// Run SOP assessment workflow (analyze codebase, report findings).
     Assess(commands::assess_cmd::AssessArgs),
 
+    /// Plugin development tools (create, validate, package).
+    Plugins(commands::plugins_cmd::PluginsArgs),
+
     /// Security scanning, auditing, and hardening.
     Security(commands::security_cmd::SecurityArgs),
 
@@ -459,6 +462,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Workspace(args) => commands::workspace_cmd::run(args).await?,
         Commands::Onboard(args) => commands::onboard::run(args).await?,
         Commands::Assess(args) => commands::assess_cmd::run(args).await?,
+        Commands::Plugins(args) => commands::plugins_cmd::run(args).await?,
         Commands::Security(args) => commands::security_cmd::run(args).await?,
         #[cfg(feature = "api")]
         Commands::Ui(args) => commands::ui_cmd::run(args).await?,
@@ -516,6 +520,7 @@ mod tests {
         assert!(sub_names.contains(&"agents"));
         assert!(sub_names.contains(&"workspace"));
         assert!(sub_names.contains(&"assess"));
+        assert!(sub_names.contains(&"plugins"));
         assert!(sub_names.contains(&"onboard"));
         assert!(sub_names.contains(&"ui"));
         // kernel commands moved to `weaver` binary (clawft-weave crate)

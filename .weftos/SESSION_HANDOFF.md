@@ -113,8 +113,8 @@ The AssessmentService currently does file counting + complexity + TODOs. Make it
 - [ ] **Evaluate gui/ vs ui/** — consolidate or archive redundant web dashboard (ui/) vs Tauri desktop (gui/)
 
 ### weavelogic.ai site (WS6)
-- [ ] /about, /contact with Calendly
 - [ ] ROI calculator
+- [ ] /about, /contact with Calendly
 - [ ] Sitemaps, PostHog analytics
 - [ ] Restructure /services as post-assessment flow
 - [ ] Consolidate CTAs to 2 variants

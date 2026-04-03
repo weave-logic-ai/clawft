@@ -19,6 +19,8 @@ pub mod help_cmd;
 pub mod mcp_server;
 pub mod memory_cmd;
 pub mod onboard;
+pub mod plugin_registry;
+pub mod plugins_cmd;
 pub mod security_cmd;
 pub mod sessions;
 pub mod skills_cmd;

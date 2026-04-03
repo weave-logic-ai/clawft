@@ -1782,7 +1782,8 @@ async fn dispatch(
 
             k.event_log().info("assessment", "assess.mesh.status queried".to_string());
 
-            if let Some(svc) = k.assessment_service() {
+            {
+                let svc = k.assessment_service();
                 if let Some(mc) = svc.mesh_coordinator() {
                     let peers: Vec<crate::protocol::AssessMeshPeerInfo> = mc
                         .peer_states()
@@ -1817,8 +1818,6 @@ async fn dispatch(
                         },
                     ).unwrap())
                 }
-            } else {
-                Response::error("assessment service not available")
             }
         }
         "assess.mesh.gossip" => {
@@ -1831,7 +1830,8 @@ async fn dispatch(
 
             k.event_log().info("assessment", "assess.mesh.gossip triggered".to_string());
 
-            if let Some(svc) = k.assessment_service() {
+            {
+                let svc = k.assessment_service();
                 if let Some(mc) = svc.mesh_coordinator() {
                     if let Some(report) = svc.get_latest() {
                         let gossip = mc.build_gossip(&report);
@@ -1853,8 +1853,6 @@ async fn dispatch(
                 } else {
                     Response::error("mesh coordination not enabled")
                 }
-            } else {
-                Response::error("assessment service not available")
             }
         }
         "ping" => Response::success(serde_json::json!("pong")),
