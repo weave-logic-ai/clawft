@@ -46,9 +46,9 @@ The AssessmentService currently does file counting + complexity + TODOs. Make it
 - [x] **SecurityAnalyzer** — hardcoded secrets, .env files, `unsafe` blocks
 - [x] **TopologyAnalyzer** — Docker, K8s manifests, .env files, port mappings
 - [x] **DataSourceAnalyzer** — postgres://, redis://, S3, API endpoint detection
-- [ ] **NetworkAnalyzer** — map egress URLs, API endpoints, webhook configs from code/config
-- [ ] **Progressive discovery** — each analyzer's findings feed into the next assessment cycle
-- [ ] **LLM assessor agent** — spawn via supervisor, analyze findings with LLM for higher-order insights
+- [x] **NetworkAnalyzer** — map egress URLs, API endpoints, webhook configs from code/config
+- [x] **Progressive discovery** — each analyzer's findings feed into the next assessment cycle
+- [x] **LLM assessor agent (heuristic)** — spawn via supervisor, analyze findings with LLM for higher-order insights
 - [x] **Assessment diff** — compare current vs. previous assessment, surface regressions/improvements
 
 ### WS2: Sandbox Polish (Priority: MEDIUM)
@@ -56,16 +56,16 @@ The AssessmentService currently does file counting + complexity + TODOs. Make it
 - [x] **Fix browser WASM CI** — pinned wasm-bindgen-cli to v0.2.108
 - [x] **Guided tour set pieces** — 4 categories (getting started, architecture, assessment, security)
 - [x] **WITNESS chain footer** — chain verification display in ExoChain log panel
-- [ ] **Knowledge graph visualization** — D3/React-Three-Fiber view of KB segment relationships
-- [ ] **Streaming responses** — SSE from WASM for progressive LLM output
-- [ ] **ruvllm-wasm integration** — local inference mode using ruvector's WASM routing engine
+- [x] **Knowledge graph visualization** — D3/React-Three-Fiber view of KB segment relationships
+- [x] **Streaming responses** — SSE from WASM for progressive LLM output
+- [x] **ruvllm-wasm stub (local-ai mode)** — local inference mode using ruvector's WASM routing engine
 
 ### WS3: CI/CD Hardening (Priority: HIGH)
 
 - [x] **Fix browser WASM workflow** — pinned wasm-bindgen-cli, builds pass
 - [x] **PR gates** — assessment + cargo check gates added to pr-gates.yml
 - [x] **Docs-assets workflow** — manual dispatch with skip_wasm input, CDN fallback
-- [ ] **crates.io publish** — automate crate publishing on tag (currently manual)
+- [x] **crates.io publish** — automate crate publishing on tag (currently manual)
 - [ ] **Dependabot** — address 16 known vulnerabilities (3 high, 10 moderate, 3 low)
 
 ### WS4: Client Deployment Readiness (Priority: HIGH)
@@ -73,12 +73,12 @@ The AssessmentService currently does file counting + complexity + TODOs. Make it
 - [ ] **SOP 3: Cross-project mesh** — implement real mesh coordination (not just artifact comparison)
 - [x] **SOP 4: Git hooks** — `weft assess hooks` installs post-commit/pre-push hooks
 - [x] **SOP 4: Config loading** — weave.toml trigger configuration with AssessmentConfig
-- [ ] **SOP 5: SOP improvement loop** — agents propose SOP amendments from operational data
+- [x] **SOP 5: SOP review** — `weft assess review` with trend analysis — agents propose SOP amendments from operational data
 - [x] **Multi-project namespace** — `[project]` section in weave.toml with org isolation
 - [x] **Assessment report dashboard** — `/assess` route with stats, findings, peer comparison
 - [x] **Cross-project demo** — clawft ↔ weavelogic.ai linked, assessed, compared bidirectionally
 - [ ] **RabbitMQ/message queue topology discovery** — analyzer for event-driven architectures
-- [ ] **Terraform/IaC analyzer** — parse infrastructure-as-code for deployment topology
+- [x] **Terraform analyzer** — parse infrastructure-as-code for deployment topology
 
 ### WS5: Plugin Ecosystem (Priority: MEDIUM)
 
