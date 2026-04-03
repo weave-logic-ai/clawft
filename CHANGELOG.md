@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-04-03
+
+### Added
+
+#### Sprint 14: WASM Sandbox, Assessment Framework, CLI Compliance, 28 ADRs
+
+- **WASM Sandbox** (`/clawft/` route): Browser-based WeftOS agent running clawft-wasm with 1,160-segment RVF knowledge base, RAG-powered documentation search, local mode (no API key needed), LLM mode with provider routing, ExoChain log panel with live audit trail, runtime introspection, and "New chat" reset
+- **CDN Asset Delivery**: GitHub Releases `cdn-assets` tag with Vercel API route proxy (`/api/cdn/[...path]`), edge-cached via `s-maxage`, blob URL WASM loading for MIME-type bypass
+- **clawft-rpc** (new crate): Shared RPC client extracted from clawft-weave. `DaemonClient`, `Request`/`Response` protocol types, `connect_or_bail()` convenience. Both `weft` and `weaver` CLIs now share this crate
+- **AssessmentService** (kernel): New `SystemService` with file scanning, tree-sitter symbol extraction (Rust/TypeScript), cyclomatic complexity analysis, scope support (full/commit/ci/dependency), peer coordination (link/compare via local path or HTTP URL), ExoChain audit logging
+- **`weft assess` CLI**: `run`, `status`, `init`, `link`, `peers`, `compare` subcommands with daemon-first RPC and local fallback
+- **Cross-project coordination**: Peer registry (`.weftos/peers.json`), assessment comparison across projects, validated on clawft (412K LOC) and weavelogic.ai (801K LOC)
+- **Docs site**: Previous/next navigation, "Edit on GitHub" links, glossary (25+ terms), troubleshooting section, assessment workflow guide, deployment SOPs
+- **28 ADRs** (ADR-020 through ADR-047): Kernel phase responsibilities, CLI daemon compliance, ExoChain mandatory audit, Noise encryption, Ed25519 identity, post-quantum dual signing, CBOR wire format, three-branch governance, effect algebra, forest of trees architecture, three operating modes, and 16 more
+
+### Changed
+
+- **CLI Kernel Compliance** (ADR-021): 32 `weft` commands migrated from direct file I/O to daemon-first RPC with local fallback. Commands: cron (6), assess (4), security (1), skills (7), tools (6), agents (3), workspace (8), other (3)
+- **clawft-weave**: `DaemonClient` and core protocol types moved to `clawft-rpc`, re-exported for backward compatibility. 5 new daemon dispatch endpoints (`assess.*`)
+
+### Fixed
+
+- WASM JS glue MIME-type: load via blob URL to bypass CDN `application/octet-stream`
+- GitHub Releases CORS: server-side proxy instead of Vercel rewrites (redirect chain exposed missing CORS headers)
+- Vercel CDN caching: `s-maxage=604800` + `stale-while-revalidate=86400` on proxied assets
+
 ## [0.3.0] - 2026-03-31
 
 ### Added

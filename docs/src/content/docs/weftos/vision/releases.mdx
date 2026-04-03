@@ -1,9 +1,62 @@
 ---
 title: Release Notes
-description: Complete version history for WeftOS from initial development through v0.3.0.
+description: Complete version history for WeftOS from initial development through v0.4.0.
 ---
 
 # Release Notes
+
+## v0.4.0 — Sprint 14: WASM Sandbox, Assessment, CLI Compliance
+
+*2026-04-03*
+
+Sprint 14 ships the browser WASM sandbox, assessment framework, CLI kernel compliance, and 28 architectural decision records.
+
+### Browser WASM Sandbox (`/clawft/`)
+
+- **Live in your browser**: clawft-wasm runs entirely client-side, loaded from CDN via GitHub Releases
+- **RVF Knowledge Base**: 1,160 documentation segments with keyword search, acronym detection, and RAG-powered answers
+- **Two modes**: Local (no API key, pure KB retrieval) and LLM (connect any provider via OpenRouter, Anthropic, OpenAI, etc.)
+- **ExoChain Log Panel**: Live audit trail showing every operation — KB search, queries, responses — with linked hashes
+- **Runtime Introspection**: Users can inspect their own WASM instance (memory, exports, KB stats, browser environment)
+
+### Assessment Framework
+
+- **`weft assess` CLI**: `run`, `status`, `init`, `link`, `peers`, `compare` subcommands
+- **AssessmentService**: Kernel-native `SystemService` with tree-sitter integration for Rust/TypeScript symbol extraction and cyclomatic complexity
+- **Cross-project coordination**: Link projects via local path or HTTP URL, compare assessments side-by-side
+- **Daemon RPC**: 5 new endpoints (`assess.run`, `assess.status`, `assess.link`, `assess.peers`, `assess.compare`) with ExoChain audit logging
+- **Validated**: clawft (2,986 files, 412K LOC) and weavelogic.ai (2,549 files, 801K LOC)
+
+### CLI Kernel Compliance (ADR-021)
+
+- **New crate: `clawft-rpc`** — shared RPC client for both `weft` and `weaver` CLIs
+- **32 commands migrated**: All bypassing commands now use daemon-first RPC with graceful local fallback
+- **Categories**: cron (6), assess (4), security (1), skills (7), tools (6), agents (3), workspace (8)
+- **Security**: Every operation can now be audited via ExoChain when the daemon is running
+
+### Architecture Decision Records (28 new)
+
+- **ADR-020 to ADR-023**: Kernel phase responsibilities, CLI compliance, ExoChain mandatory audit, assessment as kernel service
+- **ADR-024 to ADR-031**: Noise encryption, Ed25519 identity, QUIC transport, selective libp2p, post-quantum dual signing, rvf-crypto fork, CBOR codec, rvf-wire mesh format
+- **ADR-032 to ADR-039**: DashMap concurrency, three-branch governance, effect algebra, ServiceApi, hierarchical ToolRegistry, MSRV 1.93, Tauri shell, SWIM detection
+- **ADR-040 to ADR-047**: LWW-CRDT process table, ChainAnchor trait, three operating modes, hash migration, wasip1 target, tiered router, forest of trees, self-calibrating tick
+
+### Documentation
+
+- Previous/next page navigation on all doc pages
+- "Edit on GitHub" links
+- [Glossary](/docs/glossary) with 25+ terms
+- Troubleshooting section in getting-started
+- [Assessment Workflow](/docs/weftos/guides/assessment) guide
+- [Deployment SOPs](/docs/weftos/guides/deployment-sops) (SOP 1-5)
+
+### Infrastructure
+
+- CDN asset delivery via GitHub Releases `cdn-assets` tag
+- Vercel API route proxy with edge caching (`s-maxage=604800`)
+- Blob URL WASM loading for MIME-type compatibility
+
+---
 
 ## v0.3.0 — Sprint 13: Integration + Paperclip
 
