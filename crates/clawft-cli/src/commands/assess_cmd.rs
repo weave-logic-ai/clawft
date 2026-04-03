@@ -123,6 +123,17 @@ pub enum AssessAction {
         #[arg(long)]
         uninstall: bool,
     },
+
+    /// Review assessment trends and generate SOP improvement recommendations.
+    Review {
+        /// Number of past assessments to analyze.
+        #[arg(short = 'n', long, default_value_t = 5)]
+        history: usize,
+
+        /// Project directory.
+        #[arg(short, long)]
+        dir: Option<String>,
+    },
 }
 
 /// Assessment scope — what to scan.
@@ -198,6 +209,9 @@ pub async fn run(args: AssessArgs) -> anyhow::Result<()> {
             dir,
             uninstall,
         }) => run_hooks(&hook_type, dir.as_deref(), uninstall),
+        Some(AssessAction::Review { history, dir }) => {
+            run_review_with_daemon(history, dir.as_deref()).await
+        }
         // No subcommand — run assessment with top-level args.
         None => run_assessment_with_daemon(&args.scope, &args.format, args.dir.as_deref(), None).await,
     }
@@ -317,6 +331,298 @@ async fn run_compare_with_daemon(
     }
 
     run_compare(peer_name, dir)
+}
+
+/// Try daemon RPC for `assess.review`; fall back to local execution.
+async fn run_review_with_daemon(
+    history: usize,
+    dir: Option<&str>,
+) -> anyhow::Result<()> {
+    if let Some(mut client) = DaemonClient::connect().await {
+        let mut params = serde_json::json!({
+            "history": history,
+        });
+        if let Some(d) = dir {
+            params["dir"] = serde_json::json!(d);
+        }
+        let resp = client
+            .call(Request::with_params("assess.review", params))
+            .await?;
+        if resp.ok {
+            if let Some(data) = resp.result {
+                println!("{}", serde_json::to_string_pretty(&data)?);
+            }
+            return Ok(());
+        }
+        if let Some(ref err) = resp.error {
+            if !err.contains("unknown method") {
+                anyhow::bail!("{err}");
+            }
+        }
+    } else {
+        eprintln!("{NO_DAEMON_WARNING}");
+    }
+
+    run_review(history, dir)
+}
+
+/// Analyze assessment history and generate SOP improvement recommendations.
+fn run_review(history: usize, dir: Option<&str>) -> anyhow::Result<()> {
+    let project = resolve_project_dir(dir);
+    let artifacts_dir = project.join(".weftos/artifacts");
+
+    if !artifacts_dir.exists() {
+        anyhow::bail!(
+            "No .weftos/artifacts/ directory at {}. Run `weft assess` first.",
+            project.display()
+        );
+    }
+
+    // Collect assessment JSON files, sorted by name (which includes timestamps).
+    let mut assessment_files: Vec<PathBuf> = std::fs::read_dir(&artifacts_dir)?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension().is_some_and(|e| e == "json")
+                && p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("assessment"))
+        })
+        .collect();
+
+    assessment_files.sort();
+
+    // Take only the last `history` files.
+    if assessment_files.len() > history {
+        let start = assessment_files.len() - history;
+        assessment_files = assessment_files.split_off(start);
+    }
+
+    if assessment_files.is_empty() {
+        anyhow::bail!("No assessment files found in {}", artifacts_dir.display());
+    }
+
+    // Parse all reports into JSON values.
+    let reports: Vec<serde_json::Value> = assessment_files
+        .iter()
+        .filter_map(|p| {
+            std::fs::read_to_string(p)
+                .ok()
+                .and_then(|c| serde_json::from_str(&c).ok())
+        })
+        .collect();
+
+    if reports.is_empty() {
+        anyhow::bail!("Could not parse any assessment files.");
+    }
+
+    let count = reports.len();
+
+    // --- Extract per-report metrics ---
+    let mut finding_counts: Vec<usize> = Vec::new();
+    let mut coherence_scores: Vec<f64> = Vec::new();
+    let mut complexity_counts: Vec<usize> = Vec::new();
+    let mut file_occurrence: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut analyzer_findings: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+
+    for report in &reports {
+        // Findings count
+        let findings = report.get("findings").and_then(|v| v.as_array());
+        let fc = findings.map(|a| a.len()).unwrap_or(0);
+        finding_counts.push(fc);
+
+        // Coherence
+        let cs = report
+            .get("summary")
+            .and_then(|s| s.get("coherence_score"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        coherence_scores.push(cs);
+
+        // Complexity
+        let cw = report
+            .get("summary")
+            .and_then(|s| s.get("complexity_warnings"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        complexity_counts.push(cw);
+
+        // Per-file and per-category occurrence
+        if let Some(findings_arr) = findings {
+            for finding in findings_arr {
+                if let Some(file) = finding.get("file").and_then(|v| v.as_str()) {
+                    *file_occurrence.entry(file.to_string()).or_insert(0) += 1;
+                }
+                if let Some(cat) = finding.get("category").and_then(|v| v.as_str()) {
+                    *analyzer_findings.entry(cat.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    // --- Compute trends ---
+    let first_findings = finding_counts.first().copied().unwrap_or(0);
+    let last_findings = finding_counts.last().copied().unwrap_or(0);
+    let findings_pct = if first_findings > 0 {
+        ((last_findings as f64 - first_findings as f64) / first_findings as f64) * 100.0
+    } else if last_findings > 0 {
+        100.0
+    } else {
+        0.0
+    };
+
+    let first_coherence = coherence_scores.first().copied().unwrap_or(0.0);
+    let last_coherence = coherence_scores.last().copied().unwrap_or(0.0);
+    let coherence_delta = last_coherence - first_coherence;
+
+    let first_complexity = complexity_counts.first().copied().unwrap_or(0);
+    let last_complexity = complexity_counts.last().copied().unwrap_or(0);
+    let complexity_trend = if first_complexity == last_complexity {
+        "stable".to_string()
+    } else if last_complexity > first_complexity {
+        format!("+{}", last_complexity - first_complexity)
+    } else {
+        format!("-{}", first_complexity - last_complexity)
+    };
+
+    // Repeat offenders: files appearing in every assessment
+    let repeat_offenders: Vec<&String> = file_occurrence
+        .iter()
+        .filter(|&(_, &c)| c >= count)
+        .map(|(f, _)| f)
+        .collect();
+
+    // Analyzers with 0 findings across all reports
+    let known_categories = [
+        "complexity",
+        "technical-debt",
+        "security",
+        "dependency",
+        "documentation",
+    ];
+    let zero_categories: Vec<&str> = known_categories
+        .iter()
+        .filter(|c| !analyzer_findings.contains_key(**c))
+        .copied()
+        .collect();
+
+    // --- Build recommendations ---
+    let mut recommendations: Vec<(String, String)> = Vec::new();
+
+    if !repeat_offenders.is_empty() {
+        recommendations.push((
+            "SUGGEST".into(),
+            format!(
+                "{} files appear in every assessment — consider splitting or adding to exclude",
+                repeat_offenders.len()
+            ),
+        ));
+    }
+
+    for cat in &zero_categories {
+        recommendations.push((
+            "SUGGEST".into(),
+            format!(
+                "{cat} analyzer found 0 issues in {count} runs — scan frequency could be reduced"
+            ),
+        ));
+    }
+
+    if last_coherence < 30.0 {
+        recommendations.push((
+            "SUGGEST".into(),
+            format!(
+                "Coherence below 30% ({last_coherence:.1}%) — add documentation for undocumented modules"
+            ),
+        ));
+    }
+
+    if findings_pct > 10.0 {
+        recommendations.push((
+            "ACTION".into(),
+            format!(
+                "Findings increased by {findings_pct:.1}% over {count} runs — investigate root causes"
+            ),
+        ));
+    }
+
+    if last_complexity > first_complexity && count > 1 {
+        recommendations.push((
+            "ACTION".into(),
+            format!(
+                "Complexity warnings rose from {first_complexity} to {last_complexity} — review large files"
+            ),
+        ));
+    }
+
+    // --- Print report ---
+    let findings_arrow = finding_counts
+        .iter()
+        .map(|c| c.to_string())
+        .collect::<Vec<_>>()
+        .join(" → ");
+
+    println!("SOP Review ({count} assessments analyzed)");
+    println!("====================================");
+    println!();
+    println!("Trends:");
+    println!(
+        "  Findings:   {findings_arrow} ({findings_pct:+.1}% over {count} runs)"
+    );
+    println!(
+        "  Coherence:  {first_coherence:.1}% → {last_coherence:.1}% ({coherence_delta:+.1}%)"
+    );
+    println!(
+        "  Complexity: {last_complexity} warnings ({complexity_trend})"
+    );
+
+    if !recommendations.is_empty() {
+        println!();
+        println!("Recommendations:");
+        for (tag, msg) in &recommendations {
+            println!("  [{tag}] {msg}");
+        }
+    } else {
+        println!();
+        println!("No recommendations — assessment trends look healthy.");
+    }
+
+    // --- Save structured output ---
+    let review_output = serde_json::json!({
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "assessments_analyzed": count,
+        "trends": {
+            "findings": {
+                "values": finding_counts,
+                "change_pct": findings_pct,
+            },
+            "coherence": {
+                "first": first_coherence,
+                "last": last_coherence,
+                "delta": coherence_delta,
+            },
+            "complexity": {
+                "first": first_complexity,
+                "last": last_complexity,
+                "trend": complexity_trend,
+            },
+        },
+        "repeat_offenders": repeat_offenders,
+        "zero_finding_categories": zero_categories,
+        "recommendations": recommendations.iter().map(|(tag, msg)| {
+            serde_json::json!({ "tag": tag, "message": msg })
+        }).collect::<Vec<_>>(),
+    });
+
+    let review_json = serde_json::to_string_pretty(&review_output)?;
+    let output_path = artifacts_dir.join("sop-review-latest.json");
+    std::fs::write(&output_path, review_json.as_bytes())?;
+
+    println!();
+    println!("Review saved to .weftos/artifacts/sop-review-latest.json");
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

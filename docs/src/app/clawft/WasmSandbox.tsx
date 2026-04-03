@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import type { KBEntry, KBManifest } from '@/lib/rvf-reader';
 
@@ -21,7 +21,7 @@ interface ChainEntry {
 }
 
 type SandboxStatus = 'loading' | 'ready' | 'error' | 'needs-key';
-type SandboxMode = 'local' | 'llm';
+type SandboxMode = 'local' | 'llm' | 'local-ai';
 
 // ---------------------------------------------------------------------------
 // Chain log (ExoChain-style audit trail)
@@ -301,6 +301,234 @@ function keywordSearch(query: string, entries: KBEntry[], topK = 5): KBEntry[] {
 }
 
 // ---------------------------------------------------------------------------
+// KB Graph — tag co-occurrence force-directed layout
+// ---------------------------------------------------------------------------
+
+interface GraphNode {
+  id: string;
+  count: number;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+}
+
+interface GraphEdge {
+  source: string;
+  target: string;
+  weight: number;
+}
+
+/** Compute a tag co-occurrence graph from KB entries. */
+function computeKBGraph(entries: KBEntry[]): { nodes: GraphNode[]; edges: GraphEdge[] } {
+  const tagCounts: Record<string, number> = {};
+  const edgeMap: Record<string, number> = {};
+
+  for (const e of entries) {
+    const tags = e.tags ?? [];
+    for (const t of tags) {
+      tagCounts[t] = (tagCounts[t] || 0) + 1;
+    }
+    // Create edges between co-occurring tags
+    for (let i = 0; i < tags.length; i++) {
+      for (let j = i + 1; j < tags.length; j++) {
+        const key = [tags[i], tags[j]].sort().join('::');
+        edgeMap[key] = (edgeMap[key] || 0) + 1;
+      }
+    }
+  }
+
+  const nodeEntries = Object.entries(tagCounts).sort((a, b) => b[1] - a[1]).slice(0, 30);
+  const nodeSet = new Set(nodeEntries.map(([id]) => id));
+  const nodes: GraphNode[] = nodeEntries.map(([id, count], i) => ({
+    id,
+    count,
+    x: 300 + 200 * Math.cos((2 * Math.PI * i) / nodeEntries.length),
+    y: 200 + 150 * Math.sin((2 * Math.PI * i) / nodeEntries.length),
+    vx: 0,
+    vy: 0,
+  }));
+
+  const edges: GraphEdge[] = [];
+  for (const [key, weight] of Object.entries(edgeMap)) {
+    const [source, target] = key.split('::');
+    if (nodeSet.has(source) && nodeSet.has(target)) {
+      edges.push({ source, target, weight });
+    }
+  }
+
+  return { nodes, edges };
+}
+
+/** Category-based color palette for graph nodes. */
+const TAG_COLORS: Record<string, string> = {
+  architecture: '#60a5fa',
+  security: '#f87171',
+  api: '#34d399',
+  cli: '#a78bfa',
+  wasm: '#fb923c',
+  runtime: '#fbbf24',
+  docs: '#94a3b8',
+};
+
+function tagColor(tag: string): string {
+  const t = tag.toLowerCase();
+  for (const [key, color] of Object.entries(TAG_COLORS)) {
+    if (t.includes(key)) return color;
+  }
+  // Hash-based fallback color
+  let h = 0;
+  for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) | 0;
+  const hue = ((h >>> 0) % 360);
+  return `hsl(${hue}, 55%, 60%)`;
+}
+
+function KBGraph({ entries }: { entries: KBEntry[] }) {
+  const { nodes: initialNodes, edges } = useMemo(() => computeKBGraph(entries), [entries]);
+  const nodesRef = useRef<GraphNode[]>(initialNodes.map((n) => ({ ...n })));
+  const frameRef = useRef<number>(0);
+  const iterRef = useRef(0);
+  const svgRef = useRef<SVGSVGElement>(null);
+  const [, forceRender] = useState(0);
+
+  const WIDTH = 600;
+  const HEIGHT = 400;
+  const MAX_ITER = 120;
+
+  useEffect(() => {
+    // Reset nodes when entries change
+    nodesRef.current = initialNodes.map((n) => ({ ...n }));
+    iterRef.current = 0;
+
+    const nodeMap = new Map<string, GraphNode>();
+
+    function simulate() {
+      const nodes = nodesRef.current;
+      nodeMap.clear();
+      for (const n of nodes) nodeMap.set(n.id, n);
+
+      // Repulsion between all nodes
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+          const a = nodes[i];
+          const b = nodes[j];
+          let dx = a.x - b.x;
+          let dy = a.y - b.y;
+          const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
+          const force = 800 / (dist * dist);
+          dx = (dx / dist) * force;
+          dy = (dy / dist) * force;
+          a.vx += dx;
+          a.vy += dy;
+          b.vx -= dx;
+          b.vy -= dy;
+        }
+      }
+
+      // Attraction along edges
+      for (const e of edges) {
+        const a = nodeMap.get(e.source);
+        const b = nodeMap.get(e.target);
+        if (!a || !b) continue;
+        let dx = b.x - a.x;
+        let dy = b.y - a.y;
+        const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
+        const force = (dist - 80) * 0.01 * Math.min(e.weight, 3);
+        dx = (dx / dist) * force;
+        dy = (dy / dist) * force;
+        a.vx += dx;
+        a.vy += dy;
+        b.vx -= dx;
+        b.vy -= dy;
+      }
+
+      // Center gravity
+      for (const n of nodes) {
+        n.vx += (WIDTH / 2 - n.x) * 0.002;
+        n.vy += (HEIGHT / 2 - n.y) * 0.002;
+      }
+
+      // Apply velocity with damping
+      const damping = 0.85;
+      for (const n of nodes) {
+        n.vx *= damping;
+        n.vy *= damping;
+        n.x += n.vx;
+        n.y += n.vy;
+        // Clamp to bounds
+        n.x = Math.max(30, Math.min(WIDTH - 30, n.x));
+        n.y = Math.max(30, Math.min(HEIGHT - 30, n.y));
+      }
+
+      iterRef.current++;
+      forceRender((c) => c + 1);
+
+      if (iterRef.current < MAX_ITER) {
+        frameRef.current = requestAnimationFrame(simulate);
+      }
+    }
+
+    frameRef.current = requestAnimationFrame(simulate);
+    return () => cancelAnimationFrame(frameRef.current);
+  }, [initialNodes, edges]);
+
+  const nodes = nodesRef.current;
+  const nodeMap = new Map<string, GraphNode>();
+  for (const n of nodes) nodeMap.set(n.id, n);
+
+  const maxCount = Math.max(...nodes.map((n) => n.count), 1);
+
+  return (
+    <svg
+      ref={svgRef}
+      viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
+      className="w-full max-w-xl mx-auto"
+      style={{ height: 320 }}
+    >
+      {/* Edges */}
+      {edges.map((e) => {
+        const a = nodeMap.get(e.source);
+        const b = nodeMap.get(e.target);
+        if (!a || !b) return null;
+        return (
+          <line
+            key={`${e.source}::${e.target}`}
+            x1={a.x}
+            y1={a.y}
+            x2={b.x}
+            y2={b.y}
+            stroke="currentColor"
+            className="text-fd-border"
+            strokeWidth={Math.min(e.weight, 3) * 0.5 + 0.5}
+            strokeOpacity={0.4}
+          />
+        );
+      })}
+      {/* Nodes */}
+      {nodes.map((n) => {
+        const r = 6 + (n.count / maxCount) * 14;
+        const color = tagColor(n.id);
+        return (
+          <g key={n.id}>
+            <circle cx={n.x} cy={n.y} r={r} fill={color} fillOpacity={0.7} stroke={color} strokeWidth={1.5} />
+            <text
+              x={n.x}
+              y={n.y + r + 10}
+              textAnchor="middle"
+              className="fill-fd-muted-foreground"
+              fontSize={9}
+              fontFamily="monospace"
+            >
+              {n.id}
+            </text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
@@ -316,10 +544,13 @@ export default function WasmSandbox() {
   const [kbStats, setKbStats] = useState<string>('');
   const [error, setError] = useState<string>('');
   const [showLlmSetup, setShowLlmSetup] = useState(false);
+  const [streamingMessage, setStreamingMessage] = useState('');
+  const [showKBGraph, setShowKBGraph] = useState(true);
   const [chain, setChain] = useState<ChainEntry[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const chainScrollRef = useRef<HTMLDivElement>(null);
   const wasmRef = useRef<any>(null);
+  const streamAbortRef = useRef(false);
 
   const log = useCallback((op: string, detail: string) => {
     setChain((prev) => chainAppend(prev, op, detail));
@@ -329,6 +560,9 @@ export default function WasmSandbox() {
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
   }, [messages]);
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+  }, [streamingMessage]);
   useEffect(() => {
     chainScrollRef.current?.scrollTo({ top: chainScrollRef.current.scrollHeight, behavior: 'smooth' });
   }, [chain]);
@@ -463,6 +697,21 @@ export default function WasmSandbox() {
     setError('');
   };
 
+  /** Stream a reply word-by-word into the streaming bubble, then commit to messages. */
+  const streamReply = useCallback(async (reply: string): Promise<void> => {
+    streamAbortRef.current = false;
+    const words = reply.split(' ');
+    let displayed = '';
+    for (let i = 0; i < words.length; i++) {
+      if (streamAbortRef.current) break;
+      displayed += (i > 0 ? ' ' : '') + words[i];
+      setStreamingMessage(displayed);
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    setStreamingMessage('');
+    setMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
+  }, []);
+
   const handleSend = useCallback(async () => {
     const text = input.trim();
     if (!text || sending) return;
@@ -494,16 +743,17 @@ export default function WasmSandbox() {
         ? gatherRuntimeInfo(wasmRef.current, kbCache, model)
         : '';
 
-      if (mode === 'local') {
-        // ── Local mode: pure retrieval, no LLM ──────────────────
-        log('RETRIEVE', `Formatting ${hits.length} KB results (local mode)`);
+      if (mode === 'local' || mode === 'local-ai') {
+        // ── Local / Local-AI mode: pure retrieval, no LLM ──────────────────
+        const isLocalAI = mode === 'local-ai';
+        log('RETRIEVE', `Formatting ${hits.length} KB results (${isLocalAI ? 'local-ai' : 'local'} mode)`);
         let reply: string;
 
         if (introspecting && runtimeInfo) {
           reply = runtimeInfo;
         } else if (hits.length > 0) {
           // Format KB results as a readable answer
-          reply = hits
+          const formattedHits = hits
             .map((h) => {
               const meta = h.metadata as Record<string, string>;
               const title = meta?.title ?? '';
@@ -514,13 +764,20 @@ export default function WasmSandbox() {
               return `**${link}**\n\n${h.text}`;
             })
             .join('\n\n---\n\n');
+
+          if (isLocalAI) {
+            reply = `Based on the documentation, here's what I found:\n\n${formattedHits}\n\nThis is from local KB retrieval. Full local AI inference coming soon.`;
+          } else {
+            reply = formattedHits;
+          }
         } else {
-          reply =
-            "No matching documentation found. Try different keywords, or browse the full docs at [/docs](/docs).";
+          reply = isLocalAI
+            ? "I couldn't find relevant documentation for that query. Try browsing /docs/ directly."
+            : "No matching documentation found. Try different keywords, or browse the full docs at [/docs](/docs).";
         }
 
-        log('RESPOND', `Local: ${reply.length} chars`);
-        setMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
+        log('RESPOND', `${isLocalAI ? 'Local-AI' : 'Local'}: ${reply.length} chars`);
+        await streamReply(reply);
       } else {
         // ── LLM mode: RAG + send through WASM pipeline ──────────
         log('LLM_SEND', `Sending to ${model} with ${context.length} chars context`);
@@ -552,10 +809,11 @@ export default function WasmSandbox() {
 
         const reply = await wasmRef.current.send_message(ragPrompt);
         log('LLM_RECV', `Response: ${reply.length} chars`);
-        setMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
+        await streamReply(reply);
       }
     } catch (e: any) {
       log('ERROR', String(e));
+      setStreamingMessage('');
       setMessages((prev) => [
         ...prev,
         { role: 'assistant', content: `Error: ${e.message || e}` },
@@ -563,7 +821,7 @@ export default function WasmSandbox() {
     } finally {
       setSending(false);
     }
-  }, [input, sending, mode, model]);
+  }, [input, sending, mode, model, streamReply]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -614,6 +872,28 @@ export default function WasmSandbox() {
               <>
                 <span>Mode: local retrieval</span>
                 <button
+                  onClick={() => setMode('local-ai')}
+                  className="underline hover:text-fd-foreground transition-colors"
+                >
+                  Local AI
+                </button>
+                <button
+                  onClick={() => setShowLlmSetup(!showLlmSetup)}
+                  className="underline hover:text-fd-foreground transition-colors"
+                >
+                  Connect LLM
+                </button>
+              </>
+            ) : mode === 'local-ai' ? (
+              <>
+                <span>Mode: Local AI (ruvllm-wasm)</span>
+                <button
+                  onClick={() => setMode('local')}
+                  className="underline hover:text-fd-foreground transition-colors"
+                >
+                  Local
+                </button>
+                <button
                   onClick={() => setShowLlmSetup(!showLlmSetup)}
                   className="underline hover:text-fd-foreground transition-colors"
                 >
@@ -636,7 +916,7 @@ export default function WasmSandbox() {
       </header>
 
       {/* LLM config panel — shown when user wants to connect a model */}
-      {status === 'ready' && mode === 'local' && messages.length === 0 && showLlmSetup && (
+      {status === 'ready' && (mode === 'local' || mode === 'local-ai') && messages.length === 0 && showLlmSetup && (
         <div className="mx-auto w-full max-w-xl p-6">
           <div className="rounded-xl border border-fd-border bg-fd-card p-6">
             <div className="flex items-center justify-between mb-2">
@@ -719,11 +999,18 @@ export default function WasmSandbox() {
                     <h2 className="mb-2 text-xl font-semibold text-fd-foreground">
                       WeftOS WASM Sandbox
                     </h2>
-                    <p className="mb-6 text-sm text-fd-muted-foreground">
+                    <p className="mb-4 text-sm text-fd-muted-foreground">
                       {mode === 'local'
                         ? `Searching ${kbStats} of WeftOS documentation locally — no API key needed.`
+                        : mode === 'local-ai'
+                        ? `Local AI mode uses ruvllm-wasm for on-device inference. Coming soon — currently falls back to local KB retrieval.`
                         : `Running clawft-wasm with ${model.split('/').pop()}, backed by ${kbStats}.`}
                     </p>
+                    {mode === 'local-ai' && (
+                      <div className="mb-6 mx-auto max-w-md rounded-lg border border-yellow-500/30 bg-yellow-500/5 px-4 py-2 text-xs text-yellow-400">
+                        Local AI mode uses ruvllm-wasm for on-device inference. Coming soon — currently falls back to local KB retrieval.
+                      </div>
+                    )}
                     <div className="space-y-3 max-w-lg mx-auto text-left">
                       {([
                         { label: 'Getting Started', items: ['What is WeftOS?', 'How do I install it?'] },
@@ -751,6 +1038,25 @@ export default function WasmSandbox() {
                         </div>
                       ))}
                     </div>
+                    {/* KB Graph visualization */}
+                    {kbLoaded && kbCache && (
+                      <div className="mt-6">
+                        <button
+                          onClick={() => setShowKBGraph((v) => !v)}
+                          className="text-xs underline text-fd-muted-foreground hover:text-fd-foreground transition-colors"
+                        >
+                          {showKBGraph ? 'Hide KB Graph' : 'Show KB Graph'}
+                        </button>
+                        {showKBGraph && (
+                          <div className="mt-3 rounded-xl border border-fd-border bg-fd-card p-3">
+                            <KBGraph entries={kbCache.entries} />
+                            <p className="mt-2 text-[10px] text-fd-muted-foreground text-center">
+                              Tag co-occurrence graph — {kbCache.entries.length} segments
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -758,7 +1064,16 @@ export default function WasmSandbox() {
                   <ChatBubble key={i} message={msg} />
                 ))}
 
-                {sending && (
+                {/* Streaming message bubble */}
+                {streamingMessage && (
+                  <div className="flex justify-start">
+                    <div className="max-w-[80%] rounded-xl px-4 py-2.5 text-sm border border-fd-border bg-fd-card text-fd-card-foreground">
+                      <div className="whitespace-pre-wrap">{streamingMessage}<span className="inline-block w-1.5 h-4 ml-0.5 bg-fd-foreground/60 animate-pulse" /></div>
+                    </div>
+                  </div>
+                )}
+
+                {sending && !streamingMessage && (
                   <div className="flex gap-2 text-fd-muted-foreground">
                     <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-fd-primary" />
                     <span className="text-sm">Thinking...</span>

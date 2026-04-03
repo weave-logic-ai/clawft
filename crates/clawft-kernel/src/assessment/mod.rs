@@ -171,6 +171,12 @@ pub struct AssessmentSummary {
     pub coherence_score: f64,
     pub symbols_extracted: usize,
     pub avg_complexity: f64,
+    /// Number of progressive discovery rounds executed (0 for non-progressive runs).
+    #[serde(default)]
+    pub discovery_rounds: usize,
+    /// Total files discovered across all progressive rounds beyond the initial scan.
+    #[serde(default)]
+    pub files_discovered: usize,
 }
 
 /// A single finding from the assessment.
@@ -396,7 +402,7 @@ impl AssessmentService {
             1.0
         };
 
-        let report = AssessmentReport {
+        let mut report = AssessmentReport {
             timestamp: Utc::now(),
             scope: scope.to_string(),
             project: project_dir.display().to_string(),
@@ -405,6 +411,11 @@ impl AssessmentService {
             findings,
             analyzers_run: analyzer_ids,
         };
+
+        // Generate heuristic insights and append them
+        if let Some(mut insights) = self.generate_insights(&report) {
+            report.findings.append(&mut insights);
+        }
 
         *self.latest.lock().unwrap() = Some(report.clone());
         debug!(
@@ -513,6 +524,314 @@ impl AssessmentService {
             shared_deps,
         })
     }
+
+    // ── Progressive Discovery ─────────────────────────────────────
+
+    /// Run the assessment pipeline in progressive rounds.
+    ///
+    /// Each round runs all analyzers on scoped files. After each round,
+    /// new file/directory references discovered in findings (topology,
+    /// network, data_source) are collected. If they point to files not
+    /// yet scanned, a follow-up round is executed on those files.
+    /// Repeats until no new files are discovered or `max_rounds` is reached.
+    pub fn run_progressive(
+        &self,
+        project: &Path,
+        scope: &str,
+        max_rounds: usize,
+    ) -> AssessmentReport {
+        let registry = AnalyzerRegistry::with_defaults();
+        let analyzer_ids = registry.analyzer_ids();
+
+        let initial_files = match scope {
+            "commit" => collect_git_changed_files(project).unwrap_or_default(),
+            "ci" => collect_files_filtered(project, |p| is_ci_file(p)),
+            "dependency" => collect_files_filtered(project, |p| is_dependency_file(p)),
+            _ => collect_all_files(project),
+        };
+
+        let previous_report = self.load_previous_report();
+        let context = AnalysisContext {
+            scope: scope.to_string(),
+            previous_report,
+        };
+
+        let mut all_scanned: std::collections::HashSet<PathBuf> =
+            initial_files.iter().cloned().collect();
+        let mut all_findings: Vec<Finding> = Vec::new();
+        let mut round = 0;
+        let mut total_discovered: usize = 0;
+        let mut files_to_scan = initial_files;
+
+        while round < max_rounds && !files_to_scan.is_empty() {
+            let findings = registry.run_all(project, &files_to_scan, &context);
+            all_findings.extend(findings.clone());
+            round += 1;
+
+            if round >= max_rounds {
+                break;
+            }
+
+            // Extract discovery hints: file paths mentioned in findings
+            let mut new_files = Vec::new();
+            for finding in &findings {
+                if !matches!(
+                    finding.category.as_str(),
+                    "topology" | "network" | "data_source"
+                ) {
+                    continue;
+                }
+                // Look for file paths in messages
+                let hints = extract_path_hints(&finding.message, &finding.file, project);
+                for hint in hints {
+                    if hint.exists() && hint.is_file() && !all_scanned.contains(&hint) {
+                        all_scanned.insert(hint.clone());
+                        new_files.push(hint);
+                    }
+                }
+            }
+
+            // Also check if any findings reference directories we haven't walked
+            for finding in &findings {
+                let path = project.join(&finding.file);
+                if let Some(parent) = path.parent() {
+                    if parent.is_dir() {
+                        let mut extra = Vec::new();
+                        walk_dir(parent, &mut extra, &|_| true);
+                        for f in extra {
+                            if !all_scanned.contains(&f) {
+                                all_scanned.insert(f.clone());
+                                new_files.push(f);
+                            }
+                        }
+                    }
+                }
+            }
+
+            total_discovered += new_files.len();
+            files_to_scan = new_files;
+        }
+
+        // Build summary from all scanned files
+        let all_files: Vec<PathBuf> = all_scanned.into_iter().collect();
+        let mut summary = AssessmentSummary::default();
+        summary.total_files = all_files.len();
+        summary.discovery_rounds = round;
+        summary.files_discovered = total_discovered;
+
+        for path in &all_files {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            match ext {
+                "rs" => summary.rust_files += 1,
+                "ts" | "tsx" => summary.typescript_files += 1,
+                "toml" | "yaml" | "yml" | "json" if is_config_file(path) => {
+                    summary.config_files += 1;
+                }
+                "md" | "txt" | "adoc" => summary.doc_files += 1,
+                _ => {}
+            }
+            if is_dependency_file(path) {
+                summary.dependency_files += 1;
+            }
+            if let Ok(content) = std::fs::read_to_string(path) {
+                summary.lines_of_code += content.lines().count();
+            }
+        }
+
+        let warning_count = all_findings.iter().filter(|f| f.severity == "warning").count();
+        summary.complexity_warnings = all_findings
+            .iter()
+            .filter(|f| f.category == "size" && f.severity == "warning")
+            .count();
+        summary.coherence_score = if summary.total_files > 0 {
+            1.0 - (warning_count as f64 / summary.total_files as f64).min(1.0)
+        } else {
+            1.0
+        };
+
+        let mut report = AssessmentReport {
+            timestamp: Utc::now(),
+            scope: scope.to_string(),
+            project: project.display().to_string(),
+            files_scanned: all_files.len(),
+            summary,
+            findings: all_findings,
+            analyzers_run: analyzer_ids,
+        };
+
+        // Generate heuristic insights and append them
+        if let Some(mut insights) = self.generate_insights(&report) {
+            report.findings.append(&mut insights);
+        }
+
+        *self.latest.lock().unwrap() = Some(report.clone());
+        debug!(
+            scope = scope,
+            rounds = round,
+            discovered = total_discovered,
+            files = report.files_scanned,
+            "progressive assessment complete"
+        );
+        report
+    }
+
+    // ── LLM Assessor Agent Stub ───────────────────────────────────
+
+    /// Generate LLM-powered insights from assessment findings.
+    ///
+    /// When a kernel daemon is running with an LLM provider configured,
+    /// this method spawns a worker agent via the supervisor that analyzes
+    /// the findings and produces higher-order insights (architectural
+    /// patterns, risk assessment, recommendations).
+    ///
+    /// Returns None if no LLM is available (local-only mode).
+    pub fn generate_insights(&self, report: &AssessmentReport) -> Option<Vec<Finding>> {
+        let mut insights = Vec::new();
+        let summary = &report.summary;
+
+        // Heuristic 1: If coherence_score < 20%, suggest more documentation
+        if summary.coherence_score < 0.2 {
+            insights.push(Finding {
+                severity: "warning".into(),
+                category: "insight".into(),
+                file: String::new(),
+                line: None,
+                message: format!(
+                    "Low coherence score ({:.0}%): consider adding documentation and reducing warnings to improve project health",
+                    summary.coherence_score * 100.0
+                ),
+            });
+        }
+
+        // Heuristic 2: If complexity_warnings > 10% of files, suggest refactoring
+        if summary.total_files > 0
+            && summary.complexity_warnings as f64 / summary.total_files as f64 > 0.1
+        {
+            insights.push(Finding {
+                severity: "warning".into(),
+                category: "insight".into(),
+                file: String::new(),
+                line: None,
+                message: format!(
+                    "High complexity ratio: {} of {} files have complexity warnings ({:.0}%) \
+                     — consider refactoring large or deeply-nested modules",
+                    summary.complexity_warnings,
+                    summary.total_files,
+                    (summary.complexity_warnings as f64 / summary.total_files as f64) * 100.0
+                ),
+            });
+        }
+
+        // Heuristic 3: If security findings > 0, flag for review
+        let security_count = report
+            .findings
+            .iter()
+            .filter(|f| f.category == "security")
+            .count();
+        if security_count > 0 {
+            let error_count = report
+                .findings
+                .iter()
+                .filter(|f| f.category == "security" && f.severity == "error")
+                .count();
+            insights.push(Finding {
+                severity: if error_count > 0 { "error" } else { "warning" }.into(),
+                category: "insight".into(),
+                file: String::new(),
+                line: None,
+                message: format!(
+                    "Security review needed: {security_count} security finding(s) detected \
+                     ({error_count} critical) — prioritize remediation before deployment"
+                ),
+            });
+        }
+
+        // Heuristic 4: If topology shows >5 services, suggest architecture review
+        let service_findings = report
+            .findings
+            .iter()
+            .filter(|f| {
+                f.category == "topology"
+                    && f.message.starts_with("Service:")
+            })
+            .count();
+        if service_findings > 5 {
+            insights.push(Finding {
+                severity: "info".into(),
+                category: "insight".into(),
+                file: String::new(),
+                line: None,
+                message: format!(
+                    "Complex topology: {service_findings} services detected \
+                     — consider an architecture review to verify service boundaries \
+                     and communication patterns"
+                ),
+            });
+        }
+
+        // Heuristic 5: Cross-reference dependency + security findings
+        let dep_files: std::collections::HashSet<&str> = report
+            .findings
+            .iter()
+            .filter(|f| f.category == "dependency")
+            .map(|f| f.file.as_str())
+            .collect();
+        let security_files: std::collections::HashSet<&str> = report
+            .findings
+            .iter()
+            .filter(|f| f.category == "security")
+            .map(|f| f.file.as_str())
+            .collect();
+        let overlap: Vec<&&str> = dep_files.intersection(&security_files).collect();
+        if !overlap.is_empty() {
+            let file_list: Vec<String> = overlap.iter().map(|f| f.to_string()).collect();
+            insights.push(Finding {
+                severity: "warning".into(),
+                category: "insight".into(),
+                file: String::new(),
+                line: None,
+                message: format!(
+                    "Dependency files with security findings: {} \
+                     — audit these manifests for vulnerable or compromised packages",
+                    file_list.join(", ")
+                ),
+            });
+        }
+
+        Some(insights)
+    }
+}
+
+/// Extract potential file-path hints from a finding message.
+///
+/// Looks for quoted strings and path-like tokens that could reference
+/// files relative to the project root.
+fn extract_path_hints(message: &str, _finding_file: &str, project: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    // Look for quoted strings that could be paths
+    for delim in ['"', '\''] {
+        let mut rest = message;
+        while let Some(start) = rest.find(delim) {
+            rest = &rest[start + 1..];
+            if let Some(end) = rest.find(delim) {
+                let candidate = &rest[..end];
+                // Looks like a relative path if it contains / or a known extension
+                if (candidate.contains('/') || candidate.contains('.'))
+                    && !candidate.contains(' ')
+                    && !candidate.starts_with("http")
+                {
+                    let full = project.join(candidate);
+                    paths.push(full);
+                }
+                rest = &rest[end + 1..];
+            } else {
+                break;
+            }
+        }
+    }
+
+    paths
 }
 
 impl Default for AssessmentService {

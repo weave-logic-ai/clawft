@@ -1,0 +1,134 @@
+name: Publish Crates
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-publish-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-publish-
+
+      - name: Verify tag matches workspace version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::Tag v${TAG} does not match workspace version ${VERSION}"
+            exit 1
+          fi
+          echo "Publishing version ${VERSION}"
+
+      - name: Dry-run publish (all crates)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          CRATES=(
+            clawft-types
+            clawft-rpc
+            exo-resource-tree
+            clawft-plugin
+            clawft-platform
+            clawft-llm
+            clawft-core
+            clawft-tools
+            clawft-kernel
+            weftos
+          )
+          for crate in "${CRATES[@]}"; do
+            echo "--- Dry-run: $crate ---"
+            cargo publish -p "$crate" --dry-run --allow-dirty 2>&1 || true
+          done
+
+      - name: Publish crates (dependency order)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Publishable crates in dependency-topological order:
+          #   Tier 0 (no internal deps): clawft-types, clawft-rpc, exo-resource-tree, clawft-plugin
+          #   Tier 1 (depends on types): clawft-platform, clawft-llm
+          #   Tier 2 (depends on tier 0+1): clawft-core
+          #   Tier 3 (depends on tier 0-2): clawft-tools
+          #   Tier 4 (depends on core+types): clawft-kernel
+          #   Tier 5 (depends on kernel+types): weftos
+          #
+          # Skipped (publish = false):
+          #   clawft-channels, clawft-cli, clawft-wasm, clawft-weave,
+          #   clawft-services, clawft-security,
+          #   clawft-plugin-{git,cargo,oauth2,treesitter,browser,calendar,containers}
+
+          CRATES=(
+            clawft-types
+            clawft-rpc
+            exo-resource-tree
+            clawft-plugin
+            clawft-platform
+            clawft-llm
+            clawft-core
+            clawft-tools
+            clawft-kernel
+            weftos
+          )
+
+          publish_crate() {
+            local crate="$1"
+            local retries=3
+            local delay=10
+
+            for attempt in $(seq 1 $retries); do
+              echo "::group::Publishing $crate (attempt $attempt/$retries)"
+              if cargo publish -p "$crate" --allow-dirty 2>&1; then
+                echo "::endgroup::"
+                echo "Successfully published $crate"
+                return 0
+              fi
+              echo "::endgroup::"
+
+              # Check if it failed because the version already exists
+              if cargo publish -p "$crate" --allow-dirty 2>&1 | grep -q "already uploaded"; then
+                echo "::notice::$crate version already published, skipping"
+                return 0
+              fi
+
+              if [ "$attempt" -lt "$retries" ]; then
+                echo "Retrying in ${delay}s..."
+                sleep "$delay"
+                delay=$((delay * 2))
+              fi
+            done
+
+            echo "::error::Failed to publish $crate after $retries attempts"
+            return 1
+          }
+
+          for crate in "${CRATES[@]}"; do
+            publish_crate "$crate"
+            # crates.io index propagation delay
+            echo "Waiting 30s for crates.io index to update..."
+            sleep 30
+          done
+
+          echo "All crates published successfully!"

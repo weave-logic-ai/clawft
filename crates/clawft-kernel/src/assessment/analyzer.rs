@@ -52,6 +52,9 @@ impl AnalyzerRegistry {
         reg.register(Box::new(super::analyzers::SecurityAnalyzer));
         reg.register(Box::new(super::analyzers::TopologyAnalyzer));
         reg.register(Box::new(super::analyzers::DataSourceAnalyzer));
+        reg.register(Box::new(super::analyzers::NetworkAnalyzer));
+        reg.register(Box::new(super::analyzers::RabbitMQAnalyzer));
+        reg.register(Box::new(super::analyzers::TerraformAnalyzer));
         reg
     }
 
