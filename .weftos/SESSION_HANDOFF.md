@@ -84,8 +84,8 @@ The AssessmentService currently does file counting + complexity + TODOs. Make it
 
 - [x] **clawft-plugin-npm** — Node.js dependency parsing via package.json/lock
 - [x] **clawft-plugin-ci** — GitHub Actions / Vercel config parsing
-- [ ] **Plugin marketplace scaffold** — create-weftos-plugin CLI, registry design
-- [ ] **Rustdoc JSON-to-MDX** — converter for native Fumadocs API pages
+- [x] **Plugin marketplace scaffold** — create-weftos-plugin CLI, registry design
+- [x] **Rustdoc JSON-to-MDX** — converter for native Fumadocs API pages
 
 ### WS6: weavelogic.ai (Separate Project)
 
@@ -108,8 +108,8 @@ The AssessmentService currently does file counting + complexity + TODOs. Make it
 - [ ] **SOP 3: Cross-project mesh** — real-time mesh coordination via K6 transport (WS4)
 - [x] **clawft-plugin-npm** — Node.js dependency parsing via package.json/lock (WS5)
 - [x] **clawft-plugin-ci** — GitHub Actions / Vercel config parsing (WS5)
-- [ ] **Plugin marketplace scaffold** — create-weftos-plugin CLI, registry design (WS5)
-- [ ] **Rustdoc JSON-to-MDX** — converter for native Fumadocs API pages (WS5)
+- [x] **Plugin marketplace scaffold** — create-weftos-plugin CLI, registry design (WS5)
+- [x] **Rustdoc JSON-to-MDX** — converter for native Fumadocs API pages (WS5)
 - [ ] **Evaluate gui/ vs ui/** — consolidate or archive redundant web dashboard (ui/) vs Tauri desktop (gui/)
 
 ### weavelogic.ai site (WS6)
