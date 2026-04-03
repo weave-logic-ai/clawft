@@ -1,7 +1,7 @@
 # Session Handoff: Sprint 15
 
 **Date**: 2026-04-03
-**Version**: v0.4.0 (released, all channels live)
+**Version**: v0.4.1 (released, all channels live)
 **Branch**: master
 
 ---
@@ -41,40 +41,42 @@ Sprint 14 built breadth (sandbox, assessment, CLI compliance, ADRs). Sprint 15 g
 
 The AssessmentService currently does file counting + complexity + TODOs. Make it actually discover and map systems.
 
-- [ ] **Pluggable analyzer registry** — `AnalyzerRegistry` with trait-based analyzers (ADR-023)
-- [ ] **DependencyAnalyzer** — parse Cargo.toml, package.json, go.mod; track versions, detect outdated
-- [ ] **SecurityAnalyzer** — delegate to clawft-security SecurityScanner via kernel service
-- [ ] **TopologyAnalyzer** — discover services from docker-compose.yml, k8s manifests, .env files
-- [ ] **DataSourceAnalyzer** — detect database connection strings, cache configs, object store refs
+- [x] **Pluggable analyzer registry** — `AnalyzerRegistry` with trait-based analyzers (ADR-023)
+- [x] **DependencyAnalyzer** — parses Cargo.toml and package.json, flags missing/wildcard versions
+- [x] **SecurityAnalyzer** — hardcoded secrets, .env files, `unsafe` blocks
+- [x] **TopologyAnalyzer** — Docker, K8s manifests, .env files, port mappings
+- [x] **DataSourceAnalyzer** — postgres://, redis://, S3, API endpoint detection
 - [ ] **NetworkAnalyzer** — map egress URLs, API endpoints, webhook configs from code/config
 - [ ] **Progressive discovery** — each analyzer's findings feed into the next assessment cycle
 - [ ] **LLM assessor agent** — spawn via supervisor, analyze findings with LLM for higher-order insights
-- [ ] **Assessment diff** — compare current vs. previous assessment, surface regressions/improvements
+- [x] **Assessment diff** — compare current vs. previous assessment, surface regressions/improvements
 
 ### WS2: Sandbox Polish (Priority: MEDIUM)
 
-- [ ] **Fix browser WASM CI** — pin wasm-bindgen-cli version to match crate dep
-- [ ] **Playground set pieces** — guided tour scenarios (security bug, provider race, governance wall)
-- [ ] **Provenance panel** — show WITNESS chain verification on KB segments
+- [x] **Fix browser WASM CI** — pinned wasm-bindgen-cli to v0.2.108
+- [x] **Guided tour set pieces** — 4 categories (getting started, architecture, assessment, security)
+- [x] **WITNESS chain footer** — chain verification display in ExoChain log panel
 - [ ] **Knowledge graph visualization** — D3/React-Three-Fiber view of KB segment relationships
 - [ ] **Streaming responses** — SSE from WASM for progressive LLM output
 - [ ] **ruvllm-wasm integration** — local inference mode using ruvector's WASM routing engine
 
 ### WS3: CI/CD Hardening (Priority: HIGH)
 
-- [ ] **Fix browser WASM workflow** — pin wasm-bindgen-cli, add to release artifacts
-- [ ] **PR gates** — add `weft assess run --scope ci --format github-annotations` to pr-gates.yml
-- [ ] **Docs-assets workflow** — trigger on Browser WASM success to update cdn-assets
+- [x] **Fix browser WASM workflow** — pinned wasm-bindgen-cli, builds pass
+- [x] **PR gates** — assessment + cargo check gates added to pr-gates.yml
+- [x] **Docs-assets workflow** — manual dispatch with skip_wasm input, CDN fallback
 - [ ] **crates.io publish** — automate crate publishing on tag (currently manual)
 - [ ] **Dependabot** — address 16 known vulnerabilities (3 high, 10 moderate, 3 low)
 
 ### WS4: Client Deployment Readiness (Priority: HIGH)
 
 - [ ] **SOP 3: Cross-project mesh** — implement real mesh coordination (not just artifact comparison)
-- [ ] **SOP 4: Continuous assessment triggers** — filesystem watcher, git hooks, cron scheduling
+- [x] **SOP 4: Git hooks** — `weft assess hooks` installs post-commit/pre-push hooks
+- [x] **SOP 4: Config loading** — weave.toml trigger configuration with AssessmentConfig
 - [ ] **SOP 5: SOP improvement loop** — agents propose SOP amendments from operational data
-- [ ] **Multi-company namespace isolation** — separate governance domains per client
-- [ ] **Assessment report dashboard** — web view of assessment results (extend /clawft/ or new route)
+- [x] **Multi-project namespace** — `[project]` section in weave.toml with org isolation
+- [x] **Assessment report dashboard** — `/assess` route with stats, findings, peer comparison
+- [x] **Cross-project demo** — clawft ↔ weavelogic.ai linked, assessed, compared bidirectionally
 - [ ] **RabbitMQ/message queue topology discovery** — analyzer for event-driven architectures
 - [ ] **Terraform/IaC analyzer** — parse infrastructure-as-code for deployment topology
 
@@ -87,8 +89,11 @@ The AssessmentService currently does file counting + complexity + TODOs. Make it
 
 ### WS6: weavelogic.ai (Separate Project)
 
-*Tracked in weavelogic.ai project*
+*Tracked in weavelogic.ai project. Cross-project coordination active.*
 
+- [x] WeftOS initialized on weavelogic.ai (`.weftos/` created, assessed: 2,549 files, 801K LOC)
+- [x] Linked as peer from clawft (bidirectional: clawft ↔ weavelogic-ai)
+- [x] Git post-commit hook installed (auto-assessment on commit)
 - [ ] /about, /contact with Calendly
 - [ ] ROI calculator
 - [ ] Sitemaps, PostHog analytics
