@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,12 +16,36 @@ permissions:
   packages: write
 
 jobs:
+  # Wait for Release workflow to finish uploading binaries
+  wait-for-binaries:
+    name: Wait for release binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ASSET="clawft-cli-x86_64-unknown-linux-musl.tar.gz"
+          REPO="${{ github.repository }}"
+          for i in $(seq 1 30); do
+            if gh release view "v${VERSION}" --repo "$REPO" --json assets --jq '.assets[].name' 2>/dev/null | grep -q "$ASSET"; then
+              echo "Release binaries available"
+              exit 0
+            fi
+            echo "Waiting for release binaries (attempt $i/30)..."
+            sleep 30
+          done
+          echo "::error::Release binaries not available after 15 minutes"
+          exit 1
+
   # -------------------------------------------------------------------
-  # Multi-arch Docker build and push to GHCR
+  # Multi-arch Docker build using pre-built musl binaries from release
   # -------------------------------------------------------------------
   docker:
     name: Build & push multi-arch Docker image
     runs-on: ubuntu-latest
+    needs: [wait-for-binaries]
     steps:
       - uses: actions/checkout@v4
 
@@ -28,7 +53,7 @@ jobs:
         id: version
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Set up QEMU (for arm64 emulation)
+      - name: Set up QEMU (for arm64 layer)
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
@@ -60,6 +85,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.VERSION }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -72,6 +99,7 @@ jobs:
           echo "| Version | ${{ steps.version.outputs.VERSION }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Platforms | linux/amd64, linux/arm64 |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Registry | ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Base | Alpine 3.21 (musl, ~15MB) |" >> "$GITHUB_STEP_SUMMARY"
 
   # -------------------------------------------------------------------
   # Integration smoke test on the published image

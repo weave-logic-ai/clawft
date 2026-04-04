@@ -1,64 +1,45 @@
-# Multi-stage Dockerfile for weft (clawft CLI)
+# Minimal Docker image for weft (clawft CLI)
 #
-# Uses cargo-chef for dependency caching and distroless/cc-debian12 as the
-# runtime base (includes glibc + libgcc + ca-certificates, no shell).
+# Uses pre-built musl binaries from GitHub Releases + Alpine base.
+# No compilation — just downloads the correct binary for the target arch.
 #
 # Build:
-#   docker buildx build --platform linux/amd64,linux/arm64 -t weft .
+#   docker buildx build --platform linux/amd64,linux/arm64 \
+#     --build-arg VERSION=0.4.2 -t weft .
 #
-# Target: <50MB compressed image.
+# Target: ~15MB compressed image.
 
-# ---------------------------------------------------------------------------
-# Stage 1: Chef -- prepare dependency recipe
-# ---------------------------------------------------------------------------
-FROM rust:1.93-bookworm AS chef
+FROM alpine:3.21
 
-RUN cargo install cargo-chef --locked
-WORKDIR /app
+ARG VERSION=0.4.2
+ARG TARGETARCH
 
-# ---------------------------------------------------------------------------
-# Stage 2: Planner -- extract the dependency recipe
-# ---------------------------------------------------------------------------
-FROM chef AS planner
+RUN apk add --no-cache ca-certificates tzdata \
+    && adduser -D -h /home/weft weft
 
-COPY . .
-RUN cargo chef prepare --recipe-path recipe.json
+# Map Docker TARGETARCH to Rust target triple
+# TARGETARCH is set automatically by buildx: amd64 or arm64
+COPY <<'EOF' /tmp/install.sh
+#!/bin/sh
+set -eu
+case "$TARGETARCH" in
+  amd64) TRIPLE="x86_64-unknown-linux-musl" ;;
+  arm64) TRIPLE="aarch64-unknown-linux-musl" ;;
+  *) echo "Unsupported arch: $TARGETARCH"; exit 1 ;;
+esac
+ASSET="clawft-cli-${TRIPLE}.tar.gz"
+URL="https://github.com/weave-logic-ai/weftos/releases/download/v${VERSION}/${ASSET}"
+echo "Downloading ${URL}"
+wget -qO- "$URL" | tar xz -C /usr/local/bin/
+chmod +x /usr/local/bin/weft
+EOF
+RUN sh /tmp/install.sh && rm /tmp/install.sh
 
-# ---------------------------------------------------------------------------
-# Stage 3: Builder -- build dependencies (cached), then build the application
-# ---------------------------------------------------------------------------
-FROM chef AS builder
+USER weft
+WORKDIR /home/weft
 
-# Install build dependencies (pkg-config for system lib detection)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config \
-    && rm -rf /var/lib/apt/lists/*
+VOLUME ["/home/weft/.clawft"]
 
-# Build dependencies (cached layer -- only rebuilds when Cargo.toml/lock change)
-COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
-
-# Build the application
-COPY . .
-RUN cargo build --release --bin weft \
-    && strip target/release/weft
-
-# ---------------------------------------------------------------------------
-# Stage 4: Runtime -- minimal image with only the binary
-# ---------------------------------------------------------------------------
-FROM gcr.io/distroless/cc-debian12 AS runtime
-
-COPY --from=builder /app/target/release/weft /usr/local/bin/weft
-
-# distroless runs as nonroot (uid 65534) by default
-USER nonroot
-WORKDIR /home/nonroot
-
-# Default config directory
-VOLUME ["/home/nonroot/.clawft"]
-
-# Health check for gateway mode
-# HEALTHCHECK uses exec form (no shell in distroless)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["/usr/local/bin/weft", "status"]
 
