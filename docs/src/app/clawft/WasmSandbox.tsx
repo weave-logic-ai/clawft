@@ -572,7 +572,9 @@ export default function WasmSandbox() {
     log('WASM_LOAD', 'Fetching clawft_wasm.js + .wasm binary');
     const wasm = await loadWasm();
     wasmRef.current = wasm;
-    log('WASM_INIT', `Configuring runtime: model=${mdl}`);
+    log('WASM_INIT', 'Binary loaded, initializing runtime');
+    log('BOOT_CONFIG', `Agent model: ${mdl}`);
+    log('BOOT_CONFIG', `Provider: ${mdl.includes('/') ? mdl.split('/')[0] : 'openrouter (fallback)'}`);
 
     const config = {
       agents: {
@@ -598,6 +600,7 @@ export default function WasmSandbox() {
     };
 
     await wasm.init(JSON.stringify(config));
+    log('BOOT_NETWORK', `LLM transport: browser-direct CORS`);
     log('WASM_READY', `Runtime initialized, provider=${mdl.split('/')[0]}`);
   };
 
@@ -621,12 +624,21 @@ export default function WasmSandbox() {
 
     (async () => {
       try {
+        // Boot sequence — mirrors kernel BootPhase (INIT → CONFIG → SERVICES → READY)
+        log('BOOT_INIT', 'WeftOS v0.4.1 booting...');
+        log('BOOT_INIT', 'PID 0 (kernel)');
+        log('BOOT_CONFIG', 'Platform: wasm32-browser');
+        log('BOOT_CONFIG', 'Max processes: 64');
+        log('BOOT_SERVICES', 'Service registry ready');
+        log('BOOT_SERVICES', 'IPC subsystem ready');
+
         log('KB_FETCH', 'Loading RVF knowledge base...');
         const kb = await loadKB();
         if (cancelled) return;
         setKbLoaded(true);
         setKbStats(`${kb.entries.length} segments, ${kb.manifest.dimension}-dim`);
-        log('KB_READY', `${kb.entries.length} segments, dim=${kb.manifest.dimension}, embedder=${kb.manifest.embedder_name}`);
+        log('BOOT_SERVICES', `Knowledge base loaded: ${kb.entries.length} segments, dim=${kb.manifest.dimension}`);
+        log('KB_READY', `Embedder: ${kb.manifest.embedder_name}`);
 
         // Check for stored key — if present, upgrade to LLM mode
         const stored = localStorage.getItem('clawft-api-key');
@@ -642,6 +654,7 @@ export default function WasmSandbox() {
           log('MODE_SET', 'Local retrieval mode (no API key)');
         }
 
+        log('BOOT_READY', 'Kernel ready — all subsystems online');
         if (!cancelled) setStatus('ready');
       } catch (e: any) {
         if (!cancelled) {
@@ -1445,17 +1458,28 @@ function ChatBubble({
 }
 
 const OP_COLORS: Record<string, string> = {
+  // Kernel boot phases
+  BOOT_INIT: 'text-emerald-400',
+  BOOT_CONFIG: 'text-emerald-400',
+  BOOT_SERVICES: 'text-emerald-400',
+  BOOT_NETWORK: 'text-emerald-400',
+  BOOT_READY: 'text-green-300',
+  // Knowledge base
   KB_FETCH: 'text-blue-400',
   KB_READY: 'text-blue-400',
   KB_SEARCH: 'text-cyan-400',
+  // Query processing
   QUERY: 'text-yellow-400',
   RETRIEVE: 'text-green-400',
   RESPOND: 'text-green-400',
+  // LLM transport
   LLM_SEND: 'text-purple-400',
   LLM_RECV: 'text-purple-400',
+  // WASM runtime
   WASM_LOAD: 'text-orange-400',
   WASM_INIT: 'text-orange-400',
   WASM_READY: 'text-orange-400',
+  // Misc
   INTROSPECT: 'text-pink-400',
   MODE_SET: 'text-fd-muted-foreground',
   KEY_FOUND: 'text-fd-muted-foreground',

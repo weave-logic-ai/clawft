@@ -130,6 +130,9 @@ The AssessmentService currently does file counting + complexity + TODOs. Make it
 - [ ] wasip2 migration from wasip1 (ADR-044)
 - [ ] ChainAnchor blockchain integration (ADR-041)
 - [ ] wasmtime upgrade to v33+ (closes remaining 10 Dependabot alerts)
+- [ ] **Client session/config persistence** — design client-side session management (IndexedDB, localStorage) so users don't lose assessment data, conversation history, or configuration across visits; consider auth model for saving/resuming analysis sessions
+- [ ] **Browser WASM assessment engine** — refactor Analyzer trait to accept in-memory file content (`analyze_content(&str, &str)`) alongside `std::fs` path, export `#[wasm_bindgen] analyze_repo(files_json)` from browser_entry, fetch public GitHub repos via REST API client-side, run full analyzer pipeline in WASM (complexity, security, dependency, topology, data source), render findings in sandbox UI with real ExoChain boot phases
+- [ ] **Real ExoChain boot log in WASM** — export `boot_info()` from browser_entry returning kernel boot phases as JSON (depends on browser assessment engine or standalone lightweight boot)
 
 ---
 
