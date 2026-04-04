@@ -53,6 +53,7 @@ jobs:
             clawft-llm
             clawft-core
             clawft-services
+            clawft-plugin-treesitter
             clawft-tools
             clawft-kernel
             weftos
@@ -71,15 +72,17 @@ jobs:
           # Publishable crates in dependency-topological order:
           #   Tier 0 (no internal deps): clawft-types, clawft-rpc, exo-resource-tree, clawft-plugin
           #   Tier 1 (depends on types): clawft-platform, clawft-llm
-          #   Tier 2 (depends on tier 0+1): clawft-core, clawft-services
+          #   Tier 0 (no internal deps): clawft-types, clawft-rpc, exo-resource-tree, clawft-plugin
+          #   Tier 1 (depends on types): clawft-platform, clawft-llm
+          #   Tier 2 (depends on tier 0+1): clawft-core, clawft-services, clawft-plugin-treesitter
           #   Tier 3 (depends on tier 0-2): clawft-tools
-          #   Tier 4 (depends on core+types): clawft-kernel
+          #   Tier 4 (depends on core+types+treesitter): clawft-kernel
           #   Tier 5 (depends on kernel+types): weftos
           #
           # Skipped (publish = false):
           #   clawft-channels, clawft-cli, clawft-wasm, clawft-weave,
           #   clawft-security,
-          #   clawft-plugin-{git,cargo,oauth2,treesitter,browser,calendar,containers}
+          #   clawft-plugin-{git,cargo,oauth2,browser,calendar,containers,npm,ci}
 
           CRATES=(
             clawft-types
@@ -90,6 +93,7 @@ jobs:
             clawft-llm
             clawft-core
             clawft-services
+            clawft-plugin-treesitter
             clawft-tools
             clawft-kernel
             weftos
