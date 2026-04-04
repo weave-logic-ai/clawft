@@ -30,7 +30,7 @@ esac
 ASSET="clawft-cli-${TRIPLE}.tar.gz"
 URL="https://github.com/weave-logic-ai/weftos/releases/download/v${VERSION}/${ASSET}"
 echo "Downloading ${URL}"
-wget -qO- "$URL" | tar xz -C /usr/local/bin/
+wget -qO- "$URL" | tar xz --strip-components=1 -C /usr/local/bin/
 chmod +x /usr/local/bin/weft
 EOF
 RUN sh /tmp/install.sh && rm /tmp/install.sh
