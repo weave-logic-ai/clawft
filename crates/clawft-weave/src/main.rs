@@ -76,6 +76,12 @@ enum Commands {
     /// Knowledge graph extraction, query, and export (graphify).
     Graphify(commands::graphify_cmd::GraphifyArgs),
 
+    /// Run standardized kernel performance benchmark.
+    Benchmark {
+        #[command(subcommand)]
+        cmd: commands::bench_cmd::BenchCmd,
+    },
+
     /// Initialize development environment (install skills, verify tools).
     Init(commands::init_cmd::InitArgs),
 
@@ -108,6 +114,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Console(args) => commands::console_cmd::run(args).await?,
         Commands::Ecc(args) => commands::ecc_cmd::run(args).await?,
         Commands::Graphify(args) => commands::graphify_cmd::run(args).await?,
+        Commands::Benchmark { cmd } => commands::bench_cmd::run(cmd).await?,
         Commands::Init(args) => commands::init_cmd::run(args).await?,
         Commands::Version => {
             println!("weaver {} (WeftOS)", env!("CARGO_PKG_VERSION"));
