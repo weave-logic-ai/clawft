@@ -18,24 +18,54 @@ pub const PID_FILE_NAME: &str = "kernel.pid";
 /// Log file name.
 pub const LOG_FILE_NAME: &str = "kernel.log";
 
-/// Resolve the WeftOS runtime directory (`~/.clawft/`).
+/// Resolve the WeftOS runtime directory.
+///
+/// Resolution order:
+/// 1. `WEFTOS_RUNTIME_DIR` environment variable (explicit override)
+/// 2. `.weftos/runtime/` in the nearest ancestor with a `.weftos/` directory
+///    (project-local kernel — allows multiple kernels per machine)
+/// 3. `~/.clawft/` global fallback (single shared kernel)
+///
+/// This enables per-project kernels: each project with a `.weftos/` directory
+/// gets its own socket, PID file, and log file.
 pub fn runtime_dir() -> std::path::PathBuf {
+    // 1. Explicit override
+    if let Ok(dir) = std::env::var("WEFTOS_RUNTIME_DIR") {
+        return std::path::PathBuf::from(dir);
+    }
+
+    // 2. Walk up from CWD looking for .weftos/
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut dir = cwd.as_path();
+        loop {
+            let candidate = dir.join(".weftos");
+            if candidate.is_dir() {
+                return candidate.join("runtime");
+            }
+            match dir.parent() {
+                Some(parent) => dir = parent,
+                None => break,
+            }
+        }
+    }
+
+    // 3. Global fallback
     dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
         .join(".clawft")
 }
 
-/// Resolve the full socket path (`~/.clawft/kernel.sock`).
+/// Resolve the full socket path.
 pub fn socket_path() -> std::path::PathBuf {
     runtime_dir().join(SOCKET_NAME)
 }
 
-/// Resolve the PID file path (`~/.clawft/kernel.pid`).
+/// Resolve the PID file path.
 pub fn pid_path() -> std::path::PathBuf {
     runtime_dir().join(PID_FILE_NAME)
 }
 
-/// Resolve the log file path (`~/.clawft/kernel.log`).
+/// Resolve the log file path.
 pub fn log_path() -> std::path::PathBuf {
     runtime_dir().join(LOG_FILE_NAME)
 }
