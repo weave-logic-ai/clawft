@@ -197,7 +197,7 @@ async fn run_benchmark(format: &str, iterations: u32, quick: bool, endurance: bo
         "kernel.logs",
         "ecc.status",
         "ecc.causal",
-        "ecc.calibration",
+        "ecc.calibrate",
         "cron.list",
         "agent.list",
     ];
@@ -233,7 +233,7 @@ async fn run_benchmark(format: &str, iterations: u32, quick: bool, endurance: bo
     print_result_line(&r);
     compute_results.push(r);
 
-    let r = bench_chain_append(&mut client, iterations).await;
+    let r = bench_chain_ops(&mut client, iterations).await;
     print_result_line(&r);
     compute_results.push(r);
 
@@ -253,7 +253,7 @@ async fn run_benchmark(format: &str, iterations: u32, quick: bool, endurance: bo
     print_result_line(&r);
     compute_results.push(r);
 
-    let r = bench_rpc(&mut client, "ecc.calibration", "compute", iterations).await;
+    let r = bench_rpc(&mut client, "ecc.calibrate", "compute", iterations).await;
     print_result_line(&r);
     compute_results.push(r);
 
@@ -425,19 +425,15 @@ async fn bench_agent_lifecycle(client: &mut DaemonClient, iterations: u32) -> Be
     make_result("agent.lifecycle", "compute", iterations, &mut latencies, errors)
 }
 
-async fn bench_chain_append(client: &mut DaemonClient, iterations: u32) -> BenchResult {
+async fn bench_chain_ops(client: &mut DaemonClient, iterations: u32) -> BenchResult {
     let mut latencies = Vec::new();
     let mut errors = 0u32;
 
-    for i in 0..iterations {
+    for _ in 0..iterations {
         let start = Instant::now();
-        let resp = client.call(Request::with_params(
-            "chain.append",
-            serde_json::json!({
-                "event_type": "benchmark.test",
-                "payload": format!("bench-event-{i}"),
-            }),
-        )).await;
+        // chain.status is the heaviest chain operation exposed via RPC
+        // (reads chain height, last hash, verification status)
+        let resp = client.simple_call("chain.status").await;
         let elapsed = start.elapsed().as_micros() as f64;
 
         match resp {
@@ -446,7 +442,7 @@ async fn bench_chain_append(client: &mut DaemonClient, iterations: u32) -> Bench
         }
     }
 
-    make_result("chain.append", "compute", iterations, &mut latencies, errors)
+    make_result("chain.status", "compute", iterations, &mut latencies, errors)
 }
 
 async fn bench_cron_lifecycle(client: &mut DaemonClient, iterations: u32) -> BenchResult {
@@ -460,8 +456,8 @@ async fn bench_cron_lifecycle(client: &mut DaemonClient, iterations: u32) -> Ben
             "cron.add",
             serde_json::json!({
                 "name": format!("bench-cron-{i}"),
-                "schedule": "0 0 * * *",
-                "prompt": "benchmark test",
+                "interval_secs": 3600,
+                "command": "benchmark test",
             }),
         )).await;
 
@@ -499,7 +495,7 @@ async fn bench_ipc_publish(client: &mut DaemonClient, iterations: u32) -> BenchR
             "ipc.publish",
             serde_json::json!({
                 "topic": "benchmark.test",
-                "payload": format!("msg-{i}"),
+                "message": format!("msg-{i}"),
             }),
         )).await;
         let elapsed = start.elapsed().as_micros() as f64;
@@ -627,7 +623,7 @@ async fn run_stress_tests(client: &mut DaemonClient, iterations: u32) -> StressR
                 "ipc.publish",
                 serde_json::json!({
                     "topic": "benchmark.payload",
-                    "payload": payload,
+                    "message": payload,
                 }),
             )).await;
             let elapsed = start.elapsed().as_micros() as f64;
