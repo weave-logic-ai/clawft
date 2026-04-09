@@ -85,6 +85,12 @@ enum Commands {
     /// Initialize development environment (install skills, verify tools).
     Init(commands::init_cmd::InitArgs),
 
+    /// Update both weft and weaver binaries to latest release.
+    Update {
+        #[command(subcommand)]
+        cmd: Option<commands::update_cmd::UpdateCmd>,
+    },
+
     /// Show version and build info.
     Version,
 }
@@ -115,6 +121,10 @@ async fn main() -> anyhow::Result<()> {
         Commands::Ecc(args) => commands::ecc_cmd::run(args).await?,
         Commands::Graphify(args) => commands::graphify_cmd::run(args).await?,
         Commands::Benchmark { cmd } => commands::bench_cmd::run(cmd).await?,
+        Commands::Update { cmd } => match cmd {
+            Some(c) => commands::update_cmd::run(c).await?,
+            None => commands::update_cmd::run_default().await?,
+        },
         Commands::Init(args) => commands::init_cmd::run(args).await?,
         Commands::Version => {
             println!("weaver {} (WeftOS)", env!("CARGO_PKG_VERSION"));

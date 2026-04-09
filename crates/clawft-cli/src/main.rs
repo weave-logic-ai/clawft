@@ -116,6 +116,9 @@ enum Commands {
     /// Show help for a topic (skills, agents, tools, commands, config).
     Help(commands::help_cmd::HelpArgs),
 
+    /// Update weft and weaver binaries to latest release.
+    Update,
+
     /// Generate shell completions.
     Completions {
         /// Shell to generate for (bash, zsh, fish, powershell).
@@ -469,6 +472,22 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(feature = "voice")]
         Commands::Voice(args) => commands::voice::handle_voice(args).await?,
         Commands::Help(args) => commands::help_cmd::run(args)?,
+        Commands::Update => {
+            let version = env!("CARGO_PKG_VERSION");
+            println!("weft v{version}");
+            println!();
+            // Check if weaver is available and delegate
+            let weaver = std::process::Command::new("weaver")
+                .args(["update", "install"])
+                .status();
+            match weaver {
+                Ok(s) if s.success() => {}
+                _ => {
+                    println!("weaver not found — install manually:");
+                    println!("  curl -fsSL https://github.com/weave-logic-ai/weftos/releases/latest/download/clawft-cli-installer.sh | sh");
+                }
+            }
+        }
         Commands::Completions { shell } => match completions::Shell::from_str(&shell) {
             Some(s) => {
                 let mut cmd = Cli::command();

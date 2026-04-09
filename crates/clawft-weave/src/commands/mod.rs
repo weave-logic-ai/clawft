@@ -3,6 +3,7 @@
 pub mod agent_cmd;
 pub mod app_cmd;
 pub mod bench_cmd;
+pub mod update_cmd;
 pub mod chain_cmd;
 pub mod cluster_cmd;
 #[cfg(unix)]

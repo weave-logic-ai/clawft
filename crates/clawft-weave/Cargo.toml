@@ -42,6 +42,7 @@ comfy-table = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 dirs = { workspace = true }
+tempfile = { workspace = true }
 exo-resource-tree = { workspace = true, optional = true }
 weftos-rvf-wire = { workspace = true, optional = true }
 rvf-types = { workspace = true, optional = true }
