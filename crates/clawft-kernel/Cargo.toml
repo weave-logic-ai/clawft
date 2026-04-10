@@ -52,6 +52,7 @@ mesh = [
     "dep:futures-util",
 ]
 ecc = ["clawft-core/vector-memory", "dep:blake3"]
+diskann = ["ecc", "dep:ruvector-diskann"]
 onnx-embeddings = ["dep:ort", "dep:ndarray"]
 wasm-sandbox = ["dep:wasmtime", "dep:wasmtime-wasi"]
 os-patterns = ["exochain"]
@@ -71,6 +72,7 @@ tokio-util = { workspace = true, optional = true }
 ruvector-cluster = { workspace = true, optional = true }
 ruvector-raft = { workspace = true, optional = true }
 ruvector-replication = { workspace = true, optional = true }
+ruvector-diskann = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 exo-resource-tree = { workspace = true, optional = true }

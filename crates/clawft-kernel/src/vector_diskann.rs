@@ -1,10 +1,8 @@
 //! DiskANN-backed [`VectorBackend`] implementation.
 //!
-//! Feature-gated behind `diskann`. When the real `ruvector-diskann`
-//! crate is not available, this module provides a brute-force stub
-//! that stores vectors in memory and performs linear scans. The stub
-//! is useful for testing hybrid logic without the full DiskANN
-//! dependency.
+//! When compiled with the `diskann` feature, this uses the real
+//! `ruvector-diskann` crate (Vamana graph + PQ + mmap persistence).
+//! Without it, a brute-force stub performs linear scans in memory.
 //!
 //! Compiled only when the `ecc` feature is enabled.
 
@@ -12,6 +10,9 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "diskann")]
+use ruvector_diskann::{DiskAnnIndex, DiskAnnConfig as RealDiskAnnConfig};
 
 use crate::vector_backend::{SearchResult, VectorBackend, VectorError, VectorResult};
 
@@ -88,6 +89,7 @@ impl Default for DiskAnnConfig {
 // ── Stored entry ─────────────────────────────────────────────────────────
 
 /// A single vector entry stored in the brute-force stub.
+#[cfg(not(feature = "diskann"))]
 #[derive(Clone)]
 struct StoredEntry {
     key: String,
@@ -99,20 +101,49 @@ struct StoredEntry {
 
 /// DiskANN vector backend.
 ///
-/// When compiled without the real `ruvector-diskann` crate, this falls
-/// back to a brute-force linear scan over vectors stored in memory.
-/// The API matches what a real DiskANN integration would provide.
+/// With `diskann` feature: uses `ruvector-diskann` (Vamana + PQ + mmap).
+/// Without: brute-force linear scan stub.
 pub struct DiskAnnBackend {
     config: DiskAnnConfig,
+    /// Stub storage (used when `diskann` feature is off).
+    #[cfg(not(feature = "diskann"))]
     entries: Mutex<HashMap<u64, StoredEntry>>,
+    /// Real DiskANN index (used when `diskann` feature is on).
+    #[cfg(feature = "diskann")]
+    index: Mutex<DiskAnnIndex>,
+    /// ID map: u64 → string key (needed for real index too).
+    #[cfg(feature = "diskann")]
+    id_map: Mutex<HashMap<u64, String>>,
 }
 
 impl DiskAnnBackend {
     /// Create a new DiskANN backend with the given configuration.
     pub fn new(config: DiskAnnConfig) -> Self {
-        Self {
-            config,
-            entries: Mutex::new(HashMap::new()),
+        #[cfg(feature = "diskann")]
+        {
+            let real_config = RealDiskAnnConfig {
+                dim: config.dimensions,
+                max_degree: config.num_neighbors,
+                build_beam: config.search_list_size,
+                search_beam: config.search_list_size,
+                alpha: 1.2,
+                pq_subspaces: if config.use_pq { config.pq_num_chunks } else { 0 },
+                pq_iterations: 10,
+                storage_path: Some(std::path::PathBuf::from(&config.data_path)),
+            };
+            let index = DiskAnnIndex::new(real_config);
+            Self {
+                config,
+                index: Mutex::new(index),
+                id_map: Mutex::new(HashMap::new()),
+            }
+        }
+        #[cfg(not(feature = "diskann"))]
+        {
+            Self {
+                config,
+                entries: Mutex::new(HashMap::new()),
+            }
         }
     }
 
@@ -127,6 +158,7 @@ impl DiskAnnBackend {
     }
 }
 
+#[cfg(not(feature = "diskann"))]
 /// Compute cosine distance between two vectors.
 ///
 /// Returns `1.0 - cosine_similarity`. Handles zero-magnitude vectors
@@ -147,6 +179,77 @@ fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
     1.0 - (dot / denom)
 }
 
+// ── Real DiskANN backend (feature = "diskann") ──────────────────────────
+
+#[cfg(feature = "diskann")]
+impl VectorBackend for DiskAnnBackend {
+    fn insert(
+        &self,
+        id: u64,
+        key: &str,
+        vector: &[f32],
+        _metadata: serde_json::Value,
+    ) -> VectorResult<()> {
+        let mut index = self.index.lock().expect("DiskAnn lock poisoned");
+        let mut id_map = self.id_map.lock().expect("DiskAnn id_map lock poisoned");
+        index.insert(key.to_owned(), vector.to_vec())
+            .map_err(|e| VectorError::Other(format!("diskann insert: {e}")))?;
+        id_map.insert(id, key.to_owned());
+        Ok(())
+    }
+
+    fn search(&self, query: &[f32], k: usize) -> Vec<SearchResult> {
+        let index = self.index.lock().expect("DiskAnn lock poisoned");
+        match index.search(query, k) {
+            Ok(results) => results
+                .into_iter()
+                .map(|r| SearchResult::new(0, r.id, r.distance, serde_json::Value::Null))
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        let index = self.index.lock().expect("DiskAnn lock poisoned");
+        index.count()
+    }
+
+    fn contains(&self, id: u64) -> bool {
+        let id_map = self.id_map.lock().expect("DiskAnn id_map lock poisoned");
+        id_map.contains_key(&id)
+    }
+
+    fn remove(&self, id: u64) -> bool {
+        let id_map = self.id_map.lock().expect("DiskAnn id_map lock poisoned");
+        if let Some(key) = id_map.get(&id) {
+            let mut index = self.index.lock().expect("DiskAnn lock poisoned");
+            index.delete(key).unwrap_or(false)
+        } else {
+            false
+        }
+    }
+
+    fn flush(&self) -> VectorResult<()> {
+        let mut index = self.index.lock().expect("DiskAnn lock poisoned");
+        // Build the Vamana graph then save to disk
+        index.build()
+            .map_err(|e| VectorError::Other(format!("diskann build: {e}")))?;
+        let path = std::path::Path::new(&self.config.data_path);
+        std::fs::create_dir_all(path)
+            .map_err(|e| VectorError::Other(format!("diskann mkdir: {e}")))?;
+        index.save(path)
+            .map_err(|e| VectorError::Other(format!("diskann save: {e}")))?;
+        Ok(())
+    }
+
+    fn backend_name(&self) -> &str {
+        "diskann (ruvector)"
+    }
+}
+
+// ── Stub backend (no diskann feature) ───────────────────────────────────
+
+#[cfg(not(feature = "diskann"))]
 impl VectorBackend for DiskAnnBackend {
     fn insert(
         &self,
@@ -182,7 +285,6 @@ impl VectorBackend for DiskAnnBackend {
             })
             .collect();
 
-        // Sort by distance ascending (closest first).
         scored.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(k);
 
@@ -210,14 +312,11 @@ impl VectorBackend for DiskAnnBackend {
     }
 
     fn flush(&self) -> VectorResult<()> {
-        // Stub: no durable storage yet. A real DiskANN backend would
-        // flush the in-memory graph to the SSD-backed data files at
-        // `self.config.data_path`.
         Ok(())
     }
 
     fn backend_name(&self) -> &str {
-        "diskann"
+        "diskann (stub)"
     }
 }
 
