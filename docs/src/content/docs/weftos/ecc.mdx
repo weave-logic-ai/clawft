@@ -211,6 +211,94 @@ pub struct NodeEccCapability {
 
 This enables heterogeneous swarms where a glasses node (50ms tick) and a server node (10ms tick) participate in the same nervous system.
 
+## Vector Search Backends
+
+The ECC substrate supports pluggable vector search via the `VectorBackend` trait. Three backends ship with WeftOS:
+
+### HNSW (default)
+
+In-memory approximate nearest neighbor search via `instant-distance`. Best for datasets under 1 million vectors where low-latency real-time search is required.
+
+```toml
+[kernel.vector]
+backend = "hnsw"
+dimensions = 384
+ef_search = 100
+ef_construction = 200
+```
+
+### DiskANN (SSD-backed)
+
+SSD-backed approximate nearest neighbor search via `ruvector-diskann` v2.1. Uses a Vamana graph with optional product quantization and mmap persistence. Best for large corpora (1M+ vectors) where memory is constrained.
+
+```toml
+[kernel.vector]
+backend = "diskann"
+dimensions = 384
+
+[kernel.vector.diskann]
+max_points = 10_000_000
+num_neighbors = 64
+search_list_size = 128
+data_path = ".weftos/diskann"
+use_pq = true
+pq_num_chunks = 32
+```
+
+Requires the `diskann` feature flag: `scripts/build.sh native --features diskann`
+
+Without the feature flag, a brute-force stub provides the same API with linear scans (useful for development and testing).
+
+### Hybrid (HNSW + DiskANN)
+
+Hot HNSW cache in front of a cold DiskANN store. Frequently accessed vectors are promoted to the in-memory HNSW layer; cold vectors are evicted back to DiskANN via LRU. Best when you need both real-time latency for hot data and large-corpus capacity.
+
+```toml
+[kernel.vector]
+backend = "hybrid"
+dimensions = 384
+
+[kernel.vector.hnsw]
+ef_search = 100
+ef_construction = 200
+
+[kernel.vector.diskann]
+max_points = 10_000_000
+data_path = ".weftos/diskann"
+
+[kernel.vector.hybrid]
+hot_capacity = 100_000
+promotion_threshold = 3
+eviction_batch_size = 1000
+```
+
+### VectorBackend Trait
+
+All backends implement the `VectorBackend` trait:
+
+```rust
+pub trait VectorBackend: Send + Sync {
+    fn insert(&self, id: &str, vector: &[f32]) -> VectorResult<()>;
+    fn search(&self, query: &[f32], k: usize) -> VectorResult<Vec<SearchResult>>;
+    fn remove(&self, id: &str) -> bool;
+    fn flush(&self) -> VectorResult<()>;
+    fn len(&self) -> usize;
+    fn backend_name(&self) -> &str;
+}
+```
+
+### Hybrid Promotion/Eviction
+
+In hybrid mode, the backend tracks an access counter per vector. When a vector stored in the cold DiskANN layer is accessed more than `promotion_threshold` times, it is copied into the hot HNSW cache. When the hot cache exceeds `hot_capacity`, the least-recently-used vectors are evicted in batches of `eviction_batch_size` back to the cold layer. Search queries both layers and merge-deduplicate results by score.
+
+### When to Use Each Backend
+
+| Backend | Best For | Dataset Size | Latency |
+|---------|----------|-------------|---------|
+| HNSW | Real-time search, small-medium corpora | < 1M vectors | Sub-millisecond |
+| DiskANN | Large corpora, memory-constrained hosts | 1M+ vectors | Low milliseconds |
+| Hybrid | Mixed workloads with hot/cold access | Any size | Sub-ms (hot), low-ms (cold) |
+
 ## Resource Tree Namespaces
 
 6 namespaces under `/kernel/services/ecc/`:

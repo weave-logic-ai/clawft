@@ -56,7 +56,7 @@ mod tests {
     #[test]
     fn kernel_config_ext_default() {
         let ext = KernelConfigExt::default();
-        assert!(!ext.base.enabled);
+        assert!(ext.base.enabled);
         assert_eq!(ext.base.max_processes, 64);
     }
 
@@ -64,6 +64,6 @@ mod tests {
     fn kernel_config_reexport() {
         // Verify the re-export works
         let cfg = KernelConfig::default();
-        assert!(!cfg.enabled);
+        assert!(cfg.enabled);
     }
 }

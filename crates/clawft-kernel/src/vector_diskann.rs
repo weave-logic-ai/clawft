@@ -410,6 +410,10 @@ mod tests {
     #[test]
     fn backend_name() {
         let b = make_backend();
+        // Without the `diskann` feature, this is the brute-force stub.
+        #[cfg(not(feature = "diskann"))]
+        assert_eq!(b.backend_name(), "diskann (stub)");
+        #[cfg(feature = "diskann")]
         assert_eq!(b.backend_name(), "diskann");
     }
 

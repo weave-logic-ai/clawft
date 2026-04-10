@@ -484,7 +484,7 @@ mod tests {
     #[test]
     fn default_kernel_config() {
         let cfg = KernelConfig::default();
-        assert!(!cfg.enabled);
+        assert!(cfg.enabled);
         assert_eq!(cfg.max_processes, 64);
         assert_eq!(cfg.health_check_interval_secs, 30);
     }
@@ -492,7 +492,7 @@ mod tests {
     #[test]
     fn deserialize_empty() {
         let cfg: KernelConfig = serde_json::from_str("{}").unwrap();
-        assert!(!cfg.enabled);
+        assert!(cfg.enabled);
         assert_eq!(cfg.max_processes, 64);
     }
 

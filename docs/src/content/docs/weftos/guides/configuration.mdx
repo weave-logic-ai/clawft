@@ -51,7 +51,7 @@ Controls the WeftOS kernel subsystem. These fields map to `KernelConfig` in
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | bool | `false` | Activate the kernel on startup. When false, kernel subsystems only run when invoked via `weave kernel` commands |
+| `enabled` | bool | `true` | Activate the kernel on startup. When false, kernel subsystems only run when invoked via `weave kernel` commands |
 | `max_processes` | u32 | `64` | Maximum concurrent entries in the process table. Raise for workloads that spawn many parallel agents |
 | `health_check_interval_secs` | u64 | `30` | Seconds between periodic health checks. Lower values detect failures faster but add overhead |
 
@@ -117,6 +117,89 @@ shard_count = 64
 heartbeat_interval_secs = 5
 seed_nodes = ["192.168.1.100:8080", "192.168.1.101:8080"]
 node_name = "node-alpha"
+```
+
+### [kernel.vector]
+
+Vector search backend configuration. Requires the `ecc` feature gate. The
+`diskann` and `hybrid` backends additionally require the `diskann` feature.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `backend` | string | `"hnsw"` | Vector backend: `"hnsw"`, `"diskann"`, or `"hybrid"` |
+| `dimensions` | usize | `384` | Vector dimensionality (must match your embedding provider) |
+
+```toml
+[kernel.vector]
+backend = "hnsw"
+dimensions = 384
+```
+
+#### [kernel.vector.hnsw]
+
+HNSW-specific tuning (used by `hnsw` and `hybrid` backends).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `ef_search` | usize | `100` | Size of the dynamic candidate list during search. Higher values improve recall at the cost of latency |
+| `ef_construction` | usize | `200` | Size of the dynamic candidate list during index construction. Higher values produce a better graph |
+
+```toml
+[kernel.vector.hnsw]
+ef_search = 100
+ef_construction = 200
+```
+
+#### [kernel.vector.diskann]
+
+DiskANN-specific tuning (used by `diskann` and `hybrid` backends).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_points` | usize | `1_000_000` | Maximum number of vectors the index can hold |
+| `num_neighbors` | usize | `64` | Number of neighbors per node in the Vamana graph |
+| `search_list_size` | usize | `128` | Size of the search candidate list |
+| `data_path` | string | `".weftos/diskann"` | Directory for SSD-backed data files |
+| `use_pq` | bool | `false` | Enable product quantization for compression |
+| `pq_num_chunks` | usize | `32` | Number of PQ sub-quantizer chunks |
+
+```toml
+[kernel.vector.diskann]
+max_points = 10_000_000
+num_neighbors = 64
+search_list_size = 128
+data_path = ".weftos/diskann"
+use_pq = true
+pq_num_chunks = 32
+```
+
+#### [kernel.vector.hybrid]
+
+Hybrid backend tuning (HNSW hot cache + DiskANN cold store).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `hot_capacity` | usize | `100_000` | Maximum vectors in the hot HNSW cache |
+| `promotion_threshold` | u32 | `3` | Access count before a cold vector is promoted to the hot cache |
+| `eviction_batch_size` | usize | `1000` | Number of vectors evicted per batch when the hot cache is full |
+
+```toml
+[kernel.vector]
+backend = "hybrid"
+dimensions = 384
+
+[kernel.vector.hnsw]
+ef_search = 100
+ef_construction = 200
+
+[kernel.vector.diskann]
+max_points = 10_000_000
+data_path = ".weftos/diskann"
+
+[kernel.vector.hybrid]
+hot_capacity = 100_000
+promotion_threshold = 3
+eviction_batch_size = 1000
 ```
 
 ---

@@ -5,6 +5,26 @@ description: Complete version history for WeftOS from initial development throug
 
 # Release Notes
 
+## v0.5.5 — Hybrid Vector Search + DiskANN
+
+*2026-04-04*
+
+### Vector Search Backends
+
+- **VectorBackend trait**: Pluggable vector search with `insert`/`search`/`remove`/`flush` interface
+- **HNSW backend** (default): In-memory approximate nearest neighbor via `instant-distance`
+- **DiskANN backend**: SSD-backed vector search via `ruvector-diskann` v2.1, Vamana graph with product quantization and mmap persistence
+- **Hybrid backend**: Hot HNSW cache + cold DiskANN store with access-counted promotion, LRU eviction, and merged search results
+- **Configurable via `kernel.vector`** in `weave.toml`: backend selection, dimensions, per-backend tuning
+
+### Documentation
+
+- ECC page updated with vector search backend details, configuration examples, and selection guide
+- Configuration reference updated with `[kernel.vector]` section
+- Release notes updated
+
+---
+
 ## v0.5.1 — Knowledge Graph Builder
 
 *2026-04-07*
