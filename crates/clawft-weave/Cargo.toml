@@ -21,7 +21,7 @@ dist = true
 [features]
 default = ["exochain", "cluster", "ecc"]
 cluster = ["clawft-kernel/cluster"]
-ecc = ["clawft-kernel/ecc"]
+ecc = ["clawft-kernel/ecc", "dep:blake3"]
 exochain = ["clawft-kernel/exochain", "dep:exo-resource-tree"]
 rvf-rpc = ["dep:weftos-rvf-wire", "dep:rvf-types"]
 
@@ -43,6 +43,7 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 dirs = { workspace = true }
 tempfile = { workspace = true }
+blake3 = { workspace = true, optional = true }
 exo-resource-tree = { workspace = true, optional = true }
 weftos-rvf-wire = { workspace = true, optional = true }
 rvf-types = { workspace = true, optional = true }

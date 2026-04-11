@@ -697,6 +697,64 @@ impl ChainManager {
         Ok(verified.len())
     }
 
+    /// Generate a custody attestation document.
+    ///
+    /// Assembles the current chain state, vector count and content hash,
+    /// and signs the result with the kernel's Ed25519 key.
+    ///
+    /// Returns `None` if no signing key is configured.
+    pub fn generate_attestation(
+        &self,
+        vector_count: u64,
+        epoch: u64,
+        content_hash: &str,
+    ) -> Option<CustodyAttestation> {
+        use ed25519_dalek::Signer;
+
+        let signing_key = self.signing_key.as_ref()?;
+        let device_id: String = signing_key
+            .verifying_key()
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+
+        let chain = self.inner.lock().unwrap();
+        let chain_head: String = chain.last_hash.iter().map(|b| format!("{b:02x}")).collect();
+        let chain_depth = chain.events.len() as u64;
+        drop(chain);
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // Canonical payload for signing: deterministic field order
+        let canonical = format!(
+            "custody-attestation:v1\n\
+             device_id:{device_id}\n\
+             epoch:{epoch}\n\
+             chain_head:{chain_head}\n\
+             chain_depth:{chain_depth}\n\
+             vector_count:{vector_count}\n\
+             content_hash:{content_hash}\n\
+             timestamp:{timestamp}"
+        );
+
+        let signature = signing_key.sign(canonical.as_bytes());
+
+        Some(CustodyAttestation {
+            device_id,
+            epoch,
+            chain_head,
+            chain_depth,
+            vector_count,
+            content_hash: content_hash.to_owned(),
+            timestamp,
+            signature: signature.to_bytes().to_vec(),
+        })
+    }
+
     /// Verify the integrity of the entire chain.
     ///
     /// Walks all events and verifies:
@@ -1673,6 +1731,30 @@ pub struct ChainStatus {
     pub event_count: usize,
     pub checkpoint_count: usize,
     pub events_since_checkpoint: u64,
+}
+
+/// A single signed proof of system state.
+///
+/// Assembles chain state, vector store metrics, and a content hash
+/// into a document signed by the kernel's Ed25519 key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustodyAttestation {
+    /// Ed25519 public key hex (device identity).
+    pub device_id: String,
+    /// Current vector store epoch.
+    pub epoch: u64,
+    /// Hash of the latest chain event (hex).
+    pub chain_head: String,
+    /// Number of chain events.
+    pub chain_depth: u64,
+    /// Number of vectors in the store.
+    pub vector_count: u64,
+    /// BLAKE3 hash of all vector IDs (hex, or "none" if no backend).
+    pub content_hash: String,
+    /// Unix timestamp (seconds).
+    pub timestamp: u64,
+    /// Ed25519 signature over the canonical attestation payload.
+    pub signature: Vec<u8>,
 }
 
 impl std::fmt::Debug for ChainManager {
@@ -3295,5 +3377,76 @@ mod tests {
         let chain_event = cm.append_loggable(&event);
         assert_eq!(chain_event.prev_hash, hash_before);
         assert_ne!(chain_event.hash, [0u8; 32]);
+    }
+
+    #[test]
+    fn generate_attestation_without_key_returns_none() {
+        let cm = ChainManager::new(0, 1000);
+        // No signing key set
+        assert!(cm.generate_attestation(10, 5, "abc123").is_none());
+    }
+
+    #[test]
+    fn generate_attestation_with_key() {
+        use rand::rngs::OsRng;
+        let key = SigningKey::generate(&mut OsRng);
+        let cm = ChainManager::new(0, 1000).with_signing_key(key.clone());
+
+        // Append some events
+        cm.append("test", "event.one", None);
+        cm.append("test", "event.two", None);
+
+        let att = cm.generate_attestation(42, 7, "deadbeef").unwrap();
+
+        // Verify fields
+        assert!(!att.device_id.is_empty());
+        assert_eq!(att.epoch, 7);
+        assert_eq!(att.vector_count, 42);
+        assert_eq!(att.content_hash, "deadbeef");
+        assert_eq!(att.chain_depth, 3); // genesis + 2
+        assert!(!att.chain_head.is_empty());
+        assert_eq!(att.chain_head.len(), 64); // 32 bytes hex
+        assert!(att.timestamp > 0);
+        assert_eq!(att.signature.len(), 64); // Ed25519 signature
+
+        // Verify the signature
+        use ed25519_dalek::Verifier;
+        let canonical = format!(
+            "custody-attestation:v1\n\
+             device_id:{}\n\
+             epoch:{}\n\
+             chain_head:{}\n\
+             chain_depth:{}\n\
+             vector_count:{}\n\
+             content_hash:{}\n\
+             timestamp:{}",
+            att.device_id, att.epoch, att.chain_head, att.chain_depth,
+            att.vector_count, att.content_hash, att.timestamp,
+        );
+        let sig = ed25519_dalek::Signature::from_bytes(
+            att.signature.as_slice().try_into().unwrap(),
+        );
+        assert!(key.verifying_key().verify(canonical.as_bytes(), &sig).is_ok());
+    }
+
+    #[test]
+    fn custody_attestation_serde_roundtrip() {
+        let att = CustodyAttestation {
+            device_id: "aabbccdd".into(),
+            epoch: 5,
+            chain_head: "ff".repeat(32),
+            chain_depth: 100,
+            vector_count: 1000,
+            content_hash: "00".repeat(32),
+            timestamp: 1234567890,
+            signature: vec![0u8; 64],
+        };
+        let json = serde_json::to_string(&att).unwrap();
+        let restored: CustodyAttestation = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.device_id, "aabbccdd");
+        assert_eq!(restored.epoch, 5);
+        assert_eq!(restored.chain_depth, 100);
+        assert_eq!(restored.vector_count, 1000);
+        assert_eq!(restored.signature.len(), 64);
     }
 }

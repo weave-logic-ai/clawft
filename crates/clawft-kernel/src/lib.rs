@@ -89,6 +89,8 @@ pub mod vector_diskann;
 pub mod vector_hybrid;
 #[cfg(feature = "ecc")]
 pub mod weaver;
+#[cfg(feature = "ecc")]
+pub mod profile_store;
 
 #[cfg(feature = "native")]
 pub mod a2a;
@@ -117,6 +119,7 @@ pub mod health;
 pub mod heartbeat;
 pub mod ipc;
 pub mod process;
+pub mod revocation;
 pub mod service;
 pub mod supervisor;
 pub mod topic;
@@ -215,9 +218,10 @@ pub use capability::{
 #[cfg(feature = "exochain")]
 pub use chain::{
     AnchorReceipt, ChainAnchor, ChainCheckpoint, ChainEvent, ChainLoggable, ChainManager,
-    ChainStatus, ChainVerifyResult, GovernanceDecisionEvent, IpcDeadLetterEvent, MockAnchor,
-    RestartEvent,
+    ChainStatus, ChainVerifyResult, CustodyAttestation, GovernanceDecisionEvent,
+    IpcDeadLetterEvent, MockAnchor, RestartEvent,
 };
+pub use revocation::{RevocationList, RevokedHost};
 #[cfg(feature = "ecc")]
 pub use calibration::{EccCalibration, EccCalibrationConfig};
 #[cfg(feature = "ecc")]
@@ -238,10 +242,14 @@ pub use tree_manager::{TreeManager, TreeStats};
 pub use clawft_types::config::{
     ClusterNetworkConfig, KernelConfig, VectorConfig, VectorBackendKind as VectorBackendKindConfig,
     VectorDiskAnnConfig, VectorHnswConfig, VectorHybridConfig, VectorEvictionPolicy,
+    ProfilesConfig, PairingConfig,
 };
 pub use cluster::{
     ClusterConfig, ClusterError, ClusterMembership, NodeId, NodePlatform, NodeState, PeerNode,
+    PairingGate, PairingWindowResult, PairedHost, PairedHostsFile,
 };
+#[cfg(feature = "ecc")]
+pub use profile_store::{ProfileEntry, ProfileError, ProfileMeta, ProfileStore};
 #[cfg(feature = "cluster")]
 pub use cluster::ClusterService;
 pub use config::KernelConfigExt;

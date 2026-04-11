@@ -65,6 +65,8 @@ pub struct HnswService {
     config: HnswServiceConfig,
     insert_count: AtomicU64,
     search_count: AtomicU64,
+    /// Monotonic epoch counter -- bumped on every mutation.
+    epoch: AtomicU64,
 }
 
 impl HnswService {
@@ -76,6 +78,7 @@ impl HnswService {
             config,
             insert_count: AtomicU64::new(0),
             search_count: AtomicU64::new(0),
+            epoch: AtomicU64::new(0),
         }
     }
 
@@ -84,6 +87,12 @@ impl HnswService {
         let mut store = self.store.lock().expect("HnswStore lock poisoned");
         store.insert(id, embedding, metadata);
         self.insert_count.fetch_add(1, Ordering::Relaxed);
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Return the current monotonic epoch.
+    pub fn current_epoch(&self) -> u64 {
+        self.epoch.load(Ordering::SeqCst)
     }
 
     /// Search for the `top_k` nearest embeddings to `query`.
@@ -157,6 +166,7 @@ impl HnswService {
     pub fn clear(&self) {
         let mut store = self.store.lock().expect("HnswStore lock poisoned");
         *store = HnswStore::with_params(self.config.ef_search, self.config.ef_construction);
+        self.epoch.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Borrow the service configuration.
@@ -189,6 +199,7 @@ impl HnswService {
             config,
             insert_count: AtomicU64::new(0),
             search_count: AtomicU64::new(0),
+            epoch: AtomicU64::new(0),
         })
     }
 }
@@ -199,6 +210,7 @@ impl std::fmt::Debug for HnswService {
             .field("config", &self.config)
             .field("insert_count", &self.insert_count.load(Ordering::Relaxed))
             .field("search_count", &self.search_count.load(Ordering::Relaxed))
+            .field("epoch", &self.epoch.load(Ordering::Relaxed))
             .finish()
     }
 }

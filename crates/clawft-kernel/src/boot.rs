@@ -127,6 +127,7 @@ pub struct Kernel<P: Platform> {
     event_log: Arc<KernelEventLog>,
     boot_time: Instant,
     cluster_membership: Arc<ClusterMembership>,
+    revocation_list: Arc<crate::revocation::RevocationList>,
     #[cfg(feature = "exochain")]
     chain: ChainSubsystem,
     #[cfg(feature = "ecc")]
@@ -283,6 +284,24 @@ impl<P: Platform> Kernel<P> {
                 cluster_membership.local_node_id()
             ),
         ));
+
+        // 6b. Load host revocation list (persistent ban list)
+        let revocation_path = crate::revocation::RevocationList::default_path(std::path::Path::new("."));
+        let revocation_list = Arc::new(crate::revocation::RevocationList::load(revocation_path));
+        {
+            let count = revocation_list.len();
+            if count > 0 {
+                boot_log.push(BootEvent::info(
+                    BootPhase::Network,
+                    format!("Host revocation list loaded ({count} banned hosts)"),
+                ));
+            } else {
+                boot_log.push(BootEvent::info(
+                    BootPhase::Network,
+                    "Host revocation list ready (empty)",
+                ));
+            }
+        }
 
         // 7. Register cluster service (when feature-gated ruvector integration is enabled)
         #[cfg(feature = "cluster")]
@@ -1347,6 +1366,7 @@ impl<P: Platform> Kernel<P> {
             event_log,
             boot_time,
             cluster_membership,
+            revocation_list,
             #[cfg(feature = "exochain")]
             chain: ChainSubsystem {
                 chain_manager,
@@ -1559,6 +1579,11 @@ impl<P: Platform> Kernel<P> {
         &self.cluster_membership
     }
 
+    /// Get the host revocation list.
+    pub fn revocation_list(&self) -> &Arc<crate::revocation::RevocationList> {
+        &self.revocation_list
+    }
+
     /// Get the local chain manager (when exochain feature is enabled).
     #[cfg(feature = "exochain")]
     pub fn chain_manager(&self) -> Option<&Arc<crate::chain::ChainManager>> {
@@ -1687,6 +1712,8 @@ mod tests {
             chain: None,
             resource_tree: None,
             vector: None,
+            profiles: None,
+            pairing: None,
         }
     }
 
@@ -1825,6 +1852,8 @@ mod tests {
                 checkpoint_path: None,
             }),
             vector: None,
+            profiles: None,
+            pairing: None,
         }
     }
 
@@ -2225,6 +2254,8 @@ mod tests {
                 checkpoint_path: None,
             }),
             vector: None,
+            profiles: None,
+            pairing: None,
         }
     }
 

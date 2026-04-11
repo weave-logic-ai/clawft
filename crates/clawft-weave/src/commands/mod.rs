@@ -8,6 +8,7 @@ pub mod chain_cmd;
 pub mod cluster_cmd;
 #[cfg(unix)]
 pub mod console_cmd;
+pub mod custody_cmd;
 pub mod ecc_cmd;
 pub mod graphify_cmd;
 pub mod cron_cmd;

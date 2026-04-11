@@ -458,6 +458,45 @@ pub struct AssessMeshGossipResult {
     pub message: String,
 }
 
+// ── Custody attestation ─────────────────────────────────────────────
+
+/// Result of `custody.attest`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustodyAttestResult {
+    pub device_id: String,
+    pub epoch: u64,
+    pub chain_head: String,
+    pub chain_depth: u64,
+    pub vector_count: u64,
+    pub content_hash: String,
+    pub timestamp: u64,
+    pub signature: String,
+}
+
+// ── Host revocation ─────────────────────────────────────────────────
+
+/// Parameters for `mesh.revoke`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeshRevokeParams {
+    pub host_id: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// Parameters for `mesh.unrevoke`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeshUnrevokeParams {
+    pub host_id: String,
+}
+
+/// A single entry in the revocation list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevokedHostInfo {
+    pub host_id: String,
+    pub revoked_at: u64,
+    pub reason: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

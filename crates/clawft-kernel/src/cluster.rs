@@ -10,13 +10,14 @@
 //! health monitoring, and cross-node communication require the
 //! `cluster` feature flag and a distributed networking layer.
 
-use std::collections::HashMap;
-use std::time::Instant;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Unique node identifier (UUID or DID string).
 pub type NodeId = String;
@@ -504,6 +505,24 @@ impl ClusterMembership {
         Ok(())
     }
 
+    /// Register a peer node, checking the revocation list first.
+    ///
+    /// If the peer's ID appears in the revocation list, the add is
+    /// rejected with [`ClusterError::AuthFailed`].
+    pub fn add_peer_checked(
+        &self,
+        peer: PeerNode,
+        revocation_list: &crate::revocation::RevocationList,
+    ) -> Result<(), ClusterError> {
+        if revocation_list.is_revoked(&peer.id) {
+            return Err(ClusterError::AuthFailed(format!(
+                "host '{}' is revoked",
+                peer.id,
+            )));
+        }
+        self.add_peer(peer)
+    }
+
     /// Get all active peer node IDs.
     pub fn active_peers(&self) -> Vec<NodeId> {
         self.peers
@@ -511,6 +530,227 @@ impl ClusterMembership {
             .filter(|e| e.state == NodeState::Active)
             .map(|e| e.key().clone())
             .collect()
+    }
+}
+
+// ── Time-windowed pairing (Cognitum Seed Gap #2) ────────────────────
+//
+// Default: mesh rejects all new peer connections.
+// `open_pairing_window(duration)` opens a time-limited enrollment window.
+// During the window, new Noise XX handshakes are accepted.
+// After the window closes, new peers are rejected.
+// Paired peers are remembered persistently in `paired_hosts.json`.
+
+/// Result returned when a pairing window is opened.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairingWindowResult {
+    /// How long the window will remain open.
+    pub window_secs: u64,
+    /// Peers that were paired during previous windows.
+    pub already_paired: Vec<String>,
+}
+
+/// Persistent record of paired hosts.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PairedHostsFile {
+    /// Set of peer IDs that have been paired.
+    pub hosts: Vec<PairedHost>,
+}
+
+/// A single paired host record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairedHost {
+    /// Peer identifier.
+    pub peer_id: String,
+    /// When the pairing was established.
+    pub paired_at: DateTime<Utc>,
+}
+
+/// Manages the pairing window state and persistent paired host list.
+pub struct PairingGate {
+    /// When the current window expires (if open).
+    window_until: std::sync::Mutex<Option<Instant>>,
+    /// Peers paired during the current open window.
+    pending_pairs: std::sync::Mutex<Vec<String>>,
+    /// All persistently paired peer IDs.
+    paired_hosts: std::sync::Mutex<HashSet<String>>,
+    /// Path to the paired hosts persistence file.
+    persist_path: PathBuf,
+}
+
+impl PairingGate {
+    /// Create a new pairing gate.
+    ///
+    /// `persist_path` should point to e.g. `.weftos/runtime/paired_hosts.json`.
+    pub fn new(persist_path: PathBuf) -> Self {
+        Self {
+            window_until: std::sync::Mutex::new(None),
+            pending_pairs: std::sync::Mutex::new(Vec::new()),
+            paired_hosts: std::sync::Mutex::new(HashSet::new()),
+            persist_path,
+        }
+    }
+
+    /// Load paired hosts from disk. Creates file if missing.
+    pub fn load(&self) -> Result<usize, std::io::Error> {
+        if !self.persist_path.exists() {
+            if let Some(parent) = self.persist_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            self.save()?;
+            return Ok(0);
+        }
+
+        let data = std::fs::read_to_string(&self.persist_path)?;
+        let file: PairedHostsFile = serde_json::from_str(&data).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+        })?;
+
+        let mut hosts = self.paired_hosts.lock().expect("paired_hosts lock poisoned");
+        for h in &file.hosts {
+            hosts.insert(h.peer_id.clone());
+        }
+
+        let count = hosts.len();
+        info!(count, "loaded paired hosts from disk");
+        Ok(count)
+    }
+
+    /// Persist paired hosts to disk.
+    pub fn save(&self) -> Result<(), std::io::Error> {
+        let hosts = self.paired_hosts.lock().expect("paired_hosts lock poisoned");
+        let file = PairedHostsFile {
+            hosts: hosts
+                .iter()
+                .map(|id| PairedHost {
+                    peer_id: id.clone(),
+                    paired_at: Utc::now(),
+                })
+                .collect(),
+        };
+        let json = serde_json::to_string_pretty(&file).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, e)
+        })?;
+        if let Some(parent) = self.persist_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&self.persist_path, json)
+    }
+
+    /// Open a pairing window for the given duration.
+    pub fn open_pairing_window(&self, duration: Duration) -> PairingWindowResult {
+        let mut until = self.window_until.lock().expect("window lock poisoned");
+        *until = Some(Instant::now() + duration);
+
+        let mut pending = self.pending_pairs.lock().expect("pending lock poisoned");
+        pending.clear();
+
+        let already: Vec<String> = self
+            .paired_hosts
+            .lock()
+            .expect("paired_hosts lock poisoned")
+            .iter()
+            .cloned()
+            .collect();
+
+        info!(window_secs = duration.as_secs(), "pairing window opened");
+
+        PairingWindowResult {
+            window_secs: duration.as_secs(),
+            already_paired: already,
+        }
+    }
+
+    /// Check whether the pairing window is currently open.
+    pub fn is_pairing_open(&self) -> bool {
+        let until = self.window_until.lock().expect("window lock poisoned");
+        match *until {
+            Some(deadline) => Instant::now() < deadline,
+            None => false,
+        }
+    }
+
+    /// Determine whether a peer should be accepted.
+    ///
+    /// Returns `true` if:
+    /// - The peer is already paired, OR
+    /// - The pairing window is currently open (and records the peer).
+    pub fn should_accept_peer(&self, peer_id: &str) -> bool {
+        // Already paired: always accept.
+        {
+            let hosts = self.paired_hosts.lock().expect("paired_hosts lock poisoned");
+            if hosts.contains(peer_id) {
+                return true;
+            }
+        }
+
+        // Check if window is open.
+        if self.is_pairing_open() {
+            // Pair this host.
+            let mut hosts = self.paired_hosts.lock().expect("paired_hosts lock poisoned");
+            hosts.insert(peer_id.to_owned());
+
+            let mut pending = self.pending_pairs.lock().expect("pending lock poisoned");
+            pending.push(peer_id.to_owned());
+
+            info!(peer_id, "new peer paired during open window");
+
+            // Best-effort persist.
+            drop(hosts);
+            drop(pending);
+            if let Err(e) = self.save() {
+                warn!(error = %e, "failed to persist paired hosts");
+            }
+
+            return true;
+        }
+
+        debug!(peer_id, "rejecting peer: pairing window closed and not previously paired");
+        false
+    }
+
+    /// List all persistently paired host IDs.
+    pub fn paired_hosts(&self) -> Vec<String> {
+        self.paired_hosts
+            .lock()
+            .expect("paired_hosts lock poisoned")
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Remove a previously paired host. Returns `true` if it was present.
+    pub fn unpair(&self, peer_id: &str) -> bool {
+        let mut hosts = self.paired_hosts.lock().expect("paired_hosts lock poisoned");
+        let removed = hosts.remove(peer_id);
+        if removed {
+            drop(hosts);
+            if let Err(e) = self.save() {
+                warn!(error = %e, "failed to persist after unpair");
+            }
+            info!(peer_id, "unpaired host");
+        }
+        removed
+    }
+
+    /// Return the path used for persistence.
+    pub fn persist_path(&self) -> &Path {
+        &self.persist_path
+    }
+}
+
+impl std::fmt::Debug for PairingGate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let count = self
+            .paired_hosts
+            .lock()
+            .map(|h| h.len())
+            .unwrap_or(0);
+        f.debug_struct("PairingGate")
+            .field("open", &self.is_pairing_open())
+            .field("paired_hosts", &count)
+            .field("persist_path", &self.persist_path)
+            .finish()
     }
 }
 
@@ -952,6 +1192,165 @@ mod tests {
         // Should succeed (warning logged, but not rejected).
         cluster.add_peer(peer).unwrap();
         assert_eq!(cluster.len(), 1);
+    }
+
+    #[test]
+    fn add_peer_checked_allows_clean_host() {
+        let cluster = make_cluster(ClusterConfig::default());
+        let dir = tempfile::tempdir().unwrap();
+        let list = crate::revocation::RevocationList::new(dir.path().join("r.json"));
+        let peer = make_peer("node-1", "alpha");
+        assert!(cluster.add_peer_checked(peer, &list).is_ok());
+        assert_eq!(cluster.len(), 1);
+    }
+
+    #[test]
+    fn add_peer_checked_rejects_revoked_host() {
+        let cluster = make_cluster(ClusterConfig::default());
+        let dir = tempfile::tempdir().unwrap();
+        let list = crate::revocation::RevocationList::new(dir.path().join("r.json"));
+        list.revoke_host("node-1", "banned");
+        let peer = make_peer("node-1", "alpha");
+        let result = cluster.add_peer_checked(peer, &list);
+        assert!(matches!(result, Err(ClusterError::AuthFailed(_))));
+        assert_eq!(cluster.len(), 0);
+    }
+
+    // ── PairingGate tests ───────────────────────────────────────────
+
+    fn pairing_tmp_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "pairing_test_{name}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn cleanup_pairing(path: &std::path::Path) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+    }
+
+    #[test]
+    fn pairing_gate_default_closed() {
+        let path = pairing_tmp_path("default_closed").join("paired_hosts.json");
+        let gate = PairingGate::new(path.clone());
+        assert!(!gate.is_pairing_open());
+        assert!(!gate.should_accept_peer("unknown-peer"));
+        cleanup_pairing(&path);
+    }
+
+    #[test]
+    fn pairing_gate_open_window_accepts() {
+        let path = pairing_tmp_path("open_window").join("paired_hosts.json");
+        let gate = PairingGate::new(path.clone());
+
+        let result = gate.open_pairing_window(Duration::from_secs(30));
+        assert_eq!(result.window_secs, 30);
+        assert!(result.already_paired.is_empty());
+        assert!(gate.is_pairing_open());
+
+        // Should accept new peers during window.
+        assert!(gate.should_accept_peer("peer-1"));
+        assert!(gate.should_accept_peer("peer-2"));
+
+        // Paired hosts should now include them.
+        let hosts = gate.paired_hosts();
+        assert!(hosts.contains(&"peer-1".to_owned()));
+        assert!(hosts.contains(&"peer-2".to_owned()));
+
+        cleanup_pairing(&path);
+    }
+
+    #[test]
+    fn pairing_gate_already_paired_always_accepted() {
+        let path = pairing_tmp_path("already_paired").join("paired_hosts.json");
+        let gate = PairingGate::new(path.clone());
+
+        // Open window and pair a host.
+        gate.open_pairing_window(Duration::from_secs(30));
+        assert!(gate.should_accept_peer("peer-1"));
+
+        // Close window by setting it to zero duration.
+        gate.open_pairing_window(Duration::from_secs(0));
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(!gate.is_pairing_open());
+
+        // Already paired host should still be accepted.
+        assert!(gate.should_accept_peer("peer-1"));
+
+        // Unknown host should be rejected (window closed).
+        assert!(!gate.should_accept_peer("unknown"));
+
+        cleanup_pairing(&path);
+    }
+
+    #[test]
+    fn pairing_gate_unpair() {
+        let path = pairing_tmp_path("unpair").join("paired_hosts.json");
+        let gate = PairingGate::new(path.clone());
+
+        gate.open_pairing_window(Duration::from_secs(30));
+        gate.should_accept_peer("peer-1");
+
+        assert!(gate.unpair("peer-1"));
+        assert!(!gate.unpair("peer-1")); // already removed
+
+        cleanup_pairing(&path);
+    }
+
+    #[test]
+    fn pairing_gate_persist_and_load() {
+        let dir = pairing_tmp_path("persist_load");
+        let path = dir.join("paired_hosts.json");
+
+        // Create and pair.
+        {
+            let gate = PairingGate::new(path.clone());
+            gate.open_pairing_window(Duration::from_secs(30));
+            gate.should_accept_peer("peer-a");
+            gate.should_accept_peer("peer-b");
+            gate.save().unwrap();
+        }
+
+        // Load into new gate.
+        {
+            let gate = PairingGate::new(path.clone());
+            let count = gate.load().unwrap();
+            assert_eq!(count, 2);
+            assert!(gate.paired_hosts().contains(&"peer-a".to_owned()));
+            assert!(gate.paired_hosts().contains(&"peer-b".to_owned()));
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pairing_gate_load_creates_file_if_missing() {
+        let dir = pairing_tmp_path("load_creates");
+        let path = dir.join("runtime").join("paired_hosts.json");
+
+        let gate = PairingGate::new(path.clone());
+        let count = gate.load().unwrap();
+        assert_eq!(count, 0);
+        assert!(path.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pairing_window_result_serde() {
+        let result = PairingWindowResult {
+            window_secs: 30,
+            already_paired: vec!["peer-1".into()],
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let restored: PairingWindowResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.window_secs, 30);
+        assert_eq!(restored.already_paired, vec!["peer-1"]);
     }
 }
 

@@ -1161,6 +1161,7 @@ name = "clawft-weave"
 version = "0.5.5"
 dependencies = [
  "anyhow",
+ "blake3",
  "chrono",
  "clap",
  "clawft-graphify",

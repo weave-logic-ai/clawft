@@ -150,6 +150,14 @@ pub struct KernelConfig {
     /// Vector search backend configuration (ECC feature).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vector: Option<VectorConfig>,
+
+    /// Per-user profile namespace configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profiles: Option<ProfilesConfig>,
+
+    /// Time-windowed pairing configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing: Option<PairingConfig>,
 }
 
 impl Default for KernelConfig {
@@ -162,6 +170,102 @@ impl Default for KernelConfig {
             chain: None,
             resource_tree: None,
             vector: None,
+            profiles: None,
+            pairing: None,
+        }
+    }
+}
+
+// ── Profile namespace configuration ─────────────────────────────────────
+
+/// Per-user profile namespace configuration.
+///
+/// When enabled, each profile gets its own isolated vector storage
+/// directory under `storage_path`.
+///
+/// # Example TOML
+///
+/// ```toml
+/// [kernel.profiles]
+/// enabled = true
+/// storage_path = ".weftos/profiles"
+/// default_profile = "default"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfilesConfig {
+    /// Whether profile namespaces are enabled.
+    #[serde(default = "default_profiles_enabled")]
+    pub enabled: bool,
+
+    /// Base directory for profile data.
+    #[serde(default = "default_profiles_storage_path")]
+    pub storage_path: String,
+
+    /// Default profile to activate on boot.
+    #[serde(default = "default_profile_name")]
+    pub default_profile: String,
+}
+
+fn default_profiles_enabled() -> bool {
+    true
+}
+
+fn default_profiles_storage_path() -> String {
+    ".weftos/profiles".to_owned()
+}
+
+fn default_profile_name() -> String {
+    "default".to_owned()
+}
+
+impl Default for ProfilesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_profiles_enabled(),
+            storage_path: default_profiles_storage_path(),
+            default_profile: default_profile_name(),
+        }
+    }
+}
+
+// ── Time-windowed pairing configuration ─────────────────────────────────
+
+/// Configuration for time-windowed mesh pairing.
+///
+/// Controls where paired host data is persisted and the default
+/// enrollment window duration.
+///
+/// # Example TOML
+///
+/// ```toml
+/// [kernel.pairing]
+/// persist_path = ".weftos/runtime/paired_hosts.json"
+/// default_window_secs = 30
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairingConfig {
+    /// Path to the paired hosts persistence file.
+    #[serde(default = "default_pairing_persist_path")]
+    pub persist_path: String,
+
+    /// Default enrollment window duration in seconds.
+    #[serde(default = "default_pairing_window_secs")]
+    pub default_window_secs: u64,
+}
+
+fn default_pairing_persist_path() -> String {
+    ".weftos/runtime/paired_hosts.json".to_owned()
+}
+
+fn default_pairing_window_secs() -> u64 {
+    30
+}
+
+impl Default for PairingConfig {
+    fn default() -> Self {
+        Self {
+            persist_path: default_pairing_persist_path(),
+            default_window_secs: default_pairing_window_secs(),
         }
     }
 }
@@ -514,11 +618,55 @@ mod tests {
             chain: None,
             resource_tree: None,
             vector: None,
+            profiles: None,
+            pairing: None,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let restored: KernelConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.enabled, cfg.enabled);
         assert_eq!(restored.max_processes, cfg.max_processes);
+    }
+
+    #[test]
+    fn profiles_config_defaults() {
+        let cfg = ProfilesConfig::default();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.storage_path, ".weftos/profiles");
+        assert_eq!(cfg.default_profile, "default");
+    }
+
+    #[test]
+    fn profiles_config_deserialize() {
+        let json = r#"{"enabled": false, "storage_path": "/tmp/profiles", "default_profile": "admin"}"#;
+        let cfg: ProfilesConfig = serde_json::from_str(json).unwrap();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.storage_path, "/tmp/profiles");
+        assert_eq!(cfg.default_profile, "admin");
+    }
+
+    #[test]
+    fn pairing_config_defaults() {
+        let cfg = PairingConfig::default();
+        assert_eq!(cfg.persist_path, ".weftos/runtime/paired_hosts.json");
+        assert_eq!(cfg.default_window_secs, 30);
+    }
+
+    #[test]
+    fn pairing_config_deserialize() {
+        let json = r#"{"persist_path": "/opt/pairing.json", "default_window_secs": 60}"#;
+        let cfg: PairingConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.persist_path, "/opt/pairing.json");
+        assert_eq!(cfg.default_window_secs, 60);
+    }
+
+    #[test]
+    fn kernel_config_with_profiles_and_pairing() {
+        let json = r#"{"profiles": {"enabled": true}, "pairing": {"default_window_secs": 45}}"#;
+        let cfg: KernelConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.profiles.is_some());
+        assert!(cfg.profiles.unwrap().enabled);
+        assert!(cfg.pairing.is_some());
+        assert_eq!(cfg.pairing.unwrap().default_window_secs, 45);
     }
 
     #[test]

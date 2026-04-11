@@ -5,6 +5,12 @@
 //! are promoted from cold to hot based on access frequency, and evicted
 //! from the hot tier using LRU when it reaches capacity.
 //!
+//! ## Hardening features (Cognitum Seed WS1)
+//!
+//! Epoch, tombstone, and capacity operations are delegated to the cold
+//! (authoritative) tier. The hot tier mirrors soft-deletes to keep search
+//! results consistent.
+//!
 //! Compiled only when the `ecc` feature is enabled.
 
 use std::collections::{HashMap, VecDeque};
@@ -13,10 +19,10 @@ use std::sync::Mutex;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
-use crate::vector_backend::{SearchResult, VectorBackend, VectorResult};
+use crate::hnsw_service::HnswServiceConfig;
+use crate::vector_backend::{SearchResult, VectorBackend, VectorError, VectorResult};
 use crate::vector_diskann::{DiskAnnBackend, DiskAnnConfig};
 use crate::vector_hnsw::HnswBackend;
-use crate::hnsw_service::HnswServiceConfig;
 
 // ── Configuration ────────────────────────────────────────────────────────
 
@@ -24,7 +30,7 @@ use crate::hnsw_service::HnswServiceConfig;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum EvictionPolicy {
-    /// Least Recently Used — evict the vector that was accessed longest ago.
+    /// Least Recently Used -- evict the vector that was accessed longest ago.
     #[default]
     Lru,
 }
@@ -242,11 +248,7 @@ impl HybridBackend {
         }
 
         // Check access count.
-        let count = self
-            .access_counts
-            .get(&id)
-            .map(|v| *v)
-            .unwrap_or(0);
+        let count = self.access_counts.get(&id).map(|v| *v).unwrap_or(0);
 
         if count < self.config.promotion_threshold {
             return;
@@ -309,9 +311,14 @@ impl HybridBackend {
     }
 
     /// Merge and deduplicate search results from hot and cold tiers.
-    fn merge_results(hot_results: Vec<SearchResult>, cold_results: Vec<SearchResult>, k: usize) -> Vec<SearchResult> {
+    fn merge_results(
+        hot_results: Vec<SearchResult>,
+        cold_results: Vec<SearchResult>,
+        k: usize,
+    ) -> Vec<SearchResult> {
         let mut seen = std::collections::HashSet::new();
-        let mut merged: Vec<SearchResult> = Vec::with_capacity(hot_results.len() + cold_results.len());
+        let mut merged: Vec<SearchResult> =
+            Vec::with_capacity(hot_results.len() + cold_results.len());
 
         // Collect all results, dedup by id.
         for r in hot_results.into_iter().chain(cold_results) {
@@ -339,9 +346,8 @@ impl VectorBackend for HybridBackend {
         vector: &[f32],
         metadata: serde_json::Value,
     ) -> VectorResult<()> {
-        // Always insert into cold tier.
-        self.cold
-            .insert(id, key, vector, metadata.clone())?;
+        // Always insert into cold tier (authoritative for capacity).
+        self.cold.insert(id, key, vector, metadata.clone())?;
 
         // Cache the raw vector for future promotion.
         {
@@ -411,6 +417,69 @@ impl VectorBackend for HybridBackend {
     fn backend_name(&self) -> &str {
         "hybrid"
     }
+
+    // ── Epoch (delegated to cold tier as source of truth) ───────────────
+
+    fn current_epoch(&self) -> u64 {
+        self.cold.current_epoch()
+    }
+
+    fn insert_with_epoch(
+        &self,
+        id: u64,
+        key: &str,
+        vector: &[f32],
+        metadata: serde_json::Value,
+        parent_epoch: u64,
+    ) -> VectorResult<()> {
+        let current = self.cold.current_epoch();
+        if parent_epoch < current {
+            return Err(VectorError::EpochConflict {
+                expected: parent_epoch,
+                actual: current,
+            });
+        }
+        self.insert(id, key, vector, metadata)
+    }
+
+    // ── Soft-delete + compaction (mirrored to both tiers) ───────────────
+
+    fn soft_delete(&self, id: u64) -> bool {
+        // Soft-delete in cold (authoritative).
+        let deleted = self.cold.soft_delete(id);
+        if deleted {
+            // Also soft-delete in hot tier so searches exclude it.
+            self.hot.soft_delete(id);
+            if self.hot_ids.contains_key(&id) {
+                self.hot_ids.remove(&id);
+                let mut lru = self.lru.lock().expect("LRU lock poisoned");
+                lru.remove(id);
+            }
+        }
+        deleted
+    }
+
+    fn compact(&self, older_than_epoch: u64) -> usize {
+        // Compact cold tier (authoritative).
+        let purged = self.cold.compact(older_than_epoch);
+        // Also compact hot tier to stay in sync.
+        self.hot.compact(older_than_epoch);
+        purged
+    }
+
+    fn tombstone_count(&self) -> usize {
+        self.cold.tombstone_count()
+    }
+
+    // ── Capacity limits (delegated to cold tier) ────────────────────────
+
+    fn max_vectors(&self) -> Option<usize> {
+        self.cold.max_vectors()
+    }
+
+    fn set_max_vectors(&self, limit: Option<usize>) {
+        self.cold.set_max_vectors(limit);
+    }
 }
 
 impl std::fmt::Debug for HybridBackend {
@@ -418,6 +487,8 @@ impl std::fmt::Debug for HybridBackend {
         f.debug_struct("HybridBackend")
             .field("hot_len", &self.hot_len())
             .field("cold_len", &self.cold_len())
+            .field("epoch", &self.current_epoch())
+            .field("tombstones", &self.tombstone_count())
             .field("config", &self.config)
             .finish()
     }
@@ -460,7 +531,6 @@ mod tests {
     #[test]
     fn insert_beyond_hot_capacity_stays_cold_only() {
         let h = small_hybrid();
-        // Fill hot tier (capacity = 3).
         h.insert(1, "a", &[1.0, 0.0, 0.0], serde_json::json!({}))
             .unwrap();
         h.insert(2, "b", &[0.0, 1.0, 0.0], serde_json::json!({}))
@@ -473,7 +543,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(h.len(), 4);
-        assert_eq!(h.hot_len(), 3); // Still 3 (not promoted yet).
+        assert_eq!(h.hot_len(), 3);
         assert_eq!(h.cold_len(), 4);
     }
 
@@ -487,7 +557,6 @@ mod tests {
 
         let results = h.search(&[1.0, 0.0, 0.0], 2);
         assert_eq!(results.len(), 2);
-        // Closest should be id=1.
         assert_eq!(results[0].id, 1);
         assert!(results[0].distance < 0.01);
     }
@@ -495,7 +564,6 @@ mod tests {
     #[test]
     fn promotion_after_threshold() {
         let h = small_hybrid();
-        // Fill hot tier.
         h.insert(1, "a", &[1.0, 0.0, 0.0], serde_json::json!({}))
             .unwrap();
         h.insert(2, "b", &[0.0, 1.0, 0.0], serde_json::json!({}))
@@ -508,16 +576,12 @@ mod tests {
             .unwrap();
         assert!(!h.hot_ids.contains_key(&4));
 
-        // Access id=4 enough times to trigger promotion.
-        // promotion_threshold = 2, so we need 2+ accesses.
         h.record_access(4);
         h.record_access(4);
         h.try_promote(4);
 
-        // After promotion, hot tier should evict LRU (id=1, first inserted)
-        // and add id=4.
         assert!(h.hot_ids.contains_key(&4));
-        assert_eq!(h.hot_len(), 3); // Still at capacity.
+        assert_eq!(h.hot_len(), 3);
     }
 
     #[test]
@@ -539,13 +603,12 @@ mod tests {
             SearchResult::new(2, "b".into(), 0.3, serde_json::json!({})),
         ];
         let cold = vec![
-            SearchResult::new(1, "a".into(), 0.1, serde_json::json!({})), // dup
+            SearchResult::new(1, "a".into(), 0.1, serde_json::json!({})),
             SearchResult::new(3, "c".into(), 0.2, serde_json::json!({})),
         ];
 
         let merged = HybridBackend::merge_results(hot, cold, 3);
         assert_eq!(merged.len(), 3);
-        // Should be sorted by distance: 0.1, 0.2, 0.3
         assert_eq!(merged[0].id, 1);
         assert_eq!(merged[1].id, 3);
         assert_eq!(merged[2].id, 2);
@@ -576,10 +639,64 @@ mod tests {
         lru.touch(3);
         assert_eq!(lru.len(), 3);
 
-        // Touch 1 again — moves to back.
         lru.touch(1);
-        // Evict should return 2 (now least recently used).
         assert_eq!(lru.evict(), Some(2));
         assert_eq!(lru.len(), 2);
+    }
+
+    // ── Epoch tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn hybrid_epoch_tracks_cold_tier() {
+        let h = small_hybrid();
+        assert_eq!(h.current_epoch(), 0);
+        h.insert(1, "a", &[1.0, 0.0, 0.0], serde_json::json!({}))
+            .unwrap();
+        assert!(h.current_epoch() > 0);
+    }
+
+    #[test]
+    fn hybrid_insert_with_epoch_rejects_stale() {
+        let h = small_hybrid();
+        h.insert(1, "a", &[1.0], serde_json::json!({})).unwrap();
+        let result = h.insert_with_epoch(2, "b", &[0.0], serde_json::json!({}), 0);
+        assert!(matches!(result, Err(VectorError::EpochConflict { .. })));
+    }
+
+    // ── Soft-delete tests ───────────────────────────────────────────────
+
+    #[test]
+    fn hybrid_soft_delete_hides_from_both_tiers() {
+        let h = small_hybrid();
+        h.insert(1, "a", &[1.0, 0.0, 0.0], serde_json::json!({}))
+            .unwrap();
+        h.insert(2, "b", &[0.0, 1.0, 0.0], serde_json::json!({}))
+            .unwrap();
+
+        assert!(h.soft_delete(1));
+        assert_eq!(h.tombstone_count(), 1);
+        assert_eq!(h.len(), 1);
+        assert!(!h.contains(1));
+    }
+
+    #[test]
+    fn hybrid_compact() {
+        let h = small_hybrid();
+        h.insert(1, "a", &[1.0], serde_json::json!({})).unwrap();
+        h.soft_delete(1);
+        let epoch = h.current_epoch();
+        let purged = h.compact(epoch + 1);
+        assert_eq!(purged, 1);
+        assert_eq!(h.tombstone_count(), 0);
+    }
+
+    // ── Capacity tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn hybrid_capacity_delegates_to_cold() {
+        let h = small_hybrid();
+        assert_eq!(h.max_vectors(), Some(1000));
+        h.set_max_vectors(Some(5));
+        assert_eq!(h.max_vectors(), Some(5));
     }
 }

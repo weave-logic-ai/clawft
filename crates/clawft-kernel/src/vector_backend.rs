@@ -53,6 +53,14 @@ pub enum VectorError {
     #[error("capacity exceeded: max {max} entries")]
     CapacityExceeded { max: usize },
 
+    /// The store has reached its configured vector limit.
+    #[error("store full: {current}/{max} vectors")]
+    StoreFull { max: usize, current: usize },
+
+    /// Optimistic concurrency conflict: the caller's epoch is stale.
+    #[error("epoch conflict: expected {expected}, actual {actual}")]
+    EpochConflict { expected: u64, actual: u64 },
+
     /// Generic backend error.
     #[error("{0}")]
     Other(String),
@@ -106,6 +114,82 @@ pub trait VectorBackend: Send + Sync {
 
     /// Return a human-readable name for this backend (e.g. "hnsw", "diskann", "hybrid").
     fn backend_name(&self) -> &str;
+
+    // ── Epoch-based versioning ──────────────────────────────────────────
+
+    /// Return the current monotonic epoch.
+    ///
+    /// The epoch is bumped on every mutating operation (insert, delete,
+    /// update, soft-delete, compact). Implementations should persist the
+    /// epoch across restarts via [`flush`] / load.
+    fn current_epoch(&self) -> u64 {
+        0
+    }
+
+    // ── Optimistic concurrency control ──────────────────────────────────
+
+    /// Insert a vector only if the store's current epoch matches
+    /// `parent_epoch`. If the epoch has advanced past `parent_epoch`,
+    /// the call is rejected with [`VectorError::EpochConflict`].
+    ///
+    /// This enables optimistic concurrency control for multi-agent
+    /// writes: each agent reads the epoch, performs its work, then
+    /// submits with the epoch it observed.
+    fn insert_with_epoch(
+        &self,
+        id: u64,
+        key: &str,
+        vector: &[f32],
+        metadata: serde_json::Value,
+        parent_epoch: u64,
+    ) -> VectorResult<()> {
+        let current = self.current_epoch();
+        if parent_epoch < current {
+            return Err(VectorError::EpochConflict {
+                expected: parent_epoch,
+                actual: current,
+            });
+        }
+        self.insert(id, key, vector, metadata)
+    }
+
+    // ── Soft-delete + compaction ────────────────────────────────────────
+
+    /// Mark a vector as tombstoned instead of physically removing it.
+    ///
+    /// Tombstoned vectors are excluded from search results but remain
+    /// in storage until [`compact`] is called. Returns `true` if the
+    /// vector existed and was not already tombstoned.
+    fn soft_delete(&self, id: u64) -> bool {
+        // Default: fall back to hard delete for backends that do not
+        // implement tombstoning.
+        self.remove(id)
+    }
+
+    /// Physically remove tombstones whose deletion epoch is older than
+    /// `older_than_epoch`. Returns the number of entries purged.
+    fn compact(&self, _older_than_epoch: u64) -> usize {
+        0
+    }
+
+    /// Return the number of tombstoned (soft-deleted) entries.
+    fn tombstone_count(&self) -> usize {
+        0
+    }
+
+    // ── Capacity limits ────────────────────────────────────────────────
+
+    /// Return the configured maximum number of vectors, or `None` if
+    /// unbounded.
+    fn max_vectors(&self) -> Option<usize> {
+        None
+    }
+
+    /// Set the maximum number of vectors. Pass `None` for unbounded.
+    fn set_max_vectors(&self, _limit: Option<usize>) {
+        // Default: no-op. Implementations that support runtime
+        // reconfiguration should override.
+    }
 }
 
 // ── Backend configuration dispatch ───────────────────────────────────────
@@ -148,5 +232,19 @@ mod tests {
         assert_eq!(kind, VectorBackendKind::DiskAnn);
         let kind: VectorBackendKind = serde_json::from_str(r#""hybrid""#).unwrap();
         assert_eq!(kind, VectorBackendKind::Hybrid);
+    }
+
+    #[test]
+    fn error_store_full_display() {
+        let err = VectorError::StoreFull { max: 100, current: 100 };
+        assert!(format!("{err}").contains("100"));
+    }
+
+    #[test]
+    fn error_epoch_conflict_display() {
+        let err = VectorError::EpochConflict { expected: 5, actual: 10 };
+        let msg = format!("{err}");
+        assert!(msg.contains("5"));
+        assert!(msg.contains("10"));
     }
 }

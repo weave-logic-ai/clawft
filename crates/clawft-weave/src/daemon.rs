@@ -1954,6 +1954,116 @@ async fn dispatch(
                 Response::error("crossref store not available")
             }
         }
+        // ── Custody attestation ───────────────────────────────────────
+        "custody.attest" => {
+            #[cfg(feature = "exochain")]
+            {
+                let k = kernel.read().await;
+                if let Some(cm) = k.chain_manager() {
+                    #[cfg(feature = "ecc")]
+                    let (vector_count, epoch, content_hash) = {
+                        if let Some(vb) = k.ecc_vector_backend() {
+                            let count = vb.len() as u64;
+                            let ep = vb.current_epoch();
+                            let hash_input = format!("vector-ids:count={count}:epoch={ep}");
+                            let hash = blake3::hash(hash_input.as_bytes());
+                            (count, ep, hash.to_hex().to_string())
+                        } else if let Some(hnsw) = k.ecc_hnsw() {
+                            let count = hnsw.len() as u64;
+                            let hash_input = format!("hnsw-ids:count={count}");
+                            let hash = blake3::hash(hash_input.as_bytes());
+                            (count, 0u64, hash.to_hex().to_string())
+                        } else {
+                            (0u64, 0u64, "none".to_string())
+                        }
+                    };
+                    #[cfg(not(feature = "ecc"))]
+                    let (vector_count, epoch, content_hash) = (0u64, 0u64, "none".to_string());
+
+                    match cm.generate_attestation(vector_count, epoch, &content_hash) {
+                        Some(att) => {
+                            let sig_hex: String = att.signature.iter().map(|b| format!("{b:02x}")).collect();
+                            let result = crate::protocol::CustodyAttestResult {
+                                device_id: att.device_id,
+                                epoch: att.epoch,
+                                chain_head: att.chain_head,
+                                chain_depth: att.chain_depth,
+                                vector_count: att.vector_count,
+                                content_hash: att.content_hash,
+                                timestamp: att.timestamp,
+                                signature: sig_hex,
+                            };
+                            Response::success(serde_json::to_value(result).unwrap())
+                        }
+                        None => Response::error("no signing key configured — attestation requires Ed25519 key"),
+                    }
+                } else {
+                    Response::error("chain not enabled")
+                }
+            }
+            #[cfg(not(feature = "exochain"))]
+            Response::error("exochain feature not enabled")
+        }
+
+        // ── Host revocation ──────────────────────────────────────────
+        "mesh.revoke" => {
+            let revoke_params: crate::protocol::MeshRevokeParams = match serde_json::from_value(params) {
+                Ok(p) => p,
+                Err(e) => return Response::error(format!("invalid params: {e}")),
+            };
+            let k = kernel.read().await;
+            let list = k.revocation_list();
+            let added = list.revoke_host(&revoke_params.host_id, &revoke_params.reason);
+
+            #[cfg(feature = "exochain")]
+            if let Some(cm) = k.chain_manager() {
+                cm.append("mesh", "host.revoked", Some(serde_json::json!({
+                    "host_id": revoke_params.host_id,
+                    "reason": revoke_params.reason,
+                })));
+            }
+
+            Response::success(serde_json::json!({
+                "host_id": revoke_params.host_id,
+                "added": added,
+            }))
+        }
+        "mesh.unrevoke" => {
+            let unrevoke_params: crate::protocol::MeshUnrevokeParams = match serde_json::from_value(params) {
+                Ok(p) => p,
+                Err(e) => return Response::error(format!("invalid params: {e}")),
+            };
+            let k = kernel.read().await;
+            let list = k.revocation_list();
+            let removed = list.unrevoke_host(&unrevoke_params.host_id);
+
+            #[cfg(feature = "exochain")]
+            if let Some(cm) = k.chain_manager() {
+                cm.append("mesh", "host.unrevoked", Some(serde_json::json!({
+                    "host_id": unrevoke_params.host_id,
+                })));
+            }
+
+            Response::success(serde_json::json!({
+                "host_id": unrevoke_params.host_id,
+                "removed": removed,
+            }))
+        }
+        "mesh.revoked" => {
+            let k = kernel.read().await;
+            let list = k.revocation_list();
+            let entries: Vec<crate::protocol::RevokedHostInfo> = list
+                .list_revoked()
+                .into_iter()
+                .map(|h| crate::protocol::RevokedHostInfo {
+                    host_id: h.host_id,
+                    revoked_at: h.revoked_at,
+                    reason: h.reason,
+                })
+                .collect();
+            Response::success(serde_json::to_value(entries).unwrap())
+        }
+
         "ping" => Response::success(serde_json::json!("pong")),
         other => Response::error(format!("unknown method: {other}")),
     }

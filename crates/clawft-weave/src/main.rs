@@ -57,6 +57,9 @@ enum Commands {
     /// Chain management (status, events, checkpoints).
     Chain(commands::chain_cmd::ChainArgs),
 
+    /// Custody attestation (signed proof of system state).
+    Custody(commands::custody_cmd::CustodyArgs),
+
     /// Resource tree management (tree, inspect, stats).
     Resource(commands::resource_cmd::ResourceArgs),
 
@@ -116,6 +119,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::App(args) => commands::app_cmd::run(args).await?,
         Commands::Cluster(args) => commands::cluster_cmd::run(args).await?,
         Commands::Chain(args) => commands::chain_cmd::run(args).await?,
+        Commands::Custody(args) => commands::custody_cmd::run(args).await?,
         Commands::Resource(args) => commands::resource_cmd::run(args).await?,
         Commands::Cron(args) => commands::cron_cmd::run(args).await?,
         Commands::Ipc(args) => commands::ipc_cmd::run(args).await?,
