@@ -91,6 +91,8 @@ pub mod vector_hybrid;
 pub mod weaver;
 #[cfg(feature = "ecc")]
 pub mod profile_store;
+#[cfg(feature = "ecc")]
+pub mod eml_coherence;
 
 #[cfg(feature = "native")]
 pub mod a2a;

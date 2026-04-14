@@ -84,6 +84,7 @@ pub struct EccSubsystem {
     pub(crate) impulses: Option<Arc<crate::impulse::ImpulseQueue>>,
     pub(crate) calibration: Option<crate::calibration::EccCalibration>,
     pub(crate) vector_backend: Option<Arc<dyn crate::vector_backend::VectorBackend>>,
+    pub(crate) eml_coherence: Option<crate::eml_coherence::EmlCoherenceModel>,
 }
 
 /// OS-patterns observability: metrics, structured logging, timers,
@@ -1390,6 +1391,7 @@ impl<P: Platform> Kernel<P> {
                 impulses: ecc_impulses,
                 calibration: ecc_calibration,
                 vector_backend: ecc_vector_backend,
+                eml_coherence: Some(crate::eml_coherence::EmlCoherenceModel::new()),
             },
             #[cfg(feature = "os-patterns")]
             observability: ObservabilitySubsystem {
@@ -1653,6 +1655,12 @@ impl<P: Platform> Kernel<P> {
     #[cfg(feature = "ecc")]
     pub fn ecc_impulses(&self) -> Option<&Arc<crate::impulse::ImpulseQueue>> {
         self.ecc.impulses.as_ref()
+    }
+
+    /// Get the EML coherence model (if ecc feature enabled).
+    #[cfg(feature = "ecc")]
+    pub fn ecc_eml_coherence(&self) -> Option<&crate::eml_coherence::EmlCoherenceModel> {
+        self.ecc.eml_coherence.as_ref()
     }
 
     /// Get the os-patterns metrics registry (if os-patterns feature enabled).

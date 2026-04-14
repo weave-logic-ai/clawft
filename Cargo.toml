@@ -33,7 +33,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.6.2"
+version = "0.6.3"
 edition = "2024"
 rust-version = "1.93"
 license = "MIT OR Apache-2.0"
@@ -158,27 +158,27 @@ parking_lot = "0.12"
 futures = "0.3"
 
 # Internal crates (version + path: version for crates.io, path for workspace)
-clawft-rpc = { version = "0.6.2", path = "crates/clawft-rpc" }
-clawft-types = { version = "0.6.2", path = "crates/clawft-types", default-features = false }
-clawft-platform = { version = "0.6.2", path = "crates/clawft-platform", default-features = false }
-clawft-core = { version = "0.6.2", path = "crates/clawft-core", default-features = false }
-clawft-tools = { version = "0.6.2", path = "crates/clawft-tools", default-features = false }
-clawft-channels = { version = "0.6.2", path = "crates/clawft-channels" }
-clawft-llm = { version = "0.6.2", path = "crates/clawft-llm", default-features = false }
-clawft-services = { version = "0.6.2", path = "crates/clawft-services" }
-clawft-plugin = { version = "0.6.2", path = "crates/clawft-plugin", default-features = false }
-clawft-plugin-git = { version = "0.6.2", path = "crates/clawft-plugin-git" }
-clawft-plugin-cargo = { version = "0.6.2", path = "crates/clawft-plugin-cargo" }
-clawft-plugin-oauth2 = { version = "0.6.2", path = "crates/clawft-plugin-oauth2" }
-clawft-plugin-treesitter = { version = "0.6.2", path = "crates/clawft-plugin-treesitter" }
-clawft-plugin-browser = { version = "0.6.2", path = "crates/clawft-plugin-browser" }
-clawft-plugin-calendar = { version = "0.6.2", path = "crates/clawft-plugin-calendar" }
-clawft-plugin-containers = { version = "0.6.2", path = "crates/clawft-plugin-containers" }
-clawft-graphify = { version = "0.6.2", path = "crates/clawft-graphify", default-features = false }
-clawft-security = { version = "0.6.2", path = "crates/clawft-security" }
-clawft-kernel = { version = "0.6.2", path = "crates/clawft-kernel", default-features = false }
-exo-resource-tree = { version = "0.6.2", path = "crates/exo-resource-tree" }
-weftos = { version = "0.6.2", path = "crates/weftos", default-features = false }
+clawft-rpc = { version = "0.6.3", path = "crates/clawft-rpc" }
+clawft-types = { version = "0.6.3", path = "crates/clawft-types", default-features = false }
+clawft-platform = { version = "0.6.3", path = "crates/clawft-platform", default-features = false }
+clawft-core = { version = "0.6.3", path = "crates/clawft-core", default-features = false }
+clawft-tools = { version = "0.6.3", path = "crates/clawft-tools", default-features = false }
+clawft-channels = { version = "0.6.3", path = "crates/clawft-channels" }
+clawft-llm = { version = "0.6.3", path = "crates/clawft-llm", default-features = false }
+clawft-services = { version = "0.6.3", path = "crates/clawft-services" }
+clawft-plugin = { version = "0.6.3", path = "crates/clawft-plugin", default-features = false }
+clawft-plugin-git = { version = "0.6.3", path = "crates/clawft-plugin-git" }
+clawft-plugin-cargo = { version = "0.6.3", path = "crates/clawft-plugin-cargo" }
+clawft-plugin-oauth2 = { version = "0.6.3", path = "crates/clawft-plugin-oauth2" }
+clawft-plugin-treesitter = { version = "0.6.3", path = "crates/clawft-plugin-treesitter" }
+clawft-plugin-browser = { version = "0.6.3", path = "crates/clawft-plugin-browser" }
+clawft-plugin-calendar = { version = "0.6.3", path = "crates/clawft-plugin-calendar" }
+clawft-plugin-containers = { version = "0.6.3", path = "crates/clawft-plugin-containers" }
+clawft-graphify = { version = "0.6.3", path = "crates/clawft-graphify", default-features = false }
+clawft-security = { version = "0.6.3", path = "crates/clawft-security" }
+clawft-kernel = { version = "0.6.3", path = "crates/clawft-kernel", default-features = false }
+exo-resource-tree = { version = "0.6.3", path = "crates/exo-resource-tree" }
+weftos = { version = "0.6.3", path = "crates/weftos", default-features = false }
 
 # Graph library
 petgraph = "0.7"

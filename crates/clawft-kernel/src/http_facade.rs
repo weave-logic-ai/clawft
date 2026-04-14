@@ -394,6 +394,10 @@ pub fn match_facade_route(method: HttpMethod, path: &str) -> FacadeRoute {
             method: "ecc.calibrate",
             params: None,
         },
+        (HttpMethod::Get, "/api/ecc/coherence") => FacadeRoute::Rpc {
+            method: "ecc.coherence",
+            params: None,
+        },
         (HttpMethod::Get, "/api/custody/attest") => FacadeRoute::Rpc {
             method: "custody.attest",
             params: None,
@@ -873,6 +877,18 @@ mod tests {
             route,
             FacadeRoute::Rpc {
                 method: "ecc.calibrate",
+                params: None
+            }
+        );
+    }
+
+    #[test]
+    fn route_ecc_coherence() {
+        let route = match_facade_route(HttpMethod::Get, "/api/ecc/coherence");
+        assert_eq!(
+            route,
+            FacadeRoute::Rpc {
+                method: "ecc.coherence",
                 params: None
             }
         );
