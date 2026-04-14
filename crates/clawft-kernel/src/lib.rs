@@ -103,6 +103,8 @@ pub mod hnsw_eml;
 pub mod eml_kernel;
 #[cfg(feature = "ecc")]
 pub mod eml_persistence;
+#[cfg(feature = "ecc")]
+pub mod quantum_state;
 
 #[cfg(feature = "sensor")]
 pub mod sensor_graph;
@@ -338,6 +340,11 @@ pub use hnsw_eml::{
 };
 #[cfg(feature = "ecc")]
 pub use cluster::NodeEccCapability;
+#[cfg(feature = "ecc")]
+pub use quantum_state::{
+    Complex, HypothesisSuperposition, Hypothesis, QuantumCognitiveState,
+    QuantumEvidenceRanking,
+};
 pub use ipc::{
     ExitReason as SignalExitReason, GlobalPid, KernelIpc, KernelMessage, KernelSignal,
     MessagePayload, MessageTarget, ProcessDown as SignalProcessDown,
