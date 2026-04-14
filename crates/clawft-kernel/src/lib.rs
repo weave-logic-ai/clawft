@@ -93,6 +93,8 @@ pub mod weaver;
 pub mod profile_store;
 #[cfg(feature = "ecc")]
 pub mod eml_coherence;
+#[cfg(feature = "ecc")]
+pub mod hnsw_eml;
 
 #[cfg(feature = "native")]
 pub mod a2a;
@@ -307,6 +309,12 @@ pub use weaver::{
     ConfidenceGap, ConfidenceReport, DataSource, ExportedModel, IngestResult, MetaDecisionType,
     MetaLoomEvent, ModelingSession, ModelingSuggestion, StrategyPattern, TickResult,
     WeaverCommand, WeaverEngine, WeaverError, WeaverKnowledgeBase, WeaverResponse,
+};
+#[cfg(feature = "ecc")]
+pub use hnsw_eml::{
+    HnswEmlConfig, HnswEmlManager, HnswEmlStatus,
+    EfPrediction, RebuildPrediction,
+    EfTrainingPoint, DistanceTrainingPoint, PathTrainingPoint, RebuildTrainingPoint,
 };
 #[cfg(feature = "ecc")]
 pub use cluster::NodeEccCapability;
