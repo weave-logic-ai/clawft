@@ -789,6 +789,7 @@ dependencies = [
  "clawft-kernel",
  "clawft-llm",
  "dashmap",
+ "eml-core",
  "html-escape",
  "insta",
  "notify",
@@ -869,6 +870,7 @@ version = "0.6.4"
 dependencies = [
  "async-trait",
  "clawft-types",
+ "eml-core",
  "futures-util",
  "reqwest 0.12.28",
  "serde",
@@ -1173,6 +1175,7 @@ dependencies = [
  "clawft-types",
  "comfy-table",
  "dirs",
+ "eml-core",
  "exo-resource-tree",
  "nix 0.29.0",
  "rvf-types",

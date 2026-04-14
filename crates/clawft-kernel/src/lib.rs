@@ -95,6 +95,8 @@ pub mod profile_store;
 pub mod eml_coherence;
 #[cfg(feature = "ecc")]
 pub mod hnsw_eml;
+#[cfg(feature = "ecc")]
+pub mod eml_kernel;
 
 #[cfg(feature = "native")]
 pub mod a2a;

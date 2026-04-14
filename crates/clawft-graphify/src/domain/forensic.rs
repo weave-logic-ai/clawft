@@ -7,6 +7,7 @@
 //! Compiled only when the `forensic-domain` feature is enabled.
 
 use crate::domain::Domain;
+use crate::eml_models::ForensicCoherenceModel;
 use crate::entity::{EntityId, EntityType};
 use crate::model::KnowledgeGraph;
 use crate::relationship::{Confidence, RelationType, Relationship};
@@ -237,6 +238,46 @@ pub fn coherence_score(kg: &KnowledgeGraph) -> f64 {
     density * avg_confidence
 }
 
+/// Compute coherence with an optional EML model.
+///
+/// When `eml_model` is `Some` and trained, uses the learned function.
+/// Otherwise falls back to the original `density * avg_confidence` formula.
+pub fn coherence_score_eml(
+    kg: &KnowledgeGraph,
+    eml_model: Option<&ForensicCoherenceModel>,
+) -> f64 {
+    let n = kg.entity_count();
+    if n < 2 {
+        return if n == 1 { 1.0 } else { 0.0 };
+    }
+
+    let max_edges = n * (n - 1);
+    let actual_edges = kg.relationship_count();
+    if actual_edges == 0 {
+        return 0.0;
+    }
+
+    let density = actual_edges as f64 / max_edges as f64;
+
+    let total_weight: f64 = kg
+        .edges()
+        .map(|(_, _, rel)| rel.confidence.to_score())
+        .sum();
+    let avg_confidence = total_weight / actual_edges as f64;
+
+    match eml_model {
+        Some(model) if model.is_trained() => {
+            model.predict(
+                density,
+                avg_confidence,
+                n as f64,
+                actual_edges as f64,
+            )
+        }
+        _ => density * avg_confidence,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Counterfactual delta
 // ---------------------------------------------------------------------------
@@ -271,6 +312,45 @@ pub fn counterfactual_delta(kg: &KnowledgeGraph, hypothetical: &Relationship) ->
     let new_density = new_m / max_edges;
     let new_avg = new_total / new_m;
     let predicted = new_density * new_avg;
+
+    predicted - current
+}
+
+/// Predict coherence improvement with an optional EML model.
+///
+/// Same as [`counterfactual_delta`] but uses the EML model for both
+/// current and predicted coherence when trained.
+pub fn counterfactual_delta_eml(
+    kg: &KnowledgeGraph,
+    hypothetical: &Relationship,
+    eml_model: Option<&ForensicCoherenceModel>,
+) -> f64 {
+    let current = coherence_score_eml(kg, eml_model);
+
+    let n = kg.entity_count();
+    if n < 2 {
+        return 0.0;
+    }
+
+    let max_edges = (n * (n - 1)) as f64;
+    let m = kg.relationship_count() as f64;
+
+    let current_total: f64 = kg
+        .edges()
+        .map(|(_, _, rel)| rel.confidence.to_score())
+        .sum();
+
+    let new_m = m + 1.0;
+    let new_total = current_total + hypothetical.confidence.to_score();
+    let new_density = new_m / max_edges;
+    let new_avg = new_total / new_m;
+
+    let predicted = match eml_model {
+        Some(model) if model.is_trained() => {
+            model.predict(new_density, new_avg, n as f64, new_m)
+        }
+        _ => new_density * new_avg,
+    };
 
     predicted - current
 }

@@ -3,6 +3,7 @@
 //! Ported from Python `graphify/analyze.py`.
 
 use crate::cluster::cohesion_score;
+use crate::eml_models::SurpriseScorerModel;
 use crate::entity::EntityId;
 use crate::model::KnowledgeGraph;
 use crate::relationship::Confidence;
@@ -176,22 +177,96 @@ pub struct SurprisingConnection {
 ///
 /// - Multi-file corpora: cross-file edges ranked by composite surprise score.
 /// - Single-file corpora: cross-community edges.
+///
+/// When `eml_model` is `Some`, uses the trained EML model for scoring.
+/// Pass `None` to use the original hardcoded heuristics.
 pub fn surprising_connections(
     kg: &KnowledgeGraph,
     communities: &HashMap<usize, Vec<EntityId>>,
     top_n: usize,
 ) -> Vec<SurprisingConnection> {
+    surprising_connections_eml(kg, communities, top_n, None)
+}
+
+/// Find surprising connections with an optional EML model for scoring.
+pub fn surprising_connections_eml(
+    kg: &KnowledgeGraph,
+    communities: &HashMap<usize, Vec<EntityId>>,
+    top_n: usize,
+    eml_model: Option<&SurpriseScorerModel>,
+) -> Vec<SurprisingConnection> {
     let source_files = kg.source_files();
     let is_multi_source = source_files.len() > 1;
 
     if is_multi_source {
-        cross_file_surprises(kg, communities, top_n)
+        cross_file_surprises(kg, communities, top_n, eml_model)
     } else {
         cross_community_surprises(kg, communities, top_n)
     }
 }
 
+/// Build the 7-element feature vector for surprise scoring.
+///
+/// `[confidence_ordinal, cross_file_type, cross_repo,
+///   cross_community, is_semantic, min_degree, max_degree]`
+fn surprise_features(
+    kg: &KnowledgeGraph,
+    src_id: &EntityId,
+    tgt_id: &EntityId,
+    relation: &str,
+    confidence: Confidence,
+    node_community: &HashMap<EntityId, usize>,
+    src_source: &str,
+    tgt_source: &str,
+) -> [f64; 7] {
+    let conf_ord = match confidence {
+        Confidence::Ambiguous => 3.0,
+        Confidence::Inferred => 2.0,
+        Confidence::Extracted => 1.0,
+    };
+
+    let cat_u = file_category(src_source);
+    let cat_v = file_category(tgt_source);
+    let cross_file_type = if cat_u != cat_v { 1.0 } else { 0.0 };
+    let cross_repo = if top_level_dir(src_source) != top_level_dir(tgt_source) {
+        1.0
+    } else {
+        0.0
+    };
+
+    let cid_u = node_community.get(src_id);
+    let cid_v = node_community.get(tgt_id);
+    let cross_community = match (cid_u, cid_v) {
+        (Some(cu), Some(cv)) if cu != cv => 1.0,
+        _ => 0.0,
+    };
+
+    let is_semantic = if relation == "semantically_similar_to" {
+        1.0
+    } else {
+        0.0
+    };
+
+    let deg_u = kg.degree(src_id) as f64;
+    let deg_v = kg.degree(tgt_id) as f64;
+    let min_deg = deg_u.min(deg_v);
+    let max_deg = deg_u.max(deg_v);
+
+    [
+        conf_ord,
+        cross_file_type,
+        cross_repo,
+        cross_community,
+        is_semantic,
+        min_deg,
+        max_deg,
+    ]
+}
+
 /// Compute the composite surprise score for an edge.
+///
+/// When `eml_model` is `Some`, uses the trained model for scoring.
+/// Otherwise falls back to the original hardcoded heuristics.
 fn surprise_score(
     kg: &KnowledgeGraph,
     src_id: &EntityId,
@@ -201,7 +276,33 @@ fn surprise_score(
     node_community: &HashMap<EntityId, usize>,
     src_source: &str,
     tgt_source: &str,
+    eml_model: Option<&SurpriseScorerModel>,
 ) -> (i32, Vec<String>) {
+    let features = surprise_features(
+        kg,
+        src_id,
+        tgt_id,
+        relation,
+        confidence,
+        node_community,
+        src_source,
+        tgt_source,
+    );
+
+    // If a trained EML model is provided, use it for the score.
+    if let Some(model) = eml_model {
+        if model.is_trained() {
+            let eml_score = model.score(&features);
+            // Still generate human-readable reasons from the feature vector.
+            let reasons = surprise_reasons(
+                &features,
+                kg, src_id, tgt_id, src_source, tgt_source, confidence,
+            );
+            return (eml_score as i32, reasons);
+        }
+    }
+
+    // Hardcoded fallback (original logic).
     let mut score: i32 = 0;
     let mut reasons: Vec<String> = Vec::new();
 
@@ -269,6 +370,63 @@ fn surprise_score(
     (score, reasons)
 }
 
+/// Generate human-readable reasons from the feature vector.
+///
+/// Used when the EML model provides the numeric score but we still
+/// want textual explanations.
+fn surprise_reasons(
+    features: &[f64; 7],
+    kg: &KnowledgeGraph,
+    src_id: &EntityId,
+    tgt_id: &EntityId,
+    src_source: &str,
+    tgt_source: &str,
+    confidence: Confidence,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+
+    if matches!(confidence, Confidence::Ambiguous | Confidence::Inferred) {
+        reasons.push(format!(
+            "{} connection - not explicitly stated in source",
+            confidence.as_str().to_lowercase()
+        ));
+    }
+    if features[1] > 0.5 {
+        let cat_u = file_category(src_source);
+        let cat_v = file_category(tgt_source);
+        reasons.push(format!("crosses file types ({cat_u} <-> {cat_v})"));
+    }
+    if features[2] > 0.5 {
+        reasons.push("connects across different repos/directories".to_owned());
+    }
+    if features[3] > 0.5 {
+        reasons.push("bridges separate communities".to_owned());
+    }
+    if features[4] > 0.5 {
+        reasons.push("semantically similar concepts with no structural link".to_owned());
+    }
+    if features[5] <= 2.0 && features[6] >= 5.0 {
+        let src_label_str = kg
+            .entity(src_id)
+            .map(|e| e.label.clone())
+            .unwrap_or_else(|| src_id.to_hex());
+        let tgt_label_str = kg
+            .entity(tgt_id)
+            .map(|e| e.label.clone())
+            .unwrap_or_else(|| tgt_id.to_hex());
+        let (peripheral, hub) = if features[5] == kg.degree(src_id) as f64 {
+            (src_label_str.as_str(), tgt_label_str.as_str())
+        } else {
+            (tgt_label_str.as_str(), src_label_str.as_str())
+        };
+        reasons.push(format!(
+            "peripheral node `{peripheral}` unexpectedly reaches hub `{hub}`"
+        ));
+    }
+
+    reasons
+}
+
 /// Structural edge relations to exclude.
 const STRUCTURAL_RELATIONS: &[&str] = &["imports", "imports_from", "contains", "method"];
 
@@ -276,6 +434,7 @@ fn cross_file_surprises(
     kg: &KnowledgeGraph,
     communities: &HashMap<usize, Vec<EntityId>>,
     top_n: usize,
+    eml_model: Option<&SurpriseScorerModel>,
 ) -> Vec<SurprisingConnection> {
     let node_community = node_community_map(communities);
 
@@ -314,6 +473,7 @@ fn cross_file_surprises(
             &node_community,
             src_source,
             tgt_source,
+            eml_model,
         );
 
         candidates.push(Candidate {
@@ -956,11 +1116,11 @@ mod tests {
 
         let (score_amb, _) = surprise_score(
             &kg, &id_a, &id_b, "calls", Confidence::Ambiguous,
-            &node_community, "src/a.py", "src/b.py",
+            &node_community, "src/a.py", "src/b.py", None,
         );
         let (score_ext, _) = surprise_score(
             &kg, &id_c, &id_d, "calls", Confidence::Extracted,
-            &node_community, "src/c.py", "src/d.py",
+            &node_community, "src/c.py", "src/d.py", None,
         );
         assert!(score_amb > score_ext);
     }
@@ -983,11 +1143,11 @@ mod tests {
 
         let (score_cross, reasons) = surprise_score(
             &kg, &id_a, &id_b, "references", Confidence::Extracted,
-            &node_community, "src/a.py", "docs/b.pdf",
+            &node_community, "src/a.py", "docs/b.pdf", None,
         );
         let (score_same, _) = surprise_score(
             &kg, &id_c, &id_d, "references", Confidence::Extracted,
-            &node_community, "src/c.py", "src/d.py",
+            &node_community, "src/c.py", "src/d.py", None,
         );
         assert!(score_cross > score_same);
         assert!(reasons.iter().any(|r| r.contains("file types")));

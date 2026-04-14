@@ -21,6 +21,7 @@ browser = ["clawft-types/browser"]
 
 [dependencies]
 # Always available
+eml-core = { workspace = true }
 async-trait = { workspace = true }
 clawft-types = { workspace = true, default-features = false }
 futures-util = { workspace = true }

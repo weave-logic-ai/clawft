@@ -9,6 +9,7 @@
 //! - XSS prevention via label sanitization
 
 use crate::analyze::node_community_map;
+use crate::eml_models::LayoutModel;
 use crate::export::{sanitize_label, COMMUNITY_COLORS};
 use crate::model::{EntityId, KnowledgeGraph};
 use crate::GraphifyError;
@@ -24,6 +25,20 @@ pub fn to_html(
     communities: &HashMap<usize, Vec<EntityId>>,
     community_labels: &HashMap<usize, String>,
     output: &Path,
+) -> Result<(), GraphifyError> {
+    to_html_eml(kg, communities, community_labels, output, None)
+}
+
+/// Generate an interactive vis.js HTML visualization with optional EML layout model.
+///
+/// When `eml_model` is `Some` and trained, uses learned ForceAtlas2 physics
+/// parameters. Pass `None` to use the original hardcoded values.
+pub fn to_html_eml(
+    kg: &KnowledgeGraph,
+    communities: &HashMap<usize, Vec<EntityId>>,
+    community_labels: &HashMap<usize, String>,
+    output: &Path,
+    eml_model: Option<&LayoutModel>,
 ) -> Result<(), GraphifyError> {
     if kg.node_count() > MAX_NODES_FOR_VIZ {
         return Err(GraphifyError::TooLarge(format!(
@@ -171,7 +186,7 @@ pub fn to_html(
         title = title,
         styles = HTML_STYLES,
         stats = stats,
-        main_script = build_main_script(&nodes_json, &edges_json, &legend_json),
+        main_script = build_main_script(&nodes_json, &edges_json, &legend_json, eml_model, kg),
         hyperedge_script = build_hyperedge_script(&hyperedges_json),
     );
 
@@ -213,7 +228,36 @@ const HTML_STYLES: &str = r#"<style>
   #stats { padding: 10px 14px; border-top: 1px solid #2a2a4e; font-size: 11px; color: #555; }
 </style>"#;
 
-fn build_main_script(nodes_json: &str, edges_json: &str, legend_json: &str) -> String {
+fn build_main_script(
+    nodes_json: &str,
+    edges_json: &str,
+    legend_json: &str,
+    eml_model: Option<&LayoutModel>,
+    kg: &KnowledgeGraph,
+) -> String {
+    // Resolve physics parameters from EML model or hardcoded defaults.
+    use crate::eml_models::PhysicsParams;
+    let params = match eml_model {
+        Some(model) if model.is_trained() => {
+            let n = kg.node_count() as f64;
+            let e = kg.edge_count() as f64;
+            let density = if n > 1.0 {
+                e / (n * (n - 1.0))
+            } else {
+                0.0
+            };
+            model.predict(n, e, density)
+        }
+        _ => PhysicsParams::default_params(),
+    };
+
+    let grav = params.gravitational_constant;
+    let central = params.central_gravity;
+    let spring_len = params.spring_length;
+    let spring_k = params.spring_constant;
+    let damp = params.damping;
+    let overlap = params.avoid_overlap;
+
     format!(
         r##"<script>
 const RAW_NODES = {nodes_json};
@@ -243,12 +287,12 @@ const network = new vis.Network(container, {{ nodes: nodesDS, edges: edgesDS }},
     enabled: true,
     solver: 'forceAtlas2Based',
     forceAtlas2Based: {{
-      gravitationalConstant: -60,
-      centralGravity: 0.005,
-      springLength: 120,
-      springConstant: 0.08,
-      damping: 0.4,
-      avoidOverlap: 0.8,
+      gravitationalConstant: {grav},
+      centralGravity: {central},
+      springLength: {spring_len},
+      springConstant: {spring_k},
+      damping: {damp},
+      avoidOverlap: {overlap},
     }},
     stabilization: {{ iterations: 200, fit: true }},
   }},

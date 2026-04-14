@@ -45,6 +45,7 @@ regex = { workspace = true }
 rayon = { workspace = true }
 petgraph = { workspace = true }
 walkdir = { workspace = true }
+eml-core = { workspace = true }
 
 # Optional
 tree-sitter = { version = "0.24", optional = true }

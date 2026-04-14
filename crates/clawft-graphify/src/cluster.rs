@@ -5,6 +5,7 @@
 //! Leiden/Louvain since it's simpler, deterministic with a fixed seed, and matches
 //! the WeftOS `causal.rs` community detection approach.
 
+use crate::eml_models::ClusterThresholdModel;
 use crate::entity::EntityId;
 use crate::model::KnowledgeGraph;
 use std::collections::HashMap;
@@ -80,6 +81,97 @@ pub fn cluster(kg: &KnowledgeGraph) -> HashMap<usize, Vec<EntityId>> {
     }
 
     // Re-index by size descending
+    final_communities.sort_by(|a, b| b.len().cmp(&a.len()));
+    final_communities
+        .into_iter()
+        .enumerate()
+        .map(|(i, mut nodes)| {
+            nodes.sort_by(|a, b| a.0.cmp(&b.0));
+            (i, nodes)
+        })
+        .collect()
+}
+
+/// Run community detection with an optional EML threshold model.
+///
+/// When `eml_model` is `Some` and trained, uses learned thresholds
+/// for max community fraction, min split size, and cohesion.
+/// Pass `None` to use the original hardcoded constants.
+pub fn cluster_eml(
+    kg: &KnowledgeGraph,
+    eml_model: Option<&ClusterThresholdModel>,
+) -> HashMap<usize, Vec<EntityId>> {
+    if kg.node_count() == 0 {
+        return HashMap::new();
+    }
+
+    if kg.edge_count() == 0 {
+        let mut result = HashMap::new();
+        let mut ids: Vec<EntityId> = kg.entity_ids().cloned().collect();
+        ids.sort_by(|a, b| a.0.cmp(&b.0));
+        for (i, id) in ids.into_iter().enumerate() {
+            result.insert(i, vec![id]);
+        }
+        return result;
+    }
+
+    // Resolve thresholds from EML model or hardcoded defaults.
+    let (max_fraction, min_split) = match eml_model {
+        Some(model) if model.is_trained() => {
+            let node_count = kg.node_count() as f64;
+            let edge_density = if kg.node_count() > 1 {
+                kg.edge_count() as f64
+                    / (kg.node_count() as f64 * (kg.node_count() as f64 - 1.0))
+            } else {
+                0.0
+            };
+            // Use 0.0 for community count since we haven't computed it yet.
+            let (frac, split, _cohesion) = model.predict(node_count, edge_density, 0.0);
+            (frac, split as usize)
+        }
+        _ => (MAX_COMMUNITY_FRACTION, MIN_SPLIT_SIZE),
+    };
+
+    // Separate isolates from connected nodes.
+    let isolates: Vec<EntityId> = kg
+        .entity_ids()
+        .filter(|id| kg.degree(id) == 0)
+        .cloned()
+        .collect();
+    let connected: Vec<EntityId> = kg
+        .entity_ids()
+        .filter(|id| kg.degree(id) > 0)
+        .cloned()
+        .collect();
+
+    let mut raw: HashMap<usize, Vec<EntityId>> = HashMap::new();
+    if !connected.is_empty() {
+        let partition = label_propagation(kg, &connected);
+        for (node, cid) in partition {
+            raw.entry(cid).or_default().push(node);
+        }
+    }
+
+    let mut next_cid = raw.keys().copied().max().unwrap_or(0) + 1;
+    for node in isolates {
+        raw.insert(next_cid, vec![node]);
+        next_cid += 1;
+    }
+
+    let max_size = std::cmp::max(
+        min_split,
+        (kg.node_count() as f64 * max_fraction) as usize,
+    );
+
+    let mut final_communities: Vec<Vec<EntityId>> = Vec::new();
+    for nodes in raw.into_values() {
+        if nodes.len() > max_size {
+            final_communities.extend(split_community(kg, &nodes));
+        } else {
+            final_communities.push(nodes);
+        }
+    }
+
     final_communities.sort_by(|a, b| b.len().cmp(&a.len()));
     final_communities
         .into_iter()

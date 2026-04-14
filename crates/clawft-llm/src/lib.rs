@@ -63,6 +63,11 @@ pub mod retry;
 #[cfg(feature = "native")]
 pub mod router;
 
+#[cfg(feature = "native")]
+pub mod eml_retry;
+#[cfg(feature = "native")]
+pub use eml_retry::RetryModel;
+
 #[cfg(feature = "browser")]
 pub mod browser_transport;
 

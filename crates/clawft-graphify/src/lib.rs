@@ -24,6 +24,7 @@ pub mod model;
 pub mod pipeline;
 pub mod relationship;
 pub mod report;
+pub mod eml_models;
 pub mod domain;
 pub mod hooks;
 pub mod ingest;

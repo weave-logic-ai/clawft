@@ -33,6 +33,9 @@ pub enum BenchCmd {
         /// Run the 60-second endurance test (phase 6).
         #[arg(long)]
         endurance: bool,
+        /// Use EML learned scoring instead of hardcoded piecewise-linear.
+        #[arg(long)]
+        learned: bool,
     },
     /// Show results from the last benchmark run.
     Last,
@@ -41,8 +44,8 @@ pub enum BenchCmd {
 /// Run the benchmark command.
 pub async fn run(cmd: BenchCmd) -> anyhow::Result<()> {
     match cmd {
-        BenchCmd::Run { format, iterations, quick, endurance } => {
-            run_benchmark(&format, iterations, quick, endurance).await
+        BenchCmd::Run { format, iterations, quick, endurance, learned } => {
+            run_benchmark(&format, iterations, quick, endurance, learned).await
         }
         BenchCmd::Last => show_last().await,
     }
@@ -50,7 +53,7 @@ pub async fn run(cmd: BenchCmd) -> anyhow::Result<()> {
 
 /// Run with defaults (no subcommand).
 pub async fn run_default() -> anyhow::Result<()> {
-    run_benchmark("table", 100, false, false).await
+    run_benchmark("table", 100, false, false, false).await
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -160,7 +163,7 @@ struct PlatformInfo {
 // Main benchmark runner
 // ═══════════════════════════════════════════════════════════════════
 
-async fn run_benchmark(format: &str, iterations: u32, quick: bool, endurance: bool) -> anyhow::Result<()> {
+async fn run_benchmark(format: &str, iterations: u32, quick: bool, endurance: bool, learned: bool) -> anyhow::Result<()> {
     let mut client = DaemonClient::connect()
         .await
         .ok_or_else(|| anyhow::anyhow!("no kernel running — start with: weaver kernel start"))?;
@@ -306,7 +309,26 @@ async fn run_benchmark(format: &str, iterations: u32, quick: bool, endurance: bo
         endurance_result.as_ref(),
     );
 
-    let overall_score: f64 = dimensions.iter().map(|d| d.score * d.weight).sum();
+    // Extract raw metrics for EML scoring
+    let raw_metrics = extract_raw_metrics(&dimensions, &rpc_results, &compute_results, &scalability, stress.as_ref(), endurance_result.as_ref());
+
+    let (overall_score, scoring_mode) = if learned {
+        let scorer = super::bench_eml::BenchmarkScorerModel::load(
+            &super::bench_eml::BenchmarkScorerModel::model_dir(),
+        );
+        let eml_dims = scorer.score_dimensions(&raw_metrics);
+        let composite = scorer.score(&raw_metrics);
+        let mode = if scorer.is_composite_trained() {
+            "EML (trained)"
+        } else {
+            "EML (untrained, fallback)"
+        };
+        (composite, mode)
+    } else {
+        let score: f64 = dimensions.iter().map(|d| d.score * d.weight).sum();
+        (score, "hardcoded")
+    };
+
     let grade = grade_from_score(overall_score);
 
     let report = BenchReport {
@@ -335,7 +357,7 @@ async fn run_benchmark(format: &str, iterations: u32, quick: bool, endurance: bo
     if format == "json" {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        println!("-- Scoring --");
+        println!("-- Scoring ({scoring_mode}) --");
         for d in &dimensions {
             println!("  {:<14} {:>3.0}/100  ({})", format!("{}:", d.name), d.score, d.detail);
         }
@@ -912,9 +934,65 @@ fn compute_scores(
     ]
 }
 
+/// Extract raw metrics for EML scoring from the benchmark results.
+///
+/// Returns `[throughput_ops, latency_p95_us, scalability_coeff, stability_ratio, endurance_drift_pct]`.
+fn extract_raw_metrics(
+    _dimensions: &[DimensionScore],
+    rpc_results: &[BenchResult],
+    compute_results: &[BenchResult],
+    scalability: &ScalabilityResult,
+    stress: Option<&StressResult>,
+    endurance: Option<&EnduranceResult>,
+) -> [f64; 5] {
+    // Throughput: peak ops/sec
+    let throughput = stress
+        .map(|s| s.burst_ops_per_sec)
+        .or_else(|| {
+            rpc_results.iter()
+                .filter(|r| r.status.starts_with("ok"))
+                .map(|r| r.stats.ops_per_sec)
+                .fold(None, |max: Option<f64>, x| Some(max.map_or(x, |m: f64| m.max(x))))
+        })
+        .unwrap_or(0.0);
+
+    // Latency: avg P95 on compute
+    let compute_p95s: Vec<f64> = compute_results.iter()
+        .filter(|r| r.status.starts_with("ok"))
+        .map(|r| r.stats.p95_us)
+        .collect();
+    let latency = if compute_p95s.is_empty() {
+        10_000.0
+    } else {
+        compute_p95s.iter().sum::<f64>() / compute_p95s.len() as f64
+    };
+
+    // Scalability coefficient
+    let scalability_coeff = scalability.coefficient;
+
+    // Stability: avg P99/P50 ratio
+    let ratios: Vec<f64> = compute_results.iter()
+        .filter(|r| r.status.starts_with("ok") && r.stats.p50_us > 0.0)
+        .map(|r| r.stats.p99_us / r.stats.p50_us)
+        .collect();
+    let stability = if ratios.is_empty() {
+        20.0
+    } else {
+        ratios.iter().sum::<f64>() / ratios.len() as f64
+    };
+
+    // Endurance drift
+    let endurance_drift = match endurance {
+        Some(e) => e.drift_coefficient_pct,
+        None => stress.map(|s| s.sustained_p99_drift_pct).unwrap_or(50.0),
+    };
+
+    [throughput, latency, scalability_coeff, stability, endurance_drift]
+}
+
 /// Throughput score: ops/sec on mixed workload.
 /// 100K+ = 100, 50K = 80, 20K = 60, 10K = 40, 5K = 20, <1K = 0
-fn score_throughput(ops: f64) -> f64 {
+pub fn score_throughput(ops: f64) -> f64 {
     if ops >= 100_000.0 { return 100.0; }
     if ops <= 1_000.0 { return 0.0; }
     // Piecewise linear interpolation
@@ -931,7 +1009,7 @@ fn score_throughput(ops: f64) -> f64 {
 
 /// Latency score: P95 compute in microseconds.
 /// <50us = 100, 100us = 80, 500us = 60, 1ms = 40, 5ms = 20, >10ms = 0
-fn score_latency(p95_us: f64) -> f64 {
+pub fn score_latency(p95_us: f64) -> f64 {
     if p95_us <= 50.0 { return 100.0; }
     if p95_us >= 10_000.0 { return 0.0; }
     // Inverted: lower is better
@@ -948,7 +1026,7 @@ fn score_latency(p95_us: f64) -> f64 {
 
 /// Scalability score: throughput at 32x / throughput at 1x.
 /// >0.9 = 100, 0.7 = 70, 0.5 = 50, <0.3 = 0
-fn score_scalability(coefficient: f64) -> f64 {
+pub fn score_scalability(coefficient: f64) -> f64 {
     if coefficient >= 0.9 { return 100.0; }
     if coefficient <= 0.3 { return 0.0; }
     let breakpoints: &[(f64, f64)] = &[
@@ -962,7 +1040,7 @@ fn score_scalability(coefficient: f64) -> f64 {
 
 /// Stability score: P99/P50 ratio.
 /// <1.5 = 100, 2.0 = 80, 3.0 = 60, 5.0 = 40, 10.0 = 20, >20 = 0
-fn score_stability(ratio: f64) -> f64 {
+pub fn score_stability(ratio: f64) -> f64 {
     if ratio <= 1.5 { return 100.0; }
     if ratio >= 20.0 { return 0.0; }
     let breakpoints: &[(f64, f64)] = &[
@@ -978,7 +1056,7 @@ fn score_stability(ratio: f64) -> f64 {
 
 /// Endurance score: drift coefficient percentage.
 /// <1% = 100, 5% = 80, 10% = 60, 25% = 40, 50% = 20, >100% = 0
-fn score_endurance(drift_pct: f64) -> f64 {
+pub fn score_endurance(drift_pct: f64) -> f64 {
     let d = drift_pct.abs();
     if d <= 1.0 { return 100.0; }
     if d >= 100.0 { return 0.0; }
