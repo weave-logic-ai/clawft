@@ -6,6 +6,7 @@
 //!
 //! This module is compiled only when the `ecc` feature is enabled.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
@@ -45,6 +46,49 @@ impl Default for HnswServiceConfig {
             default_dimensions: 384,
         }
     }
+}
+
+// ── Multi-key types ─────────────────────────────────────────────────────
+
+/// Configuration for multi-key HNSW indexing.
+///
+/// When enabled, entities can be indexed under multiple embedding vectors
+/// (e.g., by name, context, description) so that vague queries have
+/// better recall.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultiKeyConfig {
+    /// Whether multi-key indexing is enabled.
+    pub enabled: bool,
+    /// Maximum number of keys per entity (default: 4).
+    pub max_keys_per_entity: usize,
+    /// Recognised key types (default: `["name", "context", "description"]`).
+    pub key_types: Vec<String>,
+}
+
+impl Default for MultiKeyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_keys_per_entity: 4,
+            key_types: vec![
+                "name".to_string(),
+                "context".to_string(),
+                "description".to_string(),
+            ],
+        }
+    }
+}
+
+/// A single search key for multi-key insertion.
+///
+/// Each key carries a `key_type` label (e.g., `"name"`, `"context"`) and
+/// the pre-computed embedding vector for that textual representation.
+#[derive(Debug, Clone)]
+pub struct MultiKey {
+    /// The kind of key (`"name"`, `"context"`, `"relationship"`, `"docstring"`, etc.).
+    pub key_type: String,
+    /// The embedding vector for this key's textual representation.
+    pub embedding: Vec<f32>,
 }
 
 // ── Search result ────────────────────────────────────────────────────────
@@ -177,6 +221,63 @@ impl HnswService {
                     .collect()
             })
             .collect()
+    }
+
+    /// Insert an entity with multiple search keys.
+    ///
+    /// Each key generates a separate embedding entry in the store, all
+    /// sharing the same `primary_id` prefix. The stored ID has the form
+    /// `"{primary_id}::{key_type}"`. This allows the entity to be found
+    /// via different query formulations (name, context, description, etc.).
+    ///
+    /// Keys beyond `max_keys` are silently dropped.
+    pub fn insert_multi_key(
+        &self,
+        primary_id: String,
+        keys: &[MultiKey],
+        metadata: serde_json::Value,
+        max_keys: usize,
+    ) {
+        let limit = keys.len().min(max_keys);
+        for key in &keys[..limit] {
+            let sub_id = format!("{}::{}", primary_id, key.key_type);
+            self.insert(sub_id, key.embedding.clone(), metadata.clone());
+        }
+    }
+
+    /// Search with deduplication by primary entity ID.
+    ///
+    /// Because multi-key insertion stores several embeddings for one entity,
+    /// a single query may match multiple keys of the same entity. This
+    /// method searches for `top_k * 3` candidates, deduplicates by
+    /// stripping the `"::key_type"` suffix, and returns up to `top_k`
+    /// unique entities. The best (highest) score among duplicates is kept.
+    pub fn search_dedup(&self, query: &[f32], top_k: usize) -> Vec<HnswSearchResult> {
+        let raw = self.search(query, top_k * 3);
+
+        let mut seen = HashSet::new();
+        let mut results = Vec::with_capacity(top_k);
+
+        for r in raw {
+            let primary_id = r
+                .id
+                .find("::")
+                .map(|pos| r.id[..pos].to_string())
+                .unwrap_or_else(|| r.id.clone());
+
+            if seen.insert(primary_id.clone()) {
+                results.push(HnswSearchResult {
+                    id: primary_id,
+                    score: r.score,
+                    metadata: r.metadata,
+                });
+            }
+            if results.len() >= top_k {
+                break;
+            }
+        }
+
+        results
     }
 
     /// Return the number of entries currently in the store.
@@ -374,6 +475,44 @@ impl SystemService for HnswService {
     }
 }
 
+// ── Key-generation helpers ──────────────────────────────────────────────
+
+/// Generate search-key text pairs for a graphify [`Entity`]-like value.
+///
+/// Each returned tuple is `(key_type, text)`. The caller is responsible
+/// for embedding the `text` into a vector (e.g., via the embedding service)
+/// before passing it to [`HnswService::insert_multi_key`].
+///
+/// The function accepts the entity fields directly so it does not pull in
+/// a compile-time dependency on `clawft-graphify`.
+pub fn entity_search_keys(
+    label: &str,
+    source_file: Option<&str>,
+    metadata: &serde_json::Value,
+) -> Vec<(String, String)> {
+    let mut keys = vec![("name".to_string(), label.to_string())];
+
+    // Add source-file context key.
+    if let Some(src) = source_file {
+        keys.push((
+            "context".to_string(),
+            format!("{} in {}", label, src),
+        ));
+    }
+
+    // Add description key from metadata, if present.
+    if let Some(desc) = metadata.get("description").and_then(|v| v.as_str()) {
+        keys.push(("description".to_string(), desc.to_string()));
+    }
+
+    // Add relationship summary key from metadata, if present.
+    if let Some(rels) = metadata.get("relationships").and_then(|v| v.as_str()) {
+        keys.push(("relationship".to_string(), rels.to_string()));
+    }
+
+    keys
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -533,5 +672,186 @@ mod tests {
         assert!((results[0].score - 1.0).abs() < 0.01);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ── Multi-key tests ─────────────────────────────────────────────
+
+    #[test]
+    fn multi_key_config_default() {
+        let cfg = MultiKeyConfig::default();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.max_keys_per_entity, 4);
+        assert_eq!(cfg.key_types.len(), 3);
+    }
+
+    #[test]
+    fn insert_multi_key_creates_subentries() {
+        let svc = make_service();
+        let keys = vec![
+            MultiKey {
+                key_type: "name".into(),
+                embedding: vec![1.0, 0.0, 0.0],
+            },
+            MultiKey {
+                key_type: "context".into(),
+                embedding: vec![0.7, 0.7, 0.0],
+            },
+            MultiKey {
+                key_type: "description".into(),
+                embedding: vec![0.0, 0.0, 1.0],
+            },
+        ];
+
+        svc.insert_multi_key(
+            "entity_a".into(),
+            &keys,
+            serde_json::json!({"label": "FooBar"}),
+            4,
+        );
+
+        // Three sub-entries should exist.
+        assert_eq!(svc.len(), 3);
+        assert_eq!(svc.insert_count(), 3);
+    }
+
+    #[test]
+    fn insert_multi_key_respects_max_keys() {
+        let svc = make_service();
+        let keys = vec![
+            MultiKey { key_type: "name".into(), embedding: vec![1.0, 0.0] },
+            MultiKey { key_type: "context".into(), embedding: vec![0.0, 1.0] },
+            MultiKey { key_type: "description".into(), embedding: vec![0.5, 0.5] },
+        ];
+
+        svc.insert_multi_key("e1".into(), &keys, serde_json::json!({}), 2);
+
+        // Only 2 keys should have been inserted.
+        assert_eq!(svc.len(), 2);
+    }
+
+    #[test]
+    fn search_dedup_merges_multi_key_results() {
+        let svc = make_service();
+
+        // Insert entity_a with two keys.
+        let keys_a = vec![
+            MultiKey {
+                key_type: "name".into(),
+                embedding: vec![1.0, 0.0, 0.0],
+            },
+            MultiKey {
+                key_type: "context".into(),
+                embedding: vec![0.9, 0.1, 0.0],
+            },
+        ];
+        svc.insert_multi_key(
+            "entity_a".into(),
+            &keys_a,
+            serde_json::json!({"label": "A"}),
+            4,
+        );
+
+        // Insert entity_b with one key.
+        svc.insert("entity_b".into(), vec![0.0, 1.0, 0.0], serde_json::json!({"label": "B"}));
+
+        // Query near entity_a's embeddings.
+        let results = svc.search_dedup(&[1.0, 0.0, 0.0], 2);
+
+        // entity_a should appear only once despite having two matching keys.
+        let a_count = results.iter().filter(|r| r.id == "entity_a").count();
+        assert_eq!(a_count, 1, "entity_a should be deduplicated to one result");
+
+        // The top result should be entity_a (closest to the query).
+        assert_eq!(results[0].id, "entity_a");
+    }
+
+    #[test]
+    fn search_dedup_preserves_non_multikey_ids() {
+        let svc = make_service();
+
+        // Insert a regular (non-multi-key) entry.
+        svc.insert("plain".into(), vec![1.0, 0.0], serde_json::json!({}));
+
+        let results = svc.search_dedup(&[1.0, 0.0], 1);
+        assert_eq!(results.len(), 1);
+        // ID should be preserved as-is (no "::" suffix to strip).
+        assert_eq!(results[0].id, "plain");
+    }
+
+    #[test]
+    fn search_dedup_respects_top_k() {
+        let svc = make_service();
+
+        // Insert 3 entities with 2 keys each.
+        for i in 0..3 {
+            let keys = vec![
+                MultiKey {
+                    key_type: "name".into(),
+                    embedding: vec![1.0 - (i as f32 * 0.3), i as f32 * 0.3, 0.0],
+                },
+                MultiKey {
+                    key_type: "ctx".into(),
+                    embedding: vec![1.0 - (i as f32 * 0.2), i as f32 * 0.2, 0.1],
+                },
+            ];
+            svc.insert_multi_key(
+                format!("e{i}"),
+                &keys,
+                serde_json::json!({}),
+                4,
+            );
+        }
+
+        let results = svc.search_dedup(&[1.0, 0.0, 0.0], 2);
+        assert!(results.len() <= 2, "should return at most top_k results");
+
+        // All IDs should be unique.
+        let ids: HashSet<_> = results.iter().map(|r| &r.id).collect();
+        assert_eq!(ids.len(), results.len(), "all result IDs should be unique");
+    }
+
+    // ── entity_search_keys helper tests ─────────────────────────────
+
+    #[test]
+    fn entity_search_keys_name_only() {
+        let keys = entity_search_keys("MyFunc", None, &serde_json::json!({}));
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].0, "name");
+        assert_eq!(keys[0].1, "MyFunc");
+    }
+
+    #[test]
+    fn entity_search_keys_with_source_file() {
+        let keys = entity_search_keys(
+            "MyFunc",
+            Some("src/lib.rs"),
+            &serde_json::json!({}),
+        );
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[1].0, "context");
+        assert_eq!(keys[1].1, "MyFunc in src/lib.rs");
+    }
+
+    #[test]
+    fn entity_search_keys_with_description() {
+        let meta = serde_json::json!({"description": "Handles user auth"});
+        let keys = entity_search_keys("login", None, &meta);
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[1].0, "description");
+        assert_eq!(keys[1].1, "Handles user auth");
+    }
+
+    #[test]
+    fn entity_search_keys_all_fields() {
+        let meta = serde_json::json!({
+            "description": "Core auth handler",
+            "relationships": "calls TokenService, used by Router"
+        });
+        let keys = entity_search_keys("login", Some("src/auth.rs"), &meta);
+        assert_eq!(keys.len(), 4);
+        assert_eq!(keys[0].0, "name");
+        assert_eq!(keys[1].0, "context");
+        assert_eq!(keys[2].0, "description");
+        assert_eq!(keys[3].0, "relationship");
     }
 }

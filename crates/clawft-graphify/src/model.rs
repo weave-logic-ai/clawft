@@ -307,6 +307,45 @@ impl KnowledgeGraph {
         self.node_ids()
     }
 
+    /// Remove an entity and all its incident edges.
+    ///
+    /// Returns `true` if the entity existed and was removed.
+    pub fn remove_entity(&mut self, id: &EntityId) -> bool {
+        let Some(idx) = self.entity_index.remove(id) else {
+            return false;
+        };
+
+        // Collect edge indices to remove (both directions).
+        let edge_indices: Vec<petgraph::graph::EdgeIndex> = self
+            .graph
+            .edges_directed(idx, Direction::Outgoing)
+            .chain(self.graph.edges_directed(idx, Direction::Incoming))
+            .map(|e| e.id())
+            .collect();
+
+        // Remove edges in reverse-sorted order to keep indices stable.
+        let mut sorted = edge_indices;
+        sorted.sort_unstable();
+        sorted.dedup();
+        for ei in sorted.into_iter().rev() {
+            self.graph.remove_edge(ei);
+        }
+
+        // Remove the node itself. petgraph swaps the last node into this slot,
+        // so we must fix up entity_index for the swapped node.
+        let last_idx = NodeIndex::new(self.graph.node_count() - 1);
+        self.graph.remove_node(idx);
+
+        // If the removed node was not the last, petgraph moved last_idx -> idx.
+        if idx != last_idx && idx.index() < self.graph.node_count() {
+            // The node that was at last_idx is now at idx.
+            let moved_id = self.graph[idx].id.clone();
+            self.entity_index.insert(moved_id, idx);
+        }
+
+        true
+    }
+
     /// Collect all distinct source files referenced by entities.
     pub fn source_files(&self) -> Vec<String> {
         let mut files: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -458,6 +497,51 @@ mod tests {
         let sub = kg.subgraph(&[e1.id.clone(), e2.id.clone()]);
         assert_eq!(sub.entity_count(), 2);
         assert_eq!(sub.relationship_count(), 1); // only e1->e2, not e2->e3
+    }
+
+    #[test]
+    fn remove_entity_basic() {
+        let mut kg = KnowledgeGraph::new();
+        let e1 = make_entity("a");
+        let e2 = make_entity("b");
+        kg.add_entity(e1.clone());
+        kg.add_entity(e2.clone());
+        kg.add_relationship(make_rel(&e1, &e2));
+        assert_eq!(kg.entity_count(), 2);
+        assert_eq!(kg.relationship_count(), 1);
+
+        assert!(kg.remove_entity(&e2.id));
+        assert_eq!(kg.entity_count(), 1);
+        assert_eq!(kg.relationship_count(), 0);
+        assert!(kg.entity(&e1.id).is_some());
+        assert!(kg.entity(&e2.id).is_none());
+    }
+
+    #[test]
+    fn remove_entity_not_found() {
+        let mut kg = KnowledgeGraph::new();
+        let e1 = make_entity("a");
+        assert!(!kg.remove_entity(&e1.id));
+    }
+
+    #[test]
+    fn remove_entity_preserves_others() {
+        let mut kg = KnowledgeGraph::new();
+        let e1 = make_entity("a");
+        let e2 = make_entity("b");
+        let e3 = make_entity("c");
+        kg.add_entity(e1.clone());
+        kg.add_entity(e2.clone());
+        kg.add_entity(e3.clone());
+        kg.add_relationship(make_rel(&e1, &e2));
+        kg.add_relationship(make_rel(&e2, &e3));
+
+        kg.remove_entity(&e2.id);
+        assert_eq!(kg.entity_count(), 2);
+        assert_eq!(kg.relationship_count(), 0);
+        // Both remaining entities should still be findable.
+        assert!(kg.entity(&e1.id).is_some());
+        assert!(kg.entity(&e3.id).is_some());
     }
 
     #[test]

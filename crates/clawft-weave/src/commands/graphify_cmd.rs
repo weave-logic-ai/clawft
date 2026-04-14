@@ -366,7 +366,9 @@ async fn run_diff(
 }
 
 async fn run_rebuild(root: &std::path::Path, clean: bool) -> anyhow::Result<()> {
-    println!("Rebuilding knowledge graph from: {}", root.display());
+    let graph_path = root.join("graphify-out").join("graph.json");
+    let manifest_path = root.join("graphify-out").join("manifest.json");
+
     if clean {
         println!("Clearing cache...");
         let cache_dir = root.join(".weftos").join("graphify-cache");
@@ -374,9 +376,20 @@ async fn run_rebuild(root: &std::path::Path, clean: bool) -> anyhow::Result<()> 
             std::fs::remove_dir_all(&cache_dir)?;
             println!("Cache cleared.");
         }
+        // Also remove manifest to force full rebuild
+        if manifest_path.exists() {
+            std::fs::remove_file(&manifest_path)?;
+        }
     }
 
-    run_graphify_pipeline(root)
+    // If a previous graph and manifest exist, run incremental.
+    if !clean && graph_path.exists() && manifest_path.exists() {
+        println!("Previous graph found -- running incremental update...");
+        run_graphify_pipeline_incremental(root, &graph_path, &manifest_path)
+    } else {
+        println!("Rebuilding knowledge graph from: {}", root.display());
+        run_graphify_pipeline(root)
+    }
 }
 
 /// Shared extraction pipeline used by both `rebuild` and local `ingest`.
@@ -464,7 +477,14 @@ fn run_graphify_pipeline(root: &std::path::Path) -> anyhow::Result<()> {
         println!("Wrote {}", report_path.display());
     }
 
-    // 8. Print summary
+    // 8. Save manifest for incremental detection on next run
+    let manifest = clawft_graphify::extract::detect::Manifest::from_detection(&detection);
+    let manifest_path = out_dir.join("manifest.json");
+    manifest
+        .save(&manifest_path)
+        .map_err(|e| anyhow::anyhow!("Failed to save manifest: {e}"))?;
+
+    // 9. Print summary
     println!("\nGraph summary:");
     println!("  Nodes: {}", graph.node_count());
     println!("  Edges: {}", graph.edge_count());
@@ -478,6 +498,152 @@ fn run_graphify_pipeline(root: &std::path::Path) -> anyhow::Result<()> {
         }
     }
     println!("  Files processed: {}", result.stats.files_processed);
+
+    Ok(())
+}
+
+/// Incremental pipeline: detect changes, extract only changed files, merge.
+fn run_graphify_pipeline_incremental(
+    root: &std::path::Path,
+    graph_path: &std::path::Path,
+    manifest_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    use clawft_graphify::build;
+    use clawft_graphify::extract::detect;
+    use clawft_graphify::export;
+    use clawft_graphify::pipeline::{Pipeline, PipelineConfig};
+    use clawft_graphify::report;
+
+    let start = std::time::Instant::now();
+
+    // 1. Load manifest and run incremental detection.
+    let manifest = detect::Manifest::load(manifest_path);
+    let incr = detect::detect_incremental(root, &manifest)
+        .map_err(|e| anyhow::anyhow!("Incremental detection failed: {e}"))?;
+
+    let new_count: usize = incr.new_files.values().map(|v| v.len()).sum();
+    let deleted_count = incr.deleted_files.len();
+
+    if new_count == 0 && deleted_count == 0 {
+        println!("No changes detected -- graph is up to date.");
+        return Ok(());
+    }
+
+    println!(
+        "Incremental: {} changed/new file(s), {} deleted file(s)",
+        new_count, deleted_count
+    );
+
+    // 2. Load existing graph from JSON.
+    let data = std::fs::read_to_string(graph_path)?;
+    let json_value: serde_json::Value = serde_json::from_str(&data)?;
+    let json_for_build = if json_value.get("edges").is_none() && json_value.get("links").is_some() {
+        let mut obj = json_value.clone();
+        if let Some(links) = obj.get("links").cloned() {
+            obj.as_object_mut().unwrap().insert("edges".to_string(), links);
+        }
+        obj
+    } else {
+        json_value
+    };
+    let existing_graph = build::build_from_json(&json_for_build)
+        .map_err(|e| anyhow::anyhow!("Failed to load existing graph: {e}"))?;
+
+    // 3. Build extractions only for new/changed files.
+    let incr_detection = detect::DetectionResult {
+        files: incr.new_files.clone(),
+        total_files: new_count,
+        total_words: 0, // not critical for incremental
+        needs_graph: true,
+        warning: None,
+        skipped_sensitive: vec![],
+    };
+    let extractions = build_extractions_from_detection(&incr_detection);
+
+    println!(
+        "Extracting {} file(s)...",
+        extractions.len()
+    );
+
+    // 4. Run incremental pipeline: merge -> cluster -> analyze.
+    let pipeline_detection = clawft_graphify::model::DetectionResult {
+        total_files: incr.full.total_files,
+        total_words: incr.full.total_words,
+        warning: incr.full.warning.clone(),
+    };
+    let config = PipelineConfig::default();
+    let pipeline = Pipeline::new(config);
+    let result = pipeline
+        .run_incremental(
+            existing_graph,
+            extractions,
+            &incr.deleted_files,
+            pipeline_detection.clone(),
+        )
+        .map_err(|e| anyhow::anyhow!("Incremental pipeline failed: {e}"))?;
+
+    let elapsed = start.elapsed();
+
+    // 5. Print merge stats.
+    if let Some(ref ms) = result.merge_stats {
+        println!(
+            "Incremental: +{} entities, ~{} updated, -{} removed, \
+             +{} rels, -{} rels ({:.1}s)",
+            ms.entities_added,
+            ms.entities_updated,
+            ms.entities_removed,
+            ms.relationships_added,
+            ms.relationships_removed,
+            elapsed.as_secs_f64(),
+        );
+    }
+
+    // 6. Output directory & exports.
+    let out_dir = root.join("graphify-out");
+    std::fs::create_dir_all(&out_dir)?;
+
+    let mut graph = result.graph;
+    if let Some(ref analysis) = result.analysis {
+        graph.communities = Some(analysis.communities.clone());
+    }
+
+    export::export(&graph, export::ExportFormat::Json, graph_path)
+        .map_err(|e| anyhow::anyhow!("JSON export failed: {e}"))?;
+    println!("Wrote {}", graph_path.display());
+
+    if let Some(ref analysis) = result.analysis {
+        let token_cost = report::TokenCost {
+            input: result.stats.input_tokens as usize,
+            output: result.stats.output_tokens as usize,
+        };
+        let root_str = root.to_string_lossy();
+        let report_content =
+            report::generate(&graph, analysis, &pipeline_detection, &token_cost, &root_str);
+        let report_path = out_dir.join("GRAPH_REPORT.md");
+        std::fs::write(&report_path, &report_content)?;
+        println!("Wrote {}", report_path.display());
+    }
+
+    // 7. Save updated manifest.
+    let new_manifest = detect::Manifest::from_detection(&incr.full);
+    new_manifest
+        .save(manifest_path)
+        .map_err(|e| anyhow::anyhow!("Failed to save manifest: {e}"))?;
+
+    // 8. Print summary.
+    println!("\nGraph summary:");
+    println!("  Nodes: {}", graph.node_count());
+    println!("  Edges: {}", graph.edge_count());
+    if let Some(ref analysis) = result.analysis {
+        println!("  Communities: {}", analysis.communities.len());
+        if !analysis.god_nodes.is_empty() {
+            println!(
+                "  Top god node: {} ({} edges)",
+                analysis.god_nodes[0].label, analysis.god_nodes[0].edges
+            );
+        }
+    }
+    println!("  Files processed (incremental): {}", result.stats.files_processed);
 
     Ok(())
 }

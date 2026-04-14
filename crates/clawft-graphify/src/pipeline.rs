@@ -3,6 +3,7 @@
 //! Ported from Python `graphify/pipeline.py`.
 
 use crate::analyze;
+use crate::build::MergeStats;
 use crate::cluster;
 use crate::entity::EntityId;
 use crate::model::{
@@ -76,6 +77,8 @@ pub struct PipelineResult {
     pub analysis: Option<AnalysisResult>,
     pub stats: ExtractionStats,
     pub detection: DetectionResult,
+    /// Populated only for incremental runs.
+    pub merge_stats: Option<MergeStats>,
 }
 
 // ---------------------------------------------------------------------------
@@ -188,6 +191,98 @@ impl Pipeline {
             analysis,
             stats,
             detection,
+            merge_stats: None,
+        })
+    }
+
+    /// Run incrementally: merge new extractions into an existing graph, then
+    /// re-cluster and re-analyze.
+    ///
+    /// `existing_graph` is the previously-built graph (loaded from JSON).
+    /// `new_extractions` are the extraction results for new/changed files only.
+    /// `removed_files` are file paths that existed in the last run but have
+    /// been deleted from disk.
+    pub fn run_incremental(
+        &self,
+        mut existing_graph: KnowledgeGraph,
+        new_extractions: Vec<ExtractionResult>,
+        removed_files: &[String],
+        detection: DetectionResult,
+    ) -> Result<PipelineResult, GraphifyError> {
+        // Aggregate stats from new extractions.
+        let mut stats = ExtractionStats::default();
+        for ext in &new_extractions {
+            stats.files_processed += 1;
+            stats.entities_extracted += ext.entities.len();
+            stats.relationships_extracted += ext.relationships.len();
+            stats.input_tokens += ext.input_tokens;
+            stats.output_tokens += ext.output_tokens;
+        }
+
+        // Merge into existing graph.
+        let merge_stats =
+            crate::build::merge(&mut existing_graph, &new_extractions, removed_files);
+
+        tracing::info!(
+            entities_added = merge_stats.entities_added,
+            entities_updated = merge_stats.entities_updated,
+            entities_removed = merge_stats.entities_removed,
+            relationships_added = merge_stats.relationships_added,
+            relationships_removed = merge_stats.relationships_removed,
+            "Incremental merge complete"
+        );
+
+        // Re-cluster + re-analyze on the merged graph.
+        let analysis = if self.config.cluster || self.config.analyze {
+            let communities = if self.config.cluster {
+                cluster::cluster(&existing_graph)
+            } else {
+                HashMap::new()
+            };
+
+            let community_labels = cluster::auto_label_all(&existing_graph, &communities);
+            let cohesion_scores = cluster::score_all(&existing_graph, &communities);
+
+            let (god_nodes, surprising_connections, questions) = if self.config.analyze {
+                let gn = analyze::god_nodes(&existing_graph, self.config.god_nodes_top_n);
+                let sc = analyze::surprising_connections(
+                    &existing_graph,
+                    &communities,
+                    self.config.surprises_top_n,
+                );
+                let qs = analyze::suggest_questions(
+                    &existing_graph,
+                    &communities,
+                    &community_labels,
+                    self.config.questions_top_n,
+                );
+                (gn, sc, qs)
+            } else {
+                (vec![], vec![], vec![])
+            };
+
+            Some(AnalysisResult {
+                god_nodes,
+                surprising_connections,
+                questions,
+                communities,
+                community_labels,
+                cohesion_scores,
+            })
+        } else {
+            None
+        };
+
+        // Update stats with totals from the merged graph.
+        stats.entities_extracted = existing_graph.entity_count();
+        stats.relationships_extracted = existing_graph.relationship_count();
+
+        Ok(PipelineResult {
+            graph: existing_graph,
+            analysis,
+            stats,
+            detection,
+            merge_stats: Some(merge_stats),
         })
     }
 

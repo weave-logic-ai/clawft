@@ -291,7 +291,10 @@ pub use governance::{
 };
 pub use health::{HealthStatus, HealthSystem, OverallHealth};
 #[cfg(feature = "ecc")]
-pub use hnsw_service::{HnswSearchResult, HnswService, HnswServiceConfig};
+pub use hnsw_service::{
+    entity_search_keys, HnswSearchResult, HnswService, HnswServiceConfig, MultiKey,
+    MultiKeyConfig,
+};
 #[cfg(feature = "ecc")]
 pub use vector_backend::{SearchResult as VectorSearchResult, VectorBackend, VectorBackendKind, VectorError, VectorResult};
 #[cfg(feature = "ecc")]

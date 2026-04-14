@@ -40,6 +40,7 @@ pub mod semantic_extract;
 #[cfg(feature = "vision-extract")]
 pub mod vision_extract;
 
+pub use build::MergeStats;
 pub use entity::{DomainTag, EntityId, EntityType, FileType};
 pub use model::{
     DetectionResult, Entity, ExtractionResult, ExtractionStats, GodNode, GraphDiff, Hyperedge,
