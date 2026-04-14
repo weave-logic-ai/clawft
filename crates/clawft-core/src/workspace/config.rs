@@ -68,7 +68,19 @@ pub fn load_merged_config_from(
         deep_merge(&mut merged, &ws_config);
     }
 
-    serde_json::from_value(merged).map_err(ClawftError::Json)
+    let config: Config = serde_json::from_value(merged).map_err(ClawftError::Json)?;
+
+    // Chain event marker for workspace config load/merge.
+    crate::chain_event!(
+        "workspace",
+        crate::chain_event::EVENT_KIND_WORKSPACE_CONFIG,
+        {
+            "global_path": global_config_path.map(|p| p.display().to_string()).unwrap_or_default(),
+            "workspace_path": workspace_path.map(|p| p.display().to_string()).unwrap_or_default()
+        }
+    );
+
+    Ok(config)
 }
 
 #[cfg(test)]

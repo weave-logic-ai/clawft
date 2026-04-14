@@ -156,6 +156,9 @@ impl MeshRequest {
 /// Pending request tracker for correlated request-response.
 pub struct PendingRequests {
     requests: std::collections::HashMap<String, MeshRequest>,
+    /// Optional chain manager for exochain audit logging.
+    #[cfg(feature = "exochain")]
+    chain_manager: Option<std::sync::Arc<crate::chain::ChainManager>>,
 }
 
 impl PendingRequests {
@@ -163,11 +166,32 @@ impl PendingRequests {
     pub fn new() -> Self {
         Self {
             requests: std::collections::HashMap::new(),
+            #[cfg(feature = "exochain")]
+            chain_manager: None,
         }
+    }
+
+    /// Attach a chain manager for exochain audit logging.
+    #[cfg(feature = "exochain")]
+    pub fn set_chain_manager(&mut self, cm: std::sync::Arc<crate::chain::ChainManager>) {
+        self.chain_manager = Some(cm);
     }
 
     /// Register a pending request.
     pub fn register(&mut self, request: MeshRequest) {
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "mesh_ipc",
+                crate::chain::EVENT_KIND_MESH_IPC_SEND,
+                Some(serde_json::json!({
+                    "correlation_id": &request.correlation_id,
+                    "source_node": &request.request.source_node,
+                    "dest_node": &request.request.dest_node,
+                    "envelope_id": &request.request.envelope_id,
+                })),
+            );
+        }
         self.requests
             .insert(request.correlation_id.clone(), request);
     }

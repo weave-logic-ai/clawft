@@ -267,7 +267,7 @@ pub use assessment::{
     AssessmentService, AssessmentSummary, ComparisonReport, Finding,
     PeerInfo as AssessmentPeerInfo,
 };
-pub use cron::CronService;
+pub use cron::{CronError, CronService};
 pub use container::{
     ContainerConfig, ContainerError, ContainerManager, ContainerService, ContainerState,
     ManagedContainer, PortMapping, RestartPolicy, VolumeMount,

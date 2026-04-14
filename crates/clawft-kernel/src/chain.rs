@@ -309,6 +309,355 @@ pub const EVENT_KIND_EML_SAVED: &str = "eml.saved";
 /// EML model loaded event.
 pub const EVENT_KIND_EML_LOADED: &str = "eml.loaded";
 
+/// Auth credential registration event.
+///
+/// Emitted when a new credential is registered with the AuthService.
+/// The payload should include `credential_name`, `credential_type`.
+pub const EVENT_KIND_AUTH_CREDENTIAL_REGISTER: &str = "auth.credential.register";
+
+/// Auth credential rotation event.
+///
+/// Emitted when an existing credential's value is rotated.
+/// The payload should include `credential_name`.
+pub const EVENT_KIND_AUTH_CREDENTIAL_ROTATE: &str = "auth.credential.rotate";
+
+/// Auth token issuance event.
+///
+/// Emitted when a scoped token is issued to an agent.
+/// The payload should include `token_id`, `credential_name`, `agent_id`.
+pub const EVENT_KIND_AUTH_TOKEN_ISSUE: &str = "auth.token.issue";
+
+/// Auth token revocation event.
+///
+/// Emitted when an active token is revoked.
+/// The payload should include `token_id`.
+pub const EVENT_KIND_AUTH_TOKEN_REVOKE: &str = "auth.token.revoke";
+
+/// Auth authentication attempt event.
+///
+/// Emitted on every authentication attempt (success or failure).
+/// The payload should include `agent_id`, `success`.
+pub const EVENT_KIND_AUTH_ATTEMPT: &str = "auth.attempt";
+
+/// Configuration set event.
+///
+/// Emitted when a configuration value is created or updated.
+/// The payload should include `namespace`, `key`, `changed_by`.
+pub const EVENT_KIND_CONFIG_SET: &str = "config.set";
+
+/// Configuration delete event.
+///
+/// Emitted when a configuration value is deleted.
+/// The payload should include `namespace`, `key`, `changed_by`.
+pub const EVENT_KIND_CONFIG_DELETE: &str = "config.delete";
+
+/// Secret set event.
+///
+/// Emitted when an encrypted secret is stored.
+/// The payload should include `namespace`, `key`.
+pub const EVENT_KIND_CONFIG_SECRET_SET: &str = "config.secret.set";
+
+/// Application installed event.
+pub const EVENT_KIND_APP_INSTALL: &str = "app.install";
+
+/// Application removed event.
+pub const EVENT_KIND_APP_REMOVE: &str = "app.remove";
+
+/// Application started event.
+pub const EVENT_KIND_APP_START: &str = "app.start";
+
+/// Application stopped event.
+pub const EVENT_KIND_APP_STOP: &str = "app.stop";
+
+/// Application state transition event.
+pub const EVENT_KIND_APP_TRANSITION: &str = "app.transition";
+
+/// Cron job added event.
+pub const EVENT_KIND_CRON_ADD: &str = "cron.add";
+
+/// Cron job removed event.
+pub const EVENT_KIND_CRON_REMOVE: &str = "cron.remove";
+
+/// Cron job executed (fired) event.
+pub const EVENT_KIND_CRON_EXECUTE: &str = "cron.execute";
+
+// ── Agent 6: Container / Process / WASM / Agency event kinds ──────
+
+/// Container started event.
+pub const EVENT_KIND_CONTAINER_START: &str = "container.start";
+
+/// Container stopped event.
+pub const EVENT_KIND_CONTAINER_STOP: &str = "container.stop";
+
+/// Container configured (registered) event.
+pub const EVENT_KIND_CONTAINER_CONFIGURE: &str = "container.configure";
+
+/// Process registered in the process table.
+pub const EVENT_KIND_PROCESS_REGISTER: &str = "process.register";
+
+/// Process deregistered (removed) from the process table.
+pub const EVENT_KIND_PROCESS_DEREGISTER: &str = "process.deregister";
+
+/// Process state changed.
+pub const EVENT_KIND_PROCESS_STATE: &str = "process.state";
+
+/// WASM module executed.
+pub const EVENT_KIND_WASM_EXECUTE: &str = "wasm.execute";
+
+/// Agent hierarchy: child added.
+pub const EVENT_KIND_AGENT_HIERARCHY_ADD: &str = "agent.hierarchy.add_child";
+
+/// Agent hierarchy: child removed.
+pub const EVENT_KIND_AGENT_HIERARCHY_REMOVE: &str = "agent.hierarchy.remove_child";
+
+/// Cluster peer added event.
+///
+/// Emitted when a new peer node joins the cluster.
+/// The payload should include `node_id`, `name`, `platform`.
+pub const EVENT_KIND_CLUSTER_PEER_ADD: &str = "cluster.peer.add";
+
+/// Cluster peer removed event.
+///
+/// Emitted when a peer node is removed from the cluster.
+/// The payload should include `node_id`.
+pub const EVENT_KIND_CLUSTER_PEER_REMOVE: &str = "cluster.peer.remove";
+
+/// Cluster peer state changed event.
+///
+/// Emitted when a peer node's state transitions.
+/// The payload should include `node_id`, `new_state`.
+pub const EVENT_KIND_CLUSTER_PEER_STATE: &str = "cluster.peer.state";
+
+/// Capability elevation requested event.
+///
+/// Emitted when an agent requests elevated capabilities.
+/// The payload should include `pid`, `platform`, `reason`.
+pub const EVENT_KIND_CAPABILITY_ELEVATE: &str = "capability.elevate";
+
+/// Environment registered event.
+///
+/// Emitted when a new environment is registered.
+/// The payload should include `id`, `name`, `class`.
+pub const EVENT_KIND_ENV_REGISTER: &str = "env.register";
+
+/// Environment switched (set active) event.
+///
+/// Emitted when the active environment changes.
+/// The payload should include `id`.
+pub const EVENT_KIND_ENV_SWITCH: &str = "env.switch";
+
+/// Environment removed event.
+///
+/// Emitted when an environment is deregistered.
+/// The payload should include `id`.
+pub const EVENT_KIND_ENV_REMOVE: &str = "env.remove";
+
+// ── Mesh networking event kinds (Agent 7) ──────────────────────────────
+
+/// Mesh service resolution cached.
+pub const EVENT_KIND_MESH_SERVICE_REGISTER: &str = "mesh.service.register";
+
+/// Mesh service resolution removed / negative-cached.
+pub const EVENT_KIND_MESH_SERVICE_DEREGISTER: &str = "mesh.service.deregister";
+
+/// Mesh artifact remote provider registered.
+pub const EVENT_KIND_MESH_ARTIFACT_STORE: &str = "mesh.artifact.store";
+
+/// Mesh artifact fetch request created.
+pub const EVENT_KIND_MESH_ARTIFACT_FETCH: &str = "mesh.artifact.fetch";
+
+/// Mesh IPC envelope sent.
+pub const EVENT_KIND_MESH_IPC_SEND: &str = "mesh.ipc.send";
+
+/// Mesh peer added (via announcement / catalog update).
+pub const EVENT_KIND_MESH_PEER_ADD: &str = "mesh.peer.add";
+
+/// Mesh peer removed.
+pub const EVENT_KIND_MESH_PEER_REMOVE: &str = "mesh.peer.remove";
+
+// ── Persistence event kinds (Agent 7) ──────────────────────────────────
+
+/// Kernel state saved to disk.
+pub const EVENT_KIND_KERNEL_SAVE: &str = "kernel.save";
+
+/// Kernel state loaded from disk.
+pub const EVENT_KIND_KERNEL_LOAD: &str = "kernel.load";
+
+// ── Reconciler event kinds (Agent 7) ────────────────────────────────────
+
+/// Reconciler corrective action recorded.
+pub const EVENT_KIND_RECONCILER_ACTION: &str = "reconciler.action";
+
+/// Reconciler tick completed.
+pub const EVENT_KIND_RECONCILER_TICK: &str = "reconciler.tick";
+
+/// Reconciler desired state set.
+pub const EVENT_KIND_RECONCILER_DESIRED_SET: &str = "reconciler.desired.set";
+
+/// Reconciler desired state removed.
+pub const EVENT_KIND_RECONCILER_DESIRED_REMOVE: &str = "reconciler.desired.remove";
+
+/// Causal graph node added event.
+///
+/// Emitted when a node is inserted into the causal DAG.
+/// The payload should include `node_id`, `label`.
+pub const EVENT_KIND_CAUSAL_NODE_ADD: &str = "causal.node.add";
+
+/// Causal graph node removed event.
+///
+/// Emitted when a node (and its incident edges) is removed.
+/// The payload should include `node_id`, `label`.
+pub const EVENT_KIND_CAUSAL_NODE_REMOVE: &str = "causal.node.remove";
+
+/// Causal graph edge added event.
+///
+/// Emitted when a directed edge is created between two nodes.
+/// The payload should include `source`, `target`, `edge_type`, `weight`.
+pub const EVENT_KIND_CAUSAL_EDGE_ADD: &str = "causal.edge.add";
+
+/// Causal graph edge removed event.
+///
+/// Emitted when all edges between two nodes (in one direction) are removed.
+/// The payload should include `source`, `target`, `removed_count`.
+pub const EVENT_KIND_CAUSAL_EDGE_REMOVE: &str = "causal.edge.remove";
+
+/// Causal graph cleared event.
+///
+/// Emitted when the entire causal graph is wiped. Governance-gated.
+/// The payload should include `node_count`, `edge_count` (before clear).
+pub const EVENT_KIND_CAUSAL_CLEAR: &str = "causal.clear";
+
+/// Artifact stored event.
+///
+/// Emitted when content is stored in the artifact store.
+/// The payload should include `hash`, `size`, `content_type`.
+pub const EVENT_KIND_ARTIFACT_STORE: &str = "artifact.store";
+
+/// Artifact removed event.
+///
+/// Emitted when an artifact is removed from storage.
+/// The payload should include `hash`.
+pub const EVENT_KIND_ARTIFACT_REMOVE: &str = "artifact.remove";
+
+// ── Agent 8: Core / Graphify / Weave ────────────────────────────────
+
+/// Sandbox command execution event.
+///
+/// Emitted when a sandbox enforcer checks a command, tool, network,
+/// or file operation. The payload should include `agent_id`, `action`,
+/// `target`, `allowed`.
+pub const EVENT_KIND_SANDBOX_EXECUTE: &str = "sandbox.execute";
+
+/// Session created event.
+///
+/// Emitted when a new conversation session is created.
+/// The payload should include `key`.
+pub const EVENT_KIND_SESSION_CREATE: &str = "session.create";
+
+/// Session destroyed event.
+///
+/// Emitted when a session is deleted from disk and cache.
+/// The payload should include `key`.
+pub const EVENT_KIND_SESSION_DESTROY: &str = "session.destroy";
+
+/// Workspace created event.
+///
+/// Emitted when a new workspace is scaffolded.
+/// The payload should include `name`, `path`.
+pub const EVENT_KIND_WORKSPACE_CREATE: &str = "workspace.create";
+
+/// Workspace config updated event.
+///
+/// Emitted when workspace config is loaded / merged.
+/// The payload should include `workspace_path`, `global_path`.
+pub const EVENT_KIND_WORKSPACE_CONFIG: &str = "workspace.config";
+
+/// Tool registered in the registry.
+///
+/// Emitted when a tool implementation is added to the ToolRegistry.
+/// The payload should include `tool_name`.
+pub const EVENT_KIND_TOOL_REGISTER: &str = "tool.register";
+
+/// Graphify knowledge graph built.
+///
+/// Emitted when extraction results are merged into a KnowledgeGraph.
+/// The payload should include `entity_count`, `relationship_count`,
+/// `files_processed`.
+pub const EVENT_KIND_GRAPHIFY_BUILD: &str = "graphify.build";
+
+/// Graphify URL ingested.
+///
+/// Emitted when a URL is fetched, classified, and saved.
+/// The payload should include `url`, `url_type`, `filename`.
+pub const EVENT_KIND_GRAPHIFY_INGEST: &str = "graphify.ingest";
+
+/// Graphify pipeline executed.
+///
+/// Emitted when the full graphify pipeline completes.
+/// The payload should include `entity_count`, `relationship_count`,
+/// `files_processed`, `has_analysis`.
+pub const EVENT_KIND_GRAPHIFY_PIPELINE: &str = "graphify.pipeline";
+
+/// Graphify git hook installed or uninstalled.
+///
+/// Emitted when post-commit / post-checkout hooks are installed
+/// or uninstalled.
+/// The payload should include `repo_root`, `action` (install / uninstall).
+pub const EVENT_KIND_GRAPHIFY_HOOK: &str = "graphify.hook";
+
+/// Project initialised.
+///
+/// Emitted when `weaver init` scaffolds the development environment.
+/// The payload should include `force`, `skills_only`, `analyze`.
+pub const EVENT_KIND_PROJECT_INIT: &str = "project.init";
+
+/// Profile created event.
+///
+/// Emitted when a new profile is created.
+/// The payload should include `profile_id`, `name`.
+pub const EVENT_KIND_PROFILE_CREATE: &str = "profile.create";
+
+/// Profile deleted event.
+///
+/// Emitted when a profile is deleted (governance gated).
+/// The payload should include `profile_id`.
+pub const EVENT_KIND_PROFILE_DELETE: &str = "profile.delete";
+
+/// Active profile switched event.
+///
+/// Emitted when the active profile changes.
+/// The payload should include `profile_id`, `previous`.
+pub const EVENT_KIND_PROFILE_SWITCH: &str = "profile.switch";
+
+/// Vector inserted into a profile backend.
+///
+/// Emitted when a vector is inserted into the active profile's backend.
+/// The payload should include `profile_id`, `vector_id`, `key`.
+pub const EVENT_KIND_PROFILE_VECTOR_INSERT: &str = "profile.vector.insert";
+
+/// HNSW vector inserted event.
+///
+/// Emitted when an embedding is inserted into the HNSW store.
+/// The payload should include `id`.
+pub const EVENT_KIND_HNSW_INSERT: &str = "hnsw.insert";
+
+/// HNSW store cleared event (governance gated -- bulk destruction).
+///
+/// Emitted when the HNSW store is replaced with an empty instance.
+pub const EVENT_KIND_HNSW_CLEAR: &str = "hnsw.clear";
+
+/// HNSW store saved to file event.
+///
+/// Emitted when the HNSW store is persisted to disk.
+/// The payload should include `path`.
+pub const EVENT_KIND_HNSW_SAVE: &str = "hnsw.save";
+
+/// HNSW store loaded from file event.
+///
+/// Emitted when an HNSW store is loaded from disk.
+/// The payload should include `path`, `entry_count`.
+pub const EVENT_KIND_HNSW_LOAD: &str = "hnsw.load";
+
 /// Local chain state.
 struct LocalChain {
     chain_id: u32,

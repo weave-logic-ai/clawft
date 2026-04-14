@@ -171,8 +171,8 @@ pub fn run_calibration(
     let causal_edge_count = if n > 1 { (n - 1) as u32 } else { 0 };
 
     // Clean up synthetic data.
-    hnsw.clear();
-    causal.clear();
+    let _ = hnsw.clear();
+    let _ = causal.clear();
 
     // Auto-compute tick interval from calibration results.
     //

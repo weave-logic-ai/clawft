@@ -9,6 +9,9 @@ use crate::relationship::Relationship;
 use crate::validation::validate_extraction;
 use crate::GraphifyError;
 
+/// Chain event kind for graph build completion.
+pub const EVENT_KIND_GRAPHIFY_BUILD: &str = "graphify.build";
+
 /// Merge multiple extraction results into a single `KnowledgeGraph`.
 ///
 /// Entities with the same ID are deduplicated (last-write-wins). Relationships
@@ -39,6 +42,17 @@ pub fn build(extractions: &[ExtractionResult]) -> KnowledgeGraph {
 
     kg.stats.entities_extracted = kg.entity_count();
     kg.stats.relationships_extracted = kg.relationship_count();
+
+    // Chain event marker -- daemon subscriber forwards to ExoChain.
+    tracing::info!(
+        target: "chain_event",
+        source = "graphify",
+        kind = EVENT_KIND_GRAPHIFY_BUILD,
+        entity_count = kg.entity_count(),
+        relationship_count = kg.relationship_count(),
+        files_processed = kg.stats.files_processed,
+        "chain"
+    );
 
     kg
 }

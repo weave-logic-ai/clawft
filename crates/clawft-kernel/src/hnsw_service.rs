@@ -17,6 +17,13 @@ use clawft_core::embeddings::hnsw_store::HnswStore;
 use crate::health::HealthStatus;
 use crate::service::{ServiceType, SystemService};
 
+#[cfg(feature = "exochain")]
+use std::sync::Arc;
+#[cfg(feature = "exochain")]
+use crate::chain::ChainManager;
+#[cfg(feature = "exochain")]
+use crate::governance::{EffectVector, GovernanceDecision, GovernanceEngine, GovernanceRequest};
+
 // ── Configuration ────────────────────────────────────────────────────────
 
 /// Configuration for the [`HnswService`].
@@ -67,6 +74,12 @@ pub struct HnswService {
     search_count: AtomicU64,
     /// Monotonic epoch counter -- bumped on every mutation.
     epoch: AtomicU64,
+    /// Chain manager for exochain event logging.
+    #[cfg(feature = "exochain")]
+    chain_manager: Option<Arc<ChainManager>>,
+    /// Governance engine for gating destructive operations.
+    #[cfg(feature = "exochain")]
+    governance_engine: Option<Arc<GovernanceEngine>>,
 }
 
 impl HnswService {
@@ -79,15 +92,43 @@ impl HnswService {
             insert_count: AtomicU64::new(0),
             search_count: AtomicU64::new(0),
             epoch: AtomicU64::new(0),
+            #[cfg(feature = "exochain")]
+            chain_manager: None,
+            #[cfg(feature = "exochain")]
+            governance_engine: None,
         }
+    }
+
+    /// Set the chain manager for exochain event logging.
+    #[cfg(feature = "exochain")]
+    pub fn set_chain_manager(&mut self, cm: Arc<ChainManager>) {
+        self.chain_manager = Some(cm);
+    }
+
+    /// Set the governance engine for gating destructive operations.
+    #[cfg(feature = "exochain")]
+    pub fn set_governance_engine(&mut self, engine: Arc<GovernanceEngine>) {
+        self.governance_engine = Some(engine);
     }
 
     /// Insert an embedding with associated metadata (upsert semantics).
     pub fn insert(&self, id: String, embedding: Vec<f32>, metadata: serde_json::Value) {
         let mut store = self.store.lock().expect("HnswStore lock poisoned");
-        store.insert(id, embedding, metadata);
+        store.insert(id.clone(), embedding, metadata);
         self.insert_count.fetch_add(1, Ordering::Relaxed);
         self.epoch.fetch_add(1, Ordering::SeqCst);
+
+        // Chain logging: hnsw.insert
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "hnsw_service",
+                crate::chain::EVENT_KIND_HNSW_INSERT,
+                Some(serde_json::json!({
+                    "id": id,
+                })),
+            );
+        }
     }
 
     /// Return the current monotonic epoch.
@@ -163,10 +204,38 @@ impl HnswService {
     /// Replace the inner store with a fresh, empty instance.
     ///
     /// Useful for calibration cleanup. Counters are **not** reset.
-    pub fn clear(&self) {
+    ///
+    /// Returns `Err` if the governance engine denies the bulk destruction.
+    pub fn clear(&self) -> Result<(), String> {
+        // Governance gate: bulk destruction (hnsw clear).
+        #[cfg(feature = "exochain")]
+        if let Some(ref engine) = self.governance_engine {
+            let req = GovernanceRequest::new("system", "hnsw.clear")
+                .with_effect(EffectVector { risk: 0.8, ..Default::default() });
+            let result = engine.evaluate(&req);
+            match &result.decision {
+                GovernanceDecision::Deny(reason) | GovernanceDecision::EscalateToHuman(reason) => {
+                    return Err(format!("governance denied hnsw.clear: {reason}"));
+                }
+                _ => {}
+            }
+        }
+
         let mut store = self.store.lock().expect("HnswStore lock poisoned");
         *store = HnswStore::with_params(self.config.ef_search, self.config.ef_construction);
         self.epoch.fetch_add(1, Ordering::SeqCst);
+
+        // Chain logging: hnsw.clear
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "hnsw_service",
+                crate::chain::EVENT_KIND_HNSW_CLEAR,
+                Some(serde_json::json!({})),
+            );
+        }
+
+        Ok(())
     }
 
     /// Borrow the service configuration.
@@ -180,13 +249,33 @@ impl HnswService {
     /// graph is not serialized; it will be rebuilt on load.
     pub fn save_to_file(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
         let store = self.store.lock().expect("HnswStore lock poisoned");
-        store.save(path)
+        let result = store.save(path);
+
+        // Chain logging: hnsw.save
+        #[cfg(feature = "exochain")]
+        if result.is_ok() {
+            if let Some(ref cm) = self.chain_manager {
+                cm.append(
+                    "hnsw_service",
+                    crate::chain::EVENT_KIND_HNSW_SAVE,
+                    Some(serde_json::json!({
+                        "path": path.display().to_string(),
+                    })),
+                );
+            }
+        }
+
+        result
     }
 
     /// Load an HNSW store from a JSON file and create a new service.
     ///
     /// Delegates to [`HnswStore::load`]. The HNSW index is rebuilt
     /// from the saved entries. Counters start at zero.
+    ///
+    /// Note: chain logging for `hnsw.load` requires calling
+    /// [`set_chain_manager`] after construction; use
+    /// [`load_from_file_logged`] when a chain manager is available.
     pub fn load_from_file(path: &std::path::Path) -> Result<Self, std::io::Error> {
         let store = HnswStore::load(path)?;
         let config = HnswServiceConfig {
@@ -200,6 +289,46 @@ impl HnswService {
             insert_count: AtomicU64::new(0),
             search_count: AtomicU64::new(0),
             epoch: AtomicU64::new(0),
+            #[cfg(feature = "exochain")]
+            chain_manager: None,
+            #[cfg(feature = "exochain")]
+            governance_engine: None,
+        })
+    }
+
+    /// Load an HNSW store from a JSON file with chain logging.
+    ///
+    /// Same as [`load_from_file`] but emits an `hnsw.load` chain event.
+    #[cfg(feature = "exochain")]
+    pub fn load_from_file_logged(
+        path: &std::path::Path,
+        cm: Arc<ChainManager>,
+    ) -> Result<Self, std::io::Error> {
+        let store = HnswStore::load(path)?;
+        let entry_count = store.len();
+        let config = HnswServiceConfig {
+            ef_search: 100,
+            ef_construction: 200,
+            default_dimensions: 384,
+        };
+
+        cm.append(
+            "hnsw_service",
+            crate::chain::EVENT_KIND_HNSW_LOAD,
+            Some(serde_json::json!({
+                "path": path.display().to_string(),
+                "entry_count": entry_count,
+            })),
+        );
+
+        Ok(Self {
+            store: Mutex::new(store),
+            config,
+            insert_count: AtomicU64::new(0),
+            search_count: AtomicU64::new(0),
+            epoch: AtomicU64::new(0),
+            chain_manager: Some(cm),
+            governance_engine: None,
         })
     }
 }
@@ -319,7 +448,7 @@ mod tests {
         svc.insert("b".into(), vec![0.0], serde_json::json!({}));
         assert_eq!(svc.len(), 2);
 
-        svc.clear();
+        svc.clear().expect("clear should succeed without governance engine");
         assert!(svc.is_empty());
         assert_eq!(svc.len(), 0);
         // Counters are preserved after clear.

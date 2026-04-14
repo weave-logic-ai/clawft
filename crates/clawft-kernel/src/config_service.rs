@@ -19,6 +19,11 @@ use crate::health::HealthStatus;
 use crate::process::Pid;
 use crate::service::{ServiceType, SystemService};
 
+#[cfg(feature = "exochain")]
+use crate::chain::ChainManager;
+#[cfg(feature = "exochain")]
+use crate::gate::GateBackend;
+
 // ---------------------------------------------------------------------------
 // ConfigValue — typed configuration values
 // ---------------------------------------------------------------------------
@@ -133,6 +138,12 @@ pub struct ConfigService {
     change_log: RwLock<Vec<ConfigChange>>,
     /// Total config sets.
     set_count: AtomicU64,
+    /// ExoChain manager for event logging.
+    #[cfg(feature = "exochain")]
+    chain_manager: Option<Arc<ChainManager>>,
+    /// Governance gate for access control.
+    #[cfg(feature = "exochain")]
+    governance_gate: Option<Arc<dyn GateBackend>>,
 }
 
 impl ConfigService {
@@ -147,12 +158,30 @@ impl ConfigService {
             encryption_key,
             change_log: RwLock::new(Vec::new()),
             set_count: AtomicU64::new(0),
+            #[cfg(feature = "exochain")]
+            chain_manager: None,
+            #[cfg(feature = "exochain")]
+            governance_gate: None,
         }
     }
 
     /// Create a config service with a default (zero) encryption key (testing).
     pub fn new_default() -> Self {
         Self::new([0u8; 32])
+    }
+
+    /// Set the chain manager for exochain event logging.
+    #[cfg(feature = "exochain")]
+    pub fn with_chain_manager(mut self, cm: Arc<ChainManager>) -> Self {
+        self.chain_manager = Some(cm);
+        self
+    }
+
+    /// Set the governance gate for access control.
+    #[cfg(feature = "exochain")]
+    pub fn with_governance_gate(mut self, gate: Arc<dyn GateBackend>) -> Self {
+        self.governance_gate = Some(gate);
+        self
     }
 
     // ── Config operations ─────────────────────────────────────────
@@ -165,6 +194,23 @@ impl ConfigService {
         value: serde_json::Value,
         changed_by: Pid,
     ) -> Result<(), KernelError> {
+        // Governance gate: config changes are gated.
+        #[cfg(feature = "exochain")]
+        if let Some(ref gate) = self.governance_gate {
+            use crate::gate::GateDecision;
+            let ctx = serde_json::json!({
+                "namespace": namespace,
+                "key": key,
+                "changed_by": changed_by,
+            });
+            let decision = gate.check("config-service", "config.set", &ctx);
+            if let GateDecision::Deny { reason, .. } = decision {
+                return Err(KernelError::GovernanceDenied(format!(
+                    "config set denied: {reason}"
+                )));
+            }
+        }
+
         let config_key = format!("{namespace}/{key}");
         let old_value = self.configs.get(&config_key).map(|v| v.value().clone());
         self.configs.insert(config_key, value.clone());
@@ -187,6 +233,19 @@ impl ConfigService {
         }
         self.set_count.fetch_add(1, Ordering::Relaxed);
 
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "config",
+                crate::chain::EVENT_KIND_CONFIG_SET,
+                Some(serde_json::json!({
+                    "namespace": namespace,
+                    "key": key,
+                    "changed_by": changed_by,
+                })),
+            );
+        }
+
         Ok(())
     }
 
@@ -203,6 +262,23 @@ impl ConfigService {
         key: &str,
         changed_by: Pid,
     ) -> Result<(), KernelError> {
+        // Governance gate: config deletion is gated.
+        #[cfg(feature = "exochain")]
+        if let Some(ref gate) = self.governance_gate {
+            use crate::gate::GateDecision;
+            let ctx = serde_json::json!({
+                "namespace": namespace,
+                "key": key,
+                "changed_by": changed_by,
+            });
+            let decision = gate.check("config-service", "config.delete", &ctx);
+            if let GateDecision::Deny { reason, .. } = decision {
+                return Err(KernelError::GovernanceDenied(format!(
+                    "config delete denied: {reason}"
+                )));
+            }
+        }
+
         let config_key = format!("{namespace}/{key}");
         let old_value = self.configs.remove(&config_key).map(|(_, v)| v);
 
@@ -215,6 +291,20 @@ impl ConfigService {
             timestamp: Utc::now(),
         };
         self.notify_subscribers(namespace, &change);
+
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "config",
+                crate::chain::EVENT_KIND_CONFIG_DELETE,
+                Some(serde_json::json!({
+                    "namespace": namespace,
+                    "key": key,
+                    "changed_by": changed_by,
+                })),
+            );
+        }
+
         Ok(())
     }
 
@@ -349,6 +439,22 @@ impl ConfigService {
         value: &[u8],
         scoped_to: Vec<Pid>,
     ) -> Result<(), KernelError> {
+        // Governance gate: secret storage is a critical action.
+        #[cfg(feature = "exochain")]
+        if let Some(ref gate) = self.governance_gate {
+            use crate::gate::GateDecision;
+            let ctx = serde_json::json!({
+                "namespace": namespace,
+                "key": key,
+            });
+            let decision = gate.check("config-service", "config.secret.set", &ctx);
+            if let GateDecision::Deny { reason, .. } = decision {
+                return Err(KernelError::GovernanceDenied(format!(
+                    "secret set denied: {reason}"
+                )));
+            }
+        }
+
         let secret_key = format!("{namespace}/{key}");
 
         // Simple XOR encryption (production would use AEAD).
@@ -362,6 +468,19 @@ impl ConfigService {
             scoped_to,
         };
         self.secret_refs.insert(secret_key, secret_ref);
+
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "config",
+                crate::chain::EVENT_KIND_CONFIG_SECRET_SET,
+                Some(serde_json::json!({
+                    "namespace": namespace,
+                    "key": key,
+                })),
+            );
+        }
+
         Ok(())
     }
 

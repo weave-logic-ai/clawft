@@ -16,6 +16,9 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
+#[cfg(feature = "exochain")]
+use std::sync::Arc;
+
 use crate::error::KernelError;
 use crate::health::HealthStatus;
 use crate::service::{ServiceType, SystemService};
@@ -100,6 +103,9 @@ pub struct ArtifactStore {
     backend: ArtifactBackend,
     /// Total stored bytes across all artifacts.
     total_size: AtomicU64,
+    /// Optional chain manager for ExoChain event logging.
+    #[cfg(feature = "exochain")]
+    chain_manager: Option<Arc<crate::chain::ChainManager>>,
 }
 
 impl ArtifactStore {
@@ -109,6 +115,8 @@ impl ArtifactStore {
             artifacts: DashMap::new(),
             backend: ArtifactBackend::Memory(DashMap::new()),
             total_size: AtomicU64::new(0),
+            #[cfg(feature = "exochain")]
+            chain_manager: None,
         }
     }
 
@@ -118,7 +126,15 @@ impl ArtifactStore {
             artifacts: DashMap::new(),
             backend: ArtifactBackend::File { base_path },
             total_size: AtomicU64::new(0),
+            #[cfg(feature = "exochain")]
+            chain_manager: None,
         }
+    }
+
+    /// Set the chain manager for ExoChain event logging.
+    #[cfg(feature = "exochain")]
+    pub fn set_chain_manager(&mut self, cm: Arc<crate::chain::ChainManager>) {
+        self.chain_manager = Some(cm);
     }
 
     /// Store content and return the BLAKE3 hash.
@@ -157,6 +173,8 @@ impl ArtifactStore {
 
         // Record metadata.
         let size = content.len() as u64;
+        #[cfg(feature = "exochain")]
+        let content_type_str = content_type.to_string();
         self.artifacts.insert(
             hash.clone(),
             StoredArtifact {
@@ -168,6 +186,19 @@ impl ArtifactStore {
             },
         );
         self.total_size.fetch_add(size, Ordering::Relaxed);
+
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "artifact_store",
+                crate::chain::EVENT_KIND_ARTIFACT_STORE,
+                Some(serde_json::json!({
+                    "hash": hash,
+                    "size": size,
+                    "content_type": content_type_str,
+                })),
+            );
+        }
 
         info!(hash = %hash, size, "artifact stored");
         Ok(hash)
@@ -236,6 +267,17 @@ impl ArtifactStore {
                     let path = base_path.join(prefix).join(hash);
                     let _ = std::fs::remove_file(path);
                 }
+            }
+
+            #[cfg(feature = "exochain")]
+            if let Some(ref cm) = self.chain_manager {
+                cm.append(
+                    "artifact_store",
+                    crate::chain::EVENT_KIND_ARTIFACT_REMOVE,
+                    Some(serde_json::json!({
+                        "hash": hash,
+                    })),
+                );
             }
         }
         Ok(())

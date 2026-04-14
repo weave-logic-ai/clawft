@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+#[cfg(feature = "exochain")]
+use std::sync::Arc;
 
 /// Request to resolve a service on a remote node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +73,9 @@ pub struct ServiceResolutionCache {
     negative_cache: HashMap<String, std::time::Instant>,
     /// TTL for negative cache entries.
     negative_ttl: std::time::Duration,
+    /// Optional chain manager for exochain audit logging.
+    #[cfg(feature = "exochain")]
+    chain_manager: Option<Arc<crate::chain::ChainManager>>,
 }
 
 impl ServiceResolutionCache {
@@ -80,7 +85,15 @@ impl ServiceResolutionCache {
             cache: HashMap::new(),
             negative_cache: HashMap::new(),
             negative_ttl: std::time::Duration::from_secs(30),
+            #[cfg(feature = "exochain")]
+            chain_manager: None,
         }
+    }
+
+    /// Attach a chain manager for exochain audit logging.
+    #[cfg(feature = "exochain")]
+    pub fn set_chain_manager(&mut self, cm: Arc<crate::chain::ChainManager>) {
+        self.chain_manager = Some(cm);
     }
 
     /// Look up a cached service resolution (returns `None` if expired).
@@ -97,12 +110,35 @@ impl ServiceResolutionCache {
 
     /// Cache a positive resolution.
     pub fn insert(&mut self, service_name: String, resolved: ResolvedService) {
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "mesh_service",
+                crate::chain::EVENT_KIND_MESH_SERVICE_REGISTER,
+                Some(serde_json::json!({
+                    "service_name": &service_name,
+                    "node_id": &resolved.endpoint.node_id,
+                    "version": &resolved.endpoint.version,
+                })),
+            );
+        }
         self.negative_cache.remove(&service_name);
         self.cache.insert(service_name, resolved);
     }
 
     /// Cache a negative (not found) result.
     pub fn insert_negative(&mut self, service_name: String) {
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "mesh_service",
+                crate::chain::EVENT_KIND_MESH_SERVICE_DEREGISTER,
+                Some(serde_json::json!({
+                    "service_name": &service_name,
+                    "action": "negative_cache",
+                })),
+            );
+        }
         self.negative_cache
             .insert(service_name, std::time::Instant::now());
     }
@@ -130,6 +166,7 @@ impl Default for ServiceResolutionCache {
         Self::new()
     }
 }
+
 
 /// RegistryQueryService exposes local service resolution via ServiceApi pattern.
 /// Registered as "registry" service, queryable by remote nodes.

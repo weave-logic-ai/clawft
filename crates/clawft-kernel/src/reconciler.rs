@@ -76,6 +76,9 @@ pub struct ReconciliationController {
     drifts: Arc<RwLock<Vec<DriftEvent>>>,
     process_table: Arc<ProcessTable>,
     max_drift_history: usize,
+    /// Optional chain manager for exochain audit logging.
+    #[cfg(feature = "exochain")]
+    chain_manager: Option<Arc<crate::chain::ChainManager>>,
 }
 
 impl ReconciliationController {
@@ -90,7 +93,15 @@ impl ReconciliationController {
             drifts: Arc::new(RwLock::new(Vec::new())),
             process_table,
             max_drift_history: 100,
+            #[cfg(feature = "exochain")]
+            chain_manager: None,
         }
+    }
+
+    /// Attach a chain manager for exochain audit logging.
+    #[cfg(feature = "exochain")]
+    pub fn set_chain_manager(&mut self, cm: Arc<crate::chain::ChainManager>) {
+        self.chain_manager = Some(cm);
     }
 
     /// Get the tick interval.
@@ -100,11 +111,34 @@ impl ReconciliationController {
 
     /// Set desired state for an agent.
     pub fn set_desired(&self, key: String, state: DesiredAgentState) {
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "reconciler",
+                crate::chain::EVENT_KIND_RECONCILER_DESIRED_SET,
+                Some(serde_json::json!({
+                    "key": &key,
+                    "agent_id": &state.agent_id,
+                    "app_id": &state.app_id,
+                    "replicas": state.replicas,
+                })),
+            );
+        }
         self.desired.insert(key, state);
     }
 
     /// Remove desired state for an agent.
     pub fn remove_desired(&self, key: &str) -> Option<DesiredAgentState> {
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "reconciler",
+                crate::chain::EVENT_KIND_RECONCILER_DESIRED_REMOVE,
+                Some(serde_json::json!({
+                    "key": key,
+                })),
+            );
+        }
         self.desired.remove(key).map(|(_, v)| v)
     }
 
@@ -187,12 +221,34 @@ impl ReconciliationController {
             }
         }
 
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "reconciler",
+                crate::chain::EVENT_KIND_RECONCILER_TICK,
+                Some(serde_json::json!({
+                    "drift_count": drifts.len(),
+                    "desired_count": self.desired.len(),
+                })),
+            );
+        }
+
         debug!(drift_count = drifts.len(), "reconciliation tick completed");
         drifts
     }
 
     /// Record a corrective action in drift history.
     pub async fn record_action(&self, event: DriftEvent) {
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "reconciler",
+                crate::chain::EVENT_KIND_RECONCILER_ACTION,
+                Some(serde_json::json!({
+                    "event": serde_json::to_value(&event).unwrap_or_default(),
+                })),
+            );
+        }
         let mut history = self.drifts.write().await;
         history.push(event);
         while history.len() > self.max_drift_history {

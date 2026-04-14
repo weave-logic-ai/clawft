@@ -258,7 +258,8 @@ impl BuiltinTool for SysCronAddTool {
         let command = args.get("command").and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidArgs("missing 'command'".into()))?;
         let target_pid = args.get("target_pid").and_then(|v| v.as_u64());
-        let job = self.cron.add_job(name.to_string(), interval_secs, command.to_string(), target_pid);
+        let job = self.cron.add_job(name.to_string(), interval_secs, command.to_string(), target_pid)
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
         Ok(serde_json::to_value(&job).unwrap_or_default())
     }
 }

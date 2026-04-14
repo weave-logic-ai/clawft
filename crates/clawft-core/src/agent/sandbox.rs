@@ -118,9 +118,26 @@ impl SandboxEnforcer {
     }
 
     /// Validate a command execution.
+    ///
+    /// Emits a `chain_event` for ExoChain auditing when the command is
+    /// allowed (denied actions are already captured in the audit log).
     pub fn check_command(&self, command: &str) -> Result<(), String> {
         let allowed = self.policy.is_command_allowed(command);
         self.log_decision("command_exec", command, allowed, "command not allowed");
+
+        // Chain event marker -- the daemon subscriber forwards this to
+        // ChainManager::append("sandbox", "sandbox.execute", ...).
+        crate::chain_event!(
+            "sandbox",
+            crate::chain_event::EVENT_KIND_SANDBOX_EXECUTE,
+            {
+                "agent_id": self.policy.agent_id,
+                "action": "command_exec",
+                "target": command,
+                "allowed": allowed
+            }
+        );
+
         if allowed {
             Ok(())
         } else {

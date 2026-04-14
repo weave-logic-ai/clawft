@@ -97,6 +97,26 @@ pub fn save_all(
     Ok(())
 }
 
+/// Save all kernel state, logging the event to the exochain.
+#[cfg(feature = "exochain")]
+pub fn save_all_with_chain(
+    config: &PersistenceConfig,
+    graph: &CausalGraph,
+    hnsw: &HnswService,
+    cm: &crate::chain::ChainManager,
+) -> Result<(), std::io::Error> {
+    cm.append(
+        "persistence",
+        crate::chain::EVENT_KIND_KERNEL_SAVE,
+        Some(serde_json::json!({
+            "data_dir": config.data_dir.display().to_string(),
+            "node_count": graph.node_count(),
+            "hnsw_count": hnsw.len(),
+        })),
+    );
+    save_all(config, graph, hnsw)
+}
+
 /// Restore all kernel state from the configured data directory.
 ///
 /// Components that have no saved state are returned as fresh instances.
@@ -106,6 +126,25 @@ pub fn load_all(
     let graph = load_causal_graph(config)?;
     let hnsw = load_hnsw(config)?;
     Ok((graph, hnsw))
+}
+
+/// Restore all kernel state, logging the event to the exochain.
+#[cfg(feature = "exochain")]
+pub fn load_all_with_chain(
+    config: &PersistenceConfig,
+    cm: &crate::chain::ChainManager,
+) -> Result<(CausalGraph, HnswService), std::io::Error> {
+    let result = load_all(config)?;
+    cm.append(
+        "persistence",
+        crate::chain::EVENT_KIND_KERNEL_LOAD,
+        Some(serde_json::json!({
+            "data_dir": config.data_dir.display().to_string(),
+            "node_count": result.0.node_count(),
+            "hnsw_count": result.1.len(),
+        })),
+    );
+    Ok(result)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────

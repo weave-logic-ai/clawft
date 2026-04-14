@@ -4,6 +4,8 @@
 //! to the mesh and resolving services across nodes.
 
 use std::collections::HashMap;
+#[cfg(feature = "exochain")]
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -34,17 +36,41 @@ pub struct ServiceAdvertisement {
 pub struct ClusterServiceRegistry {
     /// Services keyed by name. Multiple nodes may advertise the same service.
     services: HashMap<String, Vec<ServiceAdvertisement>>,
+    /// Optional chain manager for exochain audit logging.
+    #[cfg(feature = "exochain")]
+    chain_manager: Option<Arc<crate::chain::ChainManager>>,
 }
 
 impl ClusterServiceRegistry {
     pub fn new() -> Self {
         Self {
             services: HashMap::new(),
+            #[cfg(feature = "exochain")]
+            chain_manager: None,
         }
+    }
+
+    /// Attach a chain manager for exochain audit logging.
+    #[cfg(feature = "exochain")]
+    pub fn set_chain_manager(&mut self, cm: Arc<crate::chain::ChainManager>) {
+        self.chain_manager = Some(cm);
     }
 
     /// Merge a service advertisement (add or update).
     pub fn merge(&mut self, advert: ServiceAdvertisement) {
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "mesh_service",
+                crate::chain::EVENT_KIND_MESH_SERVICE_REGISTER,
+                Some(serde_json::json!({
+                    "service_name": &advert.name,
+                    "node_id": &advert.node_id,
+                    "version": &advert.version,
+                    "action": "merge",
+                })),
+            );
+        }
         let entries = self.services.entry(advert.name.clone()).or_default();
         // Update existing entry for same node, or add new.
         if let Some(existing) = entries.iter_mut().find(|e| e.node_id == advert.node_id) {
@@ -84,6 +110,17 @@ impl ClusterServiceRegistry {
 
     /// Remove all services from a node.
     pub fn remove_node(&mut self, node_id: &str) {
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "mesh_service",
+                crate::chain::EVENT_KIND_MESH_SERVICE_DEREGISTER,
+                Some(serde_json::json!({
+                    "node_id": node_id,
+                    "action": "remove_node",
+                })),
+            );
+        }
         for entries in self.services.values_mut() {
             entries.retain(|e| e.node_id != node_id);
         }

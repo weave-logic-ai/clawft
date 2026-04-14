@@ -19,6 +19,13 @@ use crate::vector_backend::{SearchResult, VectorBackend, VectorError, VectorResu
 use crate::vector_hnsw::HnswBackend;
 use crate::hnsw_service::HnswServiceConfig;
 
+#[cfg(feature = "exochain")]
+use std::sync::Arc;
+#[cfg(feature = "exochain")]
+use crate::chain::ChainManager;
+#[cfg(feature = "exochain")]
+use crate::governance::{EffectVector, GovernanceDecision, GovernanceEngine, GovernanceRequest};
+
 // ── Profile metadata ────────────────────────────────────────────────────
 
 /// Persisted metadata for a single profile.
@@ -73,6 +80,10 @@ pub enum ProfileError {
     /// JSON serialization error.
     #[error("profile json error: {0}")]
     Json(#[from] serde_json::Error),
+
+    /// Governance gate denied the operation.
+    #[error("governance denied: {0}")]
+    GovernanceDenied(String),
 }
 
 pub type ProfileResult<T> = Result<T, ProfileError>;
@@ -92,6 +103,12 @@ pub struct ProfileStore {
     active_profile: RwLock<String>,
     /// HNSW configuration used when creating new profile backends.
     hnsw_config: HnswServiceConfig,
+    /// Chain manager for exochain event logging.
+    #[cfg(feature = "exochain")]
+    chain_manager: Option<Arc<ChainManager>>,
+    /// Governance engine for gating destructive operations.
+    #[cfg(feature = "exochain")]
+    governance_engine: Option<Arc<GovernanceEngine>>,
 }
 
 impl ProfileStore {
@@ -104,7 +121,23 @@ impl ProfileStore {
             profiles: DashMap::new(),
             active_profile: RwLock::new("default".to_owned()),
             hnsw_config,
+            #[cfg(feature = "exochain")]
+            chain_manager: None,
+            #[cfg(feature = "exochain")]
+            governance_engine: None,
         }
+    }
+
+    /// Set the chain manager for exochain event logging.
+    #[cfg(feature = "exochain")]
+    pub fn set_chain_manager(&mut self, cm: Arc<ChainManager>) {
+        self.chain_manager = Some(cm);
+    }
+
+    /// Set the governance engine for gating destructive operations.
+    #[cfg(feature = "exochain")]
+    pub fn set_governance_engine(&mut self, engine: Arc<GovernanceEngine>) {
+        self.governance_engine = Some(engine);
     }
 
     /// Scan `storage_path` and load existing profiles from disk.
@@ -161,7 +194,36 @@ impl ProfileStore {
             return Err(ProfileError::AlreadyExists(id.to_owned()));
         }
 
-        self.create_profile_inner(id, name)
+        // Governance gate: profile creation.
+        #[cfg(feature = "exochain")]
+        if let Some(ref engine) = self.governance_engine {
+            let req = GovernanceRequest::new("system", "profile.create")
+                .with_effect(EffectVector { risk: 0.3, privacy: 0.2, ..Default::default() });
+            let result = engine.evaluate(&req);
+            match &result.decision {
+                GovernanceDecision::Deny(reason) | GovernanceDecision::EscalateToHuman(reason) => {
+                    return Err(ProfileError::GovernanceDenied(reason.clone()));
+                }
+                _ => {}
+            }
+        }
+
+        let meta = self.create_profile_inner(id, name)?;
+
+        // Chain logging: profile.create
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "profile_store",
+                crate::chain::EVENT_KIND_PROFILE_CREATE,
+                Some(serde_json::json!({
+                    "profile_id": id,
+                    "name": name,
+                })),
+            );
+        }
+
+        Ok(meta)
     }
 
     /// Delete a profile by ID. Cannot delete the currently active profile.
@@ -180,12 +242,38 @@ impl ProfileStore {
             }
         }
 
+        // Governance gate: bulk destruction (profile delete).
+        #[cfg(feature = "exochain")]
+        if let Some(ref engine) = self.governance_engine {
+            let req = GovernanceRequest::new("system", "profile.delete")
+                .with_effect(EffectVector { risk: 0.7, privacy: 0.4, ..Default::default() });
+            let result = engine.evaluate(&req);
+            match &result.decision {
+                GovernanceDecision::Deny(reason) | GovernanceDecision::EscalateToHuman(reason) => {
+                    return Err(ProfileError::GovernanceDenied(reason.clone()));
+                }
+                _ => {}
+            }
+        }
+
         self.profiles.remove(id);
 
         // Remove the directory on disk.
         let dir = self.storage_path.join(id);
         if dir.exists() {
             std::fs::remove_dir_all(&dir)?;
+        }
+
+        // Chain logging: profile.delete
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "profile_store",
+                crate::chain::EVENT_KIND_PROFILE_DELETE,
+                Some(serde_json::json!({
+                    "profile_id": id,
+                })),
+            );
         }
 
         info!(profile_id = %id, "deleted profile");
@@ -211,8 +299,23 @@ impl ProfileStore {
             return Err(ProfileError::NotFound(id.to_owned()));
         }
 
+        let previous = self.active_profile_id();
         let mut active = self.active_profile.write().expect("active_profile lock poisoned");
         *active = id.to_owned();
+
+        // Chain logging: profile.switch
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "profile_store",
+                crate::chain::EVENT_KIND_PROFILE_SWITCH,
+                Some(serde_json::json!({
+                    "profile_id": id,
+                    "previous": previous,
+                })),
+            );
+        }
+
         info!(profile_id = %id, "switched active profile");
         Ok(())
     }
@@ -251,7 +354,25 @@ impl ProfileStore {
             .profiles
             .get(&profile_id)
             .ok_or_else(|| VectorError::Other(format!("active profile '{profile_id}' not found")))?;
-        entry.backend.insert(id, key, vector, metadata)
+        let result = entry.backend.insert(id, key, vector, metadata);
+
+        // Chain logging: profile.vector.insert
+        #[cfg(feature = "exochain")]
+        if result.is_ok() {
+            if let Some(ref cm) = self.chain_manager {
+                cm.append(
+                    "profile_store",
+                    crate::chain::EVENT_KIND_PROFILE_VECTOR_INSERT,
+                    Some(serde_json::json!({
+                        "profile_id": profile_id,
+                        "vector_id": id,
+                        "key": key,
+                    })),
+                );
+            }
+        }
+
+        result
     }
 
     /// Search the active profile's backend.

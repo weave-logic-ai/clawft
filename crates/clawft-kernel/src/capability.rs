@@ -561,6 +561,74 @@ impl AgentCapabilities {
         }
     }
 
+    /// Build an elevation request with governance gating and chain logging.
+    ///
+    /// If a governance gate is provided, the request is checked against
+    /// the gate policy. If denied, returns `ElevationResult::Denied`.
+    /// If a chain manager is provided, the elevation attempt is logged.
+    #[cfg(feature = "exochain")]
+    pub fn request_elevation_gated(
+        _current: &AgentCapabilities,
+        requested: &AgentCapabilities,
+        platform: &str,
+        pid: u64,
+        gate: Option<&crate::gate::GovernanceGate>,
+        chain: Option<&crate::chain::ChainManager>,
+    ) -> ElevationResult {
+        // Governance gate: check policy before allowing elevation.
+        if let Some(gate) = gate {
+            use crate::gate::GateBackend;
+            let decision = gate.check(
+                &format!("pid:{pid}"),
+                "capability.elevate",
+                &serde_json::json!({
+                    "pid": pid,
+                    "platform": platform,
+                    "can_spawn": requested.can_spawn,
+                    "can_network": requested.can_network,
+                    "effect": { "risk": 0.5, "security": 0.5 },
+                }),
+            );
+            if decision.is_deny() {
+                // Chain logging: record denied elevation.
+                if let Some(cm) = chain {
+                    cm.append(
+                        "capability",
+                        crate::chain::EVENT_KIND_CAPABILITY_ELEVATE,
+                        Some(serde_json::json!({
+                            "pid": pid,
+                            "platform": platform,
+                            "result": "denied",
+                            "reason": "governance gate denied elevation",
+                        })),
+                    );
+                }
+                return ElevationResult::Denied {
+                    reason: "governance denied capability elevation".into(),
+                };
+            }
+        }
+
+        // Chain logging: record approved elevation.
+        if let Some(cm) = chain {
+            cm.append(
+                "capability",
+                crate::chain::EVENT_KIND_CAPABILITY_ELEVATE,
+                Some(serde_json::json!({
+                    "pid": pid,
+                    "platform": platform,
+                    "result": "granted",
+                    "can_spawn": requested.can_spawn,
+                    "can_network": requested.can_network,
+                })),
+            );
+        }
+
+        ElevationResult::Granted {
+            new_capabilities: requested.clone(),
+        }
+    }
+
     /// Check if elevation is needed (browser agents start restricted).
     ///
     /// Returns `true` if the platform is `"browser"` and the requested

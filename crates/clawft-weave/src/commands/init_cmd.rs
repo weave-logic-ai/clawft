@@ -28,6 +28,17 @@ pub struct InitArgs {
 
 /// Run the init command by delegating to `scripts/weave-init.sh`.
 pub async fn run(args: InitArgs) -> anyhow::Result<()> {
+    // Chain event marker for project initialization.
+    tracing::info!(
+        target: "chain_event",
+        source = "weave",
+        kind = "project.init",
+        force = args.force,
+        skills_only = args.skills,
+        analyze = args.analyze,
+        "chain"
+    );
+
     // Locate the project root by finding scripts/weave-init.sh relative
     // to the current working directory or the binary's location.
     let cwd = std::env::current_dir()?;

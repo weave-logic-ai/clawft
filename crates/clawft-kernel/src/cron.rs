@@ -13,6 +13,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
+#[cfg(feature = "exochain")]
+use crate::gate::GateBackend;
 use crate::health::HealthStatus;
 use crate::process::Pid;
 use crate::service::{ServiceType, SystemService};
@@ -47,6 +49,20 @@ pub struct TickResult {
     pub fired: Vec<String>,
 }
 
+/// Cron-specific errors.
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+pub enum CronError {
+    /// Governance gate denied the operation.
+    #[error("governance denied cron operation '{action}': {reason}")]
+    GovernanceDenied {
+        /// The action that was denied.
+        action: String,
+        /// Reason for denial.
+        reason: String,
+    },
+}
+
 /// Cron scheduling service.
 ///
 /// Maintains a registry of interval-based jobs. The daemon calls
@@ -55,6 +71,10 @@ pub struct TickResult {
 pub struct CronService {
     started: AtomicBool,
     jobs: Mutex<HashMap<String, CronJob>>,
+    #[cfg(feature = "exochain")]
+    chain_manager: Option<std::sync::Arc<crate::chain::ChainManager>>,
+    #[cfg(feature = "exochain")]
+    governance_gate: Option<std::sync::Arc<crate::gate::GovernanceGate>>,
 }
 
 impl CronService {
@@ -62,17 +82,63 @@ impl CronService {
         Self {
             started: AtomicBool::new(false),
             jobs: Mutex::new(HashMap::new()),
+            #[cfg(feature = "exochain")]
+            chain_manager: None,
+            #[cfg(feature = "exochain")]
+            governance_gate: None,
         }
     }
 
+    /// Attach a chain manager for audit logging.
+    #[cfg(feature = "exochain")]
+    pub fn set_chain_manager(
+        &mut self,
+        chain_manager: Option<std::sync::Arc<crate::chain::ChainManager>>,
+    ) {
+        self.chain_manager = chain_manager;
+    }
+
+    /// Attach a governance gate for policy enforcement.
+    #[cfg(feature = "exochain")]
+    pub fn set_governance_gate(
+        &mut self,
+        gate: Option<std::sync::Arc<crate::gate::GovernanceGate>>,
+    ) {
+        self.governance_gate = gate;
+    }
+
     /// Add a new cron job. Returns the created job.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CronError::GovernanceDenied` if the governance gate
+    /// rejects the job creation (only when the `exochain` feature is
+    /// enabled and a gate is attached).
     pub fn add_job(
         &self,
         name: String,
         interval_secs: u64,
         command: String,
         target_pid: Option<Pid>,
-    ) -> CronJob {
+    ) -> Result<CronJob, CronError> {
+        // Governance gate — block job creation if policy denies it.
+        #[cfg(feature = "exochain")]
+        if let Some(ref gate) = self.governance_gate {
+            let context = serde_json::json!({
+                "job_name": &name,
+                "interval_secs": interval_secs,
+                "command": &command,
+                "effect": { "risk": 0.2, "security": 0.1 },
+            });
+            let decision = gate.check("kernel", "cron.add", &context);
+            if decision.is_deny() {
+                return Err(CronError::GovernanceDenied {
+                    action: "cron.add".into(),
+                    reason: format!("governance denied adding cron job '{name}'"),
+                });
+            }
+        }
+
         let job = CronJob {
             id: uuid::Uuid::new_v4().to_string(),
             name,
@@ -88,7 +154,23 @@ impl CronService {
         let mut jobs = self.jobs.lock().unwrap();
         jobs.insert(job.id.clone(), job.clone());
         debug!(job_id = %job.id, name = %job.name, interval = job.interval_secs, "cron job added");
-        job
+
+        // Chain logging — record the job creation event.
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "cron",
+                crate::chain::EVENT_KIND_CRON_ADD,
+                Some(serde_json::json!({
+                    "job_id": &job.id,
+                    "job_name": &job.name,
+                    "interval_secs": job.interval_secs,
+                    "command": &job.command,
+                })),
+            );
+        }
+
+        Ok(job)
     }
 
     /// Remove a job by ID. Returns the removed job if it existed.
@@ -97,6 +179,19 @@ impl CronService {
         let removed = jobs.remove(id);
         if let Some(ref j) = removed {
             debug!(job_id = %j.id, name = %j.name, "cron job removed");
+
+            // Chain logging — record the job removal event.
+            #[cfg(feature = "exochain")]
+            if let Some(ref cm) = self.chain_manager {
+                cm.append(
+                    "cron",
+                    crate::chain::EVENT_KIND_CRON_REMOVE,
+                    Some(serde_json::json!({
+                        "job_id": &j.id,
+                        "job_name": &j.name,
+                    })),
+                );
+            }
         }
         removed
     }
@@ -148,6 +243,21 @@ impl CronService {
                     fire_count = job.fire_count,
                     "cron job fired"
                 );
+
+                // Chain logging — record which job fired.
+                #[cfg(feature = "exochain")]
+                if let Some(ref cm) = self.chain_manager {
+                    cm.append(
+                        "cron",
+                        crate::chain::EVENT_KIND_CRON_EXECUTE,
+                        Some(serde_json::json!({
+                            "job_id": &job.id,
+                            "job_name": &job.name,
+                            "fire_count": job.fire_count,
+                            "command": &job.command,
+                        })),
+                    );
+                }
             }
         }
 
@@ -209,8 +319,8 @@ mod tests {
     #[test]
     fn add_and_list_jobs() {
         let svc = CronService::new();
-        let j1 = svc.add_job("heartbeat".into(), 10, "ping".into(), Some(1));
-        let j2 = svc.add_job("cleanup".into(), 60, "gc".into(), None);
+        let j1 = svc.add_job("heartbeat".into(), 10, "ping".into(), Some(1)).unwrap();
+        let j2 = svc.add_job("cleanup".into(), 60, "gc".into(), None).unwrap();
 
         let jobs = svc.list_jobs();
         assert_eq!(jobs.len(), 2);
@@ -228,7 +338,7 @@ mod tests {
     #[test]
     fn remove_job() {
         let svc = CronService::new();
-        let job = svc.add_job("temp".into(), 5, "check".into(), None);
+        let job = svc.add_job("temp".into(), 5, "check".into(), None).unwrap();
 
         let removed = svc.remove_job(&job.id);
         assert!(removed.is_some());
@@ -242,7 +352,7 @@ mod tests {
     #[test]
     fn tick_fires_new_jobs_immediately() {
         let svc = CronService::new();
-        svc.add_job("fast".into(), 1, "ping".into(), None);
+        svc.add_job("fast".into(), 1, "ping".into(), None).unwrap();
 
         let result = svc.tick();
         assert_eq!(result.fired.len(), 1);
@@ -256,7 +366,7 @@ mod tests {
     #[test]
     fn tick_respects_interval() {
         let svc = CronService::new();
-        let _job = svc.add_job("slow".into(), 3600, "check".into(), None);
+        let _job = svc.add_job("slow".into(), 3600, "check".into(), None).unwrap();
 
         // First tick fires (never fired before)
         let result = svc.tick();
@@ -270,7 +380,7 @@ mod tests {
     #[test]
     fn tick_skips_disabled_jobs() {
         let svc = CronService::new();
-        let job = svc.add_job("disabled".into(), 1, "noop".into(), None);
+        let job = svc.add_job("disabled".into(), 1, "noop".into(), None).unwrap();
 
         // Disable the job
         {

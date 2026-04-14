@@ -1395,25 +1395,15 @@ async fn dispatch(
                 Err(e) => return Response::error(format!("invalid params: {e}")),
             };
             let k = kernel.read().await;
-            let job = k.cron_service().add_job(
+            let job = match k.cron_service().add_job(
                 cron_params.name,
                 cron_params.interval_secs,
                 cron_params.command,
                 cron_params.target_pid,
-            );
-
-            #[cfg(feature = "exochain")]
-            if let Some(cm) = k.chain_manager() {
-                cm.append(
-                    "cron",
-                    "cron.add",
-                    Some(serde_json::json!({
-                        "job_id": job.id,
-                        "name": job.name,
-                        "interval_secs": job.interval_secs,
-                    })),
-                );
-            }
+            ) {
+                Ok(job) => job,
+                Err(e) => return Response::error(format!("cron.add failed: {e}")),
+            };
 
             k.event_log().info("cron", format!("job added: {} ({}s)", job.name, job.interval_secs));
             let info = CronJobInfo {

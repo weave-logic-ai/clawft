@@ -177,6 +177,16 @@ impl WorkspaceManager {
         self.registry.register(entry);
         self.save_registry()?;
 
+        // Chain event marker for workspace creation.
+        crate::chain_event!(
+            "workspace",
+            crate::chain_event::EVENT_KIND_WORKSPACE_CREATE,
+            {
+                "name": name,
+                "path": ws_root.display()
+            }
+        );
+
         Ok(ws_root)
     }
 

@@ -312,6 +312,9 @@ fn fetch_webpage(
 // Core ingestion
 // ---------------------------------------------------------------------------
 
+/// Chain event kind for URL ingestion.
+pub const EVENT_KIND_GRAPHIFY_INGEST: &str = "graphify.ingest";
+
 /// Ingest a URL: fetch, classify, and save to `target_dir`.
 pub fn ingest(
     url: &str,
@@ -327,13 +330,13 @@ pub fn ingest(
 
     let url_type = detect_url_type(url);
 
-    match url_type {
+    let result = match url_type {
         UrlType::Pdf => {
             let bytes = client.fetch_bytes(url)?;
             let filename = safe_filename(url, ".pdf");
             let out_path = target_dir.join(&filename);
             std::fs::write(&out_path, bytes)?;
-            Ok(IngestResult { path: out_path, url_type, filename })
+            IngestResult { path: out_path, url_type, filename }
         }
         UrlType::Image => {
             let ext = url.rsplit('.').next()
@@ -343,7 +346,7 @@ pub fn ingest(
             let filename = safe_filename(url, &ext);
             let out_path = target_dir.join(&filename);
             std::fs::write(&out_path, bytes)?;
-            Ok(IngestResult { path: out_path, url_type, filename })
+            IngestResult { path: out_path, url_type, filename }
         }
         _ => {
             let (content, filename) = match url_type {
@@ -365,9 +368,22 @@ pub fn ingest(
             let final_filename = out_path.file_name()
                 .and_then(|n| n.to_str()).unwrap_or(&filename).to_string();
 
-            Ok(IngestResult { path: out_path, url_type, filename: final_filename })
+            IngestResult { path: out_path, url_type, filename: final_filename }
         }
-    }
+    };
+
+    // Chain event marker -- daemon subscriber forwards to ExoChain.
+    tracing::info!(
+        target: "chain_event",
+        source = "graphify",
+        kind = EVENT_KIND_GRAPHIFY_INGEST,
+        url = url,
+        url_type = ?result.url_type,
+        filename = %result.filename,
+        "chain"
+    );
+
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------

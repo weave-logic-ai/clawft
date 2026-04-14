@@ -12,12 +12,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
+
 
 /// Unique node identifier (UUID or DID string).
 pub type NodeId = String;
@@ -348,6 +350,12 @@ pub struct ClusterMembership {
     last_peer_add: std::sync::Mutex<Option<Instant>>,
     /// Minimum interval between peer additions.
     min_peer_add_interval: std::time::Duration,
+    /// Optional chain manager for exochain audit logging.
+    #[cfg(feature = "exochain")]
+    chain: Option<Arc<crate::chain::ChainManager>>,
+    /// Optional governance gate for policy enforcement.
+    #[cfg(feature = "exochain")]
+    gate: Option<Arc<crate::gate::GovernanceGate>>,
 }
 
 impl ClusterMembership {
@@ -358,7 +366,25 @@ impl ClusterMembership {
             peers: DashMap::new(),
             last_peer_add: std::sync::Mutex::new(None),
             min_peer_add_interval: std::time::Duration::from_millis(100),
+            #[cfg(feature = "exochain")]
+            chain: None,
+            #[cfg(feature = "exochain")]
+            gate: None,
         }
+    }
+
+    /// Attach a chain manager for audit logging (builder style).
+    #[cfg(feature = "exochain")]
+    pub fn with_chain(mut self, cm: Arc<crate::chain::ChainManager>) -> Self {
+        self.chain = Some(cm);
+        self
+    }
+
+    /// Attach a governance gate for policy enforcement (builder style).
+    #[cfg(feature = "exochain")]
+    pub fn with_gate(mut self, gate: Arc<crate::gate::GovernanceGate>) -> Self {
+        self.gate = Some(gate);
+        self
     }
 
     /// Set the minimum interval between peer additions (builder style).
@@ -382,6 +408,27 @@ impl ClusterMembership {
     /// Rate-limited to at most one addition per `min_peer_add_interval`
     /// (default 100 ms) to prevent join-flood attacks.
     pub fn add_peer(&self, peer: PeerNode) -> Result<(), ClusterError> {
+        // Governance gate: check policy before allowing peer addition.
+        #[cfg(feature = "exochain")]
+        if let Some(ref gate) = self.gate {
+            use crate::gate::GateBackend;
+            let decision = gate.check(
+                &self.config.node_id,
+                "cluster.peer.add",
+                &serde_json::json!({
+                    "peer_id": peer.id,
+                    "peer_name": peer.name,
+                    "platform": peer.platform.to_string(),
+                    "effect": { "risk": 0.4, "security": 0.3 },
+                }),
+            );
+            if decision.is_deny() {
+                return Err(ClusterError::AuthFailed(
+                    "governance denied peer addition".into(),
+                ));
+            }
+        }
+
         // Rate-limit peer additions.
         {
             let mut last = self.last_peer_add.lock().unwrap();
@@ -413,6 +460,20 @@ impl ClusterMembership {
             );
         }
 
+        // Chain logging: record peer addition.
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain {
+            cm.append(
+                "cluster",
+                crate::chain::EVENT_KIND_CLUSTER_PEER_ADD,
+                Some(serde_json::json!({
+                    "node_id": peer.id,
+                    "name": peer.name,
+                    "platform": peer.platform.to_string(),
+                })),
+            );
+        }
+
         debug!(node_id = %peer.id, name = %peer.name, "adding peer to cluster");
         self.peers.insert(peer.id.clone(), peer);
         Ok(())
@@ -420,12 +481,46 @@ impl ClusterMembership {
 
     /// Remove a peer node.
     pub fn remove_peer(&self, node_id: &str) -> Result<PeerNode, ClusterError> {
-        self.peers
+        // Governance gate: check policy before allowing peer removal.
+        #[cfg(feature = "exochain")]
+        if let Some(ref gate) = self.gate {
+            use crate::gate::GateBackend;
+            let decision = gate.check(
+                &self.config.node_id,
+                "cluster.peer.remove",
+                &serde_json::json!({
+                    "peer_id": node_id,
+                    "effect": { "risk": 0.3, "security": 0.2 },
+                }),
+            );
+            if decision.is_deny() {
+                return Err(ClusterError::AuthFailed(
+                    "governance denied peer removal".into(),
+                ));
+            }
+        }
+
+        let result = self.peers
             .remove(node_id)
             .map(|(_, peer)| peer)
             .ok_or_else(|| ClusterError::NodeNotFound {
                 node_id: node_id.to_owned(),
-            })
+            });
+
+        // Chain logging: record peer removal on success.
+        #[cfg(feature = "exochain")]
+        if let (Ok(peer), Some(cm)) = (&result, &self.chain) {
+            cm.append(
+                "cluster",
+                crate::chain::EVENT_KIND_CLUSTER_PEER_REMOVE,
+                Some(serde_json::json!({
+                    "node_id": peer.id,
+                    "name": peer.name,
+                })),
+            );
+        }
+
+        result
     }
 
     /// Update a peer's state.
@@ -436,6 +531,21 @@ impl ClusterMembership {
             .ok_or_else(|| ClusterError::NodeNotFound {
                 node_id: node_id.to_owned(),
             })?;
+
+        // Chain logging: record state transition.
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain {
+            cm.append(
+                "cluster",
+                crate::chain::EVENT_KIND_CLUSTER_PEER_STATE,
+                Some(serde_json::json!({
+                    "node_id": node_id,
+                    "from": entry.state.to_string(),
+                    "to": new_state.to_string(),
+                })),
+            );
+        }
+
         entry.state = new_state;
         Ok(())
     }

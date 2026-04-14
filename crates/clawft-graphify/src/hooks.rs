@@ -135,6 +135,9 @@ fn uninstall_hook(
     Ok(format!("graphify removed from {name} at {} (other content preserved)", hook_path.display()))
 }
 
+/// Chain event kind for hook install / uninstall.
+pub const EVENT_KIND_GRAPHIFY_HOOK: &str = "graphify.hook";
+
 /// Install graphify post-commit and post-checkout hooks.
 pub fn install_hooks(repo_root: &Path) -> Result<String, GraphifyError> {
     let root = find_git_root(repo_root).ok_or_else(|| {
@@ -146,6 +149,16 @@ pub fn install_hooks(repo_root: &Path) -> Result<String, GraphifyError> {
 
     let commit_msg = install_hook(&hooks_dir, "post-commit", POST_COMMIT_SCRIPT, HOOK_MARKER_START)?;
     let checkout_msg = install_hook(&hooks_dir, "post-checkout", POST_CHECKOUT_SCRIPT, CHECKOUT_MARKER_START)?;
+
+    // Chain event marker -- daemon subscriber forwards to ExoChain.
+    tracing::info!(
+        target: "chain_event",
+        source = "graphify",
+        kind = EVENT_KIND_GRAPHIFY_HOOK,
+        repo_root = %root.display(),
+        action = "install",
+        "chain"
+    );
 
     Ok(format!("post-commit: {commit_msg}\npost-checkout: {checkout_msg}"))
 }
@@ -159,6 +172,16 @@ pub fn uninstall_hooks(repo_root: &Path) -> Result<String, GraphifyError> {
     let hooks_dir = root.join(".git").join("hooks");
     let commit_msg = uninstall_hook(&hooks_dir, "post-commit", HOOK_MARKER_START, HOOK_MARKER_END)?;
     let checkout_msg = uninstall_hook(&hooks_dir, "post-checkout", CHECKOUT_MARKER_START, CHECKOUT_MARKER_END)?;
+
+    // Chain event marker -- daemon subscriber forwards to ExoChain.
+    tracing::info!(
+        target: "chain_event",
+        source = "graphify",
+        kind = EVENT_KIND_GRAPHIFY_HOOK,
+        repo_root = %root.display(),
+        action = "uninstall",
+        "chain"
+    );
 
     Ok(format!("post-commit: {commit_msg}\npost-checkout: {checkout_msg}"))
 }

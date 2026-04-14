@@ -362,7 +362,14 @@ impl ToolRegistry {
         if let Some(meta) = tool.metadata() {
             self.metadata.insert(name.clone(), meta);
         }
-        self.tools.insert(name, tool);
+        self.tools.insert(name.clone(), tool);
+
+        // Chain event marker for tool registration.
+        crate::chain_event!(
+            "tools",
+            crate::chain_event::EVENT_KIND_TOOL_REGISTER,
+            { "tool_name": name }
+        );
     }
 
     /// Register a tool with explicit metadata (used for MCP tools whose

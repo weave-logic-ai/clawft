@@ -509,23 +509,10 @@ async fn handle_message(
                 .get("target_pid")
                 .and_then(|v| v.as_u64());
 
-            let job = cron.add_job(name, interval_secs, command, target_pid);
-
-            #[cfg(feature = "exochain")]
-            if let Some(cm) = chain {
-                cm.append(
-                    "cron",
-                    "cron.add",
-                    Some(serde_json::json!({
-                        "job_id": job.id,
-                        "name": job.name,
-                        "interval_secs": job.interval_secs,
-                        "via_agent": pid,
-                    })),
-                );
+            match cron.add_job(name, interval_secs, command, target_pid) {
+                Ok(job) => serde_json::to_value(&job).unwrap_or_default(),
+                Err(e) => serde_json::json!({ "error": e.to_string() }),
             }
-
-            serde_json::to_value(&job).unwrap_or_default()
         }
         "cron.list" => {
             let jobs = cron.list_jobs();

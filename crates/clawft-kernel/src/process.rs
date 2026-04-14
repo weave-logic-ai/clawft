@@ -5,6 +5,8 @@
 //! process state without contention.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "exochain")]
+use std::sync::Arc;
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -146,6 +148,8 @@ pub struct ProcessTable {
     next_pid: AtomicU64,
     entries: DashMap<Pid, ProcessEntry>,
     max_processes: u32,
+    #[cfg(feature = "exochain")]
+    chain_manager: Option<Arc<crate::chain::ChainManager>>,
 }
 
 impl ProcessTable {
@@ -155,7 +159,15 @@ impl ProcessTable {
             next_pid: AtomicU64::new(1), // PID 0 reserved for kernel
             entries: DashMap::new(),
             max_processes,
+            #[cfg(feature = "exochain")]
+            chain_manager: None,
         }
+    }
+
+    /// Attach a chain manager for exochain event logging.
+    #[cfg(feature = "exochain")]
+    pub fn set_chain_manager(&mut self, cm: Arc<crate::chain::ChainManager>) {
+        self.chain_manager = Some(cm);
     }
 
     /// Allocate the next PID without inserting an entry.
@@ -176,6 +188,20 @@ impl ProcessTable {
         }
         let pid = self.allocate_pid();
         entry.pid = pid;
+
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "process",
+                crate::chain::EVENT_KIND_PROCESS_REGISTER,
+                Some(serde_json::json!({
+                    "pid": pid,
+                    "agent_id": &entry.agent_id,
+                    "parent_pid": entry.parent_pid,
+                })),
+            );
+        }
+
         self.entries.insert(pid, entry);
         Ok(pid)
     }
@@ -198,7 +224,23 @@ impl ProcessTable {
 
     /// Remove a process entry by PID.
     pub fn remove(&self, pid: Pid) -> Option<ProcessEntry> {
-        self.entries.remove(&pid).map(|(_, e)| e)
+        let removed = self.entries.remove(&pid).map(|(_, e)| e);
+
+        #[cfg(feature = "exochain")]
+        if let Some(ref entry) = removed {
+            if let Some(ref cm) = self.chain_manager {
+                cm.append(
+                    "process",
+                    crate::chain::EVENT_KIND_PROCESS_DEREGISTER,
+                    Some(serde_json::json!({
+                        "pid": pid,
+                        "agent_id": &entry.agent_id,
+                    })),
+                );
+            }
+        }
+
+        removed
     }
 
     /// List all process entries (cloned).
@@ -221,6 +263,19 @@ impl ProcessTable {
                 from: entry.state.clone(),
                 to: new_state,
             });
+        }
+
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "process",
+                crate::chain::EVENT_KIND_PROCESS_STATE,
+                Some(serde_json::json!({
+                    "pid": pid,
+                    "from": entry.state.to_string(),
+                    "to": new_state.to_string(),
+                })),
+            );
         }
 
         entry.state = new_state;

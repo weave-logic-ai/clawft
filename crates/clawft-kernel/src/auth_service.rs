@@ -5,6 +5,7 @@
 //! via IPC. All credential access is audited.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -18,6 +19,11 @@ use crate::error::KernelError;
 use crate::health::HealthStatus;
 use crate::process::Pid;
 use crate::service::{ServiceType, SystemService};
+
+#[cfg(feature = "exochain")]
+use crate::chain::ChainManager;
+#[cfg(feature = "exochain")]
+use crate::gate::GateBackend;
 
 // ---------------------------------------------------------------------------
 // CredentialType
@@ -194,6 +200,12 @@ pub struct AuthService {
     encryption_key: [u8; 32],
     /// Monotonic token counter.
     token_counter: AtomicU64,
+    /// ExoChain manager for event logging.
+    #[cfg(feature = "exochain")]
+    chain_manager: Option<Arc<ChainManager>>,
+    /// Governance gate for access control.
+    #[cfg(feature = "exochain")]
+    governance_gate: Option<Arc<dyn GateBackend>>,
 }
 
 /// An audit log entry.
@@ -222,12 +234,30 @@ impl AuthService {
             audit_log: std::sync::RwLock::new(Vec::new()),
             encryption_key,
             token_counter: AtomicU64::new(0),
+            #[cfg(feature = "exochain")]
+            chain_manager: None,
+            #[cfg(feature = "exochain")]
+            governance_gate: None,
         }
     }
 
     /// Create with a default (zero) encryption key (testing only).
     pub fn new_default() -> Self {
         Self::new([0u8; 32])
+    }
+
+    /// Set the chain manager for exochain event logging.
+    #[cfg(feature = "exochain")]
+    pub fn with_chain_manager(mut self, cm: Arc<ChainManager>) -> Self {
+        self.chain_manager = Some(cm);
+        self
+    }
+
+    /// Set the governance gate for access control.
+    #[cfg(feature = "exochain")]
+    pub fn with_governance_gate(mut self, gate: Arc<dyn GateBackend>) -> Self {
+        self.governance_gate = Some(gate);
+        self
     }
 
     // ── Credential registration ───────────────────────────────────
@@ -240,6 +270,22 @@ impl AuthService {
         value: &[u8],
         allowed_agents: Vec<String>,
     ) -> Result<(), KernelError> {
+        // Governance gate: credential registration is a critical action.
+        #[cfg(feature = "exochain")]
+        if let Some(ref gate) = self.governance_gate {
+            use crate::gate::GateDecision;
+            let ctx = serde_json::json!({
+                "credential_name": name,
+                "credential_type": credential_type.to_string(),
+            });
+            let decision = gate.check("auth-service", "auth.credential.register", &ctx);
+            if let GateDecision::Deny { reason, .. } = decision {
+                return Err(KernelError::GovernanceDenied(format!(
+                    "credential registration denied: {reason}"
+                )));
+            }
+        }
+
         if self.credentials.contains_key(name) {
             return Err(KernelError::Service(format!(
                 "credential already registered: {name}"
@@ -247,6 +293,7 @@ impl AuthService {
         }
 
         let encrypted = self.xor_encrypt(value);
+        let cred_type_str = credential_type.to_string();
         self.credentials.insert(
             name.to_string(),
             StoredCredential {
@@ -257,6 +304,18 @@ impl AuthService {
                 created_at: Utc::now(),
             },
         );
+
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "auth",
+                crate::chain::EVENT_KIND_AUTH_CREDENTIAL_REGISTER,
+                Some(serde_json::json!({
+                    "credential_name": name,
+                    "credential_type": cred_type_str,
+                })),
+            );
+        }
 
         info!(name, "credential registered");
         Ok(())
@@ -273,6 +332,18 @@ impl AuthService {
             .get_mut(name)
             .ok_or_else(|| KernelError::Service(format!("credential not found: {name}")))?;
         cred.encrypted_value = self.xor_encrypt(new_value);
+
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "auth",
+                crate::chain::EVENT_KIND_AUTH_CREDENTIAL_ROTATE,
+                Some(serde_json::json!({
+                    "credential_name": name,
+                })),
+            );
+        }
+
         info!(name, "credential rotated");
         Ok(())
     }
@@ -328,6 +399,20 @@ impl AuthService {
             .insert(token.token_id.clone(), token.clone());
         self.audit("token.issued", &request.agent_id, &request.credential_name, true);
 
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "auth",
+                crate::chain::EVENT_KIND_AUTH_TOKEN_ISSUE,
+                Some(serde_json::json!({
+                    "token_id": token.token_id,
+                    "credential_name": request.credential_name,
+                    "agent_id": request.agent_id,
+                    "ttl_secs": request.ttl_secs,
+                })),
+            );
+        }
+
         info!(
             token_id = %token.token_id,
             credential = %request.credential_name,
@@ -354,7 +439,22 @@ impl AuthService {
 
     /// Revoke an active token.
     pub fn revoke_token(&self, token_id: &str) -> bool {
-        self.active_tokens.remove(token_id).is_some()
+        let removed = self.active_tokens.remove(token_id).is_some();
+
+        #[cfg(feature = "exochain")]
+        if removed {
+            if let Some(ref cm) = self.chain_manager {
+                cm.append(
+                    "auth",
+                    crate::chain::EVENT_KIND_AUTH_TOKEN_REVOKE,
+                    Some(serde_json::json!({
+                        "token_id": token_id,
+                    })),
+                );
+            }
+        }
+
+        removed
     }
 
     /// List all active (non-expired) tokens.
@@ -383,6 +483,21 @@ impl AuthService {
         raw_credential: &[u8],
         scopes: Vec<String>,
     ) -> Result<(), KernelError> {
+        // Governance gate: hashed credential registration is a critical action.
+        #[cfg(feature = "exochain")]
+        if let Some(ref gate) = self.governance_gate {
+            use crate::gate::GateDecision;
+            let ctx = serde_json::json!({
+                "agent_id": agent_id,
+            });
+            let decision = gate.check("auth-service", "auth.credential.register", &ctx);
+            if let GateDecision::Deny { reason, .. } = decision {
+                return Err(KernelError::GovernanceDenied(format!(
+                    "hashed credential registration denied: {reason}"
+                )));
+            }
+        }
+
         if self.hashed_credentials.contains_key(agent_id) {
             return Err(KernelError::Service(format!(
                 "hashed credential already registered for agent: {agent_id}"
@@ -399,6 +514,18 @@ impl AuthService {
                 scopes,
             },
         );
+
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "auth",
+                crate::chain::EVENT_KIND_AUTH_CREDENTIAL_REGISTER,
+                Some(serde_json::json!({
+                    "agent_id": agent_id,
+                    "type": "hashed",
+                })),
+            );
+        }
 
         info!(agent_id, "hashed credential registered");
         Ok(())
@@ -420,6 +547,19 @@ impl AuthService {
         let provided_hash = Self::sha256_hash(raw_credential);
         if cred.hash != provided_hash {
             self.audit("authenticate.failed", agent_id, agent_id, false);
+
+            #[cfg(feature = "exochain")]
+            if let Some(ref cm) = self.chain_manager {
+                cm.append(
+                    "auth",
+                    crate::chain::EVENT_KIND_AUTH_ATTEMPT,
+                    Some(serde_json::json!({
+                        "agent_id": agent_id,
+                        "success": false,
+                    })),
+                );
+            }
+
             warn!(agent_id, "authentication failed — hash mismatch");
             return Err(KernelError::Service("authentication failed".into()));
         }
@@ -436,6 +576,19 @@ impl AuthService {
         self.auth_tokens
             .insert(token.token_id.clone(), token.clone());
         self.audit("authenticate.success", agent_id, agent_id, true);
+
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "auth",
+                crate::chain::EVENT_KIND_AUTH_ATTEMPT,
+                Some(serde_json::json!({
+                    "agent_id": agent_id,
+                    "success": true,
+                    "token_id": token.token_id,
+                })),
+            );
+        }
 
         info!(agent_id, token_id = %token.token_id, "agent authenticated");
         Ok(token)

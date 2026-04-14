@@ -22,6 +22,8 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
+#[cfg(feature = "exochain")]
+use crate::gate::GateBackend;
 use crate::capability::{AgentCapabilities, IpcScope};
 use crate::container::PortMapping;
 use crate::process::Pid;
@@ -296,6 +298,15 @@ pub enum AppError {
         reason: String,
     },
 
+    /// Governance gate denied the operation.
+    #[error("governance denied app operation '{action}': {reason}")]
+    GovernanceDenied {
+        /// The action that was denied.
+        action: String,
+        /// Reason for denial.
+        reason: String,
+    },
+
     /// Hook execution failed.
     #[error("hook '{hook}' failed for app '{app_name}': {reason}")]
     HookFailed {
@@ -405,6 +416,10 @@ pub fn validate_manifest(manifest: &AppManifest) -> Result<(), AppError> {
 /// the kernel boot sequence.
 pub struct AppManager {
     apps: DashMap<String, InstalledApp>,
+    #[cfg(feature = "exochain")]
+    chain_manager: Option<std::sync::Arc<crate::chain::ChainManager>>,
+    #[cfg(feature = "exochain")]
+    governance_gate: Option<std::sync::Arc<crate::gate::GovernanceGate>>,
 }
 
 impl AppManager {
@@ -412,7 +427,29 @@ impl AppManager {
     pub fn new() -> Self {
         Self {
             apps: DashMap::new(),
+            #[cfg(feature = "exochain")]
+            chain_manager: None,
+            #[cfg(feature = "exochain")]
+            governance_gate: None,
         }
+    }
+
+    /// Attach a chain manager for audit logging.
+    #[cfg(feature = "exochain")]
+    pub fn set_chain_manager(
+        &mut self,
+        chain_manager: Option<std::sync::Arc<crate::chain::ChainManager>>,
+    ) {
+        self.chain_manager = chain_manager;
+    }
+
+    /// Attach a governance gate for policy enforcement.
+    #[cfg(feature = "exochain")]
+    pub fn set_governance_gate(
+        &mut self,
+        gate: Option<std::sync::Arc<crate::gate::GovernanceGate>>,
+    ) {
+        self.governance_gate = gate;
     }
 
     /// Register an application from a parsed manifest.
@@ -433,18 +470,51 @@ impl AppManager {
             return Err(AppError::AlreadyInstalled { name: name.clone() });
         }
 
+        // Governance gate — block install if policy denies it.
+        #[cfg(feature = "exochain")]
+        if let Some(ref gate) = self.governance_gate {
+            let context = serde_json::json!({
+                "app_name": &name,
+                "version": &manifest.version,
+                "effect": { "risk": 0.3, "security": 0.3 },
+            });
+            let decision = gate.check("kernel", "app.install", &context);
+            if decision.is_deny() {
+                return Err(AppError::GovernanceDenied {
+                    action: "app.install".into(),
+                    reason: format!("governance denied installing app '{name}'"),
+                });
+            }
+        }
+
         debug!(app = %name, version = %manifest.version, "installing application");
 
         self.apps.insert(
             name.clone(),
             InstalledApp {
-                manifest,
+                manifest: manifest.clone(),
                 state: AppState::Installed,
                 installed_at: Utc::now(),
                 agent_pids: Vec::new(),
                 service_names: Vec::new(),
             },
         );
+
+        // Chain logging — record the install event.
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "app",
+                crate::chain::EVENT_KIND_APP_INSTALL,
+                Some(serde_json::json!({
+                    "app_name": &name,
+                    "version": &manifest.version,
+                    "agents": manifest.agents.len(),
+                    "tools": manifest.tools.len(),
+                    "services": manifest.services.len(),
+                })),
+            );
+        }
 
         Ok(name)
     }
@@ -485,8 +555,25 @@ impl AppManager {
             });
         }
 
-        debug!(app = name, from = %entry.state, to = %new_state, "state transition");
+        let from_state = entry.state.to_string();
+        let to_state = new_state.to_string();
+        debug!(app = name, from = %from_state, to = %to_state, "state transition");
         entry.state = new_state;
+
+        // Chain logging — record state transition.
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "app",
+                crate::chain::EVENT_KIND_APP_TRANSITION,
+                Some(serde_json::json!({
+                    "app_name": name,
+                    "from": from_state,
+                    "to": to_state,
+                })),
+            );
+        }
+
         Ok(())
     }
 
@@ -529,12 +616,43 @@ impl AppManager {
             });
         }
 
+        // Governance gate — block removal if policy denies it.
+        #[cfg(feature = "exochain")]
+        if let Some(ref gate) = self.governance_gate {
+            let context = serde_json::json!({
+                "app_name": name,
+                "state": entry.state.to_string(),
+                "effect": { "risk": 0.4, "security": 0.2 },
+            });
+            let decision = gate.check("kernel", "app.remove", &context);
+            if decision.is_deny() {
+                return Err(AppError::GovernanceDenied {
+                    action: "app.remove".into(),
+                    reason: format!("governance denied removing app '{name}'"),
+                });
+            }
+        }
+
         drop(entry); // release the read lock before remove
         let (_, app) = self.apps.remove(name).ok_or_else(|| AppError::NotFound {
             name: name.to_owned(),
         })?;
 
         debug!(app = name, "removed application");
+
+        // Chain logging — record the removal event.
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "app",
+                crate::chain::EVENT_KIND_APP_REMOVE,
+                Some(serde_json::json!({
+                    "app_name": name,
+                    "version": &app.manifest.version,
+                })),
+            );
+        }
+
         Ok(app.manifest)
     }
 
@@ -645,6 +763,19 @@ impl AppManager {
             "application started"
         );
 
+        // Chain logging — record the start event.
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "app",
+                crate::chain::EVENT_KIND_APP_START,
+                Some(serde_json::json!({
+                    "app_name": name,
+                    "agents_spawned": spawn_requests.len(),
+                })),
+            );
+        }
+
         Ok(spawn_requests)
     }
 
@@ -684,6 +815,19 @@ impl AppManager {
         self.transition_to(name, AppState::Stopped)?;
 
         debug!(app = name, "application stopped");
+
+        // Chain logging — record the stop event.
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "app",
+                crate::chain::EVENT_KIND_APP_STOP,
+                Some(serde_json::json!({
+                    "app_name": name,
+                })),
+            );
+        }
+
         Ok(())
     }
 

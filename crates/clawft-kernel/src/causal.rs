@@ -11,6 +11,9 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(feature = "exochain")]
+use std::sync::Arc;
+
 /// Numeric identifier for causal graph nodes.
 ///
 /// This is local to the causal module and distinct from
@@ -118,6 +121,12 @@ pub struct CausalGraph {
     next_node_id: AtomicU64,
     node_count: AtomicU64,
     edge_count: AtomicU64,
+    /// Optional chain manager for ExoChain event logging.
+    #[cfg(feature = "exochain")]
+    chain_manager: Option<Arc<crate::chain::ChainManager>>,
+    /// Optional governance engine for gating destructive operations.
+    #[cfg(feature = "exochain")]
+    governance_engine: Option<Arc<crate::governance::GovernanceEngine>>,
 }
 
 impl CausalGraph {
@@ -130,7 +139,23 @@ impl CausalGraph {
             next_node_id: AtomicU64::new(1),
             node_count: AtomicU64::new(0),
             edge_count: AtomicU64::new(0),
+            #[cfg(feature = "exochain")]
+            chain_manager: None,
+            #[cfg(feature = "exochain")]
+            governance_engine: None,
         }
+    }
+
+    /// Set the chain manager for ExoChain event logging.
+    #[cfg(feature = "exochain")]
+    pub fn set_chain_manager(&mut self, cm: Arc<crate::chain::ChainManager>) {
+        self.chain_manager = Some(cm);
+    }
+
+    /// Set the governance engine for gating destructive operations.
+    #[cfg(feature = "exochain")]
+    pub fn set_governance_engine(&mut self, ge: Arc<crate::governance::GovernanceEngine>) {
+        self.governance_engine = Some(ge);
     }
 
     /// Add a node with an auto-assigned ID.
@@ -138,7 +163,7 @@ impl CausalGraph {
         let id = self.next_node_id.fetch_add(1, Ordering::SeqCst);
         let node = CausalNode {
             id,
-            label,
+            label: label.clone(),
             created_at: 0, // caller may set via metadata; HLC not available here
             metadata,
         };
@@ -146,6 +171,19 @@ impl CausalGraph {
         self.forward_edges.insert(id, Vec::new());
         self.reverse_edges.insert(id, Vec::new());
         self.node_count.fetch_add(1, Ordering::SeqCst);
+
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "causal",
+                crate::chain::EVENT_KIND_CAUSAL_NODE_ADD,
+                Some(serde_json::json!({
+                    "node_id": id,
+                    "label": label,
+                })),
+            );
+        }
+
         id
     }
 
@@ -183,6 +221,19 @@ impl CausalGraph {
         }
 
         self.node_count.fetch_sub(1, Ordering::SeqCst);
+
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "causal",
+                crate::chain::EVENT_KIND_CAUSAL_NODE_REMOVE,
+                Some(serde_json::json!({
+                    "node_id": id,
+                    "label": node.label,
+                })),
+            );
+        }
+
         Some(node)
     }
 
@@ -217,10 +268,25 @@ impl CausalGraph {
             fwd.push(edge.clone());
         }
         if let Some(mut rev) = self.reverse_edges.get_mut(&target) {
-            rev.push(edge);
+            rev.push(edge.clone());
         }
 
         self.edge_count.fetch_add(1, Ordering::SeqCst);
+
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "causal",
+                crate::chain::EVENT_KIND_CAUSAL_EDGE_ADD,
+                Some(serde_json::json!({
+                    "source": source,
+                    "target": target,
+                    "edge_type": edge.edge_type.to_string(),
+                    "weight": edge.weight,
+                })),
+            );
+        }
+
         true
     }
 
@@ -242,6 +308,20 @@ impl CausalGraph {
 
         self.edge_count
             .fetch_sub(count as u64, Ordering::SeqCst);
+
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "causal",
+                crate::chain::EVENT_KIND_CAUSAL_EDGE_REMOVE,
+                Some(serde_json::json!({
+                    "source": source,
+                    "target": target,
+                    "removed_count": count,
+                })),
+            );
+        }
+
         count
     }
 
@@ -286,7 +366,34 @@ impl CausalGraph {
     }
 
     /// Remove all nodes and edges (used during calibration cleanup).
-    pub fn clear(&self) {
+    ///
+    /// When the `exochain` feature is enabled and a governance engine is
+    /// configured, this operation is gated: it will return
+    /// [`KernelError::GovernanceDenied`] if the governance check fails.
+    pub fn clear(&self) -> Result<(), crate::error::KernelError> {
+        // Governance gate: destructive wipe requires approval.
+        #[cfg(feature = "exochain")]
+        if let Some(ref ge) = self.governance_engine {
+            let request = crate::governance::GovernanceRequest::new("causal", "causal.clear")
+                .with_effect(crate::governance::EffectVector {
+                    risk: 0.8,
+                    ..Default::default()
+                });
+            let result = ge.evaluate(&request);
+            if matches!(
+                result.decision,
+                crate::governance::GovernanceDecision::Deny(_)
+                    | crate::governance::GovernanceDecision::EscalateToHuman(_)
+            ) {
+                return Err(crate::error::KernelError::GovernanceDenied(
+                    format!("causal.clear denied: {}", result.decision),
+                ));
+            }
+        }
+
+        let prev_nodes = self.node_count.load(Ordering::SeqCst);
+        let prev_edges = self.edge_count.load(Ordering::SeqCst);
+
         self.nodes.clear();
         self.forward_edges.clear();
         self.reverse_edges.clear();
@@ -294,6 +401,20 @@ impl CausalGraph {
         self.edge_count.store(0, Ordering::SeqCst);
         // Note: next_node_id is intentionally NOT reset so IDs remain unique
         // across clear cycles.
+
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "causal",
+                crate::chain::EVENT_KIND_CAUSAL_CLEAR,
+                Some(serde_json::json!({
+                    "node_count": prev_nodes,
+                    "edge_count": prev_edges,
+                })),
+            );
+        }
+
+        Ok(())
     }
 
     /// BFS traversal forward from `start` up to `depth` hops.
@@ -1207,6 +1328,10 @@ impl CausalGraph {
             next_node_id: AtomicU64::new(snapshot.next_node_id),
             node_count: AtomicU64::new(0),
             edge_count: AtomicU64::new(0),
+            #[cfg(feature = "exochain")]
+            chain_manager: None,
+            #[cfg(feature = "exochain")]
+            governance_engine: None,
         };
 
         // Restore nodes.
@@ -1420,7 +1545,7 @@ mod tests {
         let a = g.add_node("A".into(), serde_json::json!({}));
         let b = g.add_node("B".into(), serde_json::json!({}));
         g.link(a, b, CausalEdgeType::Causes, 1.0, 0, 0);
-        g.clear();
+        g.clear().unwrap();
         assert_eq!(g.node_count(), 0);
         assert_eq!(g.edge_count(), 0);
     }

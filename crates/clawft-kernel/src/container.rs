@@ -18,6 +18,8 @@
 //! health visible through the standard health monitoring system.
 
 use std::collections::HashMap;
+#[cfg(feature = "exochain")]
+use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
@@ -282,6 +284,8 @@ pub enum ContainerError {
 pub struct ContainerManager {
     config: ContainerConfig,
     managed: DashMap<String, ManagedContainer>,
+    #[cfg(feature = "exochain")]
+    chain_manager: Option<Arc<crate::chain::ChainManager>>,
 }
 
 impl ContainerManager {
@@ -293,7 +297,15 @@ impl ContainerManager {
         Self {
             config,
             managed: DashMap::new(),
+            #[cfg(feature = "exochain")]
+            chain_manager: None,
         }
+    }
+
+    /// Attach a chain manager for exochain event logging.
+    #[cfg(feature = "exochain")]
+    pub fn set_chain_manager(&mut self, cm: Arc<crate::chain::ChainManager>) {
+        self.chain_manager = Some(cm);
     }
 
     /// Get the container configuration.
@@ -339,6 +351,20 @@ impl ContainerManager {
         }
         let name = spec.name.clone();
         debug!(name = %spec.name, image = %spec.image, "configuring container");
+
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "container",
+                crate::chain::EVENT_KIND_CONTAINER_CONFIGURE,
+                Some(serde_json::json!({
+                    "name": &name,
+                    "image": &spec.image,
+                    "ports": spec.ports.len(),
+                })),
+            );
+        }
+
         self.managed.insert(spec.name.clone(), spec);
         Ok(name)
     }
@@ -386,6 +412,19 @@ impl ContainerManager {
                     name.hash(&mut h);
                     entry.container_id = Some(format!("sim-{:08x}", h.finish() as u32));
                 }
+
+                #[cfg(feature = "exochain")]
+                if let Some(ref cm) = self.chain_manager {
+                    cm.append(
+                        "container",
+                        crate::chain::EVENT_KIND_CONTAINER_START,
+                        Some(serde_json::json!({
+                            "name": name,
+                            "image": &entry.image,
+                        })),
+                    );
+                }
+
                 Ok(())
             }
             ContainerState::Running => {
@@ -412,6 +451,18 @@ impl ContainerManager {
 
         debug!(name, "stopping container");
         entry.state = ContainerState::Stopped;
+
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "container",
+                crate::chain::EVENT_KIND_CONTAINER_STOP,
+                Some(serde_json::json!({
+                    "name": name,
+                })),
+            );
+        }
+
         Ok(())
     }
 

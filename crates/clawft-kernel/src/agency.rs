@@ -13,6 +13,8 @@
 //! workers, and workers have no agency (leaf agents).
 
 use std::collections::HashMap;
+#[cfg(feature = "exochain")]
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -73,6 +75,11 @@ pub struct Agency {
     /// Currently spawned child PIDs.
     #[serde(default)]
     pub children: Vec<Pid>,
+
+    /// Optional chain manager for exochain event logging.
+    #[cfg(feature = "exochain")]
+    #[serde(skip)]
+    pub chain_manager: Option<Arc<crate::chain::ChainManager>>,
 }
 
 impl Agency {
@@ -88,6 +95,8 @@ impl Agency {
             ],
             capability_ceiling: AgentCapabilities::root(),
             children: Vec::new(),
+            #[cfg(feature = "exochain")]
+            chain_manager: None,
         }
     }
 
@@ -98,6 +107,8 @@ impl Agency {
             allowed_roles: vec![AgentRole::Service, AgentRole::Worker],
             capability_ceiling: AgentCapabilities::default(),
             children: Vec::new(),
+            #[cfg(feature = "exochain")]
+            chain_manager: None,
         }
     }
 
@@ -108,6 +119,8 @@ impl Agency {
             allowed_roles: vec![AgentRole::Worker],
             capability_ceiling: AgentCapabilities::default(),
             children: Vec::new(),
+            #[cfg(feature = "exochain")]
+            chain_manager: None,
         }
     }
 
@@ -118,7 +131,15 @@ impl Agency {
             allowed_roles: Vec::new(),
             capability_ceiling: AgentCapabilities::default(),
             children: Vec::new(),
+            #[cfg(feature = "exochain")]
+            chain_manager: None,
         }
+    }
+
+    /// Attach a chain manager for exochain event logging.
+    #[cfg(feature = "exochain")]
+    pub fn set_chain_manager(&mut self, cm: Arc<crate::chain::ChainManager>) {
+        self.chain_manager = Some(cm);
     }
 
     /// Check if this agency allows spawning a child with the given role.
@@ -133,11 +154,35 @@ impl Agency {
 
     /// Record a spawned child.
     pub fn add_child(&mut self, pid: Pid) {
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "agency",
+                crate::chain::EVENT_KIND_AGENT_HIERARCHY_ADD,
+                Some(serde_json::json!({
+                    "child_pid": pid,
+                    "current_children": self.children.len(),
+                })),
+            );
+        }
+
         self.children.push(pid);
     }
 
     /// Remove a terminated child.
     pub fn remove_child(&mut self, pid: Pid) {
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "agency",
+                crate::chain::EVENT_KIND_AGENT_HIERARCHY_REMOVE,
+                Some(serde_json::json!({
+                    "child_pid": pid,
+                    "current_children": self.children.len(),
+                })),
+            );
+        }
+
         self.children.retain(|&p| p != pid);
     }
 

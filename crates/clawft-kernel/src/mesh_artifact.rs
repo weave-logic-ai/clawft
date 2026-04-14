@@ -5,6 +5,8 @@
 //! content-addressed artifacts by hash.
 
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "exochain")]
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // ArtifactRequest / ArtifactResponse
@@ -65,6 +67,9 @@ pub struct ArtifactExchange {
     catalog: dashmap::DashMap<String, Vec<String>>,
     /// Pending requests (for testing).
     pending_requests: dashmap::DashMap<String, ArtifactRequest>,
+    /// Optional chain manager for exochain audit logging.
+    #[cfg(feature = "exochain")]
+    chain_manager: Option<Arc<crate::chain::ChainManager>>,
 }
 
 impl ArtifactExchange {
@@ -74,11 +79,31 @@ impl ArtifactExchange {
             node_id,
             catalog: dashmap::DashMap::new(),
             pending_requests: dashmap::DashMap::new(),
+            #[cfg(feature = "exochain")]
+            chain_manager: None,
         }
+    }
+
+    /// Attach a chain manager for exochain audit logging.
+    #[cfg(feature = "exochain")]
+    pub fn set_chain_manager(&mut self, cm: Arc<crate::chain::ChainManager>) {
+        self.chain_manager = Some(cm);
     }
 
     /// Record that a remote node has an artifact.
     pub fn register_remote(&self, hash: &str, remote_node_id: &str) {
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "mesh_artifact",
+                crate::chain::EVENT_KIND_MESH_ARTIFACT_STORE,
+                Some(serde_json::json!({
+                    "hash": hash,
+                    "remote_node_id": remote_node_id,
+                    "action": "register_remote",
+                })),
+            );
+        }
         self.catalog
             .entry(hash.to_string())
             .or_default()
@@ -87,11 +112,37 @@ impl ArtifactExchange {
 
     /// Process an artifact announcement from gossip.
     pub fn handle_announcement(&self, announcement: &ArtifactAnnouncement) {
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "mesh_artifact",
+                crate::chain::EVENT_KIND_MESH_PEER_ADD,
+                Some(serde_json::json!({
+                    "hash": &announcement.hash,
+                    "node_id": &announcement.node_id,
+                    "size": announcement.size,
+                    "content_type": &announcement.content_type,
+                    "action": "handle_announcement",
+                })),
+            );
+        }
         self.register_remote(&announcement.hash, &announcement.node_id);
     }
 
     /// Create a request frame for a remote artifact.
     pub fn create_request(&self, hash: &str) -> ArtifactRequest {
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "mesh_artifact",
+                crate::chain::EVENT_KIND_MESH_ARTIFACT_FETCH,
+                Some(serde_json::json!({
+                    "hash": hash,
+                    "requester_node_id": &self.node_id,
+                    "action": "create_request",
+                })),
+            );
+        }
         let req = ArtifactRequest {
             hash: hash.to_string(),
             requester_node_id: self.node_id.clone(),

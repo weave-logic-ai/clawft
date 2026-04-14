@@ -82,6 +82,9 @@ pub struct PipelineResult {
 // Pipeline
 // ---------------------------------------------------------------------------
 
+/// Chain event kind for pipeline completion.
+pub const EVENT_KIND_GRAPHIFY_PIPELINE: &str = "graphify.pipeline";
+
 /// The full graphify pipeline.
 pub struct Pipeline {
     config: PipelineConfig,
@@ -167,6 +170,18 @@ impl Pipeline {
         } else {
             None
         };
+
+        // Chain event marker -- daemon subscriber forwards to ExoChain.
+        tracing::info!(
+            target: "chain_event",
+            source = "graphify",
+            kind = EVENT_KIND_GRAPHIFY_PIPELINE,
+            entity_count = stats.entities_extracted,
+            relationship_count = stats.relationships_extracted,
+            files_processed = stats.files_processed,
+            has_analysis = analysis.is_some(),
+            "chain"
+        );
 
         Ok(PipelineResult {
             graph,

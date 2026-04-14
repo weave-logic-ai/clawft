@@ -123,6 +123,11 @@ pub enum KernelError {
         limit_bytes: u64,
     },
 
+    /// Governance gate denied the action.
+    #[cfg(feature = "exochain")]
+    #[error("governance denied: {0}")]
+    GovernanceDenied(String),
+
     /// Mesh networking error.
     #[error("mesh error: {0}")]
     Mesh(String),

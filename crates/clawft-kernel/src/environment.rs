@@ -14,6 +14,7 @@
 //! requires the `ruvector-apps` feature gate.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -233,6 +234,12 @@ pub enum EnvironmentError {
 pub struct EnvironmentManager {
     environments: DashMap<EnvironmentId, Environment>,
     active: std::sync::RwLock<Option<EnvironmentId>>,
+    /// Optional chain manager for exochain audit logging.
+    #[cfg(feature = "exochain")]
+    chain: Option<Arc<crate::chain::ChainManager>>,
+    /// Optional governance gate for policy enforcement.
+    #[cfg(feature = "exochain")]
+    gate: Option<Arc<crate::gate::GovernanceGate>>,
 }
 
 impl EnvironmentManager {
@@ -241,7 +248,25 @@ impl EnvironmentManager {
         Self {
             environments: DashMap::new(),
             active: std::sync::RwLock::new(None),
+            #[cfg(feature = "exochain")]
+            chain: None,
+            #[cfg(feature = "exochain")]
+            gate: None,
         }
+    }
+
+    /// Attach a chain manager for audit logging (builder style).
+    #[cfg(feature = "exochain")]
+    pub fn with_chain(mut self, cm: Arc<crate::chain::ChainManager>) -> Self {
+        self.chain = Some(cm);
+        self
+    }
+
+    /// Attach a governance gate for policy enforcement (builder style).
+    #[cfg(feature = "exochain")]
+    pub fn with_gate(mut self, gate: Arc<crate::gate::GovernanceGate>) -> Self {
+        self.gate = Some(gate);
+        self
     }
 
     /// Register an environment.
@@ -256,6 +281,21 @@ impl EnvironmentManager {
             return Err(EnvironmentError::AlreadyExists { id: env.id });
         }
 
+        // Chain logging: record environment registration.
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain {
+            cm.append(
+                "environment",
+                crate::chain::EVENT_KIND_ENV_REGISTER,
+                Some(serde_json::json!({
+                    "id": env.id,
+                    "name": env.name,
+                    "class": env.class.to_string(),
+                    "risk_threshold": env.governance.risk_threshold,
+                })),
+            );
+        }
+
         debug!(id = %env.id, name = %env.name, class = %env.class, "registering environment");
         self.environments.insert(env.id.clone(), env);
         Ok(())
@@ -266,6 +306,40 @@ impl EnvironmentManager {
         if !self.environments.contains_key(id) {
             return Err(EnvironmentError::NotFound { id: id.to_owned() });
         }
+
+        // Governance gate: check policy before switching environment.
+        #[cfg(feature = "exochain")]
+        if let Some(ref gate) = self.gate {
+            use crate::gate::GateBackend;
+            let env = self.environments.get(id).unwrap();
+            let decision = gate.check(
+                "system",
+                "env.switch",
+                &serde_json::json!({
+                    "target_env": id,
+                    "class": env.class.to_string(),
+                    "effect": { "risk": 0.3, "security": 0.2 },
+                }),
+            );
+            if decision.is_deny() {
+                return Err(EnvironmentError::NotFound { id: id.to_owned() });
+            }
+        }
+
+        // Chain logging: record environment switch.
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain {
+            let prev = self.active_id();
+            cm.append(
+                "environment",
+                crate::chain::EVENT_KIND_ENV_SWITCH,
+                Some(serde_json::json!({
+                    "id": id,
+                    "previous": prev,
+                })),
+            );
+        }
+
         let mut active = self.active.write().unwrap();
         *active = Some(id.to_owned());
         Ok(())
@@ -308,10 +382,26 @@ impl EnvironmentManager {
             *active = None;
         }
 
-        self.environments
+        let result = self.environments
             .remove(id)
             .map(|(_, env)| env)
-            .ok_or_else(|| EnvironmentError::NotFound { id: id.to_owned() })
+            .ok_or_else(|| EnvironmentError::NotFound { id: id.to_owned() });
+
+        // Chain logging: record environment removal on success.
+        #[cfg(feature = "exochain")]
+        if let (Ok(env), Some(cm)) = (&result, &self.chain) {
+            cm.append(
+                "environment",
+                crate::chain::EVENT_KIND_ENV_REMOVE,
+                Some(serde_json::json!({
+                    "id": env.id,
+                    "name": env.name,
+                    "class": env.class.to_string(),
+                })),
+            );
+        }
+
+        result
     }
 
     /// Count environments.

@@ -136,6 +136,14 @@ impl<P: Platform> SessionManager<P> {
         let session = Session::new(key);
         let mut cache = self.active_sessions.lock().await;
         cache.insert(key.to_string(), session.clone());
+
+        // Chain event marker for session creation.
+        crate::chain_event!(
+            "session",
+            crate::chain_event::EVENT_KIND_SESSION_CREATE,
+            { "key": key }
+        );
+
         Ok(session)
     }
 
@@ -361,6 +369,14 @@ impl<P: Platform> SessionManager<P> {
                 .map_err(ClawftError::Io)?;
         }
         self.invalidate(key).await;
+
+        // Chain event marker for session destruction.
+        crate::chain_event!(
+            "session",
+            crate::chain_event::EVENT_KIND_SESSION_DESTROY,
+            { "key": key }
+        );
+
         Ok(())
     }
 

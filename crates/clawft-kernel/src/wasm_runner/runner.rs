@@ -1,6 +1,8 @@
 //! WASM tool runner: compilation, execution, module cache, and hashing.
 
 use std::path::PathBuf;
+#[cfg(feature = "exochain")]
+use std::sync::Arc;
 #[cfg(feature = "wasm-sandbox")]
 use std::time::Duration;
 
@@ -21,6 +23,10 @@ pub struct WasmToolRunner {
     config: WasmSandboxConfig,
     #[cfg(feature = "wasm-sandbox")]
     engine: wasmtime::Engine,
+    #[cfg(feature = "exochain")]
+    chain_manager: Option<Arc<crate::chain::ChainManager>>,
+    #[cfg(feature = "exochain")]
+    governance_engine: Option<Arc<crate::governance::GovernanceEngine>>,
 }
 
 impl WasmToolRunner {
@@ -34,12 +40,37 @@ impl WasmToolRunner {
             // Memory limit is enforced per-store, not per-engine
             let engine = wasmtime::Engine::new(&wt_config)
                 .expect("failed to create wasmtime engine");
-            Self { config, engine }
+            Self {
+                config,
+                engine,
+                #[cfg(feature = "exochain")]
+                chain_manager: None,
+                #[cfg(feature = "exochain")]
+                governance_engine: None,
+            }
         }
         #[cfg(not(feature = "wasm-sandbox"))]
         {
-            Self { config }
+            Self {
+                config,
+                #[cfg(feature = "exochain")]
+                chain_manager: None,
+                #[cfg(feature = "exochain")]
+                governance_engine: None,
+            }
         }
+    }
+
+    /// Attach a chain manager for exochain event logging.
+    #[cfg(feature = "exochain")]
+    pub fn set_chain_manager(&mut self, cm: Arc<crate::chain::ChainManager>) {
+        self.chain_manager = Some(cm);
+    }
+
+    /// Attach a governance engine for pre-execution gating.
+    #[cfg(feature = "exochain")]
+    pub fn set_governance_engine(&mut self, ge: Arc<crate::governance::GovernanceEngine>) {
+        self.governance_engine = Some(ge);
     }
 
     /// Get the sandbox configuration.
@@ -163,6 +194,37 @@ impl WasmToolRunner {
         _tool: &WasmTool,
         _input: serde_json::Value,
     ) -> Result<WasmToolResult, WasmError> {
+        // Governance gate: check before execution
+        #[cfg(feature = "exochain")]
+        if let Some(ref ge) = self.governance_engine {
+            let request = crate::governance::GovernanceRequest::new("wasm", "wasm.execute")
+                .with_effect(crate::governance::EffectVector {
+                    risk: 0.4,
+                    security: 0.5,
+                    ..Default::default()
+                });
+            let result = ge.evaluate(&request);
+            if matches!(
+                result.decision,
+                crate::governance::GovernanceDecision::Deny(_)
+            ) {
+                return Err(WasmError::GovernanceDenied(result.decision.to_string()));
+            }
+        }
+
+        // Chain logging
+        #[cfg(feature = "exochain")]
+        if let Some(ref cm) = self.chain_manager {
+            cm.append(
+                "wasm",
+                crate::chain::EVENT_KIND_WASM_EXECUTE,
+                Some(serde_json::json!({
+                    "tool": &_tool.name,
+                    "module_size": _tool.module_size,
+                })),
+            );
+        }
+
         #[cfg(not(feature = "wasm-sandbox"))]
         {
             Err(WasmError::RuntimeUnavailable)

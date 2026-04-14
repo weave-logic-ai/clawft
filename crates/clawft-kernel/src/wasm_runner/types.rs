@@ -247,6 +247,10 @@ pub enum WasmError {
         size: usize,
         limit: usize,
     },
+
+    /// Execution denied by governance gate.
+    #[error("governance denied: {0}")]
+    GovernanceDenied(String),
 }
 
 /// Tool execution errors.
