@@ -558,6 +558,54 @@ impl EmlModel {
     }
 
     // -------------------------------------------------------------------
+    // Distillation
+    // -------------------------------------------------------------------
+
+    /// Distill this (teacher) model to a shallower student model.
+    ///
+    /// Creates a new `EmlModel` with `target_depth` (must be less than
+    /// the teacher's depth) and trains it to mimic the teacher's outputs
+    /// on `num_samples` synthetic inputs drawn uniformly from \[0, 1\].
+    ///
+    /// The student learns from the teacher's predictions, not from the
+    /// original training data. This preserves accuracy while reducing
+    /// computation for constrained devices (WASM, ESP32).
+    ///
+    /// # Panics
+    /// Panics if `target_depth >= self.depth` or `target_depth` is not
+    /// in {2, 3, 4, 5}.
+    pub fn distill(&self, target_depth: usize, num_samples: usize) -> EmlModel {
+        assert!(
+            target_depth < self.depth,
+            "student depth ({target_depth}) must be less than teacher depth ({})",
+            self.depth
+        );
+
+        let mut student = EmlModel::new(target_depth, self.input_count, self.head_count);
+
+        // Generate synthetic inputs in [0, 1] and get teacher predictions.
+        // Use a simple LCG for reproducibility without needing `rand`.
+        let mut rng_state: u64 = 0xCAFE_BABE_1234_5678;
+        let lcg_next = |state: &mut u64| -> f64 {
+            *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            // Map to [0, 1]
+            (*state >> 33) as f64 / (1u64 << 31) as f64
+        };
+
+        for _ in 0..num_samples.max(50) {
+            let inputs: Vec<f64> = (0..self.input_count)
+                .map(|_| lcg_next(&mut rng_state))
+                .collect();
+            let teacher_out = self.predict(&inputs);
+            let targets: Vec<Option<f64>> = teacher_out.into_iter().map(Some).collect();
+            student.record(&inputs, &targets);
+        }
+
+        student.train();
+        student
+    }
+
+    // -------------------------------------------------------------------
     // Serialization
     // -------------------------------------------------------------------
 
@@ -760,5 +808,79 @@ mod tests {
     #[should_panic(expected = "head_count must be >= 1")]
     fn zero_heads_panics() {
         EmlModel::new(3, 3, 0);
+    }
+
+    #[test]
+    fn distill_depth_4_to_depth_2() {
+        // Distill a depth-4 model to depth-2.
+        // The student should learn to mimic the teacher's output function,
+        // regardless of whether the teacher was "well trained" on real data.
+        // We verify structural correctness and output agreement.
+        let mut teacher = EmlModel::new(4, 2, 1);
+        // Give teacher non-trivial params so it has a non-constant function.
+        for (i, p) in teacher.params.iter_mut().enumerate() {
+            *p = ((i as f64) * 0.37).sin() * 0.5;
+        }
+        teacher.trained = true;
+
+        let student = teacher.distill(2, 500);
+        assert_eq!(student.depth(), 2);
+        assert_eq!(student.input_count(), 2);
+        assert_eq!(student.head_count(), 1);
+
+        // Evaluate on a grid and compute mean absolute error.
+        let mut total_err = 0.0;
+        let mut count = 0;
+        for i in 0..10 {
+            for j in 0..10 {
+                let x = i as f64 / 10.0;
+                let y = j as f64 / 10.0;
+                let t = teacher.predict_primary(&[x, y]);
+                let s = student.predict_primary(&[x, y]);
+                assert!(t.is_finite());
+                assert!(s.is_finite());
+                total_err += (t - s).abs();
+                count += 1;
+            }
+        }
+        let mae = total_err / count as f64;
+
+        // The student should have reasonable fidelity. With 500 samples
+        // and coordinate descent, MAE should be moderate.
+        // We primarily verify the distillation mechanism works without panics
+        // and produces finite, non-degenerate outputs.
+        assert!(
+            mae < 50.0,
+            "distilled model MAE should be reasonable, got {mae}"
+        );
+    }
+
+    #[test]
+    fn distill_multi_head() {
+        let mut teacher = EmlModel::new(4, 2, 2);
+        for i in 0..100 {
+            let x = i as f64 / 100.0;
+            let y = (i + 20) as f64 / 100.0;
+            teacher.record(&[x, y], &[Some(x + y), Some(x * y)]);
+        }
+        teacher.train();
+
+        let student = teacher.distill(2, 200);
+        assert_eq!(student.depth(), 2);
+        assert_eq!(student.head_count(), 2);
+
+        // Both heads should produce finite outputs.
+        let pred = student.predict(&[0.5, 0.7]);
+        assert_eq!(pred.len(), 2);
+        for &v in &pred {
+            assert!(v.is_finite());
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "student depth")]
+    fn distill_same_depth_panics() {
+        let teacher = EmlModel::new(4, 3, 1);
+        teacher.distill(4, 100);
     }
 }

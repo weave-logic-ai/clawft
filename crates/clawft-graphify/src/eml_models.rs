@@ -450,6 +450,90 @@ impl Default for ForensicCoherenceModel {
 }
 
 // ---------------------------------------------------------------------------
+// 5. QueryFusionModel  (graphify_cmd.rs / KG-001)
+// ---------------------------------------------------------------------------
+
+/// Learned score fusion for hybrid graph search.
+///
+/// Takes 4 features and produces a single fused relevance score:
+/// `[keyword_score, graph_proximity_score, community_match_score,
+///   entity_type_relevance]` -> fused_score
+///
+/// Training data: user marks results as relevant (1.0) or irrelevant (0.0).
+pub struct QueryFusionModel {
+    model: EmlModel,
+    trained: bool,
+}
+
+impl QueryFusionModel {
+    /// Create a new untrained model.
+    pub fn new() -> Self {
+        Self {
+            model: EmlModel::new(3, 4, 1),
+            trained: false,
+        }
+    }
+
+    /// Fuse individual scores into a single relevance score.
+    ///
+    /// Inputs: `[keyword_score, graph_proximity_score,
+    ///   community_match_score, entity_type_relevance]`
+    ///
+    /// Falls back to a simple normalized sum when untrained.
+    pub fn fuse(&self, features: &[f64; 4]) -> f64 {
+        if !self.trained {
+            return self.fallback_fuse(features);
+        }
+        self.model.predict_primary(features).max(0.0)
+    }
+
+    /// Simple weighted-sum fallback.
+    ///
+    /// Weights: keyword=0.4, proximity=0.3, community=0.2, entity_type=0.1
+    fn fallback_fuse(&self, f: &[f64; 4]) -> f64 {
+        f[0] * 0.4 + f[1] * 0.3 + f[2] * 0.2 + f[3] * 0.1
+    }
+
+    /// Record a training sample: features + user relevance (0.0 or 1.0).
+    pub fn record(&mut self, features: [f64; 4], relevance: f64) {
+        self.model.record(&features, &[Some(relevance)]);
+    }
+
+    /// Train on accumulated samples. Returns `true` if converged.
+    pub fn train(&mut self) -> bool {
+        let converged = self.model.train();
+        if converged {
+            self.trained = true;
+        }
+        converged
+    }
+
+    /// Whether the model has been trained.
+    pub fn is_trained(&self) -> bool {
+        self.trained
+    }
+
+    /// Serialize to JSON for persistence.
+    pub fn to_json(&self) -> String {
+        self.model.to_json()
+    }
+
+    /// Deserialize from JSON.
+    pub fn from_json(json: &str) -> Option<Self> {
+        EmlModel::from_json(json).map(|model| {
+            let trained = model.is_trained();
+            Self { model, trained }
+        })
+    }
+}
+
+impl Default for QueryFusionModel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -583,6 +667,38 @@ mod tests {
         let model = ForensicCoherenceModel::new();
         let json = model.to_json();
         let restored = ForensicCoherenceModel::from_json(&json).unwrap();
+        assert!(!restored.is_trained());
+    }
+
+    // -- QueryFusionModel ----------------------------------------------------
+
+    #[test]
+    fn query_fusion_fallback_weighted_sum() {
+        let model = QueryFusionModel::new();
+        // keyword=1.0, proximity=0.5, community=0.5, entity_type=1.0
+        let score = model.fuse(&[1.0, 0.5, 0.5, 1.0]);
+        // 1.0*0.4 + 0.5*0.3 + 0.5*0.2 + 1.0*0.1 = 0.4+0.15+0.10+0.10 = 0.75
+        assert!((score - 0.75).abs() < f64::EPSILON, "got {score}");
+    }
+
+    #[test]
+    fn query_fusion_fallback_zeros() {
+        let model = QueryFusionModel::new();
+        let score = model.fuse(&[0.0, 0.0, 0.0, 0.0]);
+        assert!((score - 0.0).abs() < f64::EPSILON, "got {score}");
+    }
+
+    #[test]
+    fn query_fusion_untrained_flag() {
+        let model = QueryFusionModel::new();
+        assert!(!model.is_trained());
+    }
+
+    #[test]
+    fn query_fusion_serialization_roundtrip() {
+        let model = QueryFusionModel::new();
+        let json = model.to_json();
+        let restored = QueryFusionModel::from_json(&json).unwrap();
         assert!(!restored.is_trained());
     }
 }

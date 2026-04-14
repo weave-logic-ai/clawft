@@ -328,6 +328,81 @@ pub fn cohesion_score(kg: &KnowledgeGraph, community_nodes: &[EntityId]) -> f64 
     (score * 100.0).round() / 100.0
 }
 
+/// Newman modularity score Q for a community partition.
+///
+/// Measures the quality of a partition of the graph into communities.
+/// ```text
+/// Q = (1/2m) * sum_ij [A_ij - k_i*k_j/(2m)] * delta(c_i, c_j)
+/// ```
+/// where:
+/// - `m` = total number of edges
+/// - `A_ij` = 1 if edge exists between i and j, 0 otherwise
+/// - `k_i` = degree of node i
+/// - `delta(c_i, c_j)` = 1 if i and j are in the same community
+///
+/// Q ranges from -0.5 to 1.0. Higher values indicate better partitions.
+/// A value above 0.3 typically indicates significant community structure.
+///
+/// Returns 0.0 for graphs with no edges.
+pub fn newman_modularity(
+    kg: &KnowledgeGraph,
+    communities: &HashMap<usize, Vec<EntityId>>,
+) -> f64 {
+    let m = kg.edge_count();
+    if m == 0 {
+        return 0.0;
+    }
+
+    let two_m = 2.0 * m as f64;
+
+    // Build a reverse mapping: entity_id -> community_id.
+    let mut node_community: HashMap<&EntityId, usize> = HashMap::new();
+    for (&cid, members) in communities {
+        for id in members {
+            node_community.insert(id, cid);
+        }
+    }
+
+    // For each community, sum: (internal edges) - (sum_k_i)^2 / (2m)
+    // This avoids the O(n^2) pairwise iteration.
+    //
+    // Q = sum_c [ L_c/m - (D_c/(2m))^2 ]
+    //   where L_c = number of edges with both endpoints in community c
+    //         D_c = sum of degrees of nodes in community c
+    let mut q = 0.0;
+
+    for members in communities.values() {
+        // Compute L_c: count edges within this community.
+        let member_set: std::collections::HashSet<&EntityId> = members.iter().collect();
+
+        let mut internal_edges = 0usize;
+        let mut degree_sum = 0usize;
+
+        for id in members {
+            degree_sum += kg.degree(id);
+        }
+
+        // Count edges where both endpoints are in this community.
+        // We iterate over graph edges and check membership.
+        for (src, tgt, _rel) in kg.edges() {
+            if member_set.contains(&src.id) && member_set.contains(&tgt.id) {
+                internal_edges += 1;
+            }
+        }
+
+        // In the undirected Newman formula, each internal edge contributes
+        // 2 to the adjacency sum (A_ij + A_ji). Since kg.edges() yields
+        // directed edges (each stored once), multiply by 2.
+        let l_c = 2.0 * internal_edges as f64;
+        let d_c = degree_sum as f64;
+
+        q += l_c / two_m - (d_c / two_m).powi(2);
+    }
+
+    // Clamp to theoretical range for numerical stability.
+    q.clamp(-0.5, 1.0)
+}
+
 /// Batch cohesion scoring for all communities.
 pub fn score_all(
     kg: &KnowledgeGraph,
@@ -508,6 +583,118 @@ mod tests {
         for key in communities.keys() {
             assert!(scores.contains_key(key));
         }
+    }
+
+    #[test]
+    fn newman_modularity_no_edges_is_zero() {
+        let entities = vec![make_entity("a", "f.py"), make_entity("b", "f.py")];
+        let kg = KnowledgeGraph::from_parts(entities, vec![], vec![]);
+        let mut communities = HashMap::new();
+        communities.insert(0, kg.entity_ids().cloned().collect());
+        let q = newman_modularity(&kg, &communities);
+        assert!((q - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn newman_modularity_single_community() {
+        // All nodes in one community: Q should be 0 (no better than random).
+        let entities = vec![
+            make_entity("a", "f.py"),
+            make_entity("b", "f.py"),
+            make_entity("c", "f.py"),
+        ];
+        let rels = vec![
+            make_rel("a", "f.py", "b", "f.py"),
+            make_rel("b", "f.py", "c", "f.py"),
+        ];
+        let kg = KnowledgeGraph::from_parts(entities, rels, vec![]);
+        let ids: Vec<EntityId> = kg.entity_ids().cloned().collect();
+        let mut communities = HashMap::new();
+        communities.insert(0, ids);
+        let q = newman_modularity(&kg, &communities);
+        // Single community => Q = 1 - (sum_degrees/2m)^2 = 1 - 1 = 0
+        assert!(q.abs() < 0.01, "single community Q should be ~0, got {q}");
+    }
+
+    #[test]
+    fn newman_modularity_perfect_partition() {
+        // Two disconnected cliques should give high modularity.
+        let entities = vec![
+            make_entity("a1", "f.py"),
+            make_entity("a2", "f.py"),
+            make_entity("a3", "f.py"),
+            make_entity("b1", "g.py"),
+            make_entity("b2", "g.py"),
+            make_entity("b3", "g.py"),
+        ];
+        let rels = vec![
+            // Clique A
+            make_rel("a1", "f.py", "a2", "f.py"),
+            make_rel("a2", "f.py", "a3", "f.py"),
+            make_rel("a1", "f.py", "a3", "f.py"),
+            // Clique B
+            make_rel("b1", "g.py", "b2", "g.py"),
+            make_rel("b2", "g.py", "b3", "g.py"),
+            make_rel("b1", "g.py", "b3", "g.py"),
+        ];
+        let kg = KnowledgeGraph::from_parts(entities, rels, vec![]);
+
+        let id_a1 = EntityId::new(&DomainTag::Code, &EntityType::Function, "a1", "f.py");
+        let id_a2 = EntityId::new(&DomainTag::Code, &EntityType::Function, "a2", "f.py");
+        let id_a3 = EntityId::new(&DomainTag::Code, &EntityType::Function, "a3", "f.py");
+        let id_b1 = EntityId::new(&DomainTag::Code, &EntityType::Function, "b1", "g.py");
+        let id_b2 = EntityId::new(&DomainTag::Code, &EntityType::Function, "b2", "g.py");
+        let id_b3 = EntityId::new(&DomainTag::Code, &EntityType::Function, "b3", "g.py");
+
+        let mut communities = HashMap::new();
+        communities.insert(0, vec![id_a1, id_a2, id_a3]);
+        communities.insert(1, vec![id_b1, id_b2, id_b3]);
+
+        let q = newman_modularity(&kg, &communities);
+        // Two equal disconnected cliques: Q = 0.5
+        assert!(q > 0.3, "perfect partition should have Q > 0.3, got {q}");
+    }
+
+    #[test]
+    fn newman_modularity_bad_partition() {
+        // Put connected nodes in different communities.
+        let entities = vec![
+            make_entity("a", "f.py"),
+            make_entity("b", "f.py"),
+        ];
+        let rels = vec![make_rel("a", "f.py", "b", "f.py")];
+        let kg = KnowledgeGraph::from_parts(entities, rels, vec![]);
+
+        let id_a = EntityId::new(&DomainTag::Code, &EntityType::Function, "a", "f.py");
+        let id_b = EntityId::new(&DomainTag::Code, &EntityType::Function, "b", "f.py");
+
+        let mut communities = HashMap::new();
+        communities.insert(0, vec![id_a]);
+        communities.insert(1, vec![id_b]);
+
+        let q = newman_modularity(&kg, &communities);
+        // Splitting a single edge: Q should be negative or near zero.
+        assert!(q <= 0.01, "bad partition Q should be <= 0, got {q}");
+    }
+
+    #[test]
+    fn newman_modularity_in_range() {
+        let entities = vec![
+            make_entity("a", "f.py"),
+            make_entity("b", "f.py"),
+            make_entity("c", "f.py"),
+            make_entity("d", "g.py"),
+        ];
+        let rels = vec![
+            make_rel("a", "f.py", "b", "f.py"),
+            make_rel("b", "f.py", "c", "f.py"),
+            make_rel("a", "f.py", "c", "f.py"),
+            make_rel("c", "f.py", "d", "g.py"),
+        ];
+        let kg = KnowledgeGraph::from_parts(entities, rels, vec![]);
+        let communities = cluster(&kg);
+        let q = newman_modularity(&kg, &communities);
+        assert!(q >= -0.5 && q <= 1.0, "Q must be in [-0.5, 1.0], got {q}");
     }
 
     #[test]

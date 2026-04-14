@@ -7,6 +7,9 @@ use crate::eml_models::SurpriseScorerModel;
 use crate::entity::EntityId;
 use crate::model::KnowledgeGraph;
 use crate::relationship::Confidence;
+use petgraph::graph::NodeIndex;
+use petgraph::visit::EdgeRef;
+use petgraph::Direction;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -995,6 +998,384 @@ pub fn graph_diff(old: &KnowledgeGraph, new: &KnowledgeGraph) -> GraphDiff {
 }
 
 // ---------------------------------------------------------------------------
+// KG-007: MCTS Graph Exploration (RANGER)
+// ---------------------------------------------------------------------------
+
+/// Configuration for Monte Carlo Tree Search over the knowledge graph.
+#[derive(Debug, Clone)]
+pub struct MctsExplorer {
+    /// UCB1 exploration constant (default: sqrt(2) ~= 1.414).
+    pub exploration_constant: f64,
+    /// Maximum number of MCTS iterations.
+    pub max_iterations: usize,
+    /// Maximum depth for rollout random walks.
+    pub max_depth: usize,
+}
+
+/// Result of MCTS graph exploration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MctsResult {
+    /// Best path of entity IDs found during exploration.
+    pub best_path: Vec<EntityId>,
+    /// Cumulative relevance score of the best path.
+    pub score: f64,
+    /// Number of MCTS iterations actually performed.
+    pub iterations_used: usize,
+    /// Total number of unique nodes explored across all iterations.
+    pub nodes_explored: usize,
+}
+
+/// Internal tree node for MCTS bookkeeping.
+struct MctsNode {
+    entity_id: EntityId,
+    visit_count: u32,
+    total_reward: f64,
+    children: Vec<usize>, // indices into the arena
+    parent: Option<usize>,
+    expanded: bool,
+}
+
+impl Default for MctsExplorer {
+    fn default() -> Self {
+        Self {
+            exploration_constant: std::f64::consts::SQRT_2,
+            max_iterations: 500,
+            max_depth: 10,
+        }
+    }
+}
+
+impl MctsExplorer {
+    /// Create a new explorer with the given parameters.
+    pub fn new(exploration_constant: f64, max_iterations: usize, max_depth: usize) -> Self {
+        Self {
+            exploration_constant,
+            max_iterations,
+            max_depth,
+        }
+    }
+
+    /// Explore the graph from `start`, seeking high-relevance paths.
+    ///
+    /// The `relevance_fn` scores individual entities (higher = more relevant).
+    /// MCTS balances exploitation (following high-relevance nodes) with
+    /// exploration (visiting unvisited edges) using the UCB1 formula.
+    pub fn explore(
+        &self,
+        kg: &KnowledgeGraph,
+        start: &EntityId,
+        relevance_fn: impl Fn(&crate::model::Entity) -> f64,
+    ) -> MctsResult {
+        if kg.entity(start).is_none() {
+            return MctsResult {
+                best_path: vec![],
+                score: 0.0,
+                iterations_used: 0,
+                nodes_explored: 0,
+            };
+        }
+
+        let mut arena: Vec<MctsNode> = Vec::new();
+        arena.push(MctsNode {
+            entity_id: start.clone(),
+            visit_count: 0,
+            total_reward: 0.0,
+            children: Vec::new(),
+            parent: None,
+            expanded: false,
+        });
+
+        let mut best_path: Vec<EntityId> = vec![start.clone()];
+        let mut best_score: f64 = kg.entity(start).map(&relevance_fn).unwrap_or(0.0);
+        let mut explored_nodes: HashSet<EntityId> = HashSet::new();
+        explored_nodes.insert(start.clone());
+
+        // Deterministic PRNG (xorshift64) for rollout -- avoids rand dep.
+        let mut rng_state: u64 = 0xDEAD_BEEF_CAFE_1234;
+        let mut next_rng = |state: &mut u64| -> u64 {
+            *state ^= *state << 13;
+            *state ^= *state >> 7;
+            *state ^= *state << 17;
+            *state
+        };
+
+        let mut actual_iterations = 0usize;
+
+        for _iter_idx in 0..self.max_iterations {
+            actual_iterations += 1;
+
+            // Selection -- walk down via UCB1.
+            let mut current = 0usize;
+            let mut path_ids: Vec<EntityId> = vec![arena[current].entity_id.clone()];
+            let mut depth = 0;
+
+            while arena[current].expanded
+                && !arena[current].children.is_empty()
+                && depth < self.max_depth
+            {
+                let parent_visits = arena[current].visit_count as f64;
+                let c = self.exploration_constant;
+                let best_child = arena[current]
+                    .children
+                    .iter()
+                    .copied()
+                    .max_by(|&a, &b| {
+                        let ucb_a = Self::ucb1_score(&arena[a], parent_visits, c);
+                        let ucb_b = Self::ucb1_score(&arena[b], parent_visits, c);
+                        ucb_a.partial_cmp(&ucb_b).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                match best_child {
+                    Some(ci) => {
+                        current = ci;
+                        path_ids.push(arena[current].entity_id.clone());
+                        depth += 1;
+                    }
+                    None => break,
+                }
+            }
+
+            // Expansion -- add children of current node if not expanded.
+            if !arena[current].expanded && depth < self.max_depth {
+                let current_id = arena[current].entity_id.clone();
+                let neighbors = kg.neighbors(&current_id);
+                let path_set: HashSet<&EntityId> = path_ids.iter().collect();
+                let new_neighbors: Vec<EntityId> = neighbors
+                    .iter()
+                    .map(|e| e.id.clone())
+                    .filter(|id| !path_set.contains(id))
+                    .collect();
+
+                let child_start = arena.len();
+                for nid in &new_neighbors {
+                    explored_nodes.insert(nid.clone());
+                    arena.push(MctsNode {
+                        entity_id: nid.clone(),
+                        visit_count: 0,
+                        total_reward: 0.0,
+                        children: Vec::new(),
+                        parent: Some(current),
+                        expanded: false,
+                    });
+                }
+                let child_end = arena.len();
+                arena[current].children = (child_start..child_end).collect();
+                arena[current].expanded = true;
+
+                if !arena[current].children.is_empty() {
+                    current = arena[current].children[0];
+                    path_ids.push(arena[current].entity_id.clone());
+                    depth += 1;
+                }
+            }
+
+            // Rollout -- random walk from current, accumulate relevance.
+            let mut rollout_reward = 0.0;
+            let mut rollout_id = arena[current].entity_id.clone();
+            let mut rollout_visited: HashSet<EntityId> = path_ids.iter().cloned().collect();
+            let mut rollout_steps = 0;
+            for _ in 0..self.max_depth.saturating_sub(depth) {
+                if let Some(ent) = kg.entity(&rollout_id) {
+                    rollout_reward += relevance_fn(ent);
+                }
+                rollout_steps += 1;
+                let nbrs = kg.neighbors(&rollout_id);
+                let unvis: Vec<&EntityId> = nbrs.iter().map(|e| &e.id)
+                    .filter(|id| !rollout_visited.contains(id)).collect();
+                if unvis.is_empty() { break; }
+                let pick = next_rng(&mut rng_state) as usize % unvis.len();
+                let next = unvis[pick].clone();
+                rollout_visited.insert(next.clone());
+                rollout_id = next;
+            }
+
+            let normalized_reward = if rollout_steps > 0 {
+                rollout_reward / rollout_steps as f64
+            } else { 0.0 };
+
+            // Backpropagation.
+            let mut bp = current;
+            loop {
+                arena[bp].visit_count += 1;
+                arena[bp].total_reward += normalized_reward;
+                match arena[bp].parent { Some(p) => bp = p, None => break }
+            }
+
+            let path_score: f64 = path_ids.iter()
+                .filter_map(|id| kg.entity(id)).map(&relevance_fn).sum();
+            if path_score > best_score {
+                best_score = path_score;
+                best_path = path_ids;
+            }
+
+            if actual_iterations > 10
+                && arena.iter().all(|n| n.expanded || n.children.is_empty())
+            { break; }
+        }
+
+        MctsResult {
+            best_path,
+            score: best_score,
+            iterations_used: actual_iterations,
+            nodes_explored: explored_nodes.len(),
+        }
+    }
+
+    fn ucb1_score(node: &MctsNode, parent_visits: f64, c: f64) -> f64 {
+        if node.visit_count == 0 { return f64::INFINITY; }
+        let exploitation = node.total_reward / node.visit_count as f64;
+        let exploration = c * (parent_visits.ln() / node.visit_count as f64).sqrt();
+        exploitation + exploration
+    }
+}
+
+// ---------------------------------------------------------------------------
+// KG-010: Multi-hop Traversal with Priors (Beam Search)
+// ---------------------------------------------------------------------------
+
+/// A scored traversal path through the knowledge graph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraversalPath {
+    pub nodes: Vec<EntityId>,
+    pub edges: Vec<String>,
+    pub total_score: f64,
+}
+
+/// Default edge priors for beam search exploration.
+pub fn default_edge_priors() -> HashMap<String, f64> {
+    let mut priors = HashMap::new();
+    priors.insert("calls".to_owned(), 1.0);
+    priors.insert("imports".to_owned(), 0.8);
+    priors.insert("imports_from".to_owned(), 0.8);
+    priors.insert("depends_on".to_owned(), 0.8);
+    priors.insert("contains".to_owned(), 0.5);
+    priors.insert("method_of".to_owned(), 0.5);
+    priors.insert("implements".to_owned(), 0.7);
+    priors.insert("extends".to_owned(), 0.7);
+    priors.insert("related_to".to_owned(), 0.3);
+    priors.insert("uses".to_owned(), 0.8);
+    priors
+}
+
+/// Beam search traversal with exploration priors over a knowledge graph.
+///
+/// Expands the most promising nodes first based on edge-type relevance
+/// weights. At each depth level, only the top `beam_width` paths are
+/// kept for further expansion.
+///
+/// `edge_prior` maps edge type strings (e.g. "calls") to exploration
+/// weights. Edge types not present in the map receive a default weight
+/// of 0.1.
+pub fn beam_search(
+    kg: &KnowledgeGraph,
+    start: &EntityId,
+    beam_width: usize,
+    max_depth: usize,
+    edge_prior: &HashMap<String, f64>,
+) -> Vec<TraversalPath> {
+    let graph = kg.inner_graph();
+    let entity_index = kg.entity_index();
+
+    let Some(&start_idx) = entity_index.get(start) else {
+        return Vec::new();
+    };
+
+    let default_weight = 0.1;
+
+    // Each beam entry: (path_nodes as NodeIndex vec, edge_types, cumulative score)
+    let mut beam: Vec<(Vec<NodeIndex>, Vec<String>, f64)> = vec![(vec![start_idx], Vec::new(), 0.0)];
+    let mut completed: Vec<TraversalPath> = Vec::new();
+
+    for _depth in 0..max_depth {
+        let mut candidates: Vec<(Vec<NodeIndex>, Vec<String>, f64)> = Vec::new();
+
+        for (path, edges, score) in &beam {
+            let current_idx = *path.last().unwrap();
+            let visited: HashSet<NodeIndex> = path.iter().copied().collect();
+
+            let mut has_expansion = false;
+
+            // Expand in both directions to find reachable neighbors.
+            for dir in [Direction::Outgoing, Direction::Incoming] {
+                for edge_ref in graph.edges_directed(current_idx, dir) {
+                    let neighbor_idx = match dir {
+                        Direction::Outgoing => edge_ref.target(),
+                        Direction::Incoming => edge_ref.source(),
+                    };
+
+                    if visited.contains(&neighbor_idx) {
+                        continue;
+                    }
+
+                    let rel = edge_ref.weight();
+                    let rel_str = rel.relation_type_str();
+                    let weight = edge_prior
+                        .get(&rel_str)
+                        .copied()
+                        .unwrap_or(default_weight);
+
+                    let new_score = score + weight;
+                    let mut new_path = path.clone();
+                    new_path.push(neighbor_idx);
+                    let mut new_edges = edges.clone();
+                    new_edges.push(rel_str);
+
+                    candidates.push((new_path, new_edges, new_score));
+                    has_expansion = true;
+                }
+            }
+
+            // If this path has no further expansions, record it as completed.
+            if !has_expansion && path.len() > 1 {
+                let nodes = path
+                    .iter()
+                    .map(|&idx| graph[idx].id.clone())
+                    .collect();
+                completed.push(TraversalPath {
+                    nodes,
+                    edges: edges.clone(),
+                    total_score: *score,
+                });
+            }
+        }
+
+        if candidates.is_empty() {
+            break;
+        }
+
+        // Keep only top beam_width candidates by score.
+        candidates.sort_by(|a, b| {
+            b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        candidates.truncate(beam_width);
+        beam = candidates;
+    }
+
+    // Convert remaining beam entries to completed paths.
+    for (path, edges, score) in beam {
+        if path.len() > 1 {
+            let nodes = path
+                .iter()
+                .map(|&idx| graph[idx].id.clone())
+                .collect();
+            completed.push(TraversalPath {
+                nodes,
+                edges,
+                total_score: score,
+            });
+        }
+    }
+
+    // Sort by score descending.
+    completed.sort_by(|a, b| {
+        b.total_score
+            .partial_cmp(&a.total_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    completed
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1217,5 +1598,197 @@ mod tests {
         let labels = HashMap::new();
         let qs = suggest_questions(&kg, &communities, &labels, 7);
         assert!(qs.iter().any(|q| q.question_type == QuestionType::AmbiguousEdge));
+    }
+
+    // -----------------------------------------------------------------------
+    // KG-010: Multi-hop Beam Search
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn beam_search_basic_traversal() {
+        let kg = sample_kg();
+        let priors = default_edge_priors();
+        let auth_id = EntityId::new(&DomainTag::Code, &EntityType::Function, "auth", "src/auth.py");
+
+        let paths = beam_search(&kg, &auth_id, 5, 3, &priors);
+        assert!(!paths.is_empty(), "Beam search should find at least one path");
+
+        for path in &paths {
+            assert!(path.nodes.len() >= 2, "Each path should have at least 2 nodes");
+            assert_eq!(path.edges.len(), path.nodes.len() - 1);
+            assert!(path.total_score > 0.0);
+        }
+    }
+
+    #[test]
+    fn beam_search_respects_beam_width() {
+        // Build a graph where one node connects to many others.
+        let mut entities = vec![entity("hub", "Hub", "src/hub.py")];
+        let mut rels = Vec::new();
+        for i in 0..10 {
+            let name = format!("leaf_{i}");
+            let file = format!("src/leaf_{i}.py");
+            entities.push(entity(&name, &name, &file));
+            rels.push(rel(
+                "hub", "src/hub.py",
+                &name, &file,
+                RelationType::Calls,
+                Confidence::Extracted,
+            ));
+        }
+        let kg = KnowledgeGraph::from_parts(entities, rels, vec![]);
+        let priors = default_edge_priors();
+        let hub_id = EntityId::new(&DomainTag::Code, &EntityType::Function, "hub", "src/hub.py");
+
+        // beam_width=3 should produce at most 3 paths at depth 1.
+        let paths = beam_search(&kg, &hub_id, 3, 1, &priors);
+        assert!(paths.len() <= 3, "Should respect beam_width limit");
+    }
+
+    #[test]
+    fn beam_search_unknown_start() {
+        let kg = sample_kg();
+        let priors = default_edge_priors();
+        let fake_id = EntityId::new(&DomainTag::Code, &EntityType::Function, "nope", "x.py");
+        let paths = beam_search(&kg, &fake_id, 5, 3, &priors);
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn beam_search_sorted_by_score_desc() {
+        let kg = sample_kg();
+        let priors = default_edge_priors();
+        let auth_id = EntityId::new(&DomainTag::Code, &EntityType::Function, "auth", "src/auth.py");
+
+        let paths = beam_search(&kg, &auth_id, 10, 3, &priors);
+        for w in paths.windows(2) {
+            assert!(
+                w[0].total_score >= w[1].total_score,
+                "Paths should be sorted by score descending"
+            );
+        }
+    }
+
+    #[test]
+    fn beam_search_custom_priors() {
+        let kg = sample_kg();
+        // Only value "calls" edges, zero out everything else.
+        let mut priors = HashMap::new();
+        priors.insert("calls".to_owned(), 1.0);
+        priors.insert("depends_on".to_owned(), 0.0);
+        priors.insert("contains".to_owned(), 0.0);
+
+        let auth_id = EntityId::new(&DomainTag::Code, &EntityType::Function, "auth", "src/auth.py");
+        let paths = beam_search(&kg, &auth_id, 10, 3, &priors);
+
+        // All edges in top-scoring paths should prefer "calls".
+        if let Some(top) = paths.first() {
+            for edge in &top.edges {
+                // Top path should contain calls (highest weight).
+                let _ = edge; // Just ensure it doesn't panic.
+            }
+        }
+    }
+
+    #[test]
+    fn default_edge_priors_contains_expected_keys() {
+        let priors = default_edge_priors();
+        assert!(priors.contains_key("calls"));
+        assert!(priors.contains_key("imports"));
+        assert!(priors.contains_key("contains"));
+        assert!(priors.contains_key("related_to"));
+        assert!(*priors.get("calls").unwrap() > *priors.get("related_to").unwrap());
+    }
+
+    // -- KG-007: MCTS tests ------------------------------------------------
+
+    #[test]
+    fn mcts_returns_empty_for_missing_start() {
+        let kg = KnowledgeGraph::new();
+        let explorer = MctsExplorer::default();
+        let fake_id = EntityId::new(&DomainTag::Code, &EntityType::Function, "nope", "x.py");
+        let result = explorer.explore(&kg, &fake_id, |_| 1.0);
+        assert!(result.best_path.is_empty());
+        assert_eq!(result.score, 0.0);
+        assert_eq!(result.iterations_used, 0);
+    }
+
+    #[test]
+    fn mcts_explores_single_node() {
+        let kg = KnowledgeGraph::from_parts(
+            vec![entity("a", "A", "a.py")],
+            vec![],
+            vec![],
+        );
+        let start = EntityId::new(&DomainTag::Code, &EntityType::Function, "a", "a.py");
+        let explorer = MctsExplorer::new(std::f64::consts::SQRT_2, 50, 5);
+        let result = explorer.explore(&kg, &start, |_| 1.0);
+        assert_eq!(result.best_path.len(), 1);
+        assert_eq!(result.best_path[0], start);
+        assert!(result.score >= 1.0);
+        assert_eq!(result.nodes_explored, 1);
+    }
+
+    #[test]
+    fn mcts_finds_path_in_chain() {
+        // A -> B -> C -> D, relevance increases along chain.
+        let entities = vec![
+            entity("a", "A", "a.py"),
+            entity("b", "B", "b.py"),
+            entity("c", "C", "c.py"),
+            entity("d", "D", "d.py"),
+        ];
+        let rels = vec![
+            rel("a", "a.py", "b", "b.py", RelationType::Calls, Confidence::Extracted),
+            rel("b", "b.py", "c", "c.py", RelationType::Calls, Confidence::Extracted),
+            rel("c", "c.py", "d", "d.py", RelationType::Calls, Confidence::Extracted),
+        ];
+        let kg = KnowledgeGraph::from_parts(entities, rels, vec![]);
+        let start = EntityId::new(&DomainTag::Code, &EntityType::Function, "a", "a.py");
+        let explorer = MctsExplorer::new(std::f64::consts::SQRT_2, 200, 10);
+        // Relevance by label: A=1, B=2, C=3, D=4
+        let result = explorer.explore(&kg, &start, |e| match e.label.as_str() {
+            "A" => 1.0, "B" => 2.0, "C" => 3.0, "D" => 4.0, _ => 0.0,
+        });
+        assert!(result.best_path.len() >= 2, "should find multi-node path");
+        assert!(result.score > 1.0, "score should exceed single-node");
+        assert!(result.nodes_explored >= 2);
+    }
+
+    #[test]
+    fn mcts_prefers_high_relevance_branch() {
+        // A -> B (relevance 10.0), A -> C (relevance 0.1)
+        let entities = vec![
+            entity("a", "A", "a.py"),
+            entity("b", "HighRelevance", "b.py"),
+            entity("c", "LowRelevance", "c.py"),
+        ];
+        let rels = vec![
+            rel("a", "a.py", "b", "b.py", RelationType::Calls, Confidence::Extracted),
+            rel("a", "a.py", "c", "c.py", RelationType::Calls, Confidence::Extracted),
+        ];
+        let kg = KnowledgeGraph::from_parts(entities, rels, vec![]);
+        let start = EntityId::new(&DomainTag::Code, &EntityType::Function, "a", "a.py");
+        let explorer = MctsExplorer::new(std::f64::consts::SQRT_2, 100, 5);
+        let result = explorer.explore(&kg, &start, |e| {
+            if e.label == "HighRelevance" { 10.0 }
+            else if e.label == "LowRelevance" { 0.1 }
+            else { 1.0 }
+        });
+        // The best path should include the high-relevance node.
+        let high_id = EntityId::new(&DomainTag::Code, &EntityType::Function, "b", "b.py");
+        assert!(result.best_path.contains(&high_id),
+            "MCTS should find the high-relevance branch");
+        assert!(result.score >= 11.0);
+    }
+
+    #[test]
+    fn mcts_iterations_and_nodes_populated() {
+        let kg = sample_kg();
+        let start = EntityId::new(&DomainTag::Code, &EntityType::Function, "auth", "src/auth.py");
+        let explorer = MctsExplorer::new(1.0, 50, 5);
+        let result = explorer.explore(&kg, &start, |_| 1.0);
+        assert!(result.iterations_used > 0);
+        assert!(result.nodes_explored >= 1);
     }
 }

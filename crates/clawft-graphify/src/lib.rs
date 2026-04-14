@@ -13,10 +13,12 @@
 //!   timelines and their relationships from investigative documents.
 
 // Re-export core types at the crate root for convenience.
+pub mod alignment;
 pub mod analyze;
 pub mod build;
 pub mod cache;
 pub mod cluster;
+pub mod conversation;
 pub mod entity;
 pub mod export;
 pub mod extract;
@@ -24,6 +26,7 @@ pub mod model;
 pub mod pipeline;
 pub mod relationship;
 pub mod report;
+pub mod summary;
 pub mod eml_models;
 pub mod domain;
 pub mod hooks;

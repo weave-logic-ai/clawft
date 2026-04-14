@@ -6,6 +6,7 @@ use crate::analyze;
 use crate::build::MergeStats;
 use crate::cluster;
 use crate::entity::EntityId;
+use crate::summary;
 use crate::model::{
     DetectionResult, Entity, ExtractionResult, ExtractionStats, Hyperedge,
     KnowledgeGraph,
@@ -68,6 +69,7 @@ pub struct AnalysisResult {
     pub communities: HashMap<usize, Vec<EntityId>>,
     pub community_labels: HashMap<usize, String>,
     pub cohesion_scores: HashMap<usize, f64>,
+    pub community_summaries: HashMap<usize, summary::CommunitySummary>,
 }
 
 /// Full pipeline result.
@@ -146,6 +148,8 @@ impl Pipeline {
 
             let community_labels = cluster::auto_label_all(&graph, &communities);
             let cohesion_scores = cluster::score_all(&graph, &communities);
+            let community_summaries =
+                summary::generate_community_summaries(&graph, &communities, &community_labels);
 
             let (god_nodes, surprising_connections, questions) = if self.config.analyze {
                 let gn = analyze::god_nodes(&graph, self.config.god_nodes_top_n);
@@ -169,6 +173,7 @@ impl Pipeline {
                 communities,
                 community_labels,
                 cohesion_scores,
+                community_summaries,
             })
         } else {
             None
@@ -242,6 +247,8 @@ impl Pipeline {
 
             let community_labels = cluster::auto_label_all(&existing_graph, &communities);
             let cohesion_scores = cluster::score_all(&existing_graph, &communities);
+            let community_summaries =
+                summary::generate_community_summaries(&existing_graph, &communities, &community_labels);
 
             let (god_nodes, surprising_connections, questions) = if self.config.analyze {
                 let gn = analyze::god_nodes(&existing_graph, self.config.god_nodes_top_n);
@@ -268,6 +275,7 @@ impl Pipeline {
                 communities,
                 community_labels,
                 cohesion_scores,
+                community_summaries,
             })
         } else {
             None

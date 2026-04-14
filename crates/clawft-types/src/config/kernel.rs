@@ -568,6 +568,73 @@ pub struct VectorConfig {
     /// Hybrid-specific settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hybrid: Option<VectorHybridConfig>,
+
+    /// Logarithmic quantization settings (KG-011).
+    ///
+    /// Requires `ruvector-core` with PR #352 merged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_quantized: Option<LogQuantizedStubConfig>,
+
+    /// Unified SIMD distance kernel settings (KG-012).
+    ///
+    /// Requires `ruvector-core` with PR #352 merged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simd_distance: Option<SimdDistanceStubConfig>,
+}
+
+/// Serializable stub for LogQuantized configuration (KG-011).
+///
+/// Full implementation lives in `clawft-kernel::vector_quantization`.
+/// This type mirrors the essential fields for config-file deserialization
+/// in `clawft-types` (which cannot depend on `clawft-kernel`).
+///
+/// Requires `ruvector-core` with PR #352 merged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogQuantizedStubConfig {
+    /// Whether logarithmic quantization is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Compression ratio (default: 4).
+    #[serde(default = "default_log_quantized_compression_ratio")]
+    pub compression_ratio: usize,
+}
+
+fn default_log_quantized_compression_ratio() -> usize {
+    4
+}
+
+impl Default for LogQuantizedStubConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            compression_ratio: default_log_quantized_compression_ratio(),
+        }
+    }
+}
+
+/// Serializable stub for SIMD distance configuration (KG-012).
+///
+/// Full implementation lives in `clawft-kernel::vector_quantization`.
+///
+/// Requires `ruvector-core` with PR #352 merged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimdDistanceStubConfig {
+    /// Whether the unified SIMD distance kernel is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Whether to pad vectors to power-of-two length for alignment.
+    /// See shaal's v4 caveat about memory overhead.
+    #[serde(default)]
+    pub pad_to_power_of_two: bool,
+}
+
+impl Default for SimdDistanceStubConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            pad_to_power_of_two: false,
+        }
+    }
 }
 
 impl Default for VectorConfig {
@@ -577,6 +644,8 @@ impl Default for VectorConfig {
             hnsw: None,
             diskann: None,
             hybrid: None,
+            log_quantized: None,
+            simd_distance: None,
         }
     }
 }
@@ -676,6 +745,8 @@ mod tests {
         assert!(cfg.hnsw.is_none());
         assert!(cfg.diskann.is_none());
         assert!(cfg.hybrid.is_none());
+        assert!(cfg.log_quantized.is_none());
+        assert!(cfg.simd_distance.is_none());
     }
 
     #[test]
@@ -703,5 +774,51 @@ mod tests {
         let cfg: KernelConfig = serde_json::from_str(json).unwrap();
         assert!(cfg.vector.is_some());
         assert_eq!(cfg.vector.unwrap().backend, VectorBackendKind::Hnsw);
+    }
+
+    #[test]
+    fn log_quantized_stub_config_defaults() {
+        let cfg = LogQuantizedStubConfig::default();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.compression_ratio, 4);
+    }
+
+    #[test]
+    fn log_quantized_stub_config_deserialize() {
+        let json = r#"{"enabled": true, "compression_ratio": 8}"#;
+        let cfg: LogQuantizedStubConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.compression_ratio, 8);
+    }
+
+    #[test]
+    fn simd_distance_stub_config_defaults() {
+        let cfg = SimdDistanceStubConfig::default();
+        assert!(!cfg.enabled);
+        assert!(!cfg.pad_to_power_of_two);
+    }
+
+    #[test]
+    fn simd_distance_stub_config_deserialize() {
+        let json = r#"{"enabled": true, "pad_to_power_of_two": true}"#;
+        let cfg: SimdDistanceStubConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.enabled);
+        assert!(cfg.pad_to_power_of_two);
+    }
+
+    #[test]
+    fn vector_config_with_shaal_stubs() {
+        let json = r#"{
+            "backend": "hnsw",
+            "log_quantized": {"enabled": true, "compression_ratio": 16},
+            "simd_distance": {"enabled": true, "pad_to_power_of_two": true}
+        }"#;
+        let cfg: VectorConfig = serde_json::from_str(json).unwrap();
+        let lq = cfg.log_quantized.unwrap();
+        assert!(lq.enabled);
+        assert_eq!(lq.compression_ratio, 16);
+        let sd = cfg.simd_distance.unwrap();
+        assert!(sd.enabled);
+        assert!(sd.pad_to_power_of_two);
     }
 }

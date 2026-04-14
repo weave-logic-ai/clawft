@@ -88,6 +88,8 @@ pub mod vector_diskann;
 #[cfg(feature = "ecc")]
 pub mod vector_hybrid;
 #[cfg(feature = "ecc")]
+pub mod vector_quantization;
+#[cfg(feature = "ecc")]
 pub mod weaver;
 #[cfg(feature = "ecc")]
 pub mod profile_store;
@@ -101,6 +103,9 @@ pub mod hnsw_eml;
 pub mod eml_kernel;
 #[cfg(feature = "ecc")]
 pub mod eml_persistence;
+
+#[cfg(feature = "sensor")]
+pub mod sensor_graph;
 
 #[cfg(feature = "native")]
 pub mod a2a;

@@ -57,6 +57,7 @@ onnx-embeddings = ["dep:ort", "dep:ndarray"]
 wasm-sandbox = ["dep:wasmtime", "dep:wasmtime-wasi"]
 os-patterns = ["exochain"]
 treesitter = ["dep:clawft-plugin-treesitter"]
+sensor = []
 containers = []
 http-api = []
 

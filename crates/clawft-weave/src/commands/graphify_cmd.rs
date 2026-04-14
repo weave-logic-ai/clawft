@@ -219,46 +219,207 @@ async fn run_query(
     println!("Question: {question}");
     println!("Mode: {mode}, Depth: {depth}");
 
-    // Load graph and perform keyword search.
+    // Load graph into KnowledgeGraph for structured queries.
     let data = std::fs::read_to_string(graph_path)?;
-    let json: serde_json::Value = serde_json::from_str(&data)?;
+    let json_value: serde_json::Value = serde_json::from_str(&data)?;
 
-    let nodes = json["nodes"].as_array();
-    let terms: Vec<String> = question.split_whitespace()
+    // Remap "links" -> "edges" if needed for build_from_json.
+    let json_for_build = if json_value.get("edges").is_none() && json_value.get("links").is_some() {
+        let mut obj = json_value.clone();
+        if let Some(links) = obj.get("links").cloned() {
+            obj.as_object_mut().unwrap().insert("edges".to_string(), links);
+        }
+        obj
+    } else {
+        json_value
+    };
+
+    let kg = clawft_graphify::build::build_from_json(&json_for_build)
+        .map_err(|e| anyhow::anyhow!("Failed to load graph: {e}"))?;
+
+    if kg.node_count() == 0 {
+        println!("No nodes found in graph.");
+        return Ok(());
+    }
+
+    // Run community detection for proximity and community features.
+    let communities = clawft_graphify::cluster::cluster(&kg);
+    let community_labels = clawft_graphify::cluster::auto_label_all(&kg, &communities);
+    let community_summaries =
+        clawft_graphify::summary::generate_community_summaries(&kg, &communities, &community_labels);
+
+    // Build node -> community map for quick lookups.
+    let node_community = clawft_graphify::analyze::node_community_map(&communities);
+
+    let terms: Vec<String> = question
+        .split_whitespace()
         .filter(|t| t.len() > 2)
         .map(|t| t.to_lowercase())
         .collect();
 
-    if let Some(nodes) = nodes {
-        let mut scored: Vec<(f64, &serde_json::Value)> = nodes.iter()
-            .filter_map(|n| {
-                let label = n["label"].as_str().unwrap_or("").to_lowercase();
-                let source = n["source_file"].as_str().unwrap_or("").to_lowercase();
-                let score: f64 = terms.iter()
-                    .map(|t| {
-                        (if label.contains(t.as_str()) { 1.0 } else { 0.0 })
-                        + (if source.contains(t.as_str()) { 0.5 } else { 0.0 })
-                    })
-                    .sum();
-                if score > 0.0 { Some((score, n)) } else { None }
-            })
-            .collect();
+    if terms.is_empty() {
+        println!("Query too short (all terms <= 2 chars). Try a longer question.");
+        return Ok(());
+    }
 
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
-        if scored.is_empty() {
-            println!("No matching nodes found.");
-        } else {
-            println!("\nMatching nodes:");
-            for (score, node) in scored.iter().take(10) {
-                let label = node["label"].as_str().unwrap_or("?");
-                let src = node["source_file"].as_str().unwrap_or("");
-                let community = node["community"].as_u64().map(|c| c.to_string()).unwrap_or_default();
-                println!("  [{score:.1}] {label} (src={src}, community={community})");
+    // --- KG-002: Community summary search for global queries ---
+    let summary_hits = clawft_graphify::summary::search_summaries(&community_summaries, question);
+    if !summary_hits.is_empty() {
+        println!("\nCommunity matches:");
+        for (cid, score) in summary_hits.iter().take(3) {
+            if let Some(s) = community_summaries.get(cid) {
+                println!("  [community {cid}, score={score:.1}] {}", s.label);
+                println!("    {}", s.description);
             }
         }
+    }
+
+    // --- KG-001: Hybrid score fusion ---
+    let fusion = clawft_graphify::eml_models::QueryFusionModel::new();
+
+    // 1. Keyword scoring (existing logic, per entity).
+    let mut keyword_scores: HashMap<clawft_graphify::EntityId, f64> = HashMap::new();
+    let mut max_keyword = 0.0_f64;
+    for id in kg.entity_ids() {
+        if let Some(entity) = kg.entity(id) {
+            let label = entity.label.to_lowercase();
+            let source = entity
+                .source_file
+                .as_deref()
+                .unwrap_or("")
+                .to_lowercase();
+            let score: f64 = terms
+                .iter()
+                .map(|t| {
+                    (if label.contains(t.as_str()) { 1.0 } else { 0.0 })
+                        + (if source.contains(t.as_str()) { 0.5 } else { 0.0 })
+                })
+                .sum();
+            if score > 0.0 {
+                keyword_scores.insert(id.clone(), score);
+                if score > max_keyword {
+                    max_keyword = score;
+                }
+            }
+        }
+    }
+
+    // 2. Graph proximity: for matched nodes, boost 1-hop neighbors.
+    let mut proximity_scores: HashMap<clawft_graphify::EntityId, f64> = HashMap::new();
+    for (id, kw_score) in &keyword_scores {
+        let neighbors = kg.neighbors(id);
+        let bonus = kw_score * 0.5; // neighbors get 50% of parent's keyword score
+        for neighbor in neighbors {
+            *proximity_scores.entry(neighbor.id.clone()).or_insert(0.0) += bonus;
+        }
+    }
+    let max_proximity = proximity_scores
+        .values()
+        .copied()
+        .fold(0.0_f64, f64::max)
+        .max(1.0);
+
+    // 3. Community context: nodes sharing a community with top keyword matches
+    //    get a boost.
+    let top_match_community: Option<usize> = keyword_scores
+        .iter()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .and_then(|(id, _)| node_community.get(id).copied());
+
+    // 4. Entity type relevance: code entities score higher than generic ones.
+    let code_types = ["function", "module", "class", "method"];
+
+    // 5. Fuse all scores and rank.
+    let mut all_candidate_ids: std::collections::HashSet<clawft_graphify::EntityId> =
+        std::collections::HashSet::new();
+    all_candidate_ids.extend(keyword_scores.keys().cloned());
+    all_candidate_ids.extend(proximity_scores.keys().cloned());
+
+    struct ScoredResult {
+        id: clawft_graphify::EntityId,
+        fused_score: f64,
+        keyword_score: f64,
+        proximity_score: f64,
+        community_score: f64,
+        label: String,
+        source_file: String,
+        community_id: Option<usize>,
+    }
+
+    let mut results: Vec<ScoredResult> = all_candidate_ids
+        .into_iter()
+        .filter_map(|id| {
+            let entity = kg.entity(&id)?;
+            let kw = keyword_scores.get(&id).copied().unwrap_or(0.0);
+            let prox = proximity_scores.get(&id).copied().unwrap_or(0.0);
+            let cid = node_community.get(&id).copied();
+
+            // Normalize scores to [0, 1].
+            let kw_norm = if max_keyword > 0.0 {
+                kw / max_keyword
+            } else {
+                0.0
+            };
+            let prox_norm = prox / max_proximity;
+            let community_score = match (cid, top_match_community) {
+                (Some(c), Some(top_c)) if c == top_c => 1.0,
+                _ => 0.0,
+            };
+            let type_str = entity.entity_type.discriminant().to_lowercase();
+            let entity_type_relevance = if code_types
+                .iter()
+                .any(|t| type_str.contains(t))
+            {
+                1.0
+            } else {
+                0.5
+            };
+
+            let features = [kw_norm, prox_norm, community_score, entity_type_relevance];
+            let fused = fusion.fuse(&features);
+
+            // Skip nodes with zero fused score.
+            if fused <= 0.0 {
+                return None;
+            }
+
+            Some(ScoredResult {
+                id,
+                fused_score: fused,
+                keyword_score: kw,
+                proximity_score: prox,
+                community_score,
+                label: entity.label.clone(),
+                source_file: entity.source_file.clone().unwrap_or_default(),
+                community_id: cid,
+            })
+        })
+        .collect();
+
+    results.sort_by(|a, b| {
+        b.fused_score
+            .partial_cmp(&a.fused_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    if results.is_empty() {
+        println!("\nNo matching nodes found.");
     } else {
-        println!("No nodes found in graph.");
+        println!("\nMatching nodes (hybrid fusion):");
+        for r in results.iter().take(10) {
+            let cid_str = r
+                .community_id
+                .map(|c| c.to_string())
+                .unwrap_or_default();
+            let explanation = format!(
+                "kw={:.2} prox={:.2} comm={:.0} type_rel",
+                r.keyword_score, r.proximity_score, r.community_score
+            );
+            println!(
+                "  [{:.3}] {} (src={}, community={}) [{}]",
+                r.fused_score, r.label, r.source_file, cid_str, explanation
+            );
+        }
     }
 
     Ok(())
@@ -447,10 +608,11 @@ fn run_graphify_pipeline(root: &std::path::Path) -> anyhow::Result<()> {
     let out_dir = root.join("graphify-out");
     std::fs::create_dir_all(&out_dir)?;
 
-    // 5. Store community assignments on the graph for export
+    // 5. Store community assignments and summaries on the graph for export
     let mut graph = result.graph;
     if let Some(ref analysis) = result.analysis {
         graph.communities = Some(analysis.communities.clone());
+        graph.community_summaries = Some(analysis.community_summaries.clone());
     }
 
     // 6. Export to JSON
@@ -605,6 +767,7 @@ fn run_graphify_pipeline_incremental(
     let mut graph = result.graph;
     if let Some(ref analysis) = result.analysis {
         graph.communities = Some(analysis.communities.clone());
+        graph.community_summaries = Some(analysis.community_summaries.clone());
     }
 
     export::export(&graph, export::ExportFormat::Json, graph_path)

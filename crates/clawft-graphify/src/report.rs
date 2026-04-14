@@ -371,6 +371,7 @@ mod tests {
             communities,
             community_labels,
             cohesion_scores,
+            community_summaries: HashMap::new(),
         }
     }
 
@@ -439,6 +440,7 @@ mod tests {
             communities: HashMap::new(),
             community_labels: HashMap::new(),
             cohesion_scores: HashMap::new(),
+            community_summaries: HashMap::new(),
         };
         let detection = DetectionResult {
             total_files: 0,
