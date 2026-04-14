@@ -61,6 +61,7 @@ containers = []
 http-api = []
 
 [dependencies]
+eml-core = { workspace = true }
 clawft-core = { workspace = true, default-features = false }
 clawft-types = { workspace = true, default-features = false }
 clawft-platform = { workspace = true, default-features = false }

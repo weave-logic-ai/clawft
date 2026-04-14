@@ -27,6 +27,7 @@ members = [
     "crates/exo-resource-tree",
     "crates/weftos",
     "crates/clawft-graphify",
+    "crates/eml-core",
 ]
 exclude = [
     "gui/src-tauri",
@@ -179,6 +180,9 @@ clawft-security = { version = "0.6.4", path = "crates/clawft-security" }
 clawft-kernel = { version = "0.6.4", path = "crates/clawft-kernel", default-features = false }
 exo-resource-tree = { version = "0.6.4", path = "crates/exo-resource-tree" }
 weftos = { version = "0.6.4", path = "crates/weftos", default-features = false }
+
+# EML (exp-ln) function approximation
+eml-core = { version = "0.1.0", path = "crates/eml-core" }
 
 # Graph library
 petgraph = "0.7"
