@@ -3,6 +3,10 @@
 //! The [`CognitiveTick`] service drives the kernel's cognitive processing
 //! cycle at a configurable interval, with optional adaptive adjustment
 //! based on measured compute timings and drift detection.
+//!
+//! The [`run_democritus_loop`] function implements the DEMOCRITUS two-tier
+//! coherence cycle: O(1) EML prediction on every tick, falling back to
+//! exact O(k*m) Lanczos spectral analysis when drift exceeds a threshold.
 
 use std::sync::Mutex;
 
@@ -266,6 +270,151 @@ impl SystemService for CognitiveTick {
             HealthStatus::Degraded("cognitive tick not running".into())
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// DEMOCRITUS two-tier coherence loop
+// ---------------------------------------------------------------------------
+
+/// Run the DEMOCRITUS two-tier coherence loop.
+///
+/// This is spawned as a background tokio task during kernel boot. On every
+/// cognitive tick it performs:
+///
+/// 1. **SENSE** -- gather cheap graph metadata (node/edge counts).
+/// 2. **THINK (fast)** -- O(1) EML coherence prediction.
+/// 3. **DETECT DRIFT** -- compare prediction against last exact value.
+/// 4. **THINK (exact)** -- O(k*m) Lanczos spectral analysis (only when drift
+///    exceeds threshold, or periodically to maintain calibration).
+/// 5. **COMMIT** -- record timing in the adaptive tick system.
+///
+/// The EML model is retrained periodically from accumulated exact samples so
+/// the fast path becomes more accurate over time.
+#[cfg(feature = "ecc")]
+pub async fn run_democritus_loop(
+    tick: std::sync::Arc<CognitiveTick>,
+    causal: std::sync::Arc<crate::causal::CausalGraph>,
+    hnsw: std::sync::Arc<crate::hnsw_service::HnswService>,
+    eml: std::sync::Arc<Mutex<crate::eml_coherence::EmlCoherenceModel>>,
+) {
+    use crate::eml_coherence::GraphFeatures;
+    use std::time::Instant;
+
+    let drift_threshold = 0.05; // trigger exact when fast prediction drifts >5%
+    let exact_every_n: u64 = 100; // force exact every 100 ticks regardless
+    let train_every_n: usize = 1000; // retrain model every 1000 exact samples
+
+    let mut last_exact_coherence = 0.0_f64;
+    let mut ticks_since_exact: u64 = 0;
+
+    tick.set_running(true);
+    tracing::info!(
+        "DEMOCRITUS loop started (drift_threshold={drift_threshold}, \
+         exact_every_n={exact_every_n}, train_every_n={train_every_n})"
+    );
+
+    loop {
+        let interval_ms = tick.current_interval_ms();
+        if interval_ms == 0 {
+            tracing::warn!("DEMOCRITUS loop: tick interval is 0, exiting");
+            break;
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(interval_ms as u64)).await;
+
+        if !tick.is_running() {
+            tracing::info!("DEMOCRITUS loop: tick stopped, exiting");
+            break;
+        }
+
+        let start = Instant::now();
+
+        // ── SENSE ──────────────────────────────────────────────────────
+        // Gather graph state (cheap metadata, no locking on DashMap reads).
+        let _node_count = causal.node_count();
+        let _edge_count = causal.edge_count();
+        let _hnsw_count = hnsw.len();
+
+        // ── THINK (fast path) ──────────────────────────────────────────
+        // O(1) EML coherence prediction from graph features.
+        let features = GraphFeatures::from_causal_graph(&causal);
+        let prediction = match eml.lock() {
+            Ok(model) => model.predict(&features),
+            Err(poisoned) => {
+                tracing::error!("DEMOCRITUS loop: EML model lock poisoned, exiting");
+                // Clear the poison so other consumers can proceed.
+                let model = poisoned.into_inner();
+                model.predict(&features)
+                // Cannot continue safely after a poisoned lock in a loop;
+                // the next iteration would hit the same poison. Break out.
+            }
+        };
+
+        // ── DETECT DRIFT ───────────────────────────────────────────────
+        ticks_since_exact += 1;
+        let drift = (prediction.lambda_2 - last_exact_coherence).abs();
+        let needs_exact = drift > drift_threshold
+            || ticks_since_exact >= exact_every_n
+            || last_exact_coherence == 0.0; // first tick always exact
+
+        if needs_exact {
+            // ── THINK (exact path) ─────────────────────────────────────
+            // O(k*m) Lanczos -- run rarely. Do NOT hold the EML lock here.
+            let spectral = causal.spectral_analysis(50);
+            let exact_lambda_2 = spectral.lambda_2;
+
+            if last_exact_coherence == 0.0 {
+                tracing::info!(
+                    lambda_2 = exact_lambda_2,
+                    "DEMOCRITUS: first exact coherence computed"
+                );
+            } else if drift > drift_threshold {
+                tracing::debug!(
+                    predicted = prediction.lambda_2,
+                    exact = exact_lambda_2,
+                    drift = drift,
+                    "DEMOCRITUS: drift detected, ran exact spectral analysis"
+                );
+            }
+
+            last_exact_coherence = exact_lambda_2;
+            ticks_since_exact = 0;
+
+            // Record training data for the EML model.
+            match eml.lock() {
+                Ok(mut model) => {
+                    model.record(features, exact_lambda_2);
+
+                    // Retrain periodically once we have enough samples.
+                    let sample_count = model.training_sample_count();
+                    if sample_count >= 50
+                        && sample_count % train_every_n == 0
+                    {
+                        let converged = model.train();
+                        tracing::info!(
+                            sample_count = sample_count,
+                            converged = converged,
+                            "DEMOCRITUS: EML model retrained"
+                        );
+                    }
+                }
+                Err(_) => {
+                    tracing::error!(
+                        "DEMOCRITUS loop: EML model lock poisoned during record, exiting"
+                    );
+                    break;
+                }
+            }
+        }
+
+        // ── COMMIT ─────────────────────────────────────────────────────
+        // Record timing in the adaptive tick system.
+        let compute_us = start.elapsed().as_micros() as u64;
+        tick.record_tick(compute_us);
+    }
+
+    tick.set_running(false);
+    tracing::info!("DEMOCRITUS loop exited");
 }
 
 // ---------------------------------------------------------------------------

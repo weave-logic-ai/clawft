@@ -84,7 +84,7 @@ pub struct EccSubsystem {
     pub(crate) impulses: Option<Arc<crate::impulse::ImpulseQueue>>,
     pub(crate) calibration: Option<crate::calibration::EccCalibration>,
     pub(crate) vector_backend: Option<Arc<dyn crate::vector_backend::VectorBackend>>,
-    pub(crate) eml_coherence: Option<crate::eml_coherence::EmlCoherenceModel>,
+    pub(crate) eml_coherence: Option<Arc<std::sync::Mutex<crate::eml_coherence::EmlCoherenceModel>>>,
 }
 
 /// OS-patterns observability: metrics, structured logging, timers,
@@ -1111,7 +1111,7 @@ impl<P: Platform> Kernel<P> {
 
         // 8e. Initialize ECC cognitive substrate (when ecc feature is enabled)
         #[cfg(feature = "ecc")]
-        let (ecc_hnsw, ecc_causal, ecc_tick, ecc_crossrefs, ecc_impulses, ecc_calibration, ecc_vector_backend) = {
+        let (ecc_hnsw, ecc_causal, ecc_tick, ecc_crossrefs, ecc_impulses, ecc_calibration, ecc_vector_backend, ecc_eml_model) = {
             use crate::calibration::{EccCalibrationConfig, run_calibration};
             use crate::causal::CausalGraph;
             use crate::cognitive_tick::{CognitiveTick, CognitiveTickConfig};
@@ -1229,6 +1229,33 @@ impl<P: Platform> Kernel<P> {
                 tracing::warn!(error = %e, "failed to start cognitive tick service");
             }
 
+            // Spawn the DEMOCRITUS two-tier coherence tick loop.
+            // This runs in the background, using the EML model for O(1)
+            // predictions on every tick and falling back to exact Lanczos
+            // spectral analysis when drift is detected.
+            let eml_model = Arc::new(std::sync::Mutex::new(
+                crate::eml_coherence::EmlCoherenceModel::new(),
+            ));
+            {
+                let tick_clone = tick.clone();
+                let causal_clone = causal.clone();
+                let hnsw_clone = hnsw.clone();
+                let eml_clone = eml_model.clone();
+                tokio::spawn(async move {
+                    crate::cognitive_tick::run_democritus_loop(
+                        tick_clone,
+                        causal_clone,
+                        hnsw_clone,
+                        eml_clone,
+                    )
+                    .await;
+                });
+            }
+            boot_log.push(BootEvent::info(
+                BootPhase::Ecc,
+                "DEMOCRITUS two-tier coherence loop spawned",
+            ));
+
             // Log calibration to chain
             #[cfg(feature = "exochain")]
             if let Some(ref cm) = chain_manager {
@@ -1263,6 +1290,7 @@ impl<P: Platform> Kernel<P> {
                 Some(impulses),
                 Some(calibration),
                 Some(vector_backend),
+                Some(eml_model),
             )
         };
 
@@ -1391,7 +1419,7 @@ impl<P: Platform> Kernel<P> {
                 impulses: ecc_impulses,
                 calibration: ecc_calibration,
                 vector_backend: ecc_vector_backend,
-                eml_coherence: Some(crate::eml_coherence::EmlCoherenceModel::new()),
+                eml_coherence: ecc_eml_model,
             },
             #[cfg(feature = "os-patterns")]
             observability: ObservabilitySubsystem {
@@ -1659,7 +1687,7 @@ impl<P: Platform> Kernel<P> {
 
     /// Get the EML coherence model (if ecc feature enabled).
     #[cfg(feature = "ecc")]
-    pub fn ecc_eml_coherence(&self) -> Option<&crate::eml_coherence::EmlCoherenceModel> {
+    pub fn ecc_eml_coherence(&self) -> Option<&Arc<std::sync::Mutex<crate::eml_coherence::EmlCoherenceModel>>> {
         self.ecc.eml_coherence.as_ref()
     }
 
