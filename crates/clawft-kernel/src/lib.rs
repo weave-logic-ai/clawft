@@ -92,6 +92,8 @@ pub mod weaver;
 #[cfg(feature = "ecc")]
 pub mod profile_store;
 #[cfg(feature = "ecc")]
+pub mod causal_predict;
+#[cfg(feature = "ecc")]
 pub mod eml_coherence;
 #[cfg(feature = "ecc")]
 pub mod hnsw_eml;
@@ -236,6 +238,12 @@ pub use calibration::{EccCalibration, EccCalibrationConfig};
 pub use causal::{
     CausalEdge, CausalEdgeType, CausalGraph, CausalNode, ChangeEvent, ChangePrediction,
     CouplingPair, SpectralResult,
+};
+#[cfg(feature = "ecc")]
+pub use causal_predict::{
+    CausalCollapseModel, CausalRankRequest, CausalRankResponse, CoherenceTracker,
+    CollapseFeatures, ConversationState, EvidenceRanking,
+    detect_conversation_cycle, predict_delta_lambda2, rank_evidence_by_impact,
 };
 #[cfg(feature = "ecc")]
 pub use cognitive_tick::{CognitiveTick, CognitiveTickConfig, CognitiveTickStats};

@@ -313,6 +313,7 @@ pub async fn run_democritus_loop_with_chain(
     eml: std::sync::Arc<Mutex<crate::eml_coherence::EmlCoherenceModel>>,
     chain_manager: Option<std::sync::Arc<crate::chain::ChainManager>>,
 ) {
+    use crate::causal_predict::{detect_conversation_cycle, ConversationState};
     use crate::eml_coherence::GraphFeatures;
     use std::time::Instant;
 
@@ -322,6 +323,7 @@ pub async fn run_democritus_loop_with_chain(
 
     let mut last_exact_coherence = 0.0_f64;
     let mut ticks_since_exact: u64 = 0;
+    let mut coherence_history: Vec<f64> = Vec::new();
 
     tick.set_running(true);
     tracing::info!(
@@ -395,6 +397,24 @@ pub async fn run_democritus_loop_with_chain(
 
             last_exact_coherence = exact_lambda_2;
             ticks_since_exact = 0;
+
+            // Track coherence history for cycle detection.
+            coherence_history.push(exact_lambda_2);
+
+            // Check for stuck conversation every 20 exact measurements.
+            if coherence_history.len() % 20 == 0 {
+                let state = detect_conversation_cycle(&coherence_history, 20, 0.01);
+                match state {
+                    ConversationState::Stuck { .. }
+                    | ConversationState::Oscillating { .. } => {
+                        tracing::warn!(
+                            "DEMOCRITUS: conversation appears stuck: {:?}",
+                            state
+                        );
+                    }
+                    _ => {}
+                }
+            }
 
             // Record training data for the EML model.
             match eml.lock() {
