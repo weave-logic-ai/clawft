@@ -9,6 +9,55 @@ import {
 
 type TrainState = 'idle' | 'training' | 'done';
 
+function MSESparkline({ values }: { values: number[] }) {
+  if (values.length < 2) {
+    return (
+      <div className="text-xs text-neutral-600 dark:text-neutral-400">
+        (sparkline appears once round 2 completes)
+      </div>
+    );
+  }
+  const w = 480;
+  const h = 80;
+  const pad = 8;
+  // Log scale so small relative improvements stay visible.
+  const logs = values.map((v) => Math.log10(Math.max(v, 1e-12)));
+  const lmax = Math.max(...logs);
+  const lmin = Math.min(...logs);
+  const span = lmax - lmin || 1e-6;
+  const pts = logs.map((l, i) => {
+    const x = pad + (i / (values.length - 1)) * (w - 2 * pad);
+    const y = pad + (1 - (l - lmin) / span) * (h - 2 * pad);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  return (
+    <svg
+      viewBox={`0 0 ${w} ${h}`}
+      className="w-full h-20 rounded border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950"
+      aria-label="MSE over rounds, log scale"
+    >
+      <polyline
+        points={pts.join(' ')}
+        fill="none"
+        className="stroke-neutral-900 dark:stroke-neutral-100"
+        strokeWidth={1.5}
+      />
+      {pts.map((p, i) => {
+        const [x, y] = p.split(',');
+        return (
+          <circle
+            key={i}
+            cx={x}
+            cy={y}
+            r={3}
+            className="fill-neutral-900 dark:fill-neutral-100"
+          />
+        );
+      })}
+    </svg>
+  );
+}
+
 export default function Page() {
   const [dModel, setDModel] = useState(8);
   const [dK, setDK] = useState(4);
@@ -68,8 +117,10 @@ export default function Page() {
     const trainingCurve = await a.trainOutModelOnly(samples, rng, {
       rounds,
       onStatus: (msg) => append(msg),
-      onStart: ({ samples: n, params }) => {
-        append(`train out_model: ${params} params, ${n} context pairs, 12-sample MSE subset`);
+      onStart: ({ samples: n, params, trialsPerRound }) => {
+        append(
+          `train out_model: ${params} params, ${n} context pairs, 16-sample MSE subset, ${trialsPerRound} trials/round`,
+        );
       },
       onRound: (round, mse, elapsedMs) => {
         append(`round ${round}/${rounds}   MSE = ${mse.toExponential(4)}   elapsed = ${elapsedMs.toFixed(0)} ms`);
@@ -102,7 +153,8 @@ export default function Page() {
     }
   };
 
-  const curveMax = curve.length ? Math.max(...curve) : 1;
+  // kept for compatibility with older references; not used in the new chart
+  void (curve.length ? Math.max(...curve) : 1);
 
   return (
     <main className="mx-auto my-10 max-w-4xl px-6 leading-relaxed text-neutral-900 dark:text-neutral-100">
@@ -253,30 +305,46 @@ export default function Page() {
 
       {curve.length > 0 && (
         <div className="mt-4 rounded-lg border border-neutral-300 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900 p-4">
-          <h3 className="text-base font-semibold mb-2">MSE curve</h3>
-          <div className="flex items-end gap-2 h-24">
-            {curve.map((mse, i) => {
-              const h = Math.max(
-                3,
-                Math.round((1 - mse / Math.max(curveMax, 1e-9)) * 100),
-              );
-              return (
-                <div
-                  key={i}
-                  className="flex-1 flex flex-col items-center justify-end"
-                  title={`round ${i + 1}: MSE ${mse.toExponential(3)}`}
-                >
-                  <div
-                    className="w-full rounded-t bg-neutral-400 dark:bg-neutral-500"
-                    style={{ height: `${h}%` }}
-                  />
-                  <div className="text-xs mt-1 text-neutral-600 dark:text-neutral-400">
-                    r{i + 1}
-                  </div>
-                </div>
-              );
-            })}
+          <h3 className="text-base font-semibold mb-3">MSE per round</h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm border-collapse">
+              <thead>
+                <tr className="bg-neutral-100 dark:bg-neutral-800">
+                  <th className="border border-neutral-300 dark:border-neutral-700 px-3 py-1.5 text-left">Round</th>
+                  <th className="border border-neutral-300 dark:border-neutral-700 px-3 py-1.5 text-left">MSE</th>
+                  <th className="border border-neutral-300 dark:border-neutral-700 px-3 py-1.5 text-left">Δ vs prev</th>
+                  <th className="border border-neutral-300 dark:border-neutral-700 px-3 py-1.5 text-left">Δ vs round 1</th>
+                </tr>
+              </thead>
+              <tbody>
+                {curve.map((mse, i) => {
+                  const prev = i > 0 ? curve[i - 1] : mse;
+                  const first = curve[0];
+                  const deltaPrev = i > 0 ? mse - prev : 0;
+                  const deltaFirst = mse - first;
+                  const pctFirst = first > 0 ? (1 - mse / first) * 100 : 0;
+                  return (
+                    <tr key={i}>
+                      <td className="border border-neutral-300 dark:border-neutral-700 px-3 py-1.5 font-mono">{i + 1}</td>
+                      <td className="border border-neutral-300 dark:border-neutral-700 px-3 py-1.5 font-mono">{mse.toExponential(4)}</td>
+                      <td className="border border-neutral-300 dark:border-neutral-700 px-3 py-1.5 font-mono">
+                        {i === 0 ? '—' : (deltaPrev >= 0 ? '+' : '') + deltaPrev.toExponential(2)}
+                      </td>
+                      <td className="border border-neutral-300 dark:border-neutral-700 px-3 py-1.5 font-mono">
+                        {i === 0 ? '—' : `${deltaFirst.toExponential(2)} (${pctFirst.toFixed(1)}% ↓)`}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
+
+          {/* SVG sparkline with y-axis in log space so small-but-real improvements remain visible. */}
+          <div className="mt-4">
+            <MSESparkline values={curve} />
+          </div>
+
           <p className="mt-3 text-sm">
             Final MSE:{' '}
             <strong>{finalMse != null ? finalMse.toExponential(4) : '—'}</strong>

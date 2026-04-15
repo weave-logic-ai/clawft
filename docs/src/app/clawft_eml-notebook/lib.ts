@@ -260,12 +260,14 @@ export class ToyEmlAttention {
       rounds?: number;
       trialsPerRound?: number;
       onRound?: (round: number, mse: number, elapsedMs: number) => void;
-      onStart?: (info: { samples: number; params: number }) => void;
+      onStart?: (info: { samples: number; params: number; trialsPerRound: number }) => void;
       onStatus?: (msg: string) => void;
     },
   ): Promise<number[]> {
     const rounds = opts?.rounds ?? 3;
-    const trials = opts?.trialsPerRound ?? 400;
+    // Default trials scales with param count so every param gets ~8 chances.
+    const effectiveTrials =
+      opts?.trialsPerRound ?? Math.max(400, 8 * this.out.totalParams());
 
     opts?.onStatus?.(`build training set: ${samples.length} (context, target) pairs`);
     await new Promise((r) => setTimeout(r, 0));
@@ -275,7 +277,11 @@ export class ToyEmlAttention {
       const { context } = this.forward(s.x);
       training.push({ x: context, y: s.target });
     }
-    opts?.onStart?.({ samples: training.length, params: this.out.totalParams() });
+    opts?.onStart?.({
+      samples: training.length,
+      params: this.out.totalParams(),
+      trialsPerRound: effectiveTrials,
+    });
     await new Promise((r) => setTimeout(r, 0));
 
     // Baseline MSE at current (random) weights — gives the user a delta
@@ -283,9 +289,6 @@ export class ToyEmlAttention {
     const baseline = this.out.trainOneRound(training, rng, { trials: 0 });
     opts?.onStatus?.(`baseline MSE (untrained out_model) = ${baseline.toExponential(4)}`);
     await new Promise((r) => setTimeout(r, 0));
-
-    const effectiveTrials =
-      trials > 0 ? trials : Math.max(400, 8 * this.out.totalParams());
 
     const curve: number[] = [];
     const t0 = performance.now();
