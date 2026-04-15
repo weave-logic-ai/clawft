@@ -4,23 +4,10 @@ export const metadata = {
     'Python Colab notebook that trains an Iteration 0 EML-Attention block and exports JSON files loadable by the Rust EmlModel::from_json interface.',
 };
 
-const cellStyle = {
-  margin: '24px 0',
-  border: '1px solid #ddd',
-  borderRadius: 8,
-  padding: 16,
-  background: '#fff',
-};
-
-const preStyle = {
-  background: '#f4f4f4',
-  padding: 16,
-  borderRadius: 8,
-  overflowX: 'auto' as const,
-  fontSize: '0.88em',
-  lineHeight: 1.45,
-  whiteSpace: 'pre' as const,
-};
+const cellCls =
+  'my-6 rounded-lg border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 p-4';
+const preCls =
+  'mt-3 rounded-lg border border-neutral-300 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900 p-4 overflow-x-auto text-xs leading-relaxed whitespace-pre';
 
 const cell1 = `!pip install numpy scipy matplotlib -q
 
@@ -222,8 +209,8 @@ Architecture notes:
 
 export default function Page() {
   return (
-    <main style={{ maxWidth: 960, margin: '40px auto', padding: '0 24px', fontFamily: 'system-ui, sans-serif', lineHeight: 1.6 }}>
-      <h1>WeftOS Toy EML-Transformer — Iteration 0 Colab Notebook</h1>
+    <main className="mx-auto my-10 max-w-4xl px-6 leading-relaxed text-neutral-900 dark:text-neutral-100">
+      <h1 className="mb-4 text-3xl font-semibold">WeftOS Toy EML-Transformer — Iteration 0 Colab Notebook</h1>
 
       <p>
         <strong>Goal</strong>: train a Python mirror of the Rust{' '}
@@ -253,34 +240,34 @@ export default function Page() {
         pure-JS forward-pass demonstrator that runs in the browser.
       </p>
 
-      <div style={cellStyle}>
+      <div className={cellCls}>
         <h2>Cell 1 — Setup + safe EML operator</h2>
-        <pre style={preStyle}><code>{cell1}</code></pre>
+        <pre className={preCls}><code>{cell1}</code></pre>
       </div>
 
-      <div style={cellStyle}>
+      <div className={cellCls}>
         <h2>Cell 2 — PyEmlModel (mirror of Rust <code>EmlModel</code>)</h2>
-        <pre style={preStyle}><code>{cell2}</code></pre>
+        <pre className={preCls}><code>{cell2}</code></pre>
       </div>
 
-      <div style={cellStyle}>
+      <div className={cellCls}>
         <h2>Cell 3 — ToyEmlAttention (mirror of Rust <code>ToyEmlAttention</code>)</h2>
-        <pre style={preStyle}><code>{cell3}</code></pre>
+        <pre className={preCls}><code>{cell3}</code></pre>
       </div>
 
-      <div style={cellStyle}>
+      <div className={cellCls}>
         <h2>Cell 4 — Train on the identity task</h2>
-        <pre style={preStyle}><code>{cell4}</code></pre>
+        <pre className={preCls}><code>{cell4}</code></pre>
       </div>
 
-      <div style={cellStyle}>
+      <div className={cellCls}>
         <h2>Cell 5 — Export JSON for the Rust loader</h2>
-        <pre style={preStyle}><code>{cell5}</code></pre>
+        <pre className={preCls}><code>{cell5}</code></pre>
       </div>
 
-      <div style={cellStyle}>
+      <div className={cellCls}>
         <h2>Cell 6 — Handoff to Rust</h2>
-        <pre style={preStyle}><code>{cell6}</code></pre>
+        <pre className={preCls}><code>{cell6}</code></pre>
       </div>
 
       <h2>Running this notebook</h2>

@@ -176,93 +176,105 @@ export default function Page() {
   }, [attn, seqLen, dModel, seed]);
 
   return (
-    <main style={{ maxWidth: 960, margin: '40px auto', padding: '0 24px', fontFamily: 'system-ui, sans-serif', lineHeight: 1.6 }}>
-      <h1>Toy EML-Attention — Iteration 0 (pure-JS demo)</h1>
-      <p>
+    <main className="mx-auto my-10 max-w-4xl px-6 leading-relaxed text-neutral-900 dark:text-neutral-100">
+      <h1 className="mb-4 text-3xl font-semibold">Toy EML-Attention — Iteration 0 (pure-JS demo)</h1>
+      <p className="mb-4">
         Live forward-pass demonstrator for the Iteration 0 EML-Attention block. This runs a
         pure-JS mirror of the Rust <code>ToyEmlAttention</code> entirely in the browser — the real
-        WASM build lands in 0.6.9. See the <a href="/docs/weftos/eml-attention">architecture page</a>
-        {' '}for details and the <a href="/clawft_eml-notebook">Colab notebook</a> for a trainable
+        WASM build lands in 0.6.9. See the <a href="/docs/weftos/eml-attention" className="underline">architecture page</a>
+        {' '}for details and the <a href="/clawft_eml-notebook" className="underline">Colab notebook</a> for a trainable
         Python reference that exports JSON directly loadable by the Rust <code>EmlModel</code>.
       </p>
 
-      <h2>Configuration</h2>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, background: '#f4f4f4', padding: 16, borderRadius: 8 }}>
-        <label>
-          d_model: {dModel}
+      <h2 className="mt-8 mb-3 text-2xl font-semibold">Configuration</h2>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 rounded-lg border border-neutral-300 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900 p-4">
+        <label className="flex flex-col text-sm">
+          <span className="font-mono">d_model: {dModel}</span>
           <input type="range" min={4} max={32} step={4} value={dModel} onChange={(e) => {
             const v = Number(e.target.value);
             setDModel(v);
             if (dK > v) setDK(v);
-          }} style={{ width: '100%' }} />
+          }} className="mt-1 w-full" />
         </label>
-        <label>
-          d_k: {dK}
-          <input type="range" min={2} max={dModel} step={2} value={dK} onChange={(e) => setDK(Number(e.target.value))} style={{ width: '100%' }} />
+        <label className="flex flex-col text-sm">
+          <span className="font-mono">d_k: {dK}</span>
+          <input type="range" min={2} max={dModel} step={2} value={dK} onChange={(e) => setDK(Number(e.target.value))} className="mt-1 w-full" />
         </label>
-        <label>
-          seq_len: {seqLen}
-          <input type="range" min={2} max={8} step={1} value={seqLen} onChange={(e) => setSeqLen(Number(e.target.value))} style={{ width: '100%' }} />
+        <label className="flex flex-col text-sm">
+          <span className="font-mono">seq_len: {seqLen}</span>
+          <input type="range" min={2} max={8} step={1} value={seqLen} onChange={(e) => setSeqLen(Number(e.target.value))} className="mt-1 w-full" />
         </label>
-        <label>
-          depth: {depth}
-          <input type="range" min={3} max={5} step={1} value={depth} onChange={(e) => setDepth(Number(e.target.value))} style={{ width: '100%' }} />
+        <label className="flex flex-col text-sm">
+          <span className="font-mono">depth: {depth}</span>
+          <input type="range" min={3} max={5} step={1} value={depth} onChange={(e) => setDepth(Number(e.target.value))} className="mt-1 w-full" />
         </label>
-        <label>
-          seed: {seed}
-          <input type="number" value={seed} onChange={(e) => setSeed(Number(e.target.value))} style={{ width: '100%' }} />
+        <label className="flex flex-col text-sm sm:col-span-2">
+          <span className="font-mono">seed: {seed}</span>
+          <input type="number" value={seed} onChange={(e) => setSeed(Number(e.target.value))} className="mt-1 rounded border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 px-2 py-1 text-sm" />
         </label>
       </div>
 
-      <h2>Architecture summary</h2>
-      <table style={{ borderCollapse: 'collapse', width: '100%' }}>
-        <thead>
-          <tr><th style={cell}>Submodel</th><th style={cell}>Shape</th><th style={cell}>Params</th></tr>
-        </thead>
-        <tbody>
-          <tr><td style={cell}>q_model</td><td style={cell}>({seqLen}·{dModel}) → ({seqLen}·{dK})</td><td style={cell}>{paramCount(attn.q)}</td></tr>
-          <tr><td style={cell}>k_model</td><td style={cell}>({seqLen}·{dModel}) → ({seqLen}·{dK})</td><td style={cell}>{paramCount(attn.k)}</td></tr>
-          <tr><td style={cell}>v_model</td><td style={cell}>({seqLen}·{dModel}) → ({seqLen}·{dK})</td><td style={cell}>{paramCount(attn.v)}</td></tr>
-          <tr><td style={cell}>softmax_model</td><td style={cell}>{seqLen} → {seqLen}</td><td style={cell}>{paramCount(attn.sm)}</td></tr>
-          <tr><td style={cell}>out_model</td><td style={cell}>({seqLen}·{dK}) → ({seqLen}·{dModel})</td><td style={cell}>{paramCount(attn.out)}</td></tr>
-          <tr><td style={{ ...cell, fontWeight: 600 }}>total</td><td style={cell}>—</td><td style={{ ...cell, fontWeight: 600 }}>{params}</td></tr>
-        </tbody>
-      </table>
+      <h2 className="mt-8 mb-3 text-2xl font-semibold">Architecture summary</h2>
+      <div className="overflow-x-auto">
+        <table className="w-full border-collapse text-sm">
+          <thead>
+            <tr className="bg-neutral-100 dark:bg-neutral-800">
+              <th className={thCls}>Submodel</th>
+              <th className={thCls}>Shape</th>
+              <th className={thCls}>Params</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td className={tdCls}>q_model</td><td className={tdCls}>({seqLen}·{dModel}) → ({seqLen}·{dK})</td><td className={tdCls}>{paramCount(attn.q)}</td></tr>
+            <tr><td className={tdCls}>k_model</td><td className={tdCls}>({seqLen}·{dModel}) → ({seqLen}·{dK})</td><td className={tdCls}>{paramCount(attn.k)}</td></tr>
+            <tr><td className={tdCls}>v_model</td><td className={tdCls}>({seqLen}·{dModel}) → ({seqLen}·{dK})</td><td className={tdCls}>{paramCount(attn.v)}</td></tr>
+            <tr><td className={tdCls}>softmax_model</td><td className={tdCls}>{seqLen} → {seqLen}</td><td className={tdCls}>{paramCount(attn.sm)}</td></tr>
+            <tr><td className={tdCls}>out_model</td><td className={tdCls}>({seqLen}·{dK}) → ({seqLen}·{dModel})</td><td className={tdCls}>{paramCount(attn.out)}</td></tr>
+            <tr className="bg-neutral-50 dark:bg-neutral-900">
+              <td className={`${tdCls} font-semibold`}>total</td>
+              <td className={tdCls}>—</td>
+              <td className={`${tdCls} font-semibold`}>{params}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
 
-      <h2>Forward-pass performance (pure JS, 64 iterations)</h2>
+      <h2 className="mt-8 mb-3 text-2xl font-semibold">Forward-pass performance (pure JS, 64 iterations)</h2>
       <p>
         mean: <strong>{demo.mean.toFixed(2)} µs</strong> &nbsp;·&nbsp;
         p99: <strong>{demo.p99.toFixed(2)} µs</strong>
       </p>
-      <p style={{ fontSize: '0.9em', color: '#666' }}>
+      <p className="text-sm text-neutral-600 dark:text-neutral-400">
         Rust p99 target: ≤ 5 µs at (seq_len=4, d_model=8, d_k=4, depth=3). JS is slower than the
         Rust build because of boxed-number overhead and the lack of SIMD — treat these numbers as
         an upper bound.
       </p>
 
-      <h2>Attention matrix (softmax output)</h2>
-      <p style={{ fontSize: '0.9em', color: '#666' }}>
+      <h2 className="mt-8 mb-3 text-2xl font-semibold">Attention matrix (softmax output)</h2>
+      <p className="text-sm text-neutral-600 dark:text-neutral-400">
         Rows sum to 1. Untrained projections → near-uniform attention pattern. After training,
         expect the diagonal or a sparser pattern, depending on the task.
       </p>
-      <pre style={{ background: '#f4f4f4', padding: 16, borderRadius: 8, overflowX: 'auto', fontSize: '0.85em' }}>
+      <pre className={preCls}>
 {demo.attn.map((row, i) => `row ${i}: [${row.map((v) => v.toFixed(3)).join(', ')}]`).join('\n')}
       </pre>
 
-      <h2>Output (last forward pass)</h2>
-      <p style={{ fontSize: '0.9em', color: '#666' }}>First 16 dims of the {seqLen}·{dModel}-wide output.</p>
-      <pre style={{ background: '#f4f4f4', padding: 16, borderRadius: 8, overflowX: 'auto', fontSize: '0.85em' }}>
+      <h2 className="mt-8 mb-3 text-2xl font-semibold">Output (last forward pass)</h2>
+      <p className="text-sm text-neutral-600 dark:text-neutral-400">First 16 dims of the {seqLen}·{dModel}-wide output.</p>
+      <pre className={preCls}>
 [{demo.y.slice(0, 16).map((v) => v.toFixed(4)).join(', ')}{demo.y.length > 16 ? ', …' : ''}]
       </pre>
 
-      <h2>Next steps</h2>
-      <ul>
+      <h2 className="mt-8 mb-3 text-2xl font-semibold">Next steps</h2>
+      <ul className="list-disc pl-6 space-y-1">
         <li>0.6.9 will swap this JS port for the real Rust/WASM build, same interface.</li>
         <li>Training (gradient-free coordinate descent) runs in Rust via <code>ToyEmlAttention::train</code>; this page demonstrates forward pass only.</li>
-        <li>See the <a href="/clawft_eml-notebook">Python Colab notebook</a> to train offline and export JSON for the Rust loader.</li>
+        <li>See the <a href="/clawft_eml-notebook" className="underline">Python Colab notebook</a> to train offline and export JSON for the Rust loader.</li>
       </ul>
     </main>
   );
 }
 
-const cell: React.CSSProperties = { border: '1px solid #ddd', padding: '6px 12px', textAlign: 'left' };
+const thCls = 'border border-neutral-300 dark:border-neutral-700 px-3 py-2 text-left';
+const tdCls = 'border border-neutral-300 dark:border-neutral-700 px-3 py-1.5';
+const preCls = 'mt-2 rounded-lg border border-neutral-300 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900 p-4 overflow-x-auto text-xs leading-relaxed';
