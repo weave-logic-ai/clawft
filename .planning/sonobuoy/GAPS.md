@@ -39,7 +39,13 @@ Seven gaps were identified in the round-1+round-2 synthesis. G1 is being closed 
 
 ## G2. Helmholtz-PINN 3D collapse
 
-**Status**: 🟡 IN PROGRESS
+**Status**: 🟢 **CLOSED** (2026-04-15) — see `gaps/G2-pinn-3d.md`
+**Closing approach**: Phased two-path strategy.
+- **Path A (v1, per-deployment)**: Feature-engineered PINN — sin activation + LAAF slope recovery + KRAKEN normal modes as deterministic dispersion-relation features (ocean analog of Schoder 2025's H5 result) + RAR-D adaptive sampling + optional 8-panel azimuthal XPINN decomposition (Jagtap 2020). Trains online at buoy drop in 6-16 min on L4 GPU.
+- **Path B (v2, fleet-amortized)**: PINO (Li 2021) trained once on ~500 BELLHOP3D instances spanning (SSP, freq, src_depth). 200 MB weight bundle, 50 ms inference, no per-deployment training.
+- **Path C (v3)**: Stack A+B for R² ≥ 0.97.
+**Target**: R² ≥ 0.85 (both paths project R² ≥ 0.95, comfortably above target). Multi-scale Fourier PINN (Wang 2021) as NTK-theoretic fallback for spectral bias edge cases.
+**ADR**: ADR-079 "3D PINN technique for Helmholtz physics-prior branch"
 **Severity**: P1 (limits physics-prior branch to 2D)
 **Origin**: `SYNTHESIS.md` §2.3, §10; analysis in `papers/analysis/pinn-ssp-helmholtz.md`.
 
@@ -119,7 +125,10 @@ Seven gaps were identified in the round-1+round-2 synthesis. G1 is being closed 
 
 ## G5. Federated learning under sub-kbps uplink
 
-**Status**: 🟡 IN PROGRESS
+**Status**: 🟢 **CLOSED** (2026-04-15) — see `gaps/G5-sub-kbps-fl.md`
+**Closing approach**: 5-layer compounding codec — (1) event-triggered participation gate, (2) HierFAVG two-tier (Liu 2020) with κ₁=10 local + κ₂=100 edge at Raft cluster leader, (3) DGC Top-k(s=0.001) with flash-backed residual, (4) error-feedback signSGD 1-bit (Bernstein 2018 + Karimireddy 2019 EF fix) or FetchSGD Count Sketch r=2 c=200 fallback (Rothchild 2020), (5) delta-varint + RLE + Ed25519 wire encoding via rvf-crypto. FedMD (Li & Wang 2019) runs parallel for heterogeneous hardware fleets via logit distillation on a firmware-baked 10k alignment set.
+**Result**: **~210 B per buoy per cloud round** — fits single 340 B Iridium SBD MO packet; convergence in ≤10 cloud rounds.
+**ADR**: ADR-082 "Sub-kbps federated learning protocol stack for sonobuoy network"
 **Severity**: P1 (blocks v3 federated training across sonobuoys)
 **Origin**: `SYNTHESIS.md` §4.1, §10; analyses in `papers/analysis/{fedavg-foundations,deep-gradient-compression,byzantine-robust-krum,split-learning}.md`.
 
@@ -191,10 +200,10 @@ No research agent required.
 | Gap | Severity | Status | Closing mechanism |
 |-----|----------|--------|-------------------|
 | G1 | P0 | 🟢 CLOSED | RANGING.md + ADR-078; cross-cuts into G4 (velocity) and G2/G3 (SSP) |
-| G2 | P1 | 🟡 | 3D PINN research agent (in-flight) |
+| G2 | P1 | 🟢 CLOSED | Two-path (XPINN+features online, PINO fleet-amortized); ADR-079 |
 | G3 | P1 | 🟢 CLOSED | ThermoFno hybrid (U-NO + MWT + GINO-SDF + PINO); ADR-080 |
 | G4 | P1 | 🟡 | SAS-velocity research agent (in-flight) — note G1 provides Doppler-derived velocity as input |
-| G5 | P1 | 🟡 | Sub-kbps FL research agent (in-flight) |
+| G5 | P1 | 🟢 CLOSED | 5-layer codec 210 B/round fits Iridium SBD; ADR-082 |
 | G6 | P2 | ⚪ | Monitor Perch 2.0 release |
 | G7 | P3 | ⚪ | Monitor external-repo relicensing |
 
