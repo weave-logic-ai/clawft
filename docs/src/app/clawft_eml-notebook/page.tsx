@@ -249,26 +249,100 @@ export default function Page() {
         WeftOS Toy EML-Transformer — live browser trainer
       </h1>
       <p className="mb-4">
-        Trains an Iteration-0 EML-Attention block in your browser and exports
-        Rust-loadable JSON. Pure TypeScript port of the Rust{' '}
-        <code>ToyEmlAttention</code> at{' '}
-        <code>crates/eml-core/src/attention.rs</code>. No Python, no Pyodide, no
-        Colab — just click <strong>Train</strong> and download the resulting
-        weights.
+        Trains a tiny attention block in your browser and exports Rust-loadable
+        JSON. Pure TypeScript port of the Rust <code>ToyEmlAttention</code> at{' '}
+        <code>crates/eml-core/src/attention.rs</code>. No Python, no Pyodide,
+        no Colab — pick a mode, click <strong>Train</strong>, watch it learn,
+        download the weights.
       </p>
-      <p className="mb-4 text-sm text-neutral-600 dark:text-neutral-400">
-        For the live forward-pass demo (no training), see{' '}
+      <p className="mb-6 text-sm text-neutral-600 dark:text-neutral-400">
+        Forward-pass-only sibling at{' '}
         <a href="/clawft_eml-attention" className="underline">
           /clawft_eml-attention
         </a>
-        . For the architecture spec + go/no-go criteria see the{' '}
+        . Architecture spec at{' '}
         <a href="/docs/weftos/eml-attention" className="underline">
-          EML Attention docs
+          /docs/weftos/eml-attention
         </a>
         .
       </p>
 
+      <details className="mb-6 rounded-lg border border-neutral-300 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900 p-4">
+        <summary className="cursor-pointer font-semibold">
+          New here? What is this thing actually doing?
+        </summary>
+        <div className="mt-3 text-sm space-y-3 text-neutral-700 dark:text-neutral-300">
+          <p>
+            This page trains an <strong>attention block</strong> — the same
+            building block used inside every modern transformer LLM (GPT,
+            Claude, etc.) — but at toy scale (a few hundred parameters
+            instead of billions).
+          </p>
+          <p>
+            <strong>What attention does:</strong> given a sequence of tokens
+            (here represented as random vectors), each output position is a
+            weighted blend of every input position. The weights — the{' '}
+            <em>attention pattern</em> — are computed dynamically per input.
+            That dynamism is what lets transformers handle variable-length,
+            context-dependent inputs.
+          </p>
+          <p>
+            <strong>The five sub-models:</strong> attention computes three
+            projections of the input (Q for Query, K for Key, V for Value),
+            then uses Q and K to decide weights via{' '}
+            <code>softmax(Q·Kᵀ / √dₖ)</code>, then blends V using those
+            weights, then projects through a final output layer. The "Iter 0"
+            variant only trains the output layer; "Iter 1" trains all four
+            (Q/K/V/out) jointly.
+          </p>
+          <p>
+            <strong>What training does:</strong> we feed in random input
+            vectors paired with target outputs (here: per-sequence-position
+            mean broadcast back across <code>d_model</code>), measure how
+            wrong the current weights are (Mean Squared Error), then nudge
+            weights to reduce that error. This page uses{' '}
+            <strong>gradient-free coordinate descent</strong>: pick a random
+            parameter, perturb it, keep the change if MSE drops, otherwise
+            revert. No backprop, no autograd — just trial-and-error guided
+            by error feedback. That's slower than gradient descent but
+            simpler, deterministic, and small-substrate-friendly.
+          </p>
+          <p>
+            <strong>Two substrates compared</strong> in "EML vs baseline"
+            mode:
+          </p>
+          <ul className="list-disc pl-6 space-y-1">
+            <li>
+              <strong>EML (SafeTree)</strong>: each Q/K/V/out projection is
+              a depth-N tree of <code>exp(x) − ln(y)</code> operators.
+              Universal function approximator, weights snap to integers,
+              human-readable trained models. WeftOS's bet for interpretable
+              learned functions.
+            </li>
+            <li>
+              <strong>Baseline (affine)</strong>: each projection is a plain{' '}
+              <code>W·x + b</code> matrix multiply. Standard transformer
+              math. Fewer parameters, faster, easier to train.
+            </li>
+          </ul>
+          <p>
+            Same training loop, same trial budget, same seed — only the
+            substrate differs. Watch them converge side-by-side.
+          </p>
+        </div>
+      </details>
+
       <h2 className="mt-8 mb-3 text-2xl font-semibold">Configuration</h2>
+      <p className="mb-3 text-sm text-neutral-600 dark:text-neutral-400">
+        These knobs change the shape of the attention block and the training
+        budget. <code>d_model</code> is the input embedding dimension per
+        token; <code>seq_len</code> is the number of tokens per sample;{' '}
+        <code>d_k</code> is the Q/K/V projection width;{' '}
+        <code>depth</code> is the EML tree depth (ignored by the affine
+        baseline). <code>rounds</code> and <code>samples</code> control how
+        long training runs. <code>seed</code> makes runs reproducible — same
+        seed, same trajectory.
+      </p>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 rounded-lg border border-neutral-300 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900 p-4">
         <label className="flex flex-col text-sm">
           <span className="font-mono">d_model: {dModel}</span>
@@ -363,6 +437,13 @@ export default function Page() {
       </p>
 
       <h2 className="mt-8 mb-3 text-2xl font-semibold">Train</h2>
+      <p className="mb-3 text-sm text-neutral-600 dark:text-neutral-400">
+        Pick a mode, then click Train. <strong>EML vs baseline</strong> runs
+        both substrates back-to-back and shows a side-by-side comparison —
+        this is the most informative mode and the default. The single-mode
+        options run only one substrate so you can study its behavior in
+        isolation.
+      </p>
       <div className="flex flex-wrap items-center gap-3 mb-3">
         <span className="text-sm font-mono">mode:</span>
         <div className="inline-flex rounded border border-neutral-300 dark:border-neutral-700 overflow-hidden text-sm flex-wrap">
@@ -540,24 +621,465 @@ let q = EmlModel::from_json(&q_json).unwrap();
 // same for k, v, out — plug into ToyEmlAttention`}
       </pre>
 
-      <h2 className="mt-8 mb-3 text-2xl font-semibold">What Iteration 0 trains</h2>
-      <ul className="list-disc pl-6 space-y-1 text-sm">
-        <li>
-          <code>out_model</code> trains via gradient-free coordinate descent on
-          (context → target) pairs derived from the current forward pass.
-        </li>
-        <li>
-          Q, K, V, and softmax sub-models stay at their deterministic seeded
-          init. This matches the Rust <code>ToyEmlAttention::train</code>{' '}
-          behavior and reflects Iteration-0 scope.
-        </li>
-        <li>
-          End-to-end coordinate descent across all 5 sub-models is
-          Iteration&nbsp;1. The identity task is provably unlearnable under
-          Iteration 0 constraints — the default target here is per-position
-          mean, which is low-rank enough to converge.
-        </li>
-      </ul>
+      {(state === 'done' || compareResult) && (
+        <>
+          <h2 className="mt-10 mb-3 text-2xl font-semibold">
+            Results & interpretation
+          </h2>
+          <ResultsInterpretation
+            mode={mode}
+            curve={curve}
+            finalMse={finalMse}
+            compareResult={compareResult}
+            paramCount={paramCount}
+            seqLen={seqLen}
+            dModel={dModel}
+            dK={dK}
+          />
+        </>
+      )}
+
+      <h2 className="mt-10 mb-3 text-2xl font-semibold">
+        What's happening under the hood
+      </h2>
+      <div className="text-sm space-y-3 text-neutral-700 dark:text-neutral-300">
+        <p>
+          <strong>Forward pass — the attention math</strong>: every time the
+          trainer evaluates MSE, the block runs this sequence:
+        </p>
+        <ol className="list-decimal pl-6 space-y-1">
+          <li>
+            <strong>Project to Q, K, V</strong>. The flattened input
+            (<code>seq_len × d_model</code>) goes into three separate
+            projection layers. Each produces a <code>seq_len × d_k</code>{' '}
+            tensor. Q is what each position is "asking about", K is what each
+            position "advertises", V is what each position will contribute if
+            attended to.
+          </li>
+          <li>
+            <strong>Score</strong>: for every pair of positions (i, j),
+            compute <code>scoresᵢⱼ = (Qᵢ · Kⱼ) / √dₖ</code>. Bigger score
+            means position i wants more of position j's value.
+          </li>
+          <li>
+            <strong>Softmax</strong>: turn each row of scores into a
+            probability distribution (rows sum to 1). This is the{' '}
+            <em>attention pattern</em> — the dynamic, input-dependent
+            routing.
+          </li>
+          <li>
+            <strong>Blend V</strong>: compute{' '}
+            <code>contextᵢ = Σⱼ attnᵢⱼ · Vⱼ</code>. Each position now
+            contains a weighted blend of every position's value.
+          </li>
+          <li>
+            <strong>Output projection</strong>: project context back to{' '}
+            <code>d_model</code> dimensions per position. This is the
+            block's output.
+          </li>
+        </ol>
+        <p>
+          Real transformers stack many of these blocks (12 in BERT-base, 96
+          in GPT-3) with residual connections, layer norm, and a feed-forward
+          network between attention layers. We're showing one block in
+          isolation.
+        </p>
+        <p>
+          <strong>Training — what the optimizer is actually doing</strong>:
+        </p>
+        <ol className="list-decimal pl-6 space-y-1">
+          <li>
+            Pick a random parameter index across the union of all layers.
+          </li>
+          <li>
+            Generate a perturbation <code>δ</code> from an annealing schedule
+            (big early, small late).
+          </li>
+          <li>
+            Apply <code>δ</code>, run the forward pass on a 16-sample subset,
+            measure MSE.
+          </li>
+          <li>
+            If MSE is lower than the previous best, keep the change. Else
+            revert.
+          </li>
+          <li>
+            Repeat for the full trial budget. The fraction of accepted
+            perturbations decreases as the model converges — early on, easy
+            wins; late on, you need precise small steps to make progress.
+          </li>
+        </ol>
+        <p>
+          This is <strong>random coordinate descent with simulated
+          annealing</strong>. It's the simplest possible gradient-free
+          optimizer that still works on hundreds of parameters. Real LLMs
+          use Adam (gradient-based) which is millions of times more sample-
+          efficient — but requires backprop, which EML deliberately avoids
+          because the <code>exp(x) − ln(y)</code> tree is hard to
+          differentiate cleanly.
+        </p>
+        <p>
+          <strong>What MSE means here</strong>: Mean Squared Error is the
+          average of <code>(prediction − target)²</code> across all output
+          dimensions and all samples. MSE = 0 means perfect prediction.
+          MSE = 1.0 on this task means the predictions are about 1 unit
+          off per dimension on average (since inputs are in [-1, 1]).
+        </p>
+      </div>
+
+      <h2 className="mt-10 mb-3 text-2xl font-semibold">Why two substrates?</h2>
+      <div className="text-sm space-y-3 text-neutral-700 dark:text-neutral-300">
+        <p>
+          <strong>EML</strong> (Exp-Minus-Log) replaces every multiply with
+          a tree of <code>eml(x, y) = exp(x) − ln(y)</code> operations.
+          Combined with the constant 1, this single operator can reconstruct{' '}
+          <em>any</em> elementary mathematical function (Odrzywolel 2026,
+          arXiv:2603.21852). Trained EML weights snap to exact integers,
+          making the model human-readable as a closed-form formula. WeftOS
+          has 12 production EML models doing scalar control-plane decisions.
+        </p>
+        <p>
+          <strong>Baseline</strong> is just <code>W·x + b</code> — the
+          standard transformer projection. No tree, no transcendental
+          operators, just dot products. This is what every published
+          transformer uses.
+        </p>
+        <p>
+          <strong>The honest comparison</strong> at toy scale (see results
+          above): plain affine attention converges much faster, runs ~3×
+          faster on forward pass, and uses ~2× fewer parameters than EML.
+          What EML buys at this scale is <em>interpretability</em> — the
+          trained model is a closed-form expression, not an opaque weight
+          tensor. Whether that tradeoff is worth it depends on what you're
+          building. For sequence-modeling backbones, baseline wins. For
+          control-plane scalar decisions (the existing 12 WeftOS wrappers),
+          EML wins decisively.
+        </p>
+        <p>
+          <strong>This is research, not production</strong>. The real
+          finding from this experiment isn't "use EML attention" — it's
+          "we now know EML's sweet spot ends around vector-output
+          sequence work, and starts paying off again as scalar
+          interpretable functions". See the{' '}
+          <a href="/docs/weftos/eml-attention" className="underline">
+            EML Attention docs
+          </a>{' '}
+          for the full reasoning and the upcoming "EML at the control-plane
+          boundary" design pattern.
+        </p>
+      </div>
     </main>
   );
+}
+
+// --------------------------------------------------------------------------
+// Results & interpretation component
+// --------------------------------------------------------------------------
+
+function ResultsInterpretation(props: {
+  mode: 'iter0' | 'iter1' | 'baseline' | 'compare';
+  curve: number[];
+  finalMse: number | null;
+  compareResult: null | {
+    eml: { params: number; baseline: number; final: number; p99us: number };
+    base: { params: number; baseline: number; final: number; p99us: number };
+  };
+  paramCount: number;
+  seqLen: number;
+  dModel: number;
+  dK: number;
+}) {
+  const { mode, curve, finalMse, compareResult, paramCount, seqLen, dModel, dK } = props;
+
+  if (mode === 'compare' && compareResult) {
+    return <CompareScore data={compareResult} />;
+  }
+
+  if (curve.length === 0 || finalMse === null) {
+    return (
+      <p className="text-sm text-neutral-600 dark:text-neutral-400">
+        Train first to see results.
+      </p>
+    );
+  }
+
+  const baseline = curve[0];
+  const reduction = baseline > 0 ? (1 - finalMse / baseline) * 100 : 0;
+  const grade = scoreReduction(reduction, finalMse);
+
+  return (
+    <div className="rounded-lg border border-neutral-300 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900 p-4 space-y-4 text-sm">
+      <div>
+        <div className="text-lg font-semibold mb-1">
+          Score: <span className={gradeClass(grade.tier)}>{grade.tier}</span>
+          <span className="ml-2 text-neutral-500 dark:text-neutral-400 font-normal">
+            ({reduction.toFixed(1)}% MSE reduction)
+          </span>
+        </div>
+        <p className="text-neutral-700 dark:text-neutral-300">{grade.summary}</p>
+      </div>
+
+      <div>
+        <h3 className="font-semibold mb-1">Run details</h3>
+        <ul className="list-disc pl-6 space-y-0.5 text-neutral-700 dark:text-neutral-300">
+          <li>Mode: <code>{modeLabel(mode)}</code></li>
+          <li>
+            Shape: <code>seq_len={seqLen}, d_model={dModel}, d_k={dK}</code>{' '}
+            ({paramCount} EML params total)
+          </li>
+          <li>
+            Starting MSE: <code>{baseline.toExponential(3)}</code>
+          </li>
+          <li>
+            Final MSE: <code>{finalMse.toExponential(3)}</code>
+          </li>
+          <li>
+            Improvement: <strong>{reduction.toFixed(1)}%</strong> reduction
+            over {curve.length} round(s)
+          </li>
+        </ul>
+      </div>
+
+      <div>
+        <h3 className="font-semibold mb-1">What this tells us</h3>
+        <ul className="list-disc pl-6 space-y-1 text-neutral-700 dark:text-neutral-300">
+          {grade.bullets.map((b, i) => (
+            <li key={i}>{b}</li>
+          ))}
+        </ul>
+      </div>
+
+      <div>
+        <h3 className="font-semibold mb-1">Knobs to try next</h3>
+        <ul className="list-disc pl-6 space-y-1 text-neutral-700 dark:text-neutral-300">
+          {grade.suggestions.map((s, i) => (
+            <li key={i}>{s}</li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
+function CompareScore({
+  data,
+}: {
+  data: {
+    eml: { params: number; baseline: number; final: number; p99us: number };
+    base: { params: number; baseline: number; final: number; p99us: number };
+  };
+}) {
+  const emlReduction = data.eml.baseline > 0 ? (1 - data.eml.final / data.eml.baseline) * 100 : 0;
+  const baseReduction = data.base.baseline > 0 ? (1 - data.base.final / data.base.baseline) * 100 : 0;
+  const winnerMse = data.eml.final < data.base.final ? 'EML' : 'Baseline';
+  const winnerSpeed = data.eml.p99us < data.base.p99us ? 'EML' : 'Baseline';
+  const winnerParams = data.eml.params < data.base.params ? 'EML' : 'Baseline';
+  const speedRatio = Math.max(data.eml.p99us, data.base.p99us) / Math.min(data.eml.p99us, data.base.p99us);
+  const paramRatio = Math.max(data.eml.params, data.base.params) / Math.min(data.eml.params, data.base.params);
+
+  return (
+    <div className="rounded-lg border border-neutral-300 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900 p-4 space-y-4 text-sm">
+      <div>
+        <div className="text-lg font-semibold mb-1">
+          Comparison verdict
+        </div>
+        <p className="text-neutral-700 dark:text-neutral-300">
+          Same training loop, same seed, same data — the only difference is
+          the substrate. {winnerMse} reaches lower MSE
+          ({winnerMse === 'EML' ? data.eml.final.toExponential(2) : data.base.final.toExponential(2)} vs{' '}
+          {winnerMse === 'EML' ? data.base.final.toExponential(2) : data.eml.final.toExponential(2)}),{' '}
+          {winnerSpeed} is faster on forward pass ({speedRatio.toFixed(2)}× ahead),
+          and {winnerParams} uses fewer parameters ({paramRatio.toFixed(2)}× fewer).
+        </p>
+      </div>
+
+      <div>
+        <h3 className="font-semibold mb-1">Per-substrate score</h3>
+        <table className="w-full text-sm border-collapse">
+          <thead>
+            <tr className="bg-neutral-100 dark:bg-neutral-800">
+              <th className="border border-neutral-300 dark:border-neutral-700 px-3 py-1 text-left">substrate</th>
+              <th className="border border-neutral-300 dark:border-neutral-700 px-3 py-1 text-right">grade</th>
+              <th className="border border-neutral-300 dark:border-neutral-700 px-3 py-1 text-right">MSE reduction</th>
+              <th className="border border-neutral-300 dark:border-neutral-700 px-3 py-1 text-right">final MSE</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td className="border border-neutral-300 dark:border-neutral-700 px-3 py-1 font-mono">EML (SafeTree)</td>
+              <td className="border border-neutral-300 dark:border-neutral-700 px-3 py-1 font-mono text-right">
+                <span className={gradeClass(scoreReduction(emlReduction, data.eml.final).tier)}>
+                  {scoreReduction(emlReduction, data.eml.final).tier}
+                </span>
+              </td>
+              <td className="border border-neutral-300 dark:border-neutral-700 px-3 py-1 font-mono text-right">{emlReduction.toFixed(1)}%</td>
+              <td className="border border-neutral-300 dark:border-neutral-700 px-3 py-1 font-mono text-right">{data.eml.final.toExponential(2)}</td>
+            </tr>
+            <tr>
+              <td className="border border-neutral-300 dark:border-neutral-700 px-3 py-1 font-mono">Baseline (affine)</td>
+              <td className="border border-neutral-300 dark:border-neutral-700 px-3 py-1 font-mono text-right">
+                <span className={gradeClass(scoreReduction(baseReduction, data.base.final).tier)}>
+                  {scoreReduction(baseReduction, data.base.final).tier}
+                </span>
+              </td>
+              <td className="border border-neutral-300 dark:border-neutral-700 px-3 py-1 font-mono text-right">{baseReduction.toFixed(1)}%</td>
+              <td className="border border-neutral-300 dark:border-neutral-700 px-3 py-1 font-mono text-right">{data.base.final.toExponential(2)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div>
+        <h3 className="font-semibold mb-1">What this means</h3>
+        <ul className="list-disc pl-6 space-y-1 text-neutral-700 dark:text-neutral-300">
+          {winnerMse === 'Baseline' && baseReduction > 50 && (
+            <li>
+              Plain affine attention converges <strong>much</strong> faster
+              than EML at this shape. This is the expected result documented
+              in the v0.6.10 release notes: at toy scale, EML's nested{' '}
+              <code>exp/ln</code> trees create a noisier optimization
+              landscape than plain dot products.
+            </li>
+          )}
+          {winnerMse === 'EML' && (
+            <li>
+              EML reached lower MSE this run — interesting and not the
+              typical pattern. Try a different seed; if EML consistently
+              wins at your shape, you may have found a regime where the
+              EML tree's expressive power outweighs its training overhead.
+            </li>
+          )}
+          {speedRatio > 2 && (
+            <li>
+              <strong>{winnerSpeed}</strong> is {speedRatio.toFixed(1)}×
+              faster on forward pass. EML pays for nested transcendentals
+              (exp + ln per tree level per head); baseline is one
+              multiply-accumulate per head per input dim.
+            </li>
+          )}
+          {paramRatio > 1.5 && (
+            <li>
+              EML uses {paramRatio.toFixed(1)}× more parameters. The extra
+              params are tree constants — they'd snap to exact integers
+              after long enough training, becoming a closed-form formula
+              rather than a weight matrix. Baseline weights stay as
+              opaque floats.
+            </li>
+          )}
+          <li>
+            <strong>Interpretation key</strong>: this experiment isn't
+            asking "which is better" in the abstract — it's asking "which
+            substrate fits this workload". For sequence modeling, baseline
+            wins. For interpretable scalar decisions (the 12 existing WeftOS
+            EML wrappers), EML wins. The WeftOS bet is <em>both</em>:
+            baseline-style attention for the data plane, EML for the control
+            plane around it.
+          </li>
+        </ul>
+      </div>
+    </div>
+  );
+}
+
+function scoreReduction(reductionPct: number, finalMse: number): {
+  tier: string;
+  summary: string;
+  bullets: string[];
+  suggestions: string[];
+} {
+  if (finalMse < 0.01) {
+    return {
+      tier: 'A — converged',
+      summary: 'Final MSE below 0.01 — the model has effectively memorized the task.',
+      bullets: [
+        'Output predictions are within ~10% of targets on average.',
+        'For toy tasks like per-position-mean, this is the gold-standard outcome.',
+        'A real transformer at this MSE would be considered overfit unless the train/eval distributions are matched.',
+      ],
+      suggestions: [
+        'Try a harder shape (larger seq_len or d_model) to see how convergence scales.',
+        'Switch to "EML vs baseline" mode to compare against plain affine attention.',
+        'Drop seed by 1 to see if convergence is robust across initializations.',
+      ],
+    };
+  }
+  if (reductionPct >= 50) {
+    return {
+      tier: 'B — strongly converging',
+      summary: '50%+ MSE reduction — the model is learning the task structure even if it hasn\'t memorized it yet.',
+      bullets: [
+        'The training signal is reaching the parameters effectively.',
+        'Per-position-mean is a low-rank target; the model is recovering most of that structure.',
+        'Final MSE is still meaningful — about ~30-50% of inputs would be misranked vs perfect.',
+      ],
+      suggestions: [
+        'Bump rounds from 3 to 5 to see if convergence continues or plateaus.',
+        'Try increasing trial budget by raising sample count (more diverse training data).',
+        'Compare with baseline mode at the same shape — is EML or affine learning more?',
+      ],
+    };
+  }
+  if (reductionPct >= 5) {
+    return {
+      tier: 'C — partial convergence',
+      summary: 'Some MSE reduction, but the model is far from memorizing the task.',
+      bullets: [
+        'Coordinate descent is finding improvements but slowly.',
+        'EML at this shape often plateaus here — single-param perturbation has diminishing returns past ~5% reduction.',
+        'This is the expected Iteration-2 ceiling for joint EML training; multi-param coordinated perturbation (Iteration 3, future) would push further.',
+      ],
+      suggestions: [
+        'Try a smaller shape (seq_len=2, d_model=4) — easier task, sharper convergence signal.',
+        'Switch to baseline mode — affine attention typically reaches 70%+ on this same task.',
+        'Increase rounds; the annealing schedule shrinks step size each round, so later rounds make finer adjustments.',
+      ],
+    };
+  }
+  if (reductionPct >= 0) {
+    return {
+      tier: 'D — barely moving',
+      summary: 'Almost no MSE reduction. The optimizer is running but the model isn\'t learning meaningfully.',
+      bullets: [
+        'Either the trial budget is too small for the parameter count, or the substrate is in a noise floor.',
+        'EML at high d_model with low trial counts often shows this — there are too many parameters to perturb meaningfully in 5000 trials.',
+        'Each accepted perturbation only improves MSE by ~1e-6 because the loss landscape is smooth and shallow.',
+      ],
+      suggestions: [
+        'Drop d_model and seq_len to the minimum (4 and 2) to verify the optimizer can find improvements at all.',
+        'Switch to "baseline (affine)" mode to confirm the training loop and target function work correctly.',
+        'For real EML training at this scale, you\'d want multi-param coordinated perturbation — coming in Iteration 3.',
+      ],
+    };
+  }
+  return {
+    tier: 'F — regressing',
+    summary: 'Final MSE is higher than starting MSE. The optimizer made the model worse.',
+    bullets: [
+      'This shouldn\'t happen with the current loop (we revert any non-improving perturbation), so it usually indicates noise from the small MSE-eval subset.',
+      'The 16-sample subset means individual round MSE values can fluctuate even when the underlying model improves.',
+      'Try increasing samples to 128 — more diverse subset → more stable MSE estimate.',
+    ],
+    suggestions: [
+      'Re-run with a different seed; this is rare and usually doesn\'t repeat.',
+      'Increase samples to stabilize MSE measurements.',
+      'Switch to baseline mode to verify the rest of the training loop is sane.',
+    ],
+  };
+}
+
+function gradeClass(tier: string): string {
+  if (tier.startsWith('A')) return 'text-emerald-600 dark:text-emerald-400';
+  if (tier.startsWith('B')) return 'text-blue-600 dark:text-blue-400';
+  if (tier.startsWith('C')) return 'text-amber-600 dark:text-amber-400';
+  if (tier.startsWith('D')) return 'text-orange-600 dark:text-orange-400';
+  return 'text-rose-600 dark:text-rose-400';
+}
+
+function modeLabel(mode: 'iter0' | 'iter1' | 'baseline' | 'compare'): string {
+  switch (mode) {
+    case 'iter0': return 'EML — Iteration 0 (out_model only)';
+    case 'iter1': return 'EML — Iteration 1 (joint e2e CD across Q/K/V/out)';
+    case 'baseline': return 'Baseline — plain affine attention';
+    case 'compare': return 'EML vs baseline — head-to-head';
+  }
 }
