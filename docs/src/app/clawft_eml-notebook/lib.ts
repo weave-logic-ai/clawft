@@ -78,58 +78,67 @@ export class PyEmlModel {
     return Array.from(out);
   }
 
-  // Gradient-free coordinate descent with random restarts.
-  // Mirrors the Rust EmlModel::train philosophy: no backprop, no autodiff,
-  // just per-parameter perturbation + accept-if-better.
-  train(samples: { x: number[]; y: number[] }[], rng: () => number, opts?: {
-    rounds?: number;
-    stepInit?: number;
-    stepMin?: number;
-    stepDecay?: number;
-  }): number {
-    if (samples.length < 10) {
+  // Gradient-free coordinate descent, browser-budget friendly.
+  // Evaluates MSE on a fixed 16-sample subset per perturbation and caps step
+  // halvings to keep each round under ~1s on typical hardware.
+  // For the Rust reference training loop see
+  // crates/eml-core/src/model.rs :: EmlModel::train.
+  trainOneRound(
+    samples: { x: number[]; y: number[] }[],
+    rng: () => number,
+    opts?: { stepInit?: number; stepMin?: number; stepDecay?: number; maxHalvings?: number; evalSubset?: number },
+  ): number {
+    if (samples.length < 4) {
       this.lastMse = Infinity;
       return Infinity;
     }
-    const rounds = opts?.rounds ?? 3;
     const stepInit = opts?.stepInit ?? 0.4;
-    const stepMin = opts?.stepMin ?? 0.005;
-    const stepDecay = opts?.stepDecay ?? 0.6;
+    const stepMin = opts?.stepMin ?? 0.02;
+    const stepDecay = opts?.stepDecay ?? 0.5;
+    const maxHalvings = opts?.maxHalvings ?? 4;
+    const evalSubset = Math.min(opts?.evalSubset ?? 16, samples.length);
+
+    const subset: { x: number[]; y: number[] }[] = [];
+    for (let i = 0; i < evalSubset; i++) {
+      subset.push(samples[(i * samples.length) / evalSubset | 0]);
+    }
 
     const mseOn = (): number => {
       let sum = 0;
-      for (const s of samples) {
+      for (const s of subset) {
         const pred = this.predict(s.x);
         for (let h = 0; h < this.heads; h++) {
           const diff = pred[h] - s.y[h];
           sum += diff * diff;
         }
       }
-      return sum / (samples.length * this.heads);
+      return sum / (subset.length * this.heads);
     };
 
     let bestMse = mseOn();
+    let step = stepInit;
+    let halvings = 0;
 
-    for (let round = 0; round < rounds; round++) {
-      let step = stepInit;
-      while (step > stepMin) {
-        let improvedThisStep = false;
-        const paramArrays: Float64Array[] = [this.w, this.b, this.tree];
-        for (const arr of paramArrays) {
-          for (let i = 0; i < arr.length; i++) {
-            const saved = arr[i];
-            const delta = step * rng();
-            arr[i] = saved + delta;
-            const candidate = mseOn();
-            if (candidate + 1e-12 < bestMse) {
-              bestMse = candidate;
-              improvedThisStep = true;
-            } else {
-              arr[i] = saved;
-            }
+    while (step > stepMin && halvings < maxHalvings) {
+      let improvedThisStep = false;
+      const paramArrays: Float64Array[] = [this.w, this.b, this.tree];
+      for (const arr of paramArrays) {
+        for (let i = 0; i < arr.length; i++) {
+          const saved = arr[i];
+          const delta = step * rng();
+          arr[i] = saved + delta;
+          const candidate = mseOn();
+          if (candidate + 1e-12 < bestMse) {
+            bestMse = candidate;
+            improvedThisStep = true;
+          } else {
+            arr[i] = saved;
           }
         }
-        if (!improvedThisStep) step *= stepDecay;
+      }
+      if (!improvedThisStep) {
+        step *= stepDecay;
+        halvings += 1;
       }
     }
 
@@ -227,21 +236,36 @@ export class ToyEmlAttention {
 
   // Iteration-0 training: only the out_model trains (Q/K/V stay frozen at init).
   // Matches the Rust behavior in crates/eml-core/src/attention.rs.
-  trainOutModelOnly(
+  //
+  // Async, so callers can `await` each round and the browser UI stays
+  // responsive. Emits per-round progress via the `onRound` callback before
+  // yielding to the event loop.
+  async trainOutModelOnly(
     samples: { x: number[]; target: number[] }[],
     rng: () => number,
-    opts?: { rounds?: number },
-  ): number[] {
-    const curve: number[] = [];
+    opts?: {
+      rounds?: number;
+      onRound?: (round: number, mse: number, elapsedMs: number) => void;
+      onStart?: (info: { samples: number; params: number }) => void;
+    },
+  ): Promise<number[]> {
+    const rounds = opts?.rounds ?? 3;
     const training: { x: number[]; y: number[] }[] = [];
     for (const s of samples) {
       const { context } = this.forward(s.x);
       training.push({ x: context, y: s.target });
     }
-    const rounds = opts?.rounds ?? 3;
+    opts?.onStart?.({ samples: training.length, params: this.out.totalParams() });
+
+    const curve: number[] = [];
+    const t0 = performance.now();
     for (let r = 0; r < rounds; r++) {
-      const mse = this.out.train(training, rng, { rounds: 1 });
+      const mse = this.out.trainOneRound(training, rng);
+      const elapsed = performance.now() - t0;
       curve.push(mse);
+      opts?.onRound?.(r + 1, mse, elapsed);
+      // Yield to the browser so the MSE curve + log can repaint.
+      await new Promise((resolve) => setTimeout(resolve, 0));
     }
     return curve;
   }

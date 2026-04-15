@@ -22,42 +22,70 @@ export default function Page() {
   const [curve, setCurve] = useState<number[]>([]);
   const [finalMse, setFinalMse] = useState<number | null>(null);
   const [attn, setAttn] = useState<ToyEmlAttention | null>(null);
+  const [log, setLog] = useState<string[]>([]);
 
   const paramCount = useMemo(() => {
     const a = new ToyEmlAttention(dModel, dK, seqLen, depth, seed);
     return a.paramCount();
   }, [dModel, dK, seqLen, depth, seed]);
 
-  const train = () => {
+  const train = async () => {
     setState('training');
-    // Defer actual work so the button state updates before we block the thread.
-    setTimeout(() => {
-      const rng = makeRng(seed + 1);
-      const a = new ToyEmlAttention(dModel, dK, seqLen, depth, seed);
-      const samples: { x: number[]; target: number[] }[] = [];
-      const dim = seqLen * dModel;
-      for (let s = 0; s < sampleCount; s++) {
-        const x: number[] = [];
-        for (let i = 0; i < dim; i++) x.push(rng());
-        // Target: per-sequence-position mean broadcast across d_model.
-        // This is a low-rank, information-theoretically recoverable
-        // target given Iteration-0's frozen Q/K/V projections.
-        const target: number[] = new Array(dim).fill(0);
-        for (let i = 0; i < seqLen; i++) {
-          let mean = 0;
-          for (let j = 0; j < dModel; j++) mean += x[i * dModel + j];
-          mean /= dModel;
-          for (let j = 0; j < dModel; j++) target[i * dModel + j] = mean;
-        }
-        samples.push({ x, target });
-      }
+    setCurve([]);
+    setFinalMse(null);
+    setLog([]);
+    // Defer one tick so the button state repaints before heavy work begins.
+    await new Promise((r) => setTimeout(r, 20));
 
-      const trainingCurve = a.trainOutModelOnly(samples, rng, { rounds });
-      setCurve(trainingCurve);
-      setFinalMse(trainingCurve[trainingCurve.length - 1] ?? null);
-      setAttn(a);
-      setState('done');
-    }, 40);
+    const append = (line: string) =>
+      setLog((prev) => [...prev, line]);
+
+    append(`init ToyEmlAttention(d_model=${dModel}, d_k=${dK}, seq_len=${seqLen}, depth=${depth}, seed=${seed})`);
+    const rng = makeRng(seed + 1);
+    const a = new ToyEmlAttention(dModel, dK, seqLen, depth, seed);
+    append(`param_count = ${a.paramCount()}  (q=${a.q.totalParams()} k=${a.k.totalParams()} v=${a.v.totalParams()} out=${a.out.totalParams()})`);
+
+    const samples: { x: number[]; target: number[] }[] = [];
+    const dim = seqLen * dModel;
+    for (let s = 0; s < sampleCount; s++) {
+      const x: number[] = [];
+      for (let i = 0; i < dim; i++) x.push(rng());
+      // Target: per-sequence-position mean broadcast across d_model.
+      // Low-rank and learnable given Iteration-0's frozen Q/K/V projections.
+      const target: number[] = new Array(dim).fill(0);
+      for (let i = 0; i < seqLen; i++) {
+        let mean = 0;
+        for (let j = 0; j < dModel; j++) mean += x[i * dModel + j];
+        mean /= dModel;
+        for (let j = 0; j < dModel; j++) target[i * dModel + j] = mean;
+      }
+      samples.push({ x, target });
+    }
+    append(`generated ${samples.length} (input, target) samples — target = per-position mean broadcast`);
+
+    await new Promise((r) => setTimeout(r, 20));
+
+    const trainingCurve = await a.trainOutModelOnly(samples, rng, {
+      rounds,
+      onStart: ({ samples: n, params }) => {
+        append(`train out_model: ${params} params, ${n} samples per MSE eval (subsampled to 16)`);
+      },
+      onRound: (round, mse, elapsedMs) => {
+        append(`round ${round}/${rounds}   MSE = ${mse.toExponential(4)}   elapsed = ${elapsedMs.toFixed(0)} ms`);
+        setCurve((prev) => [...prev, mse]);
+      },
+    });
+
+    const final = trainingCurve[trainingCurve.length - 1] ?? null;
+    setFinalMse(final);
+    setAttn(a);
+    if (final != null && final < 0.01) {
+      append(`converged (MSE < 1e-2)`);
+    } else {
+      append(`final MSE = ${final != null ? final.toExponential(4) : 'n/a'}`);
+    }
+    append('done — download JSON below to load into Rust EmlModel::from_json');
+    setState('done');
   };
 
   const download = (which: 'q' | 'k' | 'v' | 'out' | 'all') => {
@@ -209,6 +237,18 @@ export default function Page() {
           Q/K/V). Train time scales with samples × params × rounds.
         </span>
       </div>
+
+      {log.length > 0 && (
+        <div className="mt-4">
+          <h3 className="text-base font-semibold mb-2">Training log</h3>
+          <pre
+            className="rounded-lg border border-neutral-300 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900 p-4 overflow-auto text-xs leading-relaxed whitespace-pre max-h-72"
+            aria-live="polite"
+          >
+{log.join('\n')}
+          </pre>
+        </div>
+      )}
 
       {curve.length > 0 && (
         <div className="mt-4 rounded-lg border border-neutral-300 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900 p-4">
