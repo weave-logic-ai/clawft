@@ -64,7 +64,10 @@ Seven gaps were identified in the round-1+round-2 synthesis. G1 is being closed 
 
 ## G3. FNO failure under strong vertical SSP gradients (thermocline regime)
 
-**Status**: 🟡 IN PROGRESS
+**Status**: 🟢 **CLOSED** (2026-04-15) — see `gaps/G3-fno-thermocline.md`
+**Closing approach**: **ThermoFno** hybrid — U-NO topology (Rahman 2023) + Legendre multiwavelets k=4 on depth axis (Gupta 2021 MWT-Operator, Gibbs-free) + GINO signed-distance-function thermocline channel (Li 2023) + PINO parabolic-equation residual loss with adaptive 4× depth super-resolution (Li 2021). Warm-start from Zheng 2025 coarse weights. Runtime selector routes smooth-SSP cases to original Zheng-FNO, thermocline cases to ThermoFno.
+**Target**: 0.5-1.0 dB RMSE at ~3× inference cost (meets both G3 targets: <1 dB, <5×).
+**ADR**: ADR-080 "Thermocline-robust neural operator for ocean acoustic propagation"
 **Severity**: P1 (the thermocline regime is exactly where sonobuoys operate)
 **Origin**: `SYNTHESIS.md` §2.3, §10; analysis in `papers/analysis/fno-propagation.md`.
 
@@ -189,7 +192,7 @@ No research agent required.
 |-----|----------|--------|-------------------|
 | G1 | P0 | 🟢 CLOSED | RANGING.md + ADR-078; cross-cuts into G4 (velocity) and G2/G3 (SSP) |
 | G2 | P1 | 🟡 | 3D PINN research agent (in-flight) |
-| G3 | P1 | 🟡 | FNO-thermocline research agent (in-flight) |
+| G3 | P1 | 🟢 CLOSED | ThermoFno hybrid (U-NO + MWT + GINO-SDF + PINO); ADR-080 |
 | G4 | P1 | 🟡 | SAS-velocity research agent (in-flight) — note G1 provides Doppler-derived velocity as input |
 | G5 | P1 | 🟡 | Sub-kbps FL research agent (in-flight) |
 | G6 | P2 | ⚪ | Monitor Perch 2.0 release |
