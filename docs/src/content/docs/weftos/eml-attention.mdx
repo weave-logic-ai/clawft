@@ -3,7 +3,7 @@ title: "EML Attention (Iteration 0)"
 description: "Experimental toy-scale EML-Transformer block composed of five EmlModel instances — first step toward a gradient-free, weight-snapping, ExoChain-audited attention primitive for WeftOS."
 ---
 
-**EXPERIMENTAL (0.6.8)** — Iteration 0 of an EML-Transformer. Ships behind the `experimental-attention` feature on `eml-core`. Default builds are unchanged.
+**EXPERIMENTAL (0.6.9)** — Iteration 1 of an EML-Transformer. Ships behind the `experimental-attention` feature on `eml-core`. Default builds are unchanged.
 
 EML Attention is WeftOS's first step toward replacing backprop-trained attention with a gradient-free, coordinate-descent-trained, weight-snapping primitive that lives in the same substrate as every other learned function in the kernel. The classical path (`EmlModel` wrappers for scalar-output learned heuristics — see [EML — Self-Learning Functions](/weftos/eml)) continues to run unchanged.
 
@@ -115,11 +115,12 @@ Two live demos are deployed to the docs site alongside this page:
 
 | Iter | d_model | seq_len | heads | scope | status |
 |------|---------|---------|-------|-------|--------|
-| 0 (this) | 16 | 4-8 | 1 | hybrid toy block, pragmatic matmul | **shipped 0.6.8** |
-| 1 | 32-64 | 12-16 | 2 | end-to-end coordinate descent, learned positional encodings | next |
-| 2 | 96-128 | 24-32 | 4 | chunked attention, continual retraining on ExoChain drift | gated |
-| 3 | 192-256 | 48-64 | 8 | sparse attention, shared constants | gated |
-| 4+ | 256-512 | chunked | 16 | full hybrid attention+residual backbone | gated |
+| 0 | 16 | 4-8 | 1 | hybrid toy block, pragmatic matmul, out-model-only training | **shipped 0.6.8** |
+| 1 (this) | 16 | 4-8 | 1 | end-to-end joint CD across all 5 sub-models, bounded forward | **shipped 0.6.9** |
+| 2 | 32-64 | 12-16 | 2 | saturation-safe tree formulation OR trainable output projection; learned positional encodings | next |
+| 3 | 96-128 | 24-32 | 4 | chunked attention, continual retraining on ExoChain drift | gated |
+| 4 | 192-256 | 48-64 | 8 | sparse attention, shared constants | gated |
+| 5+ | 256-512 | chunked | 16 | full hybrid attention+residual backbone | gated |
 
 ## Further reading
 

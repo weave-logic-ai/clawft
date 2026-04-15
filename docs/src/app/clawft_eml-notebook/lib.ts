@@ -322,6 +322,100 @@ export class ToyEmlAttention {
     return curve;
   }
 
+  // Iteration 1: joint random coordinate descent over the union of all
+  // five sub-models' parameters, optimizing end-to-end MSE. Mirrors the
+  // Rust `ToyEmlAttention::train_end_to_end` behavior.
+  async trainEndToEnd(
+    samples: { x: number[]; target: number[] }[],
+    rng: () => number,
+    opts?: {
+      rounds?: number;
+      trialsPerRound?: number;
+      stepInit?: number;
+      stepFinal?: number;
+      onStart?: (info: { samples: number; params: number; trialsPerRound: number; baseline: number }) => void;
+      onRound?: (round: number, mse: number, elapsedMs: number) => void;
+      onStatus?: (msg: string) => void;
+    },
+  ): Promise<number[]> {
+    const rounds = opts?.rounds ?? 3;
+    const models: PyEmlModel[] = [this.q, this.k, this.v, this.out];
+    const totalParams = models.reduce((a, m) => a + m.totalParams(), 0);
+    const effectiveTrials = opts?.trialsPerRound ?? Math.max(600, 4 * totalParams);
+
+    opts?.onStatus?.(`e2e CD: ${totalParams} params across Q/K/V/out (softmax model skipped — not on the output path)`);
+    await new Promise((r) => setTimeout(r, 0));
+
+    const evalSubset = Math.min(16, samples.length);
+    const subset = samples.slice(0, evalSubset);
+
+    const mseOn = (): number => {
+      let sum = 0;
+      let count = 0;
+      for (const s of subset) {
+        const { y } = this.forward(s.x);
+        for (let i = 0; i < y.length && i < s.target.length; i++) {
+          sum += (y[i] - s.target[i]) ** 2;
+          count += 1;
+        }
+      }
+      return sum / Math.max(1, count);
+    };
+
+    const baseline = mseOn();
+    opts?.onStart?.({ samples: samples.length, params: totalParams, trialsPerRound: effectiveTrials, baseline });
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Pick a param across the concatenated view.
+    const pickParam = (idx: number): { arr: Float64Array; pos: number } => {
+      let remaining = idx;
+      for (const m of models) {
+        const arrs: Float64Array[] = [m.w, m.b, m.tree];
+        for (const arr of arrs) {
+          if (remaining < arr.length) return { arr, pos: remaining };
+          remaining -= arr.length;
+        }
+      }
+      // Fallback (shouldn't happen given bounds check)
+      return { arr: models[0].w, pos: 0 };
+    };
+
+    const curve: number[] = [];
+    let best = baseline;
+    const t0 = performance.now();
+
+    for (let r = 0; r < rounds; r++) {
+      const roundStepInit = (opts?.stepInit ?? 0.4) * Math.pow(0.5, r);
+      const roundStepFinal = (opts?.stepFinal ?? 0.02) * Math.pow(0.5, r);
+      opts?.onStatus?.(
+        `round ${r + 1}/${rounds}: ${effectiveTrials} trials, step ${roundStepInit.toFixed(3)} → ${roundStepFinal.toFixed(3)}…`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      for (let t = 0; t < effectiveTrials; t++) {
+        const frac = t / Math.max(1, effectiveTrials - 1);
+        const step = roundStepInit * Math.pow(roundStepFinal / roundStepInit, frac);
+        const u = (rng() + 1) * 0.5;
+        const idx = Math.min(totalParams - 1, Math.floor(u * totalParams));
+        const { arr, pos } = pickParam(idx);
+        const saved = arr[pos];
+        arr[pos] = saved + step * rng();
+        const candidate = mseOn();
+        if (candidate + 1e-12 < best) {
+          best = candidate;
+        } else {
+          arr[pos] = saved;
+        }
+      }
+
+      const elapsed = performance.now() - t0;
+      curve.push(best);
+      opts?.onRound?.(r + 1, best, elapsed);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    return curve;
+  }
+
   exportJsonBundle(prefix: string): Record<string, EmlModelJson> {
     return {
       [`${prefix}_q.json`]: this.q.toJson(`${prefix}_q`),

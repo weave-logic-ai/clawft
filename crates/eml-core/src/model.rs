@@ -102,6 +102,30 @@ impl EmlModel {
         self.params.len()
     }
 
+    /// Read-only view of the trainable parameters.
+    ///
+    /// Intended for composed models (e.g., [`crate::ToyEmlAttention`]) that
+    /// need to run coordinate descent over the union of several `EmlModel`s'
+    /// parameters. Prefer [`Self::train`] for single-model training.
+    pub fn params_slice(&self) -> &[f64] {
+        &self.params
+    }
+
+    /// Mutable view of the trainable parameters.
+    ///
+    /// Intended for composed models running joint coordinate descent.
+    /// Callers are responsible for restoring parameters they perturb if a
+    /// candidate is rejected.
+    pub fn params_slice_mut(&mut self) -> &mut [f64] {
+        &mut self.params
+    }
+
+    /// Mark the model as trained (or not). Used by composed models after
+    /// joint coordinate descent converges.
+    pub fn mark_trained(&mut self, trained: bool) {
+        self.trained = trained;
+    }
+
     /// Whether the model has been trained to convergence.
     pub fn is_trained(&self) -> bool {
         self.trained

@@ -67,6 +67,7 @@ export default function Page() {
   const [rounds, setRounds] = useState(3);
   const [sampleCount, setSampleCount] = useState(64);
 
+  const [mode, setMode] = useState<'iter0' | 'iter1'>('iter1');
   const [state, setState] = useState<TrainState>('idle');
   const [curve, setCurve] = useState<number[]>([]);
   const [finalMse, setFinalMse] = useState<number | null>(null);
@@ -114,19 +115,39 @@ export default function Page() {
 
     await new Promise((r) => setTimeout(r, 20));
 
-    const trainingCurve = await a.trainOutModelOnly(samples, rng, {
-      rounds,
-      onStatus: (msg) => append(msg),
-      onStart: ({ samples: n, params, trialsPerRound }) => {
-        append(
-          `train out_model: ${params} params, ${n} context pairs, 16-sample MSE subset, ${trialsPerRound} trials/round`,
-        );
-      },
-      onRound: (round, mse, elapsedMs) => {
-        append(`round ${round}/${rounds}   MSE = ${mse.toExponential(4)}   elapsed = ${elapsedMs.toFixed(0)} ms`);
-        setCurve((prev) => [...prev, mse]);
-      },
-    });
+    let trainingCurve: number[];
+    if (mode === 'iter1') {
+      append('mode: Iteration 1 — joint end-to-end coordinate descent across Q/K/V/out');
+      trainingCurve = await a.trainEndToEnd(samples, rng, {
+        rounds,
+        onStatus: (msg) => append(msg),
+        onStart: ({ samples: n, params, trialsPerRound, baseline }) => {
+          append(
+            `e2e CD: ${params} params across Q/K/V/out, ${n} samples, ${trialsPerRound} trials/round`,
+          );
+          append(`baseline MSE (pre-training) = ${baseline.toExponential(4)}`);
+        },
+        onRound: (round, mse, elapsedMs) => {
+          append(`round ${round}/${rounds}   MSE = ${mse.toExponential(4)}   elapsed = ${elapsedMs.toFixed(0)} ms`);
+          setCurve((prev) => [...prev, mse]);
+        },
+      });
+    } else {
+      append('mode: Iteration 0 — out_model-only self-distillation');
+      trainingCurve = await a.trainOutModelOnly(samples, rng, {
+        rounds,
+        onStatus: (msg) => append(msg),
+        onStart: ({ samples: n, params, trialsPerRound }) => {
+          append(
+            `train out_model: ${params} params, ${n} context pairs, 16-sample MSE subset, ${trialsPerRound} trials/round`,
+          );
+        },
+        onRound: (round, mse, elapsedMs) => {
+          append(`round ${round}/${rounds}   MSE = ${mse.toExponential(4)}   elapsed = ${elapsedMs.toFixed(0)} ms`);
+          setCurve((prev) => [...prev, mse]);
+        },
+      });
+    }
 
     const final = trainingCurve[trainingCurve.length - 1] ?? null;
     setFinalMse(final);
@@ -276,6 +297,25 @@ export default function Page() {
       </p>
 
       <h2 className="mt-8 mb-3 text-2xl font-semibold">Train</h2>
+      <div className="flex flex-wrap items-center gap-3 mb-3">
+        <span className="text-sm font-mono">mode:</span>
+        <div className="inline-flex rounded border border-neutral-300 dark:border-neutral-700 overflow-hidden text-sm">
+          <button
+            type="button"
+            onClick={() => setMode('iter0')}
+            className={`px-3 py-1.5 ${mode === 'iter0' ? 'bg-neutral-200 dark:bg-neutral-700 font-semibold' : 'bg-neutral-50 dark:bg-neutral-900'}`}
+          >
+            Iteration 0 (out_model only)
+          </button>
+          <button
+            type="button"
+            onClick={() => setMode('iter1')}
+            className={`px-3 py-1.5 ${mode === 'iter1' ? 'bg-neutral-200 dark:bg-neutral-700 font-semibold' : 'bg-neutral-50 dark:bg-neutral-900'}`}
+          >
+            Iteration 1 (joint e2e CD)
+          </button>
+        </div>
+      </div>
       <div className="flex flex-wrap items-center gap-3">
         <button
           type="button"
@@ -286,8 +326,8 @@ export default function Page() {
           {state === 'training' ? 'Training…' : 'Train'}
         </button>
         <span className="text-sm text-neutral-600 dark:text-neutral-400">
-          Target: low-rank per-sequence-position mean (learnable given frozen
-          Q/K/V). Train time scales with samples × params × rounds.
+          Target: per-position mean broadcast (low-rank, learnable under both modes).
+          {mode === 'iter1' && ' Iter-1 trials scale with param count — budget ~5-10s on default shape.'}
         </span>
       </div>
 

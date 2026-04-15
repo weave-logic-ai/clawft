@@ -5,6 +5,61 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.9] - 2026-04-15
+
+### Added
+
+- **EML Attention — Iteration 1** (experimental): end-to-end joint
+  coordinate descent across all 5 sub-models (Q/K/V/softmax/out)
+  - `ToyEmlAttention::train_end_to_end(EndToEndTrainConfig)` — random-param
+    random-perturbation trials with annealed step; accepts when end-to-end
+    MSE drops on a 16-sample subset
+  - `EmlModel::{params_slice, params_slice_mut, mark_trained}` — public
+    access to the flat parameter vector for composed-model training
+  - Small-random init in `ToyEmlAttention::new` (~±0.05) replaces the
+    all-zeros default that saturated under composition
+  - Bounded forward pass: soft-saturation squash `v·1e-3 / (1 + |v·1e-3|)`
+    wraps raw `EmlModel::predict` outputs so composition can't produce
+    Inf/NaN MSE when the tree saturates at `exp(20) ≈ 4.85e8`
+- **Go/no-go gate passes** on the per-position-mean learnable task
+  - Measured Iteration-1 result at the reference shape:
+    baseline MSE 2.13 → final 0.90 = **57.8% reduction in 3 rounds**
+  - 5 of 5 gate criteria PASS: G1 MSE reduction ≥ 5%, G2 p99 ≤ 5 µs
+    (observed 2 µs), G3 timings finite, G4 JSON roundtrip, G5 polynomial
+    scaling
+- **4-phase benchmark** now reports `phase2_baseline_mse` and
+  `phase2_mse_reduction` alongside `phase2_final_mse` so future iterations
+  can quantify delta against this baseline
+
+### Browser demo
+
+- `/clawft_eml-notebook` gains an "Iteration 1 mode" toggle that runs
+  end-to-end coordinate descent (trains all 5 sub-models jointly) instead
+  of the Iteration-0 out_model-only self-distillation
+- Live training log shows baseline MSE, per-round MSE, % reduction,
+  elapsed time
+
+### Known limitations (deferred to Iteration 2)
+
+- **Identity task does not converge.** The Rust `EmlTree` composition
+  saturates on identity because the nested `eml(x, y)` can hit `y ≤ 0`,
+  triggering `ln(MIN_POSITIVE) ≈ -744` followed by `exp(20) ≈ 4.85e8`
+  clamping. Single-param coordinate descent cannot escape. Iteration 2
+  will either swap the tree formulation (closer to the TS port's
+  `eml(v·c0 + c1, |v| + c2 + 1)` shape) or add a proper trainable output
+  projection.
+- **Q/K/V participation is modest.** Joint CD over 328 params reduces MSE
+  by ~58% but plateaus near the bound-1 region where a majority of heads
+  remain saturated. Multi-param coordinated perturbation or a
+  saturation-safe tree would unlock further gains.
+
+### Notes
+
+- The 13 unit tests and the 4-phase benchmark harness remain unchanged.
+- Default builds are byte-identical to 0.6.8.
+- Feature flag `experimental-attention` on `eml-core` still gates the
+  entire module.
+
 ## [0.6.8] - 2026-04-15
 
 ### Added

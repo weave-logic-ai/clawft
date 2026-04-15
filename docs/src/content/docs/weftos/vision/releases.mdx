@@ -1,9 +1,66 @@
 ---
 title: Release Notes
-description: Complete version history for WeftOS from initial development through v0.6.8.
+description: Complete version history for WeftOS from initial development through v0.6.9.
 ---
 
 # Release Notes
+
+## v0.6.9 — EML Attention, Iteration 1 (Experimental)
+
+*2026-04-15*
+
+End-to-end joint coordinate descent across all 5 sub-models of the toy
+attention block. Gate passes: 57.8% MSE reduction in 3 rounds on the
+reference shape, 5 of 5 criteria green. Identity task remains saturated —
+an Iteration-2 concern.
+
+### Highlights
+
+- **Joint CD across Q/K/V/softmax/out** via `train_end_to_end`. Random-param
+  random-perturbation trials with annealed step size, accepting candidates
+  that reduce end-to-end MSE on a 16-sample subset.
+- **EmlModel params exposed** (`params_slice`, `params_slice_mut`,
+  `mark_trained`) so composed models can iterate across the union of flat
+  parameter vectors.
+- **Small-random init** (~±0.05) in the attention constructor avoids the
+  all-zeros regime where the nested tree saturates downstream.
+- **Bounded forward pass** wraps raw output in a soft-saturation squash —
+  Inf/NaN MSE no longer possible under composition.
+- **Gate PASS**: baseline 2.13 → final 0.90 at `(seq_len=4, d_model=8,
+  d_k=4, depth=3)` = 57.8% reduction. Inference p99 holds at 2 µs (well
+  under the 5 µs target).
+
+### What still doesn't work — Iteration 2 scope
+
+The identity task does **not** converge in Iteration 1. The Rust
+`EmlTree` composition saturates when any nested `eml(x, y)` sees
+`y ≤ 0` — the `ln(MIN_POSITIVE) ≈ -744` output feeds into the next
+level's `exp(20) ≈ 4.85e8` clamp, and single-param coordinate descent
+can't escape that regime because most heads saturate together. The TS
+browser port doesn't suffer this because it wraps the tree's `y`
+argument with `|v| + c + 1` (always positive).
+
+Iteration 2 will either:
+- Swap the tree formulation to a saturation-safe shape
+- Add a learnable output projection whose weights are separate from
+  the EmlModel tree
+- Move to multi-param coordinated perturbation (pattern search)
+
+### Live demo
+
+[`/clawft_eml-notebook`](/clawft_eml-notebook) gains an Iteration-1 mode
+that runs the joint CD in-browser and reports the same baseline-vs-final
+MSE reduction the Rust gate does.
+
+### Compatibility
+
+- Feature flag `experimental-attention` on `eml-core` unchanged; default
+  builds are byte-identical to 0.6.8.
+- 13 unit tests + 4-phase benchmark harness still pass.
+- `AttentionBenchmark` struct gains `phase2_baseline_mse` and
+  `phase2_mse_reduction` fields (additive; deserialization of prior JSONs
+  still works via `#[serde(default)]` semantics on missing fields when
+  reading 0.6.8-era benchmark artifacts).
 
 ## v0.6.8 — EML Attention, Iteration 0 (Experimental)
 

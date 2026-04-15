@@ -58,6 +58,6 @@ pub use tree::EmlTree;
 
 #[cfg(feature = "experimental-attention")]
 pub use attention::{
-    run_benchmark, AttentionBenchmark, AttentionError, ScalingPoint, ToyEmlAttention,
-    MAX_TOY_D_MODEL, MAX_TOY_SEQ_LEN,
+    run_benchmark, AttentionBenchmark, AttentionError, EndToEndTrainConfig,
+    ScalingPoint, ToyEmlAttention, MAX_TOY_D_MODEL, MAX_TOY_SEQ_LEN,
 };
