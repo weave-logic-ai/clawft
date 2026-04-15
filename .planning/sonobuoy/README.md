@@ -22,9 +22,12 @@ hydrophone-array data. Shared infrastructure with:
 
 | File | Purpose |
 |------|---------|
+| **`SYNTHESIS.md`** | **Overall report — start here.** Compares all 18 analyzed papers to WeftOS (ECC, EML, quantum, HNSW), identifies which survey citations were fabricated, and lays out the v1/v2/v3 plan and nine ADR candidates. |
 | `k-stemit-sonobuoy-mapping.md` | Full K-STEMIT → sonobuoy mapping (radar-to-acoustic, learned beamforming, physics priors). Extracted from the phase-2 KG survey. |
 | `papers/k-stemit.md` | K-STEMIT reference card (abstract, arXiv link, architecture summary). |
-| `papers/survey.md` | Curated survey of additional sonar / fish-ID / bioacoustics papers (populated by the researcher agent). |
+| `papers/survey.md` | Original memory-compiled survey of 18 papers. **14/18 citations were fabricated.** See `SYNTHESIS.md` §1 for the correction table; see `papers/analysis/*.md` for full per-paper verified analyses. |
+| `papers/analysis/*.md` | 18 deep-dive analyses (one per paper) produced by parallel researcher agents. Each verifies the citation against arXiv/DOI, downloads the PDF to `papers/pdfs/`, and writes 300-500 lines covering methodology, results, portable equations, and sonobuoy integration plan. |
+| `papers/pdfs/*.pdf` | Downloaded paper PDFs. Gitignored. |
 
 ## Foundational architecture (from K-STEMIT)
 

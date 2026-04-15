@@ -18,3 +18,4 @@ docs/src/public/kb/weftos-docs.rvf.json
 docs/src/public/kb/*.rvf
 docs/src/public/kb/*.rvf.json
 docs/src/public/kb/*.rvf.json.gz
+.planning/sonobuoy/papers/pdfs/
