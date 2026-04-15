@@ -290,14 +290,30 @@ export class ToyEmlAttention {
     opts?.onStatus?.(`baseline MSE (untrained out_model) = ${baseline.toExponential(4)}`);
     await new Promise((r) => setTimeout(r, 0));
 
+    // Step range shrinks per round — round 1 explores widely, later rounds
+    // refine. Without this the same 0.5 → 0.03 sweep runs on already-good
+    // weights each round and most perturbations regress.
+    const stepSchedule = (roundIdx: number): { stepInit: number; stepFinal: number } => {
+      const base = 0.5;
+      const decay = Math.pow(0.1, 1 / Math.max(rounds, 1));
+      const stepInit = base * Math.pow(decay, roundIdx);
+      const stepFinal = stepInit * 0.1;
+      return { stepInit, stepFinal };
+    };
+
     const curve: number[] = [];
     const t0 = performance.now();
     for (let r = 0; r < rounds; r++) {
+      const { stepInit, stepFinal } = stepSchedule(r);
       opts?.onStatus?.(
-        `round ${r + 1}/${rounds}: ${effectiveTrials} annealed-step trials (0.5 → 0.03)…`,
+        `round ${r + 1}/${rounds}: ${effectiveTrials} trials, step ${stepInit.toFixed(3)} → ${stepFinal.toFixed(3)}…`,
       );
       await new Promise((resolve) => setTimeout(resolve, 0));
-      const mse = this.out.trainOneRound(training, rng, { trials: effectiveTrials });
+      const mse = this.out.trainOneRound(training, rng, {
+        trials: effectiveTrials,
+        stepInit,
+        stepFinal,
+      });
       const elapsed = performance.now() - t0;
       curve.push(mse);
       opts?.onRound?.(r + 1, mse, elapsed);
