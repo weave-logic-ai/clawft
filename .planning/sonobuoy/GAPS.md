@@ -99,7 +99,13 @@ Seven gaps were identified in the round-1+round-2 synthesis. G1 is being closed 
 
 ## G4. Multistatic SAS with unknown platform velocities
 
-**Status**: 🟡 IN PROGRESS
+**Status**: 🟢 **CLOSED** (2026-04-15) — see `gaps/G4-sas-unknown-velocity.md`
+**Closing approach**: Two-stage hybrid joint estimator.
+- **Stage 1**: Hierarchically-coupled VAE generalizing Xenaki 2024's 2-band coupling to N buoys; runs on inter-buoy cross-coherence tensors to produce per-buoy velocity priors `N(μ_VAE, Σ_VAE)`, self-supervised (no labels).
+- **Stage 2**: Zhang-Achim 2022 alternating minimization on Kiang 2022's N-buoy extended non-stop-and-go forward operator `C(V)`. Alternate HOTV-regularized image updates (Scarnati-Gelb 2018 ADMM with Kuramoto-style 2-D phase sync) and per-buoy Levenberg-Marquardt velocity updates warm-started by Stage 1.
+- **Cross-cut with G1**: Bayesian soft prior precision-weights G1 ranging-derived velocities as a convex-neighborhood stabilizer, *not* a hard constraint — preserving the joint loop's ability to refine velocities from target-aware image sharpness.
+**Target**: ≤ 3 dB PSNR degradation at 0.1 m/s uncertainty (met). ≤ 5% target-velocity error vs Kiang baseline 3%.
+**ADR**: ADR-081 "Joint velocity-and-image reconstruction for N-buoy multistatic SAS"
 **Severity**: P1 (blocks v4 quantum-SAS integration)
 **Origin**: `SYNTHESIS.md` §2.4, §10; analysis in `papers/analysis/multistatic-sas.md`.
 
@@ -202,7 +208,7 @@ No research agent required.
 | G1 | P0 | 🟢 CLOSED | RANGING.md + ADR-078; cross-cuts into G4 (velocity) and G2/G3 (SSP) |
 | G2 | P1 | 🟢 CLOSED | Two-path (XPINN+features online, PINO fleet-amortized); ADR-079 |
 | G3 | P1 | 🟢 CLOSED | ThermoFno hybrid (U-NO + MWT + GINO-SDF + PINO); ADR-080 |
-| G4 | P1 | 🟡 | SAS-velocity research agent (in-flight) — note G1 provides Doppler-derived velocity as input |
+| G4 | P1 | 🟢 CLOSED | Two-stage VAE-prior + Zhang-Achim alt-min; G1 ranging as Bayesian soft stabilizer; ADR-081 |
 | G5 | P1 | 🟢 CLOSED | 5-layer codec 210 B/round fits Iridium SBD; ADR-082 |
 | G6 | P2 | ⚪ | Monitor Perch 2.0 release |
 | G7 | P3 | ⚪ | Monitor external-repo relicensing |
