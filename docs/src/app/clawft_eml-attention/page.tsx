@@ -28,12 +28,12 @@ function numericalSoftmax(row: number[]): number[] {
 
 // -- Deterministic LCG for reproducible random ------------------------------
 
+// 32-bit Numerical Recipes LCG (no BigInt — targets ES2019+ cleanly).
 function makeRng(seed: number) {
-  let s = BigInt(seed);
+  let s = seed >>> 0;
   return (): number => {
-    s = (s * 6364136223846793005n + 1442695040888963407n) & 0xffffffffffffffffn;
-    const n = Number(s >> 33n);
-    return n / (0xffffffff / 2) - 1;
+    s = (Math.imul(s, 1664525) + 1013904223) | 0;
+    return ((s >>> 0) / 0x100000000) * 2 - 1;
   };
 }
 
