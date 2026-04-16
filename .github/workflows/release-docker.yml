@@ -1,9 +1,9 @@
 name: Release (Docker)
 
 on:
-  push:
-    tags:
-      - 'v*.*.*'
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
   workflow_dispatch:
 
 env:
@@ -16,28 +16,30 @@ permissions:
   packages: write
 
 jobs:
-  # Wait for Release workflow to finish uploading binaries
-  wait-for-binaries:
-    name: Wait for release binaries
+  # Gate: only proceed if the Release workflow succeeded
+  gate:
+    name: Verify release succeeded
     runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    outputs:
+      version: ${{ steps.version.outputs.VERSION }}
     steps:
-      - name: Wait for release assets
+      - name: Extract version from tag
+        id: version
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # workflow_run gives us the head_branch (the tag name)
+          # workflow_dispatch falls back to GITHUB_REF_NAME
+          TAG: ${{ github.event.workflow_run.head_branch || github.ref_name }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          ASSET="clawft-cli-x86_64-unknown-linux-musl.tar.gz"
-          REPO="${{ github.repository }}"
-          for i in $(seq 1 30); do
-            if gh release view "v${VERSION}" --repo "$REPO" --json assets --jq '.assets[].name' 2>/dev/null | grep -q "$ASSET"; then
-              echo "Release binaries available"
-              exit 0
-            fi
-            echo "Waiting for release binaries (attempt $i/30)..."
-            sleep 30
-          done
-          echo "::error::Release binaries not available after 15 minutes"
-          exit 1
+          VERSION="${TAG#v}"
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not determine version from tag '${TAG}'"
+            exit 1
+          fi
+          echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building Docker image for v${VERSION}"
 
   # -------------------------------------------------------------------
   # Multi-arch Docker build using pre-built musl binaries from release
@@ -45,13 +47,15 @@ jobs:
   docker:
     name: Build & push multi-arch Docker image
     runs-on: ubuntu-latest
-    needs: [wait-for-binaries]
+    needs: [gate]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: "v${{ needs.gate.outputs.version }}"
 
-      - name: Extract version from tag
+      - name: Set version
         id: version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: echo "VERSION=${{ needs.gate.outputs.version }}" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU (for arm64 layer)
         uses: docker/setup-qemu-action@v3
@@ -72,9 +76,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
+            type=raw,value=${{ steps.version.outputs.VERSION }}
             type=raw,value=latest
 
       - name: Build and push multi-arch image
@@ -107,7 +109,7 @@ jobs:
   smoke-test:
     name: Post-publish smoke test
     runs-on: ubuntu-latest
-    needs: [docker]
+    needs: [gate, docker]
     steps:
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -118,14 +120,14 @@ jobs:
 
       - name: Pull and test image
         run: |
-          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${GITHUB_REF_NAME#v}"
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.gate.outputs.version }}"
           docker pull "$IMAGE"
 
           # Start container
           docker run --rm -d \
             --name weft-release-smoke \
             -p 8080:8080 \
-            "$IMAGE" gateway || true
+            "$IMAGE" gateway 2>&1 || true
 
           # Wait for stabilization
           sleep 5
