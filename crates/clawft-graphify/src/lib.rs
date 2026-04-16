@@ -32,6 +32,7 @@ pub mod domain;
 pub mod hooks;
 pub mod ingest;
 pub mod validation;
+pub mod vault;
 pub mod watch;
 
 #[cfg(feature = "kernel-bridge")]

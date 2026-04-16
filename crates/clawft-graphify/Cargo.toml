@@ -46,6 +46,7 @@ rayon = { workspace = true }
 petgraph = { workspace = true }
 walkdir = { workspace = true }
 eml-core = { workspace = true }
+serde_yaml = { workspace = true }
 
 # Optional
 tree-sitter = { version = "0.24", optional = true }

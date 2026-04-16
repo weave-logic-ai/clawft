@@ -79,6 +79,9 @@ enum Commands {
     /// Knowledge graph extraction, query, and export (graphify).
     Graphify(commands::graphify_cmd::GraphifyArgs),
 
+    /// Obsidian vault cultivation (frontmatter, links, graph analysis).
+    Vault(commands::vault_cmd::VaultArgs),
+
     /// Run standardized kernel performance benchmark.
     Benchmark {
         #[command(subcommand)]
@@ -127,6 +130,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Console(args) => commands::console_cmd::run(args).await?,
         Commands::Ecc(args) => commands::ecc_cmd::run(args).await?,
         Commands::Graphify(args) => commands::graphify_cmd::run(args).await?,
+        Commands::Vault(args) => commands::vault_cmd::run(args).await?,
         Commands::Benchmark { cmd } => commands::bench_cmd::run(cmd).await?,
         Commands::Update { cmd } => match cmd {
             Some(c) => commands::update_cmd::run(c).await?,
