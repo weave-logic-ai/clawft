@@ -3,50 +3,123 @@
     "nodes": [
       {
         "id": "08257f994cc4b4ce7a7193abf0f4b93217de963a0960e0237072a9960ca192cb",
-        "x": 744.4638177905385,
+        "x": 719.5588065999223,
         "y": 400.0,
         "width": 36.0,
         "height": 36.0,
-        "label": "lib",
+        "label": "lib [4 ext]",
         "node_type": "module",
         "shape": "rect",
         "color": "#8b5cf6",
         "icon": "file-code",
-        "has_subgraph": false
+        "has_subgraph": false,
+        "metrics": {
+          "external_connections": 4.0
+        }
       },
       {
         "id": "d1043e920a429b86eeafbc3e7a660a0b2eb3857448344f140d163102516c3528",
-        "x": 527.7680911047306,
-        "y": 525.109336134293,
+        "x": 540.2205967000389,
+        "y": 503.5409637616833,
         "width": 36.0,
         "height": 36.0,
-        "label": "operations",
+        "label": "operations [3 ext]",
         "node_type": "module",
         "shape": "rect",
         "color": "#8b5cf6",
         "icon": "file-code",
-        "has_subgraph": false
+        "has_subgraph": false,
+        "metrics": {
+          "external_connections": 3.0
+        }
       },
       {
         "id": "c1f4245f326d8dbfe4c6214812e7ffc64ef530a77d88e53b9df4e96dfff8bc4e",
-        "x": 527.7680911047304,
-        "y": 274.8906638657071,
+        "x": 540.2205967000388,
+        "y": 296.4590362383168,
         "width": 36.0,
         "height": 36.0,
-        "label": "types",
+        "label": "types [1 ext]",
         "node_type": "module",
         "shape": "rect",
         "color": "#8b5cf6",
         "icon": "file-code",
-        "has_subgraph": false
+        "has_subgraph": false,
+        "metrics": {
+          "external_connections": 1.0
+        }
       }
     ],
-    "edges": [],
+    "edges": [
+      {
+        "source_id": "08257f994cc4b4ce7a7193abf0f4b93217de963a0960e0237072a9960ca192cb",
+        "target_id": "d1043e920a429b86eeafbc3e7a660a0b2eb3857448344f140d163102516c3528",
+        "label": "imports",
+        "edge_type": "imports",
+        "path": [
+          [
+            719.5588065999223,
+            400.0
+          ],
+          [
+            540.2205967000389,
+            503.5409637616833
+          ]
+        ],
+        "stroke": "#888888",
+        "width": 1.0,
+        "dash": "solid",
+        "arrow": true,
+        "animated": false
+      },
+      {
+        "source_id": "08257f994cc4b4ce7a7193abf0f4b93217de963a0960e0237072a9960ca192cb",
+        "target_id": "c1f4245f326d8dbfe4c6214812e7ffc64ef530a77d88e53b9df4e96dfff8bc4e",
+        "label": "imports",
+        "edge_type": "imports",
+        "path": [
+          [
+            719.5588065999223,
+            400.0
+          ],
+          [
+            540.2205967000388,
+            296.4590362383168
+          ]
+        ],
+        "stroke": "#888888",
+        "width": 1.0,
+        "dash": "solid",
+        "arrow": true,
+        "animated": false
+      },
+      {
+        "source_id": "d1043e920a429b86eeafbc3e7a660a0b2eb3857448344f140d163102516c3528",
+        "target_id": "c1f4245f326d8dbfe4c6214812e7ffc64ef530a77d88e53b9df4e96dfff8bc4e",
+        "label": "imports",
+        "edge_type": "imports",
+        "path": [
+          [
+            540.2205967000389,
+            503.5409637616833
+          ],
+          [
+            540.2205967000388,
+            296.4590362383168
+          ]
+        ],
+        "stroke": "#888888",
+        "width": 1.0,
+        "dash": "solid",
+        "arrow": true,
+        "animated": false
+      }
+    ],
     "viewport": {
-      "x": 469.7680911047304,
-      "y": 216.8906638657071,
-      "width": 332.69572668580815,
-      "height": 366.2186722685859
+      "x": 482.22059670003875,
+      "y": 238.4590362383168,
+      "width": 295.3382098998835,
+      "height": 323.0819275233665
     },
     "schema_name": "software",
     "schema_version": "1.0.0"

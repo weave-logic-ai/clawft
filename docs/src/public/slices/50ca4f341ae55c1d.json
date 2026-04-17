@@ -3,8 +3,8 @@
     "nodes": [
       {
         "id": "be7d1ad202462644612078460d4cb6be34f29178d9c0402b0f501e2b8d2d9f9a",
-        "x": 744.4638177905385,
-        "y": 400.0,
+        "x": 737.6585887077923,
+        "y": 417.1302147589819,
         "width": 36.0,
         "height": 36.0,
         "label": "lib",
@@ -16,37 +16,86 @@
       },
       {
         "id": "1f42ca0b72853c35e46dc49f234b08e10d934978bb7f273c23e8f4e28c3dba5b",
-        "x": 527.7680911047306,
-        "y": 525.109336134293,
+        "x": 546.0059067996647,
+        "y": 493.52051273158975,
         "width": 36.0,
         "height": 36.0,
-        "label": "checks",
+        "label": "checks [2 ext]",
         "node_type": "module",
         "shape": "rect",
         "color": "#8b5cf6",
         "icon": "file-code",
-        "has_subgraph": false
+        "has_subgraph": false,
+        "metrics": {
+          "external_connections": 2.0
+        }
       },
       {
         "id": "d8d82c77143319307c426d3dad3bdcc621f34dafde060b109ad862bb59b371b9",
-        "x": 527.7680911047304,
-        "y": 274.8906638657071,
+        "x": 516.3355044925415,
+        "y": 289.3492725094285,
         "width": 36.0,
         "height": 36.0,
-        "label": "patterns",
+        "label": "patterns [1 ext]",
         "node_type": "module",
         "shape": "rect",
         "color": "#8b5cf6",
         "icon": "file-code",
-        "has_subgraph": false
+        "has_subgraph": false,
+        "metrics": {
+          "external_connections": 1.0
+        }
       }
     ],
-    "edges": [],
+    "edges": [
+      {
+        "source_id": "be7d1ad202462644612078460d4cb6be34f29178d9c0402b0f501e2b8d2d9f9a",
+        "target_id": "1f42ca0b72853c35e46dc49f234b08e10d934978bb7f273c23e8f4e28c3dba5b",
+        "label": "imports",
+        "edge_type": "imports",
+        "path": [
+          [
+            737.6585887077923,
+            417.1302147589819
+          ],
+          [
+            546.0059067996647,
+            493.52051273158975
+          ]
+        ],
+        "stroke": "#888888",
+        "width": 1.0,
+        "dash": "solid",
+        "arrow": true,
+        "animated": false
+      },
+      {
+        "source_id": "1f42ca0b72853c35e46dc49f234b08e10d934978bb7f273c23e8f4e28c3dba5b",
+        "target_id": "d8d82c77143319307c426d3dad3bdcc621f34dafde060b109ad862bb59b371b9",
+        "label": "imports",
+        "edge_type": "imports",
+        "path": [
+          [
+            546.0059067996647,
+            493.52051273158975
+          ],
+          [
+            516.3355044925415,
+            289.3492725094285
+          ]
+        ],
+        "stroke": "#888888",
+        "width": 1.0,
+        "dash": "solid",
+        "arrow": true,
+        "animated": false
+      }
+    ],
     "viewport": {
-      "x": 469.7680911047304,
-      "y": 216.8906638657071,
-      "width": 332.69572668580815,
-      "height": 366.2186722685859
+      "x": 458.33550449254153,
+      "y": 231.3492725094285,
+      "width": 337.3230842152508,
+      "height": 320.17124022216126
     },
     "schema_name": "software",
     "schema_version": "1.0.0"

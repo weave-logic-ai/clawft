@@ -142,53 +142,86 @@ fn build_slice(
         map_descendants(kg, id, id, &mut entity_to_slice_node);
     }
 
-    // Collect edges: direct between slice nodes + aggregated from descendants.
+    // Collect edges in three categories:
+    // 1. Direct edges between nodes in this slice
+    // 2. Edges between descendants aggregated to their slice-level ancestor
+    // 3. Portal edges: external nodes that connect to nodes in this slice
     let mut edge_pairs: Vec<(usize, usize)> = Vec::new();
     let mut slice_edges: Vec<(EntityId, EntityId, String)> = Vec::new();
-    let mut seen_edge_keys: HashSet<(EntityId, EntityId)> = HashSet::new();
+    let mut seen_edge_keys: HashSet<(EntityId, EntityId, String)> = HashSet::new();
+
+    // Also track portal connections (edges from/to outside the slice).
+    let mut portal_sources: HashMap<EntityId, Vec<String>> = HashMap::new();
 
     for (src, tgt, rel) in kg.edges() {
         if matches!(rel.relation_type, RelationType::Contains) {
             continue;
         }
 
-        // Resolve both endpoints to their slice-level ancestor.
+        let rel_label = format!("{:?}", rel.relation_type).to_lowercase();
+
+        // Direct edges between slice nodes.
+        if node_set.contains(&src.id) && node_set.contains(&tgt.id) {
+            let key = (src.id.clone(), tgt.id.clone(), rel_label.clone());
+            if !seen_edge_keys.contains(&key) {
+                seen_edge_keys.insert(key);
+                if let (Some(&si), Some(&ti)) = (id_to_idx.get(&src.id), id_to_idx.get(&tgt.id)) {
+                    if si != ti {
+                        edge_pairs.push((si, ti));
+                        slice_edges.push((src.id.clone(), tgt.id.clone(), rel_label.clone()));
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Aggregated: resolve endpoints to slice-level ancestors.
         let src_slice = entity_to_slice_node.get(&src.id);
         let tgt_slice = entity_to_slice_node.get(&tgt.id);
 
-        if let (Some(src_s), Some(tgt_s)) = (src_slice, tgt_slice) {
-            if src_s == tgt_s {
-                continue; // Internal edge within same container.
+        match (src_slice, tgt_slice) {
+            (Some(src_s), Some(tgt_s)) if src_s != tgt_s => {
+                let key = (src_s.clone(), tgt_s.clone(), rel_label.clone());
+                if !seen_edge_keys.contains(&key) {
+                    seen_edge_keys.insert(key);
+                    if let (Some(&si), Some(&ti)) = (id_to_idx.get(src_s), id_to_idx.get(tgt_s)) {
+                        edge_pairs.push((si, ti));
+                        slice_edges.push((src_s.clone(), tgt_s.clone(), rel_label.clone()));
+                    }
+                }
             }
-            let key = (src_s.clone(), tgt_s.clone());
-            if seen_edge_keys.contains(&key) {
-                continue; // Already aggregated.
+            // Portal: one end is inside the slice, the other is outside.
+            (Some(src_s), None) if node_set.contains(src_s) => {
+                portal_sources.entry(src_s.clone()).or_default().push(
+                    format!("{} (external)", tgt.label),
+                );
             }
-            seen_edge_keys.insert(key);
-
-            if let (Some(&si), Some(&ti)) = (id_to_idx.get(src_s), id_to_idx.get(tgt_s)) {
-                edge_pairs.push((si, ti));
-                let label = format!("{:?}", rel.relation_type).to_lowercase();
-                slice_edges.push((src_s.clone(), tgt_s.clone(), label));
+            (None, Some(tgt_s)) if node_set.contains(tgt_s) => {
+                portal_sources.entry(tgt_s.clone()).or_default().push(
+                    format!("{} (external)", src.label),
+                );
             }
+            _ => {}
         }
     }
 
-    // Use force layout for this slice. Scale repulsion with node size.
-    let avg_radius = if entities.is_empty() { 24.0 } else {
-        entities.iter().map(|e| {
-            children_of.get(&e.id).copied().unwrap_or(0) as f64
-        }).sum::<f64>() / entities.len() as f64 * 6.0 + 24.0
-    };
+    // Use force layout for this slice.
+    // Scale viewport and repulsion so nodes don't overlap.
+    let n = slice_ids.len() as f64;
+    let scale = (n / 10.0).max(1.0).sqrt();
+    let layout_width = width * scale;
+    let layout_height = height * scale;
     let positions = super::force_layout::layout(
         &slice_ids,
         &edge_pairs,
-        width,
-        height,
+        layout_width,
+        layout_height,
         &super::force_layout::ForceConfig {
-            repulsion: 800.0 + avg_radius * 20.0,
-            spring_length: 180.0,
-            iterations: 300,
+            repulsion: 2000.0 + n * 100.0,
+            spring_length: 200.0 + n * 3.0,
+            damping: 0.3,
+            center_gravity: 0.003,
+            iterations: 400,
             ..Default::default()
         },
     );
@@ -213,8 +246,13 @@ fn build_slice(
             18.0
         };
 
-        let label = if child_count > 0 {
+        let portal_count = portal_sources.get(&entity.id).map(|v| v.len()).unwrap_or(0);
+        let label = if child_count > 0 && portal_count > 0 {
+            format!("{} ({} children, {} external)", entity.label, child_count, portal_count)
+        } else if child_count > 0 {
             format!("{} ({})", entity.label, child_count)
+        } else if portal_count > 0 {
+            format!("{} [{} ext]", entity.label, portal_count)
         } else {
             entity.label.clone()
         };
@@ -233,7 +271,16 @@ fn build_slice(
             icon,
             has_subgraph: child_count > 0,
             disposition: None,
-            metrics: HashMap::new(),
+            metrics: {
+                let mut m = HashMap::new();
+                if portal_count > 0 {
+                    m.insert("external_connections".into(), portal_count as f64);
+                }
+                if child_count > 0 {
+                    m.insert("children".into(), child_count as f64);
+                }
+                m
+            },
         });
     }
 

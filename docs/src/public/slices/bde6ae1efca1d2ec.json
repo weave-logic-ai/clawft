@@ -3,47 +3,56 @@
     "nodes": [
       {
         "id": "9c80227472c3c05f7a41abb0d7ad7bef534d7bdabc8ef9f34a51b411feb54190",
-        "x": 750.0098487211434,
-        "y": 400.0,
+        "x": 754.2093975280508,
+        "y": 367.7939833726354,
         "width": 36.0,
         "height": 36.0,
-        "label": "attention",
+        "label": "attention [2 ext]",
         "node_type": "module",
         "shape": "rect",
         "color": "#8b5cf6",
         "icon": "file-code",
-        "has_subgraph": false
+        "has_subgraph": false,
+        "metrics": {
+          "external_connections": 2.0
+        }
       },
       {
         "id": "f9255b0ded98a92453ff009f439461c95e35078cd439e3edb38bc6275d430ad1",
-        "x": 706.0729812754902,
-        "y": 506.07298127548916,
+        "x": 672.0750622554237,
+        "y": 568.8231815641518,
         "width": 36.0,
         "height": 36.0,
-        "label": "baseline_attention",
+        "label": "baseline_attention [2 ext]",
         "node_type": "module",
         "shape": "rect",
         "color": "#8b5cf6",
         "icon": "file-code",
-        "has_subgraph": false
+        "has_subgraph": false,
+        "metrics": {
+          "external_connections": 2.0
+        }
       },
       {
         "id": "d84a7ec595f3e57e52991411c5f1ae4f3b135595347f2a4512be720ebfe2b11d",
-        "x": 600.0,
-        "y": 550.0098487211434,
+        "x": 561.65162565104,
+        "y": 535.4271624252192,
         "width": 36.0,
         "height": 36.0,
-        "label": "events",
+        "label": "events [1 ext]",
         "node_type": "module",
         "shape": "rect",
         "color": "#8b5cf6",
         "icon": "file-code",
-        "has_subgraph": false
+        "has_subgraph": false,
+        "metrics": {
+          "external_connections": 1.0
+        }
       },
       {
         "id": "4fe0b62a7ea493ca8a0dc9c344b84eaf44be17824e1b8105b1e565d088cb541b",
-        "x": 493.9270187245114,
-        "y": 506.07298127548904,
+        "x": 464.79622739957324,
+        "y": 560.6198046078921,
         "width": 36.0,
         "height": 36.0,
         "label": "features",
@@ -55,8 +64,8 @@
       },
       {
         "id": "3feaf31cd6b7a7c39468c5c6cada21c0648a5e0eeb195d39c2f54857e974196a",
-        "x": 449.99015127885554,
-        "y": 400.0,
+        "x": 573.7816733943422,
+        "y": 363.5939884629045,
         "width": 36.0,
         "height": 36.0,
         "label": "lib",
@@ -68,21 +77,24 @@
       },
       {
         "id": "74edbd73c21249e723680984ed3e4182a9a090f31fcb671731e03e93789fdd9b",
-        "x": 493.9270187245114,
-        "y": 293.9270187245114,
+        "x": 398.9947035991855,
+        "y": 335.00945937820575,
         "width": 36.0,
         "height": 36.0,
-        "label": "model",
+        "label": "model [1 ext]",
         "node_type": "module",
         "shape": "rect",
         "color": "#8b5cf6",
         "icon": "file-code",
-        "has_subgraph": false
+        "has_subgraph": false,
+        "metrics": {
+          "external_connections": 1.0
+        }
       },
       {
         "id": "5bf07e99fd4c0ad6c635ec9bfe5f6264eb9df0cf269925e63e91dc92b66500f0",
-        "x": 600.0,
-        "y": 249.9901512788561,
+        "x": 591.8606576987793,
+        "y": 178.25113434274786,
         "width": 36.0,
         "height": 36.0,
         "label": "operator",
@@ -94,8 +106,8 @@
       },
       {
         "id": "f3162ce6c366caf5ea5bac224cfb4987ddb73aa34898741a3c4a2c6489dc5e08",
-        "x": 706.0729812754901,
-        "y": 293.92701872451136,
+        "x": 782.6306524736067,
+        "y": 290.4812858462442,
         "width": 36.0,
         "height": 36.0,
         "label": "tree",
@@ -106,12 +118,286 @@
         "has_subgraph": false
       }
     ],
-    "edges": [],
+    "edges": [
+      {
+        "source_id": "f9255b0ded98a92453ff009f439461c95e35078cd439e3edb38bc6275d430ad1",
+        "target_id": "9c80227472c3c05f7a41abb0d7ad7bef534d7bdabc8ef9f34a51b411feb54190",
+        "label": "imports",
+        "edge_type": "imports",
+        "path": [
+          [
+            672.0750622554237,
+            568.8231815641518
+          ],
+          [
+            754.2093975280508,
+            367.7939833726354
+          ]
+        ],
+        "stroke": "#888888",
+        "width": 1.0,
+        "dash": "solid",
+        "arrow": true,
+        "animated": false
+      },
+      {
+        "source_id": "3feaf31cd6b7a7c39468c5c6cada21c0648a5e0eeb195d39c2f54857e974196a",
+        "target_id": "d84a7ec595f3e57e52991411c5f1ae4f3b135595347f2a4512be720ebfe2b11d",
+        "label": "imports",
+        "edge_type": "imports",
+        "path": [
+          [
+            573.7816733943422,
+            363.5939884629045
+          ],
+          [
+            561.65162565104,
+            535.4271624252192
+          ]
+        ],
+        "stroke": "#888888",
+        "width": 1.0,
+        "dash": "solid",
+        "arrow": true,
+        "animated": false
+      },
+      {
+        "source_id": "3feaf31cd6b7a7c39468c5c6cada21c0648a5e0eeb195d39c2f54857e974196a",
+        "target_id": "4fe0b62a7ea493ca8a0dc9c344b84eaf44be17824e1b8105b1e565d088cb541b",
+        "label": "imports",
+        "edge_type": "imports",
+        "path": [
+          [
+            573.7816733943422,
+            363.5939884629045
+          ],
+          [
+            464.79622739957324,
+            560.6198046078921
+          ]
+        ],
+        "stroke": "#888888",
+        "width": 1.0,
+        "dash": "solid",
+        "arrow": true,
+        "animated": false
+      },
+      {
+        "source_id": "3feaf31cd6b7a7c39468c5c6cada21c0648a5e0eeb195d39c2f54857e974196a",
+        "target_id": "74edbd73c21249e723680984ed3e4182a9a090f31fcb671731e03e93789fdd9b",
+        "label": "imports",
+        "edge_type": "imports",
+        "path": [
+          [
+            573.7816733943422,
+            363.5939884629045
+          ],
+          [
+            398.9947035991855,
+            335.00945937820575
+          ]
+        ],
+        "stroke": "#888888",
+        "width": 1.0,
+        "dash": "solid",
+        "arrow": true,
+        "animated": false
+      },
+      {
+        "source_id": "3feaf31cd6b7a7c39468c5c6cada21c0648a5e0eeb195d39c2f54857e974196a",
+        "target_id": "5bf07e99fd4c0ad6c635ec9bfe5f6264eb9df0cf269925e63e91dc92b66500f0",
+        "label": "imports",
+        "edge_type": "imports",
+        "path": [
+          [
+            573.7816733943422,
+            363.5939884629045
+          ],
+          [
+            591.8606576987793,
+            178.25113434274786
+          ]
+        ],
+        "stroke": "#888888",
+        "width": 1.0,
+        "dash": "solid",
+        "arrow": true,
+        "animated": false
+      },
+      {
+        "source_id": "3feaf31cd6b7a7c39468c5c6cada21c0648a5e0eeb195d39c2f54857e974196a",
+        "target_id": "f3162ce6c366caf5ea5bac224cfb4987ddb73aa34898741a3c4a2c6489dc5e08",
+        "label": "imports",
+        "edge_type": "imports",
+        "path": [
+          [
+            573.7816733943422,
+            363.5939884629045
+          ],
+          [
+            782.6306524736067,
+            290.4812858462442
+          ]
+        ],
+        "stroke": "#888888",
+        "width": 1.0,
+        "dash": "solid",
+        "arrow": true,
+        "animated": false
+      },
+      {
+        "source_id": "3feaf31cd6b7a7c39468c5c6cada21c0648a5e0eeb195d39c2f54857e974196a",
+        "target_id": "9c80227472c3c05f7a41abb0d7ad7bef534d7bdabc8ef9f34a51b411feb54190",
+        "label": "imports",
+        "edge_type": "imports",
+        "path": [
+          [
+            573.7816733943422,
+            363.5939884629045
+          ],
+          [
+            754.2093975280508,
+            367.7939833726354
+          ]
+        ],
+        "stroke": "#888888",
+        "width": 1.0,
+        "dash": "solid",
+        "arrow": true,
+        "animated": false
+      },
+      {
+        "source_id": "3feaf31cd6b7a7c39468c5c6cada21c0648a5e0eeb195d39c2f54857e974196a",
+        "target_id": "f9255b0ded98a92453ff009f439461c95e35078cd439e3edb38bc6275d430ad1",
+        "label": "imports",
+        "edge_type": "imports",
+        "path": [
+          [
+            573.7816733943422,
+            363.5939884629045
+          ],
+          [
+            672.0750622554237,
+            568.8231815641518
+          ]
+        ],
+        "stroke": "#888888",
+        "width": 1.0,
+        "dash": "solid",
+        "arrow": true,
+        "animated": false
+      },
+      {
+        "source_id": "f3162ce6c366caf5ea5bac224cfb4987ddb73aa34898741a3c4a2c6489dc5e08",
+        "target_id": "5bf07e99fd4c0ad6c635ec9bfe5f6264eb9df0cf269925e63e91dc92b66500f0",
+        "label": "imports",
+        "edge_type": "imports",
+        "path": [
+          [
+            782.6306524736067,
+            290.4812858462442
+          ],
+          [
+            591.8606576987793,
+            178.25113434274786
+          ]
+        ],
+        "stroke": "#888888",
+        "width": 1.0,
+        "dash": "solid",
+        "arrow": true,
+        "animated": false
+      },
+      {
+        "source_id": "74edbd73c21249e723680984ed3e4182a9a090f31fcb671731e03e93789fdd9b",
+        "target_id": "d84a7ec595f3e57e52991411c5f1ae4f3b135595347f2a4512be720ebfe2b11d",
+        "label": "imports",
+        "edge_type": "imports",
+        "path": [
+          [
+            398.9947035991855,
+            335.00945937820575
+          ],
+          [
+            561.65162565104,
+            535.4271624252192
+          ]
+        ],
+        "stroke": "#888888",
+        "width": 1.0,
+        "dash": "solid",
+        "arrow": true,
+        "animated": false
+      },
+      {
+        "source_id": "74edbd73c21249e723680984ed3e4182a9a090f31fcb671731e03e93789fdd9b",
+        "target_id": "5bf07e99fd4c0ad6c635ec9bfe5f6264eb9df0cf269925e63e91dc92b66500f0",
+        "label": "imports",
+        "edge_type": "imports",
+        "path": [
+          [
+            398.9947035991855,
+            335.00945937820575
+          ],
+          [
+            591.8606576987793,
+            178.25113434274786
+          ]
+        ],
+        "stroke": "#888888",
+        "width": 1.0,
+        "dash": "solid",
+        "arrow": true,
+        "animated": false
+      },
+      {
+        "source_id": "9c80227472c3c05f7a41abb0d7ad7bef534d7bdabc8ef9f34a51b411feb54190",
+        "target_id": "d84a7ec595f3e57e52991411c5f1ae4f3b135595347f2a4512be720ebfe2b11d",
+        "label": "imports",
+        "edge_type": "imports",
+        "path": [
+          [
+            754.2093975280508,
+            367.7939833726354
+          ],
+          [
+            561.65162565104,
+            535.4271624252192
+          ]
+        ],
+        "stroke": "#888888",
+        "width": 1.0,
+        "dash": "solid",
+        "arrow": true,
+        "animated": false
+      },
+      {
+        "source_id": "9c80227472c3c05f7a41abb0d7ad7bef534d7bdabc8ef9f34a51b411feb54190",
+        "target_id": "5bf07e99fd4c0ad6c635ec9bfe5f6264eb9df0cf269925e63e91dc92b66500f0",
+        "label": "imports",
+        "edge_type": "imports",
+        "path": [
+          [
+            754.2093975280508,
+            367.7939833726354
+          ],
+          [
+            591.8606576987793,
+            178.25113434274786
+          ]
+        ],
+        "stroke": "#888888",
+        "width": 1.0,
+        "dash": "solid",
+        "arrow": true,
+        "animated": false
+      }
+    ],
     "viewport": {
-      "x": 391.99015127885554,
-      "y": 191.9901512788561,
-      "width": 416.01969744228785,
-      "height": 416.0196974422873
+      "x": 340.9947035991855,
+      "y": 120.25113434274786,
+      "width": 499.63594887442116,
+      "height": 506.572047221404
     },
     "schema_name": "software",
     "schema_version": "1.0.0"

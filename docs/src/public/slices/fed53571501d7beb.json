@@ -3,36 +3,64 @@
     "nodes": [
       {
         "id": "0f512409a9b20d2a6659fb9b034a617327c938ddf83e8fd13984ef338a25e8c9",
-        "x": 743.6124775667031,
+        "x": 701.4376773155292,
         "y": 400.0,
         "width": 36.0,
         "height": 36.0,
-        "label": "lib",
+        "label": "lib [3 ext]",
         "node_type": "module",
         "shape": "rect",
         "color": "#8b5cf6",
         "icon": "file-code",
-        "has_subgraph": false
+        "has_subgraph": false,
+        "metrics": {
+          "external_connections": 3.0
+        }
       },
       {
         "id": "ec251fc5cda0edcf4ac5ff2c7e7a778c27ca884c307fb24832832d7d40cd54a8",
-        "x": 456.38752243329674,
+        "x": 498.56232268447167,
         "y": 400.0,
         "width": 36.0,
         "height": 36.0,
-        "label": "types",
+        "label": "types [2 ext]",
         "node_type": "module",
         "shape": "rect",
         "color": "#8b5cf6",
         "icon": "file-code",
-        "has_subgraph": false
+        "has_subgraph": false,
+        "metrics": {
+          "external_connections": 2.0
+        }
       }
     ],
-    "edges": [],
+    "edges": [
+      {
+        "source_id": "0f512409a9b20d2a6659fb9b034a617327c938ddf83e8fd13984ef338a25e8c9",
+        "target_id": "ec251fc5cda0edcf4ac5ff2c7e7a778c27ca884c307fb24832832d7d40cd54a8",
+        "label": "imports",
+        "edge_type": "imports",
+        "path": [
+          [
+            701.4376773155292,
+            400.0
+          ],
+          [
+            498.56232268447167,
+            400.0
+          ]
+        ],
+        "stroke": "#888888",
+        "width": 1.0,
+        "dash": "solid",
+        "arrow": true,
+        "animated": false
+      }
+    ],
     "viewport": {
-      "x": 398.38752243329674,
+      "x": 440.56232268447167,
       "y": 342.0,
-      "width": 403.22495513340635,
+      "width": 318.8753546310575,
       "height": 116.0
     },
     "schema_name": "software",

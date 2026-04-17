@@ -129,6 +129,25 @@ pub fn layout(
             body.vy += (cy - body.y) * config.center_gravity * alpha_decay;
         }
 
+        // Collision resolution — push overlapping nodes apart.
+        let min_dist = 80.0;
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let dx = bodies[j].x - bodies[i].x;
+                let dy = bodies[j].y - bodies[i].y;
+                let dist = (dx * dx + dy * dy).sqrt().max(0.1);
+                if dist < min_dist {
+                    let push = (min_dist - dist) * 0.5;
+                    let px = push * dx / dist;
+                    let py = push * dy / dist;
+                    bodies[i].x -= px;
+                    bodies[i].y -= py;
+                    bodies[j].x += px;
+                    bodies[j].y += py;
+                }
+            }
+        }
+
         // Velocity Verlet integration with damping.
         for body in &mut bodies {
             body.vx *= config.damping;

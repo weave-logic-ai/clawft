@@ -3,21 +3,24 @@
     "nodes": [
       {
         "id": "62064cf7a87d35cda718d81af298cb7f8010e66b2dd1c1a091ce21c153f0e73f",
-        "x": 745.439173078269,
-        "y": 400.0,
+        "x": 706.764585527952,
+        "y": 363.8325137628013,
         "width": 36.0,
         "height": 36.0,
-        "label": "client",
+        "label": "client [1 ext]",
         "node_type": "module",
         "shape": "rect",
         "color": "#8b5cf6",
         "icon": "file-code",
-        "has_subgraph": false
+        "has_subgraph": false,
+        "metrics": {
+          "external_connections": 1.0
+        }
       },
       {
         "id": "e4081692fca8114dc28a70116dcd0f79679bec9037b2aca0c5ac93befb49a987",
         "x": 600.0,
-        "y": 545.439173078269,
+        "y": 543.070555315497,
         "width": 36.0,
         "height": 36.0,
         "label": "lib",
@@ -29,37 +32,128 @@
       },
       {
         "id": "439661926415a678aae7241ed2e2a591745fed69b7990572a5d07d46702f5484",
-        "x": 454.56082692173,
-        "y": 400.0,
+        "x": 493.23541447204843,
+        "y": 363.83251376280117,
         "width": 36.0,
         "height": 36.0,
-        "label": "protocol",
+        "label": "protocol [1 ext]",
         "node_type": "module",
         "shape": "rect",
         "color": "#8b5cf6",
         "icon": "file-code",
-        "has_subgraph": false
+        "has_subgraph": false,
+        "metrics": {
+          "external_connections": 1.0
+        }
       },
       {
         "id": "a7de23acd06ebaf5f839682c1fb2cc2f41186701ffb306de2bba4a8fcd451148",
         "x": 600.0,
-        "y": 254.5608269217301,
+        "y": 329.264417158902,
         "width": 36.0,
         "height": 36.0,
-        "label": "version_check",
+        "label": "version_check [1 ext]",
         "node_type": "module",
         "shape": "rect",
         "color": "#8b5cf6",
         "icon": "file-code",
-        "has_subgraph": false
+        "has_subgraph": false,
+        "metrics": {
+          "external_connections": 1.0
+        }
       }
     ],
-    "edges": [],
+    "edges": [
+      {
+        "source_id": "e4081692fca8114dc28a70116dcd0f79679bec9037b2aca0c5ac93befb49a987",
+        "target_id": "62064cf7a87d35cda718d81af298cb7f8010e66b2dd1c1a091ce21c153f0e73f",
+        "label": "imports",
+        "edge_type": "imports",
+        "path": [
+          [
+            600.0,
+            543.070555315497
+          ],
+          [
+            706.764585527952,
+            363.8325137628013
+          ]
+        ],
+        "stroke": "#888888",
+        "width": 1.0,
+        "dash": "solid",
+        "arrow": true,
+        "animated": false
+      },
+      {
+        "source_id": "e4081692fca8114dc28a70116dcd0f79679bec9037b2aca0c5ac93befb49a987",
+        "target_id": "439661926415a678aae7241ed2e2a591745fed69b7990572a5d07d46702f5484",
+        "label": "imports",
+        "edge_type": "imports",
+        "path": [
+          [
+            600.0,
+            543.070555315497
+          ],
+          [
+            493.23541447204843,
+            363.83251376280117
+          ]
+        ],
+        "stroke": "#888888",
+        "width": 1.0,
+        "dash": "solid",
+        "arrow": true,
+        "animated": false
+      },
+      {
+        "source_id": "e4081692fca8114dc28a70116dcd0f79679bec9037b2aca0c5ac93befb49a987",
+        "target_id": "a7de23acd06ebaf5f839682c1fb2cc2f41186701ffb306de2bba4a8fcd451148",
+        "label": "imports",
+        "edge_type": "imports",
+        "path": [
+          [
+            600.0,
+            543.070555315497
+          ],
+          [
+            600.0,
+            329.264417158902
+          ]
+        ],
+        "stroke": "#888888",
+        "width": 1.0,
+        "dash": "solid",
+        "arrow": true,
+        "animated": false
+      },
+      {
+        "source_id": "62064cf7a87d35cda718d81af298cb7f8010e66b2dd1c1a091ce21c153f0e73f",
+        "target_id": "439661926415a678aae7241ed2e2a591745fed69b7990572a5d07d46702f5484",
+        "label": "imports",
+        "edge_type": "imports",
+        "path": [
+          [
+            706.764585527952,
+            363.8325137628013
+          ],
+          [
+            493.23541447204843,
+            363.83251376280117
+          ]
+        ],
+        "stroke": "#888888",
+        "width": 1.0,
+        "dash": "solid",
+        "arrow": true,
+        "animated": false
+      }
+    ],
     "viewport": {
-      "x": 396.56082692173,
-      "y": 196.5608269217301,
-      "width": 406.87834615653907,
-      "height": 406.87834615653895
+      "x": 435.23541447204843,
+      "y": 271.264417158902,
+      "width": 329.5291710559036,
+      "height": 329.806138156595
     },
     "schema_name": "software",
     "schema_version": "1.0.0"

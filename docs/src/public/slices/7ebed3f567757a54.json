@@ -7,12 +7,15 @@
         "y": 400.0,
         "width": 36.0,
         "height": 36.0,
-        "label": "main",
+        "label": "main [5 ext]",
         "node_type": "module",
         "shape": "rect",
         "color": "#8b5cf6",
         "icon": "file-code",
-        "has_subgraph": false
+        "has_subgraph": false,
+        "metrics": {
+          "external_connections": 5.0
+        }
       }
     ],
     "edges": [],
