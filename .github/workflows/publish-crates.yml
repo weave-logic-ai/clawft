@@ -44,22 +44,11 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
         run: |
-          CRATES=(
-            eml-core
-            clawft-types
-            clawft-rpc
-            exo-resource-tree
-            clawft-plugin
-            clawft-platform
-            clawft-llm
-            clawft-core
-            clawft-services
-            clawft-plugin-treesitter
-            clawft-tools
-            clawft-kernel
-            weftos
-          )
-          for crate in "${CRATES[@]}"; do
+          # Dry-run all publishable crates.
+          for crate in eml-core clawft-types clawft-rpc exo-resource-tree \
+            clawft-plugin clawft-platform clawft-llm clawft-core \
+            clawft-services clawft-plugin-treesitter clawft-tools \
+            clawft-kernel weftos; do
             echo "--- Dry-run: $crate ---"
             cargo publish -p "$crate" --dry-run --allow-dirty 2>&1 || true
           done
@@ -134,11 +123,62 @@ jobs:
             return 1
           }
 
-          for crate in "${CRATES[@]}"; do
-            publish_crate "$crate"
-            # crates.io index propagation delay
-            echo "Waiting 30s for crates.io index to update..."
-            sleep 30
-          done
+          # Publish in tiered parallel: crates within a tier have no
+          # inter-dependencies and can publish simultaneously. Only wait
+          # between tiers for index propagation.
+
+          publish_tier() {
+            local tier_name="$1"
+            shift
+            local crates=("$@")
+            local pids=()
+
+            echo "::group::Tier: $tier_name (${#crates[@]} crates)"
+            for crate in "${crates[@]}"; do
+              publish_crate "$crate" &
+              pids+=($!)
+            done
+
+            local failed=0
+            for pid in "${pids[@]}"; do
+              if ! wait "$pid"; then
+                failed=1
+              fi
+            done
+            echo "::endgroup::"
+
+            if [ "$failed" -ne 0 ]; then
+              echo "::error::Tier $tier_name had failures"
+              return 1
+            fi
+          }
+
+          wait_for_index() {
+            echo "Waiting 15s for crates.io index propagation..."
+            sleep 15
+          }
+
+          publish_tier "0 (no internal deps)" \
+            eml-core clawft-types clawft-rpc exo-resource-tree clawft-plugin
+          wait_for_index
+
+          publish_tier "1 (depends on types/eml-core)" \
+            clawft-platform clawft-llm
+          wait_for_index
+
+          publish_tier "2 (depends on tier 0+1)" \
+            clawft-core clawft-services clawft-plugin-treesitter
+          wait_for_index
+
+          publish_tier "3 (depends on tier 0-2)" \
+            clawft-tools
+          wait_for_index
+
+          publish_tier "4 (depends on core+treesitter)" \
+            clawft-kernel
+          wait_for_index
+
+          publish_tier "5 (depends on kernel)" \
+            weftos
 
           echo "All crates published successfully!"
