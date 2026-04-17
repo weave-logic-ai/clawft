@@ -5,6 +5,206 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.12] - 2026-04-17
+
+### Universal Topology Browser
+
+The centerpiece of this release: a complete framework for navigating any
+data structure as an interactive, drillable topology graph.
+
+- **TopologySchema** (`clawft-graphify::topology`): YAML-based geometry
+  declarations for the universal topology browser. Schemas are composable
+  (Docker-config style layering via `extends`), support IRI-based identity
+  for ontology interoperability, and include mode configuration (Diff,
+  Heatmap, Flow, Timeline). Includes `NodeTypeConfig` with geometry
+  (force/tree/layered/timeline/stream/grid/geo/radial/wardley), visual
+  style, containment declarations, and `EdgeTypeConfig` with cardinality
+  constraints. Ships with a 7R Disposition enum (Rehost, Replatform,
+  Refactor, Repurchase, Retire, Retain, Ratify).
+
+- **Domain schema presets**: `schemas/software.yaml` (14 node types, 8
+  edge types, full IRIs with Schema.org `same_as` mappings) and
+  `schemas/investigation.yaml` (13 node types, 9 edge types, IRIs mapped
+  to FOAF/Schema.org for forensic analysis).
+
+- **IRI-based entity identity** (`Entity.iri` field): The word is a label,
+  the IRI is the concept. "Service" in architecture docs maps to
+  `weftos:arch#Service`, "Service" in support docs maps to
+  `weftos:support#Service` — same word, different IRIs, different things
+  in the graph. Resolves the ontology ambiguity problem.
+
+- **Rust layout engine** (`clawft-graphify::layout`):
+  - Reingold-Tilford tree layout: O(n) top-down with centered parents
+  - Barnes-Hut force-directed layout: repulsion + spring attraction +
+    center gravity + collision resolution (80px minimum spacing)
+  - Tree calculus triage dispatch: classifies nodes as Atom (no children),
+    Sequence (same-type children), Branch (mixed children) to select
+    layout strategy
+  - Auto-detection heuristic: >60% Contains edges = tree, >50% timestamps
+    = timeline, else force-directed
+  - Positioned geometry output (`PositionedGraph`) consumable by any
+    thin renderer (React, Tauri, TUI)
+
+- **Graph slicer** (`clawft-graphify::layout::slicer`): Pre-computes
+  drill-down JSON per hierarchy level. Top level shows packages (28 nodes),
+  double-click drills into modules with edges. Cross-package dependency
+  edges aggregated via ancestor mapping. Portal counts show external
+  connections. Intra-crate import edges extracted from `use crate::`
+  statements. Manifest JSON indexes all slices for lazy loading.
+
+- **Schema inference** (`clawft-graphify::topology_infer`): Generate a
+  TopologySchema from an existing KnowledgeGraph by analyzing entity types,
+  containment hierarchy, geometry, and edge patterns. Auto-generates IRIs.
+  `diff_schemas()` compares declared vs inferred to detect architectural
+  drift (added/removed types, geometry mismatches, new edge patterns).
+
+- **VOWL JSON export** (`clawft-graphify::export::vowl`): Emit
+  WebVOWL-compatible JSON (8-key format: header, namespace, metrics, class,
+  classAttribute, property, propertyAttribute) with IRI mappings from the
+  topology schema. Consumable by WebVOWL and the navigator widget.
+
+- **Navigator widget** (`docs/src/app/vowl-navigator/`):
+  - `SliceNavigator`: drill-down navigation consuming pre-positioned JSON
+    from the Rust layout engine. Breadcrumb trail, double-click to drill,
+    detail panel with type/IRI/connections, expandable node indicators.
+    No d3-force in the browser — instant navigation.
+  - `VowlNavigator`: VOWL visual notation renderer with D3 force layout,
+    search, degree filter, datatype toggle, VOWL legend.
+  - Mode toggle between drill-down (sliced) and VOWL flat views.
+  - File upload for custom VOWL JSON.
+
+- **Playwright E2E tests** (24/24 pass): Validates symposium criteria —
+  not a hairball (28 nodes at top level), drill-down with breadcrumbs,
+  detail panel for architecture understanding, schema-driven visual
+  encoding (shape/color per type), data integrity of slice files,
+  usability (zoom, pan, help text, mode toggle).
+
+### CLI Commands
+
+- `weaver topology layout <graph.json>` — compute positioned geometry
+  with schema-driven or auto-detected layout
+- `weaver topology validate <schema.yaml>` — validate schemas with warnings
+- `weaver topology detect <graph.json>` — auto-detect geometry, show
+  edge/entity distribution and tree calculus triage classification
+- `weaver topology infer <graph.json>` — infer a schema from graph data
+- `weaver topology diff <schema.yaml> <graph.json>` — declared vs inferred
+  schema drift detection
+- `weaver topology vowl <graph.json>` — export VOWL JSON for the navigator
+- `weaver topology slice <graph.json>` — generate drill-down slices
+- `weaver topology extract <path>` — extract codebase using tree calculus + EML
+
+### Tree Calculus + EML AST Extractor
+
+- **`clawft-graphify::extract::treecalc`**: Native Rust source extractor
+  using tree calculus for structural dispatch and EML for confidence/complexity
+  scoring. No tree-sitter dependency.
+  - Tree calculus triage classifies every extracted item: Atom (constant,
+    type alias), Sequence (struct fields, enum variants), Branch (impl
+    with mixed children)
+  - EML scoring: `confidence = a * exp(b * x) + c * ln(d * x + 1)` with
+    bonuses for pub/doc. Parameters hand-initialized, trainable via
+    eml-core later.
+  - Extracts: functions, structs, enums, traits, impl blocks, constants,
+    type aliases, statics, macros with children (methods, fields, variants)
+  - Relationships: Contains, MethodOf, Implements, Extends, Calls (inferred)
+
+### LSP-Based Code Intelligence
+
+- **New crate: `clawft-lsp-extract`**: Standalone crate that spawns
+  Language Server Protocol servers (rust-analyzer, typescript-language-server,
+  pylsp, gopls) and extracts full semantic graphs via JSON-RPC.
+  - `protocol.rs`: LSP JSON-RPC wire format (Content-Length + JSON-RPC 2.0)
+  - `server.rs`: server lifecycle (spawn, initialize, query, shutdown)
+  - `extract.rs`: walk source files, query documentSymbol, parse
+    hierarchical symbols into LspGraph
+  - `graph.rs`: LspGraph/LspNode/LspEdge types with all 26 LSP SymbolKinds
+  - `config.rs`: language configs with auto-detection from file extensions
+  - Enables semantic extraction from dozens of languages via their existing
+    IDE infrastructure — tapping the "digital exhaust" that language servers
+    already compute
+
+### Security
+
+- **Unified prompt injection defense** (`sanitize_llm_input()` +
+  `sanitize_schema_input()`): Wraps existing `sanitize_skill_instructions()`
+  + `sanitize_content()` with source boundary tagging for audit trail.
+  Applies at all 7 LLM input paths identified in the MAESTRO security
+  audit (semantic extraction, memory retrieval, session history, tool
+  results, bootstrap files, schema builder inputs). Schema-specific checks
+  detect injection via YAML directives and suspicious URI schemes.
+
+- **Sprint 17 security plan** (`.planning/sprint17.md`): MAESTRO-informed
+  security hardening covering prompt injection pipeline (PI-1 through PI-5),
+  RPC authentication, plugin supply chain signing, and ontology graph
+  pipeline.
+
+### Vault Cultivation (v0.6.11)
+
+- `weaver vault enrich` — YAML frontmatter generation with type/tag/status
+  inference from file content and path
+- `weaver vault analyze` — link graph metrics (orphans, clusters, density,
+  broken links) via union-find
+- `weaver vault suggest` — scored connection suggestions based on shared
+  tags, path proximity, keyword similarity
+- `weaver vault auto-link` — insert wikilinks for known document titles
+- `weaver vault backlinks` — generate backlink sections from incoming links
+
+### CI/CD Fixes
+
+- `eml-core` added to crates.io publish pipeline (was the root cause of
+  v0.6.10 publish failure — clawft-llm depends on it)
+- `eml-core v0.1.0` published to crates.io
+- Docker workflow: replaced fragile tag-push polling with `workflow_run`
+  trigger, eliminating race condition with Release workflow
+- Release gate workflow: marks GitHub releases as prerelease when
+  downstream jobs (Publish Crates, Docker) fail, so broken releases
+  are visually flagged instead of silently half-done
+
+### Symposium: Universal Topology Browser
+
+17 artifacts produced in `.planning/symposiums/ontology-navigator/`:
+
+- 8-session agenda covering schema design, layout algorithms, graph
+  nesting, navigator modes, investigative instrument use case
+- Tree calculus + EML dual substrate architecture (ADR): triage for
+  structural dispatch, EML for continuous parameters, pure Rust, <50ms
+  for 10K nodes
+- IRI-based identity architecture (ADR): word vs concept, same_as
+  mappings, OWL/RDF compatibility
+- ArcKit governance integration: 60 doc-type ontology, Wardley Map
+  geometry, traceability matrix as Diff overlay
+- Google RAMP assessment patterns: 7R disposition model (including
+  Ratify), declared-vs-observed topology diff, maturity radar
+- AI framework validation: 7 importable formal schemas (ML Schema,
+  PROV-O, DTDL, AAS, ArchiMate, BPMN, OPC UA)
+- Schema builder agent design: 5 agent types (Framework, Codebase,
+  Document, Visual, Telemetry) producing composable YAML fragments
+- Navigator mode system: Base (Explore/Timeline/Cluster/Wardley) +
+  Overlay (Diff/Heatmap/Flow/Search) + Tool (Annotate), with
+  performance budgets (base <300ms, overlay <100ms, tool <16ms)
+- Cold case investigation walkthrough scenario
+- Founder Q&A: 7 decisions (composable schemas, OWL compat, single
+  overlay mode, topological distortion for missing nodes, IRI identity)
+
+### Internal
+
+- `clawft-lsp-extract` added to workspace
+- `serde_yaml` added to clawft-weave and clawft-graphify dependencies
+- 232+ Rust tests passing across graphify (topology, layout, triage,
+  slicer, vault, VOWL export, schema inference)
+- 24 Playwright E2E tests passing for navigator
+- Fixed flaky vault suggest test (HashMap iteration order)
+
+## [0.6.11] - 2026-04-16
+
+### Added
+
+- **Vault cultivation** (`weaver vault`): Port of weave-nn's Obsidian vault
+  tooling to Rust. Frontmatter enrichment, wikilink extraction, link graph
+  analysis, connection suggestion, auto-linking, backlinks.
+- CI fix: eml-core added to publish pipeline, Docker race eliminated,
+  release gate marks failed releases as prerelease.
+
 ## [0.6.10] - 2026-04-15
 
 ### Added
