@@ -158,6 +158,10 @@ pub struct KernelConfig {
     /// Time-windowed pairing configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pairing: Option<PairingConfig>,
+
+    /// Mesh networking configuration (K6 transport layer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh: Option<MeshConfig>,
 }
 
 impl Default for KernelConfig {
@@ -172,6 +176,67 @@ impl Default for KernelConfig {
             vector: None,
             profiles: None,
             pairing: None,
+            mesh: None,
+        }
+    }
+}
+
+// ── Mesh networking configuration ──────────────────────────────────────
+
+/// Configuration for the K6 mesh transport layer.
+///
+/// Controls whether the mesh listener is started, what transport to use,
+/// and where to bind. When enabled, the kernel spawns a `MeshRuntime`
+/// that accepts peer connections and wires them into the A2A router.
+///
+/// # Example TOML
+///
+/// ```toml
+/// [kernel.mesh]
+/// enabled = true
+/// transport = "tcp"
+/// listen_addr = "0.0.0.0:9470"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeshConfig {
+    /// Whether the mesh transport is active. Default: false.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Transport backend: "tcp" (default) or "ws" (WebSocket).
+    /// QUIC planned for future.
+    #[serde(default = "default_mesh_transport")]
+    pub transport: String,
+
+    /// Address to bind the mesh listener on.
+    #[serde(default = "default_mesh_listen_addr")]
+    pub listen_addr: String,
+
+    /// Enable peer discovery via Kademlia DHT.
+    #[serde(default)]
+    pub discovery: bool,
+
+    /// Seed peers to connect to on startup.
+    #[serde(default)]
+    pub seed_peers: Vec<String>,
+}
+
+fn default_mesh_transport() -> String {
+    "tcp".to_owned()
+}
+
+fn default_mesh_listen_addr() -> String {
+    "0.0.0.0:9470".to_owned()
+}
+
+impl Default for MeshConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            transport: default_mesh_transport(),
+            listen_addr: default_mesh_listen_addr(),
+            discovery: false,
+            seed_peers: vec![],
         }
     }
 }

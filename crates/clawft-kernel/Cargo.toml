@@ -15,7 +15,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["native", "exochain", "cluster", "tilezero", "ecc"]
+default = ["native", "exochain", "cluster", "tilezero", "ecc", "mesh"]
 native = [
     "dep:tokio",
     "dep:tokio-util",

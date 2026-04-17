@@ -261,6 +261,153 @@ impl<P: Platform> Kernel<P> {
             ));
         }
 
+        // 5d. Initialize mesh transport (K6) if configured.
+        //     Must happen before cluster (step 7) because cluster needs mesh
+        //     to reach peer nodes.
+        #[cfg(all(feature = "native", feature = "mesh"))]
+        let mesh_runtime = {
+            let mesh_config = kernel_config.mesh.clone().unwrap_or_default();
+            if mesh_config.enabled {
+                let node_id = uuid::Uuid::new_v4().to_string();
+                let mut runtime = if mesh_config.discovery {
+                    let kad_id = blake3::hash(node_id.as_bytes());
+                    crate::mesh_runtime::MeshRuntime::with_discovery(
+                        node_id.clone(),
+                        *kad_id.as_bytes(),
+                    )
+                } else {
+                    crate::mesh_runtime::MeshRuntime::new(node_id.clone())
+                };
+
+                // Wire mesh into the A2A router for incoming message injection.
+                runtime.set_local_router(Arc::clone(&a2a_router));
+
+                let runtime = Arc::new(runtime);
+
+                // Clone values needed by seed-peer loop before moving mesh_config.
+                let seed_peers = mesh_config.seed_peers.clone();
+                let transport_name_for_seeds = mesh_config.transport.clone();
+                let transport_display = mesh_config.transport.clone();
+                let listen_display = mesh_config.listen_addr.clone();
+
+                // Spawn the mesh listener on the configured transport.
+                let listen_addr = mesh_config.listen_addr.clone();
+                let rt = Arc::clone(&runtime);
+                tokio::spawn(async move {
+                    use crate::mesh::MeshTransport;
+
+                    let transport: Box<dyn MeshTransport> = match mesh_config.transport.as_str() {
+                        "ws" | "websocket" => {
+                            Box::new(crate::mesh_ws::WsTransport)
+                        }
+                        _ => {
+                            Box::new(crate::mesh_tcp::TcpTransport)
+                        }
+                    };
+
+                    match transport.listen(&listen_addr).await {
+                        Ok(mut listener) => {
+                            let bind = listener.local_addr()
+                                .map(|a| a.to_string())
+                                .unwrap_or_else(|_| listen_addr.clone());
+                            tracing::info!(
+                                transport = transport.name(),
+                                addr = %bind,
+                                "mesh listener started"
+                            );
+
+                            loop {
+                                match listener.accept().await {
+                                    Ok((mut stream, peer_addr)) => {
+                                        let rt2 = Arc::clone(&rt);
+                                        tokio::spawn(async move {
+                                            tracing::debug!(peer = %peer_addr, "mesh peer connected");
+                                            loop {
+                                                match stream.recv().await {
+                                                    Ok(data) => {
+                                                        if let Err(e) = rt2.handle_incoming(&data).await {
+                                                            tracing::debug!(error = %e, "mesh message handling error");
+                                                        }
+                                                    }
+                                                    Err(_) => break,
+                                                }
+                                            }
+                                        });
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "mesh accept error");
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                addr = %listen_addr,
+                                "failed to start mesh listener"
+                            );
+                        }
+                    }
+                });
+
+                // Connect to seed peers.
+                for peer_addr in &seed_peers {
+                    let addr = peer_addr.clone();
+                    let rt = Arc::clone(&runtime);
+                    let transport_name = transport_name_for_seeds.clone();
+                    tokio::spawn(async move {
+                        use crate::mesh::MeshTransport;
+
+                        let transport: Box<dyn MeshTransport> = match transport_name.as_str() {
+                            "ws" | "websocket" => Box::new(crate::mesh_ws::WsTransport),
+                            _ => Box::new(crate::mesh_tcp::TcpTransport),
+                        };
+
+                        match transport.connect(&addr).await {
+                            Ok(stream) => {
+                                let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+                                let peer_id = addr.clone();
+                                rt.add_peer(peer_id.clone(), tx);
+                                tracing::info!(peer = %addr, "connected to seed peer");
+
+                                // Drain outbound queue to stream.
+                                let mut stream = stream;
+                                tokio::spawn(async move {
+                                    use crate::mesh::MeshStream;
+                                    while let Some(data) = rx.recv().await {
+                                        if stream.send(&data).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                tracing::warn!(peer = %addr, error = %e, "failed to connect to seed peer");
+                            }
+                        }
+                    });
+                }
+
+                boot_log.push(BootEvent::info(
+                    BootPhase::Network,
+                    format!(
+                        "Mesh transport started ({} on {}, {} seed peers)",
+                        transport_display,
+                        listen_display,
+                        seed_peers.len(),
+                    ),
+                ));
+
+                Some(runtime)
+            } else {
+                boot_log.push(BootEvent::info(
+                    BootPhase::Network,
+                    "Mesh transport disabled",
+                ));
+                None
+            }
+        };
+
         // 6. Create cluster membership (universal, always present)
         let cluster_config = ClusterConfig {
             node_id: uuid::Uuid::new_v4().to_string(),
