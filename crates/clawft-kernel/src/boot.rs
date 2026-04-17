@@ -692,6 +692,16 @@ impl<P: Platform> Kernel<P> {
             }
         };
 
+        // 8b-mesh. Wire the chain manager into the mesh runtime so every
+        //          successful `handle_incoming` appends a `peer.envelope`
+        //          event to the ExoChain. Makes mesh activity auditable
+        //          via `weaver chain local` without adding a topic
+        //          subscriber.
+        #[cfg(all(feature = "native", feature = "mesh", feature = "exochain"))]
+        if let (Some(mr), Some(cm)) = (mesh_runtime.as_ref(), chain_manager.as_ref()) {
+            mr.set_chain_manager(Arc::clone(cm));
+        }
+
         // 8c. Bootstrap resource tree via TreeManager (when exochain feature is enabled)
         //     First attempt to restore from checkpoint; fall back to fresh bootstrap.
         #[cfg(feature = "exochain")]
