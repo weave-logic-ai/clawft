@@ -56,6 +56,12 @@ pub struct MeshRuntime {
     discovery: Option<DiscoveryState>,
     /// Mesh time synchronization state.
     clock: std::sync::Mutex<MeshClockSync>,
+    /// Late-bound chain manager. When set (via
+    /// [`set_chain_manager`]), every successful `handle_incoming`
+    /// appends a `peer.envelope` event to the ExoChain so mesh
+    /// activity is auditable via `weaver chain local`.
+    #[cfg(feature = "exochain")]
+    chain_manager: std::sync::OnceLock<Arc<crate::chain::ChainManager>>,
 }
 
 impl MeshRuntime {
@@ -67,6 +73,8 @@ impl MeshRuntime {
             local_router: None,
             discovery: None,
             clock: std::sync::Mutex::new(MeshClockSync::new(ClockSource::Local)),
+            #[cfg(feature = "exochain")]
+            chain_manager: std::sync::OnceLock::new(),
         }
     }
 
@@ -85,6 +93,8 @@ impl MeshRuntime {
                 heartbeat: Mutex::new(HeartbeatTracker::new(HeartbeatConfig::default())),
             }),
             clock: std::sync::Mutex::new(MeshClockSync::new(ClockSource::Local)),
+            #[cfg(feature = "exochain")]
+            chain_manager: std::sync::OnceLock::new(),
         }
     }
 
@@ -96,6 +106,17 @@ impl MeshRuntime {
     /// Attach the local A2A router for incoming message injection.
     pub fn set_local_router(&mut self, router: Arc<A2ARouter>) {
         self.local_router = Some(router);
+    }
+
+    /// Attach the ExoChain manager for auditable peer-envelope logging.
+    ///
+    /// Idempotent (first call wins; subsequent calls are no-ops). Uses
+    /// interior mutability so this can be called after the runtime has
+    /// been wrapped in [`Arc`], which matches the boot-sequence ordering
+    /// where the chain manager is constructed after the mesh listener.
+    #[cfg(feature = "exochain")]
+    pub fn set_chain_manager(&self, cm: Arc<crate::chain::ChainManager>) {
+        let _ = self.chain_manager.set(cm);
     }
 
     /// Register a peer connection using an already-established channel.
@@ -173,6 +194,35 @@ impl MeshRuntime {
             dest_node = %envelope.dest_node,
             "received mesh envelope"
         );
+
+        // Auditable record: append a peer.envelope event to the local
+        // chain before routing. Captures source_node (leaf identity),
+        // dest_node, envelope_id, and the resolved topic/service when
+        // known. The chain append is best-effort — a failure here must
+        // not block message delivery.
+        #[cfg(feature = "exochain")]
+        if let Some(cm) = self.chain_manager.get() {
+            let topic = match &envelope.message.target {
+                MessageTarget::Topic(t) => Some(t.clone()),
+                MessageTarget::Service(s) => Some(format!("service:{s}")),
+                MessageTarget::ServiceMethod { service, method } => {
+                    Some(format!("service:{service}#{method}"))
+                }
+                MessageTarget::RemoteNode { target, .. } => match target.as_ref() {
+                    MessageTarget::Topic(t) => Some(t.clone()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let payload = serde_json::json!({
+                "source_node": envelope.source_node,
+                "dest_node": envelope.dest_node,
+                "envelope_id": envelope.envelope_id,
+                "topic": topic,
+                "hop_count": envelope.hop_count,
+            });
+            let _ = cm.append("mesh", "peer.envelope", Some(payload));
+        }
 
         let router = self.local_router.as_ref().ok_or_else(|| {
             KernelError::Mesh("no local router attached to mesh runtime".into())
