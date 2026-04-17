@@ -78,6 +78,91 @@ right cluster cheaply while flat HNSW at ef=20 sometimes misses neighbors.
 - `.planning/development_notes/adaptive-hnsw-tiered-search.md` — detailed
   development narrative including what didn't work and why
 
+### Mesh transport boot integration
+
+The K6 mesh transport layer was fully implemented (3,543 lines, 133 tests)
+but never instantiated during kernel boot. Now wired in:
+
+- **Boot phase 5d**: creates `MeshRuntime`, wires to A2A router, spawns
+  transport listener (TCP default, WebSocket available)
+- **`[kernel.mesh]` config**: `enabled`, `transport`, `listen_addr`,
+  `discovery` (Kademlia DHT), `seed_peers`
+- **`mesh` feature**: added to kernel defaults
+- Mesh starts before cluster so cluster can use mesh for peer communication
+
+### Universal Topology Browser
+
+Complete framework for navigating any data structure as an interactive,
+drillable topology graph:
+
+- **TopologySchema**: composable YAML geometry declarations with IRI identity
+  (Docker-config style layering). 9 geometry types: force, tree, layered,
+  timeline, stream, grid, geo, radial, wardley.
+- **IRI-based entity identity**: resolves the "Service" ambiguity — same
+  word, different IRIs, different concepts in the graph.
+- **Rust layout engine**: Reingold-Tilford tree + Barnes-Hut force +
+  tree calculus triage dispatch + auto-detection heuristic.
+- **Graph slicer**: pre-computed drill-down JSON. Top level: 28 packages.
+  Double-click drills into modules with edges. Cross-package dependency
+  aggregation. Portal counts for external connections.
+- **Schema inference**: `weaver topology infer` generates schemas from
+  existing graphs. `weaver topology diff` detects architectural drift.
+- **VOWL JSON export**: WebVOWL-compatible 8-key format for the navigator.
+- **Navigator widget**: SliceNavigator (drill-down + breadcrumbs) and
+  VowlNavigator (VOWL visual notation). 24 Playwright E2E tests.
+- **Domain presets**: `software.yaml` (14 node types), `investigation.yaml`
+  (13 node types) with full IRIs and Schema.org mappings.
+
+### Code Intelligence
+
+- **Tree calculus + EML AST extractor**: native Rust source extraction using
+  triage dispatch for structural classification and EML for confidence/
+  complexity scoring. No tree-sitter dependency.
+- **`clawft-lsp-extract` crate**: LSP-based semantic extraction from any
+  language server (rust-analyzer, tsserver, pylsp, gopls). Spawns servers
+  via JSON-RPC, queries documentSymbol, builds semantic graph.
+
+### Security
+
+- **Unified prompt injection defense**: `sanitize_llm_input()` at all 7
+  LLM input paths. `sanitize_schema_input()` for schema builder agents.
+- **Sprint 17 security plan**: MAESTRO-informed hardening roadmap.
+
+### CI/CD
+
+- **eml-core published to crates.io** (v0.1.0) — unblocked entire pipeline
+- **cargo-workspaces** replaces manual tiered publish scripts
+- **Tiered parallel publishing** and release gate workflow
+
+### Symposium
+
+17 artifacts in `.planning/symposiums/ontology-navigator/` covering schema
+design, layout algorithms, graph nesting, navigator modes, tree calculus +
+EML dual substrate, ArcKit governance, RAMP assessment (7R with Ratify),
+AI framework validation, schema builder agents, and investigative instrument
+design.
+
+---
+
+## v0.6.12 — Universal Topology Browser
+
+*2026-04-17*
+
+See v0.6.13 above — the topology browser work landed across v0.6.11-0.6.13.
+v0.6.12 was the first release with all crates successfully published to
+crates.io (eml-core unblocked the pipeline).
+
+---
+
+## v0.6.11 — Vault Cultivation
+
+*2026-04-16*
+
+Ported weave-nn's Obsidian vault tooling to Rust as `weaver vault`:
+`enrich` (frontmatter), `analyze` (link graph), `suggest` (connections),
+`auto-link` (wikilinks), `backlinks` (backlink sections). CI fix: eml-core
+added to publish pipeline, Docker race eliminated via workflow_run trigger.
+
 ---
 
 ## v0.6.10 — EML vs Baseline Attention (Measurement Release)

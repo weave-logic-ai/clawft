@@ -5,8 +5,10 @@ description: "K6 mesh networking: 5-layer model, transport backends, Noise Proto
 
 K6 delivers the transport-agnostic encrypted mesh networking layer for WeftOS, extending the kernel from single-node to multi-node with encrypted peer-to-peer communication, distributed IPC, chain replication, tree synchronization, and cluster-wide service discovery.
 
-**Status**: Phase 1 Complete (3,543 lines, 14 new files, 133 tests)
-**Feature**: `mesh`
+**Status**: Phase 1 Complete + Boot Integration (3,543 lines, 14 new files, 133 tests)
+**Feature**: `mesh` (enabled by default since v0.6.13)
+**Boot phase**: 5d (after A2A router, before cluster)
+**Config**: `[kernel.mesh]` in `weave.toml` — see [Configuration Reference](/docs/weftos/guides/configuration#kernelmesh)
 
 ## 5-Layer Model
 

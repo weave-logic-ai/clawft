@@ -303,23 +303,32 @@ risk_threshold = 0.7
 
 ---
 
-## [mesh]
+## [kernel.mesh]
 
-Peer-to-peer mesh networking between WeftOS nodes. Requires the `mesh`
-feature gate.
+Peer-to-peer mesh transport layer (K6). When enabled, the kernel spawns a
+`MeshRuntime` during boot that listens for peer connections and wires them
+into the A2A router for cross-node message delivery.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | bool | `false` | Enable mesh networking |
-| `bind_address` | string | `"0.0.0.0:9470"` | Address and port to bind the mesh listener |
-| `seed_peers` | string[] | `[]` | Initial peer addresses for mesh discovery |
+| `enabled` | bool | `false` | Enable mesh transport |
+| `transport` | string | `"tcp"` | Transport backend: `"tcp"` or `"ws"` (WebSocket) |
+| `listen_addr` | string | `"0.0.0.0:9470"` | Address and port to bind the mesh listener |
+| `discovery` | bool | `false` | Enable Kademlia DHT peer discovery |
+| `seed_peers` | string[] | `[]` | Peer addresses to connect to on startup |
 
 ```toml
-[mesh]
+[kernel.mesh]
 enabled = true
-bind_address = "0.0.0.0:9470"
-seed_peers = ["192.168.1.10:9470"]
+transport = "tcp"
+listen_addr = "0.0.0.0:9470"
+discovery = true
+seed_peers = ["192.168.1.10:9470", "192.168.1.11:9470"]
 ```
+
+The mesh listener starts in boot phase 5d (after the A2A router, before
+cluster service) so that cluster coordination can use mesh transport for
+peer discovery and message delivery.
 
 ---
 

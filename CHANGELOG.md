@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.13] - 2026-04-17
+
+### Mesh Transport Boot Integration
+
+- Wired K6 mesh transport into kernel boot sequence (phase 5d)
+- `MeshConfig` in `[kernel.mesh]`: enabled, transport (tcp/ws),
+  listen_addr, discovery (Kademlia), seed_peers
+- MeshRuntime created and wired to A2A router during boot
+- TCP listener spawned, seed peer connections in background
+- `mesh` feature added to kernel defaults
+
+### Adaptive HNSW: Tiered Dimensional Search
+
+- Corpus probe + tree calculus triage + EML tier parameters
+- 1.61x faster mean latency, +10% recall on clustered data
+- 2-head EML ef model (ef→latency + ef→recall joint prediction)
+- HnswService EML integration with ExoChain event trail
+- 4-phase benchmark harness, 76 new tests
+
 ## [0.6.12] - 2026-04-17
 
 ### Universal Topology Browser
