@@ -119,31 +119,76 @@ fn build_slice(
     let slice_ids: Vec<EntityId> = entities.iter().map(|e| e.id.clone()).collect();
     let id_to_idx: HashMap<&EntityId, usize> = slice_ids.iter().enumerate().map(|(i, id)| (id, i)).collect();
 
-    // Edges between nodes in this slice (not Contains — those define hierarchy).
+    // Build ancestor map: for any entity, find which slice node it belongs to.
+    // This lets us aggregate child-to-child edges onto their parent containers.
+    let mut entity_to_slice_node: HashMap<EntityId, EntityId> = HashMap::new();
+    for id in node_ids {
+        entity_to_slice_node.insert(id.clone(), id.clone());
+    }
+    fn map_descendants(
+        kg: &KnowledgeGraph,
+        parent_slice_id: &EntityId,
+        parent_id: &EntityId,
+        mapping: &mut HashMap<EntityId, EntityId>,
+    ) {
+        for (src, tgt, rel) in kg.edges() {
+            if src.id == *parent_id && matches!(rel.relation_type, RelationType::Contains) {
+                mapping.insert(tgt.id.clone(), parent_slice_id.clone());
+                map_descendants(kg, parent_slice_id, &tgt.id, mapping);
+            }
+        }
+    }
+    for id in node_ids {
+        map_descendants(kg, id, id, &mut entity_to_slice_node);
+    }
+
+    // Collect edges: direct between slice nodes + aggregated from descendants.
     let mut edge_pairs: Vec<(usize, usize)> = Vec::new();
     let mut slice_edges: Vec<(EntityId, EntityId, String)> = Vec::new();
+    let mut seen_edge_keys: HashSet<(EntityId, EntityId)> = HashSet::new();
 
     for (src, tgt, rel) in kg.edges() {
-        if !matches!(rel.relation_type, RelationType::Contains)
-            && node_set.contains(&src.id)
-            && node_set.contains(&tgt.id)
-        {
-            if let (Some(&si), Some(&ti)) = (id_to_idx.get(&src.id), id_to_idx.get(&tgt.id)) {
+        if matches!(rel.relation_type, RelationType::Contains) {
+            continue;
+        }
+
+        // Resolve both endpoints to their slice-level ancestor.
+        let src_slice = entity_to_slice_node.get(&src.id);
+        let tgt_slice = entity_to_slice_node.get(&tgt.id);
+
+        if let (Some(src_s), Some(tgt_s)) = (src_slice, tgt_slice) {
+            if src_s == tgt_s {
+                continue; // Internal edge within same container.
+            }
+            let key = (src_s.clone(), tgt_s.clone());
+            if seen_edge_keys.contains(&key) {
+                continue; // Already aggregated.
+            }
+            seen_edge_keys.insert(key);
+
+            if let (Some(&si), Some(&ti)) = (id_to_idx.get(src_s), id_to_idx.get(tgt_s)) {
                 edge_pairs.push((si, ti));
                 let label = format!("{:?}", rel.relation_type).to_lowercase();
-                slice_edges.push((src.id.clone(), tgt.id.clone(), label));
+                slice_edges.push((src_s.clone(), tgt_s.clone(), label));
             }
         }
     }
 
-    // Use force layout for this slice.
+    // Use force layout for this slice. Scale repulsion with node size.
+    let avg_radius = if entities.is_empty() { 24.0 } else {
+        entities.iter().map(|e| {
+            children_of.get(&e.id).copied().unwrap_or(0) as f64
+        }).sum::<f64>() / entities.len() as f64 * 6.0 + 24.0
+    };
     let positions = super::force_layout::layout(
         &slice_ids,
         &edge_pairs,
         width,
         height,
         &super::force_layout::ForceConfig {
-            iterations: 200,
+            repulsion: 800.0 + avg_radius * 20.0,
+            spring_length: 180.0,
+            iterations: 300,
             ..Default::default()
         },
     );
