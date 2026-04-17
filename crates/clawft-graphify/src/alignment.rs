@@ -264,6 +264,7 @@ mod tests {
             file_type: FileType::Code,
             metadata: serde_json::json!({}),
             legacy_id: None,
+            iri: None,
         }
     }
 

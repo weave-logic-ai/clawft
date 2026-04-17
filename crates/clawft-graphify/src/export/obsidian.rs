@@ -307,6 +307,7 @@ mod tests {
             file_type: FileType::Code,
             metadata: serde_json::json!({}),
             legacy_id: None,
+            iri: None,
         };
         let e2 = Entity {
             id: crate::EntityId::new(&DomainTag::Code, &EntityType::Class, "AuthService", "auth.py"),
@@ -317,6 +318,7 @@ mod tests {
             file_type: FileType::Code,
             metadata: serde_json::json!({}),
             legacy_id: None,
+            iri: None,
         };
         kg.add_entity(e1.clone());
         kg.add_entity(e2.clone());

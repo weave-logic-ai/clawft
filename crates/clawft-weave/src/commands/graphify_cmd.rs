@@ -873,6 +873,7 @@ fn build_extractions_from_detection(
                 source_location: None,
                 file_type: file_type.clone(),
                 metadata: serde_json::json!({}),
+                iri: None,
                 legacy_id: Some(file_path.clone()),
             };
 

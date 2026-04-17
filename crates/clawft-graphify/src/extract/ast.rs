@@ -143,6 +143,7 @@ impl RawExtractionResult {
                 file_type: n.file_type,
                 metadata: HashMap::new(),
                 legacy_id: Some(n.id),
+                iri: None,
             })
             .collect();
 

@@ -375,6 +375,7 @@ mod tests {
             file_type: FileType::Document,
             metadata: serde_json::json!({}),
             legacy_id: None,
+            iri: None,
         }
     }
 

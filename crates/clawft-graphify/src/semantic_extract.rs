@@ -59,6 +59,7 @@ struct LlmEntity {
     entity_type: String,
     #[serde(default)]
     description: String,
+    iri: None,
 }
 
 #[cfg(feature = "semantic-extract")]
@@ -156,6 +157,7 @@ where
             file_type: FileType::Document,
             metadata: serde_json::Value::Object(metadata),
             legacy_id: None,
+            iri: None,
         });
     }
 

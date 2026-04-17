@@ -109,6 +109,7 @@ mod tests {
             source_location: String::new(),
             community: None,
             metadata: Default::default(),
+            iri: None,
         }
     }
 

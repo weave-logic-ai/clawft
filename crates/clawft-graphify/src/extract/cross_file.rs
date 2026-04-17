@@ -162,6 +162,7 @@ mod tests {
             file_type: "code".to_string(),
             metadata: HashMap::new(),
             legacy_id: Some(legacy.to_string()),
+            iri: None,
         }
     }
 

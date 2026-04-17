@@ -233,6 +233,7 @@ pub fn build_from_json(data: &serde_json::Value) -> Result<KnowledgeGraph, Graph
                 source_location,
                 file_type,
                 metadata: node.get("metadata").cloned().unwrap_or(serde_json::json!({})),
+                iri: None,
                 legacy_id: Some(legacy_id),
             };
             kg.add_entity(entity);
@@ -338,6 +339,7 @@ mod tests {
             file_type: FileType::Code,
             metadata: serde_json::json!({}),
             legacy_id: Some(name.into()),
+            iri: None,
         };
         ExtractionResult {
             source_file: format!("{name}.py"),
@@ -422,6 +424,7 @@ mod tests {
             file_type: FileType::Code,
             metadata: serde_json::json!({}),
             legacy_id: None,
+            iri: None,
         };
         ExtractionResult {
             source_file: file.into(),

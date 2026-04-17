@@ -137,6 +137,7 @@ where
             file_type: FileType::Image,
             metadata: serde_json::Value::Object(metadata),
             legacy_id: None,
+            iri: None,
         });
     }
 

@@ -349,6 +349,72 @@ pub fn sanitize_skill_instructions(instructions: &str) -> (String, Vec<String>) 
     (result, warnings)
 }
 
+// ── SEC-PIPELINE-01: Unified LLM input sanitization ─────────────────
+
+/// Sanitize any content that will reach an LLM call, regardless of source.
+///
+/// Combines `sanitize_content()` (control char stripping) with
+/// `sanitize_skill_instructions()` (injection token removal) and tags
+/// the source boundary for audit logging.
+///
+/// Use at every LLM input path:
+/// - Semantic extraction (file content → prompt)
+/// - Memory retrieval (MEMORY.md → system message)
+/// - Session history replay
+/// - Tool results → message stream
+/// - Bootstrap files (SOUL.md etc)
+/// - Schema builder agent inputs (documents, framework docs, images)
+///
+/// Returns sanitized content and any warnings (injection tokens found, etc).
+pub fn sanitize_llm_input(content: &str, source_label: &str) -> (String, Vec<String>) {
+    let cleaned = sanitize_content(content);
+    let (sanitized, mut warnings) = sanitize_skill_instructions(&cleaned);
+
+    if !warnings.is_empty() {
+        tracing::warn!(
+            source = source_label,
+            warning_count = warnings.len(),
+            "prompt injection tokens stripped from LLM input"
+        );
+    }
+
+    // Tag warnings with source for audit trail.
+    for w in &mut warnings {
+        *w = format!("[{source_label}] {w}");
+    }
+
+    (sanitized, warnings)
+}
+
+/// Validate content intended for schema generation by an agent.
+///
+/// In addition to standard LLM sanitization, checks for patterns that
+/// could produce malicious schema entries (e.g., IRIs pointing to
+/// attacker-controlled domains, wildcard overrides, excessive permissions).
+pub fn sanitize_schema_input(content: &str, source_label: &str) -> (String, Vec<String>) {
+    let (sanitized, mut warnings) = sanitize_llm_input(content, source_label);
+
+    let lower = sanitized.to_lowercase();
+
+    // Warn on content that looks like it's trying to inject schema directives.
+    if lower.contains("geometry:") && lower.contains("contains:") {
+        warnings.push(format!(
+            "[{source_label}] input contains schema-like directives — may be attempting schema injection"
+        ));
+    }
+
+    // Warn on suspicious IRI patterns in raw input.
+    for pattern in &["javascript:", "data:", "file://", "ftp://"] {
+        if lower.contains(pattern) {
+            warnings.push(format!(
+                "[{source_label}] input contains suspicious URI scheme: {pattern}"
+            ));
+        }
+    }
+
+    (sanitized, warnings)
+}
+
 // ── SEC-SKILL-07: File size validation ──────────────────────────────
 
 /// Validate that a file size is within the allowed limit.

@@ -31,6 +31,7 @@ pub mod eml_models;
 pub mod domain;
 pub mod hooks;
 pub mod ingest;
+pub mod topology;
 pub mod validation;
 pub mod vault;
 pub mod watch;

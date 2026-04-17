@@ -378,6 +378,7 @@ impl GraphifyBridge {
                     file_type: crate::entity::FileType::Code,
                     metadata: node.metadata.clone(),
                     legacy_id: None,
+                    iri: None,
                 };
                 kg.add_entity(entity);
             }
@@ -712,6 +713,7 @@ mod tests {
             file_type: FileType::Code,
             metadata: serde_json::json!({}),
             legacy_id: None,
+            iri: None,
         }
     }
 
@@ -896,6 +898,7 @@ mod tests {
                 file_type: FileType::Code,
                 metadata: serde_json::json!({}),
                 legacy_id: None,
+                iri: None,
             };
             kg.add_entity(leaf.clone());
             kg.add_relationship(make_rel(&hub, &leaf));

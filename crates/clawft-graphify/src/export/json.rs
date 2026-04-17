@@ -165,6 +165,7 @@ mod tests {
             file_type: FileType::Code,
             metadata: json!({}),
             legacy_id: Some("auth".into()),
+            iri: None,
         };
         let e2 = Entity {
             id: EntityId::new(&DomainTag::Code, &EntityType::Module, "db", "db.py"),
@@ -175,6 +176,7 @@ mod tests {
             file_type: FileType::Code,
             metadata: json!({}),
             legacy_id: Some("db".into()),
+            iri: None,
         };
         kg.add_entity(e1.clone());
         kg.add_entity(e2.clone());

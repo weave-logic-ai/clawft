@@ -21,6 +21,12 @@ pub struct Entity {
     pub id: EntityId,
     pub entity_type: EntityType,
     pub label: String,
+    /// Globally unique concept IRI for ontology interoperability.
+    /// The word is a label; the IRI is the concept. Two entities with the same
+    /// label but different IRIs are different things (e.g., "Service" in
+    /// architecture vs "Service" in customer support).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iri: Option<String>,
     pub source_file: Option<String>,
     pub source_location: Option<String>,
     pub file_type: FileType,
@@ -673,6 +679,7 @@ mod tests {
             file_type: FileType::Code,
             metadata: serde_json::json!({}),
             legacy_id: None,
+            iri: None,
         }
     }
 
@@ -807,6 +814,7 @@ mod tests {
                     file_type: FileType::Code,
                     metadata: serde_json::json!({}),
                     legacy_id: None,
+                    iri: None,
                 }
             })
             .collect();
@@ -854,6 +862,7 @@ mod tests {
             file_type: FileType::Code,
             metadata: serde_json::json!({}),
             legacy_id: None,
+            iri: None,
         }
     }
 
@@ -997,6 +1006,7 @@ mod tests {
             file_type: FileType::Code,
             metadata: serde_json::json!({}),
             legacy_id: None,
+            iri: None,
         };
         let e2 = Entity {
             id: EntityId::new(&DomainTag::Code, &EntityType::Function, "authservice", "b.py"),
@@ -1007,6 +1017,7 @@ mod tests {
             file_type: FileType::Code,
             metadata: serde_json::json!({}),
             legacy_id: None,
+            iri: None,
         };
         kg.add_entity(e1);
         kg.add_entity(e2);
@@ -1028,6 +1039,7 @@ mod tests {
             file_type: FileType::Code,
             metadata: serde_json::json!({}),
             legacy_id: None,
+            iri: None,
         };
         let e2 = Entity {
             id: EntityId::new(&DomainTag::Code, &EntityType::Module, "auth", "b.py"),
@@ -1038,6 +1050,7 @@ mod tests {
             file_type: FileType::Code,
             metadata: serde_json::json!({}),
             legacy_id: None,
+            iri: None,
         };
         kg.add_entity(e1);
         kg.add_entity(e2);
@@ -1058,6 +1071,7 @@ mod tests {
             file_type: FileType::Code,
             metadata: serde_json::json!({}),
             legacy_id: None,
+            iri: None,
         };
         let e2 = Entity {
             id: EntityId::new(&DomainTag::Code, &EntityType::Function, "authservice", "b.py"),
@@ -1068,6 +1082,7 @@ mod tests {
             file_type: FileType::Code,
             metadata: serde_json::json!({}),
             legacy_id: None,
+            iri: None,
         };
         let e3 = Entity {
             id: EntityId::new(&DomainTag::Code, &EntityType::Function, "caller", "c.py"),
@@ -1078,6 +1093,7 @@ mod tests {
             file_type: FileType::Code,
             metadata: serde_json::json!({}),
             legacy_id: None,
+            iri: None,
         };
 
         kg.add_entity(e1.clone());
