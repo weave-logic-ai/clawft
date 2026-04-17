@@ -321,7 +321,7 @@ impl<P: Platform> Kernel<P> {
                                     Ok((mut stream, peer_addr)) => {
                                         let rt2 = Arc::clone(&rt);
                                         tokio::spawn(async move {
-                                            tracing::debug!(peer = %peer_addr, "mesh peer connected");
+                                            tracing::info!(peer = %peer_addr, "mesh peer connected");
                                             loop {
                                                 match stream.recv().await {
                                                     Ok(data) => {

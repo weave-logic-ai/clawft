@@ -66,40 +66,113 @@ pub fn discover_config_path(
 
 /// Load raw JSON configuration using the discovery algorithm.
 ///
-/// Returns the parsed and key-normalized JSON value. The caller (typically
-/// `clawft-types`) deserializes this into a typed `Config` struct.
+/// Merges configuration from two sources (project `weave.toml` first,
+/// then user JSON config on top):
 ///
-/// If no config file is found, returns an empty JSON object.
+/// 1. `weave.toml` in the current directory (project-level settings)
+/// 2. JSON config from the discovery chain:
+///    - `CLAWFT_CONFIG` env var
+///    - `~/.clawft/config.json`
+///    - `~/.nanobot/config.json` (legacy)
+///
+/// JSON config values override `weave.toml` values where keys collide.
+///
+/// Returns the merged and key-normalized JSON value. The caller (typically
+/// `clawft-types`) deserializes this into a typed `Config` struct.
 pub async fn load_config_raw(
     fs: &dyn super::fs::FileSystem,
     env: &dyn super::env::Environment,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    // Layer 1: weave.toml from project root (current directory).
+    let mut merged = load_weave_toml(fs).await.unwrap_or_else(|_| {
+        Value::Object(serde_json::Map::new())
+    });
+
+    // Layer 2: JSON config from discovery chain (overrides weave.toml).
     let home = fs.home_dir();
-    let path = discover_config_path(env, home);
+    let json_path = discover_config_path(env, home);
 
-    let Some(path) = path else {
-        tracing::info!("no config file found, using defaults");
-        return Ok(Value::Object(serde_json::Map::new()));
-    };
+    if let Some(path) = json_path {
+        if fs.exists(&path).await {
+            tracing::debug!(path = %path.display(), "loading JSON config");
+            match fs.read_to_string(&path).await {
+                Ok(contents) => {
+                    match serde_json::from_str::<Value>(&contents) {
+                        Ok(json_value) => {
+                            let normalized = normalize_keys(json_value);
+                            deep_merge(&mut merged, &normalized);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %path.display(),
+                                error = %e,
+                                "failed to parse JSON config, using weave.toml only"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "failed to read JSON config"
+                    );
+                }
+            }
+        }
+    }
 
-    if !fs.exists(&path).await {
-        tracing::warn!(
-            path = %path.display(),
-            "config path does not exist, using defaults"
-        );
+    if merged.as_object().map_or(true, |m| m.is_empty()) {
+        tracing::info!("no config found (checked weave.toml + JSON), using defaults");
+    }
+
+    Ok(merged)
+}
+
+/// Load `weave.toml` from the current directory if it exists.
+async fn load_weave_toml(
+    fs: &dyn super::fs::FileSystem,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let toml_path = PathBuf::from("weave.toml");
+
+    if !fs.exists(&toml_path).await {
         return Ok(Value::Object(serde_json::Map::new()));
     }
 
-    tracing::debug!(path = %path.display(), "loading config file");
+    tracing::debug!("loading weave.toml from project root");
     let contents = fs
-        .read_to_string(&path)
+        .read_to_string(&toml_path)
         .await
-        .map_err(|e| format!("failed to read config file {}: {}", path.display(), e))?;
+        .map_err(|e| format!("failed to read weave.toml: {e}"))?;
 
-    let value: Value = serde_json::from_str(&contents)
-        .map_err(|e| format!("failed to parse config file {}: {}", path.display(), e))?;
+    let toml_value: toml::Value = contents.parse()
+        .map_err(|e| format!("failed to parse weave.toml: {e}"))?;
 
-    Ok(normalize_keys(value))
+    // Convert TOML Value to serde_json Value for uniform handling.
+    let json_str = serde_json::to_string(&toml_value)
+        .map_err(|e| format!("failed to convert weave.toml to JSON: {e}"))?;
+    let json_value: Value = serde_json::from_str(&json_str)
+        .map_err(|e| format!("failed to re-parse weave.toml as JSON: {e}"))?;
+
+    Ok(normalize_keys(json_value))
+}
+
+/// Deep-merge `overlay` into `base`. Overlay values win on conflict.
+/// Objects are merged recursively; non-object values are replaced.
+fn deep_merge(base: &mut Value, overlay: &Value) {
+    match (base, overlay) {
+        (Value::Object(base_map), Value::Object(overlay_map)) => {
+            for (key, overlay_val) in overlay_map {
+                let entry = base_map.entry(key.clone()).or_insert(Value::Null);
+                deep_merge(entry, overlay_val);
+            }
+        }
+        (base, overlay) => {
+            if !overlay.is_null() {
+                *base = overlay.clone();
+            }
+        }
+    }
 }
 
 /// Convert camelCase JSON keys to snake_case recursively.
