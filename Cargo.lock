@@ -766,7 +766,7 @@ checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
 
 [[package]]
 name = "clawft-channels"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "async-trait",
  "chrono",
@@ -790,7 +790,7 @@ dependencies = [
 
 [[package]]
 name = "clawft-cli"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -825,7 +825,7 @@ dependencies = [
 
 [[package]]
 name = "clawft-core"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "async-trait",
  "chrono",
@@ -862,7 +862,7 @@ dependencies = [
 
 [[package]]
 name = "clawft-graphify"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "async-trait",
  "blake3",
@@ -899,7 +899,7 @@ dependencies = [
 
 [[package]]
 name = "clawft-kernel"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "async-trait",
  "blake3",
@@ -950,7 +950,7 @@ dependencies = [
 
 [[package]]
 name = "clawft-llm"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "async-trait",
  "clawft-types",
@@ -969,7 +969,7 @@ dependencies = [
 
 [[package]]
 name = "clawft-lsp-extract"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "anyhow",
  "serde",
@@ -981,7 +981,7 @@ dependencies = [
 
 [[package]]
 name = "clawft-platform"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "async-trait",
  "clawft-types",
@@ -1002,7 +1002,7 @@ dependencies = [
 
 [[package]]
 name = "clawft-plugin"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1018,7 +1018,7 @@ dependencies = [
 
 [[package]]
 name = "clawft-plugin-browser"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "async-trait",
  "chromiumoxide",
@@ -1033,7 +1033,7 @@ dependencies = [
 
 [[package]]
 name = "clawft-plugin-calendar"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1048,7 +1048,7 @@ dependencies = [
 
 [[package]]
 name = "clawft-plugin-cargo"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "async-trait",
  "clawft-plugin",
@@ -1060,7 +1060,7 @@ dependencies = [
 
 [[package]]
 name = "clawft-plugin-ci"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "serde",
  "serde_json",
@@ -1069,7 +1069,7 @@ dependencies = [
 
 [[package]]
 name = "clawft-plugin-containers"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "async-trait",
  "clawft-plugin",
@@ -1082,7 +1082,7 @@ dependencies = [
 
 [[package]]
 name = "clawft-plugin-git"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1097,7 +1097,7 @@ dependencies = [
 
 [[package]]
 name = "clawft-plugin-npm"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "serde",
  "serde_json",
@@ -1105,7 +1105,7 @@ dependencies = [
 
 [[package]]
 name = "clawft-plugin-oauth2"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1126,7 +1126,7 @@ dependencies = [
 
 [[package]]
 name = "clawft-plugin-treesitter"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "async-trait",
  "clawft-plugin",
@@ -1143,7 +1143,7 @@ dependencies = [
 
 [[package]]
 name = "clawft-rpc"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1154,7 +1154,7 @@ dependencies = [
 
 [[package]]
 name = "clawft-security"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "chrono",
  "regex",
@@ -1168,7 +1168,7 @@ dependencies = [
 
 [[package]]
 name = "clawft-services"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "async-trait",
  "axum",
@@ -1195,7 +1195,7 @@ dependencies = [
 
 [[package]]
 name = "clawft-tools"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "async-trait",
  "clawft-core",
@@ -1214,7 +1214,7 @@ dependencies = [
 
 [[package]]
 name = "clawft-types"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "chrono",
  "dirs",
@@ -1228,7 +1228,7 @@ dependencies = [
 
 [[package]]
 name = "clawft-wasm"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "chrono",
  "clawft-core",
@@ -1258,7 +1258,7 @@ dependencies = [
 
 [[package]]
 name = "clawft-weave"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1993,7 +1993,7 @@ dependencies = [
 
 [[package]]
 name = "exo-resource-tree"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "chrono",
  "serde",
@@ -6177,7 +6177,7 @@ dependencies = [
 
 [[package]]
 name = "weftos"
-version = "0.6.13"
+version = "0.6.15"
 dependencies = [
  "clap",
  "clawft-core",

@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.15] - 2026-04-17
+
+### Mesh Noise Encryption Wired End-to-End
+
+- `[kernel.mesh] noise = true` enables Noise XX handshake on all connections
+- Boot accept loop wraps streams in `NoiseChannel::respond()` (responder)
+- Seed peer connections use `NoiseChannel::initiate()` (initiator)
+- `noise_key_path` config for persistent Ed25519 key (ephemeral if absent)
+- Failed handshakes logged and dropped (don't crash listener)
+
+### ExoChain Mesh Audit Trail (PR #24)
+
+- Every `handle_incoming()` appends a `peer.envelope` event to ExoChain
+- Captures source_node, dest_node, envelope_id, topic, hop_count
+- Viewable via `weaver chain local`
+- Best-effort append — failure doesn't block message delivery
+
+### CI Fix
+
+- WASM size gate: explicit `rustup target add wasm32-wasip2` fallback
+
 ## [0.6.14] - 2026-04-17
 
 ### Mesh Time Synchronization
