@@ -28,6 +28,7 @@ members = [
     "crates/weftos",
     "crates/clawft-graphify",
     "crates/clawft-lsp-extract",
+    "crates/weftos-leaf-types",
     "crates/eml-core",
 ]
 exclude = [

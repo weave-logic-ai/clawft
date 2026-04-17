@@ -1,0 +1,17 @@
+[package]
+name = "weftos-leaf-types"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/weave-logic-ai/weftos"
+description = "Shared wire schema for WeftOS kernel → leaf push operations (no_std compatible)"
+keywords = ["weftos", "leaf", "iot", "mesh", "cbor"]
+categories = ["embedded", "no-std"]
+
+[features]
+default = []
+std = ["serde/std", "ciborium/std"]
+
+[dependencies]
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+ciborium = { version = "0.2", default-features = false }
