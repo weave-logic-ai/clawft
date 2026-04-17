@@ -1,0 +1,18 @@
+[package]
+name = "clawft-lsp-extract"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "LSP-based code intelligence extraction — tap any language server for full semantic graphs"
+keywords = ["lsp", "code-analysis", "knowledge-graph", "ast", "semantic"]
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }

@@ -1,0 +1,114 @@
+//! Language server configurations for common languages.
+
+use serde::{Deserialize, Serialize};
+
+/// Configuration for a language server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LanguageConfig {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub extensions: Vec<String>,
+    pub initialization_options: serde_json::Value,
+}
+
+impl LanguageConfig {
+    pub fn rust() -> Self {
+        Self {
+            name: "rust".into(),
+            command: "rust-analyzer".into(),
+            args: vec![],
+            extensions: vec!["rs".into()],
+            initialization_options: serde_json::json!({}),
+        }
+    }
+
+    pub fn typescript() -> Self {
+        Self {
+            name: "typescript".into(),
+            command: "typescript-language-server".into(),
+            args: vec!["--stdio".into()],
+            extensions: vec!["ts".into(), "tsx".into(), "js".into(), "jsx".into()],
+            initialization_options: serde_json::json!({}),
+        }
+    }
+
+    pub fn python() -> Self {
+        Self {
+            name: "python".into(),
+            command: "pylsp".into(),
+            args: vec![],
+            extensions: vec!["py".into()],
+            initialization_options: serde_json::json!({}),
+        }
+    }
+
+    pub fn go() -> Self {
+        Self {
+            name: "go".into(),
+            command: "gopls".into(),
+            args: vec!["serve".into()],
+            extensions: vec!["go".into()],
+            initialization_options: serde_json::json!({}),
+        }
+    }
+
+    /// Detect the appropriate config from file extensions in a directory.
+    pub fn detect(path: &std::path::Path) -> Vec<Self> {
+        let mut configs = Vec::new();
+        let mut has_rs = false;
+        let mut has_ts = false;
+        let mut has_py = false;
+        let mut has_go = false;
+
+        if let Ok(entries) = walkdir(path) {
+            for ext in entries {
+                match ext.as_str() {
+                    "rs" => has_rs = true,
+                    "ts" | "tsx" | "js" | "jsx" => has_ts = true,
+                    "py" => has_py = true,
+                    "go" => has_go = true,
+                    _ => {}
+                }
+            }
+        }
+
+        if has_rs { configs.push(Self::rust()); }
+        if has_ts { configs.push(Self::typescript()); }
+        if has_py { configs.push(Self::python()); }
+        if has_go { configs.push(Self::go()); }
+
+        configs
+    }
+}
+
+fn walkdir(path: &std::path::Path) -> Result<Vec<String>, std::io::Error> {
+    let mut exts = Vec::new();
+    collect_extensions(path, &mut exts, 3)?; // only 3 levels deep for detection
+    Ok(exts)
+}
+
+fn collect_extensions(
+    dir: &std::path::Path,
+    exts: &mut Vec<String>,
+    depth: usize,
+) -> Result<(), std::io::Error> {
+    if depth == 0 { return Ok(()); }
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with('.') || name_str == "target" || name_str == "node_modules" {
+            continue;
+        }
+        if path.is_dir() {
+            collect_extensions(&path, exts, depth - 1)?;
+        } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if !exts.contains(&ext.to_string()) {
+                exts.push(ext.to_string());
+            }
+        }
+    }
+    Ok(())
+}

@@ -27,6 +27,7 @@ members = [
     "crates/exo-resource-tree",
     "crates/weftos",
     "crates/clawft-graphify",
+    "crates/clawft-lsp-extract",
     "crates/eml-core",
 ]
 exclude = [

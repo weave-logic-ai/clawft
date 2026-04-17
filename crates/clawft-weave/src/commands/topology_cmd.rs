@@ -79,6 +79,20 @@ pub enum TopologyAction {
         #[arg(long, default_value_t = 800.0)]
         height: f64,
     },
+    /// Extract a knowledge graph from a codebase using tree calculus + EML.
+    Extract {
+        /// Path to the source code directory.
+        path: PathBuf,
+        /// Output path for the graph JSON.
+        #[arg(short, long, default_value = "graphify-out/graph.json")]
+        output: PathBuf,
+        /// Also generate slices for the navigator.
+        #[arg(long)]
+        slices: Option<PathBuf>,
+        /// Topology schema for slice generation.
+        #[arg(short, long)]
+        schema: Option<PathBuf>,
+    },
     /// Export a knowledge graph as VOWL JSON for the navigator widget.
     Vowl {
         /// Path to the knowledge graph JSON.
@@ -101,6 +115,9 @@ pub async fn run(args: TopologyArgs) -> anyhow::Result<()> {
         TopologyAction::Detect { graph } => cmd_detect(&graph),
         TopologyAction::Slice { graph, schema, output, width, height } => {
             cmd_slice(&graph, schema.as_deref(), &output, width, height)
+        }
+        TopologyAction::Extract { path, output, slices, schema } => {
+            cmd_extract(&path, &output, slices.as_deref(), schema.as_deref())
         }
         TopologyAction::Infer { graph, name, output } => cmd_infer(&graph, &name, &output),
         TopologyAction::Diff { declared, graph } => cmd_diff(&declared, &graph),
@@ -344,6 +361,101 @@ fn cmd_diff(declared_path: &PathBuf, graph_path: &PathBuf) -> anyhow::Result<()>
     }
 
     Ok(())
+}
+
+fn cmd_extract(
+    path: &PathBuf,
+    output: &PathBuf,
+    slices_dir: Option<&std::path::Path>,
+    schema_path: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    use clawft_graphify::extract::treecalc;
+    use clawft_graphify::build;
+
+    println!("Extracting from {} using tree calculus + EML...", path.display());
+    let start = std::time::Instant::now();
+
+    let extractions = treecalc::extract_directory(path);
+
+    let mut total_entities = 0usize;
+    let mut total_rels = 0usize;
+    for ext in &extractions {
+        total_entities += ext.entities.len();
+        total_rels += ext.relationships.len();
+    }
+
+    println!(
+        "Extracted {} files → {} entities, {} relationships in {:.1}s",
+        extractions.len(),
+        total_entities,
+        total_rels,
+        start.elapsed().as_secs_f64(),
+    );
+
+    // Build knowledge graph.
+    let graph = build::build(&extractions);
+
+    println!(
+        "Built graph: {} nodes, {} edges",
+        graph.entity_count(),
+        graph.relationship_count(),
+    );
+
+    // Export as JSON using the same format build_from_json expects.
+    let json = export_graph_json(&graph);
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(output, serde_json::to_string_pretty(&json)?)?;
+    println!("Graph → {}", output.display());
+
+    // Optionally generate slices.
+    if let Some(slices_path) = slices_dir {
+        let schema = load_schema(schema_path)?;
+        println!("Generating slices...");
+        let manifest = clawft_graphify::layout::slicer::generate_all_slices(
+            &graph, &schema, slices_path, 1200.0, 800.0,
+        ).map_err(|e| anyhow::anyhow!("{e}"))?;
+        println!(
+            "Generated {} slices → {}",
+            manifest.slices.len() + 1,
+            slices_path.display(),
+        );
+    }
+
+    Ok(())
+}
+
+/// Export a KnowledgeGraph as JSON compatible with build_from_json input format.
+fn export_graph_json(graph: &clawft_graphify::KnowledgeGraph) -> serde_json::Value {
+    let nodes: Vec<serde_json::Value> = graph.entities().map(|e| {
+        serde_json::json!({
+            "id": e.id.to_hex(),
+            "label": e.label,
+            "entity_type": e.entity_type.discriminant(),
+            "source_file": e.source_file,
+            "source_location": e.source_location,
+            "file_type": format!("{:?}", e.file_type).to_lowercase(),
+            "metadata": e.metadata,
+        })
+    }).collect();
+
+    let edges: Vec<serde_json::Value> = graph.edges().map(|(src, tgt, rel)| {
+        serde_json::json!({
+            "source": src.id.to_hex(),
+            "target": tgt.id.to_hex(),
+            "relation": format!("{:?}", rel.relation_type).to_lowercase(),
+            "confidence": format!("{:?}", rel.confidence).to_uppercase(),
+            "source_file": rel.source_file,
+            "weight": rel.weight,
+        })
+    }).collect();
+
+    serde_json::json!({
+        "nodes": nodes,
+        "edges": edges,
+        "hyperedges": [],
+    })
 }
 
 fn cmd_slice(
