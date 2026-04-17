@@ -222,12 +222,36 @@ fn replace_binary(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Resul
         std::fs::set_permissions(src, perms)?;
     }
 
-    // Try direct copy first
+    // On Linux, a running binary can't be overwritten (ETXTBSY / "Text file
+    // busy"). The fix: rename the old binary out of the way first — rename()
+    // works on busy executables because it operates on the directory entry,
+    // not the file. The kernel keeps the old inode alive until the process
+    // exits, but the path is now free for the new binary.
+    let backup = dst.with_extension("old");
+
+    // Try rename-then-copy (handles "Text file busy").
+    if dst.exists() {
+        if std::fs::rename(dst, &backup).is_ok() {
+            match std::fs::copy(src, dst) {
+                Ok(_) => {
+                    let _ = std::fs::remove_file(&backup);
+                    return Ok(());
+                }
+                Err(e) => {
+                    // Restore backup if copy fails.
+                    let _ = std::fs::rename(&backup, dst);
+                    eprintln!("  Copy failed after rename: {e}");
+                }
+            }
+        }
+    }
+
+    // Try direct copy (works when binary isn't running).
     if std::fs::copy(src, dst).is_ok() {
         return Ok(());
     }
 
-    // If permission denied, try with sudo
+    // Last resort: sudo cp.
     eprintln!("  Permission denied, trying with sudo...");
     let status = std::process::Command::new("sudo")
         .args(["cp"])
