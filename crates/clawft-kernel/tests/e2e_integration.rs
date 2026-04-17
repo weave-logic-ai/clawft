@@ -41,6 +41,7 @@ fn minimal_kernel_config() -> KernelConfig {
         vector: None,
         profiles: None,
         pairing: None,
+        mesh: None,
     }
 }
 
@@ -65,6 +66,7 @@ fn exochain_kernel_config() -> KernelConfig {
         vector: None,
         profiles: None,
         pairing: None,
+        mesh: None,
     }
 }
 

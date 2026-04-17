@@ -1905,6 +1905,7 @@ mod tests {
             vector: None,
             profiles: None,
             pairing: None,
+            mesh: None,
         }
     }
 
@@ -2045,6 +2046,7 @@ mod tests {
             vector: None,
             profiles: None,
             pairing: None,
+            mesh: None,
         }
     }
 
@@ -2447,6 +2449,7 @@ mod tests {
             vector: None,
             profiles: None,
             pairing: None,
+            mesh: None,
         }
     }
 

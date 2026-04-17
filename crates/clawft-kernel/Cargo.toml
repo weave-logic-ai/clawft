@@ -50,6 +50,7 @@ mesh = [
     "dep:rand",
     "dep:tokio-tungstenite",
     "dep:futures-util",
+    "dep:snow",
 ]
 ecc = ["clawft-core/vector-memory", "dep:blake3"]
 # EXPERIMENTAL (0.6.x): quantum backends — interface only, stubs return NotImplemented.
@@ -96,6 +97,7 @@ ort = { workspace = true, optional = true }
 ndarray = { workspace = true, optional = true }
 tokio-tungstenite = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
+snow = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 sha2 = { workspace = true }
 chrono = { workspace = true }

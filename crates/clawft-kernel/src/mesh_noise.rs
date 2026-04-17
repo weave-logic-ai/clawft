@@ -53,12 +53,144 @@ pub struct NoiseConfig {
     pub remote_static_key: Option<[u8; 32]>,
 }
 
-// ── Passthrough (test-only) implementation ──────────────────────
+// ── Snow-backed Noise Protocol implementation ───────────────────
 
-/// Passthrough "encryption" for testing (no actual crypto).
+/// Real Noise Protocol encrypted channel using `snow`.
 ///
-/// In production this would be replaced by a `snow`-backed
-/// implementation performing real Noise Protocol encryption.
+/// Performs a Noise XX handshake over the underlying `MeshStream`,
+/// then encrypts/decrypts all subsequent messages using the established
+/// session keys. Uses `Noise_XX_25519_ChaChaPoly_SHA256`.
+pub struct NoiseChannel {
+    stream: Box<dyn MeshStream>,
+    transport: snow::TransportState,
+    remote_static: Option<Vec<u8>>,
+}
+
+impl NoiseChannel {
+    /// Perform a Noise XX handshake as the initiator and return an encrypted channel.
+    pub async fn initiate(
+        mut stream: Box<dyn MeshStream>,
+        config: &NoiseConfig,
+    ) -> Result<Self, MeshError> {
+        let builder = snow::Builder::new(
+            "Noise_XX_25519_ChaChaPoly_SHA256".parse()
+                .map_err(|e| MeshError::Handshake(format!("bad noise params: {e}")))?,
+        )
+        .local_private_key(&config.local_private_key)
+        .map_err(|e| MeshError::Handshake(format!("bad private key: {e}")))?;
+
+        let mut handshake = builder
+            .build_initiator()
+            .map_err(|e| MeshError::Handshake(format!("build initiator: {e}")))?;
+
+        let mut buf = vec![0u8; 65535];
+
+        // XX pattern: initiator sends → responder sends → initiator sends
+
+        // -> e
+        let len = handshake.write_message(&[], &mut buf)
+            .map_err(|e| MeshError::Handshake(format!("write msg 1: {e}")))?;
+        stream.send(&buf[..len]).await?;
+
+        // <- e, ee, s, es
+        let msg = stream.recv().await?;
+        handshake.read_message(&msg, &mut buf)
+            .map_err(|e| MeshError::Handshake(format!("read msg 2: {e}")))?;
+
+        // -> s, se
+        let len = handshake.write_message(&[], &mut buf)
+            .map_err(|e| MeshError::Handshake(format!("write msg 3: {e}")))?;
+        stream.send(&buf[..len]).await?;
+
+        let remote_static = handshake.get_remote_static().map(|k| k.to_vec());
+
+        let transport = handshake.into_transport_mode()
+            .map_err(|e| MeshError::Handshake(format!("transport mode: {e}")))?;
+
+        tracing::info!("noise XX handshake complete (initiator)");
+
+        Ok(Self { stream, transport, remote_static })
+    }
+
+    /// Perform a Noise XX handshake as the responder and return an encrypted channel.
+    pub async fn respond(
+        mut stream: Box<dyn MeshStream>,
+        config: &NoiseConfig,
+    ) -> Result<Self, MeshError> {
+        let builder = snow::Builder::new(
+            "Noise_XX_25519_ChaChaPoly_SHA256".parse()
+                .map_err(|e| MeshError::Handshake(format!("bad noise params: {e}")))?,
+        )
+        .local_private_key(&config.local_private_key)
+        .map_err(|e| MeshError::Handshake(format!("bad private key: {e}")))?;
+
+        let mut handshake = builder
+            .build_responder()
+            .map_err(|e| MeshError::Handshake(format!("build responder: {e}")))?;
+
+        let mut buf = vec![0u8; 65535];
+
+        // XX pattern: initiator sends → responder sends → initiator sends
+
+        // <- e
+        let msg = stream.recv().await?;
+        handshake.read_message(&msg, &mut buf)
+            .map_err(|e| MeshError::Handshake(format!("read msg 1: {e}")))?;
+
+        // -> e, ee, s, es
+        let len = handshake.write_message(&[], &mut buf)
+            .map_err(|e| MeshError::Handshake(format!("write msg 2: {e}")))?;
+        stream.send(&buf[..len]).await?;
+
+        // <- s, se
+        let msg = stream.recv().await?;
+        handshake.read_message(&msg, &mut buf)
+            .map_err(|e| MeshError::Handshake(format!("read msg 3: {e}")))?;
+
+        let remote_static = handshake.get_remote_static().map(|k| k.to_vec());
+
+        let transport = handshake.into_transport_mode()
+            .map_err(|e| MeshError::Handshake(format!("transport mode: {e}")))?;
+
+        tracing::info!("noise XX handshake complete (responder)");
+
+        Ok(Self { stream, transport, remote_static })
+    }
+}
+
+#[async_trait]
+impl EncryptedChannel for NoiseChannel {
+    async fn send_encrypted(&mut self, plaintext: &[u8]) -> Result<(), MeshError> {
+        let mut buf = vec![0u8; plaintext.len() + 16 + 2]; // AEAD tag + length prefix room
+        let len = self.transport.write_message(plaintext, &mut buf)
+            .map_err(|e| MeshError::Io(format!("encrypt: {e}")))?;
+        self.stream.send(&buf[..len]).await
+    }
+
+    async fn recv_encrypted(&mut self) -> Result<Vec<u8>, MeshError> {
+        let ciphertext = self.stream.recv().await?;
+        let mut buf = vec![0u8; ciphertext.len()];
+        let len = self.transport.read_message(&ciphertext, &mut buf)
+            .map_err(|e| MeshError::Io(format!("decrypt: {e}")))?;
+        buf.truncate(len);
+        Ok(buf)
+    }
+
+    fn remote_static_key(&self) -> Option<&[u8]> {
+        self.remote_static.as_deref()
+    }
+
+    async fn close(&mut self) -> Result<(), MeshError> {
+        self.stream.close().await
+    }
+}
+
+// ── Passthrough (test/dev) implementation ────────────────────────
+
+/// Passthrough "encryption" for testing and development.
+///
+/// No actual crypto — plaintext passes through unchanged.
+/// Use `NoiseChannel` for production deployments.
 pub struct PassthroughChannel {
     stream: Box<dyn MeshStream>,
 }
@@ -86,6 +218,28 @@ impl EncryptedChannel for PassthroughChannel {
 
     async fn close(&mut self) -> Result<(), MeshError> {
         self.stream.close().await
+    }
+}
+
+/// Create an encrypted channel for a mesh connection.
+///
+/// When `noise_config` is `Some`, performs a real Noise XX handshake.
+/// When `None`, returns a passthrough (plaintext) channel.
+pub async fn create_encrypted_channel(
+    stream: Box<dyn MeshStream>,
+    noise_config: Option<&NoiseConfig>,
+    is_initiator: bool,
+) -> Result<Box<dyn EncryptedChannel>, MeshError> {
+    match noise_config {
+        Some(config) => {
+            let channel = if is_initiator {
+                NoiseChannel::initiate(stream, config).await?
+            } else {
+                NoiseChannel::respond(stream, config).await?
+            };
+            Ok(Box::new(channel))
+        }
+        None => Ok(Box::new(PassthroughChannel::new(stream))),
     }
 }
 
