@@ -1,0 +1,128 @@
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "9c80227472c3c05f7a41abb0d7ad7bef534d7bdabc8ef9f34a51b411feb54190",
+        "x": 761.213569935456,
+        "y": 400.0,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "attention",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "f9255b0ded98a92453ff009f439461c95e35078cd439e3edb38bc6275d430ad1",
+        "x": 713.9952085206528,
+        "y": 513.9952085206528,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "baseline_attention",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "d84a7ec595f3e57e52991411c5f1ae4f3b135595347f2a4512be720ebfe2b11d",
+        "x": 600.0,
+        "y": 561.213569935456,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "events",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "4fe0b62a7ea493ca8a0dc9c344b84eaf44be17824e1b8105b1e565d088cb541b",
+        "x": 486.0047914793476,
+        "y": 513.9952085206528,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "features",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "3feaf31cd6b7a7c39468c5c6cada21c0648a5e0eeb195d39c2f54857e974196a",
+        "x": 438.786430064544,
+        "y": 400.0,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "lib",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "74edbd73c21249e723680984ed3e4182a9a090f31fcb671731e03e93789fdd9b",
+        "x": 486.0047914793476,
+        "y": 286.0047914793476,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "model",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "5bf07e99fd4c0ad6c635ec9bfe5f6264eb9df0cf269925e63e91dc92b66500f0",
+        "x": 600.0,
+        "y": 238.78643006454442,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "operator",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "f3162ce6c366caf5ea5bac224cfb4987ddb73aa34898741a3c4a2c6489dc5e08",
+        "x": 713.9952085206528,
+        "y": 286.0047914793476,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "tree",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      }
+    ],
+    "edges": [],
+    "viewport": {
+      "x": 380.786430064544,
+      "y": 180.78643006454442,
+      "width": 438.427139870912,
+      "height": 438.42713987091156
+    },
+    "schema_name": "software",
+    "schema_version": "1.0.0"
+  },
+  "expandable": [],
+  "breadcrumbs": [
+    {
+      "id": "bde6ae1efca1d2ec986a04c3bea17986e304e0bf260c5269327c46288d1a3899",
+      "label": "eml-core"
+    }
+  ],
+  "total_nodes": 631,
+  "depth": 2
+}

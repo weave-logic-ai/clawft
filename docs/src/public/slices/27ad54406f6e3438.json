@@ -1,0 +1,63 @@
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "8da94646c91211777adde2f4f5bd35f888d012c2d203eb3fe4562478b74286fb",
+        "x": 760.0906283347458,
+        "y": 400.0,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "init",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "f0aaf2405f2c556f4b3ecb15300491d083e098d9d57838bf503e0ef74d867221",
+        "x": 519.954685832627,
+        "y": 538.642551045702,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "lib",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "d32a85047e1e3c48b05251600aa07e2da8db208a1a0860053c44d7f19cd0d847",
+        "x": 519.9546858326269,
+        "y": 261.35744895429735,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "main",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      }
+    ],
+    "edges": [],
+    "viewport": {
+      "x": 461.95468583262686,
+      "y": 203.35744895429735,
+      "width": 356.13594250211895,
+      "height": 393.28510209140467
+    },
+    "schema_name": "software",
+    "schema_version": "1.0.0"
+  },
+  "expandable": [],
+  "breadcrumbs": [
+    {
+      "id": "27ad54406f6e34387a266fec85ca09060c4be8b46c8ae9e05b1295a662720f3b",
+      "label": "weftos"
+    }
+  ],
+  "total_nodes": 631,
+  "depth": 2
+}

@@ -1,0 +1,76 @@
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "62064cf7a87d35cda718d81af298cb7f8010e66b2dd1c1a091ce21c153f0e73f",
+        "x": 760.2831718261077,
+        "y": 400.0,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "client",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "e4081692fca8114dc28a70116dcd0f79679bec9037b2aca0c5ac93befb49a987",
+        "x": 600.0,
+        "y": 560.2831718261077,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "lib",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "439661926415a678aae7241ed2e2a591745fed69b7990572a5d07d46702f5484",
+        "x": 439.716828173892,
+        "y": 400.0,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "protocol",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "a7de23acd06ebaf5f839682c1fb2cc2f41186701ffb306de2bba4a8fcd451148",
+        "x": 600.0,
+        "y": 239.71682817389203,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "version_check",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      }
+    ],
+    "edges": [],
+    "viewport": {
+      "x": 381.716828173892,
+      "y": 181.71682817389203,
+      "width": 436.5663436522157,
+      "height": 436.56634365221566
+    },
+    "schema_name": "software",
+    "schema_version": "1.0.0"
+  },
+  "expandable": [],
+  "breadcrumbs": [
+    {
+      "id": "df314c0bd352bb97c49714584b754372342d7267f79c03506b730643df654e9d",
+      "label": "clawft-rpc"
+    }
+  ],
+  "total_nodes": 631,
+  "depth": 2
+}

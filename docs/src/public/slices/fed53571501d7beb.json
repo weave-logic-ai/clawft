@@ -1,0 +1,50 @@
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "0f512409a9b20d2a6659fb9b034a617327c938ddf83e8fd13984ef338a25e8c9",
+        "x": 759.924288480296,
+        "y": 400.0,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "lib",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "ec251fc5cda0edcf4ac5ff2c7e7a778c27ca884c307fb24832832d7d40cd54a8",
+        "x": 440.0757115197034,
+        "y": 400.0,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "types",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      }
+    ],
+    "edges": [],
+    "viewport": {
+      "x": 382.0757115197034,
+      "y": 342.0,
+      "width": 435.8485769605926,
+      "height": 116.0
+    },
+    "schema_name": "software",
+    "schema_version": "1.0.0"
+  },
+  "expandable": [],
+  "breadcrumbs": [
+    {
+      "id": "fed53571501d7beb57fdaa8f571a5226e03c0f489ed850f75f5a189f67d55ee4",
+      "label": "clawft-plugin-calendar"
+    }
+  ],
+  "total_nodes": 631,
+  "depth": 2
+}

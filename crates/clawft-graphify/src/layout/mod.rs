@@ -4,6 +4,7 @@
 pub mod tree_layout;
 pub mod force_layout;
 pub mod positioned;
+pub mod slicer;
 pub mod triage;
 
 use std::collections::HashMap;

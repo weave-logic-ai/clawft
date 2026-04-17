@@ -1,0 +1,141 @@
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "8295652b417bfa0e6c4a25903c8700dd37f0436a597647bb79cac80bb282c3d0",
+        "x": 761.4734819376513,
+        "y": 400.0,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "boot",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "016ecb6ca536bcabd26c1625972605e7b681b2b14bffea95efa24fbd8ff057b6",
+        "x": 723.6958635494108,
+        "y": 503.79315348246536,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "delegation",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "dba2ea4dce2d404f79279b28f6b2eb92e66e9470134b2d60d84611cf5e00a45a",
+        "x": 628.0395758800076,
+        "y": 559.0203369180754,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "error",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "ab879a5d1c3fe9b35827144f71c16309282c4ed06a27f47d003d8b74d9bb2775",
+        "x": 519.2632590311744,
+        "y": 539.8401373955343,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "lib",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "969cc4b55a7eb4020092f8f5dd28a8e80042ea27a8e3e17f0628ebcebd178bb2",
+        "x": 448.26456057058203,
+        "y": 455.22718343561036,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "model",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "144cf76114ad1ceeb6b29c39d73be3beae2b7265a94d10ce4c7135f6d0cfe812",
+        "x": 448.264560570582,
+        "y": 344.77281656438964,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "mutation",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "db5d9f70ce09a02596b5ea501ccdfb9f726c52e96032d6c35c36539fffe629fc",
+        "x": 519.2632590311742,
+        "y": 260.1598626044663,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "permission",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "9f6e5c2c54a67537632e337ee8da441c1d0e4b7086c1afb404a0ae060181328e",
+        "x": 628.0395758800076,
+        "y": 240.9796630819242,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "scoring",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "311f7464030edae4cdf3bb4cc82451545706d1a111b22283a9dce7c1b8a35184",
+        "x": 723.6958635494108,
+        "y": 296.2068465175344,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "tree",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      }
+    ],
+    "edges": [],
+    "viewport": {
+      "x": 390.264560570582,
+      "y": 182.9796630819242,
+      "width": 429.2089213670693,
+      "height": 434.0406738361512
+    },
+    "schema_name": "software",
+    "schema_version": "1.0.0"
+  },
+  "expandable": [],
+  "breadcrumbs": [
+    {
+      "id": "d18b43f0530cf93d835337734d3fe1ccffcd42ff03efca350e8a240523d9b96f",
+      "label": "exo-resource-tree"
+    }
+  ],
+  "total_nodes": 631,
+  "depth": 2
+}

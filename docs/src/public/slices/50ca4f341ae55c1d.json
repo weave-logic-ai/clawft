@@ -1,0 +1,63 @@
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "be7d1ad202462644612078460d4cb6be34f29178d9c0402b0f501e2b8d2d9f9a",
+        "x": 760.0906283347458,
+        "y": 400.0,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "lib",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "1f42ca0b72853c35e46dc49f234b08e10d934978bb7f273c23e8f4e28c3dba5b",
+        "x": 519.954685832627,
+        "y": 538.642551045702,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "checks",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "d8d82c77143319307c426d3dad3bdcc621f34dafde060b109ad862bb59b371b9",
+        "x": 519.9546858326269,
+        "y": 261.35744895429735,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "patterns",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      }
+    ],
+    "edges": [],
+    "viewport": {
+      "x": 461.95468583262686,
+      "y": 203.35744895429735,
+      "width": 356.13594250211895,
+      "height": 393.28510209140467
+    },
+    "schema_name": "software",
+    "schema_version": "1.0.0"
+  },
+  "expandable": [],
+  "breadcrumbs": [
+    {
+      "id": "50ca4f341ae55c1d2d31e7e706e838936ddbca0f11f9594ee122278fe2b49ed7",
+      "label": "clawft-security"
+    }
+  ],
+  "total_nodes": 631,
+  "depth": 2
+}

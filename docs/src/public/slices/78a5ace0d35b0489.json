@@ -1,0 +1,154 @@
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "19c5381045eefc1092ab8863a5bfc43ba1926d017b6c325fcdb323cc85664ba5",
+        "x": 761.7413552473666,
+        "y": 400.0,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "config_loader",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "f6957aedb591389d06d2341b640eb225b09e6a860ccd5f495c34796b18c1df40",
+        "x": 730.8515050883548,
+        "y": 495.06918330019994,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "env",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "9c4fec4a249fc0baedb5a843bd1c2c608a5846bfce0fc4c7f5ff0f0a063944a7",
+        "x": 649.9808274646717,
+        "y": 553.8251698624165,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "fs",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "15e7d128b717423cc6a77bfc46be9a93405eca60f6ca23e36ba6149aab019b2f",
+        "x": 550.0191725353283,
+        "y": 553.8251698624165,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "http",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "9cbaab165c09a0e1365d7556c988e5cd159a4b812385443f6128c9a815d22b20",
+        "x": 469.1484949116451,
+        "y": 495.06918330019994,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "lib",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "037006807124837bf4719ac8d402bd0e5d48053342f32c964105c4f93ba846db",
+        "x": 438.2586447526339,
+        "y": 400.0,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "process",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "ef1676149c9fdead94cedc4fa1f845cb8a26bca5e78305eeabdcac5b4aa47c48",
+        "x": 469.14849491164506,
+        "y": 304.9308166998001,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "env",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "c58ae04fec31589efba90830c4c594c40ca9ca4790cc3a28804305294d85bb8d",
+        "x": 550.0191725353283,
+        "y": 246.17483013758323,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "fs",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "485db4ab585490d0b9bd3cab2a38420d0a0e7b1c51a8dcf08b7a25e84dd56d4f",
+        "x": 649.9808274646716,
+        "y": 246.17483013758323,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "http",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "737d74db3a266b99043c90e6b000df503ae185ea451e983f56fa11c0b7a402b6",
+        "x": 730.8515050883547,
+        "y": 304.9308166998,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "browser",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      }
+    ],
+    "edges": [],
+    "viewport": {
+      "x": 380.2586447526339,
+      "y": 188.17483013758323,
+      "width": 439.4827104947327,
+      "height": 423.65033972483326
+    },
+    "schema_name": "software",
+    "schema_version": "1.0.0"
+  },
+  "expandable": [],
+  "breadcrumbs": [
+    {
+      "id": "78a5ace0d35b04898a1514a335f0e7e6f77779d080f8684983b9c177da215940",
+      "label": "clawft-platform"
+    }
+  ],
+  "total_nodes": 631,
+  "depth": 2
+}

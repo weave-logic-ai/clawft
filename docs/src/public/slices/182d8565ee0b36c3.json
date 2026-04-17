@@ -1,0 +1,232 @@
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "91ced4f34a7fa2e14b87954dccd6f87553088187a8712b67d473fe21bb2bfc5b",
+        "x": 763.4721955765149,
+        "y": 400.0,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "audio_synthesize",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "01b93bc1e81e313acb5fd0b5a71d9d58b81756176584087cb40c885b517c6a05",
+        "x": 751.0286156278245,
+        "y": 462.55810089947823,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "audio_transcribe",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "fe82582a763715c47e55de729e7724d259ca56707e4eeac7b59a7acaee329bda",
+        "x": 715.5922980276066,
+        "y": 515.5922980276067,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "delegate_tool",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "7b173cd4a969a9da230fc90e481102e5ac5a0683ace78da485731c6f76080dfc",
+        "x": 662.558100899478,
+        "y": 551.0286156278245,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "file_tools",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "1f9506f9fb9d2ed8726a723c8f25608e96c82957f08a7d547b2ce15b1becb9fc",
+        "x": 600.0,
+        "y": 563.4721955765149,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "lib",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "9b3bd6854e7d5d153115e79a6a0464b885054c852b0424e9d2f3e3f2def183a1",
+        "x": 537.441899100522,
+        "y": 551.0286156278245,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "memory_tool",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "6bcd09d39acbe02d4f14bc4d5920718d429b912b5d04c4331c116742f0c20bf8",
+        "x": 484.40770197239266,
+        "y": 515.5922980276066,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "message_tool",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "fbd1451c121047a8d1ee124f49bcf61135647c7a20f2e8e6f44e741aa0c7c9f0",
+        "x": 448.97138437217643,
+        "y": 462.5581008994783,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "render_ui",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "647bf7f43bfa463846e5473aa5c405b3021bcd90901b5e9f5990bfe09eee4ba9",
+        "x": 436.5278044234855,
+        "y": 400.0,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "security_policy",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "eef16c261072677898ee05d53fa81c0fc63f7ae0463f8fa380c3f8a3680e598d",
+        "x": 448.97138437217643,
+        "y": 337.44189910052177,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "shell_tool",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "5e92886ed322cefdaee96c3f3b21e347771a823c62adbf076124b2bcc6aab914",
+        "x": 484.40770197239266,
+        "y": 284.40770197239266,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "spawn_tool",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "95fee3828b3969a21d715d3ce75c9fbae74cec90fd6664b877b6de8332886cc0",
+        "x": 537.441899100522,
+        "y": 248.97138437217592,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "url_safety",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "16717837855354253a2a39d97edaf41f12a506a0360fe213311a7bca6cbc7fe2",
+        "x": 600.0,
+        "y": 236.52780442348552,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "voice_listen",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "7171f418bd36a2c306c47601d40a884de20451de997eed4a792c831afcb68ded",
+        "x": 662.558100899478,
+        "y": 248.9713843721759,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "voice_speak",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "6737d93ca296fd57d846e0fe6a9e5a28dbb2bbd0ad46ff12128a6f6f553d9ee5",
+        "x": 715.5922980276066,
+        "y": 284.40770197239266,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "web_fetch",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "72ca0bda05a7b0dade7a9e04434f32ca52d34bb147f57f0cf73ce6ab6503c046",
+        "x": 751.0286156278244,
+        "y": 337.44189910052165,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "web_search",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      }
+    ],
+    "edges": [],
+    "viewport": {
+      "x": 378.5278044234855,
+      "y": 178.52780442348552,
+      "width": 442.94439115302936,
+      "height": 442.94439115302936
+    },
+    "schema_name": "software",
+    "schema_version": "1.0.0"
+  },
+  "expandable": [],
+  "breadcrumbs": [
+    {
+      "id": "182d8565ee0b36c3a294925ff08456ab7fdd9ecb5d148f7fa05a73168bbee7b2",
+      "label": "clawft-tools"
+    }
+  ],
+  "total_nodes": 631,
+  "depth": 2
+}

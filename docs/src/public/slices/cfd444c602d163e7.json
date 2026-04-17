@@ -1,0 +1,167 @@
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "38fd7d6d7a92a13828b455fd30e498111fc289e595f609ee4a523d49a5aa65bf",
+        "x": 762.0162367552139,
+        "y": 400.0,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "alloc_trace",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "2bc2888477f2f83680cb5b7c54d86dde93deb361a557b03bba0b823a6187e5e9",
+        "x": 736.2967315463368,
+        "y": 487.5925906804178,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "allocator",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "1fa4448ea8be137f09a469e8a640a03077c613c32e03b6c984c23d6329716204",
+        "x": 667.3039770981832,
+        "y": 547.3751527194752,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "audit",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "c1b369ba313b5ff74027c53f5a77e5b7fbc348fdea21a52616f3066fda846100",
+        "x": 576.9426854685358,
+        "y": 560.3671450731671,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "engine",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "b13c1dd33450a35cd3031e42fbead47767a541f5003f264da0d3c1e2754b238f",
+        "x": 493.90192828742767,
+        "y": 522.443701966231,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "env",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "6cde5962100000efbf856d2d2ef4bb4b16b7f32f29ed4ec5dbdf31b93ff909a6",
+        "x": 444.54655922191034,
+        "y": 445.64524863087246,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "fs",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "edd5cd537d95fa8d95c4fe6d11de34da23d2e0074470ee60ad8a6997104377d1",
+        "x": 444.54655922191034,
+        "y": 354.3547513691276,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "http",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "f0505d03c8770d4b4381c937ff46449b42cbd14628579956c31f0ee80fdbf51f",
+        "x": 493.90192828742767,
+        "y": 277.55629803376905,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "lib",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "b272239116581117b0c3ce2805d0a7e4e57ad42ee1ac97bab42f5ea8b7d3f8a7",
+        "x": 576.9426854685357,
+        "y": 239.63285492683232,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "permission_store",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "3aaa93dd85c62c60decc9907e6f97f7cad1861ad5b1b5e0cf5877aed89f4ea13",
+        "x": 667.303977098183,
+        "y": 252.6248472805255,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "platform",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "bfbd4b8322d4d59b4ba25be8b1773a31c6d4f83262c86337d288ebc6331abfa9",
+        "x": 736.2967315463368,
+        "y": 312.4074093195822,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "sandbox",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      }
+    ],
+    "edges": [],
+    "viewport": {
+      "x": 386.54655922191034,
+      "y": 181.63285492683232,
+      "width": 433.4696775333035,
+      "height": 436.73429014633473
+    },
+    "schema_name": "software",
+    "schema_version": "1.0.0"
+  },
+  "expandable": [],
+  "breadcrumbs": [
+    {
+      "id": "cfd444c602d163e7434eb8826ac383f9abb3f57a0842a0221552a966dfcaa633",
+      "label": "clawft-wasm"
+    }
+  ],
+  "total_nodes": 631,
+  "depth": 2
+}

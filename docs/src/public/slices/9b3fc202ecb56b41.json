@@ -1,0 +1,193 @@
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "cdd366b8e337f1de76cbd778e0661e9dba99e558afbb93cefd11383043e81c36",
+        "x": 762.5840121907569,
+        "y": 400.0,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "browser_transport",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "0cb1e7a35f025d3dbb747a41a0486952a61360bb5d46f9ad8d9edd167ed1aa70",
+        "x": 743.9609932691802,
+        "y": 475.55655786889184,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "config",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "2788fcf44438e66d85c39168d1773f717a6067acc8afce9b09fe92de493d7e7d",
+        "x": 692.3582457076774,
+        "y": 533.80401888525,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "eml_retry",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "f6f479b5d597555b56747dfe1398e0b07da0f826ce0b96939db254ac7dd695b8",
+        "x": 619.597337092065,
+        "y": 561.3985916882301,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "error",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "e0a052033ce141616d58211ae2cd351ebaccd27622ab8d8a3fcf544e0599f553",
+        "x": 542.3469147221746,
+        "y": 552.0186921993215,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "failover",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "879f554228ea5764b5b2b7d4cb267b17426e9a5fcf0a6d9c6c7a1975f5dd862a",
+        "x": 478.3041193944379,
+        "y": 507.81314235138825,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "lib",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "61b082efb8299d86fbbdfc3bb2761b62e2637c8d38379782e042bb4fcca5f58f",
+        "x": 442.1403837190872,
+        "y": 438.9089008799675,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "local_provider",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "d68fcdd4b624f6969f83619748b55d6697dea916d53a8ed8cf6d2806bc416b13",
+        "x": 442.1403837190872,
+        "y": 361.09109912003254,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "openai_compat",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "9076924899b21f2cdeeb8cbf87577f5b55845a8d5028a4fdb091bd2de139e3ce",
+        "x": 478.30411939443786,
+        "y": 292.1868576486119,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "provider",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "55d9428f614d5b0c516b344275be3f5d53e43d186162703ce603b72473687062",
+        "x": 542.3469147221745,
+        "y": 247.98130780067902,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "retry",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "125c5dee154ecd3aded3ebfc081b70c039780cf0da5e0e7165416a3d928f9bf7",
+        "x": 619.597337092065,
+        "y": 238.60140831176966,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "router",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "71d1c63767a0479d495b875c093f23ece8dc54a4e93218afbee248676c9e6714",
+        "x": 692.3582457076773,
+        "y": 266.1959811147498,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "sse",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "0ed26e7bf188aad1a62d2a1fed91eb41525b7c53354cf2af1eb4e06636e5f078",
+        "x": 743.9609932691802,
+        "y": 324.4434421311081,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "types",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      }
+    ],
+    "edges": [],
+    "viewport": {
+      "x": 384.1403837190872,
+      "y": 180.60140831176966,
+      "width": 436.4436284716697,
+      "height": 438.79718337646045
+    },
+    "schema_name": "software",
+    "schema_version": "1.0.0"
+  },
+  "expandable": [],
+  "breadcrumbs": [
+    {
+      "id": "9b3fc202ecb56b413de8d6b493a4c7c38e37fcb8004b1a524b6f4f08962cb8e6",
+      "label": "clawft-llm"
+    }
+  ],
+  "total_nodes": 631,
+  "depth": 2
+}

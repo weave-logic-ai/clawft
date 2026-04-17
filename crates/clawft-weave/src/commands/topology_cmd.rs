@@ -62,6 +62,23 @@ pub enum TopologyAction {
         /// Path to the knowledge graph JSON to infer from.
         graph: PathBuf,
     },
+    /// Generate sliced graphs for progressive drill-down navigation.
+    Slice {
+        /// Path to the knowledge graph JSON.
+        graph: PathBuf,
+        /// Path to the topology schema YAML.
+        #[arg(short, long)]
+        schema: Option<PathBuf>,
+        /// Output directory for slice JSON files.
+        #[arg(short, long, default_value = "slices")]
+        output: PathBuf,
+        /// Viewport width.
+        #[arg(long, default_value_t = 1200.0)]
+        width: f64,
+        /// Viewport height.
+        #[arg(long, default_value_t = 800.0)]
+        height: f64,
+    },
     /// Export a knowledge graph as VOWL JSON for the navigator widget.
     Vowl {
         /// Path to the knowledge graph JSON.
@@ -82,6 +99,9 @@ pub async fn run(args: TopologyArgs) -> anyhow::Result<()> {
         }
         TopologyAction::Validate { schema } => cmd_validate(&schema),
         TopologyAction::Detect { graph } => cmd_detect(&graph),
+        TopologyAction::Slice { graph, schema, output, width, height } => {
+            cmd_slice(&graph, schema.as_deref(), &output, width, height)
+        }
         TopologyAction::Infer { graph, name, output } => cmd_infer(&graph, &name, &output),
         TopologyAction::Diff { declared, graph } => cmd_diff(&declared, &graph),
         TopologyAction::Vowl { graph, schema, output } => cmd_vowl(&graph, schema.as_deref(), &output),
@@ -322,6 +342,41 @@ fn cmd_diff(declared_path: &PathBuf, graph_path: &PathBuf) -> anyhow::Result<()>
             println!("  - {e}");
         }
     }
+
+    Ok(())
+}
+
+fn cmd_slice(
+    graph_path: &PathBuf,
+    schema_path: Option<&std::path::Path>,
+    output_dir: &PathBuf,
+    width: f64,
+    height: f64,
+) -> anyhow::Result<()> {
+    let kg = load_graph(graph_path)?;
+    let schema = load_schema(schema_path)?;
+
+    println!(
+        "Slicing {} nodes, {} edges into drill-down layers...",
+        kg.entity_count(),
+        kg.relationship_count(),
+    );
+
+    let manifest = clawft_graphify::layout::slicer::generate_all_slices(
+        &kg, &schema, output_dir, width, height,
+    ).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    println!(
+        "Generated {} slices ({} expandable nodes) → {}",
+        manifest.slices.len() + 1,
+        manifest.slices.len(),
+        output_dir.display(),
+    );
+    println!("  root.json: top-level view");
+    for (id, file) in &manifest.slices {
+        println!("  {file}: {}", &id[..16]);
+    }
+    println!("  manifest.json: slice index");
 
     Ok(())
 }

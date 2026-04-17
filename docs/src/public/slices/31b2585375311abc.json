@@ -1,0 +1,63 @@
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "a7f0ed5ceeb7ba52628617ff372afa0a5dc54097d36e6b20c716ce63693af10e",
+        "x": 760.0906283347458,
+        "y": 400.0,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "lib",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "16c39e5de15e77c11c3218815fde16e3ece7cfcee6251484b0e91e95a87f6d03",
+        "x": 519.954685832627,
+        "y": 538.642551045702,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "operations",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      },
+      {
+        "id": "b5308548abb6a17f39a7377dbc38f6ac99ee3fc1ff58e2c9f8cb7466ee3ebcd4",
+        "x": 519.9546858326269,
+        "y": 261.35744895429735,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "types",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      }
+    ],
+    "edges": [],
+    "viewport": {
+      "x": 461.95468583262686,
+      "y": 203.35744895429735,
+      "width": 356.13594250211895,
+      "height": 393.28510209140467
+    },
+    "schema_name": "software",
+    "schema_version": "1.0.0"
+  },
+  "expandable": [],
+  "breadcrumbs": [
+    {
+      "id": "31b2585375311abcda35ba42c1599e4aaa388c63792c2490f078157e3dd77a3f",
+      "label": "clawft-plugin-cargo"
+    }
+  ],
+  "total_nodes": 631,
+  "depth": 2
+}

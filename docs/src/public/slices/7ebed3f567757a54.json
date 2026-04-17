@@ -1,0 +1,37 @@
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "d7945102e7ee20b3431ad0d8161b047869f2f3f9c24ebae610e9c08a6adf0b89",
+        "x": 600.0,
+        "y": 400.0,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "main",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      }
+    ],
+    "edges": [],
+    "viewport": {
+      "x": 542.0,
+      "y": 342.0,
+      "width": 116.0,
+      "height": 116.0
+    },
+    "schema_name": "software",
+    "schema_version": "1.0.0"
+  },
+  "expandable": [],
+  "breadcrumbs": [
+    {
+      "id": "7ebed3f567757a540ee73a51d3250927e5b961222cbe9d368414d1abd6619017",
+      "label": "clawft-edge-bench"
+    }
+  ],
+  "total_nodes": 631,
+  "depth": 2
+}

@@ -1,0 +1,37 @@
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "fedddfa814006a49aa822a04153acefaadea6cd03772cfab1e668b637ae16286",
+        "x": 600.0,
+        "y": 400.0,
+        "width": 36.0,
+        "height": 36.0,
+        "label": "lib",
+        "node_type": "module",
+        "shape": "rect",
+        "color": "#8b5cf6",
+        "icon": "file-code",
+        "has_subgraph": false
+      }
+    ],
+    "edges": [],
+    "viewport": {
+      "x": 542.0,
+      "y": 342.0,
+      "width": 116.0,
+      "height": 116.0
+    },
+    "schema_name": "software",
+    "schema_version": "1.0.0"
+  },
+  "expandable": [],
+  "breadcrumbs": [
+    {
+      "id": "05abc9435736a093fff0cd985338d91c3804d45a3f64641d7d6234c1e8834410",
+      "label": "clawft-plugin-npm"
+    }
+  ],
+  "total_nodes": 631,
+  "depth": 2
+}
