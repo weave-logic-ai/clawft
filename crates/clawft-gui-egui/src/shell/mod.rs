@@ -26,11 +26,12 @@ impl Phase {
     }
 }
 
-/// Boot timeline (seconds). Keep short — the user just wants the mark.
-pub const BOOT_LEN: f32 = 2.8;
-pub const BOOT_FADE_IN: f32 = 0.4;
-pub const BOOT_HOLD: f32 = 1.6;
-pub const BOOT_FADE_OUT: f32 = 0.8;
+/// Boot timeline (seconds). Bumped so the logo actually has a moment to
+/// breathe on fast machines.
+pub const BOOT_LEN: f32 = 4.2;
+pub const BOOT_FADE_IN: f32 = 0.5;
+pub const BOOT_HOLD: f32 = 3.0;
+pub const BOOT_FADE_OUT: f32 = 0.7;
 
 /// Derive the opacity of the logo over the boot timeline.
 pub fn boot_logo_alpha(elapsed: f32) -> f32 {

@@ -28,35 +28,41 @@ pub fn show(
     let rect = ui.max_rect();
     let center = rect.center();
 
-    // Paint the solid background + warm halo + subtitle using a layer
-    // painter that doesn't hold a borrow on `ui`, so we can still
-    // allocate the image sub-ui below. The halo is warm gold to echo
-    // the logo's color.
-    let painter = ui.ctx().layer_painter(egui::LayerId::background());
-    painter.rect_filled(rect, 0.0, egui::Color32::BLACK);
-    let halo = egui::Color32::from_rgba_unmultiplied(80, 60, 20, (alpha * 150.0) as u8);
-    painter.circle_filled(center, 280.0, halo);
+    // Paint background + halo + subtitle using this ui's painter. We
+    // scope the borrow so we can call `Image::paint_at` on the same ui
+    // afterwards (both need to target the same layer so the logo
+    // renders above the halo).
+    {
+        let painter = ui.painter();
+        painter.rect_filled(rect, 0.0, egui::Color32::BLACK);
 
-    let subtitle_alpha = (alpha * 0.55 * 255.0) as u8;
-    painter.text(
-        center + egui::vec2(0.0, 220.0),
-        egui::Align2::CENTER_CENTER,
-        "weave the machine",
-        egui::FontId::new(13.0, egui::FontFamily::Proportional),
-        egui::Color32::from_rgba_unmultiplied(210, 195, 160, subtitle_alpha),
-    );
+        let halo_color = egui::Color32::from_rgba_unmultiplied(
+            80,
+            60,
+            20,
+            (alpha * 150.0) as u8,
+        );
+        painter.circle_filled(center, 300.0, halo_color);
 
-    // Logo image (JPEG). Aspect is roughly 1.14:1 (1151×1007).
-    let logo_size = egui::vec2(360.0, 315.0);
+        let subtitle_alpha = (alpha * 0.55 * 255.0) as u8;
+        painter.text(
+            center + egui::vec2(0.0, 240.0),
+            egui::Align2::CENTER_CENTER,
+            "weave the machine",
+            egui::FontId::new(13.0, egui::FontFamily::Proportional),
+            egui::Color32::from_rgba_unmultiplied(210, 195, 160, subtitle_alpha),
+        );
+    }
+
+    // Logo image — drawn into the same ui/layer via `paint_at` so it sits
+    // above the halo painted above.
+    let logo_size = egui::vec2(420.0, 368.0);
     let logo_rect = egui::Rect::from_center_size(center, logo_size);
     let tint = egui::Color32::from_rgba_unmultiplied(255, 255, 255, (alpha * 255.0) as u8);
-    let img = egui::Image::from_bytes("bytes://weftos-gold.jpg", LOGO_JPG)
+    egui::Image::from_bytes("bytes://weftos-gold.jpg", LOGO_JPG)
         .fit_to_exact_size(logo_size)
-        .tint(tint);
-    let mut logo_ui = ui.new_child(
-        egui::UiBuilder::new().max_rect(logo_rect),
-    );
-    logo_ui.add(img);
+        .tint(tint)
+        .paint_at(ui, logo_rect);
 
     elapsed >= BOOT_LEN
 }
