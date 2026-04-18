@@ -8,6 +8,7 @@
 pub mod app;
 pub mod blocks;
 pub mod live;
+pub mod shell;
 
 pub use app::ClawftApp;
 

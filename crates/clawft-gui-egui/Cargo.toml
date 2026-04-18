@@ -28,3 +28,11 @@ parking_lot = { workspace = true }
 
 [features]
 default = []
+# Enable procedural boot sounds (pulls in rodio → cpal → alsa on Linux).
+audio = ["dep:rodio"]
+
+[dependencies.rodio]
+version = "0.19"
+optional = true
+default-features = false
+features = ["symphonia-wav"]
