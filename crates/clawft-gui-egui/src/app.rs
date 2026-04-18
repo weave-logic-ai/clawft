@@ -18,6 +18,14 @@ impl ClawftApp {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
         egui_extras::install_image_loaders(&cc.egui_ctx);
         apply_style(&cc.egui_ctx);
+
+        // Preload the boot logo so the splash appears on frame 1 instead
+        // of flashing in once the async image loader catches up.
+        cc.egui_ctx.include_bytes(
+            "bytes://weftos-gold.jpg",
+            crate::shell::boot::LOGO_JPG,
+        );
+
         Self {
             phase: Phase::boot(),
             desktop: Desktop::default(),

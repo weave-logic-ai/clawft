@@ -9,13 +9,17 @@
 
 use eframe::egui;
 
-const CELL: f32 = 28.0;
+const CELL: f32 = 44.0;
 /// How strongly a mass bends the grid near it. Higher = sharper wells.
-const MASS_STRENGTH: f32 = 2600.0;
+const MASS_STRENGTH: f32 = 1400.0;
 /// Softening radius so points very close to a mass don't explode.
-const SOFTEN: f32 = 40.0;
+const SOFTEN: f32 = 50.0;
 /// Maximum displacement so lines never travel absurd distances.
-const MAX_DISP: f32 = 42.0;
+const MAX_DISP: f32 = 24.0;
+/// Pixel offset used for the R/B aberration passes.
+const ABERRATION: f32 = 0.5;
+/// Line width for each pass.
+const STROKE_W: f32 = 0.7;
 
 /// A drifting "mass" that bends the grid.
 #[derive(Clone, Copy)]
@@ -75,26 +79,26 @@ pub fn paint(ui: &mut egui::Ui, rect: egui::Rect, time: f32) {
     // Three passes — R / neutral / B — with a small pixel offset to
     // fake chromatic aberration. Very subtle, only visible on the
     // bent lines.
-    // Dimmed 50% from the initial tuning — user wanted a more subtle wallpaper.
+    // Much dimmer than the initial pass — wallpaper is a whisper, not a grid overlay.
     let passes: [(egui::Vec2, egui::Color32); 3] = [
         (
-            egui::vec2(-0.8, 0.0),
-            egui::Color32::from_rgba_unmultiplied(90, 32, 56, 60),
+            egui::vec2(-ABERRATION, 0.0),
+            egui::Color32::from_rgba_unmultiplied(80, 30, 48, 22),
         ),
         (
             egui::vec2(0.0, 0.0),
-            egui::Color32::from_rgba_unmultiplied(60, 60, 78, 85),
+            egui::Color32::from_rgba_unmultiplied(55, 55, 72, 30),
         ),
         (
-            egui::vec2(0.8, 0.0),
-            egui::Color32::from_rgba_unmultiplied(40, 64, 110, 60),
+            egui::vec2(ABERRATION, 0.0),
+            egui::Color32::from_rgba_unmultiplied(34, 56, 96, 22),
         ),
     ];
 
     // Draw horizontal and vertical line segments, displacing each
     // endpoint by the summed mass contribution.
     for (offset, color) in passes {
-        let stroke = egui::Stroke::new(1.0, color);
+        let stroke = egui::Stroke::new(STROKE_W, color);
         // Horizontal segments
         for r in 0..rows {
             let y = rect.top() + (r as f32) * CELL;

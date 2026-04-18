@@ -4,8 +4,10 @@ use eframe::egui;
 
 use super::{audio, boot_logo_alpha, BOOT_LEN};
 
-/// Logo bytes are embedded so the binary is self-contained.
-const LOGO_JPG: &[u8] = include_bytes!("../../assets/weftos-gold.jpg");
+/// Logo bytes are embedded so the binary is self-contained. Exposed
+/// `pub(crate)` so `App::new` can preload it into the image cache before
+/// the first paint.
+pub(crate) const LOGO_JPG: &[u8] = include_bytes!("../../assets/weftos-gold.jpg");
 
 /// Render the boot splash. Returns `true` when the boot timeline has
 /// elapsed and the caller should transition to the desktop.
