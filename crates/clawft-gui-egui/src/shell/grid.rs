@@ -75,18 +75,19 @@ pub fn paint(ui: &mut egui::Ui, rect: egui::Rect, time: f32) {
     // Three passes — R / neutral / B — with a small pixel offset to
     // fake chromatic aberration. Very subtle, only visible on the
     // bent lines.
+    // Dimmed 50% from the initial tuning — user wanted a more subtle wallpaper.
     let passes: [(egui::Vec2, egui::Color32); 3] = [
         (
             egui::vec2(-0.8, 0.0),
-            egui::Color32::from_rgba_unmultiplied(90, 32, 56, 120),
+            egui::Color32::from_rgba_unmultiplied(90, 32, 56, 60),
         ),
         (
             egui::vec2(0.0, 0.0),
-            egui::Color32::from_rgba_unmultiplied(60, 60, 78, 170),
+            egui::Color32::from_rgba_unmultiplied(60, 60, 78, 85),
         ),
         (
             egui::vec2(0.8, 0.0),
-            egui::Color32::from_rgba_unmultiplied(40, 64, 110, 120),
+            egui::Color32::from_rgba_unmultiplied(40, 64, 110, 60),
         ),
     ];
 

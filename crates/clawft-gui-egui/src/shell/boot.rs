@@ -5,7 +5,7 @@ use eframe::egui;
 use super::{audio, boot_logo_alpha, BOOT_LEN};
 
 /// Logo bytes are embedded so the binary is self-contained.
-const LOGO_JPG: &[u8] = include_bytes!("../../assets/weft-logo.jpg");
+const LOGO_JPG: &[u8] = include_bytes!("../../assets/weftos-gold.jpg");
 
 /// Render the boot splash. Returns `true` when the boot timeline has
 /// elapsed and the caller should transition to the desktop.
@@ -48,7 +48,7 @@ pub fn show(
     let logo_size = egui::vec2(360.0, 315.0);
     let logo_rect = egui::Rect::from_center_size(center, logo_size);
     let tint = egui::Color32::from_rgba_unmultiplied(255, 255, 255, (alpha * 255.0) as u8);
-    let img = egui::Image::from_bytes("bytes://weft-logo.jpg", LOGO_JPG)
+    let img = egui::Image::from_bytes("bytes://weftos-gold.jpg", LOGO_JPG)
         .fit_to_exact_size(logo_size)
         .tint(tint);
     let mut logo_ui = ui.new_child(
