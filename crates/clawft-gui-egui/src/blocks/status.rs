@@ -1,29 +1,57 @@
 use eframe::egui;
 
-pub fn show(ui: &mut egui::Ui) {
+use crate::live::Snapshot;
+
+pub fn show(ui: &mut egui::Ui, snap: &Snapshot) {
     ui.heading("Status");
-    ui.label("Threshold-colored metric cards.");
+    ui.label("Live metric cards — pulled from `kernel.status` each tick.");
     ui.separator();
 
+    let (state, uptime, procs, max_procs, svcs, health_interval) = match &snap.status {
+        Some(s) => (
+            s.get("state").and_then(|v| v.as_str()).unwrap_or("—").to_string(),
+            s.get("uptime_secs").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            s.get("process_count").and_then(|v| v.as_u64()).unwrap_or(0),
+            s.get("max_processes").and_then(|v| v.as_u64()).unwrap_or(0),
+            s.get("service_count").and_then(|v| v.as_u64()).unwrap_or(0),
+            s.get("health_check_interval_secs").and_then(|v| v.as_u64()).unwrap_or(0),
+        ),
+        None => ("offline".into(), 0.0, 0, 0, 0, 0),
+    };
+
     ui.horizontal_wrapped(|ui| {
-        metric_card(ui, "Kernel RSS", "184", "MB", Some(200.0), Some(300.0), 184.0);
-        metric_card(ui, "CPU load", "62", "%", Some(70.0), Some(90.0), 62.0);
-        metric_card(ui, "Mesh peers", "3", "", None, None, 3.0);
-        metric_card(ui, "HNSW search", "0.9", "ms", Some(5.0), Some(20.0), 0.9);
-        metric_card(ui, "Error rate", "3", "/min", Some(1.0), Some(5.0), 3.0);
+        card(ui, "Kernel state", &state, "", kind_for_state(&state));
+        card(ui, "Uptime", &fmt_duration(uptime), "", Kind::Ok);
+        let pct = if max_procs > 0 { procs as f32 / max_procs as f32 } else { 0.0 };
+        card(
+            ui,
+            "Processes",
+            &format!("{}/{}", procs, max_procs),
+            "",
+            if pct >= 0.9 { Kind::Crit } else if pct >= 0.7 { Kind::Warn } else { Kind::Ok },
+        );
+        card(ui, "Services", &svcs.to_string(), "", Kind::Ok);
+        card(ui, "Health check", &health_interval.to_string(), "s", Kind::Ok);
     });
 }
 
-fn metric_card(
-    ui: &mut egui::Ui,
-    label: &str,
-    value: &str,
-    unit: &str,
-    warn: Option<f32>,
-    crit: Option<f32>,
-    current: f32,
-) {
-    let (border, text) = color_for(current, warn, crit);
+#[derive(Copy, Clone)]
+enum Kind { Ok, Warn, Crit }
+
+fn kind_for_state(s: &str) -> Kind {
+    match s {
+        "running" => Kind::Ok,
+        "booting" | "shutting_down" => Kind::Warn,
+        _ => Kind::Crit,
+    }
+}
+
+fn card(ui: &mut egui::Ui, label: &str, value: &str, unit: &str, kind: Kind) {
+    let (border, text) = match kind {
+        Kind::Ok => (egui::Color32::from_rgb(60, 160, 90), egui::Color32::from_rgb(110, 210, 140)),
+        Kind::Warn => (egui::Color32::from_rgb(220, 160, 40), egui::Color32::from_rgb(255, 205, 90)),
+        Kind::Crit => (egui::Color32::from_rgb(220, 70, 70), egui::Color32::from_rgb(255, 140, 140)),
+    };
     egui::Frame::none()
         .fill(egui::Color32::from_gray(22))
         .stroke(egui::Stroke::new(1.0, border))
@@ -33,12 +61,7 @@ fn metric_card(
             ui.set_min_width(140.0);
             ui.label(egui::RichText::new(label).small().weak());
             ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(value)
-                        .monospace()
-                        .size(22.0)
-                        .color(text),
-                );
+                ui.label(egui::RichText::new(value).monospace().size(22.0).color(text));
                 if !unit.is_empty() {
                     ui.label(egui::RichText::new(unit).small().weak());
                 }
@@ -46,16 +69,12 @@ fn metric_card(
         });
 }
 
-fn color_for(v: f32, warn: Option<f32>, crit: Option<f32>) -> (egui::Color32, egui::Color32) {
-    if let Some(c) = crit {
-        if v >= c {
-            return (egui::Color32::from_rgb(220, 70, 70), egui::Color32::from_rgb(255, 140, 140));
-        }
-    }
-    if let Some(w) = warn {
-        if v >= w {
-            return (egui::Color32::from_rgb(220, 160, 40), egui::Color32::from_rgb(255, 205, 90));
-        }
-    }
-    (egui::Color32::from_rgb(60, 160, 90), egui::Color32::from_rgb(110, 210, 140))
+fn fmt_duration(secs: f64) -> String {
+    let s = secs as u64;
+    let h = s / 3600;
+    let m = (s % 3600) / 60;
+    let sec = s % 60;
+    if h > 0 { format!("{h}h{m}m{sec}s") }
+    else if m > 0 { format!("{m}m{sec}s") }
+    else { format!("{sec}s") }
 }

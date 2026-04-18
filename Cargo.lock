@@ -1095,9 +1095,13 @@ dependencies = [
 name = "clawft-gui-egui"
 version = "0.6.17"
 dependencies = [
+ "clawft-rpc",
  "eframe",
  "egui_extras",
  "egui_plot",
+ "parking_lot",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

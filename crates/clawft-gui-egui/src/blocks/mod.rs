@@ -24,6 +24,7 @@ pub struct DemoState {
     pub tree_open: std::collections::HashSet<&'static str>,
     pub terminal_input: String,
     pub terminal_history: Vec<(TerminalLineKind, String)>,
+    pub pending_rpcs: Vec<terminal::PendingRpc>,
     pub scope_t: f32,
     pub scope_samples: std::collections::VecDeque<(f64, f64)>,
 }
@@ -52,13 +53,14 @@ impl Default for DemoState {
             terminal_history: vec![
                 (
                     TerminalLineKind::Output,
-                    "weft v0.6.17 (egui spike demo)".into(),
+                    "weft v0.6.17 — egui RPC console".into(),
                 ),
                 (
                     TerminalLineKind::Output,
-                    "Type `help` for mock commands.".into(),
+                    "Type `help` for commands. Tries kernel daemon on localhost.".into(),
                 ),
             ],
+            pending_rpcs: Vec::new(),
             scope_t: 0.0,
             scope_samples: std::collections::VecDeque::with_capacity(512),
         }

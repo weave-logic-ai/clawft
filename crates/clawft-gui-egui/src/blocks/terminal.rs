@@ -1,21 +1,34 @@
+use std::sync::Arc;
+
 use eframe::egui;
+use serde_json::Value;
 
 use super::{DemoState, TerminalLineKind};
+use crate::live::{Command, Live};
 
-pub fn show(ui: &mut egui::Ui, state: &mut DemoState) {
-    ui.heading("Terminal");
-    ui.label("Mock REPL — try `help`, `clear`, `echo hi`, anything else errors.");
+/// Simple RPC REPL. Commands:
+/// - `help` — list commands
+/// - `clear` — clear scrollback
+/// - `status` / `ps` / `services` — kernel.status / kernel.ps / kernel.services
+/// - `logs [n]` — kernel.logs with optional count
+/// - `rpc <method> [json]` — raw RPC call with optional JSON params
+pub fn show(ui: &mut egui::Ui, state: &mut DemoState, live: &Arc<Live>) {
+    ui.heading("Terminal — RPC console");
+    ui.label("Send commands to the kernel daemon. Try `help`, `status`, `ps`, `logs 10`.");
     ui.separator();
+
+    // Drain any pending RPC replies the command sender parked in state.
+    drain_replies(state);
 
     egui::Frame::none()
         .fill(egui::Color32::from_rgb(8, 10, 14))
         .rounding(4.0)
         .inner_margin(egui::Margin::symmetric(10.0, 8.0))
         .show(ui, |ui| {
-            ui.set_min_height(280.0);
+            ui.set_min_height(320.0);
             egui::ScrollArea::vertical()
                 .stick_to_bottom(true)
-                .max_height(280.0)
+                .max_height(320.0)
                 .show(ui, |ui| {
                     for (kind, line) in &state.terminal_history {
                         let color = match kind {
@@ -47,13 +60,13 @@ pub fn show(ui: &mut egui::Ui, state: &mut DemoState) {
             || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
         if submit {
             let cmd = std::mem::take(&mut state.terminal_input);
-            run_command(state, cmd);
+            run_command(state, live, cmd);
             resp.request_focus();
         }
     });
 }
 
-fn run_command(state: &mut DemoState, cmd: String) {
+fn run_command(state: &mut DemoState, live: &Arc<Live>, cmd: String) {
     let trimmed = cmd.trim();
     if trimmed.is_empty() {
         return;
@@ -61,31 +74,114 @@ fn run_command(state: &mut DemoState, cmd: String) {
     state
         .terminal_history
         .push((TerminalLineKind::Input, cmd.clone()));
+
     let mut parts = trimmed.splitn(2, char::is_whitespace);
     match (parts.next(), parts.next()) {
         (Some("help"), _) => {
-            state.terminal_history.push((
-                TerminalLineKind::Output,
-                "commands: help, clear, echo <text>".into(),
-            ));
+            push_out(
+                state,
+                "commands: help, clear, status, ps, services, logs [n], rpc <method> [json]",
+            );
         }
         (Some("clear"), _) => {
             state.terminal_history.clear();
         }
-        (Some("echo"), Some(rest)) => {
-            state
-                .terminal_history
-                .push((TerminalLineKind::Output, rest.to_string()));
+        (Some("status"), _) => dispatch_rpc(state, live, "kernel.status", Value::Null),
+        (Some("ps"), _) => dispatch_rpc(state, live, "kernel.ps", Value::Null),
+        (Some("services"), _) => dispatch_rpc(state, live, "kernel.services", Value::Null),
+        (Some("logs"), tail) => {
+            let count = tail
+                .and_then(|s| s.trim().parse::<usize>().ok())
+                .unwrap_or(20);
+            dispatch_rpc(
+                state,
+                live,
+                "kernel.logs",
+                serde_json::json!({ "count": count }),
+            );
         }
-        (Some("echo"), None) => {
-            state.terminal_history.push((TerminalLineKind::Output, String::new()));
+        (Some("rpc"), Some(rest)) => {
+            let (method, params_str) = rest
+                .split_once(char::is_whitespace)
+                .map(|(m, p)| (m, p.trim()))
+                .unwrap_or((rest, ""));
+            let params = if params_str.is_empty() {
+                Value::Null
+            } else {
+                match serde_json::from_str(params_str) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        push_err(state, format!("invalid JSON params: {e}"));
+                        return;
+                    }
+                }
+            };
+            dispatch_rpc(state, live, method, params);
         }
+        (Some("rpc"), None) => push_err(state, "usage: rpc <method> [json]".into()),
         (Some(unknown), _) => {
-            state.terminal_history.push((
-                TerminalLineKind::Error,
-                format!("{unknown}: command not found"),
-            ));
+            push_err(state, format!("{unknown}: command not found — try `help`"));
         }
         _ => {}
     }
+}
+
+fn dispatch_rpc(state: &mut DemoState, live: &Arc<Live>, method: &str, params: Value) {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    state.pending_rpcs.push(PendingRpc {
+        method: method.to_string(),
+        rx,
+    });
+    let submitted = live.submit(Command::Raw {
+        method: method.to_string(),
+        params,
+        reply: Some(tx),
+    });
+    if !submitted {
+        push_err(state, "poller queue full — retry in a moment".into());
+        state.pending_rpcs.pop();
+    }
+}
+
+fn drain_replies(state: &mut DemoState) {
+    let pending = std::mem::take(&mut state.pending_rpcs);
+    let mut still = Vec::with_capacity(pending.len());
+    for mut p in pending {
+        match p.rx.try_recv() {
+            Ok(Ok(value)) => {
+                let pretty = serde_json::to_string_pretty(&value)
+                    .unwrap_or_else(|_| value.to_string());
+                for line in pretty.lines() {
+                    state
+                        .terminal_history
+                        .push((TerminalLineKind::Output, line.to_string()));
+                }
+            }
+            Ok(Err(err)) => {
+                push_err(state, format!("{}: {err}", p.method));
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                still.push(p);
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                push_err(state, format!("{}: reply channel closed", p.method));
+            }
+        }
+    }
+    state.pending_rpcs = still;
+}
+
+fn push_out(state: &mut DemoState, s: impl Into<String>) {
+    state
+        .terminal_history
+        .push((TerminalLineKind::Output, s.into()));
+}
+fn push_err(state: &mut DemoState, s: String) {
+    state.terminal_history.push((TerminalLineKind::Error, s));
+}
+
+/// A single outstanding RPC whose reply we're waiting for.
+pub struct PendingRpc {
+    pub method: String,
+    pub rx: tokio::sync::oneshot::Receiver<Result<Value, String>>,
 }
