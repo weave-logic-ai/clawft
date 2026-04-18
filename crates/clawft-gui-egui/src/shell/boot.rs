@@ -5,7 +5,7 @@ use eframe::egui;
 use super::{audio, boot_logo_alpha, BOOT_LEN};
 
 /// Logo bytes are embedded so the binary is self-contained.
-const LOGO_SVG: &[u8] = include_bytes!("../../assets/weft-logo.svg");
+const LOGO_JPG: &[u8] = include_bytes!("../../assets/weft-logo.jpg");
 
 /// Render the boot splash. Returns `true` when the boot timeline has
 /// elapsed and the caller should transition to the desktop.
@@ -26,36 +26,29 @@ pub fn show(
     let rect = ui.max_rect();
     let center = rect.center();
 
-    // Paint the solid background + halo + title text using a layer painter
-    // that doesn't hold a borrow on `ui`, so we can still allocate the
-    // image sub-ui below.
+    // Paint the solid background + warm halo + subtitle using a layer
+    // painter that doesn't hold a borrow on `ui`, so we can still
+    // allocate the image sub-ui below. The halo is warm gold to echo
+    // the logo's color.
     let painter = ui.ctx().layer_painter(egui::LayerId::background());
     painter.rect_filled(rect, 0.0, egui::Color32::BLACK);
-    let halo = egui::Color32::from_rgba_unmultiplied(30, 18, 60, (alpha * 180.0) as u8);
-    painter.circle_filled(center, 220.0, halo);
+    let halo = egui::Color32::from_rgba_unmultiplied(80, 60, 20, (alpha * 150.0) as u8);
+    painter.circle_filled(center, 280.0, halo);
 
-    let title_alpha = (alpha * 255.0) as u8;
     let subtitle_alpha = (alpha * 0.55 * 255.0) as u8;
     painter.text(
-        center + egui::vec2(0.0, 150.0),
-        egui::Align2::CENTER_CENTER,
-        "WeftOS",
-        egui::FontId::new(36.0, egui::FontFamily::Proportional),
-        egui::Color32::from_rgba_unmultiplied(230, 225, 245, title_alpha),
-    );
-    painter.text(
-        center + egui::vec2(0.0, 185.0),
+        center + egui::vec2(0.0, 220.0),
         egui::Align2::CENTER_CENTER,
         "weave the machine",
         egui::FontId::new(13.0, egui::FontFamily::Proportional),
-        egui::Color32::from_rgba_unmultiplied(180, 175, 200, subtitle_alpha),
+        egui::Color32::from_rgba_unmultiplied(210, 195, 160, subtitle_alpha),
     );
 
-    // Logo image (SVG). Uses egui_extras' SVG loader installed in App::new.
-    let logo_size = egui::vec2(220.0, 220.0);
+    // Logo image (JPEG). Aspect is roughly 1.14:1 (1151×1007).
+    let logo_size = egui::vec2(360.0, 315.0);
     let logo_rect = egui::Rect::from_center_size(center, logo_size);
     let tint = egui::Color32::from_rgba_unmultiplied(255, 255, 255, (alpha * 255.0) as u8);
-    let img = egui::Image::from_bytes("bytes://weft-logo.svg", LOGO_SVG)
+    let img = egui::Image::from_bytes("bytes://weft-logo.jpg", LOGO_JPG)
         .fit_to_exact_size(logo_size)
         .tint(tint);
     let mut logo_ui = ui.new_child(
