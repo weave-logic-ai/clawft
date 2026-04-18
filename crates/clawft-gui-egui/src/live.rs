@@ -40,6 +40,11 @@ pub struct Snapshot {
     pub last_error: Option<String>,
     /// Incremented every successful poll tick so the UI can detect freshness.
     pub tick: u64,
+    /// Wall clock time of the most recent successful poll — lets the UI
+    /// show "last tick Nms ago" instead of just a counter.
+    pub last_tick_at: Option<std::time::Instant>,
+    /// Duration of the previous successful poll round-trip.
+    pub last_tick_dur: Option<std::time::Duration>,
 }
 
 #[derive(Copy, Clone, Default, PartialEq, Eq)]
@@ -152,6 +157,7 @@ fn run_poller(live: Arc<Live>, mut cmd_rx: tokio::sync::mpsc::Receiver<Command>)
 }
 
 async fn poll_once(client: &mut DaemonClient, live: &Arc<Live>) -> Result<(), String> {
+    let started = std::time::Instant::now();
     let status = simple(client, "kernel.status").await?;
     let ps = simple(client, "kernel.ps").await?;
     let services = simple(client, "kernel.services").await?;
@@ -161,6 +167,7 @@ async fn poll_once(client: &mut DaemonClient, live: &Arc<Live>) -> Result<(), St
         serde_json::json!({ "count": LOG_TAIL }),
     )
     .await?;
+    let dur = started.elapsed();
 
     live.write(|s| {
         s.connection = Connection::Connected;
@@ -169,6 +176,8 @@ async fn poll_once(client: &mut DaemonClient, live: &Arc<Live>) -> Result<(), St
         s.services = as_array(&services);
         s.logs = as_array(&logs);
         s.tick = s.tick.wrapping_add(1);
+        s.last_tick_at = Some(std::time::Instant::now());
+        s.last_tick_dur = Some(dur);
         s.last_error = None;
     });
     Ok(())
