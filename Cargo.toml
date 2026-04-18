@@ -30,6 +30,7 @@ members = [
     "crates/clawft-lsp-extract",
     "crates/weftos-leaf-types",
     "crates/eml-core",
+    "crates/clawft-gui-egui",
 ]
 exclude = [
     "gui/src-tauri",
