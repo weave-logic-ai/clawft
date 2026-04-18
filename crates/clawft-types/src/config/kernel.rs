@@ -767,6 +767,7 @@ mod tests {
             vector: None,
             profiles: None,
             pairing: None,
+            mesh: None,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let restored: KernelConfig = serde_json::from_str(&json).unwrap();

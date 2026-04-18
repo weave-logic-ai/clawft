@@ -360,12 +360,12 @@ impl<P: Platform> Kernel<P> {
                                             );
 
                                             // Optionally wrap in Noise encryption.
-                                            let mut channel = match &nc {
+                                            let mut channel: Box<dyn crate::mesh_noise::EncryptedChannel> = match &nc {
                                                 Some(cfg) => {
                                                     match crate::mesh_noise::NoiseChannel::respond(stream, cfg).await {
                                                         Ok(ch) => {
                                                             tracing::info!(peer = %peer_addr, "noise handshake complete");
-                                                            Box::new(ch) as Box<dyn crate::mesh_noise::EncryptedChannel>
+                                                            Box::new(ch)
                                                         }
                                                         Err(e) => {
                                                             tracing::warn!(peer = %peer_addr, error = %e, "noise handshake failed, dropping");
@@ -375,19 +375,41 @@ impl<P: Platform> Kernel<P> {
                                                 }
                                                 None => {
                                                     Box::new(crate::mesh_noise::PassthroughChannel::new(stream))
-                                                        as Box<dyn crate::mesh_noise::EncryptedChannel>
                                                 }
                                             };
 
-                                            // Read loop: decrypt and inject into mesh runtime.
+                                            // Outbound channel: the kernel pushes frames into
+                                            // `out_tx` (via `MeshRuntime::send_to_peer`) and this
+                                            // task drains `out_rx` back through the encrypted
+                                            // stream. This is what lets the topic forwarder in
+                                            // `A2ARouter` deliver pushes to inbound leaf peers that
+                                            // subscribed via `mesh.subscribe`.
+                                            let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+
+                                            // Bidirectional loop. `handle_incoming_from` auto-
+                                            // registers the peer by `envelope.source_node` on first
+                                            // arrival so the kernel can route back.
                                             loop {
-                                                match channel.recv_encrypted().await {
-                                                    Ok(data) => {
-                                                        if let Err(e) = rt2.handle_incoming(&data).await {
-                                                            tracing::debug!(error = %e, "mesh message handling error");
+                                                tokio::select! {
+                                                    inbound = channel.recv_encrypted() => match inbound {
+                                                        Ok(data) => {
+                                                            if let Err(e) = rt2
+                                                                .handle_incoming_from(&data, out_tx.clone())
+                                                                .await
+                                                            {
+                                                                tracing::debug!(error = %e, "mesh message handling error");
+                                                            }
                                                         }
-                                                    }
-                                                    Err(_) => break,
+                                                        Err(_) => break,
+                                                    },
+                                                    outbound = out_rx.recv() => match outbound {
+                                                        Some(data) => {
+                                                            if channel.send_encrypted(&data).await.is_err() {
+                                                                break;
+                                                            }
+                                                        }
+                                                        None => break,
+                                                    },
                                                 }
                                             }
                                         });

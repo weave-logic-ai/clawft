@@ -294,6 +294,36 @@ impl A2ARouter {
                         }
                     }
                 }
+
+                // Forward to mesh peers that registered a subscription for
+                // this topic via a `mesh.subscribe` control envelope.
+                #[cfg(feature = "mesh")]
+                if let Some(runtime) = self.mesh_runtime.get() {
+                    let peer_ids = runtime.peers_for_topic(topic);
+                    let mut mesh_delivered = 0u32;
+                    for peer_id in &peer_ids {
+                        let envelope = MeshIpcEnvelope::new(
+                            runtime.node_id().to_string(),
+                            peer_id.clone(),
+                            msg.clone(),
+                        );
+                        match runtime.send_to_peer(peer_id, envelope).await {
+                            Ok(()) => mesh_delivered += 1,
+                            Err(e) => {
+                                warn!(
+                                    topic,
+                                    peer = %peer_id,
+                                    error = %e,
+                                    "failed to forward topic to mesh peer"
+                                );
+                            }
+                        }
+                    }
+                    if mesh_delivered > 0 {
+                        debug!(from, topic, mesh_delivered, "forwarded topic to mesh peers");
+                    }
+                }
+
                 debug!(from, topic, delivered, "published to topic");
                 Ok(())
             }
