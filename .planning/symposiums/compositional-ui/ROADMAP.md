@@ -17,7 +17,11 @@ Last updated: 2026-04-19.
 - **9 session findings** (~31,900 words): historical canon, agentic
   UI SOTA, shared realtime, ontology→UI, renderer+egui, protocol
   design, dev-panel embedding, governance, agentic-OS framing.
-- **12 ADRs** (`adrs/adr-001`…`adr-012`, all *Proposed — Round 2*).
+- **14 ADRs** (`adrs/adr-001`…`adr-014`, all *Proposed — Round 2*).
+  ADR-013 (`ui://canvas`) and ADR-014 (Modal modality split) added
+  2026-04-19 after the demo-lab crosswalk surfaced gaps; ADR-001 and
+  ADR-006 amended in place. Canon count reconciled to **20 primitives
+  (19 Tier-A + 1 Tier-B)** — StreamView and Canvas both now listed.
 - **`protocol-spec.md`** — WSP-0.1 full spec (11k words, 20 §, full
   CDDL appendix, three wire example flows).
 - **M0 — VSCode/Cursor extension scaffold** at

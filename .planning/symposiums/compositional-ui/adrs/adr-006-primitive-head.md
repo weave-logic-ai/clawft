@@ -1,8 +1,17 @@
 # ADR-006: Primitive Head — Six Mandatory Fields at the Kernel Boundary
 
-**Date**: 2026-04-18
+**Date**: 2026-04-18 (initial), 2026-04-19 (amended)
 **Status**: Proposed — symposium round 2
 **Deciders**: Compositional UI Symposium (Round 1 synthesis)
+
+**Amendment note (2026-04-19)**: The demo-lab crosswalk surfaced two
+affordance-level patterns that are ubiquitous in egui but not new
+primitives: tooltips (hover info on nearly every widget) and drag-
+and-drop reordering (Stack children, Table rows). Rather than grow
+the canon, these are added as optional head fields — `tooltip` as a
+first-class optional, `reorderable` as a distinguished affordance
+flag. No wire break; renderers ignore unknown optionals per
+`protocol-spec.md §14`.
 
 ## Context
 
@@ -39,6 +48,15 @@ primitive-head = {
   variant     : variant-id,                 ; (5) active-radar attribution
   mutation-axes : [* mutation-axis],        ; (6) legal GEPA axes (empty list = none legal)
   privacy     : privacy-flags,              ; (7) mandatory; capture/retention/off-node
+  ? tooltip   : i18n-string,                ; (8) optional hover-help (amended 2026-04-19)
+}
+
+affordance = {
+  name        : tstr,
+  verb        : tstr,                       ; WSP verb to invoke (ADR-005)
+  ? actors    : [+ actor-kind],             ; "human" | "agent" | "any" — default any
+  ? args-schema : ontology-uri,
+  ? reorderable : bool,                     ; (amended 2026-04-19) child-reorder permitted
 }
 ```
 
@@ -81,6 +99,20 @@ non-empty `capture-channels` list and an absent or expired
 renderer never sees it. This is the structural precondition for
 foundations non-negotiable 1–4 (per-user, governance-gated,
 signal-lossy, observable) and is reinforced by ADR-012.
+
+**7. `tooltip` (optional, amended 2026-04-19)** — `i18n-string`.
+Hover / long-press / accessibility help-text. Rendered as a
+transient `Modal(modality="tool")` in the renderer; routed to
+AT-SPI-like descriptions for screen readers; spoken on long-press
+in voice mode. Absent field = no tooltip.
+
+**8. `reorderable` (optional, per-affordance, amended 2026-04-19)** —
+container primitives (`Stack`, `Grid`, `Table`, `Tree`) that permit
+drag-to-reorder children declare it on the `reorder` affordance.
+The renderer implements drag-and-drop only when this flag is
+present; governance can refuse to add the affordance without
+refusing the whole primitive. This closes the egui-demo drag-and-
+drop gap without a new primitive.
 
 ## Consequences
 

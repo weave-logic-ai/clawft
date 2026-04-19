@@ -1,8 +1,27 @@
-# ADR-001: Primitive Canon (18 Items — 17 Tier-A + 1 Tier-B)
+# ADR-001: Primitive Canon (20 Items — 19 Tier-A + 1 Tier-B)
 
-**Date**: 2026-04-18
+**Date**: 2026-04-18 (initial), 2026-04-19 (amended — see ADR-013, ADR-014)
 **Status**: Proposed — symposium round 2
 **Deciders**: Compositional UI Symposium (Round 1 synthesis)
+
+**Amendment note (2026-04-19)**: Two changes in this revision:
+
+1. **Reconciliation with `protocol-spec.md §7.2`** — the spec already
+   listed `StreamView` (`ui://stream-view`) as the streaming-native
+   anchor primitive (session-6 CDDL rec. 5), but it was missing from
+   the original ADR-001 table. Added as row 18.
+2. **Crosswalk against the egui demo surface** (hosted locally via
+   `weft-demo-lab`) surfaced three gaps: a freeform 2D painting
+   surface, a semantic distinction between modal and non-modal
+   floating surfaces, and two affordance-level additions. Resolved
+   by:
+   - **ADR-013** adds `ui://canvas` as a new Tier-A primitive
+     (row 19).
+   - **ADR-014** extends `ui://modal` with a `modality` field
+     (`modal | floating | tool | toast`) — one primitive, typed
+     modality.
+   - **ADR-006 amendment** adds `tooltip` and `reorderable` to the
+     primitive-head.
 
 ## Context
 
@@ -21,7 +40,7 @@ AGENDA fails.
 
 ## Decision
 
-Freeze the canon at eighteen primitives — seventeen Tier-A (all four
+Freeze the canon at twenty primitives — nineteen Tier-A (all four
 predicates, mandatory) plus one Tier-B wrapper (`ForeignSurface`, whose
 *shell* is Tier-A). Each carries an ontology IRI stem under
 `ui://`, a purpose statement, a four-predicate checklist (all four for
@@ -30,8 +49,8 @@ Tier-A; shell only for Tier-B), and a community egui crate mapping.
 | # | IRI stem | Purpose | P1 | P2 | P3 | P4 | egui implementation |
 |---|----------|---------|----|----|----|----|---------------------|
 | 1 | `ui://chip` | Labelled interactive status token | Y | Y | Y | Y | `egui::Frame` + `selectable_label` |
-| 2 | `ui://pressable` (Button) | Invoke-one-verb affordance | Y | Y | Y | Y | `egui::Button` |
-| 3 | `ui://field` | Typed input binding | Y | Y | Y | Y | `TextEdit` / `DragValue` / `DatePickerButton` / `ComboBox` |
+| 2 | `ui://pressable` (Button) | Invoke-one-verb affordance | Y | Y | Y | Y | `egui::Button` / `Hyperlink` |
+| 3 | `ui://field` | Typed input binding | Y | Y | Y | Y | `TextEdit` / `DragValue` / `DatePickerButton` / `ComboBox` / `CodeEditor` |
 | 4 | `ui://toggle` | Boolean binding (agent-reasoned) | Y | Y | Y | Y | `ui.toggle_value`, `Checkbox` |
 | 5 | `ui://select` | Closed-choice picker | Y | Y | Y | Y | `ComboBox` / `RadioButton` / `TableBuilder` |
 | 6 | `ui://slider` | Continuous range binding | Y | Y | Y | Y | `egui::Slider` |
@@ -40,13 +59,15 @@ Tier-A; shell only for Tier-B), and a community egui crate mapping.
 | 9 | `ui://strip` | Fixed-ratio division | Y | Y | Y | Y | `egui_extras::StripBuilder` |
 | 10 | `ui://dock` | Resizable tabbed / split panels | Y | Y | Y | Y | `egui_dock::DockArea` |
 | 11 | `ui://sheet` | Scrollable region, sticky headers | Y | Y | Y | Y | `egui::ScrollArea` |
-| 12 | `ui://modal` | Focus-capturing bounded decision | Y | Y | Y | Y | `egui::Area` + scrim / `Window` |
+| 12 | `ui://modal` | Floating surface with typed modality (modal / floating / tool / toast) — see ADR-014 | Y | Y | Y | Y | `egui::Area` + scrim / `Window` |
 | 13 | `ui://table` | Sortable tabular data | Y | Y | Y | Y | `egui_extras::TableBuilder` |
 | 14 | `ui://tree` | Hierarchical disclosure | Y | Y | Y | Y | `egui::CollapsingHeader` |
 | 15 | `ui://gauge` | Scalar with bounds + confidence halo | Y | Y | Y | Y | `ProgressBar` / `Painter::arc` |
 | 16 | `ui://plot` | Continuous time-series | Y | Y | Y | Y | `egui_plot` |
 | 17 | `ui://media` | Decoded image / icon / glyph | Y | Y | Y | Y | `egui::Image` + `egui_extras` loaders |
-| 18 | `ui://foreign` (Tier B) | Opaque content host | shell Y | shell Y | shell Y | shell Y | per-kind (wry, egui_term, GStreamer, capture APIs) |
+| 18 | `ui://stream-view` | Live-tailing view over event-sourced subscription — streaming-native anchor | Y | Y | Y | Y | `ScrollArea` + ring buffer from `Store` |
+| 19 | `ui://canvas` | Freeform 2D painter surface (pan / zoom / hit-test / draw) — see ADR-013 | Y | Y | Y | Y | `ui.allocate_painter()` + `Sense::drag` + `Painter` |
+| 20 | `ui://foreign` (Tier B) | Opaque content host | shell Y | shell Y | shell Y | shell Y | per-kind (wry, egui_term, GStreamer, capture APIs) |
 
 Deliberately *composed* (not primitives): `Form` = `Stack(Field…) +
 Button`; `Card` = themed `Stack` with `Gauge/Chip` cluster;
@@ -107,5 +128,11 @@ primitives are the vocabulary.
   egui mapping), `session-9-agentic-os-canon.md` (rec. 3).
 - Foundation elements: four predicates, two-tier rule
   (foundations §Two tiers), Non-negotiable §"Anti-rule" (no Tier-C).
-- ADRs: ADR-002 (promotion path), ADR-006 (primitive head),
-  ADR-010 (reverse-DDD mapping).
+- ADRs: ADR-002 (promotion path), ADR-006 (primitive head,
+  amended), ADR-010 (reverse-DDD mapping), ADR-013 (`ui://canvas`
+  primitive added), ADR-014 (`ui://modal` modality split).
+- Validation: full crosswalk against `https://www.egui.rs/#demo`
+  surface (hosted locally in `weft-demo-lab`) on 2026-04-19 —
+  17 of 20 visible demo behaviors already mapped to this canon
+  directly; the three gaps drove ADR-013/014 and the ADR-006
+  amendment.

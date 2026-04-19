@@ -676,7 +676,13 @@ A composer references a primitive in `surface.update` ops by the
 tuple; a renderer emits `PrimitiveRef` on every return-signal
 observation.
 
-### 7.2 Tier A — the 17 primitives
+### 7.2 Tier A — the 18 primitives
+
+> **Amended 2026-04-19**: Row 18 (`ui://canvas`) added per ADR-013.
+> The `ui://modal` section includes the `modality` field per ADR-014.
+> `primitive-head` picks up the optional `tooltip` field and the
+> `reorderable` per-affordance flag per the ADR-006 amendment.
+
 
 Each primitive is described with its ontology IRI stem, purpose,
 primitive-specific CDDL body (composed with `primitive-head`), legal
@@ -886,26 +892,46 @@ sheet = { primitive-head,
 - **Privacy relevance**: N/A.
 - **egui reference**: `egui::ScrollArea::vertical().stick_to_bottom(true)`.
 
-#### 7.2.12 `Modal` — `ui://modal`
+#### 7.2.12 `Modal` — `ui://modal` *(amended 2026-04-19 per ADR-014)*
 
-A foreground surface that captures focus for a bounded decision.
+A foreground surface whose behaviour is selected by the required
+`modality` field — one primitive, four modes (modal / floating / tool
+/ toast).
 
 ```cddl
 modal = { primitive-head,
-  title         : tstr,
-  body          : primitive-head,
-  ; affordances list on the head MUST include confirm | cancel | dismiss
+  modality      : "modal" / "floating" / "tool" / "toast",
+  ? title       : i18n-string,
+  ? dismissable : bool,                    ; default per modality
+  ? position    : "centre" / "docked-right" / "docked-left" / [2*float],
+  ? ttl-ms      : uint,                    ; required iff modality = "toast"
+  body          : [* primitive-ref],
+  ; affordances list MAY include confirm | cancel | dismiss; these are
+  ; frozen-by="safety" and never GEPA-legible regardless of modality.
 }
 ```
 
-- **Mutation axes**: `copy` (title only). The affordance set is
-  **frozen by safety** — `confirm`, `cancel`, `dismiss` are never
-  mutable. Additive verbs MAY be appended by schema.
-- **Privacy relevance**: consent modals MUST use `kind = "consent"`
-  flag in `primitive-head.privacy-flags` is not the right place;
-  this is declared via `type = "ui://modal" + sub-shape`.
-- **egui reference**: `egui::Area::new(id).order(Order::Foreground)`
-  + scrim.
+Per-modality semantics (ADR-014 Table):
+
+| modality | Scrim | Focus capture | Dismissable | Default position | Interrupt-priority |
+|----------|-------|---------------|-------------|------------------|-------------------|
+| `modal`    | yes | yes | via affordance | centre        | immediate  |
+| `floating` | no  | no  | always         | last position | no interrupt |
+| `tool`     | no  | no  | pinnable       | docked-right  | no interrupt |
+| `toast`    | no  | no  | auto (ttl-ms)  | top-right     | ambient    |
+
+Validation: a frame with `modality = "toast"` and no `ttl-ms` is
+malformed; a frame with `modality != "toast"` but containing `ttl-ms`
+is malformed.
+
+- **Mutation axes**: `copy` (title only). The safety affordance set
+  is frozen; additive verbs MAY be appended by schema.
+- **Privacy relevance**: consent modals MUST use `modality = "modal"`
+  and carry `privacy-flags.consent-id`. Tooltips under ADR-006 §7 are
+  rendered as `modality = "tool"` with `dismissable = true`.
+- **egui reference**: `egui::Area::new(id).order(Order::*)` with
+  `Order::Foreground` + scrim for `modal`, `Order::Middle` for
+  `floating` / `tool`, `Order::Tooltip` for `toast`.
 
 #### 7.2.13 `Table` — `ui://table`
 
@@ -1020,10 +1046,50 @@ stream-view = { primitive-head,
   sensitivity.
 - **egui reference**: `ScrollArea` + ring buffer pulled from `Store`.
 
-Note: the original 17-primitive list includes `StreamView` as the
-streaming-native anchor. `Pressable` (7.2.2) is named `Pressable`
-on the wire though colloquially known as `Button`; the ontology stem
-`ui://pressable` is authoritative.
+Note: `Pressable` (7.2.2) is named `Pressable` on the wire though
+colloquially known as `Button`; the ontology stem `ui://pressable` is
+authoritative.
+
+#### 7.2.19 `Canvas` — `ui://canvas` *(added 2026-04-19 per ADR-013)*
+
+A typed rectangular surface on which callers draw arbitrary layered
+content. Closes the Fractal-Clock / paint_bezier / pan_zoom /
+dancing_strings / painting demo gap.
+
+```cddl
+canvas = { primitive-head,
+  size          : [2*uint],                ; render target in logical pixels
+  ? view-box    : [4*float],                ; current pan/zoom viewport (x, y, w, h)
+  ? layers      : [+ canvas-layer],
+  ? cursor      : [2*float],                ; last hit-test, if tracked
+}
+
+canvas-layer = {
+  id        : tstr,
+  kind      : "strokes" / "bezier" / "shapes" / "raster",
+  content   : any,                          ; layer-type-specific payload
+}
+```
+
+Affordances the canvas MUST expose when writable:
+
+| Affordance | Verb | Notes |
+|------------|------|-------|
+| `draw` | `invoke` | Append or replace a layer. Flows through state-diff. |
+| `hit-test` | `invoke` | Returns top-most hit; feeds `topology` echo channel. |
+| `pan` | `invoke` | Updates `view-box`. Feeds `doppler`. |
+| `zoom` | `invoke` | Updates `view-box`. Feeds `doppler`. |
+| `snapshot` | `observe` | Streams raster frames — privacy-gated per §11.4. |
+
+- **Mutation axes**: `density` (layer detail), `granularity`
+  (sampling rate for strokes). Layer content kinds are frozen by
+  schema.
+- **Privacy relevance**: `snapshot` subscriptions count as a capture
+  channel — the kernel MUST auto-compose the capture tray chip
+  (§11.4) whenever any `canvas` subscription is live.
+- **egui reference**: `ui.allocate_painter(size, Sense::click_and_drag())`
+  + per-layer calls into `Painter`; `view-box` handled with
+  `RectTransform::from_to`.
 
 ### 7.3 Tier B — `ForeignSurface`
 
