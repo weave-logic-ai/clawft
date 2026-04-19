@@ -1163,6 +1163,7 @@ version = "0.6.17"
 dependencies = [
  "clawft-rpc",
  "eframe",
+ "egui_demo_lib",
  "egui_extras",
  "egui_plot",
  "parking_lot",
@@ -1607,6 +1608,12 @@ dependencies = [
  "tokio",
  "tracing",
 ]
+
+[[package]]
+name = "color-hex"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ecdffb913a326b6c642290a0d0ec8e8d6597291acdc07cc4c9cb4b3635d44cf9"
 
 [[package]]
 name = "color_quant"
@@ -2345,6 +2352,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "775cfde491852059e386c4e1deb4aef381c617dc364184c6f6afee99b87c402b"
 dependencies = [
  "bytemuck",
+ "color-hex",
  "emath",
 ]
 
@@ -2456,6 +2464,17 @@ dependencies = [
  "web-time",
  "webbrowser",
  "winit",
+]
+
+[[package]]
+name = "egui_demo_lib"
+version = "0.29.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dcc5e2dd86a62a644db35f89f712c87432ae58266f793d06683c827d67018aa1"
+dependencies = [
+ "egui",
+ "egui_extras",
+ "unicode_names2",
 ]
 
 [[package]]
@@ -7674,6 +7693,12 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
+
+[[package]]
+name = "unicode_names2"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "446c96c6dd42604779487f0a981060717156648c1706aa1f464677f03c6cc059"
 
 [[package]]
 name = "universal-hash"

@@ -15,9 +15,8 @@ pub struct ClawftApp {
 
 impl ClawftApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        crate::theming::apply(&cc.egui_ctx);
         egui_extras::install_image_loaders(&cc.egui_ctx);
-        apply_style(&cc.egui_ctx);
 
         // Preload the boot logo so the splash appears on frame 1 instead
         // of flashing in once the async image loader catches up.
@@ -65,13 +64,3 @@ impl eframe::App for ClawftApp {
     }
 }
 
-fn apply_style(ctx: &egui::Context) {
-    let mut style = (*ctx.style()).clone();
-    // Crisp, low-chrome look.
-    style.spacing.item_spacing = egui::vec2(6.0, 6.0);
-    style.spacing.button_padding = egui::vec2(8.0, 4.0);
-    style.visuals.window_rounding = egui::Rounding::same(8.0);
-    style.visuals.widgets.noninteractive.bg_stroke =
-        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 18));
-    ctx.set_style(style);
-}
