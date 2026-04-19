@@ -140,6 +140,74 @@ ontology). Promotion is a deliberate, ADR-worthy event. Wrapping is
 the default; native is the reward for proving the pattern is worth
 owning.
 
+### Tier B as a woven signal tapestry — the user's causal collapse cascade
+
+Wrappers *can* be read as mere conformance. That's fine, but it
+massively understates them. What they really emit is a **thick,
+woven tapestry of signals** — many threads running simultaneously
+(presence, identity, attention, activity, outcome, co-occurrence
+with other surfaces, timing, audio level, focus, scroll, query,
+waveform, frame, caption, clipboard, transcript). The weft is
+literally in the name of the system; it's the same metaphor. The
+value of a wrapper is that it weaves *many* threads across the
+substrate's warp at once, and no single thread tells the story —
+the interference pattern does.
+
+A user browsing, watching, speaking, and typing is performing the
+behaviour their own intent is collapsing through in real time — the
+**causal collapse cascade** (see `.planning/development_notes/
+eml-causal-collapse-research.md` for the ECC treatment). Every URL
+visited, every search typed mid-thought, every scroll stopped at,
+every voice fragment, every frame the camera saw — these are the
+raw threads of *how* a user's intent graph resolved into this
+particular action right now. The ECC reads the weave, not any one
+thread. That weave is what lets the system:
+
+- **Expand the conversation graph** with content the user cared
+  enough to look at.
+- **Close loops** by reminding the user of something they were
+  working on three browser tabs and two conversations ago.
+- **Pull ideas and content quickly** — "that page you were reading
+  yesterday about bonded-mesh peers" is a query the system can
+  answer only if it observed.
+- **Time interruptions well** — an agent that sees the user's
+  attention state chooses when to speak.
+- **Feed ECC** with the causal data it needs to model the user at
+  all, given that people are far harder to understand than code.
+
+For this reason, the ambient-capture wrappers are first-class:
+
+- `foreign://camera` — camera frame stream; affordances:
+  `enable`, `disable`, `snapshot`, `subscribe-tagged-frames`,
+  `level` (audio level if paired mic).
+- `foreign://mic` — mic stream; affordances: `enable`, `disable`,
+  `subscribe-transcript`, `subscribe-waveform`.
+- `foreign://screen` — screen-capture of the current surface;
+  affordances: `snapshot`, `subscribe-diff-frames`,
+  `subscribe-ocr-text`.
+
+**Non-negotiable privacy constraints**:
+
+1. **Per-user, never telemetry.** Observation data is the user's
+   property and lives in their own chain-backed substrate. It is
+   not uploaded, aggregated, or used for training off-node without
+   explicit, revocable consent tracked on-chain.
+2. **Governance-gated by default.** Every capture wrapper is gated
+   by the constitutional governance layer; a user can require
+   per-invocation consent, per-session consent, or standing
+   consent with an audit trail.
+3. **Signal lossy by policy.** What's emitted to the ontology is
+   the *interpretation* (detected text, detected face, detected
+   URL, detected application-in-focus), not the raw capture,
+   unless the user explicitly requests a retained recording.
+4. **Observable to the user.** A persistent, honest surface
+   primitive (probably a tray chip) shows which captures are live
+   right now. No dark recording, ever.
+
+The observation stream is the system's most valuable asset **and**
+the user's most personal dataset. Those two facts are the same fact;
+the protocol must never let them diverge.
+
 **Anti-rule**: we do not allow Tier-C. No "halfway primitives" that
 satisfy three of the four predicates. Either full citizen (Tier A),
 or opaque guest behind a compliant shell (Tier B). This keeps the
