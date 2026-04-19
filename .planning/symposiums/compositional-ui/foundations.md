@@ -208,6 +208,35 @@ The observation stream is the system's most valuable asset **and**
 the user's most personal dataset. Those two facts are the same fact;
 the protocol must never let them diverge.
 
+### Digital exhaust = intent
+
+The OS interface is **the most data-rich surface for understanding a
+human** that any system will ever get near. Every other channel is
+downstream of it — transcripts are downstream of what was said while
+doing something; repositories are downstream of what was typed at a
+workspace; emails are downstream of what a user opened, read, and
+decided to respond to. All of that lives *on the interface*. The
+interface is the delta.
+
+What flows off it is **digital exhaust**, and the critical recognition
+is that *the exhaust is not metadata. The exhaust is intent.*
+Traditional systems treat digital exhaust as telemetry — a by-product
+to be sampled for aggregate analytics. For us it is the primary
+product, because the exhaust of a single person working toward a goal
+*is* the highest-resolution trace of that goal we will ever obtain.
+
+This reframes the UI protocol. It is not primarily a display
+protocol. It is **an intent-collection protocol that happens to
+render pixels**. That inversion is what makes this system different
+from every OS that preceded it, and it is the lens every primitive,
+wrapper, signal, and ADR must be read through.
+
+Everything in the Non-negotiable privacy constraints above follows
+directly: if digital exhaust is intent, then surrendering it without
+consent is surrendering *the user's intent itself*, which is a
+harm of a different order than surrendering a click-stream. The
+protocol must protect it in proportion.
+
 **Anti-rule**: we do not allow Tier-C. No "halfway primitives" that
 satisfy three of the four predicates. Either full citizen (Tier A),
 or opaque guest behind a compliant shell (Tier B). This keeps the
