@@ -208,6 +208,70 @@ The observation stream is the system's most valuable asset **and**
 the user's most personal dataset. Those two facts are the same fact;
 the protocol must never let them diverge.
 
+### The active-radar loop — display as probe, return as model
+
+Everything so far has treated observation as *passive* — we render,
+we listen to the exhaust. The deeper point is that **this is an
+active sensing system, not a passive one**. Because we emit the
+display, we know the composition of the outgoing pulse exactly. When
+the user interacts, the return carries information we can interpret
+against the known pulse:
+
+- **Topology** — which primitive was engaged, in what order, for how
+  long. The user's trajectory across the surface plots the shape of
+  their psychology against the task.
+- **Doppler** — the velocity of interaction. Fast, confident action
+  against a suggestion is a returning echo shifted toward *coherence
+  rising*. Hesitation, backtracking, repeated re-reads are a shift
+  toward *coherence falling*. ECC consumes both.
+- **Range / latency** — how long until the user acts is a confidence
+  reading; consistently long latencies on the same primitive are a
+  design smell the system can see without anyone filing a bug.
+- **Bearing** — which affordance was chosen out of those offered
+  reveals the intent vector better than any explicit query could.
+- **Return-signal strength** — explicit acts (click, utterance,
+  confirmation) vs implicit (dwell, scroll, glance) weight the ECC
+  update.
+
+Because the emission is under our control, we can **deliberately
+vary it** — small GEPA-style mutations across the Pareto front of
+plausible variants (ordering, density, copy, timing, granularity,
+modality split). The return signal says which variant landed. The
+ECC updates its causal model of *this user doing this task through
+this surface*, and the next pulse incorporates what was learned.
+This is closed-loop, real-time, running continuously, and most of
+the time invisible to the user — no A/B banner, no feedback form.
+
+This gives the system a triple-compounding property:
+
+1. **About the user** — their psychology, coherence dynamics,
+   attention patterns.
+2. **About the task** — which primitives resolve which kinds of
+   intent; which compositions close which kinds of loops.
+3. **About the system itself** — which primitives, compositions,
+   and variants actually help, measured by downstream coherence
+   delta rather than by a designer's aesthetic preference.
+
+The protocol must therefore carry:
+
+- A **variant-id** on every primitive render so returns can be
+  attributed to the exact emitted pulse.
+- A **mutation schema** per primitive declaring which axes are
+  legal to vary (and which are fixed — brand marks, safety
+  affordances, consent flows are *not* GEPA-legible).
+- A **return-signal schema** rich enough that topology, doppler,
+  range, and bearing can all be reconstructed from the stream.
+- Governance gates on mutation itself: the system cannot silently
+  experiment on surfaces the user has marked stable, and cannot
+  mutate consent or safety flows ever.
+
+The canonical description of this loop: **display is the active
+pulse; user interaction is the return echo; ECC is the receiver;
+GEPA is the learning step**. That loop is the system's core
+learning mechanism for UI, and by extension for every app, service,
+and agent surfaced through it — the more a user uses it, the
+better it understands them, the task, and its own helpfulness.
+
 ### Digital exhaust = intent
 
 The OS interface is **the most data-rich surface for understanding a
