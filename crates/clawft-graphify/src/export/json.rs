@@ -1,4 +1,4 @@
-//! JSON export matching Python's `node_link_data` format.
+//! JSON export matching the graphify schema validated by `build_from_json`.
 //!
 //! The output schema is:
 //! ```json
@@ -7,10 +7,16 @@
 //!   "multigraph": false,
 //!   "graph": {},
 //!   "nodes": [...],
-//!   "links": [...],
+//!   "edges": [...],
 //!   "hyperedges": [...]
 //! }
 //! ```
+//!
+//! Historically this writer emitted NetworkX-style `"links"` without a
+//! `source_file` field, which round-tripped through `build_from_json` only via
+//! a reader-side remap and still failed schema validation. The writer now
+//! emits `"edges"` directly with `source_file` populated, matching the
+//! reader's expectations in `validation.rs` and `build.rs`.
 
 use std::collections::HashMap;
 use std::fs;
@@ -81,8 +87,8 @@ pub fn to_json_value(kg: &KnowledgeGraph) -> serde_json::Value {
         })
         .collect();
 
-    // Serialize links (edges).
-    let links: Vec<serde_json::Value> = kg
+    // Serialize edges.
+    let edges: Vec<serde_json::Value> = kg
         .edges()
         .map(|(src, tgt, rel)| {
             let src_str = src
@@ -110,16 +116,32 @@ pub fn to_json_value(kg: &KnowledgeGraph) -> serde_json::Value {
                 .and_then(|v| v.as_str())
                 .unwrap_or(&tgt_display);
 
-            json!({
+            // `source_file` is required by the reader's schema validator. Prefer
+            // the relationship's own provenance, then fall back to the source
+            // node's source_file, then the source id string.
+            let source_file = rel
+                .source_file
+                .clone()
+                .or_else(|| src.source_file.clone())
+                .unwrap_or_else(|| src_display.clone());
+
+            let mut edge = json!({
                 "source": src_display,
                 "target": tgt_display,
                 "relation": rel.relation_type,
                 "confidence": rel.confidence,
                 "confidence_score": rel.confidence.to_score(),
                 "weight": rel.weight,
+                "source_file": source_file,
                 "_src": meta_src,
                 "_tgt": meta_tgt,
-            })
+            });
+            if let Some(loc) = rel.source_location.as_ref() {
+                edge.as_object_mut()
+                    .unwrap()
+                    .insert("source_location".into(), json!(loc));
+            }
+            edge
         })
         .collect();
 
@@ -141,7 +163,7 @@ pub fn to_json_value(kg: &KnowledgeGraph) -> serde_json::Value {
         "multigraph": false,
         "graph": {},
         "nodes": nodes,
-        "links": links,
+        "edges": edges,
         "hyperedges": hyperedges,
     })
 }
@@ -200,16 +222,47 @@ mod tests {
         assert_eq!(val["directed"], false);
         assert_eq!(val["multigraph"], false);
         assert!(val["nodes"].as_array().unwrap().len() == 2);
-        assert!(val["links"].as_array().unwrap().len() == 1);
+        assert!(val["edges"].as_array().unwrap().len() == 1);
     }
 
     #[test]
     fn confidence_score_defaults() {
         let kg = sample_kg();
         let val = to_json_value(&kg);
-        let link = &val["links"][0];
-        assert_eq!(link["confidence"], "EXTRACTED");
-        assert_eq!(link["confidence_score"], 1.0);
+        let edge = &val["edges"][0];
+        assert_eq!(edge["confidence"], "EXTRACTED");
+        assert_eq!(edge["confidence_score"], 1.0);
+    }
+
+    #[test]
+    fn edge_has_source_file() {
+        let kg = sample_kg();
+        let val = to_json_value(&kg);
+        let edge = &val["edges"][0];
+        // source_file must be populated so the reader's schema validator passes.
+        assert_eq!(edge["source_file"], "auth.py");
+    }
+
+    #[test]
+    fn round_trip_through_build_from_json() {
+        use crate::build::build_from_json;
+        use crate::validation::validate_extraction;
+
+        let kg = sample_kg();
+        let val = to_json_value(&kg);
+
+        // Schema-validates cleanly (the reported bug was that validation failed
+        // with "Edge 0 missing required field 'source_file'").
+        let errs: Vec<_> = validate_extraction(&val)
+            .into_iter()
+            .filter(|e| !e.contains("does not match any node id"))
+            .collect();
+        assert!(errs.is_empty(), "validation errors: {errs:?}");
+
+        // Round-trips through the reader.
+        let rebuilt = build_from_json(&val).expect("build_from_json should succeed");
+        assert_eq!(rebuilt.entity_count(), 2);
+        assert_eq!(rebuilt.relationship_count(), 1);
     }
 
     #[test]

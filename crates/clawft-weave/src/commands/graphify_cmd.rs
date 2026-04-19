@@ -513,8 +513,17 @@ async fn run_diff(
 
     let old_nodes = old_data["nodes"].as_array().map(|a| a.len()).unwrap_or(0);
     let cur_nodes = cur_data["nodes"].as_array().map(|a| a.len()).unwrap_or(0);
-    let old_edges = old_data["links"].as_array().map(|a| a.len()).unwrap_or(0);
-    let cur_edges = cur_data["links"].as_array().map(|a| a.len()).unwrap_or(0);
+    // Prefer "edges" (current writer); fall back to "links" for old graph.json
+    // files produced before the writer was fixed.
+    let count_edges = |v: &serde_json::Value| -> usize {
+        v.get("edges")
+            .or_else(|| v.get("links"))
+            .and_then(|a| a.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0)
+    };
+    let old_edges = count_edges(&old_data);
+    let cur_edges = count_edges(&cur_data);
 
     let node_diff = cur_nodes as i64 - old_nodes as i64;
     let edge_diff = cur_edges as i64 - old_edges as i64;
