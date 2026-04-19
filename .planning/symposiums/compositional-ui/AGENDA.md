@@ -23,6 +23,35 @@ The protocol is the canon. Renderers come and go.
 
 ---
 
+## Foundation principle (non-negotiable)
+
+From the user, 2026-04-19:
+
+> Start with composable, semantic primitives — buttons, panels, and
+> forms whose properties are defined in an ontology or knowledge graph
+> so AI can query and manipulate them. Every component exposes state,
+> affordances, and confidence levels. Support async streaming results
+> and partial views. Base components should feel like Lego for both
+> humans and agents.
+
+Codified in `foundations.md`. Every session, ADR, and protocol design
+decision must satisfy these four predicates:
+
+1. **Ontology-addressable** — each primitive has a typed identity in the
+   knowledge graph; the agent queries it, doesn't guess.
+2. **Self-describing** — state + affordances + confidence are read-
+   able on the primitive, not inferred.
+3. **Streaming-native** — partial values, progressive disclosure, and
+   out-of-order updates are primitive-level concerns, not application-
+   level workarounds.
+4. **Dual-operator** — the same primitive is usable by a human
+   (pointer / voice / keyboard) and by an agent (query / invoke /
+   subscribe).
+
+If a proposal violates any of these, it's rejected at the ADR stage.
+
+---
+
 ## Literature we explicitly read against
 
 These are **required anchors** for every research session. Each finding
@@ -52,6 +81,61 @@ compositional frame:
   appearance.
 - **Axioms on modality, direct manipulation, undo, idioms vs
   affordances** — these are constraints the protocol must not violate.
+
+### Daniel Rasmus — *The Agentic Operating System* (seriousinsights.net, 2025)
+
+**Mandatory reading for every session.** Gets its own full research
+track (RQ9 — "Agentic OS canon"). Rasmus writes the clearest statement
+we have of *why this matters and what must be built*:
+
+- **Four-layer reference architecture**: Semantic Foundation (vector-
+  native store + knowledge graph), Probabilistic Kernel (arbitrates
+  intent under uncertainty), Model Control Plane (context window as
+  working memory), Specialized Agents (janitor, gatekeeper, archivist,
+  strategist — replace "features" in today's apps).
+- **Episodic UI**: "The system throws up exactly the UI needed to
+  confirm a decision, tweak parameters, or explore alternatives.
+  It then gets out of the way." This *is* our Mission Console
+  ephemeral-renderer model, written down.
+- **Six unsolved problems** he names — we already have substantive
+  answers to most, and the symposium needs to surface them:
+  1. **Identity and delegation** → ExoChain + dual signing + RVF
+     crypto + governance gates.
+  2. **Asynchronous execution** → mesh runtime + HeartbeatTracker
+     + MeshClockSync + ECC for interruption prioritisation.
+  3. **Multi-agent protocols** → MCP + our own A2A router + claims
+     authorization.
+  4. **Economics** → DeFi layer + bond staking + trust progression
+     + slashing.
+  5. **Training data lock-in** → ECC + reasoningbank + portable
+     trajectories (we do not store user profiles; we store *causal
+     models*).
+  6. **Serendipity vs. efficiency** → ECC deliberately introduces
+     productive disruption via hypothesis generation.
+- **Disruption argument**: "Microsoft needs to scrap Windows and start
+  over." The player who open-sources the coordination protocol and
+  gets it adopted widely wins. This is our market position.
+
+### Mei et al. — *AIOS: LLM Agent Operating System* (arXiv 2403.16971) + `agiresearch/AIOS`
+
+Academic + reference-implementation prior art for an LLM-specific
+kernel. Components: Scheduler, Context Manager, Memory Manager,
+Storage Manager, Tool Manager, Access Control, LLM Manager. We
+already ship analogues for most of these — the symposium should do
+an explicit crosswalk (ours → theirs → gaps). Key lesson: AIOS has
+no real surface-composition model, only an SDK. Our contribution is
+to fill that gap.
+
+### CedarCopilot — `cedar-OS`
+
+Dormant React framework that got several primitives right:
+`useCedarState` (agent-readable app state), Shadcn-style "you own the
+code", context-aware mentions (@user/@file/@state), Spells & Quick
+Actions radial menu, provider-agnostic agent backends. **Positive
+lesson**: state registration + semantic mentions are primitive-level
+concerns. **Negative lesson**: React-only and no confidence or
+partial-view model — we do not want to inherit its framework lock-in
+or its missing pieces.
 
 ### Eric Evans — *Domain-Driven Design: Tackling Complexity in the Heart of Software*
 
@@ -145,6 +229,18 @@ How does an egui surface embed in Cursor/VSCode? Webview with wasm build, native
 ### RQ8 — Goals as constitutional governance
 
 How do we express project-scoped goals so they outlive agent sessions and constrain what surfaces the agent may compose? This connects to the existing `governance-counsel` agent, ADR-style decisions, and the ECC model. Goals become part of the substrate, not the agent memory.
+
+### RQ9 — Agentic OS canon (dedicated track)
+
+Read Rasmus in full. Crosswalk his four-layer reference architecture
+against our stack (kernel, mesh, ExoChain, governance, ECC). For each
+of his six unsolved problems, document our answer, its maturity, and
+what's still missing. Read Mei et al. (AIOS arXiv) and
+`agiresearch/AIOS` as the academic prior art — document gaps. Read
+`cedar-OS` for positive and negative primitive-design lessons. Output
+is a single synthesis doc that becomes the *framing paper* for the
+rest of the symposium — every other RQ's findings are read against
+it. This is the heaviest single track; budget more time.
 
 ---
 
