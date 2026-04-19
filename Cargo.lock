@@ -1174,18 +1174,24 @@ name = "clawft-gui-egui"
 version = "0.6.17"
 dependencies = [
  "clawft-rpc",
+ "console_error_panic_hook",
  "eframe",
  "egui",
  "egui_demo_lib",
  "egui_extras",
  "egui_plot",
  "ehttp",
+ "futures",
+ "js-sys",
  "log",
  "parking_lot",
  "poll-promise",
  "rodio",
  "serde_json",
  "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

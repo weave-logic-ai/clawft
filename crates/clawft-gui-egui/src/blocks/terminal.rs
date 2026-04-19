@@ -127,7 +127,7 @@ fn run_command(state: &mut DemoState, live: &Arc<Live>, cmd: String) {
 }
 
 fn dispatch_rpc(state: &mut DemoState, live: &Arc<Live>, method: &str, params: Value) {
-    let (tx, rx) = tokio::sync::oneshot::channel();
+    let (tx, rx) = crate::live::reply_channel();
     state.pending_rpcs.push(PendingRpc {
         method: method.to_string(),
         rx,
@@ -147,8 +147,8 @@ fn drain_replies(state: &mut DemoState) {
     let pending = std::mem::take(&mut state.pending_rpcs);
     let mut still = Vec::with_capacity(pending.len());
     for mut p in pending {
-        match p.rx.try_recv() {
-            Ok(Ok(value)) => {
+        match crate::live::try_recv_reply(&mut p.rx) {
+            crate::live::TryReply::Done(Ok(value)) => {
                 let pretty = serde_json::to_string_pretty(&value)
                     .unwrap_or_else(|_| value.to_string());
                 for line in pretty.lines() {
@@ -157,13 +157,13 @@ fn drain_replies(state: &mut DemoState) {
                         .push((TerminalLineKind::Output, line.to_string()));
                 }
             }
-            Ok(Err(err)) => {
+            crate::live::TryReply::Done(Err(err)) => {
                 push_err(state, format!("{}: {err}", p.method));
             }
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+            crate::live::TryReply::Empty => {
                 still.push(p);
             }
-            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+            crate::live::TryReply::Closed => {
                 push_err(state, format!("{}: reply channel closed", p.method));
             }
         }
@@ -183,5 +183,5 @@ fn push_err(state: &mut DemoState, s: String) {
 /// A single outstanding RPC whose reply we're waiting for.
 pub struct PendingRpc {
     pub method: String,
-    pub rx: tokio::sync::oneshot::Receiver<Result<Value, String>>,
+    pub rx: crate::live::ReplyRx,
 }

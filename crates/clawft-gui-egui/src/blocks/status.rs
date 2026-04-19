@@ -34,9 +34,9 @@ pub fn show(ui: &mut egui::Ui, snap: &Snapshot) {
         card(ui, "Health check", &health_interval.to_string(), "s", Kind::Ok);
 
         // Poller freshness — tick number, age of the last poll, and RTT.
-        let (value, unit, kind) = match snap.last_tick_at {
+        let (value, unit, kind) = match snap.last_tick_at_ms {
             Some(t) => {
-                let age_ms = t.elapsed().as_millis();
+                let age_ms = (crate::live::now_ms() - t).max(0.0) as u64;
                 let kind = if age_ms > 5_000 { Kind::Crit }
                     else if age_ms > 2_000 { Kind::Warn }
                     else { Kind::Ok };
@@ -45,8 +45,8 @@ pub fn show(ui: &mut egui::Ui, snap: &Snapshot) {
             None => ("—".to_string(), String::new(), Kind::Warn),
         };
         card(ui, "Poll", &value, &unit, kind);
-        if let Some(d) = snap.last_tick_dur {
-            card(ui, "Poll RTT", &format!("{}", d.as_millis()), "ms", Kind::Ok);
+        if let Some(d) = snap.last_tick_dur_ms {
+            card(ui, "Poll RTT", &format!("{}", d as u64), "ms", Kind::Ok);
         }
     });
 }
