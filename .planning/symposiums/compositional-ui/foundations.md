@@ -52,6 +52,101 @@ under this canon.
 
 ---
 
+## Two tiers — primitives vs wrappers
+
+Not every useful surface can satisfy all four predicates. A web
+browser renders arbitrary HTML/JS that wasn't authored against our
+ontology. A video decoder produces pixels the agent cannot
+meaningfully interrogate. A legacy native egui/Tauri app runs in its
+own process. We still want to host them.
+
+The canon admits **two tiers**, and no more:
+
+### Tier A — primitives
+Satisfy **all four predicates**. These are the Lego blocks. Agents
+reason about them, compose them, interrogate them. Buttons, Panels,
+Forms, Fields, Chips, Gauges, Sparklines, Tables, Trees, Sheets,
+Modals, Docks, Trays. This is where the real value is, and this is
+what the protocol primarily describes.
+
+### Tier B — wrappers (`ForeignSurface`)
+A single primitive — `ForeignSurface` — is the canonical host for
+opaque content. The **shell** around a foreign surface is a tier-A
+primitive and **must** satisfy all four predicates:
+
+- **Ontology-addressable** — the wrapper has a typed identity
+  (`foreign://browser`, `foreign://video`, `foreign://xwindow`,
+  `foreign://tauri-app/weftos-gui`) and a declared capability set
+  (what the outer shell can do: position, focus, visibility,
+  lifecycle, audio routing, clipboard access, URL navigation,
+  screenshot/scrape, DOM accessibility tree if available).
+- **Self-describing** — shell state (opened-at, last-URL, focus,
+  size, exit-code, health) is queryable; inner state is declared
+  opaque unless the wrapper type provides an introspection adapter
+  (browser → DOM+a11y tree; terminal → ANSI stream; pdf → page+text).
+- **Streaming-native** — lifecycle events (load-start, ready,
+  navigation, crash, closed) stream on the shell's subscription.
+- **Dual-operator** — the shell is driveable by both pointer/voice
+  and agent (`navigate`, `focus`, `screenshot`, `terminate`,
+  `inject-text`, `read-accessibility-tree`).
+
+**Inner content is not fully exempt — it participates as signal.**
+The agent cannot compose primitives *inside* a ForeignSurface, but
+the surface's *existence, identity, state, and activity* are
+first-class signals that feed the ontology and context layer. A
+wrapper is reduced-fidelity participation, not withdrawal. Examples
+of signals every wrapper emits:
+
+- **Presence** — "a foreign surface of type X is active and in focus"
+  is a context fact. Agents use it to decide interruption priority
+  ("user is watching a video → defer audio notification", "user is
+  in a terminal → they're probably hands-on-keyboard").
+- **Identity hint** — the URI (`foreign://browser` + current URL,
+  `foreign://video` + current media id, `foreign://app` + bundle id)
+  is a coarse but meaningful ontology signal. "Browser on
+  weftos-chain.com" is a stronger prior than "browser".
+- **Activity** — input rate, scroll position, audio level, resource
+  usage. The wrapper measures; the ontology ingests.
+- **Outcomes** — navigation events, lifecycle transitions, exit
+  codes, screenshots at checkpoints. These are ingestable into the
+  knowledge graph the same way any other substrate event is.
+
+So the rule is: **the interior is opaque to primitive composition,
+but the surface still emits typed signals into the substrate.** The
+four predicates apply *in full* to the wrapper shell and *as signal
+channels* to the interior. A wrapper that refuses to emit presence /
+identity / activity signals is not a conformant wrapper.
+
+**Canonical wrapper types** to support from day one:
+
+- `foreign://browser` — Chromium/WebView pane; affordances:
+  `navigate`, `reload`, `screenshot`, `read-a11y-tree`,
+  `execute-script` (governance-gated), `export-text`.
+- `foreign://terminal` — pty host; affordances: `write`,
+  `screenshot-buffer`, `tail-output`, `resize`, `kill`.
+- `foreign://video` — media player pane; affordances: `play`,
+  `pause`, `seek`, `set-track`, `subtitles`.
+- `foreign://xwindow` — embed an X11/Wayland window (existing
+  legacy app); affordances: `focus`, `resize`, `screenshot`,
+  `terminate`.
+- `foreign://app` — a nested WeftOS app (another egui process or
+  Tauri binary); affordances: `launch`, `focus`, `terminate`,
+  `send-message` (via the app's own protocol handshake).
+
+**Design rule**: when a wrapper type earns enough usage, we may
+promote specific inner behaviours to a *native* primitive (e.g. a
+native Browser becomes a real tier-A `WebPane` that *does* speak
+ontology). Promotion is a deliberate, ADR-worthy event. Wrapping is
+the default; native is the reward for proving the pattern is worth
+owning.
+
+**Anti-rule**: we do not allow Tier-C. No "halfway primitives" that
+satisfy three of the four predicates. Either full citizen (Tier A),
+or opaque guest behind a compliant shell (Tier B). This keeps the
+surface protocol small and legible to agents.
+
+---
+
 ## The reverse-DDD arrow
 
 Classical DDD runs `domain → model → code → UI`.
@@ -101,8 +196,9 @@ These are rejected at the ADR stage, no discussion:
 - Hand-designed screens (bespoke layout code per view is an
   architectural failure).
 - CLI-shaped chat as the dev-panel primary surface.
-- Primitives that satisfy three of the four predicates. All four, or
-  it's not a primitive.
+- **Tier-C "halfway primitives"** that satisfy three of the four
+  predicates. All four (Tier A), or opaque behind a compliant shell
+  (Tier B). Nothing in between.
 
 ---
 
