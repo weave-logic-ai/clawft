@@ -1,31 +1,50 @@
-# vscode-weft-panel (M0)
+# vscode-weft-panel (M1)
 
-Smallest thing that proves the loop `daemon <-> extension <-> webview`
-end to end. Background and design rationale live in
-`.planning/symposiums/compositional-ui/session-7-dev-panel-embedding.md`;
-predicate framing in `.planning/symposiums/compositional-ui/foundations.md`.
+The WeftOS dev panel for VSCode / Cursor. Hosts the full
+`clawft-gui-egui` shell (boot splash, warped-grid desktop, tray, live
+kernel status) as a wasm bundle inside a `WebviewPanel`, with RPC
+proxied to the daemon through the extension host.
 
-This is an M0 scaffold. It deliberately stops short of egui-wasm (M1),
-voice/capture sidecar (M2), and the substrate topic layer (WSP-0.1).
+Architecture & rationale:
+`.planning/symposiums/compositional-ui/session-7-dev-panel-embedding.md`
+and `adrs/adr-011-dev-panel-embedding-hybrid.md`.
+Predicate framing: `.planning/symposiums/compositional-ui/foundations.md`.
 
 ## What it does
 
 - Registers the command `WeftOS: Open Panel` (`weft.openPanel`).
-- Opens a `WebviewPanel` in the editor area with `retainContextWhenHidden`.
-- Implements `WebviewPanelSerializer` so the shell survives window reloads.
-- Proxies `kernel.status` and `kernel.ps` from the webview to the daemon
-  over the Unix socket described in `clawft_rpc::protocol::socket_path()`.
-- Records each click + return in a small on-screen log — a placeholder
-  for the active-radar return channel in WSP.
+- Opens a sovereign-posture `WebviewPanel` (editor area,
+  `retainContextWhenHidden`, `WebviewPanelSerializer` for reload
+  survival).
+- Bootstraps the egui surface: loads the wasm bundle + wasm-bindgen
+  JS glue from `webview/wasm/`, calls `weft_start("weft-canvas")`.
+- Installs `window.__weftPostToHost` so the wasm `live::wasm_live`
+  transport can post JSON RPC-request messages up to the extension
+  host; extension proxies them to the daemon UDS and posts
+  RPC-response messages back via `webview.postMessage` (the default
+  `window 'message'` channel the wasm side already listens on).
+- Allowlists four methods for the panel's use:
+  `kernel.status`, `kernel.ps`, `kernel.services`, `kernel.logs`.
 
 ## Build
 
+Two steps — the wasm bundle, then the extension.
+
 ```bash
+# 1) Build the egui-wasm bundle into webview/wasm/
+#    (requires: rustup target add wasm32-unknown-unknown,
+#     cargo install wasm-pack)
+extensions/vscode-weft-panel/scripts/build-wasm.sh
+
+# 2) Compile the TypeScript extension
 cd extensions/vscode-weft-panel
-npm install
-npm run compile      # tsc -p .
+npm install       # first time only
+npm run compile   # tsc -p .
 # optional: npm run watch
 ```
+
+The wasm artifacts are `.gitignore`d — rebuild on every source change
+via the script above (or `watch` if you wire one up).
 
 ## Install (VSCode)
 
@@ -35,9 +54,8 @@ npm run package      # produces vscode-weft-panel-0.0.1.vsix
 code --install-extension vscode-weft-panel-0.0.1.vsix
 ```
 
-Or, for unpacked iteration: in VSCode run
-`Developer: Install Extension from Location...` and point it at
-this directory.
+Or, for unpacked iteration: palette → `Developer: Install Extension
+from Location…` → point it at this directory.
 
 ## Install (Cursor)
 
@@ -47,18 +65,20 @@ Cursor is a VSCode fork and accepts the same `.vsix`:
 cursor --install-extension vscode-weft-panel-0.0.1.vsix
 ```
 
-Or `Developer: Install Extension from Location...` in the Cursor
-command palette.
+Or palette → `Developer: Install Extension from Location…`.
 
 ## Use
 
-1. Start the daemon: `cargo run -p clawft-weave --bin weaver -- kernel start`.
-2. Open the palette and run **WeftOS: Open Panel**.
-3. Click **Fetch kernel.status** or **Fetch kernel.ps** — the JSON
-   response appears in the response pane; the radar log records the
-   round-trip with a latency.
-4. If the daemon is not running, the response pane shows the error
-   (`ENOENT` or `ECONNREFUSED` plus the "start with `weaver kernel start`"
-   hint); the extension does not crash.
+1. Start the daemon:
+   ```bash
+   cargo run -p clawft-weave --bin weaver -- kernel start
+   ```
+2. Palette → **WeftOS: Open Panel**.
+3. Watch the boot splash → desktop shell render *inside* Cursor. The
+   sidebar pill flips to green within ~1s; Status shows live kernel
+   values.
 
-See `SMOKE.md` for the full smoke test.
+If you see the fallback "Failed to load the wasm bundle" card, step 1
+of Build wasn't run. See `SMOKE.md` for the full smoke test and the
+known gaps (voice/capture sidecar, typed active-radar channel, WSP
+verbs — all deferred to M2/M3).

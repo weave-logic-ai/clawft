@@ -1,53 +1,88 @@
-# M0 smoke test
+# Smoke test — WeftOS VSCode / Cursor panel (M1)
 
-Everything here should be doable in under five minutes once the extension
-is compiled and installed. If a step below fails, M0 is not green.
+End-to-end path: **daemon ↔ VSCode extension ↔ webview ↔ egui-wasm surface**.
 
-## Prereqs
+## 1. Build the wasm bundle
 
-- `npm install && npm run compile` has been run in this directory.
-- Extension has been installed into VSCode or Cursor (see `README.md`).
+```bash
+# from repo root
+extensions/vscode-weft-panel/scripts/build-wasm.sh
+```
 
-## Steps
+Prerequisites: `rustup target add wasm32-unknown-unknown`,
+`cargo install wasm-pack` (one-time). Expected output:
 
-1. **Start the daemon.**
-   ```bash
-   cargo run -p clawft-weave --bin weaver -- kernel start
-   ```
-   Leave it running.
+```
+✓ Wasm bundle at extensions/vscode-weft-panel/webview/wasm
+… clawft_gui_egui.js  (~80 KB)
+… clawft_gui_egui_bg.wasm  (~4.2 MB unoptimized)
+```
 
-2. **Open the workspace** in VSCode or Cursor with this repo as the root.
+## 2. Compile the extension
 
-3. **Install the extension** if you have not already:
-   ```bash
-   code --install-extension extensions/vscode-weft-panel/vscode-weft-panel-0.0.1.vsix
-   # or in Cursor:
-   cursor --install-extension extensions/vscode-weft-panel/vscode-weft-panel-0.0.1.vsix
-   ```
-   Alternatively: palette -> "Developer: Install Extension from Location..."
-   and pick `extensions/vscode-weft-panel/`.
+```bash
+cd extensions/vscode-weft-panel
+npm install      # first time only
+npm run compile  # tsc -p .
+```
 
-4. **Open the panel.**
-   Palette -> **WeftOS: Open Panel**. A dark panel opens in the editor
-   column. The status line shows the resolved socket path.
+## 3. Start the daemon
 
-5. **Fetch kernel.status.** Click the button. The response pane shows
-   the JSON result (kernel state, uptime, process count, etc.). The
-   radar log at the bottom gains one entry tagged `ok`.
+```bash
+cargo run -p clawft-weave --bin weaver -- kernel start
+```
 
-6. **Fetch kernel.ps.** Click the other button. The response pane shows
-   the JSON process list (possibly empty). The radar log gains a second
-   entry.
+## 4. Install + open the panel
 
-7. **Reload the window.** Palette -> "Developer: Reload Window". The
-   panel reappears because the serializer was registered. The response
-   pane and radar log are empty (acceptable for M0; state rehydration
-   is M1). The status line still shows the socket path.
+**In VSCode / Cursor**:
 
-8. **Kill the daemon.** Stop the `weaver kernel start` process.
-   Click either button again. The response pane now shows the RPC
-   error (`ENOENT` / `ECONNREFUSED` plus the "start with
-   `weaver kernel start`" hint). The extension does not crash; the
-   panel is still usable once the daemon returns.
+- Palette → `Developer: Install Extension from Location…`
+- Point at `extensions/vscode-weft-panel/`.
+- Palette → `WeftOS: Open Panel`.
 
-If all eight steps pass, M0 is green.
+You should see:
+
+1. Loading screen: `loading egui shell…` on black for ≤1s.
+2. The **WeftOS boot splash** (gold mark on black, halo, `weave the machine`) fading in and out over ~4s.
+3. The **desktop shell** — warped-grid wallpaper + tray + kernel pill — *inside the Cursor editor pane*.
+4. Within ~1s the sidebar pill flips to green: `connected`. The Status block shows live `kernel.status` values (uptime, processes, services, Poll #N · Nms ago, Poll RTT).
+
+If the wasm bundle is missing (step 1 skipped), the panel shows a fallback card with the build-script path and the expected webview URI.
+
+## 5. Reload survival
+
+- `Developer: Reload Window` — the panel reappears (ready-blank); click around to re-fetch.
+
+## 6. Daemon-offline behaviour
+
+- Kill the daemon (`^C` on the `weaver kernel start` shell).
+- Within ~1s the sidebar pill turns red (`offline`); block data holds its last snapshot plus `last_error`.
+- Restart the daemon — next tick turns green again, no reload needed.
+
+## 7. Allowed RPC surface
+
+The extension allowlists four methods for the panel:
+
+- `kernel.status`
+- `kernel.ps`
+- `kernel.services`
+- `kernel.logs`
+
+Any other method request from the webview is rejected with
+`method not allowed: <method>`. Extending the allowlist happens in
+`extensions/vscode-weft-panel/src/extension.ts` (`ALLOWED_METHODS`).
+
+## Known gaps (deferred to M2 / M3)
+
+- No voice input — VSCode webviews can't expose `allow="microphone"`
+  yet (microsoft/vscode#303293). Capture sidecar lands next.
+- No typed active-radar return schema — webview currently posts
+  plain RPC-request / RPC-response messages only, no `variant-id`
+  yet.
+- No `ThreadDock` primitive for per-agent parallel output.
+- Panel does not yet speak WSP-0.1 verbs (protocol-spec.md); raw
+  kernel.* RPC only. WSP verbs land in M3.
+
+References:
+- Architecture & rationale: ADR-011, session-7 findings.
+- Protocol: `.planning/symposiums/compositional-ui/protocol-spec.md`.

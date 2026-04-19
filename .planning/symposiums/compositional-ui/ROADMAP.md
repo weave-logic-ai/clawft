@@ -27,6 +27,13 @@ Last updated: 2026-04-19.
 - **M0 — VSCode/Cursor extension scaffold** at
   `extensions/vscode-weft-panel/` — daemon ↔ extension ↔ webview wire
   loop, reload-survival, two sample RPC verbs.
+- **M1 — egui-wasm surface in the Cursor webview.**
+  `clawft-gui-egui` compiles to `wasm32-unknown-unknown` via wasm-pack;
+  target-conditional `Live` (tokio+UDS on native, postMessage bridge on
+  wasm); shared monotonic `now_ms()`, unified reply-channel API.
+  Extension host loads the bundle from `webview/wasm/`, installs
+  `window.__weftPostToHost`, proxies the four poll RPCs to the daemon.
+  Build script: `scripts/build-wasm.sh`.
 - **`clawft-gui-egui` theming** — WeftOS tokens applied to main shell.
 - **`weft-demo-lab` bin** — tabbed local mirror of
   `https://www.egui.rs/#demo` with Fractal / HTTP / 3D / Color Test +
@@ -36,18 +43,13 @@ Last updated: 2026-04-19.
 
 ## 🚧 In flight / next up
 
-### M1 — egui-wasm in Cursor webview *(priority-one)*
-The canon's first real render target. Closes the "CLI-trapped chat"
-complaint.
-
-- Compile `clawft-gui-egui` to `wasm32-unknown-unknown`.
-- Wasm-flavoured `Live` posts through `acquireVsCodeApi()` instead of
-  Unix sockets.
-- Reload-survival via `WebviewPanelSerializer` + the existing M0
-  extension skeleton.
-- Boot splash + desktop shell inside Cursor.
-- Kill the "X-over-WAN is slow" pain point permanently (see #perf
-  below).
+### M1 — ✅ shipped
+Compile + bundle + extension wiring all landed; see Done section.
+Remaining M1 polish ideas (optional before M2): size-optimise the
+wasm bundle (release-lto + wasm-opt-from-source → ~1.3 MB gzipped),
+add a panel-visibility observer so the wasm poller pauses when the
+tab is hidden, wire the existing demo-lab Fractal/3D/HTTP tabs into
+a browser-friendly subset (HTTP requires ehttp's web feature).
 
 ### M2 — active-radar loop closed end-to-end
 The differentiator none of the market systems have. Builds on M1.

@@ -7,6 +7,12 @@ license.workspace = true
 repository.workspace = true
 description = "egui/eframe native GUI spike for ClawFT — ports the 12 core UI blocks"
 
+# wasm-pack settings: disable wasm-opt because the cached wasm-opt
+# pinned by wasm-pack is old and rejects modern Rust's bulk-memory
+# output. We take the (modest) size hit.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
 # ── Native-only bins (excluded from wasm via target.cfg) ─────────────
 
 [[bin]]
