@@ -21,10 +21,15 @@ path = "src/lib.rs"
 
 [dependencies]
 eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui = "0.29"
 egui_extras = { version = "0.29", features = ["all_loaders"] }
 egui_plot = "0.29"
 # Official egui demo for theming-lab work (mirrors https://www.egui.rs/#demo locally).
 egui_demo_lib = "0.29"
+# Vendored demos that live in egui_demo_app (bin-only crate) rely on these:
+ehttp = { version = "0.5", features = ["native-async"] }
+poll-promise = "0.3"
+log = "0.4"
 
 # Live kernel connection (poller thread reads from the daemon IPC socket).
 clawft-rpc = { workspace = true }
