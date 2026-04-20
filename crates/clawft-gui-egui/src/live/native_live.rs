@@ -52,6 +52,10 @@ fn run_poller(live: Arc<Live>, mut cmd_rx: tokio::sync::mpsc::Receiver<Command>)
                             };
                         });
                     }
+                    // clippy::collapsible_if would collapse this with a
+                    // `let-chains` rewrite we can't emit on stable; allow
+                    // the nested shape.
+                    #[allow(clippy::collapsible_if)]
                     if let Some(c) = client.as_mut() {
                         if let Err(e) = poll_once(c, &live).await {
                             live.write(|s| {

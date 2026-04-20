@@ -38,6 +38,9 @@ egui = "0.29"
 egui_extras = { version = "0.29", features = ["all_loaders"] }
 egui_plot = "0.29"
 egui_demo_lib = "0.29"
+# NB: egui_dock 0.14 is the egui-0.29-compatible line (0.13 tracks 0.28).
+# ADR-001 row 10 — `ui://dock` is implemented via this crate.
+egui_dock = "0.14"
 log = "0.4"
 serde_json = { workspace = true }
 parking_lot = { workspace = true }
@@ -74,6 +77,11 @@ default = ["native"]
 native = []
 # Optional procedural boot sounds (pulls in rodio → cpal → alsa).
 audio = ["dep:rodio"]
+# Vendored demo_lab files (fractal_clock.rs, http_app.rs) carry upstream
+# `#[cfg_attr(feature = "serde", ...)]` gates. Declaring the feature
+# (even if unused) keeps clippy's `-D warnings` happy without editing
+# the vendored source.
+serde = []
 
 [dependencies.rodio]
 version = "0.19"

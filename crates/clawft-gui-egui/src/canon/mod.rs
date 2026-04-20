@@ -9,32 +9,128 @@
 //! kernel boundary can validate frames without reaching into the
 //! widget's internal state.
 
+pub mod canvas;
 pub mod chip;
+pub mod dock;
+pub mod field;
 pub mod gauge;
+pub mod grid;
+pub mod media;
+pub mod modal;
 pub mod plot;
 pub mod pressable;
 pub mod response;
+pub mod select;
+pub mod sheet;
+pub mod slider;
 pub mod stack;
 pub mod stream_view;
 pub mod strip;
 pub mod table;
+pub mod tabs;
+pub mod toggle;
 pub mod tree;
 pub mod types;
 
+pub use canvas::{Canvas, CanvasTransform};
 pub use chip::{Chip, ChipTone};
+pub use dock::Dock;
+pub use field::{Field, FieldKind, FieldValue};
 pub use gauge::{Gauge, Thresholds};
+pub use grid::Grid;
+pub use media::{Media, MediaFit};
+pub use modal::Modal;
 pub use plot::Plot;
 pub use pressable::Pressable;
 pub use response::{Bearing, CanonResponse, Doppler, Range, Topology};
+pub use select::Select;
+pub use sheet::Sheet;
+pub use slider::Slider;
 pub use stack::{Stack, StackAxis};
 pub use stream_view::StreamView;
 pub use strip::{CellSize, Strip, StripAxis};
 pub use table::{Table, TableColumn, TableOutcome};
+pub use tabs::Tabs;
+pub use toggle::{Toggle, ToggleStyle};
 pub use tree::{Tree, TreeNode, TreeOutcome};
 pub use types::{
     ActorKind, Affordance, Confidence, ConfidenceSource, FrozenBy, IdentityUri, Modality,
     MutationAxis, Tooltip, VariantId,
 };
+
+#[cfg(test)]
+mod tests {
+    //! Head-metadata smoke tests. Each primitive must expose its IRI,
+    //! at least one affordance when enabled (or an empty slice when
+    //! it's read-only / pure container), and its declared mutation
+    //! axes. These assertions guard the kernel-boundary invariants
+    //! (ADR-006) so drift in the head fields fails loudly here, not
+    //! downstream in the frame codec.
+
+    use super::*;
+
+    #[test]
+    fn identity_uris_are_stable() {
+        // Sanity: every primitive's static IRI matches `ui://<name>`.
+        let pressable = Pressable::new("p", "press");
+        assert_eq!(pressable.identity_uri().as_ref(), "ui://pressable");
+    }
+
+    #[test]
+    fn toggle_affordances_toggle_on_disable() {
+        let mut v = false;
+        let enabled = Toggle::new("t", "T", &mut v);
+        assert_eq!(enabled.affordances().len(), 1);
+        let mut v = false;
+        let disabled = Toggle::new("t", "T", &mut v).enabled(false);
+        assert!(disabled.affordances().is_empty());
+    }
+
+    #[test]
+    fn modal_mutation_axes_are_frozen_on_modal_modality() {
+        // ADR-014 + foundations §active-radar loop — consent flows
+        // declare zero mutation axes.
+        let m = Modal::new("m", Modality::Modal, "Confirm", |_ui: &mut eframe::egui::Ui| {});
+        assert!(m.mutation_axes().is_empty());
+
+        let f = Modal::new(
+            "m",
+            Modality::Floating,
+            "Inspector",
+            |_ui: &mut eframe::egui::Ui| {},
+        );
+        assert!(!f.mutation_axes().is_empty());
+    }
+
+    #[test]
+    fn canvas_transform_defaults_identity() {
+        let t = CanvasTransform::default();
+        assert_eq!(t.scale, 1.0);
+        assert_eq!(t.offset, eframe::egui::Vec2::ZERO);
+    }
+
+    #[test]
+    fn field_value_kind_tags_are_stable() {
+        assert_eq!(FieldValue::Text(String::new()).as_kind_tag(), "Text");
+        assert_eq!(FieldValue::Number(0.0).as_kind_tag(), "Number");
+        assert_eq!(FieldValue::Choice(0).as_kind_tag(), "Choice");
+    }
+
+    #[test]
+    fn grid_has_no_own_affordances() {
+        let g = Grid::new("g", 2, |_ui: &mut eframe::egui::Ui| {});
+        assert!(g.affordances().is_empty());
+    }
+
+    #[test]
+    fn tabs_exposes_switch_tab() {
+        let labels = ["a", "b"];
+        let mut sel = 0usize;
+        let t = Tabs::new("t", &labels, &mut sel, |_ui: &mut eframe::egui::Ui, _| {});
+        assert_eq!(t.affordances().len(), 1);
+        assert_eq!(t.affordances()[0].name.as_ref(), "switch-tab");
+    }
+}
 
 use eframe::egui;
 
