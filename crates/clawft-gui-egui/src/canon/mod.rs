@@ -9,12 +9,28 @@
 //! kernel boundary can validate frames without reaching into the
 //! widget's internal state.
 
+pub mod chip;
+pub mod gauge;
+pub mod plot;
 pub mod pressable;
 pub mod response;
+pub mod stack;
+pub mod stream_view;
+pub mod strip;
+pub mod table;
+pub mod tree;
 pub mod types;
 
+pub use chip::{Chip, ChipTone};
+pub use gauge::{Gauge, Thresholds};
+pub use plot::Plot;
 pub use pressable::Pressable;
 pub use response::{Bearing, CanonResponse, Doppler, Range, Topology};
+pub use stack::{Stack, StackAxis};
+pub use stream_view::StreamView;
+pub use strip::{CellSize, Strip, StripAxis};
+pub use table::{Table, TableColumn, TableOutcome};
+pub use tree::{Tree, TreeNode, TreeOutcome};
 pub use types::{
     ActorKind, Affordance, Confidence, ConfidenceSource, FrozenBy, IdentityUri, Modality,
     MutationAxis, Tooltip, VariantId,
