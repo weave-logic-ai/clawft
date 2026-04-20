@@ -1182,6 +1182,7 @@ dependencies = [
  "egui_plot",
  "ehttp",
  "futures",
+ "image",
  "js-sys",
  "log",
  "parking_lot",
@@ -1192,6 +1193,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "web-time",
 ]
 
 [[package]]

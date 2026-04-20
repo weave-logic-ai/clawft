@@ -7,7 +7,7 @@ pub mod desktop;
 pub mod grid;
 pub mod tray;
 
-use std::time::Instant;
+use web_time::Instant;
 
 /// Top-level visual phase of the app.
 pub enum Phase {

@@ -21,8 +21,8 @@ impl ClawftApp {
         // Preload the boot logo so the splash appears on frame 1 instead
         // of flashing in once the async image loader catches up.
         cc.egui_ctx.include_bytes(
-            "bytes://weftos-gold.jpg",
-            crate::shell::boot::LOGO_JPG,
+            "bytes://weftos-gold.png",
+            crate::shell::boot::LOGO_PNG,
         );
 
         Self {
@@ -51,7 +51,7 @@ impl eframe::App for ClawftApp {
                     let done = shell::boot::show(ui, *started, sfx_played);
                     if done {
                         self.phase = Phase::Desktop;
-                        self.desktop.boot_started = std::time::Instant::now();
+                        self.desktop.boot_started = web_time::Instant::now();
                     }
                 }
                 Phase::Desktop => {

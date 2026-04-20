@@ -153,7 +153,7 @@ fn clock_text() -> String {
 /// Crude local clock via std::time. We don't want a chrono dep bump here;
 /// seconds-since-UTC-midnight is close enough for a status bar mock.
 fn chrono_utc_local_ish() -> (u32, u32) {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use web_time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

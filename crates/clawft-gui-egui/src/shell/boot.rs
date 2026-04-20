@@ -7,13 +7,13 @@ use super::{audio, boot_logo_alpha, BOOT_LEN};
 /// Logo bytes are embedded so the binary is self-contained. Exposed
 /// `pub(crate)` so `App::new` can preload it into the image cache before
 /// the first paint.
-pub(crate) const LOGO_JPG: &[u8] = include_bytes!("../../assets/weftos-gold.jpg");
+pub(crate) const LOGO_PNG: &[u8] = include_bytes!("../../assets/weftos-gold.png");
 
 /// Render the boot splash. Returns `true` when the boot timeline has
 /// elapsed and the caller should transition to the desktop.
 pub fn show(
     ui: &mut egui::Ui,
-    started: std::time::Instant,
+    started: web_time::Instant,
     sfx_played: &mut bool,
 ) -> bool {
     let elapsed = started.elapsed().as_secs_f32();
@@ -59,7 +59,7 @@ pub fn show(
     let logo_size = egui::vec2(420.0, 368.0);
     let logo_rect = egui::Rect::from_center_size(center, logo_size);
     let tint = egui::Color32::from_rgba_unmultiplied(255, 255, 255, (alpha * 255.0) as u8);
-    egui::Image::from_bytes("bytes://weftos-gold.jpg", LOGO_JPG)
+    egui::Image::from_bytes("bytes://weftos-gold.png", LOGO_PNG)
         .fit_to_exact_size(logo_size)
         .tint(tint)
         .paint_at(ui, logo_rect);

@@ -41,6 +41,15 @@ egui_demo_lib = "0.29"
 log = "0.4"
 serde_json = { workspace = true }
 parking_lot = { workspace = true }
+# Drop-in Instant/SystemTime: std on native, performance.now() on wasm.
+# Without this, wasm32-unknown-unknown panics ("time not implemented on
+# this platform") the moment any UI code hits a clock.
+web-time = "1"
+# egui_extras's `all_loaders` turns on the `image` crate dep but leaves format
+# features OFF (default-features=false and no overrides). Feature unification
+# from other crates in the tree doesn't reliably pick up PNG for the wasm
+# target, so the boot logo silently fails to decode. Pin `png` explicitly.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 # ── Native-only dependencies ─────────────────────────────────────────
 

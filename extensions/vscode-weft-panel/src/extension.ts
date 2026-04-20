@@ -15,6 +15,7 @@
 
 import * as vscode from "vscode";
 import { randomUUID } from "node:crypto";
+import { watch as fsWatch, type FSWatcher } from "node:fs";
 import { resolveSocketPath, rpcCall, RpcError } from "./rpc";
 
 const VIEW_TYPE = "weft.panel";
@@ -115,8 +116,11 @@ function wirePanel(context: vscode.ExtensionContext, panel: vscode.WebviewPanel)
         context.subscriptions,
     );
 
+    const hotReload = installWasmHotReload(context, panel);
+
     panel.onDidDispose(
         () => {
+            hotReload.dispose();
             if (currentPanel === panel) {
                 currentPanel = undefined;
             }
@@ -124,6 +128,72 @@ function wirePanel(context: vscode.ExtensionContext, panel: vscode.WebviewPanel)
         null,
         context.subscriptions,
     );
+}
+
+/// Dev loop: watch the built wasm bundle and re-render the webview HTML
+/// when it changes. `renderHtml` mints a fresh cache-bust token each
+/// call, so VSCode's module/resource loader fetches new bytes instead
+/// of serving the previous wasm-bindgen output from cache.
+///
+/// Rebuild trigger on the author's side is the existing
+/// `extensions/vscode-weft-panel/scripts/build-wasm.sh` — e.g. run it
+/// under `cargo watch`:
+///   cargo watch -w crates/clawft-gui-egui -s \
+///     'extensions/vscode-weft-panel/scripts/build-wasm.sh'
+///
+/// Watches the directory (not the file) so the watcher survives
+/// rename-on-write patterns that wasm-bindgen uses on some platforms.
+/// Debounces burst writes (wasm-bindgen produces .js and .wasm almost
+/// simultaneously; one reload is enough).
+function installWasmHotReload(
+    context: vscode.ExtensionContext,
+    panel: vscode.WebviewPanel,
+): vscode.Disposable {
+    const wasmDir = vscode.Uri.joinPath(
+        context.extensionUri,
+        "webview",
+        "wasm",
+    ).fsPath;
+
+    let debounceTimer: NodeJS.Timeout | undefined;
+    let watcher: FSWatcher | undefined;
+    let disposed = false;
+
+    try {
+        watcher = fsWatch(wasmDir, { persistent: false }, (_eventType, filename) => {
+            if (disposed) return;
+            // wasm-bindgen emits both the JS glue and the wasm bytes;
+            // either change is a valid trigger.
+            if (
+                filename !== "clawft_gui_egui_bg.wasm" &&
+                filename !== "clawft_gui_egui.js"
+            ) {
+                return;
+            }
+            if (debounceTimer) clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => {
+                if (disposed) return;
+                panel.webview.html = renderHtml(context, panel.webview);
+                void vscode.window.setStatusBarMessage(
+                    "$(sync) WeftOS: reloaded wasm bundle",
+                    2000,
+                );
+            }, 200);
+        });
+    } catch (err) {
+        // wasm dir may not exist on first activation (before build-wasm.sh
+        // has run). Fail silently — user runs the build script, reopens
+        // the panel, and hotload re-attaches on the next wirePanel call.
+        console.warn("weft: wasm hot-reload watcher failed to attach:", err);
+    }
+
+    return {
+        dispose: () => {
+            disposed = true;
+            if (debounceTimer) clearTimeout(debounceTimer);
+            watcher?.close();
+        },
+    };
 }
 
 async function handleRpc(
@@ -172,11 +242,21 @@ function getWorkspaceCwd(): string | undefined {
 
 function renderHtml(context: vscode.ExtensionContext, webview: vscode.Webview): string {
     const nonce = makeNonce();
+    // Cache-bust the JS glue + wasm so the hot-reload watcher's html
+    // reassign actually fetches fresh bytes. VSCode's webview resource
+    // loader honors query strings for cache identity; the wasm-bindgen
+    // JS passes `module_or_path` through untouched, so the suffix rides
+    // along on the wasm fetch as well.
+    const cacheBust = Date.now().toString(36);
     const wasmRoot = vscode.Uri.joinPath(context.extensionUri, "webview", "wasm");
-    const jsUri = webview.asWebviewUri(vscode.Uri.joinPath(wasmRoot, "clawft_gui_egui.js"));
-    const wasmUri = webview.asWebviewUri(
-        vscode.Uri.joinPath(wasmRoot, "clawft_gui_egui_bg.wasm"),
-    );
+    const jsUri = webview
+        .asWebviewUri(vscode.Uri.joinPath(wasmRoot, "clawft_gui_egui.js"))
+        .toString();
+    const wasmUri = webview
+        .asWebviewUri(vscode.Uri.joinPath(wasmRoot, "clawft_gui_egui_bg.wasm"))
+        .toString();
+    const jsUrl = `${jsUri}?v=${cacheBust}`;
+    const wasmUrl = `${wasmUri}?v=${cacheBust}`;
 
     // CSP note: `wasm-unsafe-eval` is required to instantiate WebAssembly
     // modules inside a webview. `script-src` allows the nonce'd bootstrap
@@ -191,7 +271,7 @@ function renderHtml(context: vscode.ExtensionContext, webview: vscode.Webview): 
         "worker-src blob:",
     ].join("; ");
 
-    const wasmNotFoundHint = wasmUri.toString();
+    const wasmNotFoundHint = wasmUri;
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -203,9 +283,15 @@ function renderHtml(context: vscode.ExtensionContext, webview: vscode.Webview): 
   <style nonce="${nonce}">
     html, body { margin: 0; padding: 0; height: 100%; background: #04040a;
       color: #e0dee8; font-family: system-ui, sans-serif; overflow: hidden; }
-    #weft-root { position: fixed; inset: 0; display: flex; flex-direction: column; }
-    #weft-canvas { flex: 1 1 auto; width: 100%; display: block; outline: none; }
-    #weft-fallback { padding: 24px; font-size: 13px; color: #aaa; display: none; }
+    /* eframe 0.29 attaches a ResizeObserver directly to the canvas with
+       ContentBox sizing. Give the canvas explicit width+height against a
+       fixed-inset parent so the content box is well-defined at mount and
+       tracks window resizes deterministically — flex-grow sizing left the
+       canvas with an ambiguous content box in the Cursor webview. */
+    #weft-root { position: fixed; inset: 0; }
+    #weft-canvas { width: 100%; height: 100%; display: block; outline: none; }
+    #weft-fallback { position: absolute; inset: 0; padding: 24px; font-size: 13px;
+      color: #aaa; display: none; overflow: auto; background: #04040a; z-index: 5; }
     #weft-fallback code { background: #1a1a24; padding: 2px 6px; border-radius: 3px;
       color: #c4a25c; }
     body.loading #weft-splash { position: fixed; inset: 0; display: grid;
@@ -225,10 +311,61 @@ function renderHtml(context: vscode.ExtensionContext, webview: vscode.Webview): 
       <p>Expected at <code>${wasmNotFoundHint}</code>.</p>
     </div>
   </div>
+  <script nonce="${nonce}">
+    // Bootstrap-level diagnostics: if the module script below fails to
+    // parse/import (CSP, 404, syntax), neither its try/catch nor any
+    // console logging reaches the splash. Catch at window level and
+    // render the failure into the DOM so devtools are not required.
+    (function () {
+      const splash = document.getElementById("weft-splash");
+      function surface(stage, err) {
+        try {
+          const text = err && err.stack ? err.stack : String(err);
+          if (splash) {
+            splash.style.whiteSpace = "pre-wrap";
+            splash.style.padding = "24px";
+            splash.style.textAlign = "left";
+            splash.style.color = "#ff8080";
+            splash.textContent = "[" + stage + "] " + text;
+          }
+        } catch (_) {}
+      }
+      window.addEventListener("error", (ev) => surface("error", ev.error || ev.message));
+      window.addEventListener("unhandledrejection", (ev) => surface("unhandledrejection", ev.reason));
+      // Watchdog: if nothing has removed the loading class within 8s,
+      // the module script most likely never executed (CSP block on the
+      // static import). Flag it visibly.
+      setTimeout(() => {
+        if (document.body.classList.contains("loading") && splash && !splash.dataset.err) {
+          splash.style.whiteSpace = "pre-wrap";
+          splash.style.padding = "24px";
+          splash.style.textAlign = "left";
+          splash.style.color = "#f0c060";
+          splash.textContent =
+            "[watchdog] module script did not finish in 8s.\\n" +
+            "Likely causes:\\n" +
+            "  • CSP blocked the import of clawft_gui_egui.js\\n" +
+            "  • Wasm bundle missing or URL mismatch\\n" +
+            "  • wasm-bindgen init or weft_start threw before DOM update\\n" +
+            "Open: Developer: Open Webview Developer Tools for console.";
+        }
+      }, 8000);
+    })();
+  </script>
   <script type="module" nonce="${nonce}">
-    import init, { weft_start } from "${jsUri.toString()}";
+    import init, { weft_start } from "${jsUrl}";
 
     const vscode = acquireVsCodeApi();
+    const splash = document.getElementById("weft-splash");
+    const setSplash = (text, color) => {
+      if (!splash) return;
+      splash.dataset.err = "1";
+      splash.style.whiteSpace = "pre-wrap";
+      splash.style.padding = "24px";
+      splash.style.textAlign = "left";
+      splash.style.color = color || "#ff8080";
+      splash.textContent = text;
+    };
 
     // Bridge exposed to the wasm module. clawft_gui_egui::live::wasm_live
     // looks up window.__weftPostToHost and calls it with a JSON value.
@@ -242,19 +379,29 @@ function renderHtml(context: vscode.ExtensionContext, webview: vscode.Webview): 
       }
     };
 
-    // VSCode delivers extension→webview messages via window 'message'
-    // events on the default message channel. The wasm side's listener
-    // reads ev.data directly; nothing extra needed here.
-
     try {
-      await init({ module_or_path: "${wasmUri.toString()}" });
-      await weft_start("weft-canvas");
+      setSplash("init: fetching wasm…", "#7a7a86");
+      await init({ module_or_path: "${wasmUrl}" });
+      setSplash("init: mounting egui…", "#7a7a86");
+      // Remove loading class BEFORE awaiting weft_start so the canvas
+      // becomes visible even if start() resolves slowly. If start
+      // throws, catch restores the fallback below.
       document.body.classList.remove("loading");
+      await weft_start("weft-canvas");
       vscode.postMessage({ type: "ready" });
     } catch (e) {
       console.error("wasm boot failed", e);
+      const msg = e && e.stack ? e.stack : String(e);
       document.body.classList.remove("loading");
-      document.getElementById("weft-fallback").style.display = "block";
+      const fb = document.getElementById("weft-fallback");
+      if (fb) {
+        fb.style.display = "block";
+        const pre = document.createElement("pre");
+        pre.style.color = "#ff8080";
+        pre.style.whiteSpace = "pre-wrap";
+        pre.textContent = msg;
+        fb.appendChild(pre);
+      }
       document.getElementById("weft-canvas").style.display = "none";
     }
   </script>

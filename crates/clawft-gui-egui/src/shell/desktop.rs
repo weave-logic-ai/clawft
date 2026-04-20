@@ -10,7 +10,7 @@ pub struct Desktop {
     pub launcher_open: bool,
     pub blocks_state: blocks::DemoState,
     pub selected_block: BlockKind,
-    pub boot_started: std::time::Instant,
+    pub boot_started: web_time::Instant,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -52,7 +52,7 @@ impl Default for Desktop {
             launcher_open: false,
             blocks_state: blocks::DemoState::default(),
             selected_block: BlockKind::Overview,
-            boot_started: std::time::Instant::now(),
+            boot_started: web_time::Instant::now(),
         }
     }
 }
