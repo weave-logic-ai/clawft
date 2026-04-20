@@ -1,8 +1,22 @@
-# ADR-001: Primitive Canon (20 Items — 19 Tier-A + 1 Tier-B)
+# ADR-001: Primitive Canon (21 Items — 20 Tier-A + 1 Tier-B)
 
-**Date**: 2026-04-18 (initial), 2026-04-19 (amended — see ADR-013, ADR-014)
+**Date**: 2026-04-18 (initial), 2026-04-19 (amended — see ADR-013, ADR-014), 2026-04-20 (amended — `ui://tabs` re-added as row 21)
 **Status**: Proposed — symposium round 2
 **Deciders**: Compositional UI Symposium (Round 1 synthesis)
+
+**Amendment note (2026-04-20)**: Re-promote `ui://tabs` to a Tier-A
+primitive (row 21). Session-5 rec. 12 originally demoted Tabs to a
+composition (`Stack + Select(single) + Sheet`), arguing it collapses
+into `ui://dock`. During canon-implementation kickoff this collapse
+was challenged: `Dock` (`egui_dock::DockArea`) carries
+split-drag-detach workspace machinery whose ergonomics are wrong for
+"settings dialog with three sections" or "browser-style tab strip"
+patterns. A simple tab strip has a qualitatively different state
+shape (single integer vs. tree of splits) and interaction contract
+(click-to-swap-body vs. drag-to-rearrange-workspace). Keep both:
+`Dock` for workspace shells, `Tabs` for navigation within a single
+pane. Cost: one wrapper over `selectable_label` + body swap; canon
+remains under 25 (the foundations anti-rule bound).
 
 **Amendment note (2026-04-19)**: Two changes in this revision:
 
@@ -68,14 +82,16 @@ Tier-A; shell only for Tier-B), and a community egui crate mapping.
 | 18 | `ui://stream-view` | Live-tailing view over event-sourced subscription — streaming-native anchor | Y | Y | Y | Y | `ScrollArea` + ring buffer from `Store` |
 | 19 | `ui://canvas` | Freeform 2D painter surface (pan / zoom / hit-test / draw) — see ADR-013 | Y | Y | Y | Y | `ui.allocate_painter()` + `Sense::drag` + `Painter` |
 | 20 | `ui://foreign` (Tier B) | Opaque content host | shell Y | shell Y | shell Y | shell Y | per-kind (wry, egui_term, GStreamer, capture APIs) |
+| 21 | `ui://tabs` | Simple tab strip — selected-index body swap (re-promoted 2026-04-20, see amendment note) | Y | Y | Y | Y | `ui.horizontal` + `selectable_label` loop + body area |
 
 Deliberately *composed* (not primitives): `Form` = `Stack(Field…) +
 Button`; `Card` = themed `Stack` with `Gauge/Chip` cluster;
-`Toolbar/Menu/Tabs` = `Stack(Button…)` / `Stack(Select) + Sheet`;
-`Notification/Toast` = `Modal` at top order; `Launcher/Tray` =
-`Dock + Chip`. Keeping these out of the canon preserves the
-reverse-DDD arrow (Session 4): composition is the authored layer,
-primitives are the vocabulary.
+`Toolbar/Menu` = `Stack(Button…)`; `Notification/Toast` = `Modal` at
+top order; `Launcher/Tray` = `Dock + Chip`. (Note: `Tabs` was
+originally listed here as a composition; the 2026-04-20 amendment
+re-promotes it to a primitive — see row 21.) Keeping the rest out of
+the canon preserves the reverse-DDD arrow (Session 4): composition is
+the authored layer, primitives are the vocabulary.
 
 ## Consequences
 
