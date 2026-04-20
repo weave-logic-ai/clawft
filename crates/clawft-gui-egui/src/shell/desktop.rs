@@ -4,12 +4,23 @@ use eframe::egui;
 
 use super::{grid, tray};
 use crate::blocks;
+use crate::canon_demos::{self, CanonDemoState, CanonKind};
 use crate::live::Snapshot;
+
+/// Which section of the Blocks window is active.
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub enum PanelSection {
+    Blocks,
+    Canon,
+}
 
 pub struct Desktop {
     pub launcher_open: bool,
     pub blocks_state: blocks::DemoState,
+    pub canon_state: CanonDemoState,
     pub selected_block: BlockKind,
+    pub selected_canon: CanonKind,
+    pub section: PanelSection,
     pub boot_started: web_time::Instant,
 }
 
@@ -51,7 +62,10 @@ impl Default for Desktop {
         Self {
             launcher_open: false,
             blocks_state: blocks::DemoState::default(),
+            canon_state: CanonDemoState::default(),
             selected_block: BlockKind::Overview,
+            selected_canon: CanonKind::Pressable,
+            section: PanelSection::Blocks,
             boot_started: web_time::Instant::now(),
         }
     }
@@ -112,28 +126,60 @@ fn render_blocks_window(
         .resizable(false)
         .default_width(170.0)
         .show_inside(ui, |ui| {
-            ui.heading("Blocks");
-            ui.separator();
-            for (kind, label) in BlockKind::ALL {
-                let selected = desk.selected_block == kind;
-                if ui.selectable_label(selected, label).clicked() {
-                    desk.selected_block = kind;
+            ui.horizontal(|ui| {
+                if ui
+                    .selectable_label(desk.section == PanelSection::Blocks, "Blocks")
+                    .clicked()
+                {
+                    desk.section = PanelSection::Blocks;
                 }
-            }
+                if ui
+                    .selectable_label(desk.section == PanelSection::Canon, "Canon")
+                    .clicked()
+                {
+                    desk.section = PanelSection::Canon;
+                }
+            });
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| match desk.section {
+                    PanelSection::Blocks => {
+                        for (kind, label) in BlockKind::ALL {
+                            let selected = desk.selected_block == kind;
+                            if ui.selectable_label(selected, label).clicked() {
+                                desk.selected_block = kind;
+                            }
+                        }
+                    }
+                    PanelSection::Canon => {
+                        for (kind, label) in CanonKind::ALL {
+                            let selected = desk.selected_canon == kind;
+                            if ui.selectable_label(selected, label).clicked() {
+                                desk.selected_canon = kind;
+                            }
+                        }
+                    }
+                });
         });
 
-    egui::CentralPanel::default().show_inside(ui, |ui| match desk.selected_block {
-        BlockKind::Overview => blocks::overview::show(ui, snap),
-        BlockKind::Text => blocks::text::show(ui),
-        BlockKind::Button => blocks::button::show(ui, &mut desk.blocks_state),
-        BlockKind::Code => blocks::code::show(ui, snap),
-        BlockKind::Status => blocks::status::show(ui, snap),
-        BlockKind::Budget => blocks::budget::show(ui),
-        BlockKind::Table => blocks::table::show(ui, &mut desk.blocks_state, snap),
-        BlockKind::Tree => blocks::tree::show(ui, &mut desk.blocks_state, snap),
-        BlockKind::Tabs => blocks::tabs::show(ui, &mut desk.blocks_state),
-        BlockKind::Terminal => blocks::terminal::show(ui, &mut desk.blocks_state, live),
-        BlockKind::Layout => blocks::layout::show(ui),
-        BlockKind::Oscilloscope => blocks::oscilloscope::show(ui, &mut desk.blocks_state),
+    egui::CentralPanel::default().show_inside(ui, |ui| match desk.section {
+        PanelSection::Blocks => match desk.selected_block {
+            BlockKind::Overview => blocks::overview::show(ui, snap),
+            BlockKind::Text => blocks::text::show(ui),
+            BlockKind::Button => blocks::button::show(ui, &mut desk.blocks_state),
+            BlockKind::Code => blocks::code::show(ui, snap),
+            BlockKind::Status => blocks::status::show(ui, snap),
+            BlockKind::Budget => blocks::budget::show(ui),
+            BlockKind::Table => blocks::table::show(ui, &mut desk.blocks_state, snap),
+            BlockKind::Tree => blocks::tree::show(ui, &mut desk.blocks_state, snap),
+            BlockKind::Tabs => blocks::tabs::show(ui, &mut desk.blocks_state),
+            BlockKind::Terminal => blocks::terminal::show(ui, &mut desk.blocks_state, live),
+            BlockKind::Layout => blocks::layout::show(ui),
+            BlockKind::Oscilloscope => blocks::oscilloscope::show(ui, &mut desk.blocks_state),
+        },
+        PanelSection::Canon => {
+            canon_demos::show(ui, desk.selected_canon, &mut desk.canon_state);
+        }
     });
 }
