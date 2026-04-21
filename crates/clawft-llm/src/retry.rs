@@ -4,6 +4,7 @@
 //! requests with configurable exponential backoff. Retries are applied to
 //! transient errors (HTTP 429, 500, 502, 503, 504) and network failures.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -12,6 +13,7 @@ use tracing::{debug, warn};
 use tokio::sync::mpsc;
 
 use crate::error::{ProviderError, Result};
+use crate::eml_retry::{error_ordinal, RetryModel};
 use crate::provider::Provider;
 use crate::types::{ChatRequest, ChatResponse, StreamChunk};
 
@@ -98,12 +100,39 @@ pub fn compute_delay(config: &RetryConfig, attempt: u32) -> Duration {
 pub struct RetryPolicy<P> {
     inner: P,
     config: RetryConfig,
+    /// Optional EML retry model (Finding #6). When `Some`, every retry
+    /// delay is predicted by the model and every outcome is recorded
+    /// for online training. Shared via `Arc<Mutex<…>>` so the same
+    /// model can learn from every provider wrapped by `RetryPolicy`.
+    retry_model: Option<Arc<Mutex<RetryModel>>>,
 }
 
 impl<P: Provider> RetryPolicy<P> {
     /// Wrap a provider with retry logic.
     pub fn new(inner: P, config: RetryConfig) -> Self {
-        Self { inner, config }
+        Self {
+            inner,
+            config,
+            retry_model: None,
+        }
+    }
+
+    /// Wrap a provider with retry logic and enable the EML
+    /// [`RetryModel`]. Per-attempt delay comes from
+    /// [`RetryModel::delay_ms`], which falls back to
+    /// [`compute_delay`] until the model is trained. Retry outcomes
+    /// (success, exhaustion) are recorded back into the model so it
+    /// can learn the optimal backoff per error-type × attempt × hour.
+    pub fn with_model(
+        inner: P,
+        config: RetryConfig,
+        model: Arc<Mutex<RetryModel>>,
+    ) -> Self {
+        Self {
+            inner,
+            config,
+            retry_model: Some(model),
+        }
     }
 
     /// Returns a reference to the retry configuration.
@@ -115,6 +144,60 @@ impl<P: Provider> RetryPolicy<P> {
     pub fn inner(&self) -> &P {
         &self.inner
     }
+
+    /// Returns the optional EML retry model handle, if wired.
+    pub fn retry_model(&self) -> Option<&Arc<Mutex<RetryModel>>> {
+        self.retry_model.as_ref()
+    }
+
+    /// Compute the delay for this attempt. Prefers the EML model if
+    /// one is wired; otherwise falls back to the hardcoded
+    /// exponential backoff in [`compute_delay`].
+    ///
+    /// Uses the `RateLimited` suggested delay as a floor whenever
+    /// the server explicitly asked us to wait longer.
+    fn effective_delay(&self, err: &ProviderError, attempt: u32) -> Duration {
+        let base = match self.retry_model.as_ref() {
+            Some(model) => {
+                let ms = model
+                    .lock()
+                    .map(|m| m.delay_ms(err, attempt))
+                    .unwrap_or_else(|_| {
+                        // Poisoned lock — recover gracefully and fall
+                        // back to the hardcoded config.
+                        compute_delay(&self.config, attempt).as_millis() as u64
+                    });
+                Duration::from_millis(ms)
+            }
+            None => compute_delay(&self.config, attempt),
+        };
+        match err {
+            ProviderError::RateLimited { retry_after_ms } => {
+                base.max(Duration::from_millis(*retry_after_ms))
+            }
+            _ => base,
+        }
+    }
+
+    /// Record the outcome of a retry attempt into the EML model, if
+    /// one is wired. Takes the pre-computed error ordinal instead of
+    /// a `&ProviderError` so the retry loop can stash it before the
+    /// error is moved into `last_err`.
+    fn record_outcome_by_ordinal(
+        &self,
+        ordinal: f64,
+        attempt: u32,
+        delay: Duration,
+        succeeded: bool,
+    ) {
+        let Some(model) = self.retry_model.as_ref() else {
+            return;
+        };
+        let Ok(mut m) = model.lock() else {
+            return;
+        };
+        m.record_by_ordinal(ordinal, attempt, delay.as_millis() as u64, succeeded);
+    }
 }
 
 #[async_trait]
@@ -125,6 +208,11 @@ impl<P: Provider> Provider for RetryPolicy<P> {
 
     async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse> {
         let mut last_err = None;
+        // Stash the previous attempt's (ordinal, attempt, delay) so
+        // we can credit the model when the next attempt succeeds or
+        // exhausts. ProviderError isn't Clone, so we snapshot the
+        // ordinal before the error is moved into `last_err`.
+        let mut last_retry: Option<(f64, u32, Duration)> = None;
 
         for attempt in 0..=self.config.max_retries {
             match self.inner.complete(request).await {
@@ -135,22 +223,36 @@ impl<P: Provider> Provider for RetryPolicy<P> {
                             attempt,
                             "request succeeded after retry"
                         );
+                        if let Some((ord, prev_attempt, prev_delay)) =
+                            last_retry.take()
+                        {
+                            self.record_outcome_by_ordinal(
+                                ord,
+                                prev_attempt,
+                                prev_delay,
+                                true,
+                            );
+                        }
                     }
                     return Ok(response);
                 }
                 Err(err) => {
                     if !is_retryable(&err) || attempt == self.config.max_retries {
+                        if let Some((ord, prev_attempt, prev_delay)) =
+                            last_retry.take()
+                        {
+                            self.record_outcome_by_ordinal(
+                                ord,
+                                prev_attempt,
+                                prev_delay,
+                                false,
+                            );
+                        }
                         return Err(err);
                     }
 
-                    // For rate limiting, use the provider's suggested delay if larger
-                    let delay = if let ProviderError::RateLimited { retry_after_ms } = &err {
-                        let computed = compute_delay(&self.config, attempt);
-                        let suggested = Duration::from_millis(*retry_after_ms);
-                        computed.max(suggested)
-                    } else {
-                        compute_delay(&self.config, attempt)
-                    };
+                    let delay = self.effective_delay(&err, attempt);
+                    let ord = error_ordinal(&err);
 
                     warn!(
                         provider = %self.inner.name(),
@@ -161,6 +263,7 @@ impl<P: Provider> Provider for RetryPolicy<P> {
                     );
 
                     tokio::time::sleep(delay).await;
+                    last_retry = Some((ord, attempt, delay));
                     last_err = Some(err);
                 }
             }
@@ -181,6 +284,7 @@ impl<P: Provider> Provider for RetryPolicy<P> {
         // temporary channel. Only on success do we forward chunks to the real
         // sender, preventing partial output from failed attempts.
         let mut last_err = None;
+        let mut last_retry: Option<(f64, u32, Duration)> = None;
 
         for attempt in 0..=self.config.max_retries {
             let (attempt_tx, mut attempt_rx) = mpsc::channel::<StreamChunk>(256);
@@ -193,6 +297,16 @@ impl<P: Provider> Provider for RetryPolicy<P> {
                             attempt,
                             "streaming request succeeded after retry"
                         );
+                        if let Some((ord, prev_attempt, prev_delay)) =
+                            last_retry.take()
+                        {
+                            self.record_outcome_by_ordinal(
+                                ord,
+                                prev_attempt,
+                                prev_delay,
+                                true,
+                            );
+                        }
                     }
                     // Forward buffered chunks to the real sender.
                     while let Some(chunk) = attempt_rx.recv().await {
@@ -207,16 +321,21 @@ impl<P: Provider> Provider for RetryPolicy<P> {
                     drop(attempt_rx);
 
                     if !is_retryable(&err) || attempt == self.config.max_retries {
+                        if let Some((ord, prev_attempt, prev_delay)) =
+                            last_retry.take()
+                        {
+                            self.record_outcome_by_ordinal(
+                                ord,
+                                prev_attempt,
+                                prev_delay,
+                                false,
+                            );
+                        }
                         return Err(err);
                     }
 
-                    let delay = if let ProviderError::RateLimited { retry_after_ms } = &err {
-                        let computed = compute_delay(&self.config, attempt);
-                        let suggested = Duration::from_millis(*retry_after_ms);
-                        computed.max(suggested)
-                    } else {
-                        compute_delay(&self.config, attempt)
-                    };
+                    let delay = self.effective_delay(&err, attempt);
+                    let ord = error_ordinal(&err);
 
                     warn!(
                         provider = %self.inner.name(),
@@ -227,6 +346,7 @@ impl<P: Provider> Provider for RetryPolicy<P> {
                     );
 
                     tokio::time::sleep(delay).await;
+                    last_retry = Some((ord, attempt, delay));
                     last_err = Some(err);
                 }
             }
@@ -558,5 +678,55 @@ mod tests {
         };
         let provider = RetryPolicy::new(mock, config);
         assert_eq!(provider.retry_config().max_retries, 5);
+    }
+
+    #[tokio::test]
+    async fn retry_model_records_success_on_recovery() {
+        // A wrapped EML model should see a successful-retry outcome
+        // recorded once the next attempt succeeds. This verifies the
+        // whole wiring without any training happening.
+        let model = Arc::new(Mutex::new(RetryModel::new()));
+        assert_eq!(model.lock().unwrap().training_sample_count(), 0);
+
+        let mock = MockProvider::new("test", 1, |_| ProviderError::ServerError {
+            status: 503,
+            body: "unavailable".into(),
+        });
+        let provider =
+            RetryPolicy::with_model(mock, fast_retry_config(), model.clone());
+        // Sanity: the handle roundtrips.
+        assert!(provider.retry_model().is_some());
+
+        let resp = provider.complete(&test_request()).await.unwrap();
+        assert_eq!(resp.choices[0].message.content.as_deref(), Some("Hello!"));
+
+        // Exactly one record: the failed attempt whose next retry
+        // succeeded.
+        assert_eq!(model.lock().unwrap().training_sample_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_model_records_failure_on_exhaustion() {
+        let model = Arc::new(Mutex::new(RetryModel::new()));
+
+        let mock = MockProvider::new("test", 10, |_| ProviderError::ServerError {
+            status: 500,
+            body: "error".into(),
+        });
+        let config = RetryConfig {
+            max_retries: 2,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
+            jitter_fraction: 0.0,
+        };
+        let provider = RetryPolicy::with_model(mock, config, model.clone());
+
+        let err = provider.complete(&test_request()).await.unwrap_err();
+        assert!(matches!(err, ProviderError::ServerError { .. }));
+
+        // Final attempt exhausted → the last pending retry was
+        // recorded as failed. (The attempts before it don't record
+        // until their successor attempt's outcome is known.)
+        assert_eq!(model.lock().unwrap().training_sample_count(), 1);
     }
 }
