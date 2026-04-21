@@ -131,6 +131,8 @@ pub struct Kernel<P: Platform> {
     revocation_list: Arc<crate::revocation::RevocationList>,
     #[cfg(feature = "native")]
     agent_registry: crate::agent_registry::AgentRegistry,
+    #[cfg(feature = "native")]
+    substrate_service: crate::substrate_service::SubstrateService,
     #[cfg(feature = "exochain")]
     chain: ChainSubsystem,
     #[cfg(feature = "ecc")]
@@ -1661,6 +1663,8 @@ impl<P: Platform> Kernel<P> {
             revocation_list,
             #[cfg(feature = "native")]
             agent_registry: crate::agent_registry::AgentRegistry::new(),
+            #[cfg(feature = "native")]
+            substrate_service: crate::substrate_service::SubstrateService::new(),
             #[cfg(feature = "exochain")]
             chain: ChainSubsystem {
                 chain_manager,
@@ -1841,6 +1845,15 @@ impl<P: Platform> Kernel<P> {
     #[cfg(feature = "native")]
     pub fn agent_registry(&self) -> &crate::agent_registry::AgentRegistry {
         &self.agent_registry
+    }
+
+    /// Get the substrate RPC service.
+    ///
+    /// Backs the `substrate.read`, `substrate.publish`,
+    /// `substrate.subscribe`, and `substrate.notify` RPCs.
+    #[cfg(feature = "native")]
+    pub fn substrate_service(&self) -> &crate::substrate_service::SubstrateService {
+        &self.substrate_service
     }
 
     /// Get the cron service.

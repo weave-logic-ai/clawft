@@ -360,6 +360,82 @@ pub struct IpcPublishParams {
     pub ts: Option<u64>,
 }
 
+// ── Substrate RPC ─────────────────────────────────────────────
+
+/// Parameters for `substrate.read`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubstrateReadParams {
+    /// Substrate path (e.g. `"substrate/test/ping"`).
+    pub path: String,
+    /// Caller agent_id (required for capture-tier paths).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_id: Option<String>,
+}
+
+/// Result of `substrate.read`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubstrateReadResult {
+    /// Current value at the path (None if never written).
+    pub value: Option<serde_json::Value>,
+    /// Monotonic tick for the path.
+    pub tick: u64,
+    /// Declared sensitivity level as a short lowercase string.
+    pub sensitivity: String,
+}
+
+/// Parameters for `substrate.publish`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubstratePublishParams {
+    /// Substrate path to publish under.
+    pub path: String,
+    /// Value to Replace into the path.
+    pub value: serde_json::Value,
+    /// Caller agent_id — must be registered; future commits gate on
+    /// role/ownership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_id: Option<String>,
+    /// Optional Ed25519 signature; same scheme as ipc.publish but
+    /// over `(path, serialized_value_bytes, ts, actor_id)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    /// Optional nonce / timestamp (unix millis).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts: Option<u64>,
+}
+
+/// Parameters for `substrate.notify`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubstrateNotifyParams {
+    /// Substrate path to pulse.
+    pub path: String,
+    /// Caller agent_id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_id: Option<String>,
+}
+
+/// Parameters for `substrate.subscribe`.
+///
+/// Same wire shape as [`IpcSubscribeStreamParams`] — takes over the
+/// connection after the initial ack line. One JSON line per update
+/// (`{"path":..,"tick":..,"kind":"publish|notify","value":..}`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubstrateSubscribeParams {
+    /// Substrate path to subscribe to.
+    pub path: String,
+    /// Tick to resume from (reserved; M1.5 streams live updates only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_tick: Option<u64>,
+    /// Caller agent_id (required for capture-tier paths).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_id: Option<String>,
+    /// Optional signature — same scheme as `ipc.subscribe_stream`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    /// Optional nonce.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts: Option<u64>,
+}
+
 /// Parameters for `agent.register`.
 ///
 /// The caller provides a human-readable `name`, a 32-byte Ed25519

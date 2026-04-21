@@ -562,6 +562,14 @@ async fn dispatch_json_line(
                     ),
                     Err(msg) => (Response::error(msg).with_id(id), None),
                 }
+            } else if req.method == "substrate.subscribe" {
+                match handle_substrate_subscribe(req.params, Arc::clone(kernel)).await {
+                    Ok((ack, path, rx, on_disconnect)) => (
+                        ack.with_id(id),
+                        Some((path, rx, on_disconnect)),
+                    ),
+                    Err(msg) => (Response::error(msg).with_id(id), None),
+                }
             } else {
                 (
                     dispatch(req.method, req.params, Arc::clone(kernel), shutdown_tx.clone())
@@ -981,6 +989,148 @@ async fn handle_rvf_connection(
             break;
         }
     }
+}
+
+/// Handle `substrate.subscribe`: streaming subscription over the
+/// substrate service. Mirrors [`handle_ipc_subscribe_stream`].
+async fn handle_substrate_subscribe(
+    params: serde_json::Value,
+    kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
+) -> Result<
+    (
+        Response,
+        String,
+        tokio::sync::mpsc::Receiver<Vec<u8>>,
+        Box<dyn FnOnce() + Send>,
+    ),
+    String,
+> {
+    let p: crate::protocol::SubstrateSubscribeParams =
+        serde_json::from_value(params).map_err(|e| format!("invalid params: {e}"))?;
+
+    let k = kernel.read().await;
+
+    if let Some(actor_id) = p.actor_id.as_ref() {
+        let sig = p
+            .signature
+            .as_ref()
+            .ok_or_else(|| "actor_id provided but signature missing".to_string())?;
+        let ts = p.ts.unwrap_or(0);
+        let payload = clawft_kernel::subscribe_payload(&p.path, ts, actor_id);
+        verify_agent_signature(&k, actor_id, sig, &payload)
+            .map_err(|e| format!("unauthorized: {e}"))?;
+    }
+
+    let substrate = k.substrate_service().clone();
+    let (id, rx) = substrate
+        .subscribe(p.actor_id.as_deref(), &p.path)
+        .map_err(|e| e.to_string())?;
+    k.event_log().info(
+        "substrate",
+        format!(
+            "external client subscribed to '{}' (sub_id={}, actor_id={:?})",
+            p.path, id.0, p.actor_id
+        ),
+    );
+
+    let path_for_ack = p.path.clone();
+    let path_for_cleanup = p.path.clone();
+    let substrate_for_cleanup = substrate.clone();
+    let on_disconnect: Box<dyn FnOnce() + Send> = Box::new(move || {
+        substrate_for_cleanup.unsubscribe(&path_for_cleanup, id);
+    });
+
+    let ack = Response::success(serde_json::json!({
+        "subscribed": p.path,
+        "subscriber_id": id.0,
+        "streaming": true,
+    }));
+    Ok((ack, path_for_ack, rx, on_disconnect))
+}
+
+/// Handle `substrate.read`: synchronous value + tick + sensitivity.
+async fn handle_substrate_read(
+    params: serde_json::Value,
+    kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
+) -> Response {
+    let p: crate::protocol::SubstrateReadParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(e) => return Response::error(format!("invalid params: {e}")),
+    };
+    let k = kernel.read().await;
+    match k.substrate_service().read(p.actor_id.as_deref(), &p.path) {
+        Ok(snap) => Response::success(
+            serde_json::to_value(crate::protocol::SubstrateReadResult {
+                value: snap.value,
+                tick: snap.tick,
+                sensitivity: snap.sensitivity.as_str().to_string(),
+            })
+            .unwrap(),
+        ),
+        Err(e) => Response::error(format!("unauthorized: {e}")),
+    }
+}
+
+/// Handle `substrate.publish`: Replace the path's value and fan out.
+async fn handle_substrate_publish(
+    params: serde_json::Value,
+    kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
+) -> Response {
+    let p: crate::protocol::SubstratePublishParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(e) => return Response::error(format!("invalid params: {e}")),
+    };
+    let k = kernel.read().await;
+
+    if let Some(actor_id) = p.actor_id.as_ref() {
+        let sig = match p.signature.as_ref() {
+            Some(s) => s,
+            None => {
+                return Response::error(
+                    "actor_id provided but signature missing".to_string(),
+                );
+            }
+        };
+        let ts = p.ts.unwrap_or(0);
+        // Sign over the serialized value bytes + path + ts + actor_id.
+        let value_bytes = serde_json::to_vec(&p.value).unwrap_or_default();
+        let value_str = String::from_utf8_lossy(&value_bytes);
+        let payload = clawft_kernel::publish_payload(&p.path, &value_str, ts, actor_id);
+        if let Err(e) = verify_agent_signature(&k, actor_id, sig, &payload) {
+            return Response::error(format!("unauthorized: {e}"));
+        }
+    }
+
+    let tick = k
+        .substrate_service()
+        .publish(p.actor_id.as_deref(), &p.path, p.value);
+    k.event_log().info(
+        "substrate",
+        format!("publish {} tick={} actor={:?}", p.path, tick, p.actor_id),
+    );
+    Response::success(serde_json::json!({
+        "path": p.path,
+        "tick": tick,
+    }))
+}
+
+/// Handle `substrate.notify`: signal-only pulse, no payload change.
+async fn handle_substrate_notify(
+    params: serde_json::Value,
+    kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
+) -> Response {
+    let p: crate::protocol::SubstrateNotifyParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(e) => return Response::error(format!("invalid params: {e}")),
+    };
+    let k = kernel.read().await;
+    let tick = k
+        .substrate_service()
+        .notify(p.actor_id.as_deref(), &p.path);
+    Response::success(serde_json::json!({
+        "path": p.path,
+        "tick": tick,
+    }))
 }
 
 /// Dispatch a request to the appropriate handler.
@@ -1623,6 +1773,9 @@ async fn dispatch(
             Response::error("exochain feature not enabled")
         }
         "agent.register" => handle_agent_register(params, kernel).await,
+        "substrate.read" => handle_substrate_read(params, kernel).await,
+        "substrate.publish" => handle_substrate_publish(params, kernel).await,
+        "substrate.notify" => handle_substrate_notify(params, kernel).await,
         "agent.spawn" => {
             let spawn_params: AgentSpawnParams = match serde_json::from_value(params) {
                 Ok(p) => p,

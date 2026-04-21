@@ -123,6 +123,8 @@ pub mod agency;
 #[cfg(feature = "native")]
 pub mod agent_registry;
 #[cfg(feature = "native")]
+pub mod substrate_service;
+#[cfg(feature = "native")]
 pub mod agent_loop;
 pub mod app;
 pub mod assessment;
@@ -232,6 +234,10 @@ pub use a2a::A2ARouter;
 #[cfg(feature = "native")]
 pub use agent_registry::{
     publish_payload, register_payload, subscribe_payload, AgentRegistry, RegisteredAgent,
+};
+#[cfg(feature = "native")]
+pub use substrate_service::{
+    EgressDenied, Sensitivity as SubstrateSensitivity, SubstrateReadSnapshot, SubstrateService,
 };
 pub use agency::{
     Agency, AgentHealth, AgentInterface, AgentManifest, AgentPriority, AgentResources,
