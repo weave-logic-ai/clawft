@@ -8,6 +8,31 @@
 //! governance intersection, variant-id stamping, hot-path
 //! memoisation. Sibling milestones M1.6+ fill these in.
 //!
+//! # M1.5 scope reductions vs ADR-016 §5
+//!
+//! The binding expression language implemented here is a strict
+//! subset of the grammar in ADR-016 §5. Concretely, the following
+//! are *not* implemented and are expected to land in M1.6+:
+//!
+//! - `sort(list, key)` — no ordering combinator. Only `count`,
+//!   `filter`, `len`, `first`, `last` are wired.
+//! - `.first`/`.last` as field-access shorthand — both exist only as
+//!   function calls (`first($xs)`, `last($xs)`); the dotted form is
+//!   parsed as an ordinary field access and returns `Null`.
+//! - Scientific-notation (`1e5`) and hexadecimal (`0xff`) number
+//!   literals — only decimal integers and finite-decimal floats.
+//! - Ternary `?:` operator — explicitly rejected with
+//!   `ParseError::TernaryNotSupported`.
+//! - Nested lambdas — a lambda body that itself contains `->` is
+//!   rejected with `ParseError::NestedLambda`. Sibling lambdas
+//!   (e.g. the `s -> …` inside a `count(…, s -> …)` that sits
+//!   beside another `t -> …` at the same depth) are permitted.
+//! - User-defined compositions (`[compositions.*]`) — the TOML
+//!   parser does not read this table.
+//!
+//! See `.planning/symposiums/compositional-ui/adrs/adr-016-surface-description.md`
+//! §5 for the full authoritative grammar.
+//!
 //! # Authoring paths
 //!
 //! ```no_run

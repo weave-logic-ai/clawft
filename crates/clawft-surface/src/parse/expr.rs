@@ -88,6 +88,13 @@ pub enum ParseError {
     TernaryNotSupported(usize),
     #[error("nested lambda is not supported in M1.5 (ADR-016 subset); at offset {0}")]
     NestedLambda(usize),
+    #[error("wrong arity for `{func}`: expected {expected}, got {got} at offset {at}")]
+    WrongArity {
+        func: String,
+        expected: usize,
+        got: usize,
+        at: usize,
+    },
 }
 
 /// Entry point. Trims the input and parses one complete expression.
@@ -205,8 +212,10 @@ impl<'a> Parser<'a> {
             "false" => Expr::Literal(AttrValue::Bool(false)),
             _ => {
                 if self.peek() == Some('(') {
+                    let call_at = self.offset;
                     self.bump();
                     let args = self.parse_args()?;
+                    check_call_arity(&ident, args.len(), call_at)?;
                     Expr::Call(ident, args)
                 } else {
                     // A bare ident outside a call is either a
@@ -289,8 +298,10 @@ impl<'a> Parser<'a> {
                     _ => {
                         self.skip_ws();
                         if self.peek() == Some('(') {
+                            let call_at = self.offset;
                             self.bump();
                             let args = self.parse_args()?;
+                            check_call_arity(&ident, args.len(), call_at)?;
                             Expr::Call(ident, args)
                         } else {
                             // Lambda-parameter reference — the
@@ -385,6 +396,7 @@ impl<'a> Parser<'a> {
         let mut first = preconsumed;
         loop {
             self.skip_ws();
+            let used_preconsumed = first.is_some();
             let op = if let Some(op) = first.take() {
                 Some(op)
             } else {
@@ -400,10 +412,11 @@ impl<'a> Parser<'a> {
                 // only need to break here.
                 break;
             }
-            if first.is_some() {
-                // Shouldn't happen: `first` was just read above, but
-                // we guard defensively.
-            } else {
+            if !used_preconsumed {
+                // The operator has not yet been taken from the input —
+                // advance past it. If it was pre-consumed (e.g. `-`
+                // eaten during lambda lookahead), the cursor is
+                // already past it.
                 self.consume_binop(op);
             }
             let mut rhs = self.parse_unary()?;
@@ -583,6 +596,30 @@ fn binop_prec(op: BinOp) -> u8 {
     }
 }
 
+/// Static arity table mirroring the evaluator's dispatch in `eval.rs`.
+/// Kept here so malformed bindings fail at parse/author time rather
+/// than at first render. Keep in lockstep with ADR-016 §5 and the
+/// `eval_call` dispatcher.
+fn check_call_arity(name: &str, got: usize, at: usize) -> Result<(), ParseError> {
+    let expected = match name {
+        "count" | "filter" | "fmt_number" => Some(2),
+        "len" | "first" | "last" | "fmt_percent" | "fmt_pct" | "fmt_count" | "fmt_duration"
+        | "fmt_bytes" | "exists" => Some(1),
+        // Unknown function names are handled at eval time (the
+        // evaluator emits `UnknownFunction` with better context).
+        _ => None,
+    };
+    match expected {
+        Some(n) if n != got => Err(ParseError::WrongArity {
+            func: name.to_string(),
+            expected: n,
+            got,
+            at,
+        }),
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -620,17 +657,83 @@ mod tests {
 
     #[test]
     fn parses_count_filter_lambda() {
-        let e = parse("count(filter($services, s -> s.status == \"healthy\"))").unwrap();
+        // Canonical 2-arg form per ADR-016 §5: `count(list, predicate)`.
+        let e = parse("count($services, s -> s.status == \"healthy\")").unwrap();
         if let Expr::Call(name, args) = e {
             assert_eq!(name, "count");
-            assert_eq!(args.len(), 1);
-            if let Expr::Call(fname, _) = &args[0] {
-                assert_eq!(fname, "filter");
+            assert_eq!(args.len(), 2);
+            assert!(matches!(&args[0], Expr::Path(_)));
+            assert!(matches!(&args[1], Expr::Lambda(_, _)));
+        } else {
+            panic!("expected count() call");
+        }
+    }
+
+    #[test]
+    fn rejects_count_one_arg_at_parse_time() {
+        let err = parse("count($services)").unwrap_err();
+        match err {
+            ParseError::WrongArity {
+                func,
+                expected,
+                got,
+                ..
+            } => {
+                assert_eq!(func, "count");
+                assert_eq!(expected, 2);
+                assert_eq!(got, 1);
+            }
+            other => panic!("expected WrongArity, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rejects_filter_one_arg_at_parse_time() {
+        let err = parse("filter($services)").unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::WrongArity { ref func, expected: 2, got: 1, .. } if func == "filter"
+        ));
+    }
+
+    #[test]
+    fn parses_ident_minus_integer() {
+        // Regression: `x - 1` previously lost the RHS because
+        // parse_binop_rhs double-consumed the pre-consumed `-`.
+        let e = parse("x - 1").unwrap();
+        if let Expr::Binop(BinOp::Sub, lhs, rhs) = e {
+            assert!(matches!(*lhs, Expr::Var(ref n) if n == "x"));
+            assert!(matches!(*rhs, Expr::Literal(AttrValue::Int(1))));
+        } else {
+            panic!("expected Binop(Sub, Var, Int)");
+        }
+    }
+
+    #[test]
+    fn parses_path_minus_path() {
+        let e = parse("$a - $b").unwrap();
+        if let Expr::Binop(BinOp::Sub, lhs, rhs) = e {
+            assert!(matches!(*lhs, Expr::Path(ref p) if p == "a"));
+            assert!(matches!(*rhs, Expr::Path(ref p) if p == "b"));
+        } else {
+            panic!("expected Binop(Sub, Path, Path)");
+        }
+    }
+
+    #[test]
+    fn parses_chained_binops_left_assoc() {
+        // `x - y + z` must group as `(x - y) + z`.
+        let e = parse("x - y + z").unwrap();
+        if let Expr::Binop(BinOp::Add, lhs, rhs) = e {
+            assert!(matches!(*rhs, Expr::Var(ref n) if n == "z"));
+            if let Expr::Binop(BinOp::Sub, ll, lr) = *lhs {
+                assert!(matches!(*ll, Expr::Var(ref n) if n == "x"));
+                assert!(matches!(*lr, Expr::Var(ref n) if n == "y"));
             } else {
-                panic!("expected inner filter() call");
+                panic!("expected Sub under Add-left");
             }
         } else {
-            panic!("expected outer count() call");
+            panic!("expected Add at top");
         }
     }
 

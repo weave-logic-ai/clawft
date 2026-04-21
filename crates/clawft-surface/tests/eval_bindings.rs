@@ -80,3 +80,28 @@ fn literal_binding_short_circuits() {
     let v = eval_binding(&b, &snap).unwrap();
     assert_eq!(v.as_i64(), Some(7));
 }
+
+/// Finding 6: a `count()` applied to a scalar ontology topic (instead
+/// of a list) must surface a clean `TypeMismatch`, not panic and not
+/// silently return 0. Guards the wrong-shape-binding boundary.
+#[test]
+fn count_on_scalar_topic_errors_with_type_mismatch() {
+    use clawft_surface::eval::{eval, EvalError};
+    use clawft_surface::parse::expr::parse;
+
+    let mut snap = OntologySnapshot::empty();
+    // A scalar topic — shaped wrong for list combinators.
+    snap.put("substrate/scalar_metric", json!(42));
+
+    let e = parse("count($substrate/scalar_metric, s -> true)").expect("parse");
+    let err = eval(&e, &snap, None).expect_err("count on scalar must error");
+    match err {
+        EvalError::TypeMismatch(msg) => {
+            assert!(
+                msg.contains("count"),
+                "TypeMismatch message should mention count(), got: {msg}"
+            );
+        }
+        other => panic!("expected TypeMismatch, got {other:?}"),
+    }
+}

@@ -572,4 +572,26 @@ mod tests {
         assert_eq!(eval(&e1, &snap, None).unwrap().as_bool(), Some(true));
         assert_eq!(eval(&e2, &snap, None).unwrap().as_bool(), Some(false));
     }
+
+    #[test]
+    fn evaluates_subtraction_path_minus_int() {
+        // Regression guard for the `x - 1` parser bug: once parsed
+        // correctly, the evaluator must produce the arithmetic result.
+        let snap = snap_with("a", json!(5));
+        let e = parse("$a - 1").unwrap();
+        let v = eval(&e, &snap, None).unwrap();
+        assert_eq!(v.as_i64(), Some(4));
+    }
+
+    #[test]
+    fn evaluates_chained_binops_left_assoc() {
+        // `$a - $b + $c` with {a:10, b:3, c:2} must yield 9 = (10-3)+2.
+        let mut snap = OntologySnapshot::empty();
+        snap.put("a", json!(10));
+        snap.put("b", json!(3));
+        snap.put("c", json!(2));
+        let e = parse("$a - $b + $c").unwrap();
+        let v = eval(&e, &snap, None).unwrap();
+        assert_eq!(v.as_i64(), Some(9));
+    }
 }

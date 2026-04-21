@@ -72,3 +72,44 @@ fn affordance_kill_is_declared_on_process_table() {
     let tree = parse_surface_toml(FIXTURE).expect("parse");
     assert!(tree.any_affordance_with_verb("rpc.kernel.kill"));
 }
+
+/// Finding 5: a child with `when` evaluating to false must be skipped
+/// by the composer (ADR-016 §6). The emitted `CanonResponse` stream
+/// reflects the skip — the hidden chip produces zero responses, so
+/// only the parent stack + the one visible chip show up.
+#[test]
+fn when_false_child_is_skipped_by_composer() {
+    use clawft_surface::builder::{chip, stack, Surface};
+    use clawft_surface::tree::{AttrValue, Mode};
+
+    let tree = Surface::new("test/when-skip")
+        .modes(&[Mode::Desktop])
+        .root(
+            stack("/root")
+                .attr("axis", AttrValue::Str("horizontal".into()))
+                .child(
+                    chip("/root/visible")
+                        .bind_literal("label", AttrValue::Str("visible".into())),
+                )
+                .child(
+                    chip("/root/hidden")
+                        .bind_literal("label", AttrValue::Str("hidden".into()))
+                        // `$flag == true` against a snapshot where flag=false.
+                        .when("$flag == true"),
+                ),
+        )
+        .build();
+
+    let mut snap = OntologySnapshot::empty();
+    snap.put("flag", json!(false));
+
+    let responses = render_headless(&tree, snap);
+
+    let chips = responses.iter().filter(|r| r.identity == "ui://chip").count();
+    let stacks = responses.iter().filter(|r| r.identity == "ui://stack").count();
+    assert_eq!(
+        chips, 1,
+        "hidden chip must be skipped; expected 1 chip response, got {chips}"
+    );
+    assert_eq!(stacks, 1, "parent stack must still render");
+}
