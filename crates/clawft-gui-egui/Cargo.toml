@@ -54,14 +54,22 @@ web-time = "1"
 # target, so the boot logo silently fails to decode. Pin `png` explicitly.
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+# M1.5-C + M1.5-D/E: substrate state tree + ADR-017 OntologyAdapter
+# trait + surface-description composer. Compiles on wasm (adapter trait
+# + snapshot types only; the kernel adapter + Substrate::subscribe are
+# gated native-only inside the crate).
+clawft-substrate = { workspace = true }
+# M1.5-A + M1.5-D/E: app manifest + registry (ADR-015).
+clawft-app = { workspace = true }
+# M1.5-B + M1.5-D/E: surface-description IR + composer (ADR-016).
+clawft-surface = { workspace = true }
+
 # ── Native-only dependencies ─────────────────────────────────────────
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 tokio = { workspace = true }
 clawft-rpc = { workspace = true }
-# M1.5-C: kernel adapter + substrate state tree (ADR-017).
-clawft-substrate = { workspace = true }
 ehttp = { version = "0.5", features = ["native-async"] }
 poll-promise = "0.3"
 
@@ -79,6 +87,12 @@ web-sys = { version = "0.3", features = [
 console_error_panic_hook = "0.1"
 # Minimal async + channels that work in single-threaded wasm.
 futures = { version = "0.3", default-features = false, features = ["std"] }
+
+# ── Dev dependencies (integration tests only) ───────────────────────
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "time", "sync"] }
 
 # ── Features ─────────────────────────────────────────────────────────
 

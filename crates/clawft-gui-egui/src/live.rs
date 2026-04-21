@@ -192,6 +192,56 @@ impl Live {
         self.inner.read().clone()
     }
 
+    /// Snapshot the substrate state tree as an
+    /// [`clawft_substrate::OntologySnapshot`]. This is the entry point
+    /// for ADR-016 surface composers: they read bindings against the
+    /// returned snapshot and drive canon primitives accordingly.
+    ///
+    /// On native: returns the live substrate state (empty until the
+    /// first adapter tick lands). On wasm: the substrate is not yet
+    /// wired through the webview bridge (M1.6+), so we return a
+    /// best-effort snapshot assembled from the legacy `Snapshot`
+    /// fields so the composer has *something* to render.
+    pub fn substrate_snapshot(&self) -> clawft_substrate::OntologySnapshot {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(sub) = self.substrate.lock().as_ref() {
+                return sub.snapshot();
+            }
+            clawft_substrate::OntologySnapshot::default()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // Fallback path: derive substrate paths from the legacy
+            // Snapshot so the composer has data to render in the
+            // webview until the real adapter bridge lands.
+            let snap = self.inner.read();
+            let mut out = clawft_substrate::OntologySnapshot::default();
+            if let Some(v) = &snap.status {
+                out = out.with("substrate/kernel/status", v.clone());
+            }
+            if let Some(v) = &snap.processes {
+                out = out.with(
+                    "substrate/kernel/processes",
+                    serde_json::Value::Array(v.clone()),
+                );
+            }
+            if let Some(v) = &snap.services {
+                out = out.with(
+                    "substrate/kernel/services",
+                    serde_json::Value::Array(v.clone()),
+                );
+            }
+            if let Some(v) = &snap.logs {
+                out = out.with(
+                    "substrate/kernel/logs",
+                    serde_json::Value::Array(v.clone()),
+                );
+            }
+            out
+        }
+    }
+
     pub fn submit(&self, cmd: Command) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
         {
