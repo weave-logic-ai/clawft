@@ -121,7 +121,7 @@ fn services(snap: &Snapshot) -> Vec<(&'static str, &'static str, Ok)> {
     let mesh = service_present(snap, &["mesh"]);
     let defi = service_present(snap, &["defi", "bond"]);
     let wifi = link_state_to_ok(&snap.network_wifi);
-    let bluetooth = Ok::Off; // placeholder — M1.5.1c wires this
+    let bluetooth = bluetooth_state_to_ok(&snap.bluetooth);
 
     vec![
         ("Kernel", "◉ kernel", kernel),
@@ -144,6 +144,22 @@ fn link_state_to_ok(v: &Option<serde_json::Value>) -> Ok {
     match state {
         "connected" => Ok::On,
         "disconnected" => Ok::Warn,
+        _ => Ok::Off,
+    }
+}
+
+/// Map a `substrate/bluetooth` Replace value to a tray chip status.
+/// `enabled=true` → green. `present=true` but `enabled=false` (rfkill
+/// soft-blocked) → amber. Otherwise → grey.
+fn bluetooth_state_to_ok(v: &Option<serde_json::Value>) -> Ok {
+    let Some(obj) = v.as_ref() else {
+        return Ok::Off;
+    };
+    let enabled = obj.get("enabled").and_then(|b| b.as_bool()).unwrap_or(false);
+    let present = obj.get("present").and_then(|b| b.as_bool()).unwrap_or(false);
+    match (present, enabled) {
+        (_, true) => Ok::On,
+        (true, false) => Ok::Warn,
         _ => Ok::Off,
     }
 }

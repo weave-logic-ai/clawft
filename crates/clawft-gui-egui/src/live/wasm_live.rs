@@ -269,6 +269,9 @@ impl PartialPoll {
             network_wifi: None,
             network_ethernet: None,
             network_battery: None,
+            // M1.5.1c — BluetoothAdapter is native-only for the same
+            // reason as the network adapter.
+            bluetooth: None,
             last_error: err,
             tick: 0,
             last_tick_at_ms: Some(finished_ms),

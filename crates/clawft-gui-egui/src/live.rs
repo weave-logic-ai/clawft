@@ -39,6 +39,9 @@ pub struct Snapshot {
     /// M1.5.1b — raw `substrate/network/battery` value.
     /// Shape: `{"present": bool, "percent"?: u8, "charging"?: bool}`.
     pub network_battery: Option<Value>,
+    /// M1.5.1c — raw `substrate/bluetooth` value.
+    /// Shape: `{"present": bool, "enabled": bool, "controller"?}`.
+    pub bluetooth: Option<Value>,
     pub last_error: Option<String>,
     /// Incremented every successful poll tick so the UI can detect freshness.
     pub tick: u64,

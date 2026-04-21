@@ -47,6 +47,12 @@ pub mod kernel;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod network;
 
+/// Host-local bluetooth adapter. Reads `/sys/class/bluetooth` +
+/// `/sys/class/rfkill` directly — no bluez / bluetoothctl dependency.
+/// Native-only for the same reason as [`network`].
+#[cfg(not(target_arch = "wasm32"))]
+pub mod bluetooth;
+
 pub use adapter::{
     AdapterError, BufferPolicy, OntologyAdapter, PermissionReq, RefreshHint, Sensitivity, SubId,
     Subscription, TopicDecl,

@@ -14,6 +14,7 @@
 use std::sync::Arc;
 
 use clawft_rpc::{DaemonClient, Request};
+use clawft_substrate::bluetooth::{BluetoothAdapter, TOPICS as BLUETOOTH_TOPICS};
 use clawft_substrate::kernel::{KernelAdapter, TOPICS as KERNEL_TOPICS};
 use clawft_substrate::network::{NetworkAdapter, TOPICS as NETWORK_TOPICS};
 use clawft_substrate::{OntologyAdapter, Substrate};
@@ -91,6 +92,24 @@ fn run_driver(live: Arc<Live>, mut cmd_rx: tokio::sync::mpsc::Receiver<Command>)
             }
         }
 
+        // M1.5.1c — host-local bluetooth adapter. Same pattern as
+        // the network adapter; reads /sys/class/bluetooth and
+        // /sys/class/rfkill.
+        let bluetooth_adapter: Arc<dyn OntologyAdapter> = Arc::new(BluetoothAdapter::new());
+        for topic in BLUETOOTH_TOPICS {
+            match substrate
+                .subscribe_adapter(Arc::clone(&bluetooth_adapter), topic.path, Value::Null)
+                .await
+            {
+                Ok(_id) => {}
+                Err(e) => {
+                    live.write(|s| {
+                        s.last_error = Some(format!("subscribe {}: {e}", topic.path));
+                    });
+                }
+            }
+        }
+
         // Separate channel for raw UI commands (ADR-011 passthrough for
         // `blocks::terminal`). Keeps its own `DaemonClient` so the
         // substrate pollers aren't serialised behind ad-hoc calls.
@@ -149,6 +168,7 @@ async fn refresh_snapshot(substrate: &Arc<Substrate>, live: &Arc<Live>) {
     let network_wifi = snap.get("substrate/network/wifi").cloned();
     let network_ethernet = snap.get("substrate/network/ethernet").cloned();
     let network_battery = snap.get("substrate/network/battery").cloned();
+    let bluetooth = snap.get("substrate/bluetooth").cloned();
 
     // Heuristic: if any real data from the adapter has landed in the
     // substrate we treat the connection as Connected; otherwise the
@@ -172,6 +192,7 @@ async fn refresh_snapshot(substrate: &Arc<Substrate>, live: &Arc<Live>) {
         s.network_wifi = network_wifi.clone();
         s.network_ethernet = network_ethernet.clone();
         s.network_battery = network_battery.clone();
+        s.bluetooth = bluetooth.clone();
         s.tick = s.tick.wrapping_add(1);
         s.last_tick_at_ms = Some(now_ms());
         s.last_tick_dur_ms = Some(SNAPSHOT_MS as f64);
