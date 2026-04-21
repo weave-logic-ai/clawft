@@ -23,6 +23,7 @@ const MOCK_TOPICS: &[TopicDecl] = &[TopicDecl {
     refresh_hint: RefreshHint::Periodic { ms: 100 },
     sensitivity: Sensitivity::Public,
     buffer_policy: BufferPolicy::BlockCapped,
+    max_len: None,
 }];
 
 struct MockAdapter {

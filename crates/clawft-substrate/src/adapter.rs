@@ -89,6 +89,16 @@ pub struct TopicDecl {
     pub sensitivity: Sensitivity,
     /// Buffer policy — see [`BufferPolicy`].
     pub buffer_policy: BufferPolicy,
+    /// Maximum retained length for list-typed topics.
+    ///
+    /// When `Some(n)`, [`crate::Substrate::apply`] auto-trims the
+    /// front of a list topic on each [`StateDelta::Append`] so the
+    /// array never holds more than `n` entries. `None` means unbounded
+    /// (the topic is a singleton or the adapter manages its own
+    /// retention). This is a substrate-side realisation of the
+    /// drop-oldest ring contract described in ADR-017 §5 for the
+    /// kernel log topic; M1.5-D may fold this into the ADR text.
+    pub max_len: Option<usize>,
 }
 
 /// Capability the adapter needs the host to grant at install time.

@@ -121,8 +121,40 @@ pub struct Live {
     inner: RwLock<Snapshot>,
     #[cfg(not(target_arch = "wasm32"))]
     cmd_tx: tokio::sync::mpsc::Sender<Command>,
+    /// Shared substrate — populated by the native driver so
+    /// [`Live::drop`] can tombstone its kernel-adapter subscriptions on
+    /// shutdown. `None` until the driver has finished subscribing.
+    #[cfg(not(target_arch = "wasm32"))]
+    substrate: parking_lot::Mutex<Option<Arc<clawft_substrate::Substrate>>>,
     #[cfg(target_arch = "wasm32")]
     bridge: wasm_live::Bridge,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for Live {
+    /// Best-effort shutdown: ask the substrate to tombstone every
+    /// kernel-adapter subscription, then abort the remaining drain
+    /// tasks. We can't reliably await async work inside `Drop` because
+    /// the owning tokio runtime may already be gone — we therefore
+    /// prefer `Handle::try_current() + spawn` for the graceful case and
+    /// fall back to dropping the `Arc<Substrate>` (whose own `Drop`
+    /// synchronously aborts outstanding join handles). Documented
+    /// tradeoff: callers that want a clean tombstone must drop the
+    /// `Arc<Live>` while still inside the tokio runtime thread.
+    fn drop(&mut self) {
+        let Some(substrate) = self.substrate.lock().take() else {
+            return;
+        };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            // Fire-and-forget close_all on the existing runtime.
+            handle.spawn(async move {
+                substrate.close_all().await;
+            });
+        }
+        // If no runtime is current, the substrate's own `Drop` will
+        // abort outstanding join handles synchronously when this scope
+        // ends and the last `Arc` is released.
+    }
 }
 
 /// Monotonic milliseconds since app start (cross-target).

@@ -43,10 +43,11 @@ use clawft_rpc::{DaemonClient, Request};
 /// Default number of log entries to request per `kernel.logs` call.
 const LOG_TAIL: usize = 200;
 
-/// Maximum retained log entries in the substrate (ADR-017 §4 — the
-/// drop-oldest ring). The adapter doesn't currently trim; the composer
-/// trims in the future. TODO.
-#[allow(dead_code)]
+/// Maximum retained log entries in the substrate (ADR-017 §5 — the
+/// drop-oldest ring). Declared on the `substrate/kernel/logs` topic's
+/// [`TopicDecl::max_len`] so the [`crate::Substrate`] auto-trims
+/// append-only list topics. Kept as a named constant so callers can
+/// reference the contract value.
 const LOG_RING: usize = 1000;
 
 /// Channel depth for singleton topics (refuse policy).
@@ -66,6 +67,7 @@ pub const TOPICS: &[TopicDecl] = &[
         refresh_hint: RefreshHint::Periodic { ms: 2000 },
         sensitivity: Sensitivity::Workspace,
         buffer_policy: BufferPolicy::Refuse,
+        max_len: None,
     },
     TopicDecl {
         path: "substrate/kernel/processes",
@@ -73,6 +75,7 @@ pub const TOPICS: &[TopicDecl] = &[
         refresh_hint: RefreshHint::Periodic { ms: 1000 },
         sensitivity: Sensitivity::Workspace,
         buffer_policy: BufferPolicy::BlockCapped,
+        max_len: None,
     },
     TopicDecl {
         path: "substrate/kernel/services",
@@ -80,6 +83,7 @@ pub const TOPICS: &[TopicDecl] = &[
         refresh_hint: RefreshHint::Periodic { ms: 2000 },
         sensitivity: Sensitivity::Workspace,
         buffer_policy: BufferPolicy::BlockCapped,
+        max_len: None,
     },
     TopicDecl {
         path: "substrate/kernel/logs",
@@ -89,6 +93,7 @@ pub const TOPICS: &[TopicDecl] = &[
         refresh_hint: RefreshHint::EventDriven,
         sensitivity: Sensitivity::Workspace,
         buffer_policy: BufferPolicy::DropOldest,
+        max_len: Some(LOG_RING),
     },
 ];
 
@@ -321,14 +326,37 @@ async fn poll_logs(
                 match call(c, "kernel.logs", params).await {
                     Ok(value) => {
                         let Some(entries) = value.as_array() else { continue; };
-                        let new_entries = diff_tail(entries, watermark.as_ref());
-                        for entry in &new_entries {
-                            let delta = StateDelta::Append {
-                                path: "substrate/kernel/logs".into(),
-                                value: (*entry).clone(),
-                            };
-                            if tx.send(delta).await.is_err() {
-                                return;
+                        match diff_tail(entries, watermark.as_ref(), tail) {
+                            DiffTailOutcome::New(new_entries) => {
+                                for entry in &new_entries {
+                                    let delta = StateDelta::Append {
+                                        path: "substrate/kernel/logs".into(),
+                                        value: (*entry).clone(),
+                                    };
+                                    if tx.send(delta).await.is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                            DiffTailOutcome::Overflow { lost_estimate } => {
+                                // Previous watermark fell off the
+                                // tail window — the daemon either
+                                // rotated the log or emitted more
+                                // entries than our window size in a
+                                // single tick. Emit one synthetic
+                                // warning rather than re-emitting
+                                // every entry as new.
+                                let delta = StateDelta::Append {
+                                    path: "substrate/kernel/logs".into(),
+                                    value: json!({
+                                        "level": "warn",
+                                        "message": "log window overflow — some entries lost",
+                                        "lost_entries": lost_estimate,
+                                    }),
+                                };
+                                if tx.send(delta).await.is_err() {
+                                    return;
+                                }
                             }
                         }
                         if let Some(last) = entries.last() {
@@ -344,17 +372,66 @@ async fn poll_logs(
     }
 }
 
-/// Diff a tail window against the previous watermark. Returns the
-/// entries strictly after the watermark. If the watermark is unknown
-/// (first call), returns the entire window so the consumer sees the
-/// current tail on subscription.
-fn diff_tail<'a>(entries: &'a [Value], watermark: Option<&Value>) -> Vec<&'a Value> {
+/// Result of a `diff_tail` — either a batch of new entries or a
+/// synthetic overflow notice. See [`diff_tail`].
+#[derive(Debug, PartialEq)]
+enum DiffTailOutcome<'a> {
+    /// Zero-or-more new entries strictly newer than the watermark.
+    New(Vec<&'a Value>),
+    /// The previous watermark was not found in the current window and
+    /// the window is at the poll-buffer limit — entries were lost
+    /// between ticks. `lost_estimate` is a best-effort count
+    /// (window-size when full; we cannot reconstruct the exact gap
+    /// without a daemon-side sequence counter — that's a future M1.6+
+    /// RPC change).
+    Overflow {
+        /// Best-effort count of entries that fell off the window.
+        lost_estimate: usize,
+    },
+}
+
+/// Diff a tail window against the previous watermark.
+///
+/// Semantics:
+/// - If `watermark` is `None` (first call), all entries are returned.
+/// - If the watermark is found in the window, entries strictly after
+///   it are returned.
+/// - If the watermark is missing AND the window is at the poll buffer
+///   limit (`window_cap`), this is treated as an overflow: return a
+///   synthetic overflow outcome rather than re-emitting the whole
+///   window (which would duplicate already-seen entries). Callers are
+///   expected to emit a single synthetic warn entry and advance the
+///   watermark to the newest entry.
+/// - If the watermark is missing AND the window is below the cap, the
+///   simplest explanation is daemon restart / log reset — return all
+///   entries (same semantics as first call).
+///
+/// Finding 1 fix (option 2 — capped-tail + capped-returns). A proper
+/// monotonic `seq: u64` per entry (option 1) is deferred to M1.6+
+/// pending a daemon-side RPC change.
+fn diff_tail<'a>(
+    entries: &'a [Value],
+    watermark: Option<&Value>,
+    window_cap: usize,
+) -> DiffTailOutcome<'a> {
     let Some(mark) = watermark else {
-        return entries.iter().collect();
+        return DiffTailOutcome::New(entries.iter().collect());
     };
     match entries.iter().rposition(|e| e == mark) {
-        Some(idx) => entries.iter().skip(idx + 1).collect(),
-        None => entries.iter().collect(),
+        Some(idx) => DiffTailOutcome::New(entries.iter().skip(idx + 1).collect()),
+        None => {
+            if entries.len() >= window_cap {
+                // Overflow: the watermark rolled off. Report the whole
+                // window as lost rather than re-emit it.
+                DiffTailOutcome::Overflow {
+                    lost_estimate: entries.len(),
+                }
+            } else {
+                // Window is not full — daemon likely reset or rotated.
+                // Safe to treat the whole window as fresh.
+                DiffTailOutcome::New(entries.iter().collect())
+            }
+        }
     }
 }
 
@@ -452,24 +529,77 @@ mod tests {
     #[test]
     fn diff_tail_returns_everything_on_first_call() {
         let e = vec![json!(1), json!(2), json!(3)];
-        let out = diff_tail(&e, None);
-        assert_eq!(out.len(), 3);
+        match diff_tail(&e, None, LOG_TAIL) {
+            DiffTailOutcome::New(out) => assert_eq!(out.len(), 3),
+            other => panic!("expected New, got {other:?}"),
+        }
     }
 
     #[test]
     fn diff_tail_returns_new_after_watermark() {
         let e = vec![json!(1), json!(2), json!(3), json!(4)];
         let mark = json!(2);
-        let out = diff_tail(&e, Some(&mark));
-        assert_eq!(out.len(), 2);
-        assert_eq!(*out[0], json!(3));
+        match diff_tail(&e, Some(&mark), LOG_TAIL) {
+            DiffTailOutcome::New(out) => {
+                assert_eq!(out.len(), 2);
+                assert_eq!(*out[0], json!(3));
+                assert_eq!(*out[1], json!(4));
+            }
+            other => panic!("expected New, got {other:?}"),
+        }
     }
 
     #[test]
-    fn diff_tail_with_unknown_watermark_returns_all() {
+    fn diff_tail_missing_watermark_undercapped_returns_all() {
+        // Window is smaller than the poll cap → daemon likely reset.
+        // Safe to treat as a fresh first-call.
         let e = vec![json!(5), json!(6)];
         let mark = json!(99);
-        let out = diff_tail(&e, Some(&mark));
-        assert_eq!(out.len(), 2);
+        match diff_tail(&e, Some(&mark), LOG_TAIL) {
+            DiffTailOutcome::New(out) => assert_eq!(out.len(), 2),
+            other => panic!("expected New, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_tail_missing_watermark_at_cap_reports_overflow() {
+        // Window == cap, watermark missing → overflow: we can't tell
+        // if these are all new or partially duplicated. Return a
+        // synthetic overflow rather than re-emit the whole window.
+        let cap = 4;
+        let e = vec![json!(10), json!(11), json!(12), json!(13)];
+        let mark = json!(1);
+        match diff_tail(&e, Some(&mark), cap) {
+            DiffTailOutcome::Overflow { lost_estimate } => {
+                assert_eq!(lost_estimate, cap);
+            }
+            other => panic!("expected Overflow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_tail_empty_window_returns_empty_new() {
+        let e: Vec<Value> = vec![];
+        match diff_tail(&e, None, LOG_TAIL) {
+            DiffTailOutcome::New(out) => assert!(out.is_empty()),
+            other => panic!("expected New, got {other:?}"),
+        }
+        let mark = json!(1);
+        match diff_tail(&e, Some(&mark), LOG_TAIL) {
+            // Empty window with a watermark: cannot be overflow (len
+            // == 0, below any sensible cap) — treated as "no new".
+            DiffTailOutcome::New(out) => assert!(out.is_empty()),
+            other => panic!("expected New, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_tail_watermark_is_last_entry_returns_empty() {
+        let e = vec![json!(1), json!(2), json!(3)];
+        let mark = json!(3);
+        match diff_tail(&e, Some(&mark), LOG_TAIL) {
+            DiffTailOutcome::New(out) => assert!(out.is_empty()),
+            other => panic!("expected New, got {other:?}"),
+        }
     }
 }

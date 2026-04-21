@@ -32,6 +32,7 @@ pub(super) fn spawn() -> Arc<Live> {
     let live = Arc::new(Live {
         inner: RwLock::new(Snapshot::default()),
         cmd_tx,
+        substrate: parking_lot::Mutex::new(None),
     });
     let driver = Arc::clone(&live);
     std::thread::Builder::new()
@@ -50,15 +51,20 @@ fn run_driver(live: Arc<Live>, mut cmd_rx: tokio::sync::mpsc::Receiver<Command>)
     rt.block_on(async move {
         // Build the substrate + subscribe the kernel adapter to every
         // declared topic. Subscriptions outlive this function — the
-        // per-topic poller tasks run until the process exits.
+        // per-topic poller tasks run until the process exits OR until
+        // `Live::drop` calls `substrate.close_all()` (see live.rs).
         let substrate = Arc::new(Substrate::new());
+        // Publish the substrate handle on the Live so the Drop impl
+        // can tombstone subscriptions on shutdown.
+        *live.substrate.lock() = Some(Arc::clone(&substrate));
+
         let adapter: Arc<dyn OntologyAdapter> = Arc::new(KernelAdapter::new());
         for topic in TOPICS {
             match substrate
                 .subscribe_adapter(Arc::clone(&adapter), topic.path, Value::Null)
                 .await
             {
-                Ok(_id) => { /* subscription id tracked by adapter */ }
+                Ok(_id) => { /* subscription id tracked by Substrate */ }
                 Err(e) => {
                     live.write(|s| {
                         s.last_error = Some(format!("subscribe {}: {e}", topic.path));
