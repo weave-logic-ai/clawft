@@ -31,6 +31,7 @@ members = [
     "crates/weftos-leaf-types",
     "crates/eml-core",
     "crates/clawft-gui-egui",
+    "crates/clawft-app",
 ]
 exclude = [
     "gui/src-tauri",
