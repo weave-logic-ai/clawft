@@ -4,7 +4,7 @@
 and what's deferred. Sources the fragmented lists that already exist
 across AGENDA / sessions / ADRs / spec. Update this file as work moves.
 
-Last updated: 2026-04-20.
+Last updated: 2026-04-20 (M1.5 shipped).
 
 ---
 
@@ -62,6 +62,12 @@ Last updated: 2026-04-20.
   `Blocks | Canon` section toggle in the Desktop Blocks window. 20
   per-primitive demos with live `CanonResponse` footer read-out
   (identity / variant / bearing / latency). Commit `7c0c523`.
+- **M1.5 — First real panel driven by a surface description
+  (2026-04-20)** — the app-layer acceptance milestone from session-10
+  §7 landed in nine commits on `development-0.7.0`, culminating in
+  merge `0e32e67`. Four parallel-agent streams + three expert reviews
+  + two review-driven reliability patches + one integration pass.
+  Details in the dedicated section below.
 
 ### Round 3 — App Layer planning (2026-04-20)
 - **`session-10-app-layer.md`** (292 lines) — anchor doc. 3 modes
@@ -100,35 +106,128 @@ Last updated: 2026-04-20.
 
 ---
 
-## 🚧 In flight / next up (revised milestone stack)
+## ✅ M1.5 — delivered 2026-04-20
 
-Round 3 planning reshaped the milestone order. **M1.5 is inserted
-ahead of M2** because M2's instrumentation is only meaningful once an
-app layer exists to instrument.
+Merged to `development-0.7.0` as `0e32e67`. Acceptance
+(session-10 §7) met 5/5:
 
-### M1.5 — First real panel driven by a surface description
-**Acceptance**: the WeftOS Admin reference panel (session-10 §6.1)
-runs as a declarative surface description, registered as an app,
-launchable in `ide × pointer` (Cursor) and `desktop × pointer`
-(`weaver gui`). `Desktop::render_blocks_window`'s hand-coded
-`BlockKind` match is replaced by app-manifest dispatch.
+1. `clawft-app` crate with manifest parser + JSON registry. ✅
+2. `clawft-surface` crate with IR + composer + expression lang. ✅
+3. Kernel adapter refactored to emit `substrate/kernel/*` topics as
+   deltas via the ADR-017 trait. ✅
+4. WeftOS Admin launchable in `ide × pointer` and `desktop × pointer`. ✅
+5. Desktop Blocks window has a new `Apps` section. ✅
+   (`BlockKind` retained as parallel Blocks demos — deletion deferred
+   to M1.6+ when more apps cover the remaining slots.)
 
-- `clawft-app` crate — minimal manifest parser + app registry (SQLite
-  or JSON for M1.5). Implements the schema from ADR-015.
-- `clawft-surface` crate — minimal surface-description parser +
-  `SurfaceTree` IR + composer runtime. Implements a subset of ADR-016
-  sufficient for the admin panel (Stack/Strip/Grid/Chip/Gauge/Table/
-  StreamView + `$substrate/...` bindings + `count/filter` expressions).
-- `kernel` ontology adapter refactor — replaces polling `Live` with
-  the trait from ADR-017 §1. Emits `substrate/kernel/{status,
-  processes, services, logs}` as deltas.
-- WeftOS Admin manifest + surface descriptions (both TOML and Rust
-  builder variants per ADR-015 §concrete-example).
-- Delete `BlockKind` enum once the admin app covers the existing
-  demos. (Session-10 rec. 13.)
+### What shipped
 
-**Explicit non-goals for M1.5**: git/gh/deploy adapters, any voice /
-avatar work, touch adaptation, follow-editor, full IDE bridge.
+- **`clawft-app`** (new crate) — ADR-015 subset. `AppManifest` struct,
+  TOML parse + serde round-trip, `Mode`/`Input`/`EntryPoint`/
+  `Permission` enums (canonical location), `AppRegistry` backed by
+  JSON at `$XDG_DATA_HOME/weftos/apps.json`, `governance::Gate` trait
+  with `NoopGate` + `StrictGate`, 24 tests green.
+- **`clawft-surface`** (new crate) — ADR-016 subset. `SurfaceTree` IR,
+  TOML parser + Rust builder producing identical IRs, hand-rolled RD
+  parser for binding expression language (literals / `$path` reads /
+  field access / `count`/`filter`/`len`/`first`/`last`/`fmt_*` /
+  binops / single-level lambdas), `when:` conditional rendering,
+  composer runtime driving Pressable / Chip / Gauge / Table /
+  StreamView / Stack / Strip / Grid (13 other primitives emit
+  visible TODO labels pending later milestones), headless render
+  test harness, 36 tests green.
+- **`clawft-substrate`** (new crate) — ADR-017 trait. `OntologyAdapter`
+  + `TopicDecl { path, shape, refresh_hint, sensitivity,
+  buffer_policy, max_len }` + `StateDelta { Append | Replace |
+  Remove }` + `Subscription`. `KernelAdapter` emits the four
+  `substrate/kernel/*` topics. `Substrate` state tree tracks
+  subscriptions with `JoinHandle`s, exposes `close_all()` for graceful
+  shutdown. Log-ring trim (1000 entries) and watermark-overflow
+  safety (synthetic "log window overflow" warn entry rather than
+  re-emitting everything). 22 tests green.
+- **`clawft-gui-egui` integration** — `surface_host` module exposes
+  `render_headless`. `Desktop` gains `app_registry`, `selected_app`,
+  `app_surfaces` fields; new `PanelSection::Apps` shown alongside
+  `Blocks` and `Canon`. WeftOS Admin auto-installs from a bundled
+  fixture on boot so the Apps tab always has content. `live/`
+  internally driven by `KernelAdapter` + `Substrate`; public
+  `Live`/`Snapshot` API preserved byte-for-byte.
+- **End-to-end acceptance test** — `tests/admin_app_e2e.rs` wires a
+  `CannedKernelAdapter` → `Substrate::subscribe_adapter` → parsed
+  admin surface → `surface_host::render_headless` → asserts non-empty
+  responses + presence of `ui://gauge`/`ui://table` primitives. One
+  test, four layers, full M1.5 acceptance contract. ✅
+
+### How the work was done (process notes for future milestones)
+
+Four parallel worktrees off `development-0.7.0` at `d3d214f`:
+`m15/app`, `m15/surface`, `m15/kernel-adapter`, `m15/integration`.
+Three implementer agents + three reviewer agents + two review-driven
+fix agents + one integration agent. Reviewer agents found:
+- A latent parser bug in `clawft-surface` (`parse("x - 1")` lost the
+  RHS) — fixed on branch before integration.
+- Watermark-overflow re-emission in `clawft-substrate` logs + missing
+  ring trim — both fixed on branch before integration.
+- Duplicate type definitions across crates (`Permission`/
+  `PermissionReq`, `Mode`/`Input`, `OntologySnapshot`) — unified by
+  the integration agent in three checkpoint refactor commits.
+
+Total landed: 91 tests passing on the four M1.5 crates
+(24 + 36 + 22 + 9 including the new e2e test). Clippy clean.
+`scripts/build.sh check` green. Native and wasm builds both intact.
+
+### Commit trail
+
+```
+0e32e67 merge(m1.5): M1.5 complete — app layer + admin panel rendering from surface description
+87e9591 test(m1.5): end-to-end admin-app render integration test
+0fbc544 feat(m1.5): WeftOS Admin app — manifest + surface + Desktop Apps section
+f5e40c3 refactor(m1.5): break surface -> gui-egui dep cycle; wasm-gate substrate
+d98c8ff refactor(m1.5): unify Mode/Input + OntologySnapshot across surface/app/substrate
+7a6d9c3 refactor(m1.5): unify Permission enum across clawft-app and clawft-substrate
+d382745 Merge branch 'm15/kernel-adapter' into m15/integration
+bb13cbc Merge branch 'm15/surface' into m15/integration
+fb0ebfd Merge branch 'm15/app' into m15/integration
+0c8858c fix(m1.5-substrate): log ring trim + watermark overflow safety + tracked subscriptions
+55234e0 fix(m1.5-surface): parser RHS-loss on subtraction + count arity + scope docs
+75e3373 feat(m1.5): clawft-surface crate — description IR + composer + binding eval
+b397330 feat(m1.5): clawft-substrate crate + kernel adapter refactor
+0540dea feat(m1.5): clawft-app crate — manifest parser + JSON registry
+```
+
+### Review-deferred follow-ups (track as M1.5-tail beads)
+
+These were flagged by expert review and accepted as non-blockers:
+
+- **clawft-app** — `UnknownMode` validation error variant is dead
+  code (serde rejects out-of-set values at parse). Either wire a
+  Rust-constructed-manifest check or delete the variant.
+  Registry corruption recovery is currently "return JSON error to
+  caller"; a quarantine/backup path is M1.6+ polish. `uninstall`
+  while enabled doesn't yet run the ADR-015 §Lifecycle teardown
+  (surfaces/subscriptions/affordances), because those hooks don't
+  exist yet at the compositor level.
+- **clawft-surface** — `.first`/`.last` as field access not supported
+  (only as function calls). `sort(list, key)` ADR-016 §5 function not
+  implemented. Scientific (`1e5`) / hex (`0xff`) number literals not
+  accepted. User-defined compositions (`[compositions.*]`) not
+  parsed. All documented in `lib.rs` header under "M1.5 scope
+  reductions".
+- **clawft-substrate** — `substrate/meta/adapter/<id>/health` topic
+  not yet emitted (ADR-017 §7). Log event-driven ingest is still a
+  periodic poll fallback because the daemon RPC doesn't expose a
+  streaming log endpoint yet.
+- **Cross-cutting** — variant_id stamping through real widgets + the
+  honest governance-gated affordance intersection are both stubbed
+  (identity mapping) in the composer; real wiring lands with M2's
+  active-radar loop.
+
+---
+
+## 🚧 In flight / next up
+
+Round 3 planning reshaped the milestone order. M1.5 is done; M1.6
+is next.
 
 ### M1.6 — IDE bridge editor-in
 Adds `substrate/editor/*` topics (the `workspace` adapter from
@@ -303,16 +402,38 @@ unnamed. Likely not an ADR until M2 forces the question.
 | Main shell | `crates/clawft-gui-egui/` |
 | Canon primitives | `crates/clawft-gui-egui/src/canon/` |
 | Canon demos | `crates/clawft-gui-egui/src/canon_demos.rs` |
+| Surface host glue | `crates/clawft-gui-egui/src/surface_host/` |
+| Desktop compositor (Blocks + Canon + Apps sections) | `crates/clawft-gui-egui/src/shell/desktop.rs` |
 | Demo lab bin | `crates/clawft-gui-egui/src/bin/demo_lab.rs` |
 | Theming tokens | `crates/clawft-gui-egui/src/theming.rs` |
 | M0 extension | `extensions/vscode-weft-panel/` |
-| M1.5 new crates | `crates/clawft-app/` (TBD), `crates/clawft-surface/` (TBD) |
+| App manifest + registry | `crates/clawft-app/` |
+| Surface description IR + composer | `crates/clawft-surface/` |
+| Ontology adapter trait + `KernelAdapter` + `Substrate` | `crates/clawft-substrate/` |
+| WeftOS Admin manifest fixture | `crates/clawft-app/fixtures/weftos-admin.toml` |
+| WeftOS Admin desktop surface fixture | `crates/clawft-surface/fixtures/weftos-admin-desktop.toml` |
+| End-to-end M1.5 acceptance test | `crates/clawft-gui-egui/tests/admin_app_e2e.rs` |
 
 ---
 
 ## Commit graph since the pivot
 
 ```
+0e32e67 merge(m1.5): M1.5 complete — app layer + admin panel rendering from surface description
+87e9591 test(m1.5): end-to-end admin-app render integration test
+0fbc544 feat(m1.5): WeftOS Admin app — manifest + surface + Desktop Apps section
+f5e40c3 refactor(m1.5): break surface -> gui-egui dep cycle; wasm-gate substrate
+d98c8ff refactor(m1.5): unify Mode/Input + OntologySnapshot across surface/app/substrate
+7a6d9c3 refactor(m1.5): unify Permission enum across clawft-app and clawft-substrate
+d382745 Merge branch 'm15/kernel-adapter' into m15/integration
+bb13cbc Merge branch 'm15/surface' into m15/integration
+fb0ebfd Merge branch 'm15/app' into m15/integration
+0c8858c fix(m1.5-substrate): log ring trim + watermark overflow safety + tracked subscriptions
+55234e0 fix(m1.5-surface): parser RHS-loss on subtraction + count arity + scope docs
+75e3373 feat(m1.5): clawft-surface crate — description IR + composer + binding eval
+b397330 feat(m1.5): clawft-substrate crate + kernel adapter refactor
+0540dea feat(m1.5): clawft-app crate — manifest parser + JSON registry
+d3d214f plan(symposium): Round 3 — app layer session + 5 ADRs + roadmap refresh
 7c0c523 feat(gui): canon demo lab — 20 primitive demos in the WeftOS panel
 7ddc5ee merge(canon): foundation + retrofit + new primitives — full 21-item canon landed
 6e2df4d feat(gui+ext): M1 wasm-compat polish — web-time, PNG logo, extension hotload
@@ -325,11 +446,48 @@ eae8c17 feat(canon): foundation — CanonWidget trait + CanonResponse + Pressabl
 1204f7a feat(gui): M1 (part 1) — clawft-gui-egui compiles to wasm32-unknown-unknown
 c0470d3 plan(symposium): canon reconciled — 19 Tier-A + 1 Tier-B (StreamView + Canvas + Modal modality)
 7452ea3 plan(symposium): consolidated ROADMAP — done/in-flight/Round 3 open
-1259130 feat(gui): demo lab — add Fractal/HTTP/3D/Color tabs + theme-toggle A/B
-5bc1fa2 feat(gui): WeftOS theming + weft-demo-lab bin hosting egui's full demo
-c6d98f9 plan(symposium): 12 ADRs — symposium canon (Proposed Round 2)
-e158a1a plan(symposium): WSP-0.1 — WeftOS Surface Protocol spec
 fad8488 feat(gui): M0 — Cursor/VSCode extension scaffold for WeftOS panel
 f826102 plan(symposium): Round 1 research complete — 9 findings docs, 32k words
-524b56d plan(symposium): digital exhaust = intent — the protocol reframed
 ```
+
+---
+
+## Handoff: what's live, what's next
+
+**Running workspace state** (as of `0e32e67`):
+
+- `weaver kernel start` brings up the daemon on `.weftos/runtime/
+  kernel.sock`.
+- `cargo run -p clawft-gui-egui --bin weft-gui-egui` launches the
+  native shell in `desktop × pointer` mode.
+- Opening the launcher → Blocks window now has three sections:
+  **Blocks** (12 legacy demos), **Canon** (20 canon-primitive demos),
+  **Apps** (WeftOS Admin reference, auto-installed).
+- VSCode extension at `extensions/vscode-weft-panel/` loads the same
+  panel as a webview, with wasm hot-reload on edits via the cargo-
+  watch + build-wasm.sh loop documented in `extension.ts`.
+
+**Immediate follow-up beads** (pick any, no blocking order):
+
+1. **M1.6 editor-in adapter** — ship `crates/clawft-workspace-adapter`
+   emitting `substrate/editor/{buffer,cursor,diagnostics,focus,
+   terminal,tasks}` per ADR-018 §2. VSCode-side relay in the existing
+   extension's `extension.ts`. Unlocks the Project OS reference
+   panel (session-10 §6.2).
+2. **M1.5 review follow-up beads** — the three deferred items from
+   the "Review-deferred follow-ups" section above. None block M1.6;
+   each is <30 LoC.
+3. **ROADMAP hygiene** — this doc's markdownlint warnings on
+   blanks-around-headings (pre-existing; cosmetic).
+4. **Delete/keep decision on `BlockKind`** — session-10 rec. 13 asked
+   for deletion once the admin app covers the demos. The Apps
+   section is additive right now. A real decision is probably M1.7+
+   when more apps exist.
+
+**What M1.5 proves**: the reverse-DDD mapping from session-4 (aggregate
+→ Surface, entity → Chip, value → Field) now has a working
+implementation. A declarative TOML document describes a panel; the
+composer reads it + a live ontology snapshot + renders canon
+primitives. This is the architectural payoff the canon was always
+aimed at. Everything from M1.6 onward is filling out specific
+adapters and wiring specific apps.
