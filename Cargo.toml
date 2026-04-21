@@ -31,6 +31,7 @@ members = [
     "crates/weftos-leaf-types",
     "crates/eml-core",
     "crates/clawft-gui-egui",
+    "crates/clawft-substrate",
 ]
 exclude = [
     "gui/src-tauri",
@@ -186,6 +187,7 @@ clawft-security = { version = "0.6.6", path = "crates/clawft-security" }
 clawft-kernel = { version = "0.6.6", path = "crates/clawft-kernel", default-features = false }
 exo-resource-tree = { version = "0.6.6", path = "crates/exo-resource-tree" }
 weftos = { version = "0.6.6", path = "crates/weftos", default-features = false }
+clawft-substrate = { version = "0.6.6", path = "crates/clawft-substrate" }
 
 # EML (exp-ln) function approximation
 eml-core = { version = "0.1.0", path = "crates/eml-core" }

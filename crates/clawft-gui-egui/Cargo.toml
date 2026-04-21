@@ -60,6 +60,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 tokio = { workspace = true }
 clawft-rpc = { workspace = true }
+# M1.5-C: kernel adapter + substrate state tree (ADR-017).
+clawft-substrate = { workspace = true }
 ehttp = { version = "0.5", features = ["native-async"] }
 poll-promise = "0.3"
 

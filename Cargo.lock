@@ -1174,6 +1174,7 @@ name = "clawft-gui-egui"
 version = "0.6.17"
 dependencies = [
  "clawft-rpc",
+ "clawft-substrate",
  "console_error_panic_hook",
  "eframe",
  "egui",
@@ -1491,6 +1492,19 @@ dependencies = [
  "tower-http",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "clawft-substrate"
+version = "0.6.17"
+dependencies = [
+ "async-trait",
+ "clawft-rpc",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
