@@ -65,6 +65,24 @@ pub mod mesh;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod chain;
 
+/// Physical-sensor extension trait for [`adapter::OntologyAdapter`].
+/// Every hardware adapter (mic, camera, radar, speaker, geiger tube,
+/// load cell, …) implements both traits so the substrate sees one
+/// pluggable surface while the tray / admin UI can interrogate the
+/// physical interface and — critically — the
+/// [`physical::Characterization`] level (spectrometer principle).
+/// Platform-neutral: the trait works on native and wasm; individual
+/// sensor implementations gate themselves on what their backing
+/// source needs.
+pub mod physical;
+
+/// Microphone reference sensor adapter. File-backed preview stub —
+/// reads signed-16-bit LE PCM from a configurable path and emits
+/// RMS + peak dBFS levels on `substrate/sensor/mic`. Host-audio
+/// (CPAL / ALSA / CoreAudio / WASAPI) backing lands in a follow-up.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod mic;
+
 pub use adapter::{
     AdapterError, BufferPolicy, OntologyAdapter, PermissionReq, RefreshHint, Sensitivity, SubId,
     Subscription, TopicDecl,
