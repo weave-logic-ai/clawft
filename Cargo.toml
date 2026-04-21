@@ -32,6 +32,7 @@ members = [
     "crates/eml-core",
     "crates/clawft-app",
     "crates/clawft-gui-egui",
+    "crates/clawft-substrate",
     "crates/clawft-surface",
 ]
 exclude = [
@@ -188,6 +189,7 @@ clawft-security = { version = "0.6.6", path = "crates/clawft-security" }
 clawft-kernel = { version = "0.6.6", path = "crates/clawft-kernel", default-features = false }
 exo-resource-tree = { version = "0.6.6", path = "crates/exo-resource-tree" }
 weftos = { version = "0.6.6", path = "crates/weftos", default-features = false }
+clawft-substrate = { version = "0.6.6", path = "crates/clawft-substrate" }
 
 # EML (exp-ln) function approximation
 eml-core = { version = "0.1.0", path = "crates/eml-core" }
