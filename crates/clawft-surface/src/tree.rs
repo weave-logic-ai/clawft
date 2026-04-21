@@ -6,25 +6,33 @@
 //! this tree every frame, resolves bindings against an
 //! [`crate::substrate::OntologySnapshot`], and drives the canon
 //! primitives from `clawft-gui-egui`.
-//!
-//! Only the M1.5 subset is expressed here. Modes/inputs are local
-//! enums duplicated from the (sibling) `clawft-app` manifest crate —
-//! to be unified in M1.5-D integration. See TODO.
 
 use std::collections::BTreeMap;
 
 /// Session mode axis (ADR-015 §modes, session-10 §2.1).
 ///
-/// TODO(m1.5-D): unify with the `clawft-app` manifest crate's enum.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Mode {
-    SingleApp,
-    Desktop,
-    Ide,
+/// Re-export of the canonical manifest enum from [`clawft_app`] so the
+/// surface IR and the manifest speak the same type (unified in M1.5-D).
+pub use clawft_app::manifest::Mode;
+
+/// Session input axis (ADR-019, session-10 §2.2).
+///
+/// Re-export of the canonical manifest enum from [`clawft_app`] so the
+/// surface IR and the manifest speak the same type (unified in M1.5-D).
+pub use clawft_app::manifest::Input;
+
+/// Local helpers mirroring the `.as_str()` / `.parse()` shape the
+/// TOML parser and tests in this crate relied on before the M1.5-D
+/// unification. `clawft_app`'s canonical enum uses serde kebab-case
+/// tokens internally, but the surface-description parser works
+/// directly on raw strings and expects these helpers.
+pub trait ModeExt: Sized {
+    fn as_str(self) -> &'static str;
+    fn parse(s: &str) -> Option<Self>;
 }
 
-impl Mode {
-    pub fn as_str(self) -> &'static str {
+impl ModeExt for Mode {
+    fn as_str(self) -> &'static str {
         match self {
             Mode::SingleApp => "single-app",
             Mode::Desktop => "desktop",
@@ -32,7 +40,7 @@ impl Mode {
         }
     }
 
-    pub fn parse(s: &str) -> Option<Self> {
+    fn parse(s: &str) -> Option<Self> {
         match s {
             "single-app" => Some(Mode::SingleApp),
             "desktop" => Some(Mode::Desktop),
@@ -42,19 +50,13 @@ impl Mode {
     }
 }
 
-/// Session input axis (ADR-019, session-10 §2.2).
-///
-/// TODO(m1.5-D): unify with the `clawft-app` manifest crate's enum.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Input {
-    Pointer,
-    Touch,
-    Voice,
-    Hybrid,
+pub trait InputExt: Sized {
+    fn as_str(self) -> &'static str;
+    fn parse(s: &str) -> Option<Self>;
 }
 
-impl Input {
-    pub fn as_str(self) -> &'static str {
+impl InputExt for Input {
+    fn as_str(self) -> &'static str {
         match self {
             Input::Pointer => "pointer",
             Input::Touch => "touch",
@@ -63,7 +65,7 @@ impl Input {
         }
     }
 
-    pub fn parse(s: &str) -> Option<Self> {
+    fn parse(s: &str) -> Option<Self> {
         match s {
             "pointer" => Some(Input::Pointer),
             "touch" => Some(Input::Touch),

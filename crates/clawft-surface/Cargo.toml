@@ -19,6 +19,11 @@ thiserror = { workspace = true }
 egui = "0.29"
 egui_extras = { version = "0.29", features = ["all_loaders"] }
 clawft-gui-egui = { path = "../clawft-gui-egui", default-features = false }
+# Canonical Mode / Input / Permission enums (ADR-015) + OntologySnapshot
+# (ADR-017) are re-exported from these crates so the surface IR speaks
+# the same types as the manifest + substrate layers.
+clawft-app = { workspace = true }
+clawft-substrate = { workspace = true }
 
 [dev-dependencies]
 # For headless render tests we run egui passes without wasm-specific glue.

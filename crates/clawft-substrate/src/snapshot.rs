@@ -24,24 +24,66 @@ use crate::delta::StateDelta;
 /// Read-only snapshot of the substrate state tree at a point in time.
 ///
 /// Surface composers hold this for the duration of one frame and walk
-/// it to resolve ontology bindings.
-///
-/// **M1.5 compatibility note**: the shape (`BTreeMap<String, Value>`)
-/// is shared with sibling M1.5-B `clawft-surface`. When that crate
-/// lands the type will move to a common crate; today both define
-/// structurally-identical versions to avoid a pre-merge dependency
-/// cycle. TODO: M1.5-D unify.
+/// it to resolve ontology bindings. Canonical home for the type
+/// (unified in M1.5-D); `clawft-surface` re-exports it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct OntologySnapshot(pub BTreeMap<String, Value>);
 
 impl OntologySnapshot {
+    /// Construct an empty snapshot. Used by tests and the composer
+    /// runtime when no adapters are wired yet.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Insert/overwrite a single topic. Builder-style by mutable ref.
+    pub fn put(&mut self, key: impl Into<String>, value: Value) -> &mut Self {
+        self.0.insert(key.into(), value);
+        self
+    }
+
+    /// Insert/overwrite a single topic. Builder-style by move.
+    pub fn with(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.put(key, value);
+        self
+    }
+
     /// Lookup a single path. `None` if the path is not present.
     pub fn get(&self, path: &str) -> Option<&Value> {
         self.0.get(path)
     }
 
+    /// Read a path, traversing into nested JSON if the path extends
+    /// past a topic boundary.
+    ///
+    /// The path is looked up as a single key first (direct topic).
+    /// If that misses, we walk prefix/suffix splits so a binding like
+    /// `substrate/kernel/services/mesh/cpu` can resolve against a
+    /// topic `substrate/kernel/services` whose JSON contains
+    /// `{"mesh": {"cpu": …}}`. This is the composer's workhorse read.
+    pub fn read(&self, path: &str) -> Option<Value> {
+        if let Some(v) = self.0.get(path) {
+            return Some(v.clone());
+        }
+        let segs: Vec<&str> = path.split('/').collect();
+        for cut in (1..segs.len()).rev() {
+            let prefix = segs[..cut].join("/");
+            if let Some(v) = self.0.get(&prefix) {
+                let tail = &segs[cut..];
+                return walk_json(v, tail).cloned();
+            }
+        }
+        None
+    }
+
     /// Iterate over every path/value pair.
     pub fn iter(&self) -> std::collections::btree_map::Iter<'_, String, Value> {
+        self.0.iter()
+    }
+
+    /// Alias of [`iter`] kept for the composer-side naming
+    /// (`.topics()` matches the ADR-017 vocabulary).
+    pub fn topics(&self) -> impl Iterator<Item = (&String, &Value)> {
         self.0.iter()
     }
 
@@ -54,6 +96,23 @@ impl OntologySnapshot {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+}
+
+/// Walk a JSON tree along `path` segments. Used by [`OntologySnapshot::read`]
+/// when a binding path extends past the topic key into the topic value.
+fn walk_json<'a>(v: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    let mut cur = v;
+    for seg in path {
+        cur = match cur {
+            Value::Object(map) => map.get(*seg)?,
+            Value::Array(arr) => {
+                let idx: usize = seg.parse().ok()?;
+                arr.get(idx)?
+            }
+            _ => return None,
+        };
+    }
+    Some(cur)
 }
 
 /// An in-flight subscription tracked by the [`Substrate`].
@@ -373,6 +432,36 @@ mod tests {
             });
         }
         assert_eq!(sub.get("logs"), Some(json!([0, 1, 2, 3, 4])));
+    }
+
+    // ── Snapshot read helpers (previously in clawft-surface::substrate) ──
+
+    #[test]
+    fn snapshot_read_direct_topic() {
+        let snap = OntologySnapshot::empty()
+            .with("substrate/kernel/status", json!({"state": "healthy"}));
+        assert_eq!(
+            snap.read("substrate/kernel/status"),
+            Some(json!({"state": "healthy"}))
+        );
+    }
+
+    #[test]
+    fn snapshot_read_nested_via_prefix() {
+        let snap = OntologySnapshot::empty().with(
+            "substrate/kernel/services",
+            json!({"mesh": {"cpu": 42}, "ws": {"cpu": 8}}),
+        );
+        assert_eq!(
+            snap.read("substrate/kernel/services/mesh/cpu"),
+            Some(json!(42))
+        );
+    }
+
+    #[test]
+    fn snapshot_read_missing_returns_none() {
+        let snap = OntologySnapshot::empty();
+        assert!(snap.read("substrate/nope").is_none());
     }
 
     // ── close_all / subscription tracking ────────────────────────────

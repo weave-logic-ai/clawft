@@ -17,8 +17,8 @@ use toml::Value as Toml;
 
 use super::expr::{parse as parse_expr, ParseError as ExprError};
 use crate::tree::{
-    AffordanceDecl, AttrValue, Binding, IdentityIri, Input, Invocation, Mode, SurfaceNode,
-    SurfaceTree,
+    AffordanceDecl, AttrValue, Binding, IdentityIri, Input, InputExt, Invocation, Mode, ModeExt,
+    SurfaceNode, SurfaceTree,
 };
 
 #[derive(Debug, Error)]

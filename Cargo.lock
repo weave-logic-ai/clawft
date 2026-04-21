@@ -1524,7 +1524,9 @@ dependencies = [
 name = "clawft-surface"
 version = "0.6.17"
 dependencies = [
+ "clawft-app",
  "clawft-gui-egui",
+ "clawft-substrate",
  "egui",
  "egui_extras",
  "serde",
