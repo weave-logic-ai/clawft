@@ -14,7 +14,8 @@
 use std::sync::Arc;
 
 use clawft_rpc::{DaemonClient, Request};
-use clawft_substrate::kernel::{KernelAdapter, TOPICS};
+use clawft_substrate::kernel::{KernelAdapter, TOPICS as KERNEL_TOPICS};
+use clawft_substrate::network::{NetworkAdapter, TOPICS as NETWORK_TOPICS};
 use clawft_substrate::{OntologyAdapter, Substrate};
 use parking_lot::RwLock;
 use serde_json::Value;
@@ -58,13 +59,30 @@ fn run_driver(live: Arc<Live>, mut cmd_rx: tokio::sync::mpsc::Receiver<Command>)
         // can tombstone subscriptions on shutdown.
         *live.substrate.lock() = Some(Arc::clone(&substrate));
 
-        let adapter: Arc<dyn OntologyAdapter> = Arc::new(KernelAdapter::new());
-        for topic in TOPICS {
+        let kernel_adapter: Arc<dyn OntologyAdapter> = Arc::new(KernelAdapter::new());
+        for topic in KERNEL_TOPICS {
             match substrate
-                .subscribe_adapter(Arc::clone(&adapter), topic.path, Value::Null)
+                .subscribe_adapter(Arc::clone(&kernel_adapter), topic.path, Value::Null)
                 .await
             {
                 Ok(_id) => { /* subscription id tracked by Substrate */ }
+                Err(e) => {
+                    live.write(|s| {
+                        s.last_error = Some(format!("subscribe {}: {e}", topic.path));
+                    });
+                }
+            }
+        }
+
+        // M1.5.1b — host-local network adapter (wifi / ethernet /
+        // battery). Independent of the daemon; reads /sys directly.
+        let network_adapter: Arc<dyn OntologyAdapter> = Arc::new(NetworkAdapter::new());
+        for topic in NETWORK_TOPICS {
+            match substrate
+                .subscribe_adapter(Arc::clone(&network_adapter), topic.path, Value::Null)
+                .await
+            {
+                Ok(_id) => {}
                 Err(e) => {
                     live.write(|s| {
                         s.last_error = Some(format!("subscribe {}: {e}", topic.path));
@@ -123,6 +141,15 @@ async fn refresh_snapshot(substrate: &Arc<Substrate>, live: &Arc<Live>) {
         .get("substrate/kernel/logs")
         .and_then(|v| v.as_array().cloned());
 
+    // M1.5.1b — NetworkAdapter emits whole-object Replaces on each
+    // periodic tick. Copy those into the legacy Snapshot so the tray
+    // (which still reads `Snapshot` not `OntologySnapshot`) can render
+    // real chips. Migration to tray-reads-substrate lands alongside
+    // the M1.6+ workspace adapter work.
+    let network_wifi = snap.get("substrate/network/wifi").cloned();
+    let network_ethernet = snap.get("substrate/network/ethernet").cloned();
+    let network_battery = snap.get("substrate/network/battery").cloned();
+
     // Heuristic: if any real data from the adapter has landed in the
     // substrate we treat the connection as Connected; otherwise the
     // daemon is either still starting up or unreachable.
@@ -142,6 +169,9 @@ async fn refresh_snapshot(substrate: &Arc<Substrate>, live: &Arc<Live>) {
         s.processes = processes.clone();
         s.services = services.clone();
         s.logs = logs.clone();
+        s.network_wifi = network_wifi.clone();
+        s.network_ethernet = network_ethernet.clone();
+        s.network_battery = network_battery.clone();
         s.tick = s.tick.wrapping_add(1);
         s.last_tick_at_ms = Some(now_ms());
         s.last_tick_dur_ms = Some(SNAPSHOT_MS as f64);

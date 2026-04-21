@@ -30,6 +30,15 @@ pub struct Snapshot {
     pub processes: Option<Vec<Value>>,
     pub services: Option<Vec<Value>>,
     pub logs: Option<Vec<Value>>,
+    /// M1.5.1b — raw `substrate/network/wifi` value (native path).
+    /// Shape: `{"state": "connected"|"disconnected"|"absent", "iface"?}`.
+    /// `None` on wasm / before first poll.
+    pub network_wifi: Option<Value>,
+    /// M1.5.1b — raw `substrate/network/ethernet` value.
+    pub network_ethernet: Option<Value>,
+    /// M1.5.1b — raw `substrate/network/battery` value.
+    /// Shape: `{"present": bool, "percent"?: u8, "charging"?: bool}`.
+    pub network_battery: Option<Value>,
     pub last_error: Option<String>,
     /// Incremented every successful poll tick so the UI can detect freshness.
     pub tick: u64,

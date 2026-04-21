@@ -100,9 +100,16 @@ fn chip(ui: &mut egui::Ui, glyph: &str, tip: &str, status: Ok) {
     ui.add_space(6.0);
 }
 
-/// Determine service statuses from the live snapshot. For now, only the
-/// kernel link is real — the rest are mocked off/on based on whether the
-/// kernel services list contains something matching.
+/// Determine service statuses from the live snapshot.
+///
+/// As of M1.5.1:
+/// - Kernel is real (daemon-socket reachability)
+/// - Mesh / ExoChain / DeFi are presence-only checks against the
+///   service registry (promoted to real adapters in M1.5.1d)
+/// - Wi-Fi reflects the NetworkAdapter's `substrate/network/wifi`
+///   (M1.5.1b — native-only; grey on wasm until the adapter is
+///   bridged through postMessage in M1.6+)
+/// - Bluetooth still placeholder (M1.5.1c)
 fn services(snap: &Snapshot) -> Vec<(&'static str, &'static str, Ok)> {
     let kernel = match snap.connection {
         Connection::Connected => Ok::On,
@@ -113,8 +120,8 @@ fn services(snap: &Snapshot) -> Vec<(&'static str, &'static str, Ok)> {
     let exochain = service_present(snap, &["chain", "exochain"]);
     let mesh = service_present(snap, &["mesh"]);
     let defi = service_present(snap, &["defi", "bond"]);
-    let wifi = Ok::On; // placeholder
-    let bluetooth = Ok::Off; // placeholder
+    let wifi = link_state_to_ok(&snap.network_wifi);
+    let bluetooth = Ok::Off; // placeholder — M1.5.1c wires this
 
     vec![
         ("Kernel", "◉ kernel", kernel),
@@ -124,6 +131,21 @@ fn services(snap: &Snapshot) -> Vec<(&'static str, &'static str, Ok)> {
         ("Wi-Fi", "≋ wifi", wifi),
         ("Bluetooth", "∗ bt", bluetooth),
     ]
+}
+
+/// Map a `substrate/network/{wifi,ethernet}` Replace value to a tray
+/// chip status. `absent` → grey (Off). `disconnected` → amber (Warn).
+/// `connected` → green (On). `None` (no adapter tick landed yet, or
+/// we're on wasm before the substrate-bridge ships) → grey.
+fn link_state_to_ok(v: &Option<serde_json::Value>) -> Ok {
+    let Some(state) = v.as_ref().and_then(|x| x.get("state")).and_then(|s| s.as_str()) else {
+        return Ok::Off;
+    };
+    match state {
+        "connected" => Ok::On,
+        "disconnected" => Ok::Warn,
+        _ => Ok::Off,
+    }
 }
 
 fn service_present(snap: &Snapshot, needles: &[&str]) -> Ok {

@@ -34,3 +34,5 @@ tokio = { version = "1", default-features = false, features = ["sync", "macros"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["sync", "rt", "macros", "time"] }
+# Fake sysfs roots for network-adapter tests.
+tempfile = { workspace = true }

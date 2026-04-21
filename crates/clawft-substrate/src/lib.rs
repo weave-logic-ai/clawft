@@ -39,6 +39,14 @@ pub mod snapshot;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod kernel;
 
+/// Host-local WiFi / ethernet / battery adapter. Reads `/sys/class/*`
+/// directly — no daemon round-trip, no NetworkManager dependency.
+/// Native-only; the wasm path is covered by the legacy-Snapshot
+/// fallback in `clawft_gui_egui::live` (M1.6+ migrates this to a real
+/// substrate-over-postMessage bridge).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod network;
+
 pub use adapter::{
     AdapterError, BufferPolicy, OntologyAdapter, PermissionReq, RefreshHint, Sensitivity, SubId,
     Subscription, TopicDecl,

@@ -263,6 +263,12 @@ impl PartialPoll {
             processes: as_array(self.ps.as_ref().unwrap_or(&Err(String::new()))),
             services: as_array(self.services.as_ref().unwrap_or(&Err(String::new()))),
             logs: as_array(self.logs.as_ref().unwrap_or(&Err(String::new()))),
+            // M1.5.1b — NetworkAdapter is native-only; wasm path
+            // reports None so the tray shows grey chips until the
+            // substrate-over-postMessage bridge lands (M1.6+).
+            network_wifi: None,
+            network_ethernet: None,
+            network_battery: None,
             last_error: err,
             tick: 0,
             last_tick_at_ms: Some(finished_ms),
