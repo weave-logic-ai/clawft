@@ -29,6 +29,7 @@
 
 pub mod adapter;
 pub mod delta;
+pub mod projection;
 pub mod snapshot;
 
 // Kernel adapter requires a real daemon RPC client and tokio's full

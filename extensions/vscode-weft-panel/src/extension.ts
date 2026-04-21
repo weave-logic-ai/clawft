@@ -20,13 +20,20 @@ import { resolveSocketPath, rpcCall, RpcError } from "./rpc";
 
 const VIEW_TYPE = "weft.panel";
 
-// Allowed RPC methods the extension will proxy from the webview. M1
-// expands on M0 to cover the four poll methods the wasm `Live` uses.
+// Allowed RPC methods the extension will proxy from the webview.
+//
+// M1 added the four read methods the wasm `Live` polls.
+// M1.5.1a adds the two built-in admin-app write verbs that the
+// WeftOS Admin surface declares influence over (ADR-015); the
+// daemon's own capability check is the real gate — this allowlist
+// just keeps the webview from reaching arbitrary RPC surface.
 const ALLOWED_METHODS = new Set<string>([
     "kernel.status",
     "kernel.ps",
     "kernel.services",
     "kernel.logs",
+    "kernel.kill-process",
+    "kernel.restart-service",
 ]);
 
 interface WasmRpcRequest {

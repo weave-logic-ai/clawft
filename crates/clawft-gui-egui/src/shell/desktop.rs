@@ -293,17 +293,25 @@ fn render_blocks_window(
         PanelSection::Canon => {
             canon_demos::show(ui, desk.selected_canon, &mut desk.canon_state);
         }
-        PanelSection::Apps => render_selected_app(ui, desk, live),
+        PanelSection::Apps => render_selected_app(ui, desk, live, snap),
     });
 }
 
 /// Render whichever app is currently selected in `desk.selected_app`.
 /// Builds an `OntologySnapshot` from the live substrate and drives the
 /// surface-description composer against the app's cached surface tree.
+///
+/// **M1.5.1a**: drains the composer's `PendingDispatch` list and
+/// submits each one through the `Live` RPC bridge. This closes the
+/// loop from "admin surface declares an affordance" → "user clicks
+/// the primitive" → "daemon handler fires." Replies are
+/// fire-and-forget for now; the substrate's next poll tick surfaces
+/// the result (e.g. the killed PID disappears from `kernel.ps`).
 fn render_selected_app(
     ui: &mut egui::Ui,
     desk: &Desktop,
     live: &std::sync::Arc<crate::live::Live>,
+    snap: &crate::live::Snapshot,
 ) {
     let Some(app_id) = desk.selected_app.as_deref() else {
         ui.label(
@@ -327,12 +335,47 @@ fn render_selected_app(
             ui.separator();
             ui.monospace(&installed.manifest.id);
         });
-        ui.separator();
     }
 
-    // Compose against the current substrate snapshot. Ignore the
-    // returned `Vec<CanonResponse>` at the Desktop level for M1.5 —
-    // signal routing (activation → WSP verb dispatch) is M1.6+.
+    // Offline banner — before the composer runs so it's always visible
+    // at the top of the app pane, not buried under the 2x2 grid. The
+    // admin surface binds to `substrate/kernel/*` topics; when the
+    // daemon link is down every binding resolves to empty and the
+    // panel would otherwise look silently broken.
+    match snap.connection {
+        crate::live::Connection::Connected => {}
+        crate::live::Connection::Connecting => {
+            ui.colored_label(
+                egui::Color32::from_rgb(220, 180, 60),
+                "⏳ Connecting to kernel daemon…",
+            );
+        }
+        crate::live::Connection::Disconnected => {
+            ui.colored_label(
+                egui::Color32::from_rgb(240, 150, 150),
+                "◉ Demo mode — kernel daemon offline. \
+                 Start with:  weaver kernel start",
+            );
+        }
+    }
+    ui.separator();
+
+    // Compose against the current substrate snapshot, then dispatch
+    // any affordance activations through the RPC bridge.
     let snapshot = live.substrate_snapshot();
-    let _responses = surface_host::compose(tree, &snapshot, ui);
+    let outcome = surface_host::compose(tree, &snapshot, ui);
+    for d in outcome.dispatches {
+        log::info!(
+            "admin app affordance: {} -> {} ({:?}) from {}",
+            d.affordance,
+            d.verb,
+            d.params,
+            d.source_path
+        );
+        live.submit(crate::live::Command::Raw {
+            method: d.verb,
+            params: d.params,
+            reply: None,
+        });
+    }
 }

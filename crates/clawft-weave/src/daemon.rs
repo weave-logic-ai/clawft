@@ -743,6 +743,97 @@ async fn dispatch(
             let _ = shutdown_tx.send(true);
             Response::success(serde_json::json!("shutting down"))
         }
+        // ── M1.5.1a: admin-app write verbs (ADR-015 influences) ────
+        //
+        // These are the two verbs the WeftOS Admin surface declares
+        // influence over in `crates/clawft-app/fixtures/weftos-admin.toml`
+        // and binds as affordances on the process table + service
+        // gauges in `crates/clawft-surface/fixtures/weftos-admin-desktop.toml`.
+        //
+        // Governance intersection is stubbed at the compositor level
+        // (ADR-006 §2 — honest governance lands with M2's active-radar
+        // loop). The daemon's own capability check still applies via
+        // `k.supervisor()` + `k.services()`.
+        "kernel.kill-process" => {
+            let pid = match params.get("pid").and_then(|v| v.as_u64()) {
+                Some(p) => p,
+                None => {
+                    return Response::error(
+                        "kernel.kill-process: missing or non-integer `pid`".to_string(),
+                    );
+                }
+            };
+            let graceful = params
+                .get("graceful")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let k = kernel.read().await;
+            match k.supervisor().stop(pid, graceful) {
+                Ok(()) => {
+                    k.event_log().info(
+                        "kernel",
+                        format!(
+                            "kill-process PID {pid} ({})",
+                            if graceful { "graceful" } else { "force" }
+                        ),
+                    );
+                    Response::success(serde_json::json!({ "pid": pid, "graceful": graceful }))
+                }
+                Err(e) => Response::error(format!("kill-process failed: {e}")),
+            }
+        }
+        "kernel.restart-service" => {
+            let name = match params.get("name").and_then(|v| v.as_str()) {
+                Some(n) if !n.is_empty() => n.to_string(),
+                _ => {
+                    return Response::error(
+                        "kernel.restart-service: missing or empty `name`".to_string(),
+                    );
+                }
+            };
+            let k = kernel.read().await;
+            // Preferred path: service has an owner agent, restart via
+            // supervisor (re-uses the full agent-restart lineage).
+            if let Some(pid) = k.services().resolve_target(&name) {
+                match k.supervisor().restart(pid) {
+                    Ok(result) => {
+                        let _ = k.process_table().update_state(
+                            result.pid,
+                            clawft_kernel::ProcessState::Running,
+                        );
+                        k.event_log().info(
+                            "kernel",
+                            format!(
+                                "restart-service {name} (PID {pid} -> {})",
+                                result.pid
+                            ),
+                        );
+                        return Response::success(serde_json::json!({
+                            "name": name,
+                            "old_pid": pid,
+                            "new_pid": result.pid,
+                        }));
+                    }
+                    Err(e) => {
+                        return Response::error(format!("restart-service failed: {e}"));
+                    }
+                }
+            }
+            // Fallback path: SystemService without an owner agent (e.g.
+            // external / infrastructure services). Stop then start.
+            if let Some(svc) = k.services().get(&name) {
+                if let Err(e) = svc.stop().await {
+                    return Response::error(format!("restart-service stop failed: {e}"));
+                }
+                if let Err(e) = svc.start().await {
+                    return Response::error(format!("restart-service start failed: {e}"));
+                }
+                k.event_log()
+                    .info("kernel", format!("restart-service {name} (no owner pid)"));
+                return Response::success(serde_json::json!({ "name": name }));
+            }
+            Response::error(format!("restart-service: unknown service `{name}`"))
+        }
         "cluster.status" => {
             let k = kernel.read().await;
             let membership = k.cluster_membership();

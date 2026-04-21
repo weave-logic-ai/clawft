@@ -222,8 +222,33 @@ async fn poll_replace_loop(
     rpc_method: &'static str,
     period: Duration,
     tx: mpsc::Sender<StateDelta>,
-    mut cancel_rx: oneshot::Receiver<()>,
+    cancel_rx: oneshot::Receiver<()>,
 ) {
+    poll_replace_loop_with_projection(
+        topic_path,
+        rpc_method,
+        period,
+        |v| v,
+        tx,
+        cancel_rx,
+    )
+    .await;
+}
+
+/// Same as [`poll_replace_loop`] but applies `project` to each RPC
+/// response before emitting the `Replace` delta. Used to align the
+/// daemon's wire shape with the user-facing admin ontology without
+/// changing the RPC contract itself.
+async fn poll_replace_loop_with_projection<F>(
+    topic_path: &str,
+    rpc_method: &'static str,
+    period: Duration,
+    project: F,
+    tx: mpsc::Sender<StateDelta>,
+    mut cancel_rx: oneshot::Receiver<()>,
+) where
+    F: Fn(Value) -> Value + Send + 'static,
+{
     let mut client: Option<DaemonClient> = None;
     let mut ticker = tokio::time::interval(period);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -240,7 +265,7 @@ async fn poll_replace_loop(
                     Ok(value) => {
                         let delta = StateDelta::Replace {
                             path: topic_path.to_string(),
-                            value,
+                            value: project(value),
                         };
                         if tx.send(delta).await.is_err() {
                             return; // subscriber dropped
@@ -268,10 +293,11 @@ async fn poll_status(tx: mpsc::Sender<StateDelta>, cancel_rx: oneshot::Receiver<
 }
 
 async fn poll_processes(tx: mpsc::Sender<StateDelta>, cancel_rx: oneshot::Receiver<()>) {
-    poll_replace_loop(
+    poll_replace_loop_with_projection(
         "substrate/kernel/processes",
         "kernel.ps",
         Duration::from_millis(1000),
+        crate::projection::project_process_rows,
         tx,
         cancel_rx,
     )
@@ -279,10 +305,11 @@ async fn poll_processes(tx: mpsc::Sender<StateDelta>, cancel_rx: oneshot::Receiv
 }
 
 async fn poll_services(tx: mpsc::Sender<StateDelta>, cancel_rx: oneshot::Receiver<()>) {
-    poll_replace_loop(
+    poll_replace_loop_with_projection(
         "substrate/kernel/services",
         "kernel.services",
         Duration::from_millis(2000),
+        crate::projection::project_service_rows,
         tx,
         cancel_rx,
     )

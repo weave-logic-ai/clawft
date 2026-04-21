@@ -18,5 +18,5 @@
 mod compose;
 mod test_harness;
 
-pub use compose::{compose, honest_affordances};
+pub use compose::{compose, honest_affordances, ComposeOutcome, PendingDispatch};
 pub use test_harness::render_headless;

@@ -215,22 +215,34 @@ impl Live {
             // Fallback path: derive substrate paths from the legacy
             // Snapshot so the composer has data to render in the
             // webview until the real adapter bridge lands.
+            //
+            // M1.5.1a — mirror the native `KernelAdapter`'s projection
+            // so the same admin surface bindings resolve under both
+            // transports:
+            // - process rows get `name` + `cpu` aliases
+            // - services get per-name sub-paths
+            //   (`substrate/kernel/services/<name>/status`, etc.)
             let snap = self.inner.read();
             let mut out = clawft_substrate::OntologySnapshot::default();
             if let Some(v) = &snap.status {
                 out = out.with("substrate/kernel/status", v.clone());
             }
             if let Some(v) = &snap.processes {
-                out = out.with(
-                    "substrate/kernel/processes",
+                let projected = clawft_substrate::projection::project_process_rows(
                     serde_json::Value::Array(v.clone()),
                 );
+                out = out.with("substrate/kernel/processes", projected);
             }
             if let Some(v) = &snap.services {
-                out = out.with(
-                    "substrate/kernel/services",
-                    serde_json::Value::Array(v.clone()),
-                );
+                let raw = serde_json::Value::Array(v.clone());
+                let projected =
+                    clawft_substrate::projection::project_service_rows(raw.clone());
+                out = out.with("substrate/kernel/services", projected);
+                for (path, value) in
+                    clawft_substrate::projection::explode_services_by_name(v)
+                {
+                    out = out.with(path, value);
+                }
             }
             if let Some(v) = &snap.logs {
                 out = out.with(

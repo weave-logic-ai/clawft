@@ -53,8 +53,10 @@ pub struct StreamView<'a, T: AsRef<str>> {
     lines: &'a [T],
     min_height: f32,
     max_height: Option<f32>,
+    desired_width: Option<f32>,
     stick_to_bottom: bool,
     monospace: bool,
+    wrap_lines: bool,
     tooltip: Option<Tooltip>,
     variant: VariantId,
 }
@@ -66,11 +68,31 @@ impl<'a, T: AsRef<str>> StreamView<'a, T> {
             lines: &[],
             min_height: 120.0,
             max_height: None,
+            desired_width: None,
             stick_to_bottom: true,
             monospace: true,
+            wrap_lines: true,
             tooltip: None,
             variant: 0,
         }
+    }
+
+    /// Clamp the stream-view frame to a specific width. Without this
+    /// the underlying `ScrollArea` takes whatever width the parent ui
+    /// offers, which in a narrow webview lets long unwrapped lines
+    /// push the frame off-screen. M1.5.1a composer-polish path.
+    pub fn desired_width(mut self, w: f32) -> Self {
+        self.desired_width = Some(w);
+        self
+    }
+
+    /// Wrap long lines instead of letting them overflow horizontally.
+    /// Default `true` — matches the expected behaviour of a log-tail
+    /// pane. Callers that want fixed-width formatting (e.g. hex dumps)
+    /// can disable wrapping explicitly.
+    pub fn wrap_lines(mut self, wrap: bool) -> Self {
+        self.wrap_lines = wrap;
+        self
     }
 
     pub fn lines(mut self, lines: &'a [T]) -> Self {
@@ -144,8 +166,10 @@ impl<'a, T: AsRef<str>> CanonWidget for StreamView<'a, T> {
         let tooltip = self.tooltip.clone();
         let min_height = self.min_height;
         let max_height = self.max_height;
+        let desired_width = self.desired_width;
         let stick = self.stick_to_bottom;
         let monospace = self.monospace;
+        let wrap = self.wrap_lines;
         let lines = self.lines;
 
         let frame = egui::Frame::none()
@@ -155,9 +179,17 @@ impl<'a, T: AsRef<str>> CanonWidget for StreamView<'a, T> {
 
         let inner = frame.show(ui, |ui| {
             ui.set_min_height(min_height);
+            if let Some(w) = desired_width {
+                // Clamp both the inner ui and the scroll area so the
+                // frame can't exceed the caller-specified width.
+                ui.set_max_width(w);
+            }
             let mut area = egui::ScrollArea::vertical().stick_to_bottom(stick);
             if let Some(h) = max_height {
                 area = area.max_height(h);
+            }
+            if let Some(w) = desired_width {
+                area = area.max_width(w);
             }
             area.show(ui, |ui| {
                 for line in lines {
@@ -166,7 +198,11 @@ impl<'a, T: AsRef<str>> CanonWidget for StreamView<'a, T> {
                     } else {
                         egui::RichText::new(line.as_ref())
                     };
-                    ui.label(rich);
+                    let mut lbl = egui::Label::new(rich);
+                    if wrap {
+                        lbl = lbl.wrap();
+                    }
+                    ui.add(lbl);
                 }
             });
         });

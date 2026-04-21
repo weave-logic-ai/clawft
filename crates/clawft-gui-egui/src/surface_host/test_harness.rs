@@ -16,13 +16,29 @@ use crate::canon::CanonResponse;
 /// The implementation allocates a throw-away `egui::Context`, runs
 /// one `begin_frame`/`end_frame` cycle, and discards the paint
 /// output. Enough for unit tests; not an egui viewport.
+///
+/// **M1.5.1a**: the composer now returns a [`ComposeOutcome`] with
+/// both responses and pending RPC dispatches. This helper keeps the
+/// historical `Vec<CanonResponse>` return shape for existing tests;
+/// callers who want dispatches should use `render_headless_full`.
 pub fn render_headless(
     tree: &SurfaceTree,
     snapshot: OntologySnapshot,
 ) -> Vec<CanonResponse> {
+    render_headless_full(tree, snapshot).responses
+}
+
+/// Same as [`render_headless`] but returns the full
+/// [`ComposeOutcome`] — responses + pending dispatches. Used by
+/// M1.5.1a tests that assert dispatch plumbing without opening a
+/// viewport.
+pub fn render_headless_full(
+    tree: &SurfaceTree,
+    snapshot: OntologySnapshot,
+) -> super::compose::ComposeOutcome {
     let ctx = egui::Context::default();
     let raw_input = egui::RawInput::default();
-    let mut captured: Vec<CanonResponse> = Vec::new();
+    let mut captured: super::compose::ComposeOutcome = super::compose::ComposeOutcome::default();
 
     let _output = ctx.run(raw_input, |ctx| {
         egui::CentralPanel::default().show(ctx, |ui| {
