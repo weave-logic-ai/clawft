@@ -145,6 +145,45 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
             .info("daemon", format!("listening on {}", socket_path.display()));
     }
 
+    // Stream-window anchor: start configured topic anchors so every
+    // `window_secs` window emits a `stream.window_commit` chain event
+    // summarising traffic for audit. Each anchor subscribes via the
+    // a2a topic router and holds its own BLAKE3 + counters.
+    #[cfg(feature = "exochain")]
+    let mut stream_anchors: Vec<clawft_kernel::TopicAnchor> = Vec::new();
+    #[cfg(feature = "exochain")]
+    {
+        let k = kernel.read().await;
+        if let Some(cfg) = k.kernel_config().anchor.as_ref() {
+            if cfg.enabled && !cfg.topics.is_empty() {
+                let window = std::time::Duration::from_secs(cfg.window_secs.max(1));
+                let a2a = k.a2a_router().clone();
+                let chain = k.chain_manager().cloned();
+                for pattern in &cfg.topics {
+                    // Exact topics are wired directly; wildcard patterns
+                    // like "sensor.*" are not expanded here — the
+                    // config-writer provides the exact topic prefix
+                    // they want to anchor, and the anchor currently
+                    // subscribes by literal name. A wildcard anchor
+                    // watchdog is a follow-up (M1.6+).
+                    let topic = pattern.clone();
+                    let anchor = clawft_kernel::StreamWindowAnchor::start_topic(
+                        Arc::clone(&a2a),
+                        chain.clone(),
+                        topic.clone(),
+                        window,
+                    );
+                    stream_anchors.push(anchor);
+                }
+                info!(
+                    anchors = stream_anchors.len(),
+                    window_ms = window.as_millis() as u64,
+                    "stream-window anchors started"
+                );
+            }
+        }
+    }
+
     // Shutdown signal
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -434,6 +473,15 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
     // If a signal triggered shutdown, wait for the accept loop to finish.
     if restart_requested || !accept_handle.is_finished() {
         let _ = accept_handle.await;
+    }
+
+    // Stop stream-window anchors so they flush their final windows
+    // before the chain manager shuts down.
+    #[cfg(feature = "exochain")]
+    {
+        for anchor in stream_anchors {
+            anchor.shutdown();
+        }
     }
 
     // Gracefully shut down running agents before kernel shutdown

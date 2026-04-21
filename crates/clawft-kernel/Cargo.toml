@@ -40,6 +40,7 @@ exochain = [
     "dep:ciborium",
     "dep:ed25519-dalek",
     "dep:rand",
+    "dep:blake3",
 ]
 tilezero = [
     "exochain",

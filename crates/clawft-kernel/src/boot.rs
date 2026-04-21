@@ -2040,6 +2040,7 @@ mod tests {
             profiles: None,
             pairing: None,
             mesh: None,
+            anchor: None,
         }
     }
 
@@ -2181,6 +2182,7 @@ mod tests {
             profiles: None,
             pairing: None,
             mesh: None,
+            anchor: None,
         }
     }
 
@@ -2584,6 +2586,7 @@ mod tests {
             profiles: None,
             pairing: None,
             mesh: None,
+            anchor: None,
         }
     }
 

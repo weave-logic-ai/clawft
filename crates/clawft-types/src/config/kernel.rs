@@ -162,6 +162,18 @@ pub struct KernelConfig {
     /// Mesh networking configuration (K6 transport layer).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh: Option<MeshConfig>,
+
+    /// Stream-window chain anchor configuration.
+    ///
+    /// When enabled, the kernel subscribes to every topic matching
+    /// one of the configured prefixes/globs and chain-appends a
+    /// `stream.window_commit` event every `window_secs` summarising
+    /// the window: BLAKE3 of concatenated message bytes, message
+    /// count, byte count, first+last tick, and owning agent_id (when
+    /// known). This gives verifiers a tamper-evident anchor without
+    /// putting raw frames on-chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<AnchorConfig>,
 }
 
 impl Default for KernelConfig {
@@ -177,6 +189,55 @@ impl Default for KernelConfig {
             profiles: None,
             pairing: None,
             mesh: None,
+            anchor: None,
+        }
+    }
+}
+
+// ── Stream-window anchor configuration ──────────────────────────────────
+
+/// Configuration for the kernel's stream-window chain anchor.
+///
+/// Paired with [`crate::config::KernelConfig::anchor`]. When enabled,
+/// every window_secs seconds the anchor emits a `stream.window_commit`
+/// chain event summarising all traffic on topics matching one of
+/// `topics`.
+///
+/// # Example TOML
+///
+/// ```toml
+/// [kernel.anchor]
+/// enabled = true
+/// topics = ["sensor.*"]
+/// window_secs = 2
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnchorConfig {
+    /// Master switch. Default: false.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Topic patterns to anchor. Each entry is either an exact topic
+    /// name or a single-segment wildcard like `"sensor.*"` which
+    /// matches any topic sharing the literal `"sensor."` prefix.
+    #[serde(default)]
+    pub topics: Vec<String>,
+
+    /// Rolling window duration in seconds. Default: 2.
+    #[serde(default = "default_anchor_window_secs")]
+    pub window_secs: u64,
+}
+
+fn default_anchor_window_secs() -> u64 {
+    2
+}
+
+impl Default for AnchorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            topics: Vec::new(),
+            window_secs: default_anchor_window_secs(),
         }
     }
 }
@@ -768,6 +829,7 @@ mod tests {
             profiles: None,
             pairing: None,
             mesh: None,
+            anchor: None,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let restored: KernelConfig = serde_json::from_str(&json).unwrap();

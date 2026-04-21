@@ -124,6 +124,8 @@ pub mod agency;
 pub mod agent_registry;
 #[cfg(feature = "native")]
 pub mod substrate_service;
+#[cfg(all(feature = "native", feature = "exochain"))]
+pub mod stream_anchor;
 #[cfg(feature = "native")]
 pub mod agent_loop;
 pub mod app;
@@ -239,6 +241,8 @@ pub use agent_registry::{
 pub use substrate_service::{
     EgressDenied, Sensitivity as SubstrateSensitivity, SubstrateReadSnapshot, SubstrateService,
 };
+#[cfg(all(feature = "native", feature = "exochain"))]
+pub use stream_anchor::{topic_matches, StreamWindowAnchor, TopicAnchor};
 pub use agency::{
     Agency, AgentHealth, AgentInterface, AgentManifest, AgentPriority, AgentResources,
     AgentRestartPolicy, AgentRole, InterfaceProtocol, ResponseMode,
