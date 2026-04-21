@@ -1,0 +1,57 @@
+# WeftOS Admin — ADR-015 §concrete-example (declarative-TOML form).
+#
+# NOTE on key order: top-level scalars / arrays appear before any
+# `[[entry_points]]` or `[narration]` sections because TOML binds
+# subsequent bare-key lines to the most recently opened table. The
+# ADR's example is rendered in prose order for readability; on-disk
+# manifests must keep free-standing keys ahead of tables.
+id       = "app://weftos.admin"
+name     = "WeftOS Admin"
+version  = "0.1.0"
+icon     = "assets/admin.svg"
+
+supported_modes  = ["ide", "desktop", "single-app"]
+supported_inputs = ["pointer", "hybrid", "voice"]
+
+surfaces = [
+    "surfaces/admin-main.toml",
+    "surfaces/admin-kiosk.toml",
+]
+
+subscriptions = [
+    "substrate/kernel/status",
+    "substrate/kernel/processes",
+    "substrate/kernel/services",
+    "substrate/kernel/logs",
+]
+
+influences = [
+    "wsp.activate",
+    "kernel.restart-service",
+    "kernel.kill-process",
+]
+
+permissions = [
+    "fs:/var/log/weftos",
+]
+
+[[entry_points]]
+kind = "cli"
+flag = "admin"
+
+[[entry_points]]
+kind    = "vscode-command"
+command = "weft.admin.open"
+
+[[entry_points]]
+kind   = "wake-word"
+phrase = "weft, admin status"
+
+[narration]
+"substrate/kernel/services" = """
+{{count(services, s -> s.status = "healthy")}} services healthy,
+{{count(services, s -> s.status = "at_risk")}} at risk: {{names(services, s -> s.status = "at_risk")}}.
+"""
+"substrate/kernel/status" = """
+Kernel is {{status.state}}. Uptime {{duration(status.started_at)}}.
+"""
