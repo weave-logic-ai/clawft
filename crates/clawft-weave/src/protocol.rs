@@ -346,6 +346,46 @@ pub struct IpcPublishParams {
     pub topic: String,
     /// Message payload (text or JSON string).
     pub message: String,
+    /// Optional caller identity (agent_id returned by `agent.register`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_id: Option<String>,
+    /// Optional Ed25519 signature (hex) of
+    /// `blake3(topic || 0x00 || message || 0x00 || ts || 0x00 || actor_id)`
+    /// computed with the agent's registered key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    /// Optional nonce / timestamp (unix millis). Part of the signed
+    /// message so replays of past signatures fail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts: Option<u64>,
+}
+
+/// Parameters for `ipc.subscribe_stream`.
+///
+/// After a successful ack, the daemon keeps the connection open and
+/// forwards every matching publish as one JSON line per message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpcSubscribeStreamParams {
+    /// Topic name to subscribe to.
+    pub topic: String,
+    /// Resume marker — reserved for future use (requires a topic
+    /// ring-buffer; M1.5 streams live publishes only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_tick: Option<u64>,
+    /// Caller identity (agent_id returned by `agent.register`).
+    ///
+    /// Required when the target topic is declared `Capture` or
+    /// higher sensitivity on the substrate side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_id: Option<String>,
+    /// Optional Ed25519 signature (hex) of
+    /// `blake3(topic || 0x00 || ts || 0x00 || actor_id)` for
+    /// authenticated subscriptions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    /// Optional nonce / timestamp (unix millis).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts: Option<u64>,
 }
 
 // ── Resource scoring types ───────────────────────────────

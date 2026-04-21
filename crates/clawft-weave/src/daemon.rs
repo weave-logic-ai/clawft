@@ -483,7 +483,12 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
 /// Detects the connection mode by reading the first 4 bytes:
 /// - `RVFS` → RVF-framed protocol (content-hash verified segments)
 /// - Anything else → legacy line-delimited JSON (bytes prepended to first line)
-async fn handle_connection(
+/// Handle a single client connection — accepts both JSON line mode and
+/// (when the `rvf-rpc` feature is enabled) the RVF-framed protocol.
+///
+/// Exposed `pub` so integration tests can drive a preassembled kernel
+/// directly without the signal-handler plumbing in [`run`].
+pub async fn handle_connection(
     mut stream: tokio::net::UnixStream,
     kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
     shutdown_tx: watch::Sender<bool>,
@@ -503,33 +508,70 @@ async fn handle_connection(
     handle_json_connection(header, stream, kernel, shutdown_tx).await;
 }
 
+/// Outcome of dispatching a single JSON-line request.
+///
+/// Most requests produce a single response and the connection loop
+/// continues reading the next line. `ipc.subscribe_stream` and the
+/// other `*.subscribe` stream RPCs are different: after the initial
+/// ack is written, the write-half is owned by a streaming forwarder
+/// task that pushes every matching publish as one JSON line.
+enum DispatchOutcome {
+    /// Keep reading subsequent requests from the same connection.
+    Continue,
+    /// Transport error — close the connection.
+    Stop,
+    /// The request subscribed to a kernel topic; the writer must be
+    /// transferred into a streaming forwarder. The `rx` channel holds
+    /// the raw JSON lines to flush to the client; on client disconnect
+    /// (write error) the caller must call `on_disconnect` to clean up.
+    StreamSubscribe {
+        /// Topic that was subscribed to (for logging).
+        topic: String,
+        /// Receiver for serialized topic messages (JSON + trailing `\n`).
+        rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+        /// Unsubscribe action to run when the client disconnects.
+        on_disconnect: Box<dyn FnOnce() + Send>,
+    },
+}
+
 /// Dispatch a single JSON line and write the response.
 ///
-/// Returns `true` to continue reading, `false` to stop (write error).
+/// Returns the next [`DispatchOutcome`] for the connection loop.
 async fn dispatch_json_line(
     line: &str,
     kernel: &Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
     shutdown_tx: &watch::Sender<bool>,
     writer: &mut tokio::net::unix::OwnedWriteHalf,
-) -> bool {
+) -> DispatchOutcome {
     let line = line.trim();
     if line.is_empty() {
-        return true;
+        return DispatchOutcome::Continue;
     }
 
-    let response = match serde_json::from_str::<Request>(line) {
+    let (response, stream_hookup) = match serde_json::from_str::<Request>(line) {
         Ok(req) => {
             let id = req.id.clone();
-            dispatch(
-                req.method,
-                req.params,
-                Arc::clone(kernel),
-                shutdown_tx.clone(),
-            )
-            .await
-            .with_id(id)
+            // `*.subscribe_stream` methods take over the connection: the
+            // daemon registers an external sink with the router and
+            // returns a receiver the caller pipes into the socket.
+            if req.method == "ipc.subscribe_stream" {
+                match handle_ipc_subscribe_stream(req.params, Arc::clone(kernel)).await {
+                    Ok((ack, topic, rx, on_disconnect)) => (
+                        ack.with_id(id),
+                        Some((topic, rx, on_disconnect)),
+                    ),
+                    Err(msg) => (Response::error(msg).with_id(id), None),
+                }
+            } else {
+                (
+                    dispatch(req.method, req.params, Arc::clone(kernel), shutdown_tx.clone())
+                        .await
+                        .with_id(id),
+                    None,
+                )
+            }
         }
-        Err(e) => Response::error(format!("invalid request: {e}")),
+        Err(e) => (Response::error(format!("invalid request: {e}")), None),
     };
 
     let mut json = serde_json::to_string(&response).unwrap_or_else(|e| {
@@ -539,9 +581,21 @@ async fn dispatch_json_line(
 
     if let Err(e) = writer.write_all(json.as_bytes()).await {
         debug!("write error (client disconnected?): {e}");
-        return false;
+        if let Some((_, _, on_disconnect)) = stream_hookup {
+            on_disconnect();
+        }
+        return DispatchOutcome::Stop;
     }
-    true
+
+    if let Some((topic, rx, on_disconnect)) = stream_hookup {
+        return DispatchOutcome::StreamSubscribe {
+            topic,
+            rx,
+            on_disconnect,
+        };
+    }
+
+    DispatchOutcome::Continue
 }
 
 /// Handle a legacy line-delimited JSON connection.
@@ -563,8 +617,17 @@ async fn handle_json_connection(
         return;
     }
     let first_line = format!("{}{}", String::from_utf8_lossy(&prefix), rest_of_first);
-    if !dispatch_json_line(&first_line, &kernel, &shutdown_tx, &mut writer).await {
-        return;
+    match dispatch_json_line(&first_line, &kernel, &shutdown_tx, &mut writer).await {
+        DispatchOutcome::Continue => {}
+        DispatchOutcome::Stop => return,
+        DispatchOutcome::StreamSubscribe {
+            topic,
+            rx,
+            on_disconnect,
+        } => {
+            run_stream_subscribe(writer, topic, rx, on_disconnect).await;
+            return;
+        }
     }
 
     // Process remaining lines normally.
@@ -575,10 +638,92 @@ async fn handle_json_connection(
             Ok(_) => {}
             Err(_) => break,
         }
-        if !dispatch_json_line(&line, &kernel, &shutdown_tx, &mut writer).await {
+        match dispatch_json_line(&line, &kernel, &shutdown_tx, &mut writer).await {
+            DispatchOutcome::Continue => {}
+            DispatchOutcome::Stop => break,
+            DispatchOutcome::StreamSubscribe {
+                topic,
+                rx,
+                on_disconnect,
+            } => {
+                run_stream_subscribe(writer, topic, rx, on_disconnect).await;
+                return;
+            }
+        }
+    }
+}
+
+/// Pump serialized topic messages from `rx` into the client writer.
+///
+/// Runs until the receiver closes (router-side shutdown) or the
+/// writer returns an I/O error (client disconnected). On exit, runs
+/// the provided `on_disconnect` closure so the daemon can remove the
+/// external subscription from the router.
+async fn run_stream_subscribe(
+    mut writer: tokio::net::unix::OwnedWriteHalf,
+    topic: String,
+    mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    on_disconnect: Box<dyn FnOnce() + Send>,
+) {
+    debug!(topic, "ipc.subscribe_stream: forwarder started");
+    while let Some(bytes) = rx.recv().await {
+        if let Err(e) = writer.write_all(&bytes).await {
+            debug!(topic, error = %e, "ipc.subscribe_stream: write error, closing");
             break;
         }
     }
+    debug!(topic, "ipc.subscribe_stream: forwarder exiting");
+    on_disconnect();
+}
+
+/// Handle `ipc.subscribe_stream`: register an external sink with the
+/// topic router and return the ack + receiver for the streaming loop.
+async fn handle_ipc_subscribe_stream(
+    params: serde_json::Value,
+    kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
+) -> Result<
+    (
+        Response,
+        String,
+        tokio::sync::mpsc::Receiver<Vec<u8>>,
+        Box<dyn FnOnce() + Send>,
+    ),
+    String,
+> {
+    let p: crate::protocol::IpcSubscribeStreamParams =
+        serde_json::from_value(params).map_err(|e| format!("invalid params: {e}"))?;
+
+    // Bounded channel; a slow external client will see drops rather
+    // than backpressuring the kernel's in-process fanout path.
+    let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+
+    let k = kernel.read().await;
+    let router = k.a2a_router().topic_router().clone();
+    let id = router.subscribe_sink(
+        &p.topic,
+        clawft_kernel::SubscriberSink::ExternalStream(tx),
+    );
+    k.event_log().info(
+        "ipc",
+        format!(
+            "external client subscribed to '{}' (sub_id={}, actor_id={:?})",
+            p.topic, id.0, p.actor_id
+        ),
+    );
+
+    let topic = p.topic.clone();
+    let unsubscribe_topic = p.topic.clone();
+    let router_for_cleanup = router.clone();
+    let on_disconnect: Box<dyn FnOnce() + Send> = Box::new(move || {
+        router_for_cleanup.unsubscribe_id(&unsubscribe_topic, id);
+    });
+
+    let ack = Response::success(serde_json::json!({
+        "subscribed": p.topic,
+        "subscriber_id": id.0,
+        "streaming": true,
+    }));
+    Ok((ack, topic, rx, on_disconnect))
 }
 
 /// Handle an RVF-framed connection.

@@ -11,6 +11,10 @@ description = "WeftOS operator CLI (weaver) — kernel management, services, and
 keywords = ["cli", "kernel", "os", "agent", "operator"]
 categories = ["command-line-utilities"]
 
+[lib]
+name = "clawft_weave"
+path = "src/lib.rs"
+
 [[bin]]
 name = "weaver"
 path = "src/main.rs"

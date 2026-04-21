@@ -478,7 +478,7 @@ pub use metrics::{
 pub use log_service::{LogEntry, LogQuery, LogService};
 #[cfg(feature = "os-patterns")]
 pub use timer::{TimerEntry, TimerInfo, TimerService};
-pub use topic::{Subscription, TopicRouter};
+pub use topic::{SubscriberId, SubscriberSink, Subscription, TopicRouter};
 pub use wasm_runner::{
     AgentInspectTool, AgentListTool, AgentResumeTool, AgentSpawnTool,
     AgentStopTool, AgentSuspendTool, BackendSelection, BuiltinTool, BuiltinToolSpec, Certificate,

@@ -12,15 +12,7 @@
 
 use clap::{Parser, Subcommand};
 
-mod client;
-mod commands;
-#[cfg(unix)]
-mod daemon;
-mod protocol;
-#[cfg(feature = "rvf-rpc")]
-mod rvf_codec;
-#[cfg(feature = "rvf-rpc")]
-mod rvf_rpc;
+use clawft_weave::commands;
 
 /// WeftOS operator CLI.
 #[derive(Parser)]
