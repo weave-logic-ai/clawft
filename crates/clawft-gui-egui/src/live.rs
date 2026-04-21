@@ -51,6 +51,12 @@ pub struct Snapshot {
     /// event_count, ...}`. On missing `exochain` feature or daemon
     /// unreachable: `{available: false, reason}`.
     pub chain_status: Option<Value>,
+    /// M1.5.2 — raw `substrate/sensor/mic` value from the
+    /// [`MicrophoneAdapter`]. Shape on success:
+    /// `{available: true, rms_db, peak_db, sample_rate,
+    /// samples_in_window, characterization}`. On missing/truncated
+    /// source: `{available: false, reason}`.
+    pub audio_mic: Option<Value>,
     pub last_error: Option<String>,
     /// Incremented every successful poll tick so the UI can detect freshness.
     pub tick: u64,

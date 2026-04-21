@@ -279,6 +279,11 @@ impl PartialPoll {
             // them alongside the substrate-over-postMessage bridge.
             mesh_status: None,
             chain_status: None,
+            // M1.5.2 — MicrophoneAdapter is native-only (reads a host
+            // file path); the wasm panel would need a dedicated
+            // `substrate.sensor.mic.stream` RPC or MediaStream shim,
+            // tracked with the rest of the M1.6+ bridge work.
+            audio_mic: None,
             last_error: err,
             tick: 0,
             last_tick_at_ms: Some(finished_ms),

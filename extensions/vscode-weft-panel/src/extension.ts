@@ -27,6 +27,15 @@ const VIEW_TYPE = "weft.panel";
 // WeftOS Admin surface declares influence over (ADR-015); the
 // daemon's own capability check is the real gate — this allowlist
 // just keeps the webview from reaching arbitrary RPC surface.
+// M1.5.1d adds `cluster.status` / `chain.status` so the Mesh and
+// ExoChain chip panels can fetch their substrate projections from
+// the daemon even on the wasm path (native GUI already runs the
+// adapters in-process). `cluster.nodes` lets the Mesh panel list
+// peers; `chain.tail` gives the ExoChain panel recent events.
+// M1.5.2 reserves `sensor.mic.status` for the upcoming audio bridge
+// — the current MicrophoneAdapter is host-file-backed and native-
+// only, but once a capture sidecar emits over RPC the wasm panel's
+// Audio chip will read through here.
 const ALLOWED_METHODS = new Set<string>([
     "kernel.status",
     "kernel.ps",
@@ -34,6 +43,11 @@ const ALLOWED_METHODS = new Set<string>([
     "kernel.logs",
     "kernel.kill-process",
     "kernel.restart-service",
+    "cluster.status",
+    "cluster.nodes",
+    "chain.status",
+    "chain.tail",
+    "sensor.mic.status",
 ]);
 
 interface WasmRpcRequest {
