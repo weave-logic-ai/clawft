@@ -4,7 +4,7 @@
 and what's deferred. Sources the fragmented lists that already exist
 across AGENDA / sessions / ADRs / spec. Update this file as work moves.
 
-Last updated: 2026-04-20 (M1.5 shipped).
+Last updated: 2026-04-21 (M1.5.1α shipped — built-in system components functional).
 
 ---
 
@@ -224,10 +224,114 @@ These were flagged by expert review and accepted as non-blockers:
 
 ---
 
+## ✅ M1.5.1 (α) — delivered 2026-04-21
+
+Landed as 5 commits on `development-0.7.0`. The M1.5 architecture was
+proven to render a surface description, but three unobvious gaps
+meant the admin app felt non-functional when opened in the Cursor
+extension:
+(a) clawft-app panicked on wasm due to `std::time` use;
+(b) affordances rendered but did nothing (composer discarded them);
+(c) tray chips for Mesh/ExoChain/DeFi/WiFi/Bluetooth were stubbed,
+    placeholder constants, or presence-only heuristics.
+This slice closes all three end-to-end. The admin panel now kills
+processes and restarts services through real RPC verbs, and the
+tray reflects real system state via five adapters.
+
+### Commit trail
+
+```
+22aed89 feat(m1.5.1d): mesh + chain adapters, drop DeFi vapor chip
+1f19162 feat(m1.5.1c): BluetoothAdapter — host-local via /sys/class
+01d141f feat(m1.5.1b): NetworkAdapter — WiFi/ethernet/battery via /sys/class
+ee34748 feat(m1.5.1a): admin app affordances end-to-end + layout polish
+ad33a0c fix(m1.5): wasm-safe SystemTime in clawft-app registry
+```
+
+### What shipped
+
+- **fix(m1.5)** — `clawft-app::registry::AppRegistry::install()` now
+  uses `web-time::SystemTime` instead of `std::time`. This was the
+  original wasm panic ("time not implemented on this platform") that
+  took down the extension webview on load.
+- **M1.5.1a — admin app affordances end-to-end + layout polish**
+  - Two new daemon RPC verbs: `kernel.kill-process(pid)` and
+    `kernel.restart-service(name)`. Extension allowlist updated.
+  - Composer return type widened to `ComposeOutcome { responses,
+    dispatches }`. Table row-click + gauge action-button produce
+    PendingDispatches; desktop shell submits them via
+    `live.submit(Command::Raw)`.
+  - `clawft-substrate::projection` — shared module projects
+    `kernel.ps` rows with `name` and `cpu` aliases so the admin
+    fixture's `[pid, name, cpu]` column binding resolves under both
+    the native KernelAdapter and the wasm fallback.
+    `explode_services_by_name` emits per-name sub-paths so the
+    gauge's `substrate/kernel/services/<name>/cpu_percent` binding
+    resolves.
+  - StreamView gains `desired_width` + `wrap_lines` so the log pane
+    stops overflowing narrow webviews. Grid children wrapped in
+    Frame::group so the 2×2 admin layout reads as cards.
+  - Offline banner at top of app pane when daemon unreachable.
+- **M1.5.1b — NetworkAdapter** (new `clawft-substrate::network`) —
+  reads `/sys/class/net/*` + `/sys/class/power_supply/*` directly.
+  Emits `substrate/network/{wifi,ethernet,battery}`. No nmcli /
+  NetworkManager / bluez dependency.
+- **M1.5.1c — BluetoothAdapter** (new `clawft-substrate::bluetooth`)
+  — reads `/sys/class/bluetooth` + `/sys/class/rfkill`. Emits
+  `substrate/bluetooth`.
+- **M1.5.1d — MeshAdapter + ChainAdapter** (new
+  `clawft-substrate::{mesh,chain}`) — poll the existing
+  `cluster.status` / `cluster.nodes` / `chain.status` RPC verbs.
+  Emit `substrate/mesh/{status,nodes}` + `substrate/chain/status`.
+  On daemons without the `exochain` feature, emits
+  `{available: false}` so the tray shows grey instead of pretending.
+  **DeFi chip removed** from the tray — survey confirmed no module,
+  no service, no registration code exists anywhere in the workspace.
+
+### Tray before → after
+
+| Chip | Before M1.5.1α | After M1.5.1α |
+|------|---------------|--------------|
+| Kernel | ✅ real | ✅ real (unchanged) |
+| Mesh | presence-only | MeshAdapter, live peer/shard counts |
+| ExoChain | presence-only | ChainAdapter, live chain.status |
+| DeFi | fake presence | **removed** (vapor) |
+| Wi-Fi | hardcoded `On` | NetworkAdapter, /sys/class/net |
+| Bluetooth | hardcoded `Off` | BluetoothAdapter, /sys/class/bluetooth |
+
+### Test coverage
+
+- `clawft-substrate`: 46/46 green (28 pre-existing + 9 network +
+  5 bluetooth + 2 mesh + 2 chain). Adapter-level unit tests run
+  against fake sysfs roots (tempfile-backed) so the adapters are
+  testable on hosts without wireless/bluetooth/battery hardware.
+- `clawft-app`: 24/24 green (registry tests exercise
+  `SystemTime::now` path).
+- `clawft-gui-egui`: all head-tests + admin_app_e2e +
+  surface_headless_render green.
+- `scripts/build.sh check` green on workspace.
+- `cargo check --target wasm32-unknown-unknown --no-default-features`
+  green.
+- `tsc --noEmit` on the extension clean.
+- Extension wasm bundle rebuilds clean.
+- Clippy clean on all touched crates.
+
+### Wasm / extension state
+
+Native (`weft-gui-egui`) gets live tray + functional admin app.
+**Wasm (Cursor extension webview)** gets functional admin app
+(kernel verbs reach the daemon through the postMessage→UDS bridge)
+but tray chips for Mesh/ExoChain/WiFi/Bluetooth render grey until
+the substrate-over-postMessage bridge lands in M1.6+. This is
+documented inside each adapter — the path is understood; the work
+is scheduled alongside editor-in.
+
+---
+
 ## 🚧 In flight / next up
 
-Round 3 planning reshaped the milestone order. M1.5 is done; M1.6
-is next.
+Round 3 planning reshaped the milestone order. M1.5 + M1.5.1 are
+done; M1.6 is next.
 
 ### M1.6 — IDE bridge editor-in
 Adds `substrate/editor/*` topics (the `workspace` adapter from
