@@ -315,15 +315,35 @@ pub async fn run_democritus_loop_with_chain(
 ) {
     use crate::causal_predict::{detect_conversation_cycle, ConversationState};
     use crate::eml_coherence::GraphFeatures;
+    use std::collections::VecDeque;
     use std::time::Instant;
 
     let drift_threshold = 0.05; // trigger exact when fast prediction drifts >5%
     let exact_every_n: u64 = 100; // force exact every 100 ticks regardless
     let train_every_n: usize = 1000; // retrain model every 1000 exact samples
+    // Cycle-detector window. `coherence_history` stays capped at this
+    // size (Finding #3): `detect_conversation_cycle` only reads the
+    // tail anyway, so an unbounded Vec was pure leak.
+    let cycle_window: usize = 20;
+    // Steady-state suppression for the "stuck" warning (Finding #2).
+    // Once we enter a Stuck/Oscillating phase we log once, then
+    // exponentially back off: log on check 1, 2, 4, 8, 16, … up to
+    // `stuck_suppress_cap` consecutive checks before logging again.
+    // Entering/leaving the phase always logs (edge-triggered).
+    let stuck_suppress_cap: u64 = 256;
 
-    let mut last_exact_coherence = 0.0_f64;
+    // `Option<f64>` sentinel instead of `last == 0.0` (Finding #1).
+    // The old sentinel stayed true forever on an empty causal graph
+    // because `spectral_analysis` returned lambda_2 = 0.0 every time,
+    // so `needs_exact` was always true and Lanczos ran every tick.
+    let mut last_exact_coherence: Option<f64> = None;
     let mut ticks_since_exact: u64 = 0;
-    let mut coherence_history: Vec<f64> = Vec::new();
+    let mut coherence_history: VecDeque<f64> = VecDeque::with_capacity(cycle_window);
+    let mut exact_tick_count: u64 = 0;
+    // Edge-trigger + suppression state for the stuck-warning.
+    let mut in_stuck_phase = false;
+    let mut stuck_checks_since_log: u64 = 0;
+    let mut next_log_at: u64 = 1;
 
     tick.set_running(true);
     tracing::info!(
@@ -370,18 +390,27 @@ pub async fn run_democritus_loop_with_chain(
 
         // ── DETECT DRIFT ───────────────────────────────────────────────
         ticks_since_exact += 1;
-        let drift = (prediction.lambda_2 - last_exact_coherence).abs();
-        let needs_exact = drift > drift_threshold
-            || ticks_since_exact >= exact_every_n
-            || last_exact_coherence == 0.0; // first tick always exact
+        let drift = match last_exact_coherence {
+            Some(last) => (prediction.lambda_2 - last).abs(),
+            None => f64::INFINITY, // first tick — force exact once
+        };
+        let needs_exact = last_exact_coherence.is_none()
+            || drift > drift_threshold
+            || ticks_since_exact >= exact_every_n;
 
         if needs_exact {
             // ── THINK (exact path) ─────────────────────────────────────
-            // O(k*m) Lanczos -- run rarely. Do NOT hold the EML lock here.
-            let spectral = causal.spectral_analysis(50);
+            // On steady state this runs once every `exact_every_n`
+            // ticks (or when EML drift exceeds threshold). We use the
+            // random-Fourier-features Laplacian estimator (O(m) per
+            // feature vector, ~3–6x faster than Lanczos at large m)
+            // as the routine path; ground-truth Lanczos stays
+            // available for whoever wants it. (Finding #4)
+            let spectral = causal.spectral_analysis_rff(64, 50);
             let exact_lambda_2 = spectral.lambda_2;
 
-            if last_exact_coherence == 0.0 {
+            let is_first = last_exact_coherence.is_none();
+            if is_first {
                 tracing::info!(
                     lambda_2 = exact_lambda_2,
                     "DEMOCRITUS: first exact coherence computed"
@@ -395,24 +424,70 @@ pub async fn run_democritus_loop_with_chain(
                 );
             }
 
-            last_exact_coherence = exact_lambda_2;
+            last_exact_coherence = Some(exact_lambda_2);
             ticks_since_exact = 0;
+            exact_tick_count += 1;
 
-            // Track coherence history for cycle detection.
-            coherence_history.push(exact_lambda_2);
+            // Track bounded coherence history for cycle detection
+            // (Finding #3). Drop the oldest sample if we've hit the
+            // window cap so the buffer can't grow without bound.
+            if coherence_history.len() == cycle_window {
+                coherence_history.pop_front();
+            }
+            coherence_history.push_back(exact_lambda_2);
 
-            // Check for stuck conversation every 20 exact measurements.
-            if coherence_history.len() % 20 == 0 {
-                let state = detect_conversation_cycle(&coherence_history, 20, 0.01);
-                match state {
+            // Run the cycle detector once per `cycle_window` exact
+            // measurements, and rate-limit the warning on steady-state
+            // stuck/oscillating phases with an exponential-backoff
+            // suppression counter (Finding #2). Entering and leaving
+            // the stuck phase are always logged (edge-triggered); the
+            // in-phase warnings drop off geometrically so the log
+            // doesn't drown.
+            if coherence_history.len() >= cycle_window
+                && exact_tick_count % cycle_window as u64 == 0
+            {
+                let history_slice: Vec<f64> =
+                    coherence_history.iter().copied().collect();
+                let state = detect_conversation_cycle(&history_slice, cycle_window, 0.01);
+                let is_stuck = matches!(
+                    state,
                     ConversationState::Stuck { .. }
-                    | ConversationState::Oscillating { .. } => {
+                        | ConversationState::Oscillating { .. }
+                );
+
+                match (in_stuck_phase, is_stuck) {
+                    (false, true) => {
                         tracing::warn!(
-                            "DEMOCRITUS: conversation appears stuck: {:?}",
+                            "DEMOCRITUS: conversation entered stuck phase: {:?}",
                             state
                         );
+                        in_stuck_phase = true;
+                        stuck_checks_since_log = 0;
+                        next_log_at = 1;
                     }
-                    _ => {}
+                    (true, true) => {
+                        stuck_checks_since_log += 1;
+                        if stuck_checks_since_log >= next_log_at {
+                            tracing::warn!(
+                                "DEMOCRITUS: still stuck after {} checks: {:?}",
+                                stuck_checks_since_log,
+                                state
+                            );
+                            stuck_checks_since_log = 0;
+                            next_log_at = (next_log_at.saturating_mul(2))
+                                .min(stuck_suppress_cap);
+                        }
+                    }
+                    (true, false) => {
+                        tracing::info!(
+                            "DEMOCRITUS: conversation left stuck phase: {:?}",
+                            state
+                        );
+                        in_stuck_phase = false;
+                        stuck_checks_since_log = 0;
+                        next_log_at = 1;
+                    }
+                    (false, false) => { /* healthy steady state */ }
                 }
             }
 
