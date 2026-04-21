@@ -16,10 +16,13 @@ use std::{
     fs,
     io,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
+// `std::time` panics under wasm32-unknown-unknown; `web-time` is a
+// drop-in that uses std on native and `performance.now()` in the
+// browser.
+use web_time::{SystemTime, UNIX_EPOCH};
 
 use crate::manifest::AppManifest;
 use crate::validation::{ValidationError, validate};
