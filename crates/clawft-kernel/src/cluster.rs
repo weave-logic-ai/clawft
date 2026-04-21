@@ -197,6 +197,40 @@ impl Default for ClusterConfig {
     }
 }
 
+impl ClusterConfig {
+    /// Recommend the heartbeat / gossip interval (seconds), consulting
+    /// an optional learned
+    /// [`GossipTimingModel`](crate::eml_kernel::GossipTimingModel).
+    ///
+    /// When `model` is `None` or untrained, returns
+    /// `self.heartbeat_interval_secs` unchanged (current behaviour).
+    /// When trained, the model's per-context recommendation is used,
+    /// rounded to whole seconds and clamped to the model's [1, 60]
+    /// range.
+    ///
+    /// `peer_count` and `network_latency_ms` and `update_frequency_hz`
+    /// feed the model when trained; pass `(0, 0.0, 0.0)` if not
+    /// available.
+    ///
+    /// NOTE(eml-swap): wired — Finding #5 (GossipTimingModel).
+    pub fn recommended_heartbeat_secs(
+        &self,
+        model: Option<&crate::eml_kernel::GossipTimingModel>,
+        peer_count: usize,
+        network_latency_ms: f64,
+        update_frequency_hz: f64,
+    ) -> u64 {
+        match model {
+            Some(m) if m.is_trained() => {
+                let secs =
+                    m.predict(peer_count, network_latency_ms, update_frequency_hz);
+                secs.round().max(1.0) as u64
+            }
+            _ => self.heartbeat_interval_secs,
+        }
+    }
+}
+
 // ── ECC capability advertisement (K3c) ────────────────────────────
 
 /// ECC capabilities advertised by a cluster node.
@@ -1088,6 +1122,55 @@ mod tests {
         assert_eq!(config.node_name, "local");
         assert_eq!(config.heartbeat_interval_secs, 5);
         assert_eq!(config.suspect_threshold, 3);
+    }
+
+    #[test]
+    fn recommended_heartbeat_falls_back_when_no_model() {
+        // Finding #5: with no model, the recommendation must equal
+        // the configured heartbeat_interval_secs.
+        let config = ClusterConfig {
+            heartbeat_interval_secs: 7,
+            ..Default::default()
+        };
+        assert_eq!(config.recommended_heartbeat_secs(None, 0, 0.0, 0.0), 7);
+    }
+
+    #[test]
+    fn recommended_heartbeat_falls_back_when_untrained() {
+        // Finding #5: an untrained model must not override the config.
+        let config = ClusterConfig {
+            heartbeat_interval_secs: 9,
+            ..Default::default()
+        };
+        let model = crate::eml_kernel::GossipTimingModel::new();
+        assert!(!model.is_trained());
+        assert_eq!(
+            config.recommended_heartbeat_secs(Some(&model), 5, 50.0, 1.0),
+            9,
+        );
+    }
+
+    #[test]
+    fn recommended_heartbeat_uses_trained_model() {
+        // Finding #5: with a trained model the recommendation comes
+        // from the model's predict, not the config.
+        let model = crate::eml_kernel::GossipTimingModel::new();
+        let mut json = serde_json::to_value(&model).unwrap();
+        if let Some(inner) = json.get_mut("inner").and_then(|v| v.as_object_mut()) {
+            inner.insert("trained".into(), serde_json::Value::Bool(true));
+        }
+        let forced: crate::eml_kernel::GossipTimingModel =
+            serde_json::from_value(json).unwrap();
+        assert!(forced.is_trained());
+
+        let config = ClusterConfig {
+            heartbeat_interval_secs: 5,
+            ..Default::default()
+        };
+        let recommended =
+            config.recommended_heartbeat_secs(Some(&forced), 10, 50.0, 1.0);
+        // Clamped to [1, 60] by the model.
+        assert!((1..=60).contains(&recommended));
     }
 
     #[test]

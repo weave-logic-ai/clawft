@@ -275,7 +275,7 @@ markers are just breadcrumbs.
 | #2 Stuck warn spam | P0 | — | **Fixed** (2026-04-21; edge-trigger + exp backoff) |
 | #3 Unbounded coherence_history | P1 | — | **Fixed** (2026-04-21; `VecDeque` cap) |
 | #4 `spectral_analysis_rff` unused | P1 | #1 fixed first | **Fixed** (2026-04-21; swapped in democritus loop) |
-| #5 Kernel EML models unused (6) | P1 | — | In progress — GovernanceScorerModel **Fixed** (2026-04-21; `EffectVector::score`, `GovernanceEngine::with_scorer`), RestartStrategyModel **Fixed** (2026-04-21; `RestartTracker::{next_backoff_ms,record_restart}_with_model`), HealthThresholdModel **Fixed** (2026-04-21; `ProbeConfig::from_model`), DeadLetterModel **Fixed** (2026-04-21; `ReliableQueue::with_model`); others Open |
+| #5 Kernel EML models unused (6) | P1 | — | In progress — GovernanceScorerModel **Fixed** (2026-04-21; `EffectVector::score`, `GovernanceEngine::with_scorer`), RestartStrategyModel **Fixed** (2026-04-21; `RestartTracker::{next_backoff_ms,record_restart}_with_model`), HealthThresholdModel **Fixed** (2026-04-21; `ProbeConfig::from_model`), DeadLetterModel **Fixed** (2026-04-21; `ReliableQueue::with_model`), GossipTimingModel **Fixed** (2026-04-21; `ClusterConfig::recommended_heartbeat_secs`); ComplexityModel still Open |
 | #6 `RetryModel` unused | P1 | — | **Fixed** (2026-04-21; `RetryPolicy::with_model`) |
 | #7 Tick-interval recommender | P1 | — | Open |
 | #8 Treecalc conversation state | P2 | #10 | **Fixed** (2026-04-21; `detect_conversation_cycle` dispatches on `Form`) |
