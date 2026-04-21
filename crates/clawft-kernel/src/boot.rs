@@ -129,6 +129,8 @@ pub struct Kernel<P: Platform> {
     boot_time: Instant,
     cluster_membership: Arc<ClusterMembership>,
     revocation_list: Arc<crate::revocation::RevocationList>,
+    #[cfg(feature = "native")]
+    agent_registry: crate::agent_registry::AgentRegistry,
     #[cfg(feature = "exochain")]
     chain: ChainSubsystem,
     #[cfg(feature = "ecc")]
@@ -1657,6 +1659,8 @@ impl<P: Platform> Kernel<P> {
             boot_time,
             cluster_membership,
             revocation_list,
+            #[cfg(feature = "native")]
+            agent_registry: crate::agent_registry::AgentRegistry::new(),
             #[cfg(feature = "exochain")]
             chain: ChainSubsystem {
                 chain_manager,
@@ -1826,6 +1830,17 @@ impl<P: Platform> Kernel<P> {
     #[cfg(feature = "native")]
     pub fn a2a_router(&self) -> &Arc<A2ARouter> {
         &self.a2a_router
+    }
+
+    /// Get the agent identity registry.
+    ///
+    /// External clients call `agent.register` to obtain an `agent_id`
+    /// bound to an Ed25519 public key. The registry is then consulted
+    /// when verifying signatures on `ipc.publish` and
+    /// `ipc.subscribe_stream` requests.
+    #[cfg(feature = "native")]
+    pub fn agent_registry(&self) -> &crate::agent_registry::AgentRegistry {
+        &self.agent_registry
     }
 
     /// Get the cron service.

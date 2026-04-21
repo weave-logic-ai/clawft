@@ -121,6 +121,8 @@ pub mod sensor_graph;
 pub mod a2a;
 pub mod agency;
 #[cfg(feature = "native")]
+pub mod agent_registry;
+#[cfg(feature = "native")]
 pub mod agent_loop;
 pub mod app;
 pub mod assessment;
@@ -227,6 +229,10 @@ pub mod mesh_runtime;
 // Re-export key types at the crate level for convenience.
 #[cfg(feature = "native")]
 pub use a2a::A2ARouter;
+#[cfg(feature = "native")]
+pub use agent_registry::{
+    publish_payload, register_payload, subscribe_payload, AgentRegistry, RegisteredAgent,
+};
 pub use agency::{
     Agency, AgentHealth, AgentInterface, AgentManifest, AgentPriority, AgentResources,
     AgentRestartPolicy, AgentRole, InterfaceProtocol, ResponseMode,

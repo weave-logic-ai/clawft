@@ -360,6 +360,38 @@ pub struct IpcPublishParams {
     pub ts: Option<u64>,
 }
 
+/// Parameters for `agent.register`.
+///
+/// The caller provides a human-readable `name`, a 32-byte Ed25519
+/// `pubkey`, and a 64-byte `proof` signature. `proof` is the
+/// Ed25519 signature over
+/// `b"register\0" || name || b"\0" || pubkey || b"\0" || ts_le`
+/// (see `clawft_kernel::register_payload`), which binds the
+/// registration to the specific key and a fresh nonce.
+///
+/// Binary fields (`pubkey`, `proof`) accept either a hex string or a
+/// base64 string; parser is permissive.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRegisterParams {
+    /// Human-readable display name.
+    pub name: String,
+    /// Ed25519 public key bytes (hex or base64; 32 bytes decoded).
+    pub pubkey: String,
+    /// Ed25519 signature bytes (hex or base64; 64 bytes decoded).
+    pub proof: String,
+    /// Monotonic timestamp (unix millis) the proof was generated at.
+    pub ts: u64,
+}
+
+/// Result of `agent.register`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRegisterResult {
+    /// Freshly-assigned agent identifier (UUID v4).
+    pub agent_id: String,
+    /// Echo of the supplied name.
+    pub name: String,
+}
+
 /// Parameters for `ipc.subscribe_stream`.
 ///
 /// After a successful ack, the daemon keeps the connection open and

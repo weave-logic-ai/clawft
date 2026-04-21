@@ -676,6 +676,185 @@ async fn run_stream_subscribe(
     on_disconnect();
 }
 
+/// Decode a 32-byte or 64-byte key/signature from either hex or
+/// standard base64. Permissive on purpose — Python bridges emit hex,
+/// JS bridges often emit base64, and both are safe to accept.
+fn decode_bytes(s: &str) -> Result<Vec<u8>, String> {
+    let trimmed = s.trim();
+    // Try hex first (even-length, all hex digits)
+    if !trimmed.is_empty()
+        && trimmed.len() % 2 == 0
+        && trimmed.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        let mut out = Vec::with_capacity(trimmed.len() / 2);
+        for i in (0..trimmed.len()).step_by(2) {
+            let byte = u8::from_str_radix(&trimmed[i..i + 2], 16)
+                .map_err(|e| format!("hex decode: {e}"))?;
+            out.push(byte);
+        }
+        return Ok(out);
+    }
+    // Fall back to base64 (permissive: accept both URL-safe and standard).
+    base64_decode_permissive(trimmed)
+}
+
+fn base64_decode_permissive(s: &str) -> Result<Vec<u8>, String> {
+    // Minimal base64 decoder — sufficient for 32/64 byte keys. Accepts
+    // both `+/` and `-_` alphabets. Padding `=` optional.
+    let mut buf: u32 = 0;
+    let mut bits: u8 = 0;
+    let mut out = Vec::with_capacity((s.len() * 3) / 4 + 2);
+    for c in s.chars() {
+        if c == '=' {
+            break;
+        }
+        let v: u32 = match c {
+            'A'..='Z' => (c as u32) - ('A' as u32),
+            'a'..='z' => (c as u32) - ('a' as u32) + 26,
+            '0'..='9' => (c as u32) - ('0' as u32) + 52,
+            '+' | '-' => 62,
+            '/' | '_' => 63,
+            '\n' | '\r' | ' ' | '\t' => continue,
+            _ => return Err(format!("invalid base64 char: {c:?}")),
+        };
+        buf = (buf << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buf >> bits) & 0xFF) as u8);
+        }
+    }
+    Ok(out)
+}
+
+/// Verify an Ed25519 signature for a given agent_id against the
+/// canonical signed payload. Returns Ok on valid, Err with a message
+/// otherwise. Always rejects if the agent_id is not registered.
+fn verify_agent_signature(
+    kernel: &Kernel<NativePlatform>,
+    actor_id: &str,
+    signature_str: &str,
+    payload: &[u8],
+) -> Result<(), String> {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+    let agent = kernel
+        .agent_registry()
+        .get(actor_id)
+        .ok_or_else(|| format!("unknown actor_id: {actor_id}"))?;
+    let sig_bytes = decode_bytes(signature_str).map_err(|e| format!("signature: {e}"))?;
+    if sig_bytes.len() != 64 {
+        return Err(format!(
+            "signature must be 64 bytes, got {}",
+            sig_bytes.len()
+        ));
+    }
+    let mut sig_arr = [0u8; 64];
+    sig_arr.copy_from_slice(&sig_bytes);
+    let sig = Signature::from_bytes(&sig_arr);
+    let vk = VerifyingKey::from_bytes(&agent.pubkey)
+        .map_err(|e| format!("stored pubkey invalid: {e}"))?;
+    vk.verify(payload, &sig)
+        .map_err(|e| format!("signature verify failed: {e}"))?;
+    Ok(())
+}
+
+/// Handle `agent.register`: verify proof-of-possession, insert the
+/// agent into the registry, and chain-append an `agent.registered`
+/// event.
+async fn handle_agent_register(
+    params: serde_json::Value,
+    kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
+) -> Response {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+    let p: crate::protocol::AgentRegisterParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(e) => return Response::error(format!("invalid params: {e}")),
+    };
+
+    // Decode pubkey + proof.
+    let pubkey_bytes = match decode_bytes(&p.pubkey) {
+        Ok(b) => b,
+        Err(e) => return Response::error(format!("pubkey decode: {e}")),
+    };
+    if pubkey_bytes.len() != 32 {
+        return Response::error(format!(
+            "pubkey must be 32 bytes, got {}",
+            pubkey_bytes.len()
+        ));
+    }
+    let mut pubkey_arr = [0u8; 32];
+    pubkey_arr.copy_from_slice(&pubkey_bytes);
+
+    let proof_bytes = match decode_bytes(&p.proof) {
+        Ok(b) => b,
+        Err(e) => return Response::error(format!("proof decode: {e}")),
+    };
+    if proof_bytes.len() != 64 {
+        return Response::error(format!(
+            "proof must be 64 bytes, got {}",
+            proof_bytes.len()
+        ));
+    }
+    let mut proof_arr = [0u8; 64];
+    proof_arr.copy_from_slice(&proof_bytes);
+
+    // Verify the proof-of-possession.
+    let payload = clawft_kernel::register_payload(&p.name, &pubkey_arr, p.ts);
+    let vk = match VerifyingKey::from_bytes(&pubkey_arr) {
+        Ok(vk) => vk,
+        Err(e) => return Response::error(format!("invalid pubkey: {e}")),
+    };
+    let sig = Signature::from_bytes(&proof_arr);
+    if let Err(e) = vk.verify(&payload, &sig) {
+        return Response::error(format!("proof-of-possession verify failed: {e}"));
+    }
+
+    let k = kernel.read().await;
+    let entry = k.agent_registry().register(p.name.clone(), pubkey_arr);
+
+    #[cfg(feature = "exochain")]
+    if let Some(cm) = k.chain_manager() {
+        cm.append(
+            "agent",
+            "agent.registered",
+            Some(serde_json::json!({
+                "agent_id": entry.agent_id,
+                "name": entry.name,
+                "pubkey_hex": hex_encode(&entry.pubkey),
+                "registered_at": entry.registered_at.to_rfc3339(),
+            })),
+        );
+    }
+
+    k.event_log().info(
+        "agent",
+        format!(
+            "registered agent '{}' as {} (pubkey prefix {})",
+            entry.name,
+            entry.agent_id,
+            &hex_encode(&entry.pubkey)[..16.min(entry.pubkey.len() * 2)]
+        ),
+    );
+
+    Response::success(
+        serde_json::to_value(crate::protocol::AgentRegisterResult {
+            agent_id: entry.agent_id,
+            name: entry.name,
+        })
+        .unwrap(),
+    )
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
 /// Handle `ipc.subscribe_stream`: register an external sink with the
 /// topic router and return the ack + receiver for the streaming loop.
 async fn handle_ipc_subscribe_stream(
@@ -693,11 +872,31 @@ async fn handle_ipc_subscribe_stream(
     let p: crate::protocol::IpcSubscribeStreamParams =
         serde_json::from_value(params).map_err(|e| format!("invalid params: {e}"))?;
 
+    let k = kernel.read().await;
+
+    // If the caller provided an identity, verify the signature.
+    // Missing actor_id is accepted at bring-up but logged as a warn;
+    // missing signature for a declared actor is unauthorized.
+    if let Some(actor_id) = p.actor_id.as_ref() {
+        let sig = p
+            .signature
+            .as_ref()
+            .ok_or_else(|| "actor_id provided but signature missing".to_string())?;
+        let ts = p.ts.unwrap_or(0);
+        let payload = clawft_kernel::subscribe_payload(&p.topic, ts, actor_id);
+        verify_agent_signature(&k, actor_id, sig, &payload)
+            .map_err(|e| format!("unauthorized: {e}"))?;
+    } else {
+        tracing::warn!(
+            topic = %p.topic,
+            "ipc.subscribe_stream with no actor_id — anonymous subscribe accepted (bring-up only)"
+        );
+    }
+
     // Bounded channel; a slow external client will see drops rather
     // than backpressuring the kernel's in-process fanout path.
     let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
 
-    let k = kernel.read().await;
     let router = k.a2a_router().topic_router().clone();
     let id = router.subscribe_sink(
         &p.topic,
@@ -1423,6 +1622,7 @@ async fn dispatch(
             #[cfg(not(feature = "exochain"))]
             Response::error("exochain feature not enabled")
         }
+        "agent.register" => handle_agent_register(params, kernel).await,
         "agent.spawn" => {
             let spawn_params: AgentSpawnParams = match serde_json::from_value(params) {
                 Ok(p) => p,
@@ -1801,6 +2001,37 @@ async fn dispatch(
                 Err(e) => return Response::error(format!("invalid params: {e}")),
             };
             let k = kernel.read().await;
+
+            // Authenticate the publish if the caller supplied an
+            // identity. Missing actor_id is accepted for bring-up
+            // parity with existing clients; missing signature given
+            // an actor_id is unauthorized.
+            if let Some(actor_id) = pub_params.actor_id.as_ref() {
+                let sig = match pub_params.signature.as_ref() {
+                    Some(s) => s,
+                    None => {
+                        return Response::error(
+                            "actor_id provided but signature missing".to_string(),
+                        );
+                    }
+                };
+                let ts = pub_params.ts.unwrap_or(0);
+                let payload = clawft_kernel::publish_payload(
+                    &pub_params.topic,
+                    &pub_params.message,
+                    ts,
+                    actor_id,
+                );
+                if let Err(e) = verify_agent_signature(&k, actor_id, sig, &payload) {
+                    return Response::error(format!("unauthorized: {e}"));
+                }
+            } else {
+                tracing::warn!(
+                    topic = %pub_params.topic,
+                    "ipc.publish with no actor_id — anonymous publish accepted (bring-up only)"
+                );
+            }
+
             let a2a = k.a2a_router().clone();
 
             // Count all registered subscribers for reporting
