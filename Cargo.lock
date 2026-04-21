@@ -1153,6 +1153,7 @@ dependencies = [
  "blake3",
  "clawft-kernel",
  "clawft-llm",
+ "clawft-treecalc",
  "dashmap",
  "eml-core",
  "html-escape",
@@ -1226,6 +1227,7 @@ dependencies = [
  "clawft-platform",
  "clawft-plugin",
  "clawft-plugin-treesitter",
+ "clawft-treecalc",
  "clawft-types",
  "cognitum-gate-tilezero",
  "dashmap",
@@ -1459,6 +1461,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "clawft-qfs-gen"
+version = "0.6.17"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "chrono",
+ "clap",
+ "rand 0.8.5",
+ "rand_chacha 0.3.1",
+ "rand_distr",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "clawft-rpc"
 version = "0.6.17"
 dependencies = [
@@ -1555,6 +1576,13 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "clawft-treecalc"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

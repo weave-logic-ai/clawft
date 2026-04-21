@@ -20,30 +20,16 @@ use crate::relationship::{Confidence, RelationType, Relationship};
 // Tree calculus: Topology forms
 // ---------------------------------------------------------------------------
 
-/// Tree calculus form for extracted items.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Form {
-    /// Leaf — no children. Constants, type aliases, use statements.
-    Atom,
-    /// Stem — ordered same-type children. Impl blocks, module body.
-    Sequence,
-    /// Fork — typed branching children. Struct with methods, enum with variants.
-    Branch,
-}
+// `Form` and generic `triage` now live in the `clawft-treecalc` crate
+// so the kernel can share the same classifier for coherence-cycle
+// dispatch (see docs/eml-treecalc-swap-sites.md#finding-8 and
+// #finding-10). Re-export here so downstream callers that depended on
+// `clawft_graphify::extract::treecalc::Form` keep working.
+pub use clawft_treecalc::Form;
 
-/// Triage: classify an extracted item by its form.
+/// Classify an `ExtractedItem` by its children's uniformity.
 fn triage(item: &ExtractedItem) -> Form {
-    if item.children.is_empty() {
-        Form::Atom
-    } else {
-        let first_kind = &item.children[0].kind;
-        let all_same = item.children.iter().all(|c| &c.kind == first_kind);
-        if all_same {
-            Form::Sequence
-        } else {
-            Form::Branch
-        }
-    }
+    clawft_treecalc::triage(item.children.iter().map(|c| &c.kind))
 }
 
 // ---------------------------------------------------------------------------

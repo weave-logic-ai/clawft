@@ -34,6 +34,8 @@ members = [
     "crates/clawft-gui-egui",
     "crates/clawft-substrate",
     "crates/clawft-surface",
+    "crates/clawft-treecalc",
+    "crates/clawft-qfs-gen",
 ]
 exclude = [
     "gui/src-tauri",
@@ -195,6 +197,9 @@ clawft-surface = { version = "0.6.6", path = "crates/clawft-surface" }
 
 # EML (exp-ln) function approximation
 eml-core = { version = "0.1.0", path = "crates/eml-core" }
+
+# Tree-calculus Form triage
+clawft-treecalc = { version = "0.1.0", path = "crates/clawft-treecalc" }
 
 # Graph library
 petgraph = "0.7"
