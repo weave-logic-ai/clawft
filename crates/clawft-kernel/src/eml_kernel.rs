@@ -506,6 +506,108 @@ impl GossipTimingModel {
 }
 
 // ---------------------------------------------------------------------------
+// 6b. Tick Interval Recommender (Finding #7)
+// ---------------------------------------------------------------------------
+
+/// Learned tick-interval recommender replacing the four-tier
+/// step-function in [`crate::weaver::WeaverEngine::recommend_tick_interval`].
+///
+/// Inputs (3): `cpm` (changes per minute), `idle_ticks`,
+/// `variance` (a free-form change-rate variance signal in `[0, 1]`).
+/// Output (1): recommended tick interval in milliseconds.
+///
+/// Fallback: returns 1000 ms (the steady-state default the old
+/// step-function returned for moderate change rates). When the model
+/// is not yet trained, callers must keep the original step-function
+/// reachable so the historical thresholds (`200 / 1000 / 3000 / 5000`)
+/// continue to apply — see [`Self::recommend_or`] for the helper that
+/// implements that policy.
+///
+/// NOTE(eml-swap): wired — Finding #7 (TickIntervalModel).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TickIntervalModel {
+    inner: EmlModel,
+}
+
+impl Default for TickIntervalModel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TickIntervalModel {
+    /// Create a new untrained tick-interval recommender.
+    pub fn new() -> Self {
+        let mut inner = EmlModel::new(2, 3, 1);
+        inner.set_model_name("tick_interval");
+        Self { inner }
+    }
+
+    /// Drain accumulated EML lifecycle events for ExoChain forwarding.
+    pub fn drain_events(&mut self) -> Vec<EmlEvent> {
+        self.inner.drain_events()
+    }
+
+    /// Whether the model has been trained.
+    pub fn is_trained(&self) -> bool {
+        self.inner.is_trained()
+    }
+
+    /// Number of training samples collected.
+    pub fn training_sample_count(&self) -> usize {
+        self.inner.training_sample_count()
+    }
+
+    /// Predict the recommended tick interval in milliseconds.
+    ///
+    /// Result is clamped to `[100, 60_000]` ms. When untrained,
+    /// returns 1000 ms (the central tier of the legacy step-function).
+    pub fn predict(&self, cpm: f64, idle_ticks: u64, variance: f64) -> u32 {
+        if !self.inner.is_trained() {
+            return 1000;
+        }
+        let inputs = [cpm, idle_ticks as f64, variance];
+        let raw = self.inner.predict_primary(&inputs);
+        raw.clamp(100.0, 60_000.0).round() as u32
+    }
+
+    /// Recommend a tick interval: when trained returns
+    /// [`Self::predict`]; otherwise returns the caller-provided
+    /// `fallback` (typically the existing step-function's choice).
+    pub fn recommend_or(
+        &self,
+        cpm: f64,
+        idle_ticks: u64,
+        variance: f64,
+        fallback: u32,
+    ) -> u32 {
+        if self.inner.is_trained() {
+            self.predict(cpm, idle_ticks, variance)
+        } else {
+            fallback
+        }
+    }
+
+    /// Record an observed (cpm, idle_ticks, variance, recommended_ms)
+    /// tuple for training.
+    pub fn record(
+        &mut self,
+        cpm: f64,
+        idle_ticks: u64,
+        variance: f64,
+        recommended_ms: u32,
+    ) {
+        let inputs = [cpm, idle_ticks as f64, variance];
+        self.inner.record(&inputs, &[Some(recommended_ms as f64)]);
+    }
+
+    /// Train the model from recorded samples.
+    pub fn train(&mut self) -> bool {
+        self.inner.train()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 6. Assessment Complexity Threshold
 // ---------------------------------------------------------------------------
 
@@ -775,6 +877,38 @@ mod tests {
         let json = serde_json::to_string(&model).unwrap();
         let restored: GossipTimingModel = serde_json::from_str(&json).unwrap();
         assert!(!restored.is_trained());
+    }
+
+    // ── TickIntervalModel (Finding #7) ──────────────────────────────
+
+    #[test]
+    fn tick_interval_fallback_returns_1000ms() {
+        let model = TickIntervalModel::new();
+        assert!(!model.is_trained());
+        assert_eq!(model.predict(5.0, 10, 0.2), 1000);
+    }
+
+    #[test]
+    fn tick_interval_recommend_or_uses_fallback_when_untrained() {
+        let model = TickIntervalModel::new();
+        // 1234 is the caller's step-function choice.
+        assert_eq!(model.recommend_or(5.0, 10, 0.2, 1234), 1234);
+    }
+
+    #[test]
+    fn tick_interval_record_increments_count() {
+        let mut model = TickIntervalModel::new();
+        model.record(5.0, 10, 0.2, 1000);
+        assert_eq!(model.training_sample_count(), 1);
+    }
+
+    #[test]
+    fn tick_interval_serde_roundtrip() {
+        let model = TickIntervalModel::new();
+        let json = serde_json::to_string(&model).unwrap();
+        let restored: TickIntervalModel = serde_json::from_str(&json).unwrap();
+        assert!(!restored.is_trained());
+        assert_eq!(restored.predict(0.0, 0, 0.0), 1000);
     }
 
     // ── ComplexityModel ─────────────────────────────────────────────
