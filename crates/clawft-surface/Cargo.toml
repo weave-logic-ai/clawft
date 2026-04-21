@@ -1,0 +1,24 @@
+[package]
+name = "clawft-surface"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Surface description IR + TOML parser + binding expression evaluator + composer runtime (ADR-016 M1.5 subset)"
+
+[lib]
+name = "clawft_surface"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+egui = "0.29"
+egui_extras = { version = "0.29", features = ["all_loaders"] }
+clawft-gui-egui = { path = "../clawft-gui-egui", default-features = false }
+
+[dev-dependencies]
+# For headless render tests we run egui passes without wasm-specific glue.

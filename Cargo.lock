@@ -1494,6 +1494,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "clawft-surface"
+version = "0.6.17"
+dependencies = [
+ "clawft-gui-egui",
+ "egui",
+ "egui_extras",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "toml",
+]
+
+[[package]]
 name = "clawft-tools"
 version = "0.6.17"
 dependencies = [
