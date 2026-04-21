@@ -17,6 +17,9 @@ thiserror = { workspace = true }
 
 # Kernel adapter re-uses the existing daemon RPC client.
 clawft-rpc = { workspace = true }
+# Canonical `Permission` enum (ADR-015) — re-exported here as `PermissionReq`
+# so ADR-017 adapter code and ADR-015 manifest code speak the same type.
+clawft-app = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["sync", "rt", "time", "macros"] }

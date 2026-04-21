@@ -106,24 +106,11 @@ pub struct TopicDecl {
 /// Intersected with the app manifest's declared permissions during
 /// install (ADR-015). Denial fails install closed.
 ///
-/// NOTE: this enum currently lives in `clawft-substrate` because
-/// sibling crate `clawft-app` (M1.5-A) is in parallel development. The
-/// two copies have identical shape; M1.5-D will unify into the canonical
-/// location (likely a shared `clawft-manifest-types` crate). TODO.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
-pub enum PermissionReq {
-    /// Camera access via the ADR-011 `weft-capture` sidecar.
-    Camera,
-    /// Microphone access via the ADR-011 `weft-capture` sidecar.
-    Mic,
-    /// Screen capture via the ADR-011 `weft-capture` sidecar.
-    Screen,
-    /// Read access to a filesystem path.
-    FsPath(String),
-    /// Network access to a DNS name.
-    NetDomain(String),
-}
+/// Canonical enum lives in `clawft-app` as
+/// [`clawft_app::manifest::Permission`]; `clawft-substrate` re-exports it
+/// under the ADR-017 trait-contract name `PermissionReq`. The two were
+/// duplicated during M1.5-A/C parallel development and unified in M1.5-D.
+pub type PermissionReq = clawft_app::manifest::Permission;
 
 /// Errors that an adapter can return from `open` / `close`.
 #[derive(Debug, Error)]

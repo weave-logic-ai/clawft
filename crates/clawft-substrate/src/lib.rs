@@ -21,8 +21,8 @@
 //! - No dynamic-lib adapter registration (ADR-017 §3 path 2 — deferred).
 //! - No adapter-health topic (`substrate/meta/adapter/<id>/health`,
 //!   ADR-017 §7) — stub in kernel adapter, surfaces as TODO.
-//! - [`PermissionReq`] will merge with the sibling M1.5-A manifest
-//!   permission enum in M1.5-D; for now both define the same shape.
+//! - [`PermissionReq`] is a re-export of
+//!   [`clawft_app::manifest::Permission`] (unified in M1.5-D).
 
 #![deny(rust_2018_idioms)]
 #![warn(missing_docs)]

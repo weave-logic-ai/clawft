@@ -190,6 +190,8 @@ clawft-kernel = { version = "0.6.6", path = "crates/clawft-kernel", default-feat
 exo-resource-tree = { version = "0.6.6", path = "crates/exo-resource-tree" }
 weftos = { version = "0.6.6", path = "crates/weftos", default-features = false }
 clawft-substrate = { version = "0.6.6", path = "crates/clawft-substrate" }
+clawft-app = { version = "0.6.6", path = "crates/clawft-app" }
+clawft-surface = { version = "0.6.6", path = "crates/clawft-surface" }
 
 # EML (exp-ln) function approximation
 eml-core = { version = "0.1.0", path = "crates/eml-core" }
