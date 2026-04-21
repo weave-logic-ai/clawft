@@ -10,6 +10,61 @@ pub const TRAY_HEIGHT: f32 = 42.0;
 #[derive(Copy, Clone)]
 pub enum Ok { On, Warn, Off }
 
+/// Identity of a tray chip. The click handler maps this to the
+/// substrate subtree to show in the detail window (see
+/// [`chip_subtree`]).
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum ChipId {
+    Kernel,
+    Mesh,
+    ExoChain,
+    Wifi,
+    Bluetooth,
+    Audio,
+}
+
+impl ChipId {
+    /// Human label for the detail window title.
+    pub fn label(self) -> &'static str {
+        match self {
+            ChipId::Kernel => "Kernel",
+            ChipId::Mesh => "Mesh",
+            ChipId::ExoChain => "ExoChain",
+            ChipId::Wifi => "Wi-Fi",
+            ChipId::Bluetooth => "Bluetooth",
+            ChipId::Audio => "Audio",
+        }
+    }
+
+    /// Substrate path this chip reflects. Shown in the detail window
+    /// header so you can see which ontology subtree you're looking at.
+    pub fn substrate_path(self) -> &'static str {
+        match self {
+            ChipId::Kernel => "substrate/kernel/status",
+            ChipId::Mesh => "substrate/mesh/status",
+            ChipId::ExoChain => "substrate/chain/status",
+            ChipId::Wifi => "substrate/network/wifi",
+            ChipId::Bluetooth => "substrate/bluetooth",
+            ChipId::Audio => "substrate/sensor/mic",
+        }
+    }
+}
+
+/// Return the raw substrate value backing this chip, if present.
+pub fn chip_subtree<'a>(
+    chip: ChipId,
+    snap: &'a Snapshot,
+) -> Option<&'a serde_json::Value> {
+    match chip {
+        ChipId::Kernel => snap.status.as_ref(),
+        ChipId::Mesh => snap.mesh_status.as_ref(),
+        ChipId::ExoChain => snap.chain_status.as_ref(),
+        ChipId::Wifi => snap.network_wifi.as_ref(),
+        ChipId::Bluetooth => snap.bluetooth.as_ref(),
+        ChipId::Audio => snap.audio_mic.as_ref(),
+    }
+}
+
 impl Ok {
     fn color(self) -> egui::Color32 {
         match self {
@@ -22,11 +77,16 @@ impl Ok {
 
 /// Render the tray at the bottom of `rect`. Left cluster is the launcher
 /// and clock; right cluster is the service chips.
+///
+/// `open_chip` carries the currently-focused chip (the one whose detail
+/// window is open). Clicking a chip toggles that chip's window; clicking
+/// a different chip swaps focus.
 pub fn paint(
     ui: &mut egui::Ui,
     rect: egui::Rect,
     snap: &Snapshot,
     launcher_active: &mut bool,
+    open_chip: &mut Option<ChipId>,
 ) {
     let tray_rect = egui::Rect::from_min_size(
         egui::pos2(rect.left(), rect.bottom() - TRAY_HEIGHT),
@@ -46,8 +106,14 @@ pub fn paint(
     );
 
     let inner_rect = tray_rect.shrink2(egui::vec2(12.0, 6.0));
-    let mut tray_ui = ui.new_child(egui::UiBuilder::new().max_rect(inner_rect));
-    tray_ui.horizontal_centered(|ui| {
+    // `scope_builder` (vs. raw `new_child`) wraps the child Ui in
+    // `remember_min_rect` + `advance_cursor_after_rect`, so the child
+    // Ui's own widget entry is finalised against its actual bounds
+    // before egui runs hit-testing for the next frame. Without this,
+    // the tray's child Ui is registered with `Rect::NOTHING` and the
+    // chips' / launcher's hover and click responses never lock in.
+    ui.scope_builder(egui::UiBuilder::new().max_rect(inner_rect), |ui| {
+        ui.horizontal_centered(|ui| {
             // ── Left: launcher ────────────────────────────────
             let btn_text = egui::RichText::new("⏾ Blocks").monospace();
             if ui.selectable_label(*launcher_active, btn_text).clicked() {
@@ -71,16 +137,35 @@ pub fn paint(
                 ui.add_space(12.0);
 
                 // Services (right-to-left, so list them in reverse read order)
-                for (label, glyph, status) in services(snap).iter().rev() {
-                    chip(ui, glyph, label, *status);
+                for (id, label, glyph, status) in services(snap).iter().rev() {
+                    let is_open = *open_chip == Some(*id);
+                    if chip(ui, glyph, label, *status, is_open).clicked() {
+                        *open_chip = if is_open { None } else { Some(*id) };
+                    }
                 }
             });
         });
+    });
 }
 
-fn chip(ui: &mut egui::Ui, glyph: &str, tip: &str, status: Ok) {
-    let resp = egui::Frame::none()
-        .fill(egui::Color32::from_rgba_unmultiplied(28, 28, 38, 180))
+fn chip(
+    ui: &mut egui::Ui,
+    glyph: &str,
+    tip: &str,
+    status: Ok,
+    active: bool,
+) -> egui::Response {
+    // Frame::show's response only senses hover, so we draw the chrome
+    // inside a Frame and then *re-interact* the outer rect with
+    // click+hover sense so the chip becomes a button. Active chips get
+    // a brighter fill so you can see which detail window is open.
+    let fill = if active {
+        egui::Color32::from_rgba_unmultiplied(52, 52, 68, 220)
+    } else {
+        egui::Color32::from_rgba_unmultiplied(28, 28, 38, 180)
+    };
+    let frame_resp = egui::Frame::none()
+        .fill(fill)
         .rounding(8.0)
         .inner_margin(egui::Margin::symmetric(8.0, 4.0))
         .show(ui, |ui| {
@@ -96,8 +181,15 @@ fn chip(ui: &mut egui::Ui, glyph: &str, tip: &str, status: Ok) {
             });
         })
         .response;
-    resp.on_hover_text(tip);
+    // Promote the frame rect to an interactive widget. `interact` with
+    // a stable id keyed on the chip tip means the click state survives
+    // across frames even though the outer rect is recomputed each pass.
+    let id = ui.make_persistent_id(("weft_tray_chip", tip));
+    let resp = ui
+        .interact(frame_resp.rect, id, egui::Sense::click())
+        .on_hover_text(tip);
     ui.add_space(6.0);
+    resp
 }
 
 /// Determine service statuses from the live snapshot.
@@ -116,7 +208,7 @@ fn chip(ui: &mut egui::Ui, glyph: &str, tip: &str, status: Ok) {
 /// The M1.5 placeholder **DeFi** chip has been removed — no DeFi
 /// subsystem exists in the workspace today. It comes back once an
 /// ADR-scoped DeFi module ships with its own adapter.
-fn services(snap: &Snapshot) -> Vec<(&'static str, &'static str, Ok)> {
+fn services(snap: &Snapshot) -> Vec<(ChipId, &'static str, &'static str, Ok)> {
     let kernel = match snap.connection {
         Connection::Connected => Ok::On,
         Connection::Connecting => Ok::Warn,
@@ -127,13 +219,15 @@ fn services(snap: &Snapshot) -> Vec<(&'static str, &'static str, Ok)> {
     let exochain = chain_state_to_ok(&snap.chain_status);
     let wifi = link_state_to_ok(&snap.network_wifi);
     let bluetooth = bluetooth_state_to_ok(&snap.bluetooth);
+    let audio = audio_state_to_ok(&snap.audio_mic);
 
     vec![
-        ("Kernel", "◉ kernel", kernel),
-        ("Mesh", "⌖ mesh", mesh),
-        ("ExoChain", "⛓ chain", exochain),
-        ("Wi-Fi", "≋ wifi", wifi),
-        ("Bluetooth", "∗ bt", bluetooth),
+        (ChipId::Kernel, "Kernel", "◉ kernel", kernel),
+        (ChipId::Mesh, "Mesh", "⌖ mesh", mesh),
+        (ChipId::ExoChain, "ExoChain", "⛓ chain", exochain),
+        (ChipId::Wifi, "Wi-Fi", "≋ wifi", wifi),
+        (ChipId::Bluetooth, "Bluetooth", "∗ bt", bluetooth),
+        (ChipId::Audio, "Audio", "◊ mic", audio),
     ]
 }
 
@@ -188,6 +282,33 @@ fn mesh_state_to_ok(v: &Option<serde_json::Value>) -> Ok {
         (0, _) => Ok::Off,
         (t, h) if h == t => Ok::On,
         _ => Ok::Warn,
+    }
+}
+
+/// Map a `substrate/sensor/mic` Replace value to a tray chip status.
+///
+/// - `available: false` (source missing, stream reset) → grey (Off).
+/// - `available: true` but `rms_db ≤ -90` (effectively silent) → grey.
+/// - `rms_db > -3` (on the brink of clipping) → amber (Warn).
+/// - otherwise → green (On).
+fn audio_state_to_ok(v: &Option<serde_json::Value>) -> Ok {
+    let Some(obj) = v.as_ref() else {
+        return Ok::Off;
+    };
+    if obj
+        .get("available")
+        .and_then(|b| b.as_bool())
+        == Some(false)
+    {
+        return Ok::Off;
+    }
+    let rms = obj.get("rms_db").and_then(|n| n.as_f64()).unwrap_or(-120.0);
+    if rms <= -90.0 {
+        Ok::Off
+    } else if rms > -3.0 {
+        Ok::Warn
+    } else {
+        Ok::On
     }
 }
 

@@ -1,0 +1,57 @@
+# Tray-chip detail surface for the Audio chip.
+# Binds to `substrate/sensor/mic` (MicrophoneAdapter). The adapter
+# declares Characterization::Rate — scalar RMS + peak levels per 500ms
+# window, no spectral bins yet — so the fixture shows two dBFS gauges
+# plus the sample rate and an availability chip. Upgrade to an
+# oscilloscope visualisation lands when the adapter either (a) gets
+# a ring-buffer sibling topic for recent waveform samples or (b) the
+# composer grows a `ui://plot` renderer for the waveform block that
+# already exists in `crates/clawft-gui-egui/src/blocks/oscilloscope.rs`.
+
+[[surfaces]]
+id     = "weftos-chip/audio"
+modes  = ["desktop"]
+inputs = ["pointer"]
+title  = "Audio"
+subscriptions = ["substrate/sensor/mic"]
+
+[surfaces.root]
+type  = "ui://stack"
+id    = "/root"
+attrs = { axis = "vertical" }
+
+  [[surfaces.root.children]]
+  type     = "ui://chip"
+  id       = "/root/available"
+  bindings = { label = "$substrate/sensor/mic.available" }
+
+  # RMS dBFS: silence floor clamped to -120, ceiling 0. Upper half of
+  # the gauge is the "signal is present" region; the top 10 dB is hot.
+  [[surfaces.root.children]]
+  type     = "ui://gauge"
+  id       = "/root/rms-db"
+  attrs    = { min = -120.0, max = 0.0 }
+  bindings = { value = "$substrate/sensor/mic.rms_db", label = '"RMS (dBFS)"' }
+
+  # Peak dBFS: same range as RMS; 0 dBFS is clipping. The gauge shape
+  # makes "approaching clip" visible at a glance.
+  [[surfaces.root.children]]
+  type     = "ui://gauge"
+  id       = "/root/peak-db"
+  attrs    = { min = -120.0, max = 0.0 }
+  bindings = { value = "$substrate/sensor/mic.peak_db", label = '"Peak (dBFS)"' }
+
+  [[surfaces.root.children]]
+  type     = "ui://chip"
+  id       = "/root/sample-rate"
+  bindings = { label = "$substrate/sensor/mic.sample_rate" }
+
+  [[surfaces.root.children]]
+  type     = "ui://chip"
+  id       = "/root/samples-in-window"
+  bindings = { label = "$substrate/sensor/mic.samples_in_window" }
+
+  [[surfaces.root.children]]
+  type     = "ui://chip"
+  id       = "/root/characterization"
+  bindings = { label = "$substrate/sensor/mic.characterization" }

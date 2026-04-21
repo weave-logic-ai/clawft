@@ -1,0 +1,40 @@
+# Tray-chip detail surface for the Kernel chip.
+# Renders the `substrate/kernel/status` subtree as a vertical stack:
+# state chip (tone-coloured), then three gauges for uptime / process
+# count / service count. Read-only today; affordances (e.g. "Halt
+# kernel") can be declared here later without touching host code.
+
+[[surfaces]]
+id     = "weftos-chip/kernel"
+modes  = ["desktop"]
+inputs = ["pointer"]
+title  = "Kernel"
+subscriptions = ["substrate/kernel/status"]
+
+[surfaces.root]
+type  = "ui://stack"
+id    = "/root"
+attrs = { axis = "vertical" }
+
+  [[surfaces.root.children]]
+  type     = "ui://chip"
+  id       = "/root/state"
+  bindings = { label = "$substrate/kernel/status.state", tone = "$substrate/kernel/status.state" }
+
+  [[surfaces.root.children]]
+  type     = "ui://gauge"
+  id       = "/root/uptime"
+  attrs    = { min = 0.0, max = 3600.0 }
+  bindings = { value = "$substrate/kernel/status.uptime_secs", label = '"Uptime (s, capped at 1h)"' }
+
+  [[surfaces.root.children]]
+  type     = "ui://gauge"
+  id       = "/root/processes"
+  attrs    = { min = 0.0, max = 64.0 }
+  bindings = { value = "$substrate/kernel/status.process_count", label = '"Processes"' }
+
+  [[surfaces.root.children]]
+  type     = "ui://gauge"
+  id       = "/root/services"
+  attrs    = { min = 0.0, max = 16.0 }
+  bindings = { value = "$substrate/kernel/status.service_count", label = '"Services"' }
