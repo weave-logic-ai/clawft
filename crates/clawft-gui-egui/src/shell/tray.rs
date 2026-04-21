@@ -102,14 +102,20 @@ fn chip(ui: &mut egui::Ui, glyph: &str, tip: &str, status: Ok) {
 
 /// Determine service statuses from the live snapshot.
 ///
-/// As of M1.5.1:
-/// - Kernel is real (daemon-socket reachability)
-/// - Mesh / ExoChain / DeFi are presence-only checks against the
-///   service registry (promoted to real adapters in M1.5.1d)
-/// - Wi-Fi reflects the NetworkAdapter's `substrate/network/wifi`
-///   (M1.5.1b — native-only; grey on wasm until the adapter is
-///   bridged through postMessage in M1.6+)
-/// - Bluetooth still placeholder (M1.5.1c)
+/// As of M1.5.1 (α) every chip is backed by a real adapter or a real
+/// daemon read:
+/// - **Kernel** ← `snap.connection` (daemon-socket reachability)
+/// - **Mesh** ← `substrate/mesh/status` (cluster.status RPC) via
+///   M1.5.1d MeshAdapter. Grey when daemon unreachable or no peers.
+/// - **ExoChain** ← `substrate/chain/status` (chain.status RPC) via
+///   M1.5.1d ChainAdapter. Grey when the daemon lacks the `exochain`
+///   feature or is unreachable.
+/// - **Wi-Fi** ← `substrate/network/wifi` via M1.5.1b NetworkAdapter.
+/// - **Bluetooth** ← `substrate/bluetooth` via M1.5.1c BluetoothAdapter.
+///
+/// The M1.5 placeholder **DeFi** chip has been removed — no DeFi
+/// subsystem exists in the workspace today. It comes back once an
+/// ADR-scoped DeFi module ships with its own adapter.
 fn services(snap: &Snapshot) -> Vec<(&'static str, &'static str, Ok)> {
     let kernel = match snap.connection {
         Connection::Connected => Ok::On,
@@ -117,9 +123,8 @@ fn services(snap: &Snapshot) -> Vec<(&'static str, &'static str, Ok)> {
         Connection::Disconnected => Ok::Off,
     };
 
-    let exochain = service_present(snap, &["chain", "exochain"]);
-    let mesh = service_present(snap, &["mesh"]);
-    let defi = service_present(snap, &["defi", "bond"]);
+    let mesh = mesh_state_to_ok(&snap.mesh_status);
+    let exochain = chain_state_to_ok(&snap.chain_status);
     let wifi = link_state_to_ok(&snap.network_wifi);
     let bluetooth = bluetooth_state_to_ok(&snap.bluetooth);
 
@@ -127,7 +132,6 @@ fn services(snap: &Snapshot) -> Vec<(&'static str, &'static str, Ok)> {
         ("Kernel", "◉ kernel", kernel),
         ("Mesh", "⌖ mesh", mesh),
         ("ExoChain", "⛓ chain", exochain),
-        ("DeFi", "◇ defi", defi),
         ("Wi-Fi", "≋ wifi", wifi),
         ("Bluetooth", "∗ bt", bluetooth),
     ]
@@ -164,23 +168,42 @@ fn bluetooth_state_to_ok(v: &Option<serde_json::Value>) -> Ok {
     }
 }
 
-fn service_present(snap: &Snapshot, needles: &[&str]) -> Ok {
-    let Some(services) = &snap.services else {
+/// Map a `substrate/mesh/status` Replace value to a tray chip status.
+/// `total_nodes > 0` with `healthy_nodes == total_nodes` → green;
+/// some nodes degraded → amber; `available: false` or no data → grey.
+fn mesh_state_to_ok(v: &Option<serde_json::Value>) -> Ok {
+    let Some(obj) = v.as_ref() else {
         return Ok::Off;
     };
-    for svc in services {
-        let Some(name) = svc.get("name").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let Some(stype) = svc.get("service_type").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let hay = format!("{name} {stype}").to_lowercase();
-        if needles.iter().any(|n| hay.contains(n)) {
-            return Ok::On;
-        }
+    if obj
+        .get("available")
+        .and_then(|b| b.as_bool())
+        == Some(false)
+    {
+        return Ok::Off;
     }
-    Ok::Off
+    let total = obj.get("total_nodes").and_then(|n| n.as_u64()).unwrap_or(0);
+    let healthy = obj.get("healthy_nodes").and_then(|n| n.as_u64()).unwrap_or(0);
+    match (total, healthy) {
+        (0, _) => Ok::Off,
+        (t, h) if h == t => Ok::On,
+        _ => Ok::Warn,
+    }
+}
+
+/// Map a `substrate/chain/status` Replace value to a tray chip status.
+/// `available: true` → green; `available: false` (including missing
+/// `exochain` feature) → grey.
+fn chain_state_to_ok(v: &Option<serde_json::Value>) -> Ok {
+    let Some(obj) = v.as_ref() else {
+        return Ok::Off;
+    };
+    // On the success path ChainAdapter injects `available: true`.
+    // On the failure path it emits `{available: false, reason}`.
+    match obj.get("available").and_then(|b| b.as_bool()) {
+        Some(true) => Ok::On,
+        _ => Ok::Off,
+    }
 }
 
 fn clock_text() -> String {

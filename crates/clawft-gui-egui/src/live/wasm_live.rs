@@ -272,6 +272,13 @@ impl PartialPoll {
             // M1.5.1c — BluetoothAdapter is native-only for the same
             // reason as the network adapter.
             bluetooth: None,
+            // M1.5.1d — mesh/chain adapters are native-only (they
+            // call daemon RPC which the wasm build can't reach
+            // directly). Extension host proxies kernel.* RPCs but
+            // doesn't allowlist cluster.*/chain.* yet; M1.6+ wires
+            // them alongside the substrate-over-postMessage bridge.
+            mesh_status: None,
+            chain_status: None,
             last_error: err,
             tick: 0,
             last_tick_at_ms: Some(finished_ms),

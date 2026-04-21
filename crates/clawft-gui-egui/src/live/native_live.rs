@@ -15,7 +15,9 @@ use std::sync::Arc;
 
 use clawft_rpc::{DaemonClient, Request};
 use clawft_substrate::bluetooth::{BluetoothAdapter, TOPICS as BLUETOOTH_TOPICS};
+use clawft_substrate::chain::{ChainAdapter, TOPICS as CHAIN_TOPICS};
 use clawft_substrate::kernel::{KernelAdapter, TOPICS as KERNEL_TOPICS};
+use clawft_substrate::mesh::{MeshAdapter, TOPICS as MESH_TOPICS};
 use clawft_substrate::network::{NetworkAdapter, TOPICS as NETWORK_TOPICS};
 use clawft_substrate::{OntologyAdapter, Substrate};
 use parking_lot::RwLock;
@@ -110,6 +112,40 @@ fn run_driver(live: Arc<Live>, mut cmd_rx: tokio::sync::mpsc::Receiver<Command>)
             }
         }
 
+        // M1.5.1d — mesh + chain adapters that poll existing daemon
+        // RPC verbs (cluster.status, cluster.nodes, chain.status) and
+        // project into substrate/{mesh,chain}/*. Replaces the tray's
+        // `service_present(snap, [...])` heuristic with real topology
+        // data.
+        let mesh_adapter: Arc<dyn OntologyAdapter> = Arc::new(MeshAdapter::new());
+        for topic in MESH_TOPICS {
+            match substrate
+                .subscribe_adapter(Arc::clone(&mesh_adapter), topic.path, Value::Null)
+                .await
+            {
+                Ok(_id) => {}
+                Err(e) => {
+                    live.write(|s| {
+                        s.last_error = Some(format!("subscribe {}: {e}", topic.path));
+                    });
+                }
+            }
+        }
+        let chain_adapter: Arc<dyn OntologyAdapter> = Arc::new(ChainAdapter::new());
+        for topic in CHAIN_TOPICS {
+            match substrate
+                .subscribe_adapter(Arc::clone(&chain_adapter), topic.path, Value::Null)
+                .await
+            {
+                Ok(_id) => {}
+                Err(e) => {
+                    live.write(|s| {
+                        s.last_error = Some(format!("subscribe {}: {e}", topic.path));
+                    });
+                }
+            }
+        }
+
         // Separate channel for raw UI commands (ADR-011 passthrough for
         // `blocks::terminal`). Keeps its own `DaemonClient` so the
         // substrate pollers aren't serialised behind ad-hoc calls.
@@ -169,6 +205,8 @@ async fn refresh_snapshot(substrate: &Arc<Substrate>, live: &Arc<Live>) {
     let network_ethernet = snap.get("substrate/network/ethernet").cloned();
     let network_battery = snap.get("substrate/network/battery").cloned();
     let bluetooth = snap.get("substrate/bluetooth").cloned();
+    let mesh_status = snap.get("substrate/mesh/status").cloned();
+    let chain_status = snap.get("substrate/chain/status").cloned();
 
     // Heuristic: if any real data from the adapter has landed in the
     // substrate we treat the connection as Connected; otherwise the
@@ -193,6 +231,8 @@ async fn refresh_snapshot(substrate: &Arc<Substrate>, live: &Arc<Live>) {
         s.network_ethernet = network_ethernet.clone();
         s.network_battery = network_battery.clone();
         s.bluetooth = bluetooth.clone();
+        s.mesh_status = mesh_status.clone();
+        s.chain_status = chain_status.clone();
         s.tick = s.tick.wrapping_add(1);
         s.last_tick_at_ms = Some(now_ms());
         s.last_tick_dur_ms = Some(SNAPSHOT_MS as f64);

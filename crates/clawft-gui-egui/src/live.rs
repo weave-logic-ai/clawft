@@ -42,6 +42,15 @@ pub struct Snapshot {
     /// M1.5.1c — raw `substrate/bluetooth` value.
     /// Shape: `{"present": bool, "enabled": bool, "controller"?}`.
     pub bluetooth: Option<Value>,
+    /// M1.5.1d — raw `substrate/mesh/status` value.
+    /// Shape on success: `{total_nodes, healthy_nodes, ...}`.
+    /// Shape on daemon unreachable: `{available: false, reason}`.
+    pub mesh_status: Option<Value>,
+    /// M1.5.1d — raw `substrate/chain/status` value.
+    /// Shape on success: `{available: true, chain_id, sequence,
+    /// event_count, ...}`. On missing `exochain` feature or daemon
+    /// unreachable: `{available: false, reason}`.
+    pub chain_status: Option<Value>,
     pub last_error: Option<String>,
     /// Incremented every successful poll tick so the UI can detect freshness.
     pub tick: u64,

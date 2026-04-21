@@ -53,6 +53,18 @@ pub mod network;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod bluetooth;
 
+/// Mesh adapter — polls the daemon's `cluster.*` RPC verbs. Replaces
+/// the tray's `service_present(snap, ["mesh"])` heuristic with real
+/// peer/shard counts. Native-only; M1.6+ bridges to wasm.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod mesh;
+
+/// ExoChain adapter — polls `chain.status`. Emits `available: false`
+/// when the daemon lacks the `exochain` feature, so the tray can show
+/// a grey chip instead of pretending the chain is up.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod chain;
+
 pub use adapter::{
     AdapterError, BufferPolicy, OntologyAdapter, PermissionReq, RefreshHint, Sensitivity, SubId,
     Subscription, TopicDecl,
