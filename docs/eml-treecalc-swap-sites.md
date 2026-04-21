@@ -279,7 +279,7 @@ markers are just breadcrumbs.
 | #6 `RetryModel` unused | P1 | — | **Fixed** (2026-04-21; `RetryPolicy::with_model`) |
 | #7 Tick-interval recommender | P1 | — | **Fixed** (2026-04-21; new `TickIntervalModel` in `eml_kernel`; `WeaverEngine::set_tick_interval_model` + `recommend_tick_interval` dispatches through model when trained, step-function preserved as fallback) |
 | #8 Treecalc conversation state | P2 | #10 | **Fixed** (2026-04-21; `detect_conversation_cycle` dispatches on `Form`) |
-| #9 Causal decay treecalc | P2 | #10 | Open |
+| #9 Causal decay treecalc | P2 | #10 | **Fixed** (2026-04-21; `max_volatility_batched` uses `clawft_treecalc::triage` so uniform-kind incident sets collapse to a single match branch; `compute_shadows` Phase 1 dispatches through it. Per-kind `DecayScheduleModel` is a follow-up) |
 | #10 Move `treecalc::Form` out of graphify | P3 | — | **Fixed** (2026-04-21; new `clawft-treecalc` crate) |
 | #11 Composer treecalc | research | profile first | Deferred |
 | #12 Cost-tracker EML pre-check | research | profile first | Deferred |
