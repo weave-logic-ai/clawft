@@ -15,14 +15,16 @@ parking_lot = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 
-# Kernel adapter re-uses the existing daemon RPC client.
-clawft-rpc = { workspace = true }
 # Canonical `Permission` enum (ADR-015) — re-exported here as `PermissionReq`
 # so ADR-017 adapter code and ADR-015 manifest code speak the same type.
 clawft-app = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["sync", "rt", "time", "macros"] }
+# Kernel adapter re-uses the existing daemon RPC client. It unconditionally
+# links tokio `net` which doesn't build for wasm32-unknown-unknown, so the
+# dep — along with the kernel adapter module that uses it — is native-only.
+clawft-rpc = { workspace = true }
 
 # WASM build: tokio only needs sync + macros; the kernel poller task is
 # spawned via caller-provided runtime. We don't target wasm for M1.5 but

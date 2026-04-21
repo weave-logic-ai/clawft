@@ -1,15 +1,22 @@
-//! M1.5 integration test 3: headless composer render.
+//! M1.5 integration test: headless composer render.
 //!
 //! Loads the admin-panel TOML + a synthetic kernel snapshot, runs
 //! the composer through one egui pass, and asserts on the emitted
-//! `CanonResponse` stream.
+//! `CanonResponse` stream. Lives in `clawft-gui-egui` (not
+//! `clawft-surface`) because the composer moved here in M1.5-D to
+//! break the canon-types import cycle — see
+//! `src/surface_host/mod.rs`.
 
+#![cfg(not(target_arch = "wasm32"))]
+
+use clawft_gui_egui::surface_host::render_headless;
 use clawft_surface::parse::parse_surface_toml;
 use clawft_surface::substrate::OntologySnapshot;
-use clawft_surface::test_harness::render_headless;
 use serde_json::json;
 
-const FIXTURE: &str = include_str!("../fixtures/weftos-admin-desktop.toml");
+const FIXTURE: &str = include_str!(
+    "../../clawft-surface/fixtures/weftos-admin-desktop.toml"
+);
 
 fn healthy_snapshot() -> OntologySnapshot {
     let mut s = OntologySnapshot::empty();

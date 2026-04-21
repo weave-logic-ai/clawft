@@ -64,17 +64,21 @@
 //! and a full admin-panel fixture.
 
 pub mod builder;
-pub mod compose;
 pub mod eval;
 pub mod parse;
 pub mod substrate;
-pub mod test_harness;
 pub mod tree;
 
-pub use compose::compose;
 pub use substrate::OntologySnapshot;
-pub use test_harness::render_headless;
 pub use tree::{
     AffordanceDecl, AttrValue, Binding, IdentityIri, Input, Invocation, Mode, SurfaceNode,
     SurfaceTree,
 };
+
+// NOTE on composer location (M1.5-D): the composer runtime
+// (`compose(tree, snapshot, ui) -> Vec<CanonResponse>`) lives in
+// `clawft-gui-egui::surface_host` because it talks directly to canon
+// primitive types defined in that crate. Moving it here would
+// introduce a cyclic crate dependency (surface → gui-egui → surface).
+// A future milestone may extract the canon types into their own
+// crate, at which point the composer can migrate back.

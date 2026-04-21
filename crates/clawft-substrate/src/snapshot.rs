@@ -12,12 +12,17 @@
 //! entries plus a handful of paths.
 
 use std::collections::BTreeMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
-use parking_lot::{Mutex, RwLock};
+#[cfg(not(target_arch = "wasm32"))]
+use parking_lot::Mutex;
+use parking_lot::RwLock;
 use serde_json::Value;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::task::JoinHandle;
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::adapter::{AdapterError, OntologyAdapter, SubId};
 use crate::delta::StateDelta;
 
@@ -119,6 +124,7 @@ fn walk_json<'a>(v: &'a Value, path: &[&str]) -> Option<&'a Value> {
 ///
 /// Owns the adapter handle + the drain task's join handle so
 /// [`Substrate::close_all`] can tombstone it cleanly on shutdown.
+#[cfg(not(target_arch = "wasm32"))]
 struct TrackedSub {
     id: SubId,
     adapter: Arc<dyn OntologyAdapter>,
@@ -133,6 +139,7 @@ pub struct Substrate {
     /// from each adapter's [`crate::TopicDecl::max_len`] at subscribe
     /// time. `None`/missing means unbounded.
     max_lens: RwLock<BTreeMap<String, usize>>,
+    #[cfg(not(target_arch = "wasm32"))]
     subscriptions: Mutex<Vec<TrackedSub>>,
 }
 
@@ -148,6 +155,7 @@ impl Substrate {
         Self {
             state: RwLock::new(BTreeMap::new()),
             max_lens: RwLock::new(BTreeMap::new()),
+            #[cfg(not(target_arch = "wasm32"))]
             subscriptions: Mutex::new(Vec::new()),
         }
     }
@@ -206,6 +214,7 @@ impl Substrate {
 
     /// Number of live subscriptions currently tracked. Decreases after
     /// [`Substrate::close_all`] or when a drain task exits on its own.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn active_subscription_count(&self) -> usize {
         // Opportunistically reap finished handles so the count reflects
         // reality without requiring the caller to poll.
@@ -220,6 +229,7 @@ impl Substrate {
     /// errors are ignored — close is idempotent per ADR-009 tombstone
     /// discipline) and aborts the drain task. Safe to call more than
     /// once.
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn close_all(&self) {
         let drained: Vec<TrackedSub> = {
             let mut guard = self.subscriptions.lock();
@@ -263,7 +273,10 @@ impl Substrate {
     /// deltas for that path.
     ///
     /// **Runtime**: the caller must be inside a tokio runtime when this
-    /// is called (the background task spawns via `tokio::spawn`).
+    /// is called (the background task spawns via `tokio::spawn`). Not
+    /// available on `wasm32` — the adapter trait compiles there but the
+    /// driving runtime is expected to be on the webview host side.
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn subscribe_adapter(
         self: &Arc<Self>,
         adapter: Arc<dyn OntologyAdapter>,
@@ -297,6 +310,7 @@ impl Substrate {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for Substrate {
     /// Abort any outstanding drain tasks on shutdown.
     ///

@@ -1185,8 +1185,11 @@ dependencies = [
 name = "clawft-gui-egui"
 version = "0.6.17"
 dependencies = [
+ "async-trait",
+ "clawft-app",
  "clawft-rpc",
  "clawft-substrate",
+ "clawft-surface",
  "console_error_panic_hook",
  "eframe",
  "egui",
@@ -1525,10 +1528,8 @@ name = "clawft-surface"
 version = "0.6.17"
 dependencies = [
  "clawft-app",
- "clawft-gui-egui",
  "clawft-substrate",
  "egui",
- "egui_extras",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

@@ -27,12 +27,12 @@ pub use clawft_app::manifest::Input;
 /// tokens internally, but the surface-description parser works
 /// directly on raw strings and expects these helpers.
 pub trait ModeExt: Sized {
-    fn as_str(self) -> &'static str;
+    fn as_str(&self) -> &'static str;
     fn parse(s: &str) -> Option<Self>;
 }
 
 impl ModeExt for Mode {
-    fn as_str(self) -> &'static str {
+    fn as_str(&self) -> &'static str {
         match self {
             Mode::SingleApp => "single-app",
             Mode::Desktop => "desktop",
@@ -51,12 +51,12 @@ impl ModeExt for Mode {
 }
 
 pub trait InputExt: Sized {
-    fn as_str(self) -> &'static str;
+    fn as_str(&self) -> &'static str;
     fn parse(s: &str) -> Option<Self>;
 }
 
 impl InputExt for Input {
-    fn as_str(self) -> &'static str {
+    fn as_str(&self) -> &'static str {
         match self {
             Input::Pointer => "pointer",
             Input::Touch => "touch",

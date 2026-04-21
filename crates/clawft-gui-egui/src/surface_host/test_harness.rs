@@ -4,11 +4,11 @@
 //! window and no eframe glue. Suitable for asserting primitive
 //! counts, affordance presence, and rendered text regexes.
 
-use clawft_gui_egui::canon::CanonResponse;
+use clawft_surface::substrate::OntologySnapshot;
+use clawft_surface::tree::SurfaceTree;
 
-use crate::compose::compose;
-use crate::substrate::OntologySnapshot;
-use crate::tree::SurfaceTree;
+use super::compose::compose;
+use crate::canon::CanonResponse;
 
 /// Execute the composer in a headless egui frame. Returns the full
 /// `Vec<CanonResponse>` for assertion.

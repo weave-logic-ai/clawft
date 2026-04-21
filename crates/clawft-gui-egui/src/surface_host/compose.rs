@@ -1,6 +1,6 @@
 //! Composer runtime — walk a [`SurfaceTree`] and drive the canon
-//! primitives in `clawft-gui-egui`. This is the hot path from
-//! ADR-016 §4 ("Frame time").
+//! primitives in this crate. This is the hot path from ADR-016 §4
+//! ("Frame time").
 //!
 //! For M1.5 the wiring covers:
 //! - `ui://stack`, `ui://strip`, `ui://grid` containers.
@@ -18,15 +18,13 @@
 
 use std::cell::RefCell;
 
-use clawft_gui_egui::canon::{
-    pressable::PressableStyle, CanonResponse, CanonWidget, CellSize, Chip, ChipTone, Gauge,
-    Grid, Pressable, Stack, StackAxis, StreamView, Strip, StripAxis, Table, TableColumn,
-};
+use clawft_surface::eval::{eval_binding, Value};
+use clawft_surface::substrate::OntologySnapshot;
+use clawft_surface::tree::{AffordanceDecl, AttrValue, IdentityIri, SurfaceNode, SurfaceTree};
 
-use crate::eval::{eval_binding, Value};
-use crate::substrate::OntologySnapshot;
-use crate::tree::{
-    AffordanceDecl, AttrValue, IdentityIri, SurfaceNode, SurfaceTree,
+use crate::canon::{
+    pressable::PressableStyle, CanonResponse, CanonWidget, CellSize, Chip, ChipTone, Gauge, Grid,
+    Pressable, Stack, StackAxis, StreamView, Strip, StripAxis, Table, TableColumn,
 };
 
 /// Main entry point. Walks `tree.root` and drives primitives. Returns
@@ -123,9 +121,7 @@ fn render_strip(
         })
         .unwrap_or(StripAxis::Horizontal);
 
-    let cells: Vec<CellSize> = (0..node.children.len())
-        .map(|_| CellSize::Remainder)
-        .collect();
+    let cells: Vec<CellSize> = (0..node.children.len()).map(|_| CellSize::Remainder).collect();
     let children = &node.children;
 
     let strip = Strip::new(&node.path)
@@ -201,10 +197,7 @@ fn render_pressable(
         .unwrap_or(PressableStyle::Primary);
     let enabled = attr_bool(node, "enabled").unwrap_or(true);
 
-    let p = Pressable::new(&node.path, label)
-        .style(style)
-        .enabled(enabled)
-        .variant(0);
+    let p = Pressable::new(&node.path, label).style(style).enabled(enabled).variant(0);
     out.borrow_mut().push(p.show(ui));
 }
 
@@ -214,9 +207,7 @@ fn render_gauge(
     ui: &mut egui::Ui,
     out: &RefCell<Vec<CanonResponse>>,
 ) {
-    let value = bound_value(node, "value", snap)
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
+    let value = bound_value(node, "value", snap).and_then(|v| v.as_f64()).unwrap_or(0.0);
     let lo = attr_number(node, "min").unwrap_or(0.0);
     let hi = attr_number(node, "max").unwrap_or(1.0);
     let label = bound_string(node, "label", snap);
@@ -261,9 +252,7 @@ fn render_table(
         })
         .unwrap_or_default();
 
-    let rows: Vec<Value> = bound_value(node, "rows", snap)
-        .and_then(|v| v.as_list())
-        .unwrap_or_default();
+    let rows: Vec<Value> = bound_value(node, "rows", snap).and_then(|v| v.as_list()).unwrap_or_default();
     let row_count = rows.len();
 
     let col_keys: Vec<String> = columns.iter().map(|c| c.name.to_string()).collect();
@@ -301,9 +290,7 @@ fn render_todo(kind: IdentityIri, path: &str, ui: &mut egui::Ui) {
 // ── Binding / attribute helpers ────────────────────────────────────
 
 fn bound_value(node: &SurfaceNode, slot: &str, snap: &OntologySnapshot) -> Option<Value> {
-    node.bindings
-        .get(slot)
-        .and_then(|b| eval_binding(b, snap).ok())
+    node.bindings.get(slot).and_then(|b| eval_binding(b, snap).ok())
 }
 
 fn bound_string(node: &SurfaceNode, slot: &str, snap: &OntologySnapshot) -> Option<String> {
