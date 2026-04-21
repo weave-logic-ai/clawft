@@ -1,0 +1,189 @@
+/* Route-scoped theme slice for /lewm-worldmodel-rs
+ * Scoped under .lewm-scope to avoid leaking into the rest of the site.
+ */
+
+.lewm-scope {
+  --lewm-bg: #07090c;
+  --lewm-surface: #0d1117;
+  --lewm-surface-2: #121820;
+  --lewm-grid: #1a2230;
+  --lewm-ink: #e6edf3;
+  --lewm-mute: #8b98a8;
+  --lewm-line: #3a4a60;
+  --lewm-cyan: #6dd3ff;
+  --lewm-mint: #7ae0c3;
+  --lewm-violet: #b18cff;
+  --lewm-amber: #ffb65a;
+  --lewm-white: #fafbff;
+
+  --lewm-ease: cubic-bezier(0.16, 1, 0.3, 1);
+
+  background: var(--lewm-bg);
+  color: var(--lewm-ink);
+  font-family: var(--font-inter, 'Inter'), system-ui, sans-serif;
+  min-height: 100svh;
+  isolation: isolate;
+}
+
+.lewm-scope * {
+  box-sizing: border-box;
+}
+
+.lewm-mono {
+  font-family: var(--font-mono-lewm), 'JetBrains Mono', ui-monospace, monospace;
+  font-feature-settings: 'ss01', 'ss02', 'zero';
+}
+
+.lewm-editorial {
+  font-family: var(--font-fraunces), Georgia, serif;
+  font-weight: 450;
+  letter-spacing: -0.01em;
+}
+
+.lewm-grid-bg {
+  background-image:
+    linear-gradient(var(--lewm-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--lewm-grid) 1px, transparent 1px);
+  background-size: 40px 40px;
+  background-position: -1px -1px;
+  opacity: 0.25;
+}
+
+.lewm-panel {
+  background: color-mix(in oklab, var(--lewm-surface) 95%, transparent);
+  border: 1px solid var(--lewm-line);
+  border-radius: 4px;
+  box-shadow: inset 30px 30px 60px -30px rgba(255, 255, 255, 0.02);
+  position: relative;
+}
+
+.lewm-panel[data-active='true'] {
+  border-color: var(--lewm-cyan);
+  box-shadow:
+    inset 30px 30px 60px -30px rgba(255, 255, 255, 0.04),
+    0 0 0 1px color-mix(in oklab, var(--lewm-cyan) 40%, transparent);
+}
+
+.lewm-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0.6rem;
+  font-family: var(--font-mono-lewm), 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 0.72rem;
+  color: var(--lewm-mute);
+  border: 1px solid var(--lewm-line);
+  border-radius: 999px;
+}
+
+.lewm-amber-glow {
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--lewm-amber) 50%, transparent),
+    0 0 24px -4px color-mix(in oklab, var(--lewm-amber) 45%, transparent);
+}
+
+.lewm-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.6rem 1rem;
+  font-family: var(--font-mono-lewm), 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 0.85rem;
+  color: var(--lewm-ink);
+  border: 1px solid var(--lewm-line);
+  border-radius: 999px;
+  background: transparent;
+  transition: border-color 180ms var(--lewm-ease), color 180ms var(--lewm-ease);
+  text-decoration: none;
+}
+
+.lewm-cta:hover {
+  border-color: var(--lewm-cyan);
+  color: var(--lewm-white);
+}
+
+/* 192-dot latent-space breath grid (16 × 12) */
+.lewm-dots {
+  display: grid;
+  grid-template-columns: repeat(16, 6px);
+  grid-auto-rows: 6px;
+  gap: 12px;
+  width: max-content;
+  margin: 0 auto;
+}
+
+.lewm-dots span {
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--lewm-ink);
+  opacity: 0.25;
+  animation: lewm-breath 4s var(--lewm-ease) infinite;
+}
+
+@keyframes lewm-breath {
+  0%,
+  100% {
+    opacity: 0.2;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+/* Wire packet flow — used on Observation Wire panel */
+@keyframes lewm-packet {
+  0% {
+    transform: translateX(-6%);
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  90% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(106%);
+    opacity: 0;
+  }
+}
+
+.lewm-packet {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 10px;
+  height: 2px;
+  background: var(--lewm-cyan);
+  border-radius: 2px;
+  box-shadow: 0 0 8px var(--lewm-cyan);
+  animation: lewm-packet 2.4s linear infinite;
+}
+
+/* SIGReg health gauge pulse */
+@keyframes lewm-health {
+  0%,
+  100% {
+    filter: brightness(1);
+  }
+  50% {
+    filter: brightness(1.35);
+  }
+}
+
+.lewm-health {
+  animation: lewm-health 3s var(--lewm-ease) infinite;
+}
+
+/* Reduced-motion — disable scroll-linked animations gracefully */
+@media (prefers-reduced-motion: reduce) {
+  .lewm-scope * {
+    animation: none !important;
+    transition: none !important;
+  }
+  .lewm-dots span {
+    opacity: 0.3;
+  }
+}
