@@ -121,8 +121,40 @@ pub struct Live {
     inner: RwLock<Snapshot>,
     #[cfg(not(target_arch = "wasm32"))]
     cmd_tx: tokio::sync::mpsc::Sender<Command>,
+    /// Shared substrate — populated by the native driver so
+    /// [`Live::drop`] can tombstone its kernel-adapter subscriptions on
+    /// shutdown. `None` until the driver has finished subscribing.
+    #[cfg(not(target_arch = "wasm32"))]
+    substrate: parking_lot::Mutex<Option<Arc<clawft_substrate::Substrate>>>,
     #[cfg(target_arch = "wasm32")]
     bridge: wasm_live::Bridge,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for Live {
+    /// Best-effort shutdown: ask the substrate to tombstone every
+    /// kernel-adapter subscription, then abort the remaining drain
+    /// tasks. We can't reliably await async work inside `Drop` because
+    /// the owning tokio runtime may already be gone — we therefore
+    /// prefer `Handle::try_current() + spawn` for the graceful case and
+    /// fall back to dropping the `Arc<Substrate>` (whose own `Drop`
+    /// synchronously aborts outstanding join handles). Documented
+    /// tradeoff: callers that want a clean tombstone must drop the
+    /// `Arc<Live>` while still inside the tokio runtime thread.
+    fn drop(&mut self) {
+        let Some(substrate) = self.substrate.lock().take() else {
+            return;
+        };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            // Fire-and-forget close_all on the existing runtime.
+            handle.spawn(async move {
+                substrate.close_all().await;
+            });
+        }
+        // If no runtime is current, the substrate's own `Drop` will
+        // abort outstanding join handles synchronously when this scope
+        // ends and the last `Arc` is released.
+    }
 }
 
 /// Monotonic milliseconds since app start (cross-target).
@@ -158,6 +190,56 @@ impl Live {
 
     pub fn snapshot(&self) -> Snapshot {
         self.inner.read().clone()
+    }
+
+    /// Snapshot the substrate state tree as an
+    /// [`clawft_substrate::OntologySnapshot`]. This is the entry point
+    /// for ADR-016 surface composers: they read bindings against the
+    /// returned snapshot and drive canon primitives accordingly.
+    ///
+    /// On native: returns the live substrate state (empty until the
+    /// first adapter tick lands). On wasm: the substrate is not yet
+    /// wired through the webview bridge (M1.6+), so we return a
+    /// best-effort snapshot assembled from the legacy `Snapshot`
+    /// fields so the composer has *something* to render.
+    pub fn substrate_snapshot(&self) -> clawft_substrate::OntologySnapshot {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(sub) = self.substrate.lock().as_ref() {
+                return sub.snapshot();
+            }
+            clawft_substrate::OntologySnapshot::default()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // Fallback path: derive substrate paths from the legacy
+            // Snapshot so the composer has data to render in the
+            // webview until the real adapter bridge lands.
+            let snap = self.inner.read();
+            let mut out = clawft_substrate::OntologySnapshot::default();
+            if let Some(v) = &snap.status {
+                out = out.with("substrate/kernel/status", v.clone());
+            }
+            if let Some(v) = &snap.processes {
+                out = out.with(
+                    "substrate/kernel/processes",
+                    serde_json::Value::Array(v.clone()),
+                );
+            }
+            if let Some(v) = &snap.services {
+                out = out.with(
+                    "substrate/kernel/services",
+                    serde_json::Value::Array(v.clone()),
+                );
+            }
+            if let Some(v) = &snap.logs {
+                out = out.with(
+                    "substrate/kernel/logs",
+                    serde_json::Value::Array(v.clone()),
+                );
+            }
+            out
+        }
     }
 
     pub fn submit(&self, cmd: Command) -> bool {

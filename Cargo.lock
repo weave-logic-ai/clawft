@@ -1037,6 +1037,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
 
 [[package]]
+name = "clawft-app"
+version = "0.6.17"
+dependencies = [
+ "semver",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml",
+]
+
+[[package]]
 name = "clawft-channels"
 version = "0.6.17"
 dependencies = [
@@ -1173,7 +1185,11 @@ dependencies = [
 name = "clawft-gui-egui"
 version = "0.6.17"
 dependencies = [
+ "async-trait",
+ "clawft-app",
  "clawft-rpc",
+ "clawft-substrate",
+ "clawft-surface",
  "console_error_panic_hook",
  "eframe",
  "egui",
@@ -1491,6 +1507,33 @@ dependencies = [
  "tower-http",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "clawft-substrate"
+version = "0.6.17"
+dependencies = [
+ "async-trait",
+ "clawft-app",
+ "clawft-rpc",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "clawft-surface"
+version = "0.6.17"
+dependencies = [
+ "clawft-app",
+ "clawft-substrate",
+ "egui",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "toml",
 ]
 
 [[package]]

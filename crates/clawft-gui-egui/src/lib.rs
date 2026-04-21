@@ -13,6 +13,7 @@ pub mod canon;
 pub mod canon_demos;
 pub mod live;
 pub mod shell;
+pub mod surface_host;
 pub mod theming;
 
 pub use app::ClawftApp;
