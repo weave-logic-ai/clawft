@@ -129,6 +129,10 @@ pub struct Kernel<P: Platform> {
     boot_time: Instant,
     cluster_membership: Arc<ClusterMembership>,
     revocation_list: Arc<crate::revocation::RevocationList>,
+    #[cfg(feature = "native")]
+    agent_registry: crate::agent_registry::AgentRegistry,
+    #[cfg(feature = "native")]
+    substrate_service: crate::substrate_service::SubstrateService,
     #[cfg(feature = "exochain")]
     chain: ChainSubsystem,
     #[cfg(feature = "ecc")]
@@ -360,12 +364,12 @@ impl<P: Platform> Kernel<P> {
                                             );
 
                                             // Optionally wrap in Noise encryption.
-                                            let mut channel = match &nc {
+                                            let mut channel: Box<dyn crate::mesh_noise::EncryptedChannel> = match &nc {
                                                 Some(cfg) => {
                                                     match crate::mesh_noise::NoiseChannel::respond(stream, cfg).await {
                                                         Ok(ch) => {
                                                             tracing::info!(peer = %peer_addr, "noise handshake complete");
-                                                            Box::new(ch) as Box<dyn crate::mesh_noise::EncryptedChannel>
+                                                            Box::new(ch)
                                                         }
                                                         Err(e) => {
                                                             tracing::warn!(peer = %peer_addr, error = %e, "noise handshake failed, dropping");
@@ -375,19 +379,41 @@ impl<P: Platform> Kernel<P> {
                                                 }
                                                 None => {
                                                     Box::new(crate::mesh_noise::PassthroughChannel::new(stream))
-                                                        as Box<dyn crate::mesh_noise::EncryptedChannel>
                                                 }
                                             };
 
-                                            // Read loop: decrypt and inject into mesh runtime.
+                                            // Outbound channel: the kernel pushes frames into
+                                            // `out_tx` (via `MeshRuntime::send_to_peer`) and this
+                                            // task drains `out_rx` back through the encrypted
+                                            // stream. This is what lets the topic forwarder in
+                                            // `A2ARouter` deliver pushes to inbound leaf peers that
+                                            // subscribed via `mesh.subscribe`.
+                                            let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+
+                                            // Bidirectional loop. `handle_incoming_from` auto-
+                                            // registers the peer by `envelope.source_node` on first
+                                            // arrival so the kernel can route back.
                                             loop {
-                                                match channel.recv_encrypted().await {
-                                                    Ok(data) => {
-                                                        if let Err(e) = rt2.handle_incoming(&data).await {
-                                                            tracing::debug!(error = %e, "mesh message handling error");
+                                                tokio::select! {
+                                                    inbound = channel.recv_encrypted() => match inbound {
+                                                        Ok(data) => {
+                                                            if let Err(e) = rt2
+                                                                .handle_incoming_from(&data, out_tx.clone())
+                                                                .await
+                                                            {
+                                                                tracing::debug!(error = %e, "mesh message handling error");
+                                                            }
                                                         }
-                                                    }
-                                                    Err(_) => break,
+                                                        Err(_) => break,
+                                                    },
+                                                    outbound = out_rx.recv() => match outbound {
+                                                        Some(data) => {
+                                                            if channel.send_encrypted(&data).await.is_err() {
+                                                                break;
+                                                            }
+                                                        }
+                                                        None => break,
+                                                    },
                                                 }
                                             }
                                         });
@@ -497,13 +523,19 @@ impl<P: Platform> Kernel<P> {
                 .unwrap_or(5),
             ..ClusterConfig::default()
         };
-        let cluster_membership = Arc::new(ClusterMembership::new(cluster_config));
+        // Cluster peer membership persists to disk so joins survive restarts.
+        let cluster_peers_path =
+            std::path::PathBuf::from(".weftos/runtime/cluster_peers.json");
+        let cluster_membership = Arc::new(
+            ClusterMembership::new(cluster_config).with_persist_path(&cluster_peers_path),
+        );
 
         boot_log.push(BootEvent::info(
             BootPhase::Network,
             format!(
-                "Cluster membership ready (node {})",
-                cluster_membership.local_node_id()
+                "Cluster membership ready (node {}, {} peer(s) rehydrated)",
+                cluster_membership.local_node_id(),
+                cluster_membership.len(),
             ),
         ));
 
@@ -1635,6 +1667,10 @@ impl<P: Platform> Kernel<P> {
             boot_time,
             cluster_membership,
             revocation_list,
+            #[cfg(feature = "native")]
+            agent_registry: crate::agent_registry::AgentRegistry::new(),
+            #[cfg(feature = "native")]
+            substrate_service: crate::substrate_service::SubstrateService::new(),
             #[cfg(feature = "exochain")]
             chain: ChainSubsystem {
                 chain_manager,
@@ -1804,6 +1840,26 @@ impl<P: Platform> Kernel<P> {
     #[cfg(feature = "native")]
     pub fn a2a_router(&self) -> &Arc<A2ARouter> {
         &self.a2a_router
+    }
+
+    /// Get the agent identity registry.
+    ///
+    /// External clients call `agent.register` to obtain an `agent_id`
+    /// bound to an Ed25519 public key. The registry is then consulted
+    /// when verifying signatures on `ipc.publish` and
+    /// `ipc.subscribe_stream` requests.
+    #[cfg(feature = "native")]
+    pub fn agent_registry(&self) -> &crate::agent_registry::AgentRegistry {
+        &self.agent_registry
+    }
+
+    /// Get the substrate RPC service.
+    ///
+    /// Backs the `substrate.read`, `substrate.publish`,
+    /// `substrate.subscribe`, and `substrate.notify` RPCs.
+    #[cfg(feature = "native")]
+    pub fn substrate_service(&self) -> &crate::substrate_service::SubstrateService {
+        &self.substrate_service
     }
 
     /// Get the cron service.
@@ -1990,6 +2046,8 @@ mod tests {
             profiles: None,
             pairing: None,
             mesh: None,
+            anchor: None,
+            ipc_tcp: None,
         }
     }
 
@@ -2131,6 +2189,8 @@ mod tests {
             profiles: None,
             pairing: None,
             mesh: None,
+            anchor: None,
+            ipc_tcp: None,
         }
     }
 
@@ -2534,6 +2594,8 @@ mod tests {
             profiles: None,
             pairing: None,
             mesh: None,
+            anchor: None,
+            ipc_tcp: None,
         }
     }
 

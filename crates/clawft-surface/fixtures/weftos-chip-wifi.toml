@@ -1,0 +1,27 @@
+# Tray-chip detail surface for the Wi-Fi chip.
+# Binds to `substrate/network/wifi` (NetworkAdapter, M1.5.1b). Two
+# chips: state (tone follows "connected"/"disconnected"/"absent") and
+# the interface name the adapter picked. Native-only until the
+# substrate-over-postMessage bridge (M1.6+).
+
+[[surfaces]]
+id     = "weftos-chip/wifi"
+modes  = ["desktop"]
+inputs = ["pointer"]
+title  = "Wi-Fi"
+subscriptions = ["substrate/network/wifi"]
+
+[surfaces.root]
+type  = "ui://stack"
+id    = "/root"
+attrs = { axis = "vertical" }
+
+  [[surfaces.root.children]]
+  type     = "ui://chip"
+  id       = "/root/state"
+  bindings = { label = "$substrate/network/wifi.state", tone = "$substrate/network/wifi.state" }
+
+  [[surfaces.root.children]]
+  type     = "ui://chip"
+  id       = "/root/iface"
+  bindings = { label = "$substrate/network/wifi.iface" }

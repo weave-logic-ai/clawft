@@ -144,6 +144,9 @@ pub async fn run(args: LeafArgs) -> anyhow::Result<()> {
             let params = serde_json::to_value(IpcPublishParams {
                 topic: topic.clone(),
                 message: wire_message,
+                actor_id: None,
+                signature: None,
+                ts: None,
             })?;
 
             let resp = client.call(Request::with_params("ipc.publish", params)).await?;

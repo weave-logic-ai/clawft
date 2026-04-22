@@ -172,6 +172,19 @@ pub enum ConversationState {
 /// - `coherence_history`: Full history of coherence values (one per tick).
 /// - `window`: Number of recent entries to examine.
 /// - `threshold`: Minimum meaningful change (below this = stuck).
+///
+/// # Implementation
+///
+/// Dispatches through [`clawft_treecalc::triage_trajectory`] first
+/// (Finding #8 in `docs/eml-treecalc-swap-sites.md`): the trajectory
+/// is classified as `Atom` (flat), `Sequence` (monotone), or
+/// `Branch` (oscillating) by its sign-of-difference pattern. The
+/// treecalc form then drives which `ConversationState` is returned,
+/// and the per-state metrics (rate, net_change, max_swing) are
+/// computed from the same recent window. This replaces the nested
+/// threshold arithmetic with a structural dispatch that's easier to
+/// extend (e.g. a future `Atom` sub-classifier distinguishing
+/// "never-started" from "plateaued").
 pub fn detect_conversation_cycle(
     coherence_history: &[f64],
     window: usize,
@@ -190,24 +203,38 @@ pub fn detect_conversation_cycle(
         .map(|w| (w[1] - w[0]).abs())
         .fold(0.0f64, f64::max);
 
-    if total_change < threshold {
-        if max_swing > threshold * 2.0 {
-            ConversationState::Oscillating {
-                net_change: total_change,
-                max_swing,
-            }
-        } else {
-            ConversationState::Stuck {
-                net_change: total_change,
+    // Structural dispatch on the trajectory's form.
+    match clawft_treecalc::triage_trajectory(recent, threshold) {
+        clawft_treecalc::Form::Atom => ConversationState::Stuck {
+            net_change: total_change,
+        },
+        clawft_treecalc::Form::Sequence => {
+            // Monotone. Sign of `last - first` tells us up vs. down.
+            let rate = total_change / window as f64;
+            if last > first {
+                ConversationState::Converging { rate }
+            } else {
+                ConversationState::Diverging { rate }
             }
         }
-    } else if last > first {
-        ConversationState::Converging {
-            rate: total_change / window as f64,
-        }
-    } else {
-        ConversationState::Diverging {
-            rate: total_change / window as f64,
+        clawft_treecalc::Form::Branch => {
+            // Oscillating means the sign-of-difference flipped at
+            // least once. If the net change is still large we call
+            // it Converging/Diverging with noise; if small, we call
+            // it Oscillating (net flat with visible swings).
+            if total_change >= threshold {
+                let rate = total_change / window as f64;
+                if last > first {
+                    ConversationState::Converging { rate }
+                } else {
+                    ConversationState::Diverging { rate }
+                }
+            } else {
+                ConversationState::Oscillating {
+                    net_change: total_change,
+                    max_swing,
+                }
+            }
         }
     }
 }

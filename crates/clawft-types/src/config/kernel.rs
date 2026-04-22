@@ -162,6 +162,30 @@ pub struct KernelConfig {
     /// Mesh networking configuration (K6 transport layer).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh: Option<MeshConfig>,
+
+    /// Stream-window chain anchor configuration.
+    ///
+    /// When enabled, the kernel subscribes to every topic matching
+    /// one of the configured prefixes/globs and chain-appends a
+    /// `stream.window_commit` event every `window_secs` summarising
+    /// the window: BLAKE3 of concatenated message bytes, message
+    /// count, byte count, first+last tick, and owning agent_id (when
+    /// known). This gives verifiers a tamper-evident anchor without
+    /// putting raw frames on-chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<AnchorConfig>,
+
+    /// Optional TCP relay for the daemon's JSON-RPC socket.
+    ///
+    /// When enabled, the daemon also listens on a TCP port and
+    /// transparently forwards every accepted connection to the local
+    /// unix socket via in-process byte-copy. Clients speak the exact
+    /// same line-delimited JSON-RPC protocol. All auth/policy stays
+    /// in the unix-socket handler path — the TCP side is a byte
+    /// conduit only. Intended for cross-boundary callers (Windows
+    /// side of WSL, remote bridges) that cannot open `AF_UNIX`.
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "ipcTcp")]
+    pub ipc_tcp: Option<IpcTcpConfig>,
 }
 
 impl Default for KernelConfig {
@@ -177,6 +201,99 @@ impl Default for KernelConfig {
             profiles: None,
             pairing: None,
             mesh: None,
+            anchor: None,
+            ipc_tcp: None,
+        }
+    }
+}
+
+// ── IPC TCP relay configuration ─────────────────────────────────────────
+
+/// Configuration for the optional TCP relay in front of the daemon's
+/// unix-socket JSON-RPC.
+///
+/// Paired with [`crate::config::KernelConfig::ipc_tcp`]. When enabled,
+/// the daemon binds `listen_addr` and forwards each accepted TCP
+/// connection to the local unix socket via in-process byte-copy. No
+/// protocol translation: clients speak the same line-delimited
+/// JSON-RPC as unix-socket clients.
+///
+/// # Example TOML
+///
+/// ```toml
+/// [kernel.ipc_tcp]
+/// enabled = true
+/// listen_addr = "127.0.0.1:9471"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpcTcpConfig {
+    /// Master switch. Default: false.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Address to bind. Loopback-only by default so cross-boundary
+    /// callers must explicitly opt into a broader interface.
+    #[serde(default = "default_ipc_tcp_listen_addr", alias = "listenAddr")]
+    pub listen_addr: String,
+}
+
+impl Default for IpcTcpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen_addr: default_ipc_tcp_listen_addr(),
+        }
+    }
+}
+
+fn default_ipc_tcp_listen_addr() -> String {
+    "127.0.0.1:9471".to_string()
+}
+
+// ── Stream-window anchor configuration ──────────────────────────────────
+
+/// Configuration for the kernel's stream-window chain anchor.
+///
+/// Paired with [`crate::config::KernelConfig::anchor`]. When enabled,
+/// every window_secs seconds the anchor emits a `stream.window_commit`
+/// chain event summarising all traffic on topics matching one of
+/// `topics`.
+///
+/// # Example TOML
+///
+/// ```toml
+/// [kernel.anchor]
+/// enabled = true
+/// topics = ["sensor.*"]
+/// window_secs = 2
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnchorConfig {
+    /// Master switch. Default: false.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Topic patterns to anchor. Each entry is either an exact topic
+    /// name or a single-segment wildcard like `"sensor.*"` which
+    /// matches any topic sharing the literal `"sensor."` prefix.
+    #[serde(default)]
+    pub topics: Vec<String>,
+
+    /// Rolling window duration in seconds. Default: 2.
+    #[serde(default = "default_anchor_window_secs")]
+    pub window_secs: u64,
+}
+
+fn default_anchor_window_secs() -> u64 {
+    2
+}
+
+impl Default for AnchorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            topics: Vec::new(),
+            window_secs: default_anchor_window_secs(),
         }
     }
 }
@@ -767,6 +884,9 @@ mod tests {
             vector: None,
             profiles: None,
             pairing: None,
+            mesh: None,
+            anchor: None,
+            ipc_tcp: None,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let restored: KernelConfig = serde_json::from_str(&json).unwrap();

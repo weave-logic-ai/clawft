@@ -1,0 +1,31 @@
+# Tray-chip detail surface for the Bluetooth chip.
+# Binds to `substrate/bluetooth` (BluetoothAdapter, M1.5.1c). Three
+# chips: controller presence, enabled (rfkill), and the hci device
+# name. Native-only until the substrate-over-postMessage bridge.
+
+[[surfaces]]
+id     = "weftos-chip/bluetooth"
+modes  = ["desktop"]
+inputs = ["pointer"]
+title  = "Bluetooth"
+subscriptions = ["substrate/bluetooth"]
+
+[surfaces.root]
+type  = "ui://stack"
+id    = "/root"
+attrs = { axis = "vertical" }
+
+  [[surfaces.root.children]]
+  type     = "ui://chip"
+  id       = "/root/present"
+  bindings = { label = "$substrate/bluetooth.present" }
+
+  [[surfaces.root.children]]
+  type     = "ui://chip"
+  id       = "/root/enabled"
+  bindings = { label = "$substrate/bluetooth.enabled" }
+
+  [[surfaces.root.children]]
+  type     = "ui://chip"
+  id       = "/root/controller"
+  bindings = { label = "$substrate/bluetooth.controller" }

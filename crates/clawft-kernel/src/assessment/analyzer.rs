@@ -47,7 +47,7 @@ impl AnalyzerRegistry {
     /// Create a registry pre-loaded with all built-in analyzers.
     pub fn with_defaults() -> Self {
         let mut reg = Self::new();
-        reg.register(Box::new(super::analyzers::ComplexityAnalyzer));
+        reg.register(Box::new(super::analyzers::ComplexityAnalyzer::new()));
         reg.register(Box::new(super::analyzers::DependencyAnalyzer));
         reg.register(Box::new(super::analyzers::SecurityAnalyzer));
         reg.register(Box::new(super::analyzers::TopologyAnalyzer));

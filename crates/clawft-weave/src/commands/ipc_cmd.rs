@@ -74,8 +74,13 @@ pub async fn run(args: IpcArgs) -> anyhow::Result<()> {
             println!("PID {pid} subscribed to '{topic}'");
         }
         IpcCommand::Publish { topic, message } => {
-            let params =
-                serde_json::to_value(IpcPublishParams { topic: topic.clone(), message })?;
+            let params = serde_json::to_value(IpcPublishParams {
+                topic: topic.clone(),
+                message,
+                actor_id: None,
+                signature: None,
+                ts: None,
+            })?;
             let resp = client
                 .call(Request::with_params("ipc.publish", params))
                 .await?;

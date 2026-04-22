@@ -138,6 +138,11 @@ pub struct EffectVector {
 
 impl EffectVector {
     /// Compute the magnitude of the effect vector (L2 norm).
+    ///
+    /// Preserved as the stable hardcoded scalar. The EML-backed variant
+    /// is [`Self::score`], which consults an optional
+    /// [`GovernanceScorerModel`](crate::eml_kernel::GovernanceScorerModel)
+    /// and falls back to this value when the model is untrained.
     pub fn magnitude(&self) -> f64 {
         (self.risk * self.risk
             + self.fairness * self.fairness
@@ -145,6 +150,31 @@ impl EffectVector {
             + self.novelty * self.novelty
             + self.security * self.security)
             .sqrt()
+    }
+
+    /// Compute the composite governance score for this effect vector.
+    ///
+    /// When `model` is `None` or untrained, returns
+    /// [`Self::magnitude`] unchanged (bit-for-bit identical to the
+    /// pre-EML behaviour). When the model is trained, delegates to
+    /// [`GovernanceScorerModel::predict`] which combines the five
+    /// dimensions into a learned scalar.
+    ///
+    /// NOTE(eml-swap): wired — Finding #5 (GovernanceScorerModel).
+    pub fn score(
+        &self,
+        model: Option<&crate::eml_kernel::GovernanceScorerModel>,
+    ) -> f64 {
+        match model {
+            Some(m) => m.predict(
+                self.risk,
+                self.fairness,
+                self.privacy,
+                self.novelty,
+                self.security,
+            ),
+            None => self.magnitude(),
+        }
     }
 
     /// Check if any dimension exceeds a threshold.
@@ -305,6 +335,12 @@ pub struct GovernanceEngine {
     rules: Vec<GovernanceRule>,
     risk_threshold: f64,
     human_approval_required: bool,
+    /// Optional learned scorer (Finding #5). When `None` the engine
+    /// scores effect vectors with the hardcoded L2 norm; when set and
+    /// trained the scorer's learned composite is used instead.
+    /// Untrained scorers fall back to L2 (see
+    /// [`EffectVector::score`]), so this is drop-in safe.
+    scorer: Option<crate::eml_kernel::GovernanceScorerModel>,
 }
 
 impl GovernanceEngine {
@@ -314,6 +350,7 @@ impl GovernanceEngine {
             rules: Vec::new(),
             risk_threshold,
             human_approval_required,
+            scorer: None,
         }
     }
 
@@ -323,7 +360,29 @@ impl GovernanceEngine {
             rules: Vec::new(),
             risk_threshold: 1.0,
             human_approval_required: false,
+            scorer: None,
         }
+    }
+
+    /// Install a learned [`GovernanceScorerModel`](crate::eml_kernel::GovernanceScorerModel).
+    ///
+    /// With a scorer installed, [`evaluate`](Self::evaluate) uses
+    /// [`EffectVector::score`] which delegates to the model when
+    /// trained and falls back to the L2 magnitude otherwise. The
+    /// fallback path is bit-for-bit identical to the pre-EML
+    /// behaviour.
+    pub fn with_scorer(
+        mut self,
+        scorer: crate::eml_kernel::GovernanceScorerModel,
+    ) -> Self {
+        self.scorer = Some(scorer);
+        self
+    }
+
+    /// Returns a reference to the installed governance scorer model,
+    /// if any.
+    pub fn scorer(&self) -> Option<&crate::eml_kernel::GovernanceScorerModel> {
+        self.scorer.as_ref()
     }
 
     /// Add a governance rule.
@@ -354,8 +413,14 @@ impl GovernanceEngine {
     ///    - Otherwise deny.
     /// 3. If any warning rule applies, permit with warning.
     /// 4. Otherwise permit.
+    ///
+    /// NOTE(eml-swap): wired — Finding #5 (GovernanceScorerModel).
+    /// The scalar fed into the threshold check is produced by
+    /// [`EffectVector::score`], which consults the engine's optional
+    /// scorer and falls back to the L2 magnitude when no model is
+    /// installed or the model is untrained.
     pub fn evaluate(&self, request: &GovernanceRequest) -> GovernanceResult {
-        let magnitude = request.effect.magnitude();
+        let magnitude = request.effect.score(self.scorer.as_ref());
         let threshold_exceeded = magnitude > self.risk_threshold;
 
         let mut evaluated_rules = Vec::new();
@@ -457,7 +522,9 @@ impl GovernanceEngine {
         let mut result = self.evaluate(request);
 
         // Apply environment-scoped magnitude check on top.
-        let magnitude = request.effect.magnitude();
+        //
+        // NOTE(eml-swap): wired — Finding #5 (GovernanceScorerModel).
+        let magnitude = request.effect.score(self.scorer.as_ref());
         if magnitude > adjusted_threshold {
             result.threshold_exceeded = true;
             result.decision = GovernanceDecision::Deny(format!(
@@ -750,6 +817,67 @@ mod tests {
     }
 
     #[test]
+    fn effect_score_untrained_matches_magnitude() {
+        // Finding #5: untrained scorer must be bit-for-bit identical to
+        // the L2 magnitude. Covers both None and Some(untrained) paths.
+        let v = EffectVector {
+            risk: 0.5,
+            fairness: 0.3,
+            privacy: 0.2,
+            novelty: 0.1,
+            security: 0.4,
+        };
+
+        let expected = v.magnitude();
+        assert_eq!(v.score(None), expected);
+
+        let untrained = crate::eml_kernel::GovernanceScorerModel::new();
+        assert!(!untrained.is_trained());
+        assert_eq!(v.score(Some(&untrained)), expected);
+    }
+
+    #[test]
+    fn effect_score_trained_uses_model() {
+        // With a trained scorer, score() takes the EML path instead of
+        // L2. We force the trained flag via a JSON patch because the
+        // underlying coordinate descent needs 50+ samples to declare
+        // convergence, which would make this a slow integration test.
+        let v = EffectVector {
+            risk: 1.0,
+            fairness: 1.0,
+            privacy: 1.0,
+            novelty: 1.0,
+            security: 1.0,
+        };
+
+        let scorer = crate::eml_kernel::GovernanceScorerModel::new();
+        let untrained_score = v.score(Some(&scorer));
+        assert_eq!(untrained_score, v.magnitude());
+
+        // Patch the serialized form to force is_trained() = true.
+        let mut json = serde_json::to_value(&scorer).unwrap();
+        if let Some(inner) = json.get_mut("inner").and_then(|v| v.as_object_mut()) {
+            inner.insert("trained".into(), serde_json::Value::Bool(true));
+        }
+        let forced: crate::eml_kernel::GovernanceScorerModel =
+            serde_json::from_value(json).expect("patched scorer must deserialize");
+        assert!(forced.is_trained(), "patched scorer should report trained");
+
+        // Fall-through branch runs; we don't assert a specific value
+        // (params are zeros, so the EML output is deterministic but
+        // implementation-defined). The contract is: `score` dispatches
+        // to the model instead of the L2 shortcut.
+        let trained_score = v.score(Some(&forced));
+        // Untrained L2 for (1,1,1,1,1) is sqrt(5) ≈ 2.236. The model
+        // predict_primary over zero-params is 0.0 (clamped at 0.0 by
+        // max(0.0)). These must differ — proves the branch taken.
+        assert_ne!(
+            trained_score, untrained_score,
+            "trained scorer must dispatch to the model, not L2"
+        );
+    }
+
+    #[test]
     fn effect_any_exceeds() {
         let v = EffectVector {
             risk: 0.8,
@@ -835,6 +963,104 @@ mod tests {
         let result = engine.evaluate(&request);
         assert!(matches!(result.decision, GovernanceDecision::Deny(_)));
         assert!(result.threshold_exceeded);
+    }
+
+    #[test]
+    fn engine_with_untrained_scorer_preserves_behavior() {
+        // Finding #5: installing an untrained GovernanceScorerModel must
+        // not change evaluation outcomes (drop-in safe).
+        let mut baseline = GovernanceEngine::new(0.5, false);
+        baseline.add_rule(make_rule(
+            "security-check",
+            RuleSeverity::Blocking,
+            GovernanceBranch::Judicial,
+        ));
+        let mut wired = GovernanceEngine::new(0.5, false)
+            .with_scorer(crate::eml_kernel::GovernanceScorerModel::new());
+        wired.add_rule(make_rule(
+            "security-check",
+            RuleSeverity::Blocking,
+            GovernanceBranch::Judicial,
+        ));
+
+        for effect in [
+            EffectVector {
+                risk: 0.6,
+                ..Default::default()
+            },
+            EffectVector {
+                risk: 0.1,
+                fairness: 0.1,
+                ..Default::default()
+            },
+            EffectVector::default(),
+        ] {
+            let req = GovernanceRequest {
+                agent_id: "a".into(),
+                action: "x".into(),
+                effect,
+                context: Default::default(),
+                node_id: None,
+            };
+            assert_eq!(
+                baseline.evaluate(&req).decision,
+                wired.evaluate(&req).decision,
+                "untrained scorer must reproduce L2 behaviour"
+            );
+        }
+    }
+
+    #[test]
+    fn engine_with_trained_scorer_uses_model_scalar() {
+        // Finding #5: once the scorer is trained, the engine's
+        // threshold check receives the model-derived scalar. We force
+        // `is_trained` via a JSON patch so we don't have to train.
+        let scorer = crate::eml_kernel::GovernanceScorerModel::new();
+        let mut json = serde_json::to_value(&scorer).unwrap();
+        if let Some(inner) = json.get_mut("inner").and_then(|v| v.as_object_mut()) {
+            inner.insert("trained".into(), serde_json::Value::Bool(true));
+        }
+        let forced: crate::eml_kernel::GovernanceScorerModel =
+            serde_json::from_value(json).unwrap();
+        assert!(forced.is_trained());
+
+        let effect = EffectVector {
+            risk: 1.0,
+            ..Default::default()
+        };
+        let l2 = effect.magnitude();
+        let model_scalar = effect.score(Some(&forced));
+        // Zero params + softmax3(0,0,0) means model_scalar is derived
+        // from the EML tree and NOT equal to the L2 magnitude — this
+        // is the core invariant: the trained branch actually fires.
+        assert_ne!(
+            model_scalar, l2,
+            "trained scorer must not return L2 magnitude"
+        );
+
+        // Bonus: verify the engine uses it by picking a threshold that
+        // straddles the two values. Because we don't know which scalar
+        // is larger, pick between them.
+        let (lo, hi) = if model_scalar < l2 {
+            (model_scalar, l2)
+        } else {
+            (l2, model_scalar)
+        };
+        let mid = (lo + hi) / 2.0;
+        let engine = GovernanceEngine::new(mid, false).with_scorer(forced);
+        let request = GovernanceRequest {
+            agent_id: "a".into(),
+            action: "x".into(),
+            effect,
+            context: Default::default(),
+            node_id: None,
+        };
+        let result = engine.evaluate(&request);
+        // With threshold between model_scalar and l2: outcome depends
+        // on which is larger. The invariant we check is that the
+        // scorer-backed decision uses `model_scalar` (> mid only if
+        // `model_scalar == hi`).
+        assert_eq!(result.threshold_exceeded, model_scalar > mid);
     }
 
     #[test]

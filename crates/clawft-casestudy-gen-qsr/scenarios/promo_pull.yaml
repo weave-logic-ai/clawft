@@ -1,0 +1,11 @@
+id: pull_2for6_signature
+description: What if the 2-for-$6 signature promo was never run
+template: promo_pull
+brand: brand-a
+metro: null
+region: null
+week_index: null
+day_range: [0, 30]
+revenue_factor: 0.88
+labor_factor: 1.0
+promo_id_to_pull: promotion:promo-2for6-signature

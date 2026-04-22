@@ -40,6 +40,7 @@ exochain = [
     "dep:ciborium",
     "dep:ed25519-dalek",
     "dep:rand",
+    "dep:blake3",
 ]
 tilezero = [
     "exochain",
@@ -67,6 +68,7 @@ http-api = []
 
 [dependencies]
 eml-core = { workspace = true }
+clawft-treecalc = { workspace = true }
 clawft-core = { workspace = true, default-features = false }
 clawft-types = { workspace = true, default-features = false }
 clawft-platform = { workspace = true, default-features = false }

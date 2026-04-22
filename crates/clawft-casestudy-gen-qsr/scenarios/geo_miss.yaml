@@ -1,0 +1,11 @@
+id: metro_alpha_miss_week_3
+description: Metro-Alpha Brand-A stores under-perform budget by 8% during week 3
+template: geo_miss
+brand: brand-a
+metro: metro-alpha
+region: null
+week_index: 3
+day_range: [0, 30]
+revenue_factor: 0.92
+labor_factor: 1.0
+promo_id_to_pull: null

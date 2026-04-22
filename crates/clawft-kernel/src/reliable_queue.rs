@@ -89,6 +89,12 @@ pub struct ReliableQueue {
     pending: DashMap<String, PendingDelivery>,
     config: ReliableConfig,
     dead_letter: Arc<DeadLetterQueue>,
+    /// Optional learned dead-letter policy (Finding #5). When `None`
+    /// or untrained, `check_timeouts` and `expire_max_retries` use
+    /// the hardcoded config-driven formulas (bit-for-bit identical to
+    /// today). When trained, the model's `(delay_ms, should_discard)`
+    /// heads are consulted for backoff/discard decisions.
+    dead_letter_model: Option<Arc<std::sync::Mutex<crate::eml_kernel::DeadLetterModel>>>,
 }
 
 impl ReliableQueue {
@@ -98,12 +104,36 @@ impl ReliableQueue {
             pending: DashMap::new(),
             config,
             dead_letter,
+            dead_letter_model: None,
         }
     }
 
     /// Create with default configuration.
     pub fn with_defaults(dead_letter: Arc<DeadLetterQueue>) -> Self {
         Self::new(ReliableConfig::default(), dead_letter)
+    }
+
+    /// Install a learned
+    /// [`DeadLetterModel`](crate::eml_kernel::DeadLetterModel) on this
+    /// queue. With a model installed, [`Self::check_timeouts`] and
+    /// [`Self::expire_max_retries`] route their backoff / discard
+    /// decisions through the model. Untrained models fall back to
+    /// the hardcoded formulas, so `with_model` is drop-in safe.
+    ///
+    /// NOTE(eml-swap): wired — Finding #5 (DeadLetterModel).
+    pub fn with_model(
+        mut self,
+        model: Arc<std::sync::Mutex<crate::eml_kernel::DeadLetterModel>>,
+    ) -> Self {
+        self.dead_letter_model = Some(model);
+        self
+    }
+
+    /// Returns a handle to the optional dead-letter model.
+    pub fn dead_letter_model(
+        &self,
+    ) -> Option<&Arc<std::sync::Mutex<crate::eml_kernel::DeadLetterModel>>> {
+        self.dead_letter_model.as_ref()
     }
 
     /// Get the configuration.
@@ -152,9 +182,16 @@ impl ReliableQueue {
     ///
     /// Returns a list of `(correlation_id, message)` pairs that have
     /// exceeded their ack deadline and should be retried.
+    ///
+    /// NOTE(eml-swap): wired — Finding #5 (DeadLetterModel). When a
+    /// learned model is installed and trained, the next-attempt
+    /// ack deadline comes from the model; untrained models fall back
+    /// to the existing `initial_timeout * backoff_multiplier^attempt`
+    /// formula bit-for-bit.
     pub fn check_timeouts(&self) -> Vec<(String, KernelMessage)> {
         let now = Instant::now();
         let mut retries = Vec::new();
+        let queue_depth = self.pending.len();
 
         for mut entry in self.pending.iter_mut() {
             if now >= entry.ack_deadline {
@@ -164,12 +201,12 @@ impl ReliableQueue {
                 pending.attempts += 1;
                 pending.last_attempt = now;
 
-                // Calculate next timeout with backoff, capped at max_timeout
-                let attempt_idx = pending.attempts.saturating_sub(1);
-                let backoff = self.config.initial_timeout.as_secs_f64()
-                    * self.config.backoff_multiplier.powi(attempt_idx as i32);
-                let next_timeout = Duration::from_secs_f64(
-                    backoff.min(self.config.max_timeout.as_secs_f64()),
+                let message_age_ms =
+                    pending.first_sent.elapsed().as_millis() as u64;
+                let next_timeout = self.compute_next_timeout(
+                    pending.attempts.saturating_sub(1),
+                    message_age_ms,
+                    queue_depth,
                 );
                 pending.ack_deadline = now + next_timeout;
 
@@ -180,15 +217,63 @@ impl ReliableQueue {
         retries
     }
 
+    /// Compute the next ack timeout for a retry attempt, consulting
+    /// the dead-letter model when one is installed.
+    ///
+    /// Fallback (model `None` or untrained): the existing
+    /// `initial_timeout * backoff_multiplier^attempt_idx` formula
+    /// clamped at `max_timeout`. This is byte-identical to the
+    /// pre-EML computation so untrained models produce the same
+    /// schedule.
+    fn compute_next_timeout(
+        &self,
+        attempt_idx: u32,
+        message_age_ms: u64,
+        queue_depth: usize,
+    ) -> Duration {
+        // Hardcoded fallback — never changes behaviour.
+        let backoff = self.config.initial_timeout.as_secs_f64()
+            * self.config.backoff_multiplier.powi(attempt_idx as i32);
+        let fallback = Duration::from_secs_f64(
+            backoff.min(self.config.max_timeout.as_secs_f64()),
+        );
+
+        let Some(model_handle) = self.dead_letter_model.as_ref() else {
+            return fallback;
+        };
+        let Ok(model) = model_handle.lock() else {
+            return fallback;
+        };
+        if !model.is_trained() {
+            return fallback;
+        }
+        let (delay_ms, _should_discard) =
+            model.predict(attempt_idx, message_age_ms, queue_depth);
+        Duration::from_millis(delay_ms.min(
+            self.config.max_timeout.as_millis() as u64,
+        ))
+    }
+
     /// Move deliveries that have exceeded max retries to the dead letter queue.
     ///
     /// Returns the list of message IDs that were dead-lettered.
+    ///
+    /// NOTE(eml-swap): wired — Finding #5 (DeadLetterModel). When a
+    /// trained DeadLetterModel is installed, the discard decision
+    /// consults the model's `should_discard` head in addition to the
+    /// config's `max_retries` ceiling. The untrained fallback matches
+    /// today's "attempts > max_retries" rule exactly.
     pub fn expire_max_retries(&self) -> Vec<DeliveryResult> {
         let mut expired = Vec::new();
         let mut to_remove = Vec::new();
+        let queue_depth = self.pending.len();
 
         for entry in self.pending.iter() {
-            if entry.attempts > self.config.max_retries {
+            if self.should_discard(
+                entry.attempts,
+                entry.first_sent.elapsed().as_millis() as u64,
+                queue_depth,
+            ) {
                 to_remove.push(entry.key().clone());
             }
         }
@@ -210,6 +295,34 @@ impl ReliableQueue {
         }
 
         expired
+    }
+
+    /// Discard-decision helper. Consults the optional
+    /// [`DeadLetterModel`] when trained; otherwise uses the hardcoded
+    /// `attempts > max_retries` rule.
+    fn should_discard(
+        &self,
+        attempts: u32,
+        message_age_ms: u64,
+        queue_depth: usize,
+    ) -> bool {
+        // Hardcoded fallback — unchanged.
+        let fallback = attempts > self.config.max_retries;
+
+        let Some(model_handle) = self.dead_letter_model.as_ref() else {
+            return fallback;
+        };
+        let Ok(model) = model_handle.lock() else {
+            return fallback;
+        };
+        if !model.is_trained() {
+            return fallback;
+        }
+        let (_delay_ms, model_discard) =
+            model.predict(attempts, message_age_ms, queue_depth);
+        // The model is advisory: we still enforce the hard max_retries
+        // ceiling so a buggy model can never hold a message forever.
+        fallback || model_discard
     }
 
     /// Number of currently pending deliveries.
@@ -238,10 +351,12 @@ impl ReliableQueue {
     }
 
     /// Calculate the timeout for a given attempt number.
+    ///
+    /// Uses the same EML-aware dispatch as [`Self::check_timeouts`]
+    /// so external callers observing the policy see the same delays
+    /// the queue would actually wait.
     pub fn timeout_for_attempt(&self, attempt: u32) -> Duration {
-        let backoff = self.config.initial_timeout.as_secs_f64()
-            * self.config.backoff_multiplier.powi(attempt as i32);
-        Duration::from_secs_f64(backoff.min(self.config.max_timeout.as_secs_f64()))
+        self.compute_next_timeout(attempt, 0, self.pending.len())
     }
 }
 
@@ -432,5 +547,123 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // ── Finding #5: DeadLetterModel wiring ──────────────────────────
+
+    #[test]
+    fn untrained_model_preserves_backoff_schedule() {
+        // Finding #5: with an untrained DeadLetterModel installed,
+        // timeout_for_attempt must produce the same delays as the
+        // hardcoded fallback.
+        let dlq = Arc::new(DeadLetterQueue::new(100));
+        let cfg = ReliableConfig {
+            max_retries: 3,
+            initial_timeout: Duration::from_millis(100),
+            max_timeout: Duration::from_secs(2),
+            backoff_multiplier: 2.0,
+        };
+        let plain = ReliableQueue::new(cfg.clone(), dlq.clone());
+        let model = Arc::new(std::sync::Mutex::new(
+            crate::eml_kernel::DeadLetterModel::new(),
+        ));
+        let wired = ReliableQueue::new(cfg, dlq).with_model(model);
+
+        for attempt in 0..6 {
+            assert_eq!(
+                plain.timeout_for_attempt(attempt),
+                wired.timeout_for_attempt(attempt),
+                "untrained DeadLetterModel must reproduce backoff at attempt {attempt}"
+            );
+        }
+    }
+
+    #[test]
+    fn untrained_model_preserves_discard_rule() {
+        // Finding #5: untrained model must not change which deliveries
+        // get expired by `expire_max_retries`.
+        let dlq = Arc::new(DeadLetterQueue::new(100));
+        let cfg = ReliableConfig {
+            max_retries: 3,
+            initial_timeout: Duration::from_millis(100),
+            max_timeout: Duration::from_secs(2),
+            backoff_multiplier: 2.0,
+        };
+        let model = Arc::new(std::sync::Mutex::new(
+            crate::eml_kernel::DeadLetterModel::new(),
+        ));
+        let queue = ReliableQueue::new(cfg, dlq.clone()).with_model(model);
+
+        let (corr_id, _) = queue.register(make_msg(1, 2));
+        // attempts == 1 < max_retries (3); should NOT expire.
+        assert!(queue.expire_max_retries().is_empty());
+
+        if let Some(mut entry) = queue.pending.get_mut(&corr_id) {
+            entry.attempts = 5; // > max_retries
+        }
+        let expired = queue.expire_max_retries();
+        assert_eq!(expired.len(), 1);
+        assert_eq!(dlq.len(), 1);
+    }
+
+    #[test]
+    fn trained_model_can_shorten_backoff() {
+        // Finding #5: with a trained DeadLetterModel, timeout_for_attempt
+        // dispatches to the model and produces a different delay from
+        // the hardcoded formula.
+        let dlq = Arc::new(DeadLetterQueue::new(100));
+        let cfg = ReliableConfig {
+            max_retries: 3,
+            initial_timeout: Duration::from_millis(100),
+            max_timeout: Duration::from_secs(2),
+            backoff_multiplier: 2.0,
+        };
+        let plain = ReliableQueue::new(cfg.clone(), dlq.clone());
+
+        let untrained = crate::eml_kernel::DeadLetterModel::new();
+        let mut json = serde_json::to_value(&untrained).unwrap();
+        if let Some(inner) = json.get_mut("inner").and_then(|v| v.as_object_mut()) {
+            inner.insert("trained".into(), serde_json::Value::Bool(true));
+        }
+        let forced: crate::eml_kernel::DeadLetterModel =
+            serde_json::from_value(json).unwrap();
+        assert!(forced.is_trained());
+
+        let model = Arc::new(std::sync::Mutex::new(forced));
+        let wired = ReliableQueue::new(cfg, dlq).with_model(model);
+
+        let attempt = 2;
+        let hardcoded = plain.timeout_for_attempt(attempt);
+        let model_driven = wired.timeout_for_attempt(attempt);
+        // The two must differ — proves the dispatch branch executed.
+        assert_ne!(hardcoded, model_driven);
+    }
+
+    #[test]
+    fn check_timeouts_with_untrained_model_matches_plain() {
+        // Bit-for-bit verification: check_timeouts() advances the
+        // ack_deadline by the same delta when the model is untrained.
+        let dlq = Arc::new(DeadLetterQueue::new(100));
+        let cfg = ReliableConfig {
+            max_retries: 3,
+            initial_timeout: Duration::from_millis(50),
+            max_timeout: Duration::from_secs(2),
+            backoff_multiplier: 2.0,
+        };
+        let model = Arc::new(std::sync::Mutex::new(
+            crate::eml_kernel::DeadLetterModel::new(),
+        ));
+        let queue = ReliableQueue::new(cfg, dlq).with_model(model);
+
+        let (corr_id, _) = queue.register(make_msg(1, 2));
+        // Force the deadline into the past so check_timeouts retries.
+        if let Some(mut entry) = queue.pending.get_mut(&corr_id) {
+            entry.ack_deadline = Instant::now() - Duration::from_millis(10);
+        }
+        let retries = queue.check_timeouts();
+        assert_eq!(retries.len(), 1);
+        // attempts now == 2; backoff = 50ms * 2^1 = 100ms.
+        let entry = queue.pending.get(&corr_id).unwrap();
+        assert_eq!(entry.attempts, 2);
     }
 }

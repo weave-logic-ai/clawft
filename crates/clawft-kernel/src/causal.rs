@@ -1793,6 +1793,55 @@ fn edge_type_volatility(edge_type: &CausalEdgeType) -> f64 {
     }
 }
 
+/// Maximum edge-type volatility across an iterator of edges, using a
+/// [`clawft_treecalc::triage`] dispatch on the edge-kind stream so a
+/// uniform-kind incident set collapses to a single `match` branch
+/// (Sequence form) instead of one per edge.
+///
+/// Behaviour-equivalent to `edges.map(volatility).fold(1.0, max)` —
+/// the hardcoded fallback semantics — but faster on the common case
+/// where a node's incident edges are all the same kind (e.g. a
+/// node touched only by `Causes` edges).
+///
+/// NOTE(treecalc-swap): wired — Finding #9 (CausalEdgeType decay
+/// dispatch). The treecalc batching is the structural change; a
+/// per-kind learned `DecayScheduleModel` is a follow-up.
+pub fn max_volatility_batched<'a, I>(edges: I) -> f64
+where
+    I: IntoIterator<Item = &'a CausalEdge>,
+{
+    // Snapshot the edge-kind stream so we can triage and re-iterate.
+    let kinds: Vec<&CausalEdgeType> =
+        edges.into_iter().map(|e| &e.edge_type).collect();
+    if kinds.is_empty() {
+        return 1.0;
+    }
+
+    match clawft_treecalc::triage(kinds.iter().copied()) {
+        // All edges share one kind — single match, no per-edge branching.
+        clawft_treecalc::Form::Sequence => {
+            // Safe to unwrap: kinds is non-empty by the guard above.
+            edge_type_volatility(kinds[0]).max(1.0)
+        }
+        // Atom is unreachable (we guard non-empty), but treat as the
+        // identity to keep behaviour aligned with the fallback.
+        clawft_treecalc::Form::Atom => 1.0,
+        // Mixed kinds — fold over deduped representatives so each
+        // kind costs one match branch instead of one per occurrence.
+        clawft_treecalc::Form::Branch => {
+            let mut seen: std::collections::HashSet<std::mem::Discriminant<CausalEdgeType>> =
+                std::collections::HashSet::new();
+            let mut max = 1.0_f64;
+            for k in &kinds {
+                if seen.insert(std::mem::discriminant(*k)) {
+                    max = max.max(edge_type_volatility(k));
+                }
+            }
+            max
+        }
+    }
+}
+
 /// Compute shadow-adjusted relevance for each node in the graph.
 ///
 /// Recent nodes cast "shadows" that suppress older redundant nodes.
@@ -1823,6 +1872,12 @@ pub fn compute_shadows(
     }
 
     // Phase 1: Compute base weight from age and edge-type volatility.
+    //
+    // NOTE(treecalc-swap): wired — Finding #9. Per-node incident-edge
+    // dispatch goes through `max_volatility_batched`, which uses
+    // `clawft_treecalc::triage` so a uniform-kind incident set
+    // collapses to one match branch. Behaviour matches the previous
+    // `map(volatility).fold(1.0, max)` formulation exactly.
     for &id in &node_ids {
         let node = match graph.get_node(id) {
             Some(n) => n,
@@ -1831,14 +1886,10 @@ pub fn compute_shadows(
 
         let age = current_epoch.saturating_sub(node.created_at) as f64;
 
-        // Find maximum volatility among incident edges.
         let fwd_edges = graph.get_forward_edges(id);
         let rev_edges = graph.get_reverse_edges(id);
-        let max_volatility = fwd_edges
-            .iter()
-            .chain(rev_edges.iter())
-            .map(|e| edge_type_volatility(&e.edge_type))
-            .fold(1.0f64, f64::max);
+        let max_volatility =
+            max_volatility_batched(fwd_edges.iter().chain(rev_edges.iter()));
 
         // Geometric decay: weight = (1 - decay_rate)^(age * volatility).
         let base_weight = (1.0 - config.decay_rate).powf(age * max_volatility);
@@ -3333,6 +3384,115 @@ mod tests {
         for &w in weights.values() {
             assert!(w >= 0.0 && w <= 1.0, "weight {w} out of range");
         }
+    }
+
+    // -- Finding #9: treecalc-batched edge volatility ----------------------
+
+    fn make_edge(source: NodeId, target: NodeId, kind: CausalEdgeType) -> CausalEdge {
+        CausalEdge {
+            source,
+            target,
+            edge_type: kind,
+            weight: 1.0,
+            timestamp: 0,
+            chain_seq: 0,
+            source_universal_id: [0u8; 32],
+            target_universal_id: [0u8; 32],
+        }
+    }
+
+    fn naive_max_volatility(edges: &[CausalEdge]) -> f64 {
+        edges
+            .iter()
+            .map(|e| edge_type_volatility(&e.edge_type))
+            .fold(1.0_f64, f64::max)
+    }
+
+    #[test]
+    fn batched_max_volatility_empty_returns_one() {
+        // Mirrors the original `fold(1.0, max)` identity.
+        assert_eq!(max_volatility_batched(std::iter::empty()), 1.0);
+    }
+
+    #[test]
+    fn batched_max_volatility_uniform_kind_matches_naive() {
+        // Sequence form — all edges share one kind.
+        let edges = vec![
+            make_edge(1, 2, CausalEdgeType::Causes),
+            make_edge(1, 3, CausalEdgeType::Causes),
+            make_edge(1, 4, CausalEdgeType::Causes),
+        ];
+        let naive = naive_max_volatility(&edges);
+        let batched = max_volatility_batched(edges.iter());
+        assert_eq!(naive, batched);
+        // Causes has volatility 0.3, but the fold floor is 1.0.
+        assert_eq!(batched, 1.0);
+    }
+
+    #[test]
+    fn batched_max_volatility_mixed_kinds_matches_naive() {
+        // Branch form — heterogeneous kinds.
+        let edges = vec![
+            make_edge(1, 2, CausalEdgeType::Causes),
+            make_edge(1, 3, CausalEdgeType::Correlates),
+            make_edge(1, 4, CausalEdgeType::Follows),
+            make_edge(1, 5, CausalEdgeType::Inhibits),
+        ];
+        let naive = naive_max_volatility(&edges);
+        let batched = max_volatility_batched(edges.iter());
+        assert_eq!(naive, batched);
+        // Correlates volatility (2.0) wins.
+        assert_eq!(batched, 2.0);
+    }
+
+    #[test]
+    fn batched_max_volatility_high_volatility_uniform() {
+        // Sequence form for a kind whose volatility > 1.0.
+        let edges = vec![
+            make_edge(1, 2, CausalEdgeType::Correlates),
+            make_edge(1, 3, CausalEdgeType::Correlates),
+        ];
+        assert_eq!(max_volatility_batched(edges.iter()), 2.0);
+    }
+
+    #[test]
+    fn batched_max_volatility_dedups_repeated_kinds() {
+        // Branch form with repeats — should still match the naive
+        // fold because we max over the unique-kind volatilities.
+        let edges = vec![
+            make_edge(1, 2, CausalEdgeType::Causes),
+            make_edge(1, 3, CausalEdgeType::Causes),
+            make_edge(1, 4, CausalEdgeType::Correlates),
+            make_edge(1, 5, CausalEdgeType::Correlates),
+            make_edge(1, 6, CausalEdgeType::Follows),
+        ];
+        assert_eq!(
+            max_volatility_batched(edges.iter()),
+            naive_max_volatility(&edges)
+        );
+    }
+
+    #[test]
+    fn compute_shadows_post_batching_matches_pre_batching_invariants() {
+        // High-level: compute_shadows with mixed-kind edges still
+        // produces in-range weights and Correlates edges decay faster
+        // than Causes — the original `shadowing_correlates_decay_faster`
+        // invariant remains intact under the treecalc dispatch.
+        let g = make_graph();
+        let a = g.add_node("A".into(), serde_json::json!({}));
+        let b = g.add_node("B".into(), serde_json::json!({}));
+        let c = g.add_node("C".into(), serde_json::json!({}));
+        g.link(a, b, CausalEdgeType::Causes, 1.0, 0, 0);
+        g.link(a, c, CausalEdgeType::Correlates, 1.0, 0, 0);
+
+        let cfg = ShadowingConfig {
+            decay_rate: 0.05,
+            shadow_radius: 0,
+        };
+        let weights = compute_shadows(&g, &cfg, 50);
+        let w_b = *weights.get(&b).unwrap();
+        let w_c = *weights.get(&c).unwrap();
+        assert!(w_b > w_c, "Causes ({w_b}) should decay slower than Correlates ({w_c})");
     }
 
     // -- KG-014: VQ Codebook Cold-Start tests ------------------------------

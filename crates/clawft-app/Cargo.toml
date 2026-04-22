@@ -1,0 +1,30 @@
+[package]
+name = "clawft-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "WeftOS app manifest parser, validator, and local app registry (ADR-015)"
+keywords = ["weftos", "app", "manifest", "registry"]
+categories = ["development-tools"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+semver = { version = "1", features = ["serde"] }
+# Drop-in SystemTime/Instant: std on native, performance.now() on wasm.
+# Without this, AppRegistry::install() panics under
+# wasm32-unknown-unknown ("time not implemented on this platform")
+# when the admin app seeds itself during desktop boot.
+web-time = "1"
+
+[dev-dependencies]
+tempfile = { workspace = true }

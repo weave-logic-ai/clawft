@@ -1,0 +1,115 @@
+[package]
+name = "clawft-gui-egui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "egui/eframe native GUI spike for ClawFT — ports the 12 core UI blocks"
+
+# wasm-pack settings: disable wasm-opt because the cached wasm-opt
+# pinned by wasm-pack is old and rejects modern Rust's bulk-memory
+# output. We take the (modest) size hit.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+# ── Native-only bins (excluded from wasm via target.cfg) ─────────────
+
+[[bin]]
+name = "weft-gui-egui"
+path = "src/main.rs"
+required-features = ["native"]
+
+[[bin]]
+name = "weft-demo-lab"
+path = "src/bin/demo_lab.rs"
+required-features = ["native"]
+
+[lib]
+name = "clawft_gui_egui"
+path = "src/lib.rs"
+# Enables wasm-web builds via `cdylib` while still allowing native rlib.
+crate-type = ["cdylib", "rlib"]
+
+# ── Cross-target dependencies ────────────────────────────────────────
+
+[dependencies]
+egui = "0.29"
+egui_extras = { version = "0.29", features = ["all_loaders"] }
+egui_plot = "0.29"
+egui_demo_lib = "0.29"
+# NB: egui_dock 0.14 is the egui-0.29-compatible line (0.13 tracks 0.28).
+# ADR-001 row 10 — `ui://dock` is implemented via this crate.
+egui_dock = "0.14"
+log = "0.4"
+serde_json = { workspace = true }
+parking_lot = { workspace = true }
+# Drop-in Instant/SystemTime: std on native, performance.now() on wasm.
+# Without this, wasm32-unknown-unknown panics ("time not implemented on
+# this platform") the moment any UI code hits a clock.
+web-time = "1"
+# egui_extras's `all_loaders` turns on the `image` crate dep but leaves format
+# features OFF (default-features=false and no overrides). Feature unification
+# from other crates in the tree doesn't reliably pick up PNG for the wasm
+# target, so the boot logo silently fails to decode. Pin `png` explicitly.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# M1.5-C + M1.5-D/E: substrate state tree + ADR-017 OntologyAdapter
+# trait + surface-description composer. Compiles on wasm (adapter trait
+# + snapshot types only; the kernel adapter + Substrate::subscribe are
+# gated native-only inside the crate).
+clawft-substrate = { workspace = true }
+# M1.5-A + M1.5-D/E: app manifest + registry (ADR-015).
+clawft-app = { workspace = true }
+# M1.5-B + M1.5-D/E: surface-description IR + composer (ADR-016).
+clawft-surface = { workspace = true }
+
+# ── Native-only dependencies ─────────────────────────────────────────
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+tokio = { workspace = true }
+clawft-rpc = { workspace = true }
+ehttp = { version = "0.5", features = ["native-async"] }
+poll-promise = "0.3"
+
+# ── Wasm-only dependencies (compiled for `wasm32-unknown-unknown`) ──
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Window", "MessageEvent", "EventTarget", "console", "Document",
+    "HtmlCanvasElement", "HtmlElement", "Performance"
+] }
+console_error_panic_hook = "0.1"
+# Minimal async + channels that work in single-threaded wasm.
+futures = { version = "0.3", default-features = false, features = ["std"] }
+
+# ── Dev dependencies (integration tests only) ───────────────────────
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "time", "sync"] }
+
+# ── Features ─────────────────────────────────────────────────────────
+
+[features]
+default = ["native"]
+# Keep native bins/tests out of the wasm build.
+native = []
+# Optional procedural boot sounds (pulls in rodio → cpal → alsa).
+audio = ["dep:rodio"]
+# Vendored demo_lab files (fractal_clock.rs, http_app.rs) carry upstream
+# `#[cfg_attr(feature = "serde", ...)]` gates. Declaring the feature
+# (even if unused) keeps clippy's `-D warnings` happy without editing
+# the vendored source.
+serde = []
+
+[dependencies.rodio]
+version = "0.19"
+optional = true
+default-features = false
+features = ["symphonia-wav"]

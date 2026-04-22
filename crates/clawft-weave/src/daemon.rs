@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixListener;
+use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
@@ -143,6 +143,45 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
         let k = kernel.read().await;
         k.event_log()
             .info("daemon", format!("listening on {}", socket_path.display()));
+    }
+
+    // Stream-window anchor: start configured topic anchors so every
+    // `window_secs` window emits a `stream.window_commit` chain event
+    // summarising traffic for audit. Each anchor subscribes via the
+    // a2a topic router and holds its own BLAKE3 + counters.
+    #[cfg(feature = "exochain")]
+    let mut stream_anchors: Vec<clawft_kernel::TopicAnchor> = Vec::new();
+    #[cfg(feature = "exochain")]
+    {
+        let k = kernel.read().await;
+        if let Some(cfg) = k.kernel_config().anchor.as_ref() {
+            if cfg.enabled && !cfg.topics.is_empty() {
+                let window = std::time::Duration::from_secs(cfg.window_secs.max(1));
+                let a2a = k.a2a_router().clone();
+                let chain = k.chain_manager().cloned();
+                for pattern in &cfg.topics {
+                    // Exact topics are wired directly; wildcard patterns
+                    // like "sensor.*" are not expanded here — the
+                    // config-writer provides the exact topic prefix
+                    // they want to anchor, and the anchor currently
+                    // subscribes by literal name. A wildcard anchor
+                    // watchdog is a follow-up (M1.6+).
+                    let topic = pattern.clone();
+                    let anchor = clawft_kernel::StreamWindowAnchor::start_topic(
+                        Arc::clone(&a2a),
+                        chain.clone(),
+                        topic.clone(),
+                        window,
+                    );
+                    stream_anchors.push(anchor);
+                }
+                info!(
+                    anchors = stream_anchors.len(),
+                    window_ms = window.as_millis() as u64,
+                    "stream-window anchors started"
+                );
+            }
+        }
     }
 
     // Shutdown signal
@@ -404,6 +443,76 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
         }
     });
 
+    // Optional TCP relay. When `[kernel.ipc_tcp]` is enabled, every
+    // accepted TCP connection is transparently byte-copied to a fresh
+    // connection on the unix socket. All auth / JSON dispatch stays in
+    // the unix path — the TCP side is a dumb conduit so cross-boundary
+    // callers (Windows side of WSL, remote bridges) can reach the RPC
+    // without speaking `AF_UNIX`.
+    let ipc_tcp_cfg = {
+        let k = kernel.read().await;
+        k.kernel_config().ipc_tcp.clone()
+    };
+    if let Some(cfg) = ipc_tcp_cfg.filter(|c| c.enabled) {
+        match TcpListener::bind(&cfg.listen_addr).await {
+            Ok(tcp_listener) => {
+                info!(addr = %cfg.listen_addr, "ipc tcp relay listening");
+                println!("IPC TCP relay listening on {}", cfg.listen_addr);
+                let relay_socket_path = socket_path.clone();
+                let mut relay_shutdown_rx = shutdown_tx.subscribe();
+                tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            result = tcp_listener.accept() => {
+                                match result {
+                                    Ok((tcp_stream, peer)) => {
+                                        info!(peer = %peer, "ipc tcp relay: peer connected");
+                                        let sock = relay_socket_path.clone();
+                                        tokio::spawn(async move {
+                                            match UnixStream::connect(&sock).await {
+                                                Ok(mut unix_stream) => {
+                                                    let mut tcp_stream = tcp_stream;
+                                                    let (a, b) = match tokio::io::copy_bidirectional(
+                                                        &mut tcp_stream,
+                                                        &mut unix_stream,
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(pair) => pair,
+                                                        Err(e) => {
+                                                            debug!(peer = %peer, "ipc tcp relay: copy ended: {e}");
+                                                            (0, 0)
+                                                        }
+                                                    };
+                                                    info!(peer = %peer, tx_bytes = a, rx_bytes = b, "ipc tcp relay: peer disconnected");
+                                                }
+                                                Err(e) => {
+                                                    warn!(peer = %peer, "ipc tcp relay: unix connect failed: {e}");
+                                                }
+                                            }
+                                        });
+                                    }
+                                    Err(e) => {
+                                        error!("ipc tcp accept error: {e}");
+                                    }
+                                }
+                            }
+                            _ = relay_shutdown_rx.changed() => {
+                                if *relay_shutdown_rx.borrow() {
+                                    debug!("ipc tcp relay shutting down");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+            Err(e) => {
+                warn!(addr = %cfg.listen_addr, "ipc tcp relay bind failed: {e}");
+            }
+        }
+    }
+
     // Wait for shutdown signal (SIGINT, SIGTERM, SIGHUP) or RPC shutdown.
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
@@ -434,6 +543,15 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
     // If a signal triggered shutdown, wait for the accept loop to finish.
     if restart_requested || !accept_handle.is_finished() {
         let _ = accept_handle.await;
+    }
+
+    // Stop stream-window anchors so they flush their final windows
+    // before the chain manager shuts down.
+    #[cfg(feature = "exochain")]
+    {
+        for anchor in stream_anchors {
+            anchor.shutdown();
+        }
     }
 
     // Gracefully shut down running agents before kernel shutdown
@@ -483,7 +601,12 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
 /// Detects the connection mode by reading the first 4 bytes:
 /// - `RVFS` → RVF-framed protocol (content-hash verified segments)
 /// - Anything else → legacy line-delimited JSON (bytes prepended to first line)
-async fn handle_connection(
+/// Handle a single client connection — accepts both JSON line mode and
+/// (when the `rvf-rpc` feature is enabled) the RVF-framed protocol.
+///
+/// Exposed `pub` so integration tests can drive a preassembled kernel
+/// directly without the signal-handler plumbing in [`run`].
+pub async fn handle_connection(
     mut stream: tokio::net::UnixStream,
     kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
     shutdown_tx: watch::Sender<bool>,
@@ -503,33 +626,78 @@ async fn handle_connection(
     handle_json_connection(header, stream, kernel, shutdown_tx).await;
 }
 
+/// Outcome of dispatching a single JSON-line request.
+///
+/// Most requests produce a single response and the connection loop
+/// continues reading the next line. `ipc.subscribe_stream` and the
+/// other `*.subscribe` stream RPCs are different: after the initial
+/// ack is written, the write-half is owned by a streaming forwarder
+/// task that pushes every matching publish as one JSON line.
+enum DispatchOutcome {
+    /// Keep reading subsequent requests from the same connection.
+    Continue,
+    /// Transport error — close the connection.
+    Stop,
+    /// The request subscribed to a kernel topic; the writer must be
+    /// transferred into a streaming forwarder. The `rx` channel holds
+    /// the raw JSON lines to flush to the client; on client disconnect
+    /// (write error) the caller must call `on_disconnect` to clean up.
+    StreamSubscribe {
+        /// Topic that was subscribed to (for logging).
+        topic: String,
+        /// Receiver for serialized topic messages (JSON + trailing `\n`).
+        rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+        /// Unsubscribe action to run when the client disconnects.
+        on_disconnect: Box<dyn FnOnce() + Send>,
+    },
+}
+
 /// Dispatch a single JSON line and write the response.
 ///
-/// Returns `true` to continue reading, `false` to stop (write error).
+/// Returns the next [`DispatchOutcome`] for the connection loop.
 async fn dispatch_json_line(
     line: &str,
     kernel: &Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
     shutdown_tx: &watch::Sender<bool>,
     writer: &mut tokio::net::unix::OwnedWriteHalf,
-) -> bool {
+) -> DispatchOutcome {
     let line = line.trim();
     if line.is_empty() {
-        return true;
+        return DispatchOutcome::Continue;
     }
 
-    let response = match serde_json::from_str::<Request>(line) {
+    let (response, stream_hookup) = match serde_json::from_str::<Request>(line) {
         Ok(req) => {
             let id = req.id.clone();
-            dispatch(
-                req.method,
-                req.params,
-                Arc::clone(kernel),
-                shutdown_tx.clone(),
-            )
-            .await
-            .with_id(id)
+            // `*.subscribe_stream` methods take over the connection: the
+            // daemon registers an external sink with the router and
+            // returns a receiver the caller pipes into the socket.
+            if req.method == "ipc.subscribe_stream" {
+                match handle_ipc_subscribe_stream(req.params, Arc::clone(kernel)).await {
+                    Ok((ack, topic, rx, on_disconnect)) => (
+                        ack.with_id(id),
+                        Some((topic, rx, on_disconnect)),
+                    ),
+                    Err(msg) => (Response::error(msg).with_id(id), None),
+                }
+            } else if req.method == "substrate.subscribe" {
+                match handle_substrate_subscribe(req.params, Arc::clone(kernel)).await {
+                    Ok((ack, path, rx, on_disconnect)) => (
+                        ack.with_id(id),
+                        Some((path, rx, on_disconnect)),
+                    ),
+                    Err(msg) => (Response::error(msg).with_id(id), None),
+                }
+            } else {
+                (
+                    dispatch(req.method, req.params, Arc::clone(kernel), shutdown_tx.clone())
+                        .await
+                        .with_id(id),
+                    None,
+                )
+            }
         }
-        Err(e) => Response::error(format!("invalid request: {e}")),
+        Err(e) => (Response::error(format!("invalid request: {e}")), None),
     };
 
     let mut json = serde_json::to_string(&response).unwrap_or_else(|e| {
@@ -539,9 +707,21 @@ async fn dispatch_json_line(
 
     if let Err(e) = writer.write_all(json.as_bytes()).await {
         debug!("write error (client disconnected?): {e}");
-        return false;
+        if let Some((_, _, on_disconnect)) = stream_hookup {
+            on_disconnect();
+        }
+        return DispatchOutcome::Stop;
     }
-    true
+
+    if let Some((topic, rx, on_disconnect)) = stream_hookup {
+        return DispatchOutcome::StreamSubscribe {
+            topic,
+            rx,
+            on_disconnect,
+        };
+    }
+
+    DispatchOutcome::Continue
 }
 
 /// Handle a legacy line-delimited JSON connection.
@@ -563,8 +743,17 @@ async fn handle_json_connection(
         return;
     }
     let first_line = format!("{}{}", String::from_utf8_lossy(&prefix), rest_of_first);
-    if !dispatch_json_line(&first_line, &kernel, &shutdown_tx, &mut writer).await {
-        return;
+    match dispatch_json_line(&first_line, &kernel, &shutdown_tx, &mut writer).await {
+        DispatchOutcome::Continue => {}
+        DispatchOutcome::Stop => return,
+        DispatchOutcome::StreamSubscribe {
+            topic,
+            rx,
+            on_disconnect,
+        } => {
+            run_stream_subscribe(writer, topic, rx, on_disconnect).await;
+            return;
+        }
     }
 
     // Process remaining lines normally.
@@ -575,10 +764,296 @@ async fn handle_json_connection(
             Ok(_) => {}
             Err(_) => break,
         }
-        if !dispatch_json_line(&line, &kernel, &shutdown_tx, &mut writer).await {
+        match dispatch_json_line(&line, &kernel, &shutdown_tx, &mut writer).await {
+            DispatchOutcome::Continue => {}
+            DispatchOutcome::Stop => break,
+            DispatchOutcome::StreamSubscribe {
+                topic,
+                rx,
+                on_disconnect,
+            } => {
+                run_stream_subscribe(writer, topic, rx, on_disconnect).await;
+                return;
+            }
+        }
+    }
+}
+
+/// Pump serialized topic messages from `rx` into the client writer.
+///
+/// Runs until the receiver closes (router-side shutdown) or the
+/// writer returns an I/O error (client disconnected). On exit, runs
+/// the provided `on_disconnect` closure so the daemon can remove the
+/// external subscription from the router.
+async fn run_stream_subscribe(
+    mut writer: tokio::net::unix::OwnedWriteHalf,
+    topic: String,
+    mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    on_disconnect: Box<dyn FnOnce() + Send>,
+) {
+    debug!(topic, "ipc.subscribe_stream: forwarder started");
+    while let Some(bytes) = rx.recv().await {
+        if let Err(e) = writer.write_all(&bytes).await {
+            debug!(topic, error = %e, "ipc.subscribe_stream: write error, closing");
             break;
         }
     }
+    debug!(topic, "ipc.subscribe_stream: forwarder exiting");
+    on_disconnect();
+}
+
+/// Decode a 32-byte or 64-byte key/signature from either hex or
+/// standard base64. Permissive on purpose — Python bridges emit hex,
+/// JS bridges often emit base64, and both are safe to accept.
+fn decode_bytes(s: &str) -> Result<Vec<u8>, String> {
+    let trimmed = s.trim();
+    // Try hex first (even-length, all hex digits)
+    if !trimmed.is_empty()
+        && trimmed.len() % 2 == 0
+        && trimmed.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        let mut out = Vec::with_capacity(trimmed.len() / 2);
+        for i in (0..trimmed.len()).step_by(2) {
+            let byte = u8::from_str_radix(&trimmed[i..i + 2], 16)
+                .map_err(|e| format!("hex decode: {e}"))?;
+            out.push(byte);
+        }
+        return Ok(out);
+    }
+    // Fall back to base64 (permissive: accept both URL-safe and standard).
+    base64_decode_permissive(trimmed)
+}
+
+fn base64_decode_permissive(s: &str) -> Result<Vec<u8>, String> {
+    // Minimal base64 decoder — sufficient for 32/64 byte keys. Accepts
+    // both `+/` and `-_` alphabets. Padding `=` optional.
+    let mut buf: u32 = 0;
+    let mut bits: u8 = 0;
+    let mut out = Vec::with_capacity((s.len() * 3) / 4 + 2);
+    for c in s.chars() {
+        if c == '=' {
+            break;
+        }
+        let v: u32 = match c {
+            'A'..='Z' => (c as u32) - ('A' as u32),
+            'a'..='z' => (c as u32) - ('a' as u32) + 26,
+            '0'..='9' => (c as u32) - ('0' as u32) + 52,
+            '+' | '-' => 62,
+            '/' | '_' => 63,
+            '\n' | '\r' | ' ' | '\t' => continue,
+            _ => return Err(format!("invalid base64 char: {c:?}")),
+        };
+        buf = (buf << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buf >> bits) & 0xFF) as u8);
+        }
+    }
+    Ok(out)
+}
+
+/// Verify an Ed25519 signature for a given agent_id against the
+/// canonical signed payload. Returns Ok on valid, Err with a message
+/// otherwise. Always rejects if the agent_id is not registered.
+fn verify_agent_signature(
+    kernel: &Kernel<NativePlatform>,
+    actor_id: &str,
+    signature_str: &str,
+    payload: &[u8],
+) -> Result<(), String> {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+    let agent = kernel
+        .agent_registry()
+        .get(actor_id)
+        .ok_or_else(|| format!("unknown actor_id: {actor_id}"))?;
+    let sig_bytes = decode_bytes(signature_str).map_err(|e| format!("signature: {e}"))?;
+    if sig_bytes.len() != 64 {
+        return Err(format!(
+            "signature must be 64 bytes, got {}",
+            sig_bytes.len()
+        ));
+    }
+    let mut sig_arr = [0u8; 64];
+    sig_arr.copy_from_slice(&sig_bytes);
+    let sig = Signature::from_bytes(&sig_arr);
+    let vk = VerifyingKey::from_bytes(&agent.pubkey)
+        .map_err(|e| format!("stored pubkey invalid: {e}"))?;
+    vk.verify(payload, &sig)
+        .map_err(|e| format!("signature verify failed: {e}"))?;
+    Ok(())
+}
+
+/// Handle `agent.register`: verify proof-of-possession, insert the
+/// agent into the registry, and chain-append an `agent.registered`
+/// event.
+async fn handle_agent_register(
+    params: serde_json::Value,
+    kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
+) -> Response {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+    let p: crate::protocol::AgentRegisterParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(e) => return Response::error(format!("invalid params: {e}")),
+    };
+
+    // Decode pubkey + proof.
+    let pubkey_bytes = match decode_bytes(&p.pubkey) {
+        Ok(b) => b,
+        Err(e) => return Response::error(format!("pubkey decode: {e}")),
+    };
+    if pubkey_bytes.len() != 32 {
+        return Response::error(format!(
+            "pubkey must be 32 bytes, got {}",
+            pubkey_bytes.len()
+        ));
+    }
+    let mut pubkey_arr = [0u8; 32];
+    pubkey_arr.copy_from_slice(&pubkey_bytes);
+
+    let proof_bytes = match decode_bytes(&p.proof) {
+        Ok(b) => b,
+        Err(e) => return Response::error(format!("proof decode: {e}")),
+    };
+    if proof_bytes.len() != 64 {
+        return Response::error(format!(
+            "proof must be 64 bytes, got {}",
+            proof_bytes.len()
+        ));
+    }
+    let mut proof_arr = [0u8; 64];
+    proof_arr.copy_from_slice(&proof_bytes);
+
+    // Verify the proof-of-possession.
+    let payload = clawft_kernel::register_payload(&p.name, &pubkey_arr, p.ts);
+    let vk = match VerifyingKey::from_bytes(&pubkey_arr) {
+        Ok(vk) => vk,
+        Err(e) => return Response::error(format!("invalid pubkey: {e}")),
+    };
+    let sig = Signature::from_bytes(&proof_arr);
+    if let Err(e) = vk.verify(&payload, &sig) {
+        return Response::error(format!("proof-of-possession verify failed: {e}"));
+    }
+
+    let k = kernel.read().await;
+    let entry = k.agent_registry().register(p.name.clone(), pubkey_arr);
+
+    #[cfg(feature = "exochain")]
+    if let Some(cm) = k.chain_manager() {
+        cm.append(
+            "agent",
+            "agent.registered",
+            Some(serde_json::json!({
+                "agent_id": entry.agent_id,
+                "name": entry.name,
+                "pubkey_hex": hex_encode(&entry.pubkey),
+                "registered_at": entry.registered_at.to_rfc3339(),
+            })),
+        );
+    }
+
+    let pubkey_prefix = hex_encode(&entry.pubkey)[..16.min(entry.pubkey.len() * 2)].to_string();
+    k.event_log().info(
+        "agent",
+        format!(
+            "registered agent '{}' as {} (pubkey prefix {})",
+            entry.name, entry.agent_id, pubkey_prefix
+        ),
+    );
+    info!(
+        agent_id = %entry.agent_id,
+        name = %entry.name,
+        pubkey_prefix = %pubkey_prefix,
+        "agent.register: authorized"
+    );
+
+    Response::success(
+        serde_json::to_value(crate::protocol::AgentRegisterResult {
+            agent_id: entry.agent_id,
+            name: entry.name,
+        })
+        .unwrap(),
+    )
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// Handle `ipc.subscribe_stream`: register an external sink with the
+/// topic router and return the ack + receiver for the streaming loop.
+async fn handle_ipc_subscribe_stream(
+    params: serde_json::Value,
+    kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
+) -> Result<
+    (
+        Response,
+        String,
+        tokio::sync::mpsc::Receiver<Vec<u8>>,
+        Box<dyn FnOnce() + Send>,
+    ),
+    String,
+> {
+    let p: crate::protocol::IpcSubscribeStreamParams =
+        serde_json::from_value(params).map_err(|e| format!("invalid params: {e}"))?;
+
+    let k = kernel.read().await;
+
+    // If the caller provided an identity, verify the signature.
+    // Missing actor_id is accepted at bring-up but logged as a warn;
+    // missing signature for a declared actor is unauthorized.
+    if let Some(actor_id) = p.actor_id.as_ref() {
+        let sig = p
+            .signature
+            .as_ref()
+            .ok_or_else(|| "actor_id provided but signature missing".to_string())?;
+        let ts = p.ts.unwrap_or(0);
+        let payload = clawft_kernel::subscribe_payload(&p.topic, ts, actor_id);
+        verify_agent_signature(&k, actor_id, sig, &payload)
+            .map_err(|e| format!("unauthorized: {e}"))?;
+    } else {
+        tracing::warn!(
+            topic = %p.topic,
+            "ipc.subscribe_stream with no actor_id — anonymous subscribe accepted (bring-up only)"
+        );
+    }
+
+    // Bounded channel; a slow external client will see drops rather
+    // than backpressuring the kernel's in-process fanout path.
+    let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+
+    let router = k.a2a_router().topic_router().clone();
+    let id = router.subscribe_sink(
+        &p.topic,
+        clawft_kernel::SubscriberSink::ExternalStream(tx),
+    );
+    k.event_log().info(
+        "ipc",
+        format!(
+            "external client subscribed to '{}' (sub_id={}, actor_id={:?})",
+            p.topic, id.0, p.actor_id
+        ),
+    );
+
+    let topic = p.topic.clone();
+    let unsubscribe_topic = p.topic.clone();
+    let router_for_cleanup = router.clone();
+    let on_disconnect: Box<dyn FnOnce() + Send> = Box::new(move || {
+        router_for_cleanup.unsubscribe_id(&unsubscribe_topic, id);
+    });
+
+    let ack = Response::success(serde_json::json!({
+        "subscribed": p.topic,
+        "subscriber_id": id.0,
+        "streaming": true,
+    }));
+    Ok((ack, topic, rx, on_disconnect))
 }
 
 /// Handle an RVF-framed connection.
@@ -637,6 +1112,161 @@ async fn handle_rvf_connection(
             break;
         }
     }
+}
+
+/// Handle `substrate.subscribe`: streaming subscription over the
+/// substrate service. Mirrors [`handle_ipc_subscribe_stream`].
+async fn handle_substrate_subscribe(
+    params: serde_json::Value,
+    kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
+) -> Result<
+    (
+        Response,
+        String,
+        tokio::sync::mpsc::Receiver<Vec<u8>>,
+        Box<dyn FnOnce() + Send>,
+    ),
+    String,
+> {
+    let p: crate::protocol::SubstrateSubscribeParams =
+        serde_json::from_value(params).map_err(|e| format!("invalid params: {e}"))?;
+
+    let k = kernel.read().await;
+
+    if let Some(actor_id) = p.actor_id.as_ref() {
+        let sig = p
+            .signature
+            .as_ref()
+            .ok_or_else(|| "actor_id provided but signature missing".to_string())?;
+        let ts = p.ts.unwrap_or(0);
+        let payload = clawft_kernel::subscribe_payload(&p.path, ts, actor_id);
+        verify_agent_signature(&k, actor_id, sig, &payload)
+            .map_err(|e| format!("unauthorized: {e}"))?;
+    }
+
+    let substrate = k.substrate_service().clone();
+    let (id, rx) = substrate
+        .subscribe(p.actor_id.as_deref(), &p.path)
+        .map_err(|e| e.to_string())?;
+    k.event_log().info(
+        "substrate",
+        format!(
+            "external client subscribed to '{}' (sub_id={}, actor_id={:?})",
+            p.path, id.0, p.actor_id
+        ),
+    );
+
+    let path_for_ack = p.path.clone();
+    let path_for_cleanup = p.path.clone();
+    let substrate_for_cleanup = substrate.clone();
+    let on_disconnect: Box<dyn FnOnce() + Send> = Box::new(move || {
+        substrate_for_cleanup.unsubscribe(&path_for_cleanup, id);
+    });
+
+    let ack = Response::success(serde_json::json!({
+        "subscribed": p.path,
+        "subscriber_id": id.0,
+        "streaming": true,
+    }));
+    Ok((ack, path_for_ack, rx, on_disconnect))
+}
+
+/// Handle `substrate.read`: synchronous value + tick + sensitivity.
+async fn handle_substrate_read(
+    params: serde_json::Value,
+    kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
+) -> Response {
+    let p: crate::protocol::SubstrateReadParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(e) => return Response::error(format!("invalid params: {e}")),
+    };
+    let k = kernel.read().await;
+    match k.substrate_service().read(p.actor_id.as_deref(), &p.path) {
+        Ok(snap) => Response::success(
+            serde_json::to_value(crate::protocol::SubstrateReadResult {
+                value: snap.value,
+                tick: snap.tick,
+                sensitivity: snap.sensitivity.as_str().to_string(),
+            })
+            .unwrap(),
+        ),
+        Err(e) => Response::error(format!("unauthorized: {e}")),
+    }
+}
+
+/// Handle `substrate.publish`: Replace the path's value and fan out.
+async fn handle_substrate_publish(
+    params: serde_json::Value,
+    kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
+) -> Response {
+    let p: crate::protocol::SubstratePublishParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(e) => return Response::error(format!("invalid params: {e}")),
+    };
+    let k = kernel.read().await;
+
+    if let Some(actor_id) = p.actor_id.as_ref() {
+        let sig = match p.signature.as_ref() {
+            Some(s) => s,
+            None => {
+                return Response::error(
+                    "actor_id provided but signature missing".to_string(),
+                );
+            }
+        };
+        let ts = p.ts.unwrap_or(0);
+        // Sign over the serialized value bytes + path + ts + actor_id.
+        let value_bytes = serde_json::to_vec(&p.value).unwrap_or_default();
+        let value_str = String::from_utf8_lossy(&value_bytes);
+        let payload = clawft_kernel::publish_payload(&p.path, &value_str, ts, actor_id);
+        if let Err(e) = verify_agent_signature(&k, actor_id, sig, &payload) {
+            return Response::error(format!("unauthorized: {e}"));
+        }
+    }
+
+    let tick = k
+        .substrate_service()
+        .publish(p.actor_id.as_deref(), &p.path, p.value);
+    k.event_log().info(
+        "substrate",
+        format!("publish {} tick={} actor={:?}", p.path, tick, p.actor_id),
+    );
+    // Lifecycle visibility in `kernel.log`: only log the first window per
+    // path at INFO so live sensor streams don't flood. Subsequent writes
+    // stay at DEBUG for the same-path case.
+    if tick == 1 {
+        info!(
+            path = %p.path,
+            actor = ?p.actor_id,
+            signed = p.signature.is_some(),
+            "substrate.publish: stream started (first window on path)"
+        );
+    } else {
+        debug!(path = %p.path, tick, "substrate.publish");
+    }
+    Response::success(serde_json::json!({
+        "path": p.path,
+        "tick": tick,
+    }))
+}
+
+/// Handle `substrate.notify`: signal-only pulse, no payload change.
+async fn handle_substrate_notify(
+    params: serde_json::Value,
+    kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
+) -> Response {
+    let p: crate::protocol::SubstrateNotifyParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(e) => return Response::error(format!("invalid params: {e}")),
+    };
+    let k = kernel.read().await;
+    let tick = k
+        .substrate_service()
+        .notify(p.actor_id.as_deref(), &p.path);
+    Response::success(serde_json::json!({
+        "path": p.path,
+        "tick": tick,
+    }))
 }
 
 /// Dispatch a request to the appropriate handler.
@@ -742,6 +1372,97 @@ async fn dispatch(
             info!("shutdown requested via RPC");
             let _ = shutdown_tx.send(true);
             Response::success(serde_json::json!("shutting down"))
+        }
+        // ── M1.5.1a: admin-app write verbs (ADR-015 influences) ────
+        //
+        // These are the two verbs the WeftOS Admin surface declares
+        // influence over in `crates/clawft-app/fixtures/weftos-admin.toml`
+        // and binds as affordances on the process table + service
+        // gauges in `crates/clawft-surface/fixtures/weftos-admin-desktop.toml`.
+        //
+        // Governance intersection is stubbed at the compositor level
+        // (ADR-006 §2 — honest governance lands with M2's active-radar
+        // loop). The daemon's own capability check still applies via
+        // `k.supervisor()` + `k.services()`.
+        "kernel.kill-process" => {
+            let pid = match params.get("pid").and_then(|v| v.as_u64()) {
+                Some(p) => p,
+                None => {
+                    return Response::error(
+                        "kernel.kill-process: missing or non-integer `pid`".to_string(),
+                    );
+                }
+            };
+            let graceful = params
+                .get("graceful")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let k = kernel.read().await;
+            match k.supervisor().stop(pid, graceful) {
+                Ok(()) => {
+                    k.event_log().info(
+                        "kernel",
+                        format!(
+                            "kill-process PID {pid} ({})",
+                            if graceful { "graceful" } else { "force" }
+                        ),
+                    );
+                    Response::success(serde_json::json!({ "pid": pid, "graceful": graceful }))
+                }
+                Err(e) => Response::error(format!("kill-process failed: {e}")),
+            }
+        }
+        "kernel.restart-service" => {
+            let name = match params.get("name").and_then(|v| v.as_str()) {
+                Some(n) if !n.is_empty() => n.to_string(),
+                _ => {
+                    return Response::error(
+                        "kernel.restart-service: missing or empty `name`".to_string(),
+                    );
+                }
+            };
+            let k = kernel.read().await;
+            // Preferred path: service has an owner agent, restart via
+            // supervisor (re-uses the full agent-restart lineage).
+            if let Some(pid) = k.services().resolve_target(&name) {
+                match k.supervisor().restart(pid) {
+                    Ok(result) => {
+                        let _ = k.process_table().update_state(
+                            result.pid,
+                            clawft_kernel::ProcessState::Running,
+                        );
+                        k.event_log().info(
+                            "kernel",
+                            format!(
+                                "restart-service {name} (PID {pid} -> {})",
+                                result.pid
+                            ),
+                        );
+                        return Response::success(serde_json::json!({
+                            "name": name,
+                            "old_pid": pid,
+                            "new_pid": result.pid,
+                        }));
+                    }
+                    Err(e) => {
+                        return Response::error(format!("restart-service failed: {e}"));
+                    }
+                }
+            }
+            // Fallback path: SystemService without an owner agent (e.g.
+            // external / infrastructure services). Stop then start.
+            if let Some(svc) = k.services().get(&name) {
+                if let Err(e) = svc.stop().await {
+                    return Response::error(format!("restart-service stop failed: {e}"));
+                }
+                if let Err(e) = svc.start().await {
+                    return Response::error(format!("restart-service start failed: {e}"));
+                }
+                k.event_log()
+                    .info("kernel", format!("restart-service {name} (no owner pid)"));
+                return Response::success(serde_json::json!({ "name": name }));
+            }
+            Response::error(format!("restart-service: unknown service `{name}`"))
         }
         "cluster.status" => {
             let k = kernel.read().await;
@@ -1187,6 +1908,10 @@ async fn dispatch(
             #[cfg(not(feature = "exochain"))]
             Response::error("exochain feature not enabled")
         }
+        "agent.register" => handle_agent_register(params, kernel).await,
+        "substrate.read" => handle_substrate_read(params, kernel).await,
+        "substrate.publish" => handle_substrate_publish(params, kernel).await,
+        "substrate.notify" => handle_substrate_notify(params, kernel).await,
         "agent.spawn" => {
             let spawn_params: AgentSpawnParams = match serde_json::from_value(params) {
                 Ok(p) => p,
@@ -1565,6 +2290,37 @@ async fn dispatch(
                 Err(e) => return Response::error(format!("invalid params: {e}")),
             };
             let k = kernel.read().await;
+
+            // Authenticate the publish if the caller supplied an
+            // identity. Missing actor_id is accepted for bring-up
+            // parity with existing clients; missing signature given
+            // an actor_id is unauthorized.
+            if let Some(actor_id) = pub_params.actor_id.as_ref() {
+                let sig = match pub_params.signature.as_ref() {
+                    Some(s) => s,
+                    None => {
+                        return Response::error(
+                            "actor_id provided but signature missing".to_string(),
+                        );
+                    }
+                };
+                let ts = pub_params.ts.unwrap_or(0);
+                let payload = clawft_kernel::publish_payload(
+                    &pub_params.topic,
+                    &pub_params.message,
+                    ts,
+                    actor_id,
+                );
+                if let Err(e) = verify_agent_signature(&k, actor_id, sig, &payload) {
+                    return Response::error(format!("unauthorized: {e}"));
+                }
+            } else {
+                tracing::warn!(
+                    topic = %pub_params.topic,
+                    "ipc.publish with no actor_id — anonymous publish accepted (bring-up only)"
+                );
+            }
+
             let a2a = k.a2a_router().clone();
 
             // Count all registered subscribers for reporting

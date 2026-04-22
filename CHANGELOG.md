@@ -5,6 +5,78 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.19] - 2026-04-22
+
+Rollup of the `development-0.7.0` work stream onto the 0.6 release line. Ships the M1.5 app-layer trilogy, the 21-item canon UI primitive system, the built-in system components, a sensor framework, ExoChain stream-anchor auditing, eight EML-swap learnable-model wirings, and two late kernel-plumbing fixes (cluster peer persistence + optional TCP IPC relay). Also merges forward the v0.6.18 graphify fix (originally cut on an orphan commit that never reached `master`).
+
+### Added
+
+#### M1.5 — App Layer Trilogy
+- **`clawft-app` crate** — manifest parser + JSON registry for declarative system apps.
+- **`clawft-substrate` crate** — kernel adapter refactor + substrate RPCs (`read`, `subscribe`, `publish`, `notify`). Relays externally-published paths to the GUI.
+- **`clawft-surface` crate** — description IR + composer + binding evaluator. New UI composer primitives: `ui://heatmap`, `ui://waveform`.
+- Unified `Mode` / `Input` / `OntologySnapshot` / `Permission` across surface / app / substrate.
+- Broke the `surface → gui-egui` dep cycle; wasm-gated substrate.
+- **WeftOS Admin app** — manifest + surface description + Desktop Apps section, rendered end-to-end from the surface IR, covered by integration test.
+
+#### Canon Primitive System (21 components)
+- `CanonWidget` trait + `CanonResponse` + `Pressable` reference implementation.
+- Retrofit pass: 7–8 existing blocks wrapped in the trait.
+- New primitives: Field / Toggle / Select / Slider / Grid / Dock / Sheet / Modal / Media / Canvas / Tabs (11).
+- Canon demo lab — 20 primitive demos in the WeftOS panel.
+
+#### GUI + VSCode Extension
+- `clawft-gui-egui` now compiles to `wasm32-unknown-unknown`.
+- VSCode extension (`weft-panel`) hosts the egui bundle in Cursor.
+- Tray chips open ontology-backed detail panels.
+- ToF tray chip with native 8×8 heatmap panel.
+- WeftOS theming + `weft-demo-lab` bin hosting egui's full demo; demo lab Fractal / HTTP / 3D / Color tabs + theme-toggle A/B.
+- M1 wasm-compat polish: web-time, PNG logo, extension hotload.
+
+#### M1.5.1 — Built-in System Components (α)
+- `NetworkAdapter` — WiFi/ethernet/battery via `/sys/class`.
+- `BluetoothAdapter` — host-local via `/sys/class`.
+- Mesh + chain adapters; dropped the DeFi vapor chip.
+- Admin-app affordances end-to-end + layout polish.
+- wasm-safe `SystemTime` in `clawft-app` registry.
+
+#### Sensor Framework
+- `PhysicalSensorAdapter` trait.
+- `MicrophoneAdapter` preview + extension RPC allowlist extension.
+
+#### ExoChain + IPC
+- **StreamWindowCommit anchor service** — large streams (audio PCM, sensor batches) now auditable against the chain without bloating `rvf` with per-frame signatures. BLAKE3 rolling window commits.
+- **`agent.register` + signed IPC envelopes** for cross-agent message integrity.
+- **`ipc.subscribe_stream`** — external-socket streaming subscribers.
+- **`[kernel.ipc_tcp]`** — optional TCP relay for the daemon's JSON-RPC socket. Transparent byte-copy to the unix socket for Windows/WSL and remote bridges. Auth/policy stays on the unix path.
+
+#### Kernel
+- **Cluster peer persistence** — `ClusterMembership` persists to `.weftos/runtime/cluster_peers.json` via atomic tmp+rename on every add/remove/state-change, and rehydrates on boot. Fixes the regression where `weaver kernel start` reported `cluster: degraded - no healthy cluster nodes` after every restart because the in-memory peer map was wiped.
+- **`clawft-treecalc` crate** — lifts `Form` + triage into its own module.
+
+#### EML-Swap Learnable-Model Wirings (Finding #5 + #7 + #9)
+Eight learnable models replace hard-coded constants:
+- `GovernanceScorerModel` in `EffectVector::score`
+- `RestartStrategyModel` in `RestartTracker`
+- `HealthThresholdModel` in `ProbeConfig`
+- `DeadLetterModel` in `ReliableQueue`
+- `GossipTimingModel` in `ClusterConfig`
+- `ComplexityModel` in `ComplexityAnalyzer`
+- `TickIntervalModel` in `WeaverEngine`
+- `CausalEdgeType` decay treecalc dispatch
+
+### Fixed
+
+- **democritus**: stopped busy-looping the stuck detector; swapped exact-path to RFF.
+- **m1.5-surface**: parser RHS-loss on subtraction + count arity + scope docs.
+- **m1.5-substrate**: log ring trim + watermark overflow safety + tracked subscriptions.
+- **LLM retry**: `RetryModel` wired into `RetryPolicy` via `with_model()`.
+
+### Known Issues
+
+- Pre-existing workspace clippy debt (~150 errors across `clawft-types/src/goal.rs`, `clawft-rpc`, `eml-core`, and some older kernel/weave code). `scripts/build.sh check` is green; `scripts/build.sh clippy` is red on pre-existing code.
+- One test in `clawft-kernel --lib` full suite hangs when run aggregate; targeted runs pass. Tracked separately.
+
 ## [0.6.18] - 2026-04-19
 
 ### Fixed

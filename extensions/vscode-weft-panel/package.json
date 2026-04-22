@@ -1,0 +1,38 @@
+{
+  "name": "vscode-weft-panel",
+  "displayName": "WeftOS Dev Panel",
+  "description": "M0 dev-panel: proves the daemon <-> extension <-> webview loop for WeftOS.",
+  "version": "0.0.1",
+  "publisher": "weavelogic",
+  "private": true,
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onCommand:weft.openPanel",
+    "onWebviewPanel:weft.panel"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "weft.openPanel",
+        "title": "WeftOS: Open Panel",
+        "category": "WeftOS"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}

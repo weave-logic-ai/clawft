@@ -1,0 +1,11 @@
+id: region_2_labor_shock
+description: Minimum-wage increase raises labor-hours cost by 12% in region-2
+template: labor_shock
+brand: null
+metro: null
+region: region-2
+week_index: null
+day_range: [0, 30]
+revenue_factor: 1.0
+labor_factor: 1.12
+promo_id_to_pull: null

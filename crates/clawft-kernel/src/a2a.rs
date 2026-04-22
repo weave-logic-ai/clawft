@@ -29,7 +29,7 @@ use crate::error::{KernelError, KernelResult};
 use crate::ipc::{KernelMessage, MessageTarget};
 use crate::process::{Pid, ProcessState, ProcessTable};
 use crate::service::ServiceRegistry;
-use crate::topic::TopicRouter;
+use crate::topic::{SubscriberSink, TopicRouter};
 
 #[cfg(feature = "exochain")]
 use crate::chain::ChainManager;
@@ -284,16 +284,81 @@ impl A2ARouter {
                 self.deliver_to_inbox(*target_pid, msg).await
             }
             MessageTarget::Topic(topic) => {
-                let subscribers = self.topic_router.live_subscribers(topic);
+                let sinks = self.topic_router.live_sinks(topic);
                 let mut delivered = 0u32;
-                for &sub_pid in &subscribers {
-                    if sub_pid != from {
-                        let msg_clone = msg.clone();
-                        if self.deliver_to_inbox(sub_pid, msg_clone).await.is_ok() {
-                            delivered += 1;
+
+                // Serialize the message once for external streaming
+                // subscribers; only build this if at least one
+                // external sink exists so the fast path is unaffected.
+                let mut external_line: Option<Vec<u8>> = None;
+                if sinks
+                    .iter()
+                    .any(|(_, s)| matches!(s, SubscriberSink::ExternalStream(_)))
+                {
+                    if let Ok(mut bytes) = serde_json::to_vec(&msg) {
+                        bytes.push(b'\n');
+                        external_line = Some(bytes);
+                    }
+                }
+
+                for (_id, sink) in &sinks {
+                    match sink {
+                        SubscriberSink::PidInbox(sub_pid) => {
+                            if *sub_pid != from {
+                                let msg_clone = msg.clone();
+                                if self.deliver_to_inbox(*sub_pid, msg_clone).await.is_ok() {
+                                    delivered += 1;
+                                }
+                            }
+                        }
+                        SubscriberSink::ExternalStream(tx) => {
+                            if let Some(line) = external_line.as_ref() {
+                                // Best-effort delivery; a full or closed
+                                // channel drops the message for that
+                                // client (the daemon will prune on the
+                                // next publish via live_sinks).
+                                match tx.try_send(line.clone()) {
+                                    Ok(()) => {
+                                        delivered += 1;
+                                    }
+                                    Err(e) => {
+                                        warn!(topic, error = %e, "external stream drop");
+                                    }
+                                }
+                            }
                         }
                     }
                 }
+
+                // Forward to mesh peers that registered a subscription for
+                // this topic via a `mesh.subscribe` control envelope.
+                #[cfg(feature = "mesh")]
+                if let Some(runtime) = self.mesh_runtime.get() {
+                    let peer_ids = runtime.peers_for_topic(topic);
+                    let mut mesh_delivered = 0u32;
+                    for peer_id in &peer_ids {
+                        let envelope = MeshIpcEnvelope::new(
+                            runtime.node_id().to_string(),
+                            peer_id.clone(),
+                            msg.clone(),
+                        );
+                        match runtime.send_to_peer(peer_id, envelope).await {
+                            Ok(()) => mesh_delivered += 1,
+                            Err(e) => {
+                                warn!(
+                                    topic,
+                                    peer = %peer_id,
+                                    error = %e,
+                                    "failed to forward topic to mesh peer"
+                                );
+                            }
+                        }
+                    }
+                    if mesh_delivered > 0 {
+                        debug!(from, topic, mesh_delivered, "forwarded topic to mesh peers");
+                    }
+                }
+
                 debug!(from, topic, delivered, "published to topic");
                 Ok(())
             }
@@ -676,6 +741,43 @@ mod tests {
         // Subscribers should receive
         assert!(receivers[1].try_recv().is_ok());
         assert!(receivers[2].try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn topic_publish_delivers_to_external_stream() {
+        let (router, pids, _receivers) = setup_router(1);
+
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(8);
+        let _id = router
+            .topic_router()
+            .subscribe_sink("events", SubscriberSink::ExternalStream(tx));
+
+        let msg = KernelMessage::text(pids[0], MessageTarget::Topic("events".into()), "hi");
+        router.send(msg).await.unwrap();
+
+        // External stream receives a JSON line terminated by '\n'.
+        let line = rx.try_recv().expect("external stream should receive message");
+        assert!(line.ends_with(b"\n"));
+        let trimmed = std::str::from_utf8(&line[..line.len() - 1]).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(trimmed).unwrap();
+        assert_eq!(parsed["from"], pids[0]);
+    }
+
+    #[tokio::test]
+    async fn topic_publish_fans_out_to_pid_and_external() {
+        let (router, pids, mut receivers) = setup_router(2);
+        router.topic_router().subscribe(pids[1], "events");
+
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(8);
+        router
+            .topic_router()
+            .subscribe_sink("events", SubscriberSink::ExternalStream(tx));
+
+        let msg = KernelMessage::text(pids[0], MessageTarget::Topic("events".into()), "both");
+        router.send(msg).await.unwrap();
+
+        assert!(receivers[1].try_recv().is_ok(), "pid subscriber missed");
+        assert!(rx.try_recv().is_ok(), "external subscriber missed");
     }
 
     #[tokio::test]

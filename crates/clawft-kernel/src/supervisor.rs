@@ -98,11 +98,53 @@ impl RestartTracker {
     /// Calculate the next backoff delay in milliseconds.
     ///
     /// Exponential backoff: 100ms * 2^(restart_count - 1), capped at 30s.
+    ///
+    /// Preserved as the hardcoded fallback. See
+    /// [`Self::next_backoff_ms_with_model`] for the EML-aware variant
+    /// used by the supervisor. The fallback remains reachable so
+    /// callers without a model (and every existing test) behave
+    /// identically.
     pub fn next_backoff_ms(&self) -> u64 {
         let base: u64 = 100;
         let exponent = self.restart_count.saturating_sub(1);
         let delay = base.saturating_mul(1u64 << exponent.min(20));
         delay.min(30_000)
+    }
+
+    /// Calculate the next backoff delay, consulting an optional
+    /// [`RestartStrategyModel`](crate::eml_kernel::RestartStrategyModel).
+    ///
+    /// When `model` is `None` or untrained, this returns the same
+    /// exponential-backoff value as [`Self::next_backoff_ms`] (the
+    /// model's `predict` falls back to the identical formula when
+    /// `!is_trained`). When trained, the model's learned delay is used
+    /// instead.
+    ///
+    /// `failure_type` is the error-kind ordinal (0 = unknown / default
+    /// when the caller doesn't track failure kinds), `uptime_secs` is
+    /// the agent uptime before the failure, and `system_load` is a
+    /// normalised 0.0-1.0 load signal.
+    ///
+    /// NOTE(eml-swap): wired — Finding #5 (RestartStrategyModel).
+    pub fn next_backoff_ms_with_model(
+        &self,
+        model: Option<&crate::eml_kernel::RestartStrategyModel>,
+        failure_type: u32,
+        uptime_secs: f64,
+        system_load: f64,
+    ) -> u64 {
+        match model {
+            Some(m) => {
+                let (delay, _should_retry) = m.predict(
+                    self.restart_count,
+                    failure_type,
+                    uptime_secs,
+                    system_load,
+                );
+                delay
+            }
+            None => self.next_backoff_ms(),
+        }
     }
 
     /// Check if the restart budget window has expired and reset if so.
@@ -120,6 +162,30 @@ impl RestartTracker {
         self.check_window(budget);
         self.restart_count += 1;
         self.backoff_ms = self.next_backoff_ms();
+        self.last_restart = Some(std::time::Instant::now());
+        self.restart_count <= budget.max_restarts
+    }
+
+    /// Record a restart attempt with an optional learned
+    /// [`RestartStrategyModel`](crate::eml_kernel::RestartStrategyModel).
+    ///
+    /// Behaviour is identical to [`Self::record_restart`] when `model`
+    /// is `None` or untrained; when trained, the computed
+    /// `backoff_ms` is sourced from the model.
+    ///
+    /// NOTE(eml-swap): wired — Finding #5 (RestartStrategyModel).
+    pub fn record_restart_with_model(
+        &mut self,
+        budget: &RestartBudget,
+        model: Option<&crate::eml_kernel::RestartStrategyModel>,
+        failure_type: u32,
+        uptime_secs: f64,
+        system_load: f64,
+    ) -> bool {
+        self.check_window(budget);
+        self.restart_count += 1;
+        self.backoff_ms =
+            self.next_backoff_ms_with_model(model, failure_type, uptime_secs, system_load);
         self.last_restart = Some(std::time::Instant::now());
         self.restart_count <= budget.max_restarts
     }
@@ -1950,6 +2016,81 @@ mod tests {
 
             tracker.record_restart(&budget);
             assert!(tracker.last_restart.is_some());
+        }
+
+        #[test]
+        fn tracker_with_untrained_model_matches_hardcoded() {
+            // Finding #5: untrained RestartStrategyModel must reproduce
+            // the exponential-backoff formula bit-for-bit.
+            let model = crate::eml_kernel::RestartStrategyModel::new();
+            assert!(!model.is_trained());
+            let mut tracker = RestartTracker::new();
+            let budget = RestartBudget::default();
+
+            for _ in 0..5 {
+                tracker.check_window(&budget);
+                tracker.restart_count += 1;
+                let hardcoded = tracker.next_backoff_ms();
+                let via_model = tracker.next_backoff_ms_with_model(
+                    Some(&model),
+                    0,
+                    60.0,
+                    0.5,
+                );
+                assert_eq!(
+                    hardcoded, via_model,
+                    "untrained model must reproduce hardcoded backoff at count {}",
+                    tracker.restart_count
+                );
+            }
+        }
+
+        #[test]
+        fn tracker_with_trained_model_uses_prediction() {
+            // Finding #5: with a trained RestartStrategyModel the
+            // backoff must come from the model, not the formula. We
+            // force the trained flag via JSON patch.
+            let model = crate::eml_kernel::RestartStrategyModel::new();
+            let mut json = serde_json::to_value(&model).unwrap();
+            if let Some(inner) = json.get_mut("inner").and_then(|v| v.as_object_mut()) {
+                inner.insert("trained".into(), serde_json::Value::Bool(true));
+            }
+            let forced: crate::eml_kernel::RestartStrategyModel =
+                serde_json::from_value(json).unwrap();
+            assert!(forced.is_trained());
+
+            let mut tracker = RestartTracker::new();
+            tracker.restart_count = 3; // would give 400ms hardcoded
+
+            let hardcoded = tracker.next_backoff_ms();
+            let via_model = tracker.next_backoff_ms_with_model(
+                Some(&forced),
+                0,
+                60.0,
+                0.5,
+            );
+            assert_eq!(hardcoded, 400);
+            // With zero-param trained model the prediction differs
+            // from the formula — invariant is that the branch fires.
+            assert_ne!(hardcoded, via_model);
+        }
+
+        #[test]
+        fn tracker_record_with_model_matches_plain_when_untrained() {
+            // Finding #5: record_restart_with_model(untrained) must
+            // produce the same `backoff_ms` as plain record_restart.
+            let model = crate::eml_kernel::RestartStrategyModel::new();
+            let budget = RestartBudget::default();
+
+            let mut baseline = RestartTracker::new();
+            let mut wired = RestartTracker::new();
+
+            for _ in 0..4 {
+                baseline.record_restart(&budget);
+                wired.record_restart_with_model(&budget, Some(&model), 0, 60.0, 0.5);
+                assert_eq!(baseline.backoff_ms, wired.backoff_ms);
+                assert_eq!(baseline.restart_count, wired.restart_count);
+            }
         }
 
         // ── K1-G3: Resource enforcement tests ───────────────────

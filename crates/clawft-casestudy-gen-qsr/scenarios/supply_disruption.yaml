@@ -1,0 +1,12 @@
+id: region_1_supply_disruption
+description: Region-1 brand-a stores hit by a signature-item supply disruption, 10 days
+template: supply_disruption
+brand: brand-a
+metro: null
+region: region-1
+week_index: null
+day_range: [5, 15]
+revenue_factor: 0.82
+labor_factor: 1.0
+promo_id_to_pull: null
+closed_store_labels: null

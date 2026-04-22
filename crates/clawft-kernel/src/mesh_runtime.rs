@@ -11,7 +11,7 @@ use tracing::{debug, warn};
 
 use crate::a2a::A2ARouter;
 use crate::error::{KernelError, KernelResult};
-use crate::ipc::{KernelMessage, MessageTarget};
+use crate::ipc::{KernelMessage, MessagePayload, MessageTarget};
 use crate::mesh_chain::{ChainSyncRequest, ChainSyncResponse};
 use crate::mesh_heartbeat::{ClockSource, HeartbeatConfig, HeartbeatTracker, MeshClockSync};
 use crate::mesh_ipc::MeshIpcEnvelope;
@@ -62,6 +62,12 @@ pub struct MeshRuntime {
     /// activity is auditable via `weaver chain local`.
     #[cfg(feature = "exochain")]
     chain_manager: std::sync::OnceLock<Arc<crate::chain::ChainManager>>,
+    /// Peer topic subscription registry: topic → set of peer node IDs.
+    ///
+    /// Populated when a peer sends a `mesh.subscribe` control envelope.
+    /// Consulted by the A2A router's Topic handler to forward published
+    /// messages to remote nodes that subscribed to the same topic.
+    mesh_subscriptions: DashMap<String, Vec<String>>,
 }
 
 impl MeshRuntime {
@@ -75,6 +81,7 @@ impl MeshRuntime {
             clock: std::sync::Mutex::new(MeshClockSync::new(ClockSource::Local)),
             #[cfg(feature = "exochain")]
             chain_manager: std::sync::OnceLock::new(),
+            mesh_subscriptions: DashMap::new(),
         }
     }
 
@@ -95,6 +102,7 @@ impl MeshRuntime {
             clock: std::sync::Mutex::new(MeshClockSync::new(ClockSource::Local)),
             #[cfg(feature = "exochain")]
             chain_manager: std::sync::OnceLock::new(),
+            mesh_subscriptions: DashMap::new(),
         }
     }
 
@@ -106,6 +114,54 @@ impl MeshRuntime {
     /// Attach the local A2A router for incoming message injection.
     pub fn set_local_router(&mut self, router: Arc<A2ARouter>) {
         self.local_router = Some(router);
+    }
+
+    // ── Peer topic subscription registry ─────────────────────────
+
+    /// Register a remote peer as a subscriber for the given topic.
+    ///
+    /// Called from [`handle_incoming`] when a `mesh.subscribe` control
+    /// envelope is received. De-duplicates: if the peer is already
+    /// registered for this topic, the call is a no-op.
+    pub fn register_peer_topic(&self, topic: &str, peer_node_id: &str) {
+        let mut entry = self
+            .mesh_subscriptions
+            .entry(topic.to_string())
+            .or_default();
+        if !entry.contains(&peer_node_id.to_string()) {
+            entry.push(peer_node_id.to_string());
+            debug!(topic, peer = %peer_node_id, "registered peer topic subscription");
+        }
+    }
+
+    /// Remove a peer's subscription for the given topic.
+    ///
+    /// Called when a peer disconnects or sends an explicit unsubscribe.
+    pub fn unregister_peer_topic(&self, topic: &str, peer_node_id: &str) {
+        if let Some(mut subs) = self.mesh_subscriptions.get_mut(topic) {
+            subs.retain(|id| id != peer_node_id);
+        }
+    }
+
+    /// Remove all topic subscriptions for the given peer.
+    ///
+    /// Called when `disconnect_peer` is invoked so stale entries are
+    /// cleaned up and future publishes don't attempt dead channels.
+    pub fn unregister_all_peer_topics(&self, peer_node_id: &str) {
+        for mut entry in self.mesh_subscriptions.iter_mut() {
+            entry.retain(|id| id != peer_node_id);
+        }
+    }
+
+    /// Return the list of peer node IDs subscribed to the given topic.
+    ///
+    /// Used by the A2A router's Topic handler to forward published
+    /// messages to remote nodes.
+    pub fn peers_for_topic(&self, topic: &str) -> Vec<String> {
+        self.mesh_subscriptions
+            .get(topic)
+            .map(|subs| subs.clone())
+            .unwrap_or_default()
     }
 
     /// Attach the ExoChain manager for auditable peer-envelope logging.
@@ -188,7 +244,35 @@ impl MeshRuntime {
     pub async fn handle_incoming(&self, data: &[u8]) -> KernelResult<()> {
         let envelope = MeshIpcEnvelope::from_bytes(data)
             .map_err(|e| KernelError::Mesh(format!("deserialization error: {e}")))?;
+        self.handle_envelope(envelope).await
+    }
 
+    /// Handle incoming bytes while auto-registering the sending peer.
+    ///
+    /// Used by the mesh accept loop: the kernel doesn't know the peer's
+    /// node ID until the first envelope arrives, so we opportunistically
+    /// register `envelope.source_node → outbound` before dispatching.
+    /// Idempotent — a no-op if the peer is already registered under the
+    /// same ID. This is what wires `A2ARouter` topic forwarding to
+    /// inbound leaf subscribers (they send `mesh.subscribe`, then the
+    /// kernel can call `send_to_peer` back over this connection).
+    pub async fn handle_incoming_from(
+        &self,
+        data: &[u8],
+        outbound: tokio::sync::mpsc::Sender<Vec<u8>>,
+    ) -> KernelResult<()> {
+        let envelope = MeshIpcEnvelope::from_bytes(data)
+            .map_err(|e| KernelError::Mesh(format!("deserialization error: {e}")))?;
+
+        if !self.peers.contains_key(&envelope.source_node) {
+            debug!(peer = %envelope.source_node, "auto-registering inbound peer");
+            self.add_peer(envelope.source_node.clone(), outbound);
+        }
+
+        self.handle_envelope(envelope).await
+    }
+
+    async fn handle_envelope(&self, envelope: MeshIpcEnvelope) -> KernelResult<()> {
         debug!(
             from_node = %envelope.source_node,
             dest_node = %envelope.dest_node,
@@ -235,6 +319,30 @@ impl MeshRuntime {
             message.target = *target;
         }
 
+        // Intercept mesh.subscribe control envelopes before local routing.
+        //
+        // A peer sends `Topic("mesh.subscribe")` with a JSON payload of the
+        // form `{"topic": "<topic-name>"}` to register interest. We record
+        // the subscription and consume the message — it does not propagate
+        // to the local router or any local subscribers.
+        if let MessageTarget::Topic(ref ctrl_topic) = message.target {
+            if ctrl_topic == "mesh.subscribe" {
+                if let MessagePayload::Json(ref payload) = message.payload {
+                    if let Some(topic) = payload.get("topic").and_then(|v| v.as_str()) {
+                        self.register_peer_topic(topic, &envelope.source_node);
+                        return Ok(());
+                    }
+                }
+                // Malformed subscribe — drop silently rather than routing to
+                // local subscribers who have no idea what to do with it.
+                warn!(
+                    from = %envelope.source_node,
+                    "received malformed mesh.subscribe envelope (missing 'topic' field)"
+                );
+                return Ok(());
+            }
+        }
+
         router.send(message).await
     }
 
@@ -252,8 +360,12 @@ impl MeshRuntime {
     }
 
     /// Disconnect a peer, dropping its send channel.
+    ///
+    /// Also cleans up any topic subscriptions the peer registered so
+    /// future publishes don't attempt to send to a closed channel.
     pub fn disconnect_peer(&self, node_id: &str) {
         if self.peers.remove(node_id).is_some() {
+            self.unregister_all_peer_topics(node_id);
             debug!(peer = %node_id, "disconnected peer");
         } else {
             warn!(peer = %node_id, "disconnect_peer: peer not found");
@@ -899,5 +1011,83 @@ mod tests {
         let rt = MeshRuntime::new("sync-node".into());
         let err = rt.handle_chain_sync_response(b"bad json").unwrap_err();
         assert!(err.to_string().contains("chain sync deserialize"));
+    }
+
+    // ── Test 23: inbound peer auto-registered, topic forwarded ───
+
+    /// End-to-end: a leaf peer sends a `mesh.subscribe` envelope over
+    /// an inbound connection; the kernel auto-registers the peer, records
+    /// the subscription, and then forwards a locally-published topic
+    /// message back through the peer's outbound channel.
+    #[tokio::test]
+    async fn subscribe_then_topic_forwards_to_inbound_peer() {
+        let (router, pid, _inbox) = make_router_with_process();
+
+        // Wire a mesh runtime to the router so the Topic handler's
+        // forwarder can see it.
+        let mut rt = MeshRuntime::new("kernel".into());
+        rt.set_local_router(router.clone());
+        let rt = Arc::new(rt);
+        router.set_mesh_runtime(rt.clone());
+
+        // Inbound peer's outbound channel (what the accept loop would drain).
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+
+        // Leaf sends mesh.subscribe to register interest in topic "push.leaf-x".
+        let sub_msg = KernelMessage::new(
+            pid,
+            MessageTarget::Topic("mesh.subscribe".into()),
+            MessagePayload::Json(serde_json::json!({"topic": "push.leaf-x"})),
+        );
+        let sub_env =
+            MeshIpcEnvelope::new("leaf-x".into(), "kernel".into(), sub_msg);
+        let sub_bytes = sub_env.to_bytes().unwrap();
+
+        rt.handle_incoming_from(&sub_bytes, out_tx.clone())
+            .await
+            .unwrap();
+
+        // Peer should now be registered in both the peer table and the
+        // subscription registry.
+        assert!(
+            rt.peer_ids().contains(&"leaf-x".to_string()),
+            "inbound peer should be auto-registered by source_node"
+        );
+        assert_eq!(rt.peers_for_topic("push.leaf-x"), vec!["leaf-x".to_string()]);
+
+        // Locally publish to the subscribed topic. The A2A router's Topic
+        // handler should forward to the mesh peer via send_to_peer.
+        let push = KernelMessage::new(
+            pid,
+            MessageTarget::Topic("push.leaf-x".into()),
+            MessagePayload::Text("hello-leaf".into()),
+        );
+        router.send(push).await.unwrap();
+
+        // The outbound drain should see the forwarded envelope.
+        let forwarded_bytes = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            out_rx.recv(),
+        )
+        .await
+        .expect("forward should arrive within timeout")
+        .expect("channel should not be closed");
+
+        let forwarded = MeshIpcEnvelope::from_bytes(&forwarded_bytes).unwrap();
+        assert_eq!(forwarded.source_node, "kernel");
+        assert_eq!(forwarded.dest_node, "leaf-x");
+        match &forwarded.message.target {
+            MessageTarget::Topic(t) => assert_eq!(t, "push.leaf-x"),
+            other => panic!("expected Topic target, got {other:?}"),
+        }
+        match &forwarded.message.payload {
+            MessagePayload::Text(s) => assert_eq!(s, "hello-leaf"),
+            other => panic!("expected Text payload, got {other:?}"),
+        }
+
+        // Disconnect should also clear the subscription, so a follow-up
+        // publish has nowhere to go.
+        rt.disconnect_peer("leaf-x");
+        assert!(rt.peers_for_topic("push.leaf-x").is_empty());
     }
 }

@@ -1,0 +1,73 @@
+# WeftOS Admin desktop variant (ADR-016 §10). The first real
+# reference panel for the M1.5 composer runtime.
+
+[[surfaces]]
+id     = "weftos-admin/desktop"
+modes  = ["desktop", "ide"]
+inputs = ["pointer", "hybrid"]
+title  = "WeftOS Admin"
+
+subscriptions = [
+  "substrate/kernel/status",
+  "substrate/kernel/processes",
+  "substrate/kernel/services",
+  "substrate/kernel/logs",
+]
+
+[surfaces.root]
+type  = "ui://grid"
+id    = "/root"
+attrs = { columns = 2 }
+
+# --- Quadrant 1: overview chips -------------------------------------
+[[surfaces.root.children]]
+type  = "ui://stack"
+id    = "/root/overview"
+attrs = { axis = "horizontal", wrap = true }
+
+[[surfaces.root.children.children]]
+type     = "ui://chip"
+id       = "/root/overview/status"
+bindings = { label = "$substrate/kernel/status.state", tone = "$substrate/kernel/status.state" }
+
+[[surfaces.root.children.children]]
+type     = "ui://chip"
+id       = "/root/overview/services-healthy"
+bindings = { label = "count($substrate/kernel/services, s -> s.status == \"healthy\")" }
+
+# --- Quadrant 2: process table --------------------------------------
+[[surfaces.root.children]]
+type     = "ui://table"
+id       = "/root/processes"
+attrs    = { columns = ["pid", "name", "cpu"] }
+bindings = { rows = "$substrate/kernel/processes" }
+
+  [[surfaces.root.children.affordances]]
+  name        = "kill"
+  verb        = "rpc.kernel.kill"
+  invocations = ["pointer", "voice"]
+  args_schema = "ontology://kernel/kill-process"
+
+# --- Quadrant 3: service gauges -------------------------------------
+[[surfaces.root.children]]
+type  = "ui://stack"
+id    = "/root/services"
+attrs = { axis = "vertical" }
+
+[[surfaces.root.children.children]]
+type     = "ui://gauge"
+id       = "/root/services/mesh-listener"
+bindings = { value = "$substrate/kernel/services/mesh-listener/cpu_percent", label = "$substrate/kernel/services/mesh-listener/status" }
+attrs    = { min = 0.0, max = 100.0 }
+
+  [[surfaces.root.children.children.affordances]]
+  name        = "restart"
+  verb        = "rpc.kernel.restart-service"
+  invocations = ["pointer", "voice"]
+  args_schema = "ontology://kernel/restart-service"
+
+# --- Quadrant 4: log stream ------------------------------------------
+[[surfaces.root.children]]
+type     = "ui://stream-view"
+id       = "/root/logs"
+bindings = { stream = "$substrate/kernel/logs" }

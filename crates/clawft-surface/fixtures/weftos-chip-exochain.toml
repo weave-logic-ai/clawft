@@ -1,0 +1,43 @@
+# Tray-chip detail surface for the ExoChain chip.
+# Binds to `substrate/chain/status` (ChainAdapter, M1.5.1d). Chain
+# identity + monotonic counters. When the daemon lacks the `exochain`
+# feature, the adapter emits `{available: false, reason}` and every
+# field reads as Null — the chip row ends up empty, which is honest
+# signal ("chain is not wired") rather than a lie.
+
+[[surfaces]]
+id     = "weftos-chip/exochain"
+modes  = ["desktop"]
+inputs = ["pointer"]
+title  = "ExoChain"
+subscriptions = ["substrate/chain/status"]
+
+[surfaces.root]
+type  = "ui://stack"
+id    = "/root"
+attrs = { axis = "vertical" }
+
+  [[surfaces.root.children]]
+  type     = "ui://chip"
+  id       = "/root/chain-id"
+  bindings = { label = "$substrate/chain/status.chain_id" }
+
+  [[surfaces.root.children]]
+  type     = "ui://chip"
+  id       = "/root/sequence"
+  bindings = { label = "$substrate/chain/status.sequence" }
+
+  [[surfaces.root.children]]
+  type     = "ui://chip"
+  id       = "/root/event-count"
+  bindings = { label = "$substrate/chain/status.event_count" }
+
+  [[surfaces.root.children]]
+  type     = "ui://chip"
+  id       = "/root/checkpoint-count"
+  bindings = { label = "$substrate/chain/status.checkpoint_count" }
+
+  [[surfaces.root.children]]
+  type     = "ui://chip"
+  id       = "/root/last-hash"
+  bindings = { label = "$substrate/chain/status.last_hash" }

@@ -176,6 +176,48 @@ impl Default for ProbeConfig {
     }
 }
 
+#[cfg(feature = "os-patterns")]
+impl ProbeConfig {
+    /// Derive a [`ProbeConfig`] using an optional learned
+    /// [`HealthThresholdModel`](crate::eml_kernel::HealthThresholdModel).
+    ///
+    /// The model's two output heads `(degraded, failed)` map onto
+    /// `(success_threshold, failure_threshold)` respectively: the
+    /// `failed` head sets the number of consecutive probe failures
+    /// before the service is marked failed, and the `degraded` head
+    /// is treated as the number of consecutive successes required to
+    /// mark recovery (a higher value makes recovery more conservative).
+    ///
+    /// When `model` is `None` or untrained, returns
+    /// [`Self::default`] — i.e. `failure_threshold=3`,
+    /// `success_threshold=1` — exactly reproducing today's behaviour.
+    ///
+    /// `service_type`, `history_depth`, and `recent_latency_ms` feed
+    /// the EML model when it is trained; callers without those
+    /// signals can pass `(0, 0, 0.0)`.
+    ///
+    /// NOTE(eml-swap): wired — Finding #5 (HealthThresholdModel).
+    pub fn from_model(
+        model: Option<&crate::eml_kernel::HealthThresholdModel>,
+        service_type: u32,
+        history_depth: u32,
+        recent_latency_ms: f64,
+    ) -> Self {
+        match model {
+            Some(m) if m.is_trained() => {
+                let (degraded, failed) =
+                    m.predict(service_type, history_depth, recent_latency_ms);
+                Self {
+                    failure_threshold: failed,
+                    success_threshold: degraded.max(1),
+                    ..Self::default()
+                }
+            }
+            _ => Self::default(),
+        }
+    }
+}
+
 /// Tracks consecutive probe results for threshold-based decisions.
 #[cfg(feature = "os-patterns")]
 #[derive(Debug, Clone)]
@@ -403,6 +445,50 @@ mod tests {
             assert_eq!(config.readiness_interval_secs, 5);
             assert_eq!(config.failure_threshold, 3);
             assert_eq!(config.success_threshold, 1);
+        }
+
+        #[test]
+        fn probe_config_from_model_untrained_matches_default() {
+            // Finding #5: untrained HealthThresholdModel must reproduce
+            // the hardcoded defaults exactly.
+            let model = crate::eml_kernel::HealthThresholdModel::new();
+            assert!(!model.is_trained());
+
+            let from_none = ProbeConfig::from_model(None, 0, 0, 0.0);
+            let from_untrained = ProbeConfig::from_model(Some(&model), 0, 100, 50.0);
+            let defaults = ProbeConfig::default();
+
+            assert_eq!(from_none.failure_threshold, defaults.failure_threshold);
+            assert_eq!(from_none.success_threshold, defaults.success_threshold);
+            assert_eq!(
+                from_untrained.failure_threshold,
+                defaults.failure_threshold
+            );
+            assert_eq!(
+                from_untrained.success_threshold,
+                defaults.success_threshold
+            );
+        }
+
+        #[test]
+        fn probe_config_from_trained_model_uses_prediction() {
+            // Finding #5: with a trained HealthThresholdModel, the
+            // config thresholds are sourced from the model.
+            let model = crate::eml_kernel::HealthThresholdModel::new();
+            let mut json = serde_json::to_value(&model).unwrap();
+            if let Some(inner) = json.get_mut("inner").and_then(|v| v.as_object_mut()) {
+                inner.insert("trained".into(), serde_json::Value::Bool(true));
+            }
+            let forced: crate::eml_kernel::HealthThresholdModel =
+                serde_json::from_value(json).unwrap();
+            assert!(forced.is_trained());
+
+            let cfg = ProbeConfig::from_model(Some(&forced), 0, 100, 50.0);
+            // Thresholds are clamped to [1,20] inside the model.
+            assert!((1..=20).contains(&cfg.failure_threshold));
+            assert!((1..=20).contains(&cfg.success_threshold));
+            // failed >= degraded (enforced by HealthThresholdModel).
+            assert!(cfg.failure_threshold >= cfg.success_threshold);
         }
 
         #[test]

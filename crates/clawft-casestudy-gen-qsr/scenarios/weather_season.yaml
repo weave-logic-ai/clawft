@@ -1,0 +1,12 @@
+id: region_2_rainy_season
+description: Region-2 stores depressed 6% across a rainy-season stretch of 14 days
+template: weather_season
+brand: null
+metro: null
+region: region-2
+week_index: null
+day_range: [10, 24]
+revenue_factor: 0.94
+labor_factor: 1.0
+promo_id_to_pull: null
+closed_store_labels: null

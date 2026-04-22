@@ -1197,6 +1197,11 @@ pub struct WeaverEngine {
     tick_history: TickHistory,
     /// Current tick interval in milliseconds (Item 6).
     current_tick_interval_ms: u32,
+    /// Optional learned tick-interval recommender (Finding #7). When
+    /// `None` or untrained, [`Self::recommend_tick_interval`] uses
+    /// the original four-tier step-function. When trained, the
+    /// model's prediction overrides the step-function's choice.
+    tick_interval_model: Option<crate::eml_kernel::TickIntervalModel>,
 }
 
 impl WeaverEngine {
@@ -1223,7 +1228,31 @@ impl WeaverEngine {
             strategy_tracker: StrategyTracker::new(200),
             tick_history: TickHistory::new(500),
             current_tick_interval_ms: 1000,
+            tick_interval_model: None,
         }
+    }
+
+    /// Install a learned
+    /// [`TickIntervalModel`](crate::eml_kernel::TickIntervalModel)
+    /// (Finding #7). With a model installed,
+    /// [`Self::recommend_tick_interval`] consults the model after
+    /// computing its hardcoded step-function choice; the model
+    /// overrides only when trained, so the fallback is bit-for-bit
+    /// identical to today's behaviour.
+    ///
+    /// NOTE(eml-swap): wired — Finding #7 (TickIntervalModel).
+    pub fn set_tick_interval_model(
+        &mut self,
+        model: crate::eml_kernel::TickIntervalModel,
+    ) {
+        self.tick_interval_model = Some(model);
+    }
+
+    /// Returns a reference to the optional tick-interval model.
+    pub fn tick_interval_model(
+        &self,
+    ) -> Option<&crate::eml_kernel::TickIntervalModel> {
+        self.tick_interval_model.as_ref()
     }
 
     /// Create a WeaverEngine with a mock embedding provider (for tests).
@@ -2301,17 +2330,64 @@ impl WeaverEngine {
 
     /// Analyze recent tick history and recommend interval adjustment.
     ///
-    /// Looks at recent change frequency to determine if the tick interval
-    /// should be faster, slower, or idle. Thresholds:
-    /// - Frequent changes (>10/min): recommend 200ms (fast).
-    /// - Moderate changes (1-10/min): recommend 1000ms (default).
-    /// - Rare changes (<1/min): recommend 3000ms (slow).
-    /// - No changes for 100+ ticks: recommend 5000ms (idle mode).
+    /// The hardcoded step-function (preserved as the untrained
+    /// fallback) maps change-rate to interval as:
+    /// - Frequent changes (>10/min): 200ms (fast).
+    /// - Moderate changes (1-10/min): 1000ms (default).
+    /// - Rare changes (<1/min): 3000ms (slow).
+    /// - No changes for 100+ ticks: 5000ms (idle mode).
+    ///
+    /// NOTE(eml-swap): wired — Finding #7 (TickIntervalModel). When a
+    /// trained tick-interval model is installed via
+    /// [`Self::set_tick_interval_model`], its `(cpm, idle_ticks,
+    /// variance) -> recommended_ms` prediction overrides the step
+    /// function. Untrained models leave the step function untouched
+    /// so the fallback path is bit-for-bit identical.
     pub fn recommend_tick_interval(&self) -> TickRecommendation {
         let idle = self.tick_history.idle_ticks();
         let cpm = self.tick_history.changes_per_minute();
         let sample_count = self.tick_history.len();
 
+        // Step function — same logic as before, lifted into a small
+        // helper so the EML override has a clean fallback to consult.
+        let step = self.step_recommend_tick_interval(idle, cpm, sample_count);
+
+        let Some(model) = self.tick_interval_model.as_ref() else {
+            return step;
+        };
+        if !model.is_trained() {
+            return step;
+        }
+
+        // EML override — variance is the squared deviation of cpm
+        // from the moderate-tier midpoint (5/min), normalised by 100.
+        let variance = ((cpm - 5.0) * (cpm - 5.0) / 100.0).clamp(0.0, 1.0);
+        let predicted_ms =
+            model.recommend_or(cpm, idle as u64, variance, step.recommended_ms);
+        TickRecommendation {
+            recommended_ms: predicted_ms,
+            current_ms: step.current_ms,
+            reason: format!(
+                "EML tick-interval model (cpm={cpm:.2}, idle={idle}, var={variance:.3}); fallback was {fallback}ms",
+                fallback = step.recommended_ms
+            ),
+            changes_per_minute: cpm,
+            // Confidence borrowed from the step-function — the model
+            // is advisory and shares the same observability gate.
+            recommendation_confidence: step.recommendation_confidence,
+        }
+    }
+
+    /// Hardcoded step-function recommender — preserved verbatim from
+    /// the pre-EML implementation. Lifted into its own method so the
+    /// EML override in [`Self::recommend_tick_interval`] can reuse it
+    /// as the untrained fallback.
+    fn step_recommend_tick_interval(
+        &self,
+        idle: usize,
+        cpm: f64,
+        sample_count: usize,
+    ) -> TickRecommendation {
         // Not enough data to make a confident recommendation.
         if sample_count < 5 {
             return TickRecommendation {
@@ -4327,6 +4403,126 @@ mod tests {
             rec.recommended_ms,
             rec.changes_per_minute
         );
+    }
+
+    // ── Finding #7: TickIntervalModel wiring ──────────────────────
+
+    #[test]
+    fn tick_recommend_untrained_model_reproduces_step_function() {
+        // Finding #7: installing an untrained TickIntervalModel must
+        // not change the recommendation across all four step-function
+        // tiers (idle / fast / moderate / slow / insufficient-data).
+        for case in 0..5 {
+            let mut baseline = make_engine_mut();
+            let mut wired = make_engine_mut();
+            wired.set_tick_interval_model(crate::eml_kernel::TickIntervalModel::new());
+
+            // Drive the same tick_history into both engines.
+            match case {
+                0 => { /* leave empty for insufficient-data tier */ }
+                1 => {
+                    // Idle.
+                    for i in 0..110 {
+                        let res = CognitiveTickResult {
+                            tick_number: i,
+                            elapsed_ms: 10,
+                            budget_ms: 100,
+                            ..Default::default()
+                        };
+                        baseline.tick_history.record(res.clone());
+                        wired.tick_history.record(res);
+                    }
+                }
+                2 => {
+                    // High frequency.
+                    for i in 0..20 {
+                        let res = CognitiveTickResult {
+                            tick_number: i,
+                            elapsed_ms: 100,
+                            budget_ms: 200,
+                            git_commits_found: 5,
+                            ..Default::default()
+                        };
+                        baseline.tick_history.record(res.clone());
+                        wired.tick_history.record(res);
+                    }
+                }
+                3 => {
+                    // Moderate.
+                    for i in 0..10 {
+                        let res = CognitiveTickResult {
+                            tick_number: i,
+                            elapsed_ms: 10000,
+                            budget_ms: 15000,
+                            git_commits_found: if i % 5 == 0 { 1 } else { 0 },
+                            files_changed: if i % 3 == 0 { 1 } else { 0 },
+                            ..Default::default()
+                        };
+                        baseline.tick_history.record(res.clone());
+                        wired.tick_history.record(res);
+                    }
+                }
+                _ => {
+                    // Slow.
+                    for i in 0..20 {
+                        let res = CognitiveTickResult {
+                            tick_number: i,
+                            elapsed_ms: 6000,
+                            budget_ms: 10000,
+                            git_commits_found: if i == 0 { 1 } else { 0 },
+                            ..Default::default()
+                        };
+                        baseline.tick_history.record(res.clone());
+                        wired.tick_history.record(res);
+                    }
+                }
+            }
+
+            let b = baseline.recommend_tick_interval();
+            let w = wired.recommend_tick_interval();
+            assert_eq!(
+                b.recommended_ms, w.recommended_ms,
+                "untrained model must not change tier-{case} recommendation"
+            );
+        }
+    }
+
+    #[test]
+    fn tick_recommend_trained_model_overrides_step_function() {
+        // Finding #7: with a trained TickIntervalModel installed, the
+        // recommendation comes from the model, not the step function.
+        let model = crate::eml_kernel::TickIntervalModel::new();
+        let mut json = serde_json::to_value(&model).unwrap();
+        if let Some(inner) = json.get_mut("inner").and_then(|v| v.as_object_mut()) {
+            inner.insert("trained".into(), serde_json::Value::Bool(true));
+        }
+        let forced: crate::eml_kernel::TickIntervalModel =
+            serde_json::from_value(json).unwrap();
+        assert!(forced.is_trained());
+
+        let mut engine = make_engine_mut();
+        // Drive a clear "fast" tier so the step-function would say 200ms.
+        for i in 0..20 {
+            engine.tick_history.record(CognitiveTickResult {
+                tick_number: i,
+                elapsed_ms: 100,
+                budget_ms: 200,
+                git_commits_found: 5,
+                ..Default::default()
+            });
+        }
+        let baseline = engine.recommend_tick_interval();
+        assert_eq!(baseline.recommended_ms, 200);
+
+        engine.set_tick_interval_model(forced);
+        let with_model = engine.recommend_tick_interval();
+        // The reason string explicitly identifies the EML branch.
+        assert!(with_model.reason.contains("EML tick-interval model"));
+        // The trained model should produce a different value (proves
+        // the dispatch fired).
+        assert_ne!(with_model.recommended_ms, baseline.recommended_ms);
+        // Clamped to [100, 60_000].
+        assert!((100..=60_000).contains(&with_model.recommended_ms));
     }
 
     // ── Integration: on_tick records tick_history ─────────────────

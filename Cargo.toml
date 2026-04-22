@@ -30,13 +30,19 @@ members = [
     "crates/clawft-lsp-extract",
     "crates/weftos-leaf-types",
     "crates/eml-core",
+    "crates/clawft-app",
+    "crates/clawft-gui-egui",
+    "crates/clawft-substrate",
+    "crates/clawft-surface",
+    "crates/clawft-treecalc",
+    "crates/clawft-casestudy-gen-qsr",
 ]
 exclude = [
     "gui/src-tauri",
 ]
 
 [workspace.package]
-version = "0.6.18"
+version = "0.6.19"
 edition = "2024"
 rust-version = "1.93"
 license = "MIT OR Apache-2.0"
@@ -185,9 +191,15 @@ clawft-security = { version = "0.6.6", path = "crates/clawft-security" }
 clawft-kernel = { version = "0.6.6", path = "crates/clawft-kernel", default-features = false }
 exo-resource-tree = { version = "0.6.6", path = "crates/exo-resource-tree" }
 weftos = { version = "0.6.6", path = "crates/weftos", default-features = false }
+clawft-substrate = { version = "0.6.6", path = "crates/clawft-substrate" }
+clawft-app = { version = "0.6.6", path = "crates/clawft-app" }
+clawft-surface = { version = "0.6.6", path = "crates/clawft-surface" }
 
 # EML (exp-ln) function approximation
 eml-core = { version = "0.1.0", path = "crates/eml-core" }
+
+# Tree-calculus Form triage
+clawft-treecalc = { version = "0.1.0", path = "crates/clawft-treecalc" }
 
 # Graph library
 petgraph = "0.7"

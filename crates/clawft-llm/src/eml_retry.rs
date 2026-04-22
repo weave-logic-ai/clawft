@@ -29,7 +29,12 @@ use crate::retry::RetryConfig;
 // ═══════════════════════════════════════════════════════════════════
 
 /// Map a [`ProviderError`] to a numeric ordinal for the model.
-fn error_ordinal(err: &ProviderError) -> f64 {
+///
+/// Exposed `pub(crate)` so `retry::RetryPolicy` can snapshot the
+/// ordinal at retry time (when it still has an `&ProviderError`) and
+/// replay it later via [`RetryModel::record_by_ordinal`] — needed
+/// because `ProviderError` doesn't impl `Clone`.
+pub(crate) fn error_ordinal(err: &ProviderError) -> f64 {
     match err {
         ProviderError::RateLimited { .. } => 0.0,
         ProviderError::Timeout => 1.0,
@@ -127,8 +132,25 @@ impl RetryModel {
         delay_ms: u64,
         succeeded: bool,
     ) {
+        self.record_by_ordinal(error_ordinal(err), attempt, delay_ms, succeeded);
+    }
+
+    /// Record a retry outcome from a pre-computed error ordinal.
+    ///
+    /// Escape-hatch for callers who can't hold onto the original
+    /// `ProviderError` through the retry loop (it isn't `Clone`
+    /// because of `reqwest::Error` / `serde_json::Error`). Snapshot
+    /// the ordinal via [`error_ordinal`] at retry time, pass it
+    /// here when the outcome is known.
+    pub fn record_by_ordinal(
+        &mut self,
+        ordinal: f64,
+        attempt: u32,
+        delay_ms: u64,
+        succeeded: bool,
+    ) {
         let inputs = [
-            error_ordinal(err) / 8.0,
+            ordinal / 8.0,
             attempt as f64 / 10.0,
             hour_of_day_normalized(),
         ];

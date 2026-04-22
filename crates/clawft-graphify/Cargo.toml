@@ -46,6 +46,7 @@ rayon = { workspace = true }
 petgraph = { workspace = true }
 walkdir = { workspace = true }
 eml-core = { workspace = true }
+clawft-treecalc = { workspace = true }
 serde_yaml = { workspace = true }
 
 # Optional

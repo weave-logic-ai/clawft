@@ -121,6 +121,12 @@ pub mod sensor_graph;
 pub mod a2a;
 pub mod agency;
 #[cfg(feature = "native")]
+pub mod agent_registry;
+#[cfg(feature = "native")]
+pub mod substrate_service;
+#[cfg(all(feature = "native", feature = "exochain"))]
+pub mod stream_anchor;
+#[cfg(feature = "native")]
 pub mod agent_loop;
 pub mod app;
 pub mod assessment;
@@ -227,6 +233,16 @@ pub mod mesh_runtime;
 // Re-export key types at the crate level for convenience.
 #[cfg(feature = "native")]
 pub use a2a::A2ARouter;
+#[cfg(feature = "native")]
+pub use agent_registry::{
+    publish_payload, register_payload, subscribe_payload, AgentRegistry, RegisteredAgent,
+};
+#[cfg(feature = "native")]
+pub use substrate_service::{
+    EgressDenied, Sensitivity as SubstrateSensitivity, SubstrateReadSnapshot, SubstrateService,
+};
+#[cfg(all(feature = "native", feature = "exochain"))]
+pub use stream_anchor::{topic_matches, StreamWindowAnchor, TopicAnchor};
 pub use agency::{
     Agency, AgentHealth, AgentInterface, AgentManifest, AgentPriority, AgentResources,
     AgentRestartPolicy, AgentRole, InterfaceProtocol, ResponseMode,
@@ -478,7 +494,7 @@ pub use metrics::{
 pub use log_service::{LogEntry, LogQuery, LogService};
 #[cfg(feature = "os-patterns")]
 pub use timer::{TimerEntry, TimerInfo, TimerService};
-pub use topic::{Subscription, TopicRouter};
+pub use topic::{SubscriberId, SubscriberSink, Subscription, TopicRouter};
 pub use wasm_runner::{
     AgentInspectTool, AgentListTool, AgentResumeTool, AgentSpawnTool,
     AgentStopTool, AgentSuspendTool, BackendSelection, BuiltinTool, BuiltinToolSpec, Certificate,

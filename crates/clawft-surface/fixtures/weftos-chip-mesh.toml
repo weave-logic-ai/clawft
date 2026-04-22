@@ -1,0 +1,47 @@
+# Tray-chip detail surface for the Mesh chip.
+# Binds to `substrate/mesh/status` (MeshAdapter, M1.5.1d). Gauges for
+# healthy/total nodes and active/total shards; a consensus chip for
+# the boolean. When the daemon lacks cluster support, `available:false`
+# is the only populated field — the gauges render as 0/0 which reads
+# correctly as "no mesh."
+
+[[surfaces]]
+id     = "weftos-chip/mesh"
+modes  = ["desktop"]
+inputs = ["pointer"]
+title  = "Mesh"
+subscriptions = ["substrate/mesh/status"]
+
+[surfaces.root]
+type  = "ui://stack"
+id    = "/root"
+attrs = { axis = "vertical" }
+
+  [[surfaces.root.children]]
+  type     = "ui://gauge"
+  id       = "/root/healthy"
+  attrs    = { min = 0.0, max = 16.0 }
+  bindings = { value = "$substrate/mesh/status.healthy_nodes", label = '"Healthy nodes"' }
+
+  [[surfaces.root.children]]
+  type     = "ui://gauge"
+  id       = "/root/total"
+  attrs    = { min = 0.0, max = 16.0 }
+  bindings = { value = "$substrate/mesh/status.total_nodes", label = '"Total nodes"' }
+
+  [[surfaces.root.children]]
+  type     = "ui://gauge"
+  id       = "/root/active-shards"
+  attrs    = { min = 0.0, max = 32.0 }
+  bindings = { value = "$substrate/mesh/status.active_shards", label = '"Active shards"' }
+
+  [[surfaces.root.children]]
+  type     = "ui://gauge"
+  id       = "/root/total-shards"
+  attrs    = { min = 0.0, max = 32.0 }
+  bindings = { value = "$substrate/mesh/status.total_shards", label = '"Total shards"' }
+
+  [[surfaces.root.children]]
+  type     = "ui://chip"
+  id       = "/root/consensus"
+  bindings = { label = "$substrate/mesh/status.consensus_enabled" }
