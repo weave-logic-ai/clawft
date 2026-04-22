@@ -139,6 +139,8 @@ fn render_node(
         IdentityIri::Gauge => render_gauge(node, snap, ui, frame),
         IdentityIri::Table => render_table(node, snap, ui, frame),
         IdentityIri::StreamView => render_stream_view(node, snap, ui, frame),
+        IdentityIri::Heatmap => render_heatmap(node, snap, ui, frame),
+        IdentityIri::Waveform => render_waveform(node, snap, ui, frame),
         other => render_todo(other, &node.path, ui),
     }
 }
@@ -428,6 +430,252 @@ fn render_table(
             params,
         });
     }
+}
+
+// ── Sensor-oriented leaves ─────────────────────────────────────────
+//
+// `ui://heatmap` and `ui://waveform` are added outside the ADR-001
+// canonical 21 primitives. They're both read-only visualisations
+// that pull a numeric array from a binding and render it directly:
+//
+// - `heatmap` expects either a flat `values: [f64; w*h]` (paired with
+//   attrs `width`, `height`) **or** a full frame object `{width,
+//   height, depths_mm, min_mm?, max_mm?}` via `values = "$path"`.
+//   It auto-normalises over the observed range unless `min`/`max`
+//   attrs override. 0xFFFF / 65535 in `depths_mm` is treated as
+//   "no valid reading" (the VL53L5CX/L7CX sentinel) and renders grey.
+//
+// - `waveform` expects `samples: [f64; N]` + attr `range = [min, max]`
+//   (or auto-scales). Draws a line plot of the N samples.
+
+fn render_heatmap(
+    node: &SurfaceNode,
+    snap: &OntologySnapshot,
+    ui: &mut egui::Ui,
+    _frame: &Frame<'_>,
+) {
+    // Frame-object form: `values = "$substrate/sensor/tof"` resolves
+    // to a `Value::Json(...)` holding the whole frame object. We also
+    // support a flat-array form for synthetic / test cases where the
+    // caller points `values` at a raw array and passes width/height
+    // via attrs.
+    let raw: Option<serde_json::Value> = node
+        .bindings
+        .get("values")
+        .and_then(|b| clawft_surface::eval::eval_binding(b, snap).ok())
+        .and_then(|v| match v {
+            clawft_surface::eval::Value::Json(j) => Some(j),
+            clawft_surface::eval::Value::List(xs) => Some(serde_json::Value::Array(
+                xs.into_iter()
+                    .map(|x| match x {
+                        clawft_surface::eval::Value::Int(i) => serde_json::json!(i),
+                        clawft_surface::eval::Value::Num(n) => serde_json::json!(n),
+                        _ => serde_json::Value::Null,
+                    })
+                    .collect(),
+            )),
+            _ => None,
+        });
+
+    let (width, height, data, min_mm, max_mm) = match raw {
+        Some(serde_json::Value::Object(map)) => {
+            let w = map
+                .get("width")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(attr_int(node, "width").unwrap_or(8) as u64)
+                as usize;
+            let h = map
+                .get("height")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(attr_int(node, "height").unwrap_or(8) as u64)
+                as usize;
+            let data: Vec<u16> = map
+                .get("depths_mm")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .map(|v| v.as_u64().unwrap_or(65535) as u16)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let min_mm = map.get("min_mm").and_then(|v| v.as_u64()).map(|x| x as u16);
+            let max_mm = map.get("max_mm").and_then(|v| v.as_u64()).map(|x| x as u16);
+            (w, h, data, min_mm, max_mm)
+        }
+        Some(serde_json::Value::Array(arr)) => {
+            let data: Vec<u16> = arr
+                .iter()
+                .map(|v| v.as_u64().unwrap_or(65535) as u16)
+                .collect();
+            let w = attr_int(node, "width").unwrap_or(8) as usize;
+            let h = attr_int(node, "height").unwrap_or(8) as usize;
+            (w, h, data, None, None)
+        }
+        _ => (
+            attr_int(node, "width").unwrap_or(8) as usize,
+            attr_int(node, "height").unwrap_or(8) as usize,
+            Vec::new(),
+            None,
+            None,
+        ),
+    };
+
+    if width == 0 || height == 0 || data.is_empty() || data.len() != width * height {
+        ui.label(
+            egui::RichText::new(format!(
+                "heatmap: no/invalid data (w={width} h={height} len={})",
+                data.len()
+            ))
+            .color(egui::Color32::from_rgb(160, 160, 170))
+            .italics(),
+        );
+        return;
+    }
+
+    // Normalise.
+    let (lo, hi) = match (min_mm, max_mm) {
+        (Some(a), Some(b)) => (a, b),
+        _ => {
+            let mut min = u16::MAX;
+            let mut max = 0u16;
+            for d in &data {
+                if *d == 65535 {
+                    continue;
+                }
+                if *d < min { min = *d; }
+                if *d > max { max = *d; }
+            }
+            if min == u16::MAX { (0, 1) } else if min == max { (min, min + 1) } else { (min, max) }
+        }
+    };
+
+    let cell = attr_number(node, "cell_px").unwrap_or(28.0) as f32;
+    let gap: f32 = 2.0;
+    let total_w = width as f32 * cell + (width as f32 - 1.0) * gap;
+    let total_h = height as f32 * cell + (height as f32 - 1.0) * gap;
+    let (rect, _resp) =
+        ui.allocate_exact_size(egui::vec2(total_w, total_h), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+
+    for row in 0..height {
+        for col in 0..width {
+            let idx = row * width + col;
+            let raw_px = data[idx];
+            let color = heatmap_color(raw_px, lo, hi);
+            let x0 = rect.left() + col as f32 * (cell + gap);
+            let y0 = rect.top() + row as f32 * (cell + gap);
+            let cell_rect =
+                egui::Rect::from_min_size(egui::pos2(x0, y0), egui::vec2(cell, cell));
+            painter.rect_filled(cell_rect, 2.0, color);
+        }
+    }
+    // Heatmap is read-only; no CanonResponse entry needed — nothing
+    // downstream inspects a heatmap's response.
+}
+
+fn render_waveform(
+    node: &SurfaceNode,
+    snap: &OntologySnapshot,
+    ui: &mut egui::Ui,
+    _frame: &Frame<'_>,
+) {
+    let samples: Vec<f64> = bound_value(node, "samples", snap)
+        .and_then(|v| v.as_list())
+        .map(|xs| xs.into_iter().filter_map(|v| v.as_f64()).collect())
+        .unwrap_or_default();
+
+    let height_attr = attr_number(node, "height_px").unwrap_or(80.0) as f32;
+    let width_attr = attr_number(node, "width_px").unwrap_or(280.0) as f32;
+
+    let (rect, _resp) =
+        ui.allocate_exact_size(egui::vec2(width_attr, height_attr), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+
+    painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(18, 18, 24));
+
+    if samples.len() < 2 {
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "no samples",
+            egui::FontId::proportional(11.0),
+            egui::Color32::from_rgb(130, 130, 140),
+        );
+    } else {
+        let (lo, hi) = attr_range(node).unwrap_or_else(|| {
+            let mut mn = f64::INFINITY;
+            let mut mx = f64::NEG_INFINITY;
+            for s in &samples {
+                if s.is_finite() {
+                    if *s < mn { mn = *s; }
+                    if *s > mx { mx = *s; }
+                }
+            }
+            if !mn.is_finite() || !mx.is_finite() || (mx - mn).abs() < f64::EPSILON {
+                (0.0, 1.0)
+            } else {
+                (mn, mx)
+            }
+        });
+        let span = (hi - lo).max(1e-9);
+        let mut points = Vec::with_capacity(samples.len());
+        for (i, s) in samples.iter().enumerate() {
+            let t = i as f32 / (samples.len() - 1).max(1) as f32;
+            let x = rect.left() + t * rect.width();
+            let normalised = ((s - lo) / span).clamp(0.0, 1.0) as f32;
+            let y = rect.bottom() - normalised * rect.height();
+            points.push(egui::pos2(x, y));
+        }
+        painter.add(egui::epaint::PathShape::line(
+            points,
+            egui::Stroke::new(1.5, egui::Color32::from_rgb(110, 200, 150)),
+        ));
+    }
+    // Waveform is read-only; no CanonResponse entry.
+}
+
+/// Parse a `range = [min, max]` attr into `(f64, f64)`.
+fn attr_range(node: &SurfaceNode) -> Option<(f64, f64)> {
+    let arr = node.attrs.get("range").and_then(|v| match v {
+        AttrValue::Array(items) => Some(items),
+        _ => None,
+    })?;
+    if arr.len() != 2 {
+        return None;
+    }
+    let lo = arr[0].as_number()?;
+    let hi = arr[1].as_number()?;
+    Some((lo, hi))
+}
+
+/// 5-stop viridis-ish colormap mirroring `shell/desktop.rs::tof_pixel_color`.
+/// 0xFFFF (65535) is the "no valid reading" sentinel → mid-grey.
+fn heatmap_color(mm: u16, min: u16, max: u16) -> egui::Color32 {
+    if mm == 65535 {
+        return egui::Color32::from_rgb(64, 64, 72);
+    }
+    let span = (max.saturating_sub(min)).max(1) as f32;
+    let clamped = mm.clamp(min, max);
+    let t = ((clamped - min) as f32 / span).clamp(0.0, 1.0);
+    let stops = [
+        (0.00_f32, [38u8, 18, 110]),
+        (0.25, [30, 120, 200]),
+        (0.50, [50, 200, 120]),
+        (0.75, [220, 200, 60]),
+        (1.00, [220, 70, 60]),
+    ];
+    for i in 0..stops.len() - 1 {
+        let (t0, c0) = stops[i];
+        let (t1, c1) = stops[i + 1];
+        if t <= t1 {
+            let local = ((t - t0) / (t1 - t0)).clamp(0.0, 1.0);
+            let r = (c0[0] as f32 + (c1[0] as f32 - c0[0] as f32) * local) as u8;
+            let g = (c0[1] as f32 + (c1[1] as f32 - c0[1] as f32) * local) as u8;
+            let b = (c0[2] as f32 + (c1[2] as f32 - c0[2] as f32) * local) as u8;
+            return egui::Color32::from_rgb(r, g, b);
+        }
+    }
+    egui::Color32::from_rgb(220, 70, 60)
 }
 
 // ── TODO fallback ──────────────────────────────────────────────────

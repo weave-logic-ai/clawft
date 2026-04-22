@@ -1,9 +1,10 @@
 # Tray-chip detail surface for the ToF (Time-of-Flight) depth chip.
-# The 8×8 heatmap is rendered by a native egui widget in
-# `shell/desktop.rs::render_tof_heatmap` (the composer has no
-# `ui://heatmap` primitive yet). This fixture just provides the
-# header summary — availability, dimensions, min/max range —
-# below the native grid.
+# The 8×8 heatmap is rendered by the `ui://heatmap` composer primitive
+# (M1.5.3 — not in the ADR-001 canonical 21 but added when the hardware
+# loop needed a proper declarative grid-viz). Data is the whole frame
+# object at `substrate/sensor/tof`; width/height come from the frame,
+# not the fixture, so the same primitive serves 8×8 (VL53L7CX), 4×4
+# (VL53L5CX low-res), or future sensor sizes without a fixture change.
 
 [[surfaces]]
 id     = "weftos-chip/tof"
@@ -18,19 +19,20 @@ id    = "/root"
 attrs = { axis = "vertical" }
 
   [[surfaces.root.children]]
+  type     = "ui://heatmap"
+  id       = "/root/depth-grid"
+  attrs    = { cell_px = 32.0 }
+  bindings = { values = "$substrate/sensor/tof" }
+
+  [[surfaces.root.children]]
   type     = "ui://chip"
   id       = "/root/available"
   bindings = { label = "$substrate/sensor/tof.available" }
 
   [[surfaces.root.children]]
   type     = "ui://chip"
-  id       = "/root/width"
+  id       = "/root/dimensions"
   bindings = { label = "$substrate/sensor/tof.width" }
-
-  [[surfaces.root.children]]
-  type     = "ui://chip"
-  id       = "/root/height"
-  bindings = { label = "$substrate/sensor/tof.height" }
 
   [[surfaces.root.children]]
   type     = "ui://chip"

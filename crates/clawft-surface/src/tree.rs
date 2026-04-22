@@ -125,6 +125,12 @@ pub enum IdentityIri {
     Media,
     Canvas,
     Foreign,
+    // Sensor-oriented leaves (M1.5.3). Not in the ADR-001 canonical 21;
+    // added as the hardware loop matured past what Plot/Canvas could
+    // express declaratively. Both read a numeric array from a binding
+    // and render it directly — no affordances.
+    Heatmap,
+    Waveform,
 }
 
 impl IdentityIri {
@@ -151,6 +157,8 @@ impl IdentityIri {
             IdentityIri::Media => "ui://media",
             IdentityIri::Canvas => "ui://canvas",
             IdentityIri::Foreign => "ui://foreign",
+            IdentityIri::Heatmap => "ui://heatmap",
+            IdentityIri::Waveform => "ui://waveform",
         }
     }
 
@@ -177,6 +185,8 @@ impl IdentityIri {
             "ui://media" => IdentityIri::Media,
             "ui://canvas" => IdentityIri::Canvas,
             "ui://foreign" => IdentityIri::Foreign,
+            "ui://heatmap" => IdentityIri::Heatmap,
+            "ui://waveform" => IdentityIri::Waveform,
             _ => return None,
         })
     }
