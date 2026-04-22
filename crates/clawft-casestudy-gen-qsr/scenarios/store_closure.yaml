@@ -1,0 +1,13 @@
+id: metro_delta_two_store_closure
+description: Two metro-delta brand-d stores shuttered for the full quarter
+template: store_closure
+brand: null
+metro: null
+region: null
+week_index: null
+day_range: [0, 30]
+revenue_factor: 0.0
+labor_factor: 0.0
+promo_id_to_pull: null
+closed_store_labels:
+  - "store:brand-d:metro-delta_0007"

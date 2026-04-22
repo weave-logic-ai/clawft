@@ -35,14 +35,14 @@ members = [
     "crates/clawft-substrate",
     "crates/clawft-surface",
     "crates/clawft-treecalc",
-    "crates/clawft-qfs-gen",
+    "crates/clawft-casestudy-gen-qsr",
 ]
 exclude = [
     "gui/src-tauri",
 ]
 
 [workspace.package]
-version = "0.6.17"
+version = "0.6.19"
 edition = "2024"
 rust-version = "1.93"
 license = "MIT OR Apache-2.0"
