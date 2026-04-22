@@ -21,6 +21,7 @@ pub enum ChipId {
     Wifi,
     Bluetooth,
     Audio,
+    Tof,
 }
 
 impl ChipId {
@@ -33,6 +34,7 @@ impl ChipId {
             ChipId::Wifi => "Wi-Fi",
             ChipId::Bluetooth => "Bluetooth",
             ChipId::Audio => "Audio",
+            ChipId::Tof => "ToF",
         }
     }
 
@@ -46,6 +48,7 @@ impl ChipId {
             ChipId::Wifi => "substrate/network/wifi",
             ChipId::Bluetooth => "substrate/bluetooth",
             ChipId::Audio => "substrate/sensor/mic",
+            ChipId::Tof => "substrate/sensor/tof",
         }
     }
 }
@@ -62,6 +65,7 @@ pub fn chip_subtree<'a>(
         ChipId::Wifi => snap.network_wifi.as_ref(),
         ChipId::Bluetooth => snap.bluetooth.as_ref(),
         ChipId::Audio => snap.audio_mic.as_ref(),
+        ChipId::Tof => snap.tof_depth.as_ref(),
     }
 }
 
@@ -220,6 +224,7 @@ fn services(snap: &Snapshot) -> Vec<(ChipId, &'static str, &'static str, Ok)> {
     let wifi = link_state_to_ok(&snap.network_wifi);
     let bluetooth = bluetooth_state_to_ok(&snap.bluetooth);
     let audio = audio_state_to_ok(&snap.audio_mic);
+    let tof = tof_state_to_ok(&snap.tof_depth);
 
     vec![
         (ChipId::Kernel, "Kernel", "◉ kernel", kernel),
@@ -228,7 +233,39 @@ fn services(snap: &Snapshot) -> Vec<(ChipId, &'static str, &'static str, Ok)> {
         (ChipId::Wifi, "Wi-Fi", "≋ wifi", wifi),
         (ChipId::Bluetooth, "Bluetooth", "∗ bt", bluetooth),
         (ChipId::Audio, "Audio", "◊ mic", audio),
+        (ChipId::Tof, "ToF", "⊞ tof", tof),
     ]
+}
+
+/// Map a `substrate/sensor/tof` Replace value to a tray chip status.
+/// `available: false` → grey; any frame received → green.
+/// Schema: `{available, width, height, depths_mm: [u16; w*h], min_mm?, max_mm?, frame_count?}`.
+fn tof_state_to_ok(v: &Option<serde_json::Value>) -> Ok {
+    let Some(obj) = v.as_ref() else {
+        return Ok::Off;
+    };
+    if obj.get("available").and_then(|b| b.as_bool()) == Some(false) {
+        return Ok::Off;
+    }
+    // A real frame has a non-empty depths array with at least some
+    // non-0xFFFF values. If the whole frame is 0xFFFF ("no valid
+    // reading" on VL53L7CX/L5CX), chip stays amber to surface the
+    // misconfiguration.
+    let depths = obj.get("depths_mm").and_then(|v| v.as_array());
+    match depths {
+        Some(arr) if arr.is_empty() => Ok::Off,
+        Some(arr) => {
+            let all_invalid = arr
+                .iter()
+                .all(|v| v.as_u64().unwrap_or(0) == 65535);
+            if all_invalid {
+                Ok::Warn
+            } else {
+                Ok::On
+            }
+        }
+        None => Ok::Off,
+    }
 }
 
 /// Map a `substrate/network/{wifi,ethernet}` Replace value to a tray

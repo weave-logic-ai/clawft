@@ -1,0 +1,48 @@
+# Tray-chip detail surface for the ToF (Time-of-Flight) depth chip.
+# The 8×8 heatmap is rendered by a native egui widget in
+# `shell/desktop.rs::render_tof_heatmap` (the composer has no
+# `ui://heatmap` primitive yet). This fixture just provides the
+# header summary — availability, dimensions, min/max range —
+# below the native grid.
+
+[[surfaces]]
+id     = "weftos-chip/tof"
+modes  = ["desktop"]
+inputs = ["pointer"]
+title  = "ToF"
+subscriptions = ["substrate/sensor/tof"]
+
+[surfaces.root]
+type  = "ui://stack"
+id    = "/root"
+attrs = { axis = "vertical" }
+
+  [[surfaces.root.children]]
+  type     = "ui://chip"
+  id       = "/root/available"
+  bindings = { label = "$substrate/sensor/tof.available" }
+
+  [[surfaces.root.children]]
+  type     = "ui://chip"
+  id       = "/root/width"
+  bindings = { label = "$substrate/sensor/tof.width" }
+
+  [[surfaces.root.children]]
+  type     = "ui://chip"
+  id       = "/root/height"
+  bindings = { label = "$substrate/sensor/tof.height" }
+
+  [[surfaces.root.children]]
+  type     = "ui://chip"
+  id       = "/root/min-mm"
+  bindings = { label = "$substrate/sensor/tof.min_mm" }
+
+  [[surfaces.root.children]]
+  type     = "ui://chip"
+  id       = "/root/max-mm"
+  bindings = { label = "$substrate/sensor/tof.max_mm" }
+
+  [[surfaces.root.children]]
+  type     = "ui://chip"
+  id       = "/root/frame-count"
+  bindings = { label = "$substrate/sensor/tof.frame_count" }

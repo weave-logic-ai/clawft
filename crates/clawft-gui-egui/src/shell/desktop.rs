@@ -37,6 +37,8 @@ const CHIP_SURFACE_BLUETOOTH: &str =
     include_str!("../../../clawft-surface/fixtures/weftos-chip-bluetooth.toml");
 const CHIP_SURFACE_AUDIO: &str =
     include_str!("../../../clawft-surface/fixtures/weftos-chip-audio.toml");
+const CHIP_SURFACE_TOF: &str =
+    include_str!("../../../clawft-surface/fixtures/weftos-chip-tof.toml");
 
 fn chip_surface_toml(chip: tray::ChipId) -> &'static str {
     match chip {
@@ -46,6 +48,7 @@ fn chip_surface_toml(chip: tray::ChipId) -> &'static str {
         tray::ChipId::Wifi => CHIP_SURFACE_WIFI,
         tray::ChipId::Bluetooth => CHIP_SURFACE_BLUETOOTH,
         tray::ChipId::Audio => CHIP_SURFACE_AUDIO,
+        tray::ChipId::Tof => CHIP_SURFACE_TOF,
     }
 }
 
@@ -183,6 +186,7 @@ impl Default for Desktop {
             tray::ChipId::Wifi,
             tray::ChipId::Bluetooth,
             tray::ChipId::Audio,
+            tray::ChipId::Tof,
         ] {
             match clawft_surface::parse::parse_surface_toml(chip_surface_toml(chip)) {
                 Ok(tree) => {
@@ -299,6 +303,19 @@ fn render_chip_detail(
         connection_pill(ui, snap.connection);
     });
     ui.separator();
+
+    // Pre-composer native widgets for chips whose visualisation the
+    // composer can't express yet. ToF wants an NxM heatmap, which the
+    // current primitive set (stack/grid/chip/gauge/table/stream-view)
+    // can't do without a `ui://heatmap` primitive. Until that lands,
+    // draw the heatmap directly here and let the composer render the
+    // summary chips below it.
+    if chip == tray::ChipId::Tof {
+        if let Some(frame) = tray::chip_subtree(chip, snap) {
+            render_tof_heatmap(ui, frame);
+            ui.separator();
+        }
+    }
 
     // Surface-composer path (preferred). The ontology snapshot is the
     // same source of truth the Admin app reads, so fixtures written
@@ -436,6 +453,17 @@ fn render_empty_hint(ui: &mut egui::Ui, chip: tray::ChipId, snap: &Snapshot) {
                     .to_string(),
                 false,
             ),
+            tray::ChipId::Tof => (
+                "No ToF frames yet. Expected shape at \
+                 substrate/sensor/tof: \
+                 {available, width, height, depths_mm:[u16;w*h], \
+                 min_mm?, max_mm?, frame_count?}. Bridge should \
+                 publish via substrate.publish as new frames arrive. \
+                 0xFFFF pixels are treated as 'no valid reading' per \
+                 VL53L5CX/L7CX convention."
+                    .to_string(),
+                false,
+            ),
         },
     };
     ui.label(
@@ -453,6 +481,143 @@ fn render_empty_hint(ui: &mut egui::Ui, chip: tray::ChipId, snap: &Snapshot) {
             );
         }
     }
+}
+
+/// Render an NxM ToF depth frame as a native egui heatmap.
+///
+/// Expects the substrate value shape
+/// `{width, height, depths_mm: [u16; w*h], min_mm?, max_mm?}`.
+/// Falls back cleanly on missing/garbage data — renders a placeholder
+/// rectangle with the issue as a label so the panel is never blank.
+/// Pixels with value 0xFFFF (65535) are the VL53L5CX/L7CX "no valid
+/// reading" sentinel and render as pure grey (not part of the
+/// near/far colormap).
+///
+/// Colormap: viridis-ish — deep blue (near) → cyan → green → yellow
+/// → red (far). Linear in distance, normalised to the min/max
+/// observed in the current frame if not provided explicitly.
+fn render_tof_heatmap(ui: &mut egui::Ui, frame: &serde_json::Value) {
+    let width = frame.get("width").and_then(|v| v.as_u64()).unwrap_or(8) as usize;
+    let height = frame.get("height").and_then(|v| v.as_u64()).unwrap_or(8) as usize;
+    let depths = frame.get("depths_mm").and_then(|v| v.as_array());
+    let Some(depths) = depths else {
+        ui.colored_label(
+            egui::Color32::from_rgb(220, 140, 140),
+            "tof frame has no `depths_mm` array",
+        );
+        return;
+    };
+    if depths.len() != width * height {
+        ui.colored_label(
+            egui::Color32::from_rgb(220, 180, 60),
+            format!(
+                "tof frame size mismatch: depths.len()={} but width*height={}",
+                depths.len(),
+                width * height
+            ),
+        );
+        return;
+    }
+
+    // Normalise over the observed valid range (ignore 0xFFFF) unless
+    // the frame supplied explicit min/max bounds.
+    let explicit_min = frame.get("min_mm").and_then(|v| v.as_u64()).map(|v| v as u16);
+    let explicit_max = frame.get("max_mm").and_then(|v| v.as_u64()).map(|v| v as u16);
+    let (min, max) = match (explicit_min, explicit_max) {
+        (Some(a), Some(b)) => (a, b),
+        _ => {
+            let mut lo = u16::MAX;
+            let mut hi = 0u16;
+            for v in depths.iter() {
+                let d = v.as_u64().unwrap_or(65535) as u16;
+                if d == 65535 {
+                    continue;
+                }
+                if d < lo { lo = d; }
+                if d > hi { hi = d; }
+            }
+            if lo == u16::MAX {
+                // All pixels invalid — pick arbitrary defaults so
+                // render doesn't NaN. Grid will be all grey anyway.
+                (0, 1)
+            } else if lo == hi {
+                (lo, lo + 1)
+            } else {
+                (lo, hi)
+            }
+        }
+    };
+
+    // Grid sizing: request a square-ish canvas, 28px per cell.
+    let cell = 28.0;
+    let gap = 2.0;
+    let total_w = width as f32 * cell + (width as f32 - 1.0) * gap;
+    let total_h = height as f32 * cell + (height as f32 - 1.0) * gap;
+    let (rect, _resp) =
+        ui.allocate_exact_size(egui::vec2(total_w, total_h), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+
+    for row in 0..height {
+        for col in 0..width {
+            let idx = row * width + col;
+            let raw = depths[idx].as_u64().unwrap_or(65535) as u16;
+            let color = tof_pixel_color(raw, min, max);
+            let x0 = rect.left() + col as f32 * (cell + gap);
+            let y0 = rect.top() + row as f32 * (cell + gap);
+            let cell_rect =
+                egui::Rect::from_min_size(egui::pos2(x0, y0), egui::vec2(cell, cell));
+            painter.rect_filled(cell_rect, 2.0, color);
+        }
+    }
+
+    // Caption line: range + any frame metadata.
+    ui.add_space(4.0);
+    let frame_count = frame
+        .get("frame_count")
+        .and_then(|v| v.as_u64())
+        .map(|c| format!(" · frame #{c}"))
+        .unwrap_or_default();
+    ui.label(
+        egui::RichText::new(format!(
+            "range {min}-{max} mm · {width}×{height}{frame_count}"
+        ))
+        .monospace()
+        .color(egui::Color32::from_rgb(180, 180, 190)),
+    );
+}
+
+/// Map a raw 16-bit depth value (mm) to an RGB heatmap colour,
+/// linearly normalised over `[min, max]`. 0xFFFF (65535) is the
+/// sentinel for "no valid reading" and renders as mid-grey so it
+/// reads distinctly from the colormap.
+fn tof_pixel_color(mm: u16, min: u16, max: u16) -> egui::Color32 {
+    if mm == 65535 {
+        return egui::Color32::from_rgb(64, 64, 72);
+    }
+    let span = (max.saturating_sub(min)).max(1) as f32;
+    let clamped = mm.clamp(min, max);
+    let t = ((clamped - min) as f32 / span).clamp(0.0, 1.0);
+    // Cheap 5-stop colormap: dark-blue → cyan → green → yellow → red.
+    // Piecewise-linear RGB interpolation.
+    let stops = [
+        (0.00, [38u8, 18, 110]),
+        (0.25, [30, 120, 200]),
+        (0.50, [50, 200, 120]),
+        (0.75, [220, 200, 60]),
+        (1.00, [220, 70, 60]),
+    ];
+    for i in 0..stops.len() - 1 {
+        let (t0, c0) = stops[i];
+        let (t1, c1) = stops[i + 1];
+        if t <= t1 {
+            let local = ((t - t0) / (t1 - t0)).clamp(0.0, 1.0);
+            let r = (c0[0] as f32 + (c1[0] as f32 - c0[0] as f32) * local) as u8;
+            let g = (c0[1] as f32 + (c1[1] as f32 - c0[1] as f32) * local) as u8;
+            let b = (c0[2] as f32 + (c1[2] as f32 - c0[2] as f32) * local) as u8;
+            return egui::Color32::from_rgb(r, g, b);
+        }
+    }
+    egui::Color32::from_rgb(220, 70, 60)
 }
 
 fn window_frame() -> egui::Frame {

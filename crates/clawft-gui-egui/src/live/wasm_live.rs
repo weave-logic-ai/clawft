@@ -284,6 +284,10 @@ impl PartialPoll {
             // `substrate.sensor.mic.stream` RPC or MediaStream shim,
             // tracked with the rest of the M1.6+ bridge work.
             audio_mic: None,
+            // M1.5.3 — ToF sensor is hardware-attached; same native-
+            // only story until the substrate-over-postMessage bridge
+            // ships.
+            tof_depth: None,
             last_error: err,
             tick: 0,
             last_tick_at_ms: Some(finished_ms),

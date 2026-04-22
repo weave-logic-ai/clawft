@@ -57,6 +57,13 @@ pub struct Snapshot {
     /// samples_in_window, characterization}`. On missing/truncated
     /// source: `{available: false, reason}`.
     pub audio_mic: Option<Value>,
+    /// M1.5.3 — raw `substrate/sensor/tof` value from an
+    /// 8×8 (or NxM) ToF depth sensor. Shape on success:
+    /// `{available: true, width, height, depths_mm: [u16; w*h],
+    /// min_mm?, max_mm?, frame_count?}`. Pixels that the sensor
+    /// flagged as "no valid reading" are 65535 (0xFFFF) per
+    /// VL53L5CX/L7CX convention.
+    pub tof_depth: Option<Value>,
     pub last_error: Option<String>,
     /// Incremented every successful poll tick so the UI can detect freshness.
     pub tick: u64,

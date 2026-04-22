@@ -231,6 +231,7 @@ async fn refresh_snapshot(substrate: &Arc<Substrate>, live: &Arc<Live>) {
     let mesh_status = snap.get("substrate/mesh/status").cloned();
     let chain_status = snap.get("substrate/chain/status").cloned();
     let audio_mic = snap.get("substrate/sensor/mic").cloned();
+    let tof_depth = snap.get("substrate/sensor/tof").cloned();
 
     // Heuristic: if any real data from the adapter has landed in the
     // substrate we treat the connection as Connected; otherwise the
@@ -258,6 +259,7 @@ async fn refresh_snapshot(substrate: &Arc<Substrate>, live: &Arc<Live>) {
         s.mesh_status = mesh_status.clone();
         s.chain_status = chain_status.clone();
         s.audio_mic = audio_mic.clone();
+        s.tof_depth = tof_depth.clone();
         s.tick = s.tick.wrapping_add(1);
         s.last_tick_at_ms = Some(now_ms());
         s.last_tick_dur_ms = Some(SNAPSHOT_MS as f64);

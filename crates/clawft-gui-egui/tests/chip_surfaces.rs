@@ -36,6 +36,10 @@ const CHIP_FIXTURES: &[(&str, &str)] = &[
         "audio",
         include_str!("../../clawft-surface/fixtures/weftos-chip-audio.toml"),
     ),
+    (
+        "tof",
+        include_str!("../../clawft-surface/fixtures/weftos-chip-tof.toml"),
+    ),
 ];
 
 fn populated_snapshot() -> OntologySnapshot {
@@ -86,6 +90,24 @@ fn populated_snapshot() -> OntologySnapshot {
             "sample_rate": 16_000,
             "samples_in_window": 8000,
             "characterization": "rate",
+        }),
+    );
+    // ToF test frame: an 8×8 with a few non-0xFFFF values so the
+    // tray chip reads as On and the fixture can render min/max.
+    let mut depths = vec![65535u16; 64];
+    for (i, d) in depths.iter_mut().enumerate().take(32) {
+        *d = 300 + (i as u16 * 30);
+    }
+    s.put(
+        "substrate/sensor/tof",
+        json!({
+            "available": true,
+            "width": 8,
+            "height": 8,
+            "depths_mm": depths,
+            "min_mm": 300,
+            "max_mm": 1230,
+            "frame_count": 1,
         }),
     );
     s
