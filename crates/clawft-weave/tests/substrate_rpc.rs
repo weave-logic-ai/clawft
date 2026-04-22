@@ -39,6 +39,7 @@ fn minimal_kernel_config() -> KernelConfig {
         pairing: None,
         mesh: None,
         anchor: None,
+        ipc_tcp: None,
     }
 }
 

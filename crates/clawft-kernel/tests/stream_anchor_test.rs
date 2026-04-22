@@ -57,6 +57,7 @@ fn kernel_config_with_chain() -> KernelConfig {
         pairing: None,
         mesh: None,
         anchor: None,
+        ipc_tcp: None,
     }
 }
 

@@ -2041,6 +2041,7 @@ mod tests {
             pairing: None,
             mesh: None,
             anchor: None,
+            ipc_tcp: None,
         }
     }
 
@@ -2183,6 +2184,7 @@ mod tests {
             pairing: None,
             mesh: None,
             anchor: None,
+            ipc_tcp: None,
         }
     }
 
@@ -2587,6 +2589,7 @@ mod tests {
             pairing: None,
             mesh: None,
             anchor: None,
+            ipc_tcp: None,
         }
     }
 

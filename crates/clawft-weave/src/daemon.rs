@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixListener;
+use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
@@ -442,6 +442,76 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
             }
         }
     });
+
+    // Optional TCP relay. When `[kernel.ipc_tcp]` is enabled, every
+    // accepted TCP connection is transparently byte-copied to a fresh
+    // connection on the unix socket. All auth / JSON dispatch stays in
+    // the unix path — the TCP side is a dumb conduit so cross-boundary
+    // callers (Windows side of WSL, remote bridges) can reach the RPC
+    // without speaking `AF_UNIX`.
+    let ipc_tcp_cfg = {
+        let k = kernel.read().await;
+        k.kernel_config().ipc_tcp.clone()
+    };
+    if let Some(cfg) = ipc_tcp_cfg.filter(|c| c.enabled) {
+        match TcpListener::bind(&cfg.listen_addr).await {
+            Ok(tcp_listener) => {
+                info!(addr = %cfg.listen_addr, "ipc tcp relay listening");
+                println!("IPC TCP relay listening on {}", cfg.listen_addr);
+                let relay_socket_path = socket_path.clone();
+                let mut relay_shutdown_rx = shutdown_tx.subscribe();
+                tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            result = tcp_listener.accept() => {
+                                match result {
+                                    Ok((tcp_stream, peer)) => {
+                                        info!(peer = %peer, "ipc tcp relay: peer connected");
+                                        let sock = relay_socket_path.clone();
+                                        tokio::spawn(async move {
+                                            match UnixStream::connect(&sock).await {
+                                                Ok(mut unix_stream) => {
+                                                    let mut tcp_stream = tcp_stream;
+                                                    let (a, b) = match tokio::io::copy_bidirectional(
+                                                        &mut tcp_stream,
+                                                        &mut unix_stream,
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(pair) => pair,
+                                                        Err(e) => {
+                                                            debug!(peer = %peer, "ipc tcp relay: copy ended: {e}");
+                                                            (0, 0)
+                                                        }
+                                                    };
+                                                    info!(peer = %peer, tx_bytes = a, rx_bytes = b, "ipc tcp relay: peer disconnected");
+                                                }
+                                                Err(e) => {
+                                                    warn!(peer = %peer, "ipc tcp relay: unix connect failed: {e}");
+                                                }
+                                            }
+                                        });
+                                    }
+                                    Err(e) => {
+                                        error!("ipc tcp accept error: {e}");
+                                    }
+                                }
+                            }
+                            _ = relay_shutdown_rx.changed() => {
+                                if *relay_shutdown_rx.borrow() {
+                                    debug!("ipc tcp relay shutting down");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+            Err(e) => {
+                warn!(addr = %cfg.listen_addr, "ipc tcp relay bind failed: {e}");
+            }
+        }
+    }
 
     // Wait for shutdown signal (SIGINT, SIGTERM, SIGHUP) or RPC shutdown.
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -884,14 +954,19 @@ async fn handle_agent_register(
         );
     }
 
+    let pubkey_prefix = hex_encode(&entry.pubkey)[..16.min(entry.pubkey.len() * 2)].to_string();
     k.event_log().info(
         "agent",
         format!(
             "registered agent '{}' as {} (pubkey prefix {})",
-            entry.name,
-            entry.agent_id,
-            &hex_encode(&entry.pubkey)[..16.min(entry.pubkey.len() * 2)]
+            entry.name, entry.agent_id, pubkey_prefix
         ),
+    );
+    info!(
+        agent_id = %entry.agent_id,
+        name = %entry.name,
+        pubkey_prefix = %pubkey_prefix,
+        "agent.register: authorized"
     );
 
     Response::success(
@@ -1156,6 +1231,19 @@ async fn handle_substrate_publish(
         "substrate",
         format!("publish {} tick={} actor={:?}", p.path, tick, p.actor_id),
     );
+    // Lifecycle visibility in `kernel.log`: only log the first window per
+    // path at INFO so live sensor streams don't flood. Subsequent writes
+    // stay at DEBUG for the same-path case.
+    if tick == 1 {
+        info!(
+            path = %p.path,
+            actor = ?p.actor_id,
+            signed = p.signature.is_some(),
+            "substrate.publish: stream started (first window on path)"
+        );
+    } else {
+        debug!(path = %p.path, tick, "substrate.publish");
+    }
     Response::success(serde_json::json!({
         "path": p.path,
         "tick": tick,

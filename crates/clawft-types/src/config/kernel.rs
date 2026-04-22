@@ -174,6 +174,18 @@ pub struct KernelConfig {
     /// putting raw frames on-chain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<AnchorConfig>,
+
+    /// Optional TCP relay for the daemon's JSON-RPC socket.
+    ///
+    /// When enabled, the daemon also listens on a TCP port and
+    /// transparently forwards every accepted connection to the local
+    /// unix socket via in-process byte-copy. Clients speak the exact
+    /// same line-delimited JSON-RPC protocol. All auth/policy stays
+    /// in the unix-socket handler path — the TCP side is a byte
+    /// conduit only. Intended for cross-boundary callers (Windows
+    /// side of WSL, remote bridges) that cannot open `AF_UNIX`.
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "ipcTcp")]
+    pub ipc_tcp: Option<IpcTcpConfig>,
 }
 
 impl Default for KernelConfig {
@@ -190,8 +202,52 @@ impl Default for KernelConfig {
             pairing: None,
             mesh: None,
             anchor: None,
+            ipc_tcp: None,
         }
     }
+}
+
+// ── IPC TCP relay configuration ─────────────────────────────────────────
+
+/// Configuration for the optional TCP relay in front of the daemon's
+/// unix-socket JSON-RPC.
+///
+/// Paired with [`crate::config::KernelConfig::ipc_tcp`]. When enabled,
+/// the daemon binds `listen_addr` and forwards each accepted TCP
+/// connection to the local unix socket via in-process byte-copy. No
+/// protocol translation: clients speak the same line-delimited
+/// JSON-RPC as unix-socket clients.
+///
+/// # Example TOML
+///
+/// ```toml
+/// [kernel.ipc_tcp]
+/// enabled = true
+/// listen_addr = "127.0.0.1:9471"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpcTcpConfig {
+    /// Master switch. Default: false.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Address to bind. Loopback-only by default so cross-boundary
+    /// callers must explicitly opt into a broader interface.
+    #[serde(default = "default_ipc_tcp_listen_addr", alias = "listenAddr")]
+    pub listen_addr: String,
+}
+
+impl Default for IpcTcpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen_addr: default_ipc_tcp_listen_addr(),
+        }
+    }
+}
+
+fn default_ipc_tcp_listen_addr() -> String {
+    "127.0.0.1:9471".to_string()
 }
 
 // ── Stream-window anchor configuration ──────────────────────────────────
@@ -830,6 +886,7 @@ mod tests {
             pairing: None,
             mesh: None,
             anchor: None,
+            ipc_tcp: None,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let restored: KernelConfig = serde_json::from_str(&json).unwrap();
