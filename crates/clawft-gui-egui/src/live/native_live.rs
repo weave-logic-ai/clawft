@@ -174,12 +174,30 @@ fn run_driver(live: Arc<Live>, mut cmd_rx: tokio::sync::mpsc::Receiver<Command>)
         // substrate pollers aren't serialised behind ad-hoc calls.
         let mut raw_client: Option<DaemonClient> = None;
 
+        // Relay poller: for paths that are *published into the daemon's
+        // SubstrateService from outside* (e.g. a Windows-side bridge
+        // calling `substrate.publish`), no local OntologyAdapter is
+        // running. Poll the daemon's `substrate.read` for those paths
+        // and inject a Replace into the local substrate so the legacy
+        // `Snapshot` shape sees them. 250ms cadence matches SNAPSHOT_MS.
+        let mut relay_client: Option<DaemonClient> = None;
+        const RELAYED_PATHS: &[&str] = &[
+            "substrate/sensor/tof",
+            "substrate/sensor/mic",
+        ];
+
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(SNAPSHOT_MS));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
+                    relay_external_paths(
+                        &substrate,
+                        &mut relay_client,
+                        RELAYED_PATHS,
+                    )
+                    .await;
                     refresh_snapshot(&substrate, &live).await;
                 }
                 Some(cmd) = cmd_rx.recv() => {
@@ -266,6 +284,59 @@ async fn refresh_snapshot(substrate: &Arc<Substrate>, live: &Arc<Live>) {
         // Keep last_error as-is; the adapter pollers are silent on
         // transient failures by design (they just reconnect).
     });
+}
+
+/// Poll the daemon's `substrate.read` for each listed path and inject
+/// the current value into the local substrate as a `StateDelta::Replace`.
+///
+/// Purpose: bridge daemon-side publishes (via `substrate.publish` RPC
+/// from external producers like a Windows-side ESP32 bridge) into the
+/// local substrate the GUI reads from. Local OntologyAdapters don't
+/// exist for these paths; this relay is how externally-produced data
+/// reaches the panels.
+///
+/// Failures are silent — we treat them like any other adapter hiccup.
+/// If the daemon isn't running or the path has no value yet, we skip
+/// and retry next tick.
+async fn relay_external_paths(
+    substrate: &Arc<clawft_substrate::Substrate>,
+    client_opt: &mut Option<DaemonClient>,
+    paths: &[&str],
+) {
+    if client_opt.is_none() {
+        *client_opt = DaemonClient::connect().await;
+    }
+    let Some(client) = client_opt.as_mut() else {
+        return;
+    };
+    for path in paths {
+        let params = serde_json::json!({ "path": path });
+        let resp = match client
+            .call(Request::with_params("substrate.read", params))
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => {
+                // Connection dropped — null it so next tick reconnects.
+                *client_opt = None;
+                return;
+            }
+        };
+        if !resp.ok {
+            continue;
+        }
+        let result = resp.result.unwrap_or(Value::Null);
+        // Expected shape from substrate.read:
+        // `{value: Option<Value>, tick: u64, sensitivity: String}`.
+        if let Some(value) = result.get("value").cloned() {
+            if !value.is_null() {
+                substrate.apply(clawft_substrate::StateDelta::Replace {
+                    path: path.to_string(),
+                    value,
+                });
+            }
+        }
+    }
 }
 
 async fn run_raw(
