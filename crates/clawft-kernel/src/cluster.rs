@@ -377,6 +377,21 @@ fn validate_capabilities(capabilities: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// On-disk format for persisted cluster peers.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ClusterPeersFile {
+    /// Schema version for forward compatibility.
+    #[serde(default = "default_peers_file_version")]
+    pub version: u32,
+    /// Persisted peer records.
+    #[serde(default)]
+    pub peers: Vec<PeerNode>,
+}
+
+fn default_peers_file_version() -> u32 {
+    1
+}
+
 pub struct ClusterMembership {
     config: ClusterConfig,
     peers: DashMap<NodeId, PeerNode>,
@@ -384,6 +399,12 @@ pub struct ClusterMembership {
     last_peer_add: std::sync::Mutex<Option<Instant>>,
     /// Minimum interval between peer additions.
     min_peer_add_interval: std::time::Duration,
+    /// Optional path for peer membership persistence.
+    ///
+    /// When set, mutations (add/remove/state-change) are reflected to disk
+    /// so the cluster survives kernel restarts. A `Mutex` serialises writers;
+    /// the lock is held only for the JSON encode + atomic rename.
+    persist_path: std::sync::Mutex<Option<PathBuf>>,
     /// Optional chain manager for exochain audit logging.
     #[cfg(feature = "exochain")]
     chain: Option<Arc<crate::chain::ChainManager>>,
@@ -400,6 +421,7 @@ impl ClusterMembership {
             peers: DashMap::new(),
             last_peer_add: std::sync::Mutex::new(None),
             min_peer_add_interval: std::time::Duration::from_millis(100),
+            persist_path: std::sync::Mutex::new(None),
             #[cfg(feature = "exochain")]
             chain: None,
             #[cfg(feature = "exochain")]
@@ -425,6 +447,98 @@ impl ClusterMembership {
     pub fn with_min_peer_interval(mut self, interval: std::time::Duration) -> Self {
         self.min_peer_add_interval = interval;
         self
+    }
+
+    /// Enable peer persistence at the given path (builder style).
+    ///
+    /// If the file exists and is readable, peers are rehydrated into the
+    /// in-memory map so joins survive kernel restarts. Parse errors log a
+    /// warning and leave the map empty. Subsequent mutations write back to
+    /// the same path via [`Self::persist`].
+    pub fn with_persist_path(self, path: impl AsRef<Path>) -> Self {
+        let path = path.as_ref().to_path_buf();
+        if path.exists() {
+            match std::fs::read_to_string(&path) {
+                Ok(data) => match serde_json::from_str::<ClusterPeersFile>(&data) {
+                    Ok(file) => {
+                        for peer in file.peers {
+                            // Bypass rate-limiting and duplicate checks during rehydration.
+                            self.peers.insert(peer.id.clone(), peer);
+                        }
+                        info!(
+                            count = self.peers.len(),
+                            path = %path.display(),
+                            "rehydrated cluster peers from disk"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            path = %path.display(),
+                            "failed to parse cluster peers file; starting empty"
+                        );
+                    }
+                },
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        path = %path.display(),
+                        "failed to read cluster peers file; starting empty"
+                    );
+                }
+            }
+        }
+        *self
+            .persist_path
+            .lock()
+            .expect("persist_path lock poisoned") = Some(path);
+        self
+    }
+
+    /// Snapshot current peers to disk (no-op when persistence is disabled).
+    ///
+    /// Writes to a sibling `.tmp` file then renames for atomic replacement.
+    /// Errors are logged but not propagated — membership stays correct
+    /// in memory, and the next successful mutation will re-sync the file.
+    fn persist(&self) {
+        let path_opt = self
+            .persist_path
+            .lock()
+            .expect("persist_path lock poisoned")
+            .clone();
+        let Some(path) = path_opt else {
+            return;
+        };
+
+        let peers: Vec<PeerNode> = self.peers.iter().map(|e| e.value().clone()).collect();
+        let file = ClusterPeersFile {
+            version: default_peers_file_version(),
+            peers,
+        };
+        let json = match serde_json::to_string_pretty(&file) {
+            Ok(j) => j,
+            Err(e) => {
+                warn!(error = %e, "failed to serialise cluster peers");
+                return;
+            }
+        };
+
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            warn!(error = %e, path = %parent.display(), "failed to create persist parent");
+            return;
+        }
+
+        let tmp = path.with_extension("json.tmp");
+        if let Err(e) = std::fs::write(&tmp, &json) {
+            warn!(error = %e, path = %tmp.display(), "failed to write cluster peers tmp");
+            return;
+        }
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            warn!(error = %e, path = %path.display(), "failed to rename cluster peers file");
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
 
     /// Get the cluster configuration.
@@ -510,6 +624,7 @@ impl ClusterMembership {
 
         debug!(node_id = %peer.id, name = %peer.name, "adding peer to cluster");
         self.peers.insert(peer.id.clone(), peer);
+        self.persist();
         Ok(())
     }
 
@@ -540,6 +655,10 @@ impl ClusterMembership {
             .ok_or_else(|| ClusterError::NodeNotFound {
                 node_id: node_id.to_owned(),
             });
+
+        if result.is_ok() {
+            self.persist();
+        }
 
         // Chain logging: record peer removal on success.
         #[cfg(feature = "exochain")]
@@ -581,6 +700,8 @@ impl ClusterMembership {
         }
 
         entry.state = new_state;
+        drop(entry);
+        self.persist();
         Ok(())
     }
 
@@ -1544,6 +1665,74 @@ mod tests {
         let restored: PairingWindowResult = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.window_secs, 30);
         assert_eq!(restored.already_paired, vec!["peer-1"]);
+    }
+
+    fn persist_tmp_path(suffix: &str) -> PathBuf {
+        let pid = std::process::id();
+        let ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("weftos-cluster-{pid}-{ns}-{suffix}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("cluster_peers.json")
+    }
+
+    #[test]
+    fn persisted_peers_rehydrate_on_restart() {
+        let path = persist_tmp_path("rehydrate");
+
+        {
+            let cluster = ClusterMembership::new(ClusterConfig::default())
+                .with_min_peer_interval(std::time::Duration::ZERO)
+                .with_persist_path(&path);
+            cluster.add_peer(make_peer("node-1", "alpha")).unwrap();
+            cluster.add_peer(make_peer("node-2", "beta")).unwrap();
+            assert_eq!(cluster.len(), 2);
+        }
+
+        assert!(path.exists(), "persist path should exist after add_peer");
+
+        let restored = ClusterMembership::new(ClusterConfig::default())
+            .with_persist_path(&path);
+        assert_eq!(restored.len(), 2, "peers should rehydrate from disk");
+        assert!(restored.get_peer("node-1").is_some());
+        assert!(restored.get_peer("node-2").is_some());
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn persist_reflects_remove_and_state_change() {
+        let path = persist_tmp_path("mutations");
+
+        let cluster = ClusterMembership::new(ClusterConfig::default())
+            .with_min_peer_interval(std::time::Duration::ZERO)
+            .with_persist_path(&path);
+        cluster.add_peer(make_peer("node-1", "alpha")).unwrap();
+        cluster.add_peer(make_peer("node-2", "beta")).unwrap();
+        cluster
+            .update_state("node-1", NodeState::Suspect)
+            .unwrap();
+        cluster.remove_peer("node-2").unwrap();
+
+        let data = std::fs::read_to_string(&path).unwrap();
+        let file: ClusterPeersFile = serde_json::from_str(&data).unwrap();
+        assert_eq!(file.peers.len(), 1);
+        assert_eq!(file.peers[0].id, "node-1");
+        assert_eq!(file.peers[0].state, NodeState::Suspect);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn with_persist_path_missing_file_is_ok() {
+        let path = persist_tmp_path("missing").parent().unwrap().join("nope.json");
+        let cluster = ClusterMembership::new(ClusterConfig::default())
+            .with_persist_path(&path);
+        assert_eq!(cluster.len(), 0);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }
 

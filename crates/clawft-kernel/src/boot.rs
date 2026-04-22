@@ -523,13 +523,19 @@ impl<P: Platform> Kernel<P> {
                 .unwrap_or(5),
             ..ClusterConfig::default()
         };
-        let cluster_membership = Arc::new(ClusterMembership::new(cluster_config));
+        // Cluster peer membership persists to disk so joins survive restarts.
+        let cluster_peers_path =
+            std::path::PathBuf::from(".weftos/runtime/cluster_peers.json");
+        let cluster_membership = Arc::new(
+            ClusterMembership::new(cluster_config).with_persist_path(&cluster_peers_path),
+        );
 
         boot_log.push(BootEvent::info(
             BootPhase::Network,
             format!(
-                "Cluster membership ready (node {})",
-                cluster_membership.local_node_id()
+                "Cluster membership ready (node {}, {} peer(s) rehydrated)",
+                cluster_membership.local_node_id(),
+                cluster_membership.len(),
             ),
         ));
 
