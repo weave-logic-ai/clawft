@@ -196,6 +196,44 @@ x-ref: `.planning/sparc/weftos/0.1/10-sprint-plan.md` for full detail
 
 ---
 
+## In-Flight Research: LeWM World Model (ADRs 048–058)
+
+**Status**: research + design · no runtime APIs yet · existing WeftOS installs unaffected
+**Tracking**: `.planning/symposiums/lewm-worldmodel/diagram.md` · `.planning/lewm-worldmodel-rs-page/`
+**Public page**: `https://weftos.weavelogic.ai/lewm-worldmodel-rs`
+
+A sensor-primary latent world model layered *under* the ECC causal DAG. The sensor pipeline is the primary, self-sufficient plane; a WorldModelService is an additive, optional consumer. Decoupling-invariant by design (ADR-058): a node running WeftOS today will keep working identically whether LeWM is present, absent, or removed later.
+
+### What exists now (shipped to master)
+- Architecture diagram + infographic (`.planning/symposiums/lewm-worldmodel/diagram.md`)
+- Public narrative page `/lewm-worldmodel-rs` (scroll pop-up book, 12 beats)
+- Design notes `.planning/lewm-worldmodel-rs-page/{DESIGN-A,DESIGN-B,PLAN}.md`
+
+### Not implemented yet — plan around absence
+| Surface | Status | Notes for integrators |
+|---------|--------|----------------------|
+| `weftos-sensor-pipeline` crate (ADR-056) | **Not started** | Wire format will be CBOR, ≤ 2 KB/frame; schema subject to change until 1.0-freeze |
+| SIGReg-manifold encoder (ADR-050) | Research | 192-dim isotropic-Gaussian latent, no stable API |
+| `WorldModelService` (ADR-054) | Research | Single / Raft-standby / P2P deployment modes under evaluation |
+| `LatentPlanner` (ADR-051) | Research | CEM default, MPPI-warm + gradient under evaluation |
+| DEMOCRITUS 1 kHz servo loop (ADR-047) | Research | Self-calibrated heartbeat; runs *local* to node, not over mesh |
+| Mesh topics `mesh.sensor.v1.{encoded,consensus,control}` (ADR-053) | Reserved | Do not claim these topic prefixes in other features |
+| StructureTag::LatentWorldModel (ADR-048) | Reserved | Do not re-use this tag in CausalNode metadata |
+| RVF-hosted sensor models (ADR-057) | Research | Hot-swap + auto-rollback semantics drafted, not implemented |
+
+### Stability contract for existing installs (v0.6.x and forward)
+- **Nothing in the LeWM research branch gates an existing release.** LeWM lands behind a feature flag when it lands.
+- **Mesh, ECC, ExoChain, governance, and kernel APIs are unchanged** by this work. The decoupling-invariant (ADR-058) is non-negotiable.
+- **Reserved identifiers above will not be assigned to anything else.** Other teams building on mesh/causal-graph surfaces can safely ignore them.
+- **Sensor-pipeline wire format is considered provisional** until a `weftos-sensor-pipeline` crate ships with a version. Any integration before then must pin to a specific commit.
+
+### Trigger to promote out of research
+- First `weftos-sensor-pipeline` crate published (even as 0.x)
+- Decoupling-invariant test suite green (install-with-LeWM ≡ install-without-LeWM observability)
+- ADRs 048–058 moved from research to accepted
+
+---
+
 ## Post-1.0 Horizon
 
 | Item | Description | Trigger |
