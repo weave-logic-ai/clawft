@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.6.19] - 2026-04-22
 
-Rollup of the `development-0.7.0` work stream onto the 0.6 release line. Ships the M1.5 app-layer trilogy, the 21-item canon UI primitive system, the built-in system components, a sensor framework, ExoChain stream-anchor auditing, eight EML-swap learnable-model wirings, and two late kernel-plumbing fixes (cluster peer persistence + optional TCP IPC relay). Also back-fills the missing 0.6.18 changelog entry (the fix itself merged forward via cherry-pick).
+Rollup of the `development-0.7.0` work stream onto the 0.6 release line. Ships the M1.5 app-layer trilogy, the 21-item canon UI primitive system, the built-in system components, a sensor framework, ExoChain stream-anchor auditing, eight EML-swap learnable-model wirings, and two late kernel-plumbing fixes (cluster peer persistence + optional TCP IPC relay). Also merges forward the v0.6.18 graphify fix (originally cut on an orphan commit that never reached `master`).
 
 ### Added
 
@@ -87,10 +87,6 @@ Eight learnable models replace hard-coded constants:
   query` now succeeds immediately after `weaver graphify ingest`
   without any workaround. `weaver graphify diff` retains backwards
   compatibility with old `"links"`-format graph.json files.
-
-  Note: the 0.6.18 tag was cut on a commit that never merged back to
-  `master`; this release back-fills the changelog entry on the main
-  line and includes the fix (`e8075a4`) via cherry-pick.
 
 ## [0.6.17] - 2026-04-17
 
