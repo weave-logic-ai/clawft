@@ -512,7 +512,7 @@ impl<P: Platform> ContextBuilder<P> {
 pub fn count_tokens(text: &str) -> usize {
     // Ceiling division to avoid undercount on short strings.
     let words = text.split_whitespace().count();
-    (words * 4 + 2) / 3 // equivalent to ceil(words * 4/3)
+    (words * 4).div_ceil(3) // equivalent to ceil(words * 4/3)
 }
 
 /// Configuration for context compression.

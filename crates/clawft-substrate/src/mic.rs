@@ -48,8 +48,13 @@ use crate::adapter::{
 };
 use crate::delta::StateDelta;
 use crate::physical::{
-    AudioDirection, Characterization, PhysicalSensorAdapter, SensorCalibration, SensorInterface,
+    Characterization, PhysicalSensorAdapter, SensorCalibration, SensorInterface,
 };
+// Used only by `tests::host_audio_direction_variant_compiles` via
+// `use super::*` — keep the import so `cargo test` builds.
+#[cfg(test)]
+#[allow(unused_imports)]
+use crate::physical::AudioDirection;
 
 /// Window size in samples read per tick. At 16 kHz / 500 ms that's
 /// 8000 samples = 16 000 bytes.
@@ -246,6 +251,14 @@ async fn poll_level(
             _ = &mut cancel_rx => return,
             _ = ticker.tick() => {
                 let value = read_and_measure(&source_path, sample_rate, &mut cursor);
+                // If the backing file is missing we emit nothing. Otherwise
+                // we'd overwrite externally-published values (e.g. from the
+                // ESP32 bridge calling `substrate.publish`) on every tick
+                // with `{available: false, reason: "source-missing"}`,
+                // which has no `rms_db` key and breaks the gauge binding.
+                if value.get("reason").and_then(Value::as_str) == Some("source-missing") {
+                    continue;
+                }
                 let delta = StateDelta::Replace {
                     path: "substrate/sensor/mic".to_string(),
                     value,

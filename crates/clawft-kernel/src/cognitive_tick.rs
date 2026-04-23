@@ -444,7 +444,7 @@ pub async fn run_democritus_loop_with_chain(
             // in-phase warnings drop off geometrically so the log
             // doesn't drown.
             if coherence_history.len() >= cycle_window
-                && exact_tick_count % cycle_window as u64 == 0
+                && exact_tick_count.is_multiple_of(cycle_window as u64)
             {
                 let history_slice: Vec<f64> =
                     coherence_history.iter().copied().collect();
@@ -520,8 +520,8 @@ pub async fn run_democritus_loop_with_chain(
 
         // ── LOG (ExoChain) ─────────────────────────────────────────────
         // Drain EML lifecycle events and append to the chain.
-        if let Some(ref cm) = chain_manager {
-            if let Ok(mut model) = eml.lock() {
+        if let Some(ref cm) = chain_manager
+            && let Ok(mut model) = eml.lock() {
                 for event in model.drain_events() {
                     cm.append(
                         "eml",
@@ -530,7 +530,6 @@ pub async fn run_democritus_loop_with_chain(
                     );
                 }
             }
-        }
 
         // ── COMMIT ─────────────────────────────────────────────────────
         // Record timing in the adaptive tick system.

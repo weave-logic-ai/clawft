@@ -154,8 +154,8 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
     #[cfg(feature = "exochain")]
     {
         let k = kernel.read().await;
-        if let Some(cfg) = k.kernel_config().anchor.as_ref() {
-            if cfg.enabled && !cfg.topics.is_empty() {
+        if let Some(cfg) = k.kernel_config().anchor.as_ref()
+            && cfg.enabled && !cfg.topics.is_empty() {
                 let window = std::time::Duration::from_secs(cfg.window_secs.max(1));
                 let a2a = k.a2a_router().clone();
                 let chain = k.chain_manager().cloned();
@@ -181,7 +181,6 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                     "stream-window anchors started"
                 );
             }
-        }
     }
 
     // Shutdown signal
@@ -596,13 +595,12 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
     Ok(())
 }
 
-/// Handle a single client connection.
-///
-/// Detects the connection mode by reading the first 4 bytes:
-/// - `RVFS` → RVF-framed protocol (content-hash verified segments)
-/// - Anything else → legacy line-delimited JSON (bytes prepended to first line)
 /// Handle a single client connection — accepts both JSON line mode and
 /// (when the `rvf-rpc` feature is enabled) the RVF-framed protocol.
+///
+/// Detects the connection mode by reading the first 4 bytes:
+///   - `RVFS` → RVF-framed protocol (content-hash verified segments)
+///   - anything else → legacy line-delimited JSON (bytes prepended to first line)
 ///
 /// Exposed `pub` so integration tests can drive a preassembled kernel
 /// directly without the signal-handler plumbing in [`run`].
@@ -809,7 +807,7 @@ fn decode_bytes(s: &str) -> Result<Vec<u8>, String> {
     let trimmed = s.trim();
     // Try hex first (even-length, all hex digits)
     if !trimmed.is_empty()
-        && trimmed.len() % 2 == 0
+        && trimmed.len().is_multiple_of(2)
         && trimmed.chars().all(|c| c.is_ascii_hexdigit())
     {
         let mut out = Vec::with_capacity(trimmed.len() / 2);
@@ -2649,7 +2647,7 @@ async fn dispatch(
         "ecc.status" => {
             let k = kernel.read().await;
             let hnsw_count = k.ecc_hnsw().map(|h| h.len()).unwrap_or(0);
-            let tick_info = k.ecc_tick().map(|t| {
+            let tick_info = k.ecc_tick().map(|_t| {
                 serde_json::json!({
                     "interval_ms": 50,
                     "running": true,

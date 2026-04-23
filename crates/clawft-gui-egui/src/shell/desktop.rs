@@ -31,24 +31,16 @@ const CHIP_SURFACE_MESH: &str =
     include_str!("../../../clawft-surface/fixtures/weftos-chip-mesh.toml");
 const CHIP_SURFACE_EXOCHAIN: &str =
     include_str!("../../../clawft-surface/fixtures/weftos-chip-exochain.toml");
-const CHIP_SURFACE_WIFI: &str =
-    include_str!("../../../clawft-surface/fixtures/weftos-chip-wifi.toml");
-const CHIP_SURFACE_BLUETOOTH: &str =
-    include_str!("../../../clawft-surface/fixtures/weftos-chip-bluetooth.toml");
-const CHIP_SURFACE_AUDIO: &str =
-    include_str!("../../../clawft-surface/fixtures/weftos-chip-audio.toml");
-const CHIP_SURFACE_TOF: &str =
-    include_str!("../../../clawft-surface/fixtures/weftos-chip-tof.toml");
 
-fn chip_surface_toml(chip: tray::ChipId) -> &'static str {
+/// TOML surface fixture for chips that render through the composer.
+/// Returns `None` for chips rendered by bespoke panel code (today:
+/// Explorer — see `render_explorer_placeholder`).
+fn chip_surface_toml(chip: tray::ChipId) -> Option<&'static str> {
     match chip {
-        tray::ChipId::Kernel => CHIP_SURFACE_KERNEL,
-        tray::ChipId::Mesh => CHIP_SURFACE_MESH,
-        tray::ChipId::ExoChain => CHIP_SURFACE_EXOCHAIN,
-        tray::ChipId::Wifi => CHIP_SURFACE_WIFI,
-        tray::ChipId::Bluetooth => CHIP_SURFACE_BLUETOOTH,
-        tray::ChipId::Audio => CHIP_SURFACE_AUDIO,
-        tray::ChipId::Tof => CHIP_SURFACE_TOF,
+        tray::ChipId::Kernel => Some(CHIP_SURFACE_KERNEL),
+        tray::ChipId::Mesh => Some(CHIP_SURFACE_MESH),
+        tray::ChipId::ExoChain => Some(CHIP_SURFACE_EXOCHAIN),
+        tray::ChipId::Explorer => None,
     }
 }
 
@@ -183,12 +175,16 @@ impl Default for Desktop {
             tray::ChipId::Kernel,
             tray::ChipId::Mesh,
             tray::ChipId::ExoChain,
-            tray::ChipId::Wifi,
-            tray::ChipId::Bluetooth,
-            tray::ChipId::Audio,
-            tray::ChipId::Tof,
+            tray::ChipId::Explorer,
         ] {
-            match clawft_surface::parse::parse_surface_toml(chip_surface_toml(chip)) {
+            // Explorer has no surface fixture — its detail window is
+            // rendered by `render_explorer_placeholder` (MVP) until the
+            // tree-view panel from `.planning/explorer/PROJECT-PLAN.md`
+            // ships. Skip it here.
+            let Some(toml) = chip_surface_toml(chip) else {
+                continue;
+            };
+            match clawft_surface::parse::parse_surface_toml(toml) {
                 Ok(tree) => {
                     chip_surfaces.insert(chip, tree);
                 }
@@ -304,6 +300,15 @@ fn render_chip_detail(
     });
     ui.separator();
 
+    // Explorer has no surface fixture and no single backing substrate
+    // value — show a placeholder until the tree-view MVP lands. Done
+    // before the composer path below because `chip_subtree` returns
+    // None here and the generic fallback would read as "broken."
+    if matches!(chip, tray::ChipId::Explorer) {
+        render_explorer_placeholder(ui);
+        return;
+    }
+
     // Surface-composer path (preferred). The ontology snapshot is the
     // same source of truth the Admin app reads, so fixtures written
     // here stay valid for the M1.6+ substrate-over-postMessage bridge.
@@ -363,6 +368,37 @@ fn render_chip_detail(
             );
         }
     }
+}
+
+/// Placeholder body for the Explorer detail window until the tree-
+/// view MVP from `.planning/explorer/PROJECT-PLAN.md` lands. Kept
+/// intentionally spare — this is only a hold-my-place, not the real
+/// panel. The chip itself is live (tracks daemon connection) so
+/// clicking it and seeing this text is the "yes we got here" signal.
+fn render_explorer_placeholder(ui: &mut egui::Ui) {
+    ui.add_space(8.0);
+    ui.label(
+        egui::RichText::new("Ontology Explorer")
+            .strong()
+            .size(16.0),
+    );
+    ui.add_space(4.0);
+    ui.label(
+        egui::RichText::new(
+            "Tree view of the full substrate with schema-matched value \
+             viewers. Planned: left pane is the path tree, right pane \
+             renders the selected value through a registry of viewers \
+             (audio meter, depth map, JSON fallback, …).",
+        )
+        .italics()
+        .color(egui::Color32::from_rgb(180, 180, 195)),
+    );
+    ui.add_space(8.0);
+    ui.label(
+        egui::RichText::new("See .planning/explorer/PROJECT-PLAN.md")
+            .monospace()
+            .color(egui::Color32::from_rgb(140, 160, 200)),
+    );
 }
 
 /// Small coloured pill showing the daemon-link state — green for
@@ -427,31 +463,11 @@ fn render_empty_hint(ui: &mut egui::Ui, chip: tray::ChipId, snap: &Snapshot) {
                     .to_string(),
                 true,
             ),
-            tray::ChipId::Wifi | tray::ChipId::Bluetooth => (
-                "Native-only adapter — the NetworkAdapter and \
-                 BluetoothAdapter run against /sys/class on native. \
-                 The wasm webview bridge doesn't ship until M1.6+."
-                    .to_string(),
-                false,
-            ),
-            tray::ChipId::Audio => (
-                "No microphone data yet. The adapter reads raw \
-                 s16le PCM from /tmp/weftos/mic/stream.raw; until a \
-                 CPAL/ALSA/WASAPI bridge lands, this file needs an \
-                 external feeder (test fixture or future capture \
-                 sidecar). Native-only."
-                    .to_string(),
-                false,
-            ),
-            tray::ChipId::Tof => (
-                "No ToF frames yet. Expected shape at \
-                 substrate/sensor/tof: \
-                 {available, width, height, depths_mm:[u16;w*h], \
-                 min_mm?, max_mm?, frame_count?}. Bridge should \
-                 publish via substrate.publish as new frames arrive. \
-                 0xFFFF pixels are treated as 'no valid reading' per \
-                 VL53L5CX/L7CX convention."
-                    .to_string(),
+            tray::ChipId::Explorer => (
+                // Unreachable in practice — Explorer short-circuits into
+                // `render_explorer_placeholder` before chip_subtree is
+                // consulted. Kept exhaustive for the compiler.
+                "Explorer uses a dedicated detail view.".to_string(),
                 false,
             ),
         },
@@ -461,8 +477,8 @@ fn render_empty_hint(ui: &mut egui::Ui, chip: tray::ChipId, snap: &Snapshot) {
             .italics()
             .color(egui::Color32::from_rgb(170, 170, 180)),
     );
-    if show_error {
-        if let Some(err) = &snap.last_error {
+    if show_error
+        && let Some(err) = &snap.last_error {
             ui.add_space(4.0);
             ui.label(
                 egui::RichText::new(format!("last error: {err}"))
@@ -470,7 +486,6 @@ fn render_empty_hint(ui: &mut egui::Ui, chip: tray::ChipId, snap: &Snapshot) {
                     .color(egui::Color32::from_rgb(220, 140, 140)),
             );
         }
-    }
 }
 
 fn window_frame() -> egui::Frame {

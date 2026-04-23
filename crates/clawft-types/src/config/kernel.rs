@@ -746,7 +746,7 @@ impl Default for VectorHybridConfig {
 /// hot_capacity = 50000
 /// promotion_threshold = 3
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VectorConfig {
     /// Which backend to use.
     #[serde(default)]
@@ -812,7 +812,7 @@ impl Default for LogQuantizedStubConfig {
 /// Full implementation lives in `clawft-kernel::vector_quantization`.
 ///
 /// Requires `ruvector-core` with PR #352 merged.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SimdDistanceStubConfig {
     /// Whether the unified SIMD distance kernel is enabled.
     #[serde(default)]
@@ -821,28 +821,6 @@ pub struct SimdDistanceStubConfig {
     /// See shaal's v4 caveat about memory overhead.
     #[serde(default)]
     pub pad_to_power_of_two: bool,
-}
-
-impl Default for SimdDistanceStubConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            pad_to_power_of_two: false,
-        }
-    }
-}
-
-impl Default for VectorConfig {
-    fn default() -> Self {
-        Self {
-            backend: VectorBackendKind::default(),
-            hnsw: None,
-            diskann: None,
-            hybrid: None,
-            log_quantized: None,
-            simd_distance: None,
-        }
-    }
 }
 
 #[cfg(test)]

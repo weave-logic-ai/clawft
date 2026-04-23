@@ -2880,7 +2880,7 @@ mod tests {
             .await
             .unwrap();
         let log = kernel.boot_log();
-        assert!(log.events().len() > 0, "boot log should have events");
+        assert!(!log.events().is_empty(), "boot log should have events");
     }
 
     #[tokio::test]

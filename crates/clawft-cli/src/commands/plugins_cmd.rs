@@ -332,7 +332,7 @@ See `.weftos-plugin.toml` for metadata and compatibility requirements.
 
 /// Convert a snake_case or kebab-case identifier to PascalCase.
 fn to_pascal_case(s: &str) -> String {
-    s.split(|c: char| c == '_' || c == '-')
+    s.split(['_', '-'])
         .filter(|part| !part.is_empty())
         .map(|part| {
             let mut chars = part.chars();

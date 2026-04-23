@@ -10,7 +10,7 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const REPO: &str = "weave-logic-ai/weftos";
 const CACHE_FILE: &str = "version-check.json";

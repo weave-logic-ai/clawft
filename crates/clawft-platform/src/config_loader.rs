@@ -92,8 +92,8 @@ pub async fn load_config_raw(
     let home = fs.home_dir();
     let json_path = discover_config_path(env, home);
 
-    if let Some(path) = json_path {
-        if fs.exists(&path).await {
+    if let Some(path) = json_path
+        && fs.exists(&path).await {
             tracing::debug!(path = %path.display(), "loading JSON config");
             match fs.read_to_string(&path).await {
                 Ok(contents) => {
@@ -120,9 +120,8 @@ pub async fn load_config_raw(
                 }
             }
         }
-    }
 
-    if merged.as_object().map_or(true, |m| m.is_empty()) {
+    if merged.as_object().is_none_or(|m| m.is_empty()) {
         tracing::info!("no config found (checked weave.toml + JSON), using defaults");
     }
 

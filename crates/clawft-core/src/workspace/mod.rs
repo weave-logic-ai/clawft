@@ -309,7 +309,7 @@ pub(crate) mod tests {
         let result = temp_env::with_var(
             "CLAWFT_WORKSPACE",
             Some("/nonexistent/path/for/test"),
-            || discover_workspace(),
+            discover_workspace,
         );
 
         assert!(result.is_some());
