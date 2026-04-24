@@ -25,6 +25,14 @@ name = "weft-demo-lab"
 path = "src/bin/demo_lab.rs"
 required-features = ["native"]
 
+# Standalone reproduction for the `CanonResponse::from_egui` Windows
+# RwLock-reentrancy deadlock (fixed in this commit). Native-only — the
+# wasm target excludes eframe's native window loop.
+[[example]]
+name = "canon_slider_windows_deadlock_repro"
+path = "examples/canon_slider_windows_deadlock_repro.rs"
+required-features = ["native"]
+
 [lib]
 name = "clawft_gui_egui"
 path = "src/lib.rs"
