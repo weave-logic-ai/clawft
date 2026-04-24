@@ -5,6 +5,7 @@ use eframe::egui;
 use super::{grid, tray};
 use crate::blocks;
 use crate::canon_demos::{self, CanonDemoState, CanonKind};
+use crate::explorer::Explorer;
 use crate::live::Snapshot;
 use crate::surface_host;
 use clawft_app::registry::AppRegistry;
@@ -79,6 +80,9 @@ pub struct Desktop {
     /// entries mean the fixture failed to parse (fallback to the
     /// raw-JSON view kicks in).
     pub chip_surfaces: std::collections::BTreeMap<tray::ChipId, SurfaceTree>,
+    /// Ontology Explorer panel state — left-tree + right-detail. The
+    /// Explorer tray chip opens this; see `.planning/explorer/PROJECT-PLAN.md`.
+    pub explorer: Explorer,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -210,6 +214,7 @@ impl Default for Desktop {
             selected_app,
             app_surfaces,
             chip_surfaces,
+            explorer: Explorer::default(),
         }
     }
 }
@@ -264,20 +269,66 @@ pub fn show(
     if let Some(chip) = desk.open_chip {
         let mut open = true;
         let title = format!("{} · {}", chip.label(), chip.substrate_path());
+        // Explorer is the outlier: it needs `&mut Desktop` to mutate
+        // its own state (expansion set, selection, subscription), and
+        // it uses a bigger default window because a two-pane layout
+        // at 420x320 is cramped. Everything else flows through the
+        // shared `render_chip_detail` helper.
+        let is_explorer = matches!(chip, tray::ChipId::Explorer);
+        let (def_size, def_pos) = if is_explorer {
+            (
+                egui::vec2(760.0, 520.0),
+                egui::pos2(rect.left() + 80.0, rect.top() + 80.0),
+            )
+        } else {
+            (
+                egui::vec2(420.0, 320.0),
+                egui::pos2(rect.right() - 460.0, rect.bottom() - 420.0),
+            )
+        };
         egui::Window::new(title)
             .collapsible(true)
             .resizable(true)
-            .default_size(egui::vec2(420.0, 320.0))
-            .default_pos(egui::pos2(rect.right() - 460.0, rect.bottom() - 420.0))
+            .default_size(def_size)
+            .default_pos(def_pos)
             .open(&mut open)
             .frame(window_frame())
             .show(ui.ctx(), |ui| {
-                render_chip_detail(ui, desk, chip, live, snap);
+                if is_explorer {
+                    render_explorer(ui, desk, live, snap);
+                } else {
+                    render_chip_detail(ui, desk, chip, live, snap);
+                }
             });
         if !open {
+            // Closing the Explorer window drops its active subscription
+            // so no background re-read polls run against a hidden panel.
+            if is_explorer {
+                desk.explorer.close();
+            }
             desk.open_chip = None;
         }
     }
+}
+
+/// Render the Explorer panel body inside the chip-detail window.
+/// Splits header + two-pane layout; the Explorer itself draws the
+/// SidePanel / CentralPanel pair internally.
+fn render_explorer(
+    ui: &mut egui::Ui,
+    desk: &mut Desktop,
+    live: &std::sync::Arc<crate::live::Live>,
+    snap: &Snapshot,
+) {
+    ui.horizontal(|ui| {
+        ui.heading("Explorer");
+        ui.separator();
+        ui.monospace("substrate/");
+        ui.separator();
+        connection_pill(ui, snap.connection);
+    });
+    ui.separator();
+    desk.explorer.show(ui, live);
 }
 
 /// Render the chip-detail window. Prefers the per-chip surface
@@ -300,14 +351,10 @@ fn render_chip_detail(
     });
     ui.separator();
 
-    // Explorer has no surface fixture and no single backing substrate
-    // value — show a placeholder until the tree-view MVP lands. Done
-    // before the composer path below because `chip_subtree` returns
-    // None here and the generic fallback would read as "broken."
-    if matches!(chip, tray::ChipId::Explorer) {
-        render_explorer_placeholder(ui);
-        return;
-    }
+    // Explorer is handled out-of-band by `render_explorer` in the
+    // window-rendering code above — it needs `&mut Desktop` to mutate
+    // its panel state, which this helper (`&Desktop`) can't provide.
+    debug_assert!(!matches!(chip, tray::ChipId::Explorer));
 
     // Surface-composer path (preferred). The ontology snapshot is the
     // same source of truth the Admin app reads, so fixtures written
@@ -368,37 +415,6 @@ fn render_chip_detail(
             );
         }
     }
-}
-
-/// Placeholder body for the Explorer detail window until the tree-
-/// view MVP from `.planning/explorer/PROJECT-PLAN.md` lands. Kept
-/// intentionally spare — this is only a hold-my-place, not the real
-/// panel. The chip itself is live (tracks daemon connection) so
-/// clicking it and seeing this text is the "yes we got here" signal.
-fn render_explorer_placeholder(ui: &mut egui::Ui) {
-    ui.add_space(8.0);
-    ui.label(
-        egui::RichText::new("Ontology Explorer")
-            .strong()
-            .size(16.0),
-    );
-    ui.add_space(4.0);
-    ui.label(
-        egui::RichText::new(
-            "Tree view of the full substrate with schema-matched value \
-             viewers. Planned: left pane is the path tree, right pane \
-             renders the selected value through a registry of viewers \
-             (audio meter, depth map, JSON fallback, …).",
-        )
-        .italics()
-        .color(egui::Color32::from_rgb(180, 180, 195)),
-    );
-    ui.add_space(8.0);
-    ui.label(
-        egui::RichText::new("See .planning/explorer/PROJECT-PLAN.md")
-            .monospace()
-            .color(egui::Color32::from_rgb(140, 160, 200)),
-    );
 }
 
 /// Small coloured pill showing the daemon-link state — green for
@@ -529,6 +545,17 @@ fn render_blocks_window(
                     desk.section = PanelSection::Apps;
                 }
             });
+            ui.separator();
+            // Launcher-menu entry for the Ontology Explorer (plan §6 Q1
+            // default). Clicking opens the Explorer chip-detail window
+            // the same way the Explorer tray chip does.
+            if ui
+                .button(egui::RichText::new("⌸ Open Explorer").monospace())
+                .on_hover_text("Tree view of the substrate namespace")
+                .clicked()
+            {
+                desk.open_chip = Some(tray::ChipId::Explorer);
+            }
             ui.separator();
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
