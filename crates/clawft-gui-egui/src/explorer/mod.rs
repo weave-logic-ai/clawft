@@ -341,7 +341,16 @@ impl Explorer {
             return;
         };
         match self.selected_value.clone() {
-            Some(v) => viewers::dispatch(ui, &path, &v),
+            Some(v) => {
+                // Object Type badge: shape-infer a type and render a
+                // small label above the viewer. When no type is
+                // inferred we render nothing — viewer dispatch stays
+                // exactly as Phase 1 shipped it.
+                if let Some(inferred) = crate::ontology::infer(&v) {
+                    paint_object_type_badge(ui, inferred);
+                }
+                viewers::dispatch(ui, &path, &v);
+            }
             None => {
                 ui.horizontal(|ui| {
                     ui.monospace(&path);
@@ -355,4 +364,21 @@ impl Explorer {
             }
         }
     }
+}
+
+/// Render the Object Type badge for an inferred type.
+///
+/// Visual: a muted-blue pill with `[DisplayName]` above whatever the
+/// viewer registry paints. Kept deliberately small + passive — the
+/// badge is informational, not interactive. If/when property panels
+/// or Action affordances arrive, they attach here.
+fn paint_object_type_badge(ui: &mut egui::Ui, inferred: crate::ontology::InferredType) {
+    ui.horizontal(|ui| {
+        let label = egui::RichText::new(format!("[{}]", inferred.display))
+            .monospace()
+            .small()
+            .color(egui::Color32::from_rgb(140, 175, 220));
+        ui.label(label);
+    });
+    ui.add_space(2.0);
 }
