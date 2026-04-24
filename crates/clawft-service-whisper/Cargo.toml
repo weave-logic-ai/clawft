@@ -32,6 +32,13 @@ base64 = "0.22"
 # Structured logs.
 tracing = { workspace = true }
 
+# Kernel SubstrateService + SubscriberId — in-process pub/sub. We enable
+# the full default-feature set (native + ecc + exochain + cluster + mesh +
+# tilezero) because the kernel crate has internal cross-feature references
+# that don't compile with `native` alone, and the whisper service is
+# daemon-hosted so those heavier features are already compiled in upstream.
+clawft-kernel = { workspace = true, features = ["native", "ecc", "exochain", "cluster", "mesh", "tilezero"] }
+
 # Error handling.
 thiserror = { workspace = true }
 
