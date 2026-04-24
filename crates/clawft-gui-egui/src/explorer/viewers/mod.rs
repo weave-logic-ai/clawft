@@ -14,6 +14,7 @@ pub mod json_fallback;
 pub mod audio_meter;
 pub mod connection_badge;
 pub mod depth_map;
+pub mod graph;
 
 /// Dispatch rendering of `value` at `path` to the highest-priority
 /// matching viewer. Falls through to [`json_fallback::JsonFallbackViewer`]
@@ -27,6 +28,10 @@ pub mod depth_map;
 #[allow(clippy::needless_return)]
 pub fn dispatch(ui: &mut egui::Ui, path: &str, value: &serde_json::Value) {
     // [[VIEWERS_REGISTRATIONS_INSERT]]
+    if graph::GraphViewer::matches(value) > 0 {
+        graph::GraphViewer::paint(ui, path, value);
+        return;
+    }
     if audio_meter::AudioMeterViewer::matches(value) > 0 {
         audio_meter::AudioMeterViewer::paint(ui, path, value);
         return;
