@@ -28,6 +28,7 @@ use crate::live::{self, Command, Live, ReplyRx};
 
 pub mod tree;
 pub mod viewers;
+pub mod workshop;
 
 /// A path is considered "live" if its value has changed within this
 /// window. Used for the ● activity dot in the tree.
@@ -116,6 +117,12 @@ pub struct Explorer {
     pending_lists: Vec<PendingList>,
     /// Last time we re-polled every expanded prefix for changes.
     last_slow_tick: web_time::Instant,
+    /// Live Workshop-composition state, reused across frames so
+    /// per-panel subscriptions don't restart every paint. The view
+    /// is keyed to the currently-selected Workshop path; changing
+    /// selection clears it via [`Explorer::on_select`] so the new
+    /// Workshop (if any) starts from a clean slate.
+    workshop_view: workshop::WorkshopView,
 }
 
 impl Default for Explorer {
@@ -136,6 +143,7 @@ impl Default for Explorer {
             // `now - slow tick` so the first update() fires the slow
             // refresh immediately.
             last_slow_tick: web_time::Instant::now() - SLOW_TICK * 2,
+            workshop_view: workshop::WorkshopView::default(),
         }
     }
 }
@@ -169,7 +177,7 @@ impl Explorer {
             });
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
-            self.paint_detail(ui);
+            self.paint_detail(ui, live);
         });
     }
 
@@ -181,6 +189,10 @@ impl Explorer {
         self.subscription_handle = Some(SubscriptionHandle::new(path.clone()));
         self.selected = Some(path);
         self.selected_value = None;
+        // Reset Workshop state when selection moves. If the new path
+        // is also a Workshop, its subscriptions rebuild on the next
+        // paint; if not, the old per-panel polls stop immediately.
+        self.workshop_view = workshop::WorkshopView::default();
     }
 
     /// Clear the subscription handle. Called by the mount site when
@@ -189,6 +201,9 @@ impl Explorer {
     pub fn close(&mut self) {
         self.subscription_handle = None;
         self.selected_value = None;
+        // Drop all Workshop per-panel subscriptions so hidden panels
+        // stop polling.
+        self.workshop_view = workshop::WorkshopView::default();
         // Keep expanded + tree_children so reopening is instant.
     }
 
@@ -328,7 +343,15 @@ impl Explorer {
 
     /// Right-pane detail rendering. Picks a viewer via [`viewers::dispatch`]
     /// and paints it.
-    fn paint_detail(&mut self, ui: &mut egui::Ui) {
+    ///
+    /// Workshop shortcut: when the selected value shape-matches a
+    /// Workshop (see [`workshop::matches`]), the detail pane renders
+    /// it as a composition — nested panels with their own substrate
+    /// subscriptions — instead of falling through to the generic
+    /// viewer. This is what makes config-driven hot-reload work:
+    /// publishing a new Workshop JSON replaces `selected_value`, which
+    /// the Workshop renderer re-parses on the next frame.
+    fn paint_detail(&mut self, ui: &mut egui::Ui, live: &Arc<Live>) {
         let Some(path) = self.selected.clone() else {
             ui.vertical_centered(|ui| {
                 ui.add_space(64.0);
@@ -348,6 +371,16 @@ impl Explorer {
                 // exactly as Phase 1 shipped it.
                 if let Some(inferred) = crate::ontology::infer(&v) {
                     paint_object_type_badge(ui, inferred);
+                }
+                // Workshop dispatch: if the value shape-matches a
+                // Workshop, render the composition primitive instead
+                // of the generic viewer cascade. Shape-only; no path
+                // whitelist. ADOPTION §8 Step 3: "The shape of a value
+                // at a substrate path determines which Object Type it
+                // instantiates, which Viewers render it…"
+                if workshop::matches(&v) > 0 {
+                    self.workshop_view.paint(ui, &v, live);
+                    return;
                 }
                 viewers::dispatch(ui, &path, &v);
             }

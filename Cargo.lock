@@ -1207,7 +1207,9 @@ dependencies = [
 name = "clawft-gui-egui"
 version = "0.6.19"
 dependencies = [
+ "anyhow",
  "async-trait",
+ "clap",
  "clawft-app",
  "clawft-rpc",
  "clawft-substrate",
@@ -1224,11 +1226,13 @@ dependencies = [
  "image",
  "js-sys",
  "log",
+ "notify",
  "parking_lot",
  "poll-promise",
  "rodio",
  "serde_json",
  "tokio",
+ "toml",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
