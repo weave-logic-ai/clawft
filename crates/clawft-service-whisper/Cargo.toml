@@ -1,0 +1,17 @@
+[package]
+name = "clawft-service-whisper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "WeftOS whisper.cpp transcription service — HTTP client pipeline from substrate PCM to substrate transcript. Phase 2 Track 4 spike probing the sensor-ingestion pipeline primitive (Machinery + Functions)."
+
+[dependencies]
+# Pure-data + windowing for the PCM pipeline. HTTP + substrate deps land in
+# follow-up commits on the same branch — see the journal for the full shape.
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

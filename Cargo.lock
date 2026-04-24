@@ -1506,6 +1506,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "clawft-service-whisper"
+version = "0.6.19"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "clawft-services"
 version = "0.6.19"
 dependencies = [
