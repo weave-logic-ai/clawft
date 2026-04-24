@@ -16,6 +16,7 @@ pub mod chain_tail;
 pub mod connection_badge;
 pub mod depth_map;
 pub mod mesh_nodes;
+pub mod process_table;
 pub mod time_series;
 pub mod waveform;
 
@@ -41,6 +42,10 @@ pub fn dispatch(ui: &mut egui::Ui, path: &str, value: &serde_json::Value) {
     }
     if chain_tail::ChainTailViewer::matches(value) > 0 {
         chain_tail::ChainTailViewer::paint(ui, path, value);
+        return;
+    }
+    if process_table::ProcessTableViewer::matches(value) > 0 {
+        process_table::ProcessTableViewer::paint(ui, path, value);
         return;
     }
     if audio_meter::AudioMeterViewer::matches(value) > 0 {
