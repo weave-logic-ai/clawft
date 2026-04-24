@@ -424,3 +424,941 @@ sink cardinality.
 
 *This is a living document. When the second sensor's journal merges, this one
 gets revised into the primitive proposal — not kept as-is.*
+
+---
+
+## R2 revision — Source / Stage / Sink split
+
+**Added:** 2026-04-24.
+**Context:** two main-thread decisions landed after R1 was written and
+invalidate two of R1's load-bearing assumptions. This revision updates
+the primitive shape; everything above is preserved as the R1 record.
+
+**Why append rather than fork:** R1 and R2 share ~90% of their observed
+axes (A1–A9, backpressure policies, placement framing, health-probe
+contract). Forking into a companion doc would duplicate the axis
+tables and bury the diff. The decision *is* the diff, and a reader
+should see it next to what it replaced.
+
+### R2.0 What changed in the main thread
+
+Two decisions, both load-bearing:
+
+### D1 — Node vs Actor identity split
+
+A **Node** is a physical thing in the mesh; it emits (sensor data,
+heartbeats) and signs what it publishes with its ed25519 key. An
+**Actor** is an agent / program / user; it performs *Actions*
+(Foundry-style typed mutations) and has its own separate key.
+**Sensing is not acting.** Every substrate path is scoped
+`substrate/<node-id>/...` — no exceptions, no flat paths. Node-id is
+the first-6-hex-chars of `blake3(pubkey)` with an `n-` prefix, per
+`JOURNALED-NODE-ESP32.md` §2.2.
+
+Kernel-class nodes run `clawft-kernel`; leaf nodes run
+`weftos-leaf-types` + minimal firmware. Whisper runs on a kernel-class
+node (the daemon host).
+
+### D2 — Pipeline primitive splits into Source / Stage / Sink
+
+R1 tried to collapse the whole pipeline into one `SensorStage` trait.
+R2 says that was wrong, and splits it three ways:
+
+- **Source** — one substrate-subscribe + deserialize boundary. One
+  per input topic. No pure work past the deserialize.
+- **Stage** — pure in-process work (windowing, inference, fusion).
+  No substrate footprint. Typed channel in, typed channel out. Any
+  number chained.
+- **Sink** — the publish terminator. Owns its substrate path, its
+  signing identity (the publishing node's key), its sensitivity
+  tier, its publish cadence, and its backpressure contract.
+  Exactly one per pipeline.
+
+Rationale (taken in order):
+
+1. **Identity/signing happens at publish, not at every stage.** R1
+   had no clean place to put signing — the `SensorStage` trait was
+   ambiguous about whether subscribe-time or publish-time was the
+   signed boundary. A `Sink` localises signing.
+2. **Sensitivity tier applies at publish.** A fused boolean
+   "speech detected" derived from Capture-tier PCM may itself be
+   an `Ambient`-tier signal — the fusion is where the downgrade
+   happens. R1 couldn't express that without stage-local tier
+   declarations and a merge rule.
+3. **Mesh visibility applies only at publish.** Intermediate stages
+   shouldn't clutter substrate. R1's "declare your I/O topics"
+   encouraged per-stage substrate emissions; R2 forbids them.
+4. **One-job-per-primitive.** R1 mixed subscribe + pure work +
+   publish in one trait; debugging it in the whisper service
+   (see `run_pipeline`) means reading one 100-line `tokio::select!`
+   to find the bit you care about. R2's three primitives are
+   separately testable.
+
+### R2.1 R1 shape — single-primitive (preserved for comparison)
+
+```rust
+// R1 — SEEDED, NOT FINAL (as written in §6 above)
+trait SensorStage {
+    fn id(&self) -> &'static str;
+    fn input_topics(&self) -> &'static [TopicDecl];
+    fn output_topics(&self) -> &'static [TopicDecl];
+    fn placement(&self) -> Placement;
+    //   InProc | Sidecar { process_path } | RemoteHttp { url } | RemoteGrpc { addr }
+    async fn ready(&self) -> Readiness;
+    //   Ready | LoadingModel | Degraded(reason) | Down(reason)
+    fn input_policy(&self) -> BufferPolicy;
+    //   DropOldest | BlockCapped | Refuse
+    async fn run(self: Arc<Self>, substrate: SubstrateHandle, shutdown: Shutdown);
+}
+```
+
+### R2.2 R2 shape — three primitives
+
+None of the Rust below needs to compile; it is documentation of the
+fields we believe each shape wants, inferred from the whisper probe
+under the D1+D2 decisions.
+
+### R2.2.1 `Source<T>` — substrate-subscribe + deserialize boundary
+
+```rust
+trait Source<T: DeserializeOwned + Send + 'static> {
+    fn id(&self) -> &'static str;
+
+    /// Fully scoped substrate path. MUST start with `substrate/<node-id>/`.
+    fn input_topic(&self) -> &str;
+
+    /// Attach to substrate; decode each update into T; forward to out.
+    /// Panics + deserialization errors are logged and the offending
+    /// update is skipped — the stream does not close.
+    async fn run(
+        self: Arc<Self>,
+        substrate: SubstrateHandle,
+        out: mpsc::Sender<Framed<T>>,
+        shutdown: Shutdown,
+    );
+}
+
+/// Each Source emits framed payloads — value + the substrate metadata
+/// the downstream might want (source_tick, source_actor, source_path).
+/// Stages generally ignore the frame; Sinks may include it in lineage.
+struct Framed<T> {
+    value: T,
+    source_path: String,
+    source_tick: u64,
+    source_actor: Option<String>,
+}
+```
+
+**One Source per input topic.** A fusion pipeline with N inputs has N
+Source primitives. (This is one of the new open questions — §R2.6 Q3.)
+
+### R2.2.2 `Stage<I, O>` — pure in-process transform
+
+```rust
+trait Stage<I: Send + 'static, O: Send + 'static> {
+    fn id(&self) -> &'static str;
+
+    /// Pure in-process work. No substrate access. No network. No
+    /// filesystem beyond read-only model load at init.
+    ///
+    /// Backpressure: if Stage is slow, its input channel fills; the
+    /// upstream Stage (or Source) blocks. Whisper-style drop-oldest
+    /// is NOT a Stage concern — it is a Sink concern; intermediate
+    /// Stages preserve all data.
+    async fn run(
+        self: Arc<Self>,
+        input: mpsc::Receiver<I>,
+        output: mpsc::Sender<O>,
+        shutdown: Shutdown,
+    );
+
+    /// Optional: loadable-model state. `ready()` returns
+    /// `LoadingModel` until `init()` returns; pipelines gate their
+    /// Sink's `publishing` state on this.
+    async fn init(&self) -> Result<(), InitError> { Ok(()) }
+    fn ready_state(&self) -> StageReadiness {
+        StageReadiness::Ready
+    }
+}
+
+enum StageReadiness { Ready, LoadingModel, FailedInit(String) }
+```
+
+Notes:
+
+- **No `input_topics` / `output_topics`**. Stages are wired by typed
+  channels, not by substrate paths. `windower.rs` already fits this
+  shape exactly — it takes `&[u8]` chunks and returns `Option<PcmWindow>`
+  synchronously, no substrate knowledge, no async.
+- **`placement`** is not on the Stage signature. See §R2.4 for why
+  the axis may collapse.
+- **Init separation** lets whisper-style "I am loading a 2 GB model
+  for 5 s" be expressed without blocking the Source → Stage pipe.
+
+### R2.2.3 `Sink<T>` — the publish terminator
+
+```rust
+trait Sink<T: Send + 'static> {
+    fn id(&self) -> &'static str;
+
+    /// Fully scoped substrate path. MUST start with
+    /// `substrate/<this-node-id>/` — the publishing node's prefix,
+    /// not any source's.
+    fn output_topic(&self) -> &str;
+
+    /// Signing identity. This is the publishing node's keypair
+    /// handle; the Sink does not choose it, the pipeline runtime
+    /// injects it at construction.
+    fn signer(&self) -> &dyn NodeSigner;
+
+    /// Sensitivity tier of the emitted payload. May be lower than
+    /// the tier of any upstream Source (fusion can downgrade).
+    /// Never silently raised — a Sink that wants to EMIT Capture
+    /// from Ambient inputs is a programmer bug; the pipeline
+    /// runtime asserts `tier_out >= max(tier_in)` is NEVER true
+    /// without an explicit override.
+    fn sensitivity_tier(&self) -> Sensitivity;
+    //   Ambient | Capture | Privileged
+
+    /// When to publish.
+    fn cadence(&self) -> Cadence;
+
+    /// What to do when inputs arrive faster than we publish.
+    fn buffer_policy(&self) -> BufferPolicy;
+    //   DropOldest | BlockCapped { n: usize } | Refuse
+    //   (R1's A5 taxonomy, relocated from Stage to Sink)
+
+    /// Optional: how the Sink annotates its emissions with lineage
+    /// back to its Source paths. Used by the Explorer's lineage
+    /// view (see EXPLORER-MANAGEMENT-SURFACE.md #14).
+    fn lineage(&self) -> LineageMode {
+        LineageMode::Inline
+    }
+
+    /// Consume typed values; publish each (or each tick, depending
+    /// on cadence) via the signer.
+    async fn run(
+        self: Arc<Self>,
+        input: mpsc::Receiver<T>,
+        substrate: SubstrateHandle,
+        shutdown: Shutdown,
+    );
+}
+
+enum Cadence {
+    /// Publish on every input (whisper: one transcript per completed
+    /// inference, gated by the Stage's emit-when-done behaviour).
+    Event,
+    /// Publish every N ms regardless of input rate. The Sink holds
+    /// the most-recent value; on tick it emits that value. Good for
+    /// summary gauges, mic RMS chip, etc.
+    Periodic { ms: u64 },
+    /// Publish on input, but at most once per `min_ms`. Debounced
+    /// event mode — useful when a Stage is bursty but downstream
+    /// consumers want a bounded refresh rate.
+    EventDebounced { min_ms: u64 },
+}
+
+enum LineageMode {
+    /// Publish lineage metadata inline on each emission.
+    Inline,
+    /// Publish lineage once at a sibling `<topic>/meta/lineage` path,
+    /// not on each emission. Matches the EXPLORER-MANAGEMENT-SURFACE
+    /// §6 Q3 proposal.
+    Sibling,
+    None,
+}
+```
+
+### R2.2.4 `Pipeline` — the composition
+
+A Pipeline is the declarative wiring of `N Sources → Stage chain → 1 Sink`:
+
+```rust
+struct Pipeline {
+    id: &'static str,
+    node_id: NodeId,            // runs on this node; fills Sink.signer()
+    sources: Vec<Box<dyn SourceAny>>,
+    stages: Vec<Box<dyn StageAny>>,  // chained, typed at construction
+    sink: Box<dyn SinkAny>,
+}
+```
+
+Construction verifies:
+
+- All Source output types match the first Stage input type (or all
+  match, for fan-in — see §R2.6 Q3).
+- Adjacent Stage input/output types match.
+- Final Stage output type matches Sink input type.
+- Sink's `output_topic` starts with `substrate/<node_id>/`.
+- `Sink::sensitivity_tier() >= max(every Source's tier)` is checked
+  at construction unless explicitly overridden (and the override is
+  an auditable decision, not a silent allow).
+
+### R2.3 Whisper pipeline — R1 vs R2 side-by-side
+
+### R1 framing (single-primitive)
+
+```text
+ substrate/sensor/mic/pcm_chunk   substrate/derived/transcript/mic
+          ▼                                      ▲
+    ┌──────────────────────────────────────────┐
+    │ WhisperSensorStage : SensorStage         │
+    │   subscribe + deserialize                │
+    │   windower (pure)                        │
+    │   HTTP POST /inference                   │
+    │   publish                                │
+    └──────────────────────────────────────────┘
+```
+
+All five jobs in one trait implementation. This is what
+`crates/clawft-service-whisper/src/service.rs::run_pipeline` is today:
+one `tokio::select!` loop with subscribe, decode, window, spawn
+inference, publish-result arms.
+
+### R2 framing (three primitives)
+
+With post-migration scoped paths:
+
+```text
+ substrate/<esp32-node>/sensor/mic/pcm_chunk
+                  │
+                  ▼
+           ┌─────────────┐
+           │  Source<    │   (substrate-subscribe + b64 decode)
+           │  PcmChunk>  │
+           └─────────────┘
+                  │  mpsc<PcmChunk>
+                  ▼
+           ┌─────────────┐
+           │ PcmWindower │   (pure state machine — already exists
+           │  : Stage<   │    at windower.rs; no substrate I/O)
+           │  PcmChunk,  │
+           │  PcmWindow> │
+           └─────────────┘
+                  │  mpsc<PcmWindow>
+                  ▼
+           ┌─────────────┐
+           │  Whisper    │   (HTTP POST /inference; init() loads
+           │  Inference  │    model by priming the remote service's
+           │  : Stage<   │    health probe; placement is hidden here
+           │  PcmWindow, │    — see §R2.4)
+           │  Transcript>│
+           └─────────────┘
+                  │  mpsc<Transcript>
+                  ▼
+           ┌─────────────┐
+           │  Sink<      │   (publish-terminator, daemon's signer,
+           │  Transcript>│    cadence: Event, drop-oldest buffer)
+           └─────────────┘
+                  │
+                  ▼
+ substrate/<daemon-node>/derived/transcript/<esp32-node>/mic
+```
+
+### R2.4 Transcript path contradiction — resolved
+
+The R1 journal and early Phase 2 text used
+`substrate/derived/transcript/mic` — unscoped. `JOURNALED-SENSOR-MIC.md`
+§6 notes the same path but flags it as needing clarification:
+
+> "The Whisper service is an *actor*, not a node. It does not sign
+> emissions; it performs Actions. Where does its output land?"
+
+**Resolution under R2 (combined with D1):**
+
+- Whisper is **not** an Actor in the Action-Types sense. It is a
+  Sink running on the daemon-node. Sinks sign with the node's key.
+- Therefore the transcript publishes under the **daemon-node's**
+  prefix, not the ESP32's, not an actor's.
+- The ESP32 is encoded in the *path structure* (it is the thing this
+  transcript is derived FROM), not in the signing identity.
+
+**Canonical shape:**
+
+```text
+substrate/<daemon-node-id>/derived/transcript/<esp32-node-id>/mic
+```
+
+General rule this instance of:
+
+```text
+substrate/<publishing-node-id>/derived/<kind>/<source-node-id>/<source-family>
+```
+
+That shape:
+
+- Makes it obvious which node is authoritative for the data
+  (the prefix).
+- Makes it trivially filterable in the Explorer by source
+  (everything derived *from* ESP32 mic, regardless of which kernel
+  node computed it).
+- Makes redundancy explicit: if two daemons both run whisper on the
+  same ESP32 mic, they publish to different prefix paths and a
+  downstream consumer can pick one (or merge).
+
+(Which leads to §R2.6 Q1 — is that redundancy correct or wasteful?)
+
+### R2.5 What the split costs and what it buys
+
+### Costs
+
+1. **Three primitive types instead of one.** A trivial pipeline like
+   mic-summary-to-gauge ("pass the AudioStream envelope through
+   unchanged") is a `Source` + `Sink` with no intermediate Stage.
+   That's still two types, not one. For the simplest pipelines
+   R2 has more ceremony than R1.
+2. **Explicit pipeline-construction step.** R1 spawned a single
+   `SensorStage::run` on a tokio task. R2 needs a Pipeline struct
+   that wires channels between N things. More code in the shared
+   runtime, less in each pipeline.
+3. **Typed channels require known payload types at construction.**
+   R1 was bytes-in, bytes-out at every boundary (substrate is JSON;
+   stage-internal types are whatever the stage defines). R2 forces
+   you to declare the intermediate types up front. For the two-stage
+   whisper pipeline that's 2 extra named types (`PcmChunk`,
+   `PcmWindow`, `Transcript` — all three already exist in
+   `windower.rs` and `service.rs`; no cost).
+
+### Buys
+
+1. **Identity unambiguous.** Signing happens at one place. Review of
+   "who owns this path" is trivial — the Sink knows, nobody else
+   does.
+2. **Governance localised.** Sensitivity-tier checks, audit-sink
+   hooks, edit-visibility tags — all plug into the Sink. R1 had no
+   natural home for any of them.
+3. **Composition clean for fusion.** Multi-Source fan-in is N
+   Sources, shared first Stage, unchanged Sink contract. Under R1
+   we had hand-coded pipeline-graph composition as deferred work;
+   R2 makes it a construction detail.
+4. **In-process stages never touch substrate.** Explorer doesn't
+   see intermediate stage activity. Fewer topics to subscribe to,
+   fewer spurious updates. R1's "declare your output topics" was
+   pulling us the wrong way.
+5. **Per-stage testing free.** `windower.rs` is already a pure
+   function with its own test suite — R2 formalises that pattern
+   across every Stage. Each Stage is testable with `channel in,
+   channel out, assert outputs`. Sinks and Sources have their own
+   mock patterns (wiremock for HTTP sinks, mock-substrate for
+   substrate-facing).
+
+### R1 fields mapped into R2
+
+| R1 field | R2 location | Notes |
+| --- | --- | --- |
+| `id` | All three (Source.id, Stage.id, Sink.id) | Needed per-primitive |
+| `input_topics` | `Source::input_topic` (one per Source) | Cardinality moves from N-on-stage to N-Sources |
+| `output_topics` | `Sink::output_topic` (exactly one) | Sink cardinality is always 1 in R2; see R2.6 Q-also-added |
+| `placement` | collapses (§R2.4 below) | Was the R1 key insight; R2 makes it a Stage-internal choice |
+| `ready()` | `Stage::ready_state()` + Sink publishing-gated | Becomes per-Stage, not per-pipeline |
+| `input_policy` / `BufferPolicy` | `Sink::buffer_policy()` | Moves from Stage to Sink — drop-oldest is a publish-side concern |
+| `run` | Three `run`s, one per primitive | Split by concern |
+
+### Placement axis (A9) revisited
+
+R1 §4.1 promoted placement (InProc / Sidecar / RemoteHttp / RemoteGrpc)
+to a first-class primitive concern. **R2 dissolves that axis at the
+primitive level** and pushes it inside the Stage:
+
+- A `WhisperInference` Stage that talks to whisper.cpp over HTTP is
+  a Stage with an HTTP client in its state.
+- A `WhisperInference` Stage that links whisper-rs via FFI is a
+  Stage with a model handle in its state.
+- The *pipeline* doesn't care; the Stage trait is identical in both
+  cases.
+
+Placement is no longer a pipeline-primitive axis — it is an
+implementation choice inside a Stage, invisible to the pipeline
+runtime. A Stage can declare `init()` if it has expensive startup;
+that's the only externally-visible signal.
+
+**What R1 got right and R2 preserves:** the *tests* for external
+dependencies still benefit from the declared-endpoint pattern (R1
+§4.4). In R2 that lives as a per-Stage convention, not a primitive
+slot.
+
+### R2.6 New open questions created by the split
+
+### Q1. Redundant kernel-class nodes running whisper
+
+If two kernel-class nodes both run the whisper pipeline against the
+same ESP32's mic, each publishes its own transcript under its own
+prefix:
+
+```text
+substrate/<daemon-A>/derived/transcript/<esp32>/mic
+substrate/<daemon-B>/derived/transcript/<esp32>/mic
+```
+
+**Tradeoff:**
+
+- **Redundancy is a feature.** Either daemon's transcript is
+  usable; if one dies the other carries. Downstream consumers
+  (e.g. a subscription that says "give me any transcript of
+  `<esp32>/mic`") filter `derived/transcript/<esp32>/mic`
+  across all daemon-prefixes and pick the freshest or highest
+  confidence.
+- **Redundancy is wasteful.** Two 2 GB model loads, two GPU
+  contexts, two copies of identical work. A leader election or
+  assignment layer (only one daemon takes responsibility for
+  each mic) saves resources but adds consensus machinery.
+
+**Not deciding.** Both readings are defensible. Worth noting that
+the ontology already implies consumers do shape-matching across
+paths — so filtering "all transcripts of this mic" is not new
+code. Leader election would be, and it pulls in the chain /
+consensus layer that Phase 2 has deferred.
+
+### Q2. Sink cadence shape
+
+R2.2.3 sketches `Cadence::{Event | Periodic{ms} | EventDebounced{min_ms}}`.
+
+**Does this taxonomy cover the actual cases?**
+
+- Whisper: `Event` — publishes iff inference succeeded iff the
+  window had speech. ✓
+- Mic summary gauge: `Periodic{ms: 500}` — the gauge wants a steady
+  tick, independent of whether RMS changed. ✓ (but maybe the right
+  thing is "publish on tick OR on change, whichever first" — not
+  representable as-drawn)
+- ToF depth frame: `Event`? `Periodic`? Both make sense.
+- Node-level health: `Periodic{ms: 5000}`. ✓
+- An edge-triggered alarm ("door just opened"): `Event`. ✓
+
+**Uncovered cases I can think of:**
+
+- **On-change** (publish only when the value differs from the last
+  publish) — common enough that `Cadence::OnChange` is probably
+  its own variant.
+- **Periodic + on-change** ("heartbeat every 5 s OR sooner if
+  anything changes") — expressible as two Sinks on the same path
+  but that violates "exactly one Sink per pipeline"; or as a new
+  variant `PeriodicOrChange{ms}`.
+
+**Proposal**: extend to `Cadence::{Event | Periodic{ms} |
+EventDebounced{min_ms} | OnChange | PeriodicOrChange{ms}}`.
+Five variants feels right — each covers a distinct downstream
+subscriber need. **Sign-off needed** on the shape.
+
+### Q3. Multi-input Sources — N primitives or one with N topics
+
+For a fusion pipeline that takes mic + camera + ToF:
+
+**Option A:** N Source primitives, each with one `input_topic()`,
+all feeding the same first Stage:
+
+```rust
+let srcA = MicSource::new("substrate/<esp32>/sensor/mic/summary");
+let srcB = CamSource::new("substrate/<esp32>/sensor/camera/frame");
+let srcC = TofSource::new("substrate/<esp32>/sensor/tof/grid");
+// First Stage has three inputs — typed as enum or as triple-mpsc
+```
+
+**Option B:** One Source primitive declaring N input topics,
+producing one framed union value:
+
+```rust
+let src = MultiSensorSource::new(&[
+    "substrate/<esp32>/sensor/mic/summary",
+    "substrate/<esp32>/sensor/camera/frame",
+    "substrate/<esp32>/sensor/tof/grid",
+]);
+// Source output type is `FrameUnion::Mic(_) | Cam(_) | Tof(_)`
+```
+
+**Argument for A:** each Source is simple. Each has its own
+deserialize logic (a mic chunk and a camera frame don't share a
+payload shape). Errors in one Source don't contaminate the others
+(one mic deserialize-error logged, the camera stream unaffected).
+The pipeline construction sees N typed edges; types are honest.
+Matches the "one job per primitive" rationale that drove the split.
+
+**Argument for B:** the downstream Stage often *needs* time
+correlation — "the frame that happened at the same tick as this
+mic window." Merging in the Source keeps that correlation local.
+Option A defers the merge to the Stage, which either gets a
+combined-mpsc via `tokio::select!` (awkward typing) or a custom
+merge primitive.
+
+**Lean: A** — keep Sources one-topic-each, introduce a
+**`MergeStage`** primitive in the Stage catalog that takes N
+typed inputs and produces one typed output. That keeps each
+Source small; it puts the correlation logic in a dedicated
+named Stage where it belongs; it is what the "pure in-process
+work" rationale for Stage was aiming at.
+
+**Still an open question** — the counter-arg for B is real when
+upstream publishes are bursty and you need a single deserialize
+pass to keep up.
+
+### Q4. Placement axis — did it actually collapse?
+
+R2 claims placement dissolves into Stage-internal choice (§R2.4).
+But:
+
+- A Stage with an HTTP client CAN fail in ways a pure-Rust Stage
+  cannot (network, DNS, TLS).
+- A Stage-that-is-really-a-sidecar CAN have a non-trivial startup
+  latency (the sidecar's own launch).
+- These matter for observability and for operator intent.
+
+**Is "the Stage secretly talks to a service" a primitive concern
+again, just differently named?**
+
+One answer: no — `Stage::init()` is the escape hatch. A Stage with
+a remote dependency uses `init()` to probe the dependency and
+returns `StageReadiness::FailedInit` if the remote is unreachable.
+The pipeline runtime sees one state (`LoadingModel` or
+`FailedInit`) and doesn't care *why*.
+
+Another answer: the Explorer's NodeViewer / SensorViewer / pipeline
+introspection UI wants to know "what are my external deps" — Stage
+with a remote WHATEVER is materially different from a pure Stage
+for debugging purposes. This wants an optional
+`Stage::external_deps() -> &[DepDescriptor]` — descriptive only, no
+lifecycle semantics.
+
+**Lean: add `external_deps()` as an optional descriptor, keep
+placement collapsed.** The descriptor is a forward slot for the
+Explorer's "what is this stage connected to" panel; it is not a
+primitive differentiator.
+
+### Q5. Sink ordering guarantees
+
+R2 says "exactly one Sink per pipeline." What if a pipeline wants
+to publish two correlated products from a single inference — e.g.
+whisper's transcript text AND the per-segment confidence as a
+sibling path?
+
+**Options:**
+
+- **Split into two pipelines** — same Sources, same Stage chain,
+  two Sinks. Each pipeline is a `N-Sources → Stages → 1 Sink`
+  shape. Stages are shared (could be deduplicated by the runtime
+  or simply re-instantiated).
+- **Allow Sink fan-out** — relax "exactly one Sink" to "one Sink
+  per emission family" where the Sink accepts a tuple and
+  publishes each element to a declared sibling path.
+- **Keep 1 Sink and combine the payload** — whisper emits
+  `{ text, confidence }` in one envelope, consumers split
+  client-side.
+
+**Lean: keep one-Sink-per-pipeline, split into two pipelines when
+products diverge.** The cost is duplicated Stage wiring; the
+benefit is the primitive stays clean. Combine-the-payload is
+the fallback for small cases.
+
+**Still open** — worth revisiting when sensor #2 materializes a
+multi-product pipeline. Camera (frame + detections) would force
+this.
+
+### R2.7 Concrete impact on `clawft-service-whisper`
+
+**Position: this is a SMALL REFACTOR, not a redesign.** Defending
+that position:
+
+What already matches R2:
+
+- `windower.rs` is already a pure state machine with no substrate
+  knowledge. **It is already a `Stage<PcmChunk, PcmWindow>` in
+  spirit.** Moving it to R2 is renaming the trait implementation;
+  no code change to the module itself.
+- `client.rs` has no substrate knowledge. It is the "talks to
+  whisper.cpp" half of a `Stage<PcmWindow, Transcript>`. Wrapping
+  it in a Stage trait is a thin adapter.
+- `wav.rs` is pure data; consumed by the inference Stage, not a
+  primitive.
+
+What needs to move:
+
+- **`service.rs::run_pipeline`** — the ~100-line tokio::select! —
+  becomes three thin pieces:
+  1. A `PcmChunkSource` (20-ish lines: subscribe, decode_update_line,
+     decode_pcm_chunk, forward on mpsc).
+  2. A `WhisperInferenceStage` wrapping `WhisperClient` with init()
+     → `wait_for_healthy`, run() → `transcribe` in a loop, managing
+     the one-in-flight semaphore (this is the actual backpressure
+     boundary for the Stage — the Sink's `BufferPolicy::DropOldest`
+     handles the pipeline-level concern separately).
+  3. A `TranscriptSink` (30-ish lines: take a Transcript, build the
+     publish payload, call `substrate.publish` with the daemon's
+     signing identity).
+- **`SUBSTRATE_PCM_INPUT_PATH` / `SUBSTRATE_TRANSCRIPT_OUTPUT_PATH`
+  constants** in `lib.rs` — both move. Input becomes config-driven
+  (it's a function of the ESP32's node-id, known at runtime not
+  compile time). Output likewise depends on the daemon's node-id.
+- **The one-in-flight semaphore** currently held implicitly by
+  `WhisperClient` through the service's `in_flight: Option<JoinHandle>`
+  pattern — becomes explicit Stage backpressure.
+
+What stays the same:
+
+- The tests (`end_to_end_with_mocked_whisper`,
+  `service_survives_whisper_down_at_start`,
+  `drops_oldest_window_when_inference_slow`). They test publish-to-
+  publish behaviour; under R2 they test `Source → Stage → Sink`
+  wiring, which is the same observable contract. Only the
+  construction boilerplate in each test changes.
+
+**Time estimate:** a developer who knows this code well can turn
+it into R2 shape in one focused session. The big conceptual moves
+(splitting subscribe from pure from publish, identity into the
+Sink) are shallow in the file structure — they just name boundaries
+the code already has.
+
+The thing that makes this cheap is D1 + D2 landed BEFORE any second
+sensor shipped. Refactoring one pipeline to R2 establishes the
+pattern; sensor #2 is written to R2 from day one.
+
+---
+
+*R2 status: proposal. When the pipeline-primitive ADR lands, it
+consumes R1 + R2 and commits to the R2 shape with the open
+questions in §R2.6 explicitly addressed. Until then this section
+is the working record, and R1 above is kept for the history of how
+we got here.*
+
+---
+
+## R3 revision — tier split and governance amendment
+
+**Added:** 2026-04-24.
+**Context:** R2 said "every substrate path lives under `substrate/<node-id>/`."
+That was too rigid. Mesh-canonical facts (transcripts, fusion outputs,
+chain head, consensus cluster membership) need to outlive node
+failover — the path can't change because the producer changed. R3 splits
+the rule into two tiers and lays in the governance shape that follows.
+
+### R3.0 The two-tier path rule
+
+Two distinct kinds of paths, both signed by a node, but scoped
+differently:
+
+- **Node-private** — `substrate/<node-id>/...`. Facts the node owns
+  exclusively. Raw sensors, own health, own meta, own kernel state, own
+  chain replica, own cluster view. Only that node may write here. Gate
+  rule: strict prefix match (this is exactly what `publish_gated`
+  enforces today).
+- **Mesh-canonical** — `substrate/_derived/...`. Facts the mesh owns
+  collectively. The leading underscore marks "not a node id" cleanly —
+  no real node-id (hex pubkey fingerprint) ever collides with a word
+  starting `_`. Any eligible kernel-class node may write here, subject
+  to the pipeline's coordination contract. Gate rule: capability +
+  eligibility (see §R3.3).
+
+Both tiers preserve attribution — every write is signed by some node,
+and the audit envelope captures who. The tiers differ on path
+*scoping*, not on whether the writer is identified.
+
+### R3.1 Subsystem placement under the two tiers
+
+| Subsystem | Tier | Path | Notes |
+| --- | --- | --- | --- |
+| Raw sensors | node-private | `substrate/<node>/sensor/...` | Only the source node writes |
+| Health (raw counters) | node-private | `substrate/<node>/health/...` | Per-node self-report |
+| Meta (label, hardware, capabilities) | node-private | `substrate/<node>/meta/...` | Per-node identity card |
+| Kernel state | node-private | `substrate/<node>/kernel/...` | Each kernel-class node has its own |
+| Chain replica | node-private | `substrate/<node>/chain/replica` | Each node's local view |
+| Cluster view | node-private | `substrate/<node>/cluster/view` | Each node's peer list as it sees it |
+| Chain head (canonical tip) | mesh-canonical | `substrate/_derived/chain/head` | One ledger, one tip |
+| Cluster membership (consensus) | mesh-canonical | `substrate/_derived/cluster/members` | The mesh's agreed peer list |
+| Derived outputs (transcripts, fusion) | mesh-canonical | `substrate/_derived/<kind>/<source-attribution>/...` | Whoever currently runs the pipeline writes |
+
+Resolves the earlier "where does chain live" ambiguity: replica is
+node-private, head is mesh-canonical. Same shape for cluster.
+
+### R3.2 Whisper transcript — final path
+
+Under R2 we said
+`substrate/<daemon-node>/derived/transcript/<esp32>/mic`. Wrong. That
+ties the path to the producer, so a leader handoff would break
+subscribers.
+
+Final shape:
+
+```text
+substrate/_derived/transcript/<esp32-node-id>/mic
+```
+
+- Source node embedded in the path as attribution (this transcript is
+  derived from THAT mic).
+- Producer node signs the publish (audit trail says who actually did
+  it).
+- Path is stable across leader handoff — if the daemon dies and a Pi
+  takes over whisper, subscribers see continuous output at the same
+  path.
+
+### R3.3 Sink gate splits by tier
+
+The Sink primitive's gate becomes tier-aware:
+
+```rust
+fn may_publish(&self, ctx: &PublishContext) -> Result<(), GateDenied> {
+    match self.target_tier() {
+        Tier::NodePrivate => {
+            // Existing publish_gated rule.
+            require_prefix_match(ctx.path, ctx.node_id)
+        }
+        Tier::MeshCanonical => {
+            // Capability + eligibility.
+            require_grant(ctx.node_id, self.pipeline_id())?;
+            require_elected(ctx.node_id, self.pipeline_id())
+        }
+    }
+}
+```
+
+Both branches still verify the node signature; they differ only on
+what path-level checks apply.
+
+### R3.4 Sink primitive grows three fields
+
+Up from R2's shape:
+
+- `pipeline_id: PipelineId` — opaque identifier the mesh uses to issue
+  grants and resolve elections. Format: derived hash of the pipeline's
+  declared inputs + outputs + version, so the same logical pipeline
+  has a stable id across nodes.
+- `process_id: ProcessId` — local-to-node label identifying which
+  process inside the node is producing this output. For the daemon
+  today: a single value per service (e.g. `"clawft-service-whisper"`).
+  For future WASM apps: per-app instance.
+- `target_tier: Tier` — declared at construction; selects the gate
+  branch above. A Sink can't switch tiers at runtime.
+
+### R3.5 Q1 (federation) resolved — election
+
+Under N=1 (today): trivially elected, no coordination code runs.
+
+Under N>1: a coordination layer (RAFT-lite, lease-based, or
+first-claim lock — TBD per pipeline class) picks one eligible node as
+the active producer for a given `pipeline_id`. The Sink primitive
+shape doesn't change between N=1 and N>1; only the eligibility-check
+implementation changes. Substrate path is stable across leader handoff
+(§R3.2).
+
+Closes R2.6 Q1.
+
+### R3.6 Governance — `_derived/` requires a separate permission
+
+Writing to `_derived/` is not a free-by-default consequence of holding
+a node key. It requires an explicit `DerivedWriteGrant`:
+
+```rust
+struct DerivedWriteGrant {
+    node_id: NodeId,
+    pipeline_id: PipelineId,
+    output_pattern: PathPattern,  // e.g. "_derived/transcript/*"
+    issued_at: DateTime<Utc>,
+    revoked: bool,
+}
+```
+
+Grants are:
+
+- **Issued at pipeline registration.** Defining a pipeline (via
+  Workshop spec or service manifest) declares its outputs and registers
+  the needed grants for nodes that will run it.
+- **Bounded to a path pattern.** A whisper grant covers
+  `_derived/transcript/*`, not `_derived/**`. Compromising one
+  pipeline doesn't grant write access to all mesh-canonical paths.
+- **Revocable.** Removed when a pipeline is decommissioned or when a
+  node is ejected from the mesh.
+- **Per (node_id, pipeline_id) pair.** Each kernel-class node that may
+  potentially produce the pipeline holds its own grant; coordination
+  picks which one is currently active.
+
+Naturally extends `clawft-app/src/manifest.rs::Permission` — that enum
+already declares per-app capabilities (Mic, etc.). A new variant
+`Permission::DerivedWrite { pipeline_id, output_pattern }` fits the
+existing shape and the existing capability-check seam.
+
+### R3.7 Audit envelope — process-level attribution
+
+Every write to `_derived/` carries:
+
+```text
+(node_id, process_id, pipeline_id, ts, signature)
+```
+
+The signature covers the whole envelope (path + value + node_id +
+process_id + pipeline_id + ts), so the node key attests "process P on
+me did this." Tamper-evident — anyone without the node's private key
+cannot forge any field, including process_id.
+
+Both the substrate fan-out line and the chain audit log record the
+full envelope. Subscribers see (`node_id`, `pipeline_id`) for routing;
+auditors see all five fields for forensics.
+
+Node-private writes carry the same envelope, but `pipeline_id` is
+optional (a raw sensor publish doesn't have one).
+
+### R3.8 Attest vs. authenticate — chosen: attest, this phase
+
+**Attest (this phase):** `process_id` is a label. The node key signs
+the whole envelope, so the binding "this process wrote this" is only
+as strong as the node's key custody. If the node key is compromised,
+an attacker can lie about which process wrote what. Audit value is
+real (any honest read sees the truth) but defense-in-depth between
+processes on one node is not.
+
+**Authenticate (future):** `process_id` is a separate identity. Each
+long-running process holds its own ed25519 keypair; the node key
+*delegates* to process keys (signed delegation certificates). Each
+write is signed by the process key directly; the node key only signs
+delegations. Compromising one process key does not let it impersonate
+other processes on the same node.
+
+The future upgrade does not change the envelope shape (process_id
+stays a string field); it changes the signature scheme. Becomes
+load-bearing when WASM apps share a daemon — without per-app keys, a
+misbehaving app could attribute its writes to another app on the same
+daemon.
+
+For MVP: attest. Note left here for the future authenticate upgrade.
+
+### R3.9 New open questions created by the tier split
+
+- **Q1 — Grants registry location.** Does the mesh's
+  `DerivedWriteGrant` set live in the kernel (sibling to
+  `AgentRegistry` and `NodeRegistry`) or in a new
+  `governance::GrantsRegistry` crate? Probably the latter once
+  governance has more than one type of grant; for one type, kernel is
+  fine.
+- **Q2 — Pipeline-id format.** Hash of (declared inputs, outputs,
+  pipeline version)? Manifest-author-supplied opaque string? Stable
+  across reformat-of-pipeline-spec or not? Affects how grants survive
+  pipeline-spec edits.
+- **Q3 — `_derived/` sub-namespacing convention.** Today proposed:
+  `_derived/<kind>/<source-attribution>/...`. Alternative:
+  `_derived/<pipeline-id>/...` (each pipeline gets its own subtree).
+  The second is more uniform but harder to discover ("what is this
+  pipeline's output?" requires reading metadata). The first is easier
+  to read but leaves room for collisions across pipelines that
+  produce similar outputs.
+- **Q4 — Revoked-grant cleanup.** When a grant is revoked mid-publish,
+  what happens to in-flight writes? Reject immediately? Drain? Both
+  positions are defensible; affects the Sink's failure modes.
+
+### R3.10 Diff summary — what changed from R2
+
+- R2 said "all substrate paths under `substrate/<node-id>/`" —
+  corrected to two-tier rule (R3.0).
+- R2.6 Q1 (redundancy vs. election) — resolved in favor of election
+  (R3.5).
+- R2 Sink shape (`{ id, output_topic, sensitivity, cadence,
+  buffer_policy, sign }`) gains `pipeline_id`, `process_id`,
+  `target_tier` (R3.4).
+- R2 Sink gate (single rule) splits by tier (R3.3).
+- New: governance for `_derived/` (R3.6), audit envelope (R3.7),
+  attest-vs-authenticate (R3.8).
+- The transcript path final form (R3.2) supersedes both R1's
+  `substrate/derived/transcript/mic` and R2's
+  `substrate/<daemon-node>/derived/transcript/<esp32>/mic`.
+
+---
+
+*R3 status: proposal, layered on R2. The pipeline-primitive ADR will
+consume R1 + R2 + R3 once the governance crate's grant-registry shape
+is committed. R3.9 questions are inputs to that.*
