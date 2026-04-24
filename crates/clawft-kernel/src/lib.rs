@@ -239,7 +239,8 @@ pub use agent_registry::{
 };
 #[cfg(feature = "native")]
 pub use substrate_service::{
-    EgressDenied, Sensitivity as SubstrateSensitivity, SubstrateReadSnapshot, SubstrateService,
+    EgressDenied, Sensitivity as SubstrateSensitivity, SubstrateListEntry, SubstrateListSnapshot,
+    SubstrateReadSnapshot, SubstrateService,
 };
 #[cfg(all(feature = "native", feature = "exochain"))]
 pub use stream_anchor::{topic_matches, StreamWindowAnchor, TopicAnchor};

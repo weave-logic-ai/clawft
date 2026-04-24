@@ -1192,6 +1192,59 @@ async fn handle_substrate_read(
     }
 }
 
+/// Handle `substrate.list`: enumerate children of a prefix up to `depth`.
+///
+/// Wire shape (Phase 1 §3.1):
+///
+/// ```json
+/// // request
+/// { "prefix": "substrate/sensor", "depth": 1 }
+///
+/// // response
+/// {
+///   "children": [
+///     { "path": "substrate/sensor/mic", "has_value": true,  "child_count": 0 },
+///     { "path": "substrate/sensor/tof", "has_value": true,  "child_count": 0 }
+///   ],
+///   "tick": 42
+/// }
+/// ```
+///
+/// Same egress gating as `substrate.read` — the prefix itself is
+/// checked once, and capture-tier descendants are hidden from
+/// anonymous callers so path names don't leak.
+async fn handle_substrate_list(
+    params: serde_json::Value,
+    kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
+) -> Response {
+    let p: crate::protocol::SubstrateListParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(e) => return Response::error(format!("invalid params: {e}")),
+    };
+    let k = kernel.read().await;
+    match k
+        .substrate_service()
+        .list(p.actor_id.as_deref(), &p.prefix, p.depth)
+    {
+        Ok(snap) => {
+            let result = crate::protocol::SubstrateListResult {
+                children: snap
+                    .children
+                    .into_iter()
+                    .map(|c| crate::protocol::SubstrateListChild {
+                        path: c.path,
+                        has_value: c.has_value,
+                        child_count: c.child_count,
+                    })
+                    .collect(),
+                tick: snap.tick,
+            };
+            Response::success(serde_json::to_value(result).unwrap())
+        }
+        Err(e) => Response::error(format!("unauthorized: {e}")),
+    }
+}
+
 /// Handle `substrate.publish`: Replace the path's value and fan out.
 async fn handle_substrate_publish(
     params: serde_json::Value,
@@ -1908,6 +1961,7 @@ async fn dispatch(
         }
         "agent.register" => handle_agent_register(params, kernel).await,
         "substrate.read" => handle_substrate_read(params, kernel).await,
+        "substrate.list" => handle_substrate_list(params, kernel).await,
         "substrate.publish" => handle_substrate_publish(params, kernel).await,
         "substrate.notify" => handle_substrate_notify(params, kernel).await,
         "agent.spawn" => {
