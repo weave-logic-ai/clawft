@@ -78,7 +78,7 @@ async fn feature_comp_native_boots() {
         .await
         .unwrap();
     assert_eq!(*kernel.state(), KernelState::Running);
-    assert!(kernel.process_table().len() >= 1, "kernel process must exist");
+    assert!(!kernel.process_table().is_empty(), "kernel process must exist");
     assert!(kernel.services().len() >= 2, "cron + containers at minimum");
     kernel.shutdown().await.unwrap();
     assert_eq!(*kernel.state(), KernelState::Halted);

@@ -1,233 +1,208 @@
-# Session handoff — 2026-04-21
+# Session handoff — 2026-04-23 (evening)
 
-Picking up where this session left off. Everything below reflects
-`development-0.7.0` at commit `613b58a`, clean working tree except
-for user-owned untracked files (see bottom).
+Pick-up doc for the next session. Reflects `development-0.7.0` at commit `2156157`.
 
 ---
 
-## Running state
+## Right this second — the open loop
+
+**User was about to reload the WeftOS VSCode webview to test whether the just-applied Explorer Phase 0 allowlist fix brings the mic gauge + tray chip icons back to life. The result is unconfirmed as of session end.**
+
+### What's in the working tree (uncommitted)
+
+One file: `extensions/vscode-weft-panel/src/extension.ts` — added `substrate.read` and `substrate.subscribe` to the `ALLOWED_METHODS` Set around line 39. `npm run compile` ran and emitted fresh `out/extension.js` (tsc prints pre-existing `node:*` module errors in `rpc.ts` but emits anyway — unrelated, longstanding). The allowlist change is verified present in the compiled output (`grep -c 'substrate.read' out/extension.js` → 2).
+
+### What the user should do on return
+
+1. `Ctrl+Shift+P` → "Developer: Reload Webviews" (or close+reopen the WeftOS panel tab) — this picks up the fresh extension.js.
+2. Watch the tray chips:
+   - **Kernel** — green before, still green
+   - **Mesh** — icon should flip from grey to green, panel body should show `total_nodes`/`healthy_nodes`/shards
+   - **ExoChain** — icon green, panel body shows chain head + recent events
+   - **Explorer** — green (tracks daemon connection); detail window shows a placeholder until Phase 1 lands
+3. Click the Mesh or ExoChain chip → the outside icon-vs-inside-green-dot disagreement from earlier should be gone
+4. Tap the piezo — the mic gauge is **GONE from the tray** now (Audio chip was retired), but substrate data still flows. To see the gauge you'd need to drive it through the Explorer MVP — **which isn't built yet**, only planned. So there's no visual mic feedback in the GUI this session. The RMS stream is live on `substrate.read` though (`substrate/sensor/mic` ticks climb, rms_db moves in the `-43…-16 dBFS` range).
+
+### If the allowlist fix works
+
+1. Commit the 2-line change with message like `fix(vscode): allow substrate.read/subscribe through webview proxy`
+2. Go answer Q3 + Q6 inline in `.planning/symposiums/RLM - arxiv-2512.24601/00-synthesis.md` — those unblock ADR-0006 (substrate as prompt handle) + ADR-0007 (metadata-only tool history), both of which are prerequisites for the Explorer MVP and for RLM Option D.
+
+### If the allowlist fix doesn't work
+
+The diagnostic path is at the bottom of `.planning/explorer/PROJECT-PLAN.md` §2 ("If Phase 0 does NOT fix Mesh/Chain/Mic icons"). Short version: add a temporary `tracing::debug!` at the first substrate.read call site in the WASM `Live` loop (`crates/clawft-gui-egui/src/live/native_live.rs` around line 280+ — exact line may have drifted after the chip refactor). Check the webview devtools console to see whether the call even fires.
+
+---
+
+## What shipped this session (2026-04-23 midday → evening)
+
+### Commit `2156157` — `refactor(gui,mic): explorer chip + mic race fix + clippy sweep`
+
+Landed on `development-0.7.0`. 120 files, +1607/−994. Not yet pushed.
+
+1. **Mic race fix** (`crates/clawft-substrate/src/mic.rs`) — the actual change that resolved the open loop from the prior handoff. Local `MicrophoneAdapter.poll_level` now skips publishing `{available: false, reason: "source-missing"}` when the backing file is absent, so ESP32-bridge-published values at `substrate/sensor/mic` don't get stomped every 500 ms.
+2. **Tray refactor** (`crates/clawft-gui-egui/src/shell/{tray,desktop}.rs`) — retired Wi-Fi / Bluetooth / Audio / ToF chips. Kept Kernel / Mesh / ExoChain and added **Explorer** chip at the far right (user's call). Adapter wiring + `Snapshot` fields stay intact; the chip TOML fixtures on disk stay too — they'll come back as viewer patterns in the Explorer's pattern registry.
+3. **Workspace-wide clippy sweep** — ~100 files touched, mix of `cargo clippy --fix` autos (inlined format args, needless lifetimes, `&PathBuf` → `&Path`, derivable_impls, strip_prefix, div_ceil, collapsible let-chains) and targeted manual fixes (math-heavy `needless_range_loop` in `clawft-kernel/src/causal.rs` got a file-level allow; `too_many_arguments` got targeted allows; scaffold dead-code got `#[allow(dead_code)]` with rationale). Prior handoff listed this as open TODO #5 — **closed**.
+4. **Planning artifacts** — `.planning/explorer/PROJECT-PLAN.md` (Explorer MVP plan, phase 0 + phase 1 + viewer pattern growth) and `.planning/symposiums/RLM - arxiv-2512.24601/` (5-doc panel review of arXiv:2512.24601 "Recursive Language Models" — see next section).
+
+### RLM Option D selected (2026-04-23)
+
+Full panel synthesis at `.planning/symposiums/RLM - arxiv-2512.24601/00-synthesis.md`. Decision:
+
+- **Option D** — full Rust-native RLM scaffold. `llm_query` wrapped as a gated tool at `clawft-kernel/src/chain.rs`. Per-trajectory budget `{max_depth:1, max_subcalls:32, token_cap:200K}`. Sub-call events on ExoChain Stream via new `RollingWindowAnchor` aggregator. No Python REPL. Rust-native loop driver in `crates/clawft-core/src/agent/rlm.rs`. ~4-5 engineer-weeks.
+- **Cross-cutting constraint (§4.5): channel-generality.** Every primitive — `substrate.describe`, `substrate.project`, `tree.peek`/`search`/`slice`, `llm_query`, viewer registry, trajectory event schema — must work uniformly across all substrate paths. No mic-specialized code, no tof-specialized code. Schema-match in the viewer, not the loop. Explorer MVP shares these primitives; the Explorer is effectively Option D's first visible artifact.
+- **4 ADRs to write** before implementation begins:
+  - **ADR-0006** Substrate as Prompt Handle — blocked on Q6 answer
+  - **ADR-0007** Metadata-Only Tool History — blocked on Q3 answer
+  - **ADR-0008** Bounded Recursive Sub-Calls — blocked on Q2, Q4 answers
+  - **ADR-0009** RLM Trajectory Event Schema — blocked on Q2, Q5, Q7 answers
+- **Q1-Q8** are in §5 of the synthesis. The user needs to answer them inline. Recommended start order: Q3 + Q6 first (low-contention), then Q2/Q4/Q5/Q7.
+
+### Clippy-adjacent workflow gotchas the session surfaced
+
+Now persisted in memory (`~/.claude/projects/-home-aepod-dev-clawft/memory/`):
+
+- `build_script_test_exit_code.md` — `scripts/build.sh test` masks cargo's exit code. Use `cargo test --workspace` directly for commit gating.
+- `clawft_rpc_no_daemon_tests.md` — `client::tests::connect_returns_none_when_no_daemon` and `is_daemon_running_false_when_no_daemon` fail when a daemon is running. Run with `WEFTOS_RUNTIME_DIR=/tmp/nonexistent-$$` to isolate.
+- `wsl_xdg_open_test_hang.md` — some test fires `xdg-open http://localhost:99999`, hangs in WSL. Set `BROWSER=/bin/true` before the test run.
+- `weaver_binary_install_path.md` — `~/.cargo/bin/weaver` (what the daemon-launch resolves to via $PATH) drifts from `target/release/weaver` (what `scripts/build.sh native` writes). `cargo install --path crates/clawft-weave --force` to refresh.
+
+---
+
+## Running state (end of session)
 
 ### Daemon
 
-- **PID** `2563788`, CPU idle (<1%), uptime when this doc was written
-- **Unix socket** `/home/aepod/dev/clawft/.weftos/runtime/kernel.sock`
-- **Mesh listener** `0.0.0.0:9470` TCP (plaintext; `noise = false` in
-  `weave.toml` for bring-up)
-- **Node ID** issued fresh on each boot — check `weaver kernel status`
-  or the `Cluster membership ready` line in
-  `.weftos/runtime/kernel.log`
-- **DEMOCRITUS CPU-spin is fixed** — the stuck-detector is now edge-
-  triggered with exponential backoff. Roughly 1 warn per phase
-  transition, not 4.5 per second
+- **PID 43247** — `weaver kernel start --foreground` from the refreshed `~/.cargo/bin/weaver` (installed mid-session after we diagnosed the stale-binary drift). Alive and publishing.
+- **Unix socket** `.weftos/runtime/kernel.sock`
+- **TCP relay** `127.0.0.1:9471` (bound on `0.0.0.0:9471` in fact — ESP32 bridge at `192.168.1.178` has two ESTAB connections open as of last check)
+- **Kernel log** `.weftos/runtime/kernel.log` — only DEMOCRITUS stuck-phase warnings in normal operation, no real errors
 
-### Binary
+### ESP32 bridge
 
-- `~/.cargo/bin/weaver` is a stale build. The daemon is running
-  `target/release/weaver` built today (Apr 21 late evening). If you
-  restart the daemon, use `target/release/weaver kernel start`
-  not `weaver` from PATH — the PATH version doesn't have any of
-  today's work
-- `weave.toml` has `[kernel.mesh] enabled = true` — uncommitted
-  working-tree change
+Publishing live `substrate/sensor/mic` values. `tick` climbs, `rms_db` in `-43…-16 dBFS` range. Values confirmed via direct `substrate.read` on `127.0.0.1:9471`.
 
-### Substrate / chips / panels
+### Repo
 
-- Daemon's `substrate.publish` has a fresh synthetic ToF frame at
-  tick 8 (radial gradient, two corner 0xFFFF sentinels)
-- GUI relay polls `substrate.read` every 250 ms for
-  `substrate/sensor/{tof,mic}` and injects into the local substrate
-- `/tmp/weftos/mic/` exists but is empty — file-backed
-  `MicrophoneAdapter` polls `stream.raw` which doesn't exist yet;
-  chip reads grey until something writes bytes
+- Branch: `development-0.7.0` (tracking origin)
+- Last commit: `2156157 refactor(gui,mic): explorer chip + mic race fix + clippy sweep`
+- Not pushed — user's call when to `git push origin development-0.7.0`
 
-### VS Code / Cursor extension
+### Uncommitted / untracked
 
-- `extensions/vscode-weft-panel/webview/wasm/` rebuilt at 20:20. The
-  Cursor panel should hot-reload on next open; if it doesn't,
-  `Developer: Reload Window` from the command palette
-- Seven tray chips after reload: Kernel, Mesh, ExoChain, Wi-Fi,
-  Bluetooth, Audio, **ToF**
+```
+M extensions/vscode-weft-panel/src/extension.ts    ← Phase 0 allowlist fix
+(plus out/extension.js + out/rpc.js rebuilt but those are build artifacts)
+
+?? .planning/clients/                              ← pre-existing
+?? .planning/eml/                                  ← pre-existing
+?? .planning/sensors/                              ← pre-existing
+?? .planning/symposiums/exochain-logging/          ← pre-existing (prior session's symposium)
+?? .planning/weftos_sensors.md                     ← pre-existing
+?? bun.lock
+?? docs/runtime-scratch/                           ← gitignore candidate
+?? node_modules/
+```
 
 ---
 
-## Shipped today (commit chain)
+## TODOs queued (priority order)
 
-| Hash | What |
-|---|---|
-| `acfe881`..`a2ae646` | Findings #5 (6 kernel EML models), #7 (tick-interval recommender), #9 (causal-edge decay treecalc) — sub-agent batch |
-| `f0f77eb` | Lift `Form` + `triage` into new `clawft-treecalc` crate (Finding #10) |
-| `eff2d7c` | DEMOCRITUS P0: `Option<f64>` sentinel, `VecDeque` history, edge-triggered warn, swap to `spectral_analysis_rff` (Findings #1, #2, #3, #4, #8) |
-| `97b5857` | Wire `RetryModel` into `RetryPolicy::with_model()` (Finding #6) |
-| `0e4cc51` | Tray chips open ontology-backed detail panels + 6 fixtures + scope_builder tray fix |
-| `8fe5be5` | Register `MicrophoneAdapter` + extend extension RPC allowlist |
-| `75e0688` | External-socket streaming subscribers (`ipc.subscribe_stream`) |
-| `cb05b00` | `agent.register` + signed IPC envelopes |
-| `1b946dd` | `substrate.{read,subscribe,publish,notify}` RPCs |
-| `d96ed64` | `StreamWindowCommit` chain anchor service |
-| `d81582d` | ToF tray chip with native 8×8 heatmap (superseded by 613b58a) |
-| `623b6ae` | GUI relay: poll daemon's substrate.read every 250 ms for externally-published paths |
-| `613b58a` | `ui://heatmap` + `ui://waveform` composer primitives; ToF fixture goes declarative; retire native escape hatch |
+1. **Verify Phase 0** — user reloads webview; confirm chip icons go green, Mesh/Chain panel bodies populate. Commit the 2-line extension.ts change after confirmation.
 
-Branch is **31 commits ahead of origin**. Not pushed.
+2. **Answer Q3 + Q6 in the RLM synthesis** — low-contention, unblocks ADR-0006 + ADR-0007 in parallel. Those two ADRs are the Explorer MVP's backbone AND Option D's foundation primitives. Best ROI per unit of user-decision time.
 
-### Tests added
+3. **Explorer Phase 1 MVP** (after ADR-0006 lands). Plan at `.planning/explorer/PROJECT-PLAN.md` §3. Needs a new `substrate.list` daemon RPC (~20 lines), a tree-left-viewer-right egui panel, and 4 MVP viewers (AudioMeter, ConnectionBadge, DepthMap, JsonFallback). ~1-2 engineering days.
 
-- `clawft-treecalc`: 9 unit + 1 doctest
-- `clawft-kernel`: 18 new unit tests across governance/supervisor/health/reliable_queue/cluster/complexity/weaver/eml_kernel/causal; + stream_anchor integration test
-- `clawft-weave`: ipc_subscribe_stream / agent_register_and_sign / substrate_rpc integration tests (7)
-- `clawft-llm`: 2 retry-model round-trip tests
-- `clawft-gui-egui`: `chip_surfaces` (3 tests: parse / populated / empty)
+4. **Answer Q2 / Q4 / Q5 / Q7** — critical path for ADR-0008 + ADR-0009. These are harder than Q3/Q6 (touch governance, cost-tail cancellation, replayability, mesh replication).
 
-All green at `613b58a`. `scripts/build.sh check` clean.
+5. **RLM implementation** (after all 4 ADRs). ~4-5 engineer-weeks of code in `crates/clawft-core/src/agent/rlm.rs` + `clawft-kernel/src/chain.rs`. Do not start before ADR-0008 lands — ungated `llm_query` is a non-starter per gaps-and-risks §3.1.
+
+6. **ExoChain logging redesign Phase 0 ADRs** (inherited from prior handoff). 5 ADRs listed in `.planning/symposiums/exochain-logging/00-synthesis.md` §12. Interacts with RLM Option D's channel-routing question (Q2); worth settling Q2 first so ADR-0005 (ExoChain) and ADR-0009 (RLM trajectories) agree on how sub-call events land on Stream.
+
+7. **`weaver substrate` CLI subcommands** — inherited from prior handoff. ~half day. Lower priority now that Explorer absorbs the interactive case, but still useful for scripting. Template is `crates/clawft-weave/src/commands/ipc_cmd.rs`.
+
+8. **Quality-of-life fixes** (each ~5-30 min, each removes a recurring footgun):
+   - `scripts/build.sh test` should propagate cargo's exit code
+   - `clawft-rpc` "no daemon" tests should be hermetic
+   - WSL xdg-open test hang — find + fix the offending test
+   - `scripts/build.sh install` command so `cargo install --path crates/clawft-weave --force` has a memorable name
+
+9. **53 dependabot vulns on origin/master** (inherited). Untouched. Separate `chore(deps)` PR candidate.
 
 ---
 
-## Open loops
+## Test commands that work right now
 
-### Hardware → substrate bridge (Windows side)
+```bash
+# Workspace compile check — green
+scripts/build.sh check
 
-- ESP32 is streaming **audio + ToF over WTP** to a Python bridge on
-  Windows (618 audio / 80 depth in 20 s reported earlier today).
-  Bridge currently receives frames but does not forward them
-- **Missing 15-line glue**: bridge opens unix socket at
-  `\\wsl$\<distro>\home\aepod\dev\clawft\.weftos\runtime\kernel.sock`
-  and calls `substrate.publish {path:"substrate/sensor/{mic|tof}",
-  value:<frame>}` for each received frame. See example at the bottom
-  of the previous session transcript
-- If `AF_UNIX` over the WSL UNC path doesn't work from Windows
-  Python, we add a TCP RPC port (separate from mesh 9470). No one
-  has tried it yet — that's the fast experiment to do first
+# Clippy — now workspace-clean as of 2156157 (was the open-debt TODO from prior handoff)
+scripts/build.sh clippy
 
-### ToF register map (VL53L7CX behind RP2040)
+# Full tests (needs env overrides — see gotchas above)
+WEFTOS_RUNTIME_DIR=/tmp/nonexistent-weftos-$$ BROWSER=/bin/true cargo test --workspace
 
-- Sensor is reachable over I2C but reading `0x0400` returns `0xFFFF`
-  on every pixel. `0x0400` is ST's native VL53L7CX register — wrong
-  layer. The Waveshare RP2040 bridge has its own firmware with its
-  own simpler register map
-- Product: **Waveshare 8x8 Matrix ToF (ASIN B0FS77NZRC)** — chip
-  VL53L7CX, RP2040 bridge, I2C/UART/USB-C
-- Diagnostic: sequential-read 256 bytes starting at `0x00`, look for
-  a `~128-byte chunk` (64 × 16-bit) whose values change when a hand
-  approaches. That's the real buffer
-- Or: Waveshare wiki + github.com/waveshare has example code for
-  this module
+# Targeted — the two daemon-flaky tests pass when WEFTOS_RUNTIME_DIR points elsewhere
+WEFTOS_RUNTIME_DIR=/tmp/nonexistent cargo test -p clawft-rpc --lib
 
-### Audio waveform / spectrogram
+# Mic tests (9 green)
+cargo test -p clawft-substrate --lib mic::
 
-- `ui://waveform` primitive exists and works — just needs a samples
-  buffer in the substrate topic to plot
-- `MicrophoneAdapter` today emits only scalar RMS/peak per window. To
-  plot a waveform we need the adapter (or the bridge) to also emit
-  a short rolling buffer (e.g. last 2048 samples) at a sibling path
-  `substrate/sensor/mic/waveform` or embed it in the mic object
-- Spectrogram needs FFT + 2D rolling — use the existing `ui://heatmap`
-  primitive once we have a `[freq_bin][time_bin]` matrix topic
+# Daemon-side sanity — confirms bridge is publishing
+echo '{"jsonrpc":"2.0","id":"t","method":"substrate.read","params":{"path":"substrate/sensor/mic"}}' | \
+  nc -q1 127.0.0.1 9471
 
-### Policy layer (security boundary)
-
-- `egress_check(caller, path)` in `substrate_service.rs` is the seam;
-  currently allow-all-but-warn for unsigned callers on Capture-tier
-  topics. Hook it to `CapabilityGrant` and a new `EgressGrant`
-  governance rule type
-- Flip unsigned `ipc.publish` + `substrate.publish` from warn-accept
-  to hard-reject once all callers migrate to `agent.register`-signed
-  envelopes
-- `noise = true` on the mesh transport once ESP32 and Python bridge
-  both have their Ed25519 keys minted and exchanged
-
-### StreamWindowCommit anchor
-
-- Service is built and wires on boot but the `[kernel.anchor]`
-  config section isn't enabled in `weave.toml`. Once sensor
-  topics are being published regularly, add:
-  ```toml
-  [kernel.anchor]
-  enabled = true
-  topics = ["sensor.*"]
-  window_secs = 2
-  ```
-  Then every 2 s rolling window of each sensor topic chain-appends
-  a signed `StreamWindowCommit` with a BLAKE3 hash. That's the
-  audit-without-bloat path we scoped
-
-### Composer gap for sensors
-
-- Audio fixture still uses scalar chip + gauges. Once the mic adapter
-  emits a samples buffer, swap RMS/peak gauges for a `ui://waveform`
-  node bound to the buffer
-- `ui://heatmap` works for ToF, also works for any future spectrogram,
-  depth-cam image, thermal grid, 2D flow field. That's a
-  general-purpose primitive now
+# Check the running daemon matches what you just built
+diff -q target/release/weaver ~/.cargo/bin/weaver && echo "in sync" || echo "RESTART NEEDED"
+```
 
 ---
 
-## Next-session priorities
+## Architecture notes — what changed since the prior handoff
 
-In order of highest impact:
+### Tray chip model
 
-1. **Land the Windows bridge glue.** Python script opens the WSL
-   unix socket (or TCP RPC if that doesn't work), registers via
-   `agent.register`, then `substrate.publish`es each ESP32 frame on
-   the right topic. Once that flows, BOTH chips light up without any
-   more node-side work
-2. **Decode the VL53L7CX register layout** through the RP2040 bridge.
-   Either from the Waveshare docs or empirically via the 256-byte
-   dump diagnostic. Then ToF frames become real instead of the
-   synthetic test gradient
-3. **Mic waveform path** — extend `MicrophoneAdapter` to emit a
-   short rolling samples buffer, swap audio fixture to use
-   `ui://waveform`
-4. **`[kernel.anchor]` config** — flip on, let the chain build up
-   stream-audit history
-5. **Hard-reject unsigned publishes** + wire `CapabilityGrant` into
-   `egress_check`. This closes the "mesh is the trust boundary"
-   story the user repeatedly emphasized
+- **Before:** 7 chips (Kernel, Mesh, ExoChain, Wi-Fi, Bluetooth, Audio, ToF). Each with a bespoke TOML fixture and per-sensor status logic in `shell/tray.rs`.
+- **After:** 4 chips (Kernel, Mesh, ExoChain, Explorer). Explorer at the far right, status = daemon connection. Wi-Fi/BT/Audio/ToF adapter wiring and `Snapshot` fields kept; only their tray surface is gone. TOML fixtures on disk for the retired chips are unused-but-kept (will be resurrected as viewer patterns per `.planning/explorer/PROJECT-PLAN.md` Phase 2).
+
+### The VSCode proxy allowlist was the real gate
+
+The original mic-gauge problem wasn't the mic.rs race (that was real and got fixed too), but the fact that the VSCode extension's RPC proxy allowlist didn't include `substrate.read` / `substrate.subscribe`. The WASM `Live` loop running inside the webview uses substrate subscriptions to populate `Snapshot` — same code the native GUI runs. Blocked at the proxy = all substrate-driven chip icons and gauges stayed dark regardless of daemon health. Phase 0 of the Explorer plan fixes this in 2 lines.
+
+### Mic path (unchanged from prior handoff but worth re-linking)
+
+See prior handoff's "How mic data flows" section for the 8-step chain from ESP32 INMP441 → bridge RMS math → daemon substrate → GUI snapshot → detail window gauge. Still accurate. The only thing that changed is the tray Audio chip was retired, so you no longer see a 3-state lamp in the tray — you'd see the full meter in the Explorer once Phase 1 ships, OR in a direct `substrate.read` loop.
 
 ---
 
-## Architecture invariants from this session's conversation
+## Files to be aware of (so you don't accidentally clobber untracked work)
 
-These came out of the user's pushback and are load-bearing for
-future decisions:
-
-- **DeFi/chain is the control plane, not the data plane.** Per-frame
-  signing of sensor streams is the wrong layer. Use chain for
-  stream-descriptor events (register / window-commit / close) and
-  substrate/mesh for bulk with Noise envelope + caller-identity
-  auth on every message
-- **Mesh is the trust boundary.** Three concentric gates: intra-
-  process (`CapabilityGrant`), intra-mesh (peer auth + Noise),
-  off-mesh egress (`EgressGrant`, chain-logged, human-confirmed)
-- **Broadcast is the natural shape.** Producers `publish`; anyone
-  with permission can `subscribe` (stream), `read` (latest-value
-  pull), or `notify` (cheap signal). Not file polling. Not mesh
-  frames per sample. Not shared markdown files for cross-agent
-  coordination
-- **Real cross-agent coordination must go over the real bus** —
-  signed envelopes, chain-auditable. The fallback to file-based
-  handoff is a workaround we removed. Don't reintroduce it
+- `.planning/symposiums/exochain-logging/` — 5 MD files from prior session. Still uncommitted.
+- `.planning/symposiums/RLM - arxiv-2512.24601/` — 5 MD files from THIS session, now committed in `2156157`. Safe to edit, but note that Q1-Q8 in `00-synthesis.md` §5 are meant for the user to answer inline.
+- `.planning/explorer/PROJECT-PLAN.md` — committed in `2156157`. Update it as Phase 1 progresses.
+- `.planning/sensors/` — 12-category sensor taxonomy, user-authored, still untracked.
+- `.planning/clients/esp32-bridge-rpc.md` — ESP32 bridge RPC contract, source of truth, still untracked.
+- `.planning/weftos_sensors.md` — still untracked.
+- `docs/runtime-scratch/chain.json` — scratch data; gitignore candidate.
 
 ---
 
-## Working-tree status (not mine, leave alone)
+## Who's in charge of what
 
-- `.planning/sensors/` — user's
-- `.planning/weftos_sensors.md` — user's
-- `crates/clawft-qfs-gen/` — user's new crate (added to workspace in
-  `Cargo.toml` during this session). Do not commit, do not touch
-- `scripts/build_vp_deck.py` — user's
-- `weave.toml` — uncommitted `[kernel.mesh] enabled = true` + field
-  rename. Commit if you want this to persist across daemon restarts
+- **User (Mathew):** driving design decisions, running the physical ESP32 hardware, operating the VSCode webview as the primary GUI surface. Picks commit shapes (usually one bundled commit; confirmed twice this session). Renames symposium dirs to include topic shorthand (`RLM - arxiv-NNN`, not bare `arxiv-NNN`).
+- **This Claude session:** mic race fix, tray refactor, workspace clippy sweep (~100 files), RLM symposium coordination + synthesis + decision-recording, Explorer PROJECT-PLAN draft, Phase 0 extension.ts fix. Wrote 7 memory files covering the dev-env gotchas + project direction + collaboration prefs.
+- **Background agents this session:**
+  - 4 specialists for the RLM arxiv symposium (all delivered + committed)
+  - 1 synthesis agent for the RLM panel (delivered + committed, edited by this session to record Option D + channel-generality constraint)
+  - Test-suite background runs — all completed before end of session.
+  - None are still running.
 
 ---
 
-## Reference
+## Pick up here
 
-- Swap-sites catalog: `docs/eml-treecalc-swap-sites.md` (now 12/12
-  findings either shipped or research-deferred)
-- VS Code extension smoke test: `extensions/vscode-weft-panel/SMOKE.md`
-- Build script: `scripts/build.sh`
-- Rebuild wasm: `extensions/vscode-weft-panel/scripts/build-wasm.sh`
-- Rebuild native weaver:
-  `cargo build --bin weaver --profile release`
+**Highest priority:** confirm whether the Phase 0 allowlist fix works — user should reload the webview as first act of the next session. If yes → commit the 2-line change and move on to answering Q3/Q6 so ADR work can start. If no → walk the diagnostic path at the bottom of `.planning/explorer/PROJECT-PLAN.md` §2.
+
+If the user is done for the day, the commit in `2156157` is stable and the workspace is in a known-green state (clippy clean, daemon healthy, all tests pass with the env overrides noted). `git push origin development-0.7.0` is safe whenever they decide to land it on the remote.

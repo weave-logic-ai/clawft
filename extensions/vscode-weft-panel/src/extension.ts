@@ -48,6 +48,14 @@ const ALLOWED_METHODS = new Set<string>([
     "chain.status",
     "chain.tail",
     "sensor.mic.status",
+    // Ontology Explorer Phase 0 (2026-04-23): the WASM `Live` loop inside
+    // the webview drives `Snapshot` through these two verbs — same code
+    // the native GUI runs. Without them the tray chip icons never go
+    // green and the mic gauge bound to $substrate/sensor/mic.rms_db
+    // never sees bridge-published values. `substrate.publish` stays
+    // blocked; the webview is a viewer, not a writer.
+    "substrate.read",
+    "substrate.subscribe",
 ]);
 
 interface WasmRpcRequest {

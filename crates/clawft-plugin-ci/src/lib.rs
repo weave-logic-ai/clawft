@@ -276,10 +276,10 @@ pub fn scan_workflows_dir(dir: &Path) -> Vec<WorkflowInfo> {
     paths.sort();
 
     for path in paths {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(wf) = parse_github_workflow(&content) {
-                workflows.push(wf);
-            }
+        if let Ok(content) = std::fs::read_to_string(&path)
+            && let Ok(wf) = parse_github_workflow(&content)
+        {
+            workflows.push(wf);
         }
     }
     workflows

@@ -1,0 +1,60 @@
+{
+  "name": "ruvector-attention-wasm",
+  "type": "module",
+  "version": "0.1.32",
+  "description": "High-performance WebAssembly attention mechanisms for transformers and LLMs: Multi-Head, Flash Attention, Hyperbolic, Linear (Performer), MoE, Local-Global, and CGT Sheaf Attention with coherence gating. GPU-accelerated with SIMD fallback.",
+  "license": "MIT OR Apache-2.0",
+  "author": "RuVector Team <team@ruvector.dev>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ruvnet/ruvector.git"
+  },
+  "homepage": "https://ruv.io/ruvector",
+  "bugs": {
+    "url": "https://github.com/ruvnet/ruvector/issues"
+  },
+  "main": "ruvector_attention_wasm.js",
+  "module": "ruvector_attention_wasm.js",
+  "types": "ruvector_attention_wasm.d.ts",
+  "files": [
+    "ruvector_attention_wasm_bg.wasm",
+    "ruvector_attention_wasm.js",
+    "ruvector_attention_wasm.d.ts",
+    "ruvector_attention_wasm_bg.wasm.d.ts",
+    "README.md"
+  ],
+  "sideEffects": [
+    "./snippets/*"
+  ],
+  "keywords": [
+    "wasm",
+    "webassembly",
+    "attention",
+    "transformer",
+    "llm",
+    "machine-learning",
+    "neural-networks",
+    "multi-head-attention",
+    "flash-attention",
+    "hyperbolic",
+    "moe",
+    "mixture-of-experts",
+    "coherence",
+    "cgt",
+    "sheaf-attention",
+    "ai",
+    "deep-learning",
+    "gpu",
+    "simd",
+    "infonce",
+    "contrastive-learning",
+    "performer",
+    "linear-attention"
+  ],
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

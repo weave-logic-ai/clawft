@@ -1,0 +1,31 @@
+#!/usr/bin/env node
+
+/**
+ * Simple claude command wrapper
+ * This script makes the claude command available by running npx claude
+ */
+
+import { spawn } from 'child_process';
+
+// Get all arguments passed to this script (excluding node and script path)
+const args = process.argv.slice(2);
+
+// Spawn npx claude with all the arguments
+const claudeProcess = spawn('npx', ['claude', ...args], {
+  stdio: 'inherit',
+  env: process.env
+});
+
+// Handle process exit
+claudeProcess.on('exit', (code) => {
+  process.exit(code || 0);
+});
+
+// Handle signals
+process.on('SIGINT', () => {
+  claudeProcess.kill('SIGINT');
+});
+
+process.on('SIGTERM', () => {
+  claudeProcess.kill('SIGTERM');
+});

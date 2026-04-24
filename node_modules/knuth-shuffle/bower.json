@@ -1,0 +1,11 @@
+{
+  "name": "knuth-shuffle",
+  "version": "1.0.8",
+  "main": "index.js",
+  "ignore": [
+    ".jshintrc",
+    "package.json"
+  ],
+  "dependencies": {},
+  "devDependencies": {}
+}

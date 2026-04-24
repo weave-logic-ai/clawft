@@ -3,8 +3,6 @@
 //! On Unix, connects over a Unix domain socket. On other platforms,
 //! `connect()` always returns `None` (daemon transport not yet available).
 
-use crate::protocol::{Request, Response};
-
 // ── Unix implementation ──────────────────────────────────────────
 
 #[cfg(unix)]

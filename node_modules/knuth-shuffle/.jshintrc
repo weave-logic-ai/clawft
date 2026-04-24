@@ -1,0 +1,16 @@
+{ "strict": true
+, "node": true
+, "browser": true
+, "jquery": true
+
+, "indent": 2
+, "onevar": true
+, "laxcomma": true
+, "laxbreak": true
+
+, "eqeqeq": true
+, "immed": true
+, "undef": true
+, "unused": true
+, "latedef": true
+}

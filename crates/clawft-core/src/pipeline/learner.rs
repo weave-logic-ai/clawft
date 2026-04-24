@@ -198,7 +198,7 @@ impl TrajectoryLearner {
         state.poor_count >= config.evolution_trigger_count
             && !state.evolution_ready
             && state.total_recorded > 0
-            && state.total_recorded % config.check_interval == 0
+            && state.total_recorded.is_multiple_of(config.check_interval)
     }
 
     /// Generate feedback text from quality dimensions.
@@ -255,13 +255,11 @@ impl LearningBackend for TrajectoryLearner {
 
         // Ring buffer: push new, evict oldest if over capacity
         state.trajectories.push_back(scored);
-        if state.trajectories.len() > self.config.max_trajectories {
-            if let Some(removed) = state.trajectories.pop_front() {
-                if removed.trajectory.quality.overall < self.config.poor_threshold {
+        if state.trajectories.len() > self.config.max_trajectories
+            && let Some(removed) = state.trajectories.pop_front()
+                && removed.trajectory.quality.overall < self.config.poor_threshold {
                     state.poor_count = state.poor_count.saturating_sub(1);
                 }
-            }
-        }
 
         state.total_recorded += 1;
 

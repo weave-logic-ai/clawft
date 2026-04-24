@@ -1,0 +1,16 @@
+{
+  "name": "@ruvector/router-linux-x64-gnu",
+  "version": "0.1.27",
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "libc": ["glibc"],
+  "main": "ruvector-router.linux-x64-gnu.node",
+  "files": ["ruvector-router.linux-x64-gnu.node"],
+  "description": "Semantic router for AI agents - linux-x64-gnu platform",
+  "keywords": ["ruvector", "router", "semantic-router", "napi-rs"],
+  "author": "ruv.io Team <info@ruv.io>",
+  "license": "MIT",
+  "repository": {"type": "git", "url": "https://github.com/ruvnet/ruvector"},
+  "engines": {"node": ">= 18"},
+  "publishConfig": {"registry": "https://registry.npmjs.org/", "access": "public"}
+}

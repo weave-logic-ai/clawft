@@ -328,14 +328,13 @@ async fn relay_external_paths(
         let result = resp.result.unwrap_or(Value::Null);
         // Expected shape from substrate.read:
         // `{value: Option<Value>, tick: u64, sensitivity: String}`.
-        if let Some(value) = result.get("value").cloned() {
-            if !value.is_null() {
+        if let Some(value) = result.get("value").cloned()
+            && !value.is_null() {
                 substrate.apply(clawft_substrate::StateDelta::Replace {
                     path: path.to_string(),
                     value,
                 });
             }
-        }
     }
 }
 

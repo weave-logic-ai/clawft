@@ -1,0 +1,56 @@
+#!/bin/bash
+# Claude Code Wrapper for Agentic Flow
+# Simplified bash version for quick usage
+#
+# Usage:
+#   claude-code openrouter "Write a Python function"
+#   claude-code gemini "Create a REST API"
+#   claude-code anthropic "Help me debug this code"
+
+PROVIDER=${1:-anthropic}
+shift
+PROMPT="$@"
+
+# Default proxy port
+PORT=${AGENTIC_FLOW_PORT:-3000}
+
+case "$PROVIDER" in
+  openrouter)
+    if [ -z "$OPENROUTER_API_KEY" ]; then
+      echo "❌ Error: OPENROUTER_API_KEY not set"
+      exit 1
+    fi
+
+    ANTHROPIC_BASE_URL="http://localhost:$PORT" \
+    ANTHROPIC_API_KEY="sk-ant-proxy-dummy" \
+    OPENROUTER_API_KEY="$OPENROUTER_API_KEY" \
+    claude $PROMPT
+    ;;
+
+  gemini)
+    if [ -z "$GOOGLE_GEMINI_API_KEY" ]; then
+      echo "❌ Error: GOOGLE_GEMINI_API_KEY not set"
+      exit 1
+    fi
+
+    ANTHROPIC_BASE_URL="http://localhost:$PORT" \
+    ANTHROPIC_API_KEY="sk-ant-proxy-dummy" \
+    GOOGLE_GEMINI_API_KEY="$GOOGLE_GEMINI_API_KEY" \
+    claude $PROMPT
+    ;;
+
+  onnx)
+    ANTHROPIC_BASE_URL="http://localhost:$PORT" \
+    ANTHROPIC_API_KEY="sk-ant-proxy-dummy" \
+    claude $PROMPT
+    ;;
+
+  anthropic|*)
+    if [ -z "$ANTHROPIC_API_KEY" ]; then
+      echo "❌ Error: ANTHROPIC_API_KEY not set"
+      exit 1
+    fi
+
+    claude $PROMPT
+    ;;
+esac

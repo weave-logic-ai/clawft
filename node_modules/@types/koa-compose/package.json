@@ -1,0 +1,33 @@
+{
+    "name": "@types/koa-compose",
+    "version": "3.2.9",
+    "description": "TypeScript definitions for koa-compose",
+    "homepage": "https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/koa-compose",
+    "license": "MIT",
+    "contributors": [
+        {
+            "name": "jKey Lu",
+            "githubUsername": "jkeylu",
+            "url": "https://github.com/jkeylu"
+        },
+        {
+            "name": "Anton Astashov",
+            "githubUsername": "astashov",
+            "url": "https://github.com/astashov"
+        }
+    ],
+    "main": "",
+    "types": "index.d.ts",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/DefinitelyTyped/DefinitelyTyped.git",
+        "directory": "types/koa-compose"
+    },
+    "scripts": {},
+    "dependencies": {
+        "@types/koa": "*"
+    },
+    "peerDependencies": {},
+    "typesPublisherContentHash": "bc3ce762435b99eb3b2c76fff560c74872741a0fc8b4d9400c93fe4a880802c8",
+    "typeScriptVersion": "5.2"
+}

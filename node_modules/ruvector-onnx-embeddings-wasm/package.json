@@ -1,0 +1,72 @@
+{
+  "name": "ruvector-onnx-embeddings-wasm",
+  "type": "module",
+  "author": "RuVector Team",
+  "description": "Portable WASM embedding generation with SIMD and parallel workers - run text embeddings in browsers, Cloudflare Workers, Deno, and Node.js",
+  "version": "0.1.2",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ruvnet/ruvector"
+  },
+  "homepage": "https://github.com/ruvnet/ruvector/tree/main/examples/onnx-embeddings-wasm",
+  "bugs": {
+    "url": "https://github.com/ruvnet/ruvector/issues"
+  },
+  "files": [
+    "ruvector_onnx_embeddings_wasm_bg.wasm",
+    "ruvector_onnx_embeddings_wasm.js",
+    "ruvector_onnx_embeddings_wasm.d.ts",
+    "loader.js",
+    "parallel-embedder.mjs",
+    "parallel-worker.mjs",
+    "LICENSE",
+    "README.md"
+  ],
+  "main": "ruvector_onnx_embeddings_wasm.js",
+  "types": "ruvector_onnx_embeddings_wasm.d.ts",
+  "exports": {
+    ".": {
+      "types": "./ruvector_onnx_embeddings_wasm.d.ts",
+      "import": "./ruvector_onnx_embeddings_wasm.js",
+      "require": "./ruvector_onnx_embeddings_wasm.js"
+    },
+    "./loader": {
+      "import": "./loader.js"
+    },
+    "./loader.js": {
+      "import": "./loader.js"
+    },
+    "./parallel": {
+      "import": "./parallel-embedder.mjs"
+    },
+    "./parallel-embedder": {
+      "import": "./parallel-embedder.mjs"
+    }
+  },
+  "sideEffects": false,
+  "keywords": [
+    "onnx",
+    "embeddings",
+    "wasm",
+    "webassembly",
+    "simd",
+    "parallel",
+    "worker-threads",
+    "ml",
+    "machine-learning",
+    "nlp",
+    "text-embeddings",
+    "semantic-search",
+    "vector-database",
+    "rag",
+    "sentence-transformers",
+    "huggingface",
+    "cloudflare-workers",
+    "edge-computing",
+    "browser"
+  ],
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}

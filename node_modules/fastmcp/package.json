@@ -1,0 +1,128 @@
+{
+  "name": "fastmcp",
+  "version": "3.34.0",
+  "main": "dist/FastMCP.js",
+  "scripts": {
+    "build": "tsup",
+    "lint": "prettier --check . && eslint . && tsc --noEmit && jsr publish --dry-run",
+    "test": "vitest run",
+    "format": "prettier --write . && eslint --fix ."
+  },
+  "bin": {
+    "fastmcp": "dist/bin/fastmcp.js"
+  },
+  "keywords": [
+    "MCP",
+    "SSE"
+  ],
+  "type": "module",
+  "author": "Frank Fiegel <frank@glama.ai>",
+  "license": "MIT",
+  "description": "A TypeScript framework for building MCP servers.",
+  "module": "dist/FastMCP.js",
+  "types": "dist/FastMCP.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/FastMCP.js",
+      "types": "./dist/FastMCP.d.ts",
+      "require": "./dist/FastMCP.cjs"
+    },
+    "./auth": {
+      "import": "./dist/auth/index.js",
+      "types": "./dist/auth/index.d.ts",
+      "require": "./dist/auth/index.cjs"
+    },
+    "./edge": {
+      "import": "./dist/edge/index.js",
+      "types": "./dist/edge/index.d.ts",
+      "require": "./dist/edge/index.cjs"
+    }
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.24.3",
+    "@standard-schema/spec": "^1.0.0",
+    "execa": "^9.6.1",
+    "file-type": "^21.1.1",
+    "fuse.js": "^7.1.0",
+    "hono": "^4.11.5",
+    "mcp-proxy": "^6.4.0",
+    "strict-event-emitter-types": "^2.0.0",
+    "undici": "^7.16.0",
+    "uri-templates": "^0.2.0",
+    "xsschema": "^0.4.3",
+    "yargs": "^18.0.0",
+    "zod": "^4.1.13",
+    "zod-to-json-schema": "^3.25.0"
+  },
+  "peerDependencies": {
+    "jose": "^5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "jose": {
+      "optional": true
+    }
+  },
+  "repository": {
+    "url": "https://github.com/punkpeye/fastmcp"
+  },
+  "homepage": "https://glama.ai/mcp",
+  "release": {
+    "branches": [
+      "main"
+    ],
+    "plugins": [
+      "@semantic-release/commit-analyzer",
+      "@semantic-release/release-notes-generator",
+      "@semantic-release/npm",
+      "@semantic-release/github",
+      "@sebbo2002/semantic-release-jsr"
+    ]
+  },
+  "files": [
+    "dist"
+  ],
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@modelcontextprotocol/inspector": "^0.16.8",
+    "@sebbo2002/semantic-release-jsr": "^3.1.0",
+    "@tsconfig/node24": "^24.0.3",
+    "@types/node": "^24.10.1",
+    "@types/uri-templates": "^0.1.34",
+    "@types/yargs": "^17.0.35",
+    "@valibot/to-json-schema": "^1.4.0",
+    "@wong2/mcp-cli": "^1.13.0",
+    "arktype": "^2.1.28",
+    "eslint": "^9.39.1",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-perfectionist": "^4.15.1",
+    "eslint-plugin-prettier": "^5.5.4",
+    "eventsource-client": "^1.2.0",
+    "get-port-please": "^3.2.0",
+    "jiti": "^2.6.1",
+    "jsr": "^0.13.5",
+    "prettier": "^3.7.4",
+    "semantic-release": "^25.0.2",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.48.1",
+    "valibot": "^1.2.0",
+    "vitest": "^4.0.15"
+  },
+  "tsup": {
+    "entry": [
+      "src/FastMCP.ts",
+      "src/bin/fastmcp.ts",
+      "src/auth/index.ts",
+      "src/edge/index.ts",
+      "src/examples/custom-routes.ts"
+    ],
+    "format": [
+      "esm",
+      "cjs"
+    ],
+    "dts": true,
+    "splitting": true,
+    "sourcemap": true,
+    "clean": true
+  }
+}

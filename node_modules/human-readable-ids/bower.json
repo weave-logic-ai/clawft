@@ -1,0 +1,39 @@
+{
+  "name": "human-readable-ids",
+  "main": "index.js",
+  "version": "1.0.3",
+  "homepage": "https://github.com/coolaj86/human-readable-ids-js",
+  "authors": [
+    "AJ ONeal <awesome@coolaj86.com>"
+  ],
+  "description": "Generate human-readable ids from lists of easy-to-spell nouns and adjectives",
+  "moduleType": [
+    "globals",
+    "node"
+  ],
+  "keywords": [
+    "hri",
+    "human",
+    "readable",
+    "ids",
+    "string",
+    "english",
+    "noun",
+    "adjective",
+    "nouns",
+    "adjectives"
+  ],
+  "license": "Apache2",
+  "ignore": [
+    "**/.*",
+    "src/*",
+    "lists.js",
+    "node_modules",
+    "bower_components",
+    "test",
+    "tests"
+  ],
+  "dependencies": {
+    "knuth-shuffle": "~1.0.0"
+  }
+}

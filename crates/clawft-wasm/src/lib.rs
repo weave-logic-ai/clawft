@@ -768,7 +768,7 @@ mod tests {
         let caps = capabilities();
         let parsed: serde_json::Value = serde_json::from_str(&caps).unwrap();
         assert_eq!(parsed["platform"], "wasm32-wasip2");
-        assert!(parsed["tools"].as_array().unwrap().len() > 0);
+        assert!(!parsed["tools"].as_array().unwrap().is_empty());
     }
 
     #[test]

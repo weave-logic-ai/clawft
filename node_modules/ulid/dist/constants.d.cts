@@ -1,0 +1,10 @@
+export declare const B32_CHARACTERS = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+export declare const ENCODING = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+export declare const ENCODING_LEN = 32;
+export declare const MAX_ULID = "7ZZZZZZZZZZZZZZZZZZZZZZZZZ";
+export declare const MIN_ULID = "00000000000000000000000000";
+export declare const RANDOM_LEN = 16;
+export declare const TIME_LEN = 10;
+export declare const TIME_MAX = 281474976710655;
+export declare const ULID_REGEX: RegExp;
+export declare const UUID_REGEX: RegExp;

@@ -1,0 +1,1 @@
+cmd_Release/obj.target/better_sqlite3.node := g++ -o Release/obj.target/better_sqlite3.node -shared -pthread -rdynamic -Wl,-Bsymbolic -Wl,--exclude-libs,ALL -m64  -Wl,-soname=better_sqlite3.node -Wl,--start-group Release/obj.target/better_sqlite3/src/better_sqlite3.o Release/obj.target/deps/sqlite3.a -Wl,--end-group 

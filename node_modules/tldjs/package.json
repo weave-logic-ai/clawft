@@ -1,0 +1,85 @@
+{
+  "author": "Thomas Parisot (https://thom4.net)",
+  "name": "tldjs",
+  "description": "JavaScript API to work against complex domain names, subdomains and URIs.",
+  "version": "2.3.2",
+  "homepage": "https://github.com/thom4parisot/tld.js",
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/thom4parisot/tld.js.git"
+  },
+  "bugs": {
+    "url": "https://github.com/thom4parisot/tld.js/issues"
+  },
+  "engines": {
+    "node": ">= 20"
+  },
+  "main": "index.js",
+  "exports": {
+    "import": "./tld.js",
+    "require": "./index.js"
+  },
+  "license": "MIT",
+  "scripts": {
+    "benchmark": "node ./bin/benchmark.js",
+    "generate-changelog": "github-changes -o thom4parisot -r 'tld.js' -n ${npm_package_version} --only-pulls --use-commit-body",
+    "lint": "eslint ./lib ./index.js ./test",
+    "postinstall": "node ./bin/postinstall.js",
+    "posttest": "npm run lint",
+    "prepack": "npm run build && npm run build-min",
+    "prepublish": "npm run update",
+    "test": "nyc mocha -R dot -r env-test",
+    "test-watch": "mocha -R dot -r env-test --watch",
+    "update": "node ./bin/update.js",
+    "version": "npm run generate-changelog && git add CHANGELOG.md",
+    "prebuild": "npm run update",
+    "build": "browserify index.js --s tldjs > tld.js",
+    "prebuild-min": "npm run update",
+    "build-min": "browserify index.js --s tldjs | uglifyjs -c > tld.min.js"
+  },
+  "tldjs": {
+    "providers": {
+      "publicsuffix-org": "https://publicsuffix.org/list/effective_tld_names.dat"
+    }
+  },
+  "nyc": {
+    "check-coverage": true,
+    "reporter": [
+      "html",
+      "lcov",
+      "text"
+    ]
+  },
+  "dependencies": {
+    "punycode": "^2.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.30.1",
+    "benchmark": "^2.1.4",
+    "browserify": "^17.0.1",
+    "env-test": "^1.0.0",
+    "eslint": "^9.30.1",
+    "expect.js": "^0.3.1",
+    "github-changes": "^2.0.3",
+    "globals": "^16.3.0",
+    "mocha": "^11.7.1",
+    "nyc": "^17.1.0",
+    "uglify-js": "^3.1.9"
+  },
+  "keywords": [
+    "tld",
+    "sld",
+    "domain",
+    "browser",
+    "uri",
+    "url",
+    "domain name",
+    "subdomain",
+    "public suffix"
+  ],
+  "collective": {
+    "type": "opencollective",
+    "url": "https://opencollective.com/tldjs",
+    "logo": "https://opencollective.com/opencollective/logo.txt"
+  }
+}

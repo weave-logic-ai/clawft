@@ -1,0 +1,74 @@
+{
+  "name": "reasoning_bank_distill_success",
+  "version": "1.0.0",
+  "description": "Extract reusable strategy principles from successful trajectories. Creates title/description/content memories.",
+  "model": "deepseek/deepseek-chat",
+  "temperature": 0.3,
+  "max_tokens": 2048,
+  "system": "You are a knowledge extraction specialist. Your role is to analyze successful task trajectories and extract reusable, generalizable strategy principles. Each principle should be concise, actionable, and avoid task-specific details like URLs, IDs, or PII.",
+  "template": "Given a task and its successful trajectory, extract up to {{max_items}} reusable strategy principles.\n\nTask: {{task_query}}\n\nTrajectory:\n{{trajectory}}\n\nExtract memory items with this schema:\n- title: Brief, descriptive title (5-10 words)\n- description: One-sentence summary of the strategy\n- content: 3-8 numbered steps with clear decision criteria and recovery actions\n\nGuidelines:\n1. Generalize beyond this specific task (avoid URLs, IDs, constants)\n2. Focus on transferable patterns and decision logic\n3. Include preconditions, main steps, and error recovery\n4. Use imperative voice (\"Load page\", \"Verify token\", etc.)\n5. Highlight critical checks and validation steps\n\nRespond with JSON:\n{\n  \"memories\": [\n    {\n      \"title\": \"Strategy title\",\n      \"description\": \"One-sentence summary\",\n      \"content\": \"1) Step one with decision criteria. 2) Step two with validation. 3) Recovery if failure.\",\n      \"tags\": [\"tag1\", \"tag2\"],\n      \"domain\": \"optional domain hint\"\n    }\n  ]\n}",
+  "examples": [
+    {
+      "task": "Login to admin panel with CSRF protection and extract user list",
+      "trajectory": {
+        "steps": [
+          {
+            "action": "navigate",
+            "url": "https://admin.example.com/login"
+          },
+          {
+            "action": "extract_csrf",
+            "selector": "meta[name=csrf-token]",
+            "value": "abc123"
+          },
+          {
+            "action": "fill_form",
+            "fields": {
+              "username": "admin",
+              "password": "***",
+              "csrf_token": "abc123"
+            }
+          },
+          {
+            "action": "submit_and_verify",
+            "success": true
+          }
+        ]
+      },
+      "expected_response": {
+        "memories": [
+          {
+            "title": "Handle login flows with CSRF tokens",
+            "description": "Always fetch and include CSRF token before POST to avoid 403 errors.",
+            "content": "1) Load login page and parse CSRF from form input, meta tag, or cookie. 2) Include token in POST request as form field or header. 3) If 403 or 419 error, refresh page and retry with new token. 4) Verify successful authentication before proceeding.",
+            "tags": [
+              "web",
+              "auth",
+              "csrf",
+              "security"
+            ],
+            "domain": "webarena.admin"
+          },
+          {
+            "title": "Verify authentication state before data extraction",
+            "description": "Check for authentication indicators before attempting protected operations.",
+            "content": "1) After login, verify presence of session cookie or auth token. 2) Check for redirect to dashboard or user-specific content. 3) Look for logout button or user menu as positive signal. 4) If still on login page or see auth error, retry login flow.",
+            "tags": [
+              "web",
+              "auth",
+              "verification"
+            ],
+            "domain": "webarena"
+          }
+        ]
+      }
+    }
+  ],
+  "notes": [
+    "Use temperature=0.3 for some creativity while maintaining structure",
+    "Aim for 1-3 memories per trajectory, not more unless truly distinct",
+    "Content should be 3-8 steps, not a paragraph",
+    "Tags help with retrieval filtering",
+    "Domain hints improve retrieval precision for specialized tasks"
+  ]
+}

@@ -1,0 +1,111 @@
+{
+  "name": "reasoning_bank_distill_failure",
+  "version": "1.0.0",
+  "description": "Extract failure guardrails and preventative patterns from failed trajectories. Creates counterfactual memories.",
+  "model": "deepseek/deepseek-chat",
+  "temperature": 0.3,
+  "max_tokens": 2048,
+  "system": "You are a failure analysis specialist. Your role is to analyze failed task trajectories and extract guardrails, pitfalls, and recovery strategies. Focus on preventable errors and how to detect/avoid them.",
+  "template": "Given a task and its failed trajectory, extract up to {{max_items}} failure guardrail principles.\n\nTask: {{task_query}}\n\nFailed Trajectory:\n{{trajectory}}\n\nExtract guardrail items with this schema:\n- title: Brief title describing the failure mode (5-10 words)\n- description: One-sentence summary of the pitfall\n- content: 3-8 numbered steps covering detection, avoidance, and recovery\n\nGuidelines:\n1. Focus on WHY the failure occurred and HOW to prevent it\n2. Include early warning signs and detection criteria\n3. Specify checks to perform before risky operations\n4. Provide recovery steps if failure is detected\n5. Generalize the pattern (avoid task-specific details)\n\nRespond with JSON:\n{\n  \"memories\": [\n    {\n      \"title\": \"Guardrail title\",\n      \"description\": \"One-sentence summary of pitfall\",\n      \"content\": \"1) Detection: How to identify risk. 2) Prevention: Steps to avoid. 3) Recovery: What to do if encountered.\",\n      \"tags\": [\"failure\", \"tag1\", \"tag2\"],\n      \"domain\": \"optional domain hint\"\n    }\n  ]\n}",
+  "examples": [
+    {
+      "task": "Login to admin panel and extract user list",
+      "trajectory": {
+        "steps": [
+          {
+            "action": "navigate",
+            "url": "https://admin.example.com/login"
+          },
+          {
+            "action": "fill_form",
+            "fields": {
+              "username": "admin",
+              "password": "***"
+            },
+            "note": "Missing CSRF token"
+          },
+          {
+            "action": "submit",
+            "result": "403 Forbidden"
+          },
+          {
+            "action": "retry",
+            "result": "403 Forbidden"
+          }
+        ]
+      },
+      "expected_response": {
+        "memories": [
+          {
+            "title": "Avoid 403 errors by handling CSRF tokens",
+            "description": "Missing CSRF tokens cause repeated 403 Forbidden errors on POST requests.",
+            "content": "1) Detection: 403 error on form submission despite correct credentials. 2) Prevention: Always check for CSRF token requirements (meta tag, form input, or cookie) before POST. 3) Recovery: Refresh page to get new token and retry with token included. 4) Validation: Verify token is present in request before submitting.",
+            "tags": [
+              "failure",
+              "csrf",
+              "403",
+              "web"
+            ],
+            "domain": "webarena.admin"
+          },
+          {
+            "title": "Detect infinite retry loops and stop",
+            "description": "Retrying the same failing operation without changing approach causes loops.",
+            "content": "1) Detection: Same error occurs 2+ times with identical parameters. 2) Prevention: After first failure, analyze error response and adjust approach. 3) Recovery: Stop after 2 failures, log diagnostic info, and try alternative method or request human intervention. 4) Never retry more than 3 times without changing strategy.",
+            "tags": [
+              "failure",
+              "retry",
+              "loop"
+            ],
+            "domain": "general"
+          }
+        ]
+      }
+    },
+    {
+      "task": "Extract product prices from infinite scroll page",
+      "trajectory": {
+        "steps": [
+          {
+            "action": "scroll_down",
+            "new_items": 20
+          },
+          {
+            "action": "scroll_down",
+            "new_items": 20
+          },
+          {
+            "action": "scroll_down",
+            "new_items": 20
+          },
+          {
+            "note": "Repeated indefinitely, never reached end"
+          }
+        ]
+      },
+      "expected_response": {
+        "memories": [
+          {
+            "title": "Prevent infinite pagination loops",
+            "description": "Infinite scroll pages can cause endless loops if end condition is not detected.",
+            "content": "1) Detection: Track number of scrolls and items loaded. If scroll_count > 50 or no new items after 3 consecutive scrolls, likely at end. 2) Prevention: Set hard limit (e.g., max 100 scrolls) and monitor for repeated DOM states. 3) Recovery: Stop scrolling, summarize partial results, and report limited dataset. 4) Use sentinel values or page metadata when available.",
+            "tags": [
+              "failure",
+              "pagination",
+              "infinite-scroll",
+              "web"
+            ],
+            "domain": "webarena.shopping"
+          }
+        ]
+      }
+    }
+  ],
+  "notes": [
+    "Failure memories are equally valuable as success memories",
+    "Focus on root cause, not symptoms",
+    "Include both detection and recovery strategies",
+    "Tag with 'failure' to distinguish from success-derived memories",
+    "Lower confidence prior (0.60) reflects need for validation"
+  ]
+}
