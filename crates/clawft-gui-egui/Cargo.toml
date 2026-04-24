@@ -93,6 +93,15 @@ futures = { version = "0.3", default-features = false, features = ["std"] }
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "time", "sync"] }
+# Track 5 Workshop: TOML→substrate file-watcher example. These crates
+# stay in dev-dependencies so the release build of clawft-gui-egui
+# doesn't pull them; `cargo run --example workshop-watcher` compiles
+# them on demand.
+notify = { workspace = true }
+toml = { workspace = true }
+clap = { workspace = true }
+clawft-rpc = { workspace = true }
+anyhow = { workspace = true }
 
 # ── Features ─────────────────────────────────────────────────────────
 
