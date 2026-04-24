@@ -1,0 +1,27 @@
+{
+  "name": "@ruvector/graph-node-linux-x64-gnu",
+  "version": "0.1.26",
+  "description": "RuVector Graph Node.js bindings for linux-x64-gnu",
+  "main": "ruvector-graph.node",
+  "files": [
+    "ruvector-graph.node"
+  ],
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ruvnet/ruvector.git",
+    "directory": "npm/packages/graph-node"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

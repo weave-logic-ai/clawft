@@ -1,0 +1,145 @@
+reasoningbank:
+  version: "1.0.0"
+  enabled: true
+
+  # ============================================================================
+  # Retrieval Configuration (Algorithm 1)
+  # ============================================================================
+  retrieve:
+    k: 3                           # Top-k memories to inject into system prompt
+    alpha: 0.65                    # Weight: semantic similarity (cosine)
+    beta: 0.15                     # Weight: recency (exponential decay)
+    gamma: 0.20                    # Weight: reliability (confidence * usage)
+    delta: 0.10                    # Weight: diversity penalty (MMR)
+    recency_half_life_days: 45     # Exponential decay half-life for age
+    duplicate_threshold: 0.87      # Cosine similarity threshold for deduplication
+    min_score: 0.3                 # Don't inject memories below this score
+    max_age_days: 365              # Ignore memories older than this
+
+  # ============================================================================
+  # Embedding Configuration
+  # ============================================================================
+  embeddings:
+    provider: "local"              # "claude" | "openai" | "huggingface" | "local"
+    model: "Xenova/all-MiniLM-L6-v2"  # local transformers.js model
+    # model: "claude-sonnet-4-5-20250929"  # for Claude provider
+    # model: "text-embedding-3-large"    # for OpenAI provider
+    dimensions: 384                # vector dimensions (local: 384, OpenAI: 1536/3072)
+    cache_ttl_seconds: 3600        # cache embeddings for 1 hour
+    batch_size: 16                 # batch embeddings for efficiency
+
+  # ============================================================================
+  # Judge Configuration (Algorithm 2)
+  # ============================================================================
+  judge:
+    model: "claude-sonnet-4-5-20250929"
+    temperature: 0                 # deterministic evaluation
+    max_tokens: 512
+    timeout_ms: 10000
+    cache_verdicts: true           # cache judgments by trajectory hash
+    retry_on_parse_error: true
+    fallback_label: "Failure"      # conservative fallback on judge error
+    fallback_confidence: 0.5
+
+  # ============================================================================
+  # Distillation Configuration (Algorithm 3)
+  # ============================================================================
+  distill:
+    max_items_per_trajectory: 3    # extract up to N memories per trajectory
+    success_confidence_prior: 0.75 # initial confidence for success-derived memories
+    failure_confidence_prior: 0.60 # initial confidence for failure-derived guardrails
+    redact_pii: true               # scrub PII before storing
+    redact_patterns:
+      - '\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'  # emails
+      - '\b(?:\d{3}-\d{2}-\d{4}|\d{9})\b'                       # SSN
+      - '\b(?:sk-[a-zA-Z0-9]{48}|ghp_[a-zA-Z0-9]{36})\b'        # API keys (Anthropic, GitHub)
+      - '\b(?:xoxb-[a-zA-Z0-9\-]+)\b'                           # Slack tokens
+      - '\b(?:\d{13,19})\b'                                     # Credit card numbers
+    min_content_length: 20         # reject memories with content too short
+    max_content_length: 2000       # truncate if too long
+
+  # ============================================================================
+  # Consolidation Configuration (Algorithm 4)
+  # ============================================================================
+  consolidate:
+    enabled: true
+    run_every_new_items: 20        # consolidate after N new memories
+    contradiction_threshold: 0.60  # NLI probability threshold for contradictions
+    prune_age_days: 180            # hard delete if unused and old
+    min_confidence_keep: 0.30      # prune if confidence drops below this
+    max_contradictions_allowed: 5  # quarantine if contradicts > N high-usage items
+    dedup_similarity_threshold: 0.87  # merge if cosine > this
+    merge_strategy: "keep_highest_usage"  # "keep_highest_usage" | "keep_most_recent"
+
+  # ============================================================================
+  # MaTTS Configuration (Algorithm 5)
+  # ============================================================================
+  matts:
+    enabled: true
+
+    # Parallel mode: k independent rollouts with self-contrast aggregation
+    parallel:
+      k: 6                         # number of parallel rollouts
+      diversity_temperature: 0.9   # sampling temperature for diversity
+      max_concurrent: 3            # concurrent executions (rate limiting)
+      aggregation_model: "claude-sonnet-4-5-20250929"
+      aggregation_max_tokens: 2048
+
+    # Sequential mode: r iterative refinements with check-and-correct
+    sequential:
+      r: 3                         # number of refinement iterations
+      check_instruction: "Review your previous attempt. Identify errors or missing steps. Correct and continue."
+      max_iterations: 5            # hard cap to prevent infinite loops
+      stop_on_success: true        # stop if judge labels Success before r iterations
+
+  # ============================================================================
+  # Governance and Compliance
+  # ============================================================================
+  governance:
+    pii_scrubber: true             # enable PII redaction
+    tenant_scoped: false           # set true for multi-tenant deployments
+    audit_trail: true              # log all memory operations to events table
+    max_memory_age_days: 365       # absolute max age before forced deletion
+    require_approval_for_high_impact: false  # flag high-impact memories for review
+
+  # ============================================================================
+  # Performance and Observability
+  # ============================================================================
+  performance:
+    log_metrics: true              # write to performance_metrics table
+    export_csv_interval_days: 7   # export metrics CSV weekly
+    alert_on_degradation: true     # alert if success rate drops
+    success_rate_threshold: 0.70   # baseline threshold for alerting
+    max_retrieve_latency_ms: 500   # alert if retrieval takes longer
+    max_judge_latency_ms: 5000     # alert if judge takes longer
+
+  # ============================================================================
+  # Learning Rate and Confidence Updates
+  # ============================================================================
+  learning:
+    eta: 0.05                      # learning rate for confidence updates
+    success_boost: 1.0             # confidence += eta * success_boost when used in success
+    failure_penalty: -0.5          # confidence += eta * failure_penalty when used in failure
+    usage_boost_sigmoid: true      # apply sigmoid to usage_count for reliability score
+
+  # ============================================================================
+  # Feature Flags
+  # ============================================================================
+  features:
+    enable_pre_task_hook: true     # retrieve and inject memories before task
+    enable_post_task_hook: true    # judge, distill, consolidate after task
+    enable_matts_parallel: true    # allow parallel MaTTS
+    enable_matts_sequential: true  # allow sequential MaTTS
+    enable_contradiction_detection: true
+    enable_auto_pruning: true
+    enable_memory_merging: true
+
+  # ============================================================================
+  # Development and Debugging
+  # ============================================================================
+  debug:
+    verbose_logging: false
+    save_trajectories: true        # persist all trajectories to task_trajectories
+    save_embeddings: true          # persist embeddings for inspection
+    log_retrieval_scores: false    # log detailed scoring breakdown
+    dry_run: false                 # don't actually upsert memories (testing only)

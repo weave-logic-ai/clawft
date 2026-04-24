@@ -1,0 +1,119 @@
+{
+  "name": "reasoning_bank_matts_aggregate",
+  "version": "1.0.0",
+  "description": "Self-contrast aggregation for parallel MaTTS. Compares multiple trajectories to extract high-quality, generalizable memories.",
+  "model": "deepseek/deepseek-chat",
+  "temperature": 0.2,
+  "max_tokens": 3072,
+  "system": "You are a meta-learning specialist analyzing multiple attempts at the same task. Your role is to identify patterns that distinguish successful approaches from failures, and extract robust, generalizable strategies.",
+  "template": "We have {{k}} independent trajectories for the same task. Compare and contrast them to extract high-quality memory items.\n\nTask: {{task_query}}\n\nTrajectories:\n{{trajectories}}\n\nAnalyze:\n1. Patterns present in most successful attempts but absent in failures\n2. Pitfalls present in failures but not in successes\n3. Critical decision points where trajectories diverged\n4. Common suboptimal approaches even in successes\n\nExtract 1-3 distilled memory items that:\n- Generalize across successful attempts\n- Avoid task-specific details (URLs, IDs, etc.)\n- Capture robust decision criteria\n- Include failure modes to avoid\n\nRespond with JSON:\n{\n  \"memories\": [\n    {\n      \"title\": \"Strategy title\",\n      \"description\": \"One-sentence summary\",\n      \"content\": \"1) Step with decision criteria. 2) Validation check. 3) Recovery if needed.\",\n      \"confidence_boost\": 0.0 to 0.2,\n      \"evidence\": [\"trajectory_id_1\", \"trajectory_id_2\"],\n      \"tags\": [\"tag1\", \"tag2\"]\n    }\n  ],\n  \"insights\": [\n    \"Key observation 1 from comparison\",\n    \"Key observation 2 from comparison\"\n  ]\n}",
+  "examples": [
+    {
+      "task": "Login to admin panel and extract user list",
+      "trajectories": [
+        {
+          "id": "traj_1",
+          "label": "Success",
+          "confidence": 0.95,
+          "steps": [
+            "Navigate to login",
+            "Extract CSRF token from meta tag",
+            "Fill form with token",
+            "Submit and verify redirect",
+            "Navigate to users page",
+            "Extract user list"
+          ]
+        },
+        {
+          "id": "traj_2",
+          "label": "Success",
+          "confidence": 0.92,
+          "steps": [
+            "Navigate to login",
+            "Extract CSRF token from hidden input",
+            "Fill form with token",
+            "Submit and check for auth cookie",
+            "Navigate to users page",
+            "Extract user list"
+          ]
+        },
+        {
+          "id": "traj_3",
+          "label": "Failure",
+          "confidence": 0.88,
+          "steps": [
+            "Navigate to login",
+            "Fill form without token",
+            "Submit",
+            "Receive 403 error",
+            "Retry without token",
+            "Fail again"
+          ]
+        },
+        {
+          "id": "traj_4",
+          "label": "Success",
+          "confidence": 0.90,
+          "steps": [
+            "Navigate to login",
+            "Extract CSRF from cookie",
+            "Fill form with token",
+            "Submit and wait for dashboard",
+            "Navigate to users",
+            "Extract list"
+          ]
+        }
+      ],
+      "expected_response": {
+        "memories": [
+          {
+            "title": "CSRF token extraction is critical for protected forms",
+            "description": "All successful attempts extracted and included CSRF token; failure did not.",
+            "content": "1) Before submitting protected forms, search for CSRF token in: meta tags (name=csrf-token), hidden form inputs (name=_token or csrf), or cookies (XSRF-TOKEN). 2) Include token in request as form field or X-CSRF-TOKEN header. 3) If 403/419 error, token is likely missing or stale—refresh page and retry. 4) Verify token extraction succeeded before submission.",
+            "confidence_boost": 0.15,
+            "evidence": [
+              "traj_1",
+              "traj_2",
+              "traj_4"
+            ],
+            "tags": [
+              "csrf",
+              "web",
+              "auth",
+              "critical"
+            ]
+          },
+          {
+            "title": "Multiple CSRF token locations require flexible parsing",
+            "description": "Successful attempts used different token sources (meta, input, cookie).",
+            "content": "1) CSRF tokens may appear in multiple locations: meta tags, hidden inputs, cookies, or response headers. 2) Try common locations in order: meta[name=csrf-token], input[name=_token], document.cookie XSRF-TOKEN. 3) If first location fails, check alternatives before giving up. 4) Cache token location for subsequent requests to same domain.",
+            "confidence_boost": 0.10,
+            "evidence": [
+              "traj_1",
+              "traj_2",
+              "traj_4"
+            ],
+            "tags": [
+              "csrf",
+              "parsing",
+              "flexibility"
+            ]
+          }
+        ],
+        "insights": [
+          "All successes extracted CSRF token before submission; failure did not",
+          "Token sources varied (meta, input, cookie) but all successes found it",
+          "Failure retried without changing approach, demonstrating need for error analysis",
+          "Verification step (redirect, cookie, dashboard) was present in all successes"
+        ]
+      }
+    }
+  ],
+  "notes": [
+    "Use temperature=0.2 for focused analysis with minimal creativity",
+    "Confidence boost (0-0.2) reflects strength of cross-trajectory evidence",
+    "Evidence array links memory to supporting trajectories",
+    "Insights provide debugging context for future analysis",
+    "Aim for 1-3 memories, not more—quality over quantity"
+  ]
+}

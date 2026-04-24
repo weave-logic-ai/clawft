@@ -1,0 +1,34 @@
+{
+  "name": "reasoningbank-wasm",
+  "type": "module",
+  "collaborators": [
+    "ReasoningBank Contributors"
+  ],
+  "description": "WASM bindings for browser and Node.js environments",
+  "version": "0.1.0",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ruvnet/agentic-flow"
+  },
+  "files": [
+    "reasoningbank_wasm_bg.wasm",
+    "reasoningbank_wasm.js",
+    "reasoningbank_wasm_bg.js",
+    "reasoningbank_wasm.d.ts"
+  ],
+  "main": "reasoningbank_wasm.js",
+  "homepage": "https://github.com/ruvnet/agentic-flow/tree/main/reasoningbank",
+  "types": "reasoningbank_wasm.d.ts",
+  "sideEffects": [
+    "./reasoningbank_wasm.js",
+    "./snippets/*"
+  ],
+  "keywords": [
+    "reasoning",
+    "ai",
+    "mcp",
+    "quic",
+    "learning"
+  ]
+}

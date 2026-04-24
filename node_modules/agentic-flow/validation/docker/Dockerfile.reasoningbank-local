@@ -1,0 +1,24 @@
+# Dockerfile for testing local agentic-flow build
+FROM node:20-slim
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /test
+
+# Copy package tarball (must be created with npm pack first)
+COPY agentic-flow-*.tgz /test/package.tgz
+
+# Copy validation script
+COPY validation/docker/test-reasoningbank-npx.mjs /test/
+
+# Set environment
+ENV NODE_ENV=production
+ENV NPM_CONFIG_UPDATE_NOTIFIER=false
+ENV PACKAGE_VERSION=file:/test/package.tgz
+
+# Default command
+CMD ["node", "--experimental-wasm-modules", "/test/test-reasoningbank-npx.mjs"]

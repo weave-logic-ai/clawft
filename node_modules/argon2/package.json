@@ -1,0 +1,79 @@
+{
+  "name": "argon2",
+  "version": "0.44.0",
+  "description": "An Argon2 library for Node",
+  "keywords": [
+    "argon2",
+    "crypto",
+    "encryption",
+    "hashing",
+    "password"
+  ],
+  "homepage": "https://github.com/ranisalt/node-argon2#readme",
+  "bugs": {
+    "url": "https://github.com/ranisalt/node-argon2/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ranisalt/node-argon2.git"
+  },
+  "license": "MIT",
+  "author": "Ranieri Althoff <ranisalt+argon2@gmail.com>",
+  "type": "commonjs",
+  "main": "argon2.cjs",
+  "types": "argon2.d.cts",
+  "files": [
+    "argon2.cpp",
+    "argon2.d.cts",
+    "argon2.d.cts.map",
+    "binding.gyp",
+    "argon2/CHANGELOG.md",
+    "argon2/LICENSE",
+    "argon2/include/",
+    "argon2/src/blake2/",
+    "argon2/src/argon2.c",
+    "argon2/src/core.c",
+    "argon2/src/core.h",
+    "argon2/src/encoding.c",
+    "argon2/src/encoding.h",
+    "argon2/src/opt.c",
+    "argon2/src/ref.c",
+    "argon2/src/thread.c",
+    "argon2/src/thread.h",
+    "prebuilds/**/*.node"
+  ],
+  "binary": {
+    "napi_versions": [
+      8
+    ]
+  },
+  "scripts": {
+    "build": "prebuildify --napi --strip --tag-armv --tag-libc",
+    "install": "cross-env ZERO_AR_DATE=1 node-gyp-build",
+    "lint": "biome check .",
+    "prepare": "tsc",
+    "test": "node --test test.cjs"
+  },
+  "dependencies": {
+    "@phc/format": "^1.0.0",
+    "cross-env": "^10.0.0",
+    "node-addon-api": "^8.5.0",
+    "node-gyp-build": "^4.8.4"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.1.4",
+    "@tsconfig/node18": "18.2.4",
+    "@types/node": "22.16.3",
+    "node-gyp": "11.3.0",
+    "prebuildify": "6.0.1",
+    "typescript": "5.6.3"
+  },
+  "packageManager": "npm@11.5.2",
+  "engines": {
+    "node": ">=16.17.0"
+  },
+  "collective": {
+    "type": "opencollective",
+    "url": "https://opencollective.com/node-argon2"
+  }
+}

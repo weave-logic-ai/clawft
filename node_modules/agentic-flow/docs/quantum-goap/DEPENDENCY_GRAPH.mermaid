@@ -1,0 +1,133 @@
+%% Observer-Agnostic Measurement GOAP Dependency Graph
+%% Use https://mermaid.live to visualize
+
+graph TD
+    %% Phase 1: Theoretical Foundation
+    START([START]) --> A11[1.1 Formalize Theorem]
+    A11 --> A12[1.2 Verify Proof]
+    A12 --> A13[1.3 Define Predictions]
+
+    %% Phase 2: Simulation Infrastructure
+    START --> A21[2.1 Init Rust Project]
+    A21 --> A22[2.2 Math Module]
+    A21 --> A23[2.3 Eraser Module]
+    A21 --> A24[2.4 Duality Module]
+    A22 --> A25[2.5 CLI Tool]
+    A23 --> A25
+    A24 --> A25
+
+    %% Phase 3: Testing
+    A22 --> A31[3.1 Unit Tests]
+    A23 --> A32[3.2 Invariance Tests]
+    A24 --> A33[3.3 Duality Tests]
+    A31 --> A34[3.4 Run Test Suite]
+    A32 --> A34
+    A33 --> A34
+
+    %% Phase 4: Computational Validation
+    A34 --> A41[4.1 Phase Sweep]
+    A25 --> A41
+    A41 --> A42[4.2 Visualize Results]
+    A42 --> A43[4.3 Document Simulation]
+
+    %% Phase 5: Experimental Design
+    A13 --> A51[5.1 Design Apparatus]
+    A51 --> A52[5.2 Calibration Protocol]
+    A13 --> A53[5.3 Statistical Plan]
+    A51 --> A54[5.4 Pre-registration]
+    A52 --> A54
+    A53 --> A54
+
+    %% Phase 6: Hardware & Lab
+    A54 --> A61[6.1 Secure Funding]
+    A61 --> A62[6.2 Procure Hardware]
+    A62 --> A63[6.3 Build Setup]
+    A63 --> A64[6.4 Calibrate]
+
+    %% Phase 7: Data Collection
+    A64 --> A71[7.1 Pilot Study]
+    A71 --> A72[7.2 Full Data Collection]
+
+    %% Phase 8: Analysis
+    A72 --> A81[8.1 Unblind Data]
+    A81 --> A82[8.2 Statistical Analysis]
+    A82 --> A83[8.3 Interpret Results]
+
+    %% Phase 9: Publication
+    A83 --> A91[9.1 Draft Paper]
+    A83 --> A92[9.2 Publish Code]
+    A91 --> A93[9.3 Disseminate]
+    A92 --> A93
+    A93 --> END([END])
+
+    %% Critical Path Styling
+    classDef critical fill:#ff6b6b,stroke:#c92a2a,stroke-width:3px,color:#fff
+    classDef parallel fill:#51cf66,stroke:#2f9e44,stroke-width:2px
+    classDef optional fill:#74c0fc,stroke:#1971c2,stroke-width:1px
+
+    class A11,A12,A13,A51,A54,A61,A62,A63,A64,A72,A82,A91 critical
+    class A22,A23,A24,A31,A32,A33,A52,A53 parallel
+    class A25,A41,A42,A43,A71,A92,A93 optional
+
+    %% Phase Labels
+    subgraph Phase1["Phase 1: Theory (Weeks 1-2)"]
+        A11
+        A12
+        A13
+    end
+
+    subgraph Phase2["Phase 2: Simulation (Weeks 2-4)"]
+        A21
+        A22
+        A23
+        A24
+        A25
+    end
+
+    subgraph Phase3["Phase 3: Testing (Weeks 3-5)"]
+        A31
+        A32
+        A33
+        A34
+    end
+
+    subgraph Phase4["Phase 4: Validation (Week 5)"]
+        A41
+        A42
+        A43
+    end
+
+    subgraph Phase5["Phase 5: Exp Design (Weeks 6-8)"]
+        A51
+        A52
+        A53
+        A54
+    end
+
+    subgraph Phase6["Phase 6: Lab Setup (Weeks 9-16)"]
+        A61
+        A62
+        A63
+        A64
+    end
+
+    subgraph Phase7["Phase 7: Data (Weeks 17-20)"]
+        A71
+        A72
+    end
+
+    subgraph Phase8["Phase 8: Analysis (Weeks 21-22)"]
+        A81
+        A82
+        A83
+    end
+
+    subgraph Phase9["Phase 9: Publication (Weeks 23-24)"]
+        A91
+        A92
+        A93
+    end
+
+    %% Legend
+    style START fill:#ffd43b,stroke:#fab005
+    style END fill:#51cf66,stroke:#2f9e44

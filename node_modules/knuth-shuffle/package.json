@@ -1,0 +1,33 @@
+{
+  "name": "knuth-shuffle",
+  "version": "1.0.8",
+  "description": "The Fisher-Yates (aka Knuth) shuffle for Browser and Node.js",
+  "main": "index.js",
+  "homepage": "https://git.coolaj86.com/coolaj86/knuth-shuffle.js",
+  "scripts": {
+    "test": "node example.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git://git.coolaj86.com:coolaj86/knuth-shuffle.js.git"
+  },
+  "keywords": [
+    "ronald",
+    "fisher",
+    "frank",
+    "yates",
+    "fisher-yates",
+    "donald",
+    "knuth",
+    "shuffle",
+    "random",
+    "randomize",
+    "unbiased",
+    "algorithm"
+  ],
+  "author": "AJ ONeal <coolaj86@gmail.com> (https://coolaj86.com/)",
+  "license": "(MIT OR Apache-2.0)",
+  "bugs": {
+    "url": "https://git.coolaj86.com/coolaj86/knuth-shuffle/issues"
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "name": "koa-router",
+  "description": "Router middleware for koa. Maintained by Forward Email and Lad.",
+  "version": "14.0.0",
+  "author": "Alex Mingoia <talk@alexmingoia.com>",
+  "bugs": {
+    "url": "https://github.com/koajs/router/issues",
+    "email": "niftylettuce@gmail.com"
+  },
+  "contributors": [
+    {
+      "name": "Alex Mingoia",
+      "email": "talk@alexmingoia.com"
+    },
+    {
+      "name": "@koajs"
+    },
+    {
+      "name": "Imed Jaberi",
+      "email": "imed-jaberi@outlook.com"
+    }
+  ],
+  "dependencies": {
+    "debug": "^4.4.1",
+    "http-errors": "^2.0.0",
+    "koa-compose": "^4.1.0",
+    "path-to-regexp": "^8.2.0"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^17.7.2",
+    "@commitlint/config-conventional": "^17.7.0",
+    "@ladjs/env": "^4.0.0",
+    "chalk": "^5.4.1",
+    "eslint": "^9.32.0",
+    "eslint-plugin-unicorn": "^60.0.0",
+    "fixpack": "^4.0.0",
+    "husky": "^9.1.7",
+    "jsdoc-to-markdown": "^8.0.0",
+    "koa": "^3.0.1",
+    "lint-staged": "^14.0.1",
+    "mocha": "^11.7.1",
+    "nyc": "^17.0.0",
+    "remark-cli": "11",
+    "remark-preset-github": "^4.0.4",
+    "supertest": "^7.0.0"
+  },
+  "engines": {
+    "node": ">= 20"
+  },
+  "files": [
+    "lib"
+  ],
+  "homepage": "https://github.com/koajs/router",
+  "keywords": [
+    "koa",
+    "middleware",
+    "route",
+    "router"
+  ],
+  "license": "MIT",
+  "main": "lib/router.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/koajs/router.git"
+  },
+  "scripts": {
+    "bench": "make -C bench",
+    "benchmark": "node bench/run.js",
+    "coverage": "nyc npm run test",
+    "docs": "NODE_ENV=test jsdoc2md -t ./lib/API_tpl.hbs --src ./lib/*.js  >| API.md",
+    "lint": "eslint . --fix && remark . -qfo && fixpack",
+    "prepare": "husky install",
+    "pretest": "npm run lint",
+    "test": "mocha test/**/*.js",
+    "test:watch": "mocha test/**/*.js --watch"
+  }
+}

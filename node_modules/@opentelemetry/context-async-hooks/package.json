@@ -1,0 +1,65 @@
+{
+  "name": "@opentelemetry/context-async-hooks",
+  "version": "1.25.1",
+  "description": "OpenTelemetry AsyncHooks-based Context Manager",
+  "main": "build/src/index.js",
+  "types": "build/src/index.d.ts",
+  "repository": "open-telemetry/opentelemetry-js",
+  "scripts": {
+    "prepublishOnly": "npm run compile",
+    "compile": "tsc --build",
+    "clean": "tsc --build --clean",
+    "test": "nyc ts-mocha -p tsconfig.json 'test/**/*.test.ts'",
+    "tdd": "npm run test -- --watch-extensions ts --watch",
+    "codecov": "nyc report --reporter=json && codecov -f coverage/*.json -p ../../",
+    "lint": "eslint . --ext .ts",
+    "lint:fix": "eslint . --ext .ts --fix",
+    "version": "node ../../scripts/version-update.js",
+    "precompile": "cross-var lerna run version --scope $npm_package_name --include-dependencies",
+    "prewatch": "npm run precompile",
+    "peer-api-check": "node ../../scripts/peer-api-check.js",
+    "align-api-deps": "node ../../scripts/align-api-deps.js"
+  },
+  "keywords": [
+    "opentelemetry",
+    "nodejs",
+    "tracing",
+    "profiling",
+    "metrics",
+    "stats"
+  ],
+  "author": "OpenTelemetry Authors",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=14"
+  },
+  "files": [
+    "build/src/**/*.js",
+    "build/src/**/*.js.map",
+    "build/src/**/*.d.ts",
+    "doc",
+    "LICENSE",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@opentelemetry/api": ">=1.0.0 <1.10.0",
+    "@types/mocha": "10.0.6",
+    "@types/node": "18.6.5",
+    "codecov": "3.8.3",
+    "cross-var": "1.1.0",
+    "lerna": "6.6.2",
+    "mocha": "10.2.0",
+    "nyc": "15.1.0",
+    "ts-mocha": "10.0.0",
+    "typescript": "4.4.4"
+  },
+  "peerDependencies": {
+    "@opentelemetry/api": ">=1.0.0 <1.10.0"
+  },
+  "homepage": "https://github.com/open-telemetry/opentelemetry-js/tree/main/packages/opentelemetry-context-async-hooks",
+  "sideEffects": false,
+  "gitHead": "0608f405573901e54db01e44c533009cf28be262"
+}

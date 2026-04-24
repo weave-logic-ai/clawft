@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  # Test with latest published version from npm
+  reasoningbank-test-latest:
+    build:
+      context: ../..
+      dockerfile: validation/docker/Dockerfile.reasoningbank-test
+    environment:
+      - PACKAGE_VERSION=latest
+      - NODE_ENV=production
+    command: node --experimental-wasm-modules /test/test-reasoningbank-npx.mjs
+    networks:
+      - test-network
+
+  # Test with local build (after npm pack)
+  reasoningbank-test-local:
+    build:
+      context: ../..
+      dockerfile: validation/docker/Dockerfile.reasoningbank-local
+    environment:
+      - NODE_ENV=production
+    command: node --experimental-wasm-modules /test/test-reasoningbank-npx.mjs
+    networks:
+      - test-network
+
+networks:
+  test-network:
+    driver: bridge

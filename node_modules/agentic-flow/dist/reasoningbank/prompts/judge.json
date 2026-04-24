@@ -1,0 +1,101 @@
+{
+  "name": "reasoning_bank_judge",
+  "version": "1.0.0",
+  "description": "LLM-as-judge for trajectory evaluation. Returns Success or Failure with confidence score.",
+  "model": "deepseek/deepseek-chat",
+  "temperature": 0,
+  "max_tokens": 512,
+  "system": "You are a strict evaluator for task completion. Your role is to judge whether a task trajectory achieved its goal based on the final state and outputs. Be conservative: only label Success if the acceptance criteria are clearly met. Respond with pure JSON.",
+  "template": "Task: {{task_query}}\n\nTrajectory:\n{{trajectory}}\n\nEvaluate if the final state meets the acceptance criteria for this task.\n\nConsider:\n1. Was the stated goal achieved?\n2. Are all required outputs present and correct?\n3. Did the trajectory avoid critical errors or incomplete steps?\n4. Does the final state satisfy implicit requirements (e.g., proper authentication, data consistency)?\n\nRespond with JSON:\n{\n  \"label\": \"Success\" or \"Failure\",\n  \"confidence\": 0.0 to 1.0,\n  \"reasons\": [\"reason 1\", \"reason 2\", ...]\n}",
+  "examples": [
+    {
+      "task": "Login to admin panel and extract user list",
+      "trajectory": {
+        "steps": [
+          {
+            "action": "navigate",
+            "url": "https://admin.example.com/login"
+          },
+          {
+            "action": "fill_form",
+            "fields": {
+              "username": "admin",
+              "password": "***"
+            }
+          },
+          {
+            "action": "click",
+            "selector": "button[type=submit]"
+          },
+          {
+            "action": "navigate",
+            "url": "https://admin.example.com/users"
+          },
+          {
+            "action": "extract",
+            "data": [
+              {
+                "id": 1,
+                "name": "Alice"
+              },
+              {
+                "id": 2,
+                "name": "Bob"
+              }
+            ]
+          }
+        ]
+      },
+      "expected_response": {
+        "label": "Success",
+        "confidence": 0.95,
+        "reasons": [
+          "Successfully authenticated as admin",
+          "Navigated to users page",
+          "Extracted user list with expected fields"
+        ]
+      }
+    },
+    {
+      "task": "Login to admin panel and extract user list",
+      "trajectory": {
+        "steps": [
+          {
+            "action": "navigate",
+            "url": "https://admin.example.com/login"
+          },
+          {
+            "action": "fill_form",
+            "fields": {
+              "username": "admin",
+              "password": "wrong"
+            }
+          },
+          {
+            "action": "click",
+            "selector": "button[type=submit]"
+          },
+          {
+            "action": "observe",
+            "content": "Invalid credentials"
+          }
+        ]
+      },
+      "expected_response": {
+        "label": "Failure",
+        "confidence": 0.98,
+        "reasons": [
+          "Authentication failed with invalid credentials",
+          "Did not reach users page",
+          "No user list extracted"
+        ]
+      }
+    }
+  ],
+  "notes": [
+    "Use temperature=0 for deterministic evaluation",
+    "Be conservative: prefer Failure when ambiguous",
+    "Confidence should reflect certainty of judgment based on available evidence",
+    "If trajectory is malformed or incomplete, return Failure with low confidence"
+  ]
+}
