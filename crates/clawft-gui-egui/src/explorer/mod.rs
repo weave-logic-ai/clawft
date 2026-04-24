@@ -63,8 +63,16 @@ impl SubscriptionHandle {
         Self {
             path,
             pending: None,
-            // Epoch-ish: first poll fires immediately.
-            last_poll: web_time::Instant::now() - SELECT_POLL * 2,
+            // Epoch-ish: first poll fires immediately. `checked_sub`
+            // because on WASM `Instant::now()` at early page-load can be
+            // less than `SELECT_POLL * 2`, and unchecked subtraction
+            // panics with "overflow when subtracting duration from
+            // instant". When the saturating fallback hits, the first
+            // poll just fires on the next `SELECT_POLL` tick instead of
+            // immediately — acceptable cost to avoid the WASM crash.
+            last_poll: web_time::Instant::now()
+                .checked_sub(SELECT_POLL * 2)
+                .unwrap_or_else(web_time::Instant::now),
         }
     }
 }
@@ -141,8 +149,13 @@ impl Default for Explorer {
             backend_hint: None,
             pending_lists: Vec::new(),
             // `now - slow tick` so the first update() fires the slow
-            // refresh immediately.
-            last_slow_tick: web_time::Instant::now() - SLOW_TICK * 2,
+            // refresh immediately. `checked_sub` avoids the WASM
+            // `overflow when subtracting duration from instant` panic
+            // when the browser time-origin is fresh; fallback means
+            // the first slow tick fires a `SLOW_TICK` later instead.
+            last_slow_tick: web_time::Instant::now()
+                .checked_sub(SLOW_TICK * 2)
+                .unwrap_or_else(web_time::Instant::now),
             workshop_view: workshop::WorkshopView::default(),
         }
     }

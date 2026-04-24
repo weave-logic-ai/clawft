@@ -294,8 +294,15 @@ impl PanelSub {
         Self {
             value: None,
             pending: None,
-            // Epoch: fire the first poll immediately.
-            last_poll: web_time::Instant::now() - PANEL_POLL * 2,
+            // Epoch: fire the first poll immediately. `checked_sub`
+            // because on WASM `Instant::now()` at early page-load can be
+            // less than `PANEL_POLL * 2`, and unchecked subtraction
+            // panics with "overflow when subtracting duration from
+            // instant". Fallback means the first poll fires one
+            // `PANEL_POLL` later — acceptable to avoid the crash.
+            last_poll: web_time::Instant::now()
+                .checked_sub(PANEL_POLL * 2)
+                .unwrap_or_else(web_time::Instant::now),
             last_error: None,
         }
     }
