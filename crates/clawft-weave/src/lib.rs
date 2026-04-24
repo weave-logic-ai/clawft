@@ -11,6 +11,7 @@ pub mod client;
 pub mod commands;
 #[cfg(unix)]
 pub mod daemon;
+pub mod node_identity;
 pub mod protocol;
 #[cfg(feature = "rvf-rpc")]
 pub mod rvf_codec;

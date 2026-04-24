@@ -126,6 +126,28 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
     let kernel = Kernel::boot(config, kernel_config, Arc::new(platform)).await?;
     let kernel = Arc::new(tokio::sync::RwLock::new(kernel));
 
+    // Bootstrap daemon node identity. Loads `<runtime>/node.key`
+    // (generates on first run, persists with 0600). Registers the
+    // daemon's pubkey with the kernel's NodeRegistry so the substrate
+    // publish gate can verify signatures and enforce the
+    // `substrate/<node-id>/...` write prefix.
+    let runtime_dir = socket_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let daemon_identity = crate::node_identity::load_or_generate(&runtime_dir)
+        .map_err(|e| anyhow::anyhow!("daemon identity bootstrap: {e}"))?;
+    {
+        let k = kernel.read().await;
+        let pubkey: [u8; 32] = daemon_identity.signing_key.verifying_key().to_bytes();
+        k.node_registry().register(pubkey, Some("daemon".to_string()));
+        info!(node_id = %daemon_identity.node_id, "daemon node registered");
+        k.event_log().info(
+            "node",
+            format!("daemon node registered: {}", daemon_identity.node_id),
+        );
+    }
+
     // Print boot banner
     {
         let k = kernel.read().await;
