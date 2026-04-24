@@ -7,8 +7,12 @@
 //! which sign *Actions* (Foundry-style mutations).
 //!
 //! Each node holds an Ed25519 keypair. The node-id is the Ed25519
-//! pubkey's short fingerprint (the first 16 bytes of its SHA-256,
-//! hex-encoded). A friendly human label lives as a property at
+//! pubkey's short fingerprint: an `n-` prefix followed by the first
+//! 6 hex chars of `BLAKE3(pubkey)`. Format committed in
+//! `.planning/sensors/JOURNALED-NODE-ESP32.md` §2.2 — compact (8
+//! chars), self-authenticating (recompute to verify), and prefixed
+//! so a node-id never collides with a reserved word like `_derived`
+//! or `meta`. A friendly human label lives as a property at
 //! `substrate/<node-id>/meta/label`, not as the identity itself —
 //! labels can collide, keys cannot.
 //!
@@ -114,20 +118,25 @@ impl NodeRegistry {
 
 /// Derive a node-id from an Ed25519 public key.
 ///
-/// Layout: lowercase hex of the first 16 bytes of `SHA-256(pubkey)`.
-/// 128 bits of collision resistance — plenty for a mesh, and short
-/// enough to fit comfortably in a substrate path segment.
+/// Layout: `"n-"` + the first 6 hex chars (3 bytes) of
+/// `BLAKE3(pubkey)`. Total length 8 chars. Examples:
+/// `n-3a7f9c`, `n-001abc`. The `n-` prefix is load-bearing — it
+/// keeps node-ids in their own namespace so a substrate path
+/// segment can never collide with a reserved word like `_derived`
+/// or `meta`. 24 bits of collision resistance is intentionally
+/// modest at MVP; longer hex (and the same `n-` prefix) is a
+/// format-compatible upgrade once mesh size demands it.
+///
+/// Format committed in `.planning/sensors/JOURNALED-NODE-ESP32.md`
+/// §2.2.
 pub fn node_id_from_pubkey(pubkey: &[u8; 32]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(pubkey);
-    let full = h.finalize();
-    let short: &[u8] = &full[..16];
-    let mut out = String::with_capacity(32);
-    for b in short {
-        out.push_str(&format!("{b:02x}"));
-    }
-    out
+    let h = blake3::hash(pubkey);
+    let bytes = h.as_bytes();
+    // 3 bytes -> 6 hex chars.
+    format!(
+        "n-{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2]
+    )
 }
 
 /// Compose the canonical byte payload a node must sign for a
@@ -180,8 +189,9 @@ mod tests {
         let a = node_id_from_pubkey(&pk);
         let b = node_id_from_pubkey(&pk);
         assert_eq!(a, b);
-        assert_eq!(a.len(), 32, "16 bytes hex = 32 chars");
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(a.len(), 8, "n- + 6 hex chars");
+        assert!(a.starts_with("n-"));
+        assert!(a[2..].chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
@@ -189,6 +199,16 @@ mod tests {
         let a = node_id_from_pubkey(&[1u8; 32]);
         let b = node_id_from_pubkey(&[2u8; 32]);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn node_id_format_starts_with_namespace_prefix() {
+        // The "n-" prefix is load-bearing: it keeps node-ids
+        // disjoint from reserved path segments like "_derived",
+        // "meta", "sensor", etc. Without it, a hex string starting
+        // with valid characters could in principle collide.
+        let id = node_id_from_pubkey(&[42u8; 32]);
+        assert!(id.starts_with("n-"));
     }
 
     #[test]
