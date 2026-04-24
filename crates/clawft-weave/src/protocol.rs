@@ -516,6 +516,48 @@ pub struct AgentRegisterResult {
     pub name: String,
 }
 
+/// Parameters for `node.register`.
+///
+/// A **node** is a physical thing in the mesh (an ESP32 leaf, the
+/// daemon host, a future kernel-class peer). Registration is
+/// proof-of-possession: the caller signs
+/// `b"node.register\0" || pubkey || b"\0" || ts_le || b"\0" || label`
+/// (see [`clawft_kernel::node_publish_payload`]'s sibling
+/// [`clawft_kernel::node_registry::node_register_payload`]) so a
+/// hostile client cannot register someone else's key.
+///
+/// The node-id is **derived deterministically** from the pubkey
+/// (`n-<6-hex>` BLAKE3 prefix per
+/// `.planning/sensors/JOURNALED-NODE-ESP32.md` §2.2), so re-running
+/// the registration with the same key returns the same id. Distinct
+/// from `agent.register` whose `agent_id` is a fresh UUID.
+///
+/// Binary fields (`pubkey`, `proof`) accept either a hex string or
+/// a base64 string; parser is permissive.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeRegisterParams {
+    /// Optional human-readable label, e.g. `"esp32-workbench"`.
+    /// Stored in the registry as a convenience copy; authoritative
+    /// label lives at `substrate/<node-id>/meta/label`. May be empty.
+    #[serde(default)]
+    pub label: String,
+    /// Ed25519 public key bytes (hex or base64; 32 bytes decoded).
+    pub pubkey: String,
+    /// Ed25519 signature bytes (hex or base64; 64 bytes decoded).
+    pub proof: String,
+    /// Monotonic timestamp (unix millis) the proof was generated at.
+    pub ts: u64,
+}
+
+/// Result of `node.register`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeRegisterResult {
+    /// The deterministic node-id derived from the pubkey.
+    pub node_id: String,
+    /// Echo of the supplied label (may be empty).
+    pub label: String,
+}
+
 /// Parameters for `ipc.subscribe_stream`.
 ///
 /// After a successful ack, the daemon keeps the connection open and

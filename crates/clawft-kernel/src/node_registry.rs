@@ -139,6 +139,26 @@ pub fn node_id_from_pubkey(pubkey: &[u8; 32]) -> String {
     )
 }
 
+/// Compose the canonical byte payload a node must sign as the
+/// proof-of-possession for `node.register`.
+///
+/// Layout:
+/// `b"node.register\0" || pubkey || b"\0" || ts_le || b"\0" || label`.
+///
+/// The label is included in the payload so a registration cannot be
+/// silently relabelled by anyone other than the keyholder. Empty
+/// label is accepted (and signs as a zero-length suffix).
+pub fn node_register_payload(pubkey: &[u8; 32], ts: u64, label: &str) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(14 + 32 + 1 + 8 + 1 + label.len());
+    buf.extend_from_slice(b"node.register\0");
+    buf.extend_from_slice(pubkey);
+    buf.push(0);
+    buf.extend_from_slice(&ts.to_le_bytes());
+    buf.push(0);
+    buf.extend_from_slice(label.as_bytes());
+    buf
+}
+
 /// Compose the canonical byte payload a node must sign for a
 /// `substrate.publish`.
 ///

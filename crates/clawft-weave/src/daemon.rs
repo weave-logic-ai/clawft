@@ -998,6 +998,111 @@ async fn handle_agent_register(
     )
 }
 
+/// Handle `node.register`: verify proof-of-possession, insert the
+/// node into the registry, and chain-append a `node.registered`
+/// event. Returns the deterministic node-id derived from the pubkey.
+///
+/// Distinct from `agent.register`: a node is a *physical thing in
+/// the mesh* (ESP32, daemon, Pi), not an agent/program/user. Nodes
+/// sign substrate emissions; agents sign Actions. Both share the
+/// proof-of-possession shape but live in disjoint registries.
+async fn handle_node_register(
+    params: serde_json::Value,
+    kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
+) -> Response {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+    let p: crate::protocol::NodeRegisterParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(e) => return Response::error(format!("invalid params: {e}")),
+    };
+
+    // Decode pubkey + proof.
+    let pubkey_bytes = match decode_bytes(&p.pubkey) {
+        Ok(b) => b,
+        Err(e) => return Response::error(format!("pubkey decode: {e}")),
+    };
+    if pubkey_bytes.len() != 32 {
+        return Response::error(format!(
+            "pubkey must be 32 bytes, got {}",
+            pubkey_bytes.len()
+        ));
+    }
+    let mut pubkey_arr = [0u8; 32];
+    pubkey_arr.copy_from_slice(&pubkey_bytes);
+
+    let proof_bytes = match decode_bytes(&p.proof) {
+        Ok(b) => b,
+        Err(e) => return Response::error(format!("proof decode: {e}")),
+    };
+    if proof_bytes.len() != 64 {
+        return Response::error(format!(
+            "proof must be 64 bytes, got {}",
+            proof_bytes.len()
+        ));
+    }
+    let mut proof_arr = [0u8; 64];
+    proof_arr.copy_from_slice(&proof_bytes);
+
+    // Verify proof-of-possession over the canonical payload.
+    let payload = clawft_kernel::node_registry::node_register_payload(
+        &pubkey_arr,
+        p.ts,
+        &p.label,
+    );
+    let vk = match VerifyingKey::from_bytes(&pubkey_arr) {
+        Ok(vk) => vk,
+        Err(e) => return Response::error(format!("invalid pubkey: {e}")),
+    };
+    let sig = Signature::from_bytes(&proof_arr);
+    if let Err(e) = vk.verify(&payload, &sig) {
+        return Response::error(format!("proof-of-possession verify failed: {e}"));
+    }
+
+    let k = kernel.read().await;
+    let label = if p.label.is_empty() {
+        None
+    } else {
+        Some(p.label.clone())
+    };
+    let entry = k.node_registry().register(pubkey_arr, label);
+
+    #[cfg(feature = "exochain")]
+    if let Some(cm) = k.chain_manager() {
+        cm.append(
+            "node",
+            "node.registered",
+            Some(serde_json::json!({
+                "node_id": entry.node_id,
+                "label": entry.label,
+                "pubkey_hex": hex_encode(&entry.pubkey),
+                "registered_at": entry.registered_at.to_rfc3339(),
+            })),
+        );
+    }
+
+    k.event_log().info(
+        "node",
+        format!(
+            "registered node {} (label={:?})",
+            entry.node_id, entry.label
+        ),
+    );
+    info!(
+        node_id = %entry.node_id,
+        label = ?entry.label,
+        "node.register: authorized"
+    );
+
+    Response::success(
+        serde_json::to_value(crate::protocol::NodeRegisterResult {
+            node_id: entry.node_id,
+            label: entry.label.unwrap_or_default(),
+        })
+        .unwrap(),
+    )
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -1982,6 +2087,7 @@ async fn dispatch(
             Response::error("exochain feature not enabled")
         }
         "agent.register" => handle_agent_register(params, kernel).await,
+        "node.register" => handle_node_register(params, kernel).await,
         "substrate.read" => handle_substrate_read(params, kernel).await,
         "substrate.list" => handle_substrate_list(params, kernel).await,
         "substrate.publish" => handle_substrate_publish(params, kernel).await,
