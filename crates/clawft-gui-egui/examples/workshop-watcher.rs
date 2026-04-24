@@ -259,6 +259,16 @@ fn read_and_convert(toml_path: &Path) -> anyhow::Result<Value> {
 
 /// Publish a Workshop value via the running daemon. Returns the new
 /// tick on success.
+///
+/// **Known issue (post node-identity gate):** the daemon's
+/// `substrate.publish` now requires a registered `node_id` +
+/// signed `node_publish_payload(...)`. This example currently
+/// sends an unsigned publish, so it will fail at runtime with
+/// "node_id required" until migrated. Migration plan: call
+/// `node.register` once at startup with a persistent local
+/// keypair, then sign each publish over the canonical payload.
+/// Tracked in the gate-slice handoff; not a blocker for the
+/// gate flip itself since this is a developer tool.
 async fn publish(path: &str, value: Value) -> anyhow::Result<u64> {
     let mut client = DaemonClient::connect()
         .await

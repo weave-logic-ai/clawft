@@ -384,21 +384,57 @@ pub struct SubstrateReadResult {
 }
 
 /// Parameters for `substrate.publish`.
+///
+/// Under the node-identity write gate, every publish must be
+/// attributed to a **node** — the physical thing that produced the
+/// data. The caller provides:
+///
+/// - `node_id` — registered via `node.register`; deterministically
+///   derived from the signing pubkey.
+/// - `node_signature` — Ed25519 signature over
+///   `node_publish_payload(path, serialized_value, node_ts, node_id)`
+///   (see [`clawft_kernel::node_publish_payload`]).
+/// - `node_ts` — monotonic timestamp (unix millis) the signature was
+///   generated at.
+///
+/// The path must sit under `substrate/<node_id>/...` (node-private
+/// tier) — the gate rejects writes outside that prefix. Unsigned
+/// publishes are rejected outright; there is no anonymous-publish
+/// bring-up bypass.
+///
+/// `actor_id` / `signature` / `ts` are kept on the wire for future
+/// reuse when the Actions pipeline ships (an Actor performing an
+/// Action will sign with their own key alongside the node key); they
+/// are accepted but ignored by the current gate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubstratePublishParams {
     /// Substrate path to publish under.
     pub path: String,
     /// Value to Replace into the path.
     pub value: serde_json::Value,
-    /// Caller agent_id — must be registered; future commits gate on
-    /// role/ownership.
+    /// Node-id of the publisher (registered via `node.register`).
+    /// Required under the new gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    /// Ed25519 signature (hex/base64) over
+    /// `node_publish_payload(path, value_bytes, node_ts, node_id)`.
+    /// Required when `node_id` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_signature: Option<String>,
+    /// Monotonic nonce (unix millis) the node signature was generated
+    /// at. Required when `node_id` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_ts: Option<u64>,
+    /// **Reserved for the Actions pipeline.** Actor identity (UUID
+    /// from `agent.register`). Unused by the publish gate today —
+    /// Actor-signed Actions are a future addition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor_id: Option<String>,
-    /// Optional Ed25519 signature; same scheme as ipc.publish but
-    /// over `(path, serialized_value_bytes, ts, actor_id)`.
+    /// **Reserved for the Actions pipeline.** Actor signature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
-    /// Optional nonce / timestamp (unix millis).
+    /// **Reserved for the Actions pipeline.** Actor signature
+    /// timestamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ts: Option<u64>,
 }

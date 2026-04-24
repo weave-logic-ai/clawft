@@ -873,6 +873,41 @@ fn base64_decode_permissive(s: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// Verify an Ed25519 signature for a given node_id against the
+/// canonical signed payload. Returns Ok on valid, Err with a message
+/// otherwise. Always rejects if the node_id is not registered.
+///
+/// Mirrors [`verify_agent_signature`] but consults the
+/// [`clawft_kernel::NodeRegistry`] instead of the agent registry.
+fn verify_node_signature(
+    kernel: &Kernel<NativePlatform>,
+    node_id: &str,
+    signature_str: &str,
+    payload: &[u8],
+) -> Result<(), String> {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+    let node = kernel
+        .node_registry()
+        .get(node_id)
+        .ok_or_else(|| format!("unknown node_id: {node_id}"))?;
+    let sig_bytes = decode_bytes(signature_str).map_err(|e| format!("signature: {e}"))?;
+    if sig_bytes.len() != 64 {
+        return Err(format!(
+            "signature must be 64 bytes, got {}",
+            sig_bytes.len()
+        ));
+    }
+    let mut sig_arr = [0u8; 64];
+    sig_arr.copy_from_slice(&sig_bytes);
+    let sig = Signature::from_bytes(&sig_arr);
+    let vk = VerifyingKey::from_bytes(&node.pubkey)
+        .map_err(|e| format!("stored pubkey invalid: {e}"))?;
+    vk.verify(payload, &sig)
+        .map_err(|e| format!("signature verify failed: {e}"))?;
+    Ok(())
+}
+
 /// Verify an Ed25519 signature for a given agent_id against the
 /// canonical signed payload. Returns Ok on valid, Err with a message
 /// otherwise. Always rejects if the agent_id is not registered.
@@ -1372,7 +1407,14 @@ async fn handle_substrate_list(
     }
 }
 
-/// Handle `substrate.publish`: Replace the path's value and fan out.
+/// Handle `substrate.publish`: verify node signature, enforce the
+/// `substrate/<node-id>/...` write prefix, Replace the path's value
+/// and fan out.
+///
+/// Every publish must be node-attributed and signed. Unsigned
+/// publishes are rejected — there is no anonymous-publish bypass.
+/// The actor-side fields (`actor_id` / `signature` / `ts`) are
+/// reserved for the Actions pipeline and ignored here.
 async fn handle_substrate_publish(
     params: serde_json::Value,
     kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
@@ -1381,46 +1423,62 @@ async fn handle_substrate_publish(
         Ok(p) => p,
         Err(e) => return Response::error(format!("invalid params: {e}")),
     };
+
+    // Hard requirement: every write is node-attributed.
+    let node_id = match p.node_id.as_ref() {
+        Some(n) => n.clone(),
+        None => {
+            return Response::error(
+                "substrate.publish: node_id required (every write must be node-attributed)"
+                    .to_string(),
+            );
+        }
+    };
+    let signature = match p.node_signature.as_ref() {
+        Some(s) => s.clone(),
+        None => {
+            return Response::error(
+                "substrate.publish: node_signature required when node_id is set".to_string(),
+            );
+        }
+    };
+    let node_ts = p.node_ts.unwrap_or(0);
+
     let k = kernel.read().await;
 
-    if let Some(actor_id) = p.actor_id.as_ref() {
-        let sig = match p.signature.as_ref() {
-            Some(s) => s,
-            None => {
-                return Response::error(
-                    "actor_id provided but signature missing".to_string(),
-                );
-            }
-        };
-        let ts = p.ts.unwrap_or(0);
-        // Sign over the serialized value bytes + path + ts + actor_id.
-        let value_bytes = serde_json::to_vec(&p.value).unwrap_or_default();
-        let value_str = String::from_utf8_lossy(&value_bytes);
-        let payload = clawft_kernel::publish_payload(&p.path, &value_str, ts, actor_id);
-        if let Err(e) = verify_agent_signature(&k, actor_id, sig, &payload) {
-            return Response::error(format!("unauthorized: {e}"));
-        }
+    // Verify the node signature over the canonical payload.
+    let value_bytes = serde_json::to_vec(&p.value).unwrap_or_default();
+    let value_str = String::from_utf8_lossy(&value_bytes);
+    let payload = clawft_kernel::node_publish_payload(&p.path, &value_str, node_ts, &node_id);
+    if let Err(e) = verify_node_signature(&k, &node_id, &signature, &payload) {
+        return Response::error(format!("unauthorized: {e}"));
     }
 
-    let tick = k
+    // Run the publish through the node-identity gate. Rejects writes
+    // outside `substrate/<node-id>/...` (node-private tier rule).
+    // Mesh-canonical writes (`substrate/_derived/...`) require a
+    // separate capability path that isn't wired yet — they will fall
+    // through this branch and get rejected, which is correct for
+    // this phase.
+    let tick = match k
         .substrate_service()
-        .publish(p.actor_id.as_deref(), &p.path, p.value);
+        .publish_gated(Some(&node_id), &p.path, p.value)
+    {
+        Ok(t) => t,
+        Err(e) => return Response::error(format!("gate denied: {e}")),
+    };
     k.event_log().info(
         "substrate",
-        format!("publish {} tick={} actor={:?}", p.path, tick, p.actor_id),
+        format!("publish {} tick={} node={}", p.path, tick, node_id),
     );
-    // Lifecycle visibility in `kernel.log`: only log the first window per
-    // path at INFO so live sensor streams don't flood. Subsequent writes
-    // stay at DEBUG for the same-path case.
     if tick == 1 {
         info!(
             path = %p.path,
-            actor = ?p.actor_id,
-            signed = p.signature.is_some(),
+            node = %node_id,
             "substrate.publish: stream started (first window on path)"
         );
     } else {
-        debug!(path = %p.path, tick, "substrate.publish");
+        debug!(path = %p.path, node = %node_id, tick, "substrate.publish");
     }
     Response::success(serde_json::json!({
         "path": p.path,
