@@ -56,6 +56,11 @@ const ALLOWED_METHODS = new Set<string>([
     // blocked; the webview is a viewer, not a writer.
     "substrate.read",
     "substrate.subscribe",
+    // Ontology Explorer Phase 1: tree enumeration. Request is
+    // { prefix, depth }, response is { children: [...], tick }. The
+    // webview-hosted Explorer panel calls this on each tree-node
+    // expand to fetch immediate children from the daemon.
+    "substrate.list",
 ]);
 
 interface WasmRpcRequest {

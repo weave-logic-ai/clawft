@@ -156,6 +156,89 @@ async fn substrate_read_write_notify_roundtrip() {
 }
 
 #[tokio::test]
+async fn substrate_list_returns_prefix_children() {
+    let (_tmp, socket, shutdown_tx) = spawn_test_daemon().await;
+
+    // Empty list before any publish.
+    let empty = one_shot(
+        &socket,
+        "substrate.list",
+        serde_json::json!({ "prefix": "substrate/list-test", "depth": 1 }),
+    )
+    .await;
+    assert_eq!(empty["ok"], serde_json::Value::Bool(true));
+    assert!(empty["result"]["children"].as_array().unwrap().is_empty());
+
+    // Seed two children and one grandchild.
+    for (path, value) in [
+        ("substrate/list-test/mic", serde_json::json!({ "rms_db": -20 })),
+        ("substrate/list-test/tof", serde_json::json!({ "frame": 1 })),
+        (
+            "substrate/list-test/mic/history",
+            serde_json::json!([1, 2, 3]),
+        ),
+    ] {
+        let r = one_shot(
+            &socket,
+            "substrate.publish",
+            serde_json::json!({ "path": path, "value": value }),
+        )
+        .await;
+        assert_eq!(r["ok"], serde_json::Value::Bool(true), "publish {path}");
+    }
+
+    // depth = 1 (default) — expect two direct children, mic having one grandchild.
+    let r = one_shot(
+        &socket,
+        "substrate.list",
+        serde_json::json!({ "prefix": "substrate/list-test", "depth": 1 }),
+    )
+    .await;
+    assert_eq!(r["ok"], serde_json::Value::Bool(true));
+    let children = r["result"]["children"].as_array().unwrap();
+    assert_eq!(children.len(), 2, "{children:?}");
+    let mic = children
+        .iter()
+        .find(|c| c["path"] == "substrate/list-test/mic")
+        .unwrap();
+    assert_eq!(mic["has_value"], serde_json::Value::Bool(true));
+    assert_eq!(mic["child_count"], 1);
+    let tof = children
+        .iter()
+        .find(|c| c["path"] == "substrate/list-test/tof")
+        .unwrap();
+    assert_eq!(tof["has_value"], serde_json::Value::Bool(true));
+    assert_eq!(tof["child_count"], 0);
+    assert!(r["result"]["tick"].as_u64().unwrap() > 0);
+
+    // Default depth: omit field → treat as 1 (per protocol default).
+    let r2 = one_shot(
+        &socket,
+        "substrate.list",
+        serde_json::json!({ "prefix": "substrate/list-test" }),
+    )
+    .await;
+    assert_eq!(r2["result"]["children"].as_array().unwrap().len(), 2);
+
+    // depth = 2 — flat list including the grandchild.
+    let r3 = one_shot(
+        &socket,
+        "substrate.list",
+        serde_json::json!({ "prefix": "substrate/list-test", "depth": 2 }),
+    )
+    .await;
+    let paths: Vec<&str> = r3["result"]["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["path"].as_str().unwrap())
+        .collect();
+    assert!(paths.contains(&"substrate/list-test/mic/history"));
+
+    let _ = shutdown_tx.send(true);
+}
+
+#[tokio::test]
 async fn substrate_subscribe_streams_updates() {
     let (_tmp, socket, shutdown_tx) = spawn_test_daemon().await;
 

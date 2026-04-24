@@ -103,6 +103,32 @@ pub struct SubstrateReadSnapshot {
     pub sensitivity: Sensitivity,
 }
 
+/// One child entry returned by [`SubstrateService::list`].
+///
+/// Only paths that have (or have ever had) a Replace value are
+/// considered "present" for the purpose of `has_value`. `child_count`
+/// is the number of descendants strictly below `path` that themselves
+/// have a value — internal nodes without values do not inflate it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubstrateListEntry {
+    /// Full substrate path of this child (no trailing slash).
+    pub path: String,
+    /// `true` if this exact path has been published.
+    pub has_value: bool,
+    /// Count of descendants below `path` that themselves carry a value.
+    pub child_count: u32,
+}
+
+/// Snapshot returned by [`SubstrateService::list`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubstrateListSnapshot {
+    /// Children enumerated under the requested prefix (sorted by path).
+    pub children: Vec<SubstrateListEntry>,
+    /// Global substrate tick at the moment the list was taken. Mirrors
+    /// [`SubstrateReadSnapshot::tick`] semantics — monotonic.
+    pub tick: u64,
+}
+
 /// Reason an egress check denied access.
 #[derive(Debug, Clone)]
 pub struct EgressDenied {
@@ -217,6 +243,154 @@ impl SubstrateService {
         Ok(snapshot)
     }
 
+    /// Enumerate children of a prefix up to `depth` levels below it.
+    ///
+    /// Contract (ADR-Explorer Phase 1 §3.1):
+    ///
+    /// - `prefix` — substrate path; empty string or `"/"` means
+    ///   "top-level". Trailing slashes are trimmed.
+    /// - `depth = 0` — return only the prefix node itself, if it is
+    ///   a value (no children enumerated).
+    /// - `depth = 1` — one level below `prefix`. Default for the
+    ///   Explorer lazy-tree walk.
+    /// - `depth = N > 1` — up to N levels below `prefix` (flat list,
+    ///   deepest-child first in sort order).
+    ///
+    /// Only paths with a published Replace value participate — pure
+    /// internal nodes (no value of their own but with descendants that
+    /// do) are still surfaced as entries with `has_value: false` when
+    /// they sit on the path down to a value-bearing leaf; see
+    /// `child_count` semantics on [`SubstrateListEntry`].
+    ///
+    /// Per-child egress: the prefix itself is `egress_check`'d once
+    /// under op `"list"`. Each candidate descendant path is then also
+    /// egress-checked so capture-tier path *names* don't leak to an
+    /// anonymous caller — matching the spirit of `read`'s per-path gate.
+    ///
+    /// Not a hot path (the Explorer expands one prefix per user click);
+    /// a full DashMap scan is fine for the foreseeable substrate size.
+    pub fn list(
+        &self,
+        caller: Option<&str>,
+        prefix: &str,
+        depth: u32,
+    ) -> Result<SubstrateListSnapshot, EgressDenied> {
+        let norm_prefix = normalize_prefix(prefix);
+        // Gate once on the prefix itself so a `list` on a capture-tier
+        // node requires the same identity `read` would.
+        self.egress_check(caller, &norm_prefix, "list")?;
+
+        let global_tick = self.inner.global_tick.load(Ordering::Relaxed);
+
+        // Collect all path + (has_value, sensitivity) pairs once. Cheap
+        // relative to the Explorer click cadence; avoids holding the
+        // DashMap iterator across per-entry work.
+        let mut value_paths: Vec<(String, Sensitivity)> =
+            Vec::with_capacity(self.inner.entries.len());
+        for r in self.inner.entries.iter() {
+            // Only paths that have been published participate. An
+            // entry with `value == None` may still exist from a bare
+            // `notify` (which creates the entry without a value) or
+            // from `declare`; those must NOT surface in listings.
+            if r.value.is_some() {
+                value_paths.push((r.key().clone(), r.sensitivity));
+            }
+        }
+
+        // Depth 0 — just the exact-match node.
+        if depth == 0 {
+            if let Some((_, sens)) = value_paths
+                .iter()
+                .find(|(p, _)| *p == norm_prefix)
+            {
+                // Respect capture-tier gate on the entry itself.
+                if egress_permits(caller, *sens) {
+                    let child_count = count_descendants(&value_paths, &norm_prefix, caller);
+                    return Ok(SubstrateListSnapshot {
+                        children: vec![SubstrateListEntry {
+                            path: norm_prefix,
+                            has_value: true,
+                            child_count,
+                        }],
+                        tick: global_tick,
+                    });
+                }
+            }
+            return Ok(SubstrateListSnapshot {
+                children: Vec::new(),
+                tick: global_tick,
+            });
+        }
+
+        // If the prefix itself is a leaf value (e.g. list of
+        // `substrate/sensor/mic` when that path carries the mic
+        // snapshot directly), return it as a single entry so the caller
+        // can render the leaf even when they asked for its subtree.
+        if norm_prefix.is_empty() {
+            // Root list: proceed to group-by-next-segment below.
+        } else if let Some((_, sens)) = value_paths.iter().find(|(p, _)| *p == norm_prefix)
+            && is_leaf(&value_paths, &norm_prefix)
+            && egress_permits(caller, *sens)
+        {
+            return Ok(SubstrateListSnapshot {
+                children: vec![SubstrateListEntry {
+                    path: norm_prefix,
+                    has_value: true,
+                    child_count: 0,
+                }],
+                tick: global_tick,
+            });
+        }
+
+        // Group descendants by (prefix + next N segments for N in 1..=depth),
+        // collecting one entry per unique child path. Using a BTreeMap keeps
+        // results sorted (ASCII) without a post-sort pass.
+        use std::collections::BTreeMap;
+        let mut buckets: BTreeMap<String, bool> = BTreeMap::new();
+
+        for (path, sens) in &value_paths {
+            if !egress_permits(caller, *sens) {
+                continue;
+            }
+            // Only consider strict descendants of the prefix (or, for
+            // empty prefix, all paths).
+            let Some(rest) = strict_descendant_rest(path, &norm_prefix) else {
+                continue;
+            };
+            // Split the relative tail into segments.
+            let tail_segs: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+            if tail_segs.is_empty() {
+                continue;
+            }
+            // For each level from 1..=min(depth, tail_segs.len()) compute
+            // the ancestor path at that level. Record whether that
+            // exact ancestor carries a value.
+            let max_level = (depth as usize).min(tail_segs.len());
+            for level in 1..=max_level {
+                let ancestor = join_with_prefix(&norm_prefix, &tail_segs[..level]);
+                let is_exact_value_leaf = level == tail_segs.len();
+                let entry = buckets.entry(ancestor).or_insert(false);
+                if is_exact_value_leaf {
+                    *entry = true;
+                }
+            }
+        }
+
+        let children: Vec<SubstrateListEntry> = buckets
+            .into_iter()
+            .map(|(path, has_value)| SubstrateListEntry {
+                child_count: count_descendants(&value_paths, &path, caller),
+                path,
+                has_value,
+            })
+            .collect();
+
+        Ok(SubstrateListSnapshot {
+            children,
+            tick: global_tick,
+        })
+    }
+
     /// Publish a Replace delta at a path. Returns the new tick.
     ///
     /// Fans out to all external-stream subscribers registered via
@@ -310,6 +484,88 @@ fn fanout(sinks: &mut Vec<(SubscriberId, SubscriberSink)>, line: &[u8]) {
     }
 }
 
+/// Normalize a user-supplied prefix: drop leading/trailing slashes.
+/// An empty-or-`"/"` prefix becomes `""`, meaning "list from the root".
+fn normalize_prefix(prefix: &str) -> String {
+    let trimmed = prefix.trim_matches('/');
+    trimmed.to_string()
+}
+
+/// Return the relative remainder after `prefix/` inside `path`, if
+/// `path` is a strict descendant of `prefix`. Handles the root case
+/// (empty prefix means "every path is a descendant").
+fn strict_descendant_rest<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    if prefix.is_empty() {
+        // Root prefix: every non-empty path is a descendant; rest is
+        // the whole path.
+        if path.is_empty() {
+            return None;
+        }
+        return Some(path);
+    }
+    if path == prefix {
+        return None; // same node, not a strict descendant
+    }
+    let with_sep = path.strip_prefix(prefix)?;
+    let rest = with_sep.strip_prefix('/')?;
+    if rest.is_empty() {
+        None
+    } else {
+        Some(rest)
+    }
+}
+
+/// Join `prefix` + segment slice into a substrate path. Root-aware:
+/// empty prefix yields just the joined segments.
+fn join_with_prefix(prefix: &str, segs: &[&str]) -> String {
+    if prefix.is_empty() {
+        segs.join("/")
+    } else {
+        let mut out = String::with_capacity(prefix.len() + 1 + segs.iter().map(|s| s.len() + 1).sum::<usize>());
+        out.push_str(prefix);
+        for s in segs {
+            out.push('/');
+            out.push_str(s);
+        }
+        out
+    }
+}
+
+/// Whether a path is a leaf in the current substrate: no other
+/// value-carrying path is a strict descendant of it.
+fn is_leaf(value_paths: &[(String, Sensitivity)], path: &str) -> bool {
+    !value_paths
+        .iter()
+        .any(|(p, _)| strict_descendant_rest(p, path).is_some())
+}
+
+/// Count all descendants of `path` that carry a value and are visible
+/// to `caller` under the egress rules.
+fn count_descendants(
+    value_paths: &[(String, Sensitivity)],
+    path: &str,
+    caller: Option<&str>,
+) -> u32 {
+    let mut n: u32 = 0;
+    for (p, sens) in value_paths {
+        if !egress_permits(caller, *sens) {
+            continue;
+        }
+        if strict_descendant_rest(p, path).is_some() {
+            n = n.saturating_add(1);
+        }
+    }
+    n
+}
+
+/// Mirror of [`SubstrateService::egress_check`]'s accept/deny logic for
+/// a path whose sensitivity we already know. Used by `list` so we can
+/// skip capture-tier children for anonymous callers without taking a
+/// second DashMap lookup per entry.
+fn egress_permits(caller: Option<&str>, sensitivity: Sensitivity) -> bool {
+    !(sensitivity.requires_caller_identity() && caller.is_none())
+}
+
 fn build_update_line(
     path: &str,
     value: Option<&Value>,
@@ -396,5 +652,193 @@ mod tests {
         let c = svc.publish(None, "p", serde_json::json!(2));
         assert!(b > a);
         assert!(c > b);
+    }
+
+    // ── list() ──────────────────────────────────────────────────────
+
+    fn seed_sensor_substrate(svc: &SubstrateService) {
+        svc.publish(None, "substrate/sensor/mic", serde_json::json!({"rms_db": -20}));
+        svc.publish(None, "substrate/sensor/tof", serde_json::json!({"frame": 1}));
+        svc.publish(
+            None,
+            "substrate/sensor/mic/history",
+            serde_json::json!([1, 2, 3]),
+        );
+        svc.publish(None, "substrate/kernel/status", serde_json::json!({"state": "running"}));
+    }
+
+    #[test]
+    fn list_empty_store_returns_empty_children() {
+        let svc = SubstrateService::new();
+        let snap = svc.list(None, "substrate", 1).unwrap();
+        assert!(snap.children.is_empty());
+    }
+
+    #[test]
+    fn list_prefix_with_no_children_returns_empty() {
+        let svc = SubstrateService::new();
+        seed_sensor_substrate(&svc);
+        let snap = svc.list(None, "substrate/nope", 1).unwrap();
+        assert!(snap.children.is_empty());
+    }
+
+    #[test]
+    fn list_top_level_substrate() {
+        let svc = SubstrateService::new();
+        seed_sensor_substrate(&svc);
+        let snap = svc.list(None, "substrate", 1).unwrap();
+        // Expect `substrate/kernel` and `substrate/sensor` (both internal).
+        let paths: Vec<&str> = snap.children.iter().map(|c| c.path.as_str()).collect();
+        assert_eq!(paths, vec!["substrate/kernel", "substrate/sensor"]);
+        // Neither is itself a published value — internal nodes.
+        assert!(snap.children.iter().all(|c| !c.has_value));
+        // Child counts reflect descendants-with-values.
+        let sensor = snap.children.iter().find(|c| c.path == "substrate/sensor").unwrap();
+        // substrate/sensor/mic, substrate/sensor/mic/history, substrate/sensor/tof
+        assert_eq!(sensor.child_count, 3);
+    }
+
+    #[test]
+    fn list_depth_one_under_sensor_groups_children() {
+        let svc = SubstrateService::new();
+        seed_sensor_substrate(&svc);
+        let snap = svc.list(None, "substrate/sensor", 1).unwrap();
+        let mic = snap
+            .children
+            .iter()
+            .find(|c| c.path == "substrate/sensor/mic")
+            .expect("mic child present");
+        let tof = snap
+            .children
+            .iter()
+            .find(|c| c.path == "substrate/sensor/tof")
+            .expect("tof child present");
+        assert!(mic.has_value, "mic has a direct value");
+        assert!(tof.has_value, "tof has a direct value");
+        // mic has one descendant (history); tof has none.
+        assert_eq!(mic.child_count, 1);
+        assert_eq!(tof.child_count, 0);
+    }
+
+    #[test]
+    fn list_depth_two_returns_flat_descendants() {
+        let svc = SubstrateService::new();
+        seed_sensor_substrate(&svc);
+        let snap = svc.list(None, "substrate/sensor", 2).unwrap();
+        let paths: Vec<&str> = snap.children.iter().map(|c| c.path.as_str()).collect();
+        // depth=2 reveals mic/history as a sibling entry in the flat list.
+        assert!(paths.contains(&"substrate/sensor/mic"));
+        assert!(paths.contains(&"substrate/sensor/mic/history"));
+        assert!(paths.contains(&"substrate/sensor/tof"));
+    }
+
+    #[test]
+    fn list_depth_zero_returns_just_the_prefix_node() {
+        let svc = SubstrateService::new();
+        seed_sensor_substrate(&svc);
+        // A value-carrying prefix: returns a single entry for itself.
+        let snap = svc.list(None, "substrate/sensor/mic", 0).unwrap();
+        assert_eq!(snap.children.len(), 1);
+        assert_eq!(snap.children[0].path, "substrate/sensor/mic");
+        assert!(snap.children[0].has_value);
+        assert_eq!(snap.children[0].child_count, 1);
+
+        // A non-value prefix at depth 0: no entry.
+        let snap = svc.list(None, "substrate/sensor", 0).unwrap();
+        assert!(snap.children.is_empty());
+    }
+
+    #[test]
+    fn list_leaf_prefix_returns_itself() {
+        let svc = SubstrateService::new();
+        svc.publish(None, "substrate/x", serde_json::json!(1));
+        let snap = svc.list(None, "substrate/x", 1).unwrap();
+        assert_eq!(snap.children.len(), 1);
+        assert_eq!(snap.children[0].path, "substrate/x");
+        assert!(snap.children[0].has_value);
+        assert_eq!(snap.children[0].child_count, 0);
+    }
+
+    #[test]
+    fn list_empty_prefix_lists_from_root() {
+        let svc = SubstrateService::new();
+        seed_sensor_substrate(&svc);
+        let snap = svc.list(None, "", 1).unwrap();
+        let paths: Vec<&str> = snap.children.iter().map(|c| c.path.as_str()).collect();
+        assert_eq!(paths, vec!["substrate"]);
+        // root prefix, slash-only — equivalent.
+        let snap2 = svc.list(None, "/", 1).unwrap();
+        assert_eq!(snap.children, snap2.children);
+    }
+
+    #[test]
+    fn list_trailing_slash_is_normalized() {
+        let svc = SubstrateService::new();
+        seed_sensor_substrate(&svc);
+        let a = svc.list(None, "substrate/sensor", 1).unwrap();
+        let b = svc.list(None, "substrate/sensor/", 1).unwrap();
+        assert_eq!(a.children, b.children);
+    }
+
+    #[test]
+    fn list_skips_paths_without_value_from_notify_only() {
+        let svc = SubstrateService::new();
+        // `notify` creates an entry without `value`. It must NOT
+        // appear in list output.
+        svc.notify(None, "substrate/ghost/path");
+        let snap = svc.list(None, "substrate", 1).unwrap();
+        assert!(snap.children.is_empty(), "ghost entry leaked: {:?}", snap.children);
+    }
+
+    #[test]
+    fn list_tick_reflects_global_tick() {
+        let svc = SubstrateService::new();
+        svc.publish(None, "substrate/a", serde_json::json!(1));
+        svc.publish(None, "substrate/b", serde_json::json!(2));
+        let snap = svc.list(None, "substrate", 1).unwrap();
+        assert!(snap.tick >= 2, "tick should advance with writes");
+    }
+
+    #[test]
+    fn list_egress_denies_anonymous_on_capture_prefix() {
+        let svc = SubstrateService::new();
+        svc.declare("substrate/mic/capture", Sensitivity::Capture);
+        svc.publish(Some("aid-1"), "substrate/mic/capture", serde_json::json!({"pcm": []}));
+        let err = svc.list(None, "substrate/mic/capture", 1).unwrap_err();
+        assert!(err.reason.contains("requires authenticated"));
+    }
+
+    #[test]
+    fn list_hides_capture_children_from_anonymous() {
+        let svc = SubstrateService::new();
+        // Parent is workspace — safe to list.
+        svc.publish(None, "substrate/mic/public", serde_json::json!({"ok": true}));
+        // Capture-tier child.
+        svc.declare("substrate/mic/capture", Sensitivity::Capture);
+        svc.publish(Some("aid"), "substrate/mic/capture", serde_json::json!({"pcm": []}));
+
+        let snap = svc.list(None, "substrate/mic", 1).unwrap();
+        let paths: Vec<&str> = snap.children.iter().map(|c| c.path.as_str()).collect();
+        assert!(paths.contains(&"substrate/mic/public"));
+        assert!(
+            !paths.contains(&"substrate/mic/capture"),
+            "capture-tier child leaked to anonymous caller: {paths:?}"
+        );
+
+        // With identity, the capture child is visible.
+        let snap = svc.list(Some("aid"), "substrate/mic", 1).unwrap();
+        let paths: Vec<&str> = snap.children.iter().map(|c| c.path.as_str()).collect();
+        assert!(paths.contains(&"substrate/mic/capture"));
+    }
+
+    #[test]
+    fn list_sort_order_is_stable_ascii() {
+        let svc = SubstrateService::new();
+        svc.publish(None, "substrate/z", serde_json::json!(1));
+        svc.publish(None, "substrate/a", serde_json::json!(2));
+        svc.publish(None, "substrate/m", serde_json::json!(3));
+        let snap = svc.list(None, "substrate", 1).unwrap();
+        let paths: Vec<&str> = snap.children.iter().map(|c| c.path.as_str()).collect();
+        assert_eq!(paths, vec!["substrate/a", "substrate/m", "substrate/z"]);
     }
 }

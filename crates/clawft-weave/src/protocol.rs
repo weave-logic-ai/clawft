@@ -413,6 +413,54 @@ pub struct SubstrateNotifyParams {
     pub actor_id: Option<String>,
 }
 
+/// Default `depth` used by `substrate.list` when the client omits it.
+///
+/// Matches the Explorer MVP contract (Phase 1 §3.1) — a lazy tree that
+/// expands one level per click.
+pub const SUBSTRATE_LIST_DEFAULT_DEPTH: u32 = 1;
+
+/// Parameters for `substrate.list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubstrateListParams {
+    /// Substrate path prefix (e.g. `"substrate/sensor"`). Empty or `"/"`
+    /// lists from the root.
+    pub prefix: String,
+    /// How many levels below `prefix` to enumerate. Defaults to 1.
+    /// A value of 0 returns only the prefix node itself (if it carries
+    /// a value).
+    #[serde(default = "default_list_depth")]
+    pub depth: u32,
+    /// Caller agent_id (required for capture-tier prefixes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_id: Option<String>,
+}
+
+fn default_list_depth() -> u32 {
+    SUBSTRATE_LIST_DEFAULT_DEPTH
+}
+
+/// One child entry in the `substrate.list` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubstrateListChild {
+    /// Full substrate path of this child.
+    pub path: String,
+    /// `true` if this path has a published value (vs. a pure internal
+    /// node that exists only because it sits above value-bearing
+    /// descendants).
+    pub has_value: bool,
+    /// Count of descendants under `path` that themselves carry a value.
+    pub child_count: u32,
+}
+
+/// Result of `substrate.list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubstrateListResult {
+    /// Children enumerated under the requested prefix (sorted by path).
+    pub children: Vec<SubstrateListChild>,
+    /// Global substrate tick at the moment the list was taken.
+    pub tick: u64,
+}
+
 /// Parameters for `substrate.subscribe`.
 ///
 /// Same wire shape as [`IpcSubscribeStreamParams`] — takes over the
