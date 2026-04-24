@@ -16,6 +16,7 @@ pub mod chain_tail;
 pub mod connection_badge;
 pub mod depth_map;
 pub mod mesh_nodes;
+pub mod time_series;
 pub mod waveform;
 
 /// Dispatch rendering of `value` at `path` to the highest-priority
@@ -52,6 +53,10 @@ pub fn dispatch(ui: &mut egui::Ui, path: &str, value: &serde_json::Value) {
     }
     if depth_map::DepthMapViewer::matches(value) > 0 {
         depth_map::DepthMapViewer::paint(ui, path, value);
+        return;
+    }
+    if time_series::TimeSeriesViewer::matches(value) > 0 {
+        time_series::TimeSeriesViewer::paint(ui, path, value);
         return;
     }
     if json_fallback::JsonFallbackViewer::matches(value) > 0 {
