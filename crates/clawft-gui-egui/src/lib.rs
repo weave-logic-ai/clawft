@@ -11,6 +11,7 @@ pub mod app;
 pub mod blocks;
 pub mod canon;
 pub mod canon_demos;
+pub mod explorer;
 pub mod live;
 pub mod shell;
 pub mod surface_host;
