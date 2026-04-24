@@ -12,8 +12,13 @@ pub trait SubstrateViewer {
 pub mod json_fallback;
 // [[VIEWERS_MODULES_INSERT]]
 pub mod audio_meter;
+pub mod chain_tail;
 pub mod connection_badge;
 pub mod depth_map;
+pub mod mesh_nodes;
+pub mod process_table;
+pub mod time_series;
+pub mod waveform;
 
 /// Dispatch rendering of `value` at `path` to the highest-priority
 /// matching viewer. Falls through to [`json_fallback::JsonFallbackViewer`]
@@ -27,6 +32,22 @@ pub mod depth_map;
 #[allow(clippy::needless_return)]
 pub fn dispatch(ui: &mut egui::Ui, path: &str, value: &serde_json::Value) {
     // [[VIEWERS_REGISTRATIONS_INSERT]]
+    if waveform::WaveformViewer::matches(value) > 0 {
+        waveform::WaveformViewer::paint(ui, path, value);
+        return;
+    }
+    if mesh_nodes::MeshNodesViewer::matches(value) > 0 {
+        mesh_nodes::MeshNodesViewer::paint(ui, path, value);
+        return;
+    }
+    if chain_tail::ChainTailViewer::matches(value) > 0 {
+        chain_tail::ChainTailViewer::paint(ui, path, value);
+        return;
+    }
+    if process_table::ProcessTableViewer::matches(value) > 0 {
+        process_table::ProcessTableViewer::paint(ui, path, value);
+        return;
+    }
     if audio_meter::AudioMeterViewer::matches(value) > 0 {
         audio_meter::AudioMeterViewer::paint(ui, path, value);
         return;
@@ -37,6 +58,10 @@ pub fn dispatch(ui: &mut egui::Ui, path: &str, value: &serde_json::Value) {
     }
     if depth_map::DepthMapViewer::matches(value) > 0 {
         depth_map::DepthMapViewer::paint(ui, path, value);
+        return;
+    }
+    if time_series::TimeSeriesViewer::matches(value) > 0 {
+        time_series::TimeSeriesViewer::paint(ui, path, value);
         return;
     }
     if json_fallback::JsonFallbackViewer::matches(value) > 0 {
