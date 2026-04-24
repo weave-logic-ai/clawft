@@ -142,6 +142,46 @@ impl std::fmt::Display for EgressDenied {
     }
 }
 
+/// Reason the node-identity write gate rejected a publish.
+///
+/// The gate enforces that every substrate write lands under
+/// `substrate/<node-id>/` — see
+/// [`crate::node_registry::required_path_prefix`]. Either the path
+/// lies outside the caller's namespace or the caller supplied no node
+/// identity at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateDenied {
+    /// The path does not sit under `substrate/<node-id>/`.
+    WrongPrefix {
+        /// Attempted path.
+        path: String,
+        /// Node that tried to write it.
+        node_id: String,
+    },
+    /// The publish has no declared node identity.
+    MissingNodeId {
+        /// Attempted path.
+        path: String,
+    },
+}
+
+impl std::fmt::Display for GateDenied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GateDenied::WrongPrefix { path, node_id } => write!(
+                f,
+                "node {node_id} may not publish to {path} (must sit under substrate/{node_id}/)"
+            ),
+            GateDenied::MissingNodeId { path } => write!(
+                f,
+                "publish to {path} rejected: no node_id declared (every write must be node-attributed)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GateDenied {}
+
 /// Substrate RPC service.
 #[derive(Clone)]
 pub struct SubstrateService {
@@ -391,11 +431,64 @@ impl SubstrateService {
         })
     }
 
+    /// Publish a Replace delta under the node-identity write gate.
+    ///
+    /// Every substrate write belongs to exactly one **node**, and may
+    /// only land under that node's namespace — `substrate/<node-id>/…`.
+    /// This is the enforcement seam: callers provide the `node_id` they
+    /// have already authenticated (signature verified at the RPC
+    /// boundary, or trusted at in-process call sites where the daemon
+    /// stamps its own id); `publish_gated` refuses to write anywhere
+    /// else.
+    ///
+    /// Returns the new tick on success, or [`GateDenied`] when the path
+    /// is outside the node's prefix or no node id was supplied. See
+    /// [`crate::node_registry::path_belongs_to`] for the exact rule.
+    ///
+    /// Fans out to all external-stream subscribers registered via
+    /// [`Self::subscribe`].
+    pub fn publish_gated(
+        &self,
+        node_id: Option<&str>,
+        path: &str,
+        value: Value,
+    ) -> Result<u64, GateDenied> {
+        let node_id = node_id.ok_or_else(|| GateDenied::MissingNodeId {
+            path: path.to_string(),
+        })?;
+        if !crate::node_registry::path_belongs_to(path, node_id) {
+            return Err(GateDenied::WrongPrefix {
+                path: path.to_string(),
+                node_id: node_id.to_string(),
+            });
+        }
+        // Note the node id as the caller in the fan-out line so
+        // subscribers can audit who wrote it. We deliberately keep the
+        // existing `caller` wire-field name — semantics evolve (from
+        // "actor" to "node") without breaking the log shape.
+        let new_tick = self.inner.global_tick.fetch_add(1, Ordering::Relaxed) + 1;
+        let line = build_update_line(path, Some(&value), new_tick, "publish", Some(node_id));
+        let mut entry = self
+            .inner
+            .entries
+            .entry(path.to_string())
+            .or_insert_with(|| Entry::new(Sensitivity::Workspace));
+        entry.value = Some(value);
+        entry.tick = new_tick;
+        fanout(&mut entry.sinks, &line);
+        Ok(new_tick)
+    }
+
     /// Publish a Replace delta at a path. Returns the new tick.
     ///
     /// Fans out to all external-stream subscribers registered via
     /// [`Self::subscribe`]. For bring-up, the owner-check is trusted
     /// — the daemon layer should gate on its own agent role policy.
+    ///
+    /// **Legacy path.** This is the pre-node-identity surface. New
+    /// callers should use [`Self::publish_gated`] so the per-node
+    /// prefix invariant holds. Phased migration lets existing in-
+    /// process publishers keep working until they're each updated.
     pub fn publish(&self, caller: Option<&str>, path: &str, value: Value) -> u64 {
         let new_tick = self.inner.global_tick.fetch_add(1, Ordering::Relaxed) + 1;
         let line = build_update_line(path, Some(&value), new_tick, "publish", caller);
@@ -840,5 +933,105 @@ mod tests {
         let snap = svc.list(None, "substrate", 1).unwrap();
         let paths: Vec<&str> = snap.children.iter().map(|c| c.path.as_str()).collect();
         assert_eq!(paths, vec!["substrate/a", "substrate/m", "substrate/z"]);
+    }
+
+    // ── node-identity write gate ───────────────────────────────
+
+    #[test]
+    fn publish_gated_accepts_path_under_node_prefix() {
+        let svc = SubstrateService::new();
+        let tick = svc
+            .publish_gated(Some("n1"), "substrate/n1/sensor/mic", serde_json::json!(42))
+            .expect("valid prefix accepted");
+        assert_eq!(tick, 1);
+        // And the value is readable back.
+        let snap = svc.read(None, "substrate/n1/sensor/mic").unwrap();
+        assert_eq!(snap.value, Some(serde_json::json!(42)));
+    }
+
+    #[test]
+    fn publish_gated_rejects_cross_node_write() {
+        let svc = SubstrateService::new();
+        let err = svc
+            .publish_gated(
+                Some("n1"),
+                "substrate/n2/sensor/mic",
+                serde_json::json!(0),
+            )
+            .expect_err("cross-node write must be rejected");
+        match err {
+            GateDenied::WrongPrefix { path, node_id } => {
+                assert_eq!(path, "substrate/n2/sensor/mic");
+                assert_eq!(node_id, "n1");
+            }
+            other => panic!("expected WrongPrefix, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn publish_gated_rejects_top_level_write() {
+        let svc = SubstrateService::new();
+        let err = svc
+            .publish_gated(Some("n1"), "substrate/sensor/mic", serde_json::json!(0))
+            .expect_err("top-level write must be rejected");
+        assert!(matches!(err, GateDenied::WrongPrefix { .. }));
+    }
+
+    #[test]
+    fn publish_gated_rejects_missing_node_id() {
+        let svc = SubstrateService::new();
+        let err = svc
+            .publish_gated(None, "substrate/n1/x", serde_json::json!(0))
+            .expect_err("unsigned writes must be rejected");
+        match err {
+            GateDenied::MissingNodeId { path } => {
+                assert_eq!(path, "substrate/n1/x");
+            }
+            other => panic!("expected MissingNodeId, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn publish_gated_rejects_prefix_collision() {
+        // `n1` must not be able to write into `n11`'s namespace just
+        // because the string starts with `substrate/n1`. The trailing
+        // slash in `required_path_prefix` blocks it.
+        let svc = SubstrateService::new();
+        let err = svc
+            .publish_gated(Some("n1"), "substrate/n11/x", serde_json::json!(0))
+            .expect_err("sibling-prefix collision must be rejected");
+        assert!(matches!(err, GateDenied::WrongPrefix { .. }));
+    }
+
+    #[test]
+    fn publish_gated_increments_tick_like_publish() {
+        let svc = SubstrateService::new();
+        let t1 = svc
+            .publish_gated(Some("n1"), "substrate/n1/a", serde_json::json!(1))
+            .unwrap();
+        let t2 = svc
+            .publish_gated(Some("n1"), "substrate/n1/b", serde_json::json!(2))
+            .unwrap();
+        assert!(t2 > t1);
+    }
+
+    #[test]
+    fn publish_gated_fans_out_to_subscribers() {
+        let svc = SubstrateService::new();
+        let (_id, mut rx) = svc
+            .subscribe(Some("aid"), "substrate/n1/sensor/mic")
+            .unwrap();
+        svc.publish_gated(
+            Some("n1"),
+            "substrate/n1/sensor/mic",
+            serde_json::json!({"rms_db": -40}),
+        )
+        .unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let got = rt.block_on(async move { rx.recv().await });
+        assert!(got.is_some(), "subscriber did not receive fanout");
     }
 }
