@@ -12,23 +12,37 @@ use serde_json::Value;
 
 use super::{Explorer, TreeNode, ACTIVITY_WINDOW};
 
-/// Root prefix the Explorer enumerates. Empty string = "top of tree"
-/// so the backend returns `substrate/kernel`, `substrate/sensor`, …
-/// when we ask it to `list` the root.
-pub const ROOT_PREFIX: &str = "";
+/// The substrate root — children at depth-1 below this are
+/// **node-ids** (`n-<6-hex>` BLAKE3 prefixes per the node-identity
+/// gate). The Explorer's tree starts here; there is no synthetic
+/// header above it. The `ui.heading("Substrate")` painted by
+/// [`Explorer::show`](crate::explorer::Explorer::show) already
+/// frames the panel.
+pub const ROOT_PREFIX: &str = "substrate";
 
 /// Render the left tree pane. Returns the path newly selected this
 /// frame (if any) so the caller can swap subscriptions atomically.
+///
+/// Layout: each top-level row is one node in the mesh; expanding a
+/// node reveals its substrate subtree (`sensor/`, `health/`, `meta/`,
+/// `kernel/` for kernel-class nodes, etc.). Mesh-canonical paths
+/// under `substrate/_derived/...` appear as a sibling top-level row
+/// when populated.
 pub fn paint(ui: &mut egui::Ui, ex: &mut Explorer) -> Option<String> {
     let mut newly_selected: Option<String> = None;
     let mut to_request: Vec<String> = Vec::new();
 
+    // Auto-request the root listing if we don't have a cache entry
+    // yet. Also keep the root marked expanded so the slow-tick
+    // re-list fires for newly-arrived nodes.
+    if !ex.tree_children.contains_key(ROOT_PREFIX) {
+        to_request.push(ROOT_PREFIX.to_string());
+    }
+    ex.expanded.insert(ROOT_PREFIX.to_string());
+
     egui::ScrollArea::both()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            // Header row with backend-availability hint if we got a
-            // "method not allowed" back from substrate.list. Kept
-            // small so the tree remains the visual focus.
             if let Some(msg) = &ex.backend_hint {
                 ui.horizontal(|ui| {
                     ui.label(
@@ -41,17 +55,38 @@ pub fn paint(ui: &mut egui::Ui, ex: &mut Explorer) -> Option<String> {
                 ui.separator();
             }
 
-            // Render the (virtual) root, then recurse into each child
-            // that the backend has revealed so far.
-            render_node(
-                ui,
-                ex,
-                ROOT_PREFIX,
-                "substrate/",
-                0,
-                &mut newly_selected,
-                &mut to_request,
-            );
+            match ex.tree_children.get(ROOT_PREFIX).cloned() {
+                Some(kids) if kids.is_empty() => {
+                    ui.label(
+                        egui::RichText::new("(no nodes registered yet)")
+                            .italics()
+                            .small()
+                            .color(egui::Color32::from_rgb(140, 140, 150)),
+                    );
+                }
+                Some(kids) => {
+                    for child in kids {
+                        let label = last_segment(&child.path);
+                        render_node(
+                            ui,
+                            ex,
+                            &child.path,
+                            label,
+                            0,
+                            &mut newly_selected,
+                            &mut to_request,
+                        );
+                    }
+                }
+                None => {
+                    ui.label(
+                        egui::RichText::new("loading…")
+                            .italics()
+                            .small()
+                            .color(egui::Color32::from_rgb(140, 140, 150)),
+                    );
+                }
+            }
         });
 
     // After the borrow of ex is released, enqueue any list requests
@@ -118,16 +153,16 @@ fn render_node(
                 .color(dot_color),
         );
 
-        // Label / selectable.
-        let label_text = if prefix.is_empty() {
-            // The synthetic root has no real path — show the `substrate/`
-            // placeholder but don't let the user "select" it.
+        // Label / selectable. Top-level rows (depth 0 = node-ids)
+        // render slightly bolder so the eye anchors on the node
+        // boundary; deeper rows are plain monospace.
+        let label_text = if depth == 0 {
             egui::RichText::new(display).monospace().strong()
         } else {
             egui::RichText::new(display).monospace()
         };
         let resp = ui.selectable_label(is_selected, label_text);
-        if resp.clicked() && !prefix.is_empty() {
+        if resp.clicked() {
             if !is_selected {
                 *newly_selected = Some(prefix.to_string());
             }

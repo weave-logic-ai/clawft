@@ -136,9 +136,11 @@ pub struct Explorer {
 impl Default for Explorer {
     fn default() -> Self {
         let mut expanded = HashSet::new();
-        // Start with the virtual root expanded so the user sees the
-        // first level of children immediately on panel open.
-        expanded.insert(String::new());
+        // Seed with the substrate root expanded so the slow tick
+        // re-fetches the top-level node list. `tree::paint` also
+        // re-asserts this every frame; this seed just avoids one
+        // wasted frame at startup before the first paint.
+        expanded.insert(crate::explorer::tree::ROOT_PREFIX.to_string());
         Self {
             expanded,
             selected: None,
