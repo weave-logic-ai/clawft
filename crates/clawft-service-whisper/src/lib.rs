@@ -1,17 +1,21 @@
-//! WeftOS whisper transcription service — HTTP client pipeline (scaffold).
+//! WeftOS whisper transcription service — HTTP client pipeline (client layer).
 //!
-//! This commit lays the crate foundation: WAV-wrapping + PCM-chunk
-//! windowing. The HTTP client and the substrate-connected service are
-//! added in follow-up commits on the same `phase2-whisper-spike`
-//! branch. See `.planning/sensors/PIPELINE-PRIMITIVE-JOURNAL.md` for
-//! the full shape (rolls in once the pipeline lands end-to-end).
+//! This commit adds the HTTP client that POSTs WAV-wrapped PCM to
+//! whisper.cpp's `/inference` endpoint. Still missing: the substrate
+//! subscribe/publish wiring that ties the client into WeftOS pub/sub —
+//! lands in the next commit on this branch.
+//!
+//! See `.planning/sensors/PIPELINE-PRIMITIVE-JOURNAL.md` for the full
+//! shape + the FFI-vs-HTTP rationale (§1).
 
 #![deny(rust_2018_idioms)]
 #![warn(missing_docs)]
 
+pub mod client;
 pub mod wav;
 pub mod windower;
 
+pub use client::{InferenceResponse, TranscribeError, WhisperClient, WhisperConfig};
 pub use windower::{PcmChunk, PcmWindow, Windower};
 
 /// Substrate path the service subscribes to for inbound PCM chunks.

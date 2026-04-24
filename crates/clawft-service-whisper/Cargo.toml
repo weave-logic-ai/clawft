@@ -9,9 +9,34 @@ homepage.workspace = true
 description = "WeftOS whisper.cpp transcription service — HTTP client pipeline from substrate PCM to substrate transcript. Phase 2 Track 4 spike probing the sensor-ingestion pipeline primitive (Machinery + Functions)."
 
 [dependencies]
-# Pure-data + windowing for the PCM pipeline. HTTP + substrate deps land in
-# follow-up commits on the same branch — see the journal for the full shape.
+# Async runtime — tokio 'full' matches the daemon, which is the intended host.
+tokio = { workspace = true }
+
+# Serde for substrate payloads + whisper JSON response shape.
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# HTTP client — multipart for POST /inference, json for parsing, rustls to
+# avoid OpenSSL build friction on CI hosts. default-tls is off upstream.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "multipart",
+    "rustls-tls",
+    "stream",
+] }
+
+# PCM payload is base64-encoded JSON per the b64-in-JSON MVP path; a binary
+# substrate side-channel is explicitly deferred (see journal §Q1).
+base64 = "0.22"
+
+# Structured logs.
 tracing = { workspace = true }
+
+# Error handling.
 thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "sync"] }
+wiremock = "0.6"
+tempfile = { workspace = true }
+tracing-subscriber = { workspace = true }
