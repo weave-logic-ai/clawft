@@ -1648,6 +1648,46 @@ async fn handle_substrate_publish(
     }))
 }
 
+/// Handle `node.identity`: report this daemon's own node-id +
+/// label + registration timestamp.
+///
+/// Lets a remote node (the ESP32 firmware) discover the daemon's
+/// node-id at runtime instead of hardcoding it. Used to build
+/// control-path prefixes:
+/// `substrate/<node_identity.node_id>/control/sensors/...`.
+async fn handle_node_identity(
+    _params: serde_json::Value,
+    kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
+) -> Response {
+    let state = match daemon_control() {
+        Some(s) => s,
+        None => {
+            return Response::error("daemon control state not initialized".to_string());
+        }
+    };
+    // Look up the daemon's NodeRegistry entry to surface label +
+    // registered_at — these are the fields the firmware Claude
+    // requested in the dialog.
+    let k = kernel.read().await;
+    let entry = match k.node_registry().get(&state.daemon_node_id) {
+        Some(e) => e,
+        None => {
+            return Response::error(format!(
+                "daemon node {} not in registry (boot inconsistency)",
+                state.daemon_node_id
+            ));
+        }
+    };
+    Response::success(
+        serde_json::to_value(crate::protocol::NodeIdentityResult {
+            node_id: entry.node_id,
+            label: entry.label.unwrap_or_default(),
+            registered_at: entry.registered_at.to_rfc3339(),
+        })
+        .unwrap(),
+    )
+}
+
 /// Handle `control.set_enabled`: flip a daemon-side enable flag and
 /// republish the substrate control intent under the daemon's own
 /// prefix.
@@ -2467,6 +2507,7 @@ async fn dispatch(
         }
         "agent.register" => handle_agent_register(params, kernel).await,
         "node.register" => handle_node_register(params, kernel).await,
+        "node.identity" => handle_node_identity(params, kernel).await,
         "substrate.read" => handle_substrate_read(params, kernel).await,
         "substrate.list" => handle_substrate_list(params, kernel).await,
         "substrate.publish" => handle_substrate_publish(params, kernel).await,

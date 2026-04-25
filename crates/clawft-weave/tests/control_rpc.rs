@@ -194,6 +194,24 @@ async fn intent_path_construction_is_predictable() {
 }
 
 #[tokio::test]
+async fn node_identity_rejects_when_state_uninitialized() {
+    // The test daemon runs handle_connection without going through
+    // run()'s identity bootstrap, so DAEMON_CONTROL is unset.
+    // node.identity must surface that as a clean error rather than
+    // panicking — this exercises the same uninit branch that
+    // control.set_enabled goes through.
+    let (_tmp, socket, shutdown_tx, _kernel) = spawn_test_daemon().await;
+    let resp = one_shot(&socket, "node.identity", serde_json::json!({})).await;
+    assert_eq!(resp["ok"], serde_json::Value::Bool(false));
+    let err = resp["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("control state not initialized") || err.contains("not in registry"),
+        "expected uninit/registry error, got: {err}"
+    );
+    let _ = shutdown_tx.send(true);
+}
+
+#[tokio::test]
 async fn register_node_smoke() {
     // Sanity that the test harness works against the real
     // node.register handler, since the control tests above don't

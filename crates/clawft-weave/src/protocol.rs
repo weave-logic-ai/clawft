@@ -439,6 +439,27 @@ pub struct SubstratePublishParams {
     pub ts: Option<u64>,
 }
 
+/// Parameters for `node.identity`.
+///
+/// Empty params — caller asks "who is this daemon, what's its node-id."
+/// The reply lets remote nodes (the ESP32 firmware especially) build
+/// control-path prefixes without hardcoding the daemon's id.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NodeIdentityParams {}
+
+/// Result of `node.identity` — minimal facts about the daemon's
+/// own node identity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeIdentityResult {
+    /// The daemon's deterministic node-id (`n-<6-hex>` BLAKE3 prefix
+    /// of the daemon's pubkey).
+    pub node_id: String,
+    /// Friendly label (always `"daemon"` for this implementation).
+    pub label: String,
+    /// ISO-8601 timestamp the daemon registered itself at boot.
+    pub registered_at: String,
+}
+
 /// Parameters for `control.set_enabled`.
 ///
 /// Flips a daemon-managed enable flag and republishes the matching
