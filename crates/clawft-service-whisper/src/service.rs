@@ -24,6 +24,8 @@
 //! window. 4xx is a programmer bug (malformed WAV etc.) so we log +
 //! drop immediately without retry.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -57,6 +59,19 @@ pub struct WhisperServiceConfig {
     /// Substrate path to write transcripts to. Must start with
     /// `substrate/<node_id>/` for the publish gate to accept it.
     pub output_path: String,
+    /// Service-level enable flag. When `false`, the inference loop
+    /// drops incoming chunks before windowing — no work is done.
+    /// Defaults to a fresh `Arc<AtomicBool>(true)` if you don't
+    /// supply one. Caller can keep its own clone of the Arc to
+    /// flip the flag at runtime (e.g. from a control-plane RPC).
+    pub service_enabled: Arc<AtomicBool>,
+    /// Source-sensor enable flag (consumer-side soft-disable). When
+    /// `false`, the service keeps its substrate subscription alive
+    /// but drops every chunk that arrives — the bridge for "the
+    /// firmware is still emitting because it hasn't picked up the
+    /// control-path subscribe yet, but the user wants this off."
+    /// Defaults to enabled if you don't supply one.
+    pub source_enabled: Arc<AtomicBool>,
 }
 
 impl Default for WhisperServiceConfig {
@@ -71,6 +86,8 @@ impl Default for WhisperServiceConfig {
             node_id: "n-test00".to_string(),
             input_path: SUBSTRATE_PCM_INPUT_PATH.to_string(),
             output_path: "substrate/n-test00/derived/transcript/mic".to_string(),
+            service_enabled: Arc::new(AtomicBool::new(true)),
+            source_enabled: Arc::new(AtomicBool::new(true)),
         }
     }
 }
@@ -187,6 +204,18 @@ async fn run_pipeline(
                     debug!("whisper service: substrate sender dropped, exiting");
                     break;
                 };
+                // Control-plane gate: drop the chunk before any work
+                // is done if either the service or the source sensor
+                // has been toggled off. Subscription stays live so a
+                // re-enable picks up the next chunk seamlessly.
+                if !config.service_enabled.load(Ordering::SeqCst) {
+                    debug!("whisper service: chunk dropped (service disabled)");
+                    continue;
+                }
+                if !config.source_enabled.load(Ordering::SeqCst) {
+                    debug!("whisper service: chunk dropped (source sensor disabled)");
+                    continue;
+                }
                 if let Some(chunk) = decode_update_line(&bytes) {
                     match decode_pcm_chunk(&chunk) {
                         Ok((pcm, sr, ch, seq, chunk_ms)) => {
@@ -518,6 +547,87 @@ mod tests {
         let svc = WhisperService::spawn(substrate, client, cfg).unwrap();
         // Tiny delay to let the pipeline enter its main select!.
         tokio::time::sleep(Duration::from_millis(100)).await;
+        svc.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn disabled_service_flag_drops_chunks_no_inference() {
+        // POST /inference must NOT be called while service_enabled = false.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"status":"ok"}"#))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/inference"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(r#"{"text": " not heard"}"#),
+            )
+            .expect(0) // ← key assertion: zero inference calls
+            .mount(&server)
+            .await;
+
+        let substrate = SubstrateService::new();
+        let client = make_client(server.uri());
+        let service_enabled = Arc::new(AtomicBool::new(false)); // start disabled
+        let cfg = WhisperServiceConfig {
+            window_ms: 500,
+            service_enabled: Arc::clone(&service_enabled),
+            ..Default::default()
+        };
+        let input_path = cfg.input_path.clone();
+        let actor = cfg.node_id.clone();
+        let svc = WhisperService::spawn(substrate.clone(), client, cfg).unwrap();
+
+        // Pump in three windows worth of audio while disabled.
+        let half = vec![0u8; 8_000];
+        for i in 0..3 {
+            publish_pcm_chunk(&substrate, &actor, &input_path, &half, 250, i + 1);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // Give the pipeline a moment to settle. wiremock's
+        // .expect(0) verifies on drop.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        svc.shutdown().await;
+        // Implicit assertion: server drop checks .expect(0) and
+        // panics if any /inference call landed.
+    }
+
+    #[tokio::test]
+    async fn disabled_source_flag_drops_chunks_no_inference() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"status":"ok"}"#))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/inference"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"text": "x"}"#))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let substrate = SubstrateService::new();
+        let client = make_client(server.uri());
+        let source_enabled = Arc::new(AtomicBool::new(false));
+        let cfg = WhisperServiceConfig {
+            window_ms: 500,
+            source_enabled: Arc::clone(&source_enabled),
+            ..Default::default()
+        };
+        let input_path = cfg.input_path.clone();
+        let actor = cfg.node_id.clone();
+        let svc = WhisperService::spawn(substrate.clone(), client, cfg).unwrap();
+
+        let half = vec![0u8; 8_000];
+        for i in 0..3 {
+            publish_pcm_chunk(&substrate, &actor, &input_path, &half, 250, i + 1);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
         svc.shutdown().await;
     }
 

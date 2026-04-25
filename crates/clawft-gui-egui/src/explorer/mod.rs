@@ -26,6 +26,7 @@ use serde_json::Value;
 
 use crate::live::{self, Command, Live, ReplyRx};
 
+pub mod control_toggle;
 pub mod tree;
 pub mod viewers;
 pub mod workshop;
@@ -395,6 +396,14 @@ impl Explorer {
                 // instantiates, which Viewers render it…"
                 if workshop::matches(&v) > 0 {
                     self.workshop_view.paint(ui, &v, live);
+                    return;
+                }
+                // Control-intent toggle: shape-match precedes the
+                // generic viewer cascade. Lives outside the
+                // SubstrateViewer trait because it needs the Live
+                // RPC handle to fire `control.set_enabled` on click.
+                if control_toggle::matches(&v) > 0 {
+                    control_toggle::paint(ui, &path, &v, live);
                     return;
                 }
                 viewers::dispatch(ui, &path, &v);

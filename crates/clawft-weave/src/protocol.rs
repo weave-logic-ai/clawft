@@ -439,6 +439,59 @@ pub struct SubstratePublishParams {
     pub ts: Option<u64>,
 }
 
+/// Parameters for `control.set_enabled`.
+///
+/// Flips a daemon-managed enable flag and republishes the matching
+/// `substrate/<authority-node>/control/<kind>s/<target>` intent so
+/// downstream subscribers (GUI, firmware) observe the change.
+///
+/// `kind` is `"service"` or `"sensor"`. `target` is a slug that
+/// matches the substrate-path tail beneath `control/<kind>s/`:
+///
+/// - service: bare name, e.g. `"whisper"`
+/// - sensor:  `<target-node>/<sensor-tail>`, e.g.
+///   `"n-bfc4cd/mic/pcm_chunk"`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControlSetEnabledParams {
+    /// `"service"` or `"sensor"`.
+    pub kind: String,
+    /// Target slug (matches the substrate path tail).
+    pub target: String,
+    /// Desired state.
+    pub enabled: bool,
+    /// Optional human-readable label echoed into the published
+    /// intent. Defaults to empty when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// Result of `control.set_enabled`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControlSetEnabledResult {
+    /// Substrate path the new intent was published at.
+    pub path: String,
+    /// Echo of the new state.
+    pub enabled: bool,
+}
+
+/// One entry in the `control.list` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControlListEntry {
+    /// `"service"` or `"sensor"`.
+    pub kind: String,
+    /// Target slug.
+    pub target: String,
+    /// Current state.
+    pub enabled: bool,
+}
+
+/// Result of `control.list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControlListResult {
+    /// All registered control flags.
+    pub entries: Vec<ControlListEntry>,
+}
+
 /// Parameters for `substrate.canonical_publish_payload`.
 ///
 /// Diagnostic RPC — runs the daemon's value-canonicalization +

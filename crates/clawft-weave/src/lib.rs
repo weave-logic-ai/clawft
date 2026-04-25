@@ -9,6 +9,7 @@
 
 pub mod client;
 pub mod commands;
+pub mod control;
 #[cfg(unix)]
 pub mod daemon;
 pub mod node_identity;

@@ -5,12 +5,32 @@
 //! kernel itself is platform-agnostic and could be wrapped in
 //! WebSocket, TCP, or `postMessage` for other environments.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
+
+use crate::control::{ControlFlags, ControlIntent, ControlKind};
+
+/// Daemon-wide control state shared between the boot wiring (which
+/// registers flags as services come up) and the `control.*` RPC
+/// handlers (which read + flip them). Set once at daemon boot.
+struct DaemonControlState {
+    /// The daemon's own node-id, used as the authority that owns
+    /// every control intent published by this daemon.
+    daemon_node_id: String,
+    /// Per-target enable flags, shared with services that consult
+    /// them in their main loops.
+    flags: ControlFlags,
+}
+
+static DAEMON_CONTROL: OnceLock<Arc<DaemonControlState>> = OnceLock::new();
+
+fn daemon_control() -> Option<Arc<DaemonControlState>> {
+    DAEMON_CONTROL.get().cloned()
+}
 
 use clawft_kernel::{Kernel, KernelState};
 use clawft_platform::NativePlatform;
@@ -148,18 +168,40 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
         );
     }
 
+    // Stash daemon-wide control state. Set once; the `control.*`
+    // RPC handlers and the service-spawn path read it. Idempotent
+    // re-set is impossible (OnceLock) — this must run exactly once
+    // per daemon process.
+    let control_flags = ControlFlags::new();
+    {
+        let _ = DAEMON_CONTROL.set(Arc::new(DaemonControlState {
+            daemon_node_id: daemon_identity.node_id.clone(),
+            flags: control_flags.clone(),
+        }));
+    }
+
     // Spawn the whisper STT service. Subscribes to the configured
     // ESP32-side mic pcm_chunk path, transcribes via the local
     // whisper.cpp HTTP service, publishes transcripts under the
     // daemon's own node prefix.
     //
-    // Hard-wired for now per the slice — both source-node and
-    // whisper URL come from env vars with sensible defaults.
-    // A future commit replaces this with proper service discovery
-    // and the mesh-canonical `substrate/_derived/...` placement.
+    // Pre-register control flags before spawn so the service holds
+    // shared `Arc<AtomicBool>` handles to flags the RPC handler can
+    // flip.
+    let source_node_id = std::env::var("WHISPER_INPUT_NODE_ID")
+        .unwrap_or_else(|_| "n-bfc4cd".to_string());
+    let pcm_chunk_target = format!("{source_node_id}/mic/pcm_chunk");
+    let rms_target = format!("{source_node_id}/mic/rms");
+    let whisper_service_flag =
+        control_flags.register(ControlKind::Service, "whisper", true);
+    let whisper_source_flag =
+        control_flags.register(ControlKind::Sensor, &pcm_chunk_target, true);
+    // RMS sensor isn't consumed by anything in-process today; the
+    // flag still lives here so toggling it from the GUI publishes
+    // the intent that the firmware will eventually subscribe to.
+    let _rms_sensor_flag = control_flags.register(ControlKind::Sensor, &rms_target, true);
+
     let _whisper_handle: Option<clawft_service_whisper::WhisperService> = {
-        let source_node_id = std::env::var("WHISPER_INPUT_NODE_ID")
-            .unwrap_or_else(|_| "n-bfc4cd".to_string());
         let whisper_url = std::env::var(clawft_service_whisper::WHISPER_SERVICE_URL_ENV)
             .unwrap_or_else(|_| "http://127.0.0.1:8123".to_string());
         let input_path = format!(
@@ -176,6 +218,8 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
             node_id: daemon_identity.node_id.clone(),
             input_path: input_path.clone(),
             output_path: output_path.clone(),
+            service_enabled: Arc::clone(&whisper_service_flag),
+            source_enabled: Arc::clone(&whisper_source_flag),
         };
         let client_cfg = clawft_service_whisper::WhisperConfig {
             base_url: whisper_url.clone(),
@@ -211,6 +255,45 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
             }
         }
     };
+
+    // Publish initial control intents now that the daemon node is
+    // registered and services are wired. The intents live under the
+    // daemon's own prefix so `publish_gated` accepts them.
+    {
+        let k = kernel.read().await;
+        let substrate = k.substrate_service();
+        let initial = [
+            (ControlKind::Service, "whisper".to_string(), "Whisper STT"),
+            (ControlKind::Sensor, pcm_chunk_target.clone(), "Mic PCM chunks"),
+            (ControlKind::Sensor, rms_target.clone(), "Mic RMS summary"),
+        ];
+        for (kind, target, label) in &initial {
+            let intent = ControlIntent {
+                enabled: control_flags
+                    .get(*kind, target)
+                    .map(|f| f.load(std::sync::atomic::Ordering::SeqCst))
+                    .unwrap_or(true),
+                kind: *kind,
+                target: target.clone(),
+                label: (*label).to_string(),
+                updated_at_ms: crate::control::now_ms(),
+            };
+            let path = crate::control::intent_path(
+                &daemon_identity.node_id,
+                *kind,
+                target,
+            );
+            if let Err(e) = substrate.publish_gated(
+                Some(&daemon_identity.node_id),
+                &path,
+                intent.to_value(),
+            ) {
+                warn!(error = %e, path = %path, "control: initial intent publish failed");
+            } else {
+                debug!(path = %path, "control: initial intent published");
+            }
+        }
+    }
 
     // Print boot banner. Lead with the build-id so every run makes
     // which binary is executing visible in the first stdout line —
@@ -1565,6 +1648,117 @@ async fn handle_substrate_publish(
     }))
 }
 
+/// Handle `control.set_enabled`: flip a daemon-side enable flag and
+/// republish the substrate control intent under the daemon's own
+/// prefix.
+///
+/// Body: `{ kind: "service" | "sensor", target: <string>, enabled:
+/// <bool>, label?: <string> }`. The handler:
+///
+/// 1. Updates the in-memory `Arc<AtomicBool>` registered for the
+///    target. If no flag was registered (typo / unknown target)
+///    the call is rejected with `400`-flavored error.
+/// 2. Publishes a fresh `ControlIntent` value at
+///    `substrate/<daemon-node>/control/<kind>s/<target>` so
+///    subscribers (the GUI, future firmware) see the change.
+async fn handle_control_set_enabled(
+    params: serde_json::Value,
+    kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
+) -> Response {
+    let p: crate::protocol::ControlSetEnabledParams =
+        match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => return Response::error(format!("invalid params: {e}")),
+        };
+    let kind = match ControlKind::parse(&p.kind) {
+        Some(k) => k,
+        None => {
+            return Response::error(format!(
+                "unknown kind {:?} (want \"service\" or \"sensor\")",
+                p.kind
+            ));
+        }
+    };
+    let state = match daemon_control() {
+        Some(s) => s,
+        None => return Response::error("daemon control state not initialized".to_string()),
+    };
+    if state.flags.set(kind, &p.target, p.enabled).is_none() {
+        return Response::error(format!(
+            "no flag registered for kind={:?} target={:?}",
+            p.kind, p.target
+        ));
+    }
+
+    // Publish the new intent under the daemon's own prefix. Failure
+    // here doesn't roll back the in-memory flip — the in-memory
+    // flag IS the source of truth for daemon-side enforcement, and
+    // the substrate value is the eventual-consistency mirror.
+    let intent = ControlIntent {
+        enabled: p.enabled,
+        kind,
+        target: p.target.clone(),
+        label: p.label.clone().unwrap_or_default(),
+        updated_at_ms: crate::control::now_ms(),
+    };
+    let path = crate::control::intent_path(&state.daemon_node_id, kind, &p.target);
+    let publish_result = {
+        let k = kernel.read().await;
+        k.substrate_service()
+            .publish_gated(Some(&state.daemon_node_id), &path, intent.to_value())
+    };
+    if let Err(e) = publish_result {
+        warn!(
+            error = %e,
+            path = %path,
+            "control: substrate mirror publish failed (in-memory flag was still flipped)"
+        );
+    }
+    info!(
+        kind = ?kind,
+        target = %p.target,
+        enabled = p.enabled,
+        "control: flag set"
+    );
+
+    Response::success(
+        serde_json::to_value(crate::protocol::ControlSetEnabledResult {
+            path,
+            enabled: p.enabled,
+        })
+        .unwrap(),
+    )
+}
+
+/// Handle `control.list`: snapshot every registered control flag.
+/// Used by the Explorer to populate a "Controls" overview without
+/// walking substrate.
+async fn handle_control_list(
+    _params: serde_json::Value,
+    _kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
+) -> Response {
+    let state = match daemon_control() {
+        Some(s) => s,
+        None => return Response::error("daemon control state not initialized".to_string()),
+    };
+    let entries: Vec<_> = state
+        .flags
+        .list()
+        .into_iter()
+        .map(|(kind, target, enabled)| crate::protocol::ControlListEntry {
+            kind: match kind {
+                ControlKind::Service => "service".to_string(),
+                ControlKind::Sensor => "sensor".to_string(),
+            },
+            target,
+            enabled,
+        })
+        .collect();
+    Response::success(
+        serde_json::to_value(crate::protocol::ControlListResult { entries }).unwrap(),
+    )
+}
+
 /// Handle `substrate.canonical_publish_payload`: diagnostic — return
 /// the exact bytes the daemon would feed to the signature verifier
 /// for a hypothetical publish. No signature check, no actual write.
@@ -2280,6 +2474,8 @@ async fn dispatch(
             handle_substrate_canonical_publish_payload(params, kernel).await
         }
         "substrate.notify" => handle_substrate_notify(params, kernel).await,
+        "control.set_enabled" => handle_control_set_enabled(params, kernel).await,
+        "control.list" => handle_control_list(params, kernel).await,
         "agent.spawn" => {
             let spawn_params: AgentSpawnParams = match serde_json::from_value(params) {
                 Ok(p) => p,

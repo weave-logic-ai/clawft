@@ -1667,6 +1667,7 @@ dependencies = [
  "clawft-service-whisper",
  "clawft-types",
  "comfy-table",
+ "dashmap",
  "dirs",
  "ed25519-dalek",
  "eml-core",
