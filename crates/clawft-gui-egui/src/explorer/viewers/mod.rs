@@ -17,6 +17,7 @@ pub mod connection_badge;
 pub mod depth_map;
 pub mod graph;
 pub mod mesh_nodes;
+pub mod pcm_chunk;
 pub mod process_table;
 pub mod time_series;
 pub mod waveform;
@@ -33,6 +34,10 @@ pub mod waveform;
 #[allow(clippy::needless_return)]
 pub fn dispatch(ui: &mut egui::Ui, path: &str, value: &serde_json::Value) {
     // [[VIEWERS_REGISTRATIONS_INSERT]]
+    if pcm_chunk::PcmChunkViewer::matches(value) > 0 {
+        pcm_chunk::PcmChunkViewer::paint(ui, path, value);
+        return;
+    }
     if waveform::WaveformViewer::matches(value) > 0 {
         waveform::WaveformViewer::paint(ui, path, value);
         return;

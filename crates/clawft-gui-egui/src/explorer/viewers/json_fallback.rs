@@ -10,6 +10,14 @@ use serde_json::Value;
 /// don't blow up the right-hand pane.
 const STR_CLIP_LEN: usize = 200;
 
+/// Hard upper bound — beyond this we never inline-render the full
+/// content, regardless of expand state. Otherwise a multi-KB blob
+/// (the pcm_chunk's `data` field is ~21 KB of base64) re-lays out
+/// a giant galley every frame and locks up the GUI on Windows.
+/// Above this threshold we show only a clipped preview + size +
+/// copy-to-clipboard, no expand button.
+const STR_INLINE_HARD_MAX: usize = 4_096;
+
 pub struct JsonFallbackViewer;
 
 impl SubstrateViewer for JsonFallbackViewer {
@@ -73,12 +81,40 @@ fn paint_value(ui: &mut egui::Ui, id_prefix: &str, value: &Value, depth: usize) 
 
 /// Render a string value with clipping + expand-to-full when it runs
 /// past [`STR_CLIP_LEN`].
+///
+/// Strings longer than [`STR_INLINE_HARD_MAX`] are *never* inline-
+/// rendered in full — only a clipped preview plus a size badge plus
+/// a "copy" button. This prevents the GUI from locking up on
+/// pathological values (raw base64 audio chunks at ~21 KB, etc.)
+/// where re-laying out a giant monospace galley every frame
+/// chokes the render thread.
 fn paint_string(ui: &mut egui::Ui, id_prefix: &str, s: &str, _depth: usize) {
-    // Persist expand state per (path, value-hash) using egui's Id
+    let len = s.len();
+
+    // Pathological-blob branch: never inline-render in full, no
+    // expand affordance. This is the lockup guard.
+    if len > STR_INLINE_HARD_MAX {
+        let (display, _) = clip_string(s, STR_CLIP_LEN);
+        ui.horizontal_wrapped(|ui| {
+            badge(ui, "str", STR_COLOR);
+            ui.monospace(format!("\"{display}…\""));
+            ui.label(
+                egui::RichText::new(format!("[{} bytes]", len))
+                    .small()
+                    .color(egui::Color32::from_rgb(140, 140, 150)),
+            );
+            if ui.small_button("copy").clicked() {
+                ui.ctx().copy_text(s.to_string());
+            }
+        });
+        return;
+    }
+
+    // Persist expand state per (path, length) using egui's Id
     // memory. Keying on the string length keeps the bool sticky across
-    // frames as long as the value is the same, but resets if the value
-    // changes under us (subscription updates).
-    let id = egui::Id::new(("weft-explorer-string-expand", id_prefix, s.len()));
+    // frames as long as the value's length is the same; resets if the
+    // shape changes under us (subscription updates).
+    let id = egui::Id::new(("weft-explorer-string-expand", id_prefix, len));
     let mut expanded = ui
         .ctx()
         .data_mut(|d| d.get_temp::<bool>(id).unwrap_or(false));
