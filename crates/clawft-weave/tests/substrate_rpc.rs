@@ -452,6 +452,103 @@ async fn substrate_publish_rejects_top_level_write() {
 }
 
 #[tokio::test]
+async fn substrate_canonical_publish_payload_echoes_verifier_input() {
+    let (_tmp, socket, shutdown_tx) = spawn_test_daemon().await;
+
+    // The exact firmware-side worked example from the dialog file:
+    // path / value / ts / node_id known; expected canonical value
+    // JSON is alphabetically ordered.
+    let path = "substrate/n-bfc4cd/sensor/mic/rms";
+    let value = serde_json::json!({
+        "rms_db":            -26.4,
+        "peak_db":           -12.1,
+        "sample_rate":       16000,
+        "available":         true,
+        "samples_in_window": 16000,
+        "characterization":  "Rate",
+    });
+    let node_ts: u64 = 12345;
+    let node_id = "n-bfc4cd";
+
+    let r = one_shot(
+        &socket,
+        "substrate.canonical_publish_payload",
+        serde_json::json!({
+            "path": path,
+            "value": value,
+            "node_id": node_id,
+            "node_ts": node_ts,
+        }),
+    )
+    .await;
+    assert_eq!(r["ok"], serde_json::Value::Bool(true), "{r}");
+
+    let got_canonical = r["result"]["canonical_value_json"].as_str().unwrap();
+    let expected_canonical = r#"{"available":true,"characterization":"Rate","peak_db":-12.1,"rms_db":-26.4,"sample_rate":16000,"samples_in_window":16000}"#;
+    assert_eq!(got_canonical, expected_canonical);
+
+    // Length matches the worked example: 23 + path(33) + 1 + value(121)
+    // + 1 + 8 + 1 + node_id(8) = 196.
+    let got_len = r["result"]["payload_len"].as_u64().unwrap();
+    assert_eq!(got_len, 196);
+
+    // Hex prefix matches "substrate.publish.node\0" → 73 75 62 …
+    let hex = r["result"]["payload_hex"].as_str().unwrap();
+    assert!(hex.starts_with("7375627374726174652e7075626c6973682e6e6f646500"));
+    // Trailing 8 bytes are the node_id "n-bfc4cd".
+    assert!(hex.ends_with(&hex_str(node_id.as_bytes())));
+
+    let _ = shutdown_tx.send(true);
+}
+
+fn hex_str(b: &[u8]) -> String {
+    let mut s = String::with_capacity(b.len() * 2);
+    for x in b {
+        s.push_str(&format!("{x:02x}"));
+    }
+    s
+}
+
+#[tokio::test]
+async fn substrate_canonical_publish_payload_matches_real_publish_payload() {
+    let (_tmp, socket, shutdown_tx) = spawn_test_daemon().await;
+    let node = TestNode::register(&socket, 33).await;
+    let path = node.path("test/round-trip");
+    let value = serde_json::json!({"z": 1, "a": 2, "m": 3});
+    let ts = 1_700_000_000u64;
+
+    // Echo RPC: returns the bytes the daemon would verify.
+    let echo = one_shot(
+        &socket,
+        "substrate.canonical_publish_payload",
+        serde_json::json!({
+            "path": path,
+            "value": value,
+            "node_id": node.node_id,
+            "node_ts": ts,
+        }),
+    )
+    .await;
+    assert_eq!(echo["ok"], serde_json::Value::Bool(true));
+    let echoed_hex = echo["result"]["payload_hex"].as_str().unwrap().to_string();
+
+    // Compute the same bytes locally via the public kernel helper,
+    // mirroring what the daemon does on a real publish.
+    let value_bytes = serde_json::to_vec(&value).unwrap();
+    let value_str = String::from_utf8_lossy(&value_bytes);
+    let local_payload =
+        clawft_kernel::node_publish_payload(&path, &value_str, ts, &node.node_id);
+    let local_hex = hex_str(&local_payload);
+
+    assert_eq!(
+        echoed_hex, local_hex,
+        "canonical_publish_payload must match what publish_gated would verify"
+    );
+
+    let _ = shutdown_tx.send(true);
+}
+
+#[tokio::test]
 async fn substrate_publish_unknown_node_rejected() {
     let (_tmp, socket, shutdown_tx) = spawn_test_daemon().await;
 

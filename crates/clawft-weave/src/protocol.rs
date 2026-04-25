@@ -439,6 +439,51 @@ pub struct SubstratePublishParams {
     pub ts: Option<u64>,
 }
 
+/// Parameters for `substrate.canonical_publish_payload`.
+///
+/// Diagnostic RPC — runs the daemon's value-canonicalization +
+/// payload-build path and returns the exact bytes the verifier
+/// would feed to `Ed25519::verify(...)`. **No signature is
+/// checked, no actual publish happens.** Lets a remote node (or a
+/// firmware Claude) compute the same bytes locally and diff before
+/// shipping a real signed publish.
+///
+/// See `clawft_kernel::node_publish_payload` for the layout. The
+/// only kernel-side transform that's not 1:1-with-the-wire is the
+/// re-serialization of `value` through `serde_json::Value`, which
+/// alphabetizes object keys (`BTreeMap`-backed under
+/// `serde_json/preserve_order: off`). The returned
+/// `canonical_value_json` field surfaces that exact byte sequence
+/// so callers can direct-compare.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubstrateCanonicalPublishPayloadParams {
+    /// Substrate path (same as `substrate.publish.path`).
+    pub path: String,
+    /// Value (same as `substrate.publish.value`).
+    pub value: serde_json::Value,
+    /// Node id this publish would be attributed to.
+    pub node_id: String,
+    /// Timestamp (unix or boot-relative ms — opaque nonce).
+    pub node_ts: u64,
+}
+
+/// Result of `substrate.canonical_publish_payload`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubstrateCanonicalPublishPayloadResult {
+    /// Hex-encoded full payload the verifier would feed to
+    /// `Ed25519::verify(...)`. Exactly the bytes a node should
+    /// sign with its private key.
+    pub payload_hex: String,
+    /// Total length of the payload in bytes.
+    pub payload_len: usize,
+    /// The re-serialized `value` JSON the daemon would embed in
+    /// the payload. Equal to `serde_json::to_vec(&params.value)`
+    /// — keys come back alphabetically because the workspace
+    /// doesn't enable `serde_json/preserve_order`. Use this to
+    /// directly compare against your own buffer.
+    pub canonical_value_json: String,
+}
+
 /// Parameters for `substrate.notify`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubstrateNotifyParams {

@@ -212,9 +212,24 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
         }
     };
 
-    // Print boot banner
+    // Print boot banner. Lead with the build-id so every run makes
+    // which binary is executing visible in the first stdout line —
+    // disambiguates "is this the freshly-rebuilt daemon?" without
+    // needing to grep `weaver --version` separately.
     {
         let k = kernel.read().await;
+        println!(
+            "weaver {} · git {} · built {}",
+            env!("CARGO_PKG_VERSION"),
+            env!("BUILD_GIT_HASH"),
+            env!("BUILD_TIMESTAMP"),
+        );
+        info!(
+            version = env!("CARGO_PKG_VERSION"),
+            git = env!("BUILD_GIT_HASH"),
+            built = env!("BUILD_TIMESTAMP"),
+            "weaver build identity"
+        );
         print!("{}", clawft_kernel::console::boot_banner());
         print!("{}", k.boot_log().format_all());
     }
@@ -1550,6 +1565,54 @@ async fn handle_substrate_publish(
     }))
 }
 
+/// Handle `substrate.canonical_publish_payload`: diagnostic — return
+/// the exact bytes the daemon would feed to the signature verifier
+/// for a hypothetical publish. No signature check, no actual write.
+///
+/// Lets remote nodes (the ESP32 firmware especially) sanity-check
+/// their canonical-payload buffer against what the daemon expects,
+/// so byte-drift bugs become a one-shot diff instead of a guessing
+/// game.
+async fn handle_substrate_canonical_publish_payload(
+    params: serde_json::Value,
+    _kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
+) -> Response {
+    let p: crate::protocol::SubstrateCanonicalPublishPayloadParams =
+        match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => return Response::error(format!("invalid params: {e}")),
+        };
+
+    // Same canonicalization the publish handler does: re-serialize
+    // the value through serde_json::Value, which alphabetizes object
+    // keys. This is the load-bearing step — the surface the firmware
+    // most often gets wrong.
+    let value_bytes = match serde_json::to_vec(&p.value) {
+        Ok(b) => b,
+        Err(e) => return Response::error(format!("value re-serialize: {e}")),
+    };
+    let canonical_value_json = String::from_utf8_lossy(&value_bytes).into_owned();
+
+    let payload = clawft_kernel::node_publish_payload(
+        &p.path,
+        &canonical_value_json,
+        p.node_ts,
+        &p.node_id,
+    );
+
+    let payload_hex = hex_encode(&payload);
+    let payload_len = payload.len();
+
+    Response::success(
+        serde_json::to_value(crate::protocol::SubstrateCanonicalPublishPayloadResult {
+            payload_hex,
+            payload_len,
+            canonical_value_json,
+        })
+        .unwrap(),
+    )
+}
+
 /// Handle `substrate.notify`: signal-only pulse, no payload change.
 async fn handle_substrate_notify(
     params: serde_json::Value,
@@ -2213,6 +2276,9 @@ async fn dispatch(
         "substrate.read" => handle_substrate_read(params, kernel).await,
         "substrate.list" => handle_substrate_list(params, kernel).await,
         "substrate.publish" => handle_substrate_publish(params, kernel).await,
+        "substrate.canonical_publish_payload" => {
+            handle_substrate_canonical_publish_payload(params, kernel).await
+        }
         "substrate.notify" => handle_substrate_notify(params, kernel).await,
         "agent.spawn" => {
             let spawn_params: AgentSpawnParams = match serde_json::from_value(params) {

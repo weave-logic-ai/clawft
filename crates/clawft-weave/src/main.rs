@@ -138,7 +138,12 @@ async fn main() -> anyhow::Result<()> {
         },
         Commands::Init(args) => commands::init_cmd::run(args).await?,
         Commands::Version => {
-            println!("weaver {} (WeftOS)", env!("CARGO_PKG_VERSION"));
+            println!(
+                "weaver {} (WeftOS) · git {} · built {}",
+                env!("CARGO_PKG_VERSION"),
+                env!("BUILD_GIT_HASH"),
+                env!("BUILD_TIMESTAMP"),
+            );
         }
     }
 
