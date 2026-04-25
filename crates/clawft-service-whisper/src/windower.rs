@@ -12,38 +12,87 @@
 
 use serde::Deserialize;
 
-/// Inbound payload shape on `substrate/sensor/mic/pcm_chunk`.
+/// Inbound payload shape on `substrate/<node-id>/sensor/mic/pcm_chunk`.
 ///
-/// The ESP32 bridge (or the `publish_wav` test harness) encodes s16le
-/// PCM as base64 inside this JSON envelope. See journal §Q1 for the
-/// deliberate b64-in-JSON choice (vs. a binary substrate side-channel
-/// that would require `clawft-kernel::substrate_service` changes).
+/// Wire shape (from the `weftos-mic-node` ESP32 firmware):
+///
+/// ```json
+/// {
+///   "data":         "<base64>",  // s16le PCM samples
+///   "encoding":     "base64",    // currently only "base64" is supported
+///   "format":       "i16le",     // currently only "i16le" is supported
+///   "sample_rate":  16000,
+///   "channels":     1,
+///   "samples":      8000,         // count of samples in this chunk
+///   "start_ts_ms":  3807924       // boot-relative monotonic ms
+/// }
+/// ```
+///
+/// `chunk_ms` is derived as `samples * 1000 / sample_rate`. `seq` is
+/// taken from `start_ts_ms` so the transcript's `seq` field is a
+/// stable per-chunk timestamp.
+///
+/// `pcm_b64` is accepted as an alias for `data` so the older test
+/// harness (`publish_wav.rs`) still compiles unchanged.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PcmChunk {
     /// Base64-encoded signed-16-bit little-endian PCM samples.
-    pub pcm_b64: String,
+    /// Wire field name is `data`; `pcm_b64` is accepted as a legacy
+    /// alias for compatibility with the original test fixtures.
+    #[serde(alias = "pcm_b64")]
+    pub data: String,
+    /// Encoding tag — only `"base64"` is understood today.
+    #[serde(default = "default_encoding")]
+    pub encoding: String,
+    /// Sample format — only `"i16le"` is understood today.
+    #[serde(default = "default_format")]
+    pub format: String,
     /// Sample rate in Hz (whisper natively wants 16 kHz).
     pub sample_rate: u32,
     /// Channel count (whisper natively wants mono = 1).
     #[serde(default = "default_channels")]
     pub channels: u16,
-    /// Monotonically increasing sequence id from the producer. Used for
-    /// gap detection + bookkeeping (lands verbatim in the transcript
-    /// payload's `seq` field).
+    /// Number of samples in this chunk. Used to derive `chunk_ms`
+    /// when the producer doesn't declare it directly.
     #[serde(default)]
-    pub seq: u64,
-    /// Chunk duration in milliseconds (producer-declared). Combined
-    /// with accumulated chunk count to derive [`PcmWindow::start_ms`]
-    /// / [`PcmWindow::end_ms`].
-    #[serde(default = "default_chunk_ms")]
-    pub chunk_ms: u64,
+    pub samples: u64,
+    /// Producer-side timestamp the chunk started at, monotonic ms.
+    /// Lands verbatim in the transcript's `seq` field for
+    /// downstream correlation.
+    #[serde(default, alias = "seq")]
+    pub start_ts_ms: u64,
+    /// Explicit chunk duration override in ms. Optional — most
+    /// producers don't set this and let it derive from
+    /// `samples / sample_rate`. Kept for backward compatibility
+    /// with the original `publish_wav` test harness.
+    #[serde(default)]
+    pub chunk_ms: Option<u64>,
+}
+
+impl PcmChunk {
+    /// Effective chunk duration in ms.
+    /// Priority: explicit `chunk_ms` field, then derived from
+    /// `samples / sample_rate * 1000`, finally falls back to 500ms.
+    pub fn effective_chunk_ms(&self) -> u64 {
+        if let Some(ms) = self.chunk_ms {
+            return ms;
+        }
+        if self.samples > 0 && self.sample_rate > 0 {
+            (self.samples * 1000) / (self.sample_rate as u64)
+        } else {
+            500
+        }
+    }
 }
 
 fn default_channels() -> u16 {
     1
 }
-fn default_chunk_ms() -> u64 {
-    500
+fn default_encoding() -> String {
+    "base64".to_string()
+}
+fn default_format() -> String {
+    "i16le".to_string()
 }
 
 /// An emit-ready window assembled from one or more [`PcmChunk`]s.

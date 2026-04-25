@@ -36,7 +36,7 @@ use tracing::{debug, error, info, warn};
 use crate::client::{TranscribeError, WhisperClient};
 use crate::wav::write_wav;
 use crate::windower::{PcmChunk, PcmWindow, Windower};
-use crate::{SUBSTRATE_PCM_INPUT_PATH, SUBSTRATE_TRANSCRIPT_OUTPUT_PATH};
+use crate::SUBSTRATE_PCM_INPUT_PATH;
 
 /// Configuration for [`WhisperService`].
 #[derive(Debug, Clone)]
@@ -45,23 +45,32 @@ pub struct WhisperServiceConfig {
     pub window_ms: u64,
     /// Delay between a 5xx/503 response and the retry attempt.
     pub retry_backoff: Duration,
-    /// Caller identity written as the `actor_id` of the publish.
-    /// `None` treats the write as anonymous.
-    pub actor_id: Option<String>,
+    /// Node id this service publishes under. Required — every
+    /// substrate write is node-attributed under the node-identity
+    /// gate. Typically set to the daemon's own node-id (the daemon
+    /// is "the node running whisper" in the ontology); the output
+    /// path must sit under `substrate/<node_id>/...` until the
+    /// mesh-canonical gate lands.
+    pub node_id: String,
     /// Substrate path to read PCM from.
     pub input_path: String,
-    /// Substrate path to write transcripts to.
+    /// Substrate path to write transcripts to. Must start with
+    /// `substrate/<node_id>/` for the publish gate to accept it.
     pub output_path: String,
 }
 
 impl Default for WhisperServiceConfig {
     fn default() -> Self {
+        // Defaults are test-friendly. Daemon-side wiring overrides
+        // `node_id` (with the daemon's own id) and the paths (with
+        // the actual ESP32 node-id for input + the daemon's prefix
+        // for output).
         Self {
             window_ms: 2_000,
             retry_backoff: Duration::from_millis(500),
-            actor_id: Some("service-whisper".to_string()),
+            node_id: "n-test00".to_string(),
             input_path: SUBSTRATE_PCM_INPUT_PATH.to_string(),
-            output_path: SUBSTRATE_TRANSCRIPT_OUTPUT_PATH.to_string(),
+            output_path: "substrate/n-test00/derived/transcript/mic".to_string(),
         }
     }
 }
@@ -100,8 +109,11 @@ impl WhisperService {
         client: WhisperClient,
         config: WhisperServiceConfig,
     ) -> Result<Self, String> {
+        // Subscribe under the configured node id so capture-tier
+        // egress accepts the read. The egress layer requires *any*
+        // non-None caller for capture paths, not a specific role.
         let (id, rx) = substrate
-            .subscribe(config.actor_id.as_deref(), &config.input_path)
+            .subscribe(Some(&config.node_id), &config.input_path)
             .map_err(|e| format!("substrate subscribe failed: {e}"))?;
         info!(
             sub_id = id.0,
@@ -276,18 +288,31 @@ async fn handle_inference_result(
                 "lang": "en",
                 "seq": window.last_seq,
             });
-            let tick = substrate.publish(
-                config.actor_id.as_deref(),
+            // Run through the node-identity gate. Output path must
+            // sit under `substrate/<node_id>/...` (config-checked by
+            // the gate); WhisperServiceConfig builders are
+            // responsible for that. Mesh-canonical placement
+            // (`substrate/_derived/transcript/...`) requires the
+            // capability path that ships with the next gate slice.
+            match substrate.publish_gated(
+                Some(&config.node_id),
                 &config.output_path,
                 payload,
-            );
-            info!(
-                tick,
-                start_ms = window.start_ms,
-                end_ms = window.end_ms,
-                seq = window.last_seq,
-                "whisper service: transcript published"
-            );
+            ) {
+                Ok(tick) => info!(
+                    tick,
+                    start_ms = window.start_ms,
+                    end_ms = window.end_ms,
+                    seq = window.last_seq,
+                    "whisper service: transcript published"
+                ),
+                Err(e) => error!(
+                    err = %e,
+                    output_path = %config.output_path,
+                    node_id = %config.node_id,
+                    "whisper service: gate denied transcript publish"
+                ),
+            }
         }
         Err(e) => {
             error!(
@@ -324,13 +349,25 @@ fn decode_update_line(line: &[u8]) -> Option<Value> {
 }
 
 /// Decode a single [`PcmChunk`] JSON value into raw bytes + metadata.
+///
+/// Only base64 + i16le are supported today. Chunks declaring a
+/// different encoding/format are rejected with a descriptive error
+/// so future protocol changes surface loudly instead of silently
+/// dropping data.
 fn decode_pcm_chunk(value: &Value) -> Result<(Vec<u8>, u32, u16, u64, u64), String> {
     let chunk: PcmChunk = serde_json::from_value(value.clone())
         .map_err(|e| format!("not a PcmChunk: {e}"))?;
+    if chunk.encoding != "base64" {
+        return Err(format!("unsupported encoding: {:?} (want \"base64\")", chunk.encoding));
+    }
+    if chunk.format != "i16le" {
+        return Err(format!("unsupported format: {:?} (want \"i16le\")", chunk.format));
+    }
     let pcm = B64
-        .decode(chunk.pcm_b64.as_bytes())
-        .map_err(|e| format!("pcm_b64 decode: {e}"))?;
-    Ok((pcm, chunk.sample_rate, chunk.channels, chunk.seq, chunk.chunk_ms))
+        .decode(chunk.data.as_bytes())
+        .map_err(|e| format!("data b64 decode: {e}"))?;
+    let chunk_ms = chunk.effective_chunk_ms();
+    Ok((pcm, chunk.sample_rate, chunk.channels, chunk.start_ts_ms, chunk_ms))
 }
 
 #[cfg(test)]
@@ -358,12 +395,19 @@ mod tests {
         chunk_ms: u64,
         seq: u64,
     ) {
+        // Mirror the firmware wire shape: data + encoding + format
+        // + samples + start_ts_ms. `samples` is derived from the
+        // requested chunk_ms so the windower's accumulation timing
+        // stays test-deterministic.
+        let samples = (chunk_ms * 16_000) / 1000;
         let payload = json!({
-            "pcm_b64": B64.encode(pcm),
+            "data": B64.encode(pcm),
+            "encoding": "base64",
+            "format": "i16le",
             "sample_rate": 16_000,
             "channels": 1,
-            "seq": seq,
-            "chunk_ms": chunk_ms,
+            "samples": samples,
+            "start_ts_ms": seq,
         });
         substrate.publish(Some(actor_id), path, payload);
     }
@@ -428,7 +472,7 @@ mod tests {
         };
         let input_path = cfg.input_path.clone();
         let output_path = cfg.output_path.clone();
-        let actor = cfg.actor_id.clone().unwrap();
+        let actor = cfg.node_id.clone();
 
         // Pre-subscribe to the OUTPUT to catch the transcript. Must be
         // done before pumping input so we don't race the first
@@ -505,7 +549,7 @@ mod tests {
             ..Default::default()
         };
         let input_path = cfg.input_path.clone();
-        let actor = cfg.actor_id.clone().unwrap();
+        let actor = cfg.node_id.clone();
         let svc = WhisperService::spawn(substrate.clone(), client, cfg).unwrap();
 
         // Feed five 200ms windows back-to-back. Most should be dropped

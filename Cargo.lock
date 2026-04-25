@@ -1664,6 +1664,7 @@ dependencies = [
  "clawft-kernel",
  "clawft-platform",
  "clawft-rpc",
+ "clawft-service-whisper",
  "clawft-types",
  "comfy-table",
  "dirs",

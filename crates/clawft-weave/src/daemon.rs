@@ -148,6 +148,70 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
         );
     }
 
+    // Spawn the whisper STT service. Subscribes to the configured
+    // ESP32-side mic pcm_chunk path, transcribes via the local
+    // whisper.cpp HTTP service, publishes transcripts under the
+    // daemon's own node prefix.
+    //
+    // Hard-wired for now per the slice — both source-node and
+    // whisper URL come from env vars with sensible defaults.
+    // A future commit replaces this with proper service discovery
+    // and the mesh-canonical `substrate/_derived/...` placement.
+    let _whisper_handle: Option<clawft_service_whisper::WhisperService> = {
+        let source_node_id = std::env::var("WHISPER_INPUT_NODE_ID")
+            .unwrap_or_else(|_| "n-bfc4cd".to_string());
+        let whisper_url = std::env::var(clawft_service_whisper::WHISPER_SERVICE_URL_ENV)
+            .unwrap_or_else(|_| "http://127.0.0.1:8123".to_string());
+        let input_path = format!(
+            "substrate/{source_node_id}/sensor/mic/pcm_chunk"
+        );
+        let output_path = format!(
+            "substrate/{daemon}/derived/transcript/{source}/mic",
+            daemon = daemon_identity.node_id,
+            source = source_node_id,
+        );
+        let cfg = clawft_service_whisper::WhisperServiceConfig {
+            window_ms: 2_000,
+            retry_backoff: std::time::Duration::from_millis(500),
+            node_id: daemon_identity.node_id.clone(),
+            input_path: input_path.clone(),
+            output_path: output_path.clone(),
+        };
+        let client_cfg = clawft_service_whisper::WhisperConfig {
+            base_url: whisper_url.clone(),
+            ..clawft_service_whisper::WhisperConfig::default()
+        };
+        let client = match clawft_service_whisper::WhisperClient::new(client_cfg) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "whisper client init failed (continuing without STT)"
+                );
+                return Err(anyhow::anyhow!("whisper client init: {e}"));
+            }
+        };
+        let substrate = {
+            let k = kernel.read().await;
+            k.substrate_service().clone()
+        };
+        match clawft_service_whisper::WhisperService::spawn(substrate, client, cfg) {
+            Ok(svc) => {
+                info!(
+                    input = %input_path,
+                    output = %output_path,
+                    whisper_url = %whisper_url,
+                    "whisper service spawned"
+                );
+                Some(svc)
+            }
+            Err(e) => {
+                warn!(error = %e, "whisper service failed to spawn (continuing without STT)");
+                None
+            }
+        }
+    };
+
     // Print boot banner
     {
         let k = kernel.read().await;
