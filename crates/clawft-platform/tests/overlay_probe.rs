@@ -9,22 +9,29 @@
 //! the regular `cargo test -p clawft-platform` run.
 //!
 //! `set_current_dir` is a process-global side effect, so the test
-//! serializes through a [`Mutex`] and restores the prior cwd on
-//! exit. It does *not* depend on `~/.clawft/` and ignores the
+//! serializes through a [`tokio::sync::Mutex`] and restores the prior
+//! cwd on exit. It does *not* depend on `~/.clawft/` and ignores the
 //! `CLAWFT_CONFIG` env var if set.
 
 use std::env;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use clawft_platform::config_loader::load_config_raw;
 use serde_json::Value;
+use tokio::sync::Mutex;
 
 /// Process-global lock guarding the `set_current_dir` mutation
 /// across the cwd-sensitive tests below. Cargo tests run in
 /// parallel by default; without this lock concurrent overlay
 /// tests would race on cwd.
-static CWD_LOCK: Mutex<()> = Mutex::new(());
+///
+/// This is an async [`tokio::sync::Mutex`] rather than [`std::sync::Mutex`]
+/// on purpose: the guard must stay held across the `load_config_raw(...)
+/// .await` because the loader discovers `.clawft/config.json` relative to
+/// the (process-global) cwd *during* that await. A blocking std mutex held
+/// across an await point is the `clippy::await_holding_lock` foot-gun; the
+/// async mutex is the supported way to serialize an async critical section.
+static CWD_LOCK: Mutex<()> = Mutex::const_new(());
 
 /// RAII guard that snapshots cwd on construction and restores it on
 /// drop, so a test failure does not leave the test runner pointed
@@ -65,7 +72,7 @@ async fn workspace_overlay_applied_against_real_fs() {
     // Verify the cwd-relative `.clawft/config.json` Layer-3 overlay
     // surfaces in the merged JSON when load_config_raw runs against
     // a real filesystem rooted in a tempdir.
-    let _guard = CWD_LOCK.lock().expect("cwd lock");
+    let _guard = CWD_LOCK.lock().await;
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let dot_clawft = tmp.path().join(".clawft");
     std::fs::create_dir_all(&dot_clawft).expect("mkdir .clawft");
@@ -100,7 +107,7 @@ async fn workspace_overlay_applied_against_real_fs() {
 async fn workspace_overlay_skipped_when_absent_against_real_fs() {
     // No `.clawft/` in the cwd → loader returns empty/defaults; the
     // overlay must not synthesize keys.
-    let _guard = CWD_LOCK.lock().expect("cwd lock");
+    let _guard = CWD_LOCK.lock().await;
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let _cwd = CwdGuard::switch_to(tmp.path());
 
@@ -125,7 +132,7 @@ async fn workspace_overlay_skipped_when_absent_against_real_fs() {
 async fn workspace_overlay_invalid_json_is_ignored_against_real_fs() {
     // Malformed workspace JSON must not abort load_config_raw; the
     // overlay is best-effort and the loader logs + continues.
-    let _guard = CWD_LOCK.lock().expect("cwd lock");
+    let _guard = CWD_LOCK.lock().await;
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let dot_clawft = tmp.path().join(".clawft");
     std::fs::create_dir_all(&dot_clawft).expect("mkdir .clawft");
@@ -153,7 +160,7 @@ async fn workspace_overlay_keys_normalize_to_snake_case_against_real_fs() {
     // Workspace JSON written in camelCase (matches the convention used
     // in checked-in `.clawft/config.json` files) must be normalized via
     // `normalize_keys` before merging.
-    let _guard = CWD_LOCK.lock().expect("cwd lock");
+    let _guard = CWD_LOCK.lock().await;
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let dot_clawft = tmp.path().join(".clawft");
     std::fs::create_dir_all(&dot_clawft).expect("mkdir .clawft");
