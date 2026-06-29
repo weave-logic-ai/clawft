@@ -27,6 +27,8 @@
 //! [`CausalGraph`](crate::causal): it is the L2 "warm, this-run" tier. L2→L3
 //! promotion onto the durable trunk is Phase 4.
 
+use std::collections::HashSet;
+
 use dashmap::DashMap;
 use serde_json::json;
 
@@ -96,9 +98,58 @@ pub struct ScopedHit {
     pub meta: ChunkMeta,
 }
 
+/// How a grafted item's content is carried into the working set.
+///
+/// The graft is **by COW reference** — the origin chain entry is never removed.
+/// Small text rides inline; large text is referenced by its content-addressed
+/// blob hash (load via [`ArtifactStore`](crate::artifact_store::ArtifactStore));
+/// a chunk whose text was not retained in this view is a bare reference to be
+/// recovered from the chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraftContent {
+    /// Inline chunk text (small).
+    Inline(String),
+    /// RVF content-addressed blob hash (large); load via the artifact store.
+    Blob(String),
+    /// Indexed but text not retained here; recover from the origin chain.
+    Reference,
+}
+
+/// One item grafted into the working set (ADR-058 Phase 3.2).
+///
+/// Keyed by chain sequence and carrying a verifiable provenance backref
+/// (`chain_seq` + `content_hash`): the agent can produce the witness chain for
+/// any grafted context.
+#[derive(Debug, Clone)]
+pub struct GraftedItem {
+    /// ExoChain sequence — the universal key / provenance backref.
+    pub chain_seq: u64,
+    /// BLAKE3 content identity — dedup key + provenance.
+    pub content_hash: String,
+    /// Originating event kind.
+    pub kind: String,
+    /// Causal-model state of the grafted node.
+    pub state: NodeState,
+    /// Similarity score that selected this item (higher is closer).
+    pub score: f32,
+    /// COW reference to the item's content.
+    pub content: GraftContent,
+}
+
 /// Compute the content-addressed identity of a chunk's text.
 pub fn content_hash(text: &str) -> String {
     blake3::hash(text.as_bytes()).to_hex().to_string()
+}
+
+/// Resolve a chunk's content into a COW reference (blob hash > inline > bare ref).
+fn graft_content(meta: &ChunkMeta) -> GraftContent {
+    if let Some(ref h) = meta.blob_hash {
+        GraftContent::Blob(h.clone())
+    } else if let Some(ref t) = meta.inline {
+        GraftContent::Inline(t.clone())
+    } else {
+        GraftContent::Reference
+    }
 }
 
 /// A session-scoped, ephemeral semantic view over this conversation's chain
@@ -211,6 +262,44 @@ impl SessionView {
             })
             .collect()
     }
+
+    /// Graft the `top_k` most relevant chunks into the working set (ADR-058
+    /// Phase 3.2).
+    ///
+    /// Scoped query → candidate branches → **COW-reference** graft: returns
+    /// chain-sequence-keyed [`GraftedItem`]s with provenance backrefs
+    /// (`chain_seq` + `content_hash`) and a content reference (inline / blob /
+    /// bare). Candidates are **deduplicated by content hash** — identical tool
+    /// outputs or repeated file reads collapse to one item (the highest-scoring
+    /// occurrence). The origin is never removed; this only references it.
+    pub fn graft(&self, query: &[f32], top_k: usize) -> Vec<GraftedItem> {
+        if top_k == 0 {
+            return Vec::new();
+        }
+        // Over-fetch so dedup-by-content does not starve the result below top_k.
+        let raw = self.query(query, top_k.saturating_mul(2));
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut out: Vec<GraftedItem> = Vec::with_capacity(top_k);
+        // `query` returns hits sorted by descending score, so the first time a
+        // content hash is seen is its best-scoring occurrence.
+        for hit in raw {
+            if !seen.insert(hit.meta.content_hash.clone()) {
+                continue; // duplicate content — already grafted at a higher score
+            }
+            out.push(GraftedItem {
+                chain_seq: hit.chain_seq,
+                content_hash: hit.meta.content_hash.clone(),
+                kind: hit.meta.kind.clone(),
+                state: hit.meta.state,
+                score: hit.score,
+                content: graft_content(&hit.meta),
+            });
+            if out.len() == top_k {
+                break;
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -311,5 +400,63 @@ mod tests {
         view.insert_vector(axis_vec(8, 0), meta(7, "second"));
         assert_eq!(view.len(), 1);
         assert_eq!(view.chunk(7).unwrap().inline.as_deref(), Some("second"));
+    }
+
+    // ── 3.2 graft API ────────────────────────────────────────────────
+
+    #[test]
+    fn graft_returns_chain_seq_keyed_items_with_provenance() {
+        let view = SessionView::new("s1", 8);
+        view.insert_vector(axis_vec(8, 0), meta(42, "alpha"));
+        let items = view.graft(&axis_vec(8, 0), 1);
+        assert_eq!(items.len(), 1);
+        let it = &items[0];
+        assert_eq!(it.chain_seq, 42); // chain-sequence keyed
+        assert_eq!(it.content_hash, content_hash("alpha")); // provenance backref
+        assert_eq!(it.kind, "agent.chat.turn");
+        assert_eq!(it.content, GraftContent::Inline("alpha".into()));
+    }
+
+    /// Identical content at two chain sequences dedups to a single graft.
+    #[test]
+    fn graft_dedups_by_content_hash() {
+        let view = SessionView::new("s1", 8);
+        // Same text "dup" (same content_hash), identical vectors, two seqs.
+        view.insert_vector(axis_vec(8, 0), meta(1, "dup"));
+        view.insert_vector(axis_vec(8, 0), meta(2, "dup"));
+        // A distinct chunk so the index is non-trivial.
+        view.insert_vector(axis_vec(8, 5), meta(3, "other"));
+        assert_eq!(view.len(), 3);
+
+        let items = view.graft(&axis_vec(8, 0), 5);
+        let dup_hits: Vec<_> = items
+            .iter()
+            .filter(|i| i.content_hash == content_hash("dup"))
+            .collect();
+        assert_eq!(dup_hits.len(), 1, "duplicate content must collapse to one");
+        assert!(dup_hits[0].chain_seq == 1 || dup_hits[0].chain_seq == 2);
+    }
+
+    #[test]
+    fn graft_externalized_chunk_is_blob_ref() {
+        let view = SessionView::new("s1", 8);
+        let m = ChunkMeta {
+            chain_seq: 9,
+            content_hash: content_hash("huge payload"),
+            state: NodeState::Frontier,
+            kind: "tool.output".into(),
+            blob_hash: Some("blake3hash".into()),
+            inline: None,
+        };
+        view.insert_vector(axis_vec(8, 0), m);
+        let items = view.graft(&axis_vec(8, 0), 1);
+        assert_eq!(items[0].content, GraftContent::Blob("blake3hash".into()));
+    }
+
+    #[test]
+    fn graft_top_k_zero_is_empty() {
+        let view = SessionView::new("s1", 8);
+        view.insert_vector(axis_vec(8, 0), meta(1, "a"));
+        assert!(view.graft(&axis_vec(8, 0), 0).is_empty());
     }
 }
