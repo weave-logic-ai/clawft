@@ -51,6 +51,7 @@ pub mod substrate_sink;
 pub use kernel_gate::KernelEffectGate;
 pub use protocol::{AgentChatMessage, AgentChatParams, AgentChatResult, AgentChatToolCall};
 pub use service::{AgentLoopHandle, AgentService, AgentServiceError};
+pub use session_tier::SessionTier;
 pub use substrate_budget::SubstrateBudgetStore;
 pub use substrate_sink::{
     AudioRef, HEARTBEAT_PERIOD, KernelSubstrateClient, KernelTurnAnchor, NoopTurnAnchor,
