@@ -81,6 +81,15 @@ impl SessionTier {
         self
     }
 
+    /// Pre-warm the embedder (ADR-058 Phase 5.3). Runs one throwaway embed so
+    /// the model graph + runtime are hot before the first real graft — the
+    /// daemon calls this at startup (mirrors the 6.2 STT pre-warm) so turn 1 of
+    /// the first conversation doesn't pay the embedder's first-inference cost.
+    /// Best-effort; safe to call on the Mock fallback (a cheap no-cost embed).
+    pub async fn warm(&self) {
+        self.embedder.warm().await;
+    }
+
     /// Get or create the session view for `conv_id`, sized to the embedder.
     fn view(&self, conv_id: &str) -> Arc<SessionView> {
         self.views

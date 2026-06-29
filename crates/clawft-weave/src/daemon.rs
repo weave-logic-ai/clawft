@@ -980,9 +980,16 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                     let tier = Arc::new(clawft_service_agent::SessionTier::new(
                         embedder, chain, None,
                     ));
+                    // ADR-058 Phase 5.3: pre-warm the embedder at startup (one
+                    // throwaway embed) so the first conversation's first graft
+                    // doesn't pay the model's first-inference cost — mirrors the
+                    // 6.2 STT pre-warm. Best-effort; cheap on the Mock fallback.
+                    tier.warm().await;
                     anchor = anchor.with_session_tier(tier.clone());
                     session_tier = Some(tier);
-                    info!("agent.chat L2 session tier wired (index + graft active)");
+                    info!(
+                        "agent.chat L2 session tier wired (index + graft active, embedder pre-warmed)"
+                    );
                 }
                 Arc::new(anchor)
             } else {
