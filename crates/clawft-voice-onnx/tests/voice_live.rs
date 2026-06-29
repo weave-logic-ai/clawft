@@ -5,18 +5,23 @@
 //! cargo test -p clawft-voice-onnx --features onnx -- --ignored --nocapture
 //! ```
 //!
+//! - parakeet-tdt-0.6b: place the sherpa-onnx bundle under
+//!   `.weftos/models/parakeet/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/`
+//!   (or set `WEFTOS_PARAKEET_DIR`).
 //! - smart-turn-v3: place `smart-turn-v3.1-cpu.onnx` under
 //!   `.weftos/models/smart-turn/` (or set `WEFTOS_SMART_TURN_MODEL`).
 //!
 //! The fixture `tests/fixtures/jfk_en.wav` is a committed 24 kHz mono clip of
-//! the JFK line ("ask not what your country can do for you …").
+//! the JFK line ("ask not what your country can do for you …"); the backends
+//! resample/window it internally.
 
 #![cfg(feature = "onnx")]
 
 use std::path::PathBuf;
 
+use clawft_channels::voice::stt::{SttBackend, Utterance};
 use clawft_channels::voice::turn::EndpointModel;
-use clawft_voice_onnx::SmartTurnEndpoint;
+use clawft_voice_onnx::{ParakeetStt, SmartTurnEndpoint};
 
 fn fixtures() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
@@ -51,6 +56,29 @@ fn to_16k(s: &[i16], from: u32) -> Vec<i16> {
             (a + (b - a) * f).round() as i16
         })
         .collect()
+}
+
+#[tokio::test]
+#[ignore = "requires parakeet ONNX bundle under .weftos/models/parakeet/"]
+async fn parakeet_transcribes_fixture() {
+    let dir = models().join("parakeet/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8");
+    let stt = ParakeetStt::with_dir(&dir);
+    assert!(stt.is_runtime_available(), "parakeet model failed to load");
+    stt.warm().await.unwrap();
+
+    let (samples, sr) = read_wav("jfk_en.wav");
+    let text = stt
+        .transcribe(&Utterance {
+            samples,
+            sample_rate: sr,
+        })
+        .await
+        .unwrap()
+        .to_lowercase();
+    // The TDT decode must recover the salient content words.
+    for w in ["country", "ask", "you"] {
+        assert!(text.contains(w), "transcript missing {w:?}: {text:?}");
+    }
 }
 
 #[tokio::test]

@@ -17,6 +17,10 @@
 //!   encoder + linear head), satisfying
 //!   [`clawft_channels::voice::turn::EndpointModel`]. Front-end: [`WhisperMel`]
 //!   (Slaney log-mel). Falls back to the no-model heuristic without weights.
+//! - [`ParakeetStt`] — parakeet-tdt-0.6b speech-to-text (NeMo FastConformer +
+//!   TDT transducer greedy decode), satisfying
+//!   [`clawft_channels::voice::stt::SttBackend`]. Front-end: [`NemoMel`]
+//!   (NeMo 128-dim log-mel).
 //!
 //! # Feature flags
 //!
@@ -26,10 +30,16 @@
 
 pub mod ecapa;
 pub mod fbank;
+pub mod nemo_mel;
+pub mod parakeet;
+#[cfg(feature = "onnx")]
+mod parakeet_tdt;
 pub mod smart_turn;
 pub mod whisper_mel;
 
 pub use ecapa::{EMBED_DIM, EcapaEmbedder};
 pub use fbank::{Fbank, N_MELS, SAMPLE_RATE};
+pub use nemo_mel::NemoMel;
+pub use parakeet::ParakeetStt;
 pub use smart_turn::SmartTurnEndpoint;
 pub use whisper_mel::WhisperMel;
