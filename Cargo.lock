@@ -1147,6 +1147,7 @@ dependencies = [
  "clawft-services",
  "clawft-tools",
  "clawft-types",
+ "clawft-voice-talk",
  "comfy-table",
  "cron",
  "dirs",
