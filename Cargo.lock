@@ -1649,6 +1649,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "clawft-voice-talk"
+version = "0.6.20"
+dependencies = [
+ "async-trait",
+ "clawft-channels",
+ "clawft-kernel",
+ "clawft-llm",
+ "clawft-voice-aec",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "clawft-wasm"
 version = "0.6.20"
 dependencies = [
