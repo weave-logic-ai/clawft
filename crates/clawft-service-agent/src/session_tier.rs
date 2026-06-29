@@ -157,6 +157,43 @@ impl SessionTier {
         pruned
     }
 
+    /// Conversation ids with a live session view (ADR-058 Phase 5, deferred
+    /// step 4). Lets the daemon enumerate active conversations — e.g. an
+    /// idle-conversation reaper, or a shutdown sweep that promotes each before
+    /// the views are dropped.
+    pub fn active_conversations(&self) -> Vec<String> {
+        self.views.iter().map(|e| e.key().clone()).collect()
+    }
+
+    /// Concatenate this conversation's retained (inline) chunk text, oldest
+    /// first, capped at `max_bytes`, as the postmortem prompt source. Returns
+    /// `None` for an unknown conversation and `Some("")` when no chunk text was
+    /// retained inline (large chunks live as content-addressed blobs). The
+    /// daemon feeds this to the LLM postmortem that produces the durable fact.
+    pub fn conversation_digest(&self, conv_id: &str, max_bytes: usize) -> Option<String> {
+        let view = self.existing_view(conv_id)?;
+        let mut digest = String::new();
+        for seq in view.chain_seqs() {
+            let Some(meta) = view.chunk(seq) else {
+                continue;
+            };
+            let Some(text) = meta.inline else { continue };
+            if digest.len() + text.len() + 1 > max_bytes {
+                break;
+            }
+            digest.push_str(&text);
+            digest.push('\n');
+        }
+        Some(digest)
+    }
+
+    /// Drop a conversation's view without promoting (conversation ended with
+    /// nothing durable to keep). Returns `true` if a view was removed. The chain
+    /// remains the source of truth — the ephemeral L2 view is simply discarded.
+    pub fn drop_view(&self, conv_id: &str) -> bool {
+        self.views.remove(conv_id).is_some()
+    }
+
     /// Run the session-end postmortem and promote durable facts to the trunk
     /// (ADR-058 Phase 4.2/4.3), then drop the view. Returns the
     /// `memory.promote` chain sequence if anything was promoted.

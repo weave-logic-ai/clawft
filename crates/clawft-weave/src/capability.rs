@@ -90,6 +90,7 @@ pub fn required_capability(method: &str) -> Capability {
         // ── Chat: LLM-conversational verbs ──────────────────────────
         "agent.chat" => Capability::Chat,
         "agent.chat.cancel" => Capability::Chat,
+        "agent.chat.end" => Capability::Chat,
         "llm.prompt" => Capability::Chat,
 
         // ── Read: everything else explicitly classified ─────────────
