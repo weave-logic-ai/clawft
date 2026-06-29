@@ -210,6 +210,10 @@ tiktoken-rs = "0.6"
 # ONNX Runtime (embedding inference)
 ort = { version = "2.0.0-rc.12", default-features = false }
 ndarray = "0.16"
+# Qwen3 BPE tokenizer (ADR-059 embedder; pure-Rust fancy-regex, no oniguruma C dep)
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
+# fp16 scalar (ADR-059 decoder-ONNX empty past_key_values, dtype-matched to model)
+half = "2"
 
 # Noise Protocol (mesh transport encryption)
 snow = "0.10"
