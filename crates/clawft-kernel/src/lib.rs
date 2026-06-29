@@ -68,6 +68,8 @@ pub mod causal_predict;
 #[cfg(feature = "ecc")]
 pub mod cognitive_tick;
 #[cfg(feature = "ecc")]
+pub mod context_graft;
+#[cfg(feature = "ecc")]
 pub mod crossref;
 #[cfg(feature = "ecc")]
 pub mod democritus;
