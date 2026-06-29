@@ -201,6 +201,12 @@ ciborium = "0.2"
 # HNSW approximate nearest neighbor search
 instant-distance = "0.6"
 
+# Real BPE tokenizer for context-window budgeting (ADR-058 Phase 2.1).
+# Bundles GPT-family vocabs (o200k_base) so token counts are real subword
+# counts with no model download — a stand-in for the served model's
+# tokenizer until the Hermes tokenizer.json is fetched (then pluggable).
+tiktoken-rs = "0.6"
+
 # ONNX Runtime (embedding inference)
 ort = { version = "2.0.0-rc.12", default-features = false }
 ndarray = "0.16"
