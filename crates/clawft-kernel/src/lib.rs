@@ -78,6 +78,8 @@ pub mod democritus;
 #[cfg(feature = "ecc")]
 pub mod embedding;
 #[cfg(feature = "ecc")]
+pub mod floor;
+#[cfg(feature = "ecc")]
 pub mod embedding_onnx;
 #[cfg(feature = "ecc")]
 pub mod embedding_qwen3;
@@ -353,6 +355,11 @@ pub use hnsw_eml::{
 #[cfg(feature = "ecc")]
 pub use hnsw_service::{
     HnswSearchResult, HnswService, HnswServiceConfig, MultiKey, MultiKeyConfig, entity_search_keys,
+};
+#[cfg(feature = "ecc")]
+pub use floor::{
+    ContentReadiness, FloorCandidate, FloorDecision, FloorState, UrgencySignals, compute_urgency,
+    contending_count, crowd_density, evaluate_floor,
 };
 #[cfg(feature = "ecc")]
 pub use impulse::{ImpulseQueue, ImpulseType};
