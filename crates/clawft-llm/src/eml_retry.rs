@@ -314,6 +314,6 @@ mod tests {
     #[test]
     fn hour_of_day_in_range() {
         let h = hour_of_day_normalized();
-        assert!(h >= 0.0 && h < 1.0, "hour should be in [0, 1), got {h}");
+        assert!((0.0..1.0).contains(&h), "hour should be in [0, 1), got {h}");
     }
 }
