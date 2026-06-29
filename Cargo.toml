@@ -60,6 +60,12 @@ members = [
     # never pulls `ort` — real inference lives behind the `onnx` feature.
     # Implements the clawft-channels SpeakerEmbedder seam without cpal/llm/kernel.
     "crates/clawft-voice-onnx",
+    # Native-Rust TTS node-renderers (ADR-062 Phase 4): SNAC-24kHz decode,
+    # Orpheus-over-Ollama slow layer, Kokoro fast layer — no Python. Default
+    # features are EMPTY so the workspace build never pulls `ort`; real SNAC /
+    # Kokoro inference lives behind the `onnx` feature. Implements the
+    # clawft-channels TtsEngine seam without cpal/llm/kernel.
+    "crates/clawft-voice-tts",
 ]
 exclude = [
     "gui/src-tauri",

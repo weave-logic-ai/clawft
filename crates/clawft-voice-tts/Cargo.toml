@@ -1,0 +1,48 @@
+[package]
+name = "clawft-voice-tts"
+version.workspace = true
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Native-Rust TTS node-renderers for WeftOS (SNAC-24kHz decode, Orpheus-over-Ollama slow layer, Kokoro fast layer) — no Python"
+keywords = ["voice", "tts", "orpheus", "snac", "onnx"]
+categories = ["multimedia::audio"]
+
+[features]
+# Default build is weights-free: the token-grouping / frame math + trait wiring
+# compile and unit-test without ONNX Runtime or any model file. `onnx` opts into
+# `ort` for real SNAC + Kokoro inference (mirrors clawft-voice-onnx's gate).
+default = []
+onnx = ["dep:ort"]
+
+[dependencies]
+# The TtsEngine / TtsChunk / TtsTier traits + VoiceError live in clawft-channels;
+# this is a bridge crate that implements that seam without cpal/llm/kernel.
+clawft-channels = { workspace = true, features = ["voice"] }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+# Orpheus token-gen over the Ollama HTTP streaming API. `stream` adds
+# Response::bytes_stream on top of the workspace reqwest (json + rustls-tls).
+reqwest = { workspace = true, features = ["stream"] }
+futures-util = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+# Workspace pins ort with default-features = false; re-list the default set
+# (matches clawft-voice-onnx) so real SNAC / Kokoro inference works under `onnx`.
+ort = { workspace = true, optional = true, features = [
+    "std",
+    "ndarray",
+    "tracing",
+    "download-binaries",
+    "tls-native",
+    "copy-dylibs",
+    "api-24",
+] }
+
+[dev-dependencies]
+# Streaming Ollama mock for the deterministic Orpheus token→chunk test.
+wiremock = "0.6"

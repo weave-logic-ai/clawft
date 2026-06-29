@@ -1672,10 +1672,27 @@ dependencies = [
  "clawft-kernel",
  "clawft-llm",
  "clawft-voice-aec",
+ "clawft-voice-tts",
  "serde_json",
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "clawft-voice-tts"
+version = "0.6.20"
+dependencies = [
+ "async-trait",
+ "clawft-channels",
+ "futures-util",
+ "ort",
+ "reqwest 0.12.28",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "wiremock",
 ]
 
 [[package]]
