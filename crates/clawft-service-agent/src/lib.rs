@@ -44,6 +44,7 @@
 pub mod kernel_gate;
 pub mod protocol;
 pub mod service;
+pub mod session_tier;
 pub mod substrate_budget;
 pub mod substrate_sink;
 
