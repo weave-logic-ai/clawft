@@ -237,8 +237,8 @@ mod tests {
             "uptime_s": 12_345_u64,
             "tick": 42_u64,
         });
-        let _ = ctx.run(raw_input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = ctx.run_ui(raw_input, |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
                 HealthViewer::paint(ui, "substrate/n-bfc4cd/health", &v);
             });
         });

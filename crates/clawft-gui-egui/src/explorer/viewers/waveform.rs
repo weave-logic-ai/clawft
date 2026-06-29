@@ -265,8 +265,8 @@ mod tests {
         let ctx = egui::Context::default();
         let raw_input = egui::RawInput::default();
         let v = sine_fixture(128, 16000.0);
-        let _ = ctx.run(raw_input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = ctx.run_ui(raw_input, |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
                 WaveformViewer::paint(ui, "substrate/sensor/mic/waveform", &v);
             });
         });
@@ -280,8 +280,8 @@ mod tests {
             "samples": [0.0, 0.0, 0.0, 0.0],
             "sample_rate": 8000,
         });
-        let _ = ctx.run(raw_input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = ctx.run_ui(raw_input, |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
                 WaveformViewer::paint(ui, "test/flat", &v);
             });
         });

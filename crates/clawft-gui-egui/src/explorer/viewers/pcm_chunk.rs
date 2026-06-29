@@ -410,7 +410,7 @@ mod tests {
 
     #[test]
     fn priority_beats_json_fallback() {
-        assert!(PRIORITY > 1);
+        const { assert!(PRIORITY > 1) };
     }
 
     // ─── Decode + decimation tests ───────────────────────────────────
@@ -525,8 +525,8 @@ mod tests {
             "samples": 8192,
             "start_ts_ms": 99,
         });
-        let _ = ctx.run(raw_input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = ctx.run_ui(raw_input, |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
                 PcmChunkViewer::paint(ui, "substrate/n-x/sensor/mic/pcm_chunk", &value);
             });
         });
@@ -547,8 +547,8 @@ mod tests {
             "samples": 0,
             "start_ts_ms": 99,
         });
-        let _ = ctx.run(raw_input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = ctx.run_ui(raw_input, |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
                 PcmChunkViewer::paint(ui, "broken", &value);
             });
         });

@@ -485,8 +485,10 @@ mod tests {
 
     #[test]
     fn tree_filters_name_query_substring() {
-        let mut f = TreeFilters::default();
-        f.name_query = "MIC".into();
+        let f = TreeFilters {
+            name_query: "MIC".into(),
+            ..Default::default()
+        };
         assert!(f.any_active());
         // Build a minimal Explorer with no activity to drive `passes`.
         let ex = Explorer::default();
@@ -507,8 +509,10 @@ mod tests {
 
     #[test]
     fn tree_filters_sensors_only() {
-        let mut f = TreeFilters::default();
-        f.sensors_only = true;
+        let f = TreeFilters {
+            sensors_only: true,
+            ..Default::default()
+        };
         let ex = Explorer::default();
         let mic = TreeNode {
             path: "substrate/n-bfc4cd/sensor/mic".into(),
@@ -526,8 +530,10 @@ mod tests {
 
     #[test]
     fn tree_filters_hide_leaves() {
-        let mut f = TreeFilters::default();
-        f.hide_leaves = true;
+        let f = TreeFilters {
+            hide_leaves: true,
+            ..Default::default()
+        };
         let ex = Explorer::default();
         let leaf = TreeNode {
             path: "substrate/n-bfc4cd/health".into(),
@@ -545,8 +551,10 @@ mod tests {
 
     #[test]
     fn tree_filters_active_only_blocks_quiet_paths() {
-        let mut f = TreeFilters::default();
-        f.active_only = true;
+        let f = TreeFilters {
+            active_only: true,
+            ..Default::default()
+        };
         let ex = Explorer::default();
         // Nothing's been recorded as active — the "active only" filter
         // should hide every row.
@@ -561,8 +569,10 @@ mod tests {
     #[test]
     fn tree_filters_active_only_admits_recently_active_path() {
         use ::web_time::Instant;
-        let mut f = TreeFilters::default();
-        f.active_only = true;
+        let f = TreeFilters {
+            active_only: true,
+            ..Default::default()
+        };
         let mut ex = Explorer::default();
         let path = "substrate/n-bfc4cd/sensor/mic".to_string();
         ex.activity.insert(path.clone(), Instant::now());
