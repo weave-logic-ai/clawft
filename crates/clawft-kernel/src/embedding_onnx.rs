@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 #[cfg(feature = "onnx-embeddings")]
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -348,9 +348,10 @@ pub struct OnnxEmbeddingProvider {
     #[cfg(feature = "onnx-embeddings")]
     tokenizer: Option<WordPieceTokenizer>,
     /// ONNX runtime session (only present when `onnx-embeddings` feature is active
-    /// and model was loaded successfully).
+    /// and model was loaded successfully). Wrapped in a `Mutex` because ort's
+    /// `Session::run` takes `&mut self` in 2.0-rc.12.
     #[cfg(feature = "onnx-embeddings")]
-    session: Option<Arc<ort::Session>>,
+    session: Option<Arc<Mutex<ort::session::Session>>>,
 }
 
 impl OnnxEmbeddingProvider {
@@ -432,14 +433,14 @@ impl OnnxEmbeddingProvider {
     #[cfg(feature = "onnx-embeddings")]
     fn try_load_tokenizer(model_path: &Path, max_tokens: usize) -> Option<WordPieceTokenizer> {
         for path in vocab_search_paths(model_path) {
-            if path.exists() {
-                if let Some(tok) = WordPieceTokenizer::load(&path) {
-                    // max_tokens here refers to the token count limit; for
-                    // WordPiece the max_length (including [CLS]/[SEP]) is
-                    // max_tokens + 2, capped at 512 for BERT models.
-                    let max_len = (max_tokens + 2).min(512);
-                    return Some(tok.with_max_length(max_len));
-                }
+            if path.exists()
+                && let Some(tok) = WordPieceTokenizer::load(&path)
+            {
+                // max_tokens here refers to the token count limit; for
+                // WordPiece the max_length (including [CLS]/[SEP]) is
+                // max_tokens + 2, capped at 512 for BERT models.
+                let max_len = (max_tokens + 2).min(512);
+                return Some(tok.with_max_length(max_len));
             }
         }
         tracing::debug!(
@@ -452,7 +453,7 @@ impl OnnxEmbeddingProvider {
 
     /// Attempt to load an ONNX runtime session from the model path.
     #[cfg(feature = "onnx-embeddings")]
-    fn try_load_session(model_path: &PathBuf) -> Option<Arc<ort::Session>> {
+    fn try_load_session(model_path: &PathBuf) -> Option<Arc<Mutex<ort::session::Session>>> {
         if !model_path.exists() {
             tracing::debug!(
                 "ONNX model not found at {}, using hash fallback",
@@ -460,10 +461,12 @@ impl OnnxEmbeddingProvider {
             );
             return None;
         }
-        match ort::Session::builder().and_then(|builder| builder.commit_from_file(model_path)) {
+        match ort::session::Session::builder()
+            .and_then(|mut builder| builder.commit_from_file(model_path))
+        {
             Ok(session) => {
                 tracing::info!("ONNX session loaded from {}", model_path.display());
-                Some(Arc::new(session))
+                Some(Arc::new(Mutex::new(session)))
             }
             Err(e) => {
                 tracing::warn!("Failed to load ONNX session: {e}, using hash fallback");
@@ -509,8 +512,6 @@ impl OnnxEmbeddingProvider {
     /// attention_mask) to produce a fixed-size embedding.
     #[cfg(feature = "onnx-embeddings")]
     fn onnx_embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
-        use ndarray::Array2;
-
         let session = self
             .session
             .as_ref()
@@ -525,9 +526,13 @@ impl OnnxEmbeddingProvider {
             } else {
                 // Legacy hash-based fallback (produces structurally valid but
                 // semantically meaningless token IDs).
-                tracing::warn_once!(
-                    "ONNX inference without WordPiece vocab — embeddings will not be semantic"
-                );
+                static WARNED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    tracing::warn!(
+                        "ONNX inference without WordPiece vocab — embeddings will not be semantic"
+                    );
+                }
                 let tokens = simple_tokenize(text, self.max_tokens);
                 let seq_len = tokens.len().max(1) + 2; // +2 for [CLS] and [SEP]
 
@@ -548,50 +553,59 @@ impl OnnxEmbeddingProvider {
             };
 
         let seq_len = input_ids.len();
+        let shape = vec![1_i64, seq_len as i64];
 
-        let input_ids_arr = Array2::from_shape_vec((1, seq_len), input_ids)
-            .map_err(|e| EmbeddingError::BackendError(format!("shape error: {e}")))?;
-        let attention_mask_arr = Array2::from_shape_vec((1, seq_len), attention_mask.clone())
-            .map_err(|e| EmbeddingError::BackendError(format!("shape error: {e}")))?;
-        let token_type_ids_arr = Array2::from_shape_vec((1, seq_len), token_type_ids)
-            .map_err(|e| EmbeddingError::BackendError(format!("shape error: {e}")))?;
+        // Build tensors via the (shape, Vec) form so we don't depend on ort's
+        // ndarray `From` impls (the `ort::inputs!` `name => value` arm wants a
+        // value that is `Into<SessionInputValue>`, which `Tensor<T>` satisfies).
+        let input_ids_t = ort::value::Tensor::from_array((shape.clone(), input_ids))
+            .map_err(|e| EmbeddingError::BackendError(format!("input_ids tensor: {e}")))?;
+        let attention_mask_t =
+            ort::value::Tensor::from_array((shape.clone(), attention_mask.clone()))
+                .map_err(|e| EmbeddingError::BackendError(format!("attention_mask tensor: {e}")))?;
+        let token_type_ids_t = ort::value::Tensor::from_array((shape, token_type_ids))
+            .map_err(|e| EmbeddingError::BackendError(format!("token_type_ids tensor: {e}")))?;
 
         let inputs = ort::inputs![
-            "input_ids" => input_ids_arr,
-            "attention_mask" => attention_mask_arr,
-            "token_type_ids" => token_type_ids_arr,
-        ]
-        .map_err(|e| EmbeddingError::BackendError(format!("input error: {e}")))?;
+            "input_ids" => input_ids_t,
+            "attention_mask" => attention_mask_t,
+            "token_type_ids" => token_type_ids_t,
+        ];
 
-        let outputs = session
+        // `run` needs `&mut Session`; the std mutex is held only across the
+        // synchronous inference call (no await in between).
+        let mut guard = session
+            .lock()
+            .map_err(|_| EmbeddingError::BackendError("ONNX session mutex poisoned".to_string()))?;
+        let outputs = guard
             .run(inputs)
             .map_err(|e| EmbeddingError::BackendError(format!("inference error: {e}")))?;
 
         // Extract the last_hidden_state output and mean-pool across the sequence.
         // Output shape: (1, seq_len, hidden_dim)
-        let output_tensor = outputs
-            .get("last_hidden_state")
-            .or_else(|| outputs.iter().next().map(|(_, v)| v))
-            .ok_or_else(|| EmbeddingError::BackendError("no output tensor".to_string()))?;
+        let output_tensor = match outputs.get("last_hidden_state") {
+            Some(v) => v,
+            None if outputs.len() > 0 => &outputs[0],
+            None => {
+                return Err(EmbeddingError::BackendError("no output tensor".to_string()));
+            }
+        };
 
-        let tensor = output_tensor
+        // rc.12 returns (shape, contiguous slice).
+        let (out_shape, data) = output_tensor
             .try_extract_tensor::<f32>()
             .map_err(|e| EmbeddingError::BackendError(format!("extract error: {e}")))?;
 
-        let shape = tensor.shape();
-        if shape.len() < 2 {
+        if out_shape.len() < 2 {
             return Err(EmbeddingError::BackendError(format!(
-                "unexpected output shape: {shape:?}"
+                "unexpected output shape: {out_shape:?}"
             )));
         }
-        let hidden_dim = *shape.last().unwrap();
-        let seq = shape[1];
+        let hidden_dim = out_shape[out_shape.len() - 1] as usize;
+        let seq = out_shape[1] as usize;
 
         // Attention-masked mean pooling: only average over non-padding tokens.
         let mut embedding = vec![0.0f32; hidden_dim];
-        let data = tensor
-            .as_slice()
-            .ok_or_else(|| EmbeddingError::BackendError("tensor not contiguous".to_string()))?;
 
         let mut active_count: f32 = 0.0;
         for s in 0..seq {
