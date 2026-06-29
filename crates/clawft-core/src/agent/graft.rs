@@ -128,4 +128,37 @@ mod tests {
         let p = NullGraftProvider;
         assert!(p.graft_block("c1", "q").await.is_empty());
     }
+
+    /// ADR-058 Phase 5.3 (deterministic precondition): grafting must NOT disturb
+    /// the stable head, so its prefix-KV stays reusable turn-to-turn even as the
+    /// graft block (and tail) change. The live latency / actual KV-reuse /
+    /// cosine-parity measurements are #[ignore]'d against Hermes :8090.
+    #[test]
+    fn graft_preserves_head_bytes_for_kv_reuse() {
+        let head = || {
+            vec![
+                msg("system", "sys prompt"),
+                msg("system", "# Relevant Memory"),
+            ]
+        };
+
+        // Turn 1: head + one user turn, grafted with block A.
+        let mut t1 = head();
+        t1.push(msg("user", "q1"));
+        splice_graft_block(&mut t1, vec![msg("system", "graft A")]);
+
+        // Turn 2: same head, longer tail, grafted with a DIFFERENT block.
+        let mut t2 = head();
+        t2.push(msg("user", "q1"));
+        t2.push(msg("assistant", "a1"));
+        t2.push(msg("user", "q2"));
+        splice_graft_block(&mut t2, vec![msg("system", "graft B is different")]);
+
+        // The leading system head is byte-identical across turns -> KV reusable.
+        assert_eq!(t1[0].content, t2[0].content);
+        assert_eq!(t1[1].content, t2[1].content);
+        // The graft sits AFTER the head (index 2), never before it.
+        assert_eq!(t1[2].content, "graft A");
+        assert_eq!(t2[2].content, "graft B is different");
+    }
 }

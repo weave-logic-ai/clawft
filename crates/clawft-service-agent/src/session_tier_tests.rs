@@ -135,3 +135,52 @@ async fn prune_noop_when_under_keep() {
     append_and_index(&tier, &chain, "c", "only one").await;
     assert_eq!(tier.prune_to_recent("c", 5), 0);
 }
+
+// ── 5.3 budget validation ────────────────────────────────────────────
+
+/// Live hot-path budget for the per-turn graft query (embed + scoped HNSW
+/// search). Conservative; tighten once measured against the real embedder.
+const GRAFT_HOT_PATH_BUDGET_MS: u128 = 50;
+
+/// ADR-058 Phase 5.3 — query-latency budget for the graft hot path, measured
+/// against the **real** ADR-059 embedder. #[ignore]'d: needs the Qwen3 weights
+/// (staged in wt-embedder, not here) and — for the end-to-end prefill/KV-reuse
+/// numbers — the Hermes :8090 endpoint (0.1, downloading). Real measurement, no
+/// fabricated numbers; the coordinator signals when serving is up.
+///
+/// Run: `cargo test -p clawft-service-agent --features <...> -- --ignored budget_graft_latency`
+#[tokio::test]
+#[ignore = "needs real Qwen3 embedder weights + Hermes :8090 (ADR-060 0.1, blocked)"]
+async fn budget_graft_latency_under_hot_path() {
+    use clawft_kernel::embedding::select_embedding_provider;
+    use std::time::Instant;
+
+    // Real embedder when weights are present; degrades to Mock otherwise (the
+    // #[ignore] gate means this only runs intentionally, against real weights).
+    let embedder: Arc<dyn EmbeddingProvider> = Arc::from(select_embedding_provider(None));
+    let chain = Arc::new(ChainManager::new(0, 1000));
+    let tier = SessionTier::new(embedder, chain.clone(), None);
+    let conv = "budget";
+
+    // Populate a realistic session window.
+    for i in 0..64 {
+        append_and_index(
+            &tier,
+            &chain,
+            conv,
+            &format!("turn {i}: some representative conversation content for indexing"),
+        )
+        .await;
+    }
+
+    // Measure the steady-state graft query latency (embed + scoped search).
+    let start = Instant::now();
+    let _ = tier
+        .graft_block(conv, "representative query for the hot path")
+        .await;
+    let elapsed = start.elapsed().as_millis();
+    assert!(
+        elapsed <= GRAFT_HOT_PATH_BUDGET_MS,
+        "graft hot-path latency {elapsed}ms exceeded budget {GRAFT_HOT_PATH_BUDGET_MS}ms"
+    );
+}
