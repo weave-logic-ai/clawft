@@ -167,6 +167,10 @@ pub struct SessionView {
     index: HnswService,
     /// chain_seq → chunk metadata (this session's manifest).
     chunks: DashMap<u64, ChunkMeta>,
+    /// chain_seq → number of times grafted/recalled (promotion signal, 4.2).
+    ref_counts: DashMap<u64, u32>,
+    /// Chunks explicitly marked "important to remember" (promotion signal, 4.2).
+    important: DashMap<u64, ()>,
 }
 
 impl SessionView {
@@ -191,6 +195,8 @@ impl SessionView {
             dims,
             index: HnswService::new(config),
             chunks: DashMap::new(),
+            ref_counts: DashMap::new(),
+            important: DashMap::new(),
         }
     }
 
@@ -296,6 +302,8 @@ impl SessionView {
             if !seen.insert(hit.meta.content_hash.clone()) {
                 continue; // duplicate content — already grafted at a higher score
             }
+            // Recall is a promotion signal (4.2): count every graft.
+            *self.ref_counts.entry(hit.chain_seq).or_insert(0) += 1;
             out.push(GraftedItem {
                 chain_seq: hit.chain_seq,
                 content_hash: hit.meta.content_hash.clone(),
@@ -420,6 +428,31 @@ impl SessionView {
             .collect();
         v.sort_unstable();
         v
+    }
+
+    /// Mark a chunk "important to remember" — an explicit promotion signal
+    /// (ADR-058 Phase 4.2, e.g. from a `memory_store` tool call). Returns
+    /// `false` if the chunk is unknown.
+    pub fn mark_important(&self, chain_seq: u64) -> bool {
+        if self.chunks.contains_key(&chain_seq) {
+            self.important.insert(chain_seq, ());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Whether a chunk was explicitly marked important.
+    pub fn is_important(&self, chain_seq: u64) -> bool {
+        self.important.contains_key(&chain_seq)
+    }
+
+    /// How many times a chunk has been grafted/recalled (a promotion signal).
+    pub fn ref_count(&self, chain_seq: u64) -> u32 {
+        self.ref_counts
+            .get(&chain_seq)
+            .map(|e| *e.value())
+            .unwrap_or(0)
     }
 }
 
