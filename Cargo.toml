@@ -51,6 +51,10 @@ members = [
     # bridge + AEC live behind the `bridge` / `webrtc-aec` features.
     # Consumed by the voicelab harness (~/llm) for full-duplex barge-in.
     "crates/clawft-voice-aec",
+    # Talk-Mode bridge: binds the generic clawft-channels voice controller to
+    # the concrete local stack (Hermes LocalProvider, WebRTC-AEC, kernel ECC).
+    # Keeps clawft-channels free of clawft-llm / clawft-kernel / cpal.
+    "crates/clawft-voice-talk",
 ]
 exclude = [
     "gui/src-tauri",

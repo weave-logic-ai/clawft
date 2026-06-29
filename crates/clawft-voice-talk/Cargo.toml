@@ -1,0 +1,39 @@
+[package]
+name = "clawft-voice-talk"
+version.workspace = true
+# Publishable: the Talk-Mode bridge that binds the generic clawft-channels
+# voice controller to the concrete local stack (Hermes LLM, WebRTC-AEC, kernel
+# ECC). Kept separate so clawft-channels stays free of clawft-llm / clawft-kernel
+# / cpal — the dependency-inversion seam (ADR-061 §7).
+publish = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Talk-Mode bridge: binds the clawft-channels voice controller to LocalProvider (Hermes), WebRTC-AEC, and the kernel ECC CausalGraph"
+
+[features]
+# Default builds the bindings against the passthrough AEC core (no cpal / no
+# libwebrtc). `webrtc-aec` swaps in the real AEC3 echo canceller.
+default = []
+webrtc-aec = ["clawft-voice-aec/webrtc-aec"]
+
+[dependencies]
+# The generic controller + voice traits (VoiceLlm, AudioControl, SttBackend,
+# TtsEngine, SpeakerEmbedder, ConversationObserver). `voice` feature on.
+clawft-channels = { workspace = true, features = ["voice"] }
+# In-process AEC for the barge-in flush binding (passthrough by default).
+clawft-voice-aec = { path = "../clawft-voice-aec" }
+# Local Hermes provider for the concrete VoiceLlm binding.
+clawft-llm = { workspace = true, features = ["native"] }
+# Kernel CausalGraph for the ECC ConversationObserver binding.
+clawft-kernel = { workspace = true, features = ["native", "ecc", "exochain", "cluster", "mesh"] }
+
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tokio-util = { workspace = true }
