@@ -24,11 +24,17 @@ native = [
     "dep:tokio",
     "dep:tokio-util",
     "dep:clawft-service-llm",
+    "real-tokenizer",
     "clawft-platform/native",
     "clawft-llm/native",
     "clawft-plugin/native",
     "clawft-types/native",
 ]
+# ADR-058 Phase 2.1: use a real BPE tokenizer (tiktoken o200k_base) for
+# context-window budgeting instead of the whitespace heuristic. Native
+# implies it; browser/WASM builds omit it and fall back to the char/word
+# estimator in `agent::tokenizer`.
+real-tokenizer = ["dep:tiktoken-rs"]
 browser = [
     "clawft-platform/browser",
     "clawft-llm/browser",
@@ -85,6 +91,10 @@ futures-channel = { version = "0.3", optional = true }
 # Optional across both
 rand = { workspace = true, optional = true }
 instant-distance = { workspace = true, optional = true }
+# Real subword tokenizer for context budgeting (ADR-058 Phase 2.1). Native
+# only — the bundled BPE vocab is heavy and the browser build falls back to
+# the char/word heuristic in `agent::tokenizer`.
+tiktoken-rs = { workspace = true, optional = true }
 rvf-runtime = { workspace = true, optional = true }
 rvf-types = { workspace = true, optional = true }
 # E2 EmbeddingRouter: workspace-pinned at 2.1 (Cargo.toml:176). Vamana

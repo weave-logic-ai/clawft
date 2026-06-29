@@ -54,6 +54,9 @@ fn make_request_with_content(content: &str) -> ChatRequest {
     }
 }
 
+// Unused scaffolding retained for response-shaped property tests; annotated to
+// keep `clippy --all-targets -D warnings` green.
+#[allow(dead_code)]
 fn make_response_with_text(text: &str, output_tokens: u32) -> LlmResponse {
     LlmResponse {
         id: "test".into(),
@@ -98,9 +101,14 @@ fn count_tokens_monotonic_with_word_count() {
 
 #[test]
 fn count_tokens_empty_is_zero() {
+    // Empty input is always zero tokens.
     assert_eq!(count_tokens(""), 0);
-    assert_eq!(count_tokens("   "), 0);
-    assert_eq!(count_tokens("\n\t"), 0);
+    // ADR-058 Phase 2.1: budgeting now uses a real subword tokenizer, which
+    // (unlike the old whitespace heuristic) counts whitespace as the real
+    // tokens it consumes in the window. Whitespace-only input is therefore a
+    // small, non-negative count — not forced to zero. It must stay tiny.
+    assert!(count_tokens("   ") <= 3);
+    assert!(count_tokens("\n\t") <= 3);
 }
 
 #[test]
