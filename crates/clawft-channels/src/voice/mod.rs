@@ -35,6 +35,7 @@
 //! - `real-audio-test`    — turns on cpal-touching tests (skipped on CI).
 
 pub mod channel;
+pub mod speaker;
 pub mod stt;
 pub mod tts;
 pub mod turn;
@@ -45,6 +46,7 @@ pub mod wav;
 pub use channel::{
     AudioSegment, AudioSource, PlaybackSink, VoiceChannelAdapter, VoiceChannelAdapterFactory,
 };
+pub use speaker::{SpeakerEmbedder, SpeakerId, SpeakerMatch, SpeakerNode, SpeakerRegistry, cosine};
 pub use stt::{SttBackend, SttModel, SubstrateStt, Utterance};
 pub use tts::{
     DualLayerTts, SubstrateTts, TtsChunk, TtsEngine, TtsSink, TtsTier, scrub_tags, split_sentences,
