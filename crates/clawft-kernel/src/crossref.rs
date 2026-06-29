@@ -142,6 +142,11 @@ pub enum CrossRefType {
     /// Backchannel continuer (0x0B, ADR-062 D5): a "mm-hmm" linking a listener
     /// to the current speaker node **without** creating a turn node.
     Continuer,
+    /// Per-speaker association (0x0C, ADR-062 §Architecture / ADR-046 forest
+    /// join): links a turn node to the stable identity node of whoever produced
+    /// it. Lets the forest walk recall a speaker's prior turns as cross-structure
+    /// context, not by cosine alone.
+    Speaker,
     /// Domain-specific extension.
     Custom(u8),
 }
@@ -158,6 +163,7 @@ impl fmt::Display for CrossRefType {
             Self::MemoryEncoded => write!(f, "MemoryEncoded"),
             Self::TomInference => write!(f, "TomInference"),
             Self::Continuer => write!(f, "Continuer"),
+            Self::Speaker => write!(f, "Speaker"),
             Self::Custom(v) => write!(f, "Custom(0x{v:02x})"),
         }
     }

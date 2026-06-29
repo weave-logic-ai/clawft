@@ -327,7 +327,7 @@ async fn index_one(tier: &SessionTier, chain: &ChainManager, conv: &str, text: &
         "agent.chat.turn",
         Some(serde_json::json!({ "conv": conv, "content": text })),
     );
-    tier.index_turn(conv, ev.sequence, "agent.chat.turn", text)
+    tier.index_turn(conv, ev.sequence, "agent.chat.turn", "user", text)
         .await;
     ev.sequence
 }

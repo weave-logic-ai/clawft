@@ -962,14 +962,31 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                     .anchor_causal
                     .then(|| k.ecc_causal().cloned())
                     .flatten();
+                let crossrefs = anchor_cfg
+                    .anchor_causal
+                    .then(|| k.ecc_crossrefs().cloned())
+                    .flatten();
+                // ADR-062 §1.1: when both the witness chain and the causal graph
+                // are enabled, the L2 tier owns the forest dual-write (causal
+                // node + `Follows` lineage + speaker cross-ref, keyed by chain
+                // sequence). Hand the anchor `None` for causal in that case so a
+                // turn isn't double-added; the anchor keeps its own causal write
+                // only in the legacy causal-without-chain (no-tier) configuration.
+                let tier_owns_forest = chain.is_some() && causal.is_some() && crossrefs.is_some();
+                let anchor_causal = if tier_owns_forest {
+                    None
+                } else {
+                    causal.clone()
+                };
                 info!(
                     chain = chain.is_some(),
                     hnsw = hnsw.is_some(),
                     causal = causal.is_some(),
+                    forest_join = tier_owns_forest,
                     "agent.chat anchors wired (mirrors turns to enabled stores)"
                 );
                 let mut anchor =
-                    clawft_service_agent::KernelTurnAnchor::new(chain.clone(), hnsw, causal);
+                    clawft_service_agent::KernelTurnAnchor::new(chain.clone(), hnsw, anchor_causal);
                 // ADR-058 Phase 5.1: the L2 tier needs the witness chain (its
                 // sequence is the index key), so it lives only when chain
                 // anchoring is enabled. The embedder is the ADR-059 Qwen3
@@ -977,9 +994,14 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                 if let Some(chain) = chain {
                     let embedder: Arc<dyn clawft_kernel::embedding::EmbeddingProvider> =
                         Arc::from(clawft_kernel::embedding::select_embedding_provider(None));
-                    let tier = Arc::new(clawft_service_agent::SessionTier::new(
-                        embedder, chain, None,
-                    ));
+                    let mut tier = clawft_service_agent::SessionTier::new(embedder, chain, None);
+                    // ADR-062 §1.1 forest join: dual-write turns into the
+                    // kernel-global causal graph + cross-ref store and fuse
+                    // lineage/cross-structure recall with cosine on graft.
+                    if let (Some(causal), Some(crossrefs)) = (causal.clone(), crossrefs.clone()) {
+                        tier = tier.with_forest(causal, crossrefs);
+                    }
+                    let tier = Arc::new(tier);
                     // ADR-058 Phase 5.3: pre-warm the embedder at startup (one
                     // throwaway embed) so the first conversation's first graft
                     // doesn't pay the model's first-inference cost — mirrors the

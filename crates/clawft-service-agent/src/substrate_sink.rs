@@ -333,8 +333,14 @@ impl TurnAnchor for KernelTurnAnchor {
             // witness). Indexing is non-fatal (logged inside `index_turn`); the
             // turn has already landed on the chain regardless.
             if let Some(ref tier) = self.session_tier {
-                tier.index_turn(conv_id, event.sequence, "agent.chat.turn", &turn.content)
-                    .await;
+                tier.index_turn(
+                    conv_id,
+                    event.sequence,
+                    "agent.chat.turn",
+                    &turn.role,
+                    &turn.content,
+                )
+                .await;
             }
         }
 

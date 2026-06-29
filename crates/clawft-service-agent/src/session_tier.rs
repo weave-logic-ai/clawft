@@ -36,6 +36,15 @@ use clawft_kernel::chain::ChainManager;
 use clawft_kernel::context_graft::{GraftContent, GraftedItem, SessionView};
 use clawft_kernel::context_promote::{PromotionSignals, postmortem, promote_to_chain};
 use clawft_kernel::embedding::EmbeddingProvider;
+use clawft_kernel::{CausalGraph, CrossRefStore};
+
+use crate::session_forest::{self, ConvForest, DEFAULT_LINEAGE_DEPTH};
+
+/// Coherence weight stamped on a turn's `Follows` edge in the data-plane join
+/// (ADR-062 §1.1). Phase 1 has no live per-turn coherence read on the index
+/// path; the Talk-Mode tick (Phase 2) supplies the scored value. Until then a
+/// neutral 1.0 keeps the lineage edge present and walkable.
+const DEFAULT_TURN_COHERENCE: f32 = 1.0;
 
 /// Default byte threshold above which chunk text is externalized to a
 /// content-addressed blob instead of being held inline.
@@ -54,6 +63,20 @@ pub struct SessionTier {
     views: DashMap<String, Arc<SessionView>>,
     graft_top_k: usize,
     inline_max: usize,
+    /// ADR-062 §1.1 forest join — the kernel-global causal graph + cross-ref
+    /// store. When present, each indexed turn is dual-written into the forest
+    /// (causal node + `Follows` lineage + speaker cross-ref) and recall fuses
+    /// lineage/cross-structure links with cosine (ADR-062 §1.2). `None` keeps
+    /// the legacy cosine-only L2 behaviour.
+    forest: Option<ForestHandles>,
+    /// Per-conversation lineage state in the global causal graph.
+    forests: DashMap<String, Arc<ConvForest>>,
+}
+
+/// The kernel-global forest handles the L2 tier dual-writes into.
+struct ForestHandles {
+    causal: Arc<CausalGraph>,
+    crossrefs: Arc<CrossRefStore>,
 }
 
 impl SessionTier {
@@ -72,13 +95,34 @@ impl SessionTier {
             views: DashMap::new(),
             graft_top_k: DEFAULT_GRAFT_TOP_K,
             inline_max: DEFAULT_INLINE_MAX,
+            forest: None,
+            forests: DashMap::new(),
         }
+    }
+
+    /// Join this tier to the **kernel-global forest** (ADR-062 §1.1 / ADR-046):
+    /// the global [`CausalGraph`] and [`CrossRefStore`] (the daemon's
+    /// `k.ecc_causal()` / `k.ecc_crossrefs()`). Once joined, [`index_turn`]
+    /// dual-writes each turn as a causal node + `Follows` lineage edge + speaker
+    /// cross-ref, and [`graft_block`] fuses lineage/cross-structure recall with
+    /// cosine. Without it the tier stays cosine-only (legacy L2).
+    ///
+    /// [`index_turn`]: Self::index_turn
+    /// [`graft_block`]: ContextGraftProvider::graft_block
+    pub fn with_forest(mut self, causal: Arc<CausalGraph>, crossrefs: Arc<CrossRefStore>) -> Self {
+        self.forest = Some(ForestHandles { causal, crossrefs });
+        self
     }
 
     /// Override the per-turn graft fan-out (default [`DEFAULT_GRAFT_TOP_K`]).
     pub fn with_graft_top_k(mut self, k: usize) -> Self {
         self.graft_top_k = k;
         self
+    }
+
+    /// Get or create the per-conversation forest lineage state.
+    fn conv_forest(&self, conv_id: &str) -> Arc<ConvForest> {
+        self.forests.entry(conv_id.to_string()).or_default().clone()
     }
 
     /// Pre-warm the embedder (ADR-058 Phase 5.3). Runs one throwaway embed so
@@ -108,7 +152,14 @@ impl SessionTier {
     /// was appended to the chain — the universal key + witness. Non-fatal:
     /// indexing failure is logged, never propagated (the turn already landed on
     /// the chain).
-    pub async fn index_turn(&self, conv_id: &str, chain_seq: u64, kind: &str, text: &str) {
+    pub async fn index_turn(
+        &self,
+        conv_id: &str,
+        chain_seq: u64,
+        kind: &str,
+        role: &str,
+        text: &str,
+    ) {
         if text.trim().is_empty() {
             return;
         }
@@ -125,6 +176,26 @@ impl SessionTier {
             .await
         {
             warn!(conv_id, chain_seq, error = %e, "session_tier: failed to index turn");
+        }
+
+        // ADR-062 §1.1: dual-write the turn into the kernel-global forest —
+        // a causal node + a `Follows` lineage edge to the prior turn + the
+        // speaker cross-ref. Best-effort: the turn already landed on the chain
+        // and in the cosine index regardless.
+        if let Some(forest) = &self.forest {
+            let conv_forest = self.conv_forest(conv_id);
+            session_forest::dual_write_turn(
+                &forest.causal,
+                &forest.crossrefs,
+                &conv_forest,
+                conv_id,
+                chain_seq,
+                role,
+                text,
+                DEFAULT_TURN_COHERENCE,
+                None,
+                None,
+            );
         }
     }
 
@@ -240,16 +311,32 @@ impl ContextGraftProvider for SessionTier {
         let Some(view) = self.existing_view(conv_id) else {
             return Vec::new();
         };
-        match view
+        // Cosine recall (HNSW) — the historical L2 graft.
+        let cosine = match view
             .graft_text(&*self.embedder, query, self.graft_top_k)
             .await
         {
-            Ok(items) => Self::render_block(&items),
+            Ok(items) => items,
             Err(e) => {
                 warn!(conv_id, error = %e, "session_tier: graft query failed; no graft");
-                Vec::new()
+                return Vec::new();
             }
-        }
+        };
+        // ADR-062 §1.2: when joined to the forest, fuse causal-lineage +
+        // cross-structure recall onto the cosine hits so the walk follows
+        // lineage, not cosine alone. Provenance (chain_seq) stays intact.
+        let items = match (&self.forest, self.forests.get(conv_id)) {
+            (Some(forest), Some(conv_forest)) => session_forest::lineage_fuse(
+                &view,
+                &forest.causal,
+                &forest.crossrefs,
+                &conv_forest,
+                cosine,
+                DEFAULT_LINEAGE_DEPTH,
+            ),
+            _ => cosine,
+        };
+        Self::render_block(&items)
     }
 }
 

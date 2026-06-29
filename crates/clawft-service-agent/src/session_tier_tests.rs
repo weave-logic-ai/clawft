@@ -5,7 +5,10 @@
 use super::*;
 use clawft_kernel::chain::ChainManager;
 use clawft_kernel::embedding::MockEmbeddingProvider;
+use clawft_kernel::{CausalEdgeType, CausalGraph, CrossRefStore, CrossRefType};
 use serde_json::json;
+
+use crate::session_forest::{speaker_universal_id, turn_universal_id};
 
 fn make_tier(dims: usize) -> (SessionTier, Arc<ChainManager>) {
     let embedder: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbeddingProvider::new(dims));
@@ -13,15 +16,44 @@ fn make_tier(dims: usize) -> (SessionTier, Arc<ChainManager>) {
     (SessionTier::new(embedder, chain.clone(), None), chain)
 }
 
+/// Build a forest-joined tier (ADR-062 §1.1) plus handles to assert against.
+fn make_forest_tier(
+    dims: usize,
+) -> (
+    SessionTier,
+    Arc<ChainManager>,
+    Arc<CausalGraph>,
+    Arc<CrossRefStore>,
+) {
+    let embedder: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbeddingProvider::new(dims));
+    let chain = Arc::new(ChainManager::new(0, 1000));
+    let causal = Arc::new(CausalGraph::new());
+    let crossrefs = Arc::new(CrossRefStore::new());
+    let tier = SessionTier::new(embedder, chain.clone(), None)
+        .with_forest(causal.clone(), crossrefs.clone());
+    (tier, chain, causal, crossrefs)
+}
+
 /// Append a turn to the chain (as the substrate sink does) and index it into
 /// the tier; returns the assigned chain sequence (the witness).
 async fn append_and_index(tier: &SessionTier, chain: &ChainManager, conv: &str, text: &str) -> u64 {
+    append_and_index_as(tier, chain, conv, "user", text).await
+}
+
+/// Append + index a turn with an explicit speaker role.
+async fn append_and_index_as(
+    tier: &SessionTier,
+    chain: &ChainManager,
+    conv: &str,
+    role: &str,
+    text: &str,
+) -> u64 {
     let ev = chain.append(
         "agent",
         "agent.chat.turn",
         Some(json!({ "conv": conv, "content": text })),
     );
-    tier.index_turn(conv, ev.sequence, "agent.chat.turn", text)
+    tier.index_turn(conv, ev.sequence, "agent.chat.turn", role, text)
         .await;
     ev.sequence
 }
@@ -134,6 +166,116 @@ async fn prune_noop_when_under_keep() {
     let (tier, chain) = make_tier(64);
     append_and_index(&tier, &chain, "c", "only one").await;
     assert_eq!(tier.prune_to_recent("c", 5), 0);
+}
+
+// ── ADR-062 §1.1 — dual-write turns into the forest ──────────────────────
+
+/// HEADLINE (ADR-062 §1.1): indexing a turn lands a chain event AND a causal
+/// node; the second turn draws a `Follows` lineage edge to the first AND
+/// registers a speaker cross-ref.
+#[tokio::test]
+async fn index_dual_writes_causal_node_follows_edge_and_speaker_crossref() {
+    let (tier, chain, causal, crossrefs) = make_forest_tier(64);
+    let conv = "forest-c1";
+
+    let s1 = append_and_index_as(&tier, &chain, conv, "user", "first turn").await;
+    let s2 = append_and_index_as(&tier, &chain, conv, "assistant", "second turn").await;
+
+    // Chain events landed (witness): both sequences are real agent.chat.turn
+    // events on the chain.
+    for s in [s1, s2] {
+        let ev = chain
+            .tail_from(s - 1)
+            .into_iter()
+            .find(|e| e.sequence == s)
+            .expect("witness event present");
+        assert_eq!(ev.kind, "agent.chat.turn");
+    }
+
+    // Two causal nodes, one Follows edge between them.
+    assert_eq!(causal.node_count(), 2, "one causal node per indexed turn");
+    assert_eq!(causal.edge_count(), 1, "one Follows edge prev → new");
+    let follows: Vec<_> = causal
+        .node_ids()
+        .into_iter()
+        .flat_map(|n| causal.get_forward_edges(n))
+        .filter(|e| e.edge_type == CausalEdgeType::Follows)
+        .collect();
+    assert_eq!(follows.len(), 1, "exactly one Follows edge");
+    assert_eq!(
+        follows[0].chain_seq, s2,
+        "the Follows edge is stamped with the new turn's witness seq"
+    );
+
+    // Speaker cross-ref: turn 1 → the conversation's `user` identity node.
+    let turn1_uid = turn_universal_id(conv, s1, "first turn");
+    let speaker = crossrefs.by_type(&turn1_uid, &CrossRefType::Speaker);
+    assert_eq!(speaker.len(), 1, "one speaker cross-ref per turn");
+    assert_eq!(
+        speaker[0].target,
+        speaker_universal_id(conv, "user"),
+        "speaker cross-ref points at the user identity node"
+    );
+}
+
+/// The forest join is opt-in: a tier without `with_forest` writes nothing to a
+/// causal graph (legacy cosine-only L2 is unchanged).
+#[tokio::test]
+async fn no_forest_means_no_causal_write() {
+    let (tier, chain) = make_tier(64);
+    let causal = Arc::new(CausalGraph::new());
+    append_and_index(&tier, &chain, "c", "a turn").await;
+    assert_eq!(causal.node_count(), 0, "no forest handle ⇒ no causal write");
+}
+
+// ── ADR-062 §1.2 — lineage-fused graft ───────────────────────────────────
+
+/// HEADLINE (ADR-062 §1.2): recall surfaces a `Follows`-ancestor that cosine
+/// alone misses. With top_k=1 the cosine recall of turn B returns only B; the
+/// forest walk follows B's lineage back to its parent A and grafts it too —
+/// with A's witness provenance intact. A second, forest-less tier proves cosine
+/// alone leaves A out.
+#[tokio::test]
+async fn graft_fuses_follows_ancestor_cosine_alone_misses() {
+    let dims = 64;
+    let conv = "fuse-c1";
+    let fact = "the launch code is ZULU-7";
+    let reply = "understood, I have noted that down";
+
+    // Forest-joined tier with a tight top_k so cosine returns a single hit.
+    let (tier, chain, _causal, _crossrefs) = make_forest_tier(dims);
+    let tier = tier.with_graft_top_k(1);
+    // A (user, the fact) then B (assistant, the reply) — index order draws a
+    // Follows edge A → B. Different roles so the speaker cross-ref can't be what
+    // surfaces A — only the causal lineage can.
+    let s_fact = append_and_index_as(&tier, &chain, conv, "user", fact).await;
+    let _s_reply = append_and_index_as(&tier, &chain, conv, "assistant", reply).await;
+
+    // Query with B's exact text: cosine's single hit is B. Fusion walks B's
+    // reverse lineage to A and grafts it.
+    let block = tier.graft_block(conv, reply).await;
+    let body = &block[0].content;
+    assert!(
+        body.contains("ZULU-7"),
+        "lineage fusion must surface the Follows-ancestor: {body}"
+    );
+    assert!(
+        body.contains(&format!("chain_seq {s_fact}")),
+        "the surfaced ancestor keeps its witness provenance: {body}"
+    );
+
+    // Control: a forest-less tier (cosine only) with the same data + top_k=1
+    // does NOT surface A.
+    let (plain, chain2) = make_tier(dims);
+    let plain = plain.with_graft_top_k(1);
+    append_and_index_as(&plain, &chain2, conv, "user", fact).await;
+    append_and_index_as(&plain, &chain2, conv, "assistant", reply).await;
+    let plain_block = plain.graft_block(conv, reply).await;
+    let plain_body = &plain_block[0].content;
+    assert!(
+        !plain_body.contains("ZULU-7"),
+        "cosine alone (top_k=1) must miss the ancestor: {plain_body}"
+    );
 }
 
 // ── 5.3 budget validation ────────────────────────────────────────────
