@@ -380,6 +380,47 @@ impl SessionView {
         let query = embedder.embed(query_text).await?;
         Ok(self.graft(&query, top_k))
     }
+
+    /// Set a chunk's causal-model [`NodeState`]. Returns `false` if unknown.
+    pub fn set_state(&self, chain_seq: u64, state: NodeState) -> bool {
+        match self.chunks.get_mut(&chain_seq) {
+            Some(mut e) => {
+                e.state = state;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Prune a chunk from the live window (ADR-058 Phase 4.1).
+    ///
+    /// Marks it [`NodeState::Stale`] but **keeps it in the index** — the origin
+    /// stays on the chain and the chunk is re-graftable via retrieval. This is
+    /// the application-level eviction that bounds L1 with no engine
+    /// `--context-shift`. Returns `false` if the chunk is unknown.
+    pub fn prune(&self, chain_seq: u64) -> bool {
+        self.set_state(chain_seq, NodeState::Stale)
+    }
+
+    /// Re-graft a previously pruned chunk back into the live window
+    /// ([`NodeState::Frontier`]). The chunk was never removed from the index, so
+    /// this only flips its state. Returns `false` if unknown.
+    pub fn regraft(&self, chain_seq: u64) -> bool {
+        self.set_state(chain_seq, NodeState::Frontier)
+    }
+
+    /// Chain sequences currently live in the window ([`NodeState::Frontier`]),
+    /// sorted ascending.
+    pub fn live_seqs(&self) -> Vec<u64> {
+        let mut v: Vec<u64> = self
+            .chunks
+            .iter()
+            .filter(|e| e.value().state == NodeState::Frontier)
+            .map(|e| *e.key())
+            .collect();
+        v.sort_unstable();
+        v
+    }
 }
 
 // ── Tests (no model required; split to a sibling file for the <500-line rule) ─

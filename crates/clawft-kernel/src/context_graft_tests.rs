@@ -239,3 +239,39 @@ async fn index_small_chunk_stays_inline() {
     assert_eq!(chunk.inline.as_deref(), Some("short"));
     assert!(chunk.blob_hash.is_none());
 }
+
+// ── 4.1 prune-to-graft eviction ──────────────────────────────────────
+
+/// A pruned chunk leaves the live window (→ Stale) but stays in the index and
+/// is re-grafted correctly later; regraft restores it to Frontier (Done-when
+/// 4.1).
+#[test]
+fn prune_keeps_chunk_regraftable() {
+    let view = SessionView::new("s1", 8);
+    view.insert_vector(axis_vec(8, 0), meta(10, "fact"));
+    assert_eq!(view.live_seqs(), vec![10]);
+
+    // Prune: evicted from the live window, origin retained in the index.
+    assert!(view.prune(10));
+    assert_eq!(view.chunk(10).unwrap().state, NodeState::Stale);
+    assert!(view.live_seqs().is_empty());
+
+    // Re-graftable: a query still recalls it.
+    let items = view.graft(&axis_vec(8, 0), 1);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].chain_seq, 10);
+    assert_eq!(items[0].state, NodeState::Stale);
+
+    // Re-graft restores it to the live window.
+    assert!(view.regraft(10));
+    assert_eq!(view.chunk(10).unwrap().state, NodeState::Frontier);
+    assert_eq!(view.live_seqs(), vec![10]);
+}
+
+#[test]
+fn prune_unknown_seq_is_false() {
+    let view = SessionView::new("s1", 8);
+    assert!(!view.prune(999));
+    assert!(!view.regraft(999));
+    assert!(!view.set_state(999, NodeState::Committed));
+}
