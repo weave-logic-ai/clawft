@@ -38,6 +38,7 @@ pub mod channel;
 pub mod policy;
 pub mod speaker;
 pub mod stt;
+pub mod talkmode;
 pub mod tts;
 pub mod turn;
 pub mod types;
@@ -50,6 +51,10 @@ pub use channel::{
 pub use policy::{ReasoningHint, VoiceAnswerPolicy, VoiceLlm, VoiceTurnRequest, estimate_tokens};
 pub use speaker::{SpeakerEmbedder, SpeakerId, SpeakerMatch, SpeakerNode, SpeakerRegistry, cosine};
 pub use stt::{SttBackend, SttModel, SubstrateStt, Utterance};
+pub use talkmode::{
+    AudioControl, ConversationEvent, ConversationObserver, NoopAudioControl, NoopObserver,
+    TalkModeConfig, TalkModeController, contextual_ack,
+};
 pub use tts::{
     DualLayerTts, SubstrateTts, TtsChunk, TtsEngine, TtsSink, TtsTier, scrub_tags, split_sentences,
 };
