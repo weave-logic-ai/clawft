@@ -10,12 +10,7 @@ use std::time::Duration;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use crate::consts::TARGET_SR;
-
-/// The WebRTC APM is hardwired to 48 kHz, 10 ms frames (480 samples). We
-/// run the whole echo-cancel pipeline at this rate and resample the
-/// cleaned capture down to the 16 kHz wire format on the way out.
-const APM_SR: u32 = 48_000;
-const APM_FRAME: usize = 480;
+use crate::dsp::{APM_FRAME, APM_SR, Aec, LinResampler, make_aec};
 
 /// Set from the SIGUSR1 handler; polled by the flush monitor thread.
 static FLUSH_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -44,152 +39,6 @@ type SampleQ = Arc<Mutex<VecDeque<f32>>>;
 
 fn newq() -> SampleQ {
     Arc::new(Mutex::new(VecDeque::new()))
-}
-
-/// Streaming linear resampler. Maintains fractional read position and one
-/// sample of history across calls so chunk boundaries don't click.
-struct LinResampler {
-    step: f64, // input samples consumed per output sample = in_rate / out_rate
-    t: f64,    // absolute fractional input position (in input-sample units)
-    prev: f32, // input sample at absolute index (consumed - 1)
-    consumed: u64,
-}
-
-impl LinResampler {
-    fn new(in_rate: u32, out_rate: u32) -> Self {
-        Self {
-            step: f64::from(in_rate) / f64::from(out_rate.max(1)),
-            t: 0.0,
-            prev: 0.0,
-            consumed: 0,
-        }
-    }
-
-    fn sample_at(&self, idx: i64, input: &[f32], base: u64) -> f32 {
-        if idx < base as i64 {
-            self.prev // idx == base - 1
-        } else {
-            input[(idx as u64 - base) as usize]
-        }
-    }
-
-    /// Resample `input` (absolute indices `[consumed, consumed+len)`),
-    /// appending output samples to `out`.
-    fn process(&mut self, input: &[f32], out: &mut Vec<f32>) {
-        if input.is_empty() {
-            return;
-        }
-        let base = self.consumed;
-        let end = base + input.len() as u64; // one past last available index
-        loop {
-            let i0 = self.t.floor() as i64;
-            let i1 = i0 + 1;
-            if (i1 as u64) >= end {
-                break; // need i1 to be available for interpolation
-            }
-            let frac = (self.t - i0 as f64) as f32;
-            let s0 = self.sample_at(i0, input, base);
-            let s1 = self.sample_at(i1, input, base);
-            out.push(s0 + (s1 - s0) * frac);
-            self.t += self.step;
-        }
-        self.prev = *input.last().unwrap();
-        self.consumed = end;
-    }
-}
-
-/// 10 ms-frame echo canceller abstraction. Both impls operate on 48 kHz
-/// mono `APM_FRAME`-sample (480) frames, in place — the WebRTC APM's
-/// fixed native format.
-trait Aec: Send {
-    /// Feed a far-end (played) reference frame.
-    fn render(&mut self, frame: &[f32]);
-    /// Echo-cancel a near-end (mic) frame in place.
-    fn capture(&mut self, frame: &mut [f32]);
-    fn label(&self) -> &'static str;
-}
-
-/// Passthrough — no echo cancellation (used when `webrtc-aec` is off).
-struct Passthrough;
-impl Aec for Passthrough {
-    fn render(&mut self, _frame: &[f32]) {}
-    fn capture(&mut self, _frame: &mut [f32]) {}
-    fn label(&self) -> &'static str {
-        "passthrough (NO AEC — build with --features webrtc-aec)"
-    }
-}
-
-#[cfg(feature = "webrtc-aec")]
-mod webrtc {
-    use super::Aec;
-    use webrtc_audio_processing::{
-        Config as ApmConfig, EchoCancellation, EchoCancellationSuppressionLevel, GainControl,
-        GainControlMode, InitializationConfig, NoiseSuppression, NoiseSuppressionLevel, Processor,
-    };
-
-    pub struct WebrtcAec {
-        proc: Processor,
-    }
-
-    impl WebrtcAec {
-        pub fn new() -> Result<Self, String> {
-            let mut proc = Processor::new(&InitializationConfig {
-                num_capture_channels: 1,
-                num_render_channels: 1,
-                ..InitializationConfig::default()
-            })
-            .map_err(|e| format!("APM init: {e}"))?;
-
-            let config = ApmConfig {
-                echo_cancellation: Some(EchoCancellation {
-                    suppression_level: EchoCancellationSuppressionLevel::High,
-                    stream_delay_ms: None,
-                    enable_delay_agnostic: true,
-                    enable_extended_filter: true,
-                }),
-                enable_high_pass_filter: true,
-                noise_suppression: Some(NoiseSuppression {
-                    suppression_level: NoiseSuppressionLevel::Moderate,
-                }),
-                gain_control: Some(GainControl {
-                    mode: GainControlMode::AdaptiveDigital,
-                    target_level_dbfs: 3,
-                    compression_gain_db: 9,
-                    enable_limiter: true,
-                }),
-                ..ApmConfig::default()
-            };
-            proc.set_config(config);
-            Ok(Self { proc })
-        }
-    }
-
-    impl Aec for WebrtcAec {
-        fn render(&mut self, frame: &[f32]) {
-            // APM mutates the render frame in place; clone our reference.
-            let mut buf = frame.to_vec();
-            let _ = self.proc.process_render_frame(&mut buf);
-        }
-        fn capture(&mut self, frame: &mut [f32]) {
-            let _ = self.proc.process_capture_frame(frame);
-        }
-        fn label(&self) -> &'static str {
-            "WebRTC AEC3 (echo cancel + NS + AGC)"
-        }
-    }
-}
-
-fn make_aec() -> Box<dyn Aec> {
-    #[cfg(feature = "webrtc-aec")]
-    {
-        match webrtc::WebrtcAec::new() {
-            Ok(a) => return Box::new(a),
-            Err(e) => elog(&format!(
-                "[aec] WARNING: WebRTC APM init failed ({e}); falling back to passthrough."
-            )),
-        }
-    }
-    Box::new(Passthrough)
 }
 
 /// Pick a cpal device by name substring (case-insensitive) within the
@@ -225,11 +74,7 @@ fn pick_device(
 }
 
 fn dir(input: bool) -> &'static str {
-    if input {
-        "input"
-    } else {
-        "output"
-    }
+    if input { "input" } else { "output" }
 }
 
 /// Build the cpal input stream: downmix any channel count to mono and
@@ -238,9 +83,7 @@ fn build_input_stream(
     device: &cpal::Device,
     cap_q: SampleQ,
 ) -> Result<(cpal::Stream, u32), String> {
-    let supported = device
-        .default_input_config()
-        .map_err(|e| e.to_string())?;
+    let supported = device.default_input_config().map_err(|e| e.to_string())?;
     let in_rate = supported.sample_rate().0;
     let channels = supported.channels() as usize;
     let cfg: cpal::StreamConfig = supported.clone().into();
@@ -276,8 +119,8 @@ fn build_input_stream(
                 move |data: &[i16], _| {
                     let mut mono = Vec::with_capacity(data.len() / channels.max(1) + 1);
                     for fr in data.chunks(channels.max(1)) {
-                        let s: f32 =
-                            fr.iter().map(|&x| f32::from(x) / 32_768.0).sum::<f32>() / channels as f32;
+                        let s: f32 = fr.iter().map(|&x| f32::from(x) / 32_768.0).sum::<f32>()
+                            / channels as f32;
                         mono.push(s);
                     }
                     downmix_push(mono, &q);
@@ -323,9 +166,7 @@ fn build_output_stream(
     device: &cpal::Device,
     play_q: SampleQ,
 ) -> Result<(cpal::Stream, u32), String> {
-    let supported = device
-        .default_output_config()
-        .map_err(|e| e.to_string())?;
+    let supported = device.default_output_config().map_err(|e| e.to_string())?;
     let out_rate = supported.sample_rate().0;
     let channels = supported.channels() as usize;
     let cfg: cpal::StreamConfig = supported.clone().into();
@@ -422,17 +263,19 @@ pub fn run(cfg: Config) -> Result<(), String> {
     {
         let play_q = play_q.clone();
         let render_q = render_q.clone();
-        thread::spawn(move || loop {
-            if FLUSH_REQUESTED.swap(false, Ordering::SeqCst) {
-                if let Ok(mut g) = play_q.lock() {
-                    g.clear();
+        thread::spawn(move || {
+            loop {
+                if FLUSH_REQUESTED.swap(false, Ordering::SeqCst) {
+                    if let Ok(mut g) = play_q.lock() {
+                        g.clear();
+                    }
+                    if let Ok(mut g) = render_q.lock() {
+                        g.clear();
+                    }
+                    elog("[aec] flush — playback + render reference cleared.");
                 }
-                if let Ok(mut g) = render_q.lock() {
-                    g.clear();
-                }
-                elog("[aec] flush — playback + render reference cleared.");
+                thread::sleep(Duration::from_millis(5));
             }
-            thread::sleep(Duration::from_millis(5));
         });
     }
 

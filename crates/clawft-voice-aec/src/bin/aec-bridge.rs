@@ -13,7 +13,7 @@
 
 use std::process::ExitCode;
 
-use clawft_voice_aec::{run, Config};
+use clawft_voice_aec::{Config, run};
 
 fn main() -> ExitCode {
     let mut cfg = Config::default();
