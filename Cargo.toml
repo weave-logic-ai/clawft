@@ -55,6 +55,11 @@ members = [
     # the concrete local stack (Hermes LocalProvider, WebRTC-AEC, kernel ECC).
     # Keeps clawft-channels free of clawft-llm / clawft-kernel / cpal.
     "crates/clawft-voice-talk",
+    # Native-Rust ONNX voice models (ECAPA speaker embedding; parakeet STT and
+    # smart-turn to follow). Default features are EMPTY so the workspace build
+    # never pulls `ort` — real inference lives behind the `onnx` feature.
+    # Implements the clawft-channels SpeakerEmbedder seam without cpal/llm/kernel.
+    "crates/clawft-voice-onnx",
 ]
 exclude = [
     "gui/src-tauri",
@@ -214,6 +219,10 @@ tiktoken-rs = "0.6"
 # ONNX Runtime (embedding inference)
 ort = { version = "2.0.0-rc.12", default-features = false }
 ndarray = "0.16"
+# Pure-Rust FFT — mel-fbank front-end for the native ONNX voice models.
+rustfft = "6"
+# WAV decoding for voice-model tests/fixtures (dev-only).
+hound = "3"
 # Qwen3 BPE tokenizer (ADR-059 embedder; pure-Rust fancy-regex, no oniguruma C dep)
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 # fp16 scalar (ADR-059 decoder-ONNX empty past_key_values, dtype-matched to model)
