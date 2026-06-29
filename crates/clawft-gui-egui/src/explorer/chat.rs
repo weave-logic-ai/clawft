@@ -762,8 +762,8 @@ mod tests {
         // Sanity that the dispatch order in `explorer/mod.rs` lands on
         // chat first when a value (somehow) shape-matches multiple
         // primitives.
-        assert!(PRIORITY > 30);
-        assert!(PRIORITY > 25);
+        const { assert!(PRIORITY > 30) };
+        const { assert!(PRIORITY > 25) };
     }
 
     #[test]

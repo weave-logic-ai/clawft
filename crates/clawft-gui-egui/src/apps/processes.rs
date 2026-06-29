@@ -64,8 +64,8 @@ mod tests {
         let ctx = egui::Context::default();
         let mut desk = Desktop::default();
         let live = Live::spawn();
-        ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
                 let rect = ui.max_rect();
                 show(ui, rect, &mut desk, &live, &snap);
             });
@@ -79,32 +79,36 @@ mod tests {
 
     #[test]
     fn show_does_not_panic_with_kernel_ps_rows() {
-        let mut snap = Snapshot::default();
-        snap.connection = Connection::Connected;
-        snap.processes = Some(vec![
-            json!({
-                "pid": 1,
-                "agent_id": "kernel",
-                "state": "running",
-                "memory_bytes": 1_048_576_u64,
-                "cpu_time_ms": 1200_u64,
-            }),
-            json!({
-                "pid": 2,
-                "agent_id": "mic-capture",
-                "state": "sleeping",
-                "memory_bytes": 524288_u64,
-                "cpu_time_ms": 80_u64,
-            }),
-        ]);
+        let snap = Snapshot {
+            connection: Connection::Connected,
+            processes: Some(vec![
+                json!({
+                    "pid": 1,
+                    "agent_id": "kernel",
+                    "state": "running",
+                    "memory_bytes": 1_048_576_u64,
+                    "cpu_time_ms": 1200_u64,
+                }),
+                json!({
+                    "pid": 2,
+                    "agent_id": "mic-capture",
+                    "state": "sleeping",
+                    "memory_bytes": 524288_u64,
+                    "cpu_time_ms": 80_u64,
+                }),
+            ]),
+            ..Default::default()
+        };
         run_show(snap);
     }
 
     #[test]
     fn show_paints_empty_state_when_connected_with_no_rows() {
-        let mut snap = Snapshot::default();
-        snap.connection = Connection::Connected;
-        snap.processes = Some(vec![]);
+        let snap = Snapshot {
+            connection: Connection::Connected,
+            processes: Some(vec![]),
+            ..Default::default()
+        };
         run_show(snap);
     }
 }

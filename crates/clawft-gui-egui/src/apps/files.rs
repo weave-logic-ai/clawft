@@ -329,8 +329,8 @@ mod tests {
         let ctx = egui::Context::default();
         let mut desk = Desktop::default();
         let live = Live::spawn();
-        ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
                 let rect = ui.max_rect();
                 show(ui, rect, &mut desk, &live, &snap);
             });
@@ -344,8 +344,10 @@ mod tests {
 
     #[test]
     fn show_does_not_panic_when_connected() {
-        let mut snap = Snapshot::default();
-        snap.connection = Connection::Connected;
+        let snap = Snapshot {
+            connection: Connection::Connected,
+            ..Default::default()
+        };
         run_show(snap);
     }
 

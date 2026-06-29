@@ -395,10 +395,12 @@ mod tests {
         let ctx = egui::Context::default();
         let live = Live::spawn();
         let mut desk = Desktop::default();
-        let mut snap = Snapshot::default();
-        snap.connection = Connection::Connected;
-        ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let snap = Snapshot {
+            connection: Connection::Connected,
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
                 let rect = ui.max_rect();
                 show(ui, rect, &mut desk, &live, &snap);
             });
@@ -410,19 +412,21 @@ mod tests {
         let ctx = egui::Context::default();
         let live = Live::spawn();
         let mut desk = Desktop::default();
-        let mut snap = Snapshot::default();
-        snap.connection = Connection::Connected;
-        snap.cron_jobs = Some(vec![json!({
-            "id": "job-1",
-            "name": "heartbeat",
-            "interval_secs": 30,
-            "command": "echo hi",
-            "fire_count": 12,
-            "last_fired": "2026-05-02T18:00:00Z",
-            "enabled": true,
-        })]);
-        ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let snap = Snapshot {
+            connection: Connection::Connected,
+            cron_jobs: Some(vec![json!({
+                "id": "job-1",
+                "name": "heartbeat",
+                "interval_secs": 30,
+                "command": "echo hi",
+                "fire_count": 12,
+                "last_fired": "2026-05-02T18:00:00Z",
+                "enabled": true,
+            })]),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
                 let rect = ui.max_rect();
                 show(ui, rect, &mut desk, &live, &snap);
             });
