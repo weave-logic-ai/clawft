@@ -112,6 +112,8 @@ pub mod quantum_register;
 #[cfg(feature = "ecc")]
 pub mod quantum_state;
 #[cfg(feature = "ecc")]
+pub mod talk_loop;
+#[cfg(feature = "ecc")]
 pub mod vector_backend;
 #[cfg(feature = "ecc")]
 pub mod vector_diskann;
@@ -486,6 +488,8 @@ pub use supervisor::{AgentSupervisor, EnclaveConfig, SpawnBackend, SpawnRequest,
 pub use supervisor::{
     ResourceCheckResult, RestartBudget, RestartStrategy, RestartTracker, check_resource_usage,
 };
+#[cfg(feature = "ecc")]
+pub use talk_loop::{TalkModeConfig, TalkModeLoop, TalkTickResult};
 #[cfg(feature = "exochain")]
 pub use tree_manager::{TreeManager, TreeStats};
 pub use tree_view::{AgentTreeView, TreeScope};
