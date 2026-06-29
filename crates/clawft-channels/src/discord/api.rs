@@ -243,16 +243,16 @@ mod tests {
             }
             total.extend_from_slice(&buf[..n]);
 
-            if header_end.is_none() {
-                if let Some(idx) = total.windows(4).position(|w| w == b"\r\n\r\n") {
-                    header_end = Some(idx + 4);
-                    let header_str = String::from_utf8_lossy(&total[..idx]);
-                    for line in header_str.split("\r\n") {
-                        if let Some((k, v)) = line.split_once(':') {
-                            if k.trim().eq_ignore_ascii_case("content-length") {
-                                content_length = v.trim().parse::<usize>().ok();
-                            }
-                        }
+            if header_end.is_none()
+                && let Some(idx) = total.windows(4).position(|w| w == b"\r\n\r\n")
+            {
+                header_end = Some(idx + 4);
+                let header_str = String::from_utf8_lossy(&total[..idx]);
+                for line in header_str.split("\r\n") {
+                    if let Some((k, v)) = line.split_once(':')
+                        && k.trim().eq_ignore_ascii_case("content-length")
+                    {
+                        content_length = v.trim().parse::<usize>().ok();
                     }
                 }
             }

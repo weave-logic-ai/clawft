@@ -35,6 +35,7 @@
 //! - `real-audio-test`    — turns on cpal-touching tests (skipped on CI).
 
 pub mod channel;
+pub mod stt;
 pub mod types;
 pub mod vad;
 pub mod wav;
@@ -42,5 +43,6 @@ pub mod wav;
 pub use channel::{
     AudioSegment, AudioSource, PlaybackSink, VoiceChannelAdapter, VoiceChannelAdapterFactory,
 };
+pub use stt::{SttBackend, SttModel, SubstrateStt, Utterance};
 pub use types::{VoiceAdapterConfig, VoiceError};
 pub use vad::{EnergyVad, VadEvent};
