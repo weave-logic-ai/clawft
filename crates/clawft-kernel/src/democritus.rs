@@ -376,6 +376,13 @@ impl DemocritusLoop {
             ImpulseType::EdgeConfirmed => CausalEdgeType::Causes,
             ImpulseType::CoherenceAlert => CausalEdgeType::EvidenceFor,
             ImpulseType::EmbeddingRefined => CausalEdgeType::Enables,
+            // Turn-taking signals (ADR-062 D5) are conversational-flow events;
+            // the Talk-Mode tick (Phase 2) interprets them — here they read as
+            // temporal succession on the general substrate.
+            ImpulseType::EndOfUtterance
+            | ImpulseType::TurnClaim
+            | ImpulseType::TurnShift
+            | ImpulseType::Backchannel => CausalEdgeType::Follows,
             ImpulseType::Custom(_) => CausalEdgeType::Follows,
         }
     }
