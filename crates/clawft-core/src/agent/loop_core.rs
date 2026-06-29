@@ -49,6 +49,7 @@ use super::context_router::{ContextRequest, ContextRouter, NullRouter};
 use super::cost_budget::ConversationBudget;
 use super::effects::effect_for_tool;
 use super::gate::{EffectGate, GateDecision, NoopGate};
+use super::graft::{ContextGraftProvider, splice_graft_block};
 use super::sink::{ConversationSink, InMemorySink, Turn};
 use super::system_prompt::SystemPromptBuilder;
 use super::verification;
@@ -288,6 +289,15 @@ pub struct AgentLoop<P: Platform> {
     /// `None` (default for CLI / test paths) budgeting is skipped — the
     /// loop's only cap is `max_tool_iterations` per turn.
     cost_budget: Option<Arc<ConversationBudget>>,
+    /// Optional L2 context-graft provider (ADR-058 Phase 5.1).
+    ///
+    /// When set, [`Self::handle_turn`] queries it once per turn (after the
+    /// prefix-stable system head is assembled, before generation) and splices
+    /// the grafted block into the `[head] → [graft] → [tail]` position. The
+    /// kernel-backed impl (per-conversation `SessionView`) lives in
+    /// `clawft-service-agent`. Defaults to `None` (CLI / tests), preserving
+    /// prior behaviour.
+    graft_provider: Option<Arc<dyn ContextGraftProvider>>,
 }
 
 impl<P: Platform> AgentLoop<P> {
@@ -334,6 +344,7 @@ impl<P: Platform> AgentLoop<P> {
             agent_router: None,
             max_delegation_depth: resolve_max_delegation_depth(),
             cost_budget: None,
+            graft_provider: None,
         }
     }
 
@@ -473,6 +484,14 @@ impl<P: Platform> AgentLoop<P> {
     /// Borrow the optional [`ConversationBudget`].
     pub fn cost_budget(&self) -> Option<&Arc<ConversationBudget>> {
         self.cost_budget.as_ref()
+    }
+
+    /// Attach an L2 [`ContextGraftProvider`] (ADR-058 Phase 5.1). The daemon
+    /// supplies a kernel-backed, per-conversation graft provider; CLI / tests
+    /// leave this unset (no grafting).
+    pub fn with_graft_provider(mut self, provider: Arc<dyn ContextGraftProvider>) -> Self {
+        self.graft_provider = Some(provider);
+        self
     }
 
     /// Currently-configured maximum delegation depth.
@@ -707,6 +726,22 @@ impl<P: Platform> AgentLoop<P> {
                          continuing with ContextBuilder-only system prompt"
                     );
                 }
+            }
+        }
+
+        // 4·graft. L2 context graft (ADR-058 Phase 5.1). Query the
+        //     per-conversation session tier for context relevant to this
+        //     turn and splice it into the prefix-stable position: after the
+        //     leading system head (system prompt + identity + skills +
+        //     memory), before the dialogue tail — so the byte-identical head
+        //     keeps its prefix-KV reuse. The provider is non-fatal (returns
+        //     an empty block on any retrieval error); `None` (CLI / tests)
+        //     skips this entirely.
+        if let Some(ref provider) = self.graft_provider {
+            let block = provider.graft_block(&conv_id, &msg.content).await;
+            if !block.is_empty() {
+                debug!(count = block.len(), "splicing L2 graft block into prompt");
+                splice_graft_block(&mut messages, block);
             }
         }
 

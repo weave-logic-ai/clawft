@@ -930,7 +930,12 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
         // per-conv heartbeat publishes
         // `substrate/_derived/chat/<conv>/status`. The `chat`
         // derived-write grant issued at boot covers both paths.
-        let agent_sink: Arc<dyn clawft_core::agent::sink::ConversationSink> = {
+        // ADR-058 Phase 5.1: alongside the sink we build the per-conversation
+        // L2 session tier and surface it so the agent loop can graft from it.
+        let (agent_sink, session_tier): (
+            Arc<dyn clawft_core::agent::sink::ConversationSink>,
+            Option<Arc<clawft_service_agent::SessionTier>>,
+        ) = {
             let k = kernel.read().await;
             let substrate = k.substrate_service().clone();
             let node_registry = k.node_registry().clone();
@@ -943,6 +948,7 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
             // sink falls back to the no-op anchor — pure substrate
             // JSONL behaviour, no extra work per turn.
             let anchor_cfg = k.kernel_config().agent.clone().unwrap_or_default();
+            let mut session_tier: Option<Arc<clawft_service_agent::SessionTier>> = None;
             let anchor: Arc<dyn clawft_service_agent::TurnAnchor> = if anchor_cfg.any_enabled() {
                 let chain = anchor_cfg
                     .anchor_chain
@@ -962,21 +968,36 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                     causal = causal.is_some(),
                     "agent.chat anchors wired (mirrors turns to enabled stores)"
                 );
-                Arc::new(clawft_service_agent::KernelTurnAnchor::new(
-                    chain, hnsw, causal,
-                ))
+                let mut anchor =
+                    clawft_service_agent::KernelTurnAnchor::new(chain.clone(), hnsw, causal);
+                // ADR-058 Phase 5.1: the L2 tier needs the witness chain (its
+                // sequence is the index key), so it lives only when chain
+                // anchoring is enabled. The embedder is the ADR-059 Qwen3
+                // provider when its weights are present, else the Mock fallback.
+                if let Some(chain) = chain {
+                    let embedder: Arc<dyn clawft_kernel::embedding::EmbeddingProvider> =
+                        Arc::from(clawft_kernel::embedding::select_embedding_provider(None));
+                    let tier = Arc::new(clawft_service_agent::SessionTier::new(
+                        embedder, chain, None,
+                    ));
+                    anchor = anchor.with_session_tier(tier.clone());
+                    session_tier = Some(tier);
+                    info!("agent.chat L2 session tier wired (index + graft active)");
+                }
+                Arc::new(anchor)
             } else {
                 Arc::new(clawft_service_agent::NoopTurnAnchor)
             };
 
-            Arc::new(
+            let sink = Arc::new(
                 clawft_service_agent::SubstrateConversationSink::with_anchor(
                     substrate,
                     node_registry,
                     daemon_identity.node_id.clone(),
                     anchor,
                 ),
-            )
+            );
+            (sink, session_tier)
         };
 
         // agent-core-v1 Phase D1: wire a FileIdentityProvider so each
@@ -1172,6 +1193,14 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
             // hits the zero_trust fallback regardless of what the
             // workspace/home `.clawft/config.json` says.
             Some(&agent_routing),
+            // ADR-058 Phase 5.1: the L2 session tier as the loop's graft
+            // provider (the same instance the turn anchor indexes into), so
+            // each turn's prompt is augmented with recalled context. `None`
+            // when chain anchoring is off — no grafting.
+            session_tier.map(|t| {
+                let p: Arc<dyn clawft_core::agent::graft::ContextGraftProvider> = t;
+                p
+            }),
         )
         .await;
 
