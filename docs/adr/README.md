@@ -64,6 +64,7 @@ This directory contains Architecture Decision Records (ADRs) for the WeftOS + cl
 | [ADR-059](adr-059-qwen3-embedding-provider.md) | Qwen3-Embedding-0.6B as the clawft-kernel embedding provider (ort/ONNX) | Accepted | Architecture | Long-context agent-loop thread 2026-06-28 |
 | [ADR-060](adr-060-local-hermes-serving-kv.md) | Local Hermes serving + KV management for the agent loop | Accepted | Architecture | Long-context agent-loop thread 2026-06-28 |
 | [ADR-061](adr-061-conversational-voice-agent-loop.md) | Conversational voice agent loop — full-duplex, dual-layer TTS | Accepted | Architecture | Voice-pipeline thread 2026-06-26..28 (`~/llm` voicelab) |
+| [ADR-062](adr-062-ecc-graph-walk-conversation.md) | ECC graph-walk conversation — responses as nodes built by walking the causal graph | Proposed | Architecture | ECC graph-walk design swarm 2026-06-29 |
 
 ## Categories
 

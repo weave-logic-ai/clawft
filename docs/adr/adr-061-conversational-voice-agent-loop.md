@@ -126,3 +126,19 @@ supersedes/extends it (the generic speculative→committed pattern, reusable for
   native single-callback bridge gives tight render↔capture alignment. (Harness keeps both.)
 - **Generic fillers** — replaced by *contextual* acks (echo the subject) so latency reads as
   "thinking", not lag.
+
+## Update — superseded routing + native stack (2026-06-29, see ADR-062)
+
+The **conversation model + routing** in this ADR is crystallized and extended by **ADR-062 (ECC
+graph-walk conversation)**. Three carry-overs:
+- The "dual-layer / expressive routing" heuristic (fast ack vs streamed answer chosen by
+  `searched ∨ tags ∨ words>25`) is **replaced by the `NodeState` lifecycle**: the fast ack is a
+  *Speculative* node, the considered answer the *Committed* node that supersedes it — "which
+  response when" = "which node is current", never a classifier. An **overt-repair** node fires when
+  the committed answer contradicts the spoken ack.
+- **All inference is native Rust, no Python wrappers** (user direction 2026-06-29): STT (parakeet),
+  speaker (ECAPA), endpoint (smart-turn) via `ort`/sherpa-onnx; TTS native Rust ONNX with Orpheus
+  token-gen over **Ollama HTTP** (a native runtime) + **native SNAC decode**. AEC stays
+  `clawft-voice-aec`; the LLM brain stays `LocalProvider`→Hermes.
+- The loop is driven as the **Act mode (ADR-042)** of the cognitive forest (ADR-046) on the
+  self-calibrating tick (ADR-047), not a standalone controller.
