@@ -22,6 +22,8 @@
 //! # Modules
 //!
 //! - [`types`]   — [`VoiceAdapterConfig`], [`VoiceError`].
+//! - [`capture`] — [`CaptureProcessor`] (frames → VAD/endpoint →
+//!   [`VoiceImpulse`]s + frame forwarding, ADR-062 Phase 5).
 //! - [`channel`] — [`VoiceChannelAdapter`] + audio-source / playback-sink
 //!   traits + the wiremock-backed test path.
 //! - [`vad`]     — energy-RMS voice activity detector (utterance segmenter).
@@ -34,6 +36,7 @@
 //! - `voice-real-audio`   — also pulls in `cpal` for real I/O.
 //! - `real-audio-test`    — turns on cpal-touching tests (skipped on CI).
 
+pub mod capture;
 pub mod channel;
 pub mod policy;
 pub mod speaker;
@@ -45,6 +48,7 @@ pub mod types;
 pub mod vad;
 pub mod wav;
 
+pub use capture::{CaptureProcessor, ImpulseSink, VoiceImpulse};
 pub use channel::{
     AudioSegment, AudioSource, PlaybackSink, VoiceChannelAdapter, VoiceChannelAdapterFactory,
 };
