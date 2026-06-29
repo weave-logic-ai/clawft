@@ -1,0 +1,47 @@
+[package]
+name = "clawft-voice-aec"
+version.workspace = true
+# NOT publishable: macOS-first native voice-AEC bridge consumed by the
+# voicelab harness (~/llm). Standalone tool, not part of the daemon path.
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Native WebRTC-AEC full-duplex audio bridge (cpal device I/O + WebRTC APM AEC3) for full-duplex barge-in"
+
+[features]
+# Default is intentionally EMPTY so the workspace `cargo build` does not
+# pull cpal or the heavy bundled libwebrtc APM (built via cmake). The
+# runnable bridge + its device I/O live behind `bridge`; the real AEC3
+# echo canceller lives behind `webrtc-aec`. Mirrors clawft-channels'
+# `voice` / `voice-real-audio` gating convention.
+default = []
+# `bridge` = cpal device I/O + stdio protocol + passthrough AEC (always
+# runnable; proves the connect/round-trip without the heavy C++ dep).
+bridge = ["dep:cpal", "dep:libc"]
+# `webrtc-aec` = real WebRTC AEC3 echo cancellation (bundled libwebrtc
+# APM, built with cmake). Implies `bridge`.
+webrtc-aec = ["bridge", "dep:webrtc-audio-processing"]
+
+[dependencies]
+# Device I/O (capture + playback). Same version as clawft-channels'
+# voice-real-audio feature — this bridge is the same family.
+cpal = { version = "0.15", optional = true }
+# POSIX signal handling for the SIGUSR1 barge-in flush (mirrors vpio).
+libc = { version = "0.2", optional = true }
+# WebRTC Audio Processing Module (AEC3 + NS + AGC). The 0.3.x line builds
+# the bundled libwebrtc APM via cmake. Feature-gated so it never bloats
+# the default workspace build.
+# `bundled` builds the vendored libwebrtc APM from source (autotools +
+# cmake) so no system `webrtc-audio-processing` install / pkg-config lib
+# is required.
+webrtc-audio-processing = { version = "0.3", optional = true, features = ["bundled"] }
+
+# The runnable bridge binary. Only built when `bridge` is enabled, so the
+# default workspace build never compiles cpal/libwebrtc.
+[[bin]]
+name = "aec-bridge"
+path = "src/bin/aec-bridge.rs"
+required-features = ["bridge"]

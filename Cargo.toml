@@ -45,6 +45,12 @@ members = [
     "crates/clawft-service-terminal",
     "crates/clawft-service-classify",
     "crates/clawft-service-agent",
+    # Native WebRTC-AEC full-duplex audio bridge (cpal device I/O + WebRTC
+    # APM AEC3). Default features are EMPTY so the workspace build never
+    # pulls cpal or the heavy bundled libwebrtc APM (cmake) — the runnable
+    # bridge + AEC live behind the `bridge` / `webrtc-aec` features.
+    # Consumed by the voicelab harness (~/llm) for full-duplex barge-in.
+    "crates/clawft-voice-aec",
 ]
 exclude = [
     "gui/src-tauri",
