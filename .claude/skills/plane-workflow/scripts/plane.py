@@ -196,17 +196,15 @@ def paginate(path: str, *, per_page: int = 100, max_pages: int = 50) -> Iterable
         results = d.get("results", []) if isinstance(d, dict) else []
         yield from results
         next_cursor = d.get("next_cursor") if isinstance(d, dict) else None
-        if not next_cursor or next_cursor in seen_cursors:
+        # Plane's cursor is `page_size:page_index:offset` (e.g. `100:1:0`),
+        # NOT `total:size:offset` — the 3rd field is 0 on every page, so the
+        # old `if offset == 0: return` heuristic broke out after page 1 and
+        # silently truncated large lists (585 issues -> only 100 returned).
+        # Follow the explicit `next_page_results` flag instead.
+        has_more = bool(d.get("next_page_results")) if isinstance(d, dict) else False
+        if not has_more or not next_cursor or next_cursor in seen_cursors:
             return
         seen_cursors.add(next_cursor)
-        # Plane's cursor encodes total:size:offset. If offset hasn't advanced
-        # past what we've already paginated, treat as end-of-data.
-        try:
-            total, size, offset = (int(x) for x in next_cursor.split(":"))
-            if offset == 0 or len(results) < size:
-                return
-        except (ValueError, AttributeError):
-            pass
         cursor = next_cursor
 
 
