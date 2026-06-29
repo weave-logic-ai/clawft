@@ -36,6 +36,7 @@
 
 pub mod channel;
 pub mod stt;
+pub mod tts;
 pub mod types;
 pub mod vad;
 pub mod wav;
@@ -44,5 +45,8 @@ pub use channel::{
     AudioSegment, AudioSource, PlaybackSink, VoiceChannelAdapter, VoiceChannelAdapterFactory,
 };
 pub use stt::{SttBackend, SttModel, SubstrateStt, Utterance};
+pub use tts::{
+    DualLayerTts, SubstrateTts, TtsChunk, TtsEngine, TtsSink, TtsTier, scrub_tags, split_sentences,
+};
 pub use types::{VoiceAdapterConfig, VoiceError};
 pub use vad::{EnergyVad, VadEvent};
