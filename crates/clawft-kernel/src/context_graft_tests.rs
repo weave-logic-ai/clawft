@@ -275,3 +275,92 @@ fn prune_unknown_seq_is_false() {
     assert!(!view.regraft(999));
     assert!(!view.set_state(999, NodeState::Committed));
 }
+
+// ── P0.2: per-turn NodeState lifecycle ───────────────────────────────────────
+
+#[test]
+fn node_state_legal_transitions() {
+    use NodeState::*;
+    // Spine.
+    assert!(Speculative.can_transition_to(Frontier));
+    assert!(Frontier.can_transition_to(Committed));
+    // Rebases.
+    assert!(Speculative.can_transition_to(Pruned));
+    assert!(Speculative.can_transition_to(Stale));
+    assert!(Frontier.can_transition_to(Pruned));
+    assert!(Committed.can_transition_to(Stale));
+    assert!(Stale.can_transition_to(Frontier));
+    // Illegal jumps.
+    assert!(!Speculative.can_transition_to(Committed));
+    assert!(!Committed.can_transition_to(Frontier));
+    assert!(!Pruned.can_transition_to(Frontier)); // terminal
+    assert!(!Frontier.can_transition_to(Speculative)); // no rewind
+}
+
+/// A speculative chunk walks Speculative→Frontier→Committed via validated
+/// transitions; illegal jumps are rejected and leave state untouched.
+#[test]
+fn chunk_walks_speculative_to_committed() {
+    let view = SessionView::new("s1", 8);
+    view.insert_vector(axis_vec(8, 0), meta(10, "spec"));
+    assert!(view.set_speculative(10));
+    assert_eq!(view.state(10), Some(NodeState::Speculative));
+    // Speculative is not in the live window.
+    assert!(view.live_seqs().is_empty());
+
+    // Illegal skip is rejected; state unchanged.
+    assert!(!view.commit(10));
+    assert_eq!(view.state(10), Some(NodeState::Speculative));
+
+    // Spine.
+    assert!(view.transition(10, NodeState::Frontier));
+    assert_eq!(view.live_seqs(), vec![10]);
+    assert!(view.commit(10));
+    assert_eq!(view.state(10), Some(NodeState::Committed));
+}
+
+/// A speculative chunk is hard-pruned (Speculative→Pruned).
+#[test]
+fn chunk_walks_speculative_to_pruned() {
+    let view = SessionView::new("s1", 8);
+    view.insert_vector(axis_vec(8, 0), meta(20, "doomed"));
+    assert!(view.set_speculative(20));
+    assert!(view.transition(20, NodeState::Pruned));
+    assert_eq!(view.state(20), Some(NodeState::Pruned));
+    // Pruned is terminal: cannot re-graft.
+    assert!(!view.transition(20, NodeState::Frontier));
+}
+
+/// `mirror_state` advances the view AND the durable causal node metadata in
+/// lockstep (ADR-062 P0.2).
+#[test]
+fn mirror_state_syncs_view_and_causal_node() {
+    let view = SessionView::new("s1", 8);
+    view.insert_vector(axis_vec(8, 0), meta(30, "turn"));
+    assert!(view.set_speculative(30));
+
+    let graph = crate::causal::CausalGraph::new();
+    let node_id = graph.add_node("turn".into(), serde_json::json!({ "chain_seq": 30 }));
+
+    // Speculative→Frontier mirrored onto both substrates.
+    assert!(mirror_state(&view, 30, &graph, node_id, NodeState::Frontier));
+    assert_eq!(view.state(30), Some(NodeState::Frontier));
+    assert_eq!(
+        graph.get_node(node_id).unwrap().metadata["state"],
+        serde_json::json!("frontier")
+    );
+
+    // Frontier→Committed mirrored.
+    assert!(mirror_state(&view, 30, &graph, node_id, NodeState::Committed));
+    assert_eq!(
+        graph.get_node(node_id).unwrap().metadata["state"],
+        serde_json::json!("committed")
+    );
+
+    // An illegal view transition aborts before touching the causal node.
+    assert!(!mirror_state(&view, 30, &graph, node_id, NodeState::Frontier));
+    assert_eq!(
+        graph.get_node(node_id).unwrap().metadata["state"],
+        serde_json::json!("committed")
+    );
+}

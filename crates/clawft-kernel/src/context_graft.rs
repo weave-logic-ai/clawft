@@ -37,37 +37,11 @@ use crate::artifact_store::{ArtifactStore, ArtifactType};
 use crate::embedding::{EmbeddingError, EmbeddingProvider};
 use crate::hnsw_service::{HnswService, HnswServiceConfig};
 
-/// Node lifecycle state on the causal model (ADR-058 / ADR-056).
-///
-/// A grafted branch that coheres **collapses (commits)** to the trunk; one that
-/// does not is held off `main_line` and pruned — the same branch/merge/prune
-/// semantics as git ("causal collapse modeled on the git tree").
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NodeState {
-    /// A candidate branch not yet grafted into the working set.
-    Speculative,
-    /// Grafted and live in the working window this run.
-    Frontier,
-    /// Promoted (collapsed) onto the durable trunk (L3).
-    Committed,
-    /// Aged out of the live window; origin retained on the chain, re-graftable.
-    Stale,
-    /// Contradicted/revised; dropped off `main_line`.
-    Pruned,
-}
-
-impl NodeState {
-    /// Short stable tag for metadata/serialization.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            NodeState::Speculative => "speculative",
-            NodeState::Frontier => "frontier",
-            NodeState::Committed => "committed",
-            NodeState::Stale => "stale",
-            NodeState::Pruned => "pruned",
-        }
-    }
-}
+// Node lifecycle state ([`NodeState`]) + cross-substrate [`mirror_state`] live
+// in a sibling file to keep this module under the 500-line cap.
+#[path = "context_graft_state.rs"]
+mod state;
+pub use state::{NodeState, mirror_state};
 
 /// Metadata for one chunk indexed in a [`SessionView`].
 ///
@@ -389,7 +363,9 @@ impl SessionView {
         Ok(self.graft(&query, top_k))
     }
 
-    /// Set a chunk's causal-model [`NodeState`]. Returns `false` if unknown.
+    /// Set a chunk's causal-model [`NodeState`] unconditionally. Returns
+    /// `false` if the chunk is unknown. Prefer [`transition`](Self::transition)
+    /// on the per-turn path so illegal lifecycle jumps are rejected.
     pub fn set_state(&self, chain_seq: u64, state: NodeState) -> bool {
         match self.chunks.get_mut(&chain_seq) {
             Some(mut e) => {
@@ -398,6 +374,43 @@ impl SessionView {
             }
             None => false,
         }
+    }
+
+    /// The current causal-model state of a chunk, if known.
+    pub fn state(&self, chain_seq: u64) -> Option<NodeState> {
+        self.chunks.get(&chain_seq).map(|e| e.value().state)
+    }
+
+    /// Mark a chunk [`NodeState::Speculative`] — above the wavefront, mutable,
+    /// not yet hash-chained (ADR-062 D2). This is the per-turn entry state the
+    /// kernel never assigned before P0.2. Returns `false` if unknown.
+    pub fn set_speculative(&self, chain_seq: u64) -> bool {
+        self.set_state(chain_seq, NodeState::Speculative)
+    }
+
+    /// Advance a chunk through a **validated** lifecycle transition
+    /// ([`NodeState::can_transition_to`], ADR-062 D2). Returns `false` if the
+    /// chunk is unknown or the transition is illegal (the chunk is left
+    /// unchanged in that case).
+    pub fn transition(&self, chain_seq: u64, next: NodeState) -> bool {
+        match self.chunks.get_mut(&chain_seq) {
+            Some(mut e) => {
+                if e.state.can_transition_to(next) {
+                    e.state = next;
+                    true
+                } else {
+                    false
+                }
+            }
+            None => false,
+        }
+    }
+
+    /// Commit a chunk to the durable trunk ([`NodeState::Committed`]) — the
+    /// Frontier→Committed step fired at EOU (ADR-062 D5). Validated; returns
+    /// `false` if unknown or not currently `Frontier`.
+    pub fn commit(&self, chain_seq: u64) -> bool {
+        self.transition(chain_seq, NodeState::Committed)
     }
 
     /// Prune a chunk from the live window (ADR-058 Phase 4.1).
