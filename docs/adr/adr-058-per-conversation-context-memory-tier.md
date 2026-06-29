@@ -159,6 +159,16 @@ chain primitives (COW branches + append-only chain, ADR-056):
 Because the chain is append-only and RVF branches are COW, **every operation
 is non-destructive**: the origin always persists, lineage is automatic.
 
+**This IS the ECC causal model, not a parallel one — "causal collapse modeled on
+the git tree."** graft / prune / promote map directly onto the kernel's node
+lifecycle on the `CausalGraph` (ADR-056): `NodeState::{Speculative, Frontier,
+Committed, Stale, Pruned}` (node `metadata.state` + `Contradicts`/prune on
+revision, witness-chain commit via `chain_seq`). A speculative branch that doesn't
+cohere is held off `main_line` and pruned; a coherent one **collapses (commits)**
+to the trunk — the same branch / merge / prune semantics as git. The agent uses
+this kernel model directly; the full clawstage→ECC mapping (origin of the concept,
+`~/dev/mentra/clawstage`) is in `.planning/voice-ecc-synthesis.md`.
+
 ### Embedder (decision summary — full implementation in ADR-059)
 
 The semantic index needs an embedder in two lanes that must agree — **lab**
