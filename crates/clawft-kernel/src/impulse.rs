@@ -448,7 +448,14 @@ mod tests {
         let q = ImpulseQueue::new();
         let speaker = [9u8; 32];
         // 0 = CausalGraph tag (see StructureTag::as_u8).
-        q.emit(0, speaker, 0, ImpulseType::EndOfUtterance, json_payload(), 300);
+        q.emit(
+            0,
+            speaker,
+            0,
+            ImpulseType::EndOfUtterance,
+            json_payload(),
+            300,
+        );
         q.emit(0, speaker, 0, ImpulseType::Backchannel, json_payload(), 100);
         q.emit(0, speaker, 0, ImpulseType::TurnClaim, json_payload(), 200);
 

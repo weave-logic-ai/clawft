@@ -68,6 +68,8 @@ pub mod causal_predict;
 #[cfg(feature = "ecc")]
 pub mod cognitive_tick;
 #[cfg(feature = "ecc")]
+pub mod coherence;
+#[cfg(feature = "ecc")]
 pub mod context_graft;
 #[cfg(feature = "ecc")]
 pub mod context_promote;
@@ -78,8 +80,6 @@ pub mod democritus;
 #[cfg(feature = "ecc")]
 pub mod embedding;
 #[cfg(feature = "ecc")]
-pub mod floor;
-#[cfg(feature = "ecc")]
 pub mod embedding_onnx;
 #[cfg(feature = "ecc")]
 pub mod embedding_qwen3;
@@ -89,6 +89,8 @@ pub mod eml_coherence;
 pub mod eml_kernel;
 #[cfg(feature = "ecc")]
 pub mod eml_persistence;
+#[cfg(feature = "ecc")]
+pub mod floor;
 #[cfg(feature = "ecc")]
 pub mod hnsw_eml;
 #[cfg(feature = "ecc")]
@@ -308,6 +310,10 @@ pub use cluster::{
 };
 #[cfg(feature = "ecc")]
 pub use cognitive_tick::{CognitiveTick, CognitiveTickConfig, CognitiveTickStats};
+#[cfg(feature = "ecc")]
+pub use coherence::{
+    CoherenceBand, CoherenceDampener, CoherenceSignals, DAMPEN_FACTOR, compute_coherence,
+};
 pub use config::KernelConfigExt;
 #[cfg(feature = "os-patterns")]
 pub use config_service::{ConfigChange, ConfigEntry, ConfigService, ConfigValue, SecretRef};
@@ -336,6 +342,11 @@ pub use environment::{
     GovernanceBranches, GovernanceScope, LearningMode,
 };
 pub use error::{KernelError, KernelResult};
+#[cfg(feature = "ecc")]
+pub use floor::{
+    ContentReadiness, FloorCandidate, FloorDecision, FloorState, UrgencySignals, compute_urgency,
+    contending_count, crowd_density, evaluate_floor,
+};
 #[cfg(feature = "exochain")]
 pub use gate::{CapabilityGate, GateBackend, GateDecision, GovernanceGate};
 pub use governance::{
@@ -355,11 +366,6 @@ pub use hnsw_eml::{
 #[cfg(feature = "ecc")]
 pub use hnsw_service::{
     HnswSearchResult, HnswService, HnswServiceConfig, MultiKey, MultiKeyConfig, entity_search_keys,
-};
-#[cfg(feature = "ecc")]
-pub use floor::{
-    ContentReadiness, FloorCandidate, FloorDecision, FloorState, UrgencySignals, compute_urgency,
-    contending_count, crowd_density, evaluate_floor,
 };
 #[cfg(feature = "ecc")]
 pub use impulse::{ImpulseQueue, ImpulseType};

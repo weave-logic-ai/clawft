@@ -343,7 +343,13 @@ fn mirror_state_syncs_view_and_causal_node() {
     let node_id = graph.add_node("turn".into(), serde_json::json!({ "chain_seq": 30 }));
 
     // Speculative→Frontier mirrored onto both substrates.
-    assert!(mirror_state(&view, 30, &graph, node_id, NodeState::Frontier));
+    assert!(mirror_state(
+        &view,
+        30,
+        &graph,
+        node_id,
+        NodeState::Frontier
+    ));
     assert_eq!(view.state(30), Some(NodeState::Frontier));
     assert_eq!(
         graph.get_node(node_id).unwrap().metadata["state"],
@@ -351,14 +357,26 @@ fn mirror_state_syncs_view_and_causal_node() {
     );
 
     // Frontier→Committed mirrored.
-    assert!(mirror_state(&view, 30, &graph, node_id, NodeState::Committed));
+    assert!(mirror_state(
+        &view,
+        30,
+        &graph,
+        node_id,
+        NodeState::Committed
+    ));
     assert_eq!(
         graph.get_node(node_id).unwrap().metadata["state"],
         serde_json::json!("committed")
     );
 
     // An illegal view transition aborts before touching the causal node.
-    assert!(!mirror_state(&view, 30, &graph, node_id, NodeState::Frontier));
+    assert!(!mirror_state(
+        &view,
+        30,
+        &graph,
+        node_id,
+        NodeState::Frontier
+    ));
     assert_eq!(
         graph.get_node(node_id).unwrap().metadata["state"],
         serde_json::json!("committed")
