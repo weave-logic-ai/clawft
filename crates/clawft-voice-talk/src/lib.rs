@@ -17,6 +17,10 @@
 //!   that writes the speculative→committed handoff onto the kernel ECC
 //!   `CausalGraph` (NodeState lifecycle in node metadata; no parallel
 //!   mechanism).
+//! - [`native_dual_layer`] — binds the native TTS node-renderers (Kokoro fast +
+//!   Orpheus/SNAC slow, from `clawft-voice-tts`) into the
+//!   [`DualLayerTts`](clawft_channels::voice::tts::DualLayerTts) that
+//!   [`NodeRenderer`] drives (ADR-062 Phase 4).
 //!
 //! The fully-live end-to-end path (real mic/speaker + STT/TTS/ECAPA weights +
 //! the Hermes endpoint) is exercised by `#[ignore]`d tests — this environment
@@ -26,8 +30,14 @@ mod audio;
 mod ecc;
 mod llm;
 mod render;
+mod tts;
 
 pub use audio::AecAudioControl;
 pub use ecc::EccConversationObserver;
 pub use llm::LocalProviderVoiceLlm;
 pub use render::{ContradictionDetector, NeverContradicts, NodeRenderer, RenderOutcome};
+pub use tts::{native_dual_layer, native_dual_layer_with_ollama};
+
+// Re-export the concrete native TTS node-renderers so callers can compose a
+// custom DualLayerTts (e.g. swap the fast backend) without a second dependency.
+pub use clawft_voice_tts::{KokoroTts, OrpheusTts, SnacDecode, SnacOnnxDecoder};

@@ -18,6 +18,8 @@ description = "Talk-Mode bridge: binds the clawft-channels voice controller to L
 # libwebrtc). `webrtc-aec` swaps in the real AEC3 echo canceller.
 default = []
 webrtc-aec = ["clawft-voice-aec/webrtc-aec"]
+# Real native TTS inference (SNAC + Kokoro via `ort`) for the live render path.
+onnx = ["clawft-voice-tts/onnx"]
 
 [dependencies]
 # The generic controller + voice traits (VoiceLlm, AudioControl, SttBackend,
@@ -25,6 +27,10 @@ webrtc-aec = ["clawft-voice-aec/webrtc-aec"]
 clawft-channels = { workspace = true, features = ["voice"] }
 # In-process AEC for the barge-in flush binding (passthrough by default).
 clawft-voice-aec = { path = "../clawft-voice-aec" }
+# Native TTS node-renderers (ADR-062 Phase 4): Kokoro fast + Orpheus/SNAC slow,
+# bound into a DualLayerTts for render-from-node. Default features EMPTY (no
+# `ort`); real inference is behind its `onnx` feature.
+clawft-voice-tts = { path = "../clawft-voice-tts" }
 # Local Hermes provider for the concrete VoiceLlm binding.
 clawft-llm = { workspace = true, features = ["native"] }
 # Kernel CausalGraph for the ECC ConversationObserver binding.
