@@ -97,7 +97,10 @@ async fn fallback_batch_matches_individual() {
 #[test]
 fn query_instruction_format_is_official() {
     assert!(QUERY_INSTRUCTION.starts_with("Instruct: "));
-    assert!(QUERY_INSTRUCTION.ends_with("\nQuery:"));
+    // `Instruct: {task}\nQuery: ` — embed_query appends the raw query after the
+    // trailing space (matches the lab `QWEN3_INSTRUCT.format(q=..)` template).
+    assert!(QUERY_INSTRUCTION.ends_with("\nQuery: "));
+    assert!(QUERY_INSTRUCTION.contains("code-search"));
 }
 
 // -- Live decoder-ONNX test (task 1.4 — needs the model) --------------
@@ -169,5 +172,69 @@ async fn qwen3_live_inference_sanity() {
         "related cosine {} should exceed unrelated cosine {}",
         cosine(&a, &b),
         cosine(&a, &c)
+    );
+}
+
+/// Cosine-parity ≥ 0.99 vs the lab (ADR-059 consistency gate, task 1.4).
+///
+/// Reference vectors are produced by `~/llm/bin/_embedlab.py` (MLX-8bit gold) on
+/// the shared probe set, MRL-512, written to a JSON fixture. The fixture path is
+/// passed via `WEFTOS_QWEN3_PARITY_FIXTURE`; the test is skipped if unset. Run:
+///
+/// ```text
+/// WEFTOS_QWEN3_PARITY_FIXTURE=/path/qwen3_parity_fixture.json \
+///   cargo test -p clawft-kernel --features onnx-embeddings -- --ignored qwen3_parity --nocapture
+/// ```
+#[cfg(feature = "onnx-embeddings")]
+#[tokio::test]
+#[ignore = "requires Qwen3 model bundle + WEFTOS_QWEN3_PARITY_FIXTURE (ADR-059 1.4)"]
+async fn qwen3_parity_vs_lab() {
+    let Ok(fixture_path) = std::env::var("WEFTOS_QWEN3_PARITY_FIXTURE") else {
+        eprintln!("WEFTOS_QWEN3_PARITY_FIXTURE unset — skipping parity test");
+        return;
+    };
+    let raw = std::fs::read_to_string(&fixture_path).expect("read fixture");
+    let fixture: serde_json::Value = serde_json::from_str(&raw).expect("parse fixture");
+    let items = fixture["items"].as_array().expect("items array");
+
+    let provider = Qwen3EmbeddingProvider::new(
+        ".weftos/models/Qwen3-Embedding-0.6B/model_fp16.onnx",
+        ".weftos/models/Qwen3-Embedding-0.6B/tokenizer.json",
+    );
+    assert!(provider.is_runtime_available(), "model bundle not loaded");
+
+    let mut cosines = Vec::with_capacity(items.len());
+    for item in items {
+        let text = item["text"].as_str().unwrap();
+        let mode = item["mode"].as_str().unwrap_or("doc");
+        let reference: Vec<f32> = item["vec"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_f64().unwrap() as f32)
+            .collect();
+        let rust = if mode == "query" {
+            provider.embed_query(text).await.unwrap()
+        } else {
+            provider.embed(text).await.unwrap()
+        };
+        assert_eq!(rust.len(), reference.len(), "dim mismatch");
+        cosines.push(cosine(&rust, &reference));
+    }
+
+    let n = cosines.len() as f32;
+    let mean = cosines.iter().sum::<f32>() / n;
+    let min = cosines.iter().cloned().fold(f32::INFINITY, f32::min);
+    let frac_ge = cosines.iter().filter(|&&c| c >= 0.99).count() as f32 / n;
+    eprintln!(
+        "Qwen3 Rust↔lab parity (n={}): mean_cos={:.4} min_cos={:.4} frac≥0.99={:.3}",
+        cosines.len(),
+        mean,
+        min,
+        frac_ge
+    );
+    assert!(
+        mean >= 0.99,
+        "mean cosine-parity {mean:.4} < 0.99 (ADR-059 gate)"
     );
 }

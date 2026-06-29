@@ -34,9 +34,11 @@ pub const QWEN3_DIMS: usize = 512;
 pub const QWEN3_MODEL_NAME: &str = "Qwen3-Embedding-0.6B";
 
 /// Qwen3 asymmetric **query** instruction prefix. Documents are embedded raw;
-/// queries are prefixed with this (official `get_detailed_instruct` format).
-pub const QUERY_INSTRUCTION: &str =
-    "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:";
+/// queries are prefixed with this (`Instruct: {task}\nQuery: {q}` format). The
+/// task description is the code-search instruction pinned by the lab probe set
+/// (ADR-059 consistency contract) so the lab and prod share one vector space;
+/// `embed_query` appends the raw query directly after the trailing space.
+pub const QUERY_INSTRUCTION: &str = "Instruct: Given a code-search query, retrieve the relevant code, log, diff, traceback or config chunk.\nQuery: ";
 
 // ---------------------------------------------------------------------------
 // Pure helpers (always compiled + unit-tested; only wired into production
@@ -287,12 +289,22 @@ impl Qwen3EmbeddingProvider {
         let encoding = tokenizer
             .encode(text, true)
             .map_err(|e| EmbeddingError::BackendError(format!("tokenize error: {e}")))?;
-        let input_ids: Vec<i64> = encoding.get_ids().iter().map(|&u| u as i64).collect();
-        let attention_mask: Vec<i64> = encoding
+        let mut input_ids: Vec<i64> = encoding.get_ids().iter().map(|&u| u as i64).collect();
+        let mut attention_mask: Vec<i64> = encoding
             .get_attention_mask()
             .iter()
             .map(|&u| u as i64)
             .collect();
+        // Append the Qwen3 EOS (`<|im_end|>`) for last-token pooling if the
+        // tokenizer's post-processor didn't already terminate on it. The fp16
+        // export pools the hidden state at this EOS position; omitting it pools
+        // the wrong token and destroys lab parity (~0.72 cosine without it).
+        if let Some(eos) = tokenizer.token_to_id("<|im_end|>").map(|u| u as i64)
+            && input_ids.last() != Some(&eos)
+        {
+            input_ids.push(eos);
+            attention_mask.push(1);
+        }
         let seq_len = input_ids.len();
         if seq_len == 0 {
             return Ok(vec![0.0; self.dimensions]);
@@ -313,15 +325,18 @@ impl Qwen3EmbeddingProvider {
             "position_ids" => pos_t,
         ];
 
-        // Empty, dtype-matched KV cache for every layer (past_len = 0).
+        // Empty, dtype-matched KV cache for every layer (past_len = 0). ort
+        // forbids a 0-dim in the (shape, data) `from_array` path, so allocate a
+        // 0-element tensor via the default CPU allocator instead.
+        let allocator = ort::memory::Allocator::default();
         for kv in &self.kv_spec {
-            let kv_shape = vec![1_i64, kv.n_kv_heads, 0_i64, kv.head_dim];
+            let kv_shape = ort::value::Shape::new([1, kv.n_kv_heads, 0, kv.head_dim]);
             let value: SessionInputValue<'_> = if kv.fp16 {
-                Tensor::from_array((kv_shape, Vec::<half::f16>::new()))
+                Tensor::<half::f16>::new(&allocator, kv_shape)
                     .map_err(|e| EmbeddingError::BackendError(format!("kv tensor: {e}")))?
                     .into()
             } else {
-                Tensor::from_array((kv_shape, Vec::<f32>::new()))
+                Tensor::<f32>::new(&allocator, kv_shape)
                     .map_err(|e| EmbeddingError::BackendError(format!("kv tensor: {e}")))?
                     .into()
             };
