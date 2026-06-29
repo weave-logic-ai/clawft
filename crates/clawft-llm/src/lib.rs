@@ -53,6 +53,8 @@ pub mod types;
 #[cfg(feature = "native")]
 pub mod failover;
 #[cfg(feature = "native")]
+pub mod hermes;
+#[cfg(feature = "native")]
 pub mod local_provider;
 #[cfg(feature = "native")]
 pub mod openai_compat;
@@ -84,6 +86,8 @@ pub use types::{ChatMessage, ChatRequest, ChatResponse, StreamChunk, ToolCall, U
 
 #[cfg(feature = "native")]
 pub use failover::FailoverChain;
+#[cfg(feature = "native")]
+pub use hermes::ReasoningMode;
 #[cfg(feature = "native")]
 pub use local_provider::LocalProvider;
 #[cfg(feature = "native")]

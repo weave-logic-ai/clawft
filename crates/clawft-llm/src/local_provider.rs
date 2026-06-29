@@ -26,6 +26,7 @@ use std::time::Duration;
 
 use crate::config::LlmProviderConfig;
 use crate::error::{ProviderError, Result};
+use crate::hermes::{self, ReasoningMode};
 use crate::provider::Provider;
 use crate::sse::parse_sse_line;
 use crate::types::{ChatRequest, ChatResponse, StreamChunk};
@@ -44,6 +45,17 @@ pub const LMSTUDIO_DEFAULT_BASE_URL: &str = "http://localhost:1234/v1";
 
 /// Default model for local providers.
 pub const DEFAULT_LOCAL_MODEL: &str = "llama3.2";
+
+/// Default base URL for the ADR-060 Hermes serving recipe (`bin/serve-llamacpp`,
+/// OpenAI endpoint on port 8090).
+pub const HERMES_SERVING_BASE_URL: &str = "http://127.0.0.1:8090/v1";
+
+/// Default model id for the ADR-060 Hermes serving recipe.
+pub const HERMES_DEFAULT_MODEL: &str = "hermes-4.3-36b";
+
+/// Default explicit context window for the Hermes loop (ADR-060: cap to the live
+/// window, NOT the 512K native; never rely on a silent 4k default).
+pub const HERMES_DEFAULT_NUM_CTX: u32 = 32768;
 
 /// Default timeout for local providers (5 minutes -- local inference can be slow).
 const DEFAULT_LOCAL_TIMEOUT_SECS: u64 = 300;
@@ -74,6 +86,12 @@ pub struct LocalProvider {
     config: LlmProviderConfig,
     http: reqwest::Client,
     api_key: Option<String>,
+    /// Explicit context window injected as `options.num_ctx` (ADR-060: no silent
+    /// 4k truncation). `None` leaves the server's launch-time window in charge.
+    num_ctx: Option<u32>,
+    /// Default per-turn Hermes `<think>` reasoning mode for [`Provider::complete`].
+    /// Per-turn overrides go through [`LocalProvider::complete_turn`].
+    reasoning: ReasoningMode,
 }
 
 impl LocalProvider {
@@ -111,7 +129,147 @@ impl LocalProvider {
                 .expect("failed to build reqwest client"),
             config,
             api_key,
+            num_ctx: None,
+            reasoning: ReasoningMode::Default,
         }
+    }
+
+    /// Create a provider pre-configured for the ADR-060 Hermes serving recipe.
+    ///
+    /// Points at `bin/serve-llamacpp`'s OpenAI endpoint (port 8090) with the
+    /// Hermes default model and an explicit 32k context window so the loop is
+    /// never silently truncated to 4k. Reasoning mode defaults to
+    /// [`ReasoningMode::Default`] (let the server template decide); set it
+    /// per-turn with [`LocalProvider::complete_turn`].
+    pub fn hermes_serving() -> Self {
+        let mut provider = Self::new(
+            HERMES_SERVING_BASE_URL.into(),
+            HERMES_DEFAULT_MODEL.into(),
+            None,
+        );
+        provider.config.name = "hermes".into();
+        provider.num_ctx = Some(HERMES_DEFAULT_NUM_CTX);
+        provider
+    }
+
+    /// Set the explicit context window injected as `options.num_ctx`.
+    pub fn with_num_ctx(mut self, num_ctx: u32) -> Self {
+        self.num_ctx = Some(num_ctx);
+        self
+    }
+
+    /// Set the default per-turn reasoning mode used by [`Provider::complete`].
+    pub fn with_reasoning(mut self, reasoning: ReasoningMode) -> Self {
+        self.reasoning = reasoning;
+        self
+    }
+
+    /// The configured explicit context window, if any.
+    pub fn num_ctx(&self) -> Option<u32> {
+        self.num_ctx
+    }
+
+    /// The default per-turn reasoning mode.
+    pub fn reasoning(&self) -> ReasoningMode {
+        self.reasoning
+    }
+
+    /// Execute a chat completion with an explicit per-turn reasoning mode.
+    ///
+    /// This is the Hermes-aware completion path (ADR-060): it injects the
+    /// explicit `num_ctx` and the `enable_thinking` toggle into the request
+    /// body, then normalizes the response so `<think>` reasoning is stripped and
+    /// `<tool_call>` blocks are recovered into native `tool_calls` when the
+    /// server template did not already parse them. `<think>` content never
+    /// reaches the parsed `tool_calls`.
+    ///
+    /// [`Provider::complete`] delegates here with the provider's default
+    /// reasoning mode; call this directly to override it per turn (on for
+    /// planning, off for tool execution).
+    pub async fn complete_turn(
+        &self,
+        request: &ChatRequest,
+        reasoning: ReasoningMode,
+    ) -> Result<ChatResponse> {
+        let url = self.completions_url();
+
+        debug!(
+            provider = %self.config.name,
+            model = %request.model,
+            messages = request.messages.len(),
+            url = %url,
+            num_ctx = ?self.num_ctx,
+            reasoning = ?reasoning,
+            "sending local chat completion request"
+        );
+
+        // Serialize, then augment with the Hermes serving knobs (num_ctx +
+        // enable_thinking) that have no field on the shared ChatRequest type.
+        let mut body = serde_json::to_value(request)?;
+        hermes::augment_request_body(&mut body, self.num_ctx, reasoning);
+
+        let mut req = self
+            .http
+            .post(&url)
+            .header("Content-Type", "application/json");
+
+        if let Some(ref key) = self.resolve_api_key() {
+            req = req.header("Authorization", format!("Bearer {key}"));
+        }
+
+        for (k, v) in &self.config.headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+
+        let response = req.json(&body).send().await.map_err(|e| {
+            ProviderError::RequestFailed(format!(
+                "failed to connect to local LLM server at {}: {e}",
+                self.config.base_url
+            ))
+        })?;
+
+        let status = response.status();
+
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+
+            if status.as_u16() == 404 {
+                return Err(ProviderError::ModelNotFound(format!(
+                    "model '{}' not found on local server ({}): {}",
+                    request.model, self.config.base_url, body
+                )));
+            }
+
+            let code = status.as_u16();
+            if (500..=599).contains(&code) {
+                return Err(ProviderError::ServerError { status: code, body });
+            }
+
+            return Err(ProviderError::RequestFailed(format!(
+                "HTTP {status}: {body}"
+            )));
+        }
+
+        let mut chat_response: ChatResponse = response.json().await.map_err(|e| {
+            ProviderError::InvalidResponse(format!("failed to parse local response: {e}"))
+        })?;
+
+        // Normalize each choice: strip <think>, recover <tool_call> blocks.
+        for choice in &mut chat_response.choices {
+            let recovered = hermes::normalize_message(&mut choice.message);
+            if recovered && choice.finish_reason.as_deref() != Some("tool_calls") {
+                choice.finish_reason = Some("tool_calls".to_string());
+            }
+        }
+
+        debug!(
+            provider = %self.config.name,
+            model = %chat_response.model,
+            choices = chat_response.choices.len(),
+            "local chat completion response received"
+        );
+
+        Ok(chat_response)
     }
 
     /// Create a provider pre-configured for Ollama on the default port.
@@ -258,71 +416,9 @@ impl Provider for LocalProvider {
     }
 
     async fn complete(&self, request: &ChatRequest) -> Result<ChatResponse> {
-        let url = self.completions_url();
-
-        debug!(
-            provider = %self.config.name,
-            model = %request.model,
-            messages = request.messages.len(),
-            url = %url,
-            "sending local chat completion request"
-        );
-
-        let mut req = self
-            .http
-            .post(&url)
-            .header("Content-Type", "application/json");
-
-        // Only add Authorization header if we have a key
-        if let Some(ref key) = self.resolve_api_key() {
-            req = req.header("Authorization", format!("Bearer {key}"));
-        }
-
-        for (k, v) in &self.config.headers {
-            req = req.header(k.as_str(), v.as_str());
-        }
-
-        let response = req.json(request).send().await.map_err(|e| {
-            ProviderError::RequestFailed(format!(
-                "failed to connect to local LLM server at {}: {e}",
-                self.config.base_url
-            ))
-        })?;
-
-        let status = response.status();
-
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-
-            if status.as_u16() == 404 {
-                return Err(ProviderError::ModelNotFound(format!(
-                    "model '{}' not found on local server ({}): {}",
-                    request.model, self.config.base_url, body
-                )));
-            }
-
-            let code = status.as_u16();
-            if (500..=599).contains(&code) {
-                return Err(ProviderError::ServerError { status: code, body });
-            }
-
-            return Err(ProviderError::RequestFailed(format!(
-                "HTTP {status}: {body}"
-            )));
-        }
-
-        let chat_response: ChatResponse = response.json().await.map_err(|e| {
-            ProviderError::InvalidResponse(format!("failed to parse local response: {e}"))
-        })?;
-
-        debug!(
-            provider = %self.config.name,
-            model = %chat_response.model,
-            choices = chat_response.choices.len(),
-            "local chat completion response received"
-        );
-
-        Ok(chat_response)
+        // Delegate to the Hermes-aware path with the provider's default
+        // reasoning mode; per-turn overrides use `complete_turn` directly.
+        self.complete_turn(request, self.reasoning).await
     }
 
     async fn complete_stream(
@@ -505,6 +601,29 @@ mod tests {
         assert_eq!(provider.name(), "lmstudio");
         assert_eq!(provider.config().base_url, LMSTUDIO_DEFAULT_BASE_URL);
         assert_eq!(provider.config().default_model.as_deref(), Some("phi-3"));
+    }
+
+    #[test]
+    fn hermes_serving_defaults() {
+        let provider = LocalProvider::hermes_serving();
+        assert_eq!(provider.name(), "hermes");
+        assert_eq!(provider.config().base_url, HERMES_SERVING_BASE_URL);
+        assert_eq!(
+            provider.config().default_model.as_deref(),
+            Some(HERMES_DEFAULT_MODEL)
+        );
+        // Explicit window so the loop is never silently truncated to 4k.
+        assert_eq!(provider.num_ctx(), Some(HERMES_DEFAULT_NUM_CTX));
+        assert_eq!(provider.reasoning(), ReasoningMode::Default);
+    }
+
+    #[test]
+    fn with_num_ctx_and_reasoning_builders() {
+        let provider = LocalProvider::ollama()
+            .with_num_ctx(16384)
+            .with_reasoning(ReasoningMode::Off);
+        assert_eq!(provider.num_ctx(), Some(16384));
+        assert_eq!(provider.reasoning(), ReasoningMode::Off);
     }
 
     #[test]
