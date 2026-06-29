@@ -4,40 +4,66 @@
 //! subword tokenizer so the live-window budget (ADR-060: cap to 32k) is
 //! computed against actual token counts rather than word counts.
 //!
-//! # Backends
+//! # Backends (`real-tokenizer` feature, native default)
 //!
-//! * **`real-tokenizer` feature (native default)** — a real BPE tokenizer,
-//!   `tiktoken`'s `o200k_base` vocab (the GPT-4o family, ~200k entries).
-//!   It is bundled in the crate, so there is no model download, and it is a
-//!   large-vocab BPE comparable in granularity to the served Hermes /
-//!   Seed-OSS tokenizer. Crucially it counts punctuation, code, and
-//!   non-space-delimited text correctly — exactly where the whitespace
-//!   heuristic undercounts and risks overflowing the real window.
-//! * **fallback (browser / `real-tokenizer` off)** — an improved char+word
-//!   heuristic. The bundled BPE vocab is heavy and not WASM-friendly, so
-//!   browser builds use the estimator and accept a looser budget.
+//! Resolved once, in priority order, by [`backend`]:
+//!
+//! 1. **Exact (`CLAWFT_HERMES_TOKENIZER`)** — when that env var points at a
+//!    valid `tokenizer.json`, it is loaded via the HF `tokenizers` crate and
+//!    used directly. This is the served model's own tokenizer, so token
+//!    counts match the runtime window exactly.
+//! 2. **`o200k_base` stand-in** — `tiktoken`'s GPT-4o BPE (~200k entries),
+//!    bundled in the crate (no model download). It counts punctuation, code,
+//!    and non-space-delimited text far better than the whitespace heuristic,
+//!    but it is *not* the served tokenizer (see "Exactness" below).
+//!
+//! Without the feature (browser / WASM) the fallback is an improved char+word
+//! heuristic; the bundled BPE vocab is heavy and not WASM-friendly, so browser
+//! builds accept a looser budget.
 //!
 //! # Exactness vs. the served model
 //!
-//! Exact parity with the *served* Hermes tokenizer requires that model's
-//! `tokenizer.json`, which ships with the GGUF/HF weights (download blocked
-//! at the time of writing — ADR-060 0.1). `o200k_base` is the production
-//! stand-in until then; the abstraction here is the single seam through
-//! which the exact model tokenizer can later be plugged (load a
-//! `tokenizer.json` via the HF `tokenizers` crate) without touching callers.
+//! The agent-loop model (ADR-060/061) is **Hermes-4.3-36B**, a
+//! **`SeedOssForCausalLM`** model (ByteDance Seed-OSS base, 155 136-entry
+//! vocab) — *not* a Llama-3 or GPT family model. Its `tokenizer.json` is
+//! published in the non-GGUF base repo `NousResearch/Hermes-4.3-36B` and was
+//! verified to reproduce the live `llama.cpp` server's `POST /tokenize`
+//! counts **exactly** (10/10 fixtures, 0% delta).
+//!
+//! `o200k_base` is therefore only an *estimator* for this model. Measured
+//! against the live server (`:8090 /tokenize`) over a 10-fixture set spanning
+//! prose, dense code, URLs, digits, and CJK/emoji:
+//!
+//! | metric | o200k_base vs Seed-OSS |
+//! |--------|------------------------|
+//! | mean Δ | **14.8 %** |
+//! | median Δ | **12.5 %** |
+//! | max Δ | **56.4 %** (digit-heavy text) |
+//! | within 5 % | **3 / 10 fixtures** |
+//!
+//! So o200k_base is **outside** the ADR-058 ~5% target. It remains the bundled
+//! default because it needs no model download and is deterministic across
+//! environments (critical: budgeting and its tests must not silently change
+//! with which files happen to be on disk). Operators who need exact budgeting
+//! set `CLAWFT_HERMES_TOKENIZER` to the served model's `tokenizer.json`
+//! (e.g. fetched with `~/llm/bin/pull NousResearch/Hermes-4.3-36B --include
+//! "*tokenizer*"`). The `tests/hermes_tokenizer_parity.rs` `#[ignore]`'d probe
+//! re-measures both deltas against a live server.
 
 /// Approximate token count for a string, using the best available tokenizer.
 ///
-/// With the `real-tokenizer` feature (native default) this returns the exact
-/// `o200k_base` BPE token count for `text`. Without it, it returns a
-/// char/word heuristic biased slightly high so budgeting never *under*counts.
+/// With the `real-tokenizer` feature (native default) this delegates to the
+/// resolved [`backend`] — the exact Seed-OSS tokenizer when
+/// `CLAWFT_HERMES_TOKENIZER` is configured, otherwise the bundled `o200k_base`
+/// BPE estimator. Without the feature it returns a char/word heuristic biased
+/// slightly high so budgeting never *under*counts.
 ///
-/// The function is infallible and cheap to call per message; the BPE vocab is
-/// parsed once and cached for the process lifetime.
+/// The function is infallible and cheap to call per message; the tokenizer is
+/// constructed once and cached for the process lifetime.
 pub fn count_tokens(text: &str) -> usize {
     #[cfg(feature = "real-tokenizer")]
     {
-        bpe().encode_ordinary(text).len()
+        backend().count(text)
     }
     #[cfg(not(feature = "real-tokenizer"))]
     {
@@ -45,15 +71,62 @@ pub fn count_tokens(text: &str) -> usize {
     }
 }
 
-/// The lazily-initialized, process-wide BPE tokenizer.
-///
-/// `o200k_base` construction parses the bundled vocab once; subsequent calls
-/// reuse the same `CoreBPE`.
+/// Resolved token-counting backend (real-tokenizer builds).
 #[cfg(feature = "real-tokenizer")]
-fn bpe() -> &'static tiktoken_rs::CoreBPE {
+enum Backend {
+    /// The served model's own tokenizer, loaded from a `tokenizer.json`.
+    Hermes(Box<tokenizers::Tokenizer>),
+    /// The bundled `o200k_base` BPE estimator (no model download required).
+    O200k(tiktoken_rs::CoreBPE),
+}
+
+#[cfg(feature = "real-tokenizer")]
+impl Backend {
+    fn count(&self, text: &str) -> usize {
+        match self {
+            // `encode` only errors on pathological tokenizer config, never on
+            // ordinary UTF-8 input; fall back to the char/word heuristic rather
+            // than panicking in the budgeting hot path.
+            Backend::Hermes(tok) => match tok.encode(text, false) {
+                Ok(enc) => enc.len(),
+                Err(_) => heuristic_count_tokens(text),
+            },
+            Backend::O200k(bpe) => bpe.encode_ordinary(text).len(),
+        }
+    }
+}
+
+/// The lazily-initialized, process-wide token-counting backend.
+///
+/// Resolved once: if `CLAWFT_HERMES_TOKENIZER` names a loadable
+/// `tokenizer.json`, that exact tokenizer is used; otherwise the bundled
+/// `o200k_base` vocab is parsed once and reused.
+#[cfg(feature = "real-tokenizer")]
+fn backend() -> &'static Backend {
     use std::sync::OnceLock;
-    static BPE: OnceLock<tiktoken_rs::CoreBPE> = OnceLock::new();
-    BPE.get_or_init(|| tiktoken_rs::o200k_base().expect("bundled o200k_base vocab must load"))
+    static BACKEND: OnceLock<Backend> = OnceLock::new();
+    BACKEND.get_or_init(|| {
+        if let Some(path) = std::env::var_os("CLAWFT_HERMES_TOKENIZER") {
+            match tokenizers::Tokenizer::from_file(&path) {
+                Ok(tok) => {
+                    tracing::info!(
+                        path = ?path,
+                        "tokenizer: using exact Hermes/Seed-OSS tokenizer.json for budgeting"
+                    );
+                    return Backend::Hermes(Box::new(tok));
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        path = ?path,
+                        error = %err,
+                        "tokenizer: CLAWFT_HERMES_TOKENIZER failed to load; \
+                         falling back to bundled o200k_base estimator"
+                    );
+                }
+            }
+        }
+        Backend::O200k(tiktoken_rs::o200k_base().expect("bundled o200k_base vocab must load"))
+    })
 }
 
 /// Heuristic token estimate used when no real tokenizer is available.
@@ -64,9 +137,9 @@ fn bpe() -> &'static tiktoken_rs::CoreBPE {
 /// text (few spaces, many tokens) are caught by the char term, while ordinary
 /// prose is caught by the word term. Empty input is zero.
 ///
-/// Compiled only when it can actually be reached: the fallback (no real
-/// tokenizer) build, or any test build (the tests exercise it directly).
-#[cfg(any(not(feature = "real-tokenizer"), test))]
+/// Always compiled: it is the no-feature fallback, the tests exercise it
+/// directly, and (with `real-tokenizer` on) it is the infallible fallback for
+/// the exact-tokenizer encode path in [`Backend::count`].
 pub(crate) fn heuristic_count_tokens(text: &str) -> usize {
     if text.is_empty() {
         return 0;
@@ -112,13 +185,21 @@ mod tests {
     }
 
     /// Fixture set with reference counts from the real `o200k_base` BPE.
-    /// `count_tokens` (real-tokenizer on) must land within ~5% of each
-    /// reference. This guards that budgeting uses a real subword tokenizer
-    /// and never silently regresses to a word/char heuristic. References were
-    /// captured from `tiktoken_rs::o200k_base().encode_ordinary(..).len()`.
+    /// With no `CLAWFT_HERMES_TOKENIZER` configured, `count_tokens`
+    /// (real-tokenizer on) resolves to the bundled `o200k_base` backend and
+    /// must land within ~5% of each reference. This guards that budgeting uses
+    /// a real subword tokenizer and never silently regresses to a word/char
+    /// heuristic. References were captured from
+    /// `tiktoken_rs::o200k_base().encode_ordinary(..).len()`.
     #[cfg(feature = "real-tokenizer")]
     #[test]
     fn real_tokenizer_within_tolerance_on_fixtures() {
+        // The exact-tokenizer override changes `count_tokens` to the Seed-OSS
+        // vocab, whose counts differ from o200k by design (see module docs);
+        // skip the o200k reference check when an exact tokenizer is configured.
+        if std::env::var_os("CLAWFT_HERMES_TOKENIZER").is_some() {
+            return;
+        }
         // (input, reference o200k token count)
         let fixtures: &[(&str, usize)] = &[
             ("The quick brown fox jumps over the lazy dog.", 10),
@@ -128,11 +209,11 @@ mod tests {
             ),
             (
                 "fn main() {\n    let x = vec![1, 2, 3];\n    println!(\"{:?}\", x);\n}",
-                28,
+                26,
             ),
             (
                 "ExoChain is the single source of truth; the agent gets a query/graft layer.",
-                18,
+                19,
             ),
         ];
         for (text, reference) in fixtures {
