@@ -76,6 +76,8 @@ pub mod embedding;
 #[cfg(feature = "ecc")]
 pub mod embedding_onnx;
 #[cfg(feature = "ecc")]
+pub mod embedding_qwen3;
+#[cfg(feature = "ecc")]
 pub mod eml_coherence;
 #[cfg(feature = "ecc")]
 pub mod eml_kernel;
