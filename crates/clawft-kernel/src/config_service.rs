@@ -826,7 +826,7 @@ mod tests {
             .unwrap();
         svc.set_typed("t", "int", ConfigValue::Integer(42), pid(1))
             .unwrap();
-        svc.set_typed("t", "float", ConfigValue::Float(3.14), pid(1))
+        svc.set_typed("t", "float", ConfigValue::Float(2.5), pid(1))
             .unwrap();
         svc.set_typed("t", "bool", ConfigValue::Boolean(false), pid(1))
             .unwrap();
@@ -848,7 +848,7 @@ mod tests {
         );
         assert_eq!(
             svc.get_typed("t", "float").unwrap().value,
-            ConfigValue::Float(3.14)
+            ConfigValue::Float(2.5)
         );
         assert_eq!(
             svc.get_typed("t", "bool").unwrap().value,

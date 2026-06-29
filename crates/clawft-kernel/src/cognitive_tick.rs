@@ -678,8 +678,11 @@ mod tests {
     #[test]
     fn drift_detection() {
         // Default: interval=50ms, budget_ratio=0.3 => budget = 50*1000*0.3 = 15000us
-        let mut cfg = CognitiveTickConfig::default();
-        cfg.adaptive_tick = false; // disable adaptive so interval stays constant
+        // disable adaptive so interval stays constant
+        let cfg = CognitiveTickConfig {
+            adaptive_tick: false,
+            ..Default::default()
+        };
         let ct = CognitiveTick::new(cfg);
 
         // Under budget: no drift.

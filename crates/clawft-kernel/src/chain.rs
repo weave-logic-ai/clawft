@@ -2917,9 +2917,9 @@ mod tests {
 
         // Signature verification should fail (checkpoint payload was tampered).
         let pubkey = key.verifying_key();
-        match ChainManager::verify_rvf_signature(&path, &pubkey) {
-            Ok(valid) => assert!(!valid, "tampered checkpoint should not verify"),
-            Err(_) => {} // Also acceptable — tampered segment can't be parsed
+        // Err is also acceptable — a tampered segment can't be parsed.
+        if let Ok(valid) = ChainManager::verify_rvf_signature(&path, &pubkey) {
+            assert!(!valid, "tampered checkpoint should not verify");
         }
 
         let _ = std::fs::remove_dir_all(&dir);

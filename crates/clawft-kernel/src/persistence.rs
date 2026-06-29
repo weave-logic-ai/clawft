@@ -386,7 +386,9 @@ mod tests {
         let result = save_all(&cfg, &graph, &hnsw);
         assert!(result.is_err(), "saving to read-only dir should fail");
 
-        // Restore permissions for cleanup.
+        // Restore permissions for cleanup (test teardown only — we must make the
+        // temp dir writable again to delete it).
+        #[allow(clippy::permissions_set_readonly_false)]
         perms.set_readonly(false);
         let _ = std::fs::set_permissions(&base, perms);
         let _ = std::fs::remove_dir_all(&base);
