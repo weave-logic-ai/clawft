@@ -151,24 +151,30 @@ mod tests {
 
     #[test]
     fn validate_speed_out_of_range() {
-        let mut p = VoicePersonality::default();
-        p.speed = 3.0;
+        let p = VoicePersonality {
+            speed: 3.0,
+            ..Default::default()
+        };
         assert!(p.validate().is_err());
         assert!(p.validate().unwrap_err().contains("speed"));
     }
 
     #[test]
     fn validate_pitch_out_of_range() {
-        let mut p = VoicePersonality::default();
-        p.pitch = -1.5;
+        let p = VoicePersonality {
+            pitch: -1.5,
+            ..Default::default()
+        };
         assert!(p.validate().is_err());
         assert!(p.validate().unwrap_err().contains("pitch"));
     }
 
     #[test]
     fn validate_empty_voice_id() {
-        let mut p = VoicePersonality::default();
-        p.voice_id = "".into();
+        let p = VoicePersonality {
+            voice_id: "".into(),
+            ..Default::default()
+        };
         assert!(p.validate().is_err());
         assert!(p.validate().unwrap_err().contains("voice_id"));
     }
