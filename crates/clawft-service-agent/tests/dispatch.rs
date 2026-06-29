@@ -308,3 +308,93 @@ async fn reset_budget_clears_circuit_and_returns_prior_snapshot() {
     assert!(!post.circuit_open);
     assert_eq!(post.input_tokens, 0);
 }
+
+// ── ADR-058 Phase 5 deferred step 4: conversation-end promotion ──────────
+//
+// Deterministic wiring test (Mock embedder + in-memory chain, no live LLM).
+// Proves the `agent.chat.end` path: an attached SessionTier promotes on a
+// supplied durable_fact, or drops the view when none is supplied. The live
+// LLM-postmortem leg (durable_fact synthesis via Hermes) is exercised by the
+// #[ignore]'d test in `clawft-weave`.
+
+use clawft_kernel::chain::ChainManager;
+use clawft_kernel::embedding::{EmbeddingProvider, MockEmbeddingProvider};
+use clawft_service_agent::SessionTier;
+
+async fn index_one(tier: &SessionTier, chain: &ChainManager, conv: &str, text: &str) -> u64 {
+    let ev = chain.append(
+        "agent",
+        "agent.chat.turn",
+        Some(serde_json::json!({ "conv": conv, "content": text })),
+    );
+    tier.index_turn(conv, ev.sequence, "agent.chat.turn", text)
+        .await;
+    ev.sequence
+}
+
+#[tokio::test]
+async fn end_conversation_promotes_with_durable_fact() {
+    let embedder: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbeddingProvider::new(64));
+    let chain = Arc::new(ChainManager::new(0, 1000));
+    let tier = Arc::new(SessionTier::new(embedder, chain.clone(), None));
+    let conv = "end-promote";
+    let s = index_one(&tier, &chain, conv, "the api base is https://x").await;
+    assert!(tier.mark_important(conv, s));
+
+    // The digest (postmortem prompt source) carries the conversation text.
+    let digest = tier.conversation_digest(conv, 4096).unwrap();
+    assert!(
+        digest.contains("api base"),
+        "digest carries turn text: {digest}"
+    );
+    assert_eq!(tier.active_conversations(), vec![conv.to_string()]);
+
+    let release = Arc::new(Notify::new());
+    let stub = Arc::new(StubHandle::new(release));
+    let svc = AgentService::new(stub).with_session_tier(Arc::clone(&tier));
+
+    // Supplying a durable_fact (as the daemon does after the LLM postmortem)
+    // promotes to the trunk and drops the view.
+    let promoted = svc
+        .end_conversation(conv, Some("api base = https://x"))
+        .expect("promotion event emitted");
+    let ev = chain
+        .tail_from(promoted - 1)
+        .into_iter()
+        .find(|e| e.sequence == promoted)
+        .expect("memory.promote event present");
+    assert_eq!(ev.kind, "memory.promote");
+    // View dropped: the conversation is no longer active.
+    assert!(tier.active_conversations().is_empty());
+}
+
+#[tokio::test]
+async fn end_conversation_without_fact_drops_view() {
+    let embedder: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbeddingProvider::new(64));
+    let chain = Arc::new(ChainManager::new(0, 1000));
+    let tier = Arc::new(SessionTier::new(embedder, chain.clone(), None));
+    let conv = "end-drop";
+    index_one(&tier, &chain, conv, "ephemeral chatter").await;
+
+    let release = Arc::new(Notify::new());
+    let stub = Arc::new(StubHandle::new(release));
+    let svc = AgentService::new(stub).with_session_tier(Arc::clone(&tier));
+
+    // No durable_fact → the ephemeral view is dropped, nothing promoted.
+    assert!(svc.end_conversation(conv, None).is_none());
+    assert!(tier.active_conversations().is_empty());
+    // An empty fact is treated the same as None (no garbage promotion).
+    let conv2 = "end-blank";
+    index_one(&tier, &chain, conv2, "more chatter").await;
+    assert!(svc.end_conversation(conv2, Some("   ")).is_none());
+    assert!(tier.active_conversations().is_empty());
+}
+
+#[tokio::test]
+async fn end_conversation_no_tier_is_noop() {
+    let release = Arc::new(Notify::new());
+    let stub = Arc::new(StubHandle::new(release));
+    let svc = AgentService::new(stub);
+    // No tier attached → end_conversation is a clean no-op.
+    assert!(svc.end_conversation("whatever", Some("fact")).is_none());
+}

@@ -980,9 +980,16 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                     let tier = Arc::new(clawft_service_agent::SessionTier::new(
                         embedder, chain, None,
                     ));
+                    // ADR-058 Phase 5.3: pre-warm the embedder at startup (one
+                    // throwaway embed) so the first conversation's first graft
+                    // doesn't pay the model's first-inference cost — mirrors the
+                    // 6.2 STT pre-warm. Best-effort; cheap on the Mock fallback.
+                    tier.warm().await;
                     anchor = anchor.with_session_tier(tier.clone());
                     session_tier = Some(tier);
-                    info!("agent.chat L2 session tier wired (index + graft active)");
+                    info!(
+                        "agent.chat L2 session tier wired (index + graft active, embedder pre-warmed)"
+                    );
                 }
                 Arc::new(anchor)
             } else {
@@ -1197,14 +1204,21 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
             // provider (the same instance the turn anchor indexes into), so
             // each turn's prompt is augmented with recalled context. `None`
             // when chain anchoring is off — no grafting.
-            session_tier.map(|t| {
+            session_tier.clone().map(|t| {
                 let p: Arc<dyn clawft_core::agent::graft::ContextGraftProvider> = t;
                 p
             }),
         )
         .await;
 
-        let service = Arc::new(clawft_service_agent::AgentService::new(agent_loop));
+        // ADR-058 Phase 5 deferred step 4: also hand the SAME tier to the
+        // service so the `agent.chat.end` signal can drive conversation-end
+        // promotion (the loop grafts from it; the service promotes from it).
+        let mut service = clawft_service_agent::AgentService::new(agent_loop);
+        if let Some(tier) = session_tier {
+            service = service.with_session_tier(tier);
+        }
+        let service = Arc::new(service);
         let _ = DAEMON_AGENT.set(service);
         info!("agent service wired (agent.chat dispatches through clawft-service-agent)");
     } else {
@@ -4338,6 +4352,40 @@ async fn dispatch(
             } else {
                 Response::error("agent service not wired")
             }
+        }
+        "agent.chat.end" => {
+            // ADR-058 Phase 5 (deferred step 4): the explicit
+            // conversation-end signal. Unlike `agent.chat.cancel` (which
+            // re-arms the conv for the next turn), `end` rolls the L2 view
+            // up: run the LLM postmortem over the conversation digest, then
+            // promote the durable fact to the trunk and drop the view. The
+            // chain stays the source of truth, so this is safe to call more
+            // than once (a second call finds no view and is a no-op).
+            let conv_id = match params.get("conv_id").and_then(|v| v.as_str()) {
+                Some(s) if !s.is_empty() => s.to_string(),
+                _ => return Response::error("agent.chat.end requires conv_id"),
+            };
+            let Some(agent) = daemon_agent() else {
+                return Response::error("agent service not wired");
+            };
+            // Build the postmortem digest from the live view, then distill the
+            // durable fact via the same LLM the daemon already uses. Best-
+            // effort: any postmortem failure drops the view without promoting
+            // rather than failing the close.
+            let durable_fact = match (agent.session_tier(), daemon_llm()) {
+                (Some(tier), Some(llm)) => match tier.conversation_digest(&conv_id, 16_384) {
+                    Some(digest) => {
+                        crate::conv_postmortem::summarize_durable_facts(&llm, &digest).await
+                    }
+                    None => None,
+                },
+                _ => None,
+            };
+            let promoted = agent.end_conversation(&conv_id, durable_fact.as_deref());
+            Response::success(serde_json::json!({
+                "ended": conv_id,
+                "promoted_seq": promoted,
+            }))
         }
         "terminal.spawn" => handle_terminal_spawn(params, kernel).await,
         "terminal.write" => handle_terminal_write(params, kernel).await,

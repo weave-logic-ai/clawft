@@ -84,6 +84,17 @@ pub trait EmbeddingProvider: Send + Sync {
 
     /// Name of the embedding model (for metadata tracking).
     fn model_name(&self) -> &str;
+
+    /// Pre-warm the backend: run one throwaway [`embed`](Self::embed) so the
+    /// model graph, runtime thread pool, and allocator are hot before the first
+    /// real call. Best-effort — errors are swallowed (a backend with nothing to
+    /// warm, like the Mock, just pays one cheap call). Intended to be called
+    /// once at daemon startup so the first conversation turn doesn't pay the
+    /// model's first-inference cost (ADR-058 Phase 5.3; mirrors the 6.2 STT
+    /// pre-warm).
+    async fn warm(&self) {
+        let _ = self.embed("warm").await;
+    }
 }
 
 // ---------------------------------------------------------------------------

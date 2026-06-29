@@ -46,6 +46,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::protocol::{AgentChatParams, AgentChatResult};
+use crate::session_tier::SessionTier;
 
 /// Errors returned by [`AgentService::dispatch`].
 #[derive(Debug, thiserror::Error)]
@@ -137,6 +138,11 @@ pub struct AgentService<H: AgentLoopHandle> {
     /// Held here in addition to the agent loop so the daemon RPC layer
     /// can drive `reset_budget` without touching the loop's internals.
     cost_budget: Option<Arc<ConversationBudget>>,
+    /// Optional L2 [`SessionTier`] (ADR-058 Phase 5). The same instance the
+    /// agent loop grafts from and the turn anchor indexes into; held here so
+    /// the daemon's `agent.chat.end` signal can drive conversation-end
+    /// promotion (Phase 5 deferred step 4) without reaching into the loop.
+    session_tier: Option<Arc<SessionTier>>,
 }
 
 impl<H: AgentLoopHandle> AgentService<H> {
@@ -150,6 +156,42 @@ impl<H: AgentLoopHandle> AgentService<H> {
             in_flight: Arc::new(AtomicUsize::new(0)),
             drain: Arc::new(Notify::new()),
             cost_budget: None,
+            session_tier: None,
+        }
+    }
+
+    /// Attach the L2 [`SessionTier`] so [`Self::end_conversation`] can drive
+    /// conversation-end promotion (ADR-058 Phase 5 deferred step 4). Pass the
+    /// same `Arc<SessionTier>` the agent loop grafts from and the turn anchor
+    /// indexes into, so all three share one view set.
+    pub fn with_session_tier(mut self, tier: Arc<SessionTier>) -> Self {
+        self.session_tier = Some(tier);
+        self
+    }
+
+    /// Borrow the optional L2 [`SessionTier`] — the daemon uses it to build the
+    /// postmortem digest before calling [`Self::end_conversation`].
+    pub fn session_tier(&self) -> Option<&Arc<SessionTier>> {
+        self.session_tier.as_ref()
+    }
+
+    /// Conversation-end promotion (ADR-058 Phase 5 deferred step 4).
+    ///
+    /// The daemon calls this when a conversation ends (the `agent.chat.end`
+    /// signal). When a `durable_fact` is supplied (from the LLM postmortem) the
+    /// view is promoted to the trunk and dropped, returning the `memory.promote`
+    /// chain sequence; when it is `None` (nothing durable, or the postmortem was
+    /// unavailable) the ephemeral view is simply dropped — the chain stays the
+    /// source of truth. Returns `None` when no tier is attached or nothing was
+    /// promoted.
+    pub fn end_conversation(&self, conv_id: &str, durable_fact: Option<&str>) -> Option<u64> {
+        let tier = self.session_tier.as_ref()?;
+        match durable_fact {
+            Some(fact) if !fact.trim().is_empty() => tier.promote_and_drop(conv_id, fact),
+            _ => {
+                tier.drop_view(conv_id);
+                None
+            }
         }
     }
 

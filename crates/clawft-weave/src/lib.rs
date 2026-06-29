@@ -11,6 +11,7 @@ pub mod capability;
 pub mod client;
 pub mod commands;
 pub mod control;
+pub mod conv_postmortem;
 #[cfg(unix)]
 pub mod daemon;
 #[cfg(unix)]
