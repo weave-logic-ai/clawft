@@ -281,6 +281,14 @@ impl AecProcessor {
         out
     }
 
+    /// Number of queued render-reference samples (at the APM's 48 kHz rate)
+    /// awaiting cancellation. Used by device-path consumers to confirm the
+    /// playback sink is feeding the echo reference and that [`flush`](Self::flush)
+    /// cleared it.
+    pub fn render_ref_len(&self) -> usize {
+        self.render48k.len()
+    }
+
     /// Barge-in flush: drop all queued render reference. Call this the moment
     /// playback is silenced so the canceller stops subtracting audio that is
     /// no longer reaching the user's ears.

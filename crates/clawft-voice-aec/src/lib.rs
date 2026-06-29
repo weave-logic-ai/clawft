@@ -39,6 +39,10 @@
 //!   APM, built via cmake) in [`AecProcessor`]. No device deps on its own.
 //! - `bridge`     — cpal device I/O + the stdio `aec-bridge` bin. Combine with
 //!   `webrtc-aec` for a real-AEC bridge.
+//! - `device`     — in-process cpal capture/playback wired to the
+//!   `clawft-channels` voice seams: [`AecTtsSink`] (TTS playback + AEC render
+//!   reference) and [`run_capture`] (mic → AEC → `CaptureProcessor`). Combine
+//!   with `webrtc-aec` for real echo cancellation.
 
 /// Wire / processing constants. Public so the binary and any in-process
 /// weftos consumer can refer to them.
@@ -57,3 +61,9 @@ mod bridge;
 
 #[cfg(feature = "bridge")]
 pub use bridge::{Config, run};
+
+#[cfg(feature = "device")]
+mod device;
+
+#[cfg(feature = "device")]
+pub use device::{AecTtsSink, run_capture, spawn_output};
