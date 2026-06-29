@@ -28,14 +28,22 @@
 
 mod audio;
 mod ecc;
+mod forest;
+#[cfg(feature = "live-audio")]
+pub mod live;
 mod llm;
+mod native;
 mod render;
+mod session;
 mod tts;
 
 pub use audio::AecAudioControl;
 pub use ecc::EccConversationObserver;
+pub use forest::{KernelImpulseSink, LoopObserver, TalkForest};
 pub use llm::LocalProviderVoiceLlm;
+pub use native::native_components;
 pub use render::{ContradictionDetector, NeverContradicts, NodeRenderer, RenderOutcome};
+pub use session::{TalkComponents, TalkConfig, TalkSession};
 pub use tts::{native_dual_layer, native_dual_layer_with_ollama};
 
 // Re-export the concrete native TTS node-renderers so callers can compose a

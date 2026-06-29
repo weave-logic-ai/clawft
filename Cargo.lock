@@ -1676,6 +1676,7 @@ dependencies = [
  "clawft-kernel",
  "clawft-llm",
  "clawft-voice-aec",
+ "clawft-voice-onnx",
  "clawft-voice-tts",
  "serde_json",
  "tokio",

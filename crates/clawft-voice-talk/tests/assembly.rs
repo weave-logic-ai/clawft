@@ -116,3 +116,73 @@ async fn live_full_talk_mode_pipeline() {
     );
     let _ = ConversationEvent::Interrupted; // (barge-in path covered in unit tests)
 }
+
+/// The ALL-NATIVE live path (ADR-062 Phase 6.2): the real `weft talk` assembly
+/// — parakeet STT, smart-turn endpoint, ECAPA speaker, Kokoro+Orpheus TTS, the
+/// P2 Talk-Mode loop as orchestrator, and Hermes as the brain — driven by a WAV
+/// instead of a mic. No audio is faked; needs the staged ONNX models
+/// (`.weftos/models/…`, `--features onnx`) + live Hermes at `:8090`. The
+/// playback sink is discarded (the agent runtime has no speaker); a mic+speaker
+/// deployment uses `clawft_voice_talk::live` (the `live-audio` feature).
+///
+/// Run it (for the human/operator):
+/// ```text
+/// WEFT_TALK_WAV=/path/to/16k_mono.wav \
+///   cargo test -p clawft-voice-talk --features onnx --test assembly \
+///   live_native_talk_session -- --ignored --nocapture
+/// ```
+#[tokio::test]
+#[ignore = "requires staged ONNX models (--features onnx) + live Hermes (8090) + $WEFT_TALK_WAV"]
+async fn live_native_talk_session() {
+    use clawft_channels::voice::talkmode::NoopAudioControl;
+    use clawft_voice_talk::{TalkConfig, TalkSession, native_components};
+
+    let wav_path = std::env::var("WEFT_TALK_WAV").expect("set WEFT_TALK_WAV to a 16k mono WAV");
+    let config = TalkConfig {
+        conv_id: "live-native".into(),
+        base_system: "You are a terse voice assistant.".into(),
+        ..TalkConfig::default()
+    };
+    // The all-native component stack (discarding sink: no speaker in-runtime).
+    let components = native_components(&config, Arc::new(DiscardSink), Arc::new(NoopAudioControl))
+        .expect("native components assemble");
+    let session = TalkSession::assemble(config, components);
+    let forest = session.forest().clone();
+
+    let (pcm, sr) = wav_to_pcm_s16le(&std::fs::read(&wav_path).unwrap()).unwrap();
+    assert_eq!(sr, 16_000, "WEFT_TALK_WAV must be 16 kHz mono");
+
+    let cancel = CancellationToken::new();
+    let run_cancel = cancel.clone();
+    let (tx, rx) = mpsc::channel::<Vec<i16>>(256);
+    // `run` drives the P2 loop (orchestrator) + controller (render shell) live.
+    let handle = tokio::spawn(async move { session.run(rx, run_cancel).await });
+
+    for frame in pcm.chunks(1_600) {
+        tx.send(frame.to_vec()).await.unwrap();
+    }
+    for _ in 0..20 {
+        tx.send(vec![0i16; 1_600]).await.unwrap();
+    }
+
+    // Wait for the loom to fill: user turn (committed by the loop) + replies.
+    for _ in 0..400 {
+        if forest.graph().node_count() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    cancel.cancel();
+    drop(tx);
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+
+    assert!(
+        forest.graph().node_count() >= 2,
+        "native spoken turn produced user-turn + reply nodes on the forest"
+    );
+    assert_eq!(
+        forest.view().state(1),
+        Some(clawft_kernel::context_graft::NodeState::Committed),
+        "the P2 loop committed the user turn"
+    );
+}
