@@ -25,7 +25,9 @@
 mod audio;
 mod ecc;
 mod llm;
+mod render;
 
 pub use audio::AecAudioControl;
 pub use ecc::EccConversationObserver;
 pub use llm::LocalProviderVoiceLlm;
+pub use render::{ContradictionDetector, NeverContradicts, NodeRenderer, RenderOutcome};

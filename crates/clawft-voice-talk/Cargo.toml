@@ -33,7 +33,8 @@ clawft-kernel = { workspace = true, features = ["native", "ecc", "exochain", "cl
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+# Barge-in CancellationToken in the render-from-node path (ADR-062 §2.2).
+tokio-util = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
-tokio-util = { workspace = true }
