@@ -67,8 +67,10 @@ fn router_config() -> VoiceRouterConfig {
     // command-path assertion still exercises the routing seam end-to-
     // end. SC-4-specific permission gating has dedicated tests in the
     // voice_router unit-test module.
-    let mut permissions = VoicePermissions::default();
-    permissions.default_level = VoiceLevel::Level2;
+    let permissions = VoicePermissions {
+        default_level: VoiceLevel::Level2,
+        ..VoicePermissions::default()
+    };
     VoiceRouterConfig {
         transcript_topic: TOPIC.into(),
         chat_target_agent: "concierge-bot".into(),
@@ -146,17 +148,21 @@ async fn chat_path_lands_transcript_on_handler() {
     .await;
     assert!(landed, "chat handler did not receive transcript within 2s");
 
-    let calls = chat.calls.lock().unwrap();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].text, "what is the weather");
-    assert_eq!(calls[0].target_agent, "concierge-bot");
-    assert_eq!(calls[0].conv_id, "voice-smoke");
-    assert_eq!(calls[0].metadata.source, "voice");
-    assert_eq!(calls[0].metadata.transcript_topic, TOPIC);
-    assert!(
-        (calls[0].metadata.confidence.unwrap() - 0.91).abs() < 1e-9,
-        "confidence threaded through"
-    );
+    // Scope the guard so it is released before the shutdown await
+    // (guards must not be held across await points).
+    {
+        let calls = chat.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].text, "what is the weather");
+        assert_eq!(calls[0].target_agent, "concierge-bot");
+        assert_eq!(calls[0].conv_id, "voice-smoke");
+        assert_eq!(calls[0].metadata.source, "voice");
+        assert_eq!(calls[0].metadata.transcript_topic, TOPIC);
+        assert!(
+            (calls[0].metadata.confidence.unwrap() - 0.91).abs() < 1e-9,
+            "confidence threaded through"
+        );
+    }
     assert!(
         cmd.calls.lock().unwrap().is_empty(),
         "non-command transcript must not reach the command handler"
@@ -210,10 +216,14 @@ async fn command_path_dispatches_through_command_handler() {
     .await;
     assert!(landed, "command handler did not receive dispatch within 2s");
 
-    let calls = cmd.calls.lock().unwrap();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].0, "hello");
-    assert_eq!(calls[0].1, json!({"args": []}));
+    // Scope the guard so it is released before the shutdown await
+    // (guards must not be held across await points).
+    {
+        let calls = cmd.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "hello");
+        assert_eq!(calls[0].1, json!({"args": []}));
+    }
     assert!(
         chat.calls.lock().unwrap().is_empty(),
         "command transcript must not also fire chat dispatch"
@@ -265,9 +275,13 @@ async fn command_path_passes_remainder_as_args() {
     .await;
     assert!(landed, "command not dispatched within 2s");
 
-    let calls = cmd.calls.lock().unwrap();
-    assert_eq!(calls[0].0, "kernel.status");
-    assert_eq!(calls[0].1, json!({"args": ["verbose"]}));
+    // Scope the guard so it is released before the shutdown await
+    // (guards must not be held across await points).
+    {
+        let calls = cmd.calls.lock().unwrap();
+        assert_eq!(calls[0].0, "kernel.status");
+        assert_eq!(calls[0].1, json!({"args": ["verbose"]}));
+    }
 
     timeout(Duration::from_secs(2), router.shutdown())
         .await

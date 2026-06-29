@@ -529,11 +529,13 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn cron_list_with_empty_store() {
-        // Smoke test: should not panic.
+    #[tokio::test]
+    async fn cron_list_with_empty_store() {
+        // Smoke test: should not panic. `cron_list` is async, so the future
+        // must be awaited — otherwise the body never runs and the test is a
+        // no-op.
         let config = Config::default();
-        let _ = cron_list(&config);
+        let _ = cron_list(&config).await;
     }
 
     #[test]

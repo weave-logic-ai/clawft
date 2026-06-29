@@ -163,7 +163,7 @@ mod tests {
             PluginError::PermissionDenied(String::new()),
             PluginError::ResourceExhausted(String::new()),
             PluginError::NotImplemented(String::new()),
-            PluginError::Io(std::io::Error::new(std::io::ErrorKind::Other, "")),
+            PluginError::Io(std::io::Error::other("")),
             PluginError::Serialization(serde_json::from_str::<serde_json::Value>("!").unwrap_err()),
         ];
         assert_eq!(_variants.len(), 7);
