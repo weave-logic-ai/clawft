@@ -2,19 +2,22 @@
 //! Phase 5). Behind the `live-audio` feature (pulls cpal via
 //! `clawft-voice-aec/device`).
 //!
-//! [`run_live`] is the real spoken loop: it shares one [`AecProcessor`] between
-//! a cpal output [`AecTtsSink`] (which doubles as the AEC render reference) and
-//! the cpal capture path ([`run_capture`]), wires capture's
-//! [`CaptureProcessor`] to emit floor impulses into the forest via
-//! [`KernelImpulseSink`], builds the native component stack, and drives the
-//! assembled [`TalkSession`] (P2 loop orchestrator + render shell) until
-//! `cancel` fires.
+//! [`run_live`] is the real spoken loop, composed per the two reconciliation
+//! rules:
 //!
-//! Barge-in: the controller cancels the in-flight TTS, whose
-//! [`TtsSink::flush`](clawft_channels::voice::tts::TtsSink::flush) drops the
-//! queued playback **and** the shared AEC render reference together — so the
-//! mic stops cancelling the user's onset. The separate `AudioControl` is
-//! therefore a no-op here (the sink owns the shared AEC).
+//! 1. **ONE orchestrator, ONE endpointer.** [`run_capture`] is used purely as
+//!    the cpal mic → AEC → 16 kHz **frame source** (its [`CaptureProcessor`]
+//!    impulses are dropped). The single endpointer is the controller's
+//!    [`SemanticEndpointer`](clawft_channels::voice::turn::SemanticEndpointer)
+//!    (smart-turn); its end-of-turn decision becomes the `EndOfUtterance`
+//!    impulse (via the `LoopObserver` on `UserTurn`) that the **P2 Talk-Mode
+//!    loop** — the one orchestrator — commits. No second EOU path runs.
+//! 2. **ONE shared `AecProcessor`.** A single `Arc<Mutex<AecProcessor>>` is
+//!    shared across the output [`AecTtsSink`] (playback → `push_render`
+//!    reference), [`run_capture`] (mic → `process_capture`), **and** the
+//!    barge-in [`AecAudioControl`] (flush). So capture, playback, and the
+//!    barge-in flush all cancel the same echo — the live path is runnable, not
+//!    a `DiscardSink` stub.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -22,16 +25,23 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use clawft_channels::voice::capture::CaptureProcessor;
-use clawft_channels::voice::talkmode::NoopAudioControl;
+use clawft_channels::voice::capture::{CaptureProcessor, ImpulseSink, VoiceImpulse};
 use clawft_channels::voice::tts::TtsSink;
 use clawft_channels::voice::types::VoiceError;
 use clawft_channels::voice::vad::EnergyVad;
 use clawft_voice_aec::{AecProcessor, AecTtsSink, run_capture, spawn_output};
 
-use crate::forest::KernelImpulseSink;
+use crate::audio::AecAudioControl;
 use crate::native::native_components;
 use crate::session::{TalkConfig, TalkSession};
+
+/// Drops capture-side impulses: the live path's single endpointer is the
+/// controller's `SemanticEndpointer`, so the P5 VAD must not emit a competing
+/// `EndOfUtterance` (rule 1 above). `run_capture` still forwards the frames.
+struct DropImpulses;
+impl ImpulseSink for DropImpulses {
+    fn emit(&self, _impulse: VoiceImpulse, _hlc: u64) {}
+}
 
 /// Run the live cpal spoken conversation for `config` until `cancel` fires.
 ///
@@ -43,7 +53,8 @@ pub async fn run_live(
     input_device: Option<String>,
     cancel: CancellationToken,
 ) -> Result<(), VoiceError> {
-    // Shared AEC: played audio (render reference) ⇄ captured mic (subtract).
+    // ONE shared AEC: played audio (render reference) ⇄ captured mic (subtract)
+    // ⇄ barge-in flush. The single handle is what makes echo cancellation close.
     let aec = Arc::new(Mutex::new(AecProcessor::new()));
 
     // Output sink (also feeds the render reference) + its cpal stream.
@@ -51,18 +62,18 @@ pub async fn run_live(
     let _out_stream = spawn_output(sink.as_ref()).map_err(VoiceError::Config)?;
     let sink_dyn: Arc<dyn TtsSink> = sink.clone();
 
+    // Barge-in control over the SAME shared AEC (drops the render reference the
+    // instant playback is silenced, alongside the sink's own flush).
+    let audio = Arc::new(AecAudioControl::from_shared(aec.clone()));
+
     // Native component stack (Hermes brain, parakeet/smart-turn/ECAPA, Kokoro+
-    // Orpheus TTS). AudioControl is a no-op — the sink flush owns the AEC.
-    let components = native_components(&config, sink_dyn, Arc::new(NoopAudioControl))?;
+    // Orpheus TTS). The smart-turn SemanticEndpointer inside is THE endpointer.
+    let components = native_components(&config, sink_dyn, audio)?;
     let session = TalkSession::assemble(config.clone(), components);
 
-    // Capture → AEC → CaptureProcessor: emits floor impulses into the forest's
-    // queue (KernelImpulseSink) and forwards cleaned frames to the controller.
+    // Capture → AEC → CaptureProcessor: forwards cleaned frames to the
+    // controller. Impulses are dropped (single endpointer — see rule 1).
     let (frames_tx, frames_rx) = mpsc::channel::<Vec<i16>>(256);
-    let impulse_sink = Arc::new(KernelImpulseSink::new(
-        session.forest().impulses().clone(),
-        [0u8; 32],
-    ));
     let vad = EnergyVad::new(
         config.sample_rate,
         config.vad_threshold_dbfs,
@@ -70,7 +81,7 @@ pub async fn run_live(
         100,
         10_000,
     );
-    let processor = CaptureProcessor::new(vad, impulse_sink, frames_tx);
+    let processor = CaptureProcessor::new(vad, Arc::new(DropImpulses), frames_tx);
 
     // Bridge the CancellationToken to the capture loop's AtomicBool flag.
     let cap_flag = Arc::new(AtomicBool::new(false));
