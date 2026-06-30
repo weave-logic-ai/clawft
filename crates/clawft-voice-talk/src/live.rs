@@ -5,13 +5,16 @@
 //! [`run_live`] is the real spoken loop, composed per the two reconciliation
 //! rules:
 //!
-//! 1. **ONE orchestrator, ONE endpointer.** [`run_capture`] is used purely as
-//!    the cpal mic → AEC → 16 kHz **frame source** (its [`CaptureProcessor`]
-//!    impulses are dropped). The single endpointer is the controller's
+//! 1. **Endpointing composes; one authoritative EOU.** [`run_capture`]'s
+//!    [`CaptureProcessor`] runs the energy VAD and emits the coarse onset as a
+//!    `TurnClaim` (the early-turn tier) into the forest via [`KernelImpulseSink`],
+//!    but **defers EOU** (`with_emit_eou(false)`). The single *authoritative*
+//!    endpointer is the controller's smart-turn
 //!    [`SemanticEndpointer`](clawft_channels::voice::turn::SemanticEndpointer)
-//!    (smart-turn); its end-of-turn decision becomes the `EndOfUtterance`
+//!    (ADR-062 6.5); its end-of-turn decision becomes the `EndOfUtterance`
 //!    impulse (via the `LoopObserver` on `UserTurn`) that the **P2 Talk-Mode
-//!    loop** — the one orchestrator — commits. No second EOU path runs.
+//!    loop** — the one orchestrator — commits. The two endpointers never both
+//!    fire EOU.
 //! 2. **ONE shared `AecProcessor`.** A single `Arc<Mutex<AecProcessor>>` is
 //!    shared across the output [`AecTtsSink`] (playback → `push_render`
 //!    reference), [`run_capture`] (mic → `process_capture`), **and** the
@@ -25,23 +28,16 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use clawft_channels::voice::capture::{CaptureProcessor, ImpulseSink, VoiceImpulse};
+use clawft_channels::voice::capture::CaptureProcessor;
 use clawft_channels::voice::tts::TtsSink;
 use clawft_channels::voice::types::VoiceError;
 use clawft_channels::voice::vad::EnergyVad;
 use clawft_voice_aec::{AecProcessor, AecTtsSink, run_capture, spawn_output};
 
 use crate::audio::AecAudioControl;
+use crate::forest::KernelImpulseSink;
 use crate::native::native_components;
 use crate::session::{TalkConfig, TalkSession};
-
-/// Drops capture-side impulses: the live path's single endpointer is the
-/// controller's `SemanticEndpointer`, so the P5 VAD must not emit a competing
-/// `EndOfUtterance` (rule 1 above). `run_capture` still forwards the frames.
-struct DropImpulses;
-impl ImpulseSink for DropImpulses {
-    fn emit(&self, _impulse: VoiceImpulse, _hlc: u64) {}
-}
 
 /// Run the live cpal spoken conversation for `config` until `cancel` fires.
 ///
@@ -72,8 +68,13 @@ pub async fn run_live(
     let session = TalkSession::assemble(config.clone(), components);
 
     // Capture → AEC → CaptureProcessor: forwards cleaned frames to the
-    // controller. Impulses are dropped (single endpointer — see rule 1).
+    // controller AND emits the coarse onset as a TurnClaim into the forest
+    // queue; EOU is deferred to the controller's SemanticEndpointer (rule 1).
     let (frames_tx, frames_rx) = mpsc::channel::<Vec<i16>>(256);
+    let impulse_sink = Arc::new(KernelImpulseSink::new(
+        session.forest().impulses().clone(),
+        [0u8; 32],
+    ));
     let vad = EnergyVad::new(
         config.sample_rate,
         config.vad_threshold_dbfs,
@@ -81,7 +82,7 @@ pub async fn run_live(
         100,
         10_000,
     );
-    let processor = CaptureProcessor::new(vad, Arc::new(DropImpulses), frames_tx);
+    let processor = CaptureProcessor::new(vad, impulse_sink, frames_tx).with_emit_eou(false);
 
     // Bridge the CancellationToken to the capture loop's AtomicBool flag.
     let cap_flag = Arc::new(AtomicBool::new(false));

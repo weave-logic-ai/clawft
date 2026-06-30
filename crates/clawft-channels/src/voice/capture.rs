@@ -76,12 +76,21 @@ pub struct CaptureProcessor {
     vad: EnergyVad,
     sink: Arc<dyn ImpulseSink>,
     frames_tx: mpsc::Sender<Vec<i16>>,
+    /// Whether the energy VAD's end-of-speech emits an `EndOfUtterance` impulse.
+    ///
+    /// `true` (default) is the standalone channel-emits-impulses path. Set
+    /// `false` (via [`with_emit_eou`](Self::with_emit_eou)) when a downstream
+    /// **semantic** endpointer is the authoritative EOU/commit (ADR-062 6.5):
+    /// the energy onset stays the coarse early-turn `TurnClaim` tier, but the
+    /// final commit is deferred to the semantic model so the two endpointers
+    /// **compose** instead of both firing EOU.
+    emit_eou: bool,
 }
 
 impl CaptureProcessor {
     /// Build a processor from a constructed [`EnergyVad`] (the endpoint
     /// gate), the impulse `sink`, and the `frames_tx` the Talk-Mode loop
-    /// drains.
+    /// drains. Emits both onset and end-of-utterance by default.
     pub fn new(
         vad: EnergyVad,
         sink: Arc<dyn ImpulseSink>,
@@ -91,7 +100,16 @@ impl CaptureProcessor {
             vad,
             sink,
             frames_tx,
+            emit_eou: true,
         }
+    }
+
+    /// Set whether end-of-speech emits an `EndOfUtterance` impulse. Pass `false`
+    /// to defer the EOU/commit to a downstream semantic endpointer while still
+    /// emitting the coarse onset `TurnClaim` (ADR-062 6.5 composition).
+    pub fn with_emit_eou(mut self, emit_eou: bool) -> Self {
+        self.emit_eou = emit_eou;
+        self
     }
 
     /// Push one cleaned 16 kHz mono frame.
@@ -106,6 +124,11 @@ impl CaptureProcessor {
                 VadEvent::SpeechStart { at_sample } => (VoiceImpulse::SpeechStart, at_sample),
                 VadEvent::SpeechEnd { at_sample, .. } => (VoiceImpulse::EndOfUtterance, at_sample),
             };
+            // Defer EOU to the semantic endpointer when configured (compose,
+            // don't double-fire); onset always flows as the coarse claim tier.
+            if impulse == VoiceImpulse::EndOfUtterance && !self.emit_eou {
+                continue;
+            }
             self.sink.emit(impulse, hlc);
         }
         if self.frames_tx.try_send(frame).is_err() {
@@ -192,5 +215,37 @@ mod tests {
             cap.push(vec![0i16; 1_600]);
         }
         assert!(sink.emitted.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn with_emit_eou_false_emits_onset_but_defers_eou() {
+        let sink = Arc::new(RecordingSink::default());
+        let (tx, _rx) = mpsc::channel::<Vec<i16>>(256);
+        let vad = EnergyVad::new(16_000, -45.0, 300, 100, 10_000);
+        // Same onset→endpoint stimulus as the emit-both test, but EOU deferred
+        // to a downstream semantic endpointer (ADR-062 6.5 composition).
+        let mut cap = CaptureProcessor::new(vad, sink.clone(), tx).with_emit_eou(false);
+
+        let frame = 1_600usize;
+        cap.push(vec![0i16; frame]);
+        for _ in 0..3 {
+            cap.push(voiced(frame));
+        }
+        for _ in 0..5 {
+            cap.push(vec![0i16; frame]);
+        }
+
+        let kinds: Vec<VoiceImpulse> = sink
+            .emitted
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(i, _)| *i)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![VoiceImpulse::SpeechStart],
+            "onset still claims the floor; EOU is deferred to the semantic endpointer"
+        );
     }
 }
