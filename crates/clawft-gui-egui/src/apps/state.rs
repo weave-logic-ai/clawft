@@ -145,14 +145,16 @@ mod tests {
 
     #[test]
     fn render_if_needed_short_circuits_on_disconnected() {
-        let mut snap = Snapshot::default();
-        snap.connection = Connection::Disconnected;
+        let snap = Snapshot {
+            connection: Connection::Disconnected,
+            ..Default::default()
+        };
         // Sanity: the helper signals "rendered" without panicking.
         // Actual painting is exercised in the snapshot tests added
         // alongside the per-app modules in Phase 3.
         let ctx = egui::Context::default();
-        ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
                 let rect = ui.max_rect();
                 let painted = render_if_needed(ui, rect, &snap, false, "anything", None);
                 assert!(painted);
@@ -162,11 +164,13 @@ mod tests {
 
     #[test]
     fn render_if_needed_short_circuits_on_connecting() {
-        let mut snap = Snapshot::default();
-        snap.connection = Connection::Connecting;
+        let snap = Snapshot {
+            connection: Connection::Connecting,
+            ..Default::default()
+        };
         let ctx = egui::Context::default();
-        ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
                 let rect = ui.max_rect();
                 let painted = render_if_needed(ui, rect, &snap, false, "data", None);
                 assert!(painted);
@@ -176,11 +180,13 @@ mod tests {
 
     #[test]
     fn render_if_needed_paints_empty_when_connected_no_data() {
-        let mut snap = Snapshot::default();
-        snap.connection = Connection::Connected;
+        let snap = Snapshot {
+            connection: Connection::Connected,
+            ..Default::default()
+        };
         let ctx = egui::Context::default();
-        ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
                 let rect = ui.max_rect();
                 let painted =
                     render_if_needed(ui, rect, &snap, false, "files", Some("install fs adapter"));
@@ -191,11 +197,13 @@ mod tests {
 
     #[test]
     fn render_if_needed_returns_false_when_data_present() {
-        let mut snap = Snapshot::default();
-        snap.connection = Connection::Connected;
+        let snap = Snapshot {
+            connection: Connection::Connected,
+            ..Default::default()
+        };
         let ctx = egui::Context::default();
-        ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
                 let rect = ui.max_rect();
                 let painted = render_if_needed(ui, rect, &snap, true, "files", None);
                 assert!(!painted);

@@ -125,3 +125,7 @@ listens to.
 - 2026-04-29: discussion confirms substrate path is the canonical
   shipping solution; in-process is research, deferred. ADR drafted +
   accepted. WEFT-205 closed; new wiring ticket filed.
+- 2026-06-29 (see ADR-062): the in-process leg is **promoted to a first-class, cross-platform
+  native-Rust backend** behind the same `SttBackend` trait — **parakeet** via sherpa-onnx/`ort`
+  ONNX (Mac default; nemotron/whisper-turbo as alternates), alongside (not replacing) the substrate
+  HTTP backend. Driven by the no-Python-wrappers direction for the native voice stack.

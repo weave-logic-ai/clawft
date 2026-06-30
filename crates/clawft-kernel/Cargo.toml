@@ -60,7 +60,7 @@ ecc = ["clawft-core/vector-memory", "dep:blake3"]
 quantum-pasqal = ["ecc", "dep:reqwest"]
 quantum-braket = ["ecc", "dep:reqwest"]
 diskann = ["ecc", "dep:ruvector-diskann"]
-onnx-embeddings = ["dep:ort", "dep:ndarray"]
+onnx-embeddings = ["dep:ort", "dep:ndarray", "dep:tokenizers", "dep:half"]
 wasm-sandbox = ["dep:wasmtime", "dep:wasmtime-wasi"]
 os-patterns = ["exochain"]
 treesitter = ["dep:clawft-plugin-treesitter"]
@@ -97,8 +97,23 @@ rand = { workspace = true, optional = true }
 wasmtime = { workspace = true, optional = true }
 wasmtime-wasi = { workspace = true, optional = true }
 blake3 = { workspace = true, optional = true }
-ort = { workspace = true, optional = true }
+# Workspace pins ort with default-features = false; re-list the default set
+# (std/ndarray/tracing/download-binaries/tls-native/copy-dylibs/api-24) plus
+# `half` for fp16 decoder-ONNX tensors (ADR-059). Members can't re-enable a
+# workspace dep's default features, so they are enumerated here.
+ort = { workspace = true, optional = true, features = [
+    "std",
+    "ndarray",
+    "tracing",
+    "download-binaries",
+    "tls-native",
+    "copy-dylibs",
+    "api-24",
+    "half",
+] }
 ndarray = { workspace = true, optional = true }
+tokenizers = { workspace = true, optional = true }
+half = { workspace = true, optional = true }
 tokio-tungstenite = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 snow = { workspace = true, optional = true }

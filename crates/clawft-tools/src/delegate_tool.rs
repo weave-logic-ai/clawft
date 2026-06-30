@@ -179,7 +179,20 @@ mod tests {
 
     #[test]
     fn tool_name_and_description() {
-        assert_eq!("delegate_task", "delegate_task");
-        assert!(!"Delegate a complex task to Claude".is_empty());
+        use clawft_types::delegation::DelegationConfig;
+
+        // Exercise the real trait surface rather than comparing string
+        // literals to themselves (the previous form tripped clippy's
+        // `const_is_empty` and asserted nothing).
+        let config = DelegationConfig::default();
+        let delegator = Arc::new(
+            ClaudeDelegator::new(&config, "test-key".into()).expect("delegator with non-empty key"),
+        );
+        let engine = Arc::new(DelegationEngine::new(config));
+        let registry = Arc::new(ToolRegistry::new());
+        let tool = DelegateTaskTool::new(delegator, engine, Vec::new(), registry);
+
+        assert_eq!(tool.name(), "delegate_task");
+        assert!(!tool.description().is_empty());
     }
 }

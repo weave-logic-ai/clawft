@@ -423,3 +423,14 @@ is **prefill latency and decode throughput**, not RAM exhaustion.
    How deep to graft a causal-ancestor subtree (vs the token budget) is a job
    for a specialized context-curator/graft agent that learns to do it well.
    Out of v1 (which is single-index regardless).
+
+## Update — the L2 tier is the frontier-walk substrate (2026-06-29, see ADR-062)
+
+ADR-062 (ECC graph-walk conversation) builds directly on this tier and adds two framings:
+- The L2 `SessionView` is the **frontier-walk substrate** of the conversation: a turn enters at the
+  frontier, walks (recall), mutates, and renders responses *from* nodes. graft/prune/promote are the
+  walk's recall/evict/collapse steps and map to the **ADR-046 forest's graft/shake** vocabulary.
+- The **central structural change**: today the live conversation path uses HNSW recall *in
+  isolation*; ADR-062 requires it to **traverse the ADR-046 forest** — fuse HNSW recall with
+  CausalGraph lineage (`traverse_forward`/`trace_causal_chain`) + `CrossRefStore` links, and commit
+  nodes **per-turn** (Speculative→Frontier→Committed) rather than only at conversation end.

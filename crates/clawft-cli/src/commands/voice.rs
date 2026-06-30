@@ -72,80 +72,43 @@ pub async fn handle_voice(args: VoiceArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Run Talk Mode -- continuous voice conversation with the agent.
+/// Run Talk Mode — the native ECC graph-walk voice conversation (ADR-062).
 ///
-/// Creates a VoiceChannel and TalkModeController, then runs until
-/// the user presses Ctrl+C. Currently uses a stub host since the
-/// real agent pipeline integration is deferred.
+/// Constructs the full `weft talk` assembly via `clawft_voice_talk` — the P2
+/// Talk-Mode loop orchestrator + the concrete native stack (parakeet STT,
+/// smart-turn endpoint, ECAPA speaker, Kokoro+Orpheus TTS, LocalProvider→Hermes
+/// brain) over a cpal mic+speaker — and runs the spoken loop until Ctrl+C.
+///
+/// The graph constructs cleanly with no weights staged (each native component
+/// degrades gracefully); real transcription/synthesis needs the staged ONNX
+/// models and the `voice-onnx` build feature (`weft` built with `--features
+/// voice-onnx`) plus live Hermes at `:8090`.
 async fn handle_talk() -> anyhow::Result<()> {
-    use std::collections::HashMap;
-    use std::sync::Arc;
+    use clawft_voice_talk::{TalkConfig, live::run_live};
+    use tokio_util::sync::CancellationToken;
 
-    use async_trait::async_trait;
-    use clawft_plugin::error::PluginError;
-    use clawft_plugin::message::MessagePayload;
-    use clawft_plugin::traits::{CancellationToken, ChannelAdapterHost};
-    use clawft_plugin::voice::{TalkModeController, VoiceChannel, VoiceStatus};
-
-    /// Stub host that logs inbound messages.
-    /// Real integration with the agent pipeline is deferred.
-    struct StubAdapterHost;
-
-    #[async_trait]
-    impl ChannelAdapterHost for StubAdapterHost {
-        async fn deliver_inbound(
-            &self,
-            channel: &str,
-            sender_id: &str,
-            _chat_id: &str,
-            payload: MessagePayload,
-            _metadata: HashMap<String, serde_json::Value>,
-        ) -> Result<(), PluginError> {
-            if let Some(text) = payload.as_text() {
-                println!("[{}] {}: {}", channel, sender_id, text);
-            }
-            Ok(())
-        }
-    }
-
-    println!("=== ClawFT Talk Mode ===");
-    println!("Voice channel: stub (real audio processing deferred)");
+    println!("=== ClawFT Talk Mode (native ECC graph-walk) ===");
+    println!("Mic + speaker via cpal; Hermes brain at :8090.");
     println!("Press Ctrl+C to exit.\n");
 
-    let (channel, mut status_rx) = VoiceChannel::new();
-    let channel = Arc::new(channel);
+    let config = TalkConfig {
+        conv_id: "weft-talk".into(),
+        base_system: "You are a terse, friendly voice assistant.".into(),
+        ..TalkConfig::default()
+    };
+
     let cancel = CancellationToken::new();
-    let host: Arc<dyn ChannelAdapterHost> = Arc::new(StubAdapterHost);
-
-    let controller = TalkModeController::new(Arc::clone(&channel), cancel.clone());
-
-    // Spawn a task to print status changes.
-    let status_handle = tokio::spawn(async move {
-        while let Some(status) = status_rx.recv().await {
-            match status {
-                VoiceStatus::Listening => println!("[status] Listening..."),
-                VoiceStatus::Transcribing => println!("[status] Transcribing..."),
-                VoiceStatus::Processing => println!("[status] Processing..."),
-                VoiceStatus::Speaking => println!("[status] Speaking..."),
-                VoiceStatus::Idle => println!("[status] Idle"),
-            }
+    let cancel_for_signal = cancel.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            println!("\nReceived Ctrl+C, shutting down Talk Mode...");
+            cancel_for_signal.cancel();
         }
     });
 
-    // Run the controller until Ctrl+C.
-    let cancel_for_signal = cancel.clone();
-    tokio::spawn(async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to install Ctrl+C handler");
-        println!("\nReceived Ctrl+C, shutting down Talk Mode...");
-        cancel_for_signal.cancel();
-    });
-
-    controller.run(host).await?;
-
-    // Clean up the status printer.
-    status_handle.abort();
+    run_live(config, None, cancel)
+        .await
+        .map_err(|e| anyhow::anyhow!("talk mode: {e}"))?;
 
     println!("Talk Mode ended.");
     Ok(())

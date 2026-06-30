@@ -198,6 +198,27 @@ impl CausalGraph {
         self.nodes.get(&id).map(|r| r.value().clone())
     }
 
+    /// Mirror a causal-model lifecycle state onto a node's `metadata.state`
+    /// (ADR-062 P0.2).
+    ///
+    /// The L2 session view ([`SessionView`](crate::context_graft::SessionView))
+    /// owns the authoritative per-turn [`NodeState`](crate::context_graft::NodeState);
+    /// this writes the same tag (`state.as_str()`) into the durable causal node so
+    /// the two substrates stay in sync. Returns `false` if the node is unknown.
+    pub fn set_node_state(&self, id: NodeId, state: &str) -> bool {
+        match self.nodes.get_mut(&id) {
+            Some(mut node) => {
+                if let Some(obj) = node.metadata.as_object_mut() {
+                    obj.insert("state".to_string(), serde_json::Value::from(state));
+                } else {
+                    node.metadata = serde_json::json!({ "state": state });
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Remove a node and all edges incident to it.
     ///
     /// Returns the removed node, or `None` if the ID was not found.
@@ -2164,6 +2185,28 @@ mod tests {
         let node = g.get_node(id).unwrap();
         assert_eq!(node.label, "hello");
         assert_eq!(node.metadata["key"], "val");
+    }
+
+    // 3b — ADR-062 P0.2: mirror NodeState onto node metadata.
+    #[test]
+    fn set_node_state_mirrors_into_metadata() {
+        let g = make_graph();
+        // Object metadata: state is inserted alongside existing keys.
+        let id = g.add_node("turn".into(), serde_json::json!({"chain_seq": 7}));
+        assert!(g.set_node_state(id, "frontier"));
+        let node = g.get_node(id).unwrap();
+        assert_eq!(node.metadata["state"], "frontier");
+        assert_eq!(node.metadata["chain_seq"], 7);
+        assert!(g.set_node_state(id, "committed"));
+        assert_eq!(g.get_node(id).unwrap().metadata["state"], "committed");
+
+        // Non-object metadata is replaced by a fresh state object.
+        let id2 = g.add_node("scalar".into(), serde_json::json!(42));
+        assert!(g.set_node_state(id2, "pruned"));
+        assert_eq!(g.get_node(id2).unwrap().metadata["state"], "pruned");
+
+        // Unknown node → false.
+        assert!(!g.set_node_state(99_999, "frontier"));
     }
 
     // 4

@@ -756,7 +756,6 @@ mod tests {
                 max_cpu_time_ms: 100,
                 max_tool_calls: 5,
                 max_messages: 5,
-                ..Default::default()
             },
             ..Default::default()
         };
@@ -779,7 +778,6 @@ mod tests {
                 max_cpu_time_ms: 500,
                 max_tool_calls: 10,
                 max_messages: 20,
-                ..Default::default()
             },
         };
         let json = serde_json::to_string(&caps).unwrap();

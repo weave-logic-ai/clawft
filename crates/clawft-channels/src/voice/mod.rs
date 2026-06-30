@@ -22,6 +22,8 @@
 //! # Modules
 //!
 //! - [`types`]   — [`VoiceAdapterConfig`], [`VoiceError`].
+//! - [`capture`] — [`CaptureProcessor`] (frames → VAD/endpoint →
+//!   [`VoiceImpulse`]s + frame forwarding, ADR-062 Phase 5).
 //! - [`channel`] — [`VoiceChannelAdapter`] + audio-source / playback-sink
 //!   traits + the wiremock-backed test path.
 //! - [`vad`]     — energy-RMS voice activity detector (utterance segmenter).
@@ -34,13 +36,32 @@
 //! - `voice-real-audio`   — also pulls in `cpal` for real I/O.
 //! - `real-audio-test`    — turns on cpal-touching tests (skipped on CI).
 
+pub mod capture;
 pub mod channel;
+pub mod policy;
+pub mod speaker;
+pub mod stt;
+pub mod talkmode;
+pub mod tts;
+pub mod turn;
 pub mod types;
 pub mod vad;
 pub mod wav;
 
+pub use capture::{CaptureProcessor, ImpulseSink, VoiceImpulse};
 pub use channel::{
     AudioSegment, AudioSource, PlaybackSink, VoiceChannelAdapter, VoiceChannelAdapterFactory,
 };
+pub use policy::{ReasoningHint, VoiceAnswerPolicy, VoiceLlm, VoiceTurnRequest, estimate_tokens};
+pub use speaker::{SpeakerEmbedder, SpeakerId, SpeakerMatch, SpeakerNode, SpeakerRegistry, cosine};
+pub use stt::{SttBackend, SttModel, SubstrateStt, Utterance};
+pub use talkmode::{
+    AudioControl, ConversationEvent, ConversationObserver, NoopAudioControl, NoopObserver,
+    TalkModeConfig, TalkModeController, contextual_ack,
+};
+pub use tts::{
+    DualLayerTts, SubstrateTts, TtsChunk, TtsEngine, TtsSink, TtsTier, scrub_tags, split_sentences,
+};
+pub use turn::{EndpointModel, HeuristicEndpoint, SemanticEndpointer, TurnDecision};
 pub use types::{VoiceAdapterConfig, VoiceError};
 pub use vad::{EnergyVad, VadEvent};

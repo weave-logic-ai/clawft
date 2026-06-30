@@ -223,6 +223,11 @@ pub struct KernelTurnAnchor {
     hnsw: Option<Arc<HnswService>>,
     causal: Option<Arc<CausalGraph>>,
     prev_causal: DashMap<String, CausalNodeId>,
+    /// Optional L2 session tier (ADR-058 Phase 5.1). When set — and the
+    /// witness chain is enabled so a chain sequence exists — each turn is
+    /// embedded and indexed into its conversation's `SessionView` keyed by the
+    /// appended chain sequence.
+    session_tier: Option<Arc<crate::session_tier::SessionTier>>,
 }
 
 impl KernelTurnAnchor {
@@ -238,7 +243,17 @@ impl KernelTurnAnchor {
             hnsw,
             causal,
             prev_causal: DashMap::new(),
+            session_tier: None,
         }
+    }
+
+    /// Attach the L2 [`SessionTier`](crate::session_tier::SessionTier) so each
+    /// chain-appended turn is also indexed into its conversation's session view
+    /// (ADR-058 Phase 5.1). No-op unless the witness chain is also enabled (the
+    /// chain sequence is the index key).
+    pub fn with_session_tier(mut self, tier: Arc<crate::session_tier::SessionTier>) -> Self {
+        self.session_tier = Some(tier);
+        self
     }
 
     /// True if any side-effect handle is present. The daemon uses
@@ -311,7 +326,22 @@ impl TurnAnchor for KernelTurnAnchor {
             // chain.append never errs in the current API — it panics
             // on poisoned lock, which is a programmer-error class
             // failure we don't want to swallow.
-            let _ = chain.append("agent", "agent.chat.turn", Some(payload));
+            let event = chain.append("agent", "agent.chat.turn", Some(payload));
+
+            // ADR-058 Phase 5.1: index the turn into the L2 session view,
+            // keyed by the chain sequence just assigned (the universal key +
+            // witness). Indexing is non-fatal (logged inside `index_turn`); the
+            // turn has already landed on the chain regardless.
+            if let Some(ref tier) = self.session_tier {
+                tier.index_turn(
+                    conv_id,
+                    event.sequence,
+                    "agent.chat.turn",
+                    &turn.role,
+                    &turn.content,
+                )
+                .await;
+            }
         }
 
         // 2. HNSW vector index.

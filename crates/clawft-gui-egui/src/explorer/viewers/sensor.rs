@@ -284,8 +284,8 @@ mod tests {
             "kind": "mic",
             "summary": { "rms_db": -41.2, "peak_db": -17.1 },
         });
-        let _ = ctx.run(raw_input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = ctx.run_ui(raw_input, |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
                 SensorViewer::paint(ui, "substrate/n-bfc4cd/sensor/mic", &v);
             });
         });
@@ -300,8 +300,8 @@ mod tests {
             "raw": { "ranges_mm": [120, 130, 140] },
             "summary": { "min_mm": 120, "max_mm": 140 },
         });
-        let _ = ctx.run(raw_input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = ctx.run_ui(raw_input, |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
                 SensorViewer::paint(ui, "substrate/n-bfc4cd/sensor/tof", &v);
             });
         });

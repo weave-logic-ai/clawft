@@ -14,16 +14,24 @@ description = "Native WebRTC-AEC full-duplex audio bridge (cpal device I/O + Web
 [features]
 # Default is intentionally EMPTY so the workspace `cargo build` does not
 # pull cpal or the heavy bundled libwebrtc APM (built via cmake). The
-# runnable bridge + its device I/O live behind `bridge`; the real AEC3
-# echo canceller lives behind `webrtc-aec`. Mirrors clawft-channels'
-# `voice` / `voice-real-audio` gating convention.
+# in-process `AecProcessor` lib API is ALWAYS available (passthrough core,
+# zero device deps); the real AEC3 canceller lives behind `webrtc-aec`; the
+# runnable stdio bridge + its cpal device I/O live behind `bridge`. Mirrors
+# clawft-channels' `voice` / `voice-real-audio` gating convention.
 default = []
-# `bridge` = cpal device I/O + stdio protocol + passthrough AEC (always
-# runnable; proves the connect/round-trip without the heavy C++ dep).
+# `bridge` = cpal device I/O + stdio protocol for the `aec-bridge` bin
+# (passthrough AEC unless `webrtc-aec` is also enabled).
 bridge = ["dep:cpal", "dep:libc"]
-# `webrtc-aec` = real WebRTC AEC3 echo cancellation (bundled libwebrtc
-# APM, built with cmake). Implies `bridge`.
-webrtc-aec = ["bridge", "dep:webrtc-audio-processing"]
+# `webrtc-aec` = real WebRTC AEC3 echo cancellation (bundled libwebrtc APM,
+# built with cmake) inside `AecProcessor`. Standalone — does NOT pull cpal,
+# so an in-process consumer gets real AEC without device I/O. Combine with
+# `bridge` for a real-AEC stdio bridge.
+webrtc-aec = ["dep:webrtc-audio-processing"]
+# `device` = in-process cpal capture/playback wired to the clawft-channels
+# voice seams (AecTtsSink: TtsSink + AEC render reference; run_capture: mic →
+# AEC → CaptureProcessor). Pulls cpal + the channels voice traits. Feature-
+# gated so the default workspace build never compiles cpal or clawft-channels.
+device = ["dep:cpal", "dep:clawft-channels", "dep:async-trait", "dep:tokio", "dep:tracing"]
 
 [dependencies]
 # Device I/O (capture + playback). Same version as clawft-channels'
@@ -31,6 +39,12 @@ webrtc-aec = ["bridge", "dep:webrtc-audio-processing"]
 cpal = { version = "0.15", optional = true }
 # POSIX signal handling for the SIGUSR1 barge-in flush (mirrors vpio).
 libc = { version = "0.2", optional = true }
+# `device`-only: the voice seams (TtsSink/TtsChunk/CaptureProcessor/VoiceError)
+# the in-process capture/playback integrates with.
+clawft-channels = { workspace = true, features = ["voice"], optional = true }
+async-trait = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
 # WebRTC Audio Processing Module (AEC3 + NS + AGC). The 0.3.x line builds
 # the bundled libwebrtc APM via cmake. Feature-gated so it never bloats
 # the default workspace build.

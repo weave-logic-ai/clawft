@@ -389,10 +389,12 @@ mod tests {
         let ctx = egui::Context::default();
         let live = Live::spawn();
         let mut desk = Desktop::default();
-        let mut snap = Snapshot::default();
-        snap.connection = Connection::Connected;
-        ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let snap = Snapshot {
+            connection: Connection::Connected,
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
                 let rect = ui.max_rect();
                 show(ui, rect, &mut desk, &live, &snap);
             });
@@ -404,20 +406,22 @@ mod tests {
         let ctx = egui::Context::default();
         let live = Live::spawn();
         let mut desk = Desktop::default();
-        let mut snap = Snapshot::default();
-        snap.connection = Connection::Connected;
-        snap.status = Some(serde_json::json!({
-            "state": "running",
-            "uptime_secs": 1234,
-            "process_count": 3,
-            "service_count": 2,
-        }));
-        snap.mesh_status = Some(serde_json::json!({
-            "total_nodes": 4,
-            "healthy_nodes": 3,
-        }));
-        ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let snap = Snapshot {
+            connection: Connection::Connected,
+            status: Some(serde_json::json!({
+                "state": "running",
+                "uptime_secs": 1234,
+                "process_count": 3,
+                "service_count": 2,
+            })),
+            mesh_status: Some(serde_json::json!({
+                "total_nodes": 4,
+                "healthy_nodes": 3,
+            })),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
                 let rect = ui.max_rect();
                 show(ui, rect, &mut desk, &live, &snap);
             });
@@ -426,8 +430,10 @@ mod tests {
 
     #[test]
     fn build_tiles_includes_core_three_when_status_present() {
-        let mut snap = Snapshot::default();
-        snap.status = Some(serde_json::json!({"state":"running"}));
+        let snap = Snapshot {
+            status: Some(serde_json::json!({"state":"running"})),
+            ..Default::default()
+        };
         let tiles = build_tiles(&snap);
         // Kernel + Mesh + Chain are always emitted; sensor tiles only
         // when their snapshot field is present.

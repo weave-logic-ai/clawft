@@ -30,7 +30,12 @@ channels = ["dep:clawft-channels"]
 services = ["dep:clawft-services"]
 vector-memory = ["clawft-core/vector-memory"]
 delegate = ["clawft-services/delegate", "clawft-tools/delegate"]
-voice = ["clawft-tools/voice", "clawft-plugin/voice"]
+# `voice` wires the native ECC graph-walk Talk-Mode assembly (ADR-062 P6): the
+# `weft voice talk` command drives `clawft_voice_talk::live::run_live` (cpal mic+
+# speaker via `live-audio`). Real STT/TTS/speaker inference needs `voice-onnx`
+# (pulls `ort`); without it the graph still constructs and degrades gracefully.
+voice = ["clawft-tools/voice", "clawft-plugin/voice", "dep:clawft-voice-talk", "clawft-voice-talk/live-audio"]
+voice-onnx = ["voice", "clawft-voice-talk/onnx"]
 api = ["clawft-services/api"]
 
 [dependencies]
@@ -40,6 +45,8 @@ clawft-platform = { workspace = true }
 clawft-core = { workspace = true, features = ["native", "full"] }
 clawft-tools = { workspace = true, features = ["native-exec", "native", "canvas"] }
 clawft-channels = { workspace = true, optional = true }
+# Native ECC Talk-Mode assembly (ADR-062 P6) — wired by the `voice` feature.
+clawft-voice-talk = { path = "../clawft-voice-talk", optional = true }
 clawft-llm = { workspace = true }
 clawft-services = { workspace = true, optional = true }
 clawft-plugin = { workspace = true }

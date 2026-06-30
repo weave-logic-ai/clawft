@@ -339,6 +339,55 @@ impl<P: Platform> ContextBuilder<P> {
         compress_context(messages, &config)
     }
 
+    /// Build messages with LLM-backed compression (ADR-058 Phase 2.3).
+    ///
+    /// Like [`build_messages_compressed`](Self::build_messages_compressed), but
+    /// aged turns are summarized by `summarizer` (the local Hermes provider in
+    /// production, via [`LlmSummarizer`]) instead of the first-sentence
+    /// extractive heuristic. On summarizer error it degrades to the heuristic
+    /// rather than aborting the turn (see [`compress_context_with`]).
+    pub async fn build_messages_compressed_with(
+        &self,
+        session: &Session,
+        active_skills: &[String],
+        summarizer: &dyn Summarizer,
+    ) -> CompressedContext {
+        let messages = self.build_messages(session, active_skills).await;
+        let config = self
+            .compression_config
+            .as_ref()
+            .cloned()
+            .unwrap_or_default();
+        compress_context_with(messages, &config, summarizer).await
+    }
+
+    /// Assemble a prefix-stable, window-capped prompt (ADR-058 Phase 2.2).
+    ///
+    /// Order is `[stable head] → [graft block] → [rolling tail]`:
+    /// - **head** = the leading system messages (system prompt, skills,
+    ///   memory / pinned facts). Byte-identical turn-to-turn for the same
+    ///   inputs, so the serving layer reuses its KV (`--cache-reuse` /
+    ///   `--slot-save-path`). Never reshuffled or trimmed.
+    /// - **graft block** = L2-retrieved text, inserted right after the head.
+    ///   Phase 2 passes none (`&[]`); Phase 3 supplies the graft set.
+    /// - **rolling tail** = recent dialogue, trimmed oldest-first so the total
+    ///   window never exceeds the budget (`max_window_tokens` minus reserved
+    ///   output).
+    ///
+    /// The guarantee `window_tokens <= max_window_tokens` holds whenever the
+    /// head + graft fit the budget; if they do not, the head is kept regardless
+    /// (correctness over budget) and a warning is logged.
+    pub async fn build_windowed(
+        &self,
+        session: &Session,
+        active_skills: &[String],
+        graft_block: &[LlmMessage],
+        config: &WindowConfig,
+    ) -> WindowedContext {
+        let all = self.build_messages(session, active_skills).await;
+        assemble_windowed(all, graft_block, config)
+    }
+
     /// Build a system prompt message for a specific agent definition.
     ///
     /// Prepends the agent's `system_prompt` (with template rendering)
@@ -507,181 +556,140 @@ impl<P: Platform> ContextBuilder<P> {
     }
 }
 
-// ── Context compression ───────────────────────────────────────────────
+// ── Context compression & tokenizer (re-exported) ────────────────────
+//
+// The token counter (ADR-058 Phase 2.1) and compression types/functions
+// (Phase 2.3) live in sibling modules. They are re-exported here so the
+// public path `clawft_core::agent::context::{count_tokens, compress_context,
+// CompressionConfig, ...}` is unchanged for existing callers.
 
-/// Approximate token count for a string.
-///
-/// Uses a simple whitespace-based heuristic: each whitespace-delimited
-/// word maps to roughly 4/3 tokens on average (accounting for sub-word
-/// tokenization). This is intentionally coarse; callers who need exact
-/// counts can swap in a real tokenizer later.
-pub fn count_tokens(text: &str) -> usize {
-    // Ceiling division to avoid undercount on short strings.
-    let words = text.split_whitespace().count();
-    (words * 4).div_ceil(3) // equivalent to ceil(words * 4/3)
-}
+pub use super::tokenizer::count_tokens;
 
-/// Configuration for context compression.
+pub use super::context_compress::{
+    CompressedContext, CompressionConfig, CompressionMetadata, SummarizeError, Summarizer,
+    compress_context, compress_context_with,
+};
+
+#[cfg(feature = "native")]
+pub use super::context_compress::LlmSummarizer;
+
+// ── Prefix-stable windowed assembly (ADR-058 Phase 2.2) ───────────────
+
+/// Default live-window cap, in tokens (ADR-060: Hermes served at ctx 32768).
+pub const DEFAULT_WINDOW_TOKENS: usize = 32_768;
+
+/// Budget configuration for prefix-stable windowed assembly.
 #[derive(Debug, Clone)]
-pub struct CompressionConfig {
-    /// Maximum number of tokens allowed in the assembled context.
-    pub max_context_tokens: usize,
-    /// Number of recent conversation messages to keep verbatim.
-    pub recent_message_count: usize,
-    /// Whether compression is enabled at all.
-    pub compression_enabled: bool,
+pub struct WindowConfig {
+    /// Hard cap on the assembled live window, in tokens. Defaults to the
+    /// ADR-060 served context size ([`DEFAULT_WINDOW_TOKENS`]).
+    pub max_window_tokens: usize,
+    /// Tokens reserved within the cap for the model's reply (kept out of the
+    /// prompt budget). Defaults to 0.
+    pub reserve_output_tokens: usize,
 }
 
-impl Default for CompressionConfig {
+impl Default for WindowConfig {
     fn default() -> Self {
         Self {
-            max_context_tokens: 8192,
-            recent_message_count: 10,
-            compression_enabled: true,
+            max_window_tokens: DEFAULT_WINDOW_TOKENS,
+            reserve_output_tokens: 0,
         }
     }
 }
 
-/// Metadata about a compression operation.
+/// Result of prefix-stable windowed assembly.
 #[derive(Debug, Clone)]
-pub struct CompressionMetadata {
-    /// Total tokens before compression.
-    pub original_tokens: usize,
-    /// Total tokens after compression.
-    pub compressed_tokens: usize,
-    /// Ratio of compressed to original (1.0 = no compression).
-    pub compression_ratio: f64,
-    /// Number of messages that were summarized.
-    pub messages_summarized: usize,
-}
-
-/// Result of compressing a message list.
-#[derive(Debug, Clone)]
-pub struct CompressedContext {
-    /// The compressed message list, ready for the LLM.
+pub struct WindowedContext {
+    /// Assembled messages: `[stable head] → [graft block] → [rolling tail]`.
     pub messages: Vec<LlmMessage>,
-    /// Metadata describing what compression did.
-    pub metadata: CompressionMetadata,
+    /// Number of leading messages forming the prefix-stable head.
+    pub head_len: usize,
+    /// Number of graft-block messages inserted after the head (0 in Phase 2).
+    pub graft_len: usize,
+    /// Token count of the assembled window.
+    pub window_tokens: usize,
+    /// `true` if rolling-tail messages were dropped to honor the budget.
+    pub tail_truncated: bool,
 }
 
-/// Extract the first sentence from a text block.
-///
-/// Returns everything up to and including the first sentence-ending
-/// punctuation (`.`, `!`, `?`) followed by whitespace or end-of-string.
-/// If no sentence boundary is found, returns up to the first 120 characters.
-fn first_sentence(text: &str) -> &str {
-    for (i, ch) in text.char_indices() {
-        if matches!(ch, '.' | '!' | '?') {
-            let end = i + ch.len_utf8();
-            // Accept if this is the end of string or followed by whitespace.
-            if end >= text.len() || text[end..].starts_with(char::is_whitespace) {
-                return &text[..end];
-            }
+impl WindowedContext {
+    /// The prefix-stable head serialized to a byte string, for cache-key / KV
+    /// reuse and for asserting head stability turn-to-turn. Role and content
+    /// are joined with control separators so distinct messages cannot collide.
+    pub fn head_bytes(&self) -> String {
+        let mut s = String::new();
+        for m in &self.messages[..self.head_len] {
+            s.push_str(&m.role);
+            s.push('\u{0}');
+            s.push_str(&m.content);
+            s.push('\u{1}');
         }
+        s
     }
-    // No sentence boundary found; truncate.
-    let limit = text
-        .char_indices()
-        .nth(120)
-        .map(|(i, _)| i)
-        .unwrap_or(text.len());
-    &text[..limit]
 }
 
-/// Compress a message list to fit within a token budget.
-///
-/// The algorithm preserves:
-/// 1. All system-role messages (prompts, skills, memory) -- always kept.
-/// 2. The last `config.recent_message_count` non-system messages -- verbatim.
-/// 3. Older non-system messages -- summarized into a single system message
-///    containing first-sentence extracts.
-///
-/// If compression is disabled or the context already fits, the original
-/// messages are returned unchanged.
-pub fn compress_context(
-    messages: Vec<LlmMessage>,
-    config: &CompressionConfig,
-) -> CompressedContext {
-    let original_tokens: usize = messages.iter().map(|m| count_tokens(&m.content)).sum();
+/// Assemble `[head] → [graft] → [tail]` under a token budget (sync core of
+/// [`ContextBuilder::build_windowed`], split out so it is testable without a
+/// platform). The head is the leading run of `system` messages; everything
+/// after is the rolling dialogue tail, trimmed newest-first to fit.
+fn assemble_windowed(
+    all: Vec<LlmMessage>,
+    graft_block: &[LlmMessage],
+    config: &WindowConfig,
+) -> WindowedContext {
+    let head_len = all.iter().take_while(|m| m.role == "system").count();
+    let mut iter = all.into_iter();
+    let head: Vec<LlmMessage> = (&mut iter).take(head_len).collect();
+    let tail: Vec<LlmMessage> = iter.collect();
 
-    // Fast path: no compression needed.
-    if !config.compression_enabled || original_tokens <= config.max_context_tokens {
-        return CompressedContext {
-            messages,
-            metadata: CompressionMetadata {
-                original_tokens,
-                compressed_tokens: original_tokens,
-                compression_ratio: 1.0,
-                messages_summarized: 0,
-            },
-        };
+    let budget = config
+        .max_window_tokens
+        .saturating_sub(config.reserve_output_tokens);
+    let head_tokens: usize = head.iter().map(|m| count_tokens(&m.content)).sum();
+    let graft_tokens: usize = graft_block.iter().map(|m| count_tokens(&m.content)).sum();
+
+    if head_tokens + graft_tokens > budget {
+        warn!(
+            head_tokens,
+            graft_tokens,
+            budget,
+            "windowed assembly: stable head + graft exceed budget; tail dropped"
+        );
     }
 
-    // Separate system messages from conversation messages.
-    let mut system_msgs: Vec<LlmMessage> = Vec::new();
-    let mut conversation_msgs: Vec<LlmMessage> = Vec::new();
-
-    for msg in messages {
-        if msg.role == "system" {
-            system_msgs.push(msg);
+    // Remaining budget for the rolling tail after the (non-negotiable) head and
+    // the graft block. Fill newest-first, then restore chronological order.
+    let mut remaining = budget
+        .saturating_sub(head_tokens)
+        .saturating_sub(graft_tokens);
+    let mut kept_rev: Vec<LlmMessage> = Vec::new();
+    let mut tail_truncated = false;
+    for m in tail.into_iter().rev() {
+        let cost = count_tokens(&m.content);
+        if cost <= remaining {
+            remaining -= cost;
+            kept_rev.push(m);
         } else {
-            conversation_msgs.push(msg);
+            tail_truncated = true;
+            break;
         }
     }
+    kept_rev.reverse();
 
-    // Split conversation into old (to summarize) and recent (to keep).
-    let recent_count = config.recent_message_count.min(conversation_msgs.len());
-    let split_point = conversation_msgs.len() - recent_count;
-    let old_msgs = &conversation_msgs[..split_point];
-    let recent_msgs = &conversation_msgs[split_point..];
+    let graft_len = graft_block.len();
+    let mut messages = Vec::with_capacity(head.len() + graft_len + kept_rev.len());
+    messages.extend(head);
+    messages.extend(graft_block.iter().cloned());
+    messages.extend(kept_rev);
 
-    // Build summary of old messages.
-    let messages_summarized = old_msgs.len();
-    let summary = if !old_msgs.is_empty() {
-        let mut lines = Vec::with_capacity(old_msgs.len());
-        for msg in old_msgs {
-            let sentence = first_sentence(&msg.content);
-            lines.push(format!("[{}]: {}", msg.role, sentence));
-        }
-        Some(lines.join("\n"))
-    } else {
-        None
-    };
-
-    // Reassemble: system messages, optional summary, recent conversation.
-    let mut result: Vec<LlmMessage> = Vec::new();
-    result.extend(system_msgs);
-
-    if let Some(summary_text) = summary {
-        result.push(LlmMessage {
-            role: "system".into(),
-            content: format!(
-                "# Conversation Summary (compressed)\n\n\
-                 The following is a summary of {} earlier messages:\n\n{}",
-                messages_summarized, summary_text
-            ),
-            tool_call_id: None,
-            tool_calls: None,
-        });
-    }
-
-    result.extend(recent_msgs.iter().cloned());
-
-    let compressed_tokens: usize = result.iter().map(|m| count_tokens(&m.content)).sum();
-    let compression_ratio = if original_tokens > 0 {
-        compressed_tokens as f64 / original_tokens as f64
-    } else {
-        1.0
-    };
-
-    CompressedContext {
-        messages: result,
-        metadata: CompressionMetadata {
-            original_tokens,
-            compressed_tokens,
-            compression_ratio,
-            messages_summarized,
-        },
+    let window_tokens: usize = messages.iter().map(|m| count_tokens(&m.content)).sum();
+    WindowedContext {
+        messages,
+        head_len,
+        graft_len,
+        window_tokens,
+        tail_truncated,
     }
 }
 
@@ -1198,192 +1206,7 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
-    // ── Context compression tests ───────────────────────────────────
-
-    #[test]
-    fn count_tokens_basic() {
-        // "hello world" = 2 words -> ceil(2 * 4/3) = ceil(2.67) = 3
-        assert_eq!(count_tokens("hello world"), 3);
-        // Empty string
-        assert_eq!(count_tokens(""), 0);
-        // Single word
-        assert_eq!(count_tokens("hello"), 2); // ceil(4/3) = 2
-    }
-
-    #[test]
-    fn first_sentence_extracts_correctly() {
-        assert_eq!(
-            first_sentence("Hello world. More text here."),
-            "Hello world."
-        );
-        assert_eq!(first_sentence("No period here"), "No period here");
-        assert_eq!(first_sentence("Question? Yes."), "Question?");
-        assert_eq!(first_sentence("Exclaim! Done."), "Exclaim!");
-    }
-
-    fn make_msg(role: &str, content: &str) -> LlmMessage {
-        LlmMessage {
-            role: role.into(),
-            content: content.into(),
-            tool_call_id: None,
-            tool_calls: None,
-        }
-    }
-
-    #[test]
-    fn compress_context_no_op_when_within_budget() {
-        let messages = vec![
-            make_msg("system", "You are helpful."),
-            make_msg("user", "Hi"),
-            make_msg("assistant", "Hello!"),
-        ];
-        let config = CompressionConfig {
-            max_context_tokens: 100_000,
-            recent_message_count: 10,
-            compression_enabled: true,
-        };
-
-        let result = compress_context(messages.clone(), &config);
-        assert_eq!(result.messages.len(), 3);
-        assert_eq!(result.metadata.compression_ratio, 1.0);
-        assert_eq!(result.metadata.messages_summarized, 0);
-    }
-
-    #[test]
-    fn compress_context_no_op_when_disabled() {
-        let messages = vec![
-            make_msg("system", "sys"),
-            make_msg("user", "a long message that exceeds budget"),
-        ];
-        let config = CompressionConfig {
-            max_context_tokens: 1, // tiny budget
-            recent_message_count: 10,
-            compression_enabled: false,
-        };
-
-        let result = compress_context(messages.clone(), &config);
-        assert_eq!(result.messages.len(), 2);
-        assert_eq!(result.metadata.messages_summarized, 0);
-    }
-
-    #[test]
-    fn compress_context_preserves_system_prompt() {
-        // Build a context with a system message and many conversation messages.
-        let mut messages = vec![make_msg(
-            "system",
-            "You are a helpful assistant with many capabilities.",
-        )];
-        for i in 0..20 {
-            messages.push(make_msg("user", &format!("User message number {}. This is a fairly long message to inflate token count significantly.", i)));
-            messages.push(make_msg("assistant", &format!("Assistant response number {}. Also fairly long to push tokens over the budget limit.", i)));
-        }
-
-        let config = CompressionConfig {
-            max_context_tokens: 50, // very tight budget
-            recent_message_count: 4,
-            compression_enabled: true,
-        };
-
-        let result = compress_context(messages, &config);
-
-        // System prompt must always be first and preserved.
-        assert_eq!(result.messages[0].role, "system");
-        assert!(result.messages[0].content.contains("helpful assistant"));
-
-        // There should be a summary message.
-        let summary = result
-            .messages
-            .iter()
-            .find(|m| m.content.contains("Conversation Summary"));
-        assert!(summary.is_some(), "should have a summary message");
-
-        // Recent messages should be the last 4 conversation messages.
-        let non_system: Vec<_> = result
-            .messages
-            .iter()
-            .filter(|m| m.role != "system")
-            .collect();
-        assert_eq!(non_system.len(), 4);
-
-        // Check the very last message is the last assistant response.
-        let last = result.messages.last().unwrap();
-        assert_eq!(last.role, "assistant");
-        assert!(last.content.contains("response number 19"));
-    }
-
-    #[test]
-    fn compress_context_recent_messages_intact() {
-        let mut messages = vec![make_msg("system", "sys prompt")];
-        for i in 0..15 {
-            messages.push(make_msg(
-                "user",
-                &format!(
-                    "msg {} with enough words to make the token count go over budget easily",
-                    i
-                ),
-            ));
-        }
-
-        let config = CompressionConfig {
-            max_context_tokens: 10,
-            recent_message_count: 5,
-            compression_enabled: true,
-        };
-
-        let result = compress_context(messages, &config);
-
-        // Last 5 user messages should be kept verbatim.
-        let user_msgs: Vec<_> = result
-            .messages
-            .iter()
-            .filter(|m| m.role == "user")
-            .collect();
-        assert_eq!(user_msgs.len(), 5);
-        for (idx, msg) in user_msgs.iter().enumerate() {
-            let expected_num = 10 + idx; // messages 10..14
-            assert!(msg.content.contains(&format!("msg {expected_num}")));
-        }
-    }
-
-    #[test]
-    fn compress_context_metadata_accuracy() {
-        let mut messages = vec![make_msg("system", "short system")];
-        for i in 0..10 {
-            messages.push(make_msg(
-                "user",
-                &format!(
-                    "Message number {} with several words to inflate the count.",
-                    i
-                ),
-            ));
-        }
-
-        let original_tokens: usize = messages.iter().map(|m| count_tokens(&m.content)).sum();
-
-        let config = CompressionConfig {
-            max_context_tokens: 10,
-            recent_message_count: 2,
-            compression_enabled: true,
-        };
-
-        let result = compress_context(messages, &config);
-
-        assert_eq!(result.metadata.original_tokens, original_tokens);
-        assert_eq!(result.metadata.messages_summarized, 8); // 10 - 2 recent
-        // The compression ratio should be less than 1.0 when many messages
-        // are summarized (summary is shorter than full message bodies).
-        // Note: the summary header adds some overhead, so we just verify
-        // fewer messages remain and the ratio is reported accurately.
-        assert!(result.metadata.compression_ratio > 0.0);
-
-        // Verify compressed_tokens matches actual content.
-        let actual_compressed: usize = result
-            .messages
-            .iter()
-            .map(|m| count_tokens(&m.content))
-            .sum();
-        assert_eq!(result.metadata.compressed_tokens, actual_compressed);
-    }
+    // ── ContextBuilder compression integration ─────────────────────
 
     #[tokio::test]
     async fn build_messages_compressed_integration() {
@@ -1418,6 +1241,142 @@ mod tests {
 
         // Default budget is 8192, system prompt is small, should not compress.
         assert_eq!(result.metadata.compression_ratio, 1.0);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    // ── Prefix-stable windowed assembly (Phase 2.2) ──────────────────
+
+    fn wmsg(role: &str, content: &str) -> LlmMessage {
+        LlmMessage {
+            role: role.into(),
+            content: content.into(),
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    #[test]
+    fn windowed_order_is_head_graft_tail() {
+        let all = vec![
+            wmsg("system", "sys prompt"),
+            wmsg("system", "# Skill: x"),
+            wmsg("user", "u1"),
+            wmsg("assistant", "a1"),
+        ];
+        let graft = vec![wmsg("system", "# Grafted: recalled fact")];
+        let cfg = WindowConfig::default();
+        let w = assemble_windowed(all, &graft, &cfg);
+
+        assert_eq!(w.head_len, 2);
+        assert_eq!(w.graft_len, 1);
+        // head, then graft, then tail.
+        assert_eq!(w.messages[0].content, "sys prompt");
+        assert_eq!(w.messages[1].content, "# Skill: x");
+        assert_eq!(w.messages[2].content, "# Grafted: recalled fact");
+        assert_eq!(w.messages[3].content, "u1");
+        assert_eq!(w.messages[4].content, "a1");
+        assert!(!w.tail_truncated);
+    }
+
+    #[test]
+    fn windowed_head_is_prefix_stable_across_tail_changes() {
+        let head = vec![
+            wmsg("system", "stable system prompt"),
+            wmsg("system", "# Skill: y"),
+        ];
+
+        let mut a = head.clone();
+        a.push(wmsg("user", "first question"));
+        let mut b = head.clone();
+        b.push(wmsg("user", "first question"));
+        b.push(wmsg("assistant", "an answer"));
+        b.push(wmsg("user", "second question"));
+
+        let cfg = WindowConfig::default();
+        let wa = assemble_windowed(a, &[], &cfg);
+        let wb = assemble_windowed(b, &[], &cfg);
+
+        // The head bytes must be byte-identical even though the tail grew.
+        assert_eq!(wa.head_bytes(), wb.head_bytes());
+        assert_eq!(wa.head_len, wb.head_len);
+    }
+
+    #[test]
+    fn windowed_never_exceeds_cap() {
+        // Small head, many tail turns, tiny budget.
+        let mut all = vec![wmsg("system", "short head")];
+        for i in 0..200 {
+            all.push(wmsg(
+                "user",
+                &format!("user turn {i} with a fair number of words to spend the token budget"),
+            ));
+            all.push(wmsg(
+                "assistant",
+                &format!("assistant reply {i} of moderate length here"),
+            ));
+        }
+        let cfg = WindowConfig {
+            max_window_tokens: 200,
+            reserve_output_tokens: 0,
+        };
+        let w = assemble_windowed(all, &[], &cfg);
+
+        assert!(
+            w.window_tokens <= cfg.max_window_tokens,
+            "window {} exceeded cap {}",
+            w.window_tokens,
+            cfg.max_window_tokens
+        );
+        assert!(
+            w.tail_truncated,
+            "expected the tail to be trimmed under a tiny cap"
+        );
+        // The most-recent turn must survive the trim.
+        assert!(w.messages.last().unwrap().content.contains("reply 199"));
+    }
+
+    #[test]
+    fn windowed_reserve_output_tightens_budget() {
+        let mut all = vec![wmsg("system", "head")];
+        for i in 0..50 {
+            all.push(wmsg(
+                "user",
+                &format!("turn {i} with several words to consume budget"),
+            ));
+        }
+        let cfg = WindowConfig {
+            max_window_tokens: 200,
+            reserve_output_tokens: 150,
+        };
+        let w = assemble_windowed(all, &[], &cfg);
+        // Effective budget is 50; the assembled window must respect it.
+        assert!(
+            w.window_tokens <= 50,
+            "window {} exceeded effective budget 50",
+            w.window_tokens
+        );
+    }
+
+    #[tokio::test]
+    async fn build_windowed_head_stable_across_turns() {
+        let (ctx, dir, _, _) = setup("windowed_stable").await;
+
+        let mut session = Session::new("test:windowed1");
+        session.add_message("user", "first", None);
+        let w1 = ctx
+            .build_windowed(&session, &[], &[], &WindowConfig::default())
+            .await;
+
+        // Grow the dialogue; the stable head must not change byte-for-byte.
+        session.add_message("assistant", "reply", None);
+        session.add_message("user", "second", None);
+        let w2 = ctx
+            .build_windowed(&session, &[], &[], &WindowConfig::default())
+            .await;
+
+        assert_eq!(w1.head_bytes(), w2.head_bytes());
+        assert!(w1.head_len >= 1 && w1.messages[0].role == "system");
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

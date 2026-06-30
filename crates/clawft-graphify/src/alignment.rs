@@ -444,7 +444,6 @@ mod tests {
             label_candidate_threshold: 0.9,
             label_weight: 1.0,
             structural_weight: 0.0,
-            ..Default::default()
         };
         let alignments = align_entities_with_config(&kg_a, &kg_b, 0.5, &config);
         assert_eq!(alignments.len(), 1);

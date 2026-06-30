@@ -249,8 +249,8 @@ mod tests {
                 { "id": "gamma", "status": "down", "age": "expired" },
             ],
         });
-        let _ = ctx.run(raw_input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = ctx.run_ui(raw_input, |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
                 MeshNodesViewer::paint(ui, "substrate/mesh", &v);
             });
         });
@@ -261,8 +261,8 @@ mod tests {
         let ctx = egui::Context::default();
         let raw_input = egui::RawInput::default();
         let v = json!({ "total_nodes": 0, "healthy_nodes": 0 });
-        let _ = ctx.run(raw_input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = ctx.run_ui(raw_input, |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
                 MeshNodesViewer::paint(ui, "mesh/empty", &v);
             });
         });

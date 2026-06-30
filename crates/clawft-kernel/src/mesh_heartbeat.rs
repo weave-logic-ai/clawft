@@ -254,8 +254,18 @@ impl PeerHeartbeat {
                 self.suspect_since = Some(Instant::now());
             }
             HeartbeatState::Suspect => {
+                // `>=`, not `>`: a peer that has been suspect for *at least*
+                // `suspect_timeout` is dead. `Instant::elapsed()` is always
+                // non-negative, so with a zero `suspect_timeout` (used in tests
+                // to mean "transition immediately") `>` would require a strictly
+                // positive elapsed — which fails whenever two back-to-back
+                // `Instant` reads collapse into the same clock tick
+                // (`elapsed() == 0`). That made the Suspect→Dead assertions a
+                // rare load-sensitive flake. `>=` makes the zero-timeout
+                // transition deterministic and is a no-op at the nanosecond
+                // boundary for the non-zero production default.
                 if let Some(since) = self.suspect_since
-                    && since.elapsed() > config.suspect_timeout
+                    && since.elapsed() >= config.suspect_timeout
                 {
                     self.state = HeartbeatState::Dead;
                 }

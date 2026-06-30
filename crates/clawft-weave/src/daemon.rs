@@ -930,7 +930,12 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
         // per-conv heartbeat publishes
         // `substrate/_derived/chat/<conv>/status`. The `chat`
         // derived-write grant issued at boot covers both paths.
-        let agent_sink: Arc<dyn clawft_core::agent::sink::ConversationSink> = {
+        // ADR-058 Phase 5.1: alongside the sink we build the per-conversation
+        // L2 session tier and surface it so the agent loop can graft from it.
+        let (agent_sink, session_tier): (
+            Arc<dyn clawft_core::agent::sink::ConversationSink>,
+            Option<Arc<clawft_service_agent::SessionTier>>,
+        ) = {
             let k = kernel.read().await;
             let substrate = k.substrate_service().clone();
             let node_registry = k.node_registry().clone();
@@ -943,6 +948,7 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
             // sink falls back to the no-op anchor — pure substrate
             // JSONL behaviour, no extra work per turn.
             let anchor_cfg = k.kernel_config().agent.clone().unwrap_or_default();
+            let mut session_tier: Option<Arc<clawft_service_agent::SessionTier>> = None;
             let anchor: Arc<dyn clawft_service_agent::TurnAnchor> = if anchor_cfg.any_enabled() {
                 let chain = anchor_cfg
                     .anchor_chain
@@ -956,27 +962,71 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                     .anchor_causal
                     .then(|| k.ecc_causal().cloned())
                     .flatten();
+                let crossrefs = anchor_cfg
+                    .anchor_causal
+                    .then(|| k.ecc_crossrefs().cloned())
+                    .flatten();
+                // ADR-062 §1.1: when both the witness chain and the causal graph
+                // are enabled, the L2 tier owns the forest dual-write (causal
+                // node + `Follows` lineage + speaker cross-ref, keyed by chain
+                // sequence). Hand the anchor `None` for causal in that case so a
+                // turn isn't double-added; the anchor keeps its own causal write
+                // only in the legacy causal-without-chain (no-tier) configuration.
+                let tier_owns_forest = chain.is_some() && causal.is_some() && crossrefs.is_some();
+                let anchor_causal = if tier_owns_forest {
+                    None
+                } else {
+                    causal.clone()
+                };
                 info!(
                     chain = chain.is_some(),
                     hnsw = hnsw.is_some(),
                     causal = causal.is_some(),
+                    forest_join = tier_owns_forest,
                     "agent.chat anchors wired (mirrors turns to enabled stores)"
                 );
-                Arc::new(clawft_service_agent::KernelTurnAnchor::new(
-                    chain, hnsw, causal,
-                ))
+                let mut anchor =
+                    clawft_service_agent::KernelTurnAnchor::new(chain.clone(), hnsw, anchor_causal);
+                // ADR-058 Phase 5.1: the L2 tier needs the witness chain (its
+                // sequence is the index key), so it lives only when chain
+                // anchoring is enabled. The embedder is the ADR-059 Qwen3
+                // provider when its weights are present, else the Mock fallback.
+                if let Some(chain) = chain {
+                    let embedder: Arc<dyn clawft_kernel::embedding::EmbeddingProvider> =
+                        Arc::from(clawft_kernel::embedding::select_embedding_provider(None));
+                    let mut tier = clawft_service_agent::SessionTier::new(embedder, chain, None);
+                    // ADR-062 §1.1 forest join: dual-write turns into the
+                    // kernel-global causal graph + cross-ref store and fuse
+                    // lineage/cross-structure recall with cosine on graft.
+                    if let (Some(causal), Some(crossrefs)) = (causal.clone(), crossrefs.clone()) {
+                        tier = tier.with_forest(causal, crossrefs);
+                    }
+                    let tier = Arc::new(tier);
+                    // ADR-058 Phase 5.3: pre-warm the embedder at startup (one
+                    // throwaway embed) so the first conversation's first graft
+                    // doesn't pay the model's first-inference cost — mirrors the
+                    // 6.2 STT pre-warm. Best-effort; cheap on the Mock fallback.
+                    tier.warm().await;
+                    anchor = anchor.with_session_tier(tier.clone());
+                    session_tier = Some(tier);
+                    info!(
+                        "agent.chat L2 session tier wired (index + graft active, embedder pre-warmed)"
+                    );
+                }
+                Arc::new(anchor)
             } else {
                 Arc::new(clawft_service_agent::NoopTurnAnchor)
             };
 
-            Arc::new(
+            let sink = Arc::new(
                 clawft_service_agent::SubstrateConversationSink::with_anchor(
                     substrate,
                     node_registry,
                     daemon_identity.node_id.clone(),
                     anchor,
                 ),
-            )
+            );
+            (sink, session_tier)
         };
 
         // agent-core-v1 Phase D1: wire a FileIdentityProvider so each
@@ -1172,10 +1222,25 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
             // hits the zero_trust fallback regardless of what the
             // workspace/home `.clawft/config.json` says.
             Some(&agent_routing),
+            // ADR-058 Phase 5.1: the L2 session tier as the loop's graft
+            // provider (the same instance the turn anchor indexes into), so
+            // each turn's prompt is augmented with recalled context. `None`
+            // when chain anchoring is off — no grafting.
+            session_tier.clone().map(|t| {
+                let p: Arc<dyn clawft_core::agent::graft::ContextGraftProvider> = t;
+                p
+            }),
         )
         .await;
 
-        let service = Arc::new(clawft_service_agent::AgentService::new(agent_loop));
+        // ADR-058 Phase 5 deferred step 4: also hand the SAME tier to the
+        // service so the `agent.chat.end` signal can drive conversation-end
+        // promotion (the loop grafts from it; the service promotes from it).
+        let mut service = clawft_service_agent::AgentService::new(agent_loop);
+        if let Some(tier) = session_tier {
+            service = service.with_session_tier(tier);
+        }
+        let service = Arc::new(service);
         let _ = DAEMON_AGENT.set(service);
         info!("agent service wired (agent.chat dispatches through clawft-service-agent)");
     } else {
@@ -4309,6 +4374,40 @@ async fn dispatch(
             } else {
                 Response::error("agent service not wired")
             }
+        }
+        "agent.chat.end" => {
+            // ADR-058 Phase 5 (deferred step 4): the explicit
+            // conversation-end signal. Unlike `agent.chat.cancel` (which
+            // re-arms the conv for the next turn), `end` rolls the L2 view
+            // up: run the LLM postmortem over the conversation digest, then
+            // promote the durable fact to the trunk and drop the view. The
+            // chain stays the source of truth, so this is safe to call more
+            // than once (a second call finds no view and is a no-op).
+            let conv_id = match params.get("conv_id").and_then(|v| v.as_str()) {
+                Some(s) if !s.is_empty() => s.to_string(),
+                _ => return Response::error("agent.chat.end requires conv_id"),
+            };
+            let Some(agent) = daemon_agent() else {
+                return Response::error("agent service not wired");
+            };
+            // Build the postmortem digest from the live view, then distill the
+            // durable fact via the same LLM the daemon already uses. Best-
+            // effort: any postmortem failure drops the view without promoting
+            // rather than failing the close.
+            let durable_fact = match (agent.session_tier(), daemon_llm()) {
+                (Some(tier), Some(llm)) => match tier.conversation_digest(&conv_id, 16_384) {
+                    Some(digest) => {
+                        crate::conv_postmortem::summarize_durable_facts(&llm, &digest).await
+                    }
+                    None => None,
+                },
+                _ => None,
+            };
+            let promoted = agent.end_conversation(&conv_id, durable_fact.as_deref());
+            Response::success(serde_json::json!({
+                "ended": conv_id,
+                "promoted_seq": promoted,
+            }))
         }
         "terminal.spawn" => handle_terminal_spawn(params, kernel).await,
         "terminal.write" => handle_terminal_write(params, kernel).await,

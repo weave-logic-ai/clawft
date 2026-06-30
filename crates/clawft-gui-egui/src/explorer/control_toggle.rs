@@ -201,6 +201,6 @@ mod tests {
     fn priority_beats_json_fallback() {
         // Sanity that the priority sits above the json_fallback's
         // catch-all (1).
-        assert!(PRIORITY > 1);
+        const { assert!(PRIORITY > 1) };
     }
 }

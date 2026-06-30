@@ -615,6 +615,7 @@ pub async fn build_daemon_agent_loop(
     sink: Option<Arc<dyn crate::agent::sink::ConversationSink>>,
     identity_provider: Option<Arc<dyn crate::agent::identity::IdentityProvider>>,
     routing: Option<&clawft_types::routing::RoutingConfig>,
+    graft_provider: Option<Arc<dyn crate::agent::graft::ContextGraftProvider>>,
 ) -> Arc<crate::agent::loop_core::AgentLoop<clawft_platform::NativePlatform>> {
     use clawft_platform::NativePlatform;
 
@@ -759,6 +760,13 @@ pub async fn build_daemon_agent_loop(
     // passing `None` keeps the pre-E1 wire byte-identical).
     if let Some(r) = context_router {
         agent = agent.with_context_router(r);
+    }
+    // ADR-058 Phase 5.1: attach the kernel-backed L2 context-graft provider
+    // (the per-conversation SessionTier) so each turn's prompt is augmented with
+    // recalled context. `None` (CLI / tests) leaves the loop's NullGraftProvider
+    // default — no grafting, byte-identical wire.
+    if let Some(gp) = graft_provider {
+        agent = agent.with_graft_provider(gp);
     }
     Arc::new(agent)
 }

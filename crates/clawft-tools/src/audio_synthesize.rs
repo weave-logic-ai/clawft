@@ -83,13 +83,13 @@ impl Tool for AudioSynthesizeTool {
 
         // Validate output directory exists
         let path = std::path::Path::new(output_path);
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                return Err(ToolError::InvalidPath(format!(
-                    "Output directory does not exist: {}",
-                    parent.display()
-                )));
-            }
+        if let Some(parent) = path.parent()
+            && !parent.exists()
+        {
+            return Err(ToolError::InvalidPath(format!(
+                "Output directory does not exist: {}",
+                parent.display()
+            )));
         }
 
         // Validate extension

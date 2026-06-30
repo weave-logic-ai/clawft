@@ -289,8 +289,8 @@ mod tests {
         let ctx = egui::Context::default();
         let raw_input = egui::RawInput::default();
         let v = sample_tail();
-        let _ = ctx.run(raw_input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = ctx.run_ui(raw_input, |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
                 ChainTailViewer::paint(ui, "substrate/chain/tail", &v);
             });
         });
@@ -308,8 +308,8 @@ mod tests {
             { "seq": 1, "ts": 1, "kind": "ok" },
             { "seq": 3, "ts": 3, "kind": "ok" },
         ]);
-        let _ = ctx.run(raw_input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = ctx.run_ui(raw_input, |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
                 ChainTailViewer::paint(ui, "chain/out_of_order", &v);
             });
         });

@@ -232,7 +232,7 @@ mod tests {
 
     #[test]
     fn matches_floats() {
-        assert_eq!(TimeSeriesViewer::matches(&json!(3.14)), 5);
+        assert_eq!(TimeSeriesViewer::matches(&json!(1.5)), 5);
         assert_eq!(TimeSeriesViewer::matches(&json!(-0.5)), 5);
     }
 
@@ -281,8 +281,8 @@ mod tests {
         let ctx = egui::Context::default();
         let raw_input = egui::RawInput::default();
         let v = json!(1.5);
-        let _ = ctx.run(raw_input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = ctx.run_ui(raw_input, |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
                 TimeSeriesViewer::paint(ui, "test/scalar/tick", &v);
             });
         });
@@ -295,8 +295,8 @@ mod tests {
         // Seed with a handful of paints at varying values.
         for v in [1.0, 2.0, 3.0, 4.0, 5.0] {
             let raw_input = egui::RawInput::default();
-            let _ = ctx.run(raw_input, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            let _ = ctx.run_ui(raw_input, |ui| {
+                egui::CentralPanel::default().show_inside(ui, |ui| {
                     TimeSeriesViewer::paint(ui, path, &json!(v));
                 });
             });

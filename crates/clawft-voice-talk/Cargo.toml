@@ -1,0 +1,57 @@
+[package]
+name = "clawft-voice-talk"
+version.workspace = true
+# Publishable: the Talk-Mode bridge that binds the generic clawft-channels
+# voice controller to the concrete local stack (Hermes LLM, WebRTC-AEC, kernel
+# ECC). Kept separate so clawft-channels stays free of clawft-llm / clawft-kernel
+# / cpal — the dependency-inversion seam (ADR-061 §7).
+publish = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Talk-Mode bridge: binds the clawft-channels voice controller to LocalProvider (Hermes), WebRTC-AEC, and the kernel ECC CausalGraph"
+
+[features]
+# Default builds the bindings against the passthrough AEC core (no cpal / no
+# libwebrtc). `webrtc-aec` swaps in the real AEC3 echo canceller.
+default = []
+webrtc-aec = ["clawft-voice-aec/webrtc-aec"]
+# Real native inference for the live render path: SNAC + Kokoro TTS AND the
+# parakeet/smart-turn/ECAPA voice models (all `ort`-backed). Without it the
+# native stack still assembles (front-end only, graceful degradation).
+onnx = ["clawft-voice-tts/onnx", "clawft-voice-onnx/onnx"]
+# Fully-live cpal mic + speaker I/O (AEC sink + capture). Heavyweight (pulls
+# cpal); the deterministic + WAV-driven assembly paths never need it.
+live-audio = ["clawft-voice-aec/device"]
+
+[dependencies]
+# The generic controller + voice traits (VoiceLlm, AudioControl, SttBackend,
+# TtsEngine, SpeakerEmbedder, ConversationObserver). `voice` feature on.
+clawft-channels = { workspace = true, features = ["voice"] }
+# In-process AEC for the barge-in flush binding (passthrough by default).
+clawft-voice-aec = { path = "../clawft-voice-aec" }
+# Native TTS node-renderers (ADR-062 Phase 4): Kokoro fast + Orpheus/SNAC slow,
+# bound into a DualLayerTts for render-from-node. Default features EMPTY (no
+# `ort`); real inference is behind its `onnx` feature.
+clawft-voice-tts = { path = "../clawft-voice-tts" }
+# Native STT/turn/speaker models (ADR-062 Phase 3): parakeet, smart-turn,
+# ECAPA. Default features EMPTY (no `ort`); the front-ends compile and the
+# session assembles weights-free.
+clawft-voice-onnx = { path = "../clawft-voice-onnx" }
+# Local Hermes provider for the concrete VoiceLlm binding.
+clawft-llm = { workspace = true, features = ["native"] }
+# Kernel CausalGraph for the ECC ConversationObserver binding.
+clawft-kernel = { workspace = true, features = ["native", "ecc", "exochain", "cluster", "mesh"] }
+
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+# Barge-in CancellationToken in the render-from-node path (ADR-062 §2.2);
+# tokio for the assembly run loop (spawn the P2 loop + controller concurrently).
+tokio-util = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

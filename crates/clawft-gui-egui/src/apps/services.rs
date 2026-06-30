@@ -286,8 +286,8 @@ mod tests {
         let ctx = egui::Context::default();
         let mut desk = Desktop::default();
         let live = Live::spawn();
-        ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
                 let rect = ui.max_rect();
                 show(ui, rect, &mut desk, &live, &snap);
             });
@@ -301,32 +301,36 @@ mod tests {
 
     #[test]
     fn show_does_not_panic_with_service_rows() {
-        let mut snap = Snapshot::default();
-        snap.connection = Connection::Connected;
-        snap.services = Some(vec![
-            json!({
-                "name": "weave",
-                "state": "running",
-                "pid": 1234,
-                "restarts": 0,
-                "uptime_ms": 1_234_567_u64,
-            }),
-            json!({
-                "name": "whisper",
-                "state": "stopped",
-                "pid": null,
-                "restarts": 2,
-                "uptime_ms": 0,
-            }),
-        ]);
+        let snap = Snapshot {
+            connection: Connection::Connected,
+            services: Some(vec![
+                json!({
+                    "name": "weave",
+                    "state": "running",
+                    "pid": 1234,
+                    "restarts": 0,
+                    "uptime_ms": 1_234_567_u64,
+                }),
+                json!({
+                    "name": "whisper",
+                    "state": "stopped",
+                    "pid": null,
+                    "restarts": 2,
+                    "uptime_ms": 0,
+                }),
+            ]),
+            ..Default::default()
+        };
         run_show(snap);
     }
 
     #[test]
     fn show_paints_empty_state_when_connected_with_no_rows() {
-        let mut snap = Snapshot::default();
-        snap.connection = Connection::Connected;
-        snap.services = Some(vec![]);
+        let snap = Snapshot {
+            connection: Connection::Connected,
+            services: Some(vec![]),
+            ..Default::default()
+        };
         run_show(snap);
     }
 

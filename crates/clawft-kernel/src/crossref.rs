@@ -139,6 +139,14 @@ pub enum CrossRefType {
     MemoryEncoded,
     /// Theory-of-mind inference (0x0A).
     TomInference,
+    /// Backchannel continuer (0x0B, ADR-062 D5): a "mm-hmm" linking a listener
+    /// to the current speaker node **without** creating a turn node.
+    Continuer,
+    /// Per-speaker association (0x0C, ADR-062 §Architecture / ADR-046 forest
+    /// join): links a turn node to the stable identity node of whoever produced
+    /// it. Lets the forest walk recall a speaker's prior turns as cross-structure
+    /// context, not by cosine alone.
+    Speaker,
     /// Domain-specific extension.
     Custom(u8),
 }
@@ -154,6 +162,8 @@ impl fmt::Display for CrossRefType {
             Self::SceneBoundary => write!(f, "SceneBoundary"),
             Self::MemoryEncoded => write!(f, "MemoryEncoded"),
             Self::TomInference => write!(f, "TomInference"),
+            Self::Continuer => write!(f, "Continuer"),
+            Self::Speaker => write!(f, "Speaker"),
             Self::Custom(v) => write!(f, "Custom(0x{v:02x})"),
         }
     }
@@ -409,6 +419,33 @@ mod tests {
 
         let none = store.by_type(&a, &CrossRefType::SceneBoundary);
         assert!(none.is_empty());
+    }
+
+    #[test]
+    fn crossref_store_resolves_continuer() {
+        // ADR-062 D5: a backchannel is a Continuer cross-ref from listener to
+        // the current speaker node, resolvable via by_type.
+        let store = CrossRefStore::new();
+        let listener = make_id(&StructureTag::CausalGraph, b"listener", 1);
+        let speaker = make_id(&StructureTag::CausalGraph, b"speaker", 2);
+        store.insert(sample_crossref(
+            listener.clone(),
+            speaker.clone(),
+            CrossRefType::Continuer,
+        ));
+        // Unrelated edge that must not match.
+        let other = make_id(&StructureTag::CausalGraph, b"other", 3);
+        store.insert(sample_crossref(
+            listener.clone(),
+            other,
+            CrossRefType::Elaborates,
+        ));
+
+        let continuers = store.by_type(&listener, &CrossRefType::Continuer);
+        assert_eq!(continuers.len(), 1);
+        assert_eq!(continuers[0].target, speaker);
+        assert_eq!(continuers[0].ref_type, CrossRefType::Continuer);
+        assert_eq!(CrossRefType::Continuer.to_string(), "Continuer");
     }
 
     #[test]

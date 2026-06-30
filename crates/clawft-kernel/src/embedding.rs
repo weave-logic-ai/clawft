@@ -84,6 +84,17 @@ pub trait EmbeddingProvider: Send + Sync {
 
     /// Name of the embedding model (for metadata tracking).
     fn model_name(&self) -> &str;
+
+    /// Pre-warm the backend: run one throwaway [`embed`](Self::embed) so the
+    /// model graph, runtime thread pool, and allocator are hot before the first
+    /// real call. Best-effort — errors are swallowed (a backend with nothing to
+    /// warm, like the Mock, just pays one cheap call). Intended to be called
+    /// once at daemon startup so the first conversation turn doesn't pay the
+    /// model's first-inference cost (ADR-058 Phase 5.3; mirrors the 6.2 STT
+    /// pre-warm).
+    async fn warm(&self) {
+        let _ = self.embed("warm").await;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -310,16 +321,35 @@ impl EmbeddingProvider for LlmEmbeddingProvider {
 
 /// Select the best available embedding provider based on configuration.
 ///
-/// Priority order:
-/// 1. ONNX local model if `onnx_model_path` points to a valid `.onnx` file
-/// 2. LLM API if llm_embedding config is present
-/// 3. Mock (fallback, for testing or when no backend available)
+/// Priority order (ADR-059):
+/// 1. **Qwen3-Embedding-0.6B** — if `model_fp16.onnx` + `tokenizer.json` are
+///    present and the `onnx-embeddings` runtime loads them (the preferred
+///    semantic embedder: 32K ctx, MRL-512).
+/// 2. **all-MiniLM-L6-v2** ONNX — the legacy BERT encoder fallback.
+/// 3. **LLM API** — if an `llm_embedding` config is present.
+/// 4. **Mock** — graceful fallback for tests / when no model is available.
+///
+/// Selection only promotes a model-backed provider when its runtime is actually
+/// live, so without the `onnx-embeddings` feature (or the artifacts) this always
+/// degrades cleanly to LLM or Mock.
 pub fn select_embedding_provider(
     llm_config: Option<LlmEmbeddingConfig>,
 ) -> Box<dyn EmbeddingProvider> {
-    // Try ONNX first: check standard model locations.
-    let onnx_paths = onnx_model_search_paths();
-    for path in &onnx_paths {
+    // 1. Qwen3 (preferred): needs both model_fp16.onnx and tokenizer.json.
+    for dir in qwen3_model_search_dirs() {
+        let model = dir.join("model_fp16.onnx");
+        let tokenizer = dir.join("tokenizer.json");
+        if model.exists() && tokenizer.exists() {
+            let provider = crate::embedding_qwen3::Qwen3EmbeddingProvider::new(&model, &tokenizer);
+            if provider.is_runtime_available() {
+                tracing::info!("Using Qwen3 embedding provider from {}", dir.display());
+                return Box::new(provider);
+            }
+        }
+    }
+
+    // 2. all-MiniLM-L6-v2 ONNX (legacy BERT fallback).
+    for path in &onnx_model_search_paths() {
         if path.exists() {
             let provider = crate::embedding_onnx::OnnxEmbeddingProvider::new(path);
             if provider.is_runtime_available() {
@@ -329,10 +359,37 @@ pub fn select_embedding_provider(
         }
     }
 
+    // 3. LLM API.
     if let Some(config) = llm_config {
         return Box::new(LlmEmbeddingProvider::new(config));
     }
+
+    // 4. Mock.
     Box::new(MockEmbeddingProvider::new(64))
+}
+
+/// Standard search directories for the Qwen3 model bundle (each expected to hold
+/// `model_fp16.onnx` + `tokenizer.json`):
+/// 1. `.weftos/models/Qwen3-Embedding-0.6B/` (project-local)
+/// 2. `$HOME/.weftos/models/Qwen3-Embedding-0.6B/` (user-global)
+/// 3. `$WEFTOS_MODEL_PATH` (as a models-root and as the bundle dir directly)
+fn qwen3_model_search_dirs() -> Vec<std::path::PathBuf> {
+    let subdir = "Qwen3-Embedding-0.6B";
+    let mut dirs = Vec::new();
+
+    dirs.push(std::path::PathBuf::from(format!(".weftos/models/{subdir}")));
+
+    if let Some(home) = dirs_home() {
+        dirs.push(home.join(format!(".weftos/models/{subdir}")));
+    }
+
+    if let Ok(env_path) = std::env::var("WEFTOS_MODEL_PATH") {
+        let p = std::path::PathBuf::from(env_path);
+        dirs.push(p.join(subdir));
+        dirs.push(p);
+    }
+
+    dirs
 }
 
 /// Standard search paths for the ONNX embedding model.
@@ -544,6 +601,24 @@ mod tests {
     fn select_provider_returns_mock_when_no_config() {
         let provider = select_embedding_provider(None);
         assert_eq!(provider.dimensions(), 64);
+        assert_eq!(provider.model_name(), "mock-sha256");
+    }
+
+    #[test]
+    fn qwen3_search_dirs_include_project_local_bundle() {
+        let dirs = qwen3_model_search_dirs();
+        assert!(
+            dirs.iter()
+                .any(|d| d.ends_with(".weftos/models/Qwen3-Embedding-0.6B")),
+            "expected project-local Qwen3 bundle dir, got: {dirs:?}"
+        );
+    }
+
+    #[test]
+    fn select_provider_priorities_skip_unavailable_qwen3() {
+        // No model artifacts present in the test cwd → Qwen3/MiniLM runtimes are
+        // not live, so selection must fall through to Mock when no LLM config.
+        let provider = select_embedding_provider(None);
         assert_eq!(provider.model_name(), "mock-sha256");
     }
 

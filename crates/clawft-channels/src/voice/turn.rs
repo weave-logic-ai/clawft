@@ -1,0 +1,268 @@
+//! Semantic turn-taking / endpointing (ADR-061 §5).
+//!
+//! A fixed silence cutoff clips a speaker who pauses mid-thought. ADR-061
+//! adopts **smart-turn**-style *semantic* endpointing: on a short pause, keep
+//! listening while the turn still "reads open", and finalize only when the
+//! utterance is semantically complete OR a hard max-silence ceiling is hit.
+//!
+//! The model is an extension seam, mirroring [`EnergyVad`](super::vad) /
+//! [`SttBackend`](super::stt): the default [`HeuristicEndpoint`] needs no
+//! model file (it reasons over the partial transcript's trailing token); a
+//! real smart-turn ONNX model implements the same [`EndpointModel`] trait and
+//! drops in without touching the controller. The controller feeds frames +
+//! the running partial transcript to a [`SemanticEndpointer`] and acts on its
+//! [`TurnDecision`].
+
+use std::collections::VecDeque;
+
+use async_trait::async_trait;
+
+/// What the endpointer wants the capture loop to do after a frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnDecision {
+    /// Keep capturing — the turn is still active or only briefly paused.
+    Continue,
+    /// Finalize the turn now (commit the utterance to STT).
+    Finalize,
+}
+
+/// Predicts whether the speaker has finished their turn.
+#[async_trait]
+pub trait EndpointModel: Send + Sync {
+    /// Probability in `[0, 1]` that the turn is complete, given the recent
+    /// audio window and the running partial transcript. Higher = more likely
+    /// the speaker is done.
+    async fn completion_prob(&self, recent_audio: &[i16], partial_text: &str) -> f32;
+}
+
+/// No-model default endpointer: reasons over the partial transcript's
+/// trailing token. A turn ending on a conjunction / filler / comma reads
+/// "open" (the speaker is mid-thought); one ending on terminal punctuation or
+/// a plain word after a pause reads "complete". This is the lowest-common-
+/// denominator that works without an ONNX file; smart-turn is the upgrade.
+#[derive(Debug, Default, Clone)]
+pub struct HeuristicEndpoint;
+
+/// Words that, when trailing, signal the speaker is not done.
+const OPEN_WORDS: &[&str] = &[
+    "and", "or", "but", "so", "because", "with", "to", "the", "a", "an", "of", "for", "if", "when",
+    "while", "that", "as", "at", "in", "on", "um", "uh", "like", "i", "we", "you", "my", "is",
+    "are", "was", "about", "from", "by", "into", "over", "than", "this", "these", "those", "some",
+    "any",
+];
+
+#[async_trait]
+impl EndpointModel for HeuristicEndpoint {
+    async fn completion_prob(&self, _recent_audio: &[i16], partial_text: &str) -> f32 {
+        let t = partial_text.trim();
+        if t.is_empty() {
+            // Nothing transcribed yet — lean "not done" so we don't clip a
+            // slow starter, but the max-silence ceiling will still finalize.
+            return 0.3;
+        }
+        let last = t.chars().last().unwrap();
+        if matches!(last, '.' | '!' | '?') {
+            return 0.95;
+        }
+        if last == ',' || last == ';' || last == ':' || last == '-' {
+            return 0.1; // mid-clause
+        }
+        let last_word = t
+            .split(|c: char| !c.is_alphanumeric())
+            .next_back()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if OPEN_WORDS.contains(&last_word.as_str()) {
+            0.15
+        } else {
+            // A complete-looking word after a real pause: lean done.
+            0.7
+        }
+    }
+}
+
+/// Streaming semantic endpointer. Hold one per capture stream; call
+/// [`observe`](Self::observe) per frame with the current voice-activity flag
+/// and the running partial transcript.
+pub struct SemanticEndpointer<M: EndpointModel> {
+    model: M,
+    threshold: f32,
+    short_silence_samples: u64,
+    max_silence_samples: u64,
+    recent_cap: usize,
+    silence_run: u64,
+    checked_this_pause: bool,
+    recent_audio: VecDeque<i16>,
+    active: bool,
+}
+
+impl<M: EndpointModel> SemanticEndpointer<M> {
+    /// Build an endpointer.
+    ///
+    /// `short_silence_ms` is the pause length that triggers a semantic check
+    /// (e.g. 250 ms). `max_silence_ms` is the hard ceiling that finalizes
+    /// regardless of the model (e.g. 2000 ms). `threshold` is the completion
+    /// probability at/above which the turn is finalized (e.g. 0.5).
+    pub fn new(
+        model: M,
+        sample_rate: u32,
+        short_silence_ms: u32,
+        max_silence_ms: u32,
+        threshold: f32,
+    ) -> Self {
+        let sr = u64::from(sample_rate);
+        Self {
+            model,
+            threshold,
+            short_silence_samples: sr * u64::from(short_silence_ms) / 1_000,
+            max_silence_samples: sr * u64::from(max_silence_ms) / 1_000,
+            // Keep ~2 s of recent audio for the model window.
+            recent_cap: (sr * 2) as usize,
+            silence_run: 0,
+            checked_this_pause: false,
+            recent_audio: VecDeque::new(),
+            active: false,
+        }
+    }
+
+    /// Observe one frame.
+    ///
+    /// `voiced` is whether the VAD considers this frame speech. `partial_text`
+    /// is the best transcript so far (may be empty if streaming STT is off).
+    /// Returns [`TurnDecision::Finalize`] when the turn should be committed.
+    pub async fn observe(
+        &mut self,
+        frame: &[i16],
+        voiced: bool,
+        partial_text: &str,
+    ) -> TurnDecision {
+        // Maintain the recent-audio ring for the model window.
+        self.recent_audio.extend(frame.iter().copied());
+        while self.recent_audio.len() > self.recent_cap {
+            self.recent_audio.pop_front();
+        }
+
+        if voiced {
+            self.active = true;
+            self.silence_run = 0;
+            self.checked_this_pause = false;
+            return TurnDecision::Continue;
+        }
+
+        // Silence frame.
+        if !self.active {
+            return TurnDecision::Continue; // no turn in progress
+        }
+        self.silence_run = self.silence_run.saturating_add(frame.len() as u64);
+
+        // Hard ceiling: finalize no matter what the model thinks.
+        if self.silence_run >= self.max_silence_samples {
+            self.reset_turn();
+            return TurnDecision::Finalize;
+        }
+
+        // Cross the short-silence threshold once per pause → semantic check.
+        if self.silence_run >= self.short_silence_samples && !self.checked_this_pause {
+            self.checked_this_pause = true;
+            let audio: Vec<i16> = self.recent_audio.iter().copied().collect();
+            let prob = self.model.completion_prob(&audio, partial_text).await;
+            if prob >= self.threshold {
+                self.reset_turn();
+                return TurnDecision::Finalize;
+            }
+            // Model says "still open" → keep listening through this pause.
+        }
+        TurnDecision::Continue
+    }
+
+    /// Whether a turn is currently in progress.
+    pub fn turn_active(&self) -> bool {
+        self.active
+    }
+
+    fn reset_turn(&mut self) {
+        self.active = false;
+        self.silence_run = 0;
+        self.checked_this_pause = false;
+        self.recent_audio.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame_ms(sr: u32, ms: u32) -> usize {
+        (sr as usize) * (ms as usize) / 1_000
+    }
+
+    #[tokio::test]
+    async fn open_word_pause_does_not_finalize() {
+        // 250 ms short, 2000 ms max, threshold 0.5.
+        let mut ep = SemanticEndpointer::new(HeuristicEndpoint, 16_000, 250, 2_000, 0.5);
+        let voiced = vec![3_000i16; frame_ms(16_000, 100)];
+        let silent = vec![0i16; frame_ms(16_000, 100)];
+
+        // Speak.
+        assert_eq!(
+            ep.observe(&voiced, true, "tell me about").await,
+            TurnDecision::Continue
+        );
+        // 300 ms pause but the partial ends on an open word ("about") → keep
+        // listening (the user is mid-thought).
+        ep.observe(&silent, false, "tell me about").await;
+        ep.observe(&silent, false, "tell me about").await;
+        let d = ep.observe(&silent, false, "tell me about").await;
+        assert_eq!(d, TurnDecision::Continue, "must not clip mid-thought");
+        assert!(ep.turn_active());
+    }
+
+    #[tokio::test]
+    async fn complete_sentence_pause_finalizes() {
+        let mut ep = SemanticEndpointer::new(HeuristicEndpoint, 16_000, 250, 2_000, 0.5);
+        let voiced = vec![3_000i16; frame_ms(16_000, 100)];
+        let silent = vec![0i16; frame_ms(16_000, 100)];
+        ep.observe(&voiced, true, "what time is it?").await;
+        ep.observe(&silent, false, "what time is it?").await;
+        ep.observe(&silent, false, "what time is it?").await;
+        let d = ep.observe(&silent, false, "what time is it?").await;
+        assert_eq!(d, TurnDecision::Finalize);
+        assert!(!ep.turn_active());
+    }
+
+    #[tokio::test]
+    async fn max_silence_ceiling_finalizes_open_turn() {
+        // Even with an open-word partial, exceeding max-silence must finalize.
+        let mut ep = SemanticEndpointer::new(HeuristicEndpoint, 16_000, 250, 500, 0.5);
+        let voiced = vec![3_000i16; frame_ms(16_000, 100)];
+        let silent = vec![0i16; frame_ms(16_000, 100)];
+        ep.observe(&voiced, true, "and").await;
+        let mut decisions = Vec::new();
+        for _ in 0..8 {
+            decisions.push(ep.observe(&silent, false, "and").await);
+        }
+        assert!(
+            decisions.contains(&TurnDecision::Finalize),
+            "max-silence ceiling must finalize even an open turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn heuristic_probabilities() {
+        let m = HeuristicEndpoint;
+        assert!(m.completion_prob(&[], "done.").await > 0.9);
+        assert!(m.completion_prob(&[], "wait and").await < 0.3);
+        assert!(m.completion_prob(&[], "the quick brown fox").await > 0.5);
+        assert!(m.completion_prob(&[], "hold on,").await < 0.2);
+    }
+
+    #[tokio::test]
+    async fn silence_without_turn_is_noop() {
+        let mut ep = SemanticEndpointer::new(HeuristicEndpoint, 16_000, 250, 2_000, 0.5);
+        let silent = vec![0i16; frame_ms(16_000, 100)];
+        for _ in 0..30 {
+            assert_eq!(ep.observe(&silent, false, "").await, TurnDecision::Continue);
+        }
+        assert!(!ep.turn_active());
+    }
+}

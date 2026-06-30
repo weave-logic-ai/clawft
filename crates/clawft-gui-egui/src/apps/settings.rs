@@ -459,10 +459,12 @@ mod tests {
         let ctx = egui::Context::default();
         let live = Live::spawn();
         let mut desk = Desktop::default();
-        let mut snap = Snapshot::default();
-        snap.connection = Connection::Connected;
-        ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let snap = Snapshot {
+            connection: Connection::Connected,
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
                 let rect = ui.max_rect();
                 show(ui, rect, &mut desk, &live, &snap);
             });

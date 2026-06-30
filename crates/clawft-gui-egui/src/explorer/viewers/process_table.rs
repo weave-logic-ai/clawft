@@ -330,8 +330,8 @@ mod tests {
         let ctx = egui::Context::default();
         let raw_input = egui::RawInput::default();
         let v = kernel_ps_fixture();
-        let _ = ctx.run(raw_input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = ctx.run_ui(raw_input, |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
                 ProcessTableViewer::paint(ui, "substrate/kernel/ps", &v);
             });
         });
