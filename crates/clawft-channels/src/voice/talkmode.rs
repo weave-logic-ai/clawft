@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::policy::{VoiceAnswerPolicy, VoiceLlm};
 use super::speaker::{SpeakerEmbedder, SpeakerId, SpeakerRegistry};
@@ -222,16 +222,25 @@ impl<M: EndpointModel> TalkModeController<M> {
             samples,
             sample_rate: sr,
         };
+        info!(
+            samples = utt.samples.len(),
+            ms = utt.samples.len() as u64 * 1000 / sr.max(1) as u64,
+            "talk-mode end-of-turn utterance captured"
+        );
 
         // STT (6.2).
         let text = match self.stt.transcribe(&utt).await {
             Ok(t) if !t.trim().is_empty() => t,
-            Ok(_) => return,
+            Ok(_) => {
+                info!("talk-mode STT returned an empty transcript; turn dropped");
+                return;
+            }
             Err(e) => {
                 warn!(error = %e, "talk-mode STT failed");
                 return;
             }
         };
+        info!(transcript = %text, "talk-mode user turn");
 
         // Speaker attribution (6.6) → private context, never spoken.
         let (speaker_id, speaker_name, speaker_ctx) = self.attribute_speaker(&utt).await;
@@ -259,12 +268,16 @@ impl<M: EndpointModel> TalkModeController<M> {
             .await
         {
             Ok(a) if !a.trim().is_empty() => a,
-            Ok(_) => return,
+            Ok(_) => {
+                warn!("talk-mode LLM returned an empty answer; turn dropped");
+                return;
+            }
             Err(e) => {
                 warn!(error = %e, "talk-mode LLM failed");
                 return;
             }
         };
+        info!(answer = %answer, "talk-mode committed reply");
         // Committed node supersedes the speculative ack.
         self.observer.observe(ConversationEvent::CommittedReply {
             answer: answer.clone(),

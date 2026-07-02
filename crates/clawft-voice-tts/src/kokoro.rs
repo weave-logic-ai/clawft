@@ -109,6 +109,25 @@ impl KokoroTts {
         ids
     }
 
+    /// Phonemize `text` → IPA via the `espeak-ng` CLI, matching the phoneme
+    /// vocabulary the Kokoro export was trained on (its `tokens.txt` is an IPA
+    /// symbol table — feeding raw orthography produces garbled speech).
+    /// Returns `None` when espeak-ng is not installed or fails, so the caller
+    /// can fall back to the char-level seam (with a warning).
+    #[cfg(feature = "onnx")]
+    fn phonemize(text: &str) -> Option<String> {
+        let out = std::process::Command::new("espeak-ng")
+            .args(["-q", "--ipa", "-v", "en-us", "--", text])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let ipa = String::from_utf8_lossy(&out.stdout);
+        let ipa = normalize_ipa(ipa.trim());
+        if ipa.is_empty() { None } else { Some(ipa) }
+    }
+
     #[cfg(feature = "onnx")]
     fn try_load_session(model_path: &Path) -> Option<Arc<Mutex<ort::session::Session>>> {
         if !model_path.exists() {
@@ -139,7 +158,23 @@ impl KokoroTts {
             .session
             .as_ref()
             .ok_or_else(|| model_absent_error(&self.model_dir))?;
-        let ids = self.text_to_ids(sentence);
+        // Phonemize first — the model consumes IPA phoneme ids. Fall back to
+        // the char-level seam (intelligibility degrades) only when espeak-ng
+        // is unavailable, and say so once per process.
+        let ids = match Self::phonemize(sentence) {
+            Some(ipa) => self.text_to_ids(&ipa),
+            None => {
+                static WARNED: std::sync::Once = std::sync::Once::new();
+                WARNED.call_once(|| {
+                    tracing::warn!(
+                        "espeak-ng unavailable — Kokoro falling back to char-level \
+                         tokenization (speech will be garbled); install with: \
+                         brew install espeak-ng"
+                    );
+                });
+                self.text_to_ids(sentence)
+            }
+        };
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -239,6 +274,34 @@ fn load_tokens(path: &Path) -> Option<Vec<(String, i64)>> {
     (!tokens.is_empty()).then_some(tokens)
 }
 
+/// Normalize espeak-ng IPA output onto the Kokoro token table's glyph set:
+/// drop tie bars, then collapse the affricate digraphs onto the single-glyph
+/// symbols the table holds (`ʧ`, `ʤ`).
+#[cfg(feature = "onnx")]
+fn normalize_ipa(s: &str) -> String {
+    // Single pass: drop tie bars (U+0361 / U+035C), then collapse the
+    // affricate digraphs onto the table's single glyphs.
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s
+        .chars()
+        .filter(|c| !matches!(c, '\u{0361}' | '\u{035C}'))
+        .peekable();
+    while let Some(c) = chars.next() {
+        match (c, chars.peek()) {
+            ('t', Some('ʃ')) => {
+                chars.next();
+                out.push('ʧ');
+            }
+            ('d', Some('ʒ')) => {
+                chars.next();
+                out.push('ʤ');
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Load a `STYLE_DIM`-length `f32` LE style vector from `path`, or zeros.
 #[cfg(feature = "onnx")]
 fn load_style(path: &Path) -> Vec<f32> {
@@ -315,6 +378,16 @@ mod tests {
         assert!(k.text_to_ids("zzz").is_empty());
     }
 
+    #[cfg(feature = "onnx")]
+    #[test]
+    fn normalize_ipa_collapses_ties_and_affricates() {
+        // espeak-ng emits tied digraph affricates; the token table holds the
+        // single-glyph forms.
+        assert_eq!(super::normalize_ipa("t\u{0361}ʃiːz"), "ʧiːz"); // "cheese"
+        assert_eq!(super::normalize_ipa("dʒʌmp"), "ʤʌmp"); // "jump"
+        assert_eq!(super::normalize_ipa("wˈʌt"), "wˈʌt"); // untouched
+    }
+
     #[test]
     fn default_dir_honors_env() {
         // SAFETY: single-threaded test; restore afterwards.
@@ -339,5 +412,53 @@ mod tests {
         }
         h.await.unwrap().unwrap();
         assert!(total > 0, "live Kokoro produced no audio");
+    }
+
+    /// Synthesize a full sentence and write it as a WAV for out-of-band
+    /// intelligibility review (an operator listens, or an STT round-trip
+    /// checks the words survive). Prints the output path. Complements
+    /// `live_kokoro_synthesis`, which only proves PCM comes out.
+    #[tokio::test]
+    #[ignore = "requires a Kokoro ONNX bundle in .weftos/models/kokoro + --features onnx"]
+    async fn live_kokoro_synthesis_wav_for_review() {
+        let k = KokoroTts::new();
+        let (tx, mut rx) = mpsc::channel::<TtsChunk>(16);
+        let h = tokio::spawn(async move {
+            k.synthesize_stream(
+                "Seventeen times twenty three is three hundred ninety one.",
+                tx,
+                CancellationToken::new(),
+            )
+            .await
+        });
+        let mut pcm: Vec<i16> = Vec::new();
+        while let Some(c) = rx.recv().await {
+            assert_eq!(c.sample_rate, KOKORO_SAMPLE_RATE);
+            pcm.extend_from_slice(&c.samples);
+        }
+        h.await.unwrap().unwrap();
+        assert!(!pcm.is_empty(), "live Kokoro produced no audio");
+
+        // Minimal WAV writer (16-bit mono PCM) — no dev-dependency needed.
+        let path = std::env::temp_dir().join("clawft_kokoro_review.wav");
+        let data_len = (pcm.len() * 2) as u32;
+        let mut wav: Vec<u8> = Vec::with_capacity(44 + pcm.len() * 2);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+        wav.extend_from_slice(&KOKORO_SAMPLE_RATE.to_le_bytes());
+        wav.extend_from_slice(&(KOKORO_SAMPLE_RATE * 2).to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_len.to_le_bytes());
+        for s in &pcm {
+            wav.extend_from_slice(&s.to_le_bytes());
+        }
+        std::fs::write(&path, wav).unwrap();
+        println!("kokoro review wav: {}", path.display());
     }
 }
