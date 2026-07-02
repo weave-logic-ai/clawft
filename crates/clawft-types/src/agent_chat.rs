@@ -134,6 +134,46 @@ pub struct AgentChatResult {
     pub identity_source: Option<String>,
 }
 
+/// One externally-produced turn for the `agent.turn.record` RPC.
+///
+/// Unlike `agent.chat`, the daemon does not run the LLM loop for these —
+/// the caller (e.g. the `weft voice talk` Talk-Mode loop) already produced
+/// the exchange and only needs it recorded through the daemon's
+/// `ConversationSink` so the substrate JSONL + `KernelTurnAnchor`
+/// side-effects (witness chain / HNSW / causal graph / session tier)
+/// apply exactly as they do for `agent.chat` turns.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordedTurn {
+    /// `user` / `assistant` / `system`.
+    pub role: String,
+    /// Turn text (for voice: the STT transcript or the spoken answer).
+    pub content: String,
+    /// Wall-clock ms when the turn was produced; the daemon stamps
+    /// receipt time when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts_ms: Option<u64>,
+}
+
+/// Parameters for the `agent.turn.record` RPC.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentTurnRecordParams {
+    /// Conversation identifier (same keyspace as `agent.chat` conv_ids;
+    /// voice uses its Talk-Mode conv_id, e.g. `weft-talk`).
+    pub conv_id: String,
+    /// Producing channel, for provenance (e.g. `"voice.talk"`).
+    #[serde(default)]
+    pub channel: String,
+    /// Turns to record, in order. Must be non-empty.
+    pub turns: Vec<RecordedTurn>,
+}
+
+/// Result of `agent.turn.record`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentTurnRecordResult {
+    /// How many turns were durably published to the substrate.
+    pub recorded: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

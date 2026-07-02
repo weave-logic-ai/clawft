@@ -27,7 +27,8 @@ use clawft_channels::voice::policy::VoiceAnswerPolicy;
 use clawft_channels::voice::speaker::{SpeakerEmbedder, SpeakerRegistry};
 use clawft_channels::voice::stt::SttBackend;
 use clawft_channels::voice::talkmode::{
-    AudioControl, ConversationObserver, TalkModeConfig as ControllerConfig, TalkModeController,
+    AudioControl, ConversationEvent, ConversationObserver, TalkModeConfig as ControllerConfig,
+    TalkModeController,
 };
 use clawft_channels::voice::tts::{DualLayerTts, TtsSink};
 use clawft_channels::voice::turn::{EndpointModel, SemanticEndpointer};
@@ -116,8 +117,30 @@ impl<M: EndpointModel + 'static> TalkSession<M> {
     /// Assemble a session from explicit components (the seam the deterministic
     /// test and the native builder share).
     pub fn assemble(config: TalkConfig, components: TalkComponents<M>) -> Self {
+        Self::assemble_observed(config, components, None)
+    }
+
+    /// [`Self::assemble`] with an optional extra [`ConversationObserver`]
+    /// fanned out alongside the loop's own [`LoopObserver`] — the seam for
+    /// mirroring committed turns to an external recorder (e.g. the daemon's
+    /// `agent.turn.record` RPC so voice exchanges anchor to the witness
+    /// chain). The extra observer sees every event the loop observer sees;
+    /// it must be non-blocking (fan-out is synchronous on the turn path).
+    pub fn assemble_observed(
+        config: TalkConfig,
+        components: TalkComponents<M>,
+        extra_observer: Option<Arc<dyn ConversationObserver>>,
+    ) -> Self {
         let forest = Arc::new(TalkForest::new(config.conv_id.clone(), config.dims));
-        let observer: Arc<dyn ConversationObserver> = Arc::new(LoopObserver::new(forest.clone()));
+        let loop_observer: Arc<dyn ConversationObserver> =
+            Arc::new(LoopObserver::new(forest.clone()));
+        let observer: Arc<dyn ConversationObserver> = match extra_observer {
+            Some(extra) => Arc::new(FanoutObserver {
+                primary: loop_observer,
+                extra,
+            }),
+            None => loop_observer,
+        };
         let registry = SpeakerRegistry::new(config.speaker_threshold);
         let controller = TalkModeController::new(
             components.endpointer,
@@ -162,6 +185,21 @@ impl<M: EndpointModel + 'static> TalkSession<M> {
         self.controller.run(frames, cancel).await;
         loop_handle.abort();
         let _ = loop_handle.await;
+    }
+}
+
+/// Fans each [`ConversationEvent`] out to the loop's own observer first
+/// (turn-taking is load-bearing) and then to an extra recorder. Both see
+/// every event; the extra observer must not block the turn path.
+struct FanoutObserver {
+    primary: Arc<dyn ConversationObserver>,
+    extra: Arc<dyn ConversationObserver>,
+}
+
+impl ConversationObserver for FanoutObserver {
+    fn observe(&self, event: ConversationEvent) {
+        self.primary.observe(event.clone());
+        self.extra.observe(event);
     }
 }
 

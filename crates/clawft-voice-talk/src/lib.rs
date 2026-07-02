@@ -38,6 +38,10 @@ mod session;
 mod tts;
 
 pub use audio::AecAudioControl;
+// Re-exported so `weft voice talk` can implement an extra observer
+// (turn recording via `agent.turn.record`) without a direct
+// clawft-channels dependency.
+pub use clawft_channels::voice::talkmode::{ConversationEvent, ConversationObserver};
 pub use ecc::EccConversationObserver;
 pub use forest::{KernelImpulseSink, LoopObserver, TalkForest};
 pub use llm::LocalProviderVoiceLlm;

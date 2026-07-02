@@ -84,7 +84,7 @@ pub async fn handle_voice(args: VoiceArgs) -> anyhow::Result<()> {
 /// models and the `voice-onnx` build feature (`weft` built with `--features
 /// voice-onnx`) plus live Hermes at `:8090`.
 async fn handle_talk() -> anyhow::Result<()> {
-    use clawft_voice_talk::{TalkConfig, live::run_live};
+    use clawft_voice_talk::{TalkConfig, live::run_live_observed};
     use tokio_util::sync::CancellationToken;
 
     println!("=== ClawFT Talk Mode (native ECC graph-walk) ===");
@@ -97,6 +97,19 @@ async fn handle_talk() -> anyhow::Result<()> {
         ..TalkConfig::default()
     };
 
+    // Mirror committed turns to the kernel daemon's `agent.turn.record`
+    // RPC so the exchange lands on the substrate JSONL and anchors to the
+    // witness chain / HNSW / causal graph per `[kernel.agent]`. Best-effort:
+    // without a running daemon the conversation still works, unanchored.
+    let recorder = spawn_turn_recorder(config.conv_id.clone()).await;
+    match &recorder {
+        Some(_) => println!("Turn anchoring: ON (daemon connected — turns recorded on chain)"),
+        None => println!(
+            "Turn anchoring: OFF (no kernel daemon — start one with `weaver kernel start` \
+             to record turns on the chain)"
+        ),
+    }
+
     let cancel = CancellationToken::new();
     let cancel_for_signal = cancel.clone();
     tokio::spawn(async move {
@@ -106,12 +119,87 @@ async fn handle_talk() -> anyhow::Result<()> {
         }
     });
 
-    run_live(config, None, cancel)
+    run_live_observed(config, None, cancel, recorder)
         .await
         .map_err(|e| anyhow::anyhow!("talk mode: {e}"))?;
 
     println!("Talk Mode ended.");
     Ok(())
+}
+
+/// Non-blocking [`ConversationObserver`] that forwards user / committed-
+/// assistant turns into an unbounded queue; a background poster task posts
+/// each to the daemon's `agent.turn.record` RPC.
+struct TurnRecordObserver {
+    tx: tokio::sync::mpsc::UnboundedSender<(&'static str, String)>,
+}
+
+impl clawft_voice_talk::ConversationObserver for TurnRecordObserver {
+    fn observe(&self, event: clawft_voice_talk::ConversationEvent) {
+        use clawft_voice_talk::ConversationEvent;
+        let pair = match event {
+            ConversationEvent::UserTurn { text, .. } => ("user", text),
+            ConversationEvent::CommittedReply { answer } => ("assistant", answer),
+            // Speculative acks are superseded by the committed reply and
+            // barge-ins prune in-forest; neither is a durable turn.
+            _ => return,
+        };
+        // Receiver gone (daemon died and the poster exited) — drop silently;
+        // anchoring is best-effort by design.
+        let _ = self.tx.send(pair);
+    }
+}
+
+/// Connect to the kernel daemon and spawn the poster task. Returns `None`
+/// (anchoring disabled) when no daemon is reachable.
+async fn spawn_turn_recorder(
+    conv_id: String,
+) -> Option<std::sync::Arc<dyn clawft_voice_talk::ConversationObserver>> {
+    use clawft_rpc::{DaemonClient, Request};
+
+    let mut client = DaemonClient::connect().await?;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(&'static str, String)>();
+
+    tokio::spawn(async move {
+        while let Some((role, content)) = rx.recv().await {
+            let params = serde_json::json!({
+                "conv_id": conv_id,
+                "channel": "voice.talk",
+                "turns": [{ "role": role, "content": content }],
+            });
+            // One reconnect attempt per turn: a dropped socket loses no
+            // event, a stopped daemon ends anchoring for the session.
+            let mut posted = false;
+            for attempt in 0..2 {
+                let request = Request::with_params("agent.turn.record", params.clone());
+                match client.call(request).await {
+                    Ok(resp) => {
+                        if let Err(e) = resp.into_result() {
+                            tracing::warn!(error = %e, role, "agent.turn.record rejected");
+                        }
+                        posted = true;
+                        break;
+                    }
+                    Err(e) if attempt == 0 => {
+                        tracing::debug!(error = %e, "agent.turn.record transport error; reconnecting");
+                        match DaemonClient::connect().await {
+                            Some(c) => client = c,
+                            None => break,
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "agent.turn.record transport error after reconnect");
+                    }
+                }
+            }
+            if !posted && DaemonClient::connect().await.is_none() {
+                tracing::warn!("kernel daemon gone — voice turn anchoring stopped for this session");
+                return;
+            }
+        }
+    });
+
+    Some(std::sync::Arc::new(TurnRecordObserver { tx }))
 }
 
 /// Run the wake word daemon -- continuously listen for "Hey Weft".

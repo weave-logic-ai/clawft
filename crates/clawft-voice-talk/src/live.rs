@@ -49,6 +49,21 @@ pub async fn run_live(
     input_device: Option<String>,
     cancel: CancellationToken,
 ) -> Result<(), VoiceError> {
+    run_live_observed(config, input_device, cancel, None).await
+}
+
+/// [`run_live`] with an optional extra [`ConversationObserver`] fanned out
+/// alongside the loop observer — the seam `weft voice talk` uses to mirror
+/// committed turns to the daemon's `agent.turn.record` RPC (witness-chain /
+/// substrate anchoring). The observer must be non-blocking.
+pub async fn run_live_observed(
+    config: TalkConfig,
+    input_device: Option<String>,
+    cancel: CancellationToken,
+    extra_observer: Option<
+        std::sync::Arc<dyn clawft_channels::voice::talkmode::ConversationObserver>,
+    >,
+) -> Result<(), VoiceError> {
     // ONE shared AEC: played audio (render reference) ⇄ captured mic (subtract)
     // ⇄ barge-in flush. The single handle is what makes echo cancellation close.
     let aec = Arc::new(Mutex::new(AecProcessor::new()));
@@ -65,7 +80,7 @@ pub async fn run_live(
     // Native component stack (Hermes brain, parakeet/smart-turn/ECAPA, Kokoro+
     // Orpheus TTS). The smart-turn SemanticEndpointer inside is THE endpointer.
     let components = native_components(&config, sink_dyn, audio)?;
-    let session = TalkSession::assemble(config.clone(), components);
+    let session = TalkSession::assemble_observed(config.clone(), components, extra_observer);
 
     // Capture → AEC → CaptureProcessor: forwards cleaned frames to the
     // controller AND emits the coarse onset as a TurnClaim into the forest

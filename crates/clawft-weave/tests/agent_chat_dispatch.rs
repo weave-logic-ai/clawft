@@ -202,6 +202,78 @@ async fn agent_chat_returns_error_when_params_invalid() {
 }
 
 #[tokio::test]
+async fn agent_turn_record_invalid_params_rejected() {
+    // Param validation runs BEFORE the sink lookup, so a malformed
+    // payload gets the specific `invalid params` error even on a
+    // daemon whose agent service never wired (this test harness).
+    let (_tmp, socket, shutdown_tx, _kernel) = spawn_test_daemon().await;
+    let resp = one_shot(
+        &socket,
+        "agent.turn.record",
+        serde_json::json!({ "conv_id": "voice-1" }), // no `turns`
+    )
+    .await;
+    assert_eq!(resp["ok"], serde_json::Value::Bool(false));
+    let err = resp["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("invalid params"),
+        "expected invalid-params error, got: {err}",
+    );
+    let _ = shutdown_tx.send(true);
+}
+
+#[tokio::test]
+async fn agent_turn_record_rejects_unknown_role() {
+    let (_tmp, socket, shutdown_tx, _kernel) = spawn_test_daemon().await;
+    let resp = one_shot(
+        &socket,
+        "agent.turn.record",
+        serde_json::json!({
+            "conv_id": "voice-1",
+            "channel": "voice.talk",
+            "turns": [{ "role": "narrator", "content": "hm" }],
+        }),
+    )
+    .await;
+    assert_eq!(resp["ok"], serde_json::Value::Bool(false));
+    let err = resp["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("unsupported role"),
+        "expected unsupported-role error, got: {err}",
+    );
+    let _ = shutdown_tx.send(true);
+}
+
+#[tokio::test]
+async fn agent_turn_record_clean_error_when_sink_not_wired() {
+    // Well-formed request on a daemon whose agent service (and thus
+    // the turn sink) never booted: typed error, no panic. NOTE: this
+    // relies on the test harness never setting DAEMON_TURN_SINK —
+    // like DAEMON_AGENT, it is only set inside daemon::run.
+    let (_tmp, socket, shutdown_tx, _kernel) = spawn_test_daemon().await;
+    let resp = one_shot(
+        &socket,
+        "agent.turn.record",
+        serde_json::json!({
+            "conv_id": "voice-1",
+            "channel": "voice.talk",
+            "turns": [
+                { "role": "user", "content": "what is 17 * 23?" },
+                { "role": "assistant", "content": "391" },
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(resp["ok"], serde_json::Value::Bool(false));
+    let err = resp["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("turn sink not wired"),
+        "expected sink-not-wired error, got: {err}",
+    );
+    let _ = shutdown_tx.send(true);
+}
+
+#[tokio::test]
 async fn agent_chat_cancel_clean_error_when_service_not_wired() {
     // Sanity check that C2's `agent.chat.cancel` arm — which D3
     // explicitly preserves — still surfaces a clean error (not a

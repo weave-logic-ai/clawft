@@ -79,6 +79,21 @@ fn daemon_agent() -> Option<Arc<DaemonAgentService>> {
     DAEMON_AGENT.get().cloned()
 }
 
+/// Daemon-wide handle to the agent conversation sink, for the
+/// `agent.turn.record` RPC — externally-produced turns (the `weft voice
+/// talk` Talk-Mode loop) recorded through the SAME
+/// `SubstrateConversationSink` + `KernelTurnAnchor` as `agent.chat`
+/// turns, so voice exchanges land on the substrate JSONL and are
+/// mirrored to the witness chain / HNSW / causal graph / session tier
+/// per the `[kernel.agent]` anchor flags. Set at boot alongside
+/// `DAEMON_AGENT`.
+static DAEMON_TURN_SINK: OnceLock<Arc<dyn clawft_core::agent::sink::ConversationSink>> =
+    OnceLock::new();
+
+fn daemon_turn_sink() -> Option<Arc<dyn clawft_core::agent::sink::ConversationSink>> {
+    DAEMON_TURN_SINK.get().cloned()
+}
+
 /// agent-core-v1 Phase D2: daemon-wide handle to the concierge
 /// agent's kernel-issued `agent_id`.
 ///
@@ -139,7 +154,8 @@ use clawft_types::config::{Config, KernelConfig};
 
 use crate::protocol::{
     self, AgentChatParams, AgentInspectResult, AgentRestartParams, AgentSendParams,
-    AgentSpawnParams, AgentSpawnResult, AgentStopParams, ClusterJoinParams, ClusterLeaveParams,
+    AgentSpawnParams, AgentSpawnResult, AgentStopParams, AgentTurnRecordParams,
+    ClusterJoinParams, ClusterLeaveParams,
     ClusterNodeInfo, ClusterStatusResult, CronAddParams, CronJobInfo, CronRemoveParams,
     IpcPublishParams, IpcSubscribeParams, IpcTopicInfo, KernelStatusResult, LogEntry, LogsParams,
     ProcessInfo, Request, Response, ServiceInfo,
@@ -1028,6 +1044,11 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
             );
             (sink, session_tier)
         };
+
+        // Expose the sink to the `agent.turn.record` dispatch arm so
+        // externally-produced turns (voice Talk-Mode) share the exact
+        // substrate + anchor path as agent.chat turns.
+        let _ = DAEMON_TURN_SINK.set(agent_sink.clone());
 
         // agent-core-v1 Phase D1: wire a FileIdentityProvider so each
         // turn's leading system message is built from
@@ -4408,6 +4429,74 @@ async fn dispatch(
                 "ended": conv_id,
                 "promoted_seq": promoted,
             }))
+        }
+        "agent.turn.record" => {
+            // Record externally-produced turns (voice Talk-Mode per
+            // ADR-062 §1.1) through the same ConversationSink +
+            // KernelTurnAnchor path as agent.chat turns: substrate
+            // JSONL first (durable), then best-effort chain / HNSW /
+            // causal / session-tier mirroring per [kernel.agent].
+            // The daemon does NOT run the LLM loop here — the caller
+            // already produced the exchange.
+            let p: AgentTurnRecordParams = match serde_json::from_value(params) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Response::error(format!("agent.turn.record: invalid params: {e}"));
+                }
+            };
+            if p.conv_id.is_empty() {
+                return Response::error("agent.turn.record: conv_id must be non-empty");
+            }
+            if p.turns.is_empty() {
+                return Response::error("agent.turn.record: turns must be non-empty");
+            }
+            if let Some(bad) = p
+                .turns
+                .iter()
+                .find(|t| !matches!(t.role.as_str(), "user" | "assistant" | "system"))
+            {
+                return Response::error(format!(
+                    "agent.turn.record: unsupported role `{}` \
+                     (expected user | assistant | system)",
+                    bad.role
+                ));
+            }
+            let Some(sink) = daemon_turn_sink() else {
+                return Response::error(
+                    "agent.turn.record: turn sink not wired \
+                     (agent service did not boot — check daemon log)",
+                );
+            };
+            let mut recorded = 0usize;
+            for t in &p.turns {
+                let turn = clawft_core::agent::sink::Turn {
+                    turn_id: String::new(),
+                    role: t.role.clone(),
+                    content: t.content.clone(),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    ts_ms: t.ts_ms.unwrap_or_else(crate::control::now_ms),
+                };
+                match sink.append_turn(&p.conv_id, turn).await {
+                    Ok(()) => recorded += 1,
+                    Err(e) => {
+                        return Response::error(format!(
+                            "agent.turn.record: append failed after {recorded} \
+                             recorded turn(s): {e}"
+                        ));
+                    }
+                }
+            }
+            debug!(
+                conv_id = %p.conv_id,
+                channel = %p.channel,
+                recorded,
+                "agent.turn.record: turns published + anchored"
+            );
+            match serde_json::to_value(crate::protocol::AgentTurnRecordResult { recorded }) {
+                Ok(v) => Response::success(v),
+                Err(e) => Response::error(format!("agent.turn.record: {e}")),
+            }
         }
         "terminal.spawn" => handle_terminal_spawn(params, kernel).await,
         "terminal.write" => handle_terminal_write(params, kernel).await,

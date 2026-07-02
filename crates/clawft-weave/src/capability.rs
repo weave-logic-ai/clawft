@@ -91,6 +91,7 @@ pub fn required_capability(method: &str) -> Capability {
         "agent.chat" => Capability::Chat,
         "agent.chat.cancel" => Capability::Chat,
         "agent.chat.end" => Capability::Chat,
+        "agent.turn.record" => Capability::Chat,
         "llm.prompt" => Capability::Chat,
 
         // ── Read: everything else explicitly classified ─────────────
