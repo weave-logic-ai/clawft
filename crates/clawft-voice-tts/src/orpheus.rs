@@ -186,7 +186,11 @@ impl OrpheusTts {
     /// The Orpheus prompt for `text`: `<|audio|>{voice}: {text}` (tags kept
     /// verbatim — Orpheus performs them).
     fn prompt(&self, text: &str) -> String {
-        format!("<|audio|>{}: {}", self.voice, text)
+        // lex-au Orpheus raw prompt format. The trailing `<|eot_id|>` is
+        // load-bearing: without it the model never enters audio-token
+        // generation and streams zero `<custom_token_N>` pieces (verified
+        // against the working voicelab `tts_orpheus_ollama` impl).
+        format!("<|audio|>{}: {}<|eot_id|>", self.voice, text)
     }
 }
 
@@ -206,6 +210,16 @@ impl TtsEngine for OrpheusTts {
             "prompt": self.prompt(text),
             "raw": true,
             "stream": true,
+            // Match the proven voicelab request: keep the model resident
+            // between turns and use the calm-delivery sampling the "dan"
+            // voice was tuned with (lower temp = less word-doubling).
+            "keep_alive": "10m",
+            "options": {
+                "temperature": 0.4,
+                "top_p": 0.9,
+                "repeat_penalty": 1.1,
+                "num_predict": 1200,
+            },
         });
         let resp = self
             .http
