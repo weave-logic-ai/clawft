@@ -66,4 +66,6 @@ pub use bridge::{Config, run};
 mod device;
 
 #[cfg(feature = "device")]
-pub use device::{AecTtsSink, run_capture, spawn_output};
+pub use device::{
+    AecTtsSink, MicProbeReport, list_input_devices, mic_probe, run_capture, spawn_output,
+};

@@ -117,6 +117,120 @@ type SampleQ = Arc<Mutex<VecDeque<f32>>>;
 
 /// Pick a cpal input device by case-insensitive name substring, or the
 /// system default.
+/// Names of all available input devices on the default host, with the
+/// default device (the one [`run_capture`] opens when no substring is
+/// given) first when identifiable.
+pub fn list_input_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    let default_name = host.default_input_device().and_then(|d| d.name().ok());
+    let mut names: Vec<String> = host
+        .input_devices()
+        .map(|it| it.filter_map(|d| d.name().ok()).collect())
+        .unwrap_or_default();
+    if let Some(def) = default_name {
+        names.retain(|n| *n != def);
+        names.insert(0, format!("{def} (default)"));
+    }
+    names
+}
+
+/// Report from [`mic_probe`]: which device was opened and what raw input
+/// levels it saw. No AEC, no VAD — straight off the stream, for diagnosing
+/// "it doesn't hear me".
+#[derive(Debug)]
+pub struct MicProbeReport {
+    /// Device name actually opened (same selection as [`run_capture`]).
+    pub device: String,
+    /// The device's native sample rate.
+    pub native_rate: u32,
+    /// The device's channel count (downmixed for level math).
+    pub channels: u16,
+    /// RMS level in dBFS per ~500 ms window, in capture order.
+    pub windows_dbfs: Vec<f32>,
+    /// Loudest window seen.
+    pub peak_dbfs: f32,
+}
+
+/// Open the same input device [`run_capture`] would and measure raw levels
+/// for `seconds`. Blocking — call from a blocking task.
+pub fn mic_probe(input_device: Option<&str>, seconds: u32) -> Result<MicProbeReport, String> {
+    let host = cpal::default_host();
+    let device = pick_input(&host, input_device)?;
+    let name = device.name().unwrap_or_else(|_| "<unknown>".into());
+    let supported = device.default_input_config().map_err(|e| e.to_string())?;
+    let native_rate = supported.sample_rate().0;
+    let channels = supported.channels().max(1);
+    let cfg: cpal::StreamConfig = supported.clone().into();
+
+    let q: SampleQ = Arc::new(Mutex::new(VecDeque::new()));
+    let n_ch = channels as usize;
+    let err_fn = |e| tracing::warn!("[mic-probe] input stream error: {e}");
+    let stream = match supported.sample_format() {
+        cpal::SampleFormat::F32 => {
+            let q = q.clone();
+            device.build_input_stream(
+                &cfg,
+                move |data: &[f32], _| {
+                    let mut g = q.lock().unwrap();
+                    g.extend(
+                        data.chunks(n_ch)
+                            .map(|fr| fr.iter().copied().sum::<f32>() / n_ch as f32),
+                    );
+                },
+                err_fn,
+                None,
+            )
+        }
+        cpal::SampleFormat::I16 => {
+            let q = q.clone();
+            device.build_input_stream(
+                &cfg,
+                move |data: &[i16], _| {
+                    let mut g = q.lock().unwrap();
+                    for fr in data.chunks(n_ch) {
+                        let s: f32 = fr.iter().map(|&x| f32::from(x) / 32_768.0).sum::<f32>()
+                            / n_ch as f32;
+                        g.push_back(s);
+                    }
+                },
+                err_fn,
+                None,
+            )
+        }
+        other => return Err(format!("unsupported input sample format {other:?}")),
+    }
+    .map_err(|e| e.to_string())?;
+    stream.play().map_err(|e| e.to_string())?;
+
+    let window = (native_rate as usize / 2).max(1);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds.into());
+    let mut cur: Vec<f32> = Vec::new();
+    let mut windows_dbfs: Vec<f32> = Vec::new();
+    let mut peak_dbfs = f32::NEG_INFINITY;
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        {
+            let mut g = q.lock().unwrap();
+            cur.extend(g.drain(..));
+        }
+        while cur.len() >= window {
+            let w: Vec<f32> = cur.drain(..window).collect();
+            let rms = (w.iter().map(|s| s * s).sum::<f32>() / w.len() as f32).sqrt();
+            let db = 20.0 * rms.max(1e-9).log10();
+            peak_dbfs = peak_dbfs.max(db);
+            windows_dbfs.push(db);
+        }
+    }
+    drop(stream);
+    Ok(MicProbeReport {
+        device: name,
+        native_rate,
+        channels,
+        windows_dbfs,
+        peak_dbfs,
+    })
+}
+
 fn pick_input(host: &cpal::Host, want: Option<&str>) -> Result<cpal::Device, String> {
     if let Some(sub) = want {
         let sub_l = sub.to_lowercase();
@@ -152,6 +266,12 @@ pub fn run_capture(
     let in_rate = supported.sample_rate().0;
     let channels = supported.channels().max(1) as usize;
     let cfg: cpal::StreamConfig = supported.clone().into();
+    tracing::info!(
+        device = %device.name().unwrap_or_else(|_| "<unknown>".into()),
+        rate = in_rate,
+        channels,
+        "voice capture stream opening"
+    );
 
     let cap_q: SampleQ = Arc::new(Mutex::new(VecDeque::new()));
     let err_fn = |e| tracing::warn!("[aec-device] input stream error: {e}");

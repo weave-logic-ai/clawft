@@ -164,6 +164,61 @@ impl EnergyVad {
     }
 }
 
+/// Adaptive noise-floor tracker (dBFS).
+///
+/// Room tone varies machine-to-machine (fans, HVAC, street noise): a fixed
+/// dBFS gate mis-classifies a loud room as permanent speech, and the
+/// silence-based endpointer then never finalizes a turn (observed live:
+/// a -37 dBFS room vs the -45 dBFS default gate — Talk-Mode "never heard"
+/// anyone). Track the floor as an asymmetric EMA over frame RMS — fast to
+/// fall (quieter evidence adopts quickly), slow to rise (speech must not
+/// drag the floor up) — and gate voice at `floor + margin`.
+#[derive(Debug)]
+pub struct NoiseFloor {
+    floor_dbfs: f32,
+    margin_db: f32,
+    initialized: bool,
+}
+
+impl NoiseFloor {
+    /// `margin_db` is how far above the tracked floor a frame must be to
+    /// count as voice (8–10 dB works well for speech at conversational
+    /// distance).
+    pub fn new(margin_db: f32) -> Self {
+        Self {
+            floor_dbfs: -100.0,
+            margin_db,
+            initialized: false,
+        }
+    }
+
+    /// Feed one frame's dBFS and return the updated voice threshold
+    /// (`floor + margin`, clamped to [-100, 0]).
+    pub fn observe(&mut self, dbfs: f32) -> f32 {
+        if !self.initialized {
+            self.floor_dbfs = dbfs;
+            self.initialized = true;
+        } else if dbfs < self.floor_dbfs {
+            // Fall fast: quieter evidence is authoritative for a floor.
+            self.floor_dbfs += (dbfs - self.floor_dbfs) * 0.3;
+        } else {
+            // Rise slowly: speech frames must not lift the floor.
+            self.floor_dbfs += (dbfs - self.floor_dbfs) * 0.005;
+        }
+        self.threshold_dbfs()
+    }
+
+    /// Current voice threshold (`floor + margin`).
+    pub fn threshold_dbfs(&self) -> f32 {
+        (self.floor_dbfs + self.margin_db).clamp(-100.0, 0.0)
+    }
+
+    /// Current tracked floor.
+    pub fn floor_dbfs(&self) -> f32 {
+        self.floor_dbfs
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,5 +324,47 @@ mod tests {
         let events = vad.feed(&silence);
         assert!(events.is_empty());
         assert!(!vad.in_speech());
+    }
+
+    #[test]
+    fn noise_floor_adapts_to_loud_room() {
+        // The live failure: -38 dBFS room tone vs a fixed -45 gate. The
+        // tracker must lift the threshold above the room tone so ambient
+        // reads as silence, while conversational speech (-20 dBFS) still
+        // clears it.
+        let mut nf = NoiseFloor::new(8.0);
+        let mut thr = 0.0;
+        for _ in 0..50 {
+            thr = nf.observe(-38.0);
+        }
+        assert!(
+            thr > -38.0,
+            "threshold {thr} must sit above the room tone (-38)"
+        );
+        assert!(-20.0 >= thr, "speech at -20 dBFS must clear threshold {thr}");
+    }
+
+    #[test]
+    fn noise_floor_rises_slowly_through_speech() {
+        // A burst of speech frames must not drag the floor up to speech
+        // level — the threshold stays low enough that the post-speech room
+        // tone reads as silence again.
+        let mut nf = NoiseFloor::new(8.0);
+        for _ in 0..50 {
+            nf.observe(-60.0); // quiet room
+        }
+        for _ in 0..40 {
+            nf.observe(-20.0); // 4s of speech at 100ms frames
+        }
+        let thr = nf.threshold_dbfs();
+        assert!(
+            thr < -35.0,
+            "threshold {thr} crept too high through speech"
+        );
+        // Back in the quiet room the floor falls again quickly.
+        for _ in 0..10 {
+            nf.observe(-60.0);
+        }
+        assert!(nf.floor_dbfs() < -50.0, "floor {} should re-fall", nf.floor_dbfs());
     }
 }

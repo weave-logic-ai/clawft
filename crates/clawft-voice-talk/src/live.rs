@@ -33,6 +33,9 @@ use clawft_channels::voice::tts::TtsSink;
 use clawft_channels::voice::types::VoiceError;
 use clawft_channels::voice::vad::EnergyVad;
 use clawft_voice_aec::{AecProcessor, AecTtsSink, run_capture, spawn_output};
+// Re-exported for `weft voice test-mic` — the probe opens the same device
+// the live capture path would, so its verdict transfers directly.
+pub use clawft_voice_aec::{MicProbeReport, list_input_devices, mic_probe};
 
 use crate::audio::AecAudioControl;
 use crate::forest::KernelImpulseSink;

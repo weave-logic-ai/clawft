@@ -52,8 +52,7 @@ pub async fn handle_voice(args: VoiceArgs) -> anyhow::Result<()> {
             println!("This will download STT/TTS/VAD models to ~/.clawft/models/voice/");
         }
         VoiceCommand::TestMic { duration } => {
-            println!("Microphone test not yet implemented (requires cpal)");
-            println!("Would record for {} seconds from default mic", duration);
+            handle_test_mic(duration).await?;
         }
         VoiceCommand::TestSpeak { text } => {
             println!("Speaker test not yet implemented (requires sherpa-rs TTS)");
@@ -124,6 +123,64 @@ async fn handle_talk() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("talk mode: {e}"))?;
 
     println!("Talk Mode ended.");
+    Ok(())
+}
+
+/// Probe the microphone the live Talk-Mode capture would open: list input
+/// devices, record for `duration` seconds, and print a per-half-second level
+/// meter plus a verdict against the Talk-Mode VAD threshold (-45 dBFS).
+async fn handle_test_mic(duration: u32) -> anyhow::Result<()> {
+    use clawft_voice_talk::live::{list_input_devices, mic_probe};
+
+    /// Talk-Mode's default VAD onset threshold (TalkConfig::default).
+    const VAD_THRESHOLD_DBFS: f32 = -45.0;
+
+    println!("Input devices:");
+    for name in list_input_devices() {
+        println!("  - {name}");
+    }
+    println!("\nRecording {duration}s from the default device — SPEAK NOW...\n");
+
+    let report = tokio::task::spawn_blocking(move || mic_probe(None, duration))
+        .await?
+        .map_err(|e| anyhow::anyhow!("mic probe: {e}"))?;
+
+    println!(
+        "Opened: {} ({} Hz, {} ch)\n",
+        report.device, report.native_rate, report.channels
+    );
+    for (i, db) in report.windows_dbfs.iter().enumerate() {
+        let over = *db >= VAD_THRESHOLD_DBFS;
+        let bar_len = ((db + 90.0).max(0.0) / 2.0) as usize;
+        println!(
+            "  {:>4.1}s  {:>7.1} dBFS  {}{}",
+            (i as f32 + 1.0) * 0.5,
+            db,
+            "█".repeat(bar_len.min(40)),
+            if over { "  << voice" } else { "" },
+        );
+    }
+    println!();
+    if report.windows_dbfs.is_empty() {
+        println!("NO AUDIO DELIVERED — the device produced no samples at all.");
+        println!("Check System Settings → Privacy & Security → Microphone for your terminal.");
+    } else if report.peak_dbfs < VAD_THRESHOLD_DBFS {
+        println!(
+            "Peak {:.1} dBFS is BELOW the Talk-Mode VAD threshold ({VAD_THRESHOLD_DBFS} dBFS) — \
+             the voice loop will never trigger at this level.",
+            report.peak_dbfs
+        );
+        println!(
+            "Fix: raise input volume in System Settings → Sound → Input, or select a \
+             different mic (this probe used the system default)."
+        );
+    } else {
+        println!(
+            "Peak {:.1} dBFS clears the VAD threshold ({VAD_THRESHOLD_DBFS} dBFS) — \
+             the voice loop should hear you on this device.",
+            report.peak_dbfs
+        );
+    }
     Ok(())
 }
 

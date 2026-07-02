@@ -36,7 +36,12 @@ use super::speaker::{SpeakerEmbedder, SpeakerId, SpeakerRegistry};
 use super::stt::{SttBackend, Utterance};
 use super::tts::{DualLayerTts, TtsSink};
 use super::turn::{EndpointModel, SemanticEndpointer, TurnDecision};
-use super::vad::EnergyVad;
+use super::vad::{EnergyVad, NoiseFloor};
+
+/// How far above the tracked room-tone floor a frame must sit to count as
+/// voice. 8 dB keeps conversational speech (typically 15–25 dB above room
+/// tone) comfortably inside while HVAC/fan drift stays out.
+const VAD_NOISE_MARGIN_DB: f32 = 8.0;
 
 /// Barge-in control over the audio substrate: drop the AEC render reference the
 /// instant playback is silenced so stale frames stop cancelling the user's
@@ -141,6 +146,12 @@ pub struct TalkModeController<M: EndpointModel> {
     audio: Arc<dyn AudioControl>,
     observer: Arc<dyn ConversationObserver>,
     config: TalkModeConfig,
+    /// Adaptive room-tone tracker. The voiced gate is
+    /// `max(config.vad_threshold_dbfs, floor + margin)` so a loud room
+    /// (fans, HVAC) cannot read as permanent speech and starve the
+    /// silence-based endpointer (observed live: -37 dBFS room vs the
+    /// -45 dBFS fixed default — turns never finalized).
+    noise_floor: NoiseFloor,
 }
 
 impl<M: EndpointModel> TalkModeController<M> {
@@ -171,6 +182,7 @@ impl<M: EndpointModel> TalkModeController<M> {
             audio,
             observer,
             config,
+            noise_floor: NoiseFloor::new(VAD_NOISE_MARGIN_DB),
         }
     }
 
@@ -179,8 +191,10 @@ impl<M: EndpointModel> TalkModeController<M> {
         &self.registry
     }
 
-    fn voiced(&self, frame: &[i16]) -> bool {
-        EnergyVad::rms_dbfs(frame) >= self.config.vad_threshold_dbfs
+    fn voiced(&mut self, frame: &[i16]) -> bool {
+        let dbfs = EnergyVad::rms_dbfs(frame);
+        let adaptive = self.noise_floor.observe(dbfs);
+        dbfs >= adaptive.max(self.config.vad_threshold_dbfs)
     }
 
     /// Run the conversation loop until `cancel` fires or the capture channel
@@ -328,6 +342,14 @@ impl<M: EndpointModel> TalkModeController<M> {
         frames: &mut mpsc::Receiver<Vec<i16>>,
         cancel: &CancellationToken,
     ) {
+        // Snapshot the voiced gate for the playback window: the noise-floor
+        // tracker must NOT learn from frames while the bot is speaking (its
+        // own echo would lift the floor), so barge-in uses a frozen
+        // threshold instead of `self.voiced`.
+        let barge_gate = self
+            .noise_floor
+            .threshold_dbfs()
+            .max(self.config.vad_threshold_dbfs);
         let turn_cancel = cancel.child_token();
         let ack_owned = ack.to_string();
         let speak = self.tts.speak(
@@ -355,7 +377,7 @@ impl<M: EndpointModel> TalkModeController<M> {
                 maybe = frames.recv() => {
                     match maybe {
                         Some(frame) => {
-                            if self.voiced(&frame) {
+                            if EnergyVad::rms_dbfs(&frame) >= barge_gate {
                                 voiced_run += 1;
                                 if voiced_run >= self.config.barge_in_frames {
                                     debug!("talk-mode barge-in detected");
