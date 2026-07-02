@@ -75,6 +75,13 @@ pub trait TtsSink: Send + Sync {
 
     /// Barge-in: drop all queued + in-flight audio immediately.
     async fn flush(&self);
+
+    /// Wait until queued audio has actually left the speaker. `play_chunk`
+    /// queues; without this, a caller that resumes capturing the mic as soon
+    /// as the last chunk is queued will hear the bot's own tail-end speech
+    /// as a new user turn (observed live). Default is a no-op for sinks with
+    /// no physical playback latency (tests, discard sinks).
+    async fn wait_drained(&self) {}
 }
 
 /// Strip every markup fragment so no `<`/`>`/`[`/`]` ever reaches audio
@@ -297,6 +304,7 @@ impl DualLayerTts {
             );
 
         let mut interrupted = false;
+        let mut slow_chunks = 0usize;
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
@@ -305,7 +313,10 @@ impl DualLayerTts {
                 }
                 maybe = rx.recv() => {
                     match maybe {
-                        Some(chunk) => sink.play_chunk(&chunk).await?,
+                        Some(chunk) => {
+                            slow_chunks += 1;
+                            sink.play_chunk(&chunk).await?;
+                        }
                         None => break,
                     }
                 }
@@ -313,12 +324,44 @@ impl DualLayerTts {
         }
         if interrupted {
             sink.flush().await;
+            return match producer.await {
+                Ok(r) => r,
+                Err(_) => Ok(()),
+            };
         }
         // Producer observes the same cancel token; join its result.
-        match producer.await {
+        let slow_result = match producer.await {
             Ok(r) => r,
             Err(_) => Ok(()), // task aborted/panicked on shutdown — non-fatal
+        };
+
+        // The answer must ALWAYS be audible: when the slow tier yielded no
+        // audio at all (endpoint down, unparseable token stream, missing
+        // decoder), re-render the whole answer through the fast tier rather
+        // than going silent after the ack. Observed live: Ollama `orpheus-tts`
+        // returning zero decodable frames left only "One sec" playing.
+        if slow_chunks == 0 && !answer.trim().is_empty() {
+            tracing::warn!(
+                slow_error = %slow_result.as_ref().err().map(|e| e.to_string()).unwrap_or_else(|| "produced no chunks".into()),
+                "slow TTS tier produced no audio — falling back to the fast tier for the answer"
+            );
+            let (ftx, mut frx) = mpsc::channel::<TtsChunk>(4);
+            let fast = self.fast.clone();
+            let text = answer.to_string();
+            let fcancel = cancel.clone();
+            let fprod = tokio::spawn(async move {
+                let _ = fast.synthesize_stream(&text, ftx, fcancel).await;
+            });
+            while let Some(chunk) = frx.recv().await {
+                if cancel.is_cancelled() {
+                    break;
+                }
+                sink.play_chunk(&chunk).await?;
+            }
+            let _ = fprod.await;
+            return Ok(());
         }
+        slow_result
     }
 }
 

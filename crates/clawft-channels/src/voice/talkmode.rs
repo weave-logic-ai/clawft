@@ -43,6 +43,21 @@ use super::vad::{EnergyVad, NoiseFloor};
 /// tone) comfortably inside while HVAC/fan drift stays out.
 const VAD_NOISE_MARGIN_DB: f32 = 8.0;
 
+/// Minimum voiced audio (ms) for a finalized turn to reach STT. Shorter
+/// captures are noise blips or playback reverb tails, not words.
+const MIN_TURN_MS: usize = 250;
+
+/// Barge-in margin over the tracked room floor while the bot is speaking.
+/// Steeper than [`VAD_NOISE_MARGIN_DB`]: the AEC only partially cancels
+/// speaker→mic echo (observed live: the bot barged in on its own ack 300 ms
+/// after starting to speak, cancelling every answer), while a human
+/// genuinely interrupting is much louder at the mic than echo residue.
+const BARGE_IN_MARGIN_DB: f32 = 15.0;
+
+/// Ignore barge-in candidates during the first moments of playback while
+/// the echo canceller converges on the new render signal.
+const BARGE_IN_GRACE_MS: u64 = 400;
+
 /// Barge-in control over the audio substrate: drop the AEC render reference the
 /// instant playback is silenced so stale frames stop cancelling the user's
 /// onset. Implemented over `clawft_voice_aec::AecProcessor` in the bridge.
@@ -214,8 +229,21 @@ impl<M: EndpointModel> TalkModeController<M> {
                         TurnDecision::Continue => {}
                         TurnDecision::Finalize => {
                             let captured = std::mem::take(&mut utt);
-                            if !captured.is_empty() {
+                            // Guard against ghost turns: noise blips and the
+                            // reverb tail of our own playback can cross the
+                            // gate for a few frames and finalize a sub-word
+                            // "utterance" — each of which would earn an ack.
+                            // Real one-word turns run well past 250 ms.
+                            let min_samples =
+                                (self.config.sample_rate as usize) * MIN_TURN_MS / 1_000;
+                            if captured.len() >= min_samples {
                                 self.handle_turn(captured, &mut frames, &cancel).await;
+                            } else if !captured.is_empty() {
+                                debug!(
+                                    ms = captured.len() * 1_000
+                                        / self.config.sample_rate.max(1) as usize,
+                                    "talk-mode dropping sub-minimum utterance blip"
+                                );
                             }
                         }
                     }
@@ -344,12 +372,11 @@ impl<M: EndpointModel> TalkModeController<M> {
     ) {
         // Snapshot the voiced gate for the playback window: the noise-floor
         // tracker must NOT learn from frames while the bot is speaking (its
-        // own echo would lift the floor), so barge-in uses a frozen
-        // threshold instead of `self.voiced`.
-        let barge_gate = self
-            .noise_floor
-            .threshold_dbfs()
+        // own echo would lift the floor), so barge-in uses a frozen, steeper
+        // threshold instead of `self.voiced` (see BARGE_IN_MARGIN_DB).
+        let barge_gate = (self.noise_floor.floor_dbfs() + BARGE_IN_MARGIN_DB)
             .max(self.config.vad_threshold_dbfs);
+        let speak_started = std::time::Instant::now();
         let turn_cancel = cancel.child_token();
         let ack_owned = ack.to_string();
         let speak = self.tts.speak(
@@ -377,7 +404,9 @@ impl<M: EndpointModel> TalkModeController<M> {
                 maybe = frames.recv() => {
                     match maybe {
                         Some(frame) => {
-                            if EnergyVad::rms_dbfs(&frame) >= barge_gate {
+                            let in_grace = speak_started.elapsed()
+                                < std::time::Duration::from_millis(BARGE_IN_GRACE_MS);
+                            if !in_grace && EnergyVad::rms_dbfs(&frame) >= barge_gate {
                                 voiced_run += 1;
                                 if voiced_run >= self.config.barge_in_frames {
                                     debug!("talk-mode barge-in detected");
@@ -385,7 +414,7 @@ impl<M: EndpointModel> TalkModeController<M> {
                                     turn_cancel.cancel();        // TTS producer + sink flush
                                     self.observer.observe(ConversationEvent::Interrupted);
                                     let _ = (&mut speak).await;   // let it unwind
-                                    break;
+                                    return;
                                 }
                             } else {
                                 voiced_run = 0;
@@ -394,12 +423,18 @@ impl<M: EndpointModel> TalkModeController<M> {
                         None => {
                             turn_cancel.cancel();
                             let _ = (&mut speak).await;
-                            break;
+                            return;
                         }
                     }
                 }
             }
         }
+        // Synthesis finished, but `play_chunk` only QUEUES audio — seconds of
+        // our own speech may still be leaving the speaker. Hold here until
+        // the sink drains, then discard the frames that piled up during
+        // playback (they contain our own voice), so capture resumes clean.
+        self.sink.wait_drained().await;
+        while frames.try_recv().is_ok() {}
     }
 }
 

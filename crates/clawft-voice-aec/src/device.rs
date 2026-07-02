@@ -46,6 +46,12 @@ pub struct AecTtsSink {
     /// Lazy input→16 kHz resampler for chunks not already at 16 kHz; keyed
     /// by input rate so a constant-rate stream stays gap-free.
     resampler: Mutex<Option<(u32, LinResampler)>>,
+    /// Wall-clock instant when everything queued so far will have left the
+    /// speaker. Audio plays in real time, so queue length ÷ 16 kHz extends
+    /// this deadline on every `play_chunk`; `wait_drained` sleeps until it
+    /// passes. (Polling `play_q` is NOT a drain signal — the output stream
+    /// slurps it into an internal buffer far ahead of real time.)
+    playback_until: Mutex<std::time::Instant>,
 }
 
 impl AecTtsSink {
@@ -57,6 +63,7 @@ impl AecTtsSink {
             play_q: Arc::new(Mutex::new(VecDeque::new())),
             aec,
             resampler: Mutex::new(None),
+            playback_until: Mutex::new(std::time::Instant::now()),
         }
     }
 
@@ -102,13 +109,35 @@ impl TtsSink for AecTtsSink {
         // Feed the render reference first so the canceller already has the
         // played audio when the mic picks up its echo.
         self.aec.lock().unwrap().push_render(&pcm);
+        let dur = std::time::Duration::from_micros(pcm.len() as u64 * 1_000_000 / u64::from(TARGET_SR));
         self.play_q.lock().unwrap().extend(pcm);
+        {
+            let mut until = self.playback_until.lock().unwrap();
+            let base = (*until).max(std::time::Instant::now());
+            *until = base + dur;
+        }
         Ok(())
     }
 
     async fn flush(&self) {
         self.play_q.lock().unwrap().clear();
         self.aec.lock().unwrap().flush();
+        *self.playback_until.lock().unwrap() = std::time::Instant::now();
+    }
+
+    async fn wait_drained(&self) {
+        // Sleep until the queued-audio deadline passes, then a short
+        // hangover for the DAC/room reverb to go quiet so the tail of our
+        // own speech cannot be captured as a user turn.
+        loop {
+            let until = *self.playback_until.lock().unwrap();
+            let now = std::time::Instant::now();
+            if now >= until {
+                break;
+            }
+            tokio::time::sleep((until - now).min(std::time::Duration::from_millis(50))).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
 }
 
