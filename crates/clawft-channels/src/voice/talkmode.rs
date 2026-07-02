@@ -58,6 +58,33 @@ const BARGE_IN_MARGIN_DB: f32 = 15.0;
 /// the echo canceller converges on the new render signal.
 const BARGE_IN_GRACE_MS: u64 = 400;
 
+/// Extract a self-given name from a transcript ("my name is X" / "call me
+/// X" …). Mirrors voicelab's deliberately explicit phrase set — the loose
+/// "I'm X" would mis-enroll ordinary chit-chat.
+fn extract_spoken_name(text: &str) -> Option<String> {
+    const PHRASES: [&str; 5] = [
+        "my name is ",
+        "you can call me ",
+        "call me ",
+        "i'm called ",
+        "name's ",
+    ];
+    let lower = text.to_lowercase();
+    for phrase in PHRASES {
+        if let Some(pos) = lower.find(phrase) {
+            let rest = &text[pos + phrase.len()..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphabetic() || *c == '\'' || *c == '-')
+                .collect();
+            if (2..=30).contains(&name.chars().count()) {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
 /// Barge-in control over the audio substrate: drop the AEC render reference the
 /// instant playback is silenced so stale frames stop cancelling the user's
 /// onset. Implemented over `clawft_voice_aec::AecProcessor` in the bridge.
@@ -133,6 +160,12 @@ pub struct TalkModeConfig {
     pub default_speaker_name: String,
     /// Base agent system persona (the spoken-answer policy is appended).
     pub base_system: String,
+    /// Where to persist the speaker registry (enrollments + spoken
+    /// self-naming survive across sessions). `None` keeps it in-memory.
+    pub speaker_store: Option<std::path::PathBuf>,
+    /// Barge-in grace (ms) at playback start while the echo canceller
+    /// converges on the new render signal. 0 disables (tests).
+    pub barge_in_grace_ms: u64,
 }
 
 impl Default for TalkModeConfig {
@@ -143,7 +176,35 @@ impl Default for TalkModeConfig {
             barge_in_frames: 3,
             default_speaker_name: "unknown speaker".into(),
             base_system: String::new(),
+            speaker_store: None,
+            barge_in_grace_ms: BARGE_IN_GRACE_MS,
         }
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::extract_spoken_name;
+
+    #[test]
+    fn explicit_phrases_extract_names() {
+        assert_eq!(
+            extract_spoken_name("Hi, my name is Mathew."),
+            Some("Mathew".into())
+        );
+        assert_eq!(
+            extract_spoken_name("you can call me Jean-Luc please"),
+            Some("Jean-Luc".into())
+        );
+        assert_eq!(extract_spoken_name("Name's O'Brien"), Some("O'Brien".into()));
+    }
+
+    #[test]
+    fn loose_or_absent_phrases_do_not_enroll() {
+        assert_eq!(extract_spoken_name("I'm tired today"), None);
+        assert_eq!(extract_spoken_name("what is seventeen times three"), None);
+        // Over-long / single-char captures rejected.
+        assert_eq!(extract_spoken_name("call me X"), None);
     }
 }
 
@@ -204,6 +265,19 @@ impl<M: EndpointModel> TalkModeController<M> {
     /// Borrow the speaker registry (e.g. to persist it after a session).
     pub fn registry(&self) -> &SpeakerRegistry {
         &self.registry
+    }
+
+    /// Best-effort save of the speaker registry to the configured store
+    /// (enrollments + renames survive sessions). No-op when unconfigured.
+    fn persist_registry(&self) {
+        if let Some(path) = &self.config.speaker_store {
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            if let Err(e) = self.registry.save(path) {
+                warn!(error = %e, path = %path.display(), "speaker registry save failed");
+            }
+        }
     }
 
     fn voiced(&mut self, frame: &[i16]) -> bool {
@@ -287,6 +361,17 @@ impl<M: EndpointModel> TalkModeController<M> {
         // Speaker attribution (6.6) → private context, never spoken.
         let (speaker_id, speaker_name, speaker_ctx) = self.attribute_speaker(&utt).await;
 
+        // Spoken self-enrollment (voicelab parity): a voice naming itself
+        // ("my name is X" / "call me X") upgrades its placeholder name on
+        // the spot. Deliberately explicit phrases only — the loose "I'm X"
+        // would mis-enroll chit-chat.
+        if let (Some(id), Some(name)) = (&speaker_id, extract_spoken_name(&text))
+            && self.registry.rename(id, name.clone())
+        {
+            info!(speaker = %id, %name, "talk-mode speaker self-enrolled by name");
+            self.persist_registry();
+        }
+
         self.observer.observe(ConversationEvent::UserTurn {
             text: text.clone(),
             speaker: speaker_id,
@@ -353,6 +438,7 @@ impl<M: EndpointModel> TalkModeController<M> {
                 id: id.clone(),
                 name: name.clone().unwrap_or_default(),
             });
+            self.persist_registry();
         }
         let ctx = name
             .as_ref()
@@ -405,7 +491,7 @@ impl<M: EndpointModel> TalkModeController<M> {
                     match maybe {
                         Some(frame) => {
                             let in_grace = speak_started.elapsed()
-                                < std::time::Duration::from_millis(BARGE_IN_GRACE_MS);
+                                < std::time::Duration::from_millis(self.config.barge_in_grace_ms);
                             if !in_grace && EnergyVad::rms_dbfs(&frame) >= barge_gate {
                                 voiced_run += 1;
                                 if voiced_run >= self.config.barge_in_frames {

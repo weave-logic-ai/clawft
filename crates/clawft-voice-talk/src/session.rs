@@ -64,6 +64,9 @@ pub struct TalkConfig {
     pub default_speaker_name: String,
     /// Base agent persona (the spoken-answer policy is appended).
     pub base_system: String,
+    /// Persistent speaker-registry path (enrollments + spoken self-naming
+    /// survive sessions). `None` keeps identities in-memory only.
+    pub speaker_store: Option<std::path::PathBuf>,
 }
 
 impl Default for TalkConfig {
@@ -74,12 +77,19 @@ impl Default for TalkConfig {
             sample_rate: 16_000,
             vad_threshold_dbfs: -45.0,
             barge_in_frames: 3,
-            short_silence_ms: 250,
-            max_silence_ms: 2_000,
+            // Turn-taking knobs match the tuned voicelab david profile
+            // (base_silence=0.5 / max_silence=2.5 / turn_threshold=0.5).
+            short_silence_ms: 500,
+            max_silence_ms: 2_500,
             endpoint_threshold: 0.5,
-            speaker_threshold: 0.6,
+            // voicelab-tuned cosine floor (same-speaker ~0.6-0.8,
+            // different ~0.1-0.2).
+            speaker_threshold: 0.45,
             default_speaker_name: "unknown speaker".into(),
             base_system: String::new(),
+            speaker_store: std::env::var("HOME")
+                .ok()
+                .map(|h| std::path::PathBuf::from(h).join(".weftos/speakers.json")),
         }
     }
 }
@@ -141,7 +151,14 @@ impl<M: EndpointModel + 'static> TalkSession<M> {
             }),
             None => loop_observer,
         };
-        let registry = SpeakerRegistry::new(config.speaker_threshold);
+        // Load persisted speaker identities when a store is configured;
+        // fresh registry otherwise (or on first run / unreadable file).
+        let registry = config
+            .speaker_store
+            .as_ref()
+            .filter(|p| p.exists())
+            .and_then(|p| SpeakerRegistry::load(p).ok())
+            .unwrap_or_else(|| SpeakerRegistry::new(config.speaker_threshold));
         let controller = TalkModeController::new(
             components.endpointer,
             components.stt,
@@ -159,6 +176,8 @@ impl<M: EndpointModel + 'static> TalkSession<M> {
                 barge_in_frames: config.barge_in_frames,
                 default_speaker_name: config.default_speaker_name,
                 base_system: config.base_system,
+                speaker_store: config.speaker_store,
+                ..ControllerConfig::default()
             },
         );
         Self { forest, controller }

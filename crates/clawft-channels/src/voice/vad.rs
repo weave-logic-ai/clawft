@@ -180,6 +180,17 @@ pub struct NoiseFloor {
     initialized: bool,
 }
 
+/// Initialization ceiling for the tracked floor: even when the very first
+/// frame is already speech (a session started mid-utterance), the floor
+/// starts no higher than this, so that first utterance still clears the
+/// gate (the -45 dBFS default threshold minus the margin).
+const INIT_MAX_FLOOR_DBFS: f32 = -53.0;
+
+/// Frames within this many dB above the floor are ambient drift (fans
+/// spinning up, HVAC) and pull the floor up at a moderate rate; frames
+/// beyond it are speech and barely move it.
+const DRIFT_BAND_DB: f32 = 18.0;
+
 impl NoiseFloor {
     /// `margin_db` is how far above the tracked floor a frame must be to
     /// count as voice (8–10 dB works well for speech at conversational
@@ -196,14 +207,23 @@ impl NoiseFloor {
     /// (`floor + margin`, clamped to [-100, 0]).
     pub fn observe(&mut self, dbfs: f32) -> f32 {
         if !self.initialized {
-            self.floor_dbfs = dbfs;
+            // Cap the seed: a session that opens on speech must not
+            // calibrate the floor to speech level and gate itself deaf.
+            self.floor_dbfs = dbfs.min(INIT_MAX_FLOOR_DBFS);
             self.initialized = true;
-        } else if dbfs < self.floor_dbfs {
-            // Fall fast: quieter evidence is authoritative for a floor.
-            self.floor_dbfs += (dbfs - self.floor_dbfs) * 0.3;
         } else {
-            // Rise slowly: speech frames must not lift the floor.
-            self.floor_dbfs += (dbfs - self.floor_dbfs) * 0.005;
+            let delta = dbfs - self.floor_dbfs;
+            if delta < 0.0 {
+                // Fall fast: quieter evidence is authoritative for a floor.
+                self.floor_dbfs += delta * 0.3;
+            } else if delta < DRIFT_BAND_DB {
+                // Near-floor drift: ambient got louder — adapt within ~1-2 s
+                // so a loud room cannot read as permanent speech.
+                self.floor_dbfs += delta * 0.08;
+            } else {
+                // Speech: barely moves the floor.
+                self.floor_dbfs += delta * 0.002;
+            }
         }
         self.threshold_dbfs()
     }
@@ -342,6 +362,19 @@ mod tests {
             "threshold {thr} must sit above the room tone (-38)"
         );
         assert!(-20.0 >= thr, "speech at -20 dBFS must clear threshold {thr}");
+    }
+
+    #[test]
+    fn noise_floor_survives_speech_first_startup() {
+        // A session that opens on speech (-15 dBFS) must not calibrate the
+        // floor to speech level: the init cap keeps the first utterance
+        // above the gate.
+        let mut nf = NoiseFloor::new(8.0);
+        let thr = nf.observe(-15.0);
+        assert!(
+            -15.0 >= thr,
+            "first speech frame must clear threshold {thr}"
+        );
     }
 
     #[test]

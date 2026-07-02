@@ -148,6 +148,18 @@ impl SpeakerRegistry {
         }
     }
 
+    /// Rename a known speaker (spoken self-enrollment: an unknown voice
+    /// saying "my name is X" upgrades its auto-enrolled placeholder name).
+    /// Returns `true` when `id` exists.
+    pub fn rename(&mut self, id: &str, name: impl Into<String>) -> bool {
+        if let Some(s) = self.speakers.iter_mut().find(|s| s.id == id) {
+            s.name = name.into();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Identify-or-enroll convenience: returns `(id, true)` if a new speaker
     /// was enrolled, `(id, false)` if an existing one matched (and was
     /// attributed). `name_for_new` names a freshly enrolled speaker.

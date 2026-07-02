@@ -222,7 +222,9 @@ async fn full_pipeline_speculative_then_committed() {
     let run_cancel = cancel.clone();
     let handle = tokio::spawn(async move { ctrl.run(rx, run_cancel).await });
 
-    // One utterance (200 ms voiced) then silence to cross the 300 ms ceiling.
+    // One utterance (300 ms voiced — clears the 250 ms min-turn guard)
+    // then silence to cross the ceiling.
+    tx.send(voiced_frame()).await.unwrap();
     tx.send(voiced_frame()).await.unwrap();
     tx.send(voiced_frame()).await.unwrap();
     for _ in 0..4 {
@@ -321,6 +323,9 @@ async fn barge_in_flushes_and_emits_interrupted() {
         observer.clone() as Arc<dyn ConversationObserver>,
         TalkModeConfig {
             barge_in_frames: 3,
+            // Scripted frames land instantly; disable the AEC-convergence
+            // grace so the barge-in itself is what's under test.
+            barge_in_grace_ms: 0,
             ..Default::default()
         },
     );
@@ -330,7 +335,8 @@ async fn barge_in_flushes_and_emits_interrupted() {
     let run_cancel = cancel.clone();
     let handle = tokio::spawn(async move { ctrl.run(rx, run_cancel).await });
 
-    // Utterance + silence to finalize.
+    // Utterance (≥ the 250 ms min-turn guard) + silence to finalize.
+    tx.send(voiced_frame()).await.unwrap();
     tx.send(voiced_frame()).await.unwrap();
     tx.send(voiced_frame()).await.unwrap();
     for _ in 0..4 {
