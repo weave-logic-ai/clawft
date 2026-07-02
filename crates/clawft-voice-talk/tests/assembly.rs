@@ -165,9 +165,15 @@ async fn live_native_talk_session() {
         tx.send(vec![0i16; 1_600]).await.unwrap();
     }
 
-    // Wait for the loom to fill: user turn (committed by the loop) + replies.
+    // Wait for the loom to fill AND for the loop tick to commit the user
+    // turn: `LoopObserver` writes the turn as Frontier and the
+    // Frontier→Committed promotion happens on the loop's *next* tick, so
+    // waiting on node_count alone races the commit.
     for _ in 0..400 {
-        if forest.graph().node_count() >= 2 {
+        if forest.graph().node_count() >= 2
+            && forest.view().state(1)
+                == Some(clawft_kernel::context_graft::NodeState::Committed)
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
