@@ -325,7 +325,17 @@ pub fn create_adapter_from_config(config: &Config) -> Arc<dyn LlmProvider> {
         "creating LLM adapter from config"
     );
 
-    let provider = OpenAiCompatProvider::new(provider_config);
+    // Honor an explicit api_key from config.providers.<name>, matching
+    // create_adapter_for_provider. Keyless local endpoints (llama.cpp
+    // behind a builtin's api_base override) can set a placeholder key in
+    // config instead of requiring the provider's env var.
+    let provider_name = provider_config.name.clone();
+    let app_api_key = resolve_app_api_key(&provider_name, config);
+    let provider = if let Some(key) = app_api_key {
+        OpenAiCompatProvider::with_api_key(provider_config, key)
+    } else {
+        OpenAiCompatProvider::new(provider_config)
+    };
     // Wrap in RetryPolicy so transient errors (5xx, rate-limit, timeout)
     // are retried with exponential backoff at the provider level.
     let retrying =

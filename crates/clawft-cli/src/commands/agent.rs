@@ -212,12 +212,27 @@ async fn run_single_message(
     // Wait for the outbound response.
     let response = bus.consume_outbound().await;
 
+    // The loop marks failed turns with metadata.error=true (e.g. provider
+    // not configured, max tool iterations) — exit non-zero instead of
+    // printing the error as a normal reply.
+    let mut failure: Option<String> = None;
     match response {
         Some(msg) => {
-            println!("{}", msg.content);
+            let is_error = msg
+                .metadata
+                .get("error")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if is_error {
+                eprintln!("{}", msg.content);
+                failure = Some(msg.content);
+            } else {
+                println!("{}", msg.content);
+            }
         }
         None => {
             eprintln!("error: no response from agent");
+            failure = Some("no response from agent".to_string());
         }
     }
 
@@ -227,6 +242,9 @@ async fn run_single_message(
     agent_handle.abort();
     let _ = agent_handle.await;
 
+    if let Some(err) = failure {
+        anyhow::bail!("{err}");
+    }
     Ok(())
 }
 

@@ -561,6 +561,7 @@ impl<P: Platform> AgentLoop<P> {
                         chat_id = %msg.chat_id,
                         "processing inbound message"
                     );
+                    let (channel, chat_id) = (msg.channel.clone(), msg.chat_id.clone());
                     match self.handle_turn(msg).await {
                         Ok(outbound) => {
                             if let Err(e) = self.bus.dispatch_outbound(outbound) {
@@ -569,6 +570,23 @@ impl<P: Platform> AgentLoop<P> {
                         }
                         Err(e) => {
                             error!("failed to process message: {}", e);
+                            // Surface the failure to the sender instead of
+                            // going silent: single-message CLI mode blocks on
+                            // the outbound reply, and channel users otherwise
+                            // see nothing at all.
+                            let mut metadata = std::collections::HashMap::new();
+                            metadata.insert("error".to_string(), serde_json::Value::Bool(true));
+                            let outbound = OutboundMessage {
+                                channel,
+                                chat_id,
+                                content: format!("error: {e}"),
+                                reply_to: None,
+                                media: vec![],
+                                metadata,
+                            };
+                            if let Err(e) = self.bus.dispatch_outbound(outbound) {
+                                error!("failed to dispatch error reply: {}", e);
+                            }
                         }
                     }
                 }
