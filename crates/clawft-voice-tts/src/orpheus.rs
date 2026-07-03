@@ -96,6 +96,10 @@ impl TokenAccum {
     }
 
     /// Drain one whole `batch_frames`-frame batch, if available.
+    /// Retained for a future lead-chunks streaming mode (voicelab
+    /// `slow_lead_chunks`); the live path decodes whole-utterance to
+    /// avoid SNAC seam glitches.
+    #[allow(dead_code)]
     fn take_batch(&mut self, batch_frames: usize) -> Option<Vec<i64>> {
         let avail = self.codes.len() / FRAME_TOKENS;
         if batch_frames > 0 && avail >= batch_frames {
@@ -148,6 +152,9 @@ pub struct OrpheusTts {
     model: String,
     voice: String,
     decoder: Arc<dyn SnacDecode>,
+    /// Retained for a future lead-chunks streaming mode; the live path
+    /// decodes whole-utterance (see synthesize_stream seam note).
+    #[allow(dead_code)]
     batch_frames: usize,
 }
 
@@ -259,23 +266,12 @@ impl TtsEngine for OrpheusTts {
                 }
             }
 
-            // Emit every whole batch the new tokens completed.
-            while let Some(batch) = accum.take_batch(self.batch_frames) {
-                if cancel.is_cancelled() {
-                    return Ok(());
-                }
-                let pcm = self.decoder.decode_frames(&batch)?;
-                if pcm.is_empty() {
-                    continue;
-                }
-                let chunk = TtsChunk {
-                    samples: pcm,
-                    sample_rate: sr,
-                };
-                if cancel.is_cancelled() || tx.send(chunk).await.is_err() {
-                    return Ok(());
-                }
-            }
+            // NOTE: no per-batch decode here. SNAC decoded in small batches
+            // glitches at every seam — audible doubled/broken syllables
+            // (voicelab hit the same artifact and settled on whole-utterance
+            // "sentence" decode). Tokens accumulate and are decoded ONCE
+            // below; the DualLayerTts consumer prebuffers anyway, so
+            // streaming partial PCM buys no latency.
             if done {
                 break;
             }
@@ -289,11 +285,11 @@ impl TtsEngine for OrpheusTts {
             accum.push_text(&frag);
         }
 
-        // Flush the trailing whole frames.
+        // Single seam-free decode of the whole utterance's code stream.
         if !cancel.is_cancelled()
-            && let Some(batch) = accum.take_remaining()
+            && let Some(all_codes) = accum.take_remaining()
         {
-            let pcm = self.decoder.decode_frames(&batch)?;
+            let pcm = self.decoder.decode_frames(&all_codes)?;
             if !pcm.is_empty() {
                 let _ = tx
                     .send(TtsChunk {
@@ -427,8 +423,9 @@ mod tests {
             samples += chunk.samples.len();
             assert_eq!(chunk.sample_rate, 24_000);
         }
-        // 3 frames at batch=1 → 3 chunks, 7 codes each via the fake decoder.
-        assert_eq!(chunks, 3, "one chunk per frame");
+        // Whole-utterance decode: ONE seam-free chunk covering all 3 frames
+        // (per-batch decode glitched at every seam — doubled syllables).
+        assert_eq!(chunks, 1, "single seam-free chunk");
         assert_eq!(samples, 21);
     }
 
