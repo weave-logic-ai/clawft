@@ -323,8 +323,10 @@ async fn barge_in_flushes_and_emits_interrupted() {
         observer.clone() as Arc<dyn ConversationObserver>,
         TalkModeConfig {
             barge_in_frames: 3,
-            // Scripted frames land instantly; disable the AEC-convergence
-            // grace so the barge-in itself is what's under test.
+            // Barge-in is opt-in (default off until AEC residual is tuned);
+            // this test IS the barge-in path, so enable it and disable the
+            // AEC-convergence grace (scripted frames land instantly).
+            barge_in_enabled: true,
             barge_in_grace_ms: 0,
             ..Default::default()
         },

@@ -166,6 +166,12 @@ pub struct TalkModeConfig {
     /// Barge-in grace (ms) at playback start while the echo canceller
     /// converges on the new render signal. 0 disables (tests).
     pub barge_in_grace_ms: u64,
+    /// Whether talking over the bot cancels its reply. OFF by default:
+    /// the AEC's echo return loss is not yet verified on real hardware —
+    /// live sessions showed the bot's own playback tripping the gate
+    /// ~400 ms in and cancelling every answer. Enable once AEC residual
+    /// is tuned (tracked in Plane).
+    pub barge_in_enabled: bool,
 }
 
 impl Default for TalkModeConfig {
@@ -178,6 +184,7 @@ impl Default for TalkModeConfig {
             base_system: String::new(),
             speaker_store: None,
             barge_in_grace_ms: BARGE_IN_GRACE_MS,
+            barge_in_enabled: false,
         }
     }
 }
@@ -492,7 +499,10 @@ impl<M: EndpointModel> TalkModeController<M> {
                         Some(frame) => {
                             let in_grace = speak_started.elapsed()
                                 < std::time::Duration::from_millis(self.config.barge_in_grace_ms);
-                            if !in_grace && EnergyVad::rms_dbfs(&frame) >= barge_gate {
+                            if self.config.barge_in_enabled
+                                && !in_grace
+                                && EnergyVad::rms_dbfs(&frame) >= barge_gate
+                            {
                                 voiced_run += 1;
                                 if voiced_run >= self.config.barge_in_frames {
                                     debug!("talk-mode barge-in detected");
