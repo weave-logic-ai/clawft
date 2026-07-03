@@ -46,13 +46,25 @@ const TOKEN_PREFIX: &str = "<custom_token_";
 const TOKEN_OFFSET: i64 = 10;
 
 /// Parse one `<custom_token_N>` into its SNAC code, applying Orpheus' per-slot
-/// offset: `N - 10 - ((index % 7) * 4096)`, where `index` is the running
-/// custom-token count (so the 7 slots of a frame map back into the codebook
-/// range). Returns `None` for anything that is not a well-formed custom token.
+/// offset: `N - 10 - ((index % 7) * 4096)`, where `index` is the count of
+/// previously ACCEPTED audio codes (so the 7 slots of a frame map back into
+/// the codebook range).
+///
+/// Returns `None` for malformed tokens AND for control tokens whose base
+/// value `N - 10` is negative: the stream opens with a few low-id custom
+/// tokens (observed live: `N = 4, 5, 1`) that are not audio. Counting those
+/// in the slot index shifts the `%7` phase — every subsequent code lands in
+/// the wrong codebook band and the whole utterance decodes to noise
+/// (observed: 251/251 codes out of range → "repeating broken speech").
+/// The working voicelab impl drops `c < 0` before slot phasing; mirror it.
 pub fn parse_custom_token(token: &str, index: usize) -> Option<i64> {
     let inner = token.trim().strip_prefix(TOKEN_PREFIX)?.strip_suffix('>')?;
     let n: i64 = inner.parse().ok()?;
-    Some(n - TOKEN_OFFSET - ((index % FRAME_TOKENS) as i64) * SNAC_CODEBOOK_SIZE)
+    let base = n - TOKEN_OFFSET;
+    if base < 0 {
+        return None; // control token, not audio — must not consume a slot
+    }
+    Some(base - ((index % FRAME_TOKENS) as i64) * SNAC_CODEBOOK_SIZE)
 }
 
 /// Incremental parser turning a streamed token text into SNAC codes. Tolerates
@@ -335,6 +347,26 @@ mod tests {
         // Not a custom token.
         assert_eq!(parse_custom_token("hello", 0), None);
         assert_eq!(parse_custom_token("<custom_token_x>", 0), None);
+        // Leading control tokens (N < 10, observed N=4,5,1 opening every
+        // stream) are NOT audio and must not consume a slot — counting
+        // them shifts the %7 phase and the whole utterance decodes to
+        // noise.
+        assert_eq!(parse_custom_token("<custom_token_4>", 0), None);
+        assert_eq!(parse_custom_token("<custom_token_1>", 3), None);
+    }
+
+    #[test]
+    fn accum_ignores_control_tokens_without_phase_shift() {
+        // Stream opens with 3 control tokens then a full 7-slot frame:
+        // codes must come out slot-aligned (all in [0, 4096)).
+        let mut a = TokenAccum::default();
+        a.push_text("<custom_token_4><custom_token_5><custom_token_1>");
+        for slot in 0..7usize {
+            let n = 10 + (slot as i64) * 4096 + 42; // valid code 42 in each band
+            a.push_text(&format!("<custom_token_{n}>"));
+        }
+        let frame = a.take_remaining().expect("one whole frame");
+        assert_eq!(frame, vec![42; 7], "phase must ignore control tokens");
     }
 
     #[test]
