@@ -240,6 +240,10 @@ impl TtsEngine for SubstrateTts {
 pub struct DualLayerTts {
     fast: Arc<dyn TtsEngine>,
     slow: Arc<dyn TtsEngine>,
+    /// Acks pre-rendered through the SLOW tier (single-voice consistency):
+    /// `speak` plays a cached ack instantly in the answer's own voice
+    /// instead of rendering it in the fast tier's different voice.
+    ack_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<TtsChunk>>>>,
 }
 
 impl DualLayerTts {
@@ -251,7 +255,52 @@ impl DualLayerTts {
                 "DualLayerTts: fast engine must be Fast tier and slow engine Slow tier".into(),
             ));
         }
-        Ok(Self { fast, slow })
+        Ok(Self {
+            fast,
+            slow,
+            ack_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        })
+    }
+
+    /// Pre-render `acks` through the SLOW tier into the cache, off-thread —
+    /// call once at session start. Until a given ack lands in the cache,
+    /// `speak` falls back to the fast tier for it (different voice, still
+    /// audible), so warming is best-effort and non-blocking.
+    pub fn spawn_warm_acks(&self, acks: Vec<String>) {
+        let slow = self.slow.clone();
+        let cache = self.ack_cache.clone();
+        tokio::spawn(async move {
+            for ack in acks {
+                if cache.lock().unwrap().contains_key(&ack) {
+                    continue;
+                }
+                let (tx, mut rx) = mpsc::channel::<TtsChunk>(16);
+                let engine = slow.clone();
+                let text = ack.clone();
+                let producer = tokio::spawn(async move {
+                    engine
+                        .synthesize_stream(&text, tx, CancellationToken::new())
+                        .await
+                });
+                let mut chunks: Vec<TtsChunk> = Vec::new();
+                while let Some(c) = rx.recv().await {
+                    chunks.push(c);
+                }
+                match producer.await {
+                    Ok(Ok(())) if !chunks.is_empty() => {
+                        tracing::info!(ack = %ack, "ack pre-rendered in the answer voice");
+                        cache.lock().unwrap().insert(ack, chunks);
+                    }
+                    res => {
+                        tracing::debug!(
+                            ack = %ack,
+                            ?res,
+                            "ack warm failed; fast-tier fallback will speak it"
+                        );
+                    }
+                }
+            }
+        });
     }
 
     /// Speak `ack` (optional, fast layer, covers latency) then stream `answer`
@@ -264,27 +313,39 @@ impl DualLayerTts {
         sink: Arc<dyn TtsSink>,
         cancel: CancellationToken,
     ) -> Result<(), VoiceError> {
-        // FAST layer: render the contextual ack and play it immediately so
-        // the loop doesn't go silent while the slow answer renders.
+        // ACK: prefer the pre-rendered slow-voice cache (single-voice
+        // consistency — the ack speaks in the answer's own voice, instantly);
+        // fall back to the FAST layer for uncached acks so the loop never
+        // goes silent while the slow answer renders.
         if let Some(ack) = ack {
             if cancel.is_cancelled() {
                 sink.flush().await;
                 return Ok(());
             }
-            let (atx, mut arx) = mpsc::channel::<TtsChunk>(4);
-            let fast = self.fast.clone();
-            let ack_text = ack.to_string();
-            let ack_cancel = cancel.clone();
-            let producer = tokio::spawn(async move {
-                let _ = fast.synthesize_stream(&ack_text, atx, ack_cancel).await;
-            });
-            while let Some(chunk) = arx.recv().await {
-                if cancel.is_cancelled() {
-                    break;
+            let cached = self.ack_cache.lock().unwrap().get(ack).cloned();
+            if let Some(chunks) = cached {
+                for chunk in &chunks {
+                    if cancel.is_cancelled() {
+                        break;
+                    }
+                    sink.play_chunk(chunk).await?;
                 }
-                sink.play_chunk(&chunk).await?;
+            } else {
+                let (atx, mut arx) = mpsc::channel::<TtsChunk>(4);
+                let fast = self.fast.clone();
+                let ack_text = ack.to_string();
+                let ack_cancel = cancel.clone();
+                let producer = tokio::spawn(async move {
+                    let _ = fast.synthesize_stream(&ack_text, atx, ack_cancel).await;
+                });
+                while let Some(chunk) = arx.recv().await {
+                    if cancel.is_cancelled() {
+                        break;
+                    }
+                    sink.play_chunk(&chunk).await?;
+                }
+                let _ = producer.await;
             }
-            let _ = producer.await;
         }
 
         if cancel.is_cancelled() {

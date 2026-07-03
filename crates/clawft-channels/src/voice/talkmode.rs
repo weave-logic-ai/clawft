@@ -296,6 +296,11 @@ impl<M: EndpointModel> TalkModeController<M> {
     /// Run the conversation loop until `cancel` fires or the capture channel
     /// closes. Frames are 16 kHz mono `i16` (echo-cancelled mic).
     pub async fn run(&mut self, mut frames: mpsc::Receiver<Vec<i16>>, cancel: CancellationToken) {
+        // Pre-render the fixed ack set through the slow tier (off-thread) so
+        // acks speak in the answer's own voice from the first turn that the
+        // warm beats; fast-tier fallback covers the race.
+        self.tts
+            .spawn_warm_acks(vec![ACK_SHORT.to_string(), ACK_LONG.to_string()]);
         let mut utt: Vec<i16> = Vec::new();
         loop {
             tokio::select! {
@@ -550,20 +555,23 @@ impl<M: EndpointModel> TalkModeController<M> {
 /// Build a short *contextual* acknowledgment from the transcript (echo the
 /// subject so the latency reads as "thinking", not lag — ADR-061). A fast-LLM
 /// ack is the future upgrade; this deterministic version needs no model.
+/// The fixed ack set. Kept to CLOSED strings (no transcript interpolation)
+/// so [`DualLayerTts`] can pre-render every ack through the SLOW tier at
+/// session start and play from cache — the ack then speaks in the SAME
+/// voice as the answer (single-voice consistency, the david-profile
+/// property) with zero latency. The subject-echo flourish
+/// ("{Subject} — one sec.") returns when the fast tier is a clone of the
+/// slow tier's voice (WEFT-613).
+pub const ACK_SHORT: &str = "One sec.";
+/// Ack for longer questions.
+pub const ACK_LONG: &str = "Okay, one sec.";
+
 pub fn contextual_ack(transcript: &str) -> String {
     let words: Vec<&str> = transcript.split_whitespace().collect();
     if words.len() <= 3 {
-        return "One sec.".to_string();
-    }
-    // Prefer echoing a capitalized subject word (a proper noun / topic).
-    let subject = words
-        .iter()
-        .rev()
-        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
-        .find(|w| w.chars().next().map(|c| c.is_uppercase()).unwrap_or(false));
-    match subject {
-        Some(s) if !s.is_empty() => format!("{s} — one sec."),
-        _ => "Okay, one sec.".to_string(),
+        ACK_SHORT.to_string()
+    } else {
+        ACK_LONG.to_string()
     }
 }
 
@@ -578,14 +586,11 @@ mod tests {
     }
 
     #[test]
-    fn ack_echoes_capitalized_subject() {
-        assert_eq!(
-            contextual_ack("tell me about Puyo please"),
-            "Puyo — one sec."
-        );
-        assert_eq!(
-            contextual_ack("can you explain the thing now"),
-            "Okay, one sec."
-        );
+    fn ack_stays_in_the_fixed_cacheable_set() {
+        // Acks are a CLOSED set so the slow tier can pre-render them all
+        // (single-voice consistency). Subject echo returns with WEFT-613.
+        assert_eq!(contextual_ack("tell me about Puyo please"), ACK_LONG);
+        assert_eq!(contextual_ack("can you explain the thing now"), ACK_LONG);
+        assert_eq!(contextual_ack("quick question"), ACK_SHORT);
     }
 }

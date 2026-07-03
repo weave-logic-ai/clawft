@@ -137,9 +137,13 @@ async fn speculative_then_committed_supersedes() {
         "all fast (speculative) chunks precede the first slow (committed) chunk"
     );
 
-    // The ack was a cheap graph-local read (echoes the frontier subject), NOT
-    // the LLM answer.
-    assert_eq!(outcome.spoken_ack, "Paris — one sec.");
+    // The ack is a cheap fixed phrase from the closed cacheable set (so the
+    // slow tier pre-renders it in the answer's voice), NOT the LLM answer.
+    // Subject echo ("Paris — one sec.") returns with WEFT-613.
+    assert_eq!(
+        outcome.spoken_ack,
+        clawft_channels::voice::talkmode::ACK_LONG
+    );
     assert_ne!(outcome.spoken_ack, outcome.spoken_answer);
 
     // State transitions: the committed reply is committed; the speculative ack
