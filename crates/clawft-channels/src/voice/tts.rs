@@ -303,8 +303,15 @@ impl DualLayerTts {
                 async move { slow.synthesize_stream(&answer_text, tx, prod_cancel).await },
             );
 
+        // PREBUFFER the slow tier (voicelab `slow_prebuffer` semantics):
+        // Orpheus over Ollama can render slower than real time on a loaded
+        // machine, and playing its chunks as they trickle in starves the
+        // output stream — audible stutter ("skipping"). Collect the full
+        // render first, then play gap-free; the fast ack already covers
+        // the latency window.
         let mut interrupted = false;
         let mut slow_chunks = 0usize;
+        let mut buffered: Vec<TtsChunk> = Vec::new();
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
@@ -315,11 +322,20 @@ impl DualLayerTts {
                     match maybe {
                         Some(chunk) => {
                             slow_chunks += 1;
-                            sink.play_chunk(&chunk).await?;
+                            buffered.push(chunk);
                         }
                         None => break,
                     }
                 }
+            }
+        }
+        if !interrupted {
+            for chunk in &buffered {
+                if cancel.is_cancelled() {
+                    interrupted = true;
+                    break;
+                }
+                sink.play_chunk(chunk).await?;
             }
         }
         if interrupted {

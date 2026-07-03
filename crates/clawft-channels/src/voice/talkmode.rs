@@ -527,9 +527,22 @@ impl<M: EndpointModel> TalkModeController<M> {
         }
         // Synthesis finished, but `play_chunk` only QUEUES audio — seconds of
         // our own speech may still be leaving the speaker. Hold here until
-        // the sink drains, then discard the frames that piled up during
-        // playback (they contain our own voice), so capture resumes clean.
-        self.sink.wait_drained().await;
+        // the sink drains — KEEP CONSUMING mic frames while waiting (they
+        // contain our own voice; unconsumed they fill the capture channel
+        // and the capture thread floods "frame channel full" warnings) —
+        // then discard any stragglers so capture resumes clean.
+        let drained = self.sink.wait_drained();
+        tokio::pin!(drained);
+        loop {
+            tokio::select! {
+                _ = &mut drained => break,
+                maybe = frames.recv() => {
+                    if maybe.is_none() {
+                        break; // capture channel closed
+                    }
+                }
+            }
+        }
         while frames.try_recv().is_ok() {}
     }
 }
