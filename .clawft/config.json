@@ -1,7 +1,7 @@
 {
   "agents": {
     "defaults": {
-      "model": "deepseek/deepseek-chat",
+      "model": "hermes-4.3-36b",
       "maxTokens": 8192,
       "temperature": 0.7,
       "maxToolIterations": 20,
@@ -14,7 +14,7 @@
     }
   },
   "routing": {
-    "mode": "tiered",
+    "mode": "static",
     "tiers": [
       {
         "name": "free",
