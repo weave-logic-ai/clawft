@@ -137,5 +137,12 @@
     "apiEnabled": true,
     "apiPort": 18789,
     "corsOrigins": ["http://localhost:5173"]
+  },
+  "kernel": {
+    "agent": {
+      "anchor_chain": true,
+      "anchor_causal": true,
+      "talk_loop": true
+    }
   }
 }
