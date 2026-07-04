@@ -1065,10 +1065,17 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                             crossrefs.clone(),
                         ) {
                             (Some(impulses), Some(tick), Some(causal), Some(crossrefs)) => {
-                                // `TalkModeLoop::new` takes `Arc<dyn ViewResolver>`;
-                                // the Arc<SessionTier> coerces at the call site
-                                // (SessionTier: ViewResolver via P3).
-                                let views: Arc<dyn clawft_kernel::ViewResolver> = tier.clone();
+                                // Hand the loop a WEAK handle to the tier (P3's
+                                // `weak_view_resolver`). The tier's OnceLock holds
+                                // the loop strongly, so a strong resolver here would
+                                // form a `tier ↔ loop` cycle that never drops; the
+                                // Weak keeps loop→tier weak. The tier stays alive for
+                                // the daemon's lifetime via the agent service's
+                                // strong ref, so resolution always upgrades at
+                                // runtime; if the tier is ever dropped the loop
+                                // no-ops (D4 reaped-conversation contract).
+                                let views =
+                                    clawft_service_agent::SessionTier::weak_view_resolver(&tier);
                                 let talk_loop = Arc::new(clawft_kernel::TalkModeLoop::new(
                                     impulses,
                                     causal,
