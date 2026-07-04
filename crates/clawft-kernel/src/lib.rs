@@ -116,6 +116,8 @@ pub mod talk_loop;
 #[cfg(feature = "ecc")]
 pub mod vector_backend;
 #[cfg(feature = "ecc")]
+pub mod view_resolver;
+#[cfg(feature = "ecc")]
 pub mod vector_diskann;
 #[cfg(feature = "ecc")]
 pub mod vector_hnsw;
@@ -490,6 +492,8 @@ pub use supervisor::{
 };
 #[cfg(feature = "ecc")]
 pub use talk_loop::{TalkModeConfig, TalkModeLoop, TalkTickResult};
+#[cfg(feature = "ecc")]
+pub use view_resolver::{SingleViewResolver, ViewResolver};
 #[cfg(feature = "exochain")]
 pub use tree_manager::{TreeManager, TreeStats};
 pub use tree_view::{AgentTreeView, TreeScope};

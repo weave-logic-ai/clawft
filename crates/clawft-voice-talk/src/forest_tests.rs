@@ -43,13 +43,13 @@ fn user_turn_dual_writes_and_loop_commits_it() {
     // The turn is dual-written as a Frontier on both substrates and registered
     // with the loop (the observer does NOT commit — the loop does).
     assert_eq!(f.view().state(1), Some(NodeState::Frontier));
-    assert_eq!(f.talk_loop().current_turn(), Some(1));
+    assert_eq!(f.talk_loop().current_turn("conv-test"), Some(1));
 
     // The loop's next tick drains the observer's EOU impulse and commits.
     let r = f.talk_loop().tick();
     assert_eq!(r.commits, 1);
     assert_eq!(f.view().state(1), Some(NodeState::Committed));
-    assert_eq!(f.talk_loop().current_turn(), None);
+    assert_eq!(f.talk_loop().current_turn("conv-test"), None);
 }
 
 #[test]

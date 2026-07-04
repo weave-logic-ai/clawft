@@ -207,6 +207,28 @@ impl ImpulseQueue {
         sorted
     }
 
+    /// Drain up to `max` unacknowledged impulses in `hlc_timestamp` order,
+    /// leaving any overflow **queued** for the next call.
+    ///
+    /// This is the data-loss-safe variant of [`drain_ready`](Self::drain_ready):
+    /// a consumer that only processes `max` per tick (the Talk-Mode loop) must
+    /// not silently drop the remainder. Acknowledged impulses are still
+    /// discarded. `max == 0` drains nothing and leaves the queue untouched.
+    pub fn drain_ready_limited(&self, max: usize) -> Vec<Impulse> {
+        let mut q = self.queue.lock().expect("impulse queue poisoned");
+        let mut ready: Vec<Impulse> = std::mem::take(&mut *q)
+            .into_iter()
+            .filter(|imp| !imp.acknowledged.load(Ordering::Acquire))
+            .collect();
+        ready.sort_by_key(|imp| imp.hlc_timestamp);
+        if ready.len() > max {
+            // Keep the earliest `max`; the tail stays queued (HLC-ordered) for
+            // the next drain rather than being dropped on the floor.
+            *q = ready.split_off(max);
+        }
+        ready
+    }
+
     /// Total number of impulses in the queue (acknowledged or not).
     pub fn len(&self) -> usize {
         self.queue.lock().expect("impulse queue poisoned").len()

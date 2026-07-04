@@ -32,6 +32,7 @@ use clawft_channels::voice::speaker::SpeakerId;
 use clawft_channels::voice::talkmode::{ConversationEvent, ConversationObserver};
 use clawft_kernel::causal::NodeId as CausalNodeId;
 use clawft_kernel::context_graft::{ChunkMeta, NodeState, SessionView, content_hash};
+use clawft_kernel::view_resolver::{SingleViewResolver, ViewResolver};
 use clawft_kernel::{
     CausalEdgeType, CausalGraph, CognitiveTick, CognitiveTickConfig, CrossRefStore, ImpulseQueue,
     ImpulseType, StructureTag, TalkModeConfig, TalkModeLoop, UniversalNodeId,
@@ -64,11 +65,14 @@ impl TalkForest {
         let crossrefs = Arc::new(CrossRefStore::new());
         let view = Arc::new(SessionView::new(conv_id.clone(), dims));
         let tick = Arc::new(CognitiveTick::new(CognitiveTickConfig::default()));
+        // Voice is single-conversation: the multiplexed loop resolves its one
+        // bookkeeping view for any conv_id (M2 D4 "voice stays green" adapter).
+        let views: Arc<dyn ViewResolver> = Arc::new(SingleViewResolver::new(view.clone()));
         let talk_loop = Arc::new(TalkModeLoop::new(
             impulses.clone(),
             causal.clone(),
             crossrefs.clone(),
-            view.clone(),
+            views,
             tick,
             TalkModeConfig::default(),
         ));
@@ -242,7 +246,9 @@ impl LoopObserver {
             text.as_bytes(),
             b"turn",
         );
-        self.forest.talk_loop.register_turn(seq, node, uid);
+        self.forest
+            .talk_loop
+            .register_turn(seq, node, uid, self.forest.conv_id());
         (seq, node)
     }
 
