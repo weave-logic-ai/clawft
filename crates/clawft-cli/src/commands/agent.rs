@@ -90,6 +90,21 @@ pub async fn run(args: AgentArgs) -> anyhow::Result<()> {
     let effective_model = &config.agents.defaults.model;
     info!(model = %effective_model, "initializing agent");
 
+    // Daemon-first routing (M1 / ADR-061, WEFT-606): if a kernel daemon is
+    // reachable, route every turn through its long-lived AgentService via the
+    // `agent.chat` RPC so the daemon-hosted loop is THE single conversation
+    // engine. When no daemon is running we fall through to the in-process
+    // AgentLoop below with no behaviour change.
+    if let Some(client) = super::agent_daemon::detect().await {
+        info!("kernel daemon reachable — routing agent turns via agent.chat");
+        if let Some(ref message) = args.message {
+            return super::agent_daemon::run_single_message(client, message).await;
+        }
+        let skill_registry = discover_skill_registry(args.trust_project_skills).await;
+        return super::agent_daemon::run_interactive(client, &skill_registry).await;
+    }
+    info!("no kernel daemon reachable — using in-process agent loop");
+
     // Bootstrap the application context (bus, sessions, memory, skills, pipeline).
     let mut ctx = AppContext::new(config.clone(), platform.clone())
         .await
@@ -142,27 +157,7 @@ pub async fn run(args: AgentArgs) -> anyhow::Result<()> {
     }
 
     // Discover v2 skills from workspace (.clawft/skills/) and user (~/.clawft/skills/).
-    let (ws_skill_dir, user_skill_dir) = discover_skill_dirs();
-    let trust_ws = args.trust_project_skills;
-    let skill_registry = match SkillRegistry::discover_with_trust(
-        ws_skill_dir.as_deref(),
-        user_skill_dir.as_deref(),
-        Vec::new(),
-        trust_ws,
-    )
-    .await
-    {
-        Ok(reg) => {
-            info!(skills = reg.len(), "v2 skill discovery complete");
-            reg
-        }
-        Err(e) => {
-            tracing::warn!("v2 skill discovery failed: {e}");
-            SkillRegistry::discover(None, None, Vec::new())
-                .await
-                .expect("empty registry should never fail")
-        }
-    };
+    let skill_registry = discover_skill_registry(args.trust_project_skills).await;
 
     // Clone the bus before consuming the context.
     let bus = ctx.bus().clone();
@@ -188,6 +183,9 @@ async fn run_single_message(
     model: &str,
 ) -> anyhow::Result<()> {
     info!(model = %model, "single-message mode");
+
+    // Engine line to stderr so `-m` stdout stays clean for scripting.
+    eprintln!("Engine: in-process (daemon not running)");
 
     // Create and publish the inbound message.
     let inbound = InboundMessage {
@@ -265,6 +263,7 @@ async fn run_interactive(
     skill_registry: &SkillRegistry,
 ) -> anyhow::Result<()> {
     println!("weft agent -- interactive mode (type /help for commands)");
+    println!("Engine: in-process (daemon not running)");
     println!("Model: {model}");
 
     // Set up slash command registry with builtins.
@@ -451,6 +450,35 @@ pub(crate) fn build_url_policy(
         config.allowed_domains.iter().cloned().collect(),
         config.blocked_domains.iter().cloned().collect(),
     )
+}
+
+/// Discover the v2 skill registry from the workspace and user skill dirs.
+///
+/// Shared by the in-process and daemon-routed paths so both surface the
+/// same set of `/skill` slash commands. `trust_ws` gates whether
+/// workspace-level (`.clawft/skills/`) skills are loaded (SEC-SKILL-05).
+/// Falls back to an empty registry if discovery fails.
+async fn discover_skill_registry(trust_ws: bool) -> SkillRegistry {
+    let (ws_skill_dir, user_skill_dir) = discover_skill_dirs();
+    match SkillRegistry::discover_with_trust(
+        ws_skill_dir.as_deref(),
+        user_skill_dir.as_deref(),
+        Vec::new(),
+        trust_ws,
+    )
+    .await
+    {
+        Ok(reg) => {
+            info!(skills = reg.len(), "v2 skill discovery complete");
+            reg
+        }
+        Err(e) => {
+            tracing::warn!("v2 skill discovery failed: {e}");
+            SkillRegistry::discover(None, None, Vec::new())
+                .await
+                .expect("empty registry should never fail")
+        }
+    }
 }
 
 /// Discover workspace and user skill directories for v2 skill loading.

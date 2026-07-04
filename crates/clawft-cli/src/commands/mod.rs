@@ -8,6 +8,7 @@
 //! - [`status`] -- Configuration diagnostics.
 
 pub mod agent;
+pub mod agent_daemon;
 pub mod agents_cmd;
 pub mod analyze_cmd;
 pub mod assess_cmd;
