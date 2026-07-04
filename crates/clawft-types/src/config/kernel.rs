@@ -270,6 +270,20 @@ pub struct AgentAnchorConfig {
     /// within the same conversation.
     #[serde(default, alias = "anchorCausal")]
     pub anchor_causal: bool,
+
+    /// Host the daemon-side multiplexed `TalkModeLoop` and wire the text
+    /// ImpulseSource (M2 D7). When true, each anchored turn is registered with
+    /// the loop and an `EndOfUtterance` is emitted so the turn commits
+    /// Frontier→Committed on the shared forest.
+    ///
+    /// Structurally requires `anchor_chain` (for the global `chain_seq`) and
+    /// `anchor_causal` (for the causal graph + cross-refs). The daemon logs a
+    /// warning and treats this as inert if those prerequisites are off — it is
+    /// deliberately independent of [`any_enabled`](Self::any_enabled) so the
+    /// daemon validates the prerequisites rather than folding this flag into
+    /// the anchor side-effect set.
+    #[serde(default, alias = "talkLoop")]
+    pub talk_loop: bool,
 }
 
 impl AgentAnchorConfig {

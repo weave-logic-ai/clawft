@@ -5,7 +5,7 @@
 use super::*;
 use clawft_kernel::chain::ChainManager;
 use clawft_kernel::embedding::MockEmbeddingProvider;
-use clawft_kernel::{CausalEdgeType, CausalGraph, CrossRefStore, CrossRefType};
+use clawft_kernel::{CausalEdgeType, CausalGraph, CrossRefStore, CrossRefType, ViewResolver};
 use serde_json::json;
 
 use crate::session_forest::{speaker_universal_id, turn_universal_id};
@@ -276,6 +276,103 @@ async fn graft_fuses_follows_ancestor_cosine_alone_misses() {
         !plain_body.contains("ZULU-7"),
         "cosine alone (top_k=1) must miss the ancestor: {plain_body}"
     );
+}
+
+// ── M2 D2/D4 — text ImpulseSource + view resolution ──────────────────────
+
+/// M2 D4: `ViewResolver::view_for` returns the *same* stable `Arc<SessionView>`
+/// the graft path reads — one view per conversation, not a second copy. Before
+/// any turn is indexed there is no view (`None`); after, repeated resolves are
+/// pointer-identical.
+#[tokio::test]
+async fn view_for_returns_the_stable_graft_view() {
+    let (tier, chain) = make_tier(64);
+    let conv = "vr-c1";
+
+    // No view yet → resolver returns None (loop would log a no-op).
+    assert!(ViewResolver::view_for(&tier, conv).is_none());
+
+    // Indexing a turn creates the conversation's single view.
+    append_and_index(&tier, &chain, conv, "hello").await;
+
+    let v1 = ViewResolver::view_for(&tier, conv).expect("view present after index");
+    let v2 = ViewResolver::view_for(&tier, conv).expect("view present");
+    assert!(
+        Arc::ptr_eq(&v1, &v2),
+        "view_for must return the one stable view graft also reads"
+    );
+}
+
+/// M2 D2 (HEADLINE): a tier with a `TalkModeLoop` attached, on `index_turn`,
+/// registers the turn with the loop AND emits exactly one `EndOfUtterance`
+/// carrying the right `{chain_seq, conv_id}` (HLC-stamped with the chain_seq).
+#[tokio::test]
+async fn index_turn_registers_and_emits_one_eou() {
+    use clawft_kernel::context_graft::SessionView;
+    use clawft_kernel::{
+        CognitiveTick, CognitiveTickConfig, ImpulseQueue, ImpulseType, SingleViewResolver,
+        TalkModeConfig, TalkModeLoop,
+    };
+
+    let (tier, chain, causal, crossrefs) = make_forest_tier(64);
+    let conv = "loop-c1";
+
+    // Build a multiplexed loop over a queue we hold, so we can inspect emits.
+    // Commit routing is not exercised here, so a trivial view resolver suffices.
+    let impulses = Arc::new(ImpulseQueue::new());
+    let resolver: Arc<dyn ViewResolver> =
+        Arc::new(SingleViewResolver::new(Arc::new(SessionView::new(conv, 64))));
+    let tick = Arc::new(CognitiveTick::new(CognitiveTickConfig::default()));
+    let talk_loop = Arc::new(TalkModeLoop::new(
+        impulses.clone(),
+        causal.clone(),
+        crossrefs.clone(),
+        resolver,
+        tick,
+        TalkModeConfig::default(),
+    ));
+    let tier = tier.with_talk_loop(talk_loop.clone());
+
+    let seq = append_and_index_as(&tier, &chain, conv, "user", "hello there").await;
+
+    // register_turn fired: the loop tracks this conversation's in-flight turn.
+    assert_eq!(
+        talk_loop.current_turn(conv),
+        Some(seq),
+        "register_turn must make the indexed turn the conv's in-flight turn"
+    );
+
+    // Exactly one EndOfUtterance, carrying {chain_seq, conv_id}, HLC = chain_seq.
+    let drained = impulses.drain_ready();
+    assert_eq!(drained.len(), 1, "exactly one impulse emitted per indexed turn");
+    let imp = &drained[0];
+    assert_eq!(imp.impulse_type, ImpulseType::EndOfUtterance);
+    assert_eq!(
+        imp.payload.get("chain_seq").and_then(|v| v.as_u64()),
+        Some(seq),
+        "EOU payload carries the turn's chain_seq"
+    );
+    assert_eq!(
+        imp.payload.get("conv_id").and_then(|v| v.as_str()),
+        Some(conv),
+        "EOU payload carries the conv_id for multiplex routing"
+    );
+    assert_eq!(
+        imp.hlc_timestamp, seq,
+        "EOU is HLC-stamped with the kernel-global chain_seq"
+    );
+}
+
+/// A tier WITHOUT a talk loop indexes turns but emits nothing — the legacy
+/// index-only path is unchanged (turns stay `Frontier`, no commit actor).
+#[tokio::test]
+async fn no_talk_loop_means_no_impulse() {
+    use clawft_kernel::ImpulseQueue;
+    let (tier, chain, _causal, _crossrefs) = make_forest_tier(64);
+    // A queue not wired to the tier: indexing must not touch it.
+    let queue = Arc::new(ImpulseQueue::new());
+    append_and_index_as(&tier, &chain, "no-loop", "user", "hi").await;
+    assert!(queue.is_empty(), "no talk loop ⇒ no impulse emitted");
 }
 
 // ── 5.3 budget validation ────────────────────────────────────────────

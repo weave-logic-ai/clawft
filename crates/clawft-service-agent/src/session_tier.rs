@@ -36,7 +36,9 @@ use clawft_kernel::chain::ChainManager;
 use clawft_kernel::context_graft::{GraftContent, GraftedItem, SessionView};
 use clawft_kernel::context_promote::{PromotionSignals, postmortem, promote_to_chain};
 use clawft_kernel::embedding::EmbeddingProvider;
-use clawft_kernel::{CausalGraph, CrossRefStore};
+use clawft_kernel::{
+    CausalGraph, CrossRefStore, ImpulseType, StructureTag, TalkModeLoop, ViewResolver,
+};
 
 use crate::session_forest::{self, ConvForest, DEFAULT_LINEAGE_DEPTH};
 
@@ -71,6 +73,12 @@ pub struct SessionTier {
     forest: Option<ForestHandles>,
     /// Per-conversation lineage state in the global causal graph.
     forests: DashMap<String, Arc<ConvForest>>,
+    /// The daemon-hosted multiplexed [`TalkModeLoop`] (M2 D2). When present,
+    /// [`index_turn`](Self::index_turn) registers each dual-written turn with
+    /// the loop and emits an `EndOfUtterance` so the loop commits it
+    /// Frontier→Committed on the shared forest. `None` keeps the legacy
+    /// index-only behaviour (no commit actor — turns stay `Frontier`).
+    talk_loop: Option<Arc<TalkModeLoop>>,
 }
 
 /// The kernel-global forest handles the L2 tier dual-writes into.
@@ -97,6 +105,7 @@ impl SessionTier {
             inline_max: DEFAULT_INLINE_MAX,
             forest: None,
             forests: DashMap::new(),
+            talk_loop: None,
         }
     }
 
@@ -117,6 +126,20 @@ impl SessionTier {
     /// Override the per-turn graft fan-out (default [`DEFAULT_GRAFT_TOP_K`]).
     pub fn with_graft_top_k(mut self, k: usize) -> Self {
         self.graft_top_k = k;
+        self
+    }
+
+    /// Attach the daemon-hosted multiplexed [`TalkModeLoop`] (M2 D2). Once
+    /// attached, [`index_turn`](Self::index_turn) registers each dual-written
+    /// turn node with the loop and emits an `EndOfUtterance` impulse, so the
+    /// loop's next tick commits the turn Frontier→Committed on the same forest
+    /// [`graft_block`](ContextGraftProvider::graft_block) reads from.
+    ///
+    /// The impulse queue handle is derived from the loop itself
+    /// ([`TalkModeLoop::impulses`]) at emit time — one source of truth, no
+    /// separately-threaded queue (plan §4 open-item 1).
+    pub fn with_talk_loop(mut self, talk_loop: Arc<TalkModeLoop>) -> Self {
+        self.talk_loop = Some(talk_loop);
         self
     }
 
@@ -184,7 +207,7 @@ impl SessionTier {
         // and in the cosine index regardless.
         if let Some(forest) = &self.forest {
             let conv_forest = self.conv_forest(conv_id);
-            session_forest::dual_write_turn(
+            let node = session_forest::dual_write_turn(
                 &forest.causal,
                 &forest.crossrefs,
                 &conv_forest,
@@ -196,6 +219,36 @@ impl SessionTier {
                 None,
                 None,
             );
+
+            // M2 D2 — text ImpulseSource, at the anchor convergence seam.
+            // `index_turn` is reached by BOTH `agent.chat` and
+            // `agent.turn.record` (through `KernelTurnAnchor`) and NEVER by the
+            // in-process CLI (`NoopTurnAnchor`), so emitting here fires an
+            // impulse for exactly the daemon turns that mint a `chain_seq`.
+            // Register the just-written turn node with the multiplexed loop,
+            // then emit an `EndOfUtterance` so the loop's next tick commits it
+            // Frontier→Committed on the shared forest. `register_turn` MUST
+            // precede the emit: the loop routes the commit by the turn's
+            // registered `conv_id`.
+            if let Some(talk_loop) = &self.talk_loop {
+                let uid = session_forest::turn_universal_id(conv_id, chain_seq, text);
+                talk_loop.register_turn(chain_seq, node, uid, conv_id);
+
+                // HLC stamp: `chain_seq` itself — the kernel-global monotone
+                // sequence minted by `ChainManager::append` (one counter across
+                // every conversation). Reusing it as the impulse HLC makes the
+                // queue's drain-order match witness-chain append-order across
+                // modalities without inventing a new clock (plan §4 item 3).
+                let tag = StructureTag::CausalGraph.as_u8();
+                talk_loop.impulses().emit(
+                    tag,
+                    [0u8; 32],
+                    tag,
+                    ImpulseType::EndOfUtterance,
+                    serde_json::json!({ "chain_seq": chain_seq, "conv_id": conv_id }),
+                    chain_seq,
+                );
+            }
         }
     }
 
@@ -337,6 +390,20 @@ impl ContextGraftProvider for SessionTier {
             _ => cosine,
         };
         Self::render_block(&items)
+    }
+}
+
+/// M2 D4 — SessionView frontier unification. The multiplexed
+/// [`TalkModeLoop`] resolves each conversation's [`SessionView`] through this
+/// seam, so it commits the *same* view [`graft_block`] reads from — one view,
+/// not a second lifecycle copy. Delegates to the tier's existing per-conversation
+/// view map; `None` when the view has been reaped (the loop treats that as a
+/// logged no-op).
+///
+/// [`graft_block`]: ContextGraftProvider::graft_block
+impl ViewResolver for SessionTier {
+    fn view_for(&self, conv_id: &str) -> Option<Arc<SessionView>> {
+        self.existing_view(conv_id)
     }
 }
 
