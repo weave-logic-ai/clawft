@@ -1204,12 +1204,14 @@ mod tests {
             temperature: None,
             max_tokens: None,
             conv_id: "x".into(),
+            metadata: None,
         };
         let q: clawft_service_agent::AgentChatParams = AgentChatParams {
             messages: Vec::new(),
             temperature: None,
             max_tokens: None,
             conv_id: "y".into(),
+            metadata: None,
         };
         _assert_same(p, q);
     }

@@ -116,8 +116,6 @@ pub mod talk_loop;
 #[cfg(feature = "ecc")]
 pub mod vector_backend;
 #[cfg(feature = "ecc")]
-pub mod view_resolver;
-#[cfg(feature = "ecc")]
 pub mod vector_diskann;
 #[cfg(feature = "ecc")]
 pub mod vector_hnsw;
@@ -125,6 +123,8 @@ pub mod vector_hnsw;
 pub mod vector_hybrid;
 #[cfg(feature = "ecc")]
 pub mod vector_quantization;
+#[cfg(feature = "ecc")]
+pub mod view_resolver;
 #[cfg(feature = "ecc")]
 pub mod weaver;
 
@@ -492,8 +492,6 @@ pub use supervisor::{
 };
 #[cfg(feature = "ecc")]
 pub use talk_loop::{TalkModeConfig, TalkModeLoop, TalkTickResult};
-#[cfg(feature = "ecc")]
-pub use view_resolver::{SingleViewResolver, ViewResolver};
 #[cfg(feature = "exochain")]
 pub use tree_manager::{TreeManager, TreeStats};
 pub use tree_view::{AgentTreeView, TreeScope};
@@ -507,6 +505,8 @@ pub use vector_diskann::{DiskAnnBackend, DiskAnnConfig};
 pub use vector_hnsw::HnswBackend;
 #[cfg(feature = "ecc")]
 pub use vector_hybrid::{EvictionPolicy, HybridBackend, HybridConfig};
+#[cfg(feature = "ecc")]
+pub use view_resolver::{SingleViewResolver, ViewResolver};
 #[cfg(feature = "ecc")]
 pub use weaver::{
     ConfidenceGap, ConfidenceReport, DataSource, ExportedModel, IngestResult, MetaDecisionType,

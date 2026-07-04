@@ -7,7 +7,9 @@ use crate::cognitive_tick::{CognitiveTick, CognitiveTickConfig};
 use crate::coherence::CoherenceSignals;
 use crate::context_graft::{ChunkMeta, NodeState, SessionView, content_hash};
 use crate::crossref::{CrossRefStore, CrossRefType, StructureTag, UniversalNodeId};
+use crate::health::HealthStatus;
 use crate::impulse::{ImpulseQueue, ImpulseType};
+use crate::service::{ServiceType, SystemService};
 use crate::view_resolver::ViewResolver;
 use serde_json::json;
 
@@ -37,7 +39,14 @@ impl ViewResolver for MapResolver {
     }
 }
 
-fn new_loop(views: Arc<dyn ViewResolver>) -> (Arc<ImpulseQueue>, Arc<CausalGraph>, Arc<CrossRefStore>, TalkModeLoop) {
+fn new_loop(
+    views: Arc<dyn ViewResolver>,
+) -> (
+    Arc<ImpulseQueue>,
+    Arc<CausalGraph>,
+    Arc<CrossRefStore>,
+    TalkModeLoop,
+) {
     let iq = Arc::new(ImpulseQueue::new());
     let causal = Arc::new(CausalGraph::new());
     let crs = Arc::new(CrossRefStore::new());
@@ -288,8 +297,22 @@ fn multiplex_commits_two_convs_independently() {
     let (nb, _) = seed_turn_in(&view_b, &causal, &l, "conv-b", 2, "hello from b");
 
     // EOU for each conversation, carrying both chain_seq and conv_id.
-    iq.emit(0, [0u8; 32], 0, ImpulseType::EndOfUtterance, json!({ "chain_seq": 1, "conv_id": "conv-a" }), 10);
-    iq.emit(0, [0u8; 32], 0, ImpulseType::EndOfUtterance, json!({ "chain_seq": 2, "conv_id": "conv-b" }), 11);
+    iq.emit(
+        0,
+        [0u8; 32],
+        0,
+        ImpulseType::EndOfUtterance,
+        json!({ "chain_seq": 1, "conv_id": "conv-a" }),
+        10,
+    );
+    iq.emit(
+        0,
+        [0u8; 32],
+        0,
+        ImpulseType::EndOfUtterance,
+        json!({ "chain_seq": 2, "conv_id": "conv-b" }),
+        11,
+    );
 
     let r = l.tick();
     assert_eq!(r.commits, 2);
@@ -315,7 +338,14 @@ fn eou_with_explicit_chain_seq_commits_named_seq() {
     assert_eq!(l.current_turn("conv-1"), Some(11));
 
     // Commit the NAMED (older) seq 10, not the in-flight 11.
-    iq.emit(0, [0u8; 32], 0, ImpulseType::EndOfUtterance, json!({ "chain_seq": 10 }), 5);
+    iq.emit(
+        0,
+        [0u8; 32],
+        0,
+        ImpulseType::EndOfUtterance,
+        json!({ "chain_seq": 10 }),
+        5,
+    );
     let r = l.tick();
     assert_eq!(r.commits, 1);
 
@@ -338,7 +368,14 @@ fn end_conversation_evicts_lineage() {
     assert_eq!(l.current_turn("conv-1"), None);
 
     // A late EOU for the evicted seq commits nothing — lineage is gone.
-    iq.emit(0, [0u8; 32], 0, ImpulseType::EndOfUtterance, json!({ "chain_seq": 100 }), 5);
+    iq.emit(
+        0,
+        [0u8; 32],
+        0,
+        ImpulseType::EndOfUtterance,
+        json!({ "chain_seq": 100 }),
+        5,
+    );
     let r = l.tick();
     assert_eq!(r.commits, 0);
     assert_eq!(view.state(100), Some(NodeState::Frontier));
@@ -357,7 +394,14 @@ fn drain_overflow_not_dropped() {
     let total = max + 10;
     for seq in 0..total as u64 {
         seed_turn(&view, &causal, &l, seq, &format!("turn {seq}"));
-        iq.emit(0, [0u8; 32], 0, ImpulseType::EndOfUtterance, json!({ "chain_seq": seq }), seq);
+        iq.emit(
+            0,
+            [0u8; 32],
+            0,
+            ImpulseType::EndOfUtterance,
+            json!({ "chain_seq": seq }),
+            seq,
+        );
     }
 
     // Tick until the queue is fully drained (never more than `max` per tick).
@@ -365,7 +409,12 @@ fn drain_overflow_not_dropped() {
     let mut committed = 0;
     while !iq.is_empty() {
         let r = l.tick();
-        assert!(r.impulses_sensed <= max, "drained {} > max {}", r.impulses_sensed, max);
+        assert!(
+            r.impulses_sensed <= max,
+            "drained {} > max {}",
+            r.impulses_sensed,
+            max
+        );
         committed += r.commits;
         ticks += 1;
         assert!(ticks < 10, "did not drain within a bounded number of ticks");
@@ -375,6 +424,10 @@ fn drain_overflow_not_dropped() {
 
     // Every seq is Committed on the view.
     for seq in 0..total as u64 {
-        assert_eq!(view.state(seq), Some(NodeState::Committed), "seq {seq} not committed");
+        assert_eq!(
+            view.state(seq),
+            Some(NodeState::Committed),
+            "seq {seq} not committed"
+        );
     }
 }

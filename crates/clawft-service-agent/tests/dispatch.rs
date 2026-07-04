@@ -81,6 +81,7 @@ fn params_for(conv_id: &str, content: &str) -> AgentChatParams {
         temperature: None,
         max_tokens: None,
         conv_id: conv_id.into(),
+        metadata: None,
     }
 }
 

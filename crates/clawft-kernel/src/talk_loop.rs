@@ -36,7 +36,6 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use async_trait::async_trait;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
@@ -50,16 +49,10 @@ use crate::floor::{
     ContentReadiness, FloorCandidate, FloorState, UrgencySignals, contending_count, crowd_density,
     evaluate_floor,
 };
-use crate::health::HealthStatus;
 use crate::impulse::{Impulse, ImpulseQueue, ImpulseType};
-use crate::service::{ServiceType, SystemService};
 use crate::view_resolver::ViewResolver;
 
 use std::sync::Arc;
-
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
 
 /// Configuration for the Talk-Mode loop.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,10 +73,6 @@ impl Default for TalkModeConfig {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tick result
-// ---------------------------------------------------------------------------
 
 /// Summary of one Talk-Mode tick (SENSE → FLOOR → MUTATE).
 #[derive(Debug, Clone)]
@@ -108,10 +97,6 @@ pub struct TalkTickResult {
     pub duration_us: u64,
 }
 
-// ---------------------------------------------------------------------------
-// Turn lineage
-// ---------------------------------------------------------------------------
-
 /// A registered turn node: its causal-graph id, its universal id (the cross-ref
 /// key), and the conversation it belongs to. Populated by the dual-write path
 /// (Phase 1). `conv_id` is what lets the multiplexed loop (M2 D4) resolve the
@@ -127,10 +112,6 @@ struct TalkInner {
     /// Coherence soft-dampener (ADR-062 D6); applied to floor scores.
     dampener: CoherenceDampener,
 }
-
-// ---------------------------------------------------------------------------
-// TalkModeLoop
-// ---------------------------------------------------------------------------
 
 /// The Talk-Mode tick service (ADR-062 Phase 2.1; multiplexed per M2 D1/D4).
 ///
@@ -297,14 +278,11 @@ impl TalkModeLoop {
     }
 
     /// FLOOR: build candidates from the live frontier of every conversation
-    /// touched this tick, score them, apply the coherence dampener to the
-    /// winning score. Returns `(state, raw_score, dampened_score)`.
-    ///
-    /// Multiplexed (M2 D4): the resolver exposes no way to enumerate all views,
-    /// so the conversations to read are those referenced by the drained impulses
-    /// plus any with an in-flight turn. Degenerate for text (single frontier per
-    /// conversation) and identical to the pre-M2 read for a single-conversation
-    /// loop (voice).
+    /// touched this tick, score them, dampen the winner. Returns
+    /// `(state, raw_score, dampened_score)`. Multiplexed (M2 D4): the resolver
+    /// can't enumerate all views, so the conversations read are those referenced
+    /// by the drained impulses plus any with an in-flight turn — degenerate for
+    /// text, identical to the pre-M2 read for a single-conversation loop (voice).
     fn read_floor(&self, drained: &[Impulse]) -> (FloorState, f32, f32) {
         let crowd = crowd_density(contending_count(drained));
         let mut convs: HashSet<String> = HashSet::new();
@@ -351,10 +329,9 @@ impl TalkModeLoop {
     }
 
     /// Resolve the conversation an impulse acts on: explicit `conv_id` in the
-    /// payload, else the conversation of its `chain_seq`'s registered turn, else
-    /// — for empty-payload floor-pressure impulses (voice) — the sole in-flight
-    /// conversation if exactly one exists. Text always carries `conv_id`/`chain_seq`,
-    /// so the single-conversation fallback only fires for voice.
+    /// payload, else its `chain_seq`'s registered turn, else — for empty-payload
+    /// floor-pressure impulses (voice) — the sole in-flight conversation if one
+    /// exists. Text always carries `conv_id`/`chain_seq`, so the fallback is voice-only.
     fn impulse_conv(&self, imp: &Impulse) -> Option<String> {
         if let Some(conv) = imp.payload.get("conv_id").and_then(|v| v.as_str()) {
             return Some(conv.to_string());
@@ -503,69 +480,13 @@ fn payload_u64(imp: &Impulse, key: &str) -> Option<u64> {
     imp.payload.get(key).and_then(|v| v.as_u64())
 }
 
-// ---------------------------------------------------------------------------
-// SystemService
-// ---------------------------------------------------------------------------
-
-#[async_trait]
-impl SystemService for TalkModeLoop {
-    fn name(&self) -> &str {
-        "voice.talk_mode"
-    }
-
-    fn service_type(&self) -> ServiceType {
-        ServiceType::Core
-    }
-
-    async fn start(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.tick.set_running(true);
-        Ok(())
-    }
-
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.tick.set_running(false);
-        Ok(())
-    }
-
-    async fn health_check(&self) -> HealthStatus {
-        if self.tick.is_running() {
-            HealthStatus::Healthy
-        } else {
-            HealthStatus::Degraded("talk-mode tick not running".into())
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Async run loop (native only — needs tokio/tokio-util)
-// ---------------------------------------------------------------------------
-
-/// Drive the Talk-Mode loop on the ADR-047 self-calibrating cadence until
-/// `cancel` fires or the tick is stopped. Modeled on
-/// [`run_democritus_loop`](crate::cognitive_tick::run_democritus_loop) but for
-/// turn-taking. Spawned by the daemon (Phase 6).
+// The `SystemService` impl + the native `run_talk_loop` live in a sibling file
+// (child module, so it reaches these private fields) to keep this file under the
+// 500-line ceiling. `run_talk_loop` is re-exported so the daemon path is stable.
+#[path = "talk_loop_service.rs"]
+mod service;
 #[cfg(feature = "native")]
-pub async fn run_talk_loop(loop_: Arc<TalkModeLoop>, cancel: tokio_util::sync::CancellationToken) {
-    loop_.tick.set_running(true);
-    tracing::info!("Talk-Mode loop started");
-    loop {
-        let interval_ms = loop_.tick.current_interval_ms();
-        if interval_ms == 0 {
-            tracing::warn!("Talk-Mode loop: tick interval is 0, exiting");
-            break;
-        }
-        tokio::select! {
-            _ = cancel.cancelled() => break,
-            _ = tokio::time::sleep(tokio::time::Duration::from_millis(interval_ms as u64)) => {}
-        }
-        if !loop_.tick.is_running() {
-            break;
-        }
-        loop_.tick();
-    }
-    loop_.tick.set_running(false);
-    tracing::info!("Talk-Mode loop exited");
-}
+pub use service::run_talk_loop;
 
 // ── Tests (split to a sibling file for the <500-line rule) ────────────────────
 #[cfg(test)]

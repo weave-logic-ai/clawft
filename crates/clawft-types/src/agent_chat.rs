@@ -63,6 +63,22 @@ pub struct AgentChatParams {
     /// ephemeral id so legacy panels keep working.
     #[serde(default = "default_conv_id")]
     pub conv_id: String,
+    /// Free-form per-turn metadata carried to the daemon agent loop.
+    ///
+    /// Threaded into `InboundMessage.metadata` by
+    /// `clawft_service_agent`'s `inbound_from_params`, giving the daemon
+    /// loop the same per-turn context the in-process REPL injects
+    /// directly. Documented known keys consumed by `loop_core`:
+    /// - `skill_instructions: String` — injected as a system note.
+    /// - `allowed_tools: [String]` — tool-subset filter.
+    /// - `model: String` — model override, carried to the router.
+    /// - `provenance: object` — diagnostic (e.g.
+    ///   `{"impulse_source":"agent.chat"}`) for the witness/audit trail.
+    ///
+    /// Additive and fully backward-compatible: absent on the wire when
+    /// `None`, and older callers that omit it deserialize to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// Default conversation id when the caller omits `conv_id`.

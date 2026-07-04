@@ -5751,6 +5751,7 @@ impl crate::voice_router::ChatHandler for DaemonAgentChatHandler {
             temperature: None,
             max_tokens: None,
             conv_id: turn.conv_id,
+            metadata: None,
         };
         agent
             .dispatch(params)

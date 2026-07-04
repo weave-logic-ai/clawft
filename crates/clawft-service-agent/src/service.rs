@@ -435,6 +435,15 @@ impl Drop for InFlightGuard {
 /// `session_key()` (`"agent.chat:<conv_id>"`) is stable across calls.
 fn inbound_from_params(params: &AgentChatParams, conv_id: &str) -> InboundMessage {
     let content = last_user_content(&params.messages).unwrap_or_default();
+    // Thread wire metadata (skill_instructions / allowed_tools / model /
+    // provenance) into the InboundMessage so the daemon loop sees the same
+    // per-turn context the in-process REPL injects directly (D5). The wire
+    // shape is a JSON object; `InboundMessage.metadata` is a HashMap.
+    let metadata = params
+        .metadata
+        .as_ref()
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default();
     InboundMessage {
         channel: AGENT_CHAT_CHANNEL.into(),
         sender_id: DEFAULT_SENDER_ID.into(),
@@ -442,7 +451,7 @@ fn inbound_from_params(params: &AgentChatParams, conv_id: &str) -> InboundMessag
         content,
         timestamp: chrono::Utc::now(),
         media: Vec::new(),
-        metadata: std::collections::HashMap::new(),
+        metadata,
     }
 }
 
@@ -512,7 +521,41 @@ mod tests {
             temperature: None,
             max_tokens: None,
             conv_id: conv_id.into(),
+            metadata: None,
         }
+    }
+
+    #[test]
+    fn inbound_from_params_threads_wire_metadata() {
+        // skill_instructions (and any other wire metadata) must survive
+        // the params → InboundMessage hop so the daemon loop reads what
+        // the in-process REPL injects directly (D5).
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            "skill_instructions".into(),
+            serde_json::Value::String("be terse".into()),
+        );
+        let p = AgentChatParams {
+            messages: vec![crate::protocol::AgentChatMessage {
+                role: "user".into(),
+                content: "hi".into(),
+            }],
+            temperature: None,
+            max_tokens: None,
+            conv_id: "c".into(),
+            metadata: Some(meta),
+        };
+        let inbound = inbound_from_params(&p, "c");
+        assert_eq!(
+            inbound.metadata.get("skill_instructions"),
+            Some(&serde_json::Value::String("be terse".into())),
+        );
+    }
+
+    #[test]
+    fn inbound_from_params_absent_metadata_is_empty() {
+        let inbound = inbound_from_params(&params_for("c", "hi"), "c");
+        assert!(inbound.metadata.is_empty());
     }
 
     #[test]
@@ -539,6 +582,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             conv_id: "c".into(),
+            metadata: None,
         };
         let inbound = inbound_from_params(&p, "c");
         assert_eq!(inbound.channel, AGENT_CHAT_CHANNEL);
@@ -557,6 +601,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             conv_id: "c".into(),
+            metadata: None,
         };
         let inbound = inbound_from_params(&p, "c");
         assert_eq!(inbound.content, "lone");
