@@ -51,6 +51,7 @@ clawft-rpc = { workspace = true }
 clawft-types = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde = { workspace = true }

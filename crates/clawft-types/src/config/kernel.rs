@@ -284,6 +284,19 @@ pub struct AgentAnchorConfig {
     /// the anchor side-effect set.
     #[serde(default, alias = "talkLoop")]
     pub talk_loop: bool,
+
+    /// Idle timeout in seconds before the daemon reaper ends an inactive
+    /// talk-loop conversation (runs the postmortem/promote path, then evicts
+    /// the loop's per-conversation state). Only consulted when [`talk_loop`] is
+    /// on. `None` ⇒ 1800s (30 min).
+    ///
+    /// [`talk_loop`]: Self::talk_loop
+    #[serde(
+        default,
+        alias = "talkLoopIdleSecs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub talk_loop_idle_secs: Option<u64>,
 }
 
 impl AgentAnchorConfig {

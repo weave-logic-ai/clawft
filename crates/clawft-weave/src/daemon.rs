@@ -94,6 +94,20 @@ fn daemon_turn_sink() -> Option<Arc<dyn clawft_core::agent::sink::ConversationSi
     DAEMON_TURN_SINK.get().cloned()
 }
 
+/// M2 D1/D6: daemon-wide handle to the multiplexed `TalkModeLoop` hosted at
+/// boot when `[kernel.agent].talk_loop` is on. Stashed so the `agent.chat.end`
+/// arm and the idle reaper can evict a conversation's loop state via
+/// `TalkModeLoop::end_conversation`. Set once at boot alongside `DAEMON_AGENT`.
+static DAEMON_TALK_LOOP: OnceLock<Arc<clawft_kernel::TalkModeLoop>> = OnceLock::new();
+
+/// M2 D6: per-conversation last-activity timestamps for the idle reaper.
+/// Touched in the `agent.chat` / `agent.turn.record` arms; the reaper walks
+/// `SessionTier::active_conversations()` and ends any conversation idle past
+/// `[kernel.agent].talk_loop_idle_secs`. Kept out of the view (no cheap
+/// wall-clock ts there) per plan §4.
+static DAEMON_CONV_ACTIVITY: OnceLock<Arc<dashmap::DashMap<String, std::time::Instant>>> =
+    OnceLock::new();
+
 /// agent-core-v1 Phase D2: daemon-wide handle to the concierge
 /// agent's kernel-issued `agent_id`.
 ///
@@ -948,6 +962,13 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
         // derived-write grant issued at boot covers both paths.
         // ADR-058 Phase 5.1: alongside the sink we build the per-conversation
         // L2 session tier and surface it so the agent loop can graft from it.
+        // M2 D7: hoist the anchor config so the post-block `talk_loop`
+        // validation warning (which runs after the kernel read guard is
+        // dropped) can consult it without re-locking.
+        let anchor_cfg = {
+            let k = kernel.read().await;
+            k.kernel_config().agent.clone().unwrap_or_default()
+        };
         let (agent_sink, session_tier): (
             Arc<dyn clawft_core::agent::sink::ConversationSink>,
             Option<Arc<clawft_service_agent::SessionTier>>,
@@ -963,7 +984,7 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
             // gated independently. With every flag off (default) the
             // sink falls back to the no-op anchor — pure substrate
             // JSONL behaviour, no extra work per turn.
-            let anchor_cfg = k.kernel_config().agent.clone().unwrap_or_default();
+            // `anchor_cfg` is hoisted above the block (M2 D7); reuse it here.
             let mut session_tier: Option<Arc<clawft_service_agent::SessionTier>> = None;
             let anchor: Arc<dyn clawft_service_agent::TurnAnchor> = if anchor_cfg.any_enabled() {
                 let chain = anchor_cfg
@@ -1023,6 +1044,58 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                     // doesn't pay the model's first-inference cost — mirrors the
                     // 6.2 STT pre-warm. Best-effort; cheap on the Mock fallback.
                     tier.warm().await;
+
+                    // M2 D1/D6/D7: host the multiplexed TalkModeLoop when
+                    // `talk_loop` is on AND the tier owns the forest (chain +
+                    // causal + cross-refs). The loop is the sole consumer of
+                    // `ecc_impulses`; each text turn's `EndOfUtterance` (emitted
+                    // by `SessionTier::index_turn`) commits Frontier→Committed on
+                    // the shared forest on the loop's next tick. The loop resolves
+                    // per-conversation views through the tier itself
+                    // (`ViewResolver`), so it commits the SAME view graft reads
+                    // from (D4). Attached via `set_talk_loop` on the already-Arc'd
+                    // tier to break the tier↔loop construction cycle (the loop
+                    // needs the tier as its `Arc<dyn ViewResolver>`, so the tier
+                    // must be Arc'd first).
+                    if anchor_cfg.talk_loop && tier_owns_forest {
+                        match (
+                            k.ecc_impulses().cloned(),
+                            k.ecc_tick().cloned(),
+                            causal.clone(),
+                            crossrefs.clone(),
+                        ) {
+                            (Some(impulses), Some(tick), Some(causal), Some(crossrefs)) => {
+                                // `TalkModeLoop::new` takes `Arc<dyn ViewResolver>`;
+                                // the Arc<SessionTier> coerces at the call site
+                                // (SessionTier: ViewResolver via P3).
+                                let views: Arc<dyn clawft_kernel::ViewResolver> = tier.clone();
+                                let talk_loop = Arc::new(clawft_kernel::TalkModeLoop::new(
+                                    impulses,
+                                    causal,
+                                    crossrefs,
+                                    views,
+                                    tick,
+                                    clawft_kernel::TalkModeConfig::default(),
+                                ));
+                                tier.set_talk_loop(talk_loop.clone());
+                                if let Err(e) = k.services().register(talk_loop.clone()) {
+                                    warn!(error = %e, "M2: TalkModeLoop service registration failed");
+                                }
+                                let _ = DAEMON_TALK_LOOP.set(talk_loop);
+                                info!(
+                                    "M2: multiplexed TalkModeLoop hosted — text turns commit \
+                                     Frontier→Committed on the shared forest"
+                                );
+                            }
+                            _ => {
+                                warn!(
+                                    "M2: talk_loop=true but kernel ECC handles \
+                                     (impulses/tick/causal/crossrefs) missing — talk_loop inert"
+                                );
+                            }
+                        }
+                    }
+
                     anchor = anchor.with_session_tier(tier.clone());
                     session_tier = Some(tier);
                     info!(
@@ -1044,6 +1117,20 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
             );
             (sink, session_tier)
         };
+
+        // M2 D7: if `talk_loop` was requested but never hosted (prerequisites
+        // off, or the kernel's ECC subsystem is absent), say so once and carry
+        // on with it inert — no partial wiring. Text turns still index and
+        // graft; they simply stay `Frontier` (uncommitted-but-functional).
+        if anchor_cfg.talk_loop && DAEMON_TALK_LOOP.get().is_none() {
+            warn!(
+                "M2: [kernel.agent].talk_loop=true but the loop was not hosted \
+                 (requires anchor_chain + anchor_causal AND kernel ECC init); \
+                 text turns will index but stay Frontier"
+            );
+        }
+        // M2 D6: back the idle reaper's per-conversation last-activity map.
+        let _ = DAEMON_CONV_ACTIVITY.set(Arc::new(dashmap::DashMap::new()));
 
         // Expose the sink to the `agent.turn.record` dispatch arm so
         // externally-produced turns (voice Talk-Mode) share the exact
@@ -1764,6 +1851,101 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
             }
         }
     });
+
+    // M2 D1/D6: drive the daemon-hosted TalkModeLoop and its idle reaper —
+    // only when the loop was actually hosted at boot (talk_loop on + prereqs
+    // met, so `DAEMON_TALK_LOOP` is set). Placed before the accept loop moves
+    // `shutdown_rx`.
+    // The tier is retrieved from the agent service (the boot-time
+    // `session_tier` local was moved into `with_session_tier` above).
+    if let (Some(talk_loop), Some(session_tier)) = (
+        DAEMON_TALK_LOOP.get().cloned(),
+        daemon_agent().and_then(|a| a.session_tier().cloned()),
+    ) {
+        // (a) run_talk_loop on the ECC self-calibrating cadence, cancelled on
+        // daemon shutdown. It wants a tokio-util CancellationToken, so bridge
+        // the daemon's watch-based shutdown into one.
+        let cancel = tokio_util::sync::CancellationToken::new();
+        {
+            let cancel = cancel.clone();
+            let mut rx = shutdown_rx.clone();
+            tokio::spawn(async move {
+                let _ = rx.changed().await;
+                cancel.cancel();
+            });
+        }
+        tokio::spawn(clawft_kernel::talk_loop::run_talk_loop(
+            talk_loop.clone(),
+            cancel,
+        ));
+
+        // (b) idle reaper — coarse 60s cadence (NOT the ~50ms tick). For each
+        // conversation idle past `talk_loop_idle_secs`, run the same
+        // postmortem/promote path `agent.chat.end` uses, then evict the loop's
+        // per-conversation state (D6), so `lineage`/views don't grow unbounded.
+        let idle_secs = {
+            let k = kernel.read().await;
+            k.kernel_config()
+                .agent
+                .as_ref()
+                .and_then(|a| a.talk_loop_idle_secs)
+                .unwrap_or(1800)
+        };
+        let idle = std::time::Duration::from_secs(idle_secs.max(1));
+        let activity = DAEMON_CONV_ACTIVITY
+            .get()
+            .cloned()
+            .unwrap_or_else(|| Arc::new(dashmap::DashMap::new()));
+        let reaper_tier = session_tier.clone();
+        let reaper_loop = talk_loop.clone();
+        let mut reaper_shutdown_rx = shutdown_rx.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let now = std::time::Instant::now();
+                        for conv_id in reaper_tier.active_conversations() {
+                            let idle_for = activity
+                                .get(&conv_id)
+                                .map(|t| now.duration_since(*t.value()));
+                            if !matches!(idle_for, Some(d) if d >= idle) {
+                                continue;
+                            }
+                            // Same end path as agent.chat.end: digest → durable
+                            // fact → promote_and_drop / drop_view.
+                            let durable = match daemon_llm() {
+                                Some(llm) => {
+                                    match reaper_tier.conversation_digest(&conv_id, 16_384) {
+                                        Some(digest) => {
+                                            crate::conv_postmortem::summarize_durable_facts(
+                                                &llm, &digest,
+                                            )
+                                            .await
+                                        }
+                                        None => None,
+                                    }
+                                }
+                                None => None,
+                            };
+                            if let Some(agent) = daemon_agent() {
+                                let _ = agent.end_conversation(&conv_id, durable.as_deref());
+                            }
+                            reaper_loop.end_conversation(&conv_id);
+                            activity.remove(&conv_id);
+                            info!(conv_id = %conv_id, "M2 reaper: ended idle talk conversation");
+                        }
+                    }
+                    _ = reaper_shutdown_rx.changed() => {
+                        if *reaper_shutdown_rx.borrow() {
+                            debug!("talk reaper shutting down");
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
 
     // Accept loop — clone shutdown_tx so the outer scope can still use it for Ctrl+C
     let accept_kernel = Arc::clone(&kernel);
@@ -4372,11 +4554,19 @@ async fn dispatch(
                 Ok(p) => p,
                 Err(e) => return Response::error(format!("agent.chat: invalid params: {e}")),
             };
+            // M2 D6: capture conv_id before `dispatch` consumes params so the
+            // idle reaper can stamp last-activity on success.
+            let conv_id = params.conv_id.clone();
             match agent.dispatch(params).await {
-                Ok(result) => match serde_json::to_value(result) {
-                    Ok(v) => Response::success(v),
-                    Err(e) => Response::error(format!("agent.chat: {e}")),
-                },
+                Ok(result) => {
+                    if let Some(activity) = DAEMON_CONV_ACTIVITY.get() {
+                        activity.insert(conv_id, std::time::Instant::now());
+                    }
+                    match serde_json::to_value(result) {
+                        Ok(v) => Response::success(v),
+                        Err(e) => Response::error(format!("agent.chat: {e}")),
+                    }
+                }
                 Err(e) => Response::error(format!("agent.chat: {e}")),
             }
         }
@@ -4425,6 +4615,15 @@ async fn dispatch(
                 _ => None,
             };
             let promoted = agent.end_conversation(&conv_id, durable_fact.as_deref());
+            // M2 D6: explicit end also evicts the hosted loop's per-conversation
+            // state (lineage / in-flight slot) and drops the activity entry, so
+            // the reaper never revisits it.
+            if let Some(talk_loop) = DAEMON_TALK_LOOP.get() {
+                talk_loop.end_conversation(&conv_id);
+            }
+            if let Some(activity) = DAEMON_CONV_ACTIVITY.get() {
+                activity.remove(&conv_id);
+            }
             Response::success(serde_json::json!({
                 "ended": conv_id,
                 "promoted_seq": promoted,
@@ -4493,6 +4692,12 @@ async fn dispatch(
                 recorded,
                 "agent.turn.record: turns published + anchored"
             );
+            // M2 D6: voice turns recorded here also mint EOU impulses via the
+            // shared anchor→index_turn seam, so stamp last-activity for the
+            // idle reaper just like agent.chat.
+            if let Some(activity) = DAEMON_CONV_ACTIVITY.get() {
+                activity.insert(p.conv_id.clone(), std::time::Instant::now());
+            }
             match serde_json::to_value(crate::protocol::AgentTurnRecordResult { recorded }) {
                 Ok(v) => Response::success(v),
                 Err(e) => Response::error(format!("agent.turn.record: {e}")),
