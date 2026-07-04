@@ -5473,26 +5473,45 @@ async fn dispatch(
         #[cfg(feature = "ecc")]
         "ecc.status" => {
             let k = kernel.read().await;
+            // Emit the flat keys the `weaver ecc status` CLI printer
+            // (`ecc_cmd.rs`) reads: `calibration`, `tick`, `hnsw_count`,
+            // `causal_nodes`, `causal_edges`, `crossref_count`,
+            // `impulse_pending`. A prior nested shape (`causal_graph.nodes`,
+            // `hnsw_entries`, `cognitive_tick`) drifted from the CLI's reads, so
+            // every field but `crossref_count` displayed 0 regardless of the
+            // real graph state — masking a working ECC pipeline as empty.
             let hnsw_count = k.ecc_hnsw().map(|h| h.len()).unwrap_or(0);
-            let tick_info = k.ecc_tick().map(|_t| {
-                serde_json::json!({
-                    "interval_ms": 50,
-                    "running": true,
-                })
-            });
-            let causal_stats = k.ecc_causal().map(|g| {
-                serde_json::json!({
-                    "nodes": g.node_count(),
-                    "edges": g.edge_count(),
-                })
-            });
+            let (causal_nodes, causal_edges) = k
+                .ecc_causal()
+                .map(|g| (g.node_count(), g.edge_count()))
+                .unwrap_or((0, 0));
             let crossref_count = k.ecc_crossrefs().map(|c| c.count()).unwrap_or(0);
+            let impulse_pending = k.ecc_impulses().map(|q| q.pending_count()).unwrap_or(0);
+            let calibration = k.ecc_calibration().map(|c| {
+                serde_json::json!({
+                    "compute_p50_us": c.compute_p50_us,
+                    "compute_p95_us": c.compute_p95_us,
+                    "tick_interval_ms": c.tick_interval_ms,
+                    "spectral_capable": c.spectral_capable,
+                })
+            });
+            let tick = k.ecc_tick().map(|t| {
+                serde_json::json!({
+                    "tick_count": t.tick_count(),
+                    "current_interval_ms": t.current_interval_ms(),
+                    "drift_count": t.drift_count(),
+                    "running": t.is_running(),
+                })
+            });
             Response::success(serde_json::json!({
                 "enabled": k.ecc_hnsw().is_some(),
-                "hnsw_entries": hnsw_count,
-                "cognitive_tick": tick_info,
-                "causal_graph": causal_stats,
+                "calibration": calibration,
+                "tick": tick,
+                "hnsw_count": hnsw_count,
+                "causal_nodes": causal_nodes,
+                "causal_edges": causal_edges,
                 "crossref_count": crossref_count,
+                "impulse_pending": impulse_pending,
             }))
         }
         #[cfg(feature = "ecc")]
