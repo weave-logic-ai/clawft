@@ -375,6 +375,71 @@ async fn no_talk_loop_means_no_impulse() {
     assert!(queue.is_empty(), "no talk loop ⇒ no impulse emitted");
 }
 
+/// HEADLINE (D2 + D4, daemon wiring path): build the tier `Arc`-first, hand the
+/// loop a `Weak` resolver to that tier, attach the loop via `set_talk_loop`
+/// (no strong cycle), then index a turn. One tick commits it Frontier→Committed
+/// on the tier's OWN view — the same object `graft_block` reads — proving the
+/// loop resolves through the weak handle to the live view.
+#[tokio::test]
+async fn daemon_wiring_commits_on_the_tiers_own_view() {
+    use clawft_kernel::context_graft::NodeState;
+    use clawft_kernel::{
+        CognitiveTick, CognitiveTickConfig, ImpulseQueue, TalkModeConfig, TalkModeLoop,
+    };
+
+    // Build the tier exactly as the daemon does: Arc-wrapped, forest-joined.
+    let embedder: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbeddingProvider::new(64));
+    let chain = Arc::new(ChainManager::new(0, 1000));
+    let causal = Arc::new(CausalGraph::new());
+    let crossrefs = Arc::new(CrossRefStore::new());
+    let tier = Arc::new(
+        SessionTier::new(embedder, chain.clone(), None)
+            .with_forest(causal.clone(), crossrefs.clone()),
+    );
+
+    // Loop resolves the tier through a Weak handle (no tier↔loop strong cycle);
+    // attach the loop to the tier via interior mutability.
+    let impulses = Arc::new(ImpulseQueue::new());
+    let resolver = SessionTier::weak_view_resolver(&tier);
+    let tick = Arc::new(CognitiveTick::new(CognitiveTickConfig::default()));
+    let talk_loop = Arc::new(TalkModeLoop::new(
+        impulses.clone(),
+        causal.clone(),
+        crossrefs.clone(),
+        resolver,
+        tick,
+        TalkModeConfig::default(),
+    ));
+    tier.set_talk_loop(talk_loop.clone());
+
+    // Drive a turn through the anchor seam → Frontier chunk + one queued EOU.
+    let conv = "wire-c1";
+    let ev = chain.append(
+        "agent",
+        "agent.chat.turn",
+        Some(json!({ "conv": conv, "content": "hello" })),
+    );
+    let seq = ev.sequence;
+    tier.index_turn(conv, seq, "agent.chat.turn", "user", "hello")
+        .await;
+
+    let view = ViewResolver::view_for(&*tier, conv).expect("view exists after index");
+    assert_eq!(
+        view.chunk(seq).expect("chunk indexed").state,
+        NodeState::Frontier,
+        "turn is born Frontier before the loop ticks"
+    );
+
+    // One tick: the loop resolves the tier's own view through the Weak handle
+    // and commits Frontier→Committed.
+    talk_loop.tick();
+    assert_eq!(
+        view.chunk(seq).expect("chunk still present").state,
+        NodeState::Committed,
+        "loop committed the turn on the tier's own view via the weak resolver"
+    );
+}
+
 // ── 5.3 budget validation ────────────────────────────────────────────
 
 /// Per-turn graft hot-path budget (embed + scoped HNSW search), against the

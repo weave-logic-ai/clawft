@@ -23,7 +23,7 @@
 //! [`prune_to_recent`]: SessionTier::prune_to_recent
 //! [`promote_and_drop`]: SessionTier::promote_and_drop
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Weak};
 
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -73,12 +73,19 @@ pub struct SessionTier {
     forest: Option<ForestHandles>,
     /// Per-conversation lineage state in the global causal graph.
     forests: DashMap<String, Arc<ConvForest>>,
-    /// The daemon-hosted multiplexed [`TalkModeLoop`] (M2 D2). When present,
+    /// The daemon-hosted multiplexed [`TalkModeLoop`] (M2 D2). When set,
     /// [`index_turn`](Self::index_turn) registers each dual-written turn with
     /// the loop and emits an `EndOfUtterance` so the loop commits it
-    /// Frontier→Committed on the shared forest. `None` keeps the legacy
+    /// Frontier→Committed on the shared forest. Empty keeps the legacy
     /// index-only behaviour (no commit actor — turns stay `Frontier`).
-    talk_loop: Option<Arc<TalkModeLoop>>,
+    ///
+    /// A write-once [`OnceLock`] rather than a plain field so the daemon can
+    /// attach the loop through [`set_talk_loop`](Self::set_talk_loop) *after*
+    /// the tier is already `Arc`-wrapped — the loop needs the finished
+    /// `Arc<SessionTier>` as its [`ViewResolver`], so the tier can't hold the
+    /// loop before it exists. Interior mutability breaks that construction
+    /// cycle (see [`weak_view_resolver`](Self::weak_view_resolver)).
+    talk_loop: OnceLock<Arc<TalkModeLoop>>,
 }
 
 /// The kernel-global forest handles the L2 tier dual-writes into.
@@ -105,7 +112,7 @@ impl SessionTier {
             inline_max: DEFAULT_INLINE_MAX,
             forest: None,
             forests: DashMap::new(),
-            talk_loop: None,
+            talk_loop: OnceLock::new(),
         }
     }
 
@@ -129,18 +136,55 @@ impl SessionTier {
         self
     }
 
-    /// Attach the daemon-hosted multiplexed [`TalkModeLoop`] (M2 D2). Once
-    /// attached, [`index_turn`](Self::index_turn) registers each dual-written
-    /// turn node with the loop and emits an `EndOfUtterance` impulse, so the
-    /// loop's next tick commits the turn Frontier→Committed on the same forest
+    /// Attach the daemon-hosted multiplexed [`TalkModeLoop`] (M2 D2) as an
+    /// owned-value builder. Once attached, [`index_turn`](Self::index_turn)
+    /// registers each dual-written turn node with the loop and emits an
+    /// `EndOfUtterance` impulse, so the loop's next tick commits the turn
+    /// Frontier→Committed on the same forest
     /// [`graft_block`](ContextGraftProvider::graft_block) reads from.
     ///
     /// The impulse queue handle is derived from the loop itself
     /// ([`TalkModeLoop::impulses`]) at emit time — one source of truth, no
     /// separately-threaded queue (plan §4 open-item 1).
-    pub fn with_talk_loop(mut self, talk_loop: Arc<TalkModeLoop>) -> Self {
-        self.talk_loop = Some(talk_loop);
+    ///
+    /// Use this when the tier is built and consumed by value (tests, voice's
+    /// single-view assembly). The daemon builds a `TalkModeLoop` whose
+    /// resolver *is* this tier — a construction cycle the by-value builder
+    /// can't express — so the daemon uses [`set_talk_loop`](Self::set_talk_loop)
+    /// after `Arc`-wrapping instead.
+    pub fn with_talk_loop(self, talk_loop: Arc<TalkModeLoop>) -> Self {
+        // First write wins; wiring attaches the loop exactly once.
+        let _ = self.talk_loop.set(talk_loop);
         self
+    }
+
+    /// Attach the [`TalkModeLoop`] through interior mutability (M2 D2), after
+    /// the tier is already `Arc`-wrapped. This is the daemon's wiring path: the
+    /// loop's [`ViewResolver`] must be this very tier, so the tier can't hold
+    /// the loop until the loop (and thus the tier `Arc`) exists. The daemon:
+    ///
+    /// ```ignore
+    /// let tier = Arc::new(SessionTier::new(..).with_forest(..));
+    /// let resolver = SessionTier::weak_view_resolver(&tier); // loop → tier (Weak)
+    /// let talk_loop = Arc::new(TalkModeLoop::new(.., resolver, ..));
+    /// tier.set_talk_loop(talk_loop.clone());                 // tier → loop (Arc)
+    /// ```
+    ///
+    /// The loop holds a [`Weak`] back-reference (via `weak_view_resolver`), so
+    /// there is **no strong reference cycle** — the tier owns the loop, the loop
+    /// only borrows the tier and gracefully no-ops its commits if the tier is
+    /// ever dropped. First write wins.
+    pub fn set_talk_loop(&self, talk_loop: Arc<TalkModeLoop>) {
+        let _ = self.talk_loop.set(talk_loop);
+    }
+
+    /// Build the [`ViewResolver`] the daemon hands to `TalkModeLoop::new` — a
+    /// `Weak` handle to this tier so the loop resolves the tier's live
+    /// per-conversation views without forming a strong `tier ↔ loop` cycle
+    /// (see [`set_talk_loop`](Self::set_talk_loop)). Resolves to `None` (a
+    /// logged no-op in the loop) once the tier is dropped.
+    pub fn weak_view_resolver(tier: &Arc<Self>) -> Arc<dyn ViewResolver> {
+        Arc::new(WeakTierResolver(Arc::downgrade(tier)))
     }
 
     /// Get or create the per-conversation forest lineage state.
@@ -230,7 +274,7 @@ impl SessionTier {
             // Frontier→Committed on the shared forest. `register_turn` MUST
             // precede the emit: the loop routes the commit by the turn's
             // registered `conv_id`.
-            if let Some(talk_loop) = &self.talk_loop {
+            if let Some(talk_loop) = self.talk_loop.get() {
                 let uid = session_forest::turn_universal_id(conv_id, chain_seq, text);
                 talk_loop.register_turn(chain_seq, node, uid, conv_id);
 
@@ -404,6 +448,20 @@ impl ContextGraftProvider for SessionTier {
 impl ViewResolver for SessionTier {
     fn view_for(&self, conv_id: &str) -> Option<Arc<SessionView>> {
         self.existing_view(conv_id)
+    }
+}
+
+/// A [`Weak`] adapter that lets the multiplexed [`TalkModeLoop`] resolve a
+/// [`SessionTier`]'s views without a strong `tier ↔ loop` reference cycle
+/// (built by [`SessionTier::weak_view_resolver`]). The tier owns the loop; the
+/// loop only borrows the tier. When the tier has been dropped the upgrade
+/// fails and view resolution returns `None` — which the loop treats as a
+/// logged no-op, exactly the reaped-conversation contract of D4.
+struct WeakTierResolver(Weak<SessionTier>);
+
+impl ViewResolver for WeakTierResolver {
+    fn view_for(&self, conv_id: &str) -> Option<Arc<SessionView>> {
+        self.0.upgrade()?.view_for(conv_id)
     }
 }
 
