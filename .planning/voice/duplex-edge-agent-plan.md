@@ -24,6 +24,14 @@ optimization; the desktop native session becomes a thin client of a localhost da
 
 ---
 
+> **Sequencing note (2026-07-05).** `.planning/voice/phase1-waves-plan.md` restructures the
+> voice rollout into three user-defined waves and inserts an **observation-first, half-duplex
+> validation stage in front of this plan**: Wave 1 (STT ingestion + labeling + a process
+> surface) and Wave 2 (voice → agent loop, text reply) reuse the in-process capture + the
+> `agent.turn.record`→`index_turn` commit seam, with no transport/floor/TTS work. **This
+> plan's Phase 0 + Phase 1 below == that plan's Wave 3** — do them *after* the surface exists,
+> using it as the floor/barge debugging instrument. Phases 2/2b/3 are unchanged.
+
 ## 1. Phasing (desktop-over-localhost first — zero hardware, zero remote-transport risk)
 
 ### Phase 0 — Daemon-side DuplexChannel + EdgeReflex core + loopback sim (no hardware)
