@@ -615,13 +615,12 @@ async fn listen_only_cycles_multiple_turns() {
 }
 
 #[tokio::test]
-async fn listen_only_drains_stale_backlog_after_each_turn() {
-    // Root-cause regression: talk-mode drains the capture channel after every
-    // turn (in speak_with_barge_in); listen-only had no such drain, so frames
-    // captured during (slow) STT stayed queued and later utterances corrupted /
-    // capture "never re-armed". Here a full SECOND utterance is queued behind a
-    // gated (in-flight) first turn; after the turn records, the drain must
-    // discard that backlog, so ONLY the first turn produces a UserTurn.
+async fn listen_only_decodes_both_utterances_through_slow_decode() {
+    // Round-3 fix (replaces the old drain): decode runs on a spawned worker so
+    // the capture loop never blocks. A full SECOND utterance streams in and
+    // finalizes WHILE the first is still in (gated) decode; when decode
+    // releases, BOTH must be transcribed completely — no speech dropped. This
+    // is RED against the previous drain (which discarded the second utterance).
     let observer = Arc::new(RecordingObserver::default());
     let sink = Arc::new(RecordingSink::default());
     let audio = Arc::new(CountingAudio::default());
@@ -664,9 +663,9 @@ async fn listen_only_drains_stale_backlog_after_each_turn() {
             .count()
     };
 
-    // Turn 1 (finalizes) immediately followed by a full second utterance — all
-    // queued before STT is released, so the second sits as backlog behind the
-    // gated first turn.
+    // Turn 1 (finalizes) immediately followed by a full second utterance — both
+    // queued before decode is released; the second finalizes while the first is
+    // still in the worker's (gated) decode.
     for _ in 0..3 {
         tx.send(voiced_frame()).await.unwrap();
     }
@@ -680,11 +679,12 @@ async fn listen_only_drains_stale_backlog_after_each_turn() {
         tx.send(silent_frame()).await.unwrap();
     }
 
-    // Let the loop finalize turn 1 and park in gated STT with the backlog queued.
+    // Let the loop finalize both turns (worker parked in gated decode on #1,
+    // #2 queued behind it).
     tokio::time::sleep(Duration::from_millis(80)).await;
-    // Release decode: turn 1 records, then the drain discards the backlog.
+    // Release decode — both queued utterances now decode in order.
     gate.add_permits(100);
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    wait_until(|| turns(&observer) >= 2).await;
 
     cancel.cancel();
     drop(tx);
@@ -692,9 +692,9 @@ async fn listen_only_drains_stale_backlog_after_each_turn() {
 
     assert_eq!(
         turns(&observer),
-        1,
-        "the backlog captured during STT must be drained — a stale second \
-         utterance must NOT re-fire as a turn"
+        2,
+        "both utterances must decode — the non-blocking worker drops no speech \
+         during decode (RED against the old drain)"
     );
 }
 

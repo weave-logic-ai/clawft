@@ -26,10 +26,10 @@
 //! and never pulls clawft-llm / clawft-kernel / cpal into clawft-channels.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -44,7 +44,7 @@ use super::ser::{refine_emotion, DspSer, SerModel};
 use super::speaker::{SpeakerEmbedder, SpeakerId, SpeakerRegistry};
 use super::stt::{SttBackend, Utterance};
 use super::tts::{DualLayerTts, TtsSink};
-use super::turn::{EndpointModel, SemanticEndpointer, TurnDecision};
+use super::turn::{EndpointModel, EndpointSnapshot, SemanticEndpointer, TurnDecision};
 use super::vad::{EnergyVad, NoiseFloor};
 
 /// How far above the tracked room-tone floor a frame must sit to count as
@@ -78,6 +78,11 @@ const LEVEL_METER_INTERVAL: Duration = Duration::from_millis(100);
 /// much raw audio continuously and prepend it at onset so sentence starts
 /// aren't clipped — standard dictation-stack pre-roll.
 const PREROLL_MS: usize = 400;
+
+/// How many finalized utterances the listen-only decode worker may queue before
+/// it drops the OLDEST (with a warning). Bounds memory if decode falls behind
+/// sustained speech; whole utterances are dropped, never frames mid-utterance.
+const DECODE_QUEUE_CAP: usize = 8;
 
 /// Extract a self-given name from a transcript ("my name is X" / "call me
 /// X" …). Mirrors voicelab's deliberately explicit phrase set — the loose
@@ -287,13 +292,278 @@ mod name_tests {
     }
 }
 
+/// A finalized utterance handed from the capture loop to decode. It carries the
+/// endpoint + noise-floor readings sampled *at finalize* so decode can run off
+/// the capture loop without touching the (still-advancing) endpointer / floor.
+struct FinalizedTurn {
+    samples: Vec<i16>,
+    voiced_samples: usize,
+    endpoint: Option<EndpointSnapshot>,
+    noise_floor_dbfs: f32,
+    noise_floor_converged: bool,
+}
+
+/// The STT → speaker → record → emit pipeline for one finalized utterance,
+/// factored out of the controller so it runs either inline (talk mode, which
+/// then speaks) or on a spawned worker (listen-only, so the capture loop never
+/// blocks during the slow native decode — the fix for the round-3 "restart is
+/// wrong" speech loss). All state is `Arc`, so it is cheap to clone into the
+/// worker.
+#[derive(Clone)]
+struct Decoder {
+    stt: Arc<dyn SttBackend>,
+    embedder: Option<Arc<dyn SpeakerEmbedder>>,
+    registry: Arc<Mutex<SpeakerRegistry>>,
+    ser: Arc<dyn SerModel>,
+    observer: Arc<dyn ConversationObserver>,
+    config: TalkModeConfig,
+}
+
+impl Decoder {
+    /// Best-effort save of the speaker registry to the configured store.
+    fn persist_registry(&self) {
+        if let Some(path) = &self.config.speaker_store {
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let reg = self.registry.lock().expect("speaker registry poisoned");
+            if let Err(e) = reg.save(path) {
+                warn!(error = %e, path = %path.display(), "speaker registry save failed");
+            }
+        }
+    }
+
+    /// Attribute the utterance to a speaker, returning the full
+    /// [`SpeakerAnalysis`] (id / name / near-miss cosine / action / dim) plus
+    /// the private LLM context. Listen-only never auto-enrolls (no registry
+    /// pollution); talk mode enrolls a session speaker on a non-match.
+    async fn attribute_speaker(&self, utt: &Utterance) -> (SpeakerAnalysis, Option<String>) {
+        let Some(embedder) = self.embedder.clone() else {
+            return (SpeakerAnalysis::default(), None);
+        };
+        let emb = match embedder.embed(&utt.samples, utt.sample_rate).await {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(error = %e, "speaker embed failed; turn unattributed");
+                return (SpeakerAnalysis::default(), None);
+            }
+        };
+        let embedding_dim = embedder.dim() as u32;
+        // Lock once for the read + optional enroll; release before the observer
+        // event / persist so those never run under the lock.
+        let (analysis, enrolled) = {
+            let mut reg = self.registry.lock().expect("speaker registry poisoned");
+            let threshold = reg.threshold();
+            let best = reg.best_match(&emb);
+            let near_score = best.as_ref().map(|(_, s)| *s).unwrap_or(0.0);
+            if let Some((id, score)) = best.filter(|(_, s)| *s >= threshold) {
+                reg.attribute(&id, &emb);
+                let name = reg.get(&id).map(|n| n.name.clone());
+                (
+                    SpeakerAnalysis {
+                        id: Some(id),
+                        name,
+                        score,
+                        threshold,
+                        action: SpeakerAction::Identified,
+                        embedding_dim,
+                    },
+                    None,
+                )
+            } else if self.config.listen_only {
+                (
+                    SpeakerAnalysis {
+                        id: None,
+                        name: None,
+                        score: near_score,
+                        threshold,
+                        action: SpeakerAction::Unknown,
+                        embedding_dim,
+                    },
+                    None,
+                )
+            } else {
+                let id = reg.enroll(self.config.default_speaker_name.clone(), &emb);
+                let name = reg.get(&id).map(|n| n.name.clone());
+                (
+                    SpeakerAnalysis {
+                        id: Some(id.clone()),
+                        name: name.clone(),
+                        score: near_score,
+                        threshold,
+                        action: SpeakerAction::Enrolled,
+                        embedding_dim,
+                    },
+                    Some((id, name.unwrap_or_default())),
+                )
+            }
+        };
+        if let Some((id, name)) = enrolled {
+            self.observer
+                .observe(ConversationEvent::SpeakerEnrolled { id, name });
+            self.persist_registry();
+        }
+        let ctx = analysis.id.as_ref().zip(analysis.name.as_ref()).map(|(id, n)| {
+            format!("The current speaker is {n} (id {id}). Use this only as private context; never read it aloud.")
+        });
+        (analysis, ctx)
+    }
+
+    /// Assemble the complete `VoiceAnalysis` record (§W1.2) — endpoint + floor
+    /// come from the [`FinalizedTurn`] sampled at finalize, the rest from the
+    /// DSP extractors over the utterance.
+    #[allow(clippy::too_many_arguments)]
+    fn build_voice_analysis(
+        &self,
+        utt: &Utterance,
+        detail: &super::stt::TranscriptResult,
+        speaker: SpeakerAnalysis,
+        stt_latency_ms: u64,
+        voiced_samples: usize,
+        endpoint: Option<EndpointSnapshot>,
+        noise_floor_dbfs: f32,
+        noise_floor_converged: bool,
+    ) -> VoiceAnalysis {
+        let sr = utt.sample_rate.max(1);
+        // True voiced duration (excludes pre-roll padding in `utt.samples`).
+        let voiced_ms = voiced_samples as u64 * 1_000 / sr as u64;
+
+        let tokens: Vec<TokenAnalysis> = detail
+            .tokens
+            .iter()
+            .map(|t| TokenAnalysis {
+                text: t.text.clone(),
+                t_ms: t.start_ms,
+                dur_ms: t.duration_ms,
+                conf: t.confidence,
+            })
+            .collect();
+        let path = if tokens.is_empty() {
+            SttPath::Substrate
+        } else {
+            SttPath::Native
+        };
+        let stt = SttAnalysis::new(self.stt.model().wire_name(), path, stt_latency_ms, tokens);
+
+        let silence_tail_ms = endpoint.as_ref().map(|s| s.silence_tail_ms).unwrap_or(0);
+        let duration_ms = voiced_ms + silence_tail_ms;
+        let endpoint = EndpointAnalysis {
+            completion_prob: endpoint.as_ref().map(|s| s.completion_prob).unwrap_or(0.0),
+            source: endpoint
+                .as_ref()
+                .map(|s| s.source.clone())
+                .unwrap_or_else(|| "unknown".into()),
+            silence_tail_ms,
+            latency_ms: duration_ms,
+        };
+
+        let health = capture_health(&utt.samples, sr);
+        let audio = AudioAnalysis {
+            duration_ms,
+            voiced_ms,
+            silence_ms: silence_tail_ms,
+            rms_dbfs_mean: health.rms_dbfs_mean,
+            rms_dbfs_peak: health.rms_dbfs_peak,
+            noise_floor_dbfs,
+            snr_db: health.rms_dbfs_mean - noise_floor_dbfs,
+            clip_pct: health.clip_pct,
+            dc_offset: health.dc_offset,
+            noise_floor_converged,
+        };
+
+        let prosody = analyze_prosody(&ProsodyInput {
+            samples: &utt.samples,
+            sample_rate: sr,
+            voiced_ms,
+            tokens: &detail.tokens,
+        });
+        let emotion = refine_emotion(
+            emotion_from_prosody(&prosody),
+            self.ser.predict(&utt.samples, sr),
+        );
+        let paralinguistics = classify_paralinguistics(&ParalinguisticInput {
+            transcript: &detail.text,
+            voiced_ms,
+            energy_dynamics_db: prosody.energy_dynamics_db,
+            has_f0: prosody.f0_mean_hz > 0.0,
+        });
+
+        VoiceAnalysis::new(stt, endpoint, speaker, audio, prosody, emotion, paralinguistics)
+    }
+
+    /// Full decode of one finalized utterance: STT → speaker → record → emit
+    /// `UserTurn`. Returns `(transcript, private speaker context)` for talk-mode
+    /// follow-up, or `None` when the turn is dropped (empty transcript / error).
+    async fn decode_and_emit(&self, turn: FinalizedTurn) -> Option<(String, Option<String>)> {
+        let sr = self.config.sample_rate;
+        let utt = Utterance {
+            samples: turn.samples,
+            sample_rate: sr,
+        };
+        info!(
+            samples = utt.samples.len(),
+            ms = utt.samples.len() as u64 * 1000 / sr.max(1) as u64,
+            "talk-mode end-of-turn utterance captured"
+        );
+
+        let stt_start = Instant::now();
+        let detail = match self.stt.transcribe_detailed(&utt).await {
+            Ok(d) if !d.text.trim().is_empty() => d,
+            Ok(_) => {
+                info!("talk-mode STT returned an empty transcript; turn dropped");
+                return None;
+            }
+            Err(e) => {
+                warn!(error = %e, "talk-mode STT failed");
+                return None;
+            }
+        };
+        let stt_latency_ms = stt_start.elapsed().as_millis() as u64;
+        let text = detail.text.clone();
+        info!(transcript = %text, "talk-mode user turn");
+
+        let (speaker, speaker_ctx) = self.attribute_speaker(&utt).await;
+        let speaker_id = speaker.id.clone();
+        let speaker_name = speaker.name.clone();
+
+        // Spoken self-enrollment: a voice naming itself upgrades its placeholder.
+        if let (Some(id), Some(name)) = (&speaker_id, extract_spoken_name(&text)) {
+            let renamed = self
+                .registry
+                .lock()
+                .expect("speaker registry poisoned")
+                .rename(id, name.clone());
+            if renamed {
+                info!(speaker = %id, %name, "talk-mode speaker self-enrolled by name");
+                self.persist_registry();
+            }
+        }
+
+        let voice_analysis = self.build_voice_analysis(
+            &utt,
+            &detail,
+            speaker,
+            stt_latency_ms,
+            turn.voiced_samples,
+            turn.endpoint,
+            turn.noise_floor_dbfs,
+            turn.noise_floor_converged,
+        );
+
+        self.observer.observe(ConversationEvent::UserTurn {
+            text: text.clone(),
+            speaker: speaker_id,
+            speaker_name,
+            voice_analysis: Some(Box::new(voice_analysis)),
+        });
+        Some((text, speaker_ctx))
+    }
+}
+
 /// The Talk-Mode controller. Generic over the endpoint model so a smart-turn
 /// ONNX model or the heuristic default both fit.
 pub struct TalkModeController<M: EndpointModel> {
     endpointer: SemanticEndpointer<M>,
-    stt: Arc<dyn SttBackend>,
-    embedder: Option<Arc<dyn SpeakerEmbedder>>,
-    registry: SpeakerRegistry,
     policy: VoiceAnswerPolicy,
     llm: Arc<dyn VoiceLlm>,
     tts: DualLayerTts,
@@ -301,11 +571,8 @@ pub struct TalkModeController<M: EndpointModel> {
     audio: Arc<dyn AudioControl>,
     observer: Arc<dyn ConversationObserver>,
     config: TalkModeConfig,
-    /// Speech-emotion seam (§W1.2). Defaults to [`DspSer`] — no model, so the
-    /// DSP prosody arousal floor stands and `emotion.source` is `prosody-dsp`;
-    /// inject a real SER ONNX with [`Self::with_ser`] later to refine valence +
-    /// label without reshaping the record.
-    ser: Arc<dyn SerModel>,
+    /// STT → speaker → record → emit pipeline (shared with the listen worker).
+    decoder: Decoder,
     /// Adaptive room-tone tracker. The voiced gate is
     /// `max(config.vad_threshold_dbfs, floor + margin)` so a loud room
     /// (fans, HVAC) cannot read as permanent speech and starve the
@@ -330,11 +597,16 @@ impl<M: EndpointModel> TalkModeController<M> {
         observer: Arc<dyn ConversationObserver>,
         config: TalkModeConfig,
     ) -> Self {
-        Self {
-            endpointer,
+        let decoder = Decoder {
             stt,
             embedder,
-            registry,
+            registry: Arc::new(Mutex::new(registry)),
+            ser: Arc::new(DspSer),
+            observer: observer.clone(),
+            config: config.clone(),
+        };
+        Self {
+            endpointer,
             policy,
             llm,
             tts,
@@ -342,7 +614,7 @@ impl<M: EndpointModel> TalkModeController<M> {
             audio,
             observer,
             config,
-            ser: Arc::new(DspSer),
+            decoder,
             noise_floor: NoiseFloor::new(VAD_NOISE_MARGIN_DB),
         }
     }
@@ -352,26 +624,8 @@ impl<M: EndpointModel> TalkModeController<M> {
     /// ONNX from `clawft-voice-onnx` overrides `emotion.valence` + `label`
     /// (and `dominance`) while DSP arousal stays the floor.
     pub fn with_ser(mut self, ser: Arc<dyn SerModel>) -> Self {
-        self.ser = ser;
+        self.decoder.ser = ser;
         self
-    }
-
-    /// Borrow the speaker registry (e.g. to persist it after a session).
-    pub fn registry(&self) -> &SpeakerRegistry {
-        &self.registry
-    }
-
-    /// Best-effort save of the speaker registry to the configured store
-    /// (enrollments + renames survive sessions). No-op when unconfigured.
-    fn persist_registry(&self) {
-        if let Some(path) = &self.config.speaker_store {
-            if let Some(dir) = path.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            if let Err(e) = self.registry.save(path) {
-                warn!(error = %e, path = %path.display(), "speaker registry save failed");
-            }
-        }
     }
 
     /// Per-frame level: the voiced decision plus the `CaptureLevel` inputs
@@ -395,6 +649,41 @@ impl<M: EndpointModel> TalkModeController<M> {
             self.tts
                 .spawn_warm_acks(vec![ACK_SHORT.to_string(), ACK_LONG.to_string()]);
         }
+
+        // Listen-only decode worker: the capture loop hands finalized utterances
+        // to this off-loop task so it NEVER blocks on the slow native decode
+        // (the round-3 fix — no drain, no during-decode speech loss). A drop-
+        // oldest queue bounds memory if decode falls behind sustained speech.
+        let (decode_queue, decode_notify, decode_worker) = if self.config.listen_only {
+            let queue: Arc<Mutex<VecDeque<FinalizedTurn>>> = Arc::new(Mutex::new(VecDeque::new()));
+            let notify = Arc::new(Notify::new());
+            let decoder = self.decoder.clone();
+            let wq = queue.clone();
+            let wn = notify.clone();
+            let wc = cancel.clone();
+            let handle = tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = wc.cancelled() => break,
+                        _ = wn.notified() => {
+                            loop {
+                                let next = wq.lock().expect("decode queue poisoned").pop_front();
+                                match next {
+                                    Some(turn) => {
+                                        decoder.decode_and_emit(turn).await;
+                                    }
+                                    None => break,
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            (Some(queue), Some(notify), Some(handle))
+        } else {
+            (None, None, None)
+        };
+
         let mut utt: Vec<i16> = Vec::new();
         // Voiced-sample count for the current utterance — the min-turn guard
         // gates on this, not `utt.len()`, since pre-roll prepends (mostly quiet)
@@ -452,30 +741,36 @@ impl<M: EndpointModel> TalkModeController<M> {
                                 // Surface the endpoint decision (§W1.4) just
                                 // before the turn is processed — prob + source +
                                 // silence tail, captured by the endpointer.
-                                if let Some(s) = self.endpointer.last_endpoint().cloned() {
+                                let snap = self.endpointer.last_endpoint().cloned();
+                                if let Some(s) = &snap {
                                     self.observer.observe(ConversationEvent::EndpointFired {
                                         completion_prob: s.completion_prob,
-                                        source: s.source,
+                                        source: s.source.clone(),
                                         silence_ms: s.silence_tail_ms,
                                     });
                                 }
-                                self.handle_turn(captured, captured_voiced, &mut frames, &cancel)
-                                    .await;
-                                // Listen-only has no playback phase, so it never
-                                // reaches talk-mode's post-speak drain — but the
-                                // mic kept capturing during STT/decode. The live
-                                // capture thread drops frames on a full bounded
-                                // channel (it must never block), so an undrained
-                                // backlog leaves the channel chronically full and
-                                // the loop permanently behind real time: later
-                                // utterances get dropped mid-word and capture
-                                // "never re-arms". Discard the during-decode
-                                // stragglers so the next turn starts from live
-                                // audio — the listen-only analogue of the
-                                // talk-mode drain. (Talk mode drains inside
-                                // speak_with_barge_in after playback.)
-                                if self.config.listen_only {
-                                    while frames.try_recv().is_ok() {}
+                                let turn = FinalizedTurn {
+                                    samples: captured,
+                                    voiced_samples: captured_voiced,
+                                    endpoint: snap,
+                                    noise_floor_dbfs: self.noise_floor.floor_dbfs(),
+                                    noise_floor_converged: self.noise_floor.converged(),
+                                };
+                                if let (Some(q), Some(n)) = (&decode_queue, &decode_notify) {
+                                    // Listen-only: hand off to the worker and keep
+                                    // consuming — the loop never blocks on decode.
+                                    {
+                                        let mut ql = q.lock().expect("decode queue poisoned");
+                                        if ql.len() >= DECODE_QUEUE_CAP {
+                                            ql.pop_front();
+                                            warn!("decode backlog full; dropping oldest utterance");
+                                        }
+                                        ql.push_back(turn);
+                                    }
+                                    n.notify_one();
+                                } else {
+                                    // Talk mode: decode inline, then reply.
+                                    self.talk_turn(turn, &mut frames, &cancel).await;
                                 }
                             } else if !captured.is_empty() {
                                 debug!(
@@ -489,83 +784,26 @@ impl<M: EndpointModel> TalkModeController<M> {
                 }
             }
         }
+        // Stop the decode worker (cancel usually already did; abort covers the
+        // capture-channel-closed path where `cancel` never fired).
+        if let Some(handle) = decode_worker {
+            handle.abort();
+        }
     }
 
-    /// One full turn: STT → speaker → grounded answer → ack+answer with barge-in.
-    /// `voiced_samples` is the true voiced-sample count (excludes the pre-roll
-    /// padding prepended to `samples`), used for the record's `voiced_ms`.
-    async fn handle_turn(
+    /// One talk-mode turn: decode + emit the `UserTurn` (via the shared
+    /// [`Decoder`]), then ack → grounded answer → speak with barge-in. Talk mode
+    /// decodes inline (it must produce the reply anyway); listen-only runs the
+    /// same decode off-loop in the worker.
+    async fn talk_turn(
         &mut self,
-        samples: Vec<i16>,
-        voiced_samples: usize,
+        turn: FinalizedTurn,
         frames: &mut mpsc::Receiver<Vec<i16>>,
         cancel: &CancellationToken,
     ) {
-        let sr = self.config.sample_rate;
-        let utt = Utterance {
-            samples,
-            sample_rate: sr,
+        let Some((text, speaker_ctx)) = self.decoder.decode_and_emit(turn).await else {
+            return; // empty transcript / STT error — turn dropped (UserTurn not emitted)
         };
-        info!(
-            samples = utt.samples.len(),
-            ms = utt.samples.len() as u64 * 1000 / sr.max(1) as u64,
-            "talk-mode end-of-turn utterance captured"
-        );
-
-        // STT (6.2) with per-token detail (native path) + latency (§W1.3).
-        let stt_start = Instant::now();
-        let detail = match self.stt.transcribe_detailed(&utt).await {
-            Ok(d) if !d.text.trim().is_empty() => d,
-            Ok(_) => {
-                info!("talk-mode STT returned an empty transcript; turn dropped");
-                return;
-            }
-            Err(e) => {
-                warn!(error = %e, "talk-mode STT failed");
-                return;
-            }
-        };
-        let stt_latency_ms = stt_start.elapsed().as_millis() as u64;
-        let text = detail.text.clone();
-        info!(transcript = %text, "talk-mode user turn");
-
-        // Speaker attribution (6.6) → private context, never spoken. Now also
-        // yields the cosine score + action for the record (§W1.2).
-        let (speaker, speaker_ctx) = self.attribute_speaker(&utt).await;
-        let speaker_id = speaker.id.clone();
-        let speaker_name = speaker.name.clone();
-
-        // Spoken self-enrollment (voicelab parity): a voice naming itself
-        // ("my name is X" / "call me X") upgrades its placeholder name on
-        // the spot. Deliberately explicit phrases only — the loose "I'm X"
-        // would mis-enroll chit-chat.
-        if let (Some(id), Some(name)) = (&speaker_id, extract_spoken_name(&text))
-            && self.registry.rename(id, name.clone())
-        {
-            info!(speaker = %id, %name, "talk-mode speaker self-enrolled by name");
-            self.persist_registry();
-        }
-
-        // Assemble the complete VoiceAnalysis record (§W1.2) client-side and
-        // hand it off at the observer boundary; the recorder observer carries
-        // it over the wire.
-        let voice_analysis =
-            self.build_voice_analysis(&utt, &detail, speaker, stt_latency_ms, voiced_samples);
-
-        self.observer.observe(ConversationEvent::UserTurn {
-            text: text.clone(),
-            speaker: speaker_id,
-            speaker_name: speaker_name.clone(),
-            voice_analysis: Some(Box::new(voice_analysis)),
-        });
-
-        // Listen-only (§W1.4): the turn is recorded + classified + stored (the
-        // observer fired above), but the brain is off — no ack, no LLM answer,
-        // no audio out. Stop here; the surface shows ingestion without a reply.
-        if self.config.listen_only {
-            info!("talk-mode listen-only: turn recorded, brain skipped");
-            return;
-        }
 
         // Fast ack = Speculative spoken node (6.4 fast layer covers latency).
         let ack = contextual_ack(&text);
@@ -575,12 +813,7 @@ impl<M: EndpointModel> TalkModeController<M> {
         // Grounded answer, shaped short by the spoken-answer policy (6.3).
         let answer = match self
             .policy
-            .answer(
-                self.llm.as_ref(),
-                &self.config.base_system,
-                &text,
-                speaker_ctx,
-            )
+            .answer(self.llm.as_ref(), &self.config.base_system, &text, speaker_ctx)
             .await
         {
             Ok(a) if !a.trim().is_empty() => a,
@@ -594,190 +827,12 @@ impl<M: EndpointModel> TalkModeController<M> {
             }
         };
         info!(answer = %answer, "talk-mode committed reply");
-        // Committed node supersedes the speculative ack.
         self.observer.observe(ConversationEvent::CommittedReply {
             answer: answer.clone(),
         });
 
         // Speak ack then stream the answer (6.4); monitor for barge-in.
-        self.speak_with_barge_in(&ack, &answer, frames, cancel)
-            .await;
-    }
-
-    /// Attribute the utterance to a speaker, returning the full
-    /// [`SpeakerAnalysis`] (id / name / cosine score / threshold / action /
-    /// embedding dim) for the record, plus the private LLM context string.
-    /// `SpeakerAnalysis::default()` (action `Unknown`) when no embedder.
-    async fn attribute_speaker(
-        &mut self,
-        utt: &Utterance,
-    ) -> (SpeakerAnalysis, Option<String>) {
-        let Some(embedder) = self.embedder.clone() else {
-            return (SpeakerAnalysis::default(), None);
-        };
-        let emb = match embedder.embed(&utt.samples, utt.sample_rate).await {
-            Ok(e) => e,
-            Err(e) => {
-                warn!(error = %e, "speaker embed failed; turn unattributed");
-                return (SpeakerAnalysis::default(), None);
-            }
-        };
-        let threshold = self.registry.threshold();
-        let embedding_dim = embedder.dim() as u32;
-        // Nearest enrolled speaker regardless of threshold — so the record
-        // surfaces the *real* near-miss cosine (how close attribution got),
-        // never a meaningless 0.0.
-        let best = self.registry.best_match(&emb);
-        let near_score = best.as_ref().map(|(_, s)| *s).unwrap_or(0.0);
-
-        let analysis = if let Some((id, score)) = best.filter(|(_, s)| *s >= threshold) {
-            // Confident match — fold the embedding into the running-mean centroid.
-            self.registry.attribute(&id, &emb);
-            let name = self.registry.get(&id).map(|n| n.name.clone());
-            SpeakerAnalysis {
-                id: Some(id),
-                name,
-                score,
-                threshold,
-                action: SpeakerAction::Identified,
-                embedding_dim,
-            }
-        } else if self.config.listen_only {
-            // Observe-only: identify against existing profiles but NEVER
-            // auto-enroll — a placeholder "unknown speaker" written to the
-            // persistent registry pollutes it and never gets renamed (there is
-            // no spoken self-ID loop in listen mode). Mark unknown, surface the
-            // near-miss, persist nothing.
-            SpeakerAnalysis {
-                id: None,
-                name: None,
-                score: near_score,
-                threshold,
-                action: SpeakerAction::Unknown,
-                embedding_dim,
-            }
-        } else {
-            // Talk mode: auto-enroll a session speaker (renamed on spoken
-            // self-ID, e.g. "my name is X"), reporting the near-miss score.
-            let id = self
-                .registry
-                .enroll(self.config.default_speaker_name.clone(), &emb);
-            self.observer.observe(ConversationEvent::SpeakerEnrolled {
-                id: id.clone(),
-                name: self
-                    .registry
-                    .get(&id)
-                    .map(|n| n.name.clone())
-                    .unwrap_or_default(),
-            });
-            self.persist_registry();
-            let name = self.registry.get(&id).map(|n| n.name.clone());
-            SpeakerAnalysis {
-                id: Some(id),
-                name,
-                score: near_score,
-                threshold,
-                action: SpeakerAction::Enrolled,
-                embedding_dim,
-            }
-        };
-        let ctx = analysis.id.as_ref().zip(analysis.name.as_ref()).map(|(id, n)| {
-            format!("The current speaker is {n} (id {id}). Use this only as private context; never read it aloud.")
-        });
-        (analysis, ctx)
-    }
-
-    /// Assemble the complete `VoiceAnalysis` record (§W1.2) from the decoded
-    /// transcript, the speaker attribution, the endpoint snapshot, and the DSP
-    /// extractors. Every section is present; coarse fields carry their honest
-    /// confidence flags. This is the production point the plan puts in the
-    /// session — the daemon carries the emitted record over `agent.turn.record`.
-    fn build_voice_analysis(
-        &self,
-        utt: &Utterance,
-        detail: &super::stt::TranscriptResult,
-        speaker: SpeakerAnalysis,
-        stt_latency_ms: u64,
-        voiced_samples: usize,
-    ) -> VoiceAnalysis {
-        let sr = utt.sample_rate.max(1);
-        // True voiced duration (excludes pre-roll padding in `utt.samples`).
-        let voiced_ms = voiced_samples as u64 * 1_000 / sr as u64;
-
-        // STT section: map the per-token detail; the path is native when the
-        // decode exposed tokens (the substrate path is honestly text-only).
-        let tokens: Vec<TokenAnalysis> = detail
-            .tokens
-            .iter()
-            .map(|t| TokenAnalysis {
-                text: t.text.clone(),
-                t_ms: t.start_ms,
-                dur_ms: t.duration_ms,
-                conf: t.confidence,
-            })
-            .collect();
-        let path = if tokens.is_empty() {
-            SttPath::Substrate
-        } else {
-            SttPath::Native
-        };
-        let stt = SttAnalysis::new(self.stt.model().wire_name(), path, stt_latency_ms, tokens);
-
-        // Endpoint section from the endpointer's captured snapshot.
-        let snap = self.endpointer.last_endpoint().cloned();
-        let silence_tail_ms = snap.as_ref().map(|s| s.silence_tail_ms).unwrap_or(0);
-        let duration_ms = voiced_ms + silence_tail_ms;
-        let endpoint = EndpointAnalysis {
-            completion_prob: snap.as_ref().map(|s| s.completion_prob).unwrap_or(0.0),
-            source: snap
-                .as_ref()
-                .map(|s| s.source.clone())
-                .unwrap_or_else(|| "unknown".into()),
-            silence_tail_ms,
-            // Onset→finalize wall clock ≈ voiced audio + the trailing tail.
-            latency_ms: duration_ms,
-        };
-
-        // Audio / capture-health section (one pass over the i16 frames) + the
-        // tracked room-tone floor → SNR.
-        let health = capture_health(&utt.samples, sr);
-        let noise_floor_dbfs = self.noise_floor.floor_dbfs();
-        let noise_floor_converged = self.noise_floor.converged();
-        let audio = AudioAnalysis {
-            duration_ms,
-            voiced_ms,
-            silence_ms: silence_tail_ms,
-            rms_dbfs_mean: health.rms_dbfs_mean,
-            rms_dbfs_peak: health.rms_dbfs_peak,
-            noise_floor_dbfs,
-            // SNR is only meaningful once the floor has seen real silence; the
-            // `noise_floor_converged` flag tells consumers when to trust it.
-            snr_db: health.rms_dbfs_mean - noise_floor_dbfs,
-            clip_pct: health.clip_pct,
-            dc_offset: health.dc_offset,
-            noise_floor_converged,
-        };
-
-        // Prosody (DSP) → emotion (DSP floor, refined by the SER seam) →
-        // paralinguistics.
-        let prosody = analyze_prosody(&ProsodyInput {
-            samples: &utt.samples,
-            sample_rate: sr,
-            voiced_ms,
-            tokens: &detail.tokens,
-        });
-        let emotion = refine_emotion(
-            emotion_from_prosody(&prosody),
-            self.ser.predict(&utt.samples, sr),
-        );
-        let paralinguistics = classify_paralinguistics(&ParalinguisticInput {
-            transcript: &detail.text,
-            voiced_ms,
-            energy_dynamics_db: prosody.energy_dynamics_db,
-            has_f0: prosody.f0_mean_hz > 0.0,
-        });
-
-        VoiceAnalysis::new(stt, endpoint, speaker, audio, prosody, emotion, paralinguistics)
+        self.speak_with_barge_in(&ack, &answer, frames, cancel).await;
     }
 
     /// Play the fast ack then stream the answer; a sustained voiced run during
