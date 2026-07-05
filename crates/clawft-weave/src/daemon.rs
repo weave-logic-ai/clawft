@@ -1026,7 +1026,8 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                     enabled: a.subagents.enabled,
                     max_per_conv: a.subagents.max_per_conv,
                     max_depth: a.subagents.max_depth,
-                    timeout: std::time::Duration::from_secs(a.subagents.timeout_secs),
+                    // config owns the seconds→Duration conversion (D.1 helper)
+                    timeout: a.subagents.timeout(),
                 },
                 None => clawft_service_agent::SubagentConfig::default(),
             };
