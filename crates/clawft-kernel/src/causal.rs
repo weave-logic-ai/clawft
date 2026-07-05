@@ -643,6 +643,55 @@ impl CausalGraph {
         self.nodes.iter().map(|r| *r.key()).collect()
     }
 
+    /// All nodes whose `metadata.conv_id` equals `conv_id`, cloned in full.
+    ///
+    /// The global graph is unbounded (nodes are never removed for the daemon's
+    /// lifetime), so any conversation-scoped projection — the `conversation.graph`
+    /// RPC in particular — MUST filter at the source rather than ship the whole
+    /// graph. Each returned [`CausalNode`] carries its `metadata` intact,
+    /// including the `state` tag written by [`Self::set_node_state`], so a caller
+    /// can read node lifecycle state without a second lookup.
+    pub fn nodes_for_conv(&self, conv_id: &str) -> Vec<CausalNode> {
+        self.nodes
+            .iter()
+            .filter(|r| {
+                r.value()
+                    .metadata
+                    .get("conv_id")
+                    .and_then(|v| v.as_str())
+                    == Some(conv_id)
+            })
+            .map(|r| r.value().clone())
+            .collect()
+    }
+
+    /// All forward edges internal to a conversation — both endpoints carry
+    /// `metadata.conv_id == conv_id`.
+    ///
+    /// A conversation's lineage (`Follows` edges) is intra-conversation by
+    /// construction, so requiring both endpoints in the conversation drops any
+    /// stray cross-conversation causal edge rather than dangling it against a
+    /// node the scoped projection did not emit.
+    pub fn edges_for_conv(&self, conv_id: &str) -> Vec<CausalEdge> {
+        let in_conv: std::collections::HashSet<NodeId> = self
+            .nodes
+            .iter()
+            .filter(|r| {
+                r.value()
+                    .metadata
+                    .get("conv_id")
+                    .and_then(|v| v.as_str())
+                    == Some(conv_id)
+            })
+            .map(|r| *r.key())
+            .collect();
+        in_conv
+            .iter()
+            .flat_map(|id| self.get_forward_edges(*id))
+            .filter(|e| in_conv.contains(&e.source) && in_conv.contains(&e.target))
+            .collect()
+    }
+
     /// Degree of a node (in + out edges, treating graph as undirected).
     pub fn degree(&self, id: NodeId) -> usize {
         let fwd = self.forward_edges.get(&id).map_or(0, |e| e.len());

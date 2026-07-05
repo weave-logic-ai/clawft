@@ -262,6 +262,23 @@ impl CrossRefStore {
             .collect()
     }
 
+    /// Every cross-ref in the store, each yielded exactly once.
+    ///
+    /// The forward index holds one copy of each cross-ref under its `source`
+    /// key (the reverse index is the mirror), so flattening the forward map
+    /// enumerates the store without duplication. Ordering is unspecified
+    /// (`DashMap` iteration order). Intended for whole-store projections such as
+    /// the `conversation.graph` RPC, which scopes the result to a conversation
+    /// by intersecting each cross-ref's endpoints against that conversation's
+    /// node UID set (there is no `conv_id` on a [`CrossRef`] to filter by
+    /// directly).
+    pub fn all(&self) -> Vec<CrossRef> {
+        self.forward
+            .iter()
+            .flat_map(|entry| entry.value().clone())
+            .collect()
+    }
+
     /// Remove all entries (useful for calibration resets).
     pub fn clear(&self) {
         self.forward.clear();

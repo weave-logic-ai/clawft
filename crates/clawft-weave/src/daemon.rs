@@ -5735,6 +5735,218 @@ async fn dispatch(
                 Response::error("crossref store not available")
             }
         }
+        // ── ADR-067 P0: conversation graph export ──────────────────────
+        //
+        // `conversation.graph { conv_id, since?: u64, window?: {from_ts, to_ts} }`
+        // projects the kernel-global causal forest for a SINGLE conversation
+        // into the `{nodes, edges}` shape the egui `GraphViewer`
+        // (`explorer/viewers/graph.rs`) already parses. Node `kind` = the
+        // NodeState string and edge `kind` = the CausalEdgeType / CrossRefType
+        // string, so that viewer's `kind_color` hashing lights up for free.
+        //
+        // Scoping by `conv_id` is MANDATORY (recon): the global `CausalGraph`
+        // accumulates every turn of every conversation for the daemon's whole
+        // lifetime and is never pruned — shipping it whole is untenable. Both
+        // the causal nodes/edges and the UID-keyed cross-refs are filtered to
+        // this conversation before serialization.
+        //
+        // Node identity: turn nodes are keyed by their stable universal id
+        // (hex), stored on the causal node's `metadata.uid` by
+        // `dual_write_turn`. This is what lets UID-based cross-refs (Speaker,
+        // EmotionCause, GoalMotivation, and the M4 spawn TriggeredBy /
+        // EvidenceFor) join back to a turn node — the numeric causal id alone
+        // cannot, since a cross-ref endpoint is an opaque BLAKE3 hash of
+        // `conv_id + chain_seq + text` the daemon does not hold. Causal
+        // `Follows` edges (which reference numeric ids internally) are mapped to
+        // the same UID keys via `numeric → uid`. Cross-ref endpoints that are
+        // NOT turn nodes — speaker/emotion/goal identity nodes, and far-side
+        // turns of a cross-conversation spawn edge — are emitted as minimal
+        // stub nodes flagged `"stub": true` (with `"far_side": true` when the
+        // endpoint is neither a turn of this conversation nor one of its own
+        // identity/classification anchors), so a cross-conv edge is never
+        // dangled against a node the projection did not emit.
+        #[cfg(feature = "ecc")]
+        "conversation.graph" => {
+            let conv_id = match params.get("conv_id").and_then(|v| v.as_str()) {
+                Some(c) if !c.is_empty() => c.to_string(),
+                _ => return Response::error("conversation.graph requires a non-empty conv_id"),
+            };
+            let since = params.get("since").and_then(|v| v.as_u64());
+            let (window_from, window_to) = match params.get("window") {
+                Some(w) => (
+                    w.get("from_ts").and_then(|v| v.as_u64()),
+                    w.get("to_ts").and_then(|v| v.as_u64()),
+                ),
+                None => (None, None),
+            };
+
+            let k = kernel.read().await;
+            let Some(causal) = k.ecc_causal() else {
+                // Honest empty-graph shape rather than an error, so the GUI can
+                // render the "ECC conversation loop not enabled" empty-state
+                // over a well-formed payload (ADR-067 D7).
+                return Response::success(serde_json::json!({
+                    "conv_id": conv_id,
+                    "nodes": [],
+                    "edges": [],
+                }));
+            };
+
+            // --- Nodes: turn nodes of this conversation, filtered by since/window.
+            // `numeric → uid` maps causal edge endpoints onto the UID keys the
+            // cross-refs use; `conv_uids` is the membership set that scopes
+            // cross-refs and drives stub emission. `emitted` is every node id we
+            // actually ship, so no edge is ever dangled.
+            let mut numeric_to_uid: std::collections::HashMap<u64, String> =
+                std::collections::HashMap::new();
+            let mut conv_uids: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            let mut emitted: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            let mut nodes_json: Vec<serde_json::Value> = Vec::new();
+
+            for node in causal.nodes_for_conv(&conv_id) {
+                let meta = &node.metadata;
+                let chain_seq = meta.get("chain_seq").and_then(|v| v.as_u64());
+                let ts_ms = node.created_at;
+                if let Some(s) = since
+                    && chain_seq.map(|c| c < s).unwrap_or(false)
+                {
+                    continue;
+                }
+                if let Some(from) = window_from
+                    && ts_ms < from
+                {
+                    continue;
+                }
+                if let Some(to) = window_to
+                    && ts_ms > to
+                {
+                    continue;
+                }
+                // Canonical id: the stable UID (hex) written by dual_write_turn;
+                // fall back to the numeric id (stringified) for any legacy node
+                // that predates the uid metadata.
+                let uid = meta
+                    .get("uid")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| node.id.to_string());
+                numeric_to_uid.insert(node.id, uid.clone());
+                conv_uids.insert(uid.clone());
+                emitted.insert(uid.clone());
+
+                let role = meta.get("role").and_then(|v| v.as_str()).unwrap_or("");
+                let state = meta.get("state").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let text = meta.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                let classification = meta.get("classification").cloned().unwrap_or(serde_json::Value::Null);
+                nodes_json.push(serde_json::json!({
+                    "id": uid,
+                    "label": node.label,
+                    "kind": state,
+                    "chain_seq": chain_seq,
+                    "conv_id": conv_id,
+                    "role": role,
+                    "text": text,
+                    "state": state,
+                    "ts_ms": ts_ms,
+                    "classification": classification,
+                }));
+            }
+
+            // --- Causal Follows-lineage edges (intra-conversation). Both
+            // endpoints are guaranteed in-conversation by `edges_for_conv`;
+            // require both to have survived since/window filtering too.
+            let mut edges_json: Vec<serde_json::Value> = Vec::new();
+            for edge in causal.edges_for_conv(&conv_id) {
+                let (Some(src), Some(tgt)) = (
+                    numeric_to_uid.get(&edge.source),
+                    numeric_to_uid.get(&edge.target),
+                ) else {
+                    continue;
+                };
+                if !emitted.contains(src) || !emitted.contains(tgt) {
+                    continue;
+                }
+                edges_json.push(serde_json::json!({
+                    "source": src,
+                    "target": tgt,
+                    "kind": edge.edge_type.to_string(),
+                    "weight": edge.weight,
+                    "chain_seq": edge.chain_seq,
+                }));
+            }
+
+            // --- Cross-ref edges (Speaker / EmotionCause / GoalMotivation /
+            // spawn TriggeredBy / EvidenceFor / Continuer …). A cross-ref is in
+            // scope iff at least one endpoint is a turn node of this
+            // conversation. Endpoints that are not this conversation's turn
+            // nodes get a stub node so the edge never dangles.
+            let mut stubs: std::collections::HashMap<String, bool> =
+                std::collections::HashMap::new();
+            if let Some(crossrefs) = k.ecc_crossrefs() {
+                for cr in crossrefs.all() {
+                    if let Some(s) = since
+                        && cr.chain_seq < s
+                    {
+                        continue;
+                    }
+                    let src = cr.source.to_string();
+                    let tgt = cr.target.to_string();
+                    let src_in = conv_uids.contains(&src);
+                    let tgt_in = conv_uids.contains(&tgt);
+                    if !src_in && !tgt_in {
+                        continue;
+                    }
+                    // A local turn endpoint dropped by since/window filtering
+                    // means the edge has no anchor to draw against — skip it.
+                    if (src_in && !emitted.contains(&src)) || (tgt_in && !emitted.contains(&tgt)) {
+                        continue;
+                    }
+                    // `far_side` = the endpoint is neither a turn of this
+                    // conversation nor one of its own identity/classification
+                    // anchors — i.e. the far turn of a cross-conversation spawn
+                    // edge, which lives in another conversation's graph.
+                    if !src_in {
+                        stubs.entry(src.clone()).or_insert(true);
+                    }
+                    if !tgt_in {
+                        stubs.entry(tgt.clone()).or_insert(true);
+                    }
+                    edges_json.push(serde_json::json!({
+                        "source": src,
+                        "target": tgt,
+                        "kind": cr.ref_type.to_string(),
+                        "weight": 1.0,
+                        "chain_seq": cr.chain_seq,
+                    }));
+                }
+            }
+
+            // Materialize stub nodes for cross-ref endpoints outside this
+            // conversation's turn set. Speaker/emotion/goal identity anchors and
+            // far-side cross-conv turns share this shape; `far_side` is always
+            // true here (a non-turn endpoint is, by definition, not one of this
+            // conversation's own emitted nodes).
+            for (uid, far_side) in stubs {
+                if emitted.insert(uid.clone()) {
+                    nodes_json.push(serde_json::json!({
+                        "id": uid,
+                        "label": "",
+                        "kind": "external",
+                        "state": "external",
+                        "stub": true,
+                        "far_side": far_side,
+                    }));
+                }
+            }
+
+            Response::success(serde_json::json!({
+                "conv_id": conv_id,
+                "nodes": nodes_json,
+                "edges": edges_json,
+            }))
+        }
         // ── Custody attestation ───────────────────────────────────────
         "custody.attest" => {
             #[cfg(feature = "exochain")]
@@ -6181,9 +6393,232 @@ impl crate::voice_router::CommandHandler for DaemonCommandHandler {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use super::*;
+
     #[test]
     fn socket_path_resolves() {
         let path = crate::protocol::socket_path();
         assert!(path.to_string_lossy().ends_with("kernel.sock"));
+    }
+
+    /// ADR-067 P0: `conversation.graph` projects one conversation's causal
+    /// forest into `{nodes, edges}`, scoped strictly to its `conv_id`.
+    ///
+    /// Builds a two-turn conversation (`conv-A`) with a `Follows` lineage edge
+    /// and a `Speaker` cross-ref, plus a cross-conversation spawn `TriggeredBy`
+    /// cross-ref pointing from a far-side turn in `conv-B` into `conv-A`'s first
+    /// turn, and a decoy turn in `conv-B`. Asserts the JSON shape, that the
+    /// decoy never leaks, that lineage + cross-ref edges are present, and that
+    /// non-turn / far-side endpoints are emitted as flagged stub nodes.
+    #[cfg(feature = "ecc")]
+    #[tokio::test]
+    async fn conversation_graph_scopes_and_shapes() {
+        use clawft_kernel::causal::CausalEdgeType;
+        use clawft_kernel::crossref::{CrossRef, CrossRefType, StructureTag, UniversalNodeId};
+        use clawft_kernel::Kernel;
+        use clawft_platform::NativePlatform;
+        use clawft_types::config::{Config, KernelConfig};
+        use std::sync::Arc;
+
+        // Mirror `dual_write_turn`'s node metadata so the handler reads the same
+        // `uid` key it relies on to join cross-refs back to turn nodes.
+        fn turn_uid(conv: &str, seq: u64, text: &str) -> UniversalNodeId {
+            UniversalNodeId::new(
+                &StructureTag::CausalGraph,
+                conv.as_bytes(),
+                seq,
+                text.as_bytes(),
+                b"turn",
+            )
+        }
+        fn speaker_uid(conv: &str, role: &str) -> UniversalNodeId {
+            UniversalNodeId::new(
+                &StructureTag::CausalGraph,
+                conv.as_bytes(),
+                0,
+                role.as_bytes(),
+                b"speaker",
+            )
+        }
+
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(Config::default(), KernelConfig::default(), platform)
+            .await
+            .expect("kernel boots");
+        let causal = kernel.ecc_causal().expect("causal graph present").clone();
+        let crossrefs = kernel.ecc_crossrefs().expect("crossref store present").clone();
+
+        // conv-A: turn 1 (user) → turn 2 (assistant) via Follows.
+        let a_uid1 = turn_uid("conv-A", 1, "hello");
+        let a_uid2 = turn_uid("conv-A", 2, "hi there");
+        let n1 = causal.add_node(
+            "turn:conv-A:1".into(),
+            serde_json::json!({
+                "conv_id": "conv-A", "chain_seq": 1, "role": "user",
+                "state": "committed", "uid": a_uid1.to_string(),
+            }),
+        );
+        let n2 = causal.add_node(
+            "turn:conv-A:2".into(),
+            serde_json::json!({
+                "conv_id": "conv-A", "chain_seq": 2, "role": "assistant",
+                "state": "committed", "uid": a_uid2.to_string(),
+            }),
+        );
+        assert!(causal.link(n1, n2, CausalEdgeType::Follows, 0.9, 0, 2));
+
+        // Speaker cross-ref: turn-2 → assistant identity node.
+        let a_speaker = speaker_uid("conv-A", "assistant");
+        crossrefs.insert(CrossRef {
+            source: a_uid2.clone(),
+            source_structure: StructureTag::CausalGraph,
+            target: a_speaker.clone(),
+            target_structure: StructureTag::CausalGraph,
+            ref_type: CrossRefType::Speaker,
+            created_at: 0,
+            chain_seq: 2,
+        });
+
+        // Cross-conversation spawn: far-side turn in conv-B TriggeredBy conv-A turn-1.
+        let b_child_goal = turn_uid("conv-B", 5, "child goal");
+        crossrefs.insert(CrossRef {
+            source: b_child_goal.clone(),
+            source_structure: StructureTag::CausalGraph,
+            target: a_uid1.clone(),
+            target_structure: StructureTag::CausalGraph,
+            ref_type: CrossRefType::TriggeredBy,
+            created_at: 0,
+            chain_seq: 5,
+        });
+
+        // Decoy turn in conv-B — must never appear in conv-A's projection.
+        let b_uid1 = turn_uid("conv-B", 5, "child goal");
+        causal.add_node(
+            "turn:conv-B:5".into(),
+            serde_json::json!({
+                "conv_id": "conv-B", "chain_seq": 5, "role": "user",
+                "state": "committed", "uid": b_uid1.to_string(),
+            }),
+        );
+
+        let kernel = Arc::new(tokio::sync::RwLock::new(kernel));
+        let (shutdown_tx, _rx) = watch::channel(false);
+        let resp = dispatch(
+            "conversation.graph".into(),
+            serde_json::json!({ "conv_id": "conv-A" }),
+            kernel,
+            shutdown_tx,
+        )
+        .await;
+        assert!(resp.ok, "handler ok: {:?}", resp.error);
+        let result = resp.result.expect("result present");
+        assert_eq!(result["conv_id"], "conv-A");
+
+        let nodes = result["nodes"].as_array().expect("nodes array");
+        let edges = result["edges"].as_array().expect("edges array");
+
+        // Both conv-A turns present, keyed by their UID hex; every emitted turn
+        // node is scoped to conv-A (nothing from conv-B leaks).
+        let node_ids: std::collections::HashSet<&str> =
+            nodes.iter().filter_map(|n| n["id"].as_str()).collect();
+        assert!(node_ids.contains(a_uid1.to_string().as_str()));
+        assert!(node_ids.contains(a_uid2.to_string().as_str()));
+        for n in nodes {
+            if n["stub"].as_bool().unwrap_or(false) {
+                continue;
+            }
+            assert_eq!(n["conv_id"], "conv-A", "no foreign conv turn leaked: {n}");
+        }
+        // The decoy conv-B turn's UID must not appear as a *turn* node. It shares
+        // its UID with the spawn source (same conv/seq/text), which is correctly
+        // emitted only as a far-side stub — assert that entry is a stub.
+        let decoy = nodes
+            .iter()
+            .find(|n| n["id"].as_str() == Some(b_child_goal.to_string().as_str()))
+            .expect("far-side spawn endpoint emitted");
+        assert_eq!(decoy["stub"], serde_json::json!(true));
+        assert_eq!(decoy["far_side"], serde_json::json!(true));
+
+        // Speaker identity endpoint is a stub too.
+        let speaker_node = nodes
+            .iter()
+            .find(|n| n["id"].as_str() == Some(a_speaker.to_string().as_str()))
+            .expect("speaker stub emitted");
+        assert_eq!(speaker_node["stub"], serde_json::json!(true));
+
+        // Edges: Follows lineage, Speaker cross-ref, TriggeredBy spawn.
+        let has_edge = |kind: &str, src: &str, tgt: &str| {
+            edges.iter().any(|e| {
+                e["kind"] == kind && e["source"].as_str() == Some(src) && e["target"].as_str() == Some(tgt)
+            })
+        };
+        assert!(
+            has_edge("Follows", &a_uid1.to_string(), &a_uid2.to_string()),
+            "lineage edge present: {edges:?}"
+        );
+        assert!(
+            has_edge("Speaker", &a_uid2.to_string(), &a_speaker.to_string()),
+            "speaker cross-ref edge present"
+        );
+        assert!(
+            has_edge("TriggeredBy", &b_child_goal.to_string(), &a_uid1.to_string()),
+            "cross-conv spawn edge present"
+        );
+    }
+
+    /// A conversation with no nodes returns a well-formed empty graph, not an
+    /// error — so the GUI can render its empty-state over a valid payload.
+    #[cfg(feature = "ecc")]
+    #[tokio::test]
+    async fn conversation_graph_unknown_conv_is_empty() {
+        use clawft_kernel::Kernel;
+        use clawft_platform::NativePlatform;
+        use clawft_types::config::{Config, KernelConfig};
+        use std::sync::Arc;
+
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(Config::default(), KernelConfig::default(), platform)
+            .await
+            .expect("kernel boots");
+        let kernel = Arc::new(tokio::sync::RwLock::new(kernel));
+        let (shutdown_tx, _rx) = watch::channel(false);
+        let resp = dispatch(
+            "conversation.graph".into(),
+            serde_json::json!({ "conv_id": "nope" }),
+            kernel,
+            shutdown_tx,
+        )
+        .await;
+        assert!(resp.ok);
+        let result = resp.result.expect("result");
+        assert_eq!(result["nodes"].as_array().unwrap().len(), 0);
+        assert_eq!(result["edges"].as_array().unwrap().len(), 0);
+    }
+
+    /// A missing / empty `conv_id` is rejected — the projection must never run
+    /// unscoped against the unbounded global graph.
+    #[cfg(feature = "ecc")]
+    #[tokio::test]
+    async fn conversation_graph_requires_conv_id() {
+        use clawft_kernel::Kernel;
+        use clawft_platform::NativePlatform;
+        use clawft_types::config::{Config, KernelConfig};
+        use std::sync::Arc;
+
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(Config::default(), KernelConfig::default(), platform)
+            .await
+            .expect("kernel boots");
+        let kernel = Arc::new(tokio::sync::RwLock::new(kernel));
+        let (shutdown_tx, _rx) = watch::channel(false);
+        let resp = dispatch(
+            "conversation.graph".into(),
+            serde_json::json!({}),
+            kernel,
+            shutdown_tx,
+        )
+        .await;
+        assert!(!resp.ok);
     }
 }

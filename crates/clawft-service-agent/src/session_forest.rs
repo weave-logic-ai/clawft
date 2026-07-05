@@ -121,12 +121,20 @@ pub(crate) fn dual_write_turn(
     emotion: Option<&str>,
     goal: Option<&str>,
 ) -> CausalNodeId {
+    // The turn's stable universal id, stored on the causal node so a later
+    // read projection (the ADR-067 `conversation.graph` RPC) can join UID-keyed
+    // cross-refs (Speaker / EmotionCause / GoalMotivation / spawn TriggeredBy /
+    // EvidenceFor) back to this numeric node. The UID is derived from
+    // `conv_id + chain_seq + text`, which the daemon does not hold, so without
+    // this the cross-ref endpoints are unrecoverable from the graph alone.
+    let turn_uid = turn_universal_id(conv_id, chain_seq, text);
     let label = format!("turn:{conv_id}:{chain_seq}");
     let metadata = serde_json::json!({
         "conv_id": conv_id,
         "chain_seq": chain_seq,
         "role": role,
         "state": "frontier",
+        "uid": turn_uid.to_string(),
     });
     let node = causal.add_node(label, metadata);
     forest.seq_to_node.insert(chain_seq, node);
@@ -150,7 +158,7 @@ pub(crate) fn dual_write_turn(
     }
 
     // Speaker cross-ref: turn → speaker identity node (per-speaker recall).
-    let turn_uid = turn_universal_id(conv_id, chain_seq, text);
+    // `turn_uid` was computed above (stored on the causal node's metadata).
     forest.seq_to_uid.insert(chain_seq, turn_uid.clone());
     // Track the latest turn's uid so the subagent spawner can root spawn edges
     // at the actual spawning turn (M4 turn-level edge rooting).
