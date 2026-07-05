@@ -43,6 +43,9 @@ use crate::protocol::{AgentChatMessage, AgentChatParams, AgentChatResult};
 use crate::service::{AgentLoopHandle, AgentService};
 use crate::session_forest::link_cross_conv;
 use crate::spawn_registry::SpawnRegistry;
+use crate::turn_classifier::{
+    ClassificationVector, Intent, KeywordTurnClassifier, TurnClassifier, Vad,
+};
 
 /// Chain source label for subagent lifecycle events (ADR-033 witnessing).
 const WITNESS_SOURCE: &str = "subagent";
@@ -235,6 +238,11 @@ impl<H: AgentLoopHandle> SubagentSpawner for DaemonSubagentSpawner<H> {
         // spawn tree is visible even for a still-running async child.
         let parent_uid = self.resolve_parent_uid(spec.parent_turn_uid.as_deref(), &parent_conv);
         if let Some(ref forest) = self.forest {
+            // Spawn nodes are nodes: classify the goal so the tree renders with a
+            // hue/glyph like every committed turn (classification design §D5).
+            // The `goal` axis is the literal goal string (GoalMotivation
+            // material); intent is Request; emotion neutral; tier keyword.
+            let goal_class = spawn_goal_classification(&spec.goal);
             forest.causal.add_node(
                 format!("spawn_goal:{task_id}"),
                 serde_json::json!({
@@ -244,6 +252,7 @@ impl<H: AgentLoopHandle> SubagentSpawner for DaemonSubagentSpawner<H> {
                     "depth": spec.depth,
                     "kind": "spawn_goal",
                     "state": "frontier",
+                    "classification": goal_class.to_metadata_value(),
                 }),
             );
             link_cross_conv(
@@ -251,6 +260,17 @@ impl<H: AgentLoopHandle> SubagentSpawner for DaemonSubagentSpawner<H> {
                 spawn_goal_uid(&child_conv),
                 parent_uid.clone(),
                 CrossRefType::TriggeredBy,
+                0,
+            );
+            // GoalMotivation: spawn_goal --GoalMotivation--> goal-anchor (design
+            // §D5). Same synthetic-anchor pattern as `dual_write_turn`'s goal
+            // cross-ref (`session_forest.rs`), so the ADR-067 view can reverse-walk
+            // a goal anchor to every spawn that pursued it.
+            link_cross_conv(
+                &forest.crossrefs,
+                spawn_goal_uid(&child_conv),
+                goal_anchor_uid(&child_conv, &spec.goal),
+                CrossRefType::GoalMotivation,
                 0,
             );
         }
@@ -451,6 +471,10 @@ async fn drive_child<H: AgentLoopHandle>(
 
     // Forest: R_c@C --EvidenceFor--> T_user@P (design D3).
     if let Some(ref forest) = forest {
+        // Classify the result too (classification design §D5): intent Statement,
+        // topic inherited from the goal so the result renders the same hue as its
+        // parent goal in the graph view, emotion neutral.
+        let result_class = spawn_result_classification(&ctx.goal, outcome.result.as_deref());
         forest.causal.add_node(
             format!("spawn_result:{}", ctx.task_id),
             serde_json::json!({
@@ -459,6 +483,7 @@ async fn drive_child<H: AgentLoopHandle>(
                 "kind": "spawn_result",
                 "status": terminal.as_str(),
                 "state": "frontier",
+                "classification": result_class.to_metadata_value(),
             }),
         );
         link_cross_conv(
@@ -584,6 +609,47 @@ fn goal_hash(goal: &str) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     goal.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
+}
+
+/// Classify a spawn-goal node (design §D5): topic from the goal's top token,
+/// `intent = Request`, neutral emotion, `goal` axis = the literal goal string
+/// (the `GoalMotivation` material), tier keyword. Reuses the keyword classifier
+/// for the topic extraction, then overrides the fixed axes.
+fn spawn_goal_classification(goal: &str) -> ClassificationVector {
+    let mut cv = KeywordTurnClassifier::new().classify("assistant", goal, None);
+    cv.intent = Intent::Request;
+    cv.emotion = Vad::neutral();
+    cv.goal = Some(goal.to_string());
+    cv
+}
+
+/// Classify a spawn-result node (design §D5): `intent = Statement`, topic
+/// inherited from the goal (same hue as the parent goal), neutral emotion, no
+/// goal axis. Classified from the result summary when present, else the goal.
+fn spawn_result_classification(goal: &str, result: Option<&str>) -> ClassificationVector {
+    let goal_topic = KeywordTurnClassifier::new()
+        .classify("assistant", goal, None)
+        .topic;
+    let summary = result.unwrap_or(goal);
+    let mut cv = KeywordTurnClassifier::new().classify("assistant", summary, None);
+    cv.intent = Intent::Statement;
+    cv.emotion = Vad::neutral();
+    cv.topic = goal_topic; // inherit the goal's topic (design §D5)
+    cv
+}
+
+/// Synthetic goal-anchor uid for a spawn goal (`GoalMotivation` target). Mirrors
+/// the `dual_write_turn` goal anchor (`session_forest.rs`) — conversation-scoped,
+/// keyed by the goal string, `b"goal"` discriminator — so spawn goals and turn
+/// goals cluster on the same anchor when the strings match.
+fn goal_anchor_uid(conv_id: &str, goal: &str) -> UniversalNodeId {
+    UniversalNodeId::new(
+        &StructureTag::CausalGraph,
+        conv_id.as_bytes(),
+        0,
+        goal.as_bytes(),
+        b"goal",
+    )
 }
 
 /// Deterministic uid for the child's spawn-goal node (`TriggeredBy` source).
@@ -719,12 +785,48 @@ mod tests {
         let svc = service_with("4");
         sp.set_service(Arc::downgrade(&svc));
 
-        sp.spawn(spec("P", "answer 2+2")).await.unwrap();
+        let handle = sp.spawn(spec("P", "answer 2+2")).await.unwrap();
 
-        // TriggeredBy (spawn) + EvidenceFor (completion) cross-refs both drawn.
-        assert_eq!(forest.crossrefs.count(), 2);
+        // TriggeredBy (spawn) + GoalMotivation (goal anchor) + EvidenceFor
+        // (completion) cross-refs all drawn.
+        assert_eq!(forest.crossrefs.count(), 3);
         // Two causal nodes: the spawn goal + the spawn result.
         assert_eq!(forest.causal.node_count(), 2);
+
+        // GoalMotivation edge: spawn_goal --GoalMotivation--> goal-anchor (§D5).
+        let goal_src = spawn_goal_uid(&handle.child_conv_id);
+        assert_eq!(
+            forest
+                .crossrefs
+                .by_type(&goal_src, &CrossRefType::GoalMotivation)
+                .len(),
+            1,
+            "spawn_goal must carry a GoalMotivation cross-ref to the goal anchor"
+        );
+
+        // The spawn_goal node carries the classification blob, goal == the goal.
+        let nodes = forest.causal.nodes_for_conv(&handle.child_conv_id);
+        let goal_node = nodes
+            .iter()
+            .find(|n| n.metadata.get("kind").and_then(|v| v.as_str()) == Some("spawn_goal"))
+            .expect("spawn_goal node present");
+        let class = goal_node
+            .metadata
+            .get("classification")
+            .expect("spawn_goal carries a classification blob");
+        assert_eq!(class["goal"], serde_json::json!("answer 2+2"));
+        assert_eq!(class["intent"], serde_json::json!("request"));
+        assert_eq!(class["tier"], serde_json::json!("keyword"));
+
+        // The spawn_result node is classified too (intent Statement, §D5).
+        let result_node = nodes
+            .iter()
+            .find(|n| n.metadata.get("kind").and_then(|v| v.as_str()) == Some("spawn_result"))
+            .expect("spawn_result node present");
+        assert_eq!(
+            result_node.metadata["classification"]["intent"],
+            serde_json::json!("statement")
+        );
     }
 
     #[tokio::test]
