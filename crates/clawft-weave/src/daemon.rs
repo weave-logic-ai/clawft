@@ -79,6 +79,51 @@ fn daemon_agent() -> Option<Arc<DaemonAgentService>> {
     DAEMON_AGENT.get().cloned()
 }
 
+/// M4 Phase C.1/D5: daemon-wide handles to the subagent spawn substrate.
+/// The `SpawnRegistry` backs the parent-end cascade (it knows a parent
+/// conversation's still-running children); the `SubagentSpawner` trait object
+/// performs the cancel (abort driver + cancel child turn + witness + release
+/// the per-conv concurrency slot). Both are set once at boot alongside
+/// `DAEMON_AGENT`, after the service `Arc` exists so the spawner's `Weak`
+/// back-reference is wired (Arc-cycle break, design D2).
+static DAEMON_SPAWN_REGISTRY: OnceLock<Arc<clawft_service_agent::SpawnRegistry>> = OnceLock::new();
+static DAEMON_SUBAGENT_SPAWNER: OnceLock<Arc<dyn clawft_core::agent::spawn::SubagentSpawner>> =
+    OnceLock::new();
+
+/// M4 D5: cancel every still-running child of a parent conversation that is
+/// ending — driven by the idle reaper, `agent.chat.end`, and `agent.chat.cancel`.
+/// Each `spawner.cancel` aborts the child's detached driver, cancels its
+/// in-flight turn, releases the parent's live concurrency slot, and witnesses
+/// `agent.cancel` on the chain, so no spawned child is orphaned when its parent
+/// goes away. A no-op when the spawn substrate isn't wired or the parent has no
+/// live children.
+async fn cascade_cancel_children(parent_conv: &str) {
+    let (Some(registry), Some(spawner)) =
+        (DAEMON_SPAWN_REGISTRY.get(), DAEMON_SUBAGENT_SPAWNER.get())
+    else {
+        return;
+    };
+    let children = registry.live_children(parent_conv);
+    if children.is_empty() {
+        return;
+    }
+    for task_id in &children {
+        if let Err(e) = spawner.cancel(task_id).await {
+            warn!(
+                parent = %parent_conv,
+                task_id = %task_id,
+                error = %e,
+                "M4 cascade cancel: child cancel failed"
+            );
+        }
+    }
+    info!(
+        parent = %parent_conv,
+        cancelled = children.len(),
+        "M4: cascaded cancel to spawned children on parent end"
+    );
+}
+
 /// Daemon-wide handle to the agent conversation sink, for the
 /// `agent.turn.record` RPC — externally-produced turns (the `weft voice
 /// talk` Talk-Mode loop) recorded through the SAME
@@ -943,6 +988,42 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
             &workspace,
         ));
 
+        // M4 Phase C.1: construct the subagent spawn substrate BEFORE
+        // register_all so the four spawn tools (agent_spawn / task_status /
+        // task_result / agent_message) register against a live backend. The
+        // service back-reference is late-wired below once the AgentService
+        // `Arc` exists (Arc-cycle break, design D2 — same OnceLock shape as
+        // DAEMON_AGENT). Caps default to the plan values (5 concurrent /
+        // depth 3 / 120s timeout); TODO(D.1): seed from
+        // `KernelConfig.agent.subagents` once that config block lands.
+        let spawn_registry = Arc::new(clawft_service_agent::SpawnRegistry::new());
+        let subagent_spawner: Arc<
+            clawft_service_agent::DaemonSubagentSpawner<
+                clawft_core::agent::loop_core::AgentLoop<NativePlatform>,
+            >,
+        > = {
+            let k = kernel.read().await;
+            let mut sp = clawft_service_agent::DaemonSubagentSpawner::new(
+                Arc::clone(&spawn_registry),
+                clawft_service_agent::SubagentConfig::default(),
+            );
+            // D6 witnessing: record spawn lifecycle (spawn/complete/fail/cancel)
+            // on the chain when it exists (ADR-033).
+            if let Some(chain) = k.chain_manager().cloned() {
+                sp = sp.with_chain(chain);
+            }
+            // D3 forest: draw cross-conv spawn edges into the SAME kernel-global
+            // causal graph + cross-ref store the SessionTier dual-writes turns
+            // into (they are the kernel's single shared instances), so the
+            // ADR-067 graph view renders the spawn tree with no extra work.
+            if let (Some(causal), Some(crossrefs)) =
+                (k.ecc_causal().cloned(), k.ecc_crossrefs().cloned())
+            {
+                sp = sp.with_forest(clawft_service_agent::SubagentForest { causal, crossrefs });
+            }
+            Arc::new(sp)
+        };
+
         let mut tool_registry = clawft_core::tools::registry::ToolRegistry::new();
         clawft_tools::register_all(
             &mut tool_registry,
@@ -951,11 +1032,19 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
             clawft_tools::security_policy::CommandPolicy::safe_defaults(),
             clawft_tools::url_safety::UrlPolicy::default(),
             clawft_tools::web_search::WebSearchConfig::default(),
-            // M4 Phase C.1 (pD): flip this `None` to `Some(subagent_spawner)`
-            // once the DaemonSubagentSpawner is constructed and late-wired.
-            None,
+            // M4 Phase C.1: the four subagent tools register against this
+            // spawner. `None` on the in-process CLI path leaves them unregistered.
+            Some(Arc::clone(&subagent_spawner)
+                as Arc<dyn clawft_core::agent::spawn::SubagentSpawner>),
         );
         let tool_registry = Arc::new(tool_registry);
+        // Stash the registry + spawner so the lifecycle paths (idle reaper,
+        // agent.chat.end, agent.chat.cancel) can cascade-cancel a parent's
+        // still-running children when the parent conversation ends (design D5).
+        let _ = DAEMON_SPAWN_REGISTRY.set(Arc::clone(&spawn_registry));
+        let _ = DAEMON_SUBAGENT_SPAWNER.set(
+            Arc::clone(&subagent_spawner) as Arc<dyn clawft_core::agent::spawn::SubagentSpawner>,
+        );
 
         // agent-core-v1 Phase C3: wire the substrate-backed
         // `ConversationSink` so per-turn JSONL lands at
@@ -1359,8 +1448,14 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
             service = service.with_session_tier(tier);
         }
         let service = Arc::new(service);
+        // M4 Phase C.1: late-wire the spawner's `Weak<AgentService>` back-reference
+        // now the service `Arc` exists (Arc-cycle break, design D2). Idempotent
+        // OnceLock set — mirrors the A2ARouter gate late-wiring. Without this the
+        // spawner can't dispatch child conversations.
+        subagent_spawner.set_service(Arc::downgrade(&service));
         let _ = DAEMON_AGENT.set(service);
         info!("agent service wired (agent.chat dispatches through clawft-service-agent)");
+        info!("subagent spawner wired (agent_spawn dispatches child conversations)");
     } else {
         warn!(
             "agent service: DAEMON_LLM not set, skipping wiring \
@@ -1941,6 +2036,10 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                             if let Some(agent) = daemon_agent() {
                                 let _ = agent.end_conversation(&conv_id, durable.as_deref());
                             }
+                            // M4 D5: an idle-reaped parent must not leave its
+                            // spawned children running — cancel them before the
+                            // loop state is evicted.
+                            cascade_cancel_children(&conv_id).await;
                             reaper_loop.end_conversation(&conv_id);
                             activity.remove(&conv_id);
                             info!(conv_id = %conv_id, "M2 reaper: ended idle talk conversation");
@@ -4591,6 +4690,10 @@ async fn dispatch(
             };
             if let Some(agent) = daemon_agent() {
                 agent.cancel(&conv_id);
+                // M4 D5: cancelling a parent conversation also cancels its
+                // still-running spawned children (design D5 — cancel reaches
+                // the spawn tree).
+                cascade_cancel_children(&conv_id).await;
                 Response::success(serde_json::json!({"cancelled": conv_id}))
             } else {
                 Response::error("agent service not wired")
@@ -4625,6 +4728,9 @@ async fn dispatch(
                 _ => None,
             };
             let promoted = agent.end_conversation(&conv_id, durable_fact.as_deref());
+            // M4 D5: an explicitly ended parent cascades cancel to its still-
+            // running spawned children so none are orphaned.
+            cascade_cancel_children(&conv_id).await;
             // M2 D6: explicit end also evicts the hosted loop's per-conversation
             // state (lineage / in-flight slot) and drops the activity entry, so
             // the reaper never revisits it.
