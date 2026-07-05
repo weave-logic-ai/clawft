@@ -83,6 +83,62 @@ pub trait ConversationSink: Send + Sync + 'static {
     /// `derived/chat/<conv>/turns/`; in-memory returns the HashMap
     /// entry.
     async fn load_history(&self, conv_id: &str) -> Result<Vec<Turn>, String>;
+
+    /// Read back conversation history for **hydration** (M3 store
+    /// collapse, design §D2). Returns the sink's turn log in
+    /// chronological order, truncated to the most recent `window`
+    /// turns; `window == 0` returns every turn.
+    ///
+    /// ## Superset semantics (load-bearing for P3)
+    ///
+    /// The returned turns are the **superset** — they include the
+    /// tool-loop intermediates (`assistant`-with-`tool_calls` turns and
+    /// `role == "tool"` result turns) that the retired SessionManager
+    /// store never held. P3 hydration reconstructs the assembly
+    /// `Session` by dropping those intermediates (keep `user` turns +
+    /// the final `assistant` of each exchange). Because the window is
+    /// applied to the **superset**, a superset window of `N` is *not*
+    /// equivalent to a store-1 window of `N`: the intermediates inflate
+    /// the count. P3 must therefore either pass `window == 0` (read all,
+    /// filter, and let the assembly stage re-window via
+    /// `Session::get_history(memory_window)` exactly as today), or pass
+    /// a bound comfortably larger than `memory_window`. The
+    /// `prompt_identity_golden` gate proves the filter reproduces store
+    /// 1 only when the full superset is available.
+    ///
+    /// ## Failure mode
+    ///
+    /// Infallible by contract: a substrate/read error degrades to an
+    /// empty vec with a warn at the impl site (design §6: "degrade,
+    /// don't crash"). Hydration must never fail a turn because the read
+    /// path hiccuped.
+    ///
+    /// Default impl returns `vec![]` so non-substrate sinks compile
+    /// untouched.
+    async fn history(&self, _conv_id: &str, _window: usize) -> Vec<Turn> {
+        Vec::new()
+    }
+
+    /// Read the per-conversation metadata sidecar (M3 design §D3).
+    ///
+    /// Home of the hallucination score (and any future per-conv K/V)
+    /// once SessionManager stops persisting session metadata. Returns
+    /// [`serde_json::Value::Null`] when unset or on read error — the
+    /// caller defaults the hallucination score to `0.0` on `Null`
+    /// exactly as the current `loop_core` path does.
+    ///
+    /// Default impl returns `Null` so non-substrate sinks compile
+    /// untouched.
+    async fn meta(&self, _conv_id: &str) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
+    /// Write the per-conversation metadata sidecar (M3 design §D3).
+    ///
+    /// Best-effort and infallible by contract: a write failure warns at
+    /// the impl site and is swallowed, mirroring the turn-append path.
+    /// Default impl is a no-op so non-substrate sinks compile untouched.
+    async fn set_meta(&self, _conv_id: &str, _meta: serde_json::Value) {}
 }
 
 /// Test-only [`ConversationSink`] backed by a `Mutex<HashMap>`.
@@ -93,6 +149,10 @@ pub trait ConversationSink: Send + Sync + 'static {
 #[derive(Debug, Default)]
 pub struct InMemorySink {
     turns: Mutex<HashMap<String, Vec<Turn>>>,
+    /// Per-conv metadata sidecar (design §D3). Mirrors the substrate
+    /// `_derived/chat/<conv>/meta` node so the hydration K/V is
+    /// testable without the kernel.
+    meta: Mutex<HashMap<String, serde_json::Value>>,
 }
 
 impl InMemorySink {
@@ -142,6 +202,33 @@ impl ConversationSink for InMemorySink {
             .lock()
             .map_err(|_| "InMemorySink mutex poisoned".to_string())?;
         Ok(guard.get(conv_id).cloned().unwrap_or_default())
+    }
+
+    async fn history(&self, conv_id: &str, window: usize) -> Vec<Turn> {
+        let guard = match self.turns.lock() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(), // poisoned — degrade to empty (design §6)
+        };
+        let all = guard.get(conv_id).cloned().unwrap_or_default();
+        // Truncate to the most recent `window` turns; `0` means all.
+        if window == 0 || all.len() <= window {
+            all
+        } else {
+            all[all.len() - window..].to_vec()
+        }
+    }
+
+    async fn meta(&self, conv_id: &str) -> serde_json::Value {
+        self.meta
+            .lock()
+            .map(|g| g.get(conv_id).cloned().unwrap_or(serde_json::Value::Null))
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    async fn set_meta(&self, conv_id: &str, meta: serde_json::Value) {
+        if let Ok(mut g) = self.meta.lock() {
+            g.insert(conv_id.to_string(), meta);
+        }
     }
 }
 
@@ -236,6 +323,107 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(sink.turn_count("x"), 1);
+    }
+
+    #[tokio::test]
+    async fn history_windows_to_the_most_recent_turns() {
+        let sink = InMemorySink::new();
+        for i in 0..5 {
+            sink.append_turn("c", make_turn("user", &i.to_string()))
+                .await
+                .unwrap();
+        }
+
+        // window == 0 → all turns, in append order.
+        let all = sink.history("c", 0).await;
+        assert_eq!(all.len(), 5);
+        assert_eq!(all[0].content, "0");
+        assert_eq!(all[4].content, "4");
+
+        // window smaller than history → the tail, in order.
+        let tail = sink.history("c", 2).await;
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0].content, "3");
+        assert_eq!(tail[1].content, "4");
+
+        // window larger than history → all of it, no panic.
+        let over = sink.history("c", 100).await;
+        assert_eq!(over.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn history_preserves_the_superset_intermediates() {
+        // history returns the raw superset — tool intermediates are NOT
+        // dropped here (that's P3's hydration filter). This locks the
+        // contract the golden gate depends on.
+        let sink = InMemorySink::new();
+        sink.append_turn("c", make_turn("user", "q")).await.unwrap();
+        let tool_call = Turn {
+            tool_calls: Some(vec![json!({"name": "search"})]),
+            ..make_turn("assistant", "calling")
+        };
+        sink.append_turn("c", tool_call).await.unwrap();
+        let tool_result = Turn {
+            tool_call_id: Some("call-1".into()),
+            ..make_turn("tool", "result")
+        };
+        sink.append_turn("c", tool_result).await.unwrap();
+        sink.append_turn("c", make_turn("assistant", "final"))
+            .await
+            .unwrap();
+
+        let turns = sink.history("c", 0).await;
+        assert_eq!(turns.len(), 4, "history must keep all superset turns");
+        assert!(turns[1].tool_calls.is_some());
+        assert_eq!(turns[2].tool_call_id.as_deref(), Some("call-1"));
+    }
+
+    #[tokio::test]
+    async fn meta_round_trips_and_defaults_to_null() {
+        let sink = InMemorySink::new();
+        // Absent → Null (P3 defaults hallucination score to 0.0 on Null).
+        assert_eq!(sink.meta("c").await, serde_json::Value::Null);
+
+        sink.set_meta("c", json!({"hallucination_score": 0.42}))
+            .await;
+        assert_eq!(sink.meta("c").await["hallucination_score"], 0.42);
+
+        // Overwrite in place.
+        sink.set_meta("c", json!({"hallucination_score": 0.99}))
+            .await;
+        assert_eq!(sink.meta("c").await["hallucination_score"], 0.99);
+
+        // Metadata is per-conv isolated.
+        assert_eq!(sink.meta("other").await, serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn default_trait_impls_degrade_safely() {
+        // A minimal sink that overrides nothing must inherit the safe
+        // defaults: empty history, Null meta, no-op set_meta.
+        struct BareSink;
+        #[async_trait]
+        impl ConversationSink for BareSink {
+            async fn lock_conversation(&self, _c: &str) {}
+            async fn append_turn(&self, _c: &str, _t: Turn) -> Result<(), String> {
+                Ok(())
+            }
+            async fn publish_status(
+                &self,
+                _c: &str,
+                _s: &str,
+                _p: serde_json::Value,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+            async fn load_history(&self, _c: &str) -> Result<Vec<Turn>, String> {
+                Ok(vec![])
+            }
+        }
+        let sink = BareSink;
+        assert!(sink.history("c", 10).await.is_empty());
+        assert_eq!(sink.meta("c").await, serde_json::Value::Null);
+        sink.set_meta("c", json!({"x": 1})).await; // no panic
     }
 
     #[tokio::test]

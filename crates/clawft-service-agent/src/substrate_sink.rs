@@ -493,6 +493,15 @@ impl SubstrateConversationSink {
         format!("substrate/_derived/chat/{conv_id}/status")
     }
 
+    /// Substrate path for the per-conversation metadata sidecar
+    /// (M3 design §D3). A **sibling** of `status` — kept distinct so
+    /// the 2s heartbeat's `Replace` at `status` never clobbers the
+    /// hallucination-score K/V. Same `_derived/chat/<conv>/` parent, so
+    /// the daemon's `chat` `DerivedWriteGrant` already authorises it.
+    fn meta_path(conv_id: &str) -> String {
+        format!("substrate/_derived/chat/{conv_id}/meta")
+    }
+
     /// Mint a sortable per-turn id: a fixed-width base-32 per-conv
     /// counter PREFIX followed by a [`ulid::Ulid::new()`] suffix
     /// (ms-prefixed timestamp + 80-bit randomness for uniqueness).
@@ -658,6 +667,47 @@ impl ConversationSink for SubstrateConversationSink {
                 .then_with(|| a.turn_id.cmp(&b.turn_id))
         });
         Ok(turns)
+    }
+
+    async fn history(&self, conv_id: &str, window: usize) -> Vec<Turn> {
+        // Reuse the sorted, superset `load_history` read and truncate to
+        // the most recent `window` turns. `window == 0` returns all. A
+        // read error degrades to empty (design §6) so hydration never
+        // fails a turn on a transient substrate hiccup.
+        match self.load_history(conv_id).await {
+            Ok(mut turns) => {
+                if window != 0 && turns.len() > window {
+                    turns.drain(0..turns.len() - window);
+                }
+                turns
+            }
+            Err(e) => {
+                warn!(error = %e, conv_id, "history: substrate read failed; hydrating empty");
+                Vec::new()
+            }
+        }
+    }
+
+    async fn meta(&self, conv_id: &str) -> Value {
+        match self.client.read(&Self::meta_path(conv_id)) {
+            Ok(Some(v)) => v,
+            Ok(None) => Value::Null,
+            Err(e) => {
+                warn!(error = %e, conv_id, "meta: substrate read failed; defaulting Null");
+                Value::Null
+            }
+        }
+    }
+
+    async fn set_meta(&self, conv_id: &str, meta: Value) {
+        // Best-effort mirror of the turn-append error policy: warn and
+        // swallow so a metadata write failure can't fail a turn.
+        if let Err(e) = self
+            .client
+            .publish(&self.node_id, &Self::meta_path(conv_id), meta)
+        {
+            warn!(error = %e, conv_id, "set_meta: substrate publish failed");
+        }
     }
 }
 

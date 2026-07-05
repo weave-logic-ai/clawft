@@ -184,6 +184,130 @@ async fn load_history_returns_in_order() {
 }
 
 #[tokio::test]
+async fn history_windows_to_the_most_recent_turns() {
+    // history reuses the sorted superset read and truncates to the
+    // tail. Append five, ask for the last two.
+    let stub = Arc::new(StubClient::default());
+    let sink = mk_sink(Arc::clone(&stub), HEARTBEAT_PERIOD);
+
+    for i in 0..5u64 {
+        sink.append_turn("c", turn_text("user", &i.to_string(), 100 + i))
+            .await
+            .unwrap();
+    }
+
+    let all = sink.history("c", 0).await;
+    assert_eq!(all.len(), 5, "window 0 returns every turn");
+    assert_eq!(all[0].content, "0");
+    assert_eq!(all[4].content, "4");
+
+    let tail = sink.history("c", 2).await;
+    assert_eq!(tail.len(), 2);
+    assert_eq!(tail[0].content, "3");
+    assert_eq!(tail[1].content, "4");
+
+    // Over-window doesn't panic and returns everything.
+    assert_eq!(sink.history("c", 999).await.len(), 5);
+    // Unknown conv → empty, not an error.
+    assert!(sink.history("nope", 0).await.is_empty());
+}
+
+#[tokio::test]
+async fn history_orders_same_ms_burst_by_counter_prefix() {
+    // Several appends stamped with the SAME ts_ms must come back in
+    // append order — the fixed-width per-conv counter prefix on the
+    // minted turn_id is the tiebreak the ts_ms sort falls through to.
+    let stub = Arc::new(StubClient::default());
+    let sink = mk_sink(Arc::clone(&stub), HEARTBEAT_PERIOD);
+
+    let same_ms = 1_700_000_000_000;
+    for i in 0..6u64 {
+        sink.append_turn("burst", turn_text("user", &i.to_string(), same_ms))
+            .await
+            .unwrap();
+    }
+
+    let turns = sink.history("burst", 0).await;
+    let order: Vec<&str> = turns.iter().map(|t| t.content.as_str()).collect();
+    assert_eq!(
+        order,
+        vec!["0", "1", "2", "3", "4", "5"],
+        "same-ms burst must preserve append order via the counter prefix"
+    );
+}
+
+#[tokio::test]
+async fn meta_round_trips_via_sidecar_and_defaults_null() {
+    let stub = Arc::new(StubClient::default());
+    let sink = mk_sink(Arc::clone(&stub), HEARTBEAT_PERIOD);
+
+    // Absent → Null.
+    assert_eq!(sink.meta("c").await, Value::Null);
+
+    sink.set_meta("c", serde_json::json!({"hallucination_score": 0.42}))
+        .await;
+    assert_eq!(sink.meta("c").await["hallucination_score"], 0.42);
+
+    // The sidecar lands at its own path — NOT the status path — so the
+    // heartbeat's status Replace can't clobber it.
+    let snap = stub.snapshot();
+    assert!(
+        snap.contains_key("substrate/_derived/chat/c/meta"),
+        "meta must write to the /meta sidecar, keys: {:?}",
+        snap.keys().collect::<Vec<_>>()
+    );
+    assert!(!snap.contains_key("substrate/_derived/chat/c/status"));
+
+    // Overwrite in place.
+    sink.set_meta("c", serde_json::json!({"hallucination_score": 0.99}))
+        .await;
+    assert_eq!(sink.meta("c").await["hallucination_score"], 0.99);
+}
+
+#[tokio::test]
+async fn meta_survives_heartbeat_status_writes() {
+    // Regression for the D3 path-collision risk: a status write to the
+    // same conv must not disturb the meta sidecar.
+    let stub = Arc::new(StubClient::default());
+    let sink = mk_sink(Arc::clone(&stub), HEARTBEAT_PERIOD);
+
+    sink.set_meta("c", serde_json::json!({"hallucination_score": 0.5}))
+        .await;
+    sink.publish_status("c", "alive", serde_json::json!({"ts_ms": 1}))
+        .await
+        .unwrap();
+
+    assert_eq!(sink.meta("c").await["hallucination_score"], 0.5);
+}
+
+#[tokio::test]
+async fn history_returns_superset_intermediates() {
+    // history is the raw superset read — tool intermediates survive
+    // (P3's hydration filter drops them, not the sink). Locks the
+    // contract the prompt-identity golden depends on.
+    let stub = Arc::new(StubClient::default());
+    let sink = mk_sink(Arc::clone(&stub), HEARTBEAT_PERIOD);
+
+    sink.append_turn("c", turn_text("user", "q", 1))
+        .await
+        .unwrap();
+    let mut tool_call = turn_text("assistant", "calling", 2);
+    tool_call.tool_calls = Some(vec![serde_json::json!({"name": "search"})]);
+    sink.append_turn("c", tool_call).await.unwrap();
+    let mut tool_result = turn_text("tool", "result", 3);
+    tool_result.tool_call_id = Some("call-1".into());
+    sink.append_turn("c", tool_result).await.unwrap();
+    sink.append_turn("c", turn_text("assistant", "final", 4))
+        .await
+        .unwrap();
+
+    let turns = sink.history("c", 0).await;
+    assert_eq!(turns.len(), 4, "superset keeps every turn");
+    assert!(turns[1].tool_calls.is_some());
+    assert_eq!(turns[2].tool_call_id.as_deref(), Some("call-1"));
+}
+
+#[tokio::test]
 async fn start_heartbeat_periodically_publishes() {
     let stub = Arc::new(StubClient::default());
     let sink = mk_sink(Arc::clone(&stub), Duration::from_millis(50));
