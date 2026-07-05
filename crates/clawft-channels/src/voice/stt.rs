@@ -50,6 +50,42 @@ pub struct Utterance {
     pub sample_rate: u32,
 }
 
+/// One decoded token with acoustic timing, already converted to milliseconds
+/// from the utterance start. Produced only by a backend whose decode exposes
+/// per-token data (the native TDT path); the substrate HTTP path yields none.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TranscriptToken {
+    /// Token surface text (SentencePiece `▁` word-starts turned into spaces).
+    pub text: String,
+    /// Onset in ms from utterance start.
+    pub start_ms: u32,
+    /// Duration in ms.
+    pub duration_ms: u32,
+    /// Softmax confidence of the emitted token over the token logits.
+    pub confidence: f32,
+}
+
+/// A transcript plus optional per-token detail. The richer return type
+/// [`SttBackend::transcribe_detailed`] hands back — `tokens` is empty on any
+/// backend that cannot expose them (the substrate path stays text-only).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TranscriptResult {
+    /// Trimmed transcript (may be empty).
+    pub text: String,
+    /// Per-token timing/duration/confidence; empty when unavailable.
+    pub tokens: Vec<TranscriptToken>,
+}
+
+impl TranscriptResult {
+    /// A text-only result (no per-token data) — the substrate/default shape.
+    pub fn text_only(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            tokens: Vec::new(),
+        }
+    }
+}
+
 /// Speech-to-text backend. ADR-053's documented extension point: the
 /// substrate HTTP backend ships, but an in-process backend (sherpa-rs,
 /// parakeet-mlx) can implement the same trait without touching the caller.
@@ -62,6 +98,20 @@ pub trait SttBackend: Send + Sync {
 
     /// Transcribe a finalized utterance to text (trimmed; may be empty).
     async fn transcribe(&self, utt: &Utterance) -> Result<String, VoiceError>;
+
+    /// Transcribe with per-token detail when the backend can produce it.
+    ///
+    /// **Additive, non-breaking:** the default implementation wraps
+    /// [`transcribe`](Self::transcribe) and returns `tokens: []`, so every
+    /// existing backend (the substrate HTTP path, mocks) is honestly
+    /// text-only without any change. A backend whose decode exposes per-token
+    /// data (the native TDT path) overrides this to fill `tokens`. Wave 1's
+    /// in-process session calls this so full token data flows into the
+    /// `VoiceAnalysis` record; nothing forces the substrate contract to grow.
+    async fn transcribe_detailed(&self, utt: &Utterance) -> Result<TranscriptResult, VoiceError> {
+        let text = self.transcribe(utt).await?;
+        Ok(TranscriptResult::text_only(text))
+    }
 
     /// Which model this backend serves.
     fn model(&self) -> SttModel;
@@ -215,6 +265,34 @@ mod tests {
         let text = stt.transcribe(&utt).await.unwrap();
         assert_eq!(text, "hello world");
         assert_eq!(stt.model(), SttModel::ParakeetEnglish);
+    }
+
+    #[tokio::test]
+    async fn transcribe_detailed_default_is_text_only() {
+        // The substrate backend does not override transcribe_detailed, so the
+        // default wraps transcribe and honestly reports no per-token data.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/inference"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "text": " hi there "
+            })))
+            .mount(&server)
+            .await;
+        let stt = SubstrateStt::new(
+            format!("{}/inference", server.uri()),
+            SttModel::ParakeetEnglish,
+            "en",
+            5,
+        )
+        .unwrap();
+        let utt = Utterance {
+            samples: vec![1_000i16; 1_600],
+            sample_rate: 16_000,
+        };
+        let res = stt.transcribe_detailed(&utt).await.unwrap();
+        assert_eq!(res.text, "hi there");
+        assert!(res.tokens.is_empty(), "substrate path must be text-only");
     }
 
     #[tokio::test]

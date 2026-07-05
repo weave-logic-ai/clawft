@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use clawft_channels::voice::stt::{SttBackend, SttModel, Utterance};
+#[cfg(feature = "onnx")]
+use clawft_channels::voice::stt::{TranscriptResult, TranscriptToken};
 use clawft_channels::voice::types::VoiceError;
 
 use crate::nemo_mel::NemoMel;
@@ -98,6 +100,41 @@ impl ParakeetStt {
         }
         engine.decode(&feats, frames)
     }
+
+    /// [`run`](Self::run) with per-token detail (native path). Converts the
+    /// TDT decode's encoder-frame timing to milliseconds via the mel hop and
+    /// the FastConformer subsampling factor.
+    #[cfg(feature = "onnx")]
+    fn run_detailed(&self, samples_16k: &[f32]) -> Result<TranscriptResult, VoiceError> {
+        let engine = self
+            .engine
+            .as_ref()
+            .ok_or_else(|| absent(&self.model_dir))?;
+        let (frames, feats) = self.mel.compute(samples_16k);
+        if frames == 0 {
+            return Ok(TranscriptResult::default());
+        }
+        let (text, tokens) = engine.decode_detailed(&feats, frames)?;
+        let stride = frame_stride_ms();
+        let tokens = tokens
+            .into_iter()
+            .map(|t| TranscriptToken {
+                text: engine.token_text(t.id),
+                start_ms: (t.t_frame as u32) * stride,
+                duration_ms: (t.dur_frames as u32) * stride,
+                confidence: t.conf,
+            })
+            .collect();
+        Ok(TranscriptResult { text, tokens })
+    }
+}
+
+/// Milliseconds per encoder frame: `HOP · subsampling / sample_rate`. For
+/// parakeet-tdt-0.6b (160-sample hop, 8× subsampling, 16 kHz) this is 80 ms.
+#[cfg(feature = "onnx")]
+fn frame_stride_ms() -> u32 {
+    use crate::nemo_mel::HOP;
+    (HOP as u32 * crate::parakeet_tdt::SUBSAMPLING_FACTOR as u32 * 1_000) / SAMPLE_RATE
 }
 
 impl Default for ParakeetStt {
@@ -128,6 +165,23 @@ impl SttBackend for ParakeetStt {
                 let mono: Vec<f32> = utt.samples.iter().map(|&s| s as f32 / 32_768.0).collect();
                 let samples = resample_linear(&mono, utt.sample_rate, SAMPLE_RATE);
                 return self.run(&samples);
+            }
+        }
+        #[cfg(not(feature = "onnx"))]
+        let _ = utt;
+        Err(absent(&self.model_dir))
+    }
+
+    async fn transcribe_detailed(
+        &self,
+        utt: &Utterance,
+    ) -> Result<clawft_channels::voice::stt::TranscriptResult, VoiceError> {
+        #[cfg(feature = "onnx")]
+        {
+            if self.runtime_available {
+                let mono: Vec<f32> = utt.samples.iter().map(|&s| s as f32 / 32_768.0).collect();
+                let samples = resample_linear(&mono, utt.sample_rate, SAMPLE_RATE);
+                return self.run_detailed(&samples);
             }
         }
         #[cfg(not(feature = "onnx"))]

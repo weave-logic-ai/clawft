@@ -87,6 +87,7 @@ impl ConversationObserver for EccConversationObserver {
                 text,
                 speaker,
                 speaker_name,
+                ..
             } => {
                 let t = self.graph.add_node(
                     text,
@@ -166,6 +167,7 @@ mod tests {
             text: "what's the capital of France".into(),
             speaker: Some("spk-0".into()),
             speaker_name: Some("Alice".into()),
+            voice_analysis: None,
         });
         obs.observe(ConversationEvent::SpeculativeReply {
             ack: "one sec.".into(),
@@ -190,6 +192,7 @@ mod tests {
             text: "turn one".into(),
             speaker: None,
             speaker_name: None,
+            voice_analysis: None,
         });
         obs.observe(ConversationEvent::SpeculativeReply { ack: "ok".into() });
         // Barge-in prunes the in-flight reply.
@@ -198,6 +201,7 @@ mod tests {
             text: "turn two".into(),
             speaker: None,
             speaker_name: None,
+            voice_analysis: None,
         });
 
         // Nodes: turn1, spec, interrupt, turn2 = 4.

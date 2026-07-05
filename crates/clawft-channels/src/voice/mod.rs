@@ -36,10 +36,14 @@
 //! - `voice-real-audio`   — also pulls in `cpal` for real I/O.
 //! - `real-audio-test`    — turns on cpal-touching tests (skipped on CI).
 
+pub mod analysis;
 pub mod capture;
 pub mod channel;
 pub mod edge_reflex;
+pub mod paralinguistics;
 pub mod policy;
+pub mod prosody;
+pub mod ser;
 pub mod speaker;
 pub mod stt;
 pub mod talkmode;
@@ -49,14 +53,25 @@ pub mod types;
 pub mod vad;
 pub mod wav;
 
+pub use analysis::{
+    AudioAnalysis, Confidence, EmotionAnalysis, EmotionSource, EndpointAnalysis,
+    ParalinguisticClass, ParalinguisticsAnalysis, ProsodyAnalysis, SpeakerAction, SpeakerAnalysis,
+    SttAnalysis, SttPath, TokenAnalysis, VoiceAnalysis, VOICE_ANALYSIS_VERSION, VOICE_TIER,
+};
 pub use capture::{CaptureProcessor, ImpulseSink, VoiceImpulse};
 pub use edge_reflex::{EdgeCommand, EdgeReflex, ReflexState};
+pub use paralinguistics::{classify_paralinguistics, ParalinguisticInput};
+pub use prosody::{
+    analyze_prosody, capture_health, emotion_from_prosody, estimate_f0_track, CaptureHealth,
+    F0Track, ProsodyInput,
+};
+pub use ser::{refine_emotion, DspSer, SerModel, SerPrediction};
 pub use channel::{
     AudioSegment, AudioSource, PlaybackSink, VoiceChannelAdapter, VoiceChannelAdapterFactory,
 };
 pub use policy::{ReasoningHint, VoiceAnswerPolicy, VoiceLlm, VoiceTurnRequest, estimate_tokens};
 pub use speaker::{SpeakerEmbedder, SpeakerId, SpeakerMatch, SpeakerNode, SpeakerRegistry, cosine};
-pub use stt::{SttBackend, SttModel, SubstrateStt, Utterance};
+pub use stt::{SttBackend, SttModel, SubstrateStt, TranscriptResult, TranscriptToken, Utterance};
 pub use talkmode::{
     AudioControl, ConversationEvent, ConversationObserver, NoopAudioControl, NoopObserver,
     TalkModeConfig, TalkModeController, contextual_ack,

@@ -298,6 +298,7 @@ impl ConversationObserver for LoopObserver {
                 text,
                 speaker,
                 speaker_name,
+                ..
             } => {
                 let role = speaker_name.as_deref().unwrap_or("user");
                 let (seq, node) = self.dual_write_turn(&text, role);

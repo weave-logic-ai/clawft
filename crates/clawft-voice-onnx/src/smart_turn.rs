@@ -161,6 +161,16 @@ impl EndpointModel for SmartTurnEndpoint {
             .completion_prob(recent_audio, partial_text)
             .await
     }
+
+    /// `smart-turn-v3` when the ONNX runtime is live, else the heuristic path
+    /// this model degrades to — matching what `completion_prob` actually used.
+    fn source(&self) -> &'static str {
+        if self.runtime_available {
+            "smart-turn-v3"
+        } else {
+            "heuristic"
+        }
+    }
 }
 
 /// Resolve the model path: env override → cwd `.weftos` → `$HOME/.weftos`.

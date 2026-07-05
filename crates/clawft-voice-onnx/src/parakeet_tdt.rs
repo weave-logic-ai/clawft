@@ -30,6 +30,25 @@ const MAX_TOKENS_PER_FRAME: usize = 5;
 /// Prediction-net step output: `(decoder_out[640], h', c')`.
 type DecoderStep = (Vec<f32>, Vec<f32>, Vec<f32>);
 
+/// FastConformer subsampling factor: the encoder emits one frame per 8 mel
+/// frames, so an encoder frame index `t` maps to `t · HOP · 8` samples. Pinned
+/// from the parakeet-tdt-0.6b model config (`subsampling_factor: 8`).
+pub(crate) const SUBSAMPLING_FACTOR: usize = 8;
+
+/// One emitted token with its encoder-frame timing and confidence — the data
+/// the TDT decode already computes but historically discarded. Frame units
+/// (not ms); the caller converts via [`SUBSAMPLING_FACTOR`] and the mel hop.
+pub(crate) struct DecodedToken {
+    /// Token id (index into `tokens`).
+    pub id: usize,
+    /// Encoder frame index at emission (onset).
+    pub t_frame: usize,
+    /// Frames advanced by the TDT duration head after this token (≥ 1).
+    pub dur_frames: usize,
+    /// Softmax confidence of the emitted token over the token logits.
+    pub conf: f32,
+}
+
 /// Loaded encoder/decoder/joiner sessions + the token table. Constructed only
 /// when every artifact is present (see [`TdtEngine::load`]).
 pub(crate) struct TdtEngine {
@@ -59,9 +78,22 @@ impl TdtEngine {
     /// Encoder → TDT greedy decode → text for one utterance's `[N_MELS, frames]`
     /// (mel-major) feature buffer.
     pub(crate) fn decode(&self, feats: &[f32], frames: usize) -> Result<String, VoiceError> {
+        Ok(self.decode_detailed(feats, frames)?.0)
+    }
+
+    /// [`decode`](Self::decode) plus the per-token detail the decode already
+    /// computes (onset frame, duration frames, softmax confidence). The text
+    /// is identical to [`decode`]; the tokens are the enrichment §W1.3 surfaces
+    /// for the `VoiceAnalysis` record on the native path.
+    pub(crate) fn decode_detailed(
+        &self,
+        feats: &[f32],
+        frames: usize,
+    ) -> Result<(String, Vec<DecodedToken>), VoiceError> {
         let (enc, t_out) = self.run_encoder(feats, frames)?;
-        let ids = self.greedy_tdt(&enc, t_out)?;
-        Ok(self.ids_to_text(&ids))
+        let tokens = self.greedy_tdt(&enc, t_out)?;
+        let ids: Vec<usize> = tokens.iter().map(|t| t.id).collect();
+        Ok((self.ids_to_text(&ids), tokens))
     }
 
     /// Blank token id (`<blk>`, the last entry in `tokens.txt`).
@@ -103,7 +135,13 @@ impl TdtEngine {
     }
 
     /// TDT greedy search (`DecodeOneTDT`).
-    fn greedy_tdt(&self, enc: &[f32], t_out: usize) -> Result<Vec<usize>, VoiceError> {
+    ///
+    /// Returns the emitted tokens with their onset frame, advance (duration)
+    /// frames, and softmax confidence — all computed inline at ~zero extra
+    /// cost. The token *sequence* and the decode's time advance are byte-for-
+    /// byte what the text-only path produced; the record just captures the
+    /// intermediates it used to throw away.
+    fn greedy_tdt(&self, enc: &[f32], t_out: usize) -> Result<Vec<DecodedToken>, VoiceError> {
         let blank = self.blank_id();
         let n_tokens = self.tokens.len(); // token logits incl. blank
 
@@ -113,7 +151,7 @@ impl TdtEngine {
         h = nh;
         c = nc;
 
-        let mut out = Vec::new();
+        let mut out: Vec<DecodedToken> = Vec::new();
         let mut t: usize = 0;
         let mut tokens_this_frame = 0usize;
         while t < t_out {
@@ -122,8 +160,14 @@ impl TdtEngine {
             let y = argmax(&logits[..n_tokens]);
             let mut skip = argmax(&logits[n_tokens..]);
 
+            // Confidence of the emitted token (only meaningful for a non-blank).
+            let conf = if y != blank {
+                softmax_at(&logits[..n_tokens], y)
+            } else {
+                0.0
+            };
+
             if y != blank {
-                out.push(y);
                 let (d, nh, nc) = self.run_decoder(y, &h, &c)?;
                 dec_out = d;
                 h = nh;
@@ -140,6 +184,15 @@ impl TdtEngine {
             if y == blank && skip == 0 {
                 tokens_this_frame = 0;
                 skip = 1;
+            }
+            // Record the token once the final advance for this step is known.
+            if y != blank {
+                out.push(DecodedToken {
+                    id: y,
+                    t_frame: t,
+                    dur_frames: skip.max(1),
+                    conf,
+                });
             }
             t += skip;
         }
@@ -193,6 +246,18 @@ impl TdtEngine {
         extract(&outputs, "outputs")
     }
 
+    /// One token id → its surface text: the `tokens.txt` symbol with the
+    /// SentencePiece `▁` word-start turned into a leading space, or empty for a
+    /// special (`<blk>`, `<unk>`, …). Used to label per-token `VoiceAnalysis`
+    /// entries; the whole-utterance join stays in [`ids_to_text`].
+    pub(crate) fn token_text(&self, id: usize) -> String {
+        match self.tokens.get(id) {
+            Some(tok) if tok.starts_with('<') && tok.ends_with('>') => String::new(),
+            Some(tok) => tok.replace('\u{2581}', " "),
+            None => String::new(),
+        }
+    }
+
     /// Map token ids → text: join `tokens.txt` symbols, turning SentencePiece
     /// `▁` word-starts into spaces, dropping specials.
     fn ids_to_text(&self, ids: &[usize]) -> String {
@@ -229,6 +294,21 @@ fn argmax(v: &[f32]) -> usize {
     best
 }
 
+/// Numerically-stable softmax probability of `logits[idx]` over the slice —
+/// the emitted token's confidence. `idx` is assumed the argmax, so the result
+/// is the largest probability in `[0, 1]`.
+fn softmax_at(logits: &[f32], idx: usize) -> f32 {
+    if logits.is_empty() {
+        return 0.0;
+    }
+    let max = logits.iter().copied().fold(f32::MIN, f32::max);
+    let sum: f32 = logits.iter().map(|&x| (x - max).exp()).sum();
+    if sum <= 0.0 {
+        return 0.0;
+    }
+    ((logits[idx] - max).exp() / sum).clamp(0.0, 1.0)
+}
+
 /// Extract a named float output tensor as an owned `Vec<f32>`.
 fn extract(outputs: &SessionOutputs, name: &str) -> Result<Vec<f32>, VoiceError> {
     let v = outputs
@@ -256,4 +336,39 @@ fn try_load(path: &Path) -> Option<Arc<Mutex<Session>>> {
 
 fn poisoned() -> VoiceError {
     VoiceError::Audio("parakeet session mutex poisoned".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn softmax_at_is_a_probability() {
+        // A clearly-dominant logit yields high confidence; the softmax over the
+        // slice sums to 1 so the peak sits in (0, 1].
+        let logits = [0.1, 4.0, 0.2, -1.0];
+        let p = softmax_at(&logits, 1);
+        assert!(p > 0.9, "dominant logit should be confident, got {p}");
+        assert!(p <= 1.0);
+    }
+
+    #[test]
+    fn softmax_at_flat_is_uniform() {
+        // Equal logits → uniform 1/N confidence.
+        let logits = [1.0, 1.0, 1.0, 1.0];
+        let p = softmax_at(&logits, 2);
+        assert!((p - 0.25).abs() < 1e-5, "uniform should be 1/N, got {p}");
+    }
+
+    #[test]
+    fn softmax_at_empty_is_zero() {
+        assert_eq!(softmax_at(&[], 0), 0.0);
+    }
+
+    #[test]
+    fn subsampling_factor_pinned() {
+        // 8× subsampling over a 10 ms mel hop → 80 ms per encoder frame; the
+        // record's t_ms/dur_ms conversion rides on this.
+        assert_eq!(SUBSAMPLING_FACTOR, 8);
+    }
 }

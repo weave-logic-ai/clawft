@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use clawft_channels::voice::VoiceAnswerPolicy;
+use clawft_channels::voice::analysis::{EmotionSource, SpeakerAction};
 use clawft_channels::voice::policy::{VoiceLlm, VoiceTurnRequest};
 use clawft_channels::voice::speaker::{SpeakerEmbedder, SpeakerRegistry};
 use clawft_channels::voice::stt::{SttBackend, SttModel, Utterance};
@@ -283,6 +284,36 @@ async fn full_pipeline_speculative_then_committed() {
         )
     });
     assert!(attributed, "turn must be attributed to a speaker node");
+
+    // The user turn carries the complete VoiceAnalysis record (§W1.2),
+    // produced client-side and handed off at the observer boundary.
+    let va = events
+        .iter()
+        .find_map(|e| match e {
+            ConversationEvent::UserTurn {
+                voice_analysis: Some(va),
+                ..
+            } => Some(va.clone()),
+            _ => None,
+        })
+        .expect("user turn must carry a voice_analysis record");
+    assert_eq!(va.v, 1, "record is versioned");
+    assert_eq!(va.tier, "voice", "tier discriminator");
+    assert_eq!(va.stt.model, "parakeet-tdt-0.6b", "STT model wire name");
+    assert_eq!(va.speaker.embedding_dim, 3, "ECAPA-mock dim threaded onto record");
+    assert!(
+        matches!(
+            va.speaker.action,
+            SpeakerAction::Identified | SpeakerAction::Enrolled
+        ),
+        "speaker attributed"
+    );
+    assert!(va.audio.snr_db.is_finite(), "SNR computed from RMS − floor");
+    assert_eq!(
+        va.emotion.source,
+        EmotionSource::ProsodyDsp,
+        "DSP emotion floor with no SER model staged"
+    );
 
     // Ack + answer actually reached the sink; no barge-in happened.
     assert!(

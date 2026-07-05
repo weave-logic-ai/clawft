@@ -26,12 +26,20 @@
 //! and never pulls clawft-llm / clawft-kernel / cpal into clawft-channels.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use super::analysis::{
+    AudioAnalysis, EndpointAnalysis, SpeakerAction, SpeakerAnalysis, SttAnalysis, SttPath,
+    TokenAnalysis, VoiceAnalysis,
+};
+use super::paralinguistics::{classify_paralinguistics, ParalinguisticInput};
 use super::policy::{VoiceAnswerPolicy, VoiceLlm};
+use super::prosody::{analyze_prosody, capture_health, emotion_from_prosody, ProsodyInput};
+use super::ser::{refine_emotion, DspSer, SerModel};
 use super::speaker::{SpeakerEmbedder, SpeakerId, SpeakerRegistry};
 use super::stt::{SttBackend, Utterance};
 use super::tts::{DualLayerTts, TtsSink};
@@ -101,7 +109,11 @@ impl AudioControl for NoopAudioControl {
 
 /// One step of the conversation's ECC lifecycle. The bridge's observer turns
 /// these into `CausalGraph` nodes / `CrossRef`s; tests assert the sequence.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Not `Eq`: [`ConversationEvent::UserTurn`] carries the `VoiceAnalysis`
+/// record, whose acoustic/prosodic fields are `f32` (no total order). Equality
+/// comparisons in tests use `PartialEq`.
+#[derive(Debug, Clone, PartialEq)]
 pub enum ConversationEvent {
     /// A finalized user utterance committed as a `Follows` `CausalNode`.
     UserTurn {
@@ -111,6 +123,13 @@ pub enum ConversationEvent {
         speaker: Option<SpeakerId>,
         /// Attributed speaker name (private context, never spoken).
         speaker_name: Option<String>,
+        /// The complete per-utterance voice decomposition (§W1.2), produced
+        /// client-side in the session and handed off here at the observer
+        /// boundary. The recorder observer carries it over `agent.turn.record`
+        /// so `index_turn` stores it and merges its emotion axis. `None` when
+        /// the record could not be produced (no STT text). Boxed to keep the
+        /// enum small for the common non-user variants.
+        voice_analysis: Option<Box<VoiceAnalysis>>,
     },
     /// A new speaker was enrolled (ECC per-speaker node created).
     SpeakerEnrolled {
@@ -229,6 +248,11 @@ pub struct TalkModeController<M: EndpointModel> {
     audio: Arc<dyn AudioControl>,
     observer: Arc<dyn ConversationObserver>,
     config: TalkModeConfig,
+    /// Speech-emotion seam (§W1.2). Defaults to [`DspSer`] — no model, so the
+    /// DSP prosody arousal floor stands and `emotion.source` is `prosody-dsp`;
+    /// inject a real SER ONNX with [`Self::with_ser`] later to refine valence +
+    /// label without reshaping the record.
+    ser: Arc<dyn SerModel>,
     /// Adaptive room-tone tracker. The voiced gate is
     /// `max(config.vad_threshold_dbfs, floor + margin)` so a loud room
     /// (fans, HVAC) cannot read as permanent speech and starve the
@@ -265,8 +289,18 @@ impl<M: EndpointModel> TalkModeController<M> {
             audio,
             observer,
             config,
+            ser: Arc::new(DspSer),
             noise_floor: NoiseFloor::new(VAD_NOISE_MARGIN_DB),
         }
+    }
+
+    /// Inject a speech-emotion model (§W1.2 SER seam). By default the
+    /// controller uses [`DspSer`] (no model → DSP arousal floor); a real SER
+    /// ONNX from `clawft-voice-onnx` overrides `emotion.valence` + `label`
+    /// (and `dominance`) while DSP arousal stays the floor.
+    pub fn with_ser(mut self, ser: Arc<dyn SerModel>) -> Self {
+        self.ser = ser;
+        self
     }
 
     /// Borrow the speaker registry (e.g. to persist it after a session).
@@ -356,9 +390,10 @@ impl<M: EndpointModel> TalkModeController<M> {
             "talk-mode end-of-turn utterance captured"
         );
 
-        // STT (6.2).
-        let text = match self.stt.transcribe(&utt).await {
-            Ok(t) if !t.trim().is_empty() => t,
+        // STT (6.2) with per-token detail (native path) + latency (§W1.3).
+        let stt_start = Instant::now();
+        let detail = match self.stt.transcribe_detailed(&utt).await {
+            Ok(d) if !d.text.trim().is_empty() => d,
             Ok(_) => {
                 info!("talk-mode STT returned an empty transcript; turn dropped");
                 return;
@@ -368,10 +403,15 @@ impl<M: EndpointModel> TalkModeController<M> {
                 return;
             }
         };
+        let stt_latency_ms = stt_start.elapsed().as_millis() as u64;
+        let text = detail.text.clone();
         info!(transcript = %text, "talk-mode user turn");
 
-        // Speaker attribution (6.6) → private context, never spoken.
-        let (speaker_id, speaker_name, speaker_ctx) = self.attribute_speaker(&utt).await;
+        // Speaker attribution (6.6) → private context, never spoken. Now also
+        // yields the cosine score + action for the record (§W1.2).
+        let (speaker, speaker_ctx) = self.attribute_speaker(&utt).await;
+        let speaker_id = speaker.id.clone();
+        let speaker_name = speaker.name.clone();
 
         // Spoken self-enrollment (voicelab parity): a voice naming itself
         // ("my name is X" / "call me X") upgrades its placeholder name on
@@ -384,10 +424,16 @@ impl<M: EndpointModel> TalkModeController<M> {
             self.persist_registry();
         }
 
+        // Assemble the complete VoiceAnalysis record (§W1.2) client-side and
+        // hand it off at the observer boundary; the recorder observer carries
+        // it over the wire.
+        let voice_analysis = self.build_voice_analysis(&utt, &detail, speaker, stt_latency_ms);
+
         self.observer.observe(ConversationEvent::UserTurn {
             text: text.clone(),
             speaker: speaker_id,
             speaker_name: speaker_name.clone(),
+            voice_analysis: Some(Box::new(voice_analysis)),
         });
 
         // Fast ack = Speculative spoken node (6.4 fast layer covers latency).
@@ -427,35 +473,150 @@ impl<M: EndpointModel> TalkModeController<M> {
             .await;
     }
 
+    /// Attribute the utterance to a speaker, returning the full
+    /// [`SpeakerAnalysis`] (id / name / cosine score / threshold / action /
+    /// embedding dim) for the record, plus the private LLM context string.
+    /// `SpeakerAnalysis::default()` (action `Unknown`) when no embedder.
     async fn attribute_speaker(
         &mut self,
         utt: &Utterance,
-    ) -> (Option<SpeakerId>, Option<String>, Option<String>) {
+    ) -> (SpeakerAnalysis, Option<String>) {
         let Some(embedder) = self.embedder.clone() else {
-            return (None, None, None);
+            return (SpeakerAnalysis::default(), None);
         };
         let emb = match embedder.embed(&utt.samples, utt.sample_rate).await {
             Ok(e) => e,
             Err(e) => {
                 warn!(error = %e, "speaker embed failed; turn unattributed");
-                return (None, None, None);
+                return (SpeakerAnalysis::default(), None);
             }
         };
-        let (id, is_new) = self
-            .registry
-            .identify_or_enroll(&emb, self.config.default_speaker_name.clone());
+        let threshold = self.registry.threshold();
+        let embedding_dim = embedder.dim() as u32;
+        // Identify first so the cosine score survives (identify_or_enroll drops
+        // it); then attribute / enroll to keep the running-mean behaviour.
+        let (id, score, action) = match self.registry.identify(&emb) {
+            Some(m) => {
+                let score = m.score;
+                self.registry.attribute(&m.id, &emb);
+                (m.id, score, SpeakerAction::Identified)
+            }
+            None => {
+                let id = self
+                    .registry
+                    .enroll(self.config.default_speaker_name.clone(), &emb);
+                self.observer.observe(ConversationEvent::SpeakerEnrolled {
+                    id: id.clone(),
+                    name: self
+                        .registry
+                        .get(&id)
+                        .map(|n| n.name.clone())
+                        .unwrap_or_default(),
+                });
+                self.persist_registry();
+                (id, 0.0, SpeakerAction::Enrolled)
+            }
+        };
         let name = self.registry.get(&id).map(|n| n.name.clone());
-        if is_new {
-            self.observer.observe(ConversationEvent::SpeakerEnrolled {
-                id: id.clone(),
-                name: name.clone().unwrap_or_default(),
-            });
-            self.persist_registry();
-        }
         let ctx = name
             .as_ref()
             .map(|n| format!("The current speaker is {n} (id {id}). Use this only as private context; never read it aloud."));
-        (Some(id), name, ctx)
+        let analysis = SpeakerAnalysis {
+            id: Some(id),
+            name,
+            score,
+            threshold,
+            action,
+            embedding_dim,
+        };
+        (analysis, ctx)
+    }
+
+    /// Assemble the complete `VoiceAnalysis` record (§W1.2) from the decoded
+    /// transcript, the speaker attribution, the endpoint snapshot, and the DSP
+    /// extractors. Every section is present; coarse fields carry their honest
+    /// confidence flags. This is the production point the plan puts in the
+    /// session — the daemon carries the emitted record over `agent.turn.record`.
+    fn build_voice_analysis(
+        &self,
+        utt: &Utterance,
+        detail: &super::stt::TranscriptResult,
+        speaker: SpeakerAnalysis,
+        stt_latency_ms: u64,
+    ) -> VoiceAnalysis {
+        let sr = utt.sample_rate.max(1);
+        let voiced_ms = utt.samples.len() as u64 * 1_000 / sr as u64;
+
+        // STT section: map the per-token detail; the path is native when the
+        // decode exposed tokens (the substrate path is honestly text-only).
+        let tokens: Vec<TokenAnalysis> = detail
+            .tokens
+            .iter()
+            .map(|t| TokenAnalysis {
+                text: t.text.clone(),
+                t_ms: t.start_ms,
+                dur_ms: t.duration_ms,
+                conf: t.confidence,
+            })
+            .collect();
+        let path = if tokens.is_empty() {
+            SttPath::Substrate
+        } else {
+            SttPath::Native
+        };
+        let stt = SttAnalysis::new(self.stt.model().wire_name(), path, stt_latency_ms, tokens);
+
+        // Endpoint section from the endpointer's captured snapshot.
+        let snap = self.endpointer.last_endpoint().cloned();
+        let silence_tail_ms = snap.as_ref().map(|s| s.silence_tail_ms).unwrap_or(0);
+        let duration_ms = voiced_ms + silence_tail_ms;
+        let endpoint = EndpointAnalysis {
+            completion_prob: snap.as_ref().map(|s| s.completion_prob).unwrap_or(0.0),
+            source: snap
+                .as_ref()
+                .map(|s| s.source.clone())
+                .unwrap_or_else(|| "unknown".into()),
+            silence_tail_ms,
+            // Onset→finalize wall clock ≈ voiced audio + the trailing tail.
+            latency_ms: duration_ms,
+        };
+
+        // Audio / capture-health section (one pass over the i16 frames) + the
+        // tracked room-tone floor → SNR.
+        let health = capture_health(&utt.samples, sr);
+        let noise_floor_dbfs = self.noise_floor.floor_dbfs();
+        let audio = AudioAnalysis {
+            duration_ms,
+            voiced_ms,
+            silence_ms: silence_tail_ms,
+            rms_dbfs_mean: health.rms_dbfs_mean,
+            rms_dbfs_peak: health.rms_dbfs_peak,
+            noise_floor_dbfs,
+            snr_db: health.rms_dbfs_mean - noise_floor_dbfs,
+            clip_pct: health.clip_pct,
+            dc_offset: health.dc_offset,
+        };
+
+        // Prosody (DSP) → emotion (DSP floor, refined by the SER seam) →
+        // paralinguistics.
+        let prosody = analyze_prosody(&ProsodyInput {
+            samples: &utt.samples,
+            sample_rate: sr,
+            voiced_ms,
+            tokens: &detail.tokens,
+        });
+        let emotion = refine_emotion(
+            emotion_from_prosody(&prosody),
+            self.ser.predict(&utt.samples, sr),
+        );
+        let paralinguistics = classify_paralinguistics(&ParalinguisticInput {
+            transcript: &detail.text,
+            voiced_ms,
+            energy_dynamics_db: prosody.energy_dynamics_db,
+            has_f0: prosody.f0_mean_hz > 0.0,
+        });
+
+        VoiceAnalysis::new(stt, endpoint, speaker, audio, prosody, emotion, paralinguistics)
     }
 
     /// Play the fast ack then stream the answer; a sustained voiced run during

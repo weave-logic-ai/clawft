@@ -33,6 +33,30 @@ pub trait EndpointModel: Send + Sync {
     /// audio window and the running partial transcript. Higher = more likely
     /// the speaker is done.
     async fn completion_prob(&self, recent_audio: &[i16], partial_text: &str) -> f32;
+
+    /// Which endpointer produced the probability, for the `VoiceAnalysis`
+    /// `endpoint.source` field. Additive with a default so existing models
+    /// need no change; the smart-turn model overrides this to report
+    /// `smart-turn-v3` when its ONNX runtime is live (else `heuristic`).
+    fn source(&self) -> &'static str {
+        "heuristic"
+    }
+}
+
+/// The endpoint "related data" a finalize decision produces then normally
+/// discards — captured for the `VoiceAnalysis` record (§W1.2). The controller
+/// reads it after a [`TurnDecision::Finalize`] and maps it into the record's
+/// `endpoint` section (adding the wall-clock latency it measures itself).
+#[derive(Debug, Clone, PartialEq)]
+pub struct EndpointSnapshot {
+    /// Completion probability that fired the finalize, or the last one computed
+    /// before a max-silence ceiling finalize (the heuristic's empty-transcript
+    /// default when no semantic check ran).
+    pub completion_prob: f32,
+    /// Which endpointer produced it: `smart-turn-v3` | `heuristic`.
+    pub source: String,
+    /// Trailing-silence length at finalize (ms).
+    pub silence_tail_ms: u64,
 }
 
 /// No-model default endpointer: reasons over the partial transcript's
@@ -87,6 +111,7 @@ impl EndpointModel for HeuristicEndpoint {
 pub struct SemanticEndpointer<M: EndpointModel> {
     model: M,
     threshold: f32,
+    sample_rate: u32,
     short_silence_samples: u64,
     max_silence_samples: u64,
     recent_cap: usize,
@@ -94,6 +119,13 @@ pub struct SemanticEndpointer<M: EndpointModel> {
     checked_this_pause: bool,
     recent_audio: VecDeque<i16>,
     active: bool,
+    /// Last completion probability computed this turn (the heuristic's
+    /// empty-transcript default until a semantic check runs). Captured into the
+    /// finalize snapshot so a max-silence ceiling finalize still reports a prob.
+    last_prob: f32,
+    /// The endpoint related-data from the most recent finalize, read by the
+    /// controller for the `VoiceAnalysis` record.
+    last_endpoint: Option<EndpointSnapshot>,
 }
 
 impl<M: EndpointModel> SemanticEndpointer<M> {
@@ -114,6 +146,7 @@ impl<M: EndpointModel> SemanticEndpointer<M> {
         Self {
             model,
             threshold,
+            sample_rate,
             short_silence_samples: sr * u64::from(short_silence_ms) / 1_000,
             max_silence_samples: sr * u64::from(max_silence_ms) / 1_000,
             // Keep ~2 s of recent audio for the model window.
@@ -122,7 +155,30 @@ impl<M: EndpointModel> SemanticEndpointer<M> {
             checked_this_pause: false,
             recent_audio: VecDeque::new(),
             active: false,
+            last_prob: 0.0,
+            last_endpoint: None,
         }
+    }
+
+    /// The endpoint related-data from the most recent finalize (probability,
+    /// source, silence tail). `None` until the first turn finalizes; consumed
+    /// by the controller when assembling the `VoiceAnalysis` record.
+    pub fn last_endpoint(&self) -> Option<&EndpointSnapshot> {
+        self.last_endpoint.as_ref()
+    }
+
+    /// Milliseconds represented by a trailing-silence sample count.
+    fn samples_to_ms(&self, samples: u64) -> u64 {
+        samples * 1_000 / u64::from(self.sample_rate.max(1))
+    }
+
+    /// Record the finalize snapshot (before the turn state is reset).
+    fn snapshot(&mut self) {
+        self.last_endpoint = Some(EndpointSnapshot {
+            completion_prob: self.last_prob,
+            source: self.model.source().to_string(),
+            silence_tail_ms: self.samples_to_ms(self.silence_run),
+        });
     }
 
     /// Observe one frame.
@@ -143,6 +199,11 @@ impl<M: EndpointModel> SemanticEndpointer<M> {
         }
 
         if voiced {
+            if !self.active {
+                // New turn onset — clear the prior turn's probability so a
+                // max-silence finalize can't report a stale value.
+                self.last_prob = 0.0;
+            }
             self.active = true;
             self.silence_run = 0;
             self.checked_this_pause = false;
@@ -157,6 +218,7 @@ impl<M: EndpointModel> SemanticEndpointer<M> {
 
         // Hard ceiling: finalize no matter what the model thinks.
         if self.silence_run >= self.max_silence_samples {
+            self.snapshot();
             self.reset_turn();
             return TurnDecision::Finalize;
         }
@@ -166,7 +228,9 @@ impl<M: EndpointModel> SemanticEndpointer<M> {
             self.checked_this_pause = true;
             let audio: Vec<i16> = self.recent_audio.iter().copied().collect();
             let prob = self.model.completion_prob(&audio, partial_text).await;
+            self.last_prob = prob;
             if prob >= self.threshold {
+                self.snapshot();
                 self.reset_turn();
                 return TurnDecision::Finalize;
             }
@@ -254,6 +318,40 @@ mod tests {
         assert!(m.completion_prob(&[], "wait and").await < 0.3);
         assert!(m.completion_prob(&[], "the quick brown fox").await > 0.5);
         assert!(m.completion_prob(&[], "hold on,").await < 0.2);
+    }
+
+    #[tokio::test]
+    async fn finalize_captures_endpoint_snapshot() {
+        let mut ep = SemanticEndpointer::new(HeuristicEndpoint, 16_000, 250, 2_000, 0.5);
+        let voiced = vec![3_000i16; frame_ms(16_000, 100)];
+        let silent = vec![0i16; frame_ms(16_000, 100)];
+        assert!(ep.last_endpoint().is_none());
+        ep.observe(&voiced, true, "what time is it?").await;
+        ep.observe(&silent, false, "what time is it?").await;
+        ep.observe(&silent, false, "what time is it?").await;
+        let d = ep.observe(&silent, false, "what time is it?").await;
+        assert_eq!(d, TurnDecision::Finalize);
+        let snap = ep.last_endpoint().expect("finalize records a snapshot");
+        // Terminal punctuation → high completion prob from the heuristic.
+        assert!(snap.completion_prob > 0.9, "prob {}", snap.completion_prob);
+        assert_eq!(snap.source, "heuristic");
+        assert!(snap.silence_tail_ms >= 250, "silence tail {}", snap.silence_tail_ms);
+    }
+
+    #[tokio::test]
+    async fn max_silence_snapshot_reports_last_prob_and_tail() {
+        // Open-word partial never crosses threshold; the max-silence ceiling
+        // finalizes and the snapshot still carries the last computed prob.
+        let mut ep = SemanticEndpointer::new(HeuristicEndpoint, 16_000, 250, 500, 0.5);
+        let voiced = vec![3_000i16; frame_ms(16_000, 100)];
+        let silent = vec![0i16; frame_ms(16_000, 100)];
+        ep.observe(&voiced, true, "and").await;
+        for _ in 0..8 {
+            ep.observe(&silent, false, "and").await;
+        }
+        let snap = ep.last_endpoint().expect("ceiling finalize records a snapshot");
+        assert!(snap.completion_prob < 0.3, "open word prob {}", snap.completion_prob);
+        assert!(snap.silence_tail_ms >= 500, "tail {}", snap.silence_tail_ms);
     }
 
     #[tokio::test]

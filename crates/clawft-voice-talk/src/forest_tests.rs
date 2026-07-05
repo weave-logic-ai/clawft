@@ -38,6 +38,7 @@ fn user_turn_dual_writes_and_loop_commits_it() {
         text: "tell me about Puyo please".into(),
         speaker: None,
         speaker_name: None,
+        voice_analysis: None,
     });
 
     // The turn is dual-written as a Frontier on both substrates and registered
@@ -61,6 +62,7 @@ fn full_turn_renders_speculative_then_committed_and_barge_in_contradicts() {
         text: "what's the capital of France".into(),
         speaker: None,
         speaker_name: None,
+        voice_analysis: None,
     });
     f.talk_loop().tick(); // loop commits the user turn
     let after_turn = f.graph().node_count();
