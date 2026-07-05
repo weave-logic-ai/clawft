@@ -295,6 +295,14 @@ pub struct AgentAnchorConfig {
     /// timeout), matching the spawner's own `Default`.
     #[serde(default)]
     pub subagents: SubagentsConfig,
+
+    /// Turn classification & labeling (ADR-067 P2, classification-design §D6).
+    /// Gates the `TurnClassifier` the L2 tier runs at `index_turn` so every
+    /// committed turn node carries a 4-axis `classification` blob. Absent ⇒
+    /// `mode = off` (classification disabled, no per-turn cost), matching the
+    /// conservative `talk_loop=false` precedent.
+    #[serde(default)]
+    pub classification: ClassificationConfig,
 }
 
 impl AgentAnchorConfig {
@@ -396,6 +404,86 @@ impl SubagentsConfig {
     /// shape the spawner's `SubagentConfig.timeout` field wants.
     pub fn timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.timeout_secs)
+    }
+}
+
+// ── Turn classification configuration ───────────────────────────────────
+
+fn default_classification_queue_bound() -> usize {
+    256
+}
+
+/// Turn-classification tier selector (classification-design §D6).
+///
+/// - `Off` (default) — no classifier is attached; turn nodes carry no
+///   `classification` blob and the graph view stays inert. Non-ECC /
+///   cost-sensitive deployments pay nothing.
+/// - `Keyword` — the synchronous keyword tier runs inside `index_turn`
+///   (microseconds of CPU); every committed turn gets a full 4-axis blob.
+/// - `Full` — keyword tier plus the async LLM enrichment queue (Phase B):
+///   after commit, a cheap-model round-trip refines the blob off the turn path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClassificationMode {
+    /// No classification (default).
+    #[default]
+    Off,
+    /// Synchronous keyword tier only.
+    Keyword,
+    /// Keyword tier + async LLM enrichment (Phase B).
+    Full,
+}
+
+/// Operator config for turn classification (ADR-067 P2, design §D6).
+///
+/// Lives under `[kernel.agent.classification]`. The daemon reads `mode` at
+/// agent-service boot: when it is not `Off`, it constructs a
+/// `KeywordTurnClassifier` and attaches it to the `SessionTier`. Mirrors
+/// [`SubagentsConfig`] — every field is `#[serde(default)]` so a partial or
+/// absent block fills from the defaults rather than failing to deserialize.
+///
+/// ```toml
+/// [kernel.agent.classification]
+/// mode           = "keyword"     # off | keyword | full   (default: off)
+/// model_override = "haiku-3.5"   # only consulted when mode = full
+/// queue_bound    = 256           # async enrich queue depth; full ⇒ drop-oldest
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClassificationConfig {
+    /// Which tier to run. `Off` (default) attaches no classifier.
+    #[serde(default)]
+    pub mode: ClassificationMode,
+
+    /// Cheap-model override for the async LLM tier. Only consulted when
+    /// `mode = full`; `None` ⇒ the daemon's default classifier model.
+    #[serde(
+        default,
+        alias = "modelOverride",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub model_override: Option<String>,
+
+    /// Async enrichment queue depth (Phase B). A full queue drops the oldest
+    /// job (best-effort) so `index_turn` never blocks. Only consulted when
+    /// `mode = full`.
+    #[serde(default = "default_classification_queue_bound", alias = "queueBound")]
+    pub queue_bound: usize,
+}
+
+impl Default for ClassificationConfig {
+    fn default() -> Self {
+        Self {
+            mode: ClassificationMode::default(),
+            model_override: None,
+            queue_bound: default_classification_queue_bound(),
+        }
+    }
+}
+
+impl ClassificationConfig {
+    /// True when a classifier should be attached (any tier other than `Off`).
+    pub fn is_enabled(&self) -> bool {
+        self.mode != ClassificationMode::Off
     }
 }
 
@@ -1310,5 +1398,57 @@ mod tests {
         assert_eq!(cfg.max_depth, 2);
         assert_eq!(cfg.timeout_secs, 60);
         assert!(cfg.notify_on_complete);
+    }
+
+    #[test]
+    fn classification_config_defaults_to_off() {
+        // No block ⇒ disabled, default queue bound, no cost.
+        let cfg = ClassificationConfig::default();
+        assert_eq!(cfg.mode, ClassificationMode::Off);
+        assert!(!cfg.is_enabled());
+        assert!(cfg.model_override.is_none());
+        assert_eq!(cfg.queue_bound, 256);
+    }
+
+    #[test]
+    fn classification_config_absent_block_uses_defaults() {
+        // An agent block with no `classification` key ⇒ mode = off.
+        let json = r#"{"anchor_causal": true}"#;
+        let cfg: AgentAnchorConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.anchor_causal);
+        assert_eq!(cfg.classification.mode, ClassificationMode::Off);
+        assert!(!cfg.classification.is_enabled());
+        assert_eq!(cfg.classification.queue_bound, 256);
+    }
+
+    #[test]
+    fn classification_config_partial_block_fills_missing_fields() {
+        // A partial block overrides only what it sets; the rest default.
+        let json = r#"{"classification": {"mode": "keyword"}}"#;
+        let cfg: AgentAnchorConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.classification.mode, ClassificationMode::Keyword);
+        assert!(cfg.classification.is_enabled());
+        assert!(cfg.classification.model_override.is_none()); // untouched → default
+        assert_eq!(cfg.classification.queue_bound, 256); // untouched → default
+    }
+
+    #[test]
+    fn classification_config_full_mode_round_trip() {
+        let json =
+            r#"{"mode": "full", "model_override": "haiku-3.5", "queue_bound": 512}"#;
+        let cfg: ClassificationConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.mode, ClassificationMode::Full);
+        assert!(cfg.is_enabled());
+        assert_eq!(cfg.model_override.as_deref(), Some("haiku-3.5"));
+        assert_eq!(cfg.queue_bound, 512);
+    }
+
+    #[test]
+    fn classification_config_camel_case_aliases() {
+        let json = r#"{"mode": "full", "modelOverride": "haiku-3.5", "queueBound": 128}"#;
+        let cfg: ClassificationConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.mode, ClassificationMode::Full);
+        assert_eq!(cfg.model_override.as_deref(), Some("haiku-3.5"));
+        assert_eq!(cfg.queue_bound, 128);
     }
 }
