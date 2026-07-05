@@ -322,3 +322,111 @@ async fn anchor_turn_commits_on_the_kernel_global_forest() {
     assert_eq!(follows.len(), 1, "one Follows edge out of the user turn");
     assert_eq!(follows[0].target, n2, "Follows edge points at the reply");
 }
+
+/// CLASSIFICATION (ADR-067 P2, classification-design §8 `index_turn`
+/// integration): with a keyword classifier attached (`mode = keyword`),
+/// `index_turn` writes a non-null 4-axis `classification` blob AND the turn
+/// `text` (§6 piggyback) into the causal node metadata, and emits an
+/// `EmotionCause` cross-ref for the derived emotion label — while leaving
+/// `goal` null and emitting no `GoalMotivation` cross-ref (the keyword tier
+/// never fabricates a goal, §D2).
+#[tokio::test]
+async fn index_turn_classifies_and_populates_node_metadata() {
+    use clawft_kernel::{CrossRefType, StructureTag, UniversalNodeId};
+    use clawft_service_agent::KeywordTurnClassifier;
+
+    let embedder: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbeddingProvider::new(DIMS));
+    let chain = Arc::new(ChainManager::new(0, 1000));
+    let causal = Arc::new(CausalGraph::new());
+    let crossrefs = Arc::new(CrossRefStore::new());
+    let tier = SessionTier::new(embedder, chain.clone(), None)
+        .with_forest(causal.clone(), crossrefs.clone())
+        .with_classifier(Arc::new(KeywordTurnClassifier::new()));
+
+    let conv = "classify-ecc";
+    let text = "why is this BROKEN?"; // question + negative + caps → frustrated
+    let ev = chain.append(
+        "agent",
+        "agent.chat.turn",
+        Some(serde_json::json!({ "conv": conv, "content": text })),
+    );
+    let s1 = ev.sequence;
+    tier.index_turn(conv, s1, "agent.chat.turn", "user", text).await;
+
+    let node = node_for_seq(&causal, s1);
+    let meta = causal.get_node(node).unwrap().metadata.clone();
+
+    // §6 piggyback: the turn text is now at rest in the causal node metadata.
+    assert_eq!(
+        meta.get("text").and_then(|v| v.as_str()),
+        Some(text),
+        "index_turn wrote the turn text into node metadata"
+    );
+
+    // Four-axis blob, non-null, exact §D2 shape.
+    let class = meta.get("classification").expect("classification blob present");
+    assert!(class.is_object(), "classification is an object: {class}");
+    assert_eq!(class["intent"], "question", "trailing '?' → Question");
+    assert!(class["topic"].is_string(), "topic axis present");
+    assert_eq!(class["tier"], "keyword");
+    assert_eq!(class["v"], 1);
+    assert_eq!(class["goal"], serde_json::Value::Null, "keyword tier goal stays null");
+    let emo = &class["emotion"];
+    assert!(emo["arousal"].is_number(), "arousal present for the floor (§5)");
+    assert!(
+        emo["valence"].as_f64().unwrap() < 0.0,
+        "negative valence from 'broken': {emo}"
+    );
+    assert!(emo["label"].is_string(), "coarse emotion label present");
+
+    // EmotionCause cross-ref emitted (turn → emotion anchor) for the label;
+    // NO GoalMotivation (goal is null). Reconstruct the turn UID exactly as
+    // `dual_write_turn` does.
+    let turn_uid = UniversalNodeId::new(
+        &StructureTag::CausalGraph,
+        conv.as_bytes(),
+        s1,
+        text.as_bytes(),
+        b"turn",
+    );
+    assert_eq!(
+        crossrefs.by_type(&turn_uid, &CrossRefType::EmotionCause).len(),
+        1,
+        "one EmotionCause cross-ref for the classified turn"
+    );
+    assert!(
+        crossrefs.by_type(&turn_uid, &CrossRefType::GoalMotivation).is_empty(),
+        "keyword tier emits no goal cross-ref"
+    );
+}
+
+/// Default (no classifier attached, `mode = off`): `index_turn` writes neither
+/// a `classification` blob nor `text` into the node metadata — the legacy
+/// shape, with text-at-rest gated off (design §6 privacy note).
+#[tokio::test]
+async fn index_turn_without_classifier_writes_no_classification_or_text() {
+    let embedder: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbeddingProvider::new(DIMS));
+    let chain = Arc::new(ChainManager::new(0, 1000));
+    let causal = Arc::new(CausalGraph::new());
+    let crossrefs = Arc::new(CrossRefStore::new());
+    let tier = SessionTier::new(embedder, chain.clone(), None)
+        .with_forest(causal.clone(), crossrefs.clone()); // no classifier
+
+    let conv = "classify-off";
+    let ev = chain.append(
+        "agent",
+        "agent.chat.turn",
+        Some(serde_json::json!({ "conv": conv, "content": "hello" })),
+    );
+    tier.index_turn(conv, ev.sequence, "agent.chat.turn", "user", "hello").await;
+
+    let meta = causal.get_node(node_for_seq(&causal, ev.sequence)).unwrap().metadata.clone();
+    assert!(
+        meta.get("classification").is_none(),
+        "no classification blob when no classifier is attached"
+    );
+    assert!(
+        meta.get("text").is_none(),
+        "text-at-rest stays off when classification is off (§6)"
+    );
+}

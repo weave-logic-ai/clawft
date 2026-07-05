@@ -57,6 +57,12 @@ pub(crate) struct ConvForest {
     /// the daemon path that is the assistant tool-call turn, anchored just
     /// before the tool dispatches (the user turn is one `Follows` hop upstream).
     last_uid: Mutex<Option<UniversalNodeId>>,
+    /// This conversation's most-recent classified topic — the `prev_topic`
+    /// carry for the turn classifier's continuity heuristic (design §D2). A
+    /// per-turn top-token flickers; inheriting the prior topic while it is still
+    /// mentioned stabilises the graph-view hue clusters. `None` until the first
+    /// classified turn (or when classification is disabled).
+    last_topic: Mutex<Option<String>>,
 }
 
 impl ConvForest {
@@ -74,6 +80,17 @@ impl ConvForest {
     /// any (M4 turn-level edge rooting).
     pub(crate) fn latest_turn_uid(&self) -> Option<UniversalNodeId> {
         self.last_uid.lock().expect("conv forest last_uid lock").clone()
+    }
+
+    /// The prior classified turn's topic (the classifier's `prev_topic` carry,
+    /// design §D2). `None` until the first classified turn.
+    pub(crate) fn last_topic(&self) -> Option<String> {
+        self.last_topic.lock().expect("conv forest last_topic lock").clone()
+    }
+
+    /// Record this turn's topic as the continuity carry for the next turn.
+    pub(crate) fn set_last_topic(&self, topic: String) {
+        *self.last_topic.lock().expect("conv forest last_topic lock") = Some(topic);
     }
 }
 
@@ -108,6 +125,17 @@ pub(crate) fn speaker_universal_id(conv_id: &str, role: &str) -> UniversalNodeId
 /// `prev → new` with [`CausalEdgeType::Follows`] (`weight = coherence`), and
 /// registers the speaker (plus optional emotion/goal) as [`CrossRef`]s. Returns
 /// the new node id.
+///
+/// `classification` is the 4-axis blob produced by the turn classifier
+/// (classification-design §D2). When `Some`, it is written verbatim into the
+/// node metadata under `"classification"` — the shape the `conversation.graph`
+/// RPC reads back — and the turn's `text` is written alongside it under
+/// `"text"` (design §6 piggyback, unblocking node-inspect). Both are **gated by
+/// the same signal**: text-at-rest in causal metadata is only stored when
+/// classification is on (mode != off, per the design's privacy note). When
+/// `None` (classification disabled) neither key is written, preserving the
+/// legacy text-free node metadata. The derived `emotion.label` / `goal` feed the
+/// `emotion` / `goal` cross-ref params.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn dual_write_turn(
     causal: &CausalGraph,
@@ -118,6 +146,7 @@ pub(crate) fn dual_write_turn(
     role: &str,
     text: &str,
     coherence: f32,
+    classification: Option<&serde_json::Value>,
     emotion: Option<&str>,
     goal: Option<&str>,
 ) -> CausalNodeId {
@@ -129,13 +158,22 @@ pub(crate) fn dual_write_turn(
     // this the cross-ref endpoints are unrecoverable from the graph alone.
     let turn_uid = turn_universal_id(conv_id, chain_seq, text);
     let label = format!("turn:{conv_id}:{chain_seq}");
-    let metadata = serde_json::json!({
+    let mut metadata = serde_json::json!({
         "conv_id": conv_id,
         "chain_seq": chain_seq,
         "role": role,
         "state": "frontier",
         "uid": turn_uid.to_string(),
     });
+    // Classification blob + text-at-rest (design §D2, §6). Gated together: both
+    // land only when the classifier ran (mode != off). `metadata` is the object
+    // literal above, so `as_object_mut` is always `Some`.
+    if let Some(classification) = classification
+        && let Some(obj) = metadata.as_object_mut()
+    {
+        obj.insert("classification".into(), classification.clone());
+        obj.insert("text".into(), serde_json::Value::String(text.to_string()));
+    }
     let node = causal.add_node(label, metadata);
     forest.seq_to_node.insert(chain_seq, node);
 

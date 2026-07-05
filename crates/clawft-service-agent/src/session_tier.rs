@@ -42,6 +42,7 @@ use clawft_kernel::{
 };
 
 use crate::session_forest::{self, ConvForest, DEFAULT_LINEAGE_DEPTH};
+use crate::turn_classifier::TurnClassifier;
 
 /// Coherence weight stamped on a turn's `Follows` edge in the data-plane join
 /// (ADR-062 §1.1). Phase 1 has no live per-turn coherence read on the index
@@ -74,6 +75,14 @@ pub struct SessionTier {
     forest: Option<ForestHandles>,
     /// Per-conversation lineage state in the global causal graph.
     forests: DashMap<String, Arc<ConvForest>>,
+    /// Turn classifier (ADR-067 P2, design §D2). When set, [`index_turn`] runs
+    /// it synchronously before the forest dual-write so every committed turn
+    /// node carries a non-null 4-axis `classification` blob (and its `text`).
+    /// `None` — the daemon's default when `[kernel.agent.classification]
+    /// mode = off` — keeps the legacy unclassified node metadata.
+    ///
+    /// [`index_turn`]: Self::index_turn
+    classifier: Option<Arc<dyn TurnClassifier>>,
     /// The daemon-hosted multiplexed [`TalkModeLoop`] (M2 D2). When set,
     /// [`index_turn`](Self::index_turn) registers each dual-written turn with
     /// the loop and emits an `EndOfUtterance` so the loop commits it
@@ -113,8 +122,20 @@ impl SessionTier {
             inline_max: DEFAULT_INLINE_MAX,
             forest: None,
             forests: DashMap::new(),
+            classifier: None,
             talk_loop: OnceLock::new(),
         }
+    }
+
+    /// Attach a turn classifier (ADR-067 P2). Once set, [`index_turn`] derives a
+    /// 4-axis `classification` blob per turn and threads it (plus the turn text,
+    /// design §6) into the forest dual-write. The daemon calls this at
+    /// agent-service boot when `[kernel.agent.classification] mode != off`.
+    ///
+    /// [`index_turn`]: Self::index_turn
+    pub fn with_classifier(mut self, classifier: Arc<dyn TurnClassifier>) -> Self {
+        self.classifier = Some(classifier);
+        self
     }
 
     /// Join this tier to the **kernel-global forest** (ADR-062 §1.1 / ADR-046):
@@ -263,6 +284,23 @@ impl SessionTier {
         // and in the cosine index regardless.
         if let Some(forest) = &self.forest {
             let conv_forest = self.conv_forest(conv_id);
+
+            // ADR-067 P2: when a classifier is attached (mode != off), derive
+            // the 4-axis `classification` blob synchronously here (design §D1 —
+            // µs of CPU, safe on the witness path). `prev_topic` threads the
+            // conversation's last topic for the continuity carry (design §D2);
+            // the derived `emotion.label` / `goal` feed the dual-write's
+            // EmotionCause / GoalMotivation cross-ref params. With no classifier
+            // the blob is `None`, so no `classification`/`text` keys are written
+            // (legacy behaviour, and text-at-rest stays off — design §6).
+            let classification = self.classifier.as_ref().map(|c| {
+                let prev_topic = conv_forest.last_topic();
+                c.classify(role, text, prev_topic.as_deref())
+            });
+            let blob = classification.as_ref().map(|cv| cv.to_metadata_value());
+            let emotion_label = classification.as_ref().map(|cv| cv.emotion.label.clone());
+            let goal = classification.as_ref().and_then(|cv| cv.goal.clone());
+
             let node = session_forest::dual_write_turn(
                 &forest.causal,
                 &forest.crossrefs,
@@ -272,9 +310,16 @@ impl SessionTier {
                 role,
                 text,
                 DEFAULT_TURN_COHERENCE,
-                None,
-                None,
+                blob.as_ref(),
+                emotion_label.as_deref(),
+                goal.as_deref(),
             );
+
+            // Carry this turn's topic forward for the next turn's continuity
+            // heuristic (design §D2). Only when a classifier ran.
+            if let Some(cv) = &classification {
+                conv_forest.set_last_topic(cv.topic.clone());
+            }
 
             // M2 D2 — text ImpulseSource, at the anchor convergence seam.
             // `index_turn` is reached by BOTH `agent.chat` and
