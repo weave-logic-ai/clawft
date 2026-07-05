@@ -50,6 +50,7 @@ pub mod spawn_registry;
 pub mod subagent;
 pub mod substrate_budget;
 pub mod substrate_sink;
+pub mod turn_classifier;
 
 pub use kernel_gate::KernelEffectGate;
 pub use protocol::{AgentChatMessage, AgentChatParams, AgentChatResult, AgentChatToolCall};
@@ -58,6 +59,9 @@ pub use session_tier::SessionTier;
 pub use spawn_registry::{SharedSpawnRegistry, SpawnRegistry, TaskRecord};
 pub use subagent::{DaemonSubagentSpawner, SubagentConfig, SubagentForest};
 pub use substrate_budget::SubstrateBudgetStore;
+pub use turn_classifier::{
+    arousal_of, ClassificationVector, Intent, KeywordTurnClassifier, Tier, TurnClassifier, Vad,
+};
 pub use substrate_sink::{
     AudioRef, HEARTBEAT_PERIOD, KernelSubstrateClient, KernelTurnAnchor, NoopTurnAnchor,
     SubstrateClient, SubstrateConversationSink, TurnAnchor, TurnContent, TurnContentPart,
