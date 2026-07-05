@@ -1013,12 +1013,16 @@ impl<P: Platform> AgentLoop<P> {
         // context, never from the LLM. conv_id / agent_id are in hand
         // here; depth rides the inbound metadata (SPAWN_DEPTH_KEY, set by
         // the daemon spawner for child conversations, 0 for top-level).
-        // turn_uid stays None: the parent turn's *universal* id is a
-        // kernel-layer concept minted by SessionTier/KernelTurnAnchor at
-        // the daemon layer, not available in clawft-core — the spawner
-        // roots the TriggeredBy edge at a deterministic per-conversation
-        // anchor uid in that case (its documented fallback). Native-only:
-        // the seam is a tokio task-local (a daemon capability); the
+        // turn_uid stays None here by design: the parent turn's
+        // *universal* id is a kernel-layer concept minted by
+        // SessionTier/KernelTurnAnchor at the daemon layer, not available
+        // in clawft-core. The daemon spawner resolves the real parent-turn
+        // uid from SessionTier (`latest_turn_uid(parent_conv)`, keyed by
+        // the parent_conv_id this scope supplies) and roots the
+        // TriggeredBy/EvidenceFor edges at that real committed turn — the
+        // conv-anchor uid is only the last-resort fallback when the tier is
+        // unreachable, not the intended target (M4 #31). Native-only: the
+        // seam is a tokio task-local (a daemon capability); the
         // browser/wasm build runs the loop unscoped.
         let loop_fut = self.run_tool_loop(request, &conv_id, &agent_id);
         #[cfg(feature = "native")]
