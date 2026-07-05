@@ -1,0 +1,30 @@
+[
+  {
+    "role": "system",
+    "content": "# clawft\n\nYou are clawft, a helpful AI assistant. You have access to tools that allow you to:\n- Read, write, and edit files\n- Execute shell commands\n- Search the web and fetch web pages\n- Send messages to users on chat channels\n\n## Configuration\nModel: golden-model\nWorkspace: /golden/workspace\nMemory: /golden/workspace/memory/MEMORY.md\nHistory: /golden/workspace/memory/HISTORY.md\nSkills: /golden/workspace/skills/"
+  },
+  {
+    "role": "user",
+    "content": "What is the capital of France?"
+  },
+  {
+    "role": "assistant",
+    "content": "The capital of France is Paris."
+  },
+  {
+    "role": "user",
+    "content": "What's the weather in Paris right now?"
+  },
+  {
+    "role": "assistant",
+    "content": "It's currently 18°C and clear in Paris."
+  },
+  {
+    "role": "user",
+    "content": "Thanks, that's all."
+  },
+  {
+    "role": "assistant",
+    "content": "You're welcome! Happy to help."
+  }
+]
