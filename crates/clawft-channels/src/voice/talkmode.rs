@@ -26,7 +26,7 @@
 //! and never pulls clawft-llm / clawft-kernel / cpal into clawft-channels.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -65,6 +65,11 @@ const BARGE_IN_MARGIN_DB: f32 = 15.0;
 /// Ignore barge-in candidates during the first moments of playback while
 /// the echo canceller converges on the new render signal.
 const BARGE_IN_GRACE_MS: u64 = 400;
+
+/// Minimum spacing between live `CaptureLevel` events (~10 Hz). The capture
+/// loop computes RMS + floor every frame, but the surface only needs a smooth
+/// meter — this caps observer traffic regardless of the device frame cadence.
+const LEVEL_METER_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Extract a self-given name from a transcript ("my name is X" / "call me
 /// X" …). Mirrors voicelab's deliberately explicit phrase set — the loose
@@ -171,6 +176,17 @@ pub enum ConversationEvent {
     PartialTranscript {
         /// Best-so-far transcript (may be revised by the next partial).
         text: String,
+    },
+    /// Live capture level (§W1.4 process event) — the per-frame RMS against
+    /// the tracked room-tone floor, throttled to ~10 Hz. Drives the watch
+    /// surface's level meter so the user sees input react **before** they
+    /// finish speaking (matters for the acting-test feel). Surface-only; not
+    /// a committed graph node.
+    CaptureLevel {
+        /// Frame RMS energy (dBFS).
+        rms_dbfs: f32,
+        /// Tracked noise-floor voice threshold (dBFS).
+        floor_dbfs: f32,
     },
 }
 
@@ -350,10 +366,14 @@ impl<M: EndpointModel> TalkModeController<M> {
         }
     }
 
-    fn voiced(&mut self, frame: &[i16]) -> bool {
-        let dbfs = EnergyVad::rms_dbfs(frame);
-        let adaptive = self.noise_floor.observe(dbfs);
-        dbfs >= adaptive.max(self.config.vad_threshold_dbfs)
+    /// Per-frame level: the voiced decision plus the `CaptureLevel` inputs
+    /// (frame RMS + the tracked floor threshold). Advances the adaptive
+    /// noise-floor tracker, so call exactly once per captured frame.
+    fn level(&mut self, frame: &[i16]) -> (bool, f32, f32) {
+        let rms_dbfs = EnergyVad::rms_dbfs(frame);
+        let adaptive = self.noise_floor.observe(rms_dbfs);
+        let voiced = rms_dbfs >= adaptive.max(self.config.vad_threshold_dbfs);
+        (voiced, rms_dbfs, adaptive)
     }
 
     /// Run the conversation loop until `cancel` fires or the capture channel
@@ -368,12 +388,22 @@ impl<M: EndpointModel> TalkModeController<M> {
                 .spawn_warm_acks(vec![ACK_SHORT.to_string(), ACK_LONG.to_string()]);
         }
         let mut utt: Vec<i16> = Vec::new();
+        let mut last_level: Option<Instant> = None;
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,
                 maybe = frames.recv() => {
                     let Some(frame) = maybe else { break };
-                    let voiced = self.voiced(&frame);
+                    let (voiced, rms_dbfs, floor_dbfs) = self.level(&frame);
+                    // Live level meter (§W1.4), throttled to ~10 Hz so the
+                    // observer channel isn't flooded at the device frame rate.
+                    if last_level.is_none_or(|t| t.elapsed() >= LEVEL_METER_INTERVAL) {
+                        last_level = Some(Instant::now());
+                        self.observer.observe(ConversationEvent::CaptureLevel {
+                            rms_dbfs,
+                            floor_dbfs,
+                        });
+                    }
                     if voiced {
                         utt.extend_from_slice(&frame);
                     }

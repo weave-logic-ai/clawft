@@ -138,8 +138,9 @@ impl ConversationObserver for EccConversationObserver {
                 st.last_reply = Some(c);
             }
             // §W1.4 process events are surface-only — not committed graph nodes.
-            ConversationEvent::EndpointFired { .. } | ConversationEvent::PartialTranscript { .. } => {
-            }
+            ConversationEvent::EndpointFired { .. }
+            | ConversationEvent::PartialTranscript { .. }
+            | ConversationEvent::CaptureLevel { .. } => {}
             ConversationEvent::Interrupted => {
                 let i = self.graph.add_node(
                     "interrupted".to_string(),

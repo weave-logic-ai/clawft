@@ -265,6 +265,16 @@ async fn full_pipeline_speculative_then_committed() {
         .iter()
         .position(|e| matches!(e, ConversationEvent::CommittedReply { .. }));
     assert!(spk.is_some() && usr.is_some() && spec.is_some() && comm.is_some());
+    // The live level meter is surfaced (§W1.4 process event) as frames flow.
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            ConversationEvent::CaptureLevel { rms_dbfs, floor_dbfs }
+                if rms_dbfs.is_finite() && floor_dbfs.is_finite()
+        )),
+        "capture level meter must be surfaced"
+    );
+
     // The endpoint fire is surfaced (§W1.4 process event) just before the turn.
     let ep = events
         .iter()

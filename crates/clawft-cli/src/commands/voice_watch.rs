@@ -305,6 +305,13 @@ impl ConversationObserver for LiveRenderObserver {
             ConversationEvent::CommittedReply { answer } => {
                 println!("  ↳ reply: {answer}");
             }
+            // Live level meter (§W1.4 row 1). Placeholder to keep the render
+            // exhaustive — coder-B owns the visual (a moving dBFS-vs-floor bar,
+            // overwrite-in-place like the partial). Fields are ready to render.
+            ConversationEvent::CaptureLevel {
+                rms_dbfs: _,
+                floor_dbfs: _,
+            } => {}
             // Listen-only never fires these; a full talk loop supersedes the ack
             // with the committed reply and prunes on barge-in.
             ConversationEvent::SpeculativeReply { .. } | ConversationEvent::Interrupted => {}
