@@ -434,3 +434,14 @@ ADR-062 (ECC graph-walk conversation) builds directly on this tier and adds two 
   isolation*; ADR-062 requires it to **traverse the ADR-046 forest** — fuse HNSW recall with
   CausalGraph lineage (`traverse_forward`/`trace_causal_chain`) + `CrossRefStore` links, and commit
   nodes **per-turn** (Speculative→Frontier→Committed) rather than only at conversation end.
+
+## Update — single conversation store (M3 store collapse, 2026-07)
+
+The M3 store collapse (design `.planning/hermes-loop/m3-store-collapse-design.md`)
+retires the duplicate `SessionManager` JSONL turn store: the LLM-context
+assembly input (the in-memory `Session` this tier's graft splices into) is now
+**hydrated from the `ConversationSink`** rather than a second per-turn store.
+The assembly path (`ContextBuilder::build_messages` + `session.get_history`)
+and this tier's graft splice are unchanged; only the *source* of the hydrated
+`Session.messages` moved (sink history, filtered to the store-1 subset). One
+durable store now feeds sink → chain → tier → forest.

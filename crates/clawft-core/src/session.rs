@@ -75,6 +75,92 @@ pub(crate) async fn discover_sessions_dir<P: Platform>(
     }
 }
 
+/// Parse a session `.jsonl` document (metadata header on line 1, one message
+/// object per line thereafter) into a [`Session`].
+///
+/// This is the single decoder for the on-disk session format, shared by
+/// [`SessionManager::load_session`] and
+/// [`crate::agent::local_file_sink::LocalFileSink::load_session`] (M3
+/// store-collapse, design §D4/§P5) so the CLI's `sessions` reader and the
+/// retained bridge reader agree byte-for-byte on how a file decodes. Malformed
+/// message lines are dropped with a warn (they never fail the whole load);
+/// missing header fields fall back to sensible defaults.
+///
+/// # Errors
+///
+/// Returns [`ClawftError::ConfigInvalid`] if `content` is empty (no header
+/// line), or [`ClawftError::Json`] if the header line is not valid JSON.
+pub(crate) fn session_from_jsonl(
+    key: &str,
+    content: &str,
+    path: &Path,
+) -> clawft_types::Result<Session> {
+    let mut lines = content.lines();
+
+    // Parse metadata line.
+    let meta_line = lines.next().ok_or_else(|| ClawftError::ConfigInvalid {
+        reason: format!("session file is empty: {}", path.display()),
+    })?;
+
+    let meta: serde_json::Value = serde_json::from_str(meta_line)?;
+
+    let created_at = meta
+        .get("created_at")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(Utc::now);
+
+    let updated_at = meta
+        .get("updated_at")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(Utc::now);
+
+    let metadata: HashMap<String, serde_json::Value> = meta
+        .get("metadata")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    let last_consolidated = meta
+        .get("last_consolidated")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+
+    // Parse message lines.
+    let mut messages = Vec::new();
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(msg) => messages.push(msg),
+            Err(e) => {
+                warn!(
+                    key = key,
+                    error = %e,
+                    "skipping malformed message line in session"
+                );
+            }
+        }
+    }
+
+    debug!(
+        key = key,
+        messages = messages.len(),
+        "loaded session from disk"
+    );
+
+    Ok(Session {
+        key: key.to_string(),
+        messages,
+        created_at,
+        updated_at,
+        metadata,
+        last_consolidated,
+    })
+}
+
 /// Manages conversation sessions with in-memory caching and JSONL persistence.
 ///
 /// Sessions are identified by a string key (typically `"{channel}:{chat_id}"`).
@@ -206,70 +292,7 @@ impl<P: Platform> SessionManager<P> {
 
         let content = self.platform.fs().read_to_string(&path).await?;
 
-        let mut lines = content.lines();
-
-        // Parse metadata line.
-        let meta_line = lines.next().ok_or_else(|| ClawftError::ConfigInvalid {
-            reason: format!("session file is empty: {}", path.display()),
-        })?;
-
-        let meta: serde_json::Value = serde_json::from_str(meta_line)?;
-
-        let created_at = meta
-            .get("created_at")
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_else(Utc::now);
-
-        let updated_at = meta
-            .get("updated_at")
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_else(Utc::now);
-
-        let metadata: HashMap<String, serde_json::Value> = meta
-            .get("metadata")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-
-        let last_consolidated = meta
-            .get("last_consolidated")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-
-        // Parse message lines.
-        let mut messages = Vec::new();
-        for line in lines {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<serde_json::Value>(trimmed) {
-                Ok(msg) => messages.push(msg),
-                Err(e) => {
-                    warn!(
-                        key = key,
-                        error = %e,
-                        "skipping malformed message line in session"
-                    );
-                }
-            }
-        }
-
-        debug!(
-            key = key,
-            messages = messages.len(),
-            "loaded session from disk"
-        );
-
-        Ok(Session {
-            key: key.to_string(),
-            messages,
-            created_at,
-            updated_at,
-            metadata,
-            last_consolidated,
-        })
+        session_from_jsonl(key, &content, &path)
     }
 
     /// Save a session to its JSONL file on disk.

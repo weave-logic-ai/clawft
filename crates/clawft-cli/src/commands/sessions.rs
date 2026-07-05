@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use comfy_table::{Table, presets::UTF8_FULL};
 
-use clawft_core::session::SessionManager;
+use clawft_core::agent::local_file_sink::LocalFileSink;
 use clawft_platform::NativePlatform;
 use clawft_types::config::Config;
 
@@ -59,13 +59,13 @@ fn message_content_preview(msg: &serde_json::Value, max_len: usize) -> String {
 /// List all sessions.
 pub async fn sessions_list(_config: &Config) -> anyhow::Result<()> {
     let platform = Arc::new(NativePlatform::new());
-    let mgr = SessionManager::new(platform).await?;
+    let sink = LocalFileSink::new(platform).await?;
 
-    let keys = mgr.list_sessions().await?;
+    let keys = sink.list_conversations().await?;
 
     if keys.is_empty() {
         println!("No sessions found.");
-        println!("  Dir: {}", mgr.sessions_dir().display());
+        println!("  Dir: {}", sink.sessions_dir().display());
         return Ok(());
     }
 
@@ -74,7 +74,7 @@ pub async fn sessions_list(_config: &Config) -> anyhow::Result<()> {
     table.set_header(["SESSION KEY", "MESSAGES", "LAST UPDATED"]);
 
     for key in &keys {
-        match mgr.load_session(key).await {
+        match sink.load_session(key).await {
             Ok(session) => {
                 let msg_count = session.messages.len().to_string();
                 let updated = format_datetime(&session.updated_at);
@@ -89,16 +89,16 @@ pub async fn sessions_list(_config: &Config) -> anyhow::Result<()> {
 
     println!("{table}");
     println!("  {} session(s)", keys.len());
-    println!("  Dir: {}", mgr.sessions_dir().display());
+    println!("  Dir: {}", sink.sessions_dir().display());
     Ok(())
 }
 
 /// Inspect a single session, displaying its messages.
 pub async fn sessions_inspect(session_id: String, _config: &Config) -> anyhow::Result<()> {
     let platform = Arc::new(NativePlatform::new());
-    let mgr = SessionManager::new(platform).await?;
+    let sink = LocalFileSink::new(platform).await?;
 
-    let session = mgr
+    let session = sink
         .load_session(&session_id)
         .await
         .map_err(|e| anyhow::anyhow!("failed to load session '{}': {e}", session_id))?;
@@ -150,9 +150,9 @@ pub async fn sessions_inspect(session_id: String, _config: &Config) -> anyhow::R
 /// Delete a session.
 pub async fn sessions_delete(session_id: String, _config: &Config) -> anyhow::Result<()> {
     let platform = Arc::new(NativePlatform::new());
-    let mgr = SessionManager::new(platform).await?;
+    let sink = LocalFileSink::new(platform).await?;
 
-    mgr.delete_session(&session_id)
+    sink.delete(&session_id)
         .await
         .map_err(|e| anyhow::anyhow!("failed to delete session '{}': {e}", session_id))?;
 

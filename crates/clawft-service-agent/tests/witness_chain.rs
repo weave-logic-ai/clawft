@@ -54,7 +54,6 @@ use clawft_core::pipeline::traits::{
     ModelRouter, Pipeline, PipelineRegistry, QualityScore, QualityScorer, ResponseOutcome,
     RoutingDecision, TaskClassifier, TaskProfile, TaskType, Trajectory, TransportRequest,
 };
-use clawft_core::session::SessionManager;
 use clawft_core::tools::registry::{Tool, ToolError, ToolRegistry};
 use clawft_kernel::chain::ChainManager;
 use clawft_kernel::gate::{GateBackend, GovernanceGate};
@@ -361,8 +360,6 @@ fn make_loop(
     let platform = Arc::new(NativePlatform::new());
     let bus = Arc::new(MessageBus::new());
 
-    let sessions = SessionManager::with_dir(platform.clone(), dir.join("sessions"));
-
     let memory = Arc::new(MemoryStore::with_paths(
         dir.join("memory").join("MEMORY.md"),
         dir.join("memory").join("HISTORY.md"),
@@ -385,7 +382,6 @@ fn make_loop(
         pipeline,
         Arc::new(tool_registry),
         context,
-        Arc::new(sessions),
         PermissionResolver::default_resolver(),
     )
     .with_gate(gate);

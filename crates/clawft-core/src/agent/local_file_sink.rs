@@ -41,13 +41,16 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use percent_encoding::percent_decode_str;
 use tracing::warn;
 
 use clawft_platform::Platform;
+use clawft_types::error::ClawftError;
+use clawft_types::session::Session;
 
 use super::sink::{ConversationSink, Turn};
 use crate::security::validate_session_id;
-use crate::session::{discover_sessions_dir, session_file_path};
+use crate::session::{discover_sessions_dir, session_file_path, session_from_jsonl};
 
 /// `ConversationSink` persisting to `~/.clawft/workspace/sessions/*.jsonl`.
 ///
@@ -152,6 +155,82 @@ impl<P: Platform> LocalFileSink<P> {
         let content = self.platform.fs().read_to_string(path).await.ok()?;
         let first = content.lines().next()?;
         serde_json::from_str::<serde_json::Value>(first).ok()
+    }
+
+    // ── Session-management surface (the `weft sessions` CLI) ─────────────
+    //
+    // These inherent methods let the CLI list / inspect / delete the JSONL
+    // files directly through this sink instead of `SessionManager`, which the
+    // M3 store-collapse retires from the read path (design §P5). They read the
+    // same directory and format `SessionManager` uses, via the shared helpers
+    // (`session_file_path`, `session_from_jsonl`), so the CLI's output is
+    // unchanged.
+
+    /// List every conversation key backed by this sink.
+    ///
+    /// Enumerates `{encoded}.jsonl` files and percent-decodes each stem back
+    /// to its `"{channel}:{chat_id}"` key — the inverse of
+    /// [`session_file_path`]. Undecodable filenames are skipped with a warn.
+    /// Keys are returned sorted for stable CLI output.
+    pub async fn list_conversations(&self) -> clawft_types::Result<Vec<String>> {
+        let entries = self
+            .platform
+            .fs()
+            .list_dir(&self.sessions_dir)
+            .await
+            .map_err(ClawftError::Io)?;
+
+        let mut keys = Vec::new();
+        for entry in entries {
+            if let Some(name) = entry.file_name() {
+                let name = name.to_string_lossy();
+                if let Some(stem) = name.strip_suffix(".jsonl") {
+                    match percent_decode_str(stem).decode_utf8() {
+                        Ok(decoded) => keys.push(decoded.into_owned()),
+                        Err(e) => {
+                            warn!(filename = %name, error = %e, "skipping undecodable session filename");
+                        }
+                    }
+                }
+            }
+        }
+
+        keys.sort();
+        Ok(keys)
+    }
+
+    /// Load a full [`Session`] (header metadata + all message lines) for
+    /// `conv_id`, decoded via the shared [`session_from_jsonl`] parser.
+    ///
+    /// Unlike [`history`](Self::history) (which yields the [`Turn`] superset
+    /// for hydration), this returns the raw `Session` the CLI's `inspect`
+    /// renders — key, timestamps, metadata, `last_consolidated`, and the
+    /// message objects verbatim. Errors if the file is missing or its header
+    /// line is unparseable.
+    pub async fn load_session(&self, conv_id: &str) -> clawft_types::Result<Session> {
+        validate_session_id(conv_id)?;
+        let path = session_file_path(&self.sessions_dir, conv_id);
+        let content = self.platform.fs().read_to_string(&path).await?;
+        session_from_jsonl(conv_id, &content, &path)
+    }
+
+    /// Delete the on-disk `.jsonl` file for `conv_id`.
+    ///
+    /// A missing file is a no-op (idempotent delete). Unlike
+    /// `SessionManager::delete_session` there is no in-memory cache to evict
+    /// and no chain-event marker — the in-process CLI has no live chain writer
+    /// to receive one.
+    pub async fn delete(&self, conv_id: &str) -> clawft_types::Result<()> {
+        validate_session_id(conv_id)?;
+        let path = session_file_path(&self.sessions_dir, conv_id);
+        if self.platform.fs().exists(&path).await {
+            self.platform
+                .fs()
+                .remove_file(&path)
+                .await
+                .map_err(ClawftError::Io)?;
+        }
+        Ok(())
     }
 }
 
@@ -628,5 +707,88 @@ mod tests {
 
         // No stray trailing content.
         assert!(lines.next().is_none());
+    }
+
+    // ── CLI surface: list_conversations / load_session / delete ─────────
+
+    #[tokio::test]
+    async fn list_conversations_decodes_and_sorts_keys() {
+        let (_dir, sink) = temp_sink();
+        // Two channels sharing a chat id, plus a key with special chars — all
+        // must round-trip through the percent-encoded filenames.
+        sink.append_turn("telegram:42", turn("user", "a"))
+            .await
+            .unwrap();
+        sink.append_turn("discord:42", turn("user", "b"))
+            .await
+            .unwrap();
+        sink.append_turn("slack:channel:thread", turn("user", "c"))
+            .await
+            .unwrap();
+
+        let keys = sink.list_conversations().await.unwrap();
+        assert_eq!(
+            keys,
+            vec![
+                "discord:42".to_string(),
+                "slack:channel:thread".to_string(),
+                "telegram:42".to_string(),
+            ],
+            "keys must be decoded and sorted"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_conversations_empty_dir_is_empty() {
+        let (_dir, sink) = temp_sink();
+        assert!(sink.list_conversations().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_session_returns_header_and_messages() {
+        let (_dir, sink) = temp_sink();
+        sink.set_meta("telegram:7", json!({"hallucination_score": 0.3}))
+            .await;
+        sink.append_turn("telegram:7", turn("user", "hi"))
+            .await
+            .unwrap();
+        sink.append_turn("telegram:7", turn("assistant", "hello"))
+            .await
+            .unwrap();
+
+        let session = sink.load_session("telegram:7").await.unwrap();
+        assert_eq!(session.key, "telegram:7");
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[0]["role"], "user");
+        assert_eq!(session.messages[0]["content"], "hi");
+        assert_eq!(session.messages[1]["content"], "hello");
+        assert_eq!(session.metadata["hallucination_score"], 0.3);
+        assert_eq!(session.last_consolidated, 0);
+    }
+
+    #[tokio::test]
+    async fn load_session_missing_is_error() {
+        let (_dir, sink) = temp_sink();
+        assert!(sink.load_session("nope:0").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn delete_removes_file_and_is_idempotent() {
+        let (_dir, sink) = temp_sink();
+        sink.append_turn("telegram:9", turn("user", "x"))
+            .await
+            .unwrap();
+        assert_eq!(sink.list_conversations().await.unwrap().len(), 1);
+
+        sink.delete("telegram:9").await.unwrap();
+        assert!(sink.list_conversations().await.unwrap().is_empty());
+        // Deleting an already-absent conversation is a no-op, not an error.
+        sink.delete("telegram:9").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_rejects_invalid_conv_id() {
+        let (_dir, sink) = temp_sink();
+        assert!(sink.delete("../evil").await.is_err());
     }
 }

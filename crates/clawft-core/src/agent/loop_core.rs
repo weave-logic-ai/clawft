@@ -44,7 +44,6 @@ use clawft_types::routing::AuthContext;
 use crate::bus::MessageBus;
 use crate::pipeline::permissions::PermissionResolver;
 use crate::pipeline::traits::{ChatRequest, LlmMessage, PipelineRegistry};
-use crate::session::SessionManager;
 use crate::tools::registry::ToolRegistry;
 
 use super::context::ContextBuilder;
@@ -280,14 +279,6 @@ pub struct AgentLoop<P: Platform> {
     pipeline: PipelineRegistry,
     tools: Arc<ToolRegistry>,
     context: ContextBuilder<P>,
-    /// Retired from the turn path by the M3 store collapse (design §D1):
-    /// [`Self::handle_turn`] hydrates from the [`ConversationSink`] and no
-    /// longer reads or writes `SessionManager`. The handle is still held —
-    /// callers construct the loop with it and the `sessions` CLI + P5
-    /// cleanup depend on the type staying wired — so it is retained but
-    /// unread on the non-test turn path until P5 removes it as a store.
-    #[allow(dead_code)]
-    sessions: Arc<SessionManager<P>>,
     permission_resolver: PermissionResolver,
     cancel: Option<CancellationToken>,
     /// Optional pre-LLM auto-delegation router.
@@ -429,7 +420,13 @@ impl<P: Platform> AgentLoop<P> {
     /// * `pipeline` -- Pipeline registry for LLM invocation
     /// * `tools` -- Tool registry for executing tool calls
     /// * `context` -- Context builder for assembling prompts
-    /// * `sessions` -- Session manager for conversation persistence
+    ///
+    /// The M3 store collapse (design §P5) retired `SessionManager` from the
+    /// turn path: the loop hydrates every turn from the [`ConversationSink`],
+    /// so the constructor no longer takes a session manager. Durable session
+    /// state lives in the sink (substrate-backed on the daemon path,
+    /// [`LocalFileSink`](crate::agent::local_file_sink::LocalFileSink) in
+    /// process).
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: AgentsConfig,
@@ -438,7 +435,6 @@ impl<P: Platform> AgentLoop<P> {
         pipeline: PipelineRegistry,
         tools: Arc<ToolRegistry>,
         context: ContextBuilder<P>,
-        sessions: Arc<SessionManager<P>>,
         permission_resolver: PermissionResolver,
     ) -> Self {
         Self {
@@ -448,7 +444,6 @@ impl<P: Platform> AgentLoop<P> {
             pipeline,
             tools,
             context,
-            sessions,
             permission_resolver,
             cancel: None,
             auto_delegation: None,
@@ -2135,9 +2130,6 @@ mod tests {
         let platform = Arc::new(NativePlatform::new());
         let bus = Arc::new(MessageBus::new());
 
-        let sessions_dir = dir.join("sessions");
-        let sessions = SessionManager::with_dir(platform.clone(), sessions_dir);
-
         let memory = Arc::new(MemoryStore::with_paths(
             dir.join("memory").join("MEMORY.md"),
             dir.join("memory").join("HISTORY.md"),
@@ -2158,7 +2150,6 @@ mod tests {
             pipeline,
             Arc::new(tools),
             context,
-            Arc::new(sessions),
             PermissionResolver::default_resolver(),
         );
         (agent, dir)
@@ -2854,9 +2845,6 @@ mod tests {
         let platform = Arc::new(NativePlatform::new());
         let bus = Arc::new(MessageBus::new());
 
-        let sessions_dir = dir.join("sessions");
-        let sessions = SessionManager::with_dir(platform.clone(), sessions_dir);
-
         let memory = Arc::new(MemoryStore::with_paths(
             dir.join("memory").join("MEMORY.md"),
             dir.join("memory").join("HISTORY.md"),
@@ -2877,7 +2865,6 @@ mod tests {
             pipeline,
             Arc::new(tools),
             context,
-            Arc::new(sessions),
             PermissionResolver::default_resolver(),
         );
 
@@ -3633,9 +3620,6 @@ mod tests {
         let platform = Arc::new(NativePlatform::new());
         let bus = Arc::new(MessageBus::new());
 
-        let sessions_dir = dir.join("sessions");
-        let sessions = SessionManager::with_dir(platform.clone(), sessions_dir);
-
         let memory = Arc::new(MemoryStore::with_paths(
             dir.join("memory").join("MEMORY.md"),
             dir.join("memory").join("HISTORY.md"),
@@ -3657,7 +3641,6 @@ mod tests {
             pipeline,
             Arc::new(tools),
             context,
-            Arc::new(sessions),
             PermissionResolver::default_resolver(),
         )
         .with_auto_delegation(Arc::new(MockAutoDelegation));
@@ -4520,7 +4503,6 @@ mod tests {
         let dir = temp_dir("d8_spawn");
         let platform = Arc::new(NativePlatform::new());
         let bus = Arc::new(MessageBus::new());
-        let sessions = SessionManager::with_dir(platform.clone(), dir.join("sessions"));
         let memory = Arc::new(MemoryStore::with_paths(
             dir.join("memory").join("MEMORY.md"),
             dir.join("memory").join("HISTORY.md"),
@@ -4543,7 +4525,6 @@ mod tests {
             pipeline,
             Arc::new(tools),
             context,
-            Arc::new(sessions),
             PermissionResolver::default_resolver(),
         );
 
@@ -4657,7 +4638,6 @@ mod tests {
         let dir = temp_dir("d5_ctx");
         let platform = Arc::new(NativePlatform::new());
         let bus = Arc::new(MessageBus::new());
-        let sessions = SessionManager::with_dir(platform.clone(), dir.join("sessions"));
         let memory = Arc::new(MemoryStore::with_paths(
             dir.join("memory").join("MEMORY.md"),
             dir.join("memory").join("HISTORY.md"),
@@ -4681,7 +4661,6 @@ mod tests {
             pipeline,
             Arc::new(tools),
             context,
-            Arc::new(sessions),
             PermissionResolver::default_resolver(),
         );
 

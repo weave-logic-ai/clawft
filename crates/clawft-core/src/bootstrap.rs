@@ -243,7 +243,6 @@ impl<P: Platform> AppContext<P> {
             self.pipeline,
             self.tools.clone(),
             self.context,
-            self.sessions.clone(),
             resolver,
         )
         .with_sink(sink);
@@ -677,12 +676,10 @@ pub async fn build_daemon_agent_loop(
     // failure rather than a recoverable error.
     let bus = Arc::new(MessageBus::new());
 
-    // SessionManager::new can still fail when the platform's home_dir
-    // resolution fails. The daemon already resolved the runtime dir
-    // earlier; we propagate via expect.
-    let sessions = SessionManager::new(platform.clone())
-        .await
-        .expect("daemon: SessionManager init failed");
+    // M3 store collapse (design §P5): the daemon path's durable session
+    // state lives entirely in the substrate-backed `ConversationSink`
+    // attached below (`with_sink`). `SessionManager` is no longer
+    // constructed here — the loop hydrates each turn from the sink.
 
     // WEFT-79: route memory + skills through the workspace overlay
     // the daemon already resolved. The daemon hands us the workspace
@@ -735,7 +732,6 @@ pub async fn build_daemon_agent_loop(
         pipeline,
         tools,
         context,
-        Arc::new(sessions),
         resolver,
     )
     // M3 §D5: the daemon's `agent.chat` conv_id already arrives as a

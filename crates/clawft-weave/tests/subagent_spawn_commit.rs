@@ -64,7 +64,6 @@ use clawft_core::pipeline::traits::{
     ModelRouter, Pipeline, PipelineRegistry, QualityScore, QualityScorer, ResponseOutcome,
     RoutingDecision, TaskClassifier, TaskProfile, TaskType, Trajectory, TransportRequest,
 };
-use clawft_core::session::SessionManager;
 use clawft_core::tools::registry::ToolRegistry;
 
 use clawft_kernel::chain::ChainManager;
@@ -436,7 +435,6 @@ async fn agent_spawns_subagent_result_commits_into_parent() {
     let dir = temp_dir("loop");
     let platform = Arc::new(NativePlatform::new());
     let bus = Arc::new(MessageBus::new());
-    let sessions = SessionManager::with_dir(platform.clone(), dir.join("sessions"));
     let memory = Arc::new(MemoryStore::with_paths(
         dir.join("memory").join("MEMORY.md"),
         dir.join("memory").join("HISTORY.md"),
@@ -463,7 +461,6 @@ async fn agent_spawns_subagent_result_commits_into_parent() {
         make_pipeline(),
         tool_registry,
         context,
-        Arc::new(sessions),
         resolver,
     )
     .with_gate(gate)

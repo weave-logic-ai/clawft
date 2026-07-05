@@ -118,3 +118,29 @@ The RSTE coherence read (`engines/04-RSTE.md §5.2`): `0.30·relation_coverage +
 
 - **Full-duplex S2S (Moshi/Kyutai)** — true talking-while-listening, ~200ms, but **welds the LLM + voice** (loses the swappable brain). Confirmed by the field as a swappability trap; "evaluate, don't bet." The duplex migration path is making *this* node/unit loop audio-native (the 2601.20230 semi-cascade), not adopting Moshi.
 - **Keep the heuristic controller** (the 6.7 `TalkModeController` as-is) — rejected: it bolts routing onto a controller instead of deriving it from the conversation model; it cannot express backchannel/floor/repair as first-class.
+
+## Update — M3 store collapse landed (build-target #5 "Join the graphs")
+
+The "one engine → one store" half of build-target #5 is implemented (design
+`.planning/hermes-loop/m3-store-collapse-design.md` + `-plan.md`). The turn
+path no longer writes two per-turn conversation stores:
+
+- **Canonical durable store = the `ConversationSink`** (substrate-backed on the
+  daemon path; `LocalFileSink` reusing the existing
+  `~/.clawft/workspace/sessions/{channel}:{chat_id}.jsonl` files in process).
+  `AgentLoop::handle_turn` hydrates the in-memory `Session` from the sink each
+  turn and no longer reads or writes `SessionManager`; `save_session` is retired
+  from the turn path.
+- **`SessionManager` is retired as a turn store** but *not deleted*: it remains
+  the read backend for the dashboard/API session viewer (`SessionBridge` in
+  `clawft-services`). The on-disk JSONL format is unchanged and is now decoded
+  through one shared parser (`clawft-core/src/session.rs::session_from_jsonl`)
+  used by both the retained bridge reader and the `weft sessions` CLI (which now
+  reads via `LocalFileSink`).
+- **Session metadata** (the hallucination score, design §D3) moved to a per-conv
+  sidecar the sink owns, so the K/V survives the collapse without
+  `SessionManager` persisting it.
+
+The graph-join proper (fusing HNSW recall with `CausalGraph` lineage +
+`CrossRefStore`, per-turn Speculative→Committed) remains the open part of
+build-target #5.
