@@ -150,6 +150,28 @@ pub enum ConversationEvent {
     },
     /// Barge-in: the in-flight reply is **Contradicted** / pruned.
     Interrupted,
+    /// The endpointer fired — the turn is finalizing (§W1.4 process event).
+    /// Surfaces the smart-turn completion probability + its source + the
+    /// trailing silence live, before they are discarded. Not a durable graph
+    /// node — the surface renders it; the committed `UserTurn` follows.
+    EndpointFired {
+        /// Completion probability that fired the finalize (or the last computed
+        /// before a max-silence ceiling finalize).
+        completion_prob: f32,
+        /// Which endpointer produced it: `smart-turn-v3` | `heuristic`.
+        source: String,
+        /// Trailing-silence length at finalize (ms).
+        silence_ms: u64,
+    },
+    /// A running (non-final) transcript while the user is still speaking
+    /// (§W1.4 process event). Deferrable (riskiest-call #4): the controller
+    /// does not emit this until incremental decode is wired — the surface
+    /// falls back to the level meter + finalized line. Defined now so the
+    /// surface never reshapes when partials land.
+    PartialTranscript {
+        /// Best-so-far transcript (may be revised by the next partial).
+        text: String,
+    },
 }
 
 /// Observer of the conversation's ECC lifecycle. The bridge implements this
@@ -364,6 +386,16 @@ impl<M: EndpointModel> TalkModeController<M> {
                             let min_samples =
                                 (self.config.sample_rate as usize) * MIN_TURN_MS / 1_000;
                             if captured.len() >= min_samples {
+                                // Surface the endpoint decision (§W1.4) just
+                                // before the turn is processed — prob + source +
+                                // silence tail, captured by the endpointer.
+                                if let Some(s) = self.endpointer.last_endpoint().cloned() {
+                                    self.observer.observe(ConversationEvent::EndpointFired {
+                                        completion_prob: s.completion_prob,
+                                        source: s.source,
+                                        silence_ms: s.silence_tail_ms,
+                                    });
+                                }
                                 self.handle_turn(captured, &mut frames, &cancel).await;
                             } else if !captured.is_empty() {
                                 debug!(

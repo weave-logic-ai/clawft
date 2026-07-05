@@ -265,6 +265,17 @@ async fn full_pipeline_speculative_then_committed() {
         .iter()
         .position(|e| matches!(e, ConversationEvent::CommittedReply { .. }));
     assert!(spk.is_some() && usr.is_some() && spec.is_some() && comm.is_some());
+    // The endpoint fire is surfaced (§W1.4 process event) just before the turn.
+    let ep = events
+        .iter()
+        .position(|e| matches!(e, ConversationEvent::EndpointFired { .. }));
+    assert!(ep.is_some(), "endpoint fire must be surfaced");
+    assert!(ep < usr, "endpoint fires before the user turn is committed");
+    assert!(events.iter().any(|e| matches!(
+        e,
+        ConversationEvent::EndpointFired { source, .. } if source == "heuristic"
+    )), "endpoint source is the heuristic (no smart-turn model in this test)");
+
     assert!(spk < usr, "speaker enrolled before user turn");
     assert!(usr < spec, "user turn before speculative ack");
     assert!(

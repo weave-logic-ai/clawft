@@ -366,6 +366,9 @@ impl ConversationObserver for LoopObserver {
                 // Drive the floor: the barge-in claims back the floor.
                 self.emit_claim();
             }
+            // §W1.4 process events are surface-only — not committed graph nodes.
+            ConversationEvent::EndpointFired { .. } | ConversationEvent::PartialTranscript { .. } => {
+            }
         }
     }
 }
