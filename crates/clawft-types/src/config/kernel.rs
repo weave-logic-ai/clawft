@@ -297,12 +297,100 @@ pub struct AgentAnchorConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub talk_loop_idle_secs: Option<u64>,
+
+    /// Agent-initiated subagent spawning (M4 D1/D5). Maps 1:1 onto
+    /// `clawft_service_agent::SubagentConfig`, which the daemon builds from
+    /// this block at agent-service boot. Absent ⇒ the defaults below (spawning
+    /// enabled, 5 concurrent per conversation, depth cap 3, 120s per-child
+    /// timeout), matching the spawner's own `Default`.
+    #[serde(default)]
+    pub subagents: SubagentsConfig,
 }
 
 impl AgentAnchorConfig {
     /// True if at least one anchor side-effect is enabled.
     pub fn any_enabled(&self) -> bool {
         self.anchor_chain || self.anchor_hnsw || self.anchor_causal
+    }
+}
+
+fn default_subagents_enabled() -> bool {
+    true
+}
+
+fn default_subagents_max_per_conv() -> u32 {
+    5
+}
+
+fn default_subagents_max_depth() -> u32 {
+    3
+}
+
+fn default_subagents_timeout_secs() -> u64 {
+    120
+}
+
+/// Operator config for agent-initiated subagent spawning (M4 D5).
+///
+/// Lives under `[kernel.agent.subagents]`. The daemon converts this into the
+/// `clawft_service_agent::SubagentConfig` the `DaemonSubagentSpawner` enforces
+/// (`max_per_conv` concurrency guard, `max_depth` WEFT-180 cap, `timeout` per
+/// child). Every field is `#[serde(default = ...)]` so a partial or absent
+/// block fills from the defaults rather than failing to deserialize.
+///
+/// ```toml
+/// [kernel.agent.subagents]
+/// enabled       = true
+/// max_per_conv  = 5
+/// max_depth     = 3
+/// timeout_secs  = 120
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubagentsConfig {
+    /// Master switch. When false the spawner refuses every `agent_spawn`
+    /// (the tool returns a runtime error) even if the tools are registered.
+    #[serde(default = "default_subagents_enabled")]
+    pub enabled: bool,
+
+    /// Max concurrent live children per parent conversation (concurrency
+    /// guard, design D5). Mirrors the raw-`spawn` tool's cap.
+    #[serde(default = "default_subagents_max_per_conv", alias = "maxPerConv")]
+    pub max_per_conv: u32,
+
+    /// Spawn recursion depth cap (WEFT-180, design D5). A spawn past this
+    /// depth is denied before dispatch.
+    #[serde(default = "default_subagents_max_depth", alias = "maxDepth")]
+    pub max_depth: u32,
+
+    /// Per-child dispatch timeout in seconds; on timeout the child conv is
+    /// cancelled and the task fails.
+    #[serde(default = "default_subagents_timeout_secs", alias = "timeoutSecs")]
+    pub timeout_secs: u64,
+
+    /// Default for the tool's `notify_on_complete` flag (proactive completion
+    /// injection, design D3.2). Flag-gated and deferred past M4 core; carried
+    /// here so the config surface is stable.
+    #[serde(default, alias = "notifyOnComplete")]
+    pub notify_on_complete: bool,
+}
+
+impl Default for SubagentsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_subagents_enabled(),
+            max_per_conv: default_subagents_max_per_conv(),
+            max_depth: default_subagents_max_depth(),
+            timeout_secs: default_subagents_timeout_secs(),
+            notify_on_complete: false,
+        }
+    }
+}
+
+impl SubagentsConfig {
+    /// Per-child dispatch timeout as a [`Duration`](std::time::Duration) — the
+    /// shape the spawner's `SubagentConfig.timeout` field wants.
+    pub fn timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.timeout_secs)
     }
 }
 
@@ -1174,5 +1262,48 @@ mod tests {
         let sd = cfg.simd_distance.unwrap();
         assert!(sd.enabled);
         assert!(sd.pad_to_power_of_two);
+    }
+
+    #[test]
+    fn subagents_config_defaults_match_spawner() {
+        // Must mirror clawft_service_agent::SubagentConfig::default().
+        let cfg = SubagentsConfig::default();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.max_per_conv, 5);
+        assert_eq!(cfg.max_depth, 3);
+        assert_eq!(cfg.timeout_secs, 120);
+        assert!(!cfg.notify_on_complete);
+        assert_eq!(cfg.timeout(), std::time::Duration::from_secs(120));
+    }
+
+    #[test]
+    fn subagents_config_absent_block_uses_defaults() {
+        // An agent block with no `subagents` key still yields the defaults.
+        let json = r#"{"talk_loop": true}"#;
+        let cfg: AgentAnchorConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.talk_loop);
+        assert!(cfg.subagents.enabled);
+        assert_eq!(cfg.subagents.max_depth, 3);
+    }
+
+    #[test]
+    fn subagents_config_partial_block_fills_missing_fields() {
+        // A partial block overrides only what it sets; the rest default.
+        let json = r#"{"subagents": {"max_depth": 1, "enabled": false}}"#;
+        let cfg: AgentAnchorConfig = serde_json::from_str(json).unwrap();
+        assert!(!cfg.subagents.enabled);
+        assert_eq!(cfg.subagents.max_depth, 1);
+        assert_eq!(cfg.subagents.max_per_conv, 5); // untouched → default
+        assert_eq!(cfg.subagents.timeout_secs, 120); // untouched → default
+    }
+
+    #[test]
+    fn subagents_config_camel_case_aliases() {
+        let json = r#"{"maxPerConv": 8, "maxDepth": 2, "timeoutSecs": 60, "notifyOnComplete": true}"#;
+        let cfg: SubagentsConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.max_per_conv, 8);
+        assert_eq!(cfg.max_depth, 2);
+        assert_eq!(cfg.timeout_secs, 60);
+        assert!(cfg.notify_on_complete);
     }
 }
