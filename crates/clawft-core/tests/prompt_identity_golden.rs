@@ -98,6 +98,7 @@ impl RecordedTurn {
                 .then(|| vec![serde_json::json!({"id": "call-golden", "name": "tool"})]),
             tool_call_id: self.is_tool_result.then(|| "call-golden".to_string()),
             ts_ms: 1_700_000_000_000 + index as u64,
+            voice_analysis: None,
         }
     }
 }

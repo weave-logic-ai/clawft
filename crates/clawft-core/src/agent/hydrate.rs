@@ -92,6 +92,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             ts_ms: 1_700_000_000_000,
+            voice_analysis: None,
         }
     }
 
@@ -102,6 +103,7 @@ mod tests {
             content: content.into(),
             tool_calls: None,
             tool_call_id: None,
+            voice_analysis: None,
             ts_ms: 1_700_000_000_000,
         }
     }

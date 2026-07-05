@@ -149,6 +149,7 @@ pub(crate) fn dual_write_turn(
     classification: Option<&serde_json::Value>,
     emotion: Option<&str>,
     goal: Option<&str>,
+    voice_analysis: Option<&serde_json::Value>,
 ) -> CausalNodeId {
     // The turn's stable universal id, stored on the causal node so a later
     // read projection (the ADR-067 `conversation.graph` RPC) can join UID-keyed
@@ -173,6 +174,17 @@ pub(crate) fn dual_write_turn(
     {
         obj.insert("classification".into(), classification.clone());
         obj.insert("text".into(), serde_json::Value::String(text.to_string()));
+    }
+    // Wave 1 §W1.2: the full per-utterance voice decomposition rides as a
+    // SIBLING metadata key, stored verbatim (flat keys — the 422c40ea parity
+    // lesson) and served verbatim by `conversation.graph`. Independent of the
+    // classification gate above: it is opt-in caller data, never fabricated, and
+    // its `emotion` axis has already been merged into the compact
+    // `classification` blob (index_turn) for the cross-modality consumers.
+    if let Some(voice_analysis) = voice_analysis
+        && let Some(obj) = metadata.as_object_mut()
+    {
+        obj.insert("voice_analysis".into(), voice_analysis.clone());
     }
     let node = causal.add_node(label, metadata);
     forest.seq_to_node.insert(chain_seq, node);

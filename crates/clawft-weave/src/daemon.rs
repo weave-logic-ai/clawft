@@ -4998,6 +4998,11 @@ async fn dispatch(
                     tool_calls: None,
                     tool_call_id: None,
                     ts_ms: t.ts_ms.unwrap_or_else(crate::control::now_ms),
+                    // Wave 1 §W1.2: carry the optional per-utterance voice
+                    // decomposition verbatim onto the turn so the anchor →
+                    // index_turn seam stores it as a sibling metadata key and
+                    // overrides the classification emotion axis (tier:"voice").
+                    voice_analysis: t.voice_analysis.clone(),
                 };
                 match sink.append_turn(&p.conv_id, turn).await {
                     Ok(()) => recorded += 1,
@@ -6008,6 +6013,12 @@ async fn dispatch(
                 let state = meta.get("state").and_then(|v| v.as_str()).unwrap_or("unknown");
                 let text = meta.get("text").and_then(|v| v.as_str()).unwrap_or("");
                 let classification = meta.get("classification").cloned().unwrap_or(serde_json::Value::Null);
+                // Wave 1 §W1.2: serve the sibling voice decomposition verbatim
+                // (flat keys — the 422c40ea parity lesson). Null for text turns
+                // and any node that predates the record, so the surface / GUI
+                // node-detail can distinguish an analysed voice turn from a
+                // text one without a schema change.
+                let voice_analysis = meta.get("voice_analysis").cloned().unwrap_or(serde_json::Value::Null);
                 nodes_json.push(serde_json::json!({
                     "id": uid,
                     "label": node.label,
@@ -6019,6 +6030,7 @@ async fn dispatch(
                     "state": state,
                     "ts_ms": ts_ms,
                     "classification": classification,
+                    "voice_analysis": voice_analysis,
                 }));
             }
 
@@ -6840,5 +6852,110 @@ mod tests {
         )
         .await;
         assert!(!resp.ok);
+    }
+
+    /// Wave 1 §W1.5 — `conversation.graph` serves the sibling `voice_analysis`
+    /// record **verbatim**, alongside the emotion-flipped classification blob.
+    ///
+    /// Coder-B's `voice_analysis_wire.rs` pins that `index_turn` *stores* the
+    /// record + flips the classification emotion axis; this pins the read side —
+    /// a committed node whose metadata carries a `voice_analysis` sibling key and
+    /// a `tier:"voice"` classification is projected by the RPC with the record
+    /// intact byte-for-byte (the one added `meta.get("voice_analysis")` read at
+    /// the node build), so the surface (`weft voice watch`) and the ADR-067 GUI
+    /// graph both light up from the served payload. Device-free: a node with the
+    /// frozen §W1.2 shape written straight into the causal graph, then read back
+    /// through `dispatch`.
+    #[cfg(feature = "ecc")]
+    #[tokio::test]
+    async fn conversation_graph_serves_voice_analysis_verbatim() {
+        use clawft_kernel::crossref::{StructureTag, UniversalNodeId};
+        use clawft_kernel::Kernel;
+        use clawft_platform::NativePlatform;
+        use clawft_types::config::{Config, KernelConfig};
+        use std::sync::Arc;
+
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(Config::default(), KernelConfig::default(), platform)
+            .await
+            .expect("kernel boots");
+        let causal = kernel.ecc_causal().expect("causal graph present").clone();
+
+        // The frozen §W1.2 record (acted / high-arousal), exactly as the sibling
+        // metadata key holds it after `index_turn`.
+        let va = serde_json::json!({
+            "v": 1, "tier": "voice",
+            "stt": {
+                "model": "parakeet-tdt-0.6b", "path": "native", "latency_ms": 48,
+                "tokens": [{ "text": "stop", "t_ms": 120, "dur_ms": 240, "conf": 0.97 }],
+                "token_conf_mean": 0.97, "token_conf_min": 0.97
+            },
+            "endpoint": { "completion_prob": 0.9, "source": "smart-turn-v3",
+                          "silence_tail_ms": 300, "latency_ms": 900 },
+            "speaker": { "id": "spk_1", "name": "Mathew", "score": 0.71, "threshold": 0.45,
+                         "action": "identified", "embedding_dim": 192 },
+            "audio": { "duration_ms": 900, "voiced_ms": 700, "silence_ms": 200,
+                       "rms_dbfs_mean": -18.0, "rms_dbfs_peak": -6.0,
+                       "noise_floor_dbfs": -52.0, "snr_db": 34.0, "clip_pct": 0.0, "dc_offset": 2 },
+            "prosody": { "f0_mean_hz": 210.0, "f0_min_hz": 140.0, "f0_max_hz": 330.0,
+                         "f0_range_semitones": 14.8, "f0_slope": 1.2,
+                         "rate_tokens_per_s": 5.1, "pause_count": 0, "pause_mean_ms": 0,
+                         "energy_dynamics_db": 22.0, "confidence": "medium" },
+            "emotion": { "valence": -0.45, "arousal": 0.92, "dominance": 0.30, "label": "agitated",
+                         "arousal_conf": "medium", "valence_conf": "low", "source": "prosody-dsp" },
+            "paralinguistics": { "non_lexical": false, "class": "speech", "confidence": "low" }
+        });
+        // The compact cross-modality blob after the voice emotion override.
+        let classification = serde_json::json!({
+            "intent": "command", "topic": "stop",
+            "emotion": { "valence": -0.45, "arousal": 0.92, "dominance": 0.30, "label": "agitated" },
+            "goal": serde_json::Value::Null, "tier": "voice", "v": 1,
+        });
+        let uid = UniversalNodeId::new(
+            &StructureTag::CausalGraph,
+            b"voice-graph",
+            1,
+            b"stop",
+            b"turn",
+        );
+        causal.add_node(
+            "turn:voice-graph:1".into(),
+            serde_json::json!({
+                "conv_id": "voice-graph", "chain_seq": 1, "role": "user",
+                "state": "committed", "uid": uid.to_string(),
+                "text": "stop", "classification": classification, "voice_analysis": va,
+            }),
+        );
+
+        let kernel = Arc::new(tokio::sync::RwLock::new(kernel));
+        let (shutdown_tx, _rx) = watch::channel(false);
+        let resp = dispatch(
+            "conversation.graph".into(),
+            serde_json::json!({ "conv_id": "voice-graph" }),
+            kernel,
+            shutdown_tx,
+        )
+        .await;
+        assert!(resp.ok, "handler ok: {:?}", resp.error);
+        let result = resp.result.expect("result present");
+        let node = result["nodes"]
+            .as_array()
+            .expect("nodes array")
+            .iter()
+            .find(|n| n["id"].as_str() == Some(uid.to_string().as_str()))
+            .expect("voice turn node projected");
+
+        // The sibling record is served verbatim — byte-for-byte, unreshaped.
+        assert_eq!(node["voice_analysis"], va, "voice_analysis served verbatim");
+        // Spot-check the fields the exit test keys on survive the projection.
+        assert_eq!(node["voice_analysis"]["stt"]["tokens"][0]["conf"], serde_json::json!(0.97));
+        assert_eq!(node["voice_analysis"]["audio"]["snr_db"], serde_json::json!(34.0));
+        assert_eq!(node["voice_analysis"]["prosody"]["f0_mean_hz"], serde_json::json!(210.0));
+        assert_eq!(node["voice_analysis"]["emotion"]["arousal"], serde_json::json!(0.92));
+        assert_eq!(node["voice_analysis"]["tier"], serde_json::json!("voice"));
+        // And the compact classification carries the voice-flipped emotion axis.
+        assert_eq!(node["classification"]["tier"], serde_json::json!("voice"));
+        assert_eq!(node["classification"]["emotion"]["arousal"], serde_json::json!(0.92));
+        assert_eq!(node["text"], serde_json::json!("stop"), "turn text surfaced");
     }
 }

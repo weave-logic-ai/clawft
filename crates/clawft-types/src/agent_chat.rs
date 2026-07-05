@@ -234,6 +234,13 @@ pub struct RecordedTurn {
     /// receipt time when omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ts_ms: Option<u64>,
+    /// Optional per-utterance voice decomposition (Wave 1 §W1.2). Carried
+    /// verbatim through `index_turn` to the sibling `voice_analysis` node
+    /// metadata key (served verbatim by `conversation.graph`); its `emotion`
+    /// sub-blob overrides the classification emotion axis with `tier:"voice"`
+    /// (the voice > llm > keyword confidence hierarchy). Absent for text turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_analysis: Option<serde_json::Value>,
 }
 
 /// Parameters for the `agent.turn.record` RPC.

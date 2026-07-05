@@ -143,7 +143,8 @@
       "anchor_chain": true,
       "anchor_causal": true,
       "talk_loop": true,
-      "subagents": { "governance_grant": true }
+      "subagents": { "governance_grant": true },
+      "classification": { "mode": "keyword" }
     }
   }
 }

@@ -33,7 +33,7 @@ use async_trait::async_trait;
 /// their own [`Turn`]; the role discriminates. `tool_calls` is set on
 /// assistant turns that invoked tools; `tool_call_id` is set on
 /// `role == "tool"` turns to bind the result to its dispatch.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Turn {
     /// Stable per-turn identifier. The sink is responsible for
     /// monotonic ULIDs in the substrate impl; in-memory tests can
@@ -49,6 +49,13 @@ pub struct Turn {
     pub tool_call_id: Option<String>,
     /// Wall-clock millisecond timestamp the sink saw the turn.
     pub ts_ms: u64,
+    /// Optional per-utterance voice decomposition (Wave 1 §W1.2). `None` for
+    /// every text turn (agent.chat + tests). Set only by the voice recorder
+    /// path (`agent.turn.record`), it rides the anchor→`index_turn` seam so the
+    /// blob is stored verbatim on the turn node and its `emotion` overrides the
+    /// classification emotion axis (`tier:"voice"`). An opaque `serde_json`
+    /// value — the daemon never reshapes it (the flat-key parity contract).
+    pub voice_analysis: Option<serde_json::Value>,
 }
 
 /// Per-conversation persistence seam.
@@ -248,6 +255,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             ts_ms: 1_700_000_000_000,
+            voice_analysis: None,
         }
     }
 
@@ -436,6 +444,7 @@ mod tests {
             tool_calls: Some(vec![json!({"name": "echo"})]),
             tool_call_id: None,
             ts_ms: 1_700_000_000_000,
+            voice_analysis: None,
         };
         sink.append_turn("c1", turn.clone()).await.unwrap();
         let history = sink.load_history("c1").await.unwrap();

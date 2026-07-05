@@ -1394,6 +1394,7 @@ impl<P: Platform> AgentLoop<P> {
                     tool_calls: None,
                     tool_call_id: None,
                     ts_ms: Self::now_ms(),
+                    voice_analysis: None,
                 },
             )
             .await
@@ -1698,6 +1699,7 @@ impl<P: Platform> AgentLoop<P> {
                         tool_calls: Some(assistant_tool_calls),
                         tool_call_id: None,
                         ts_ms: Self::now_ms(),
+                        voice_analysis: None,
                     },
                 )
                 .await
@@ -1863,6 +1865,7 @@ impl<P: Platform> AgentLoop<P> {
                             tool_calls: None,
                             tool_call_id: Some(id.clone()),
                             ts_ms: Self::now_ms(),
+                            voice_analysis: None,
                         },
                     )
                     .await

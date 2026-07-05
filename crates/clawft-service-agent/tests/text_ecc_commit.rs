@@ -85,7 +85,7 @@ async fn append_and_index(
         "agent.chat.turn",
         Some(serde_json::json!({ "conv": conv, "content": text })),
     );
-    tier.index_turn(conv, ev.sequence, "agent.chat.turn", role, text)
+    tier.index_turn(conv, ev.sequence, "agent.chat.turn", role, text, None)
         .await;
     ev.sequence
 }
@@ -261,6 +261,7 @@ async fn anchor_turn_commits_on_the_kernel_global_forest() {
         tool_calls: None,
         tool_call_id: None,
         ts_ms: 1,
+        voice_analysis: None,
     };
     anchor.anchor_turn(conv, "t1", &user).await;
 
@@ -302,6 +303,7 @@ async fn anchor_turn_commits_on_the_kernel_global_forest() {
         tool_calls: None,
         tool_call_id: None,
         ts_ms: 2,
+        voice_analysis: None,
     };
     anchor.anchor_turn(conv, "t2", &reply).await;
     assert_eq!(causal.node_count(), 2, "reply dual-wrote a second node");
@@ -351,7 +353,7 @@ async fn index_turn_classifies_and_populates_node_metadata() {
         Some(serde_json::json!({ "conv": conv, "content": text })),
     );
     let s1 = ev.sequence;
-    tier.index_turn(conv, s1, "agent.chat.turn", "user", text).await;
+    tier.index_turn(conv, s1, "agent.chat.turn", "user", text, None).await;
 
     let node = node_for_seq(&causal, s1);
     let meta = causal.get_node(node).unwrap().metadata.clone();
@@ -418,7 +420,7 @@ async fn index_turn_without_classifier_writes_no_classification_or_text() {
         "agent.chat.turn",
         Some(serde_json::json!({ "conv": conv, "content": "hello" })),
     );
-    tier.index_turn(conv, ev.sequence, "agent.chat.turn", "user", "hello").await;
+    tier.index_turn(conv, ev.sequence, "agent.chat.turn", "user", "hello", None).await;
 
     let meta = causal.get_node(node_for_seq(&causal, ev.sequence)).unwrap().metadata.clone();
     assert!(

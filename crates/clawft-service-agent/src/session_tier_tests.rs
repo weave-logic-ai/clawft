@@ -53,7 +53,7 @@ async fn append_and_index_as(
         "agent.chat.turn",
         Some(json!({ "conv": conv, "content": text })),
     );
-    tier.index_turn(conv, ev.sequence, "agent.chat.turn", role, text)
+    tier.index_turn(conv, ev.sequence, "agent.chat.turn", role, text, None)
         .await;
     ev.sequence
 }
@@ -420,7 +420,7 @@ async fn daemon_wiring_commits_on_the_tiers_own_view() {
         Some(json!({ "conv": conv, "content": "hello" })),
     );
     let seq = ev.sequence;
-    tier.index_turn(conv, seq, "agent.chat.turn", "user", "hello")
+    tier.index_turn(conv, seq, "agent.chat.turn", "user", "hello", None)
         .await;
 
     let view = ViewResolver::view_for(&*tier, conv).expect("view exists after index");

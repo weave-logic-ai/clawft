@@ -295,6 +295,7 @@ impl TurnAnchor for KernelTurnAnchor {
                     "agent.chat.turn",
                     &turn.role,
                     &turn.content,
+                    turn.voice_analysis.as_ref(),
                 )
                 .await;
             }
@@ -678,6 +679,10 @@ fn turn_from_value(v: &Value) -> Option<Turn> {
         tool_calls,
         tool_call_id,
         ts_ms,
+        // The substrate JSONL turn log does not carry the voice decomposition —
+        // it lives on the causal node metadata (served by conversation.graph),
+        // which is the store of record for Wave 1. Read-back is honestly None.
+        voice_analysis: None,
     })
 }
 

@@ -296,6 +296,7 @@ fn message_to_turn(msg: &serde_json::Value, conv_id: &str, index: usize) -> Opti
         tool_calls,
         tool_call_id,
         ts_ms,
+        voice_analysis: None,
     })
 }
 
@@ -471,6 +472,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             ts_ms: 1_700_000_000_000,
+            voice_analysis: None,
         }
     }
 

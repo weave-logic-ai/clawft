@@ -280,6 +280,7 @@ impl SessionTier {
         kind: &str,
         role: &str,
         text: &str,
+        voice_analysis: Option<&serde_json::Value>,
     ) {
         if text.trim().is_empty() {
             return;
@@ -318,9 +319,37 @@ impl SessionTier {
                 let prev_topic = conv_forest.last_topic();
                 c.classify(role, text, prev_topic.as_deref())
             });
-            let blob = classification.as_ref().map(|cv| cv.to_metadata_value());
-            let emotion_label = classification.as_ref().map(|cv| cv.emotion.label.clone());
+            let mut blob = classification.as_ref().map(|cv| cv.to_metadata_value());
+            let mut emotion_label = classification.as_ref().map(|cv| cv.emotion.label.clone());
             let goal = classification.as_ref().and_then(|cv| cv.goal.clone());
+
+            // Wave 1 §W1.2: when the caller supplied a per-utterance voice
+            // decomposition, its `emotion` sub-blob is the authoritative emotion
+            // axis (the voice > llm > keyword confidence hierarchy, design §5).
+            // Overwrite ONLY the four canonical VAD fields of the classification
+            // emotion axis (keeping the compact 4-axis contract's shape — the
+            // rich confidence flags / source live in the sibling record) and
+            // bump the blob's `tier` to "voice". Intent/topic stay keyword. The
+            // full record is stored verbatim as a sibling key by
+            // `dual_write_turn`; `emotion_label` (the EmotionCause cross-ref key)
+            // follows the voice label so per-emotion recall groups by it.
+            if let Some(va) = voice_analysis
+                && let Some(vemo) = va.get("emotion")
+                && let Some(blob_val) = blob.as_mut()
+                && let Some(obj) = blob_val.as_object_mut()
+            {
+                if let Some(cemo) = obj.get_mut("emotion").and_then(|e| e.as_object_mut()) {
+                    for k in ["valence", "arousal", "dominance", "label"] {
+                        if let Some(v) = vemo.get(k) {
+                            cemo.insert(k.to_string(), v.clone());
+                        }
+                    }
+                }
+                obj.insert("tier".into(), serde_json::Value::String("voice".into()));
+                if let Some(label) = vemo.get("label").and_then(|v| v.as_str()) {
+                    emotion_label = Some(label.to_string());
+                }
+            }
 
             let node = session_forest::dual_write_turn(
                 &forest.causal,
@@ -334,6 +363,7 @@ impl SessionTier {
                 blob.as_ref(),
                 emotion_label.as_deref(),
                 goal.as_deref(),
+                voice_analysis,
             );
 
             // Carry this turn's topic forward for the next turn's continuity

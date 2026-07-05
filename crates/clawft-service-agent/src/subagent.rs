@@ -986,9 +986,9 @@ mod tests {
         // agent_spawn is appended and anchored immediately BEFORE the tool
         // dispatches. So the latest anchored turn at spawn time is the assistant
         // tool-call turn — the turn that actually made the call.
-        tier.index_turn("P", 1, "message", "user", "please spawn a helper")
+        tier.index_turn("P", 1, "message", "user", "please spawn a helper", None)
             .await;
-        tier.index_turn("P", 2, "message", "assistant", "calling agent_spawn")
+        tier.index_turn("P", 2, "message", "assistant", "calling agent_spawn", None)
             .await;
         let assistant_uid = tier.latest_turn_uid("P").expect("assistant turn anchored");
         let user_uid = crate::session_forest::turn_universal_id("P", 1, "please spawn a helper");
