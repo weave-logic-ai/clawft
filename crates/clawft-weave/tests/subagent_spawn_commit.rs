@@ -467,7 +467,12 @@ async fn agent_spawns_subagent_result_commits_into_parent() {
         resolver,
     )
     .with_gate(gate)
-    .with_sink(sink);
+    .with_sink(sink)
+    // Mirror the daemon (`build_daemon_agent_loop`): the `agent.chat`
+    // conv_id arrives as a unique `chat_id`, used verbatim (M3 §D5) so the
+    // subagent child namespace stays `sub:<conv>:…` without an `agent.chat:`
+    // prefix.
+    .with_chat_id_as_conv_id();
 
     // ── Service + late-wire the spawner back-reference (Arc-cycle break) ──────
     // The tier is attached to the service (as the daemon does, daemon.rs ~1448)

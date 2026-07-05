@@ -9,6 +9,7 @@ pub mod effects;
 pub mod gate;
 pub mod graft;
 pub mod helpers;
+pub mod hydrate;
 pub mod identity;
 pub mod local_file_sink;
 pub mod loop_core;

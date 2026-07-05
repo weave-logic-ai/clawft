@@ -19,18 +19,20 @@
 //!
 //! # The provider seam (for P3)
 //!
-//! [`HistoryProvider`] is the swappable input source. P0 ships two impls:
-//!   - [`SessionManagerProvider`] — the current store-1 path (the golden's
-//!     authoritative source).
-//!   - [`SupersetFilterProvider`] — models the future P3 path: it holds the
-//!     sink superset and applies [`filter_store1_subset`] (the design's D2
-//!     rule) at hydrate time.
+//! [`HistoryProvider`] is the swappable input source. Two impls:
+//!   - [`SessionManagerProvider`] — the pre-collapse store-1 path (the
+//!     golden's authoritative source).
+//!   - [`SupersetFilterProvider`] — the **production** P3 path (wired at the
+//!     cutover): it loads the recorded superset into a real
+//!     [`InMemorySink`](clawft_core::agent::sink::InMemorySink) and hydrates
+//!     via the production
+//!     [`hydrate_session`](clawft_core::agent::hydrate::hydrate_session),
+//!     which applies the production `hydrate::filter_store1_subset` (design D2).
 //!
 //! The equivalence test asserts both produce the identical assembled prompt —
-//! i.e. read-time filtering of the superset reproduces the write-time subset.
-//! P3's implementer repoints [`SupersetFilterProvider`] (or adds a real
-//! sink-backed provider) at the production `ConversationSink::history` +
-//! production filter; this test must stay green unchanged.
+//! i.e. read-time filtering of the superset by the production hydration path
+//! reproduces the write-time subset. This test must stay green unchanged; the
+//! `.snap` golden is never regenerated for the cutover.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -39,7 +41,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 use async_trait::async_trait;
 
 use clawft_core::agent::context::{ContextBuilder, LlmMessage};
+use clawft_core::agent::hydrate::hydrate_session;
 use clawft_core::agent::memory::MemoryStore;
+use clawft_core::agent::sink::{ConversationSink, InMemorySink, Turn};
 use clawft_core::agent::skills::SkillsLoader;
 use clawft_core::session::SessionManager;
 use clawft_platform::Platform;
@@ -78,6 +82,23 @@ impl RecordedTurn {
     /// A tool-result turn — superset-only intermediate.
     const fn tool_result(content: &'static str) -> Self {
         Self { role: "tool", content, has_tool_calls: false, is_tool_result: true }
+    }
+
+    /// Convert to a production [`Turn`] as the sink superset stores it, so the
+    /// cutover test can drive the **real** `hydrate::filter_store1_subset`
+    /// (which keys off `tool_calls` / `tool_call_id`, never the golden's local
+    /// bool flags).
+    fn to_sink_turn(&self, index: usize) -> Turn {
+        Turn {
+            turn_id: format!("golden-{index:04}"),
+            role: self.role.to_string(),
+            content: self.content.to_string(),
+            tool_calls: self
+                .has_tool_calls
+                .then(|| vec![serde_json::json!({"id": "call-golden", "name": "tool"})]),
+            tool_call_id: self.is_tool_result.then(|| "call-golden".to_string()),
+            ts_ms: 1_700_000_000_000 + index as u64,
+        }
     }
 }
 
@@ -161,20 +182,29 @@ impl HistoryProvider for SessionManagerProvider {
     }
 }
 
-/// Models the P3 path: holds the sink **superset** and applies the D2 filter
-/// at hydrate time. Read-time filtering here must reproduce the write-time
-/// subset the SessionManager provider produced.
+/// The **production** P3 path (no longer a model): loads the recorded
+/// superset — tool intermediates and all — into a real
+/// [`InMemorySink`], then hydrates via the production
+/// [`hydrate_session`], which applies the production
+/// `hydrate::filter_store1_subset`. Read-time filtering of the superset
+/// here must reproduce the write-time subset the SessionManager provider
+/// produced. This is what wires the golden's cutover assertion to the
+/// real production hydration path.
 struct SupersetFilterProvider;
 
 #[async_trait]
 impl HistoryProvider for SupersetFilterProvider {
     async fn hydrate(&self, conv_id: &str) -> Session {
-        let superset = recorded_superset();
-        let mut session = Session::new(conv_id);
-        for turn in filter_store1_subset(&superset) {
-            session.add_message(turn.role, turn.content, None);
+        let sink = InMemorySink::new();
+        for (i, turn) in recorded_superset().iter().enumerate() {
+            sink.append_turn(conv_id, turn.to_sink_turn(i))
+                .await
+                .expect("append recorded superset turn into golden sink");
         }
-        session
+        // window == 0: hydrate the full superset, filter, and let the
+        // assembly stage re-window (the P1 `ConversationSink::history`
+        // contract) — exactly what `AgentLoop::handle_turn` does.
+        hydrate_session(&sink, conv_id, 0).await
     }
 }
 

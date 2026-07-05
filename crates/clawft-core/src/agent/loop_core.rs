@@ -280,6 +280,13 @@ pub struct AgentLoop<P: Platform> {
     pipeline: PipelineRegistry,
     tools: Arc<ToolRegistry>,
     context: ContextBuilder<P>,
+    /// Retired from the turn path by the M3 store collapse (design §D1):
+    /// [`Self::handle_turn`] hydrates from the [`ConversationSink`] and no
+    /// longer reads or writes `SessionManager`. The handle is still held —
+    /// callers construct the loop with it and the `sessions` CLI + P5
+    /// cleanup depend on the type staying wired — so it is retained but
+    /// unread on the non-test turn path until P5 removes it as a store.
+    #[allow(dead_code)]
     sessions: Arc<SessionManager<P>>,
     permission_resolver: PermissionResolver,
     cancel: Option<CancellationToken>,
@@ -392,6 +399,23 @@ pub struct AgentLoop<P: Platform> {
     /// `clawft-service-agent`. Defaults to `None` (CLI / tests), preserving
     /// prior behaviour.
     graft_provider: Option<Arc<dyn ContextGraftProvider>>,
+    /// Whether the inbound `chat_id` is already a globally-unique
+    /// conversation id (M3 §D5 reconciliation).
+    ///
+    /// The M3 store collapse adopts `"{channel}:{chat_id}"` (the session
+    /// key) as the canonical `conv_id` so multi-channel `chat_id`s can't
+    /// collide and the in-process [`LocalFileSink`] reads the existing
+    /// `{channel}:{chat_id}.jsonl` files unchanged (§D4). But the daemon's
+    /// `agent.chat` path already mints a globally-unique conv id and carries
+    /// it *as* `chat_id` (under a constant `agent.chat` channel), and it keys
+    /// the substrate turn log, causal forest, session tier, `conversation.graph`
+    /// / `agent.chat.end`, and the `sub:<parent>:…` subagent child namespace by
+    /// that bare id. Prefixing it there would diverge from those readers and
+    /// compound the prefix on nested spawns. So the daemon sets this flag (via
+    /// [`Self::with_chat_id_as_conv_id`], wired in `build_daemon_agent_loop`)
+    /// to use `chat_id` verbatim; CLI / channel callers leave it `false` and
+    /// get the canonical session-key `conv_id`.
+    chat_id_is_conv_id: bool,
 }
 
 impl<P: Platform> AgentLoop<P> {
@@ -439,6 +463,7 @@ impl<P: Platform> AgentLoop<P> {
             max_delegation_depth: resolve_max_delegation_depth(),
             cost_budget: None,
             graft_provider: None,
+            chat_id_is_conv_id: false,
         }
     }
 
@@ -588,6 +613,34 @@ impl<P: Platform> AgentLoop<P> {
         self
     }
 
+    /// Treat the inbound `chat_id` as the canonical `conv_id` verbatim
+    /// instead of deriving `"{channel}:{chat_id}"` (M3 §D5 reconciliation).
+    ///
+    /// The daemon's `agent.chat` path mints a globally-unique conv id and
+    /// carries it as `chat_id`; its substrate turn log, causal forest,
+    /// session tier, `conversation.graph`, and subagent child namespace all
+    /// key by that bare id. `build_daemon_agent_loop` calls this so the
+    /// collapse hydrates from / writes to the exact same key those readers
+    /// use. CLI / channel callers leave it unset for the canonical
+    /// session-key `conv_id` (see [`Self::chat_id_is_conv_id`]).
+    pub fn with_chat_id_as_conv_id(mut self) -> Self {
+        self.chat_id_is_conv_id = true;
+        self
+    }
+
+    /// Resolve the conversation id for `msg` under the configured key scheme
+    /// (M3 §D5). Either the canonical session key `"{channel}:{chat_id}"`
+    /// (default) or the bare `chat_id` when [`Self::chat_id_is_conv_id`] is
+    /// set (daemon path). Threaded identically through hydration, the sink,
+    /// the graft, and the spawn context.
+    fn conv_id_for(&self, msg: &InboundMessage) -> String {
+        if self.chat_id_is_conv_id {
+            msg.chat_id.clone()
+        } else {
+            msg.session_key()
+        }
+    }
+
     /// Currently-configured maximum delegation depth.
     pub fn max_delegation_depth(&self) -> u32 {
         self.max_delegation_depth
@@ -722,12 +775,16 @@ impl<P: Platform> AgentLoop<P> {
         // consumption (auth_context, gate checks).
         let routed_agent_id = self.resolve_routed_agent(&msg);
         let session_key = msg.session_key();
-        // Conversation identity for the ConversationSink. We use
-        // `chat_id` directly today (matches the spike's substrate
-        // path layout `derived/chat/<conv_id>/`); when Phase C lands
-        // an explicit `conv_id` field on InboundMessage the wiring
-        // moves there with no other call-site changes.
-        let conv_id = msg.chat_id.clone();
+        // Conversation identity for the ConversationSink (M3 store
+        // collapse, design §D5). Default is the canonical
+        // `"{channel}:{chat_id}"` session key — the scheme `SessionManager`
+        // used, so the in-process `LocalFileSink` reads the existing
+        // `{channel}:{chat_id}.jsonl` files with no rename and two channels
+        // sharing a `chat_id` no longer collide. The daemon opts into the
+        // bare `chat_id` (already a unique conv id) via
+        // `with_chat_id_as_conv_id`. This is the single conv identity threaded
+        // through hydration, the sink, the graft, and the spawn context.
+        let conv_id = self.conv_id_for(&msg);
         // Acquire the per-conv lock. InMemorySink is a no-op; the
         // substrate-backed sink (Phase C3) blocks concurrent turns
         // in the same conversation against the AgentService DashMap.
@@ -772,37 +829,31 @@ impl<P: Platform> AgentLoop<P> {
             );
         }
 
-        // 1. Get or create session
-        let mut session = self.sessions.get_or_create(&session_key).await?;
+        // 1. Hydrate the assembly session from the conversation sink
+        //    (M3 store collapse, design §D2). The in-memory `Session`
+        //    is no longer independently persisted; it is reconstructed
+        //    each turn from the single durable store — the sink turn log
+        //    — by dropping the tool-loop intermediates the sink superset
+        //    carries (see `hydrate::filter_store1_subset`). Session
+        //    metadata (hallucination score, §D3) rides the sink's meta
+        //    sidecar. `SessionManager` is retired from this path.
+        let mut session =
+            crate::agent::hydrate::hydrate_session(self.sink.as_ref(), &conv_id, 0).await;
 
         // 2. Build context messages from memory, skills, and history BEFORE
         //    adding the user message to session (to avoid duplicate).
         let context_messages = self.context.build_messages(&session, &[]).await;
 
-        // 3. Add user message to session (after building context)
+        // 3. Add user message to session (after building context). The
+        //    in-memory session is a per-turn assembly buffer only (§D1);
+        //    durability is the sink's job below.
         session.add_message("user", &msg.content, None);
 
-        // 3b. Persist the user turn to the conversation sink. Errors
-        //     here are logged and swallowed — sink failures must not
-        //     abort the LLM turn (Phase C3 will harden this against
-        //     substrate write errors).
-        if let Err(e) = self
-            .sink
-            .append_turn(
-                &conv_id,
-                Turn {
-                    turn_id: Self::next_turn_id(),
-                    role: "user".into(),
-                    content: msg.content.clone(),
-                    tool_calls: None,
-                    tool_call_id: None,
-                    ts_ms: Self::now_ms(),
-                },
-            )
-            .await
-        {
-            warn!(error = %e, "sink: failed to append user turn");
-        }
+        // 3b. Persist the user turn to the conversation sink — the single
+        //     durable store. Errors are logged and swallowed: a sink write
+        //     hiccup must never abort the LLM turn (design §6, degrade
+        //     don't crash); the next turn simply hydrates without it.
+        self.sink_append_plain(&conv_id, "user", &msg.content).await;
 
         // 4. Context messages are already pipeline::traits::LlmMessage (B2 unification).
         let mut messages: Vec<LlmMessage> = context_messages;
@@ -1058,33 +1109,28 @@ impl<P: Platform> AgentLoop<P> {
             );
         }
 
-        // 12. Add assistant message to session
+        // 12. Add assistant message to session (assembly buffer only, §D1).
         session.add_message("assistant", &tool_result.text, None);
 
         // 12b. Persist the final assistant turn to the conversation
         //      sink. Tool-result intermediates already went through
         //      append_turn from inside run_tool_loop; this is the
         //      last record per `chat-agent-v1.md` §11.5.
-        if let Err(e) = self
-            .sink
-            .append_turn(
-                &conv_id,
-                Turn {
-                    turn_id: Self::next_turn_id(),
-                    role: "assistant".into(),
-                    content: tool_result.text.clone(),
-                    tool_calls: None,
-                    tool_call_id: None,
-                    ts_ms: Self::now_ms(),
-                },
-            )
-            .await
-        {
-            warn!(error = %e, "sink: failed to append assistant turn");
-        }
+        self.sink_append_plain(&conv_id, "assistant", &tool_result.text)
+            .await;
 
-        // 13. Save session
-        self.sessions.save_session(&session).await?;
+        // 13. Persist session metadata to the sink's meta sidecar (§D3).
+        //     `SessionManager::save_session` is retired on this path (§D1):
+        //     the sink already durably recorded every turn as it happened,
+        //     so the only remaining per-conv state is the metadata map
+        //     (home of the hallucination score updated above). Best-effort
+        //     and infallible by contract — a write hiccup can't fail the turn.
+        self.sink
+            .set_meta(
+                &conv_id,
+                serde_json::to_value(&session.metadata).unwrap_or(serde_json::Value::Null),
+            )
+            .await;
 
         // 14. Build outbound reply (caller handles dispatch).
         //
@@ -1136,7 +1182,12 @@ impl<P: Platform> AgentLoop<P> {
         msg: &InboundMessage,
         mut delegate_args: serde_json::Value,
     ) -> clawft_types::Result<OutboundMessage> {
+        // Conv identity for the sink (design §D5), matching
+        // [`Self::handle_turn`]'s key scheme. `SessionManager` is retired
+        // here too: the delegation user/assistant turns are recorded to the
+        // single durable store so the next turn hydrates them.
         let session_key = msg.session_key();
+        let conv_id = self.conv_id_for(msg);
 
         // WEFT-180: Recursive-delegation depth guard. Each delegation
         // hop bumps the depth; when the bumped value would exceed
@@ -1159,14 +1210,12 @@ impl<P: Platform> AgentLoop<P> {
                 channel = %msg.channel,
                 "delegation depth exceeded, refusing delegate_task hop"
             );
-            // Save the user message + error to session for traceability.
-            let mut session = self.sessions.get_or_create(&session_key).await?;
-            session.add_message("user", &msg.content, None);
+            // Record the user message + refusal to the sink for traceability.
             let body = format!(
                 "Delegation refused: maximum recursive delegation depth ({cap}) reached at hop {next_depth}. Override via CLAWFT_DELEGATION_DEPTH if intentional."
             );
-            session.add_message("assistant", &body, None);
-            self.sessions.save_session(&session).await?;
+            self.sink_append_plain(&conv_id, "user", &msg.content).await;
+            self.sink_append_plain(&conv_id, "assistant", &body).await;
             return Ok(OutboundMessage {
                 channel: msg.channel.clone(),
                 chat_id: msg.chat_id.clone(),
@@ -1183,9 +1232,8 @@ impl<P: Platform> AgentLoop<P> {
             obj.insert(DELEGATION_DEPTH_KEY.into(), serde_json::json!(next_depth));
         }
 
-        // Save user message to session for history.
-        let mut session = self.sessions.get_or_create(&session_key).await?;
-        session.add_message("user", &msg.content, None);
+        // Record the user turn to the sink for history.
+        self.sink_append_plain(&conv_id, "user", &msg.content).await;
 
         // Resolve auth context for permission checks.
         let auth = self.resolve_auth_context(msg);
@@ -1215,9 +1263,9 @@ impl<P: Platform> AgentLoop<P> {
             }
         };
 
-        // Save response to session.
-        session.add_message("assistant", &response_text, None);
-        self.sessions.save_session(&session).await?;
+        // Record the delegate's response to the sink.
+        self.sink_append_plain(&conv_id, "assistant", &response_text)
+            .await;
 
         // Build outbound reply (caller handles dispatch).
         let outbound = OutboundMessage {
@@ -1314,6 +1362,35 @@ impl<P: Platform> AgentLoop<P> {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         format!("turn-{ts}-{seq:08x}", ts = Self::now_ms(), seq = seq)
+    }
+
+    /// Append a plain (no tool metadata) role turn to the conversation
+    /// sink, warning and swallowing on failure.
+    ///
+    /// The sink is the single durable store after the M3 store collapse,
+    /// but a write is still best-effort by contract (design §6): a
+    /// substrate/file hiccup must never abort the LLM turn — the next
+    /// turn just hydrates without the lost record. Shared by the user /
+    /// assistant appends in [`Self::handle_turn`] and the auto-delegation
+    /// path so all three record turns identically.
+    async fn sink_append_plain(&self, conv_id: &str, role: &str, content: &str) {
+        if let Err(e) = self
+            .sink
+            .append_turn(
+                conv_id,
+                Turn {
+                    turn_id: Self::next_turn_id(),
+                    role: role.into(),
+                    content: content.into(),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    ts_ms: Self::now_ms(),
+                },
+            )
+            .await
+        {
+            warn!(error = %e, role, "sink: failed to append turn");
+        }
     }
 
     /// Resolve the workspace path from config, expanding `~` to home dir.
@@ -2614,14 +2691,63 @@ mod tests {
         let msg = agent.bus.consume_inbound().await.unwrap();
         let _outbound = agent.handle_turn(msg).await.unwrap();
 
-        // Verify session was saved with both messages
-        let session = agent
-            .sessions
-            .get_or_create("telegram:chat42")
-            .await
-            .unwrap();
-        // Session should have user message + assistant message
+        // M3 store collapse: durability moved from SessionManager to the
+        // ConversationSink. Hydrate from the sink (the single store) and
+        // verify both the user and assistant turns landed. conv_id is the
+        // canonical session_key `"telegram:chat42"` (design §D5).
+        let session =
+            crate::agent::hydrate::hydrate_session(agent.sink.as_ref(), "telegram:chat42", 0).await;
         assert!(session.messages.len() >= 2);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// M3 T5 (design risk 3): the session-metadata K/V (hallucination score)
+    /// must survive the cutover. Pre-collapse it rode `SessionManager`'s
+    /// persisted header; now it lives in the sink's meta sidecar (§D3),
+    /// hydrated into `Session::metadata` at turn start and written back via
+    /// `sink.set_meta` at turn end. A score seeded before a turn must still be
+    /// present after it — proving the K/V is not silently dropped when
+    /// `save_session` is retired.
+    #[tokio::test]
+    async fn hallucination_metadata_survives_cutover() {
+        let transport = Arc::new(MockTransport::new("ok"));
+        let (agent, dir) = make_agent_loop(transport, "meta_survive").await;
+
+        // Seed a prior hallucination score into the sink meta sidecar.
+        agent
+            .sink
+            .set_meta(
+                "telegram:c",
+                serde_json::json!({ "hallucination_score": 0.37 }),
+            )
+            .await;
+
+        let inbound = InboundMessage {
+            channel: "telegram".into(),
+            sender_id: "u".into(),
+            chat_id: "c".into(),
+            content: "hi".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        agent.bus.publish_inbound(inbound).unwrap();
+        let msg = agent.bus.consume_inbound().await.unwrap();
+        let _ = agent.handle_turn(msg).await.unwrap();
+
+        // The turn hydrated the score into `session.metadata` and wrote it
+        // back through `set_meta`; hydrating again must still see it.
+        let session =
+            crate::agent::hydrate::hydrate_session(agent.sink.as_ref(), "telegram:c", 0).await;
+        assert_eq!(
+            session
+                .metadata
+                .get("hallucination_score")
+                .and_then(|v| v.as_f64()),
+            Some(0.37),
+            "hallucination score must survive a turn through the sink sidecar"
+        );
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
@@ -3006,8 +3132,9 @@ mod tests {
             tool_result_msg.content
         );
 
-        // Verify session was persisted with both user and assistant messages
-        let session = agent.sessions.get_or_create("cli:e2e-chat").await.unwrap();
+        // M3 store collapse: verify durability via the sink (single store).
+        let session =
+            crate::agent::hydrate::hydrate_session(agent.sink.as_ref(), "cli:e2e-chat", 0).await;
         assert!(
             session.messages.len() >= 2,
             "session should have at least user + assistant messages, got {}",
@@ -3117,8 +3244,9 @@ mod tests {
         assert_eq!(outbound.content, "Direct answer from LLM");
         assert_eq!(outbound.channel, "direct");
 
-        // Session should have user + assistant
-        let session = agent.sessions.get_or_create("direct:chat").await.unwrap();
+        // M3 store collapse: hydrate from the sink and check both roles landed.
+        let session =
+            crate::agent::hydrate::hydrate_session(agent.sink.as_ref(), "direct:chat", 0).await;
         let roles: Vec<String> = session
             .messages
             .iter()
@@ -4576,7 +4704,10 @@ mod tests {
             .unwrap()
             .clone()
             .expect("tool must observe an installed spawn context");
-        assert_eq!(ctx.conv_id.as_deref(), Some("d5-ctx-chat"));
+        // M3 §D5: conv_id is the canonical session_key `"{channel}:{chat_id}"`,
+        // not the bare chat_id — the spawn context roots at the same conv
+        // identity the sink / tier key by.
+        assert_eq!(ctx.conv_id.as_deref(), Some("cli:d5-ctx-chat"));
         // No router / daemon id in this harness → channel:sender fallback.
         assert_eq!(ctx.agent_id.as_deref(), Some("cli:u7"));
         assert_eq!(ctx.depth, 2, "depth must come from inbound spawn_depth");

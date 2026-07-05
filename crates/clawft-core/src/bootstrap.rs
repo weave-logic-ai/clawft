@@ -216,11 +216,26 @@ impl<P: Platform> AppContext<P> {
     ///
     /// All dependencies are moved into the agent loop. After this call,
     /// the `AppContext` is consumed and cannot be reused.
-    pub fn into_agent_loop(self) -> AgentLoop<P> {
+    pub fn into_agent_loop(self) -> AgentLoop<P>
+    where
+        P: 'static,
+    {
         let resolver = crate::pipeline::permissions::PermissionResolver::new(
             &self.config.routing,
             None, // workspace config not yet supported
         );
+        // M3 store collapse (design §D4): the in-process / no-daemon path
+        // gets a real durable sink instead of the no-op `InMemorySink`
+        // default. `LocalFileSink` reads and writes the **same**
+        // `~/.clawft/workspace/sessions/{key}.jsonl` files `SessionManager`
+        // used — reusing the directory `SessionManager` already discovered —
+        // so the collapse keeps in-process durability through one store with
+        // zero migration. The daemon path attaches its substrate-backed sink
+        // via `build_daemon_agent_loop`.
+        let sink = Arc::new(crate::agent::local_file_sink::LocalFileSink::with_dir(
+            self.platform.clone(),
+            self.sessions.sessions_dir().clone(),
+        ));
         let mut agent = AgentLoop::new(
             self.config.agents,
             self.platform,
@@ -230,7 +245,8 @@ impl<P: Platform> AppContext<P> {
             self.context,
             self.sessions.clone(),
             resolver,
-        );
+        )
+        .with_sink(sink);
         if let Some(delegation) = self.auto_delegation {
             agent = agent.with_auto_delegation(delegation);
         }
@@ -721,7 +737,13 @@ pub async fn build_daemon_agent_loop(
         context,
         Arc::new(sessions),
         resolver,
-    );
+    )
+    // M3 §D5: the daemon's `agent.chat` conv_id already arrives as a
+    // globally-unique `chat_id`; use it verbatim so the M3 collapse keys
+    // the substrate turn log / forest / tier / `conversation.graph` /
+    // subagent child namespace exactly as they do today (no `agent.chat:`
+    // prefix, no compounding on nested spawns).
+    .with_chat_id_as_conv_id();
     // C3 attaches the caller's sink (substrate-backed at the daemon
     // construction site; falls back to the in-memory default for CLI
     // / non-substrate callers).
