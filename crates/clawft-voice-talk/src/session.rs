@@ -67,6 +67,10 @@ pub struct TalkConfig {
     /// Persistent speaker-registry path (enrollments + spoken self-naming
     /// survive sessions). `None` keeps identities in-memory only.
     pub speaker_store: Option<std::path::PathBuf>,
+    /// Listen-only mode (Wave 1 §W1.4): record + classify + store every turn
+    /// but skip the brain (no ack / LLM / audio out). Drives `weft voice
+    /// listen`. OFF by default.
+    pub listen_only: bool,
 }
 
 impl Default for TalkConfig {
@@ -90,6 +94,7 @@ impl Default for TalkConfig {
             speaker_store: std::env::var("HOME")
                 .ok()
                 .map(|h| std::path::PathBuf::from(h).join(".weftos/speakers.json")),
+            listen_only: false,
         }
     }
 }
@@ -177,6 +182,7 @@ impl<M: EndpointModel + 'static> TalkSession<M> {
                 default_speaker_name: config.default_speaker_name,
                 base_system: config.base_system,
                 speaker_store: config.speaker_store,
+                listen_only: config.listen_only,
                 ..ControllerConfig::default()
             },
         );

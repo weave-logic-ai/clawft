@@ -399,3 +399,80 @@ async fn barge_in_flushes_and_emits_interrupted() {
         "barge-in must flush the TTS sink"
     );
 }
+
+#[tokio::test]
+async fn listen_only_records_the_turn_but_skips_the_brain() {
+    // §W1.4 listen-only: the turn is recorded + decomposed (UserTurn with the
+    // full VoiceAnalysis fires so the recorder/observer carries it), but the
+    // brain is OFF — no ack, no committed answer, no audio out.
+    let observer = Arc::new(RecordingObserver::default());
+    let sink = Arc::new(RecordingSink::default());
+    let audio = Arc::new(CountingAudio::default());
+    let tts = DualLayerTts::new(
+        Arc::new(ImmediateEngine(TtsTier::Fast)),
+        Arc::new(ImmediateEngine(TtsTier::Slow)),
+    )
+    .unwrap();
+
+    let mut ctrl = TalkModeController::new(
+        endpointer(),
+        Arc::new(MockStt("what is the capital of France")),
+        Some(Arc::new(MockEmbedder)),
+        SpeakerRegistry::new(0.45),
+        VoiceAnswerPolicy::default(),
+        Arc::new(MockLlm("THIS ANSWER MUST NOT BE PRODUCED")),
+        tts,
+        sink.clone(),
+        audio.clone(),
+        observer.clone() as Arc<dyn ConversationObserver>,
+        TalkModeConfig {
+            listen_only: true,
+            ..Default::default()
+        },
+    );
+
+    let (tx, rx) = mpsc::channel::<Vec<i16>>(64);
+    let cancel = CancellationToken::new();
+    let run_cancel = cancel.clone();
+    let handle = tokio::spawn(async move { ctrl.run(rx, run_cancel).await });
+
+    tx.send(voiced_frame()).await.unwrap();
+    tx.send(voiced_frame()).await.unwrap();
+    tx.send(voiced_frame()).await.unwrap();
+    for _ in 0..6 {
+        tx.send(silent_frame()).await.unwrap();
+    }
+
+    wait_until(|| observer.has(|e| matches!(e, ConversationEvent::UserTurn { .. }))).await;
+    // Give the loop a beat to (not) produce a reply, then stop.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    cancel.cancel();
+    drop(tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+
+    // The turn is recorded WITH the full decomposition...
+    assert!(
+        observer.has(|e| matches!(
+            e,
+            ConversationEvent::UserTurn {
+                voice_analysis: Some(_),
+                ..
+            }
+        )),
+        "listen-only still records the turn + VoiceAnalysis"
+    );
+    // ...but the brain never runs: no ack, no committed reply, no audio out.
+    assert!(
+        !observer.has(|e| matches!(e, ConversationEvent::SpeculativeReply { .. })),
+        "listen-only must not ack"
+    );
+    assert!(
+        !observer.has(|e| matches!(e, ConversationEvent::CommittedReply { .. })),
+        "listen-only must not answer"
+    );
+    assert_eq!(
+        sink.chunks.load(Ordering::SeqCst),
+        0,
+        "listen-only plays no audio"
+    );
+}

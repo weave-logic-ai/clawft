@@ -191,6 +191,12 @@ pub struct TalkModeConfig {
     /// ~400 ms in and cancelling every answer. Enable once AEC residual
     /// is tuned (tracked in Plane).
     pub barge_in_enabled: bool,
+    /// Listen-only mode (Wave 1 §W1.4): record + classify + store every turn
+    /// (the recorder observer still fires `UserTurn` with the full
+    /// `VoiceAnalysis`), but **skip the brain** — no ack, no LLM answer, no
+    /// audio out. The surface shows ingestion + decomposition without a reply.
+    /// OFF by default (full conversational loop).
+    pub listen_only: bool,
 }
 
 impl Default for TalkModeConfig {
@@ -204,6 +210,7 @@ impl Default for TalkModeConfig {
             speaker_store: None,
             barge_in_grace_ms: BARGE_IN_GRACE_MS,
             barge_in_enabled: false,
+            listen_only: false,
         }
     }
 }
@@ -435,6 +442,14 @@ impl<M: EndpointModel> TalkModeController<M> {
             speaker_name: speaker_name.clone(),
             voice_analysis: Some(Box::new(voice_analysis)),
         });
+
+        // Listen-only (§W1.4): the turn is recorded + classified + stored (the
+        // observer fired above), but the brain is off — no ack, no LLM answer,
+        // no audio out. Stop here; the surface shows ingestion without a reply.
+        if self.config.listen_only {
+            info!("talk-mode listen-only: turn recorded, brain skipped");
+            return;
+        }
 
         // Fast ack = Speculative spoken node (6.4 fast layer covers latency).
         let ack = contextual_ack(&text);
