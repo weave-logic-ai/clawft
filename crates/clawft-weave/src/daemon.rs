@@ -1011,9 +1011,8 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
         // task_result / agent_message) register against a live backend. The
         // service back-reference is late-wired below once the AgentService
         // `Arc` exists (Arc-cycle break, design D2 — same OnceLock shape as
-        // DAEMON_AGENT). Caps default to the plan values (5 concurrent /
-        // depth 3 / 120s timeout); TODO(D.1): seed from
-        // `KernelConfig.agent.subagents` once that config block lands.
+        // DAEMON_AGENT). Caps are seeded from `[kernel.agent.subagents]` (D.1);
+        // absent ⇒ the spawner defaults (enabled, 5 concurrent / depth 3 / 120s).
         let spawn_registry = Arc::new(clawft_service_agent::SpawnRegistry::new());
         let subagent_spawner: Arc<
             clawft_service_agent::DaemonSubagentSpawner<
@@ -1021,9 +1020,19 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
             >,
         > = {
             let k = kernel.read().await;
+            // D.1: map the operator config block 1:1 onto the spawner's caps.
+            let subagent_config = match k.kernel_config().agent.as_ref() {
+                Some(a) => clawft_service_agent::SubagentConfig {
+                    enabled: a.subagents.enabled,
+                    max_per_conv: a.subagents.max_per_conv,
+                    max_depth: a.subagents.max_depth,
+                    timeout: std::time::Duration::from_secs(a.subagents.timeout_secs),
+                },
+                None => clawft_service_agent::SubagentConfig::default(),
+            };
             let mut sp = clawft_service_agent::DaemonSubagentSpawner::new(
                 Arc::clone(&spawn_registry),
-                clawft_service_agent::SubagentConfig::default(),
+                subagent_config,
             );
             // D6 witnessing: record spawn lifecycle (spawn/complete/fail/cancel)
             // on the chain when it exists (ADR-033).
