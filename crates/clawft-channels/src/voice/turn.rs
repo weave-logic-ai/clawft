@@ -105,6 +105,17 @@ impl EndpointModel for HeuristicEndpoint {
     }
 }
 
+/// Minimum voiced audio a turn must accumulate before a *semantic* endpoint may
+/// finalize it. Below this a fragment like "From" can't finalize alone on a
+/// short pause — it waits for more speech (or the hard max-silence ceiling).
+const MIN_VOICED_MS: u32 = 400;
+
+/// Below this much voiced audio the smart-turn completion probability is
+/// discounted: the model is overconfident on tiny clips (observed "From" at
+/// p=0.83). Halving keeps a genuine short answer finalizable at a very high
+/// prob while stopping mid-sentence fragments from ending the turn.
+const SHORT_AUDIO_MS: u32 = 500;
+
 /// Streaming semantic endpointer. Hold one per capture stream; call
 /// [`observe`](Self::observe) per frame with the current voice-activity flag
 /// and the running partial transcript.
@@ -114,8 +125,14 @@ pub struct SemanticEndpointer<M: EndpointModel> {
     sample_rate: u32,
     short_silence_samples: u64,
     max_silence_samples: u64,
+    /// Minimum voiced samples before a semantic finalize is allowed.
+    min_voiced_samples: u64,
+    /// Voiced threshold below which the completion prob is discounted.
+    short_audio_samples: u64,
     recent_cap: usize,
     silence_run: u64,
+    /// Voiced samples accumulated across the current turn (through pauses).
+    voiced_samples: u64,
     checked_this_pause: bool,
     recent_audio: VecDeque<i16>,
     active: bool,
@@ -149,9 +166,12 @@ impl<M: EndpointModel> SemanticEndpointer<M> {
             sample_rate,
             short_silence_samples: sr * u64::from(short_silence_ms) / 1_000,
             max_silence_samples: sr * u64::from(max_silence_ms) / 1_000,
+            min_voiced_samples: sr * u64::from(MIN_VOICED_MS) / 1_000,
+            short_audio_samples: sr * u64::from(SHORT_AUDIO_MS) / 1_000,
             // Keep ~2 s of recent audio for the model window.
             recent_cap: (sr * 2) as usize,
             silence_run: 0,
+            voiced_samples: 0,
             checked_this_pause: false,
             recent_audio: VecDeque::new(),
             active: false,
@@ -207,6 +227,7 @@ impl<M: EndpointModel> SemanticEndpointer<M> {
             self.active = true;
             self.silence_run = 0;
             self.checked_this_pause = false;
+            self.voiced_samples = self.voiced_samples.saturating_add(frame.len() as u64);
             return TurnDecision::Continue;
         }
 
@@ -228,13 +249,27 @@ impl<M: EndpointModel> SemanticEndpointer<M> {
             self.checked_this_pause = true;
             let audio: Vec<i16> = self.recent_audio.iter().copied().collect();
             let prob = self.model.completion_prob(&audio, partial_text).await;
-            self.last_prob = prob;
-            if prob >= self.threshold {
-                self.snapshot();
-                self.reset_turn();
-                return TurnDecision::Finalize;
+            self.last_prob = prob; // report the RAW prob in the record
+
+            // Min-voiced gate: a fragment shorter than MIN_VOICED_MS can't end
+            // the turn on a short pause — it waits for more speech (mid-sentence
+            // "From" must not finalize alone). The max-silence ceiling above is
+            // the only escape, so a genuine one-word turn still finalizes.
+            if self.voiced_samples >= self.min_voiced_samples {
+                // Short-audio discount: smart-turn is overconfident on tiny
+                // clips, so halve its prob below SHORT_AUDIO_MS voiced.
+                let effective = if self.voiced_samples < self.short_audio_samples {
+                    prob * 0.5
+                } else {
+                    prob
+                };
+                if effective >= self.threshold {
+                    self.snapshot();
+                    self.reset_turn();
+                    return TurnDecision::Finalize;
+                }
             }
-            // Model says "still open" → keep listening through this pause.
+            // Still open (too short, or prob below threshold) → keep listening.
         }
         TurnDecision::Continue
     }
@@ -247,6 +282,7 @@ impl<M: EndpointModel> SemanticEndpointer<M> {
     fn reset_turn(&mut self) {
         self.active = false;
         self.silence_run = 0;
+        self.voiced_samples = 0;
         self.checked_this_pause = false;
         self.recent_audio.clear();
     }
@@ -286,7 +322,10 @@ mod tests {
         let mut ep = SemanticEndpointer::new(HeuristicEndpoint, 16_000, 250, 2_000, 0.5);
         let voiced = vec![3_000i16; frame_ms(16_000, 100)];
         let silent = vec![0i16; frame_ms(16_000, 100)];
-        ep.observe(&voiced, true, "what time is it?").await;
+        // 500 ms voiced clears the min-voiced gate (a real sentence, not a blip).
+        for _ in 0..5 {
+            ep.observe(&voiced, true, "what time is it?").await;
+        }
         ep.observe(&silent, false, "what time is it?").await;
         ep.observe(&silent, false, "what time is it?").await;
         let d = ep.observe(&silent, false, "what time is it?").await;
@@ -326,7 +365,9 @@ mod tests {
         let voiced = vec![3_000i16; frame_ms(16_000, 100)];
         let silent = vec![0i16; frame_ms(16_000, 100)];
         assert!(ep.last_endpoint().is_none());
-        ep.observe(&voiced, true, "what time is it?").await;
+        for _ in 0..5 {
+            ep.observe(&voiced, true, "what time is it?").await; // ≥400ms voiced
+        }
         ep.observe(&silent, false, "what time is it?").await;
         ep.observe(&silent, false, "what time is it?").await;
         let d = ep.observe(&silent, false, "what time is it?").await;
@@ -362,5 +403,64 @@ mod tests {
             assert_eq!(ep.observe(&silent, false, "").await, TurnDecision::Continue);
         }
         assert!(!ep.turn_active());
+    }
+
+    /// An endpoint model that always returns a fixed probability — stands in
+    /// for smart-turn's overconfidence on tiny clips.
+    struct FixedProb(f32);
+    #[async_trait]
+    impl EndpointModel for FixedProb {
+        async fn completion_prob(&self, _recent: &[i16], _partial: &str) -> f32 {
+            self.0
+        }
+    }
+
+    #[tokio::test]
+    async fn short_fragment_gate_then_discount_then_finalize() {
+        // Round-3 "From" bug: smart-turn returns p=0.83 on a fragment. The
+        // min-voiced gate + short-audio discount must stop it finalizing until
+        // enough voiced audio has accumulated. max-silence huge so the ceiling
+        // never intervenes.
+        let mut ep = SemanticEndpointer::new(FixedProb(0.83), 16_000, 250, 10_000, 0.5);
+        let v100 = vec![3_000i16; frame_ms(16_000, 100)];
+        let v50 = vec![3_000i16; frame_ms(16_000, 50)];
+        let silent = vec![0i16; frame_ms(16_000, 100)];
+
+        // (1) 300 ms voiced → below the 400 ms min-voiced gate → must not end.
+        for _ in 0..3 {
+            ep.observe(&v100, true, "").await;
+        }
+        ep.observe(&silent, false, "").await;
+        ep.observe(&silent, false, "").await;
+        let d1 = ep.observe(&silent, false, "").await; // crosses 250ms short-silence
+        assert_eq!(
+            d1,
+            TurnDecision::Continue,
+            "300ms fragment must not finalize (min-voiced gate)"
+        );
+
+        // (2) accumulate to 450 ms → gate passes, but the short-audio discount
+        // (0.83·0.5 = 0.415 < 0.5) still holds the turn open.
+        ep.observe(&v100, true, "").await; // → 400ms, resets the pause
+        ep.observe(&v50, true, "").await; // → 450ms
+        ep.observe(&silent, false, "").await;
+        ep.observe(&silent, false, "").await;
+        let d2 = ep.observe(&silent, false, "").await;
+        assert_eq!(
+            d2,
+            TurnDecision::Continue,
+            "450ms fragment: discounted prob stays below threshold"
+        );
+
+        // (3) past 500 ms voiced → no discount → 0.83 ≥ 0.5 → finalize.
+        ep.observe(&v100, true, "").await; // → 550ms
+        ep.observe(&silent, false, "").await;
+        ep.observe(&silent, false, "").await;
+        let d3 = ep.observe(&silent, false, "").await;
+        assert_eq!(
+            d3,
+            TurnDecision::Finalize,
+            "past 500ms voiced the full prob finalizes"
+        );
     }
 }

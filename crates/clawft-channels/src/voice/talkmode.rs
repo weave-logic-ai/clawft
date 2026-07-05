@@ -25,6 +25,7 @@
 //! the `clawft-voice-talk` bridge crate, so this stays unit-testable with mocks
 //! and never pulls clawft-llm / clawft-kernel / cpal into clawft-channels.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -70,6 +71,13 @@ const BARGE_IN_GRACE_MS: u64 = 400;
 /// loop computes RMS + floor every frame, but the surface only needs a smooth
 /// meter — this caps observer traffic regardless of the device frame cadence.
 const LEVEL_METER_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Pre-onset ring buffer length (ms). The energy gate only flips voiced once a
+/// word's attack clears the threshold, so the quiet onset (leading consonant,
+/// the ramp into the first vowel) is below-gate and would be lost. Retain this
+/// much raw audio continuously and prepend it at onset so sentence starts
+/// aren't clipped — standard dictation-stack pre-roll.
+const PREROLL_MS: usize = 400;
 
 /// Extract a self-given name from a transcript ("my name is X" / "call me
 /// X" …). Mirrors voicelab's deliberately explicit phrase set — the loose
@@ -388,7 +396,15 @@ impl<M: EndpointModel> TalkModeController<M> {
                 .spawn_warm_acks(vec![ACK_SHORT.to_string(), ACK_LONG.to_string()]);
         }
         let mut utt: Vec<i16> = Vec::new();
+        // Voiced-sample count for the current utterance — the min-turn guard
+        // gates on this, not `utt.len()`, since pre-roll prepends (mostly quiet)
+        // pre-onset audio that would otherwise let a noise blip clear the gate.
+        let mut voiced_samples: usize = 0;
         let mut last_level: Option<Instant> = None;
+        // Pre-onset ring: the last PREROLL_MS of raw frames, prepended to a new
+        // utterance at onset so the below-gate word attack isn't clipped.
+        let preroll_cap = (self.config.sample_rate as usize) * PREROLL_MS / 1_000;
+        let mut preroll: VecDeque<i16> = VecDeque::with_capacity(preroll_cap + 1);
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,
@@ -404,21 +420,35 @@ impl<M: EndpointModel> TalkModeController<M> {
                             floor_dbfs,
                         });
                     }
+                    // Onset (first voiced frame of a fresh utterance): prepend the
+                    // pre-onset ring so the clipped attack is recovered.
+                    if voiced && utt.is_empty() {
+                        utt.extend(preroll.iter().copied());
+                    }
+                    // Maintain the ring with this frame AFTER the onset check, so
+                    // the prepended audio is strictly pre-onset (the current voiced
+                    // frame is added to `utt` below, not duplicated from the ring).
+                    preroll.extend(frame.iter().copied());
+                    while preroll.len() > preroll_cap {
+                        preroll.pop_front();
+                    }
                     if voiced {
                         utt.extend_from_slice(&frame);
+                        voiced_samples += frame.len();
                     }
                     match self.endpointer.observe(&frame, voiced, "").await {
                         TurnDecision::Continue => {}
                         TurnDecision::Finalize => {
                             let captured = std::mem::take(&mut utt);
+                            let captured_voiced = std::mem::take(&mut voiced_samples);
                             // Guard against ghost turns: noise blips and the
                             // reverb tail of our own playback can cross the
                             // gate for a few frames and finalize a sub-word
                             // "utterance" — each of which would earn an ack.
-                            // Real one-word turns run well past 250 ms.
+                            // Gate on VOICED samples (pre-roll padding excluded).
                             let min_samples =
                                 (self.config.sample_rate as usize) * MIN_TURN_MS / 1_000;
-                            if captured.len() >= min_samples {
+                            if captured_voiced >= min_samples {
                                 // Surface the endpoint decision (§W1.4) just
                                 // before the turn is processed — prob + source +
                                 // silence tail, captured by the endpointer.
@@ -429,7 +459,8 @@ impl<M: EndpointModel> TalkModeController<M> {
                                         silence_ms: s.silence_tail_ms,
                                     });
                                 }
-                                self.handle_turn(captured, &mut frames, &cancel).await;
+                                self.handle_turn(captured, captured_voiced, &mut frames, &cancel)
+                                    .await;
                                 // Listen-only has no playback phase, so it never
                                 // reaches talk-mode's post-speak drain — but the
                                 // mic kept capturing during STT/decode. The live
@@ -461,9 +492,12 @@ impl<M: EndpointModel> TalkModeController<M> {
     }
 
     /// One full turn: STT → speaker → grounded answer → ack+answer with barge-in.
+    /// `voiced_samples` is the true voiced-sample count (excludes the pre-roll
+    /// padding prepended to `samples`), used for the record's `voiced_ms`.
     async fn handle_turn(
         &mut self,
         samples: Vec<i16>,
+        voiced_samples: usize,
         frames: &mut mpsc::Receiver<Vec<i16>>,
         cancel: &CancellationToken,
     ) {
@@ -515,7 +549,8 @@ impl<M: EndpointModel> TalkModeController<M> {
         // Assemble the complete VoiceAnalysis record (§W1.2) client-side and
         // hand it off at the observer boundary; the recorder observer carries
         // it over the wire.
-        let voice_analysis = self.build_voice_analysis(&utt, &detail, speaker, stt_latency_ms);
+        let voice_analysis =
+            self.build_voice_analysis(&utt, &detail, speaker, stt_latency_ms, voiced_samples);
 
         self.observer.observe(ConversationEvent::UserTurn {
             text: text.clone(),
@@ -663,9 +698,11 @@ impl<M: EndpointModel> TalkModeController<M> {
         detail: &super::stt::TranscriptResult,
         speaker: SpeakerAnalysis,
         stt_latency_ms: u64,
+        voiced_samples: usize,
     ) -> VoiceAnalysis {
         let sr = utt.sample_rate.max(1);
-        let voiced_ms = utt.samples.len() as u64 * 1_000 / sr as u64;
+        // True voiced duration (excludes pre-roll padding in `utt.samples`).
+        let voiced_ms = voiced_samples as u64 * 1_000 / sr as u64;
 
         // STT section: map the per-token detail; the path is native when the
         // decode exposed tokens (the substrate path is honestly text-only).

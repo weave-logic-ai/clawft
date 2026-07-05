@@ -61,6 +61,23 @@ impl SttBackend for GatedStt {
     }
 }
 
+/// STT that records the sample-length of the utterance it received — lets a
+/// test prove pre-roll prepended the pre-onset audio.
+struct LenRecordingStt(Arc<AtomicUsize>);
+#[async_trait]
+impl SttBackend for LenRecordingStt {
+    async fn warm(&self) -> Result<(), VoiceError> {
+        Ok(())
+    }
+    async fn transcribe(&self, utt: &Utterance) -> Result<String, VoiceError> {
+        self.0.store(utt.samples.len(), Ordering::SeqCst);
+        Ok("recovered word".to_string())
+    }
+    fn model(&self) -> SttModel {
+        SttModel::ParakeetEnglish
+    }
+}
+
 struct MockLlm(&'static str);
 #[async_trait]
 impl VoiceLlm for MockLlm {
@@ -192,6 +209,13 @@ fn voiced_frame() -> Vec<i16> {
 }
 fn silent_frame() -> Vec<i16> {
     vec![0i16; 1_600]
+}
+/// A quiet, below-VAD-gate frame (~-50 dBFS) — sub-threshold word attack that
+/// pre-roll should retain and prepend.
+fn quiet_frame() -> Vec<i16> {
+    (0..1_600)
+        .map(|i| if i % 2 == 0 { 100 } else { -100 })
+        .collect()
 }
 
 fn endpointer() -> SemanticEndpointer<HeuristicEndpoint> {
@@ -743,4 +767,66 @@ async fn listen_only_marks_unknown_without_polluting_registry() {
         "non-match in listen-only is Unknown, not Enrolled"
     );
     assert!(va.speaker.id.is_none(), "no placeholder id assigned");
+}
+
+#[tokio::test]
+async fn preroll_prepends_pre_onset_audio_to_utterance() {
+    // Onset-clipping regression: sub-threshold word attack (quiet frames below
+    // the VAD gate) precedes the voiced frames. Pre-roll must prepend that
+    // pre-onset audio, so the utterance handed to STT is longer than the
+    // voiced-only slice — the leading word is recovered, not clipped.
+    let recorded = Arc::new(AtomicUsize::new(0));
+    let observer = Arc::new(RecordingObserver::default());
+    let sink = Arc::new(RecordingSink::default());
+    let audio = Arc::new(CountingAudio::default());
+    let tts = DualLayerTts::new(
+        Arc::new(ImmediateEngine(TtsTier::Fast)),
+        Arc::new(ImmediateEngine(TtsTier::Slow)),
+    )
+    .unwrap();
+
+    let mut ctrl = TalkModeController::new(
+        endpointer(),
+        Arc::new(LenRecordingStt(recorded.clone())),
+        Some(Arc::new(MockEmbedder)),
+        SpeakerRegistry::new(0.45),
+        VoiceAnswerPolicy::default(),
+        Arc::new(MockLlm("unused")),
+        tts,
+        sink.clone(),
+        audio.clone(),
+        observer.clone() as Arc<dyn ConversationObserver>,
+        TalkModeConfig {
+            listen_only: true,
+            ..Default::default()
+        },
+    );
+
+    let (tx, rx) = mpsc::channel::<Vec<i16>>(64);
+    let cancel = CancellationToken::new();
+    let run_cancel = cancel.clone();
+    let handle = tokio::spawn(async move { ctrl.run(rx, run_cancel).await });
+
+    // 2 quiet (pre-onset attack) → 3 voiced → 4 silence (finalize).
+    for _ in 0..2 {
+        tx.send(quiet_frame()).await.unwrap();
+    }
+    for _ in 0..3 {
+        tx.send(voiced_frame()).await.unwrap();
+    }
+    for _ in 0..4 {
+        tx.send(silent_frame()).await.unwrap();
+    }
+    wait_until(|| observer.has(|e| matches!(e, ConversationEvent::UserTurn { .. }))).await;
+    cancel.cancel();
+    drop(tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+
+    let voiced_only = 3 * 1_600;
+    let got = recorded.load(Ordering::SeqCst);
+    assert!(
+        got > voiced_only,
+        "STT utterance ({got}) must exceed the voiced-only slice ({voiced_only}) — \
+         pre-roll should prepend the pre-onset attack"
+    );
 }
