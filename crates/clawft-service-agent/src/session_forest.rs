@@ -53,8 +53,9 @@ pub(crate) struct ConvForest {
     prev: Mutex<Option<CausalNodeId>>,
     /// Universal id of the most-recently indexed turn (M4 turn-level edge
     /// rooting). Tracked alongside `prev` so the subagent spawner can root a
-    /// `TriggeredBy`/`EvidenceFor` edge at the actual spawning turn — the parent
-    /// conversation's latest anchored turn at spawn time is `T_user@P`.
+    /// `TriggeredBy`/`EvidenceFor` edge at the turn that issued the spawn — in
+    /// the daemon path that is the assistant tool-call turn, anchored just
+    /// before the tool dispatches (the user turn is one `Follows` hop upstream).
     last_uid: Mutex<Option<UniversalNodeId>>,
 }
 

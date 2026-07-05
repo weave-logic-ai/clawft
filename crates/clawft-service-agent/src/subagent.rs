@@ -156,10 +156,13 @@ impl<H: AgentLoopHandle> DaemonSubagentSpawner<H> {
     /// 1. **Supplied hint** — the tool passes the parent turn's uid (64-hex)
     ///    when the loop can mint it; use it directly.
     /// 2. **SessionTier lookup** — otherwise resolve the parent conversation's
-    ///    latest anchored turn uid through the service's [`SessionTier`]. At
-    ///    spawn time (inside the committed-turn bracket) that is `T_user@P`, the
-    ///    exact turn that made the spawn call, so the edge roots at the real
-    ///    parent turn node the ADR-067 view renders.
+    ///    latest anchored turn uid through the service's [`SessionTier`]. In the
+    ///    daemon path `run_tool_loop` appends and anchors the assistant
+    ///    tool-call turn immediately before dispatching the tool, so the latest
+    ///    anchored turn at spawn time is the **assistant tool-call turn that
+    ///    issued `agent_spawn`** — the turn that actually made the call. The
+    ///    edge roots there (the user turn is one `Follows` hop upstream), the
+    ///    most precise node the ADR-067 view can render.
     /// 3. **Conversation anchor** — final degraded tier (no tier attached, or an
     ///    empty conversation): a deterministic per-conv anchor uid so the tree
     ///    still renders rooted at the parent conversation.
@@ -876,11 +879,17 @@ mod tests {
             SessionTier::new(embedder, chain.clone(), None)
                 .with_forest(causal.clone(), crossrefs.clone()),
         );
-        // Anchor the parent's user turn T_user@P (the turn that will make the
-        // spawn call), exactly as the M2 pipeline does before run_tool_loop.
+        // Production ordering (loop_core::run_tool_loop): the parent's user turn
+        // is anchored first, then the assistant tool-call turn that issues
+        // agent_spawn is appended and anchored immediately BEFORE the tool
+        // dispatches. So the latest anchored turn at spawn time is the assistant
+        // tool-call turn — the turn that actually made the call.
         tier.index_turn("P", 1, "message", "user", "please spawn a helper")
             .await;
-        let parent_uid = tier.latest_turn_uid("P").expect("parent turn anchored");
+        tier.index_turn("P", 2, "message", "assistant", "calling agent_spawn")
+            .await;
+        let assistant_uid = tier.latest_turn_uid("P").expect("assistant turn anchored");
+        let user_uid = crate::session_forest::turn_universal_id("P", 1, "please spawn a helper");
 
         // Service carries the same tier; spawner shares the same forest handles.
         let svc = Arc::new(
@@ -899,18 +908,23 @@ mod tests {
         s.parent_turn_uid = None;
         sp.spawn(s).await.unwrap();
 
-        // The TriggeredBy edge roots at the REAL parent turn node, not the
-        // synthetic conversation anchor.
-        let to_parent = crossrefs.get_reverse(&parent_uid);
+        // The TriggeredBy edge roots at the ASSISTANT tool-call turn (the turn
+        // that issued the spawn), NOT the user turn (one Follows hop upstream)
+        // and NOT the synthetic conversation anchor.
         assert!(
-            to_parent
+            crossrefs
+                .get_reverse(&assistant_uid)
                 .iter()
                 .any(|cr| cr.ref_type == CrossRefType::TriggeredBy),
-            "TriggeredBy edge must root at the real parent turn uid"
+            "TriggeredBy edge must root at the assistant tool-call turn"
+        );
+        assert!(
+            crossrefs.get_reverse(&user_uid).is_empty(),
+            "edge must NOT root at the user turn — it is one Follows hop upstream"
         );
         assert!(
             crossrefs.get_reverse(&conv_anchor_uid("P")).is_empty(),
-            "no edge should fall back to the conv anchor when the tier resolves the turn"
+            "edge must NOT fall back to the conv anchor when the tier resolves the turn"
         );
     }
 

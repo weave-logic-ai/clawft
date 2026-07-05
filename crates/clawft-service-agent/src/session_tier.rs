@@ -196,9 +196,10 @@ impl SessionTier {
     /// Universal id of a conversation's most-recently anchored turn (M4
     /// turn-level edge rooting). Returns `None` for a conversation with no
     /// indexed turns yet (or when the forest join is disabled). The subagent
-    /// spawner uses this to root `TriggeredBy`/`EvidenceFor` edges at the actual
-    /// spawning turn `T_user@P` — the parent's latest anchored turn at spawn
-    /// time — instead of a synthetic conversation anchor.
+    /// spawner uses this to root `TriggeredBy`/`EvidenceFor` edges at the turn
+    /// that issued the spawn — in the daemon path the assistant tool-call turn,
+    /// anchored just before the tool dispatches (the user turn is one `Follows`
+    /// hop upstream) — instead of a synthetic conversation anchor.
     pub fn latest_turn_uid(&self, conv_id: &str) -> Option<UniversalNodeId> {
         self.forests.get(conv_id).and_then(|f| f.latest_turn_uid())
     }
