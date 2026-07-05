@@ -21,6 +21,8 @@ pub mod skill_watcher;
 pub mod skills;
 pub mod skills_v2;
 pub mod spawn;
+#[cfg(feature = "native")]
+pub mod spawn_context;
 pub mod system_prompt;
 pub mod tokenizer;
 pub mod verification;

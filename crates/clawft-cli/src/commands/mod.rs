@@ -122,6 +122,8 @@ pub async fn register_core_tools<P: Platform + 'static>(
         command_policy,
         url_policy,
         web_search_config,
+        // In-process CLI has no daemon substrate to spawn subagents into.
+        None,
     );
 
     let _mcp_sessions = crate::mcp_tools::register_mcp_tools(config, registry).await;

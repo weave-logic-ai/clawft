@@ -12,7 +12,7 @@ keywords = ["tools", "shell", "file", "memory", "security"]
 categories = ["development-tools"]
 
 [features]
-default = ["native-exec", "native"]
+default = ["native-exec", "native", "subagent"]
 native-exec = []
 native = [
     "dep:tokio",
@@ -20,6 +20,10 @@ native = [
     "clawft-core/native",
     "clawft-types/native",
 ]
+# M4 agent-initiated-work tools (agent_spawn / task_status / task_result /
+# agent_message). Requires `native` — the `SubagentSpawner` seam and its
+# `spawn_context` task-local are native/daemon-only. Off for browser/WASM.
+subagent = ["native"]
 browser = [
     "clawft-platform/browser",
     "clawft-core/browser",

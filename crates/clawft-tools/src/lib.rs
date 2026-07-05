@@ -28,6 +28,8 @@ pub mod security_policy;
 pub mod shell_tool;
 #[cfg(feature = "native-exec")]
 pub mod spawn_tool;
+#[cfg(feature = "subagent")]
+pub mod subagent_tools;
 pub mod url_safety;
 #[cfg(feature = "voice")]
 pub mod voice_listen;
@@ -39,6 +41,7 @@ pub mod web_search;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use clawft_core::agent::spawn::SubagentSpawner;
 use clawft_core::tools::registry::ToolRegistry;
 use clawft_platform::Platform;
 
@@ -62,6 +65,10 @@ use crate::web_search::WebSearchConfig;
 /// * `command_policy` - Security policy for shell/spawn command execution.
 /// * `url_policy` - Security policy for URL fetching (SSRF protection).
 /// * `web_search_config` - Configuration for the web search tool (API key / endpoint).
+/// * `subagent_spawner` - Optional injected [`SubagentSpawner`] seam (M4). When
+///   `Some` and the `subagent` feature is enabled, the four agent-initiated-work
+///   tools (`agent_spawn` / `task_status` / `task_result` / `agent_message`) are
+///   registered. This is the daemon path; the in-process CLI passes `None`.
 pub fn register_all<P: Platform + 'static>(
     registry: &mut ToolRegistry,
     platform: Arc<P>,
@@ -69,6 +76,7 @@ pub fn register_all<P: Platform + 'static>(
     command_policy: CommandPolicy,
     url_policy: UrlPolicy,
     web_search_config: WebSearchConfig,
+    subagent_spawner: Option<Arc<dyn SubagentSpawner>>,
 ) {
     // Suppress unused warning when native-exec is disabled.
     #[cfg(not(feature = "native-exec"))]
@@ -127,4 +135,23 @@ pub fn register_all<P: Platform + 'static>(
 
     #[cfg(feature = "canvas")]
     registry.register(Arc::new(render_ui::RenderUiTool::new()));
+
+    // M4: agent-initiated-work tools. Registered only when the daemon injects
+    // a `SubagentSpawner` (the CLI/browser fallbacks pass `None`), so spawning
+    // is never exposed without a substrate to spawn into.
+    #[cfg(feature = "subagent")]
+    if let Some(spawner) = subagent_spawner {
+        registry.register(Arc::new(subagent_tools::AgentSpawnTool::new(
+            spawner.clone(),
+        )));
+        registry.register(Arc::new(subagent_tools::TaskStatusTool::new(
+            spawner.clone(),
+        )));
+        registry.register(Arc::new(subagent_tools::TaskResultTool::new(
+            spawner.clone(),
+        )));
+        registry.register(Arc::new(subagent_tools::AgentMessageTool::new(spawner)));
+    }
+    #[cfg(not(feature = "subagent"))]
+    let _ = subagent_spawner;
 }

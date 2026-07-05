@@ -54,7 +54,9 @@ impl<P: Platform + 'static> Tool for SpawnTool<P> {
     }
 
     fn description(&self) -> &str {
-        "Spawn a sub-process to run a command. Runs in the workspace directory with a concurrency limit."
+        "Run a command as a raw OS sub-process in the workspace directory (with a \
+         concurrency limit). This is NOT a WeftOS agent and leaves no trace in the \
+         forest — to spawn a reasoning subagent, use `agent_spawn` instead."
     }
 
     fn parameters(&self) -> serde_json::Value {

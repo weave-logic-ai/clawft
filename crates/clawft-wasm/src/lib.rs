@@ -349,6 +349,8 @@ mod browser_entry {
             clawft_types::security::CommandPolicy::default(),
             clawft_types::security::UrlPolicy::default(),
             clawft_tools::web_search::WebSearchConfig::default(),
+            // Browser build has no subagent substrate.
+            None,
         );
 
         // Replace the stub transport with the BrowserLlmClient-backed

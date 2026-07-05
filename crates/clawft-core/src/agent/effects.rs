@@ -113,6 +113,31 @@ pub fn effect_for_tool(name: &str, _args: &serde_json::Value) -> EffectVector {
             ..Default::default()
         },
 
+        // ── Agent-initiated work (M4 / D6) ─────────────────────────
+        // Spawning a subagent forks a new reasoning conversation on the
+        // shared LLM under a fresh identity. Magnitude ≈ 0.93 (> the
+        // 0.8 default threshold) so every spawn forces an explicit
+        // governance decision (Permit/Defer/Deny) rather than a silent
+        // Permit — see the M4 design D6.
+        "agent_spawn" => EffectVector {
+            risk: 0.5,
+            novelty: 0.6,
+            security: 0.5,
+            ..Default::default()
+        },
+        // Sending a message into a running subagent is a moderate,
+        // bounded action (A2A into an already-spawned child).
+        "agent_message" => EffectVector {
+            security: 0.3,
+            ..Default::default()
+        },
+        // Task introspection tools are pure reads of the spawn
+        // registry — near-zero effect.
+        "task_status" | "task_result" => EffectVector {
+            privacy: 0.05,
+            ..Default::default()
+        },
+
         // Unknown tools = neutral. New tools land in this table the
         // first time they need policy-aware behaviour; until then a
         // zero vector + the kernel's permissive default is fine.
@@ -147,6 +172,45 @@ mod tests {
         let e = effect_for_tool("exec", &json!({"cmd": "ls"}));
         assert!((e.risk - 0.6).abs() < f64::EPSILON);
         assert!((e.security - 0.7).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn agent_spawn_forces_a_governance_decision() {
+        // D6: agent_spawn's magnitude must exceed the 0.8 default gate
+        // threshold so a spawn can never be a silent Permit.
+        let ev = effect_for_tool("agent_spawn", &json!({"goal": "answer 2+2"}));
+        assert!(
+            (ev.risk - 0.5).abs() < f64::EPSILON
+                && (ev.novelty - 0.6).abs() < f64::EPSILON
+                && (ev.security - 0.5).abs() < f64::EPSILON,
+            "agent_spawn effect vector drifted from the D6 spec"
+        );
+        assert!(
+            ev.magnitude() > 0.8,
+            "agent_spawn magnitude {} must exceed the 0.8 default threshold",
+            ev.magnitude()
+        );
+    }
+
+    #[test]
+    fn agent_message_is_moderate() {
+        let ev = effect_for_tool("agent_message", &json!({"task_id": "t", "message": "hi"}));
+        assert!((ev.security - 0.3).abs() < f64::EPSILON);
+        // Well under the threshold — a delivered A2A message should not
+        // routinely trip a governance decision.
+        assert!(ev.magnitude() < 0.8);
+    }
+
+    #[test]
+    fn task_introspection_tools_are_near_zero() {
+        for tool in ["task_status", "task_result"] {
+            let ev = effect_for_tool(tool, &json!({"task_id": "t"}));
+            assert!(
+                ev.magnitude() < 0.1,
+                "{tool} is a read and must score near-zero, got {}",
+                ev.magnitude()
+            );
+        }
     }
 
     #[test]

@@ -951,6 +951,9 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
             clawft_tools::security_policy::CommandPolicy::safe_defaults(),
             clawft_tools::url_safety::UrlPolicy::default(),
             clawft_tools::web_search::WebSearchConfig::default(),
+            // M4 Phase C.1 (pD): flip this `None` to `Some(subagent_spawner)`
+            // once the DaemonSubagentSpawner is constructed and late-wired.
+            None,
         );
         let tool_registry = Arc::new(tool_registry);
 
