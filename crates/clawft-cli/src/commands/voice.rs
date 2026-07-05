@@ -33,6 +33,22 @@ pub enum VoiceCommand {
     /// Start Talk Mode (continuous voice conversation).
     Talk,
 
+    /// Watch the live voice process for a conversation (§W1.4): committed turns,
+    /// their labels, and the per-utterance voice decomposition, rendered as they
+    /// land via the ~1 Hz `conversation.graph` poll. Read-only — no mic, no
+    /// brain; run it alongside `weft voice talk` or an `agent.turn.record` feed.
+    Watch {
+        /// Conversation id to watch (the Talk-Mode conv, e.g. `weft-talk`).
+        #[arg(default_value = "weft-talk")]
+        conv_id: String,
+        /// Emit each newly-committed node's full record as JSON (one per line).
+        #[arg(long)]
+        json: bool,
+        /// Committed-state poll cadence in milliseconds (ADR-067 D2 ~1 Hz).
+        #[arg(long, default_value = "1000")]
+        interval: u64,
+    },
+
     /// Start the wake word daemon (listen for "Hey Weft").
     Wake,
 
@@ -60,6 +76,13 @@ pub async fn handle_voice(args: VoiceArgs) -> anyhow::Result<()> {
         }
         VoiceCommand::Talk => {
             handle_talk().await?;
+        }
+        VoiceCommand::Watch {
+            conv_id,
+            json,
+            interval,
+        } => {
+            super::voice_watch::handle_watch(conv_id, json, interval).await?;
         }
         VoiceCommand::Wake => {
             handle_wake().await?;
@@ -188,22 +211,35 @@ async fn handle_test_mic(duration: u32) -> anyhow::Result<()> {
 /// assistant turns into an unbounded queue; a background poster task posts
 /// each to the daemon's `agent.turn.record` RPC.
 struct TurnRecordObserver {
-    tx: tokio::sync::mpsc::UnboundedSender<(&'static str, String)>,
+    tx: tokio::sync::mpsc::UnboundedSender<(&'static str, String, Option<serde_json::Value>)>,
 }
 
 impl clawft_voice_talk::ConversationObserver for TurnRecordObserver {
     fn observe(&self, event: clawft_voice_talk::ConversationEvent) {
         use clawft_voice_talk::ConversationEvent;
-        let pair = match event {
-            ConversationEvent::UserTurn { text, .. } => ("user", text),
-            ConversationEvent::CommittedReply { answer } => ("assistant", answer),
+        let triple = match event {
+            ConversationEvent::UserTurn {
+                text,
+                voice_analysis,
+                ..
+            } => {
+                // Wave 1 §W1.2: serialize the per-utterance decomposition onto
+                // the wire so the daemon's `index_turn` stores it as a sibling
+                // key and merges its emotion axis (tier:"voice"). Best-effort —
+                // a serialization failure drops only the record, never the turn.
+                let va = voice_analysis
+                    .as_deref()
+                    .and_then(|v| serde_json::to_value(v).ok());
+                ("user", text, va)
+            }
+            ConversationEvent::CommittedReply { answer } => ("assistant", answer, None),
             // Speculative acks are superseded by the committed reply and
             // barge-ins prune in-forest; neither is a durable turn.
             _ => return,
         };
         // Receiver gone (daemon died and the poster exited) — drop silently;
         // anchoring is best-effort by design.
-        let _ = self.tx.send(pair);
+        let _ = self.tx.send(triple);
     }
 }
 
@@ -215,14 +251,19 @@ async fn spawn_turn_recorder(
     use clawft_rpc::{DaemonClient, Request};
 
     let mut client = DaemonClient::connect().await?;
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(&'static str, String)>();
+    let (tx, mut rx) =
+        tokio::sync::mpsc::unbounded_channel::<(&'static str, String, Option<serde_json::Value>)>();
 
     tokio::spawn(async move {
-        while let Some((role, content)) = rx.recv().await {
+        while let Some((role, content, voice_analysis)) = rx.recv().await {
+            let mut turn = serde_json::json!({ "role": role, "content": content });
+            if let Some(va) = voice_analysis {
+                turn["voice_analysis"] = va;
+            }
             let params = serde_json::json!({
                 "conv_id": conv_id,
                 "channel": "voice.talk",
-                "turns": [{ "role": role, "content": content }],
+                "turns": [turn],
             });
             // One reconnect attempt per turn: a dropped socket loses no
             // event, a stopped daemon ends anchoring for the session.

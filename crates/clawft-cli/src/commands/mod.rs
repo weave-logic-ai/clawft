@@ -32,6 +32,8 @@ pub mod tools_cmd;
 pub mod ui_cmd;
 #[cfg(feature = "voice")]
 pub mod voice;
+#[cfg(feature = "voice")]
+pub mod voice_watch;
 pub mod workspace_cmd;
 
 use std::path::{Path, PathBuf};
