@@ -219,6 +219,71 @@ impl CausalGraph {
         }
     }
 
+    /// Metadata keys that are load-bearing node identity/lifecycle and may
+    /// never be overwritten by a [`Self::merge_node_metadata`] patch.
+    ///
+    /// `state` is owned by [`Self::set_node_state`]; `uid` / `chain_seq` /
+    /// `conv_id` are set once at commit and index the node in every scoped
+    /// projection; `text` is the durable turn content. A patch touching any
+    /// of these is a bug in the caller, so we drop it and warn rather than
+    /// silently corrupt the node.
+    const PROTECTED_METADATA_KEYS: &'static [&'static str] =
+        &["state", "uid", "chain_seq", "text", "conv_id"];
+
+    /// Merge the keys of `patch` into a node's metadata object, in place,
+    /// under the node's existing per-entry lock (Phase B enrichment path).
+    ///
+    /// This is the single mutable-metadata seam on the causal graph. Async
+    /// classification enrichment (design §D4) calls it to overwrite the
+    /// `classification` blob with an `llm`-tier refinement after the turn has
+    /// already committed. Protected identity/lifecycle keys
+    /// ([`Self::PROTECTED_METADATA_KEYS`]) are never clobbered: an attempt to
+    /// patch one is ignored and logged at WARN, not treated as an error.
+    ///
+    /// The merge is deterministic and holds a single lock for the whole patch
+    /// (the same `get_mut` entry lock `set_node_state` takes), so it
+    /// serialises cleanly against a concurrent `set_node_state`: each write
+    /// lands whole, neither can observe a half-applied patch, and both survive.
+    /// Under ADR-067 P1-graph replay this makes each patch one observable
+    /// state-at-T mutation a future snapshot/journal can capture atomically —
+    /// a "classification refined" event, not a torn write.
+    ///
+    /// Returns `false` if the node is unknown. A patch that is entirely
+    /// protected keys still returns `true` (the node exists); it simply
+    /// applies nothing.
+    pub fn merge_node_metadata(
+        &self,
+        id: NodeId,
+        patch: &serde_json::Map<String, serde_json::Value>,
+    ) -> bool {
+        match self.nodes.get_mut(&id) {
+            Some(mut node) => {
+                // A non-object metadata value has no keys to merge into; seed a
+                // fresh object so the patch has a home (mirrors set_node_state).
+                if !node.metadata.is_object() {
+                    node.metadata = serde_json::Value::Object(serde_json::Map::new());
+                }
+                let obj = node
+                    .metadata
+                    .as_object_mut()
+                    .expect("metadata was just ensured to be an object");
+                for (key, value) in patch {
+                    if Self::PROTECTED_METADATA_KEYS.contains(&key.as_str()) {
+                        tracing::warn!(
+                            node_id = id,
+                            key = key.as_str(),
+                            "merge_node_metadata ignored a patch on a protected key"
+                        );
+                        continue;
+                    }
+                    obj.insert(key.clone(), value.clone());
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Remove a node and all edges incident to it.
     ///
     /// Returns the removed node, or `None` if the ID was not found.
@@ -2256,6 +2321,123 @@ mod tests {
 
         // Unknown node → false.
         assert!(!g.set_node_state(99_999, "frontier"));
+    }
+
+    // 3c — Phase B: merge_node_metadata merges patch keys, preserves the rest.
+    #[test]
+    fn merge_node_metadata_merges_and_preserves() {
+        let g = make_graph();
+        let id = g.add_node(
+            "turn".into(),
+            serde_json::json!({ "chain_seq": 7, "classification": { "tier": "keyword" } }),
+        );
+
+        let mut patch = serde_json::Map::new();
+        patch.insert(
+            "classification".into(),
+            serde_json::json!({ "tier": "llm", "intent": "question" }),
+        );
+        assert!(g.merge_node_metadata(id, &patch));
+
+        let node = g.get_node(id).unwrap();
+        // Patched key is overwritten wholesale with the refined blob.
+        assert_eq!(node.metadata["classification"]["tier"], "llm");
+        assert_eq!(node.metadata["classification"]["intent"], "question");
+        // Untouched keys survive.
+        assert_eq!(node.metadata["chain_seq"], 7);
+
+        // Unknown node → false.
+        assert!(!g.merge_node_metadata(99_999, &patch));
+    }
+
+    // 3d — Phase B: protected keys are never clobbered by a patch.
+    #[test]
+    fn merge_node_metadata_rejects_protected_keys() {
+        let g = make_graph();
+        let id = g.add_node(
+            "turn".into(),
+            serde_json::json!({
+                "state": "committed",
+                "uid": "abc",
+                "chain_seq": 7,
+                "text": "hello",
+                "conv_id": "conv-1",
+            }),
+        );
+
+        let mut patch = serde_json::Map::new();
+        for key in ["state", "uid", "chain_seq", "text", "conv_id"] {
+            patch.insert(key.into(), serde_json::json!("HACKED"));
+        }
+        // A non-protected key rides along in the same patch and must land.
+        patch.insert("classification".into(), serde_json::json!({ "tier": "llm" }));
+
+        // Node exists → true even though every protected key was dropped.
+        assert!(g.merge_node_metadata(id, &patch));
+
+        let node = g.get_node(id).unwrap();
+        assert_eq!(node.metadata["state"], "committed");
+        assert_eq!(node.metadata["uid"], "abc");
+        assert_eq!(node.metadata["chain_seq"], 7);
+        assert_eq!(node.metadata["text"], "hello");
+        assert_eq!(node.metadata["conv_id"], "conv-1");
+        assert_eq!(node.metadata["classification"]["tier"], "llm");
+    }
+
+    // 3e — Phase B: a non-object metadata value is seeded before merge.
+    #[test]
+    fn merge_node_metadata_seeds_non_object() {
+        let g = make_graph();
+        let id = g.add_node("scalar".into(), serde_json::json!(42));
+        let mut patch = serde_json::Map::new();
+        patch.insert("classification".into(), serde_json::json!({ "tier": "llm" }));
+        assert!(g.merge_node_metadata(id, &patch));
+        assert_eq!(
+            g.get_node(id).unwrap().metadata["classification"]["tier"],
+            "llm"
+        );
+    }
+
+    // 3f — Phase B race invariant: concurrent merge_node_metadata +
+    // set_node_state interleavings preserve BOTH writes. The two share the
+    // node's per-entry DashMap lock, so `state` (owned by set_node_state) and
+    // `classification` (owned by the merge) never race to a torn value.
+    #[test]
+    fn merge_node_metadata_races_with_set_node_state() {
+        use std::sync::Arc;
+        use std::thread;
+
+        for _round in 0..64 {
+            let g = Arc::new(make_graph());
+            let id = g.add_node(
+                "turn".into(),
+                serde_json::json!({ "chain_seq": 1, "classification": { "tier": "keyword" } }),
+            );
+
+            let g_state = Arc::clone(&g);
+            let state_thread = thread::spawn(move || {
+                for _ in 0..200 {
+                    g_state.set_node_state(id, "committed");
+                }
+            });
+            let g_merge = Arc::clone(&g);
+            let merge_thread = thread::spawn(move || {
+                let mut patch = serde_json::Map::new();
+                patch.insert("classification".into(), serde_json::json!({ "tier": "llm" }));
+                for _ in 0..200 {
+                    g_merge.merge_node_metadata(id, &patch);
+                }
+            });
+            state_thread.join().unwrap();
+            merge_thread.join().unwrap();
+
+            // Both writers' final effects are present — neither clobbered the
+            // other, and chain_seq (touched by neither) survived intact.
+            let node = g.get_node(id).unwrap();
+            assert_eq!(node.metadata["state"], "committed");
+            assert_eq!(node.metadata["classification"]["tier"], "llm");
+            assert_eq!(node.metadata["chain_seq"], 1);
+        }
     }
 
     // 4
