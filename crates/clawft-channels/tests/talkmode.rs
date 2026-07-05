@@ -40,6 +40,27 @@ impl SttBackend for MockStt {
     }
 }
 
+/// STT whose `transcribe` blocks on a semaphore — a stand-in for slow native
+/// decode, so a test can queue a backlog behind an in-flight turn deterministically.
+struct GatedStt {
+    text: &'static str,
+    gate: Arc<tokio::sync::Semaphore>,
+}
+#[async_trait]
+impl SttBackend for GatedStt {
+    async fn warm(&self) -> Result<(), VoiceError> {
+        Ok(())
+    }
+    async fn transcribe(&self, _utt: &Utterance) -> Result<String, VoiceError> {
+        // Hold the turn in "decode" until the test releases the gate.
+        let _permit = self.gate.acquire().await.unwrap();
+        Ok(self.text.to_string())
+    }
+    fn model(&self) -> SttModel {
+        SttModel::ParakeetEnglish
+    }
+}
+
 struct MockLlm(&'static str);
 #[async_trait]
 impl VoiceLlm for MockLlm {
@@ -495,5 +516,160 @@ async fn listen_only_records_the_turn_but_skips_the_brain() {
         sink.chunks.load(Ordering::SeqCst),
         0,
         "listen-only plays no audio"
+    );
+}
+
+#[tokio::test]
+async fn listen_only_cycles_multiple_turns() {
+    // Regression (user acting-test bug): listen-only captured the FIRST turn
+    // then never re-armed. The controller loop must finalize → record → return
+    // → re-arm → finalize again, indefinitely. Drive THREE sequential
+    // utterances and assert three UserTurns are observed.
+    let observer = Arc::new(RecordingObserver::default());
+    let sink = Arc::new(RecordingSink::default());
+    let audio = Arc::new(CountingAudio::default());
+    let tts = DualLayerTts::new(
+        Arc::new(ImmediateEngine(TtsTier::Fast)),
+        Arc::new(ImmediateEngine(TtsTier::Slow)),
+    )
+    .unwrap();
+
+    let mut ctrl = TalkModeController::new(
+        endpointer(),
+        Arc::new(MockStt("hello there")),
+        Some(Arc::new(MockEmbedder)),
+        SpeakerRegistry::new(0.45),
+        VoiceAnswerPolicy::default(),
+        Arc::new(MockLlm("unused in listen-only")),
+        tts,
+        sink.clone(),
+        audio.clone(),
+        observer.clone() as Arc<dyn ConversationObserver>,
+        TalkModeConfig {
+            listen_only: true,
+            ..Default::default()
+        },
+    );
+
+    let (tx, rx) = mpsc::channel::<Vec<i16>>(256);
+    let cancel = CancellationToken::new();
+    let run_cancel = cancel.clone();
+    let handle = tokio::spawn(async move { ctrl.run(rx, run_cancel).await });
+
+    let turns = |obs: &RecordingObserver| {
+        obs.snapshot()
+            .iter()
+            .filter(|e| matches!(e, ConversationEvent::UserTurn { .. }))
+            .count()
+    };
+
+    // Three SEQUENTIAL utterances (real speech has a gap between turns): feed a
+    // turn, wait for it to record, then feed the next. Each is a voiced burst
+    // (>250 ms min) + a silence tail that crosses the max-silence ceiling. The
+    // post-turn drain only discards inter-turn stragglers, so all three record.
+    for turn in 1..=3 {
+        for _ in 0..3 {
+            tx.send(voiced_frame()).await.unwrap();
+        }
+        for _ in 0..4 {
+            tx.send(silent_frame()).await.unwrap();
+        }
+        wait_until(|| turns(&observer) >= turn).await;
+        // Let the post-turn drain settle before the next utterance is fed.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    cancel.cancel();
+    drop(tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+
+    assert_eq!(
+        turns(&observer),
+        3,
+        "listen-only must cycle turns continuously (re-arm after each finalize)"
+    );
+}
+
+#[tokio::test]
+async fn listen_only_drains_stale_backlog_after_each_turn() {
+    // Root-cause regression: talk-mode drains the capture channel after every
+    // turn (in speak_with_barge_in); listen-only had no such drain, so frames
+    // captured during (slow) STT stayed queued and later utterances corrupted /
+    // capture "never re-armed". Here a full SECOND utterance is queued behind a
+    // gated (in-flight) first turn; after the turn records, the drain must
+    // discard that backlog, so ONLY the first turn produces a UserTurn.
+    let observer = Arc::new(RecordingObserver::default());
+    let sink = Arc::new(RecordingSink::default());
+    let audio = Arc::new(CountingAudio::default());
+    let tts = DualLayerTts::new(
+        Arc::new(ImmediateEngine(TtsTier::Fast)),
+        Arc::new(ImmediateEngine(TtsTier::Slow)),
+    )
+    .unwrap();
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+
+    let mut ctrl = TalkModeController::new(
+        endpointer(),
+        Arc::new(GatedStt {
+            text: "hello there",
+            gate: gate.clone(),
+        }),
+        Some(Arc::new(MockEmbedder)),
+        SpeakerRegistry::new(0.45),
+        VoiceAnswerPolicy::default(),
+        Arc::new(MockLlm("unused in listen-only")),
+        tts,
+        sink.clone(),
+        audio.clone(),
+        observer.clone() as Arc<dyn ConversationObserver>,
+        TalkModeConfig {
+            listen_only: true,
+            ..Default::default()
+        },
+    );
+
+    let (tx, rx) = mpsc::channel::<Vec<i16>>(256);
+    let cancel = CancellationToken::new();
+    let run_cancel = cancel.clone();
+    let handle = tokio::spawn(async move { ctrl.run(rx, run_cancel).await });
+
+    let turns = |obs: &RecordingObserver| {
+        obs.snapshot()
+            .iter()
+            .filter(|e| matches!(e, ConversationEvent::UserTurn { .. }))
+            .count()
+    };
+
+    // Turn 1 (finalizes) immediately followed by a full second utterance — all
+    // queued before STT is released, so the second sits as backlog behind the
+    // gated first turn.
+    for _ in 0..3 {
+        tx.send(voiced_frame()).await.unwrap();
+    }
+    for _ in 0..4 {
+        tx.send(silent_frame()).await.unwrap();
+    }
+    for _ in 0..3 {
+        tx.send(voiced_frame()).await.unwrap();
+    }
+    for _ in 0..4 {
+        tx.send(silent_frame()).await.unwrap();
+    }
+
+    // Let the loop finalize turn 1 and park in gated STT with the backlog queued.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    // Release decode: turn 1 records, then the drain discards the backlog.
+    gate.add_permits(100);
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    cancel.cancel();
+    drop(tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+
+    assert_eq!(
+        turns(&observer),
+        1,
+        "the backlog captured during STT must be drained — a stale second \
+         utterance must NOT re-fire as a turn"
     );
 }

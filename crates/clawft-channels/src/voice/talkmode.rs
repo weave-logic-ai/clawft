@@ -430,6 +430,22 @@ impl<M: EndpointModel> TalkModeController<M> {
                                     });
                                 }
                                 self.handle_turn(captured, &mut frames, &cancel).await;
+                                // Listen-only has no playback phase, so it never
+                                // reaches talk-mode's post-speak drain — but the
+                                // mic kept capturing during STT/decode. The live
+                                // capture thread drops frames on a full bounded
+                                // channel (it must never block), so an undrained
+                                // backlog leaves the channel chronically full and
+                                // the loop permanently behind real time: later
+                                // utterances get dropped mid-word and capture
+                                // "never re-arms". Discard the during-decode
+                                // stragglers so the next turn starts from live
+                                // audio — the listen-only analogue of the
+                                // talk-mode drain. (Talk mode drains inside
+                                // speak_with_barge_in after playback.)
+                                if self.config.listen_only {
+                                    while frames.try_recv().is_ok() {}
+                                }
                             } else if !captured.is_empty() {
                                 debug!(
                                     ms = captured.len() * 1_000
