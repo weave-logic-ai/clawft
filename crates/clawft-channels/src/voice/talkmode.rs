@@ -361,9 +361,12 @@ impl<M: EndpointModel> TalkModeController<M> {
     pub async fn run(&mut self, mut frames: mpsc::Receiver<Vec<i16>>, cancel: CancellationToken) {
         // Pre-render the fixed ack set through the slow tier (off-thread) so
         // acks speak in the answer's own voice from the first turn that the
-        // warm beats; fast-tier fallback covers the race.
-        self.tts
-            .spawn_warm_acks(vec![ACK_SHORT.to_string(), ACK_LONG.to_string()]);
+        // warm beats; fast-tier fallback covers the race. Skipped in listen-only
+        // mode — that path never speaks, so it does zero synthesis.
+        if !self.config.listen_only {
+            self.tts
+                .spawn_warm_acks(vec![ACK_SHORT.to_string(), ACK_LONG.to_string()]);
+        }
         let mut utt: Vec<i16> = Vec::new();
         loop {
             tokio::select! {
