@@ -192,3 +192,135 @@ async fn live_native_talk_session() {
         "the P2 loop committed the user turn"
     );
 }
+
+/// Wave 1 §W1.5 exit — the **complete `VoiceAnalysis` decomposition off real
+/// audio**. Drives a WAV (drive an *acted* / high-arousal clip to watch arousal
+/// move) through the all-native in-process session and captures the record the
+/// controller assembles at the observer boundary
+/// (`ConversationEvent::UserTurn { voice_analysis }`) — the exact record
+/// `weft voice talk` serializes onto `agent.turn.record`. Asserts every section
+/// is present and honest: native STT per-token data, a real SNR, a voiced pitch
+/// track, an in-range arousal off the DSP floor, `tier:"voice"`.
+///
+/// This is the audio→record half of the exit path; the record→`index_turn`→
+/// `conversation.graph` half is pinned device-free by
+/// `clawft-service-agent`'s `voice_analysis_wire.rs` (store + emotion flip) and
+/// `clawft-weave`'s `conversation_graph_serves_voice_analysis_verbatim` (served
+/// verbatim), bound to this half by the frozen §W1.2 schema. The acoustic
+/// arousal *response* (acted > calm) is proven device-free in
+/// `voice_analysis_dsp.rs`.
+///
+/// Needs only the staged ONNX models (`--features onnx`) — the record is
+/// emitted *before* the LLM reply, so no live Hermes is required. Run it:
+/// ```text
+/// WEFT_TALK_WAV=/path/to/16k_mono_acted.wav \
+///   cargo test -p clawft-voice-talk --features onnx --test assembly \
+///   live_native_voice_analysis_decomposition -- --ignored --nocapture
+/// ```
+#[tokio::test]
+#[ignore = "requires staged ONNX models (--features onnx) + $WEFT_TALK_WAV (16k mono; drive an acted clip)"]
+async fn live_native_voice_analysis_decomposition() {
+    use std::sync::Mutex;
+
+    use clawft_channels::voice::talkmode::NoopAudioControl;
+    use clawft_channels::voice::{EmotionSource, SttPath, VoiceAnalysis};
+    use clawft_voice_talk::{TalkConfig, TalkSession, native_components};
+
+    /// Captures the `VoiceAnalysis` the controller emits on the user turn.
+    #[derive(Default)]
+    struct Capture {
+        va: Mutex<Option<VoiceAnalysis>>,
+    }
+    impl ConversationObserver for Capture {
+        fn observe(&self, event: ConversationEvent) {
+            if let ConversationEvent::UserTurn {
+                voice_analysis: Some(va),
+                ..
+            } = event
+            {
+                *self.va.lock().unwrap() = Some(*va);
+            }
+        }
+    }
+
+    let wav_path = std::env::var("WEFT_TALK_WAV").expect("set WEFT_TALK_WAV to a 16k mono WAV");
+    let config = TalkConfig {
+        conv_id: "voice-analysis-exit".into(),
+        base_system: "You are a terse voice assistant.".into(),
+        ..TalkConfig::default()
+    };
+    let capture = Arc::new(Capture::default());
+    let capture_obs: Arc<dyn ConversationObserver> = capture.clone();
+    let components = native_components(&config, Arc::new(DiscardSink), Arc::new(NoopAudioControl))
+        .expect("native components assemble");
+    let session = TalkSession::assemble_observed(config, components, Some(capture_obs));
+    let forest = session.forest().clone();
+
+    let (pcm, sr) = wav_to_pcm_s16le(&std::fs::read(&wav_path).unwrap()).unwrap();
+    assert_eq!(sr, 16_000, "WEFT_TALK_WAV must be 16 kHz mono");
+
+    let cancel = CancellationToken::new();
+    let run_cancel = cancel.clone();
+    let (tx, rx) = mpsc::channel::<Vec<i16>>(256);
+    let handle = tokio::spawn(async move { session.run(rx, run_cancel).await });
+
+    for frame in pcm.chunks(1_600) {
+        tx.send(frame.to_vec()).await.unwrap();
+    }
+    for _ in 0..20 {
+        tx.send(vec![0i16; 1_600]).await.unwrap();
+    }
+
+    // Wait for the finalized user turn to produce its record (emitted before
+    // the reply, so this does not wait on the LLM).
+    for _ in 0..400 {
+        if capture.va.lock().unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    cancel.cancel();
+    drop(tx);
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+
+    let va = capture
+        .va
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the finalized user turn produced a VoiceAnalysis record");
+
+    // §W1.2 completeness + honesty, off real audio.
+    assert_eq!(va.v, 1, "record versioned");
+    assert_eq!(va.tier, "voice", "tier discriminator");
+    // STT decode enrichment (§W1.3): native path with real per-token data.
+    assert_eq!(va.stt.path, SttPath::Native, "native TDT path");
+    assert!(!va.stt.model.is_empty(), "STT model wire name present");
+    assert!(!va.stt.tokens.is_empty(), "native decode surfaced per-token timing/conf");
+    assert!(
+        va.stt.token_conf_mean > 0.0 && va.stt.token_conf_mean <= 1.0,
+        "per-token softmax confidence in (0,1]: {}",
+        va.stt.token_conf_mean
+    );
+    let first = &va.stt.tokens[0];
+    assert!(first.dur_ms > 0, "token carries a duration");
+    // Capture health → SNR from RMS − floor.
+    assert!(va.audio.duration_ms > 0, "utterance duration measured");
+    assert!(va.audio.snr_db.is_finite(), "SNR = RMS mean − noise floor");
+    // Prosody: a real voiced pitch track (needs voiced speech in the clip).
+    assert!(va.prosody.f0_mean_hz > 0.0, "voiced pitch estimated: {}", va.prosody.f0_mean_hz);
+    // Emotion axis off the DSP floor (no SER staged), in range, honest source.
+    assert!(
+        (0.0..=1.0).contains(&va.emotion.arousal),
+        "arousal in [0,1]: {}",
+        va.emotion.arousal
+    );
+    assert_eq!(va.emotion.source, EmotionSource::ProsodyDsp, "DSP floor with no SER staged");
+    assert_eq!(va.emotion.dominance, 0.0, "dominance 0.0 without a SER model");
+
+    // The turn also committed on the in-process forest.
+    assert!(
+        forest.graph().node_count() >= 1,
+        "the finalized user turn committed on the forest"
+    );
+}
