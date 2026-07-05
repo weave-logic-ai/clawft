@@ -25,7 +25,8 @@ use clawft_kernel::{
     CausalEdgeType, CausalGraph, CognitiveTick, CognitiveTickConfig, CrossRefStore, TalkModeConfig,
     TalkModeLoop, ViewResolver,
 };
-use clawft_service_agent::SessionTier;
+use clawft_core::agent::sink::Turn;
+use clawft_service_agent::{KernelTurnAnchor, SessionTier, TurnAnchor};
 
 const DIMS: usize = 64;
 
@@ -232,4 +233,92 @@ async fn text_turn_commits_frontier_to_committed_on_shared_forest() {
         body.contains(&format!("chain_seq {s2}")),
         "graft lineage-fuses the committed reply: {body}"
     );
+}
+
+/// DAEMON SEAM (the gap the headline test skips): drive a turn through
+/// [`KernelTurnAnchor::anchor_turn`] — the exact convergence point `agent.chat`
+/// and `agent.turn.record` both reach in the daemon — rather than calling
+/// `index_turn` directly. This guards the class of bug the live M2 verification
+/// had to rule out by hand: that the tier the anchor indexes into is the SAME
+/// `Arc<SessionTier>` that was `with_forest`'d + `set_talk_loop`'d (no
+/// two-instance split), and that the `if let Some(chain)` gate in `anchor_turn`
+/// actually reaches `index_turn`. Wired exactly as `clawft-weave`'s boot in the
+/// `tier_owns_forest` config: the anchor gets `causal = None` (the tier owns the
+/// forest dual-write), chain enabled (the chain_seq is the index key).
+#[tokio::test]
+async fn anchor_turn_commits_on_the_kernel_global_forest() {
+    let (tier, chain, causal, talk_loop) = wire_tier();
+    let conv = "anchor-ecc";
+
+    // Daemon `tier_owns_forest` wiring: chain on, hnsw off, anchor causal None
+    // (the tier dual-writes the forest), session tier = the wired Arc.
+    let anchor = KernelTurnAnchor::new(Some(chain.clone()), None, None).with_session_tier(tier.clone());
+
+    let user = Turn {
+        turn_id: "t1".into(),
+        role: "user".into(),
+        content: "hello via anchor".into(),
+        tool_calls: None,
+        tool_call_id: None,
+        ts_ms: 1,
+    };
+    anchor.anchor_turn(conv, "t1", &user).await;
+
+    // The anchor reached index_turn → dual_write on the SAME kernel-global
+    // causal graph the test holds (a two-instance split would leave this 0),
+    // and emitted exactly one EndOfUtterance.
+    assert_eq!(
+        causal.node_count(),
+        1,
+        "anchor_turn dual-wrote one node onto the kernel-global causal graph"
+    );
+    let view = tier
+        .view_for(conv)
+        .expect("anchor_turn created the conversation view on the wired tier");
+    let s1 = view.chain_seqs()[0];
+    assert_eq!(causal_state(&causal, s1), "frontier", "node enters Frontier");
+    assert_eq!(
+        talk_loop.impulses().len(),
+        1,
+        "anchor_turn emitted one EndOfUtterance"
+    );
+
+    // The hosted loop drains + commits it Frontier→Committed on both substrates.
+    let r1 = talk_loop.tick();
+    assert_eq!(r1.impulses_sensed, 1);
+    assert_eq!(r1.commits, 1, "the anchor-emitted EOU commits the turn");
+    assert_eq!(
+        view.state(s1),
+        Some(NodeState::Committed),
+        "loop committed the anchored turn in the view"
+    );
+    assert_eq!(causal_state(&causal, s1), "committed", "…and on the causal node");
+
+    // Assistant reply through the anchor → committed + Follows-linked.
+    let reply = Turn {
+        turn_id: "t2".into(),
+        role: "assistant".into(),
+        content: "hi from the anchored reply".into(),
+        tool_calls: None,
+        tool_call_id: None,
+        ts_ms: 2,
+    };
+    anchor.anchor_turn(conv, "t2", &reply).await;
+    assert_eq!(causal.node_count(), 2, "reply dual-wrote a second node");
+    let s2 = *view.chain_seqs().iter().max().unwrap();
+    assert!(s2 > s1, "chain_seq is globally monotone across anchor turns");
+
+    let r2 = talk_loop.tick();
+    assert_eq!(r2.commits, 1, "the reply's EOU commits it");
+    assert_eq!(causal_state(&causal, s2), "committed");
+
+    let n1 = node_for_seq(&causal, s1);
+    let n2 = node_for_seq(&causal, s2);
+    let follows: Vec<_> = causal
+        .get_forward_edges(n1)
+        .into_iter()
+        .filter(|e| e.edge_type == CausalEdgeType::Follows)
+        .collect();
+    assert_eq!(follows.len(), 1, "one Follows edge out of the user turn");
+    assert_eq!(follows[0].target, n2, "Follows edge points at the reply");
 }
