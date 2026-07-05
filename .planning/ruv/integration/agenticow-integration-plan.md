@@ -139,6 +139,18 @@ pollutes the shared store.
 | Commit a good turn into the brain | `promote(target?)` | replay `working.edit_vecs` → `base.ingest_batch`; replay `tombstones` → `base.delete`; carry `texts` |
 | What changed this turn | `diff()` | set-diff `working.edit_ids` vs ancestors → `{added, overridden, deleted}` |
 | Provenance / audit trail | `lineage()` | walk chain → `[{role, file_id, label, parent, created_at, mutations, tombstones}]` (pairs with exochain witness) |
+
+**DESIGN CONSTRAINT — single vector space per lineage (added 2026-07-05, from
+`.planning/research/e5-rvf-integration-study.md` §2.3).** COW chain-walk queries
+compare child vectors against ancestor vectors, so a whole lineage MUST share one
+embedding producer. Bake in from Phase 0: stamp an `embedder_id` (model name +
+revision + prefix convention + dims) into the base store's META segment at
+`create`; `branch`/`derive` inherit it and REFUSE to open/derive/promote across a
+differing `embedder_id`. An embedder migration (e.g. hash→e5-small-v2, WEFT-640)
+is always *fork a new base + re-embed the promoted set*, never an in-place
+producer swap on a live lineage. RVF 0.2 does not enforce this itself — stored
+vectors are not self-describing about their space; WeftOS must write and check
+the stamp deliberately.
 | Persist/reopen a chain | `save/load(manifest)` | JSON manifest of `[{path, label, tombstones, edit_ids, edit_vecs}]`; reopen base+ancestors read-only, working writable |
 | Store health | `status()` | `working.status()` + chain depth + dim + metric |
 
