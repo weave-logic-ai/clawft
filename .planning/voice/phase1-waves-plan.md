@@ -16,10 +16,14 @@ validation stage in front of it**, in three user-defined waves:
   `VoiceAnalysis` record**, not a first-pass extractor — every field present with an honest
   confidence flag, structure complete so later upgrades refine values without reshaping
   storage or surface.
-- **Wave 2 — Wire into the agent loop.** Route finalized voice turns into the agent; the
-  agent replies as **text** on the same surface. No audio out; the surface shows the full loop.
-- **Wave 3 — Full duplex, and only that.** TTS out + DuplexChannel floor + ERL + barge.
-  Every audio-out / interrupt problem isolated here. **Wave 3 == ADR-068 Phase 1.**
+- **Wave 2 — Agent loop + the cognitive interrupt/steering brain.** Route finalized voice turns
+  into the agent (text reply, no TTS) **and** build the interrupt/steering layer: as the agent
+  works, "hold on" / "actually do X" is classified (STOP / refine / backchannel / queue) and
+  cancels-or-amends the in-flight turn on a **hot mic with no echo** (the killer consequence of
+  text-out — zero AEC/ERL confounds). The ECC floor decision-machinery, proven with text.
+- **Wave 3 — Full duplex: pure audio-out physics on a proven interrupt brain.** TTS out + AEC/ERL
+  + acoustic barge *discrimination* + `Speaking`/`Overlap`. The interrupt *decision* is already
+  Wave 2; Wave 3 adds only the audio layer that feeds a verdict into it. **Wave 3 == ADR-068 Phase 1.**
 
 **Why this ordering de-risks the feature.** Waves 1–2 reuse the **already-working in-process
 native capture** (`weft voice talk`) and the **already-wired `agent.turn.record` →
@@ -184,7 +188,17 @@ the real classifier lands.
 
 ### W1.3 — STT decode enrichment: surface per-token timing/duration/confidence
 
-The native TDT decode discards data it already computes. Change:
+**Audit conclusion (does the bundle expose per-word/token timings + confidences?): NO public
+API does today, but they are fully recoverable — this is *our* native decode, not a sherpa-rs
+binding.** The STT path is `ParakeetStt` → `TdtEngine`, a native `ort` reimplementation of
+sherpa-onnx's `DecodeOneTDT` (`parakeet_tdt.rs:1-12`), **not** sherpa-rs bindings — so there is
+no upstream token-timestamp API to call; and the substrate HTTP path returns `{"text"}` only
+(`stt.rs:135`). But the native greedy TDT loop *already computes* the per-token encoder-frame
+index `t` and the per-token duration `skip`, and the joiner already emits the full token-logit
+vector (`parakeet_tdt.rs:106-146`) — all three are discarded at the `-> String` boundary. So
+per-token **timestamp (t → ms via the subsampling stride), duration, and confidence
+(`softmax(logits)`)** join the record at ~zero compute cost by surfacing what the loop throws
+away. The native TDT decode discards data it already computes. Change:
 - `TdtEngine::greedy_tdt` → return `Vec<Token{ id, t_frame, dur_frames, conf }>` instead of
   `Vec<usize>`: capture `t` and `skip` at each emission and `softmax(&logits[..n_tokens])[y]`.
 - `TdtEngine::decode` / `ParakeetStt::run` → a `TranscriptResult{ text, tokens }`; frame→ms via
@@ -265,29 +279,136 @@ model (seam ships).
 
 ---
 
-## Wave 2 — wire into the agent loop, text reply only (outline)
+## Wave 2 — agent loop + the cognitive interrupt/steering brain (detailed design)
 
-Route finalized voice turns into the agent (`agent.chat`, the M2 `TalkModeLoop` decider)
-instead of `turn.record`-only; the agent replies as **text** on the same Wave 1 surface. No TTS.
+**Goal (user).** "Wave 2's challenge is the agent loop — we can even build a lot of the
+interrupt logic in here, because as it starts to do something I could say 'hold on' or give
+refinement or direction." Route finalized voice turns into the agent, which replies as **text**
+on the Wave 1 surface — **and build the cognitive interrupt/steering layer on top**.
 
-- **Route:** recorder path calls `agent.chat`; the committed reply returns as `CommittedReply`
-  and renders as a text line + its `Follows` edge on the graph surface.
-- **Tools/spawn by voice:** M4 spawn + the `tool_choice` lever (WEFT-632, landed) work for free;
-  spoken requests that spawn show the (already-classified) `spawn_goal`/`spawn_result` nodes.
-- **Surface:** the assistant node's Speculative→Committed lifecycle + tool edges; Wave 1's
-  `voice_analysis` now annotates the user side of each exchange.
-- Still half-duplex — no floor, no barge, no audio out.
+**Why the interrupt brain belongs in Wave 2, not Wave 3 (the killer consequence of text-out).**
+Text output means **no speaker → no echo → the mic stays HOT while the agent works, with zero
+AEC/ERL confounds**. The self-cancel problem that makes acoustic barge hard (ADR-068 D1: the
+bot's own reply leaking past AEC) **does not exist** when the reply is text. So Wave 2 builds and
+proves the *decision* half of interruption — the taxonomy, cancel, amendment, supersession, and
+the ECC floor impulses — in isolation, leaving Wave 3 only the acoustic-physics half. **The
+machinery already exists** (recon): `agent.chat.cancel`, the `TalkModeLoop` impulse handlers,
+`Correction` intent, and the Phase-0 `DuplexChannel` are all landed; Wave 2 *wires and witnesses*
+them for the text-during-busy case.
 
-Estimate ~4–6 days. Swarm: `coder` (route + surface) + `tester` + `reviewer`.
+### W2.1 — The enabling structural change: capture no longer blocks on the reply
+
+Today's half-duplex loop blocks the turn on the reply. Wave 2 **decouples capture from the agent
+turn**: because text output has no playback, capture keeps running continuously and every
+finalized utterance during agent-busy is routed through the interrupt router (§W2.2). This is
+safe *only* because there is no echo (the text-out insight) — and it is exactly the non-blocking
+loop shape Wave 3 needs, so Wave 2 earns it half-duplex-safe first.
+
+### W2.2 — The interrupt taxonomy + router (the core new logic)
+
+Each finalized utterance is routed by **busy-state × intent × paralinguistics**. "Busy" = the
+conv has an in-flight (Frontier, uncommitted) turn — the daemon already tracks this
+(`current_turn(conv)` `talk_loop.rs:368`; the `AgentService` cancel-token/in-flight state). When
+idle, an utterance is a normal turn (`agent.chat`). When **busy**, it enters the router → an
+`InterruptAction`:
+
+| Class | Trigger (busy) | Action | Mechanism (all landed unless noted) |
+|---|---|---|---|
+| **STOP / cancel** | STOP lexicon ("hold on", "stop", "wait", "cancel", "never mind") | cancel the in-flight turn | `agent.chat.cancel` (`daemon.rs:4885`) → cancel token; **inline children unwind, detached survive, conv re-arms** — already correct. **NEW: prune the in-flight node + witness the cancel** (§W2.3) |
+| **REFINEMENT / steering** | `Correction` intent ("actually…", "also make it blue", "use the other file") or a topically-continuous Request during-busy | amend | conservative: **cancel-and-resubmit-with-amendment** (§W2.4); mid-flight injection deferred |
+| **BACKCHANNEL** | Wave-1 `paralinguistics.class == backchannel_candidate`, or `Social` intent + very short + during-busy | no action | emit `Backchannel 0x60` → `TalkModeLoop` writes a **`Continuer` crossref, never a turn** (`talk_loop.rs:383`); agent keeps working |
+| **UNRELATED new request** | fresh `Request`, topically discontinuous, during-busy | **queue behind** (default) or supersede | queue = becomes the next turn on commit; supersede only on an explicit STOP — don't guess abandonment |
+
+The router is a small new component in the recorder→agent path, consuming signals Wave 1 and
+classification already produce — `Intent` (incl. `Correction`, `turn_classifier.rs:242`),
+`paralinguistics.class`, and a STOP lexicon (a ~15-word list in the `OPEN_WORDS`/`PATTERNS`
+idiom) — plus the busy read. **The timing axis is load-bearing**: the same words are a normal
+turn when idle and an interrupt when busy; the router keys on busy-state.
+
+### W2.3 — What cancel leaves on the forest (the honest M2-D8 question)
+
+Today `agent.chat.cancel` trips the token and re-arms the conv but **does not touch the forest**
+— the in-flight Frontier node is left dangling and no cancel is witnessed. Wave 2 closes this:
+
+- **Prune the in-flight node to a tombstone.** Reuse the existing barge-in prune path
+  (`talk_loop.rs:403`, `TurnClaim` → prune the in-flight node → `Stale`/`Pruned`): a STOP/refine
+  emits that prune so the abandoned attempt becomes a **`Pruned` tombstone** on the kernel-global
+  forest — rendered struck/hollow by ADR-067 D6. The attempt is *witnessed as abandoned*, not
+  silently dropped (the M2 D8 durable-transition record).
+- **Witness a turn-level cancel marker** on the chain (mirroring `subagent.rs`'s `agent.cancel`
+  witness, `EVENT_CANCEL`), so history/replay records "turn X cancelled at seq Y".
+- **The amendment references the cancelled attempt via a `Contradicts` edge.** The new
+  (amendment) turn draws `Contradicts → pruned-attempt` (a first-class causal edge, ADR-062;
+  rendered red/zigzag by ADR-067 D6). **This makes steering history visible in the graph** —
+  "you tried X, I stopped you, you redirected to Y" is a literal Contradicts edge from Y to X. A
+  strong, near-free feature: it falls out of doing the prune + amendment correctly.
+
+### W2.4 — Amendment mechanics: conservative first, injection deferred (argued)
+
+- **Conservative (SHIP in Wave 2): cancel-and-resubmit-with-amendment.** On a refinement
+  during-busy: prune the in-flight attempt (Contradicts), then submit a **new** `agent.chat` turn
+  = original goal + amendment as combined context. Deterministic, uses only landed cancel +
+  submit, and the Contradicts edge records the steering. Cost: work-in-progress is discarded —
+  acceptable with text output + fast local Hermes + no audio. Renders as: attempt pruned
+  ←Contradicts← amendment turn → new Frontier → text reply.
+- **Ambitious (DESIGN-ONLY seam, defer): true mid-flight injection.** Inject the amendment into
+  the *running* tool-loop as a message the agent sees on its next tool-iteration, without
+  restarting — no thrown-away work. This is a real change to the engine's inner loop (an
+  "amendment inbox" the loop polls between tool calls). Right end-state, deeper change; defer it.
+  Design the inbox seam now so the conservative path upgrades to injection **without reshaping the
+  taxonomy or the surface** — same `InterruptAction::Refine{amendment}`, different executor.
+
+### W2.5 — This IS the ECC floor machinery, exercised live with text
+
+Wave 2 drives the real ADR-062 paths with text output: `TurnShift 0x52` handoffs
+(`talk_loop.rs:374`), `TurnClaim 0x50` supersession-prune (`:403`), `Backchannel 0x60` Continuer
+(`:383`), and the Phase-0 `DuplexChannel`'s Thinking→Listening `TurnShift` transition
+(`duplex.rs:389`). `Correction` intent + the busy-vs-idle timing drive the taxonomy. So the floor
+state machine gets validated on a hot mic **before** any audio-out physics — the `DuplexChannel`
+is proven in the text-degenerate collapse (ADR-068 D6) *plus* the live TurnShift/TurnClaim/
+Backchannel arcs, with no ERL in the loop yet.
+
+### W2.6 — The surface (Wave 2 additions)
+
+On the Wave 1 `weft voice watch` surface: the **agent-busy state** (Thinking / tool-running /
+spawning); an **incoming interruption classified live** (STOP vs Refine vs Backchannel vs Queue,
+shown as the router decides); the **cancellation/amendment taking effect** (in-flight node →
+Pruned tombstone, amendment node appearing with its Contradicts edge, new Frontier); and **what
+happened to in-flight work** — turn cancelled, and **spawn survived vs died per the cancel rules**
+(detached spawn nodes stay live; inline children unwound). The committed text reply renders as a
+line + its `Follows` edge; Wave 1's `voice_analysis` annotates the user side of each exchange.
+
+### W2.7 — Wave 2 exit test (crisp, the user's acting test)
+
+Speak a task ("write a function that sorts a list") → watch the agent go busy (Thinking, maybe a
+spawn) → interrupt mid-flight with **"hold on, actually do X instead"** → watch: STOP classified
+live → the in-flight turn pruned to a tombstone + any detached spawn **survives** → the amendment
+classified as Refine → a new turn submitted with X → a **`Contradicts` edge from the new turn to
+the pruned attempt** → the redirect lands as text → **all witnessed on the forest** and visible
+in the graph. Plus a backchannel probe ("mm-hmm" mid-task → no interruption, a Continuer crossref)
+and an unrelated-request probe (queues behind).
+
+Estimate ~6–9 days. Swarm: `system-architect` (interrupt taxonomy + forest semantics) →
+`coder`-A (non-blocking loop + interrupt router) ∥ `coder`-B (cancel→prune→Contradicts forest
+plumbing + witness) → `tester` (exit test + backchannel/queue probes) → `reviewer`.
 
 ---
 
-## Wave 3 — full duplex, and only that (outline == ADR-068 Phase 1)
+## Wave 3 — full duplex: pure audio-out physics on a proven interrupt brain (outline == ADR-068 Phase 1)
 
-TTS out + the DuplexChannel floor machine + EdgeReflex + barge, on top of a validated
-ingestion + surface. This **is** `duplex-edge-agent-plan.md` §1 Phase 1 (five wiring jobs) plus
-its Phase 0 (DuplexChannel + EdgeReflex core + loopback sim; `edge_reflex.rs` already scaffolded
-at `crates/clawft-channels/src/voice/edge_reflex.rs`):
+**Scope shrinks after Wave 2.** Because Wave 2 builds and proves the interrupt *decision* brain
+(taxonomy, cancel→prune→Contradicts, amendment, TurnShift/TurnClaim/Backchannel floor arcs) on a
+hot mic with text output, Wave 3 is reduced to the **audio-out physics** that Wave 2 could not
+exercise: **TTS out + AEC/ERL + acoustic barge *discrimination* (is this onset during Speaking a
+real barge or the bot's own leakage?) + the `Speaking`/`Overlap` states.** Everything downstream
+of "a barge is confirmed" — what to cancel, what to amend, what survives — is the Wave 2 brain,
+unchanged. Wave 3 only adds the acoustic layer that *feeds a verdict into* that brain (the ERL
+term in `compute_urgency`) and the audio-out states.
+
+TTS out + the DuplexChannel floor machine + EdgeReflex + barge, on top of a validated ingestion +
+surface + interrupt brain. This **is** `duplex-edge-agent-plan.md` §1 Phase 1 (five wiring jobs)
+plus its Phase 0 (DuplexChannel + EdgeReflex core + loopback sim; `edge_reflex.rs` already
+scaffolded at `crates/clawft-channels/src/voice/edge_reflex.rs`):
 
 1. streaming duplex channel (localhost two-lane wire, `clawft-rpc`);
 2. daemon hosts the capture pipeline (VAD/endpoint/STT move daemon-side);
@@ -324,8 +445,12 @@ demo (operator's call at claim via `plane-workflow`).
 | Enrich `ConversationEvent` + latency instrumentation | 1 | 0.8.x | `talkmode.rs` events; §W1.4 | — |
 | `weft voice watch` live surface + listen-only mode | 1 | 0.8.x | CLI stream + graph poll + `--json`; §W1.4 | enriched events + record |
 | Wave 1 exit/assembly + unit tests | 1 | 0.8.x | `assembly.rs` + unit; §W1.5 | all Wave 1 |
-| Route voice turns into `agent.chat`; text reply on surface | 2 | 0.8.x | recorder→chat; CommittedReply render | Wave 1 |
-| Full-duplex (== ADR-068 Phase 0+1) | 3 | 0.8.x/0.9.x | the duplex-plan items | Wave 2 |
+| Non-blocking capture loop + route voice turns into `agent.chat` (text reply) | 2 | 0.8.x | decouple capture from reply; §W2.1 | Wave 1 |
+| Interrupt taxonomy + router (STOP/refine/backchannel/queue) | 2 | 0.8.x | busy×intent×paralinguistics → `InterruptAction`; §W2.2 | non-blocking loop |
+| Cancel→prune→Contradicts + witness (M2-D8 forest record) | 2 | 0.8.x | prune in-flight node, cancel marker, Contradicts edge; §W2.3 | router |
+| Amendment executor (conservative cancel-and-resubmit; inbox seam) | 2 | 0.8.x | §W2.4; injection deferred | cancel→prune |
+| Interrupt surface + Wave 2 exit test (steering + backchannel/queue probes) | 2 | 0.8.x | §W2.6/W2.7 | all Wave 2 |
+| Full-duplex — audio-out physics (TTS/AEC/ERL/Speaking-Overlap) == ADR-068 Phase 0+1 | 3 | 0.8.x/0.9.x | the duplex-plan items on the proven brain | Wave 2 |
 
 **Reconcile (do not duplicate):** WEFT-606 (daemon tick) + the duplex-plan §4 Phase-0/1
 candidates **are Wave 3** — point them there. WEFT-614 (grounded brain) rides Wave 2.

@@ -57,6 +57,20 @@ uniformly** (a spawn goal and a spoken complaint share one searchable space),
 which is what enables cross-modality recall, agent self-reflection, and a single
 coherent feature space for the Weaver's future learned weights.
 
+**The overlay frame** (second directive, Part 6): the semantic/e5 space is **one
+projection among several complementary indexes over the same atom stream — not a
+replacement for any of them.** Temporal (witness chain / HLC), causal
+(`CausalGraph` + cross-refs), semantic (HNSW/e5), spatial (BVH, ADR-056), and
+lifecycle (`SessionView` frontier states) are all joined by **`chain_seq`**. They
+compose, they do not compete (ADR-056 says this outright for the spatial lens). e5
+sharpens **one** lens; the composite — "semantically similar AND within 2 causal
+hops AND in the last hour" — is where the "much clearer view" lives. Today that
+composite is dead because the semantic lens is hash-noise; **e5 upgrades the one
+lens that is currently fake to load-bearing**, which is what makes the overlay pay
+off. (Bonus: semantic *layout* surfaces — the ADR-067 graph view, a future
+UMAP-style projection, and ADR-056's deferred §10 BVH+HNSW fingerprinting — also
+cluster far better on e5 than on hash vectors.)
+
 **Recommendation**: land e5 as a third `select_embedding_provider` candidate
 (above MiniLM, below Qwen3), gated on staged artifacts + a `weave.toml` knob;
 add `embed_query` to the trait; thread prefixes; define **one** schema-keyed
@@ -431,6 +445,92 @@ fall out that a per-feature (per-silo) embedding could never deliver:
   itself (separate plan — just contribute the single-space constraint);
   fine-tuning/TabSTAR (this is unsupervised recall, not a supervised head);
   graphify/context-router adapters (fast-follows, not blockers).
+
+---
+
+## PART 6 — The overlay: one atom stream, many supportive projections
+
+The second framing directive: e5/semantic is **one projection among several
+complementary indexes over the same atom stream, not a replacement for any of
+them.** WeftOS already builds (or plans) a family of indexes, each answering a
+different question about the *same* atoms, all joined by the atom's identity
+(**`chain_seq`** — "the universal ExoChain key", `context_graft.rs:48` — plus
+`content_hash` for dedup). This is not incidental; it is the substrate's design.
+
+### The index family (all keyed by `chain_seq`)
+
+| # | Lens | Answers | Where | e5 touches it? |
+|---|---|---|---|---|
+| 1 | **Temporal / ordinal** | "when, in what order" | witness chain (`chain_seq` = global clock) + HLC | no |
+| 2 | **Causal / relational** | "what led to / evidences what" | `CausalGraph` (8 typed edges: Follows, TriggeredBy, EvidenceFor…) + `CrossRefStore` (UNID); ADR-062 forest | no |
+| 3 | **Semantic** | "what *means* the same" | HNSW over embeddings — `SessionView`, `ecc_vector_backend` | **yes — the e5 upgrade** |
+| 4 | **Spatial / hierarchical** | "what is where, what shape, what overlaps" | **BVH** (ADR-056): AABB broad-phase, tagged-union leaves, cross-keyed into the causal store **by chain sequence** | indirectly (see bonus) |
+| 5 | **Lifecycle / frontier** | "is this speculative / frontier / settled" | L2 `SessionView` `NodeState` per atom (ADR-062 D2) | no |
+
+**Design principle (state it plainly): one atom stream, many supportive
+projections, `chain_seq` as the join key.** ADR-056 already says this for the
+spatial lens — the BVH "answers geometric overlap … they compose, they do not
+compete" with HNSW, and it "cross-keys BVH leaves into [the causal] store by
+chain sequence." e5 **strengthens lens #3 without displacing #1/#2/#4/#5.** An
+embedder upgrade sharpens one lens; the composite is where the "much clearer
+view" lives.
+
+### Composite queries — where the overlay pays off
+
+Because every lens keys off `chain_seq`, they intersect cheaply. Examples:
+
+- **"Semantically similar to this turn AND within 2 causal hops AND in the last
+  hour."** Semantic candidate set (HNSW/e5, top-N) → causal filter
+  (`CausalGraph` 2-hop neighborhood of the anchor) → temporal window
+  (`chain_seq`/HLC range). Each index narrows; **none suffices alone**, and the
+  cheap join is the shared key.
+- **Graph view (ADR-067) colored by semantic hue.** The conversation graph lays
+  atoms out by causal edges (lens #2) and colors them by classification today; add
+  **semantic-cluster hue** from e5 (lens #3) and the causal layout gains a second,
+  orthogonal signal — "these two causally-unconnected turns are about the same
+  thing" becomes visible as shared color.
+- **Scrubber + spatial view, same atoms.** The scrubber replays **temporally**
+  (`chain_seq` order, lens #1) while a BVH view (lens #4) shows the same atoms
+  **spatially**; selecting one atom in either view resolves the other by
+  `chain_seq`. Add e5 and a third pane can show the **semantic neighbourhood** of
+  the scrubbed atom — three lenses, one selection.
+- **Branch-diff across lenses, one witness.** RVF COW (semantic store) and BVH
+  `derive()` (spatial store) both branch and both witness on the *same* append-only
+  chain — so a speculative turn's semantic *and* spatial deltas roll back together
+  under one exochain event (this is exactly the agenticow DualStateBridge shape).
+
+### Why e5 matters *to the overlay specifically*
+
+A composite is only as good as its weakest lens. **Today the semantic lens is
+hash-noise**, so any composite that includes "semantically similar" collapses to
+random — the overlay's headline query is effectively dead on arrival. The join
+key already exists (`chain_seq`), the temporal and causal lenses already work, the
+spatial lens is planned with the same key — **e5 is what upgrades the one lens
+that is currently fake** to load-bearing, which is precisely what makes the
+multi-index composite deliver the "much clearer view."
+
+### Bonus — spatial *layout* from embeddings (accurate scope)
+
+ADR-056's BVH indexes **geometric extent** (physical AABBs of units, sensor reads,
+terrain) — it does **not** ingest embeddings, so e5 does not change the BVH's own
+broad-phase. But two *semantic-layout* surfaces do consume embedding vectors, and
+there e5 vs hash is night-and-day:
+
+1. **Deferred BVH+HNSW fingerprinting.** The concept paper §10 ("Temporal
+   Similarity Search via HNSW Fingerprinting"), explicitly **deferred to a future
+   ADR** by ADR-056 (§Neutral), is the sanctioned overlay of semantic-into-spatial.
+   A stronger e5 fingerprint is what would make that future composition cluster
+   meaningfully instead of by hash noise — e5 raises the ceiling on that deferred
+   work.
+2. **Semantic layout of the conversation graph / any future 2D-3D projection.**
+   Whenever atom *positions* are derived from their embeddings (a force-directed
+   graph-view layout, or a future UMAP/t-SNE projection of atom vectors for a
+   spatial conversation browser), hash vectors scatter atoms randomly while **e5
+   places same-topic atoms together** — real visible clusters. So "the 3D
+   projection could also consume e5 vectors for better spatial clustering than hash
+   vectors" is a **real bonus use case**, landing on the semantic-*layout* surfaces
+   (graph view, future projection, deferred §10), not on ADR-056's geometric
+   broad-phase.
 
 ---
 
