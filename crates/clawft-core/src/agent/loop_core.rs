@@ -32,6 +32,9 @@ use clawft_plugin::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use clawft_platform::Platform;
+use clawft_types::agent_chat::{
+    AGENT_LOOP_RESULT_META_KEY, AgentChatToolCall, AgentLoopResultMeta, SpawnedTaskSummary,
+};
 use clawft_types::config::AgentsConfig;
 use clawft_types::error::ClawftError;
 use clawft_types::event::{InboundMessage, OutboundMessage};
@@ -147,7 +150,15 @@ Rules:
 - Do not narrate your actions (\"Let me search for...\"). Just provide the answer.
 - Sound warm and natural, not robotic or formal.";
 
-/// Result from the tool loop, including hallucination counters.
+/// Max bytes of a tool's arguments/result kept for the UI preview
+/// carried in [`AgentChatToolCall`] (M4 D8). Distinct from
+/// [`MAX_TOOL_RESULT_BYTES`], which bounds what the LLM sees; this is a
+/// much smaller cap for a collapsible panel bubble.
+const TOOL_PREVIEW_MAX_BYTES: usize = 512;
+
+/// Result from the tool loop, including hallucination counters and the
+/// M4 D8 result-enrichment summary (real tool calls / finish reason /
+/// iterations / spawned subagents).
 #[derive(Debug)]
 struct ToolLoopResult {
     /// The final text response from the LLM.
@@ -156,6 +167,66 @@ struct ToolLoopResult {
     hallucinations: usize,
     /// Number of write claims that passed verification.
     verified_successes: usize,
+    /// Tool calls executed during the loop, in order (M4 D8).
+    tool_calls: Vec<AgentChatToolCall>,
+    /// Why the loop terminated: `"stop"` on a clean text response (M4
+    /// D8). The max-iterations path returns `Err` before constructing
+    /// this, so `"stop"` is the only value produced today.
+    finish_reason: String,
+    /// Number of LLM round-trips executed inside the loop (M4 D8).
+    iterations: u32,
+    /// Subagents spawned during the loop, detected from `agent_spawn`
+    /// tool results (M4 D8).
+    spawned_tasks: Vec<SpawnedTaskSummary>,
+}
+
+/// Truncate a string to at most `TOOL_PREVIEW_MAX_BYTES` bytes on a
+/// char boundary, appending an ellipsis marker when clipped.
+fn preview_truncate(s: &str) -> String {
+    if s.len() <= TOOL_PREVIEW_MAX_BYTES {
+        return s.to_string();
+    }
+    let mut end = TOOL_PREVIEW_MAX_BYTES;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
+}
+
+/// A tool result JSON string counts as a failure when it deserializes
+/// to an object carrying an `"error"` (registry/verification/truncation
+/// failures) or `"denied"` (gate denial) key — the same shapes
+/// [`AgentLoop::execute_tool_with_guards`] emits. Anything else (incl.
+/// non-object results) is treated as success.
+fn tool_result_succeeded(result_json: &str) -> bool {
+    match serde_json::from_str::<serde_json::Value>(result_json) {
+        Ok(serde_json::Value::Object(map)) => {
+            !map.contains_key("error") && !map.contains_key("denied")
+        }
+        _ => true,
+    }
+}
+
+/// Detect an `agent_spawn` tool result and extract its
+/// [`SpawnedTaskSummary`] (M4 D8). The tool result JSON shape is frozen
+/// by the M4 design (D4): `{task_id, child_conv_id, status, …}`. A
+/// denied or malformed result yields `None`.
+fn spawned_task_from_result(name: &str, result_json: &str) -> Option<SpawnedTaskSummary> {
+    if name != "agent_spawn" {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(result_json).ok()?;
+    let obj = value.as_object()?;
+    // A gate denial carries no task; skip it (the tool call itself is
+    // still recorded in `tool_calls`).
+    if obj.contains_key("denied") || obj.contains_key("error") {
+        return None;
+    }
+    Some(SpawnedTaskSummary {
+        task_id: obj.get("task_id")?.as_str()?.to_string(),
+        child_conv_id: obj.get("child_conv_id")?.as_str()?.to_string(),
+        status: obj.get("status")?.as_str()?.to_string(),
+    })
 }
 
 /// The core agent loop that processes inbound messages.
@@ -964,14 +1035,37 @@ impl<P: Platform> AgentLoop<P> {
         // 13. Save session
         self.sessions.save_session(&session).await?;
 
-        // 14. Build outbound reply (caller handles dispatch)
+        // 14. Build outbound reply (caller handles dispatch).
+        //
+        // M4 D8: thread the enriched loop result (real tool calls,
+        // finish reason, iterations, spawned subagents) through the
+        // envelope's free-form metadata map under a well-known key so
+        // the agent service's `result_from_outbound` can populate the
+        // `AgentChatResult` fields that were previously hardcoded. This
+        // mirrors the inbound `AgentChatParams.metadata` precedent and
+        // avoids widening the generic `OutboundMessage` bus envelope.
+        let mut metadata = std::collections::HashMap::new();
+        let result_meta = AgentLoopResultMeta {
+            tool_calls: tool_result.tool_calls,
+            finish_reason: tool_result.finish_reason,
+            iterations: tool_result.iterations,
+            spawned_tasks: tool_result.spawned_tasks,
+        };
+        match serde_json::to_value(&result_meta) {
+            Ok(v) => {
+                metadata.insert(AGENT_LOOP_RESULT_META_KEY.to_string(), v);
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to serialize agent loop result meta; result fields will default");
+            }
+        }
         let outbound = OutboundMessage {
             channel: msg.channel.clone(),
             chat_id: msg.chat_id.clone(),
             content: tool_result.text,
             reply_to: None,
             media: vec![],
-            metadata: Default::default(),
+            metadata,
         };
 
         debug!(session_key = %session_key, "message processed successfully");
@@ -1287,6 +1381,9 @@ impl<P: Platform> AgentLoop<P> {
         let max_iterations = self.config.defaults.max_tool_iterations.max(1) as usize;
         let mut total_hallucinations: usize = 0;
         let mut total_verified: usize = 0;
+        // M4 D8: accumulate the real result enrichment across iterations.
+        let mut tool_call_summaries: Vec<AgentChatToolCall> = Vec::new();
+        let mut spawned_tasks: Vec<SpawnedTaskSummary> = Vec::new();
         let workspace = self.workspace_path();
 
         for iteration in 0..max_iterations {
@@ -1398,6 +1495,11 @@ impl<P: Platform> AgentLoop<P> {
                     text,
                     hallucinations: total_hallucinations,
                     verified_successes: total_verified,
+                    tool_calls: tool_call_summaries,
+                    finish_reason: "stop".into(),
+                    // `iteration` is 0-based; this LLM round-trip ran.
+                    iterations: (iteration as u32).saturating_add(1),
+                    spawned_tasks,
                 });
             }
 
@@ -1567,7 +1669,7 @@ impl<P: Platform> AgentLoop<P> {
                 }
             }
 
-            for (id, _name, result_json) in &results {
+            for (id, name, result_json) in &results {
                 let content = if hallucinated_ids.contains(id) {
                     // Replace the success result with a verification failure error.
                     serde_json::json!({
@@ -1576,6 +1678,31 @@ impl<P: Platform> AgentLoop<P> {
                 } else {
                     result_json.clone()
                 };
+
+                // M4 D8: record a per-tool-call summary for the wire
+                // result. `arguments_preview` comes from the request-side
+                // tool input (matched by call id); `result_preview` and
+                // `success` reflect the post-verification `content`.
+                let arguments_preview = tool_calls
+                    .iter()
+                    .find(|(cid, _, _)| cid == id)
+                    .map(|(_, _, input)| {
+                        preview_truncate(&serde_json::to_string(input).unwrap_or_default())
+                    })
+                    .unwrap_or_default();
+                tool_call_summaries.push(AgentChatToolCall {
+                    name: name.clone(),
+                    arguments_preview,
+                    result_preview: preview_truncate(&content),
+                    success: tool_result_succeeded(&content),
+                });
+
+                // M4 D8: surface any subagent spawned this iteration.
+                // Detected from the real tool output (`result_json`),
+                // which for `agent_spawn` is never hallucination-replaced.
+                if let Some(task) = spawned_task_from_result(name, result_json) {
+                    spawned_tasks.push(task);
+                }
 
                 request.messages.push(LlmMessage {
                     role: "tool".into(),
@@ -4054,6 +4181,218 @@ mod tests {
         // run_tool_loop.
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(parsed["error"].is_string());
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    // ── M4 D8: result-enrichment ───────────────────────────────────────
+
+    #[test]
+    fn preview_truncate_leaves_short_strings_and_clips_long_ones() {
+        assert_eq!(preview_truncate("short"), "short");
+        let long = "y".repeat(TOOL_PREVIEW_MAX_BYTES + 50);
+        let clipped = preview_truncate(&long);
+        assert!(clipped.ends_with('…'));
+        // The retained prefix is at most the byte cap.
+        assert!(clipped.len() <= TOOL_PREVIEW_MAX_BYTES + '…'.len_utf8());
+    }
+
+    #[test]
+    fn tool_result_succeeded_detects_error_and_denial() {
+        assert!(tool_result_succeeded(r#"{"output":"ok"}"#));
+        assert!(!tool_result_succeeded(r#"{"error":"boom"}"#));
+        assert!(!tool_result_succeeded(r#"{"denied":true,"reason":"policy"}"#));
+        // Non-object results are treated as success.
+        assert!(tool_result_succeeded(r#""just a string""#));
+    }
+
+    #[test]
+    fn spawned_task_from_result_parses_agent_spawn_shape() {
+        let ok = r#"{"task_id":"t1","child_conv_id":"sub:P:01HQ","status":"completed","result":"4"}"#;
+        let task = spawned_task_from_result("agent_spawn", ok).expect("should parse");
+        assert_eq!(task.task_id, "t1");
+        assert_eq!(task.child_conv_id, "sub:P:01HQ");
+        assert_eq!(task.status, "completed");
+
+        // Wrong tool name → None.
+        assert!(spawned_task_from_result("echo", ok).is_none());
+        // Denied spawn carries no task.
+        assert!(spawned_task_from_result("agent_spawn", r#"{"denied":true}"#).is_none());
+        // Missing required field → None.
+        assert!(spawned_task_from_result("agent_spawn", r#"{"task_id":"t1"}"#).is_none());
+    }
+
+    #[tokio::test]
+    async fn handle_turn_threads_real_tool_calls_and_iterations() {
+        // A turn that runs one echo tool then answers must surface real
+        // tool_calls + iterations in the OutboundMessage metadata (D8).
+        let transport = Arc::new(E2eRecordingTransport::new());
+        let (agent, dir) = make_agent_loop(transport, "d8_toolcalls").await;
+
+        let inbound = InboundMessage {
+            channel: "cli".into(),
+            sender_id: "u".into(),
+            chat_id: "d8-chat".into(),
+            content: "please use the echo tool".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        let outbound = agent.handle_turn(inbound).await.unwrap();
+
+        let meta_value = outbound
+            .metadata
+            .get(AGENT_LOOP_RESULT_META_KEY)
+            .expect("outbound must carry the loop result meta");
+        let meta: AgentLoopResultMeta = serde_json::from_value(meta_value.clone()).unwrap();
+        assert_eq!(meta.finish_reason, "stop");
+        // Two LLM round-trips: tool_use then text.
+        assert_eq!(meta.iterations, 2);
+        assert_eq!(meta.tool_calls.len(), 1);
+        assert_eq!(meta.tool_calls[0].name, "echo");
+        assert!(meta.tool_calls[0].success);
+        assert!(meta.tool_calls[0].arguments_preview.contains("e2e-ping"));
+        // No spawns in this turn.
+        assert!(meta.spawned_tasks.is_empty());
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// A tool named `agent_spawn` returning the frozen D4 result shape.
+    struct SpawnStubTool;
+
+    #[async_trait]
+    impl Tool for SpawnStubTool {
+        fn name(&self) -> &str {
+            "agent_spawn"
+        }
+        fn description(&self) -> &str {
+            "Stub subagent spawner for tests"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": { "goal": { "type": "string" } },
+                "required": ["goal"]
+            })
+        }
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+        ) -> Result<serde_json::Value, crate::tools::registry::ToolError> {
+            Ok(serde_json::json!({
+                "task_id": "task-42",
+                "child_conv_id": "sub:d8-spawn-chat:01HQ",
+                "status": "completed",
+                "result": "4"
+            }))
+        }
+    }
+
+    /// Transport: emit an `agent_spawn` tool_use, then a text reply.
+    struct SpawnE2eTransport {
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmTransport for SpawnE2eTransport {
+        async fn complete(&self, _request: &TransportRequest) -> clawft_types::Result<LlmResponse> {
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if count == 0 {
+                Ok(LlmResponse {
+                    id: "spawn-resp-1".into(),
+                    content: vec![ContentBlock::ToolUse {
+                        id: "call-spawn-1".into(),
+                        name: "agent_spawn".into(),
+                        input: serde_json::json!({"goal": "answer 2+2"}),
+                    }],
+                    stop_reason: StopReason::ToolUse,
+                    usage: Usage {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        total_tokens: 0,
+                    },
+                    metadata: HashMap::new(),
+                })
+            } else {
+                Ok(LlmResponse {
+                    id: "spawn-resp-2".into(),
+                    content: vec![ContentBlock::Text {
+                        text: "The subagent answered 4".into(),
+                    }],
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage {
+                        input_tokens: 20,
+                        output_tokens: 8,
+                        total_tokens: 0,
+                    },
+                    metadata: HashMap::new(),
+                })
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_turn_surfaces_spawned_tasks_from_agent_spawn_result() {
+        // The headline D8 unit: a turn whose tool call is `agent_spawn`
+        // yields a real spawned_tasks[] entry in the result metadata.
+        let dir = temp_dir("d8_spawn");
+        let platform = Arc::new(NativePlatform::new());
+        let bus = Arc::new(MessageBus::new());
+        let sessions = SessionManager::with_dir(platform.clone(), dir.join("sessions"));
+        let memory = Arc::new(MemoryStore::with_paths(
+            dir.join("memory").join("MEMORY.md"),
+            dir.join("memory").join("HISTORY.md"),
+            platform.clone(),
+        ));
+        let skills = Arc::new(SkillsLoader::with_dir(dir.join("skills"), platform.clone()));
+        let context = ContextBuilder::new(test_config(), memory, skills, platform.clone());
+
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(SpawnStubTool));
+
+        let pipeline = make_pipeline(Arc::new(SpawnE2eTransport {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        }));
+
+        let agent = AgentLoop::new(
+            test_config(),
+            platform,
+            bus,
+            pipeline,
+            Arc::new(tools),
+            context,
+            Arc::new(sessions),
+            PermissionResolver::default_resolver(),
+        );
+
+        let inbound = InboundMessage {
+            channel: "cli".into(),
+            sender_id: "u".into(),
+            chat_id: "d8-spawn-chat".into(),
+            content: "spawn a subagent to compute 2+2".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        let outbound = agent.handle_turn(inbound).await.unwrap();
+
+        let meta: AgentLoopResultMeta = serde_json::from_value(
+            outbound
+                .metadata
+                .get(AGENT_LOOP_RESULT_META_KEY)
+                .expect("loop meta present")
+                .clone(),
+        )
+        .unwrap();
+        assert_eq!(meta.spawned_tasks.len(), 1, "one subagent should surface");
+        assert_eq!(meta.spawned_tasks[0].task_id, "task-42");
+        assert_eq!(meta.spawned_tasks[0].child_conv_id, "sub:d8-spawn-chat:01HQ");
+        assert_eq!(meta.spawned_tasks[0].status, "completed");
+        // The spawn tool call is also recorded in tool_calls.
+        assert!(meta.tool_calls.iter().any(|t| t.name == "agent_spawn"));
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

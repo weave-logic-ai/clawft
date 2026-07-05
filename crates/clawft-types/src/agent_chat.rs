@@ -117,13 +117,33 @@ pub struct AgentChatToolCall {
     pub success: bool,
 }
 
+/// Summary of one subagent spawned during a chat turn (M4 D8).
+///
+/// Emitted when the agent's tool loop calls `agent_spawn`. Lets the
+/// CLI / GUI render "agent kicked off N subagents (M done, K running)"
+/// without re-deriving the spawn tree from the forest. `status` is the
+/// stringified `TaskStatus` (`"running"` / `"completed"` / `"failed"` /
+/// `"exhausted"` / `"cancelled"` / `"denied"`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SpawnedTaskSummary {
+    /// Spawn task id (`SpawnHandle.task_id`).
+    pub task_id: String,
+    /// Child conversation id (`"sub:<parent>:<ulid>"`).
+    pub child_conv_id: String,
+    /// Task status at the time the parent turn finished.
+    pub status: String,
+}
+
 /// Result of `agent.chat`.
 ///
-/// Several fields (`tool_calls`, `prompt_tokens`, `completion_tokens`,
-/// `model`, `identity_source`) cannot always be populated end-to-end
-/// from a generic `OutboundMessage` envelope; the agent service's
-/// `dispatch` returns best-effort defaults (empty vec, 0, None) when
-/// the underlying loop result type does not carry the data.
+/// Several fields (`prompt_tokens`, `completion_tokens`, `model`,
+/// `identity_source`) cannot always be populated end-to-end from a
+/// generic `OutboundMessage` envelope; the agent service's `dispatch`
+/// returns best-effort defaults (0, None) when the underlying loop
+/// result type does not carry the data. Since M4 D8 the loop threads a
+/// real [`AgentLoopResultMeta`] through `OutboundMessage.metadata`, so
+/// `tool_calls` / `finish_reason` / `iterations` / `spawned_tasks`
+/// carry actual values.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentChatResult {
     /// Final assistant text after the tool loop terminates.
@@ -148,6 +168,46 @@ pub struct AgentChatResult {
     /// leaves this `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_source: Option<String>,
+    /// Subagents spawned during the turn (M4 D8). Absent on the wire
+    /// when empty; older clients that omit it deserialize to an empty
+    /// vec, so the field is fully backward-compatible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spawned_tasks: Vec<SpawnedTaskSummary>,
+}
+
+/// Well-known `OutboundMessage.metadata` key under which the daemon
+/// agent loop stashes the enriched turn result (M4 D8).
+///
+/// `OutboundMessage` is a generic bus envelope with no slots for the
+/// tool-call summary, finish reason, iteration count, or spawned-task
+/// list. Rather than widen the envelope, the loop serializes an
+/// [`AgentLoopResultMeta`] into the envelope's free-form `metadata`
+/// map under this key; the agent service's `result_from_outbound`
+/// reads it back. Mirrors the `AgentChatParams.metadata` precedent
+/// used for the inbound direction.
+pub const AGENT_LOOP_RESULT_META_KEY: &str = "agent_loop_result";
+
+/// Enriched loop-result summary threaded from the tool loop (in
+/// `clawft-core`) to the agent service's `result_from_outbound` via
+/// `OutboundMessage.metadata[AGENT_LOOP_RESULT_META_KEY]` (M4 D8).
+///
+/// Every field is `#[serde(default)]` so a missing key or a partial
+/// object degrades to the pre-M4 defaults rather than failing to
+/// deserialize.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentLoopResultMeta {
+    /// Tool calls executed during the loop, in order.
+    #[serde(default)]
+    pub tool_calls: Vec<AgentChatToolCall>,
+    /// Why the loop terminated (`"stop"`, `"max_iterations"`, …).
+    #[serde(default)]
+    pub finish_reason: String,
+    /// Number of LLM round-trips inside the loop.
+    #[serde(default)]
+    pub iterations: u32,
+    /// Subagents spawned during the turn.
+    #[serde(default)]
+    pub spawned_tasks: Vec<SpawnedTaskSummary>,
 }
 
 /// One externally-produced turn for the `agent.turn.record` RPC.
@@ -231,10 +291,93 @@ mod tests {
             completion_tokens: 0,
             model: None,
             identity_source: None,
+            spawned_tasks: Vec::new(),
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(!json.contains("\"model\""));
         assert!(!json.contains("\"identity_source\""));
         assert!(json.contains("\"tool_calls\":[]"));
+        // Empty spawned_tasks must not appear on the wire (backward-compat).
+        assert!(!json.contains("\"spawned_tasks\""));
+    }
+
+    #[test]
+    fn agent_chat_result_serializes_spawned_tasks_when_present() {
+        let r = AgentChatResult {
+            assistant_text: "kicked off work".into(),
+            tool_calls: Vec::new(),
+            finish_reason: "stop".into(),
+            iterations: 2,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            model: None,
+            identity_source: None,
+            spawned_tasks: vec![SpawnedTaskSummary {
+                task_id: "task-1".into(),
+                child_conv_id: "sub:P:01HQ".into(),
+                status: "completed".into(),
+            }],
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"spawned_tasks\""));
+        assert!(json.contains("\"task-1\""));
+        // Round-trips back to the same summary.
+        let back: AgentChatResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.spawned_tasks.len(), 1);
+        assert_eq!(back.spawned_tasks[0].status, "completed");
+    }
+
+    #[test]
+    fn agent_chat_result_old_client_without_spawned_tasks_deserializes() {
+        // A pre-M4 payload omits spawned_tasks entirely; it must
+        // deserialize to an empty vec, not fail.
+        let json = r#"{
+            "assistant_text": "hi",
+            "tool_calls": [],
+            "finish_reason": "stop",
+            "iterations": 1,
+            "prompt_tokens": 0,
+            "completion_tokens": 0
+        }"#;
+        let r: AgentChatResult = serde_json::from_str(json).unwrap();
+        assert!(r.spawned_tasks.is_empty());
+    }
+
+    #[test]
+    fn agent_loop_result_meta_round_trips_through_metadata_value() {
+        // The loop stashes this as a serde_json::Value in
+        // OutboundMessage.metadata; the service reads it back.
+        let meta = AgentLoopResultMeta {
+            tool_calls: vec![AgentChatToolCall {
+                name: "agent_spawn".into(),
+                arguments_preview: "{\"goal\":\"answer 2+2\"}".into(),
+                result_preview: "{\"status\":\"completed\"}".into(),
+                success: true,
+            }],
+            finish_reason: "stop".into(),
+            iterations: 3,
+            spawned_tasks: vec![SpawnedTaskSummary {
+                task_id: "t1".into(),
+                child_conv_id: "sub:P:01HQ".into(),
+                status: "completed".into(),
+            }],
+        };
+        let value = serde_json::to_value(&meta).unwrap();
+        let back: AgentLoopResultMeta = serde_json::from_value(value).unwrap();
+        assert_eq!(back.iterations, 3);
+        assert_eq!(back.tool_calls.len(), 1);
+        assert_eq!(back.spawned_tasks.len(), 1);
+        assert_eq!(back.spawned_tasks[0].task_id, "t1");
+    }
+
+    #[test]
+    fn agent_loop_result_meta_partial_object_uses_defaults() {
+        // A partial/absent object degrades to defaults rather than
+        // failing to deserialize.
+        let back: AgentLoopResultMeta = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(back.iterations, 0);
+        assert!(back.finish_reason.is_empty());
+        assert!(back.tool_calls.is_empty());
+        assert!(back.spawned_tasks.is_empty());
     }
 }

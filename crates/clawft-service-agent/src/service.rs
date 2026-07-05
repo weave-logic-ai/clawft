@@ -47,6 +47,7 @@ use tracing::{debug, warn};
 
 use crate::protocol::{AgentChatParams, AgentChatResult};
 use crate::session_tier::SessionTier;
+use clawft_types::agent_chat::{AGENT_LOOP_RESULT_META_KEY, AgentLoopResultMeta};
 
 /// Errors returned by [`AgentService::dispatch`].
 #[derive(Debug, thiserror::Error)]
@@ -470,31 +471,48 @@ fn last_user_content(messages: &[crate::protocol::AgentChatMessage]) -> Option<S
 /// Convert an [`OutboundMessage`] into the wire-shape
 /// [`AgentChatResult`].
 ///
-/// Several fields cannot be populated from `OutboundMessage` alone —
-/// it is a generic bus envelope without token counts or tool-call
-/// summaries. C1's contract is "pass through what we have, default
-/// the rest, trace what's missing"; richer plumbing lands when the
-/// loop's result type is enriched in C2/D3.
+/// Token counts, `model`, and `identity_source` still cannot be
+/// populated from `OutboundMessage` alone (it is a generic bus
+/// envelope) and stay defaulted here — the daemon injects
+/// `identity_source` at the wire boundary. Since M4 D8 the loop threads
+/// an [`AgentLoopResultMeta`] through `OutboundMessage.metadata` under
+/// [`AGENT_LOOP_RESULT_META_KEY`], so `tool_calls`, `finish_reason`,
+/// `iterations`, and `spawned_tasks` now carry real values. When the
+/// key is absent (a non-loop outbound, or an older producer) the fields
+/// fall back to the pre-M4 defaults.
 fn result_from_outbound(outbound: OutboundMessage, _params: &AgentChatParams) -> AgentChatResult {
+    // M4 D8: read the enriched loop result the daemon agent loop stashed
+    // in the envelope metadata. A missing/partial object degrades to
+    // `AgentLoopResultMeta::default()` rather than failing the turn.
+    let meta = outbound
+        .metadata
+        .get(AGENT_LOOP_RESULT_META_KEY)
+        .and_then(|v| serde_json::from_value::<AgentLoopResultMeta>(v.clone()).ok())
+        .unwrap_or_default();
+    let finish_reason = if meta.finish_reason.is_empty() {
+        "stop".into()
+    } else {
+        meta.finish_reason
+    };
     debug!(
         chat_id = %outbound.chat_id,
+        iterations = meta.iterations,
+        tool_calls = meta.tool_calls.len(),
+        spawned_tasks = meta.spawned_tasks.len(),
         "agent.chat result populated from OutboundMessage; tokens/model/identity_source default"
     );
     AgentChatResult {
         assistant_text: outbound.content,
-        // OutboundMessage doesn't carry the loop's tool-call summary;
-        // C2/D3 will surface it when the loop's result type grows.
-        tool_calls: Vec::new(),
-        // Same — the spike sets a real reason ("stop", "max_iterations",
-        // …) but `OutboundMessage` doesn't have a slot for it. Use a
-        // neutral default until the loop result type is enriched.
-        finish_reason: "stop".into(),
-        // Populated end-to-end in C2/D3.
-        iterations: 0,
+        tool_calls: meta.tool_calls,
+        finish_reason,
+        iterations: meta.iterations,
+        // Still not routed through the loop result; default until a
+        // token-accounting increment surfaces them.
         prompt_tokens: 0,
         completion_tokens: 0,
         model: None,
         identity_source: None,
+        spawned_tasks: meta.spawned_tasks,
     }
 }
 
@@ -609,6 +627,8 @@ mod tests {
 
     #[test]
     fn result_from_outbound_marks_known_shortfalls() {
+        // No loop metadata on the envelope (e.g. a non-loop outbound):
+        // enriched fields fall back to their pre-M4 defaults.
         let out = OutboundMessage {
             channel: "agent.chat".into(),
             chat_id: "c".into(),
@@ -619,12 +639,80 @@ mod tests {
         };
         let r = result_from_outbound(out, &params_for("c", ""));
         assert_eq!(r.assistant_text, "hi");
-        // Documented C1 shortfalls: tool_calls empty, tokens 0,
-        // model and identity_source None until C2/D3.
         assert!(r.tool_calls.is_empty());
+        assert_eq!(r.finish_reason, "stop");
+        assert_eq!(r.iterations, 0);
+        assert!(r.spawned_tasks.is_empty());
+        // Still defaulted: tokens 0, model/identity_source None.
         assert_eq!(r.prompt_tokens, 0);
         assert_eq!(r.completion_tokens, 0);
         assert!(r.model.is_none());
         assert!(r.identity_source.is_none());
+    }
+
+    #[test]
+    fn result_from_outbound_reads_enriched_loop_meta() {
+        // M4 D8: the daemon loop stashes AgentLoopResultMeta under the
+        // well-known key; result_from_outbound must surface it.
+        use clawft_types::agent_chat::{AgentChatToolCall, SpawnedTaskSummary};
+        let meta = AgentLoopResultMeta {
+            tool_calls: vec![AgentChatToolCall {
+                name: "agent_spawn".into(),
+                arguments_preview: "{\"goal\":\"answer 2+2\"}".into(),
+                result_preview: "{\"status\":\"completed\"}".into(),
+                success: true,
+            }],
+            finish_reason: "stop".into(),
+            iterations: 2,
+            spawned_tasks: vec![SpawnedTaskSummary {
+                task_id: "task-1".into(),
+                child_conv_id: "sub:c:01HQ".into(),
+                status: "completed".into(),
+            }],
+        };
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            AGENT_LOOP_RESULT_META_KEY.to_string(),
+            serde_json::to_value(&meta).unwrap(),
+        );
+        let out = OutboundMessage {
+            channel: "agent.chat".into(),
+            chat_id: "c".into(),
+            content: "kicked off a subagent".into(),
+            reply_to: None,
+            media: Vec::new(),
+            metadata,
+        };
+        let r = result_from_outbound(out, &params_for("c", ""));
+        assert_eq!(r.iterations, 2);
+        assert_eq!(r.tool_calls.len(), 1);
+        assert_eq!(r.tool_calls[0].name, "agent_spawn");
+        assert_eq!(r.spawned_tasks.len(), 1);
+        assert_eq!(r.spawned_tasks[0].task_id, "task-1");
+        assert_eq!(r.spawned_tasks[0].status, "completed");
+    }
+
+    #[test]
+    fn result_from_outbound_ignores_garbage_meta() {
+        // A malformed value under the key must not fail the turn; the
+        // fields degrade to defaults.
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            AGENT_LOOP_RESULT_META_KEY.to_string(),
+            serde_json::json!("not-an-object"),
+        );
+        let out = OutboundMessage {
+            channel: "agent.chat".into(),
+            chat_id: "c".into(),
+            content: "hi".into(),
+            reply_to: None,
+            media: Vec::new(),
+            metadata,
+        };
+        let r = result_from_outbound(out, &params_for("c", ""));
+        assert_eq!(r.finish_reason, "stop");
+        assert_eq!(r.iterations, 0);
+        assert!(r.tool_calls.is_empty());
+        assert!(r.spawned_tasks.is_empty());
     }
 }

@@ -605,8 +605,8 @@ pub struct LlmPromptResult {
 // paths (`clawft_weave::protocol::AgentChatParams`, etc.).
 
 pub use clawft_types::agent_chat::{
-    AgentChatMessage, AgentChatParams, AgentChatResult, AgentChatToolCall,
-    AgentTurnRecordParams, AgentTurnRecordResult, RecordedTurn,
+    AgentChatMessage, AgentChatParams, AgentChatResult, AgentChatToolCall, AgentTurnRecordParams,
+    AgentTurnRecordResult, RecordedTurn, SpawnedTaskSummary,
 };
 
 // ── Terminal RPCs ─────────────────────────────────────────

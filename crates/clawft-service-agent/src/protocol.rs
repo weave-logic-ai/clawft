@@ -12,5 +12,6 @@
 //! the canonical definitions moved upstream.
 
 pub use clawft_types::agent_chat::{
-    AgentChatMessage, AgentChatParams, AgentChatResult, AgentChatToolCall, default_conv_id,
+    AgentChatMessage, AgentChatParams, AgentChatResult, AgentChatToolCall, SpawnedTaskSummary,
+    default_conv_id,
 };
