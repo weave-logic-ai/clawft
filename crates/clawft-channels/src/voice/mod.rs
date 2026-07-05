@@ -62,8 +62,8 @@ pub use capture::{CaptureProcessor, ImpulseSink, VoiceImpulse};
 pub use edge_reflex::{EdgeCommand, EdgeReflex, ReflexState};
 pub use paralinguistics::{classify_paralinguistics, ParalinguisticInput};
 pub use prosody::{
-    analyze_prosody, capture_health, emotion_from_prosody, estimate_f0_track, CaptureHealth,
-    F0Track, ProsodyInput,
+    analyze_prosody, capture_health, emotion_from_prosody, emotion_from_prosody_baseline,
+    estimate_f0_track, BaselineDeviation, CaptureHealth, F0Track, ProsodyInput, SessionBaseline,
 };
 pub use ser::{refine_emotion, DspSer, SerModel, SerPrediction};
 pub use channel::{

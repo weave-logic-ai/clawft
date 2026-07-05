@@ -39,7 +39,9 @@ use super::analysis::{
 };
 use super::paralinguistics::{classify_paralinguistics, ParalinguisticInput};
 use super::policy::{VoiceAnswerPolicy, VoiceLlm};
-use super::prosody::{analyze_prosody, capture_health, emotion_from_prosody, ProsodyInput};
+use super::prosody::{
+    analyze_prosody, capture_health, emotion_from_prosody_baseline, ProsodyInput, SessionBaseline,
+};
 use super::ser::{refine_emotion, DspSer, SerModel};
 use super::speaker::{SpeakerEmbedder, SpeakerId, SpeakerRegistry};
 use super::stt::{SttBackend, Utterance};
@@ -317,6 +319,10 @@ struct Decoder {
     ser: Arc<dyn SerModel>,
     observer: Arc<dyn ConversationObserver>,
     config: TalkModeConfig,
+    /// Session-relative f0/energy baseline (§round-4). Shared across turns (the
+    /// listen worker holds a clone of the same `Arc`), so arousal is scored on
+    /// deviation from the speaker's running baseline, not just absolutes.
+    baseline: Arc<Mutex<SessionBaseline>>,
 }
 
 impl Decoder {
@@ -477,8 +483,15 @@ impl Decoder {
             voiced_ms,
             tokens: &detail.tokens,
         });
+        // Score arousal against the session baseline (deviation), then fold this
+        // turn in. Zero deviation on the first turn (cold start = absolute).
+        let deviation = self
+            .baseline
+            .lock()
+            .expect("session baseline poisoned")
+            .observe(prosody.f0_mean_hz, health.rms_dbfs_mean);
         let emotion = refine_emotion(
-            emotion_from_prosody(&prosody),
+            emotion_from_prosody_baseline(&prosody, deviation),
             self.ser.predict(&utt.samples, sr),
         );
         let paralinguistics = classify_paralinguistics(&ParalinguisticInput {
@@ -604,6 +617,7 @@ impl<M: EndpointModel> TalkModeController<M> {
             ser: Arc::new(DspSer),
             observer: observer.clone(),
             config: config.clone(),
+            baseline: Arc::new(Mutex::new(SessionBaseline::new())),
         };
         Self {
             endpointer,

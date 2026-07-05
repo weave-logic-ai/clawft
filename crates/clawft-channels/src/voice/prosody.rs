@@ -90,6 +90,60 @@ pub struct CaptureHealth {
     pub dc_offset: i32,
 }
 
+/// One turn's deviation from the session running baseline (zeros before a
+/// baseline exists). Fed into [`emotion_from_prosody_baseline`].
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct BaselineDeviation {
+    /// This turn's mean f0 vs the baseline f0, in semitones (positive = higher).
+    pub f0_semitones: f32,
+    /// This turn's mean energy vs the baseline energy, in dB (positive = louder).
+    pub energy_db: f32,
+}
+
+/// Session-level speaker-relative baseline — an EMA of per-turn f0 + energy.
+/// No speaker-ID (per-session is enough for Wave 1); arousal is scored partly
+/// on the DEVIATION from this so a personal jump reads as the surprise it is,
+/// which absolute thresholds miss. The record's honesty flags cover the
+/// cold-start first turn (no baseline → zero deviation → absolute behaviour).
+#[derive(Debug, Clone, Default)]
+pub struct SessionBaseline {
+    f0_hz: Option<f32>,
+    energy_dbfs: Option<f32>,
+}
+
+impl SessionBaseline {
+    /// A fresh baseline with no history.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return this turn's deviation from the running baseline (zeros on the
+    /// first voiced turn), THEN fold the turn into the EMA. `f0_hz <= 0` (an
+    /// unvoiced turn) does not move the pitch baseline.
+    pub fn observe(&mut self, f0_hz: f32, energy_dbfs: f32) -> BaselineDeviation {
+        const ALPHA: f32 = 0.3;
+        let f0_semitones = match self.f0_hz {
+            Some(base) if base > 0.0 && f0_hz > 0.0 => 12.0 * (f0_hz / base).log2(),
+            _ => 0.0,
+        };
+        let energy_db = self.energy_dbfs.map(|base| energy_dbfs - base).unwrap_or(0.0);
+        if f0_hz > 0.0 {
+            self.f0_hz = Some(
+                self.f0_hz
+                    .map_or(f0_hz, |b| b * (1.0 - ALPHA) + f0_hz * ALPHA),
+            );
+        }
+        self.energy_dbfs = Some(
+            self.energy_dbfs
+                .map_or(energy_dbfs, |b| b * (1.0 - ALPHA) + energy_dbfs * ALPHA),
+        );
+        BaselineDeviation {
+            f0_semitones,
+            energy_db,
+        }
+    }
+}
+
 /// Estimate the pitch track over an utterance via YIN-lite.
 pub fn estimate_f0_track(samples: &[i16], sample_rate: u32) -> F0Track {
     let sr = sample_rate.max(1) as f32;
@@ -307,22 +361,39 @@ pub fn analyze_prosody(input: &ProsodyInput) -> ProsodyAnalysis {
 /// DSP-inferable. `source` is `prosody-dsp`; a SER model overrides valence +
 /// label (and dominance) via [`crate::voice::ser`] while DSP arousal stays.
 pub fn emotion_from_prosody(p: &ProsodyAnalysis) -> EmotionAnalysis {
-    // Normalize each cue into [0,1] against a plausible speech span, then
-    // blend. These weights favour pitch variability + rate (the strongest
-    // arousal correlates) with energy dynamics as support.
+    emotion_from_prosody_baseline(p, BaselineDeviation::default())
+}
+
+/// [`emotion_from_prosody`] with a session-relative baseline. A personal jump
+/// above the speaker's running f0/energy baseline is a strong arousal/surprise
+/// cue that absolute thresholds underweight — e.g. "Really?" at 190 Hz over a
+/// ~108 Hz session baseline is a +9-semitone spike. `dev` is zero on the first
+/// turn (no baseline), so this reduces to the absolute behaviour.
+pub fn emotion_from_prosody_baseline(
+    p: &ProsodyAnalysis,
+    dev: BaselineDeviation,
+) -> EmotionAnalysis {
+    // Absolute cues, normalized into [0,1] against a plausible speech span.
     let pitch_var = norm(p.f0_range_semitones, 2.0, 14.0);
     let rate = norm(p.rate_tokens_per_s, 2.0, 9.0);
     let dyn_db = norm(p.energy_dynamics_db, 6.0, 28.0);
-    let arousal = (0.45 * pitch_var + 0.35 * rate + 0.20 * dyn_db).clamp(0.0, 1.0);
+    // Personal deviation: only UPWARD jumps raise arousal (a drop below one's
+    // baseline is not itself activating).
+    let f0_jump = norm(dev.f0_semitones.max(0.0), 2.0, 12.0);
+    let energy_jump = norm(dev.energy_db.max(0.0), 3.0, 15.0);
+    let arousal = (0.40 * pitch_var + 0.30 * rate + 0.15 * dyn_db + 0.30 * f0_jump
+        + 0.15 * energy_jump)
+        .clamp(0.0, 1.0);
 
-    // Valence: only a lean. Higher/rising pitch skews mildly positive; a
-    // strong downward slope skews mildly negative. Kept small — it's Low conf.
+    // Valence: a lean off pitch height/slope; a big upward jump reads slightly
+    // more positive (surprise/excitement). Kept small — it's Low confidence.
     let height = if p.f0_mean_hz > 0.0 {
         norm(p.f0_mean_hz, 90.0, 260.0) - 0.5
     } else {
         0.0
     };
-    let valence = (0.4 * height + 0.3 * p.f0_slope.clamp(-1.0, 1.0)).clamp(-1.0, 1.0);
+    let valence =
+        (0.4 * height + 0.3 * p.f0_slope.clamp(-1.0, 1.0) + 0.15 * f0_jump).clamp(-1.0, 1.0);
 
     EmotionAnalysis {
         valence,
@@ -461,25 +532,40 @@ fn pause_structure(tokens: &[TranscriptToken]) -> (u32, u32) {
     (count, mean)
 }
 
-/// Coarse categorical label from the VAD quadrant — deliberately a small,
-/// prosody-honest set. A SER model replaces this with a real label.
+/// Coarse categorical label over the VAD (arousal × valence) quadrants —
+/// deliberately a small, prosody-honest set. A SER model replaces it with a
+/// real label. The high threshold sits at 0.55 so a genuine spike like
+/// "Really?" (arousal ~0.6, positive valence) reads "excited", not "neutral".
 fn coarse_label(arousal: f32, valence: f32) -> String {
-    let label = if arousal >= 0.6 {
-        if valence <= -0.15 {
-            "agitated"
-        } else if valence >= 0.15 {
+    let v_pos = valence >= 0.15;
+    let v_neg = valence <= -0.15;
+    let label = if arousal >= 0.55 {
+        // High arousal.
+        if v_pos {
             "excited"
+        } else if v_neg {
+            "agitated"
         } else {
-            "activated"
+            "surprised" // activated but valence-ambiguous
         }
     } else if arousal < 0.35 {
-        if valence <= -0.15 {
+        // Low arousal.
+        if v_pos {
+            "content"
+        } else if v_neg {
             "subdued"
         } else {
             "calm"
         }
     } else {
-        "neutral"
+        // Middle arousal.
+        if v_pos {
+            "content"
+        } else if v_neg {
+            "tense"
+        } else {
+            "neutral"
+        }
     };
     label.to_string()
 }
@@ -683,5 +769,55 @@ mod tests {
         let e = emotion_from_prosody(&ProsodyAnalysis::default());
         assert_eq!(e.dominance, 0.0);
         assert_eq!(e.source, EmotionSource::ProsodyDsp);
+    }
+
+    #[test]
+    fn label_map_over_vad_quadrants() {
+        // "Really?" (0.58 / +0.34) must read excited, NOT neutral (round-4).
+        assert_eq!(coarse_label(0.58, 0.34), "excited");
+        // "Just do it." (0.73 / -0.42) stays agitated (confirmed correct live).
+        assert_eq!(coarse_label(0.73, -0.42), "agitated");
+        assert_eq!(coarse_label(0.60, 0.0), "surprised"); // high, ambiguous valence
+        assert_eq!(coarse_label(0.20, 0.30), "content"); // low + positive
+        assert_eq!(coarse_label(0.20, -0.30), "subdued"); // low + negative
+        assert_eq!(coarse_label(0.20, 0.0), "calm"); // low + neutral
+        assert_eq!(coarse_label(0.45, 0.0), "neutral"); // middle + neutral
+    }
+
+    #[test]
+    fn baseline_deviation_raises_arousal() {
+        let p = ProsodyAnalysis {
+            f0_mean_hz: 190.0,
+            f0_range_semitones: 5.0,
+            rate_tokens_per_s: 3.0,
+            energy_dynamics_db: 10.0,
+            confidence: Confidence::Medium,
+            ..ProsodyAnalysis::default()
+        };
+        let flat = emotion_from_prosody_baseline(&p, BaselineDeviation::default());
+        let jumped = emotion_from_prosody_baseline(
+            &p,
+            BaselineDeviation {
+                f0_semitones: 9.0,
+                energy_db: 6.0,
+            },
+        );
+        assert!(
+            jumped.arousal > flat.arousal + 0.15,
+            "a +9 st personal jump must raise arousal: {} vs {}",
+            jumped.arousal,
+            flat.arousal
+        );
+    }
+
+    #[test]
+    fn session_baseline_first_turn_zero_then_deviation() {
+        let mut b = SessionBaseline::new();
+        // First turn: no baseline yet → zero deviation, current behaviour.
+        assert_eq!(b.observe(108.0, -30.0), BaselineDeviation::default());
+        // A later 190 Hz / louder turn is a ~+9.6 st, +5 dB personal spike.
+        let d = b.observe(190.0, -25.0);
+        assert!(d.f0_semitones > 8.0, "jump {} should be ~+9.6 st", d.f0_semitones);
+        assert!(d.energy_db > 4.0, "louder by ~5 dB, got {}", d.energy_db);
     }
 }
