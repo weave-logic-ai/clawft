@@ -78,6 +78,8 @@ pub mod crossref;
 #[cfg(feature = "ecc")]
 pub mod democritus;
 #[cfg(feature = "ecc")]
+pub mod duplex;
+#[cfg(feature = "ecc")]
 pub mod embedding;
 #[cfg(feature = "ecc")]
 pub mod embedding_onnx;
@@ -344,6 +346,11 @@ pub use embedding_onnx::{
 pub use environment::{
     AuditLevel, Environment, EnvironmentClass, EnvironmentError, EnvironmentManager,
     GovernanceBranches, GovernanceScope, LearningMode,
+};
+#[cfg(feature = "ecc")]
+pub use duplex::{
+    DuplexChannel, DuplexImpulse, DuplexState, EdgeCommand, FloorVerdict, MediaPayload, PayloadKind,
+    StreamObservation,
 };
 pub use error::{KernelError, KernelResult};
 #[cfg(feature = "ecc")]

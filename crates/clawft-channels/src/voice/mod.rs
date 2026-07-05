@@ -38,6 +38,7 @@
 
 pub mod capture;
 pub mod channel;
+pub mod edge_reflex;
 pub mod policy;
 pub mod speaker;
 pub mod stt;
@@ -49,6 +50,7 @@ pub mod vad;
 pub mod wav;
 
 pub use capture::{CaptureProcessor, ImpulseSink, VoiceImpulse};
+pub use edge_reflex::{EdgeCommand, EdgeReflex, ReflexState};
 pub use channel::{
     AudioSegment, AudioSource, PlaybackSink, VoiceChannelAdapter, VoiceChannelAdapterFactory,
 };
