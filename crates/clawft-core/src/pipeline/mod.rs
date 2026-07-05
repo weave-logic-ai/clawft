@@ -69,6 +69,7 @@ mod factory_tests {
             temperature: None,
             auth_context: None,
             complexity_boost: 0.0,
+            tool_choice: None,
         };
         let resp = clawft_types::provider::LlmResponse {
             id: "test".into(),
@@ -101,6 +102,7 @@ mod factory_tests {
             temperature: None,
             auth_context: None,
             complexity_boost: 0.0,
+            tool_choice: None,
         };
         let resp = clawft_types::provider::LlmResponse {
             id: "test".into(),
@@ -150,6 +152,7 @@ mod factory_tests {
             temperature: None,
             auth_context: None,
             complexity_boost: 0.0,
+            tool_choice: None,
         };
         let resp = clawft_types::provider::LlmResponse {
             id: "test".into(),

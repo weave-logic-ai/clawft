@@ -68,6 +68,7 @@ impl LlmProvider for BrowserLlmAdapter {
         tools: &[serde_json::Value],
         max_tokens: Option<i32>,
         temperature: Option<f64>,
+        tool_choice: Option<&serde_json::Value>,
     ) -> Result<serde_json::Value, String> {
         let chat_messages: Vec<ChatMessage> =
             messages.iter().map(convert_value_to_message).collect();
@@ -79,6 +80,7 @@ impl LlmProvider for BrowserLlmAdapter {
             temperature,
             tools: tools.to_vec(),
             stream: None,
+            tool_choice: tool_choice.cloned(),
         };
 
         debug!(

@@ -102,6 +102,7 @@ mod tests {
             temperature: None,
             auth_context: None,
             complexity_boost: 0.0,
+            tool_choice: None,
         }
     }
 
@@ -138,6 +139,7 @@ mod tests {
             temperature: Some(0.0),
             auth_context: None,
             complexity_boost: 0.0,
+            tool_choice: None,
         };
         let profile = TaskProfile {
             task_type: TaskType::CodeGeneration,

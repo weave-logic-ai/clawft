@@ -47,7 +47,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tracing::debug;
 
-use clawft_service_llm::{ChatMessage, ChatResponse, LlmClient, Tool, ToolCall, ToolCallFunction};
+use clawft_service_llm::{
+    ChatMessage, ChatResponse, LlmClient, Tool, ToolCall, ToolCallFunction, ToolChoice,
+};
 
 use super::transport::LlmProvider;
 
@@ -92,10 +94,34 @@ impl LlmProvider for ServiceLlmAdapter {
         tools: &[serde_json::Value],
         max_tokens: Option<i32>,
         temperature: Option<f64>,
+        tool_choice: Option<&serde_json::Value>,
     ) -> Result<serde_json::Value, String> {
         let chat_messages: Vec<ChatMessage> = messages.iter().map(value_to_message).collect();
+        let choice = tool_choice.and_then(value_to_tool_choice);
+
+        // When the caller pins a specific tool (`tool_choice = {function:
+        // name}`), narrow the advertised tool set to just that tool. This
+        // maximizes the odds the pin is honored and rules out the model
+        // firing a *different* tool. Note: enforcement is ultimately
+        // server-side — llama-server + Hermes treats `tool_choice` as
+        // advisory once a system prompt is present and may still answer in
+        // text, so this improves but does not guarantee forcing on that
+        // stack. `Auto` / `None` / `Required` leave the tool set untouched.
+        let forced_name = match &choice {
+            Some(ToolChoice::Function(n)) => Some(n.as_str()),
+            _ => None,
+        };
         let parsed_tools: Vec<Tool> = tools
             .iter()
+            .filter(|t| match forced_name {
+                Some(name) => {
+                    t.get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|n| n.as_str())
+                        == Some(name)
+                }
+                None => true,
+            })
             .filter_map(|t| match serde_json::from_value::<Tool>(t.clone()) {
                 Ok(parsed) => Some(parsed),
                 Err(e) => {
@@ -121,7 +147,7 @@ impl LlmProvider for ServiceLlmAdapter {
 
         let resp = self
             .client
-            .complete_with_tools(chat_messages, parsed_tools, None, temp, max_tok)
+            .complete_with_tools(chat_messages, parsed_tools, choice, temp, max_tok)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -171,6 +197,40 @@ fn value_to_message(value: &serde_json::Value) -> ChatMessage {
         tool_calls,
         tool_call_id,
     }
+}
+
+/// Parse a pipeline `tool_choice` [`serde_json::Value`] into the narrow
+/// client's [`ToolChoice`].
+///
+/// Accepts the OpenAI-standard forms carried through
+/// `AgentChatParams.metadata["tool_choice"]`:
+/// - the string `"auto"` / `"none"` / `"required"`;
+/// - an object `{"type":"function","function":{"name":"…"}}` (or the
+///   shorthand `{"name":"…"}`) pinning a specific tool.
+///
+/// Returns `None` for anything unrecognized so a malformed override
+/// degrades to the server default rather than failing the turn.
+fn value_to_tool_choice(value: &serde_json::Value) -> Option<ToolChoice> {
+    if let Some(s) = value.as_str() {
+        return match s {
+            "auto" => Some(ToolChoice::Auto),
+            "none" => Some(ToolChoice::None),
+            "required" | "any" => Some(ToolChoice::Required),
+            _ => None,
+        };
+    }
+    if let Some(obj) = value.as_object() {
+        // {"type":"function","function":{"name":"X"}} or {"name":"X"}.
+        let name = obj
+            .get("function")
+            .and_then(|f| f.get("name"))
+            .or_else(|| obj.get("name"))
+            .and_then(|n| n.as_str());
+        if let Some(name) = name {
+            return Some(ToolChoice::Function(name.to_string()));
+        }
+    }
+    None
 }
 
 /// Convert a typed [`ChatResponse`] into the OpenAI-shape JSON the
@@ -422,7 +482,7 @@ mod tests {
 
         let messages = vec![serde_json::json!({"role":"user","content":"hi"})];
         let v = adapter
-            .complete("Qwen3.6-35B", &messages, &[], None, None)
+            .complete("Qwen3.6-35B", &messages, &[], None, None, None)
             .await
             .expect("adapter call should succeed");
 
@@ -487,6 +547,7 @@ mod tests {
                 &tools,
                 None,
                 None,
+                None,
             )
             .await
             .expect("adapter tool-call round-trip should succeed");
@@ -498,5 +559,35 @@ mod tests {
         assert_eq!(tcs[0]["id"], "call_42");
         assert_eq!(tcs[0]["function"]["name"], "ls");
         assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
+    }
+
+    #[test]
+    fn value_to_tool_choice_parses_openai_forms() {
+        // ToolChoice has no PartialEq; assert via its wire serialization
+        // (the exact bytes the llama-server body will carry).
+        let ser = |v: serde_json::Value| {
+            value_to_tool_choice(&v).map(|tc| serde_json::to_value(&tc).unwrap())
+        };
+
+        assert_eq!(ser(serde_json::json!("auto")), Some(serde_json::json!("auto")));
+        assert_eq!(ser(serde_json::json!("none")), Some(serde_json::json!("none")));
+        assert_eq!(
+            ser(serde_json::json!("required")),
+            Some(serde_json::json!("required"))
+        );
+        // OpenAI-standard named form round-trips to the same object shape.
+        assert_eq!(
+            ser(serde_json::json!({"type":"function","function":{"name":"agent_spawn"}})),
+            Some(serde_json::json!({"type":"function","function":{"name":"agent_spawn"}}))
+        );
+        // Shorthand {"name":…} is accepted and normalizes to the full form.
+        assert_eq!(
+            ser(serde_json::json!({"name":"agent_spawn"})),
+            Some(serde_json::json!({"type":"function","function":{"name":"agent_spawn"}}))
+        );
+        // Unrecognized values degrade to None (server default), not an error.
+        assert_eq!(ser(serde_json::json!("bogus")), None);
+        assert_eq!(ser(serde_json::json!(42)), None);
+        assert_eq!(ser(serde_json::json!({"foo":"bar"})), None);
     }
 }

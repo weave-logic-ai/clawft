@@ -729,6 +729,7 @@ mod tests {
             temperature: Some(0.7),
             tools: Vec::new(),
             stream: None,
+            tool_choice: None,
         };
         let json = serde_json::to_value(&request).unwrap();
         assert_eq!(json["model"], "hermes-3-llama-3.1-8b");

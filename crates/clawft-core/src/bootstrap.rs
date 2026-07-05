@@ -1024,6 +1024,7 @@ mod tests {
             tools: vec![],
             max_tokens: Some(10),
             temperature: Some(0.0),
+            tool_choice: None,
         };
 
         let result = pipeline.transport.complete(&transport_req).await;

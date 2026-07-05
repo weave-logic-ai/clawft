@@ -66,6 +66,7 @@ impl LocalProviderVoiceLlm {
             temperature: Some(self.temperature),
             tools: Vec::new(), // tool-calling is OUT of voice scope (ADR-061 §3)
             stream: None,
+            tool_choice: None, // voice never forces tools (ADR-061 §3)
         }
     }
 }

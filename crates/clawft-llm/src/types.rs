@@ -102,6 +102,13 @@ pub struct ChatRequest {
     /// Whether to stream the response.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
+
+    /// Tool-selection strategy passed straight through to the server
+    /// (OpenAI `tool_choice`: the string `"auto"`/`"none"`/`"required"`
+    /// or a `{"type":"function","function":{"name":…}}` object). `None`
+    /// omits the field, preserving the server's default behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<serde_json::Value>,
 }
 
 impl ChatRequest {
@@ -114,6 +121,7 @@ impl ChatRequest {
             temperature: None,
             tools: Vec::new(),
             stream: None,
+            tool_choice: None,
         }
     }
 }
@@ -363,6 +371,7 @@ mod tests {
             temperature: Some(0.7),
             tools: vec![serde_json::json!({"type": "function", "function": {"name": "test"}})],
             stream: Some(true),
+            tool_choice: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("max_tokens"));

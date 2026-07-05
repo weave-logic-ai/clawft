@@ -157,6 +157,7 @@ impl Summarizer for LlmSummarizer {
             temperature: Some(0.0),
             tools: Vec::new(),
             stream: None,
+            tool_choice: None,
         };
         let response = self
             .provider

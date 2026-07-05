@@ -72,6 +72,12 @@ pub struct AgentChatParams {
     /// - `skill_instructions: String` — injected as a system note.
     /// - `allowed_tools: [String]` — tool-subset filter.
     /// - `model: String` — model override, carried to the router.
+    /// - `tool_choice: string | object` — OpenAI `tool_choice` override
+    ///   (`"auto"`/`"none"`/`"required"` or
+    ///   `{"type":"function","function":{"name":…}}`). Requests a tool
+    ///   selection for a turn; absent leaves it to the model. Enforcement
+    ///   is provider-side (llama-server honors it only probabilistically
+    ///   when a system prompt is present).
     /// - `provenance: object` — diagnostic (e.g.
     ///   `{"impulse_source":"agent.chat"}`) for the witness/audit trail.
     ///

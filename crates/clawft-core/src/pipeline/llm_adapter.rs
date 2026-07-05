@@ -75,6 +75,7 @@ impl LlmProvider for ClawftLlmAdapter {
         tools: &[serde_json::Value],
         max_tokens: Option<i32>,
         temperature: Option<f64>,
+        tool_choice: Option<&serde_json::Value>,
     ) -> Result<serde_json::Value, String> {
         // -- Inbound conversion: Value messages -> ChatMessage ---------------
         let chat_messages: Vec<ChatMessage> =
@@ -87,6 +88,7 @@ impl LlmProvider for ClawftLlmAdapter {
             temperature,
             tools: tools.to_vec(),
             stream: None,
+            tool_choice: tool_choice.cloned(),
         };
 
         debug!(
@@ -105,6 +107,7 @@ impl LlmProvider for ClawftLlmAdapter {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn complete_stream(
         &self,
         model: &str,
@@ -112,6 +115,7 @@ impl LlmProvider for ClawftLlmAdapter {
         tools: &[serde_json::Value],
         max_tokens: Option<i32>,
         temperature: Option<f64>,
+        tool_choice: Option<&serde_json::Value>,
         tx: mpsc::Sender<String>,
     ) -> Result<serde_json::Value, String> {
         let chat_messages: Vec<ChatMessage> =
@@ -124,6 +128,7 @@ impl LlmProvider for ClawftLlmAdapter {
             temperature,
             tools: tools.to_vec(),
             stream: Some(true),
+            tool_choice: tool_choice.cloned(),
         };
 
         debug!(
@@ -760,7 +765,9 @@ mod tests {
     #[tokio::test]
     async fn adapter_maps_errors() {
         let adapter = ClawftLlmAdapter::new(Arc::new(FailingProvider));
-        let result = adapter.complete("test-model", &[], &[], None, None).await;
+        let result = adapter
+            .complete("test-model", &[], &[], None, None, None)
+            .await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -812,7 +819,7 @@ mod tests {
         })];
 
         let result = adapter
-            .complete("test-model", &messages, &[], Some(100), Some(0.5))
+            .complete("test-model", &messages, &[], Some(100), Some(0.5), None)
             .await
             .unwrap();
 
@@ -974,6 +981,7 @@ mod tests {
             tools: vec![],
             max_tokens: Some(100),
             temperature: Some(0.5),
+            tool_choice: None,
         };
 
         // 5. Call complete and verify
@@ -1018,6 +1026,7 @@ mod tests {
             tools: vec![],
             max_tokens: None,
             temperature: None,
+            tool_choice: None,
         };
 
         let result = transport.complete(&request).await;
@@ -1093,6 +1102,7 @@ mod tests {
             tools: vec![serde_json::json!({"type": "function", "name": "web_search"})],
             max_tokens: Some(100),
             temperature: None,
+            tool_choice: None,
         };
 
         let response = transport

@@ -180,6 +180,7 @@ mod tests {
             temperature: None,
             auth_context: None,
             complexity_boost: 0.0,
+            tool_choice: None,
         }
     }
 
@@ -205,6 +206,7 @@ mod tests {
             temperature: None,
             auth_context: None,
             complexity_boost: 0.0,
+            tool_choice: None,
         }
     }
 
@@ -314,6 +316,7 @@ mod tests {
             temperature: None,
             auth_context: None,
             complexity_boost: 0.0,
+            tool_choice: None,
         };
         // Only the last user message is scanned; system messages are ignored.
         let profile = classifier.classify(&req);
@@ -357,6 +360,7 @@ mod tests {
             temperature: None,
             auth_context: None,
             complexity_boost: 0.0,
+            tool_choice: None,
         };
         let profile = classifier.classify(&req);
         assert_eq!(profile.task_type, TaskType::CodeGeneration);

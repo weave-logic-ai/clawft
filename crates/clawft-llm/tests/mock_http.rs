@@ -486,6 +486,7 @@ async fn complete_sends_request_body_correctly() {
             }
         })],
         stream: None,
+        tool_choice: None,
     };
 
     let response = provider.complete(&request).await.unwrap();

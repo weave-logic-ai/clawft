@@ -38,6 +38,7 @@ fn tool_request(model: &str) -> ChatRequest {
             }
         })],
         stream: None,
+        tool_choice: None,
     }
 }
 

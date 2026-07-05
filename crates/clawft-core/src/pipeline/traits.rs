@@ -56,6 +56,15 @@ pub struct ChatRequest {
     /// sessions into higher-tier models.
     #[serde(default)]
     pub complexity_boost: f32,
+
+    /// Optional tool-selection override forwarded to the provider
+    /// (OpenAI `tool_choice`). `None` (the default) leaves selection to
+    /// the model — today's behavior. When set (e.g. by a harness via the
+    /// `AgentChatParams.metadata["tool_choice"]` key), it is carried into
+    /// the [`TransportRequest`] and on to the provider to request a named
+    /// tool call. Actual enforcement is provider-side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<serde_json::Value>,
 }
 
 /// A single message in a chat conversation.
@@ -283,6 +292,10 @@ pub struct TransportRequest {
 
     /// Sampling temperature.
     pub temperature: Option<f64>,
+
+    /// Optional tool-selection override (OpenAI `tool_choice`), carried
+    /// verbatim from the [`ChatRequest`]. `None` omits it.
+    pub tool_choice: Option<serde_json::Value>,
 }
 
 // ── Learning types ──────────────────────────────────────────────────────
@@ -593,6 +606,7 @@ impl PipelineRegistry {
             tools: request.tools.clone(),
             max_tokens: request.max_tokens,
             temperature: request.temperature,
+            tool_choice: request.tool_choice.clone(),
         };
         let start_ms = crate::runtime::now_millis();
         let response = pipeline.transport.complete(&transport_request).await?;
@@ -654,6 +668,7 @@ impl PipelineRegistry {
             tools: request.tools.clone(),
             max_tokens: request.max_tokens,
             temperature: request.temperature,
+            tool_choice: request.tool_choice.clone(),
         };
 
         // Stage 4: streaming transport (with latency measurement)
@@ -706,6 +721,7 @@ mod tests {
             temperature: Some(0.7),
             auth_context: None,
             complexity_boost: 0.0,
+            tool_choice: None,
         };
         assert_eq!(req.messages.len(), 1);
         assert_eq!(req.model.as_deref(), Some("gpt-4o"));
@@ -875,6 +891,7 @@ mod tests {
             tools: vec![],
             max_tokens: Some(2048),
             temperature: None,
+            tool_choice: None,
         };
         assert_eq!(req.provider, "openai");
         assert!(req.temperature.is_none());
@@ -931,6 +948,7 @@ mod tests {
             temperature: Some(0.5),
             auth_context: None,
             complexity_boost: 0.0,
+            tool_choice: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let restored: ChatRequest = serde_json::from_str(&json).unwrap();
@@ -1137,6 +1155,7 @@ mod tests {
             temperature: None,
             auth_context: None,
             complexity_boost: 0.0,
+            tool_choice: None,
         });
     }
 
@@ -1173,6 +1192,7 @@ mod tests {
             temperature: None,
             auth_context: None,
             complexity_boost: 0.0,
+            tool_choice: None,
         };
 
         let response = registry.complete(&request).await.unwrap();
@@ -1211,6 +1231,7 @@ mod tests {
             temperature: None,
             auth_context: None,
             complexity_boost: 0.0,
+            tool_choice: None,
         };
 
         // The classifier returns CodeGeneration, so the specialized pipeline is used.
@@ -1270,6 +1291,7 @@ mod tests {
             temperature: None,
             auth_context: None,
             complexity_boost: 0.0,
+            tool_choice: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         // skip_deserializing only affects the Deserialize side.
@@ -1308,6 +1330,7 @@ mod tests {
                 permissions: UserPermissions::default(),
             }),
             complexity_boost: 0.0,
+            tool_choice: None,
         };
 
         // Serialize -- should include auth_context.
@@ -1350,6 +1373,7 @@ mod tests {
             temperature: None,
             auth_context: Some(AuthContext::cli_default()),
             complexity_boost: 0.0,
+            tool_choice: None,
         };
 
         // Complete should succeed with auth_context present.
@@ -1376,6 +1400,7 @@ mod tests {
             temperature: None,
             auth_context: None,
             complexity_boost: 0.0,
+            tool_choice: None,
         };
 
         // Should not panic and should return a valid response.

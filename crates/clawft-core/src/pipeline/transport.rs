@@ -63,6 +63,7 @@ pub trait LlmProvider: Send + Sync {
         tools: &[serde_json::Value],
         max_tokens: Option<i32>,
         temperature: Option<f64>,
+        tool_choice: Option<&serde_json::Value>,
     ) -> Result<serde_json::Value, String>;
 
     /// Execute a streaming chat completion, sending text deltas to the channel.
@@ -76,6 +77,9 @@ pub trait LlmProvider: Send + Sync {
     ///
     /// Only available with the `native` feature (requires tokio channels).
     #[cfg(feature = "native")]
+    #[allow(clippy::too_many_arguments)] // OpenAI-compat call shape: the model
+    // plus messages/tools/max_tokens/temperature/tool_choice knobs and the
+    // stream sink. Bundling into a struct would obscure the wire mapping.
     async fn complete_stream(
         &self,
         _model: &str,
@@ -83,6 +87,7 @@ pub trait LlmProvider: Send + Sync {
         _tools: &[serde_json::Value],
         _max_tokens: Option<i32>,
         _temperature: Option<f64>,
+        _tool_choice: Option<&serde_json::Value>,
         _tx: tokio::sync::mpsc::Sender<String>,
     ) -> Result<serde_json::Value, String> {
         Err("streaming not supported by this provider".into())
@@ -204,6 +209,7 @@ impl LlmTransport for OpenAiCompatTransport {
                 &request.tools,
                 request.max_tokens,
                 request.temperature,
+                request.tool_choice.as_ref(),
             )
             .await
             .map_err(|e| ClawftError::Provider { message: e })?;
@@ -262,11 +268,20 @@ impl LlmTransport for OpenAiCompatTransport {
         let tools = request.tools.clone();
         let max_tokens = request.max_tokens;
         let temperature = request.temperature;
+        let tool_choice = request.tool_choice.clone();
         let provider_clone = Arc::clone(provider);
 
         let stream_handle = tokio::spawn(async move {
             provider_clone
-                .complete_stream(&model, &messages, &tools, max_tokens, temperature, tx)
+                .complete_stream(
+                    &model,
+                    &messages,
+                    &tools,
+                    max_tokens,
+                    temperature,
+                    tool_choice.as_ref(),
+                    tx,
+                )
                 .await
         });
 
@@ -442,6 +457,7 @@ mod tests {
             tools: vec![],
             max_tokens: Some(1024),
             temperature: Some(0.7),
+            tool_choice: None,
         }
     }
 
@@ -553,6 +569,7 @@ mod tests {
             _tools: &[serde_json::Value],
             _max_tokens: Option<i32>,
             _temperature: Option<f64>,
+            _tool_choice: Option<&serde_json::Value>,
         ) -> Result<serde_json::Value, String> {
             Ok(self.response.clone())
         }
@@ -569,6 +586,7 @@ mod tests {
             _tools: &[serde_json::Value],
             _max_tokens: Option<i32>,
             _temperature: Option<f64>,
+            _tool_choice: Option<&serde_json::Value>,
         ) -> Result<serde_json::Value, String> {
             Err("mock network failure".into())
         }
@@ -781,6 +799,7 @@ mod tests {
             tools: vec![serde_json::json!({"type": "function"})],
             max_tokens: None,
             temperature: None,
+            tool_choice: None,
         };
         let req2 = make_transport_request();
 
@@ -1164,10 +1183,12 @@ mod tests {
             _tools: &[serde_json::Value],
             _max_tokens: Option<i32>,
             _temperature: Option<f64>,
+            _tool_choice: Option<&serde_json::Value>,
         ) -> Result<serde_json::Value, String> {
             Ok(self.final_response.clone())
         }
 
+        #[allow(clippy::too_many_arguments)]
         async fn complete_stream(
             &self,
             _model: &str,
@@ -1175,6 +1196,7 @@ mod tests {
             _tools: &[serde_json::Value],
             _max_tokens: Option<i32>,
             _temperature: Option<f64>,
+            _tool_choice: Option<&serde_json::Value>,
             tx: mpsc::Sender<String>,
         ) -> Result<serde_json::Value, String> {
             for chunk in &self.text_chunks {

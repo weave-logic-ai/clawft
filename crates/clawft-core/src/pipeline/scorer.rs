@@ -381,6 +381,7 @@ mod tests {
             temperature: None,
             auth_context: None,
             complexity_boost: 0.0,
+            tool_choice: None,
         }
     }
 
@@ -398,6 +399,7 @@ mod tests {
             temperature: None,
             auth_context: None,
             complexity_boost: 0.0,
+            tool_choice: None,
         }
     }
 
@@ -498,6 +500,7 @@ mod tests {
             temperature: Some(0.0),
             auth_context: None,
             complexity_boost: 0.0,
+            tool_choice: None,
         };
         let score = scorer.score(&req, &make_response());
         assert!((score.overall - 1.0).abs() < f32::EPSILON);

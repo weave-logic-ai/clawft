@@ -136,6 +136,14 @@ fn read_delegation_depth(msg: &InboundMessage) -> u32 {
 #[cfg(feature = "native")]
 pub(crate) const SPAWN_DEPTH_KEY: &str = "spawn_depth";
 
+/// Inbound-metadata key carrying an optional OpenAI `tool_choice`
+/// override (string `"auto"`/`"none"`/`"required"` or a
+/// `{"type":"function","function":{"name":…}}` object). Threaded from
+/// `AgentChatParams.metadata` into the pipeline [`ChatRequest`] so a
+/// harness can request a named tool call (enforcement is provider-side).
+/// Absent leaves selection to the model — today's behavior.
+pub(crate) const TOOL_CHOICE_META_KEY: &str = "tool_choice";
+
 /// Read this conversation's spawn depth from an [`InboundMessage`]'s
 /// metadata (M4 D5). Absent / non-integer values read as 0 (a top-level
 /// conversation); an `agent_spawn` inside this turn spawns a child at
@@ -1025,7 +1033,12 @@ impl<P: Platform> AgentLoop<P> {
             hallucination_boost
         };
 
-        // 9. Create pipeline request with auth context + hallucination boost
+        // 9. Create pipeline request with auth context + hallucination boost.
+        //    A caller (test harness / panel) may force tool selection by
+        //    putting an OpenAI `tool_choice` under the inbound metadata key
+        //    `tool_choice` (mirrors the `allowed_tools` / `model` precedent);
+        //    absent metadata leaves selection to the model — today's behavior.
+        let tool_choice = msg.metadata.get(TOOL_CHOICE_META_KEY).cloned();
         let request = ChatRequest {
             messages,
             tools: tool_schemas,
@@ -1034,6 +1047,7 @@ impl<P: Platform> AgentLoop<P> {
             temperature: Some(self.config.defaults.temperature),
             auth_context: Some(auth_context),
             complexity_boost,
+            tool_choice,
         };
 
         // 10. Execute pipeline + tool loop.
@@ -2269,6 +2283,7 @@ mod tests {
             temperature: Some(0.5),
             auth_context: None,
             complexity_boost: 0.0,
+            tool_choice: None,
         };
 
         let result = agent
@@ -2303,6 +2318,7 @@ mod tests {
             temperature: Some(0.5),
             auth_context: None,
             complexity_boost: 0.0,
+            tool_choice: None,
         }
     }
 
@@ -2881,6 +2897,7 @@ mod tests {
             temperature: Some(0.5),
             auth_context: None,
             complexity_boost: 0.0,
+            tool_choice: None,
         };
 
         let tool_result = agent
