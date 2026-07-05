@@ -589,42 +589,66 @@ impl<M: EndpointModel> TalkModeController<M> {
         };
         let threshold = self.registry.threshold();
         let embedding_dim = embedder.dim() as u32;
-        // Identify first so the cosine score survives (identify_or_enroll drops
-        // it); then attribute / enroll to keep the running-mean behaviour.
-        let (id, score, action) = match self.registry.identify(&emb) {
-            Some(m) => {
-                let score = m.score;
-                self.registry.attribute(&m.id, &emb);
-                (m.id, score, SpeakerAction::Identified)
+        // Nearest enrolled speaker regardless of threshold — so the record
+        // surfaces the *real* near-miss cosine (how close attribution got),
+        // never a meaningless 0.0.
+        let best = self.registry.best_match(&emb);
+        let near_score = best.as_ref().map(|(_, s)| *s).unwrap_or(0.0);
+
+        let analysis = if let Some((id, score)) = best.filter(|(_, s)| *s >= threshold) {
+            // Confident match — fold the embedding into the running-mean centroid.
+            self.registry.attribute(&id, &emb);
+            let name = self.registry.get(&id).map(|n| n.name.clone());
+            SpeakerAnalysis {
+                id: Some(id),
+                name,
+                score,
+                threshold,
+                action: SpeakerAction::Identified,
+                embedding_dim,
             }
-            None => {
-                let id = self
+        } else if self.config.listen_only {
+            // Observe-only: identify against existing profiles but NEVER
+            // auto-enroll — a placeholder "unknown speaker" written to the
+            // persistent registry pollutes it and never gets renamed (there is
+            // no spoken self-ID loop in listen mode). Mark unknown, surface the
+            // near-miss, persist nothing.
+            SpeakerAnalysis {
+                id: None,
+                name: None,
+                score: near_score,
+                threshold,
+                action: SpeakerAction::Unknown,
+                embedding_dim,
+            }
+        } else {
+            // Talk mode: auto-enroll a session speaker (renamed on spoken
+            // self-ID, e.g. "my name is X"), reporting the near-miss score.
+            let id = self
+                .registry
+                .enroll(self.config.default_speaker_name.clone(), &emb);
+            self.observer.observe(ConversationEvent::SpeakerEnrolled {
+                id: id.clone(),
+                name: self
                     .registry
-                    .enroll(self.config.default_speaker_name.clone(), &emb);
-                self.observer.observe(ConversationEvent::SpeakerEnrolled {
-                    id: id.clone(),
-                    name: self
-                        .registry
-                        .get(&id)
-                        .map(|n| n.name.clone())
-                        .unwrap_or_default(),
-                });
-                self.persist_registry();
-                (id, 0.0, SpeakerAction::Enrolled)
+                    .get(&id)
+                    .map(|n| n.name.clone())
+                    .unwrap_or_default(),
+            });
+            self.persist_registry();
+            let name = self.registry.get(&id).map(|n| n.name.clone());
+            SpeakerAnalysis {
+                id: Some(id),
+                name,
+                score: near_score,
+                threshold,
+                action: SpeakerAction::Enrolled,
+                embedding_dim,
             }
         };
-        let name = self.registry.get(&id).map(|n| n.name.clone());
-        let ctx = name
-            .as_ref()
-            .map(|n| format!("The current speaker is {n} (id {id}). Use this only as private context; never read it aloud."));
-        let analysis = SpeakerAnalysis {
-            id: Some(id),
-            name,
-            score,
-            threshold,
-            action,
-            embedding_dim,
-        };
+        let ctx = analysis.id.as_ref().zip(analysis.name.as_ref()).map(|(id, n)| {
+            format!("The current speaker is {n} (id {id}). Use this only as private context; never read it aloud.")
+        });
         (analysis, ctx)
     }
 
@@ -681,6 +705,7 @@ impl<M: EndpointModel> TalkModeController<M> {
         // tracked room-tone floor → SNR.
         let health = capture_health(&utt.samples, sr);
         let noise_floor_dbfs = self.noise_floor.floor_dbfs();
+        let noise_floor_converged = self.noise_floor.converged();
         let audio = AudioAnalysis {
             duration_ms,
             voiced_ms,
@@ -688,9 +713,12 @@ impl<M: EndpointModel> TalkModeController<M> {
             rms_dbfs_mean: health.rms_dbfs_mean,
             rms_dbfs_peak: health.rms_dbfs_peak,
             noise_floor_dbfs,
+            // SNR is only meaningful once the floor has seen real silence; the
+            // `noise_floor_converged` flag tells consumers when to trust it.
             snr_db: health.rms_dbfs_mean - noise_floor_dbfs,
             clip_pct: health.clip_pct,
             dc_offset: health.dc_offset,
+            noise_floor_converged,
         };
 
         // Prosody (DSP) → emotion (DSP floor, refined by the SER seam) →

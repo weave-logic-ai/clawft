@@ -673,3 +673,74 @@ async fn listen_only_drains_stale_backlog_after_each_turn() {
          utterance must NOT re-fire as a turn"
     );
 }
+
+#[tokio::test]
+async fn listen_only_marks_unknown_without_polluting_registry() {
+    // Speaker-match-against-registry regression: on a non-match, listen-only
+    // must NOT auto-enroll a placeholder "unknown speaker" (which pollutes the
+    // persistent registry). It marks the turn Unknown and enrolls nothing.
+    let observer = Arc::new(RecordingObserver::default());
+    let sink = Arc::new(RecordingSink::default());
+    let audio = Arc::new(CountingAudio::default());
+    let tts = DualLayerTts::new(
+        Arc::new(ImmediateEngine(TtsTier::Fast)),
+        Arc::new(ImmediateEngine(TtsTier::Slow)),
+    )
+    .unwrap();
+
+    let mut ctrl = TalkModeController::new(
+        endpointer(),
+        Arc::new(MockStt("this is a test")),
+        Some(Arc::new(MockEmbedder)),
+        SpeakerRegistry::new(0.45), // empty — no profile to match
+        VoiceAnswerPolicy::default(),
+        Arc::new(MockLlm("unused")),
+        tts,
+        sink.clone(),
+        audio.clone(),
+        observer.clone() as Arc<dyn ConversationObserver>,
+        TalkModeConfig {
+            listen_only: true,
+            ..Default::default()
+        },
+    );
+
+    let (tx, rx) = mpsc::channel::<Vec<i16>>(64);
+    let cancel = CancellationToken::new();
+    let run_cancel = cancel.clone();
+    let handle = tokio::spawn(async move { ctrl.run(rx, run_cancel).await });
+
+    for _ in 0..3 {
+        tx.send(voiced_frame()).await.unwrap();
+    }
+    for _ in 0..4 {
+        tx.send(silent_frame()).await.unwrap();
+    }
+    wait_until(|| observer.has(|e| matches!(e, ConversationEvent::UserTurn { .. }))).await;
+    cancel.cancel();
+    drop(tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+
+    // No enrollment event fired — the registry was not polluted.
+    assert!(
+        !observer.has(|e| matches!(e, ConversationEvent::SpeakerEnrolled { .. })),
+        "listen-only must not auto-enroll on a non-match"
+    );
+    let va = observer
+        .snapshot()
+        .into_iter()
+        .find_map(|e| match e {
+            ConversationEvent::UserTurn {
+                voice_analysis: Some(va),
+                ..
+            } => Some(va),
+            _ => None,
+        })
+        .expect("user turn recorded");
+    assert_eq!(
+        va.speaker.action,
+        SpeakerAction::Unknown,
+        "non-match in listen-only is Unknown, not Enrolled"
+    );
+    assert!(va.speaker.id.is_none(), "no placeholder id assigned");
+}

@@ -213,6 +213,13 @@ pub struct AudioAnalysis {
     pub clip_pct: f32,
     /// Mean sample offset (DC bias) in i16 units.
     pub dc_offset: i32,
+    /// Whether the noise-floor tracker had converged when this turn finalized.
+    /// `false` on an early (typically first) turn of a speech-first session —
+    /// the floor hasn't seen real silence yet, so `snr_db` is unreliable and
+    /// should be read as provisional. The honesty flag for §W1.2 riskiest-call
+    /// #3 applied to capture health.
+    #[serde(default)]
+    pub noise_floor_converged: bool,
 }
 
 impl Default for AudioAnalysis {
@@ -227,6 +234,7 @@ impl Default for AudioAnalysis {
             snr_db: 0.0,
             clip_pct: 0.0,
             dc_offset: 0,
+            noise_floor_converged: false,
         }
     }
 }
@@ -423,6 +431,7 @@ mod tests {
                 snr_db: 23.6,
                 clip_pct: 0.0,
                 dc_offset: 3,
+                noise_floor_converged: true,
             },
             ProsodyAnalysis {
                 f0_mean_hz: 165.0,

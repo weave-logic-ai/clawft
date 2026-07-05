@@ -115,6 +115,23 @@ impl SpeakerRegistry {
         id
     }
 
+    /// Best cosine match **regardless of threshold** — the nearest enrolled
+    /// speaker and its similarity, or `None` when the registry is empty. Unlike
+    /// [`identify`](Self::identify) this does not reject a below-threshold hit,
+    /// so callers can surface the *near-miss* score (how close attribution got)
+    /// for the record/surface instead of a meaningless zero.
+    pub fn best_match(&self, embedding: &[f32]) -> Option<(SpeakerId, f32)> {
+        let q = normalize(embedding);
+        let mut best: Option<(SpeakerId, f32)> = None;
+        for s in &self.speakers {
+            let score = cosine_normalized(&q, &s.centroid);
+            if best.as_ref().map(|(_, b)| score > *b).unwrap_or(true) {
+                best = Some((s.id.clone(), score));
+            }
+        }
+        best
+    }
+
     /// Identify the speaker of an embedding (CrossRef resolve). Returns the
     /// best match at/above the threshold, else `None` (unknown speaker
     /// rejected).
@@ -238,6 +255,25 @@ mod tests {
         assert_eq!(m.id, id);
         assert_eq!(m.name, "Alice");
         assert!(m.score >= 0.45);
+    }
+
+    #[test]
+    fn best_match_reports_near_miss_below_threshold() {
+        // A high threshold rejects everyone via identify(), but best_match still
+        // surfaces the nearest speaker + score so the record isn't a bogus 0.0.
+        let mut reg = SpeakerRegistry::new(0.995);
+        let alice = reg.enroll("Alice", &alice());
+        reg.enroll("Bob", &bob());
+        assert!(reg.identify(&alice_variant()).is_none(), "0.995 rejects the ~0.99 match");
+        let (id, score) = reg.best_match(&alice_variant()).expect("nearest exists");
+        assert_eq!(id, alice, "nearest is still Alice");
+        assert!(score > 0.95 && score < 0.995, "near-miss score surfaced: {score}");
+    }
+
+    #[test]
+    fn best_match_empty_registry_is_none() {
+        let reg = SpeakerRegistry::new(0.45);
+        assert!(reg.best_match(&alice()).is_none());
     }
 
     #[test]

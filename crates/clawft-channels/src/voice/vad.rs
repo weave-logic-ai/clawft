@@ -178,7 +178,19 @@ pub struct NoiseFloor {
     floor_dbfs: f32,
     margin_db: f32,
     initialized: bool,
+    /// Count of observed frames judged quiet (below the current threshold).
+    /// The floor is only a trustworthy noise estimate once it has seen real
+    /// silence to fall to — before that (e.g. a session that opens on speech)
+    /// `floor` sits at the init cap and any SNR derived from it is bogus. See
+    /// [`converged`](Self::converged).
+    quiet_frames: u32,
 }
+
+/// Quiet frames the floor must observe before it is a trustworthy noise
+/// estimate. The floor falls at 0.3/frame, so ~10 quiet frames converges it to
+/// within a few percent of the true room tone — until then SNR is flagged
+/// unreliable in the record.
+const FLOOR_CONVERGE_FRAMES: u32 = 10;
 
 /// Initialization ceiling for the tracked floor: even when the very first
 /// frame is already speech (a session started mid-utterance), the floor
@@ -200,12 +212,18 @@ impl NoiseFloor {
             floor_dbfs: -100.0,
             margin_db,
             initialized: false,
+            quiet_frames: 0,
         }
     }
 
     /// Feed one frame's dBFS and return the updated voice threshold
     /// (`floor + margin`, clamped to [-100, 0]).
     pub fn observe(&mut self, dbfs: f32) -> f32 {
+        // A frame below the current threshold is silence/room-tone — the
+        // evidence the floor needs to converge.
+        if self.initialized && dbfs < self.threshold_dbfs() {
+            self.quiet_frames = self.quiet_frames.saturating_add(1);
+        }
         if !self.initialized {
             // Cap the seed: a session that opens on speech must not
             // calibrate the floor to speech level and gate itself deaf.
@@ -236,6 +254,14 @@ impl NoiseFloor {
     /// Current tracked floor.
     pub fn floor_dbfs(&self) -> f32 {
         self.floor_dbfs
+    }
+
+    /// Whether the floor has observed enough real silence to be a trustworthy
+    /// noise estimate. Until this is true (e.g. the very first turn of a
+    /// speech-first session), any SNR derived from the floor is unreliable and
+    /// should be flagged in the record.
+    pub fn converged(&self) -> bool {
+        self.quiet_frames >= FLOOR_CONVERGE_FRAMES
     }
 }
 
@@ -375,6 +401,20 @@ mod tests {
             -15.0 >= thr,
             "first speech frame must clear threshold {thr}"
         );
+    }
+
+    #[test]
+    fn noise_floor_converges_only_after_seeing_silence() {
+        // SNR honesty: a speech-first session's floor is NOT converged until it
+        // has observed real silence — so an early-turn SNR reads as unreliable.
+        let mut nf = NoiseFloor::new(8.0);
+        assert!(!nf.converged(), "fresh floor is unconverged");
+        nf.observe(-20.0); // opens on speech → floor pinned at the init cap
+        assert!(!nf.converged(), "speech-first init is not converged");
+        for _ in 0..FLOOR_CONVERGE_FRAMES {
+            nf.observe(-70.0); // room tone
+        }
+        assert!(nf.converged(), "floor converges once it has seen silence");
     }
 
     #[test]

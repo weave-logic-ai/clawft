@@ -122,26 +122,93 @@ pub fn estimate_f0_track(samples: &[i16], sample_rate: u32) -> F0Track {
         };
     }
 
-    let n = voiced.len() as f32;
-    let mean = voiced.iter().map(|(_, f)| *f).sum::<f32>() / n;
-    let min = voiced.iter().map(|(_, f)| *f).fold(f32::INFINITY, f32::min);
-    let max = voiced.iter().map(|(_, f)| *f).fold(f32::NEG_INFINITY, f32::max);
-    let range_semitones = if min > 0.0 {
-        12.0 * (max / min).log2()
+    // YIN is prone to octave errors (a frame reported at 2× or ½ the true
+    // pitch), which min/max range grossly inflates — a flat calm sentence read
+    // ~2 octaves before this. Clean the track in two passes:
+    //  1. octave-fold every frame toward the track median (halve/double until
+    //     within a ~1.5× band), which collapses octave doubling/halving for
+    //     speech (whose real range sits well inside one octave);
+    //  2. 5-point median filter to drop residual single-frame spikes.
+    // Then report a ROBUST range from the p10–p90 spread, not min/max.
+    let raw: Vec<f32> = voiced.iter().map(|(_, f)| *f).collect();
+    let med = median(&raw);
+    let mut folded: Vec<(f32, f32)> = voiced
+        .iter()
+        .map(|(t, f)| (*t, octave_fold(*f, med)))
+        .collect();
+    median_filter_f0(&mut folded, 5);
+
+    let vals: Vec<f32> = folded.iter().map(|(_, f)| *f).collect();
+    let mean = vals.iter().sum::<f32>() / vals.len() as f32;
+    let p10 = percentile(&vals, 0.10);
+    let p90 = percentile(&vals, 0.90);
+    let range_semitones = if p10 > 0.0 {
+        12.0 * (p90 / p10).log2()
     } else {
         0.0
     };
     F0Track {
         mean_hz: mean,
-        min_hz: min,
-        max_hz: max,
+        min_hz: p10,
+        max_hz: p90,
         range_semitones,
-        slope: normalized_slope(&voiced, mean),
+        slope: normalized_slope(&folded, mean),
         voiced_ratio: if analyzed > 0 {
-            voiced.len() as f32 / analyzed as f32
+            folded.len() as f32 / analyzed as f32
         } else {
             0.0
         },
+    }
+}
+
+/// Median of a slice (returns 0.0 for empty).
+fn median(v: &[f32]) -> f32 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    let mut s = v.to_vec();
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    s[s.len() / 2]
+}
+
+/// Interpolation-free percentile `p ∈ [0,1]` of a slice (nearest-rank).
+fn percentile(v: &[f32], p: f32) -> f32 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    let mut s = v.to_vec();
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let idx = ((p * (s.len() - 1) as f32).round() as usize).min(s.len() - 1);
+    s[idx]
+}
+
+/// Fold `f` toward `reference` by octaves until it sits within a ~1.5× band —
+/// collapsing YIN octave errors for speech (real range < 1 octave).
+fn octave_fold(f: f32, reference: f32) -> f32 {
+    if reference <= 0.0 || f <= 0.0 {
+        return f;
+    }
+    let mut v = f;
+    while v > reference * 1.5 {
+        v /= 2.0;
+    }
+    while v < reference / 1.5 {
+        v *= 2.0;
+    }
+    v
+}
+
+/// In-place odd-window median filter over the f0 values (times untouched).
+fn median_filter_f0(track: &mut [(f32, f32)], window: usize) {
+    if track.len() < window || window < 3 {
+        return;
+    }
+    let half = window / 2;
+    let orig: Vec<f32> = track.iter().map(|(_, f)| *f).collect();
+    for i in half..track.len() - half {
+        let mut w: Vec<f32> = orig[i - half..=i + half].to_vec();
+        w.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        track[i].1 = w[half];
     }
 }
 
@@ -472,16 +539,64 @@ mod tests {
     }
 
     #[test]
-    fn range_semitones_from_octave() {
-        // A tone at 200 Hz spans no range; two concatenated octaves span ~12 st.
+    fn octave_jumps_are_folded_to_low_range() {
+        // A 150↔300 Hz octave alternation is the classic YIN octave-error shape.
+        // The estimator folds toward the median, so the reported range stays
+        // small instead of the ~12 st a raw min/max would show.
         let mut s = tone(150.0, 0.3, 8_000);
         s.extend(tone(300.0, 0.3, 8_000));
         let track = estimate_f0_track(&s, 16_000);
         assert!(
-            track.range_semitones > 9.0,
-            "octave should be ~12 st, got {}",
+            track.range_semitones < 4.0,
+            "octave error must fold to a low range, got {}",
             track.range_semitones
         );
+    }
+
+    #[test]
+    fn octave_fold_collapses_doubling_and_halving() {
+        assert!((octave_fold(240.0, 120.0) - 120.0).abs() < 1e-3);
+        assert!((octave_fold(60.0, 120.0) - 120.0).abs() < 1e-3);
+        // A real sub-octave excursion is preserved (a fifth ≈ 180 Hz).
+        assert!((octave_fold(180.0, 120.0) - 180.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn median_filter_drops_single_spike() {
+        let mut track: Vec<(f32, f32)> = vec![
+            (0.0, 120.0),
+            (0.1, 121.0),
+            (0.2, 480.0), // octave-error spike
+            (0.3, 119.0),
+            (0.4, 120.0),
+        ];
+        median_filter_f0(&mut track, 3);
+        assert!(track[2].1 < 130.0, "spike should be median-smoothed, got {}", track[2].1);
+    }
+
+    #[test]
+    fn percentile_nearest_rank() {
+        let v = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        assert_eq!(percentile(&v, 0.0), 1.0);
+        assert_eq!(percentile(&v, 1.0), 5.0);
+        assert!((percentile(&v, 0.5) - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn calm_monotone_reads_low_range_and_arousal() {
+        // Acceptance: a calm ~monotone sentence reads range < 4 st and the DSP
+        // emotion floor stays calm (arousal < 0.35).
+        let s = tone(140.0, 1.0, 6_000);
+        let input = ProsodyInput {
+            samples: &s,
+            sample_rate: 16_000,
+            voiced_ms: 1_000,
+            tokens: &[],
+        };
+        let p = analyze_prosody(&input);
+        assert!(p.f0_range_semitones < 4.0, "calm range {} must be <4st", p.f0_range_semitones);
+        let e = emotion_from_prosody(&p);
+        assert!(e.arousal < 0.35, "calm arousal {} must be <0.35", e.arousal);
     }
 
     #[test]
