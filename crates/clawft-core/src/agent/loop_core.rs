@@ -127,6 +127,29 @@ fn read_delegation_depth(msg: &InboundMessage) -> u32 {
         .unwrap_or(0)
 }
 
+/// Metadata key carrying a conversation's spawn depth (M4 D5).
+///
+/// Cross-crate contract: the daemon subagent spawner
+/// (`clawft_service_agent::subagent`) writes this key into a child
+/// conversation's `AgentChatParams.metadata` so the child's loop knows
+/// its own depth and any grandchild spawn increments correctly under the
+/// WEFT-180 cap. Top-level conversations omit it and read as depth 0.
+#[cfg(feature = "native")]
+pub(crate) const SPAWN_DEPTH_KEY: &str = "spawn_depth";
+
+/// Read this conversation's spawn depth from an [`InboundMessage`]'s
+/// metadata (M4 D5). Absent / non-integer values read as 0 (a top-level
+/// conversation); an `agent_spawn` inside this turn spawns a child at
+/// `depth + 1`.
+#[cfg(feature = "native")]
+fn read_spawn_depth(msg: &InboundMessage) -> u32 {
+    msg.metadata
+        .get(SPAWN_DEPTH_KEY)
+        .and_then(|v| v.as_u64())
+        .map(|v| v.min(u32::MAX as u64) as u32)
+        .unwrap_or(0)
+}
+
 /// System prompt injected for voice-mode sessions.
 ///
 /// Instructs the LLM to respond in natural conversational language suitable
@@ -984,7 +1007,31 @@ impl<P: Platform> AgentLoop<P> {
         } else {
             format!("{}:{}", msg.channel, msg.sender_id)
         };
-        let tool_result = self.run_tool_loop(request, &conv_id, &agent_id).await?;
+        // M4 D3/D5: install the ambient parent spawn context around the
+        // tool loop so an `agent_spawn` call inside it populates its
+        // SpawnSpec's parent_* fields and depth from the execution
+        // context, never from the LLM. conv_id / agent_id are in hand
+        // here; depth rides the inbound metadata (SPAWN_DEPTH_KEY, set by
+        // the daemon spawner for child conversations, 0 for top-level).
+        // turn_uid stays None: the parent turn's *universal* id is a
+        // kernel-layer concept minted by SessionTier/KernelTurnAnchor at
+        // the daemon layer, not available in clawft-core — the spawner
+        // roots the TriggeredBy edge at a deterministic per-conversation
+        // anchor uid in that case (its documented fallback). Native-only:
+        // the seam is a tokio task-local (a daemon capability); the
+        // browser/wasm build runs the loop unscoped.
+        let loop_fut = self.run_tool_loop(request, &conv_id, &agent_id);
+        #[cfg(feature = "native")]
+        let tool_result = crate::agent::spawn_context::SpawnContext {
+            conv_id: Some(conv_id.clone()),
+            agent_id: Some(agent_id.clone()),
+            turn_uid: None,
+            depth: read_spawn_depth(&msg),
+        }
+        .scope(loop_fut)
+        .await?;
+        #[cfg(not(feature = "native"))]
+        let tool_result = loop_fut.await?;
 
         // 11. Update hallucination score if any write verifications occurred.
         if tool_result.hallucinations > 0 || tool_result.verified_successes > 0 {
@@ -4395,5 +4442,167 @@ mod tests {
         assert!(meta.tool_calls.iter().any(|t| t.name == "agent_spawn"));
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    // ── M4 D5: spawn_context write-side (loop installs parent context) ──
+
+    /// Tool that captures the ambient [`spawn_context`] visible during its
+    /// dispatch, so a test can assert the loop installed the right context.
+    #[cfg(feature = "native")]
+    struct CtxCaptureTool {
+        seen: Arc<std::sync::Mutex<Option<crate::agent::spawn_context::SpawnContext>>>,
+    }
+
+    #[cfg(feature = "native")]
+    #[async_trait]
+    impl Tool for CtxCaptureTool {
+        fn name(&self) -> &str {
+            "capture_ctx"
+        }
+        fn description(&self) -> &str {
+            "Capture the ambient spawn context for assertions"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object", "properties": {} })
+        }
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+        ) -> Result<serde_json::Value, crate::tools::registry::ToolError> {
+            *self.seen.lock().unwrap() = crate::agent::spawn_context::current();
+            Ok(serde_json::json!({ "captured": true }))
+        }
+    }
+
+    /// Transport: emit a `capture_ctx` tool_use, then a text reply.
+    #[cfg(feature = "native")]
+    struct CaptureCtxTransport {
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(feature = "native")]
+    #[async_trait]
+    impl LlmTransport for CaptureCtxTransport {
+        async fn complete(&self, _request: &TransportRequest) -> clawft_types::Result<LlmResponse> {
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let content = if count == 0 {
+                vec![ContentBlock::ToolUse {
+                    id: "call-cap-1".into(),
+                    name: "capture_ctx".into(),
+                    input: serde_json::json!({}),
+                }]
+            } else {
+                vec![ContentBlock::Text {
+                    text: "done".into(),
+                }]
+            };
+            Ok(LlmResponse {
+                id: "cap-resp".into(),
+                content,
+                stop_reason: if count == 0 {
+                    StopReason::ToolUse
+                } else {
+                    StopReason::EndTurn
+                },
+                usage: Usage {
+                    input_tokens: 5,
+                    output_tokens: 3,
+                    total_tokens: 0,
+                },
+                metadata: HashMap::new(),
+            })
+        }
+    }
+
+    #[cfg(feature = "native")]
+    #[tokio::test]
+    async fn handle_turn_installs_parent_spawn_context_for_tools() {
+        // A tool dispatched inside run_tool_loop must see the parent
+        // conversation's spawn context: conv_id, agent_id, depth from the
+        // inbound metadata, and turn_uid=None (kernel-layer, not in core).
+        let dir = temp_dir("d5_ctx");
+        let platform = Arc::new(NativePlatform::new());
+        let bus = Arc::new(MessageBus::new());
+        let sessions = SessionManager::with_dir(platform.clone(), dir.join("sessions"));
+        let memory = Arc::new(MemoryStore::with_paths(
+            dir.join("memory").join("MEMORY.md"),
+            dir.join("memory").join("HISTORY.md"),
+            platform.clone(),
+        ));
+        let skills = Arc::new(SkillsLoader::with_dir(dir.join("skills"), platform.clone()));
+        let context = ContextBuilder::new(test_config(), memory, skills, platform.clone());
+
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(CtxCaptureTool { seen: seen.clone() }));
+
+        let pipeline = make_pipeline(Arc::new(CaptureCtxTransport {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        }));
+
+        let agent = AgentLoop::new(
+            test_config(),
+            platform,
+            bus,
+            pipeline,
+            Arc::new(tools),
+            context,
+            Arc::new(sessions),
+            PermissionResolver::default_resolver(),
+        );
+
+        // Inbound with a spawn_depth of 2 (as a child conversation would carry).
+        let mut metadata = HashMap::new();
+        metadata.insert(SPAWN_DEPTH_KEY.to_string(), serde_json::json!(2));
+        let inbound = InboundMessage {
+            channel: "cli".into(),
+            sender_id: "u7".into(),
+            chat_id: "d5-ctx-chat".into(),
+            content: "use the capture tool".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata,
+        };
+        agent.handle_turn(inbound).await.unwrap();
+
+        let ctx = seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("tool must observe an installed spawn context");
+        assert_eq!(ctx.conv_id.as_deref(), Some("d5-ctx-chat"));
+        // No router / daemon id in this harness → channel:sender fallback.
+        assert_eq!(ctx.agent_id.as_deref(), Some("cli:u7"));
+        assert_eq!(ctx.depth, 2, "depth must come from inbound spawn_depth");
+        assert!(
+            ctx.turn_uid.is_none(),
+            "turn_uid is kernel-layer; the loop leaves it None"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// Depth defaults to 0 for a top-level conversation (no spawn_depth
+    /// metadata), so a first-level child spawns at depth 1 (pB's tool adds 1).
+    #[cfg(feature = "native")]
+    #[test]
+    fn read_spawn_depth_defaults_to_zero() {
+        let msg = InboundMessage {
+            channel: "cli".into(),
+            sender_id: "u".into(),
+            chat_id: "c".into(),
+            content: "hi".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        assert_eq!(read_spawn_depth(&msg), 0);
+        let mut with_depth = msg.clone();
+        with_depth
+            .metadata
+            .insert(SPAWN_DEPTH_KEY.to_string(), serde_json::json!(3));
+        assert_eq!(read_spawn_depth(&with_depth), 3);
     }
 }
