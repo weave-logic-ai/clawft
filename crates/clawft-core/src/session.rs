@@ -8,7 +8,7 @@
 //! Ported from Python `nanobot/session/manager.py`.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::runtime::Mutex;
@@ -19,6 +19,61 @@ use tracing::{debug, warn};
 use clawft_platform::Platform;
 use clawft_types::error::ClawftError;
 use clawft_types::session::Session;
+
+/// Compute the on-disk `.jsonl` filename for a session `key`, joined under
+/// `sessions_dir`.
+///
+/// Uses percent-encoding (`NON_ALPHANUMERIC`) so any valid session key maps to
+/// a safe, collision-free filename that [`SessionManager::list_sessions`]
+/// decodes back to the original key. This is the single source of truth for the
+/// path scheme, shared with [`crate::agent::local_file_sink::LocalFileSink`]
+/// (M3 store-collapse, design §D4) so the in-process sink reuses the **exact**
+/// same files SessionManager writes today — zero migration.
+pub(crate) fn session_file_path(sessions_dir: &Path, key: &str) -> PathBuf {
+    let encoded = percent_encode(key.as_bytes(), NON_ALPHANUMERIC).to_string();
+    sessions_dir.join(format!("{encoded}.jsonl"))
+}
+
+/// Resolve the sessions directory the same way [`SessionManager::new`] does:
+///
+/// 1. `~/.clawft/workspace/sessions/` if it exists,
+/// 2. else `~/.nanobot/workspace/sessions/` (legacy fallback) if it exists,
+/// 3. else create and return `~/.clawft/workspace/sessions/`.
+///
+/// Shared with [`crate::agent::local_file_sink::LocalFileSink`] so both the
+/// legacy manager and the M3 in-process sink agree on the directory.
+pub(crate) async fn discover_sessions_dir<P: Platform>(
+    platform: &P,
+) -> clawft_types::Result<PathBuf> {
+    let home = platform
+        .fs()
+        .home_dir()
+        .ok_or_else(|| ClawftError::ConfigInvalid {
+            reason: "cannot determine home directory".into(),
+        })?;
+
+    let clawft_dir = home.join(".clawft").join("workspace").join("sessions");
+    let nanobot_dir = home.join(".nanobot").join("workspace").join("sessions");
+
+    if platform.fs().exists(&clawft_dir).await {
+        debug!(path = %clawft_dir.display(), "using clawft sessions dir");
+        Ok(clawft_dir)
+    } else if platform.fs().exists(&nanobot_dir).await {
+        debug!(path = %nanobot_dir.display(), "using nanobot sessions dir (fallback)");
+        Ok(nanobot_dir)
+    } else {
+        debug!(
+            path = %clawft_dir.display(),
+            "sessions dir does not exist, creating"
+        );
+        platform
+            .fs()
+            .create_dir_all(&clawft_dir)
+            .await
+            .map_err(ClawftError::Io)?;
+        Ok(clawft_dir)
+    }
+}
 
 /// Manages conversation sessions with in-memory caching and JSONL persistence.
 ///
@@ -59,34 +114,7 @@ impl<P: Platform> SessionManager<P> {
     /// If neither exists, defaults to `~/.clawft/workspace/sessions/` and
     /// creates it. Returns an error if the home directory cannot be determined.
     pub async fn new(platform: Arc<P>) -> clawft_types::Result<Self> {
-        let home = platform
-            .fs()
-            .home_dir()
-            .ok_or_else(|| ClawftError::ConfigInvalid {
-                reason: "cannot determine home directory".into(),
-            })?;
-
-        let clawft_dir = home.join(".clawft").join("workspace").join("sessions");
-        let nanobot_dir = home.join(".nanobot").join("workspace").join("sessions");
-
-        let sessions_dir = if platform.fs().exists(&clawft_dir).await {
-            debug!(path = %clawft_dir.display(), "using clawft sessions dir");
-            clawft_dir
-        } else if platform.fs().exists(&nanobot_dir).await {
-            debug!(path = %nanobot_dir.display(), "using nanobot sessions dir (fallback)");
-            nanobot_dir
-        } else {
-            debug!(
-                path = %clawft_dir.display(),
-                "sessions dir does not exist, creating"
-            );
-            platform
-                .fs()
-                .create_dir_all(&clawft_dir)
-                .await
-                .map_err(ClawftError::Io)?;
-            clawft_dir
-        };
+        let sessions_dir = discover_sessions_dir(platform.as_ref()).await?;
 
         Ok(Self {
             sessions_dir,
@@ -391,9 +419,7 @@ impl<P: Platform> SessionManager<P> {
     /// a filename. This is reversible: `list_sessions()` decodes back to
     /// the original key.
     fn session_path(&self, key: &str) -> PathBuf {
-        let encoded = percent_encode(key.as_bytes(), NON_ALPHANUMERIC).to_string();
-        let filename = format!("{encoded}.jsonl");
-        self.sessions_dir.join(filename)
+        session_file_path(&self.sessions_dir, key)
     }
 }
 

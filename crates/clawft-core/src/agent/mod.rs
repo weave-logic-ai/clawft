@@ -10,6 +10,7 @@ pub mod gate;
 pub mod graft;
 pub mod helpers;
 pub mod identity;
+pub mod local_file_sink;
 pub mod loop_core;
 pub mod memory;
 pub mod runtime;
