@@ -1153,6 +1153,32 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                     if let (Some(causal), Some(crossrefs)) = (causal.clone(), crossrefs.clone()) {
                         tier = tier.with_forest(causal, crossrefs);
                     }
+                    // ADR-067 P2 (classification-design §D6): attach the keyword
+                    // turn classifier when `[kernel.agent.classification]` is on
+                    // (mode != off), so every committed turn node carries a
+                    // 4-axis `classification` blob + its text. Default off ⇒ no
+                    // classifier, no per-turn cost. The classifier only does
+                    // anything alongside the forest join above (it feeds
+                    // `dual_write_turn`), so it is inert without `anchor_causal`.
+                    if anchor_cfg.classification.is_enabled() {
+                        tier = tier.with_classifier(Arc::new(
+                            clawft_service_agent::KeywordTurnClassifier::new(),
+                        ));
+                        info!(
+                            mode = ?anchor_cfg.classification.mode,
+                            "turn classification enabled — committed turn nodes carry a \
+                             4-axis classification blob (keyword tier)"
+                        );
+                    } else if anchor_cfg.talk_loop {
+                        // Operator hint (design §D6): the ECC loop is on but the
+                        // graph view is inert without classification.
+                        info!(
+                            "classification.mode=off while talk_loop is on — committed turn \
+                             nodes carry no classification blob and the conversation.graph view \
+                             stays inert; set [kernel.agent.classification] mode = \"keyword\" \
+                             to populate it"
+                        );
+                    }
                     let tier = Arc::new(tier);
                     // ADR-058 Phase 5.3: pre-warm the embedder at startup (one
                     // throwaway embed) so the first conversation's first graft
@@ -6447,11 +6473,23 @@ mod tests {
         // conv-A: turn 1 (user) → turn 2 (assistant) via Follows.
         let a_uid1 = turn_uid("conv-A", 1, "hello");
         let a_uid2 = turn_uid("conv-A", 2, "hi there");
+        // Mirror what `dual_write_turn` writes when the classifier is on
+        // (classification-design §D2 blob + §6 `text` piggyback) so the
+        // projection is exercised the way the keyword tier populates it.
+        let a_class1 = serde_json::json!({
+            "intent": "social",
+            "topic": "hello",
+            "emotion": { "valence": 0.2, "arousal": 0.5, "dominance": 0.0, "label": "neutral" },
+            "goal": serde_json::Value::Null,
+            "tier": "keyword",
+            "v": 1,
+        });
         let n1 = causal.add_node(
             "turn:conv-A:1".into(),
             serde_json::json!({
                 "conv_id": "conv-A", "chain_seq": 1, "role": "user",
                 "state": "committed", "uid": a_uid1.to_string(),
+                "text": "hello", "classification": a_class1,
             }),
         );
         let n2 = causal.add_node(
@@ -6459,6 +6497,15 @@ mod tests {
             serde_json::json!({
                 "conv_id": "conv-A", "chain_seq": 2, "role": "assistant",
                 "state": "committed", "uid": a_uid2.to_string(),
+                "text": "hi there",
+                "classification": {
+                    "intent": "statement",
+                    "topic": "hello",
+                    "emotion": { "valence": 0.3, "arousal": 0.5, "dominance": 0.0, "label": "neutral" },
+                    "goal": serde_json::Value::Null,
+                    "tier": "keyword",
+                    "v": 1,
+                },
             }),
         );
         assert!(causal.link(n1, n2, CausalEdgeType::Follows, 0.9, 0, 2));
@@ -6525,6 +6572,37 @@ mod tests {
             }
             assert_eq!(n["conv_id"], "conv-A", "no foreign conv turn leaked: {n}");
         }
+
+        // Every (non-stub) turn node surfaces its `text` and a populated 4-axis
+        // `classification` blob verbatim (classification-design §D2, §6). This
+        // is the RPC-surfacing exit criterion for Phase A — the blob is read
+        // straight from node metadata with no wire change.
+        let a_turn1 = nodes
+            .iter()
+            .find(|n| n["id"].as_str() == Some(a_uid1.to_string().as_str()))
+            .expect("conv-A turn-1 present");
+        assert_eq!(a_turn1["text"], "hello", "turn text surfaced: {a_turn1}");
+        let class1 = &a_turn1["classification"];
+        assert!(class1.is_object(), "classification blob present: {a_turn1}");
+        assert_eq!(class1["intent"], "social");
+        assert_eq!(class1["topic"], "hello");
+        assert_eq!(class1["tier"], "keyword");
+        assert_eq!(class1["v"], 1);
+        assert!(
+            class1["emotion"]["arousal"].is_number(),
+            "emotion arousal present for the floor (design §5): {class1}"
+        );
+        assert!(class1.get("goal").is_some(), "goal axis present (may be null)");
+
+        let a_turn2 = nodes
+            .iter()
+            .find(|n| n["id"].as_str() == Some(a_uid2.to_string().as_str()))
+            .expect("conv-A turn-2 present");
+        assert_eq!(a_turn2["text"], "hi there");
+        assert!(
+            a_turn2["classification"].is_object(),
+            "turn-2 classification blob present: {a_turn2}"
+        );
         // The decoy conv-B turn's UID must not appear as a *turn* node. It shares
         // its UID with the spawn source (same conv/seq/text), which is correctly
         // emitted only as a far-side stub — assert that entry is a stub.
