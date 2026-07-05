@@ -194,6 +194,37 @@ pub(crate) fn dual_write_turn(
     node
 }
 
+/// Draw a cross-conversation [`CrossRef`] link (M4 A.4).
+///
+/// Spawn causality between two conversations — `C.goal --TriggeredBy--> T_user@P`
+/// on spawn, `R_c@C --EvidenceFor--> T_user@P` on completion (design D3) — rides
+/// the shared [`CrossRefStore`], **not** a [`CausalGraph`] edge. That is
+/// deliberate: the causal-graph BFS ([`lineage_fuse`]) walks `Follows` edges and
+/// would cross any node→node causal edge, so a cross-conv causal edge would leak
+/// a parent's turns into a child's recall. A `CrossRef` carries the same
+/// `TriggeredBy` / `EvidenceFor` semantics for the ADR-067 graph view while
+/// keeping each conversation's lineage walk contained.
+///
+/// No enum changes: [`CrossRefType::TriggeredBy`] and
+/// [`CrossRefType::EvidenceFor`] already exist.
+pub(crate) fn link_cross_conv(
+    crossrefs: &CrossRefStore,
+    from_uid: UniversalNodeId,
+    to_uid: UniversalNodeId,
+    ref_type: CrossRefType,
+    chain_seq: u64,
+) {
+    crossrefs.insert(CrossRef {
+        source: from_uid,
+        source_structure: StructureTag::CausalGraph,
+        target: to_uid,
+        target_structure: StructureTag::CausalGraph,
+        ref_type,
+        created_at: 0,
+        chain_seq,
+    });
+}
+
 /// Resolve a chunk's content into a COW reference (blob hash > inline > bare ref).
 /// Mirrors the kernel's private `graft_content` so a lineage-sourced item carries
 /// the same content reference shape as a cosine hit.

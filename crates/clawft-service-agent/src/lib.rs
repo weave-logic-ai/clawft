@@ -46,6 +46,8 @@ pub mod protocol;
 pub mod service;
 mod session_forest;
 pub mod session_tier;
+pub mod spawn_registry;
+pub mod subagent;
 pub mod substrate_budget;
 pub mod substrate_sink;
 
@@ -53,6 +55,8 @@ pub use kernel_gate::KernelEffectGate;
 pub use protocol::{AgentChatMessage, AgentChatParams, AgentChatResult, AgentChatToolCall};
 pub use service::{AgentLoopHandle, AgentService, AgentServiceError};
 pub use session_tier::SessionTier;
+pub use spawn_registry::{SharedSpawnRegistry, SpawnRegistry, TaskRecord};
+pub use subagent::{DaemonSubagentSpawner, SubagentConfig, SubagentForest};
 pub use substrate_budget::SubstrateBudgetStore;
 pub use substrate_sink::{
     AudioRef, HEARTBEAT_PERIOD, KernelSubstrateClient, KernelTurnAnchor, NoopTurnAnchor,
