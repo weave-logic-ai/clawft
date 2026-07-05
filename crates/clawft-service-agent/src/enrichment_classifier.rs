@@ -1,25 +1,28 @@
 //! Enrichment classifier — the async LLM (Phase B) tier of the ADR-067 P2
 //! classifier (design `.planning/hermes-loop/classification-design.md` §D4,
-//! plan B2).
+//! plan B2; taxonomy v2 §D2.1).
 //!
 //! After a turn commits with a keyword blob (Phase A), a cheap-model round-trip
-//! refines the four axes off the turn path and the node blob is patched with
-//! `tier: "llm"` (design §D1, §D4). This module owns that round-trip: it reuses
-//! the routing crate's [`Classifier`] backend trait for the LLM call (so local
-//! llama-server and hosted backends both work) but emits a **separate** four-axis
-//! prompt and parses into the A1 [`ClassificationVector`] — it never touches
-//! `ClassifierOutput` / `LlmClassifierRouter`, which the routing contract owns
-//! (design §4 directive).
+//! refines the dialogue act, topic, emotion, and goal off the turn path and adds
+//! the one thing the keyword tier honestly cannot: the command's **argument
+//! structure** (verb + object). The node blob is then patched with `tier: "llm"`
+//! (design §D1, §D4). This module owns that round-trip: it reuses the routing
+//! crate's [`Classifier`] backend trait for the LLM call but emits a **separate**
+//! v2 prompt and parses into the A1 [`ClassificationVector`] — it never touches
+//! `ClassifierOutput` / `LlmClassifierRouter`, the routing contract (design §4).
+//!
+//! **Entity spans stay keyword-owned** (design §D2.1 — keyword owns the regex
+//! spans, the LLM owns the act + argument). Rather than have the LLM re-list
+//! spans (unreliable), the parser re-derives the structure deterministically from
+//! the turn text via [`extract_structure`] and layers only the LLM `argument` on
+//! top, so a patch never drops the keyword-extracted paths / urls / numbers.
 //!
 //! # Robustness
 //!
-//! Mirrors the router's hardening (`llm_classifier.rs`): fences are stripped,
-//! total parse failure / backend error / empty body collapse to `None` (so the
-//! caller keeps the durable keyword blob), and a *partial* object fills only what
-//! parsed — a missing axis takes its honest default (topic ⇒ prior/`general`,
-//! emotion ⇒ neutral, goal ⇒ `None`), a garbled intent maps to the nearest known
-//! variant or the neutral `Statement`. The enrichment never blocks or corrupts a
-//! committed turn.
+//! Mirrors the router's hardening: fences are stripped; total parse failure /
+//! backend error / empty body collapse to `None` (the caller keeps the durable
+//! keyword blob); a *partial* object fills what parsed (act ⇒ nearest-or-comment,
+//! topic ⇒ prior/`general`, emotion ⇒ neutral, goal/argument ⇒ `None`).
 
 use std::sync::Arc;
 
@@ -29,45 +32,44 @@ use tracing::warn;
 use clawft_core::agent::context_router::Classifier;
 use clawft_types::config::ClassificationConfig;
 
-use crate::turn_classifier::{
-    ClassificationVector, Intent, Tier, Vad, DEFAULT_TOPIC, TAXONOMY_VERSION,
-};
+use crate::dialogue_act::{Act, RefinedAct};
+use crate::text_structure::{extract_structure, Argument};
+use crate::turn_classifier::{ClassificationVector, Tier, Vad, DEFAULT_TOPIC, TAXONOMY_VERSION};
 
-/// System prompt for the four-axis enrichment turn. Emits the §D2 taxonomy
-/// exactly (same intent enum + emotion axes as the keyword tier) so the parsed
-/// result is a drop-in replacement blob — only `tier`/`v` are stamped by us.
-///
-/// Kept compact: every enrichment round-trips a cheap model, so length trades
-/// against latency and (hosted) cost. Two few-shot examples anchor the shape.
+/// System prompt for the v2 enrichment turn. Emits the refined dialogue act, a
+/// refined topic, emotion, goal, and the argument structure — matching the §D2.1
+/// taxonomy so the parsed result drops into the blob (class is re-derived from
+/// the act; entity spans come from the keyword tier).
 pub const ENRICHMENT_SYSTEM_PROMPT: &str = "\
-You label a single conversation turn for a graph view. Reply with JSON only:\n\
-{ \"intent\": \"question\"|\"request\"|\"statement\"|\"correction\"|\"feedback\"|\"social\"|\"meta\",\n\
+You label one conversation turn for a graph view. Reply with JSON only:\n\
+{ \"act\": \"question\"|\"clarification-request\"|\"clarification-provide\"|\"command\"\n\
+        |\"comment\"|\"correction\"|\"feedback\"|\"acknowledgment\"|\"social\"|\"meta\",\n\
   \"topic\": \"<1-3 lowercase words>\",\n\
   \"emotion\": { \"valence\": <-1..1>, \"arousal\": <-1..1>, \"dominance\": <-1..1>, \"label\": \"<one word>\" },\n\
-  \"goal\": \"<short active-goal phrase>\" | null }\n\
+  \"goal\": \"<short active-goal phrase>\" | null,\n\
+  \"argument\": { \"verb\": \"<imperative verb>\", \"object\": \"<what it acts on>\" } | null }\n\
 \n\
-intent — the conversational act:\n\
-  question: asks for information   request: asks for an action\n\
-  statement: asserts a fact        correction: fixes a prior turn\n\
-  feedback: evaluates the assistant or its output\n\
-  social: greeting / thanks / farewell   meta: talks about the conversation itself\n\
-topic — the subject in 1-3 lowercase words (e.g. \"voice tts\", \"kernel scheduler\").\n\
+act — the dialogue move:\n\
+  question: asks for info      clarification-request: asks the other to clarify\n\
+  clarification-provide: clarifies your own prior turn    command: asks for an action\n\
+  comment: asserts a fact      correction: fixes a prior turn\n\
+  feedback: evaluates the assistant   acknowledgment: ok / got it / makes sense\n\
+  social: greeting / thanks    meta: talks about the conversation itself\n\
+argument — for a command only: the verb + the object it acts on; null otherwise.\n\
 emotion — valence (unpleasant..pleasant), arousal (calm..intense), dominance\n\
   (submissive..assertive), each in [-1,1]; label is one plain word.\n\
-goal — the active task the user is pursuing, short phrase, or null if unclear.\n\
 \n\
 Examples:\n\
-  \"how does the SNAC decode work?\" -> {\"intent\":\"question\",\"topic\":\"snac decode\",\"emotion\":{\"valence\":0.1,\"arousal\":0.5,\"dominance\":0.0,\"label\":\"curious\"},\"goal\":null}\n\
-  \"no, that broke the build!\" -> {\"intent\":\"correction\",\"topic\":\"build\",\"emotion\":{\"valence\":-0.6,\"arousal\":0.8,\"dominance\":0.2,\"label\":\"frustrated\"},\"goal\":\"fix the build\"}\n\
+  \"what do you mean by that?\" -> {\"act\":\"clarification-request\",\"topic\":\"meaning\",\"emotion\":{\"valence\":0.0,\"arousal\":0.4,\"dominance\":0.0,\"label\":\"puzzled\"},\"goal\":null,\"argument\":null}\n\
+  \"fix the SNAC decode\" -> {\"act\":\"command\",\"topic\":\"snac decode\",\"emotion\":{\"valence\":-0.1,\"arousal\":0.5,\"dominance\":0.3,\"label\":\"focused\"},\"goal\":\"fix the decoder\",\"argument\":{\"verb\":\"fix\",\"object\":\"the SNAC decode\"}}\n\
 ";
 
 /// Upper bound on the enrichment turn's `max_tokens`. Larger than the router's
-/// `{archetype, complexity}` cap (64) because the four-axis blob is bigger, but
-/// still tight enough to bound a runaway generation.
-pub const DEFAULT_ENRICHMENT_MAX_TOKENS: u32 = 160;
+/// 64-token cap because the v2 act + argument blob is bigger.
+pub const DEFAULT_ENRICHMENT_MAX_TOKENS: u32 = 200;
 
-/// The Phase-B async enrichment classifier (design §D4). Holds a [`Classifier`]
-/// backend and the cheap-model override; produces a refined
+/// The Phase-B async enrichment classifier (design §D4, §D2.1). Holds a
+/// [`Classifier`] backend and the cheap-model override; produces a refined
 /// [`ClassificationVector`] with `tier: Llm`.
 pub struct EnrichmentClassifier {
     backend: Arc<dyn Classifier>,
@@ -118,13 +120,18 @@ impl EnrichmentClassifier {
     }
 
     /// Enrich one turn. `prev_topic` is the node's existing (keyword) topic, used
-    /// as the fallback when the model omits a topic.
+    /// as the topic fallback when the model omits one; the entity structure is
+    /// re-derived from `text` so the keyword spans survive the patch (design
+    /// §D2.1).
     ///
     /// Returns a refined [`ClassificationVector`] (`tier: Llm`) on success, or
-    /// `None` on any backend failure, empty body, or total parse failure — in
-    /// which case the caller keeps the durable keyword blob (design §D4,
-    /// best-effort).
-    pub async fn enrich(&self, text: &str, prev_topic: Option<&str>) -> Option<ClassificationVector> {
+    /// `None` on any backend failure, empty body, or total parse failure — the
+    /// caller then keeps the durable keyword blob (design §D4).
+    pub async fn enrich(
+        &self,
+        text: &str,
+        prev_topic: Option<&str>,
+    ) -> Option<ClassificationVector> {
         let raw = match self
             .backend
             .classify(text, self.max_tokens, self.model_override.as_deref())
@@ -140,7 +147,7 @@ impl EnrichmentClassifier {
                 return None;
             }
         };
-        match parse_enrichment_envelope(&raw, prev_topic) {
+        match parse_enrichment_envelope(&raw, text, prev_topic) {
             Some(cv) => Some(cv),
             None => {
                 warn!(body = %raw, "EnrichmentClassifier: malformed JSON; keeping keyword blob");
@@ -150,24 +157,34 @@ impl EnrichmentClassifier {
     }
 }
 
-/// Parse a four-axis enrichment envelope into a [`ClassificationVector`]
-/// (`tier: Llm`). Returns `None` only when the body is not a JSON object at all
-/// (so the caller keeps the keyword blob); a *partial* object fills what parsed
-/// and defaults the rest (design §D4 "fill-what-parsed"). Pure — no I/O — so the
-/// hardening matrix can be unit-tested without a backend.
-pub fn parse_enrichment_envelope(body: &str, prev_topic: Option<&str>) -> Option<ClassificationVector> {
+/// Parse a v2 enrichment envelope into a [`ClassificationVector`] (`tier: Llm`).
+/// `text` re-derives the entity structure (keyword spans survive the patch);
+/// `prev_topic` is the topic fallback. Returns `None` only when the body is not a
+/// JSON object (caller keeps the keyword blob); a partial object fills what parsed
+/// (design §D2.1). Pure — the hardening matrix unit-tests it without a backend.
+pub fn parse_enrichment_envelope(
+    body: &str,
+    text: &str,
+    prev_topic: Option<&str>,
+) -> Option<ClassificationVector> {
     let parsed: Value = serde_json::from_str(strip_fences(body)).ok()?;
     let obj = parsed.as_object()?;
 
-    let intent = obj
-        .get("intent")
-        .and_then(|v| v.as_str())
-        .map(parse_intent)
-        .unwrap_or(Intent::Statement);
+    let act = obj
+        .get("act")
+        .and_then(Value::as_str)
+        .map(parse_refined_act)
+        .or_else(|| {
+            obj.get("intent")
+                .and_then(Value::as_str)
+                .map(RefinedAct::from_intent_str)
+        })
+        .map(Act::new)
+        .unwrap_or_else(|| Act::new(RefinedAct::Comment));
 
     let topic = obj
         .get("topic")
-        .and_then(|v| v.as_str())
+        .and_then(Value::as_str)
         .map(normalize_topic)
         .filter(|t| !t.is_empty())
         .or_else(|| prev_topic.map(str::to_string))
@@ -177,60 +194,82 @@ pub fn parse_enrichment_envelope(body: &str, prev_topic: Option<&str>) -> Option
 
     let goal = obj
         .get("goal")
-        .and_then(|v| v.as_str())
+        .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
+    // Keyword-owned entity spans + shape, re-derived from the text; the LLM only
+    // contributes the argument (design §D2.1). No speaker vocab at this tier.
+    let mut structure = extract_structure(text, &[]);
+    structure.argument = parse_argument(obj.get("argument"));
+
     Some(ClassificationVector {
-        intent,
+        act,
         topic,
         emotion,
+        structure,
         goal,
         tier: Tier::Llm,
         v: TAXONOMY_VERSION,
     })
 }
 
-/// Known intent names for the nearest-match fallback (design §D4
-/// "wrong-enum → nearest-or-none").
-const KNOWN_INTENTS: &[(&str, Intent)] = &[
-    ("question", Intent::Question),
-    ("request", Intent::Request),
-    ("statement", Intent::Statement),
-    ("correction", Intent::Correction),
-    ("feedback", Intent::Feedback),
-    ("social", Intent::Social),
-    ("meta", Intent::Meta),
-];
-
-/// Parse an intent string: exact lowercase match, else the nearest known variant
-/// (prefix/substring), else the neutral `Statement` default. Never fails the
-/// whole envelope on a garbled enum.
-fn parse_intent(s: &str) -> Intent {
+/// Parse a refined-act string: exact kebab-case match, else nearest known act by
+/// substring, else the neutral `Comment` default (design §D2.1 nearest-or-none).
+fn parse_refined_act(s: &str) -> RefinedAct {
+    if let Some(a) = RefinedAct::from_wire(s) {
+        return a;
+    }
     let lower = s.trim().to_lowercase();
-    for (name, intent) in KNOWN_INTENTS {
-        if lower == *name {
-            return *intent;
+    for name in [
+        "clarification-request",
+        "clarification-provide",
+        "question",
+        "command",
+        "comment",
+        "correction",
+        "feedback",
+        "acknowledgment",
+        "social",
+        "meta",
+    ] {
+        if (lower.contains(name) || name.contains(lower.as_str()))
+            && let Some(a) = RefinedAct::from_wire(name)
+        {
+            return a;
         }
     }
-    for (name, intent) in KNOWN_INTENTS {
-        if lower.starts_with(name) || name.starts_with(lower.as_str()) || lower.contains(name) {
-            return *intent;
-        }
-    }
-    Intent::Statement
+    RefinedAct::Comment
+}
+
+/// Parse the `argument` object into an [`Argument`]; `verb` is required.
+fn parse_argument(v: Option<&Value>) -> Option<Argument> {
+    let obj = v?.as_object()?;
+    let verb = obj
+        .get("verb")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    let object = obj
+        .get("object")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    Some(Argument { verb, object })
 }
 
 /// Parse the emotion object into a [`Vad`], clamping each scalar to `[-1, 1]` and
-/// defaulting missing/non-finite axes (arousal `0.5`, others `0.0`, design §D2).
+/// defaulting missing/non-finite axes (arousal `0.5`, others `0.0`).
 fn parse_emotion(v: Option<&Value>) -> Vad {
     let Some(obj) = v else {
         return Vad::neutral();
     };
     let label = obj
         .get("label")
-        .and_then(|v| v.as_str())
+        .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_lowercase)
@@ -277,6 +316,8 @@ fn strip_fences(body: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dialogue_act::SpeechActClass;
+    use crate::text_structure::EntityKind;
     use async_trait::async_trait;
     use std::sync::Mutex;
 
@@ -309,165 +350,177 @@ mod tests {
         }
     }
 
-    const VALID: &str = r#"{"intent":"question","topic":"snac decode","emotion":{"valence":0.1,"arousal":0.6,"dominance":0.0,"label":"curious"},"goal":null}"#;
+    const VALID: &str = r#"{"act":"command","topic":"snac decode","emotion":{"valence":-0.1,"arousal":0.6,"dominance":0.3,"label":"focused"},"goal":"fix the decoder","argument":{"verb":"fix","object":"the SNAC decode"}}"#;
+
+    // The turn text drives the re-derived structure layer.
+    const TEXT: &str = "fix src/snac.rs decode";
 
     // -- Pure parse hardening matrix ---------------------------------------
 
     #[test]
-    fn parses_valid_envelope() {
-        let cv = parse_enrichment_envelope(VALID, None).expect("valid parses");
-        assert_eq!(cv.intent, Intent::Question);
+    fn parses_valid_v2_envelope() {
+        let cv = parse_enrichment_envelope(VALID, TEXT, None).expect("valid parses");
+        assert_eq!(cv.act.refined, RefinedAct::Command);
+        assert_eq!(cv.act.class, SpeechActClass::Directive);
         assert_eq!(cv.topic, "snac decode");
         assert!((cv.emotion.arousal - 0.6).abs() < 1e-6);
-        assert_eq!(cv.emotion.label, "curious");
-        assert!(cv.goal.is_none());
+        assert_eq!(cv.goal.as_deref(), Some("fix the decoder"));
+        let arg = cv.structure.argument.as_ref().expect("argument parsed");
+        assert_eq!(arg.verb, "fix");
+        assert_eq!(arg.object.as_deref(), Some("the SNAC decode"));
         assert_eq!(cv.tier, Tier::Llm);
         assert_eq!(cv.v, TAXONOMY_VERSION);
     }
 
     #[test]
-    fn strips_json_fences() {
+    fn structure_derived_from_text_with_llm_argument() {
+        // Path entity comes from the text (keyword-owned); argument from the LLM.
+        let cv = parse_enrichment_envelope(VALID, TEXT, None).unwrap();
+        assert!(cv
+            .structure
+            .entities
+            .iter()
+            .any(|e| e.kind == EntityKind::Path && e.text == "src/snac.rs"));
+        assert!(cv.structure.argument.is_some());
+    }
+
+    #[test]
+    fn clarification_request_act() {
+        let body = r#"{"act":"clarification-request","topic":"meaning"}"#;
+        let cv = parse_enrichment_envelope(body, "what do you mean?", None).unwrap();
+        assert_eq!(cv.act.refined, RefinedAct::ClarificationRequest);
+        assert_eq!(cv.act.class, SpeechActClass::Interrogative);
+    }
+
+    #[test]
+    fn strips_fences() {
         let fenced = format!("```json\n{VALID}\n```");
-        let cv = parse_enrichment_envelope(&fenced, None).expect("fenced parses");
-        assert_eq!(cv.intent, Intent::Question);
+        assert!(parse_enrichment_envelope(&fenced, TEXT, None).is_some());
+        let bare = format!("```\n{VALID}\n```");
+        assert!(parse_enrichment_envelope(&bare, TEXT, None).is_some());
     }
 
     #[test]
-    fn strips_bare_fences() {
-        let fenced = format!("```\n{VALID}\n```");
-        assert!(parse_enrichment_envelope(&fenced, None).is_some());
+    fn malformed_is_none() {
+        assert!(parse_enrichment_envelope("not json", TEXT, None).is_none());
+        assert!(parse_enrichment_envelope("42", TEXT, None).is_none());
     }
 
     #[test]
-    fn malformed_json_is_none() {
-        assert!(parse_enrichment_envelope("not json, sorry", None).is_none());
-        // A JSON scalar is not an object → None (keep the keyword blob).
-        assert!(parse_enrichment_envelope("42", None).is_none());
-    }
-
-    #[test]
-    fn partial_fills_what_parsed() {
-        // Only intent present: topic ⇒ prev/general, emotion ⇒ neutral, goal ⇒ None.
-        let cv = parse_enrichment_envelope(r#"{"intent":"request"}"#, Some("voice"))
-            .expect("partial still parses");
-        assert_eq!(cv.intent, Intent::Request);
-        assert_eq!(cv.topic, "voice"); // inherited prev_topic
+    fn partial_fills_defaults() {
+        // Only act present: topic ⇒ prev/general, emotion ⇒ neutral, goal/arg ⇒ None.
+        let cv = parse_enrichment_envelope(r#"{"act":"command"}"#, "do it", None).unwrap();
+        assert_eq!(cv.act.refined, RefinedAct::Command);
+        assert_eq!(cv.topic, DEFAULT_TOPIC);
         assert_eq!(cv.emotion, Vad::neutral());
         assert!(cv.goal.is_none());
+        assert!(cv.structure.argument.is_none());
+        // With a prev topic, the topic falls back to it.
+        let cv = parse_enrichment_envelope(r#"{"act":"command"}"#, "do it", Some("decode")).unwrap();
+        assert_eq!(cv.topic, "decode");
     }
 
     #[test]
-    fn partial_topic_missing_no_prev_defaults_general() {
-        let cv = parse_enrichment_envelope(r#"{"intent":"statement"}"#, None).unwrap();
-        assert_eq!(cv.topic, DEFAULT_TOPIC);
+    fn wrong_act_maps_to_nearest_or_comment() {
+        // "commanding" → nearest "command".
+        let cv = parse_enrichment_envelope(r#"{"act":"commanding"}"#, TEXT, None).unwrap();
+        assert_eq!(cv.act.refined, RefinedAct::Command);
+        // gibberish → Comment default.
+        let cv = parse_enrichment_envelope(r#"{"act":"zzzzz"}"#, TEXT, None).unwrap();
+        assert_eq!(cv.act.refined, RefinedAct::Comment);
     }
 
     #[test]
-    fn wrong_enum_maps_to_nearest_or_statement() {
-        // "questions" → nearest "question".
-        let cv = parse_enrichment_envelope(r#"{"intent":"questions","topic":"x"}"#, None).unwrap();
-        assert_eq!(cv.intent, Intent::Question);
-        // "inquiry" matches nothing → neutral Statement default.
-        let cv = parse_enrichment_envelope(r#"{"intent":"inquiry","topic":"x"}"#, None).unwrap();
-        assert_eq!(cv.intent, Intent::Statement);
+    fn legacy_intent_key_still_upgrades() {
+        // An LLM that emits the old v1 `intent` key is still parsed.
+        let cv = parse_enrichment_envelope(r#"{"intent":"request","topic":"x"}"#, TEXT, None).unwrap();
+        assert_eq!(cv.act.refined, RefinedAct::Command);
     }
 
     #[test]
-    fn emotion_out_of_range_is_clamped() {
-        let body = r#"{"intent":"statement","topic":"x","emotion":{"valence":9.0,"arousal":-5.0,"dominance":2.0,"label":"X"}}"#;
-        let cv = parse_enrichment_envelope(body, None).unwrap();
+    fn emotion_out_of_range_clamped() {
+        let body = r#"{"act":"comment","topic":"x","emotion":{"valence":9.0,"arousal":-5.0,"dominance":2.0,"label":"X"}}"#;
+        let cv = parse_enrichment_envelope(body, TEXT, None).unwrap();
         assert_eq!(cv.emotion.valence, 1.0);
         assert_eq!(cv.emotion.arousal, -1.0);
         assert_eq!(cv.emotion.dominance, 1.0);
-        assert_eq!(cv.emotion.label, "x"); // lowercased
+        assert_eq!(cv.emotion.label, "x");
     }
 
     #[test]
-    fn emotion_missing_defaults_neutral() {
-        let cv = parse_enrichment_envelope(r#"{"intent":"statement","topic":"x"}"#, None).unwrap();
-        assert_eq!(cv.emotion, Vad::neutral());
-    }
-
-    #[test]
-    fn goal_empty_string_is_none() {
+    fn argument_needs_verb() {
+        // Object-only argument (no verb) is dropped.
         let cv =
-            parse_enrichment_envelope(r#"{"intent":"statement","topic":"x","goal":"  "}"#, None)
+            parse_enrichment_envelope(r#"{"act":"command","argument":{"object":"x"}}"#, TEXT, None)
                 .unwrap();
-        assert!(cv.goal.is_none());
-        let cv =
-            parse_enrichment_envelope(r#"{"intent":"statement","topic":"x","goal":"fix build"}"#, None)
-                .unwrap();
-        assert_eq!(cv.goal.as_deref(), Some("fix build"));
+        assert!(cv.structure.argument.is_none());
     }
 
-    #[test]
-    fn topic_capped_to_three_words() {
-        let cv =
-            parse_enrichment_envelope(r#"{"intent":"statement","topic":"One Two Three Four Five"}"#, None)
-                .unwrap();
-        assert_eq!(cv.topic, "one two three");
-    }
-
-    // -- Blob-shape golden (reuse A1's §D2 shape, tier now llm) -------------
+    // -- Blob-shape golden (v2, tier llm) ----------------------------------
 
     #[test]
-    fn enriched_blob_has_exact_keys_and_llm_tier() {
-        let cv = parse_enrichment_envelope(VALID, None).unwrap();
+    fn enriched_blob_has_v2_keys_and_llm_tier() {
+        let cv = parse_enrichment_envelope(VALID, TEXT, None).unwrap();
         let blob = cv.to_metadata_value();
         let obj = blob.as_object().unwrap();
         let mut keys: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["emotion", "goal", "intent", "tier", "topic", "v"]);
+        assert_eq!(
+            keys,
+            ["act", "emotion", "goal", "intent", "structure", "tier", "topic", "v"]
+        );
         assert_eq!(obj["tier"], serde_json::json!("llm"));
-        assert_eq!(obj["v"], serde_json::json!(1));
+        assert_eq!(obj["v"], serde_json::json!(2));
+        assert_eq!(obj["intent"], serde_json::json!("request")); // command → request
+        assert_eq!(obj["structure"]["argument"]["verb"], serde_json::json!("fix"));
     }
 
     // -- Prompt snapshot ----------------------------------------------------
 
     #[test]
-    fn prompt_names_all_axes_and_intents() {
+    fn prompt_names_acts_and_argument() {
         let p = ENRICHMENT_SYSTEM_PROMPT;
-        assert!(p.starts_with("You label a single conversation turn"));
         assert!(p.contains("JSON only"));
-        for intent in ["question", "request", "statement", "correction", "feedback", "social", "meta"] {
-            assert!(p.contains(intent), "prompt must name intent {intent}");
+        for act in [
+            "question",
+            "clarification-request",
+            "clarification-provide",
+            "command",
+            "comment",
+            "correction",
+            "feedback",
+            "acknowledgment",
+            "social",
+            "meta",
+        ] {
+            assert!(p.contains(act), "prompt must name act {act}");
         }
-        for axis in ["valence", "arousal", "dominance", "label"] {
-            assert!(p.contains(axis), "prompt must name emotion axis {axis}");
-        }
-        assert!(p.contains("\"topic\""));
-        assert!(p.contains("\"goal\""));
+        assert!(p.contains("\"argument\""));
+        assert!(p.contains("\"verb\""));
+        assert!(p.contains("\"object\""));
     }
 
-    // -- enrich() integration (backend failure + config consumption) --------
+    // -- enrich() integration ----------------------------------------------
 
     #[tokio::test]
     async fn enrich_returns_vector_on_valid_body() {
         let ec = EnrichmentClassifier::from_backend(Arc::new(MockClassifier::ok(VALID)));
-        let cv = ec.enrich("how does snac work?", None).await.expect("valid enriches");
-        assert_eq!(cv.intent, Intent::Question);
+        let cv = ec.enrich("fix snac", None).await.expect("valid enriches");
+        assert_eq!(cv.act.refined, RefinedAct::Command);
         assert_eq!(cv.tier, Tier::Llm);
     }
 
     #[tokio::test]
-    async fn enrich_none_on_backend_error() {
-        let ec = EnrichmentClassifier::from_backend(Arc::new(MockClassifier {
-            response: Err("transport: refused".into()),
+    async fn enrich_none_on_failures() {
+        let err = EnrichmentClassifier::from_backend(Arc::new(MockClassifier {
+            response: Err("transport".into()),
             seen_model: Mutex::new(None),
         }));
-        assert!(ec.enrich("x", None).await.is_none());
-    }
-
-    #[tokio::test]
-    async fn enrich_none_on_empty_body() {
-        let ec = EnrichmentClassifier::from_backend(Arc::new(MockClassifier::ok("   \n ")));
-        assert!(ec.enrich("x", None).await.is_none());
-    }
-
-    #[tokio::test]
-    async fn enrich_none_on_malformed_body() {
-        let ec = EnrichmentClassifier::from_backend(Arc::new(MockClassifier::ok("nonsense")));
-        assert!(ec.enrich("x", None).await.is_none());
+        assert!(err.enrich("x", None).await.is_none());
+        let empty = EnrichmentClassifier::from_backend(Arc::new(MockClassifier::ok("  ")));
+        assert!(empty.enrich("x", None).await.is_none());
+        let bad = EnrichmentClassifier::from_backend(Arc::new(MockClassifier::ok("nonsense")));
+        assert!(bad.enrich("x", None).await.is_none());
     }
 
     #[tokio::test]
@@ -481,8 +534,7 @@ mod tests {
         ec.enrich("x", None).await;
         assert_eq!(
             backend.seen_model.lock().unwrap().as_deref(),
-            Some("haiku-3.5"),
-            "from_config must thread model_override into the backend call"
+            Some("haiku-3.5")
         );
     }
 

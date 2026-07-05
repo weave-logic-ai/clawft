@@ -46,6 +46,10 @@ ulid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+# Regex-based typed entity-span extraction for the v2 structure layer
+# (classification-design §D2.1 — paths, urls, numbers, dates, code tokens).
+regex = { workspace = true }
+
 # Async runtime — tokio 'full' matches the daemon, which is the
 # intended host. The `sync` feature is pulled in by `full`.
 tokio = { workspace = true }

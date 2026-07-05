@@ -43,9 +43,8 @@ use crate::protocol::{AgentChatMessage, AgentChatParams, AgentChatResult};
 use crate::service::{AgentLoopHandle, AgentService};
 use crate::session_forest::link_cross_conv;
 use crate::spawn_registry::SpawnRegistry;
-use crate::turn_classifier::{
-    ClassificationVector, Intent, KeywordTurnClassifier, TurnClassifier, Vad,
-};
+use crate::dialogue_act::{Act, RefinedAct};
+use crate::turn_classifier::{ClassificationVector, KeywordTurnClassifier, TurnClassifier, Vad};
 
 /// Chain source label for subagent lifecycle events (ADR-033 witnessing).
 const WITNESS_SOURCE: &str = "subagent";
@@ -617,7 +616,7 @@ fn goal_hash(goal: &str) -> String {
 /// for the topic extraction, then overrides the fixed axes.
 fn spawn_goal_classification(goal: &str) -> ClassificationVector {
     let mut cv = KeywordTurnClassifier::new().classify("assistant", goal, None);
-    cv.intent = Intent::Request;
+    cv.act = Act::new(RefinedAct::Command); // a spawn goal is a directive (§D5)
     cv.emotion = Vad::neutral();
     cv.goal = Some(goal.to_string());
     cv
@@ -632,7 +631,7 @@ fn spawn_result_classification(goal: &str, result: Option<&str>) -> Classificati
         .topic;
     let summary = result.unwrap_or(goal);
     let mut cv = KeywordTurnClassifier::new().classify("assistant", summary, None);
-    cv.intent = Intent::Statement;
+    cv.act = Act::new(RefinedAct::Comment); // a result is an assertive comment (§D5)
     cv.emotion = Vad::neutral();
     cv.topic = goal_topic; // inherit the goal's topic (design §D5)
     cv

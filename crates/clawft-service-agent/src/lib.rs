@@ -42,6 +42,7 @@
 #![warn(missing_docs)]
 
 pub mod enrich_queue;
+pub mod dialogue_act;
 pub mod enrichment_classifier;
 pub mod kernel_gate;
 pub mod protocol;
@@ -52,14 +53,17 @@ pub mod spawn_registry;
 pub mod subagent;
 pub mod substrate_budget;
 pub mod substrate_sink;
+pub mod text_structure;
 pub mod turn_classifier;
 
 pub use enrich_queue::{EnrichJob, EnrichQueue};
+pub use dialogue_act::{Act, Intent, RefinedAct, SpeechActClass};
 pub use enrichment_classifier::{
     parse_enrichment_envelope, EnrichmentClassifier, DEFAULT_ENRICHMENT_MAX_TOKENS,
     ENRICHMENT_SYSTEM_PROMPT,
 };
 pub use kernel_gate::KernelEffectGate;
+pub use text_structure::{Argument, EntityKind, EntitySpan, Structure, UtteranceShape};
 pub use protocol::{AgentChatMessage, AgentChatParams, AgentChatResult, AgentChatToolCall};
 pub use service::{AgentLoopHandle, AgentService, AgentServiceError};
 pub use session_tier::SessionTier;
@@ -67,7 +71,7 @@ pub use spawn_registry::{SharedSpawnRegistry, SpawnRegistry, TaskRecord};
 pub use subagent::{DaemonSubagentSpawner, SubagentConfig, SubagentForest};
 pub use substrate_budget::SubstrateBudgetStore;
 pub use turn_classifier::{
-    arousal_of, ClassificationVector, Intent, KeywordTurnClassifier, Tier, TurnClassifier, Vad,
+    arousal_of, ClassificationVector, KeywordTurnClassifier, Tier, TurnClassifier, Vad,
 };
 pub use substrate_sink::{
     AudioRef, HEARTBEAT_PERIOD, KernelSubstrateClient, KernelTurnAnchor, NoopTurnAnchor,

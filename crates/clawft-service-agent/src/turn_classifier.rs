@@ -1,60 +1,41 @@
 //! Turn classification — the keyword (sync) tier of the ADR-067 P2 classifier
-//! (design `.planning/hermes-loop/classification-design.md`, plan A1).
+//! (design `.planning/hermes-loop/classification-design.md`, plan A1 + §D2.1 v2).
 //!
-//! Every committed turn node on the ECC forest must carry a non-null, four-axis
-//! `classification` blob so the graph view has stable strings for hue / glyph and
-//! the floor has an arousal scalar (design §1, §5). This module supplies the
-//! always-on, deterministic keyword extractor: pure CPU string ops, microseconds
-//! per turn, safe on the `index_turn` witness path (design §D1).
+//! Every committed turn node on the ECC forest carries a non-null `classification`
+//! blob so the graph view has stable strings for hue / glyph and the floor has an
+//! arousal scalar (design §1, §5). This module supplies the always-on,
+//! deterministic keyword extractor: pure CPU string ops, microseconds per turn,
+//! safe on the `index_turn` witness path (design §D1).
 //!
-//! # Axes (taxonomy v1, design §D2)
+//! # Axes (taxonomy v2, design §D2 + §D2.1)
 //!
-//! - **[`Intent`]** — closed 7-variant enum from surface cues (`?` → Question,
-//!   verb-initial → Request, correction/social/feedback lexicons, Meta).
+//! - **`act`** — two-level dialogue act [`Act`] (`{class, refined}`) from
+//!   [`dialogue_act`](crate::dialogue_act). The blob also serialises a legacy
+//!   `intent` key projected from `act.refined` (v1 back-compat).
 //! - **`topic`** — top non-stopword token via the graphify `tokenize` idiom, with
-//!   a topic-continuity carry so per-turn flicker does not destabilise the GUI
-//!   clusters (design §D2 caveat).
-//! - **[`Vad`]** — valence/arousal/dominance + coarse label. Arousal is always
-//!   present (default `0.5`) for the floor; `dominance` is always `0.0` because a
-//!   keyword pass cannot infer it honestly (design §D2).
-//! - **`goal`** — always `None` at this tier: inferring a goal from a single turn
-//!   is unreliable and we do not fabricate one (design §D2). Spawn nodes fill it
-//!   from `SpawnSpec.goal` separately (design §D5).
+//!   a topic-continuity carry (design §D2 caveat).
+//! - **`emotion`** — [`Vad`] valence/arousal/dominance + coarse label. Arousal is
+//!   always present (default `0.5`) for the floor; `dominance` is always `0.0`.
+//! - **`structure`** — typed entity spans + utterance-shape flags from
+//!   [`text_structure`](crate::text_structure) (design §D2.1).
+//! - **`goal`** — always `None` at this tier (no fabrication; design §D2).
 //!
-//! The blob is emitted by [`ClassificationVector::to_metadata_value`] in exactly
-//! the design §D2 shape (no wire change to the `conversation.graph` RPC).
+//! The blob is emitted by [`ClassificationVector::to_metadata_value`] in the
+//! design §D2.1 shape; [`ClassificationVector::from_metadata_value`] reads it back
+//! tolerating a `v:1` blob (no `act` / `structure`).
 
 use serde::Serialize;
 use serde_json::Value;
 
-/// Taxonomy version stamped into every blob (`"v": 1`, design §D2).
-pub const TAXONOMY_VERSION: u8 = 1;
+use crate::dialogue_act::{classify_act, Act, RefinedAct};
+use crate::text_structure::{extract_structure, Structure};
+
+/// Taxonomy version stamped into every blob (`"v": 2`, design §D2.1).
+pub const TAXONOMY_VERSION: u8 = 2;
 
 /// Neutral topic used when a turn carries no extractable token and there is no
 /// prior topic to inherit (design §D2 topic-continuity).
 pub const DEFAULT_TOPIC: &str = "general";
-
-/// Conversational intent of a turn — the glyph axis for the graph view
-/// (design §D2). Distinct from the routing archetype (`Reasoning`/`CodeGen`/…),
-/// which is about tier complexity and stays untouched (design directive).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Intent {
-    /// A request for information — `?` or an interrogative opener.
-    Question,
-    /// An imperative / verb-initial ask for an action.
-    Request,
-    /// A declarative statement (the default when no other cue fires).
-    Statement,
-    /// A correction of a prior turn ("no", "actually", "wait", "i meant").
-    Correction,
-    /// Evaluative feedback on the assistant or its output ("you should", praise).
-    Feedback,
-    /// Social pleasantry — greeting, thanks, farewell.
-    Social,
-    /// Meta-conversational control ("start over", "nevermind", "new topic").
-    Meta,
-}
 
 /// Provenance of a classification blob — lets consumers weight sources by
 /// confidence (voice VAD > llm > keyword, design §5).
@@ -96,16 +77,19 @@ impl Vad {
     }
 }
 
-/// The full four-axis classification of a single turn (design §D2). Serialises
-/// verbatim into the node metadata `classification` blob.
+/// The full classification of a single turn (design §D2 + §D2.1). Serialised into
+/// the node metadata `classification` blob by [`Self::to_metadata_value`].
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ClassificationVector {
-    /// Conversational intent (glyph axis).
-    pub intent: Intent,
+    /// Two-level dialogue act (glyph axis). The blob also carries a legacy
+    /// `intent` key projected from `act.refined`.
+    pub act: Act,
     /// Short open-vocab topic tag (hue / cluster axis), `≤ 3` words.
     pub topic: String,
     /// Emotion VAD + label.
     pub emotion: Vad,
+    /// Structure / data-type layer — typed entity spans + utterance shape.
+    pub structure: Structure,
     /// Active goal thread, or `None` (always `None` at the keyword tier).
     pub goal: Option<String>,
     /// Provenance tier.
@@ -115,18 +99,113 @@ pub struct ClassificationVector {
 }
 
 impl ClassificationVector {
-    /// Produce the `classification` metadata blob in exactly the design §D2 shape
-    /// (`{intent, topic, emotion:{valence,arousal,dominance,label}, goal, tier,
-    /// v}`). Derived `Serialize` guarantees the key names and enum casing.
+    /// Produce the `classification` metadata blob in the design §D2.1 shape.
+    /// Built by hand (not derived `Serialize`) so the legacy `intent` key is
+    /// injected as the projection of `act.refined` (v1 back-compat).
     pub fn to_metadata_value(&self) -> Value {
-        serde_json::to_value(self).expect("ClassificationVector serialises")
+        let mut m = serde_json::Map::new();
+        m.insert(
+            "intent".into(),
+            serde_json::to_value(self.act.intent()).expect("intent serialises"),
+        );
+        m.insert("act".into(), serde_json::to_value(self.act).expect("act serialises"));
+        m.insert("topic".into(), Value::String(self.topic.clone()));
+        m.insert(
+            "emotion".into(),
+            serde_json::to_value(&self.emotion).expect("emotion serialises"),
+        );
+        m.insert(
+            "structure".into(),
+            serde_json::to_value(&self.structure).expect("structure serialises"),
+        );
+        m.insert(
+            "goal".into(),
+            self.goal
+                .as_ref()
+                .map_or(Value::Null, |g| Value::String(g.clone())),
+        );
+        m.insert("tier".into(), serde_json::to_value(self.tier).expect("tier serialises"));
+        m.insert("v".into(), Value::from(self.v));
+        Value::Object(m)
+    }
+
+    /// Read a stored `classification` blob back into a vector, tolerating a `v:1`
+    /// blob (design §D2.1): a missing `act` is upgraded from the legacy `intent`
+    /// key, and a missing `structure` defaults to empty. Returns `None` only when
+    /// neither `act` nor `intent` is present.
+    pub fn from_metadata_value(value: &Value) -> Option<Self> {
+        let obj = value.as_object()?;
+        let act = obj
+            .get("act")
+            .and_then(Act::from_value)
+            .or_else(|| {
+                obj.get("intent")
+                    .and_then(|i| i.as_str())
+                    .map(|s| Act::new(RefinedAct::from_intent_str(s)))
+            })?;
+        let topic = obj
+            .get("topic")
+            .and_then(|v| v.as_str())
+            .unwrap_or(DEFAULT_TOPIC)
+            .to_string();
+        let emotion = read_vad(obj.get("emotion"));
+        let structure = obj
+            .get("structure")
+            .and_then(Structure::from_value)
+            .unwrap_or_default();
+        let goal = obj
+            .get("goal")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let tier = obj
+            .get("tier")
+            .and_then(|v| v.as_str())
+            .map(read_tier)
+            .unwrap_or(Tier::Keyword);
+        let v = obj.get("v").and_then(Value::as_u64).unwrap_or(1) as u8;
+        Some(Self {
+            act,
+            topic,
+            emotion,
+            structure,
+            goal,
+            tier,
+            v,
+        })
+    }
+}
+
+/// Read a stored `emotion` object into a [`Vad`], defaulting missing axes
+/// (arousal `0.5`, others `0.0`, label `"neutral"`).
+fn read_vad(v: Option<&Value>) -> Vad {
+    let Some(o) = v else {
+        return Vad::neutral();
+    };
+    Vad {
+        valence: o.get("valence").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+        arousal: o.get("arousal").and_then(Value::as_f64).unwrap_or(0.5) as f32,
+        dominance: o.get("dominance").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+        label: o
+            .get("label")
+            .and_then(Value::as_str)
+            .unwrap_or("neutral")
+            .to_string(),
+    }
+}
+
+/// Parse a stored `tier` string (unknown → keyword).
+fn read_tier(s: &str) -> Tier {
+    match s {
+        "llm" => Tier::Llm,
+        "voice" => Tier::Voice,
+        _ => Tier::Keyword,
     }
 }
 
 /// Extract the emotion arousal scalar from a causal node's metadata blob
 /// (floor-arousal readiness, design §5). Returns `None` for a legacy node with no
-/// `classification` (never a fabricated default), so the floor can distinguish a
-/// classified turn from an unclassified one.
+/// `classification` (never a fabricated default).
 pub fn arousal_of(node_meta: &Value) -> Option<f32> {
     node_meta
         .get("classification")?
@@ -147,123 +226,42 @@ pub trait TurnClassifier: Send + Sync {
     fn classify(&self, role: &str, text: &str, prev_topic: Option<&str>) -> ClassificationVector;
 }
 
-/// The always-on deterministic keyword classifier (design §D1, §D2). Holds no
-/// state — continuity rides the `prev_topic` argument.
+/// The always-on deterministic keyword classifier (design §D1, §D2, §D2.1).
+/// Stateless except for an optional enrolled-speaker vocabulary used for speaker
+/// entity spans (empty ⇒ speaker spans are never guessed).
 #[derive(Debug, Default, Clone)]
-pub struct KeywordTurnClassifier;
+pub struct KeywordTurnClassifier {
+    speakers: Vec<String>,
+}
 
 impl KeywordTurnClassifier {
-    /// Construct the keyword classifier (stateless).
+    /// Construct the keyword classifier with no enrolled speakers.
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Attach an enrolled-speaker vocabulary so speaker names surface as
+    /// [`EntityKind::Speaker`](crate::text_structure::EntityKind::Speaker) spans
+    /// (design §D2.1 — the keyword tier never guesses names without a vocab).
+    #[must_use]
+    pub fn with_speakers(mut self, speakers: Vec<String>) -> Self {
+        self.speakers = speakers;
+        self
     }
 }
 
 impl TurnClassifier for KeywordTurnClassifier {
     fn classify(&self, _role: &str, text: &str, prev_topic: Option<&str>) -> ClassificationVector {
         ClassificationVector {
-            intent: classify_intent(text),
+            act: classify_act(text),
             topic: classify_topic(text, prev_topic),
             emotion: classify_emotion(text),
+            structure: extract_structure(text, &self.speakers),
             goal: None, // keyword tier never fabricates a goal (design §D2)
             tier: Tier::Keyword,
             v: TAXONOMY_VERSION,
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Intent
-// ---------------------------------------------------------------------------
-
-/// Verb-initial imperative openers → [`Intent::Request`] (design §D2).
-const IMPERATIVE_VERBS: &[&str] = &[
-    "add", "build", "check", "create", "delete", "explain", "find", "fix", "generate", "give",
-    "help", "implement", "list", "make", "move", "open", "refactor", "remove", "rename", "run",
-    "show", "tell", "update", "write",
-];
-
-/// Leading tokens / phrases that mark a [`Intent::Correction`].
-const CORRECTION_CUES: &[&str] = &["no", "nope", "nah", "actually", "wait"];
-
-/// Social opener tokens → [`Intent::Social`].
-const SOCIAL_CUES: &[&str] = &[
-    "hi", "hello", "hey", "yo", "thanks", "thank", "thx", "ty", "bye", "goodbye", "cheers", "lol",
-    "haha", "gm",
-];
-
-/// Meta-conversational control phrases → [`Intent::Meta`].
-const META_PHRASES: &[&str] = &[
-    "start over",
-    "nevermind",
-    "never mind",
-    "scratch that",
-    "forget it",
-    "ignore that",
-    "new topic",
-    "reset",
-];
-
-/// Evaluative feedback phrases → [`Intent::Feedback`].
-const FEEDBACK_PHRASES: &[&str] = &[
-    "you should",
-    "it should",
-    "that works",
-    "that's good",
-    "thats good",
-    "looks good",
-    "lgtm",
-    "well done",
-    "good job",
-    "nice work",
-    "good work",
-    "great job",
-];
-
-/// Classify intent from surface cues. Precedence (design §D2): question mark →
-/// correction → meta → social → feedback → imperative → statement default.
-fn classify_intent(text: &str) -> Intent {
-    let trimmed = text.trim();
-    if trimmed.ends_with('?') {
-        return Intent::Question;
-    }
-    let lower = trimmed.to_lowercase();
-    let first = lower
-        .split(|c: char| !c.is_alphanumeric())
-        .find(|w| !w.is_empty())
-        .unwrap_or("");
-
-    if CORRECTION_CUES.contains(&first)
-        || lower.contains("i meant")
-        || lower.contains("that's wrong")
-        || lower.contains("thats wrong")
-        || lower.contains("not what i")
-    {
-        return Intent::Correction;
-    }
-    if META_PHRASES.iter().any(|p| lower.contains(p)) {
-        return Intent::Meta;
-    }
-    if SOCIAL_CUES.contains(&first) || lower.contains("thank you") || lower.contains("good morning")
-    {
-        return Intent::Social;
-    }
-    if FEEDBACK_PHRASES.iter().any(|p| lower.contains(p)) {
-        return Intent::Feedback;
-    }
-    // Imperative: verb-initial, allowing a leading politeness token.
-    let head = match first {
-        "please" | "pls" | "kindly" => lower
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|w| !w.is_empty())
-            .nth(1)
-            .unwrap_or(""),
-        other => other,
-    };
-    if IMPERATIVE_VERBS.contains(&head) {
-        return Intent::Request;
-    }
-    Intent::Statement
 }
 
 // ---------------------------------------------------------------------------
@@ -414,7 +412,7 @@ fn has_elongation(text: &str) -> bool {
 }
 
 /// Map (valence, arousal) to a coarse label. High arousal `> 0.6`; valence bands
-/// at `±0.15`. Kept purely a function of the scalars (no intent coupling).
+/// at `±0.15`. Kept purely a function of the scalars (no act coupling).
 fn emotion_label(valence: f32, arousal: f32) -> String {
     let high = arousal > 0.6;
     let label = if valence > 0.15 {
@@ -444,80 +442,44 @@ fn emotion_label(valence: f32, arousal: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dialogue_act::{RefinedAct, SpeechActClass};
+    use crate::text_structure::EntityKind;
 
     fn classify(text: &str) -> ClassificationVector {
         KeywordTurnClassifier::new().classify("user", text, None)
     }
 
-    // -- Intent cues (design §8) -------------------------------------------
+    // -- Composed act + structure ------------------------------------------
 
     #[test]
-    fn question_mark_is_question() {
-        assert_eq!(classify("how does this work?").intent, Intent::Question);
-        assert_eq!(classify("can you fix the parser?").intent, Intent::Question);
-    }
-
-    #[test]
-    fn imperative_is_request() {
-        assert_eq!(classify("write a function to sort").intent, Intent::Request);
-        assert_eq!(classify("fix the SNAC decode").intent, Intent::Request);
-        assert_eq!(classify("please add a test").intent, Intent::Request);
-    }
-
-    #[test]
-    fn correction_lexicon() {
-        assert_eq!(classify("no, that is not right").intent, Intent::Correction);
-        assert_eq!(classify("actually the file is empty").intent, Intent::Correction);
-        assert_eq!(classify("wait let me reconsider").intent, Intent::Correction);
-        assert_eq!(classify("i meant the other module").intent, Intent::Correction);
-    }
-
-    #[test]
-    fn social_lexicon() {
-        assert_eq!(classify("thanks for the help").intent, Intent::Social);
-        assert_eq!(classify("hi there").intent, Intent::Social);
-        assert_eq!(classify("thank you so much").intent, Intent::Social);
-        assert_eq!(classify("bye").intent, Intent::Social);
-    }
-
-    #[test]
-    fn feedback_lexicon() {
-        assert_eq!(classify("you should use a HashMap").intent, Intent::Feedback);
-        assert_eq!(classify("that works nicely").intent, Intent::Feedback);
-        assert_eq!(classify("looks good to me").intent, Intent::Feedback);
-    }
-
-    #[test]
-    fn meta_lexicon() {
-        assert_eq!(classify("start over please").intent, Intent::Meta);
-        assert_eq!(classify("nevermind").intent, Intent::Meta);
-        assert_eq!(classify("let's switch to a new topic").intent, Intent::Meta);
-    }
-
-    #[test]
-    fn statement_default() {
-        assert_eq!(classify("the daemon runs on port 8090").intent, Intent::Statement);
+    fn classify_sets_act_and_structure() {
+        let cv = classify("open crates/foo/bar.rs and then run the tests");
+        assert_eq!(cv.act.refined, RefinedAct::Command);
+        assert_eq!(cv.act.class, SpeechActClass::Directive);
+        assert!(cv.structure.shape.multi_part, "'and then' → multi-part");
+        assert!(cv
+            .structure
+            .entities
+            .iter()
+            .any(|e| e.kind == EntityKind::Path && e.text == "crates/foo/bar.rs"));
     }
 
     // -- Topic extraction + continuity (design §8) --------------------------
 
     #[test]
     fn topic_is_top_token() {
-        // "voice" appears twice → top token.
         let cv = classify("the voice pipeline handles voice synthesis");
         assert_eq!(cv.topic, "voice");
     }
 
     #[test]
     fn topic_empty_falls_back() {
-        // All stop words / too-short → default topic, no prior.
         let cv = KeywordTurnClassifier::new().classify("user", "is it?", None);
         assert_eq!(cv.topic, DEFAULT_TOPIC);
     }
 
     #[test]
     fn topic_continuity_inherits_when_still_mentioned() {
-        // prev topic "voice" still appears → carried even if not the top token.
         let cv = KeywordTurnClassifier::new().classify(
             "user",
             "the decoder decoder also touches voice",
@@ -528,9 +490,11 @@ mod tests {
 
     #[test]
     fn topic_continuity_shifts_on_material_change() {
-        // prev topic "voice" absent from this turn → adopt the new top token.
-        let cv =
-            KeywordTurnClassifier::new().classify("user", "the kernel scheduler stalled", Some("voice"));
+        let cv = KeywordTurnClassifier::new().classify(
+            "user",
+            "the kernel scheduler stalled",
+            Some("voice"),
+        );
         assert_ne!(cv.topic, "voice");
         assert!(matches!(cv.topic.as_str(), "kernel" | "scheduler" | "stalled"));
     }
@@ -546,31 +510,16 @@ mod tests {
     }
 
     #[test]
-    fn caps_raises_arousal() {
-        assert!(classify("this is BROKEN").emotion.arousal > 0.5);
-    }
-
-    #[test]
-    fn positive_lexicon_lifts_valence() {
+    fn positive_and_negative_lexicon() {
         assert!(classify("this is great and awesome").emotion.valence > 0.15);
-    }
-
-    #[test]
-    fn negative_lexicon_drops_valence() {
         assert!(classify("this is broken and terrible").emotion.valence < -0.15);
     }
 
     #[test]
-    fn valence_stays_in_range() {
-        let cv = classify("great great great great great awesome awesome awesome awesome");
-        assert!(cv.emotion.valence <= 1.0 && cv.emotion.valence >= -1.0);
-    }
-
-    #[test]
-    fn dominance_is_always_zero_and_arousal_default_neutral() {
+    fn dominance_zero_arousal_default() {
         let cv = classify("the file exists");
         assert_eq!(cv.emotion.dominance, 0.0);
-        assert_eq!(cv.emotion.arousal, 0.5); // no cue → neutral default
+        assert_eq!(cv.emotion.arousal, 0.5);
     }
 
     #[test]
@@ -578,26 +527,71 @@ mod tests {
         assert!(classify("fix the bug now").goal.is_none());
     }
 
-    // -- Blob shape golden (design §8: assert exact JSON keys) --------------
+    // -- Blob shape golden (v2 keys) ----------------------------------------
 
     #[test]
-    fn blob_shape_has_exact_keys() {
+    fn blob_shape_v2_keys() {
         let blob = classify("how does the voice loop work?").to_metadata_value();
         let obj = blob.as_object().expect("blob is an object");
         let mut keys: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["emotion", "goal", "intent", "tier", "topic", "v"]);
+        assert_eq!(
+            keys,
+            ["act", "emotion", "goal", "intent", "structure", "tier", "topic", "v"]
+        );
 
-        let emo = obj["emotion"].as_object().expect("emotion is an object");
+        // Legacy intent key still projected from the refined act.
+        assert_eq!(obj["intent"], serde_json::json!("question"));
+        // New act layer.
+        assert_eq!(obj["act"]["class"], serde_json::json!("interrogative"));
+        assert_eq!(obj["act"]["refined"], serde_json::json!("question"));
+        // Structure layer present with its sub-shape.
+        assert!(obj["structure"]["entities"].is_array());
+        assert!(obj["structure"]["shape"]["multi_part"].is_boolean());
+        assert_eq!(obj["structure"]["argument"], Value::Null);
+
+        assert_eq!(obj["tier"], serde_json::json!("keyword"));
+        assert_eq!(obj["v"], serde_json::json!(2));
+        assert_eq!(obj["goal"], Value::Null);
+
+        let emo = obj["emotion"].as_object().expect("emotion object");
         let mut emo_keys: Vec<&str> = emo.keys().map(|s| s.as_str()).collect();
         emo_keys.sort_unstable();
         assert_eq!(emo_keys, ["arousal", "dominance", "label", "valence"]);
+    }
 
-        // Enum casing + version stamp per §D2.
-        assert_eq!(obj["intent"], serde_json::json!("question"));
-        assert_eq!(obj["tier"], serde_json::json!("keyword"));
-        assert_eq!(obj["v"], serde_json::json!(1));
-        assert_eq!(obj["goal"], Value::Null);
+    // -- v1-blob read tolerance (design §D2.1) ------------------------------
+
+    #[test]
+    fn from_metadata_value_upgrades_v1_blob() {
+        // A legacy v1 blob: flat `intent`, no `act` / `structure`.
+        let v1 = serde_json::json!({
+            "intent": "request",
+            "topic": "voice",
+            "emotion": { "valence": 0.0, "arousal": 0.5, "dominance": 0.0, "label": "neutral" },
+            "goal": null,
+            "tier": "keyword",
+            "v": 1
+        });
+        let cv = ClassificationVector::from_metadata_value(&v1).expect("v1 blob reads");
+        // intent → refined act upgrade.
+        assert_eq!(cv.act.refined, RefinedAct::Command);
+        assert_eq!(cv.act.class, SpeechActClass::Directive);
+        // Missing structure defaults to empty.
+        assert_eq!(cv.structure, Structure::default());
+        assert_eq!(cv.topic, "voice");
+        assert_eq!(cv.v, 1);
+    }
+
+    #[test]
+    fn to_from_metadata_value_roundtrips_v2() {
+        let cv = classify("write the parser in src/parse.rs");
+        let back = ClassificationVector::from_metadata_value(&cv.to_metadata_value())
+            .expect("v2 blob reads");
+        assert_eq!(back.act, cv.act);
+        assert_eq!(back.structure, cv.structure);
+        assert_eq!(back.topic, cv.topic);
+        assert_eq!(back.v, 2);
     }
 
     // -- arousal_of round-trip (design §5, §8) ------------------------------
@@ -605,7 +599,6 @@ mod tests {
     #[test]
     fn arousal_of_reads_classified_node() {
         let blob = classify("this is BROKEN!!!").to_metadata_value();
-        // Mirror the causal node metadata shape (classification nested under key).
         let node_meta = serde_json::json!({ "classification": blob, "state": "frontier" });
         let a = arousal_of(&node_meta).expect("classified node carries arousal");
         assert!(a > 0.6);

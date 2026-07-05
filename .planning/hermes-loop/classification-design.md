@@ -112,6 +112,108 @@ What each tier can *reliably* produce: intent — high; topic — medium; emotio
 low-to-medium (coarse); goal — low (usually `null`). The doc states this plainly so no
 consumer over-trusts a keyword arousal.
 
+### D2.1 — Taxonomy v2: dialogue acts + structure (additive, `v:2`)
+
+Motivation (user, verbatim): *"I would also like it to classify the text as things
+like question, clarification, comment, command, etc. Not just the emotional quality but
+the directive, the data types, the underlying structure should be clear."*
+
+v2 is **purely additive and versioned**. Every v1 key keeps its meaning; two new keys
+(`act`, `structure`) are added, `v` bumps to `2`, and the `intent` key is **retained but
+now projected from the refined act** so every existing consumer (the graph glyph, any
+UID-keyed reader) keeps working unchanged. A reader given a `v:1` blob (no `act` /
+`structure`) derives `act` from `intent` and treats `structure` as empty — the
+`from_metadata_value` tolerance path.
+
+```jsonc
+"classification": {
+  "intent":  "question",                       // v1 key, projected from act.refined
+  "act":     { "class": "interrogative",
+               "refined": "clarification-request" },
+  "topic":   "voice-tts",
+  "emotion": { "valence": 0.1, "arousal": 0.6, "dominance": 0.0, "label": "curious" },
+  "structure": {
+    "entities": [ { "kind": "path", "text": "src/voice/tts.rs", "confidence": 0.9 } ],
+    "shape":    { "multi_part": false, "conditional": false, "refers_prior": false },
+    "argument": null                            // {verb, object} — LLM tier only
+  },
+  "goal":  null,
+  "tier":  "keyword",
+  "v":     2
+}
+```
+
+**Two-level dialogue act** — `act: { class, refined }`.
+
+Coarse `class` (Searle-style illocutionary category), 5:
+
+| class | meaning |
+|---|---|
+| `interrogative` | seeks information |
+| `directive` | seeks an action / controls the exchange |
+| `assertive` | commits the speaker to a state of the world |
+| `expressive` | conveys attitude / social stance |
+| `commissive` | commits the speaker to future action (LLM-only in v2) |
+
+Refined `refined`, 10 — covers the user's examples + the conversational reality M2/M4
+gave us. Each maps deterministically up to a `class` and down to a v1 `intent`:
+
+| refined | class | v1 `intent` | keyword cue (honest) |
+|---|---|---|---|
+| `question` | interrogative | question | `?` without a clarification cue |
+| `clarification-request` | interrogative | question | "what do you mean", "which one", "you mean …?", "to clarify …?" |
+| `clarification-provide` | assertive | statement | "i mean", "i meant", "in other words", "to be clear" |
+| `command` | directive | request | verb-initial imperative |
+| `comment` | assertive | statement | declarative default |
+| `correction` | assertive | correction | leading no / actually / wait, "that's wrong" |
+| `feedback` | expressive | feedback | "you should", praise lexicon |
+| `acknowledgment` | expressive | social | "ok", "got it", "makes sense", "sounds good" |
+| `social` | expressive | social | greeting / thanks / farewell |
+| `meta` | directive | meta | "start over", "nevermind", "new topic" |
+
+Back-compat: the old 7 `Intent` variants each map **into** a refined act
+(`question→question`, `request→command`, `statement→comment`, plus identity for
+correction/feedback/social/meta), which is how a `v:1` blob is upgraded on read.
+
+**Structure / data-type layer** — `structure: { entities, shape, argument }`.
+
+`entities: [{ kind, text, confidence }]` — typed spans extracted by the keyword tier via
+regex/heuristic, each with a per-span confidence:
+
+| kind | keyword source | conf |
+|---|---|---|
+| `url` | `https?://…` | 0.95 |
+| `path` | contains `/` or a code file-ext (`.rs`,`.toml`,…) | 0.90 |
+| `quote` | `"…"` | 0.90 |
+| `speaker` | matches a supplied **enrolled-speaker** vocab | 0.90 |
+| `date` | ISO `YYYY-MM-DD`, `M/D`, month-name + day | 0.85 |
+| `time` | `HH:MM[:SS]`, `N am/pm` | 0.85 |
+| `duration` | `N (ms\|s\|min\|h\|d\|w…)` | 0.80 |
+| `code` | backtick span, `a::b`, `foo()`, `snake_case` | 0.70 |
+| `number` | bare `\d+(.\d+)?` in an otherwise-unclaimed span | 0.70 |
+
+Speaker spans are emitted **only** when an enrolled-speaker vocabulary is supplied; absent
+one the keyword tier emits none — it will not guess names (the v1 honesty stance).
+
+`shape: { multi_part, conditional, refers_prior }` — coarse booleans: sequencing /
+conjunction ("and then"), conditional ("if …"), reference-to-prior ("that one", "like
+before"). `argument: { verb, object } | null` — the command's predicate + object;
+**keyword tier leaves this `null`** (reliable predicate-argument extraction needs the
+LLM, same stance as `goal`), the enrichment tier fills it.
+
+**What the keyword tier can/can't do honestly.** Acts — high on the surface-cue moves
+(question / command / social / acknowledgment), medium on clarification (cue-based, misses
+paraphrase), the coarse `class` is exact once `refined` is chosen. Structure entities —
+high for the regex kinds (url / path / number / date / time), medium for code-ish tokens,
+**none** for speakers without a vocab. Argument structure — **none** (LLM only). The
+enrichment (LLM) tier v2 refines the act, adds `argument`, and may promote `class` to
+`commissive` where the keyword tier never does.
+
+**GUI (ADR-067 D6, note only — no RPC change; the blob is served verbatim).** The glyph
+axis moves from `intent` to `act.refined` (a finer glyph set) with `act.class` as the
+coarse hue-family; entity spans render as inline chips (path / url / number / date / code),
+and the shape flags as small markers (multi-part ⋯, conditional branch, refers-prior ↩).
+
 ### D3 — Storage shape & crossref emission
 
 - **Node metadata**: the single `classification` blob above (matches the RPC's existing

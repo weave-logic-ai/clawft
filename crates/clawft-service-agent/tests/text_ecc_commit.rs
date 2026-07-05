@@ -371,7 +371,7 @@ async fn index_turn_classifies_and_populates_node_metadata() {
     assert_eq!(class["intent"], "question", "trailing '?' → Question");
     assert!(class["topic"].is_string(), "topic axis present");
     assert_eq!(class["tier"], "keyword");
-    assert_eq!(class["v"], 1);
+    assert_eq!(class["v"], 2); // taxonomy v2 (act + structure layers)
     assert_eq!(class["goal"], serde_json::Value::Null, "keyword tier goal stays null");
     let emo = &class["emotion"];
     assert!(emo["arousal"].is_number(), "arousal present for the floor (§5)");

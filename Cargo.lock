@@ -1472,6 +1472,7 @@ dependencies = [
  "clawft-service-llm",
  "clawft-types",
  "dashmap",
+ "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
