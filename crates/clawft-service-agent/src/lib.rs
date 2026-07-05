@@ -41,6 +41,7 @@
 #![deny(rust_2018_idioms)]
 #![warn(missing_docs)]
 
+pub mod enrichment_classifier;
 pub mod kernel_gate;
 pub mod protocol;
 pub mod service;
@@ -52,6 +53,10 @@ pub mod substrate_budget;
 pub mod substrate_sink;
 pub mod turn_classifier;
 
+pub use enrichment_classifier::{
+    parse_enrichment_envelope, EnrichmentClassifier, DEFAULT_ENRICHMENT_MAX_TOKENS,
+    ENRICHMENT_SYSTEM_PROMPT,
+};
 pub use kernel_gate::KernelEffectGate;
 pub use protocol::{AgentChatMessage, AgentChatParams, AgentChatResult, AgentChatToolCall};
 pub use service::{AgentLoopHandle, AgentService, AgentServiceError};
