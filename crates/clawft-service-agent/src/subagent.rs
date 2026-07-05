@@ -149,6 +149,32 @@ impl<H: AgentLoopHandle> DaemonSubagentSpawner<H> {
             chain.append(WITNESS_SOURCE, kind, Some(payload));
         }
     }
+
+    /// Resolve the parent turn (T_user@P) uid for the spawn edges, tiered
+    /// (M4 turn-level edge rooting):
+    ///
+    /// 1. **Supplied hint** — the tool passes the parent turn's uid (64-hex)
+    ///    when the loop can mint it; use it directly.
+    /// 2. **SessionTier lookup** — otherwise resolve the parent conversation's
+    ///    latest anchored turn uid through the service's [`SessionTier`]. At
+    ///    spawn time (inside the committed-turn bracket) that is `T_user@P`, the
+    ///    exact turn that made the spawn call, so the edge roots at the real
+    ///    parent turn node the ADR-067 view renders.
+    /// 3. **Conversation anchor** — final degraded tier (no tier attached, or an
+    ///    empty conversation): a deterministic per-conv anchor uid so the tree
+    ///    still renders rooted at the parent conversation.
+    fn resolve_parent_uid(&self, hint: Option<&str>, parent_conv: &str) -> UniversalNodeId {
+        if let Some(bytes) = hint.and_then(decode_hex32) {
+            return UniversalNodeId::from_bytes(bytes);
+        }
+        if let Some(uid) = self
+            .service()
+            .and_then(|svc| svc.session_tier().and_then(|t| t.latest_turn_uid(parent_conv)))
+        {
+            return uid;
+        }
+        conv_anchor_uid(parent_conv)
+    }
 }
 
 #[async_trait]
@@ -204,7 +230,7 @@ impl<H: AgentLoopHandle> SubagentSpawner for DaemonSubagentSpawner<H> {
 
         // Forest: C.goal --TriggeredBy--> T_user@P (design D3). Drawn now so the
         // spawn tree is visible even for a still-running async child.
-        let parent_uid = parent_target_uid(spec.parent_turn_uid.as_deref(), &parent_conv);
+        let parent_uid = self.resolve_parent_uid(spec.parent_turn_uid.as_deref(), &parent_conv);
         if let Some(ref forest) = self.forest {
             forest.causal.add_node(
                 format!("spawn_goal:{task_id}"),
@@ -579,17 +605,22 @@ fn spawn_result_uid(child_conv: &str, task_id: &str) -> UniversalNodeId {
     )
 }
 
-/// Resolve the parent turn (T_user@P) target uid for the spawn edges.
-///
-/// When the tool supplies the parent turn's uid (64-hex of the 32-byte
-/// [`UniversalNodeId`], computed loop-side where `chain_seq` is known), the edge
-/// points at the exact parent turn. Absent/malformed, it falls back to a
-/// deterministic per-conversation anchor uid so the tree still renders rooted at
-/// the parent conversation.
+/// Hint-or-anchor parent uid: the supplied 64-hex uid if present, else the
+/// per-conversation anchor. The non-`SessionTier` slice of the tiered
+/// [`DaemonSubagentSpawner::resolve_parent_uid`] resolution, factored out for a
+/// unit test that exercises tiers 1 and 3 without a live service.
+#[cfg(test)]
 fn parent_target_uid(parent_turn_uid: Option<&str>, parent_conv: &str) -> UniversalNodeId {
     if let Some(bytes) = parent_turn_uid.and_then(decode_hex32) {
         return UniversalNodeId::from_bytes(bytes);
     }
+    conv_anchor_uid(parent_conv)
+}
+
+/// Deterministic per-conversation anchor uid — the final degraded tier when no
+/// parent-turn uid can be resolved, so the spawn tree still renders rooted at
+/// the parent conversation.
+fn conv_anchor_uid(parent_conv: &str) -> UniversalNodeId {
     UniversalNodeId::new(
         &StructureTag::CausalGraph,
         parent_conv.as_bytes(),
@@ -830,6 +861,57 @@ mod tests {
         // Malformed input falls through.
         assert!(decode_hex32("nothex").is_none());
         assert!(decode_hex32("abcd").is_none());
+    }
+
+    #[tokio::test]
+    async fn spawn_edge_roots_at_parent_turn_via_session_tier() {
+        use crate::session_tier::SessionTier;
+        use clawft_kernel::embedding::{EmbeddingProvider, MockEmbeddingProvider};
+
+        let causal = Arc::new(CausalGraph::new());
+        let crossrefs = Arc::new(CrossRefStore::new());
+        let chain = Arc::new(ChainManager::new(0, 128));
+        let embedder: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbeddingProvider::new(64));
+        let tier = Arc::new(
+            SessionTier::new(embedder, chain.clone(), None)
+                .with_forest(causal.clone(), crossrefs.clone()),
+        );
+        // Anchor the parent's user turn T_user@P (the turn that will make the
+        // spawn call), exactly as the M2 pipeline does before run_tool_loop.
+        tier.index_turn("P", 1, "message", "user", "please spawn a helper")
+            .await;
+        let parent_uid = tier.latest_turn_uid("P").expect("parent turn anchored");
+
+        // Service carries the same tier; spawner shares the same forest handles.
+        let svc = Arc::new(
+            AgentService::new(Arc::new(StubLoop { answer: "ok".into() }))
+                .with_session_tier(tier.clone()),
+        );
+        let sp = spawner(Arc::new(SpawnRegistry::new()), SubagentConfig::default())
+            .with_forest(SubagentForest {
+                causal: causal.clone(),
+                crossrefs: crossrefs.clone(),
+            });
+        sp.set_service(Arc::downgrade(&svc));
+
+        // No parent_turn_uid hint → the spawner must resolve via the tier.
+        let mut s = spec("P", "help");
+        s.parent_turn_uid = None;
+        sp.spawn(s).await.unwrap();
+
+        // The TriggeredBy edge roots at the REAL parent turn node, not the
+        // synthetic conversation anchor.
+        let to_parent = crossrefs.get_reverse(&parent_uid);
+        assert!(
+            to_parent
+                .iter()
+                .any(|cr| cr.ref_type == CrossRefType::TriggeredBy),
+            "TriggeredBy edge must root at the real parent turn uid"
+        );
+        assert!(
+            crossrefs.get_reverse(&conv_anchor_uid("P")).is_empty(),
+            "no edge should fall back to the conv anchor when the tier resolves the turn"
+        );
     }
 
     #[test]

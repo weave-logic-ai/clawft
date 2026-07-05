@@ -51,6 +51,11 @@ pub(crate) struct ConvForest {
     /// concurrent cross-conversation indexing can't interleave (within a
     /// conversation, dispatch is already serialised by `AgentService`).
     prev: Mutex<Option<CausalNodeId>>,
+    /// Universal id of the most-recently indexed turn (M4 turn-level edge
+    /// rooting). Tracked alongside `prev` so the subagent spawner can root a
+    /// `TriggeredBy`/`EvidenceFor` edge at the actual spawning turn — the parent
+    /// conversation's latest anchored turn at spawn time is `T_user@P`.
+    last_uid: Mutex<Option<UniversalNodeId>>,
 }
 
 impl ConvForest {
@@ -62,6 +67,12 @@ impl ConvForest {
     /// The turn node's universal id for a chain sequence, if known.
     pub(crate) fn uid_for(&self, chain_seq: u64) -> Option<UniversalNodeId> {
         self.seq_to_uid.get(&chain_seq).map(|e| e.value().clone())
+    }
+
+    /// Universal id of the most-recently indexed turn in this conversation, if
+    /// any (M4 turn-level edge rooting).
+    pub(crate) fn latest_turn_uid(&self) -> Option<UniversalNodeId> {
+        self.last_uid.lock().expect("conv forest last_uid lock").clone()
     }
 }
 
@@ -140,6 +151,9 @@ pub(crate) fn dual_write_turn(
     // Speaker cross-ref: turn → speaker identity node (per-speaker recall).
     let turn_uid = turn_universal_id(conv_id, chain_seq, text);
     forest.seq_to_uid.insert(chain_seq, turn_uid.clone());
+    // Track the latest turn's uid so the subagent spawner can root spawn edges
+    // at the actual spawning turn (M4 turn-level edge rooting).
+    *forest.last_uid.lock().expect("conv forest last_uid lock") = Some(turn_uid.clone());
     let speaker_uid = speaker_universal_id(conv_id, role);
     crossrefs.insert(CrossRef {
         source: turn_uid.clone(),

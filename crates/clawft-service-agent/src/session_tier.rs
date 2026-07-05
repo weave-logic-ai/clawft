@@ -37,7 +37,8 @@ use clawft_kernel::context_graft::{GraftContent, GraftedItem, SessionView};
 use clawft_kernel::context_promote::{PromotionSignals, postmortem, promote_to_chain};
 use clawft_kernel::embedding::EmbeddingProvider;
 use clawft_kernel::{
-    CausalGraph, CrossRefStore, ImpulseType, StructureTag, TalkModeLoop, ViewResolver,
+    CausalGraph, CrossRefStore, ImpulseType, StructureTag, TalkModeLoop, UniversalNodeId,
+    ViewResolver,
 };
 
 use crate::session_forest::{self, ConvForest, DEFAULT_LINEAGE_DEPTH};
@@ -190,6 +191,16 @@ impl SessionTier {
     /// Get or create the per-conversation forest lineage state.
     fn conv_forest(&self, conv_id: &str) -> Arc<ConvForest> {
         self.forests.entry(conv_id.to_string()).or_default().clone()
+    }
+
+    /// Universal id of a conversation's most-recently anchored turn (M4
+    /// turn-level edge rooting). Returns `None` for a conversation with no
+    /// indexed turns yet (or when the forest join is disabled). The subagent
+    /// spawner uses this to root `TriggeredBy`/`EvidenceFor` edges at the actual
+    /// spawning turn `T_user@P` — the parent's latest anchored turn at spawn
+    /// time — instead of a synthetic conversation anchor.
+    pub fn latest_turn_uid(&self, conv_id: &str) -> Option<UniversalNodeId> {
+        self.forests.get(conv_id).and_then(|f| f.latest_turn_uid())
     }
 
     /// Pre-warm the embedder (ADR-058 Phase 5.3). Runs one throwaway embed so
