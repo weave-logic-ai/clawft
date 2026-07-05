@@ -1111,10 +1111,6 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                     .anchor_chain
                     .then(|| k.chain_manager().cloned())
                     .flatten();
-                let hnsw = anchor_cfg
-                    .anchor_hnsw
-                    .then(|| k.ecc_hnsw().cloned())
-                    .flatten();
                 let causal = anchor_cfg
                     .anchor_causal
                     .then(|| k.ecc_causal().cloned())
@@ -1137,13 +1133,12 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                 };
                 info!(
                     chain = chain.is_some(),
-                    hnsw = hnsw.is_some(),
                     causal = causal.is_some(),
                     forest_join = tier_owns_forest,
                     "agent.chat anchors wired (mirrors turns to enabled stores)"
                 );
                 let mut anchor =
-                    clawft_service_agent::KernelTurnAnchor::new(chain.clone(), hnsw, anchor_causal);
+                    clawft_service_agent::KernelTurnAnchor::new(chain.clone(), anchor_causal);
                 // ADR-058 Phase 5.1: the L2 tier needs the witness chain (its
                 // sequence is the index key), so it lives only when chain
                 // anchoring is enabled. The embedder is the ADR-059 Qwen3

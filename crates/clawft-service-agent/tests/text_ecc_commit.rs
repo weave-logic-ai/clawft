@@ -250,9 +250,9 @@ async fn anchor_turn_commits_on_the_kernel_global_forest() {
     let (tier, chain, causal, talk_loop) = wire_tier();
     let conv = "anchor-ecc";
 
-    // Daemon `tier_owns_forest` wiring: chain on, hnsw off, anchor causal None
+    // Daemon `tier_owns_forest` wiring: chain on, anchor causal None
     // (the tier dual-writes the forest), session tier = the wired Arc.
-    let anchor = KernelTurnAnchor::new(Some(chain.clone()), None, None).with_session_tier(tier.clone());
+    let anchor = KernelTurnAnchor::new(Some(chain.clone()), None).with_session_tier(tier.clone());
 
     let user = Turn {
         turn_id: "t1".into(),

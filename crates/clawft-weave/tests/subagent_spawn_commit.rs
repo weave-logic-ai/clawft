@@ -398,7 +398,7 @@ async fn agent_spawns_subagent_result_commits_into_parent() {
     // Anchor wired the daemon `tier_owns_forest` way: chain on, causal None on the
     // anchor (the tier dual-writes the forest), session tier attached.
     let anchor =
-        Arc::new(KernelTurnAnchor::new(Some(chain.clone()), None, None).with_session_tier(tier.clone()));
+        Arc::new(KernelTurnAnchor::new(Some(chain.clone()), None).with_session_tier(tier.clone()));
     let sink = Arc::new(AnchorSink { anchor });
 
     // ── Subagent spawn substrate (mirrors daemon.rs C.1) ──────────────────────

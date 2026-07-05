@@ -42,7 +42,7 @@ use async_trait::async_trait;
 use clawft_core::agent::sink::{ConversationSink, Turn};
 use clawft_kernel::causal::NodeId as CausalNodeId;
 use clawft_kernel::{
-    CausalEdgeType, CausalGraph, ChainManager, HnswService, NodeRegistry, SubstrateService,
+    CausalEdgeType, CausalGraph, ChainManager, NodeRegistry, SubstrateService,
 };
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -170,8 +170,9 @@ impl SubstrateClient for KernelSubstrateClient {
 }
 
 /// Side-effect seam invoked after every successful per-turn substrate
-/// publish. Lets `agent.chat` mirror turns into the witness chain, the
-/// HNSW index, and the causal graph without giving the sink a hard
+/// publish. Lets `agent.chat` mirror turns into the witness chain (and,
+/// via the attached session tier, the semantic session view) and the
+/// causal graph without giving the sink a hard
 /// dependency on each kernel handle. The default impl is
 /// [`NoopTurnAnchor`]; the daemon swaps in [`KernelTurnAnchor`] when
 /// `[kernel.agent].anchor_*` flags are on.
@@ -192,23 +193,16 @@ impl TurnAnchor for NoopTurnAnchor {
     async fn anchor_turn(&self, _conv_id: &str, _turn_id: &str, _turn: &Turn) {}
 }
 
-/// HNSW embedding dimension — matches the kernel's
-/// `HnswServiceConfig::default().default_dimensions`. Hardcoded here
-/// to keep the anchor self-contained; if the kernel default ever
-/// drifts the test in this module catches the mismatch.
-const HNSW_EMBED_DIM: usize = 384;
-
 /// Kernel-backed [`TurnAnchor`].
 ///
 /// Each enabled handle drives one side-effect on `anchor_turn`:
 ///
 /// - `chain` → `chain.append("agent", "agent.chat.turn", payload)`
 ///   with `{conv_id, turn_id, role, content_hash, ts_ms}`. Witness
-///   chain seq advances on every turn.
-/// - `hnsw` → `hnsw.insert(turn_id, embed, metadata)` where `embed`
-///   is a deterministic-hash 384-d vector derived from the turn id +
-///   content. Explorer "Vector entries" KPI ticks. The vector is not
-///   semantic; a future change will route through a real embedder.
+///   chain seq advances on every turn. When a `session_tier` is also
+///   attached, the same turn is embedded and semantically indexed into
+///   its conversation's `SessionView` (the sole vector index for chat
+///   turns; the redundant non-semantic HNSW insert was removed in M3).
 /// - `causal` → `causal.add_node(label, metadata)` for the new turn,
 ///   plus `causal.link(prev, this, edge_type)` when this conv has a
 ///   prior turn. Explorer "Causal graph" KPI ticks.
@@ -220,7 +214,6 @@ const HNSW_EMBED_DIM: usize = 384;
 /// to cope with cross-conv parallelism.
 pub struct KernelTurnAnchor {
     chain: Option<Arc<ChainManager>>,
-    hnsw: Option<Arc<HnswService>>,
     causal: Option<Arc<CausalGraph>>,
     prev_causal: DashMap<String, CausalNodeId>,
     /// Optional L2 session tier (ADR-058 Phase 5.1). When set — and the
@@ -235,12 +228,10 @@ impl KernelTurnAnchor {
     /// the operator hasn't enabled.
     pub fn new(
         chain: Option<Arc<ChainManager>>,
-        hnsw: Option<Arc<HnswService>>,
         causal: Option<Arc<CausalGraph>>,
     ) -> Self {
         Self {
             chain,
-            hnsw,
             causal,
             prev_causal: DashMap::new(),
             session_tier: None,
@@ -260,43 +251,8 @@ impl KernelTurnAnchor {
     /// this to decide between [`NoopTurnAnchor`] (cheaper) and the
     /// kernel-backed instance.
     pub fn any_enabled(&self) -> bool {
-        self.chain.is_some() || self.hnsw.is_some() || self.causal.is_some()
+        self.chain.is_some() || self.causal.is_some()
     }
-}
-
-/// Deterministic hash → 384-d unit-norm embedding. Splits a
-/// SHA-256 of the input into 8 32-bit seeds and unfolds each into
-/// 48 floats via xorshift, so a tiny input still fills the vector
-/// without collisions on the first byte. Result is L2-normalised so
-/// HNSW cosine math stays well-conditioned.
-fn hash_embed(input: &str, dim: usize) -> Vec<f32> {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    // 8 independent 64-bit seeds derived from differently-salted hashes.
-    let mut seeds = [0u64; 8];
-    for (i, seed) in seeds.iter_mut().enumerate() {
-        let mut h = DefaultHasher::new();
-        (i as u32).hash(&mut h);
-        input.hash(&mut h);
-        *seed = h.finish().max(1);
-    }
-    let mut out = Vec::with_capacity(dim);
-    for i in 0..dim {
-        let s = &mut seeds[i % seeds.len()];
-        // xorshift64 — cheap, well-distributed, no allocations.
-        *s ^= *s << 13;
-        *s ^= *s >> 7;
-        *s ^= *s << 17;
-        // Map u64 → f32 in [-1, 1].
-        let u = (*s >> 32) as u32;
-        out.push((u as f32) / (u32::MAX as f32) * 2.0 - 1.0);
-    }
-    let norm: f32 = out.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
-    for x in &mut out {
-        *x /= norm;
-    }
-    out
 }
 
 #[async_trait]
@@ -344,21 +300,7 @@ impl TurnAnchor for KernelTurnAnchor {
             }
         }
 
-        // 2. HNSW vector index.
-        if let Some(ref hnsw) = self.hnsw {
-            let embed_input = format!("{conv_id}:{turn_id}:{}", turn.content);
-            let vec = hash_embed(&embed_input, HNSW_EMBED_DIM);
-            let metadata = serde_json::json!({
-                "conv_id": conv_id,
-                "turn_id": turn_id,
-                "role": turn.role,
-                "ts_ms": turn.ts_ms,
-            });
-            // HnswService::insert is `&self` and never returns an err.
-            hnsw.insert(turn_id.to_string(), vec, metadata);
-        }
-
-        // 3. Causal graph node + link to prev turn in this conv.
+        // 2. Causal graph node + link to prev turn in this conv.
         if let Some(ref causal) = self.causal {
             let label = format!("turn:{conv_id}:{turn_id}");
             let metadata = serde_json::json!({
@@ -421,7 +363,7 @@ impl SubstrateConversationSink {
     /// Convenience for the daemon construction site —
     /// `clawft-weave::daemon` already has both handles on hand.
     /// Anchor side-effects default off; use [`Self::with_anchor`] to
-    /// opt in to chain / hnsw / causal mirroring.
+    /// opt in to chain / causal mirroring.
     pub fn new(
         substrate: SubstrateService,
         node_registry: NodeRegistry,
@@ -468,7 +410,7 @@ impl SubstrateConversationSink {
     /// explicit anchor. Mirrors the production wiring path:
     /// `SubstrateService` + `NodeRegistry` from the booted kernel,
     /// plus a [`KernelTurnAnchor`] built from the same kernel's
-    /// chain / hnsw / causal handles.
+    /// chain / causal handles.
     pub fn with_anchor(
         substrate: SubstrateService,
         node_registry: NodeRegistry,
@@ -612,7 +554,7 @@ impl ConversationSink for SubstrateConversationSink {
         });
         // Substrate publish first — that's the durable record. Anchor
         // side-effects are best-effort and only run after the publish
-        // succeeded, so a chain/hnsw/causal failure can never lose a
+        // succeeded, so a chain/causal failure can never lose a
         // turn.
         self.client.publish(&self.node_id, &path, body)?;
         // Re-stamp the turn id so the anchor sees the id we actually

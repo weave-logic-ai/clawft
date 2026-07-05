@@ -236,12 +236,9 @@ impl Default for KernelConfig {
 /// chat turn produces side-effects beyond the substrate JSONL archive
 /// (`_derived/chat/<conv>/turns/<ulid>`):
 ///
-/// - `chain` → append `agent.chat.turn` to the witness chain.
-/// - `hnsw`  → insert a deterministic-hash 384-dim embedding into the
-///   kernel HNSW index keyed by the turn id (Explorer "Vector entries"
-///   ticks). Without a real embedder this gives motion in the KPI but
-///   no semantic similarity; a future change will route through the
-///   `EmbeddingRouter` once it's daemon-side.
+/// - `chain` → append `agent.chat.turn` to the witness chain. The turn
+///   is also embedded and semantically indexed into its conversation's
+///   `SessionView` via the L2 session tier attached alongside the chain.
 /// - `causal` → add a causal node per turn and link it to the previous
 ///   turn in the same conversation (Explorer "Causal graph" ticks).
 ///
@@ -250,7 +247,6 @@ impl Default for KernelConfig {
 /// ```toml
 /// [kernel.agent]
 /// anchor_chain  = true
-/// anchor_hnsw   = true
 /// anchor_causal = true
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -259,12 +255,6 @@ pub struct AgentAnchorConfig {
     /// successful turn.
     #[serde(default, alias = "anchorChain")]
     pub anchor_chain: bool,
-
-    /// Insert a per-turn embedding into the kernel HNSW index. Uses a
-    /// deterministic hash-derived 384-d vector — KPI moves but
-    /// neighbours are not semantic.
-    #[serde(default, alias = "anchorHnsw")]
-    pub anchor_hnsw: bool,
 
     /// Add a causal-graph node per turn and link `prev_turn → this_turn`
     /// within the same conversation.
@@ -310,7 +300,7 @@ pub struct AgentAnchorConfig {
 impl AgentAnchorConfig {
     /// True if at least one anchor side-effect is enabled.
     pub fn any_enabled(&self) -> bool {
-        self.anchor_chain || self.anchor_hnsw || self.anchor_causal
+        self.anchor_chain || self.anchor_causal
     }
 }
 
