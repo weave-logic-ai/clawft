@@ -372,6 +372,20 @@ pub struct SubagentsConfig {
     /// here so the config surface is stable.
     #[serde(default, alias = "notifyOnComplete")]
     pub notify_on_complete: bool,
+
+    /// Narrow, opt-in governance grant for `agent_spawn` (D6). The daemon's
+    /// chat gate blocks any tool whose effect magnitude exceeds its 0.8
+    /// threshold, and `agent_spawn`'s effect (~0.93) is deliberately above it
+    /// so a spawn always forces a decision. Because the `GovernanceEngine`
+    /// evaluates pure magnitude — it never consults the action string — there
+    /// is no config-only way to permit *just* `agent_spawn` without globally
+    /// loosening the threshold. When `true`, the daemon adds a per-action
+    /// exemption for exactly `tool.agent_spawn` to the chat gate: the spawn is
+    /// permitted, but the decision is still evaluated and witnessed (as a
+    /// `governance.grant`) so the audit trail shows the grant was exercised.
+    /// Default `false` — spawning stays gated until an operator opts in.
+    #[serde(default, alias = "governanceGrant")]
+    pub governance_grant: bool,
 }
 
 impl Default for SubagentsConfig {
@@ -382,6 +396,7 @@ impl Default for SubagentsConfig {
             max_depth: default_subagents_max_depth(),
             timeout_secs: default_subagents_timeout_secs(),
             notify_on_complete: false,
+            governance_grant: false,
         }
     }
 }

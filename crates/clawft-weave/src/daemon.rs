@@ -1318,6 +1318,13 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                 reference_url: None,
                 sop_category: None,
             });
+            // D6: opt-in per-action grant so agent_spawn (~0.93 effect) clears
+            // the 0.8 chat gate without globally loosening the threshold. Off
+            // by default ([kernel.agent.subagents].governance_grant); the grant
+            // is still evaluated and witnessed as a `governance.grant`.
+            if anchor_cfg.subagents.governance_grant {
+                g = g.exempt_action("tool.agent_spawn");
+            }
             #[cfg(feature = "exochain")]
             {
                 let k = kernel.read().await;

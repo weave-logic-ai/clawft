@@ -270,6 +270,15 @@ mod tilezero_gate {
 pub struct GovernanceGate {
     engine: crate::governance::GovernanceEngine,
     chain: Option<std::sync::Arc<crate::chain::ChainManager>>,
+    /// Actions granted a per-action exemption from the blocking-deny path.
+    /// The `GovernanceEngine` scores pure effect magnitude and never consults
+    /// the action string, so a specific high-magnitude action (e.g.
+    /// `tool.agent_spawn`, ~0.93) cannot be permitted through config without
+    /// globally lowering the threshold. This opt-in set lets an operator grant
+    /// exactly-named actions: an exempted action that would otherwise be
+    /// denied/deferred is permitted instead, and the override is still
+    /// witnessed (as `governance.grant`) so the audit trail is never silent.
+    exempt_actions: std::collections::HashSet<String>,
 }
 
 impl GovernanceGate {
@@ -278,6 +287,7 @@ impl GovernanceGate {
         Self {
             engine: crate::governance::GovernanceEngine::new(risk_threshold, human_approval),
             chain: None,
+            exempt_actions: std::collections::HashSet::new(),
         }
     }
 
@@ -286,12 +296,27 @@ impl GovernanceGate {
         Self {
             engine: crate::governance::GovernanceEngine::open(),
             chain: None,
+            exempt_actions: std::collections::HashSet::new(),
         }
     }
 
     /// Attach a chain manager for audit logging.
     pub fn with_chain(mut self, cm: std::sync::Arc<crate::chain::ChainManager>) -> Self {
         self.chain = Some(cm);
+        self
+    }
+
+    /// Grant a per-action exemption from the blocking-deny path.
+    ///
+    /// `action` must match the gate action string exactly (the chat path uses
+    /// `format!("tool.{name}")`, so e.g. `"tool.agent_spawn"`). An exempted
+    /// action that the engine would deny or escalate is permitted instead, but
+    /// the decision is still evaluated and witnessed as a `governance.grant`.
+    /// Every other action is unaffected; a gate that never calls this is
+    /// identical to before. Opt-in only — driven by the
+    /// `[kernel.agent.subagents].governance_grant` config flag.
+    pub fn exempt_action(mut self, action: impl Into<String>) -> Self {
+        self.exempt_actions.insert(action.into());
         self
     }
 
@@ -369,34 +394,65 @@ impl GateBackend for GovernanceGate {
 
         let result = self.engine.evaluate(&request);
 
-        let decision = match &result.decision {
-            crate::governance::GovernanceDecision::Permit => GateDecision::Permit { token: None },
-            crate::governance::GovernanceDecision::PermitWithWarning(_) => {
-                GateDecision::Permit { token: None }
+        use crate::governance::GovernanceDecision;
+
+        // A blocking decision (Deny / EscalateToHuman) is overridden to Permit
+        // for an explicitly-exempted action. The engine still ran and its
+        // verdict is preserved for the audit witness below — the grant flips
+        // the *gate outcome*, not the *governance evaluation*.
+        let grant_applied = self.exempt_actions.contains(action)
+            && matches!(
+                result.decision,
+                GovernanceDecision::Deny(_) | GovernanceDecision::EscalateToHuman(_)
+            );
+
+        let decision = if grant_applied {
+            GateDecision::Permit { token: None }
+        } else {
+            match &result.decision {
+                GovernanceDecision::Permit => GateDecision::Permit { token: None },
+                GovernanceDecision::PermitWithWarning(_) => GateDecision::Permit { token: None },
+                GovernanceDecision::EscalateToHuman(reason) => GateDecision::Defer {
+                    reason: reason.clone(),
+                },
+                GovernanceDecision::Deny(reason) => GateDecision::Deny {
+                    reason: reason.clone(),
+                    receipt: None,
+                },
             }
-            crate::governance::GovernanceDecision::EscalateToHuman(reason) => GateDecision::Defer {
-                reason: reason.clone(),
-            },
-            crate::governance::GovernanceDecision::Deny(reason) => GateDecision::Deny {
-                reason: reason.clone(),
-                receipt: None,
-            },
         };
 
         // Log to chain.
         if let Some(ref cm) = self.chain {
-            let (event_kind, extra) = match &result.decision {
-                crate::governance::GovernanceDecision::Permit => {
-                    ("governance.permit", serde_json::json!({}))
-                }
-                crate::governance::GovernanceDecision::PermitWithWarning(w) => {
-                    ("governance.warn", serde_json::json!({"warning": w}))
-                }
-                crate::governance::GovernanceDecision::EscalateToHuman(r) => {
-                    ("governance.defer", serde_json::json!({"reason": r}))
-                }
-                crate::governance::GovernanceDecision::Deny(r) => {
-                    ("governance.deny", serde_json::json!({"reason": r}))
+            let (event_kind, extra) = if grant_applied {
+                // The audit trail must show the grant was exercised, not fall
+                // silent: record what the engine would have done and that the
+                // per-action exemption overrode it to a Permit.
+                let overridden_reason = match &result.decision {
+                    GovernanceDecision::Deny(r) | GovernanceDecision::EscalateToHuman(r) => {
+                        r.clone()
+                    }
+                    _ => String::new(),
+                };
+                (
+                    "governance.grant",
+                    serde_json::json!({
+                        "granted_action": action,
+                        "overridden_reason": overridden_reason,
+                    }),
+                )
+            } else {
+                match &result.decision {
+                    GovernanceDecision::Permit => ("governance.permit", serde_json::json!({})),
+                    GovernanceDecision::PermitWithWarning(w) => {
+                        ("governance.warn", serde_json::json!({"warning": w}))
+                    }
+                    GovernanceDecision::EscalateToHuman(r) => {
+                        ("governance.defer", serde_json::json!({"reason": r}))
+                    }
+                    GovernanceDecision::Deny(r) => {
+                        ("governance.deny", serde_json::json!({"reason": r}))
+                    }
                 }
             };
 
@@ -1069,5 +1125,87 @@ mod tilezero_tests {
         assert_eq!(action_ctx.context.session_id, Some("sess-42".into()));
         assert_eq!(action_ctx.target.device, Some("router-1".into()));
         assert_eq!(action_ctx.target.path, Some("/config/acl".into()));
+    }
+
+    // ── D6: per-action governance grant (GovernanceGate::exempt_action) ──
+
+    /// agent_spawn's effect (risk 0.5, novelty 0.6, security 0.5) has magnitude
+    /// ≈ 0.927, above the 0.8 chat-gate threshold — so a blocking rule denies it
+    /// unless the action is explicitly granted.
+    fn high_magnitude_spawn_ctx() -> serde_json::Value {
+        serde_json::json!({ "effect": { "risk": 0.5, "novelty": 0.6, "security": 0.5 } })
+    }
+
+    fn blocking_chat_gate() -> GovernanceGate {
+        use crate::governance::{GovernanceBranch, GovernanceRule, RuleSeverity};
+        GovernanceGate::new(0.8, false).add_rule(GovernanceRule {
+            id: "chat-tool-guard".into(),
+            description: "Block high-risk tool dispatches in agent.chat".into(),
+            branch: GovernanceBranch::Judicial,
+            severity: RuleSeverity::Blocking,
+            active: true,
+            reference_url: None,
+            sop_category: None,
+        })
+    }
+
+    #[test]
+    fn governance_grant_default_off_denies_high_magnitude_spawn() {
+        let gate = blocking_chat_gate();
+        let d = gate.check("agent-P", "tool.agent_spawn", &high_magnitude_spawn_ctx());
+        assert!(
+            matches!(d, GateDecision::Deny { .. }),
+            "without the grant, a 0.93 spawn must be denied, got {d:?}"
+        );
+    }
+
+    #[test]
+    fn governance_grant_permits_exempted_spawn() {
+        let gate = blocking_chat_gate().exempt_action("tool.agent_spawn");
+        let d = gate.check("agent-P", "tool.agent_spawn", &high_magnitude_spawn_ctx());
+        assert!(
+            matches!(d, GateDecision::Permit { .. }),
+            "the grant must permit tool.agent_spawn, got {d:?}"
+        );
+    }
+
+    #[test]
+    fn governance_grant_does_not_leak_to_other_actions() {
+        // Granting agent_spawn must NOT permit an unrelated high-magnitude action.
+        let gate = blocking_chat_gate().exempt_action("tool.agent_spawn");
+        let d = gate.check("agent-P", "tool.exec", &high_magnitude_spawn_ctx());
+        assert!(
+            matches!(d, GateDecision::Deny { .. }),
+            "the exemption must not leak to tool.exec, got {d:?}"
+        );
+    }
+
+    #[test]
+    fn governance_grant_is_witnessed_on_chain() {
+        let cm = std::sync::Arc::new(crate::chain::ChainManager::new(0, 1000));
+        let gate = blocking_chat_gate()
+            .with_chain(cm.clone())
+            .exempt_action("tool.agent_spawn");
+        let d = gate.check("agent-P", "tool.agent_spawn", &high_magnitude_spawn_ctx());
+        assert!(matches!(d, GateDecision::Permit { .. }));
+
+        // The grant must leave an audit trail — a governance.grant event, not silence.
+        let events = cm.tail(0);
+        let grant = events
+            .iter()
+            .find(|e| e.kind == "governance.grant")
+            .expect("the exercised grant must be witnessed on the chain");
+        let payload = grant.payload.as_ref().expect("grant event carries a payload");
+        assert_eq!(
+            payload.get("granted_action").and_then(|v| v.as_str()),
+            Some("tool.agent_spawn")
+        );
+        assert!(
+            payload
+                .get("overridden_reason")
+                .and_then(|v| v.as_str())
+                .is_some_and(|r| !r.is_empty()),
+            "the witness records what the grant overrode"
+        );
     }
 }
