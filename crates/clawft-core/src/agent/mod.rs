@@ -20,6 +20,7 @@ pub mod skill_autogen;
 pub mod skill_watcher;
 pub mod skills;
 pub mod skills_v2;
+pub mod spawn;
 pub mod system_prompt;
 pub mod tokenizer;
 pub mod verification;
