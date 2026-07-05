@@ -41,6 +41,7 @@ use clawft_kernel::{
     ViewResolver,
 };
 
+use crate::enrich_queue::{EnrichJob, EnrichQueue};
 use crate::session_forest::{self, ConvForest, DEFAULT_LINEAGE_DEPTH};
 use crate::turn_classifier::TurnClassifier;
 
@@ -83,6 +84,14 @@ pub struct SessionTier {
     ///
     /// [`index_turn`]: Self::index_turn
     classifier: Option<Arc<dyn TurnClassifier>>,
+    /// Bounded async-enrichment queue (Phase B, design §D4). `Some` only when
+    /// `[kernel.agent.classification] mode = full`: [`index_turn`](Self::index_turn)
+    /// enqueues one [`EnrichJob`] per committed turn after the sync write, and a
+    /// daemon drain task refines the blob off the turn path. `None` (keyword or
+    /// off) skips the enqueue entirely — the enqueue is the mode-gate. Enqueue
+    /// never blocks (drop-oldest on a full queue), so it is safe on the anchor
+    /// path even while the LLM tier is slow.
+    enrich_tx: Option<Arc<EnrichQueue>>,
     /// The daemon-hosted multiplexed [`TalkModeLoop`] (M2 D2). When set,
     /// [`index_turn`](Self::index_turn) registers each dual-written turn with
     /// the loop and emits an `EndOfUtterance` so the loop commits it
@@ -123,6 +132,7 @@ impl SessionTier {
             forest: None,
             forests: DashMap::new(),
             classifier: None,
+            enrich_tx: None,
             talk_loop: OnceLock::new(),
         }
     }
@@ -135,6 +145,17 @@ impl SessionTier {
     /// [`index_turn`]: Self::index_turn
     pub fn with_classifier(mut self, classifier: Arc<dyn TurnClassifier>) -> Self {
         self.classifier = Some(classifier);
+        self
+    }
+
+    /// Attach the Phase-B async-enrichment queue (design §D4). The daemon calls
+    /// this at agent-service boot only when `[kernel.agent.classification]
+    /// mode = full`; once set, [`index_turn`](Self::index_turn) enqueues an
+    /// [`EnrichJob`] per committed turn for the daemon drain task to refine
+    /// (`tier → "llm"`) off the turn path. The enqueue is non-blocking
+    /// (drop-oldest on overflow), so the turn never waits on enrichment.
+    pub fn with_enrich_queue(mut self, queue: Arc<EnrichQueue>) -> Self {
+        self.enrich_tx = Some(queue);
         self
     }
 
@@ -319,6 +340,20 @@ impl SessionTier {
             // heuristic (design §D2). Only when a classifier ran.
             if let Some(cv) = &classification {
                 conv_forest.set_last_topic(cv.topic.clone());
+            }
+
+            // Phase B (design §D4): when `mode = full` the daemon attached an
+            // enrich queue. Enqueue the just-committed node for off-path LLM
+            // refinement of its `classification` blob. Non-blocking (drop-oldest
+            // on a full queue) so a slow enrichment backend never stalls the
+            // turn — the queue's presence IS the `full`-mode gate.
+            if let Some(queue) = &self.enrich_tx {
+                queue.enqueue(EnrichJob {
+                    conv_id: conv_id.to_string(),
+                    node_id: node,
+                    chain_seq,
+                    text: text.to_string(),
+                });
             }
 
             // M2 D2 — text ImpulseSource, at the anchor convergence seam.

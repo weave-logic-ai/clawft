@@ -142,6 +142,68 @@ async fn cascade_end_children(parent_conv: &str) {
     );
 }
 
+/// Phase B enrichment drain (classification-design §D4, plan B3). Pulls
+/// [`clawft_service_agent::EnrichJob`]s from the bounded queue one at a time,
+/// refines each committed turn's classification blob with the cheap-model
+/// [`clawft_service_agent::EnrichmentClassifier`], and patches the node
+/// (`tier → "llm"`) via [`clawft_kernel::causal::CausalGraph::merge_node_metadata`]
+/// (B1). Serialises the LLM calls (one job in flight) and exits on daemon
+/// shutdown. Every effect is best-effort: a backend/parse failure or a
+/// vanished node leaves the durable keyword blob in place, never an error.
+async fn run_enrich_drain(
+    queue: Arc<clawft_service_agent::EnrichQueue>,
+    enricher: Arc<clawft_service_agent::EnrichmentClassifier>,
+    causal: Arc<clawft_kernel::causal::CausalGraph>,
+    shutdown_rx: &mut tokio::sync::watch::Receiver<bool>,
+) {
+    loop {
+        let job = tokio::select! {
+            biased;
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    debug!("classification enrich drain shutting down");
+                    return;
+                }
+                continue;
+            }
+            job = queue.recv() => job,
+        };
+
+        // `prev_topic` — the node's existing keyword topic, threaded so the
+        // enricher can fall back to it when the model omits a topic (design §D2
+        // continuity). Read live from the graph, matching the §D4 job shape
+        // (which carries no topic).
+        let prev_topic = causal.get_node(job.node_id).and_then(|n| {
+            n.metadata
+                .get("classification")
+                .and_then(|c| c.get("topic"))
+                .and_then(|t| t.as_str())
+                .map(str::to_string)
+        });
+
+        // Cheap-model round-trip off the turn path. `enrich` returns `None` on
+        // any backend/parse failure, in which case the node keeps its durable
+        // keyword blob (best-effort refinement, never a regression).
+        let Some(cv) = enricher.enrich(&job.text, prev_topic.as_deref()).await else {
+            continue;
+        };
+
+        // Patch only the `classification` key (now `tier = "llm"`);
+        // `merge_node_metadata` leaves the protected identity/lifecycle keys
+        // (state, uid, chain_seq, text, conv_id) untouched (B1). The GUI shows
+        // the refinement on its next `conversation.graph` poll.
+        let mut patch = serde_json::Map::new();
+        patch.insert("classification".to_string(), cv.to_metadata_value());
+        if !causal.merge_node_metadata(job.node_id, &patch) {
+            warn!(
+                node_id = job.node_id,
+                conv_id = %job.conv_id,
+                "enrich drain: node vanished before its classification patch"
+            );
+        }
+    }
+}
+
 /// Daemon-wide handle to the agent conversation sink, for the
 /// `agent.turn.record` RPC — externally-produced turns (the `weft voice
 /// talk` Talk-Mode loop) recorded through the SAME
@@ -162,6 +224,17 @@ fn daemon_turn_sink() -> Option<Arc<dyn clawft_core::agent::sink::ConversationSi
 /// arm and the idle reaper can evict a conversation's loop state via
 /// `TalkModeLoop::end_conversation`. Set once at boot alongside `DAEMON_AGENT`.
 static DAEMON_TALK_LOOP: OnceLock<Arc<clawft_kernel::TalkModeLoop>> = OnceLock::new();
+
+/// Phase B (classification-design §D4): the bounded async-enrichment queue and
+/// its cheap-model classifier, wired at boot only when
+/// `[kernel.agent.classification] mode = full`. `index_turn` (via the session
+/// tier) enqueues into the queue; the drain task spawned in the run loop pulls
+/// jobs, refines the blob with the classifier, and patches the node
+/// (`tier → "llm"`). Kept out of the tier so the drain lives under the daemon's
+/// shutdown cancel like `run_talk_loop`, not the request path.
+static DAEMON_ENRICH_QUEUE: OnceLock<Arc<clawft_service_agent::EnrichQueue>> = OnceLock::new();
+static DAEMON_ENRICH_CLASSIFIER: OnceLock<Arc<clawft_service_agent::EnrichmentClassifier>> =
+    OnceLock::new();
 
 /// M2 D6: per-conversation last-activity timestamps for the idle reaper.
 /// Touched in the `agent.chat` / `agent.turn.record` arms; the reaper walks
@@ -1179,6 +1252,48 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                              to populate it"
                         );
                     }
+                    // Phase B (classification-design §D4): `mode = full` adds the
+                    // async LLM enrichment tier on top of the keyword sync tier
+                    // wired above. Stand up the bounded drop-oldest enrich queue,
+                    // attach it to the tier (so `index_turn` enqueues committed
+                    // turns), and build the cheap-model `EnrichmentClassifier`;
+                    // both are stashed for the drain task spawned in the run loop.
+                    // The queue-full path drops oldest, so the enqueue never
+                    // stalls a turn. Requires an LLM backend — `full` without one
+                    // warns and stays keyword-only (no queue ⇒ no enqueue).
+                    if anchor_cfg.classification.is_full() {
+                        match daemon_llm() {
+                            Some(llm) => {
+                                let queue =
+                                    Arc::new(clawft_service_agent::EnrichQueue::new(
+                                        anchor_cfg.classification.queue_bound,
+                                    ));
+                                tier = tier.with_enrich_queue(queue.clone());
+                                let backend: Arc<
+                                    dyn clawft_core::agent::context_router::Classifier,
+                                > = llm;
+                                let enricher = Arc::new(
+                                    clawft_service_agent::EnrichmentClassifier::from_config(
+                                        backend,
+                                        &anchor_cfg.classification,
+                                    ),
+                                );
+                                let _ = DAEMON_ENRICH_QUEUE.set(queue);
+                                let _ = DAEMON_ENRICH_CLASSIFIER.set(enricher);
+                                info!(
+                                    queue_bound = anchor_cfg.classification.queue_bound,
+                                    "classification.mode=full — async LLM enrichment queue \
+                                     wired; committed turns refine off the turn path (tier=llm)"
+                                );
+                            }
+                            None => {
+                                warn!(
+                                    "classification.mode=full but no LLM backend (DAEMON_LLM \
+                                     unset) — enrichment disabled; turns keep the keyword blob"
+                                );
+                            }
+                        }
+                    }
                     let tier = Arc::new(tier);
                     // ADR-058 Phase 5.3: pre-warm the embedder at startup (one
                     // throwaway embed) so the first conversation's first graft
@@ -2110,6 +2225,38 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                 }
             }
         });
+    }
+
+    // Phase B (classification-design §D4): drain the async enrichment queue.
+    // One task — hosted only when `mode = full` wired the queue + classifier at
+    // boot — pulls each committed-turn job, runs the cheap-model four-axis
+    // enrichment off the turn path, and patches the node's `classification` blob
+    // (tier=llm) via `CausalGraph::merge_node_metadata` (B1). Cancelled on daemon
+    // shutdown like the loops above. Serialises the cheap-model calls (one job in
+    // flight at a time), which is the point of a single drain.
+    if let (Some(queue), Some(enricher)) = (
+        DAEMON_ENRICH_QUEUE.get().cloned(),
+        DAEMON_ENRICH_CLASSIFIER.get().cloned(),
+    ) {
+        let causal = {
+            let k = kernel.read().await;
+            k.ecc_causal().cloned()
+        };
+        match causal {
+            Some(causal) => {
+                let mut drain_shutdown_rx = shutdown_rx.clone();
+                tokio::spawn(async move {
+                    run_enrich_drain(queue, enricher, causal, &mut drain_shutdown_rx).await;
+                });
+                info!("Phase B: classification enrichment drain task hosted (mode=full)");
+            }
+            None => {
+                warn!(
+                    "classification.mode=full but the kernel has no causal graph — \
+                     enrichment drain inert"
+                );
+            }
+        }
     }
 
     // Accept loop — clone shutdown_tx so the outer scope can still use it for Ctrl+C

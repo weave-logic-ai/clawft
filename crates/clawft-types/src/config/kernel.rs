@@ -485,6 +485,12 @@ impl ClassificationConfig {
     pub fn is_enabled(&self) -> bool {
         self.mode != ClassificationMode::Off
     }
+
+    /// True when the async LLM enrichment tier is on (`mode = full`). Gates the
+    /// daemon's Phase-B enrich queue + drain task (design §D4).
+    pub fn is_full(&self) -> bool {
+        self.mode == ClassificationMode::Full
+    }
 }
 
 // ── LLM endpoint configuration ──────────────────────────────────────────
