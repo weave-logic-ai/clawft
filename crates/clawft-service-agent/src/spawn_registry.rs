@@ -231,6 +231,17 @@ impl SpawnRegistry {
             .collect()
     }
 
+    /// Snapshot outcomes for every tracked task, terminal and live — backs an
+    /// optional `task.list` / `agent.tasks` daemon RPC surface. Ordering is
+    /// unspecified (DashMap iteration order); callers that need a stable order
+    /// sort by `task_id`.
+    pub fn all_tasks(&self) -> Vec<TaskOutcome> {
+        self.tasks
+            .iter()
+            .filter_map(|r| self.outcome(&r.task_id))
+            .collect()
+    }
+
     /// Total tracked tasks (terminal + live).
     pub fn len(&self) -> usize {
         self.tasks.len()
@@ -345,6 +356,18 @@ mod tests {
         reg.set_outcome("t1", outcome("t1", "sub:P:1", TaskStatus::Completed, Some("done")));
         let live = reg.live_children("P");
         assert_eq!(live, vec!["t2".to_string()]);
+    }
+
+    #[test]
+    fn all_tasks_snapshots_terminal_and_live() {
+        let reg = SpawnRegistry::new();
+        reg.insert("t1", "P", "sub:P:1", None);
+        reg.insert("t2", "Q", "sub:Q:1", None);
+        reg.set_outcome("t1", outcome("t1", "sub:P:1", TaskStatus::Completed, Some("x")));
+        let all = reg.all_tasks();
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().any(|o| o.status == TaskStatus::Completed));
+        assert!(all.iter().any(|o| o.status == TaskStatus::Running));
     }
 
     #[test]
