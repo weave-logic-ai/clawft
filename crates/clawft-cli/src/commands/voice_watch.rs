@@ -11,14 +11,20 @@
 //!
 //! This is the committed-state half of the §W1.4 surface — its source is the
 //! `conversation.graph` poll (ADR-067 D2), which serves `voice_analysis`
-//! verbatim (Wave 1 §W1.2 wire). The live per-frame observer stream (capture
-//! level meter, partial transcript, endpoint fire the instant it happens) layers
-//! on top once the enriched `ConversationEvent` is emitted by the controller.
+//! verbatim (Wave 1 §W1.2 wire). The **live per-frame half** ([`LiveRenderObserver`])
+//! layers on top: attached to the observe-only `weft voice listen` loop, it
+//! renders the partial transcript, the endpoint fire the instant it happens, and
+//! the finalized turn's full decomposition as events arrive — no graph round-trip.
+//! (A live capture level-meter awaits a per-frame `CaptureLevel` event; until
+//! then the finalized-line + arousal bar is the fallback, plan riskiest-call #4.)
 
 use std::collections::HashSet;
+use std::io::Write;
+use std::sync::Arc;
 use std::time::Duration;
 
 use clawft_rpc::{DaemonClient, Request};
+use clawft_voice_talk::{ConversationEvent, ConversationObserver};
 use serde_json::Value;
 
 /// Render width of the arousal bar.
@@ -125,12 +131,17 @@ fn render_node(node: &Value) {
         println!("│  “{text}”");
     }
 
-    // 4-axis classification (intent / topic / emotion tier).
+    // Classification: v2 dialogue act (act.refined), falling back to the legacy
+    // v1 `intent` axis, + topic + the emotion provenance tier.
     if let Some(cls) = node.get("classification").filter(|v| !v.is_null()) {
         let intent = cls.get("intent").and_then(Value::as_str).unwrap_or("—");
+        let act = cls
+            .get("act")
+            .and_then(|a| a.get("refined").and_then(Value::as_str))
+            .unwrap_or(intent);
         let topic = cls.get("topic").and_then(Value::as_str).unwrap_or("—");
         let tier = cls.get("tier").and_then(Value::as_str).unwrap_or("—");
-        println!("│  intent={intent} · topic={topic} · emotion-tier=[{tier}]");
+        println!("│  act={act} · topic={topic} · emotion-tier=[{tier}]");
     }
 
     // The rich voice decomposition, when present.
@@ -238,6 +249,83 @@ fn arousal_bar(arousal: f64) -> String {
     bar
 }
 
+// ── Live per-frame surface (§W1.4) ─────────────────────────────────────────
+//
+// The observe-side counterpart to the graph poll above: a `ConversationObserver`
+// attached to the `weft voice listen` loop that renders the process live as
+// events fire, reusing the same decomposition rows the committed-state view uses.
+
+/// Renders the live process stream to the terminal as [`ConversationEvent`]s
+/// arrive: the running partial ("listening…"), the endpoint fire the instant it
+/// decides (probability, source, trailing silence), the finalized turn with its
+/// full voice decomposition (speaker, prosody, arousal bar, paralinguistics), and
+/// speaker enrollment plus any reply. Non-blocking — plain terminal writes.
+pub struct LiveRenderObserver;
+
+impl ConversationObserver for LiveRenderObserver {
+    fn observe(&self, event: ConversationEvent) {
+        match event {
+            ConversationEvent::PartialTranscript { text } => {
+                let line = if text.trim().is_empty() {
+                    "  … listening".to_string()
+                } else {
+                    format!("  … {text}")
+                };
+                // Overwrite in place (no newline) so the partial updates live.
+                print!("\r{line}\x1b[K");
+                let _ = std::io::stdout().flush();
+            }
+            ConversationEvent::EndpointFired {
+                completion_prob,
+                source,
+                silence_ms,
+            } => {
+                println!("\r  ⏎ endpoint p={completion_prob:.2} ({source}) @ {silence_ms}ms silence\x1b[K");
+            }
+            ConversationEvent::UserTurn {
+                text,
+                speaker_name,
+                voice_analysis,
+                ..
+            } => {
+                let who = speaker_name.as_deref().unwrap_or("speaker");
+                println!("┌─ {who}: \u{201c}{text}\u{201d}");
+                // Reuse the committed-state decomposition rows by serializing the
+                // record to the same flat JSON the graph view renders from.
+                if let Some(va) = voice_analysis.as_deref()
+                    && let Ok(v) = serde_json::to_value(va)
+                {
+                    render_voice_analysis(&v);
+                }
+                println!("└─\n");
+            }
+            ConversationEvent::SpeakerEnrolled { name, .. } => {
+                println!("  ✦ enrolled new speaker: {name}");
+            }
+            ConversationEvent::CommittedReply { answer } => {
+                println!("  ↳ reply: {answer}");
+            }
+            // Listen-only never fires these; a full talk loop supersedes the ack
+            // with the committed reply and prunes on barge-in.
+            ConversationEvent::SpeculativeReply { .. } | ConversationEvent::Interrupted => {}
+        }
+    }
+}
+
+/// Fan one event out to several observers. `run_live_observed` accepts a single
+/// `extra_observer`, so the listen surface combines the daemon turn-recorder and
+/// the [`LiveRenderObserver`] through this. Events are `Clone`, so each observer
+/// gets its own copy.
+pub struct FanOutObserver(pub Vec<Arc<dyn ConversationObserver>>);
+
+impl ConversationObserver for FanOutObserver {
+    fn observe(&self, event: ConversationEvent) {
+        for observer in &self.0 {
+            observer.observe(event.clone());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,5 +361,31 @@ mod tests {
         // Idempotent: re-render adds nothing.
         render_new_nodes(&graph, &mut seen, true);
         assert_eq!(seen.len(), 2);
+    }
+
+    #[test]
+    fn fan_out_delivers_to_every_observer() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Counter(Arc<AtomicUsize>);
+        impl ConversationObserver for Counter {
+            fn observe(&self, _event: ConversationEvent) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let a = Arc::new(AtomicUsize::new(0));
+        let b = Arc::new(AtomicUsize::new(0));
+        let fan = FanOutObserver(vec![
+            Arc::new(Counter(a.clone())),
+            Arc::new(Counter(b.clone())),
+        ]);
+        fan.observe(ConversationEvent::EndpointFired {
+            completion_prob: 0.9,
+            source: "smart-turn-v3".into(),
+            silence_ms: 300,
+        });
+        assert_eq!(a.load(Ordering::SeqCst), 1, "first observer received the event");
+        assert_eq!(b.load(Ordering::SeqCst), 1, "second observer received the event");
     }
 }

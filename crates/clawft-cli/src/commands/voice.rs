@@ -33,6 +33,12 @@ pub enum VoiceCommand {
     /// Start Talk Mode (continuous voice conversation).
     Talk,
 
+    /// Listen-only mode (§W1.4): record + decompose + classify every turn WITHOUT
+    /// the LLM brain or audio out, rendering the live process stream (partials,
+    /// endpoint fire, finalized turn + its decomposition) as it happens. Turns
+    /// anchor via `agent.turn.record`, so `weft voice watch` lights up in parallel.
+    Listen,
+
     /// Watch the live voice process for a conversation (§W1.4): committed turns,
     /// their labels, and the per-utterance voice decomposition, rendered as they
     /// land via the ~1 Hz `conversation.graph` poll. Read-only — no mic, no
@@ -76,6 +82,9 @@ pub async fn handle_voice(args: VoiceArgs) -> anyhow::Result<()> {
         }
         VoiceCommand::Talk => {
             handle_talk().await?;
+        }
+        VoiceCommand::Listen => {
+            handle_listen().await?;
         }
         VoiceCommand::Watch {
             conv_id,
@@ -146,6 +155,63 @@ async fn handle_talk() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("talk mode: {e}"))?;
 
     println!("Talk Mode ended.");
+    Ok(())
+}
+
+/// Run Listen-only Mode (§W1.4): the native capture + decomposition + classify
+/// path with the LLM brain and audio-out disabled (`TalkConfig::listen_only`).
+/// Renders the live process stream via [`LiveRenderObserver`] and mirrors each
+/// finalized turn to `agent.turn.record` (fanned out with the recorder), so the
+/// forest fills and `weft voice watch` lights up in parallel — no reply, no TTS.
+async fn handle_listen() -> anyhow::Result<()> {
+    use clawft_voice_talk::{ConversationObserver, TalkConfig, live::run_live_observed};
+    use tokio_util::sync::CancellationToken;
+
+    use super::voice_watch::{FanOutObserver, LiveRenderObserver};
+
+    println!("=== ClawFT Listen Mode (observe-only — no brain, no audio out) ===");
+    println!("Records + decomposes + classifies every turn and renders it live.");
+    println!("Press Ctrl+C to exit.\n");
+
+    let config = TalkConfig {
+        conv_id: "weft-talk".into(),
+        listen_only: true,
+        ..TalkConfig::default()
+    };
+
+    // Anchor finalized turns to the daemon (best-effort) AND render them live.
+    let recorder = spawn_turn_recorder(config.conv_id.clone()).await;
+    match &recorder {
+        Some(_) => println!("Turn anchoring: ON (turns recorded on the chain)"),
+        None => println!(
+            "Turn anchoring: OFF (no kernel daemon — start one with `weaver kernel start` \
+             to record turns; the live stream still renders)"
+        ),
+    }
+
+    // `run_live_observed` takes ONE extra observer; fan out recorder + renderer.
+    let mut observers: Vec<std::sync::Arc<dyn ConversationObserver>> =
+        vec![std::sync::Arc::new(LiveRenderObserver)];
+    if let Some(recorder) = recorder {
+        observers.push(recorder);
+    }
+    let observer: std::sync::Arc<dyn ConversationObserver> =
+        std::sync::Arc::new(FanOutObserver(observers));
+
+    let cancel = CancellationToken::new();
+    let cancel_for_signal = cancel.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            println!("\nReceived Ctrl+C, shutting down Listen Mode...");
+            cancel_for_signal.cancel();
+        }
+    });
+
+    run_live_observed(config, None, cancel, Some(observer))
+        .await
+        .map_err(|e| anyhow::anyhow!("listen mode: {e}"))?;
+
+    println!("Listen Mode ended.");
     Ok(())
 }
 
