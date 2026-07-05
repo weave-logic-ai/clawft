@@ -90,23 +90,21 @@ static DAEMON_SPAWN_REGISTRY: OnceLock<Arc<clawft_service_agent::SpawnRegistry>>
 static DAEMON_SUBAGENT_SPAWNER: OnceLock<Arc<dyn clawft_core::agent::spawn::SubagentSpawner>> =
     OnceLock::new();
 
-/// M4 D5: tear down every still-running child of a parent conversation that is
-/// going away — driven by the idle reaper, `agent.chat.end`, and
-/// `agent.chat.cancel`. Each `spawner.cancel` aborts the child's detached
-/// driver, cancels its in-flight turn, releases the parent's live concurrency
-/// slot, and witnesses `agent.cancel` on the chain, so no spawned child is
-/// orphaned when its parent goes away.
+/// M4 D5: fully end every still-running child of a parent conversation that is
+/// itself ending — driven by `agent.chat.end` and the idle reaper (conversation
+/// over ⇒ children die). Each child is torn down the way the parent is:
+/// `spawner.cancel` aborts the detached driver, cancels the in-flight child
+/// turn, releases the parent's live concurrency slot, and witnesses
+/// `agent.cancel`; then the child's ephemeral L2 SessionTier view is dropped
+/// (no postmortem — the child was torn down, not completed) and its talk-loop
+/// state evicted, so the reaper never revisits it. A no-op when the spawn
+/// substrate isn't wired or the parent has no live children.
 ///
-/// When `end_views` is set (the parent is fully ended — `agent.chat.end` or an
-/// idle reap), each child is also *ended* like the parent is: its ephemeral L2
-/// SessionTier view is dropped (no postmortem — the child was torn down, not
-/// completed) and its talk-loop state is evicted, so the reaper never revisits
-/// it. When it is clear (`agent.chat.cancel` — the parent's turn is cancelled
-/// but the conversation lives on) the children are only cancelled.
-///
-/// A no-op when the spawn substrate isn't wired or the parent has no live
-/// children.
-async fn cascade_cancel_children(parent_conv: &str, end_views: bool) {
+/// NOTE: `agent.chat.cancel` deliberately does NOT call this — a turn-level
+/// cancel must not destroy detached (`await:false`) children, which are
+/// independent work the user fired off on purpose (see the `agent.chat.cancel`
+/// arm). Only conversation-end (here) tears the whole spawn tree down.
+async fn cascade_end_children(parent_conv: &str) {
     let (Some(registry), Some(spawner)) =
         (DAEMON_SPAWN_REGISTRY.get(), DAEMON_SUBAGENT_SPAWNER.get())
     else {
@@ -125,10 +123,10 @@ async fn cascade_cancel_children(parent_conv: &str, end_views: bool) {
                 parent = %parent_conv,
                 task_id = %task_id,
                 error = %e,
-                "M4 cascade cancel: child cancel failed"
+                "M4 cascade end: child cancel failed"
             );
         }
-        if end_views && let Some(child_conv) = child_conv {
+        if let Some(child_conv) = child_conv {
             if let Some(agent) = daemon_agent() {
                 let _ = agent.end_conversation(&child_conv, None);
             }
@@ -140,8 +138,7 @@ async fn cascade_cancel_children(parent_conv: &str, end_views: bool) {
     info!(
         parent = %parent_conv,
         children = children.len(),
-        ended_views = end_views,
-        "M4: cascaded teardown to spawned children on parent end"
+        "M4: ended spawned children on parent end"
     );
 }
 
@@ -2060,7 +2057,7 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                             // M4 D5: an idle-reaped parent fully ends its spawned
                             // children too (cancel + drop view + evict loop
                             // state) before its own loop state is evicted.
-                            cascade_cancel_children(&conv_id, true).await;
+                            cascade_end_children(&conv_id).await;
                             reaper_loop.end_conversation(&conv_id);
                             activity.remove(&conv_id);
                             info!(conv_id = %conv_id, "M2 reaper: ended idle talk conversation");
@@ -4711,12 +4708,13 @@ async fn dispatch(
             };
             if let Some(agent) = daemon_agent() {
                 agent.cancel(&conv_id);
-                // M4 D5: cancelling a parent conversation also cancels its
-                // still-running spawned children (design D5 — cancel reaches the
-                // spawn tree). The parent's conversation lives on (cancel only
-                // re-arms the current turn), so the children are cancelled, not
-                // ended — no view drop here.
-                cascade_cancel_children(&conv_id, false).await;
+                // M4 D5 rule: a turn-level cancel tears down only the work
+                // blocking that turn. Inline (await:true) children are on the
+                // cancelled turn's call stack and unwind with it; detached
+                // (await:false) children are independent work the user fired off
+                // deliberately and MUST survive — so we do NOT cascade to them
+                // here. The full spawn-tree teardown happens only on
+                // conversation-end (agent.chat.end / idle reap → cascade_end_children).
                 Response::success(serde_json::json!({"cancelled": conv_id}))
             } else {
                 Response::error("agent service not wired")
@@ -4754,7 +4752,7 @@ async fn dispatch(
             // M4 D5: an explicitly ended parent fully ends its still-running
             // spawned children (cancel + drop view + evict loop state) so none
             // are orphaned — the same teardown the parent itself gets below.
-            cascade_cancel_children(&conv_id, true).await;
+            cascade_end_children(&conv_id).await;
             // M2 D6: explicit end also evicts the hosted loop's per-conversation
             // state (lineage / in-flight slot) and drops the activity entry, so
             // the reaper never revisits it.
