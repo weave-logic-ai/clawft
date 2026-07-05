@@ -65,7 +65,8 @@
     "tests": "d97c332e-3ae4-49ae-a1a2-6b1a1a4838d1",
     "tooling": "fcc3661d-1a25-4192-a480-13ed848a48eb",
     "security": "5dffa02b-8d62-4bb2-9845-aad33fca8f8c",
-    "performance": "d0d0e5d4-0149-48ac-a1f7-3e34e3929ccf"
+    "performance": "d0d0e5d4-0149-48ac-a1f7-3e34e3929ccf",
+    "ruv-integration": "5acbe91e-3841-4269-9da0-50ee90e0280d"
   },
   "last_refreshed": "2026-04-28"
 }

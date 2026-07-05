@@ -33,6 +33,7 @@
     { "name": "tests",                  "color": "#33cc66", "description": "Test coverage / fixtures / test infra" },
     { "name": "tooling",                "color": "#996633", "description": "scripts/, build, dev ergonomics" },
     { "name": "security",               "color": "#cc0000", "description": "Security control / sandbox / authn / authz" },
-    { "name": "performance",            "color": "#ff6600", "description": "Latency, throughput, allocation, hot path" }
+    { "name": "performance",            "color": "#ff6600", "description": "Latency, throughput, allocation, hot path" },
+    { "name": "ruv-integration",        "color": "#6f42c1", "description": "Derived from the ruv (ruvnet) ecosystem — prototype/eval/vendor/integrate a ruv package or pattern" }
   ]
 }
