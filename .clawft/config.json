@@ -142,7 +142,8 @@
     "agent": {
       "anchor_chain": true,
       "anchor_causal": true,
-      "talk_loop": true
+      "talk_loop": true,
+      "subagents": { "governance_grant": true }
     }
   }
 }
