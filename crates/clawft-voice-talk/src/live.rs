@@ -100,7 +100,9 @@ pub async fn run_live_observed(
         100,
         10_000,
     );
-    let processor = CaptureProcessor::new(vad, impulse_sink, frames_tx).with_emit_eou(false);
+    let processor = CaptureProcessor::new(vad, impulse_sink, frames_tx)
+        .with_emit_eou(false)
+        .with_metrics(session.capture_metrics());
 
     // Bridge the CancellationToken to the capture loop's AtomicBool flag.
     let cap_flag = Arc::new(AtomicBool::new(false));

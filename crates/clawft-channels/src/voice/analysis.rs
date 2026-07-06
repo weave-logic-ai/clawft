@@ -220,6 +220,15 @@ pub struct AudioAnalysis {
     /// #3 applied to capture health.
     #[serde(default)]
     pub noise_floor_converged: bool,
+    /// Frames the real-time capture thread dropped (channel full) up to this
+    /// turn — cumulative for the session. Non-zero means the consume loop fell
+    /// behind and audio was lost mid-stream (rate/token-conf become unreliable).
+    #[serde(default)]
+    pub dropped_frames: u64,
+    /// High-water mark of frames queued in the capture→consume channel this
+    /// session — the early warning that precedes a drop.
+    #[serde(default)]
+    pub channel_peak: u64,
 }
 
 impl Default for AudioAnalysis {
@@ -235,6 +244,8 @@ impl Default for AudioAnalysis {
             clip_pct: 0.0,
             dc_offset: 0,
             noise_floor_converged: false,
+            dropped_frames: 0,
+            channel_peak: 0,
         }
     }
 }
@@ -432,6 +443,8 @@ mod tests {
                 clip_pct: 0.0,
                 dc_offset: 3,
                 noise_floor_converged: true,
+                dropped_frames: 0,
+                channel_peak: 0,
             },
             ProsodyAnalysis {
                 f0_mean_hz: 165.0,

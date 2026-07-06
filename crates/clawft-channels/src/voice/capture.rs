@@ -21,11 +21,36 @@
 //!                                              └─► frames_tx ─► Talk-Mode loop
 //! ```
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
 use super::vad::{EnergyVad, VadEvent};
+
+/// Shared capture-path health counters, written by the real-time capture thread
+/// and read when the `VoiceAnalysis` record is built — so we never GUESS whether
+/// frames dropped. A drop means the consume loop fell behind and the capture
+/// thread (which must never block) discarded a mic frame; a rising `channel_peak`
+/// warns before the drop.
+#[derive(Debug, Default)]
+pub struct CaptureMetrics {
+    /// Frames dropped because the consume channel was full (try_send failed).
+    pub dropped_frames: AtomicU64,
+    /// High-water mark of frames queued in the consume channel.
+    pub channel_peak: AtomicU64,
+}
+
+impl CaptureMetrics {
+    /// Current dropped-frame count.
+    pub fn dropped(&self) -> u64 {
+        self.dropped_frames.load(Ordering::Relaxed)
+    }
+    /// Current channel high-water mark.
+    pub fn peak(&self) -> u64 {
+        self.channel_peak.load(Ordering::Relaxed)
+    }
+}
 
 /// A turn-taking signal emitted by the capture pipeline.
 ///
@@ -85,6 +110,10 @@ pub struct CaptureProcessor {
     /// final commit is deferred to the semantic model so the two endpointers
     /// **compose** instead of both firing EOU.
     emit_eou: bool,
+    /// Shared drop/high-water counters surfaced in the record. Default is a
+    /// private throwaway; [`with_metrics`](Self::with_metrics) shares one with
+    /// the controller so the record can report it.
+    metrics: Arc<CaptureMetrics>,
 }
 
 impl CaptureProcessor {
@@ -101,6 +130,7 @@ impl CaptureProcessor {
             sink,
             frames_tx,
             emit_eou: true,
+            metrics: Arc::new(CaptureMetrics::default()),
         }
     }
 
@@ -109,6 +139,13 @@ impl CaptureProcessor {
     /// emitting the coarse onset `TurnClaim` (ADR-062 6.5 composition).
     pub fn with_emit_eou(mut self, emit_eou: bool) -> Self {
         self.emit_eou = emit_eou;
+        self
+    }
+
+    /// Share the drop/high-water counters with the controller so the record can
+    /// report `capture.dropped_frames` / `capture.channel_peak`.
+    pub fn with_metrics(mut self, metrics: Arc<CaptureMetrics>) -> Self {
+        self.metrics = metrics;
         self
     }
 
@@ -131,8 +168,20 @@ impl CaptureProcessor {
             }
             self.sink.emit(impulse, hlc);
         }
+        // Track how full the consume channel is (high-water mark) — a rising
+        // peak is the early warning; a drop is the failure.
+        let queued = self
+            .frames_tx
+            .max_capacity()
+            .saturating_sub(self.frames_tx.capacity()) as u64;
+        self.metrics.channel_peak.fetch_max(queued, Ordering::Relaxed);
         if self.frames_tx.try_send(frame).is_err() {
-            tracing::warn!("voice capture: frame channel full/closed; dropping frame");
+            let n = self.metrics.dropped_frames.fetch_add(1, Ordering::Relaxed) + 1;
+            tracing::warn!(
+                dropped_total = n,
+                channel_peak = self.metrics.peak(),
+                "voice capture: frame channel full/closed; dropping frame (consume loop behind)"
+            );
         }
     }
 }

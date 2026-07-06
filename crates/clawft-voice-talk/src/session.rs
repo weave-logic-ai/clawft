@@ -194,6 +194,13 @@ impl<M: EndpointModel + 'static> TalkSession<M> {
         &self.forest
     }
 
+    /// Shared capture-path metrics — the live path passes these to the
+    /// `CaptureProcessor` so its dropped-frame / high-water counts surface in
+    /// the `VoiceAnalysis` record (§round-5 instrumentation).
+    pub fn capture_metrics(&self) -> Arc<clawft_channels::voice::CaptureMetrics> {
+        self.controller.capture_metrics()
+    }
+
     /// Run the conversation: drive the P2 loop (orchestrator) on its
     /// self-calibrating tick **and** the controller (render shell) on the frame
     /// stream, concurrently, until `cancel` fires or `frames` closes.

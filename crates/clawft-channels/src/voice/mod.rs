@@ -58,7 +58,7 @@ pub use analysis::{
     ParalinguisticClass, ParalinguisticsAnalysis, ProsodyAnalysis, SpeakerAction, SpeakerAnalysis,
     SttAnalysis, SttPath, TokenAnalysis, VoiceAnalysis, VOICE_ANALYSIS_VERSION, VOICE_TIER,
 };
-pub use capture::{CaptureProcessor, ImpulseSink, VoiceImpulse};
+pub use capture::{CaptureMetrics, CaptureProcessor, ImpulseSink, VoiceImpulse};
 pub use edge_reflex::{EdgeCommand, EdgeReflex, ReflexState};
 pub use paralinguistics::{classify_paralinguistics, ParalinguisticInput};
 pub use prosody::{

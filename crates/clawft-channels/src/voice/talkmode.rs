@@ -37,6 +37,7 @@ use super::analysis::{
     AudioAnalysis, EndpointAnalysis, SpeakerAction, SpeakerAnalysis, SttAnalysis, SttPath,
     TokenAnalysis, VoiceAnalysis,
 };
+use super::capture::CaptureMetrics;
 use super::paralinguistics::{classify_paralinguistics, ParalinguisticInput};
 use super::policy::{VoiceAnswerPolicy, VoiceLlm};
 use super::prosody::{
@@ -323,6 +324,9 @@ struct Decoder {
     /// listen worker holds a clone of the same `Arc`), so arousal is scored on
     /// deviation from the speaker's running baseline, not just absolutes.
     baseline: Arc<Mutex<SessionBaseline>>,
+    /// Capture-path drop/high-water counters, shared with the capture thread so
+    /// the record reports whether frames were lost (§round-5 instrumentation).
+    capture_metrics: Arc<CaptureMetrics>,
 }
 
 impl Decoder {
@@ -475,6 +479,8 @@ impl Decoder {
             clip_pct: health.clip_pct,
             dc_offset: health.dc_offset,
             noise_floor_converged,
+            dropped_frames: self.capture_metrics.dropped(),
+            channel_peak: self.capture_metrics.peak(),
         };
 
         let prosody = analyze_prosody(&ProsodyInput {
@@ -618,6 +624,7 @@ impl<M: EndpointModel> TalkModeController<M> {
             observer: observer.clone(),
             config: config.clone(),
             baseline: Arc::new(Mutex::new(SessionBaseline::new())),
+            capture_metrics: Arc::new(CaptureMetrics::default()),
         };
         Self {
             endpointer,
@@ -640,6 +647,12 @@ impl<M: EndpointModel> TalkModeController<M> {
     pub fn with_ser(mut self, ser: Arc<dyn SerModel>) -> Self {
         self.decoder.ser = ser;
         self
+    }
+
+    /// The shared capture-path metrics — pass to the `CaptureProcessor`
+    /// (`with_metrics`) so drops it records surface in this controller's records.
+    pub fn capture_metrics(&self) -> Arc<CaptureMetrics> {
+        self.decoder.capture_metrics.clone()
     }
 
     /// Per-frame level: the voiced decision plus the `CaptureLevel` inputs

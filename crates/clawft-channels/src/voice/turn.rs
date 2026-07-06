@@ -247,15 +247,16 @@ impl<M: EndpointModel> SemanticEndpointer<M> {
         // Cross the short-silence threshold once per pause → semantic check.
         if self.silence_run >= self.short_silence_samples && !self.checked_this_pause {
             self.checked_this_pause = true;
-            let audio: Vec<i16> = self.recent_audio.iter().copied().collect();
-            let prob = self.model.completion_prob(&audio, partial_text).await;
-            self.last_prob = prob; // report the RAW prob in the record
 
             // Min-voiced gate: a fragment shorter than MIN_VOICED_MS can't end
             // the turn on a short pause — it waits for more speech (mid-sentence
-            // "From" must not finalize alone). The max-silence ceiling above is
-            // the only escape, so a genuine one-word turn still finalizes.
+            // "From" must not finalize alone). Skip the model call entirely in
+            // that case: the smart-turn inference is the heaviest thing on the
+            // capture loop (§round-5), so we never run it when it can't finalize.
             if self.voiced_samples >= self.min_voiced_samples {
+                let audio: Vec<i16> = self.recent_audio.iter().copied().collect();
+                let prob = self.model.completion_prob(&audio, partial_text).await;
+                self.last_prob = prob; // report the RAW prob in the record
                 // Short-audio discount: smart-turn is overconfident on tiny
                 // clips, so halve its prob below SHORT_AUDIO_MS voiced.
                 let effective = if self.voiced_samples < self.short_audio_samples {
