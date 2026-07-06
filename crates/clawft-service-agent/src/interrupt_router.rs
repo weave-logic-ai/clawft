@@ -157,9 +157,25 @@ impl InterruptRouter {
         // 1. Explicit STOP. A bare stop cancels; a stop that CONTINUES into a
         //    correction/request steers (cancel-and-resubmit — the executor
         //    cancels either way), so "hold on, actually do X" is a Refine.
+        //
+        //    Steering is judged on the CONTINUATION, not the full utterance:
+        //    the leading stop phrase drags the full-text classification to
+        //    Statement (first-token heuristics see "hold", never "actually"),
+        //    which live-routed "hold on, actually just give me X" to a bare
+        //    Stop — the work was cancelled and the steer silently dropped.
         if let Some(remainder) = self.stop_remainder(&s.text) {
-            let steers = s.intent == Intent::Correction
-                || (self.is_actionable(s.intent) && !remainder.is_empty());
+            let steers = if remainder.is_empty() {
+                s.intent == Intent::Correction
+            } else {
+                // Either classification steering — the remainder's own act OR
+                // the caller's full-text signal (a superset of the pre-fix
+                // behaviour, so hand-classified callers keep working).
+                let r_intent = crate::dialogue_act::classify_act(&remainder).intent();
+                r_intent == Intent::Correction
+                    || self.is_actionable(r_intent)
+                    || s.intent == Intent::Correction
+                    || self.is_actionable(s.intent)
+            };
             if steers {
                 let amendment = if remainder.is_empty() {
                     s.text.clone()

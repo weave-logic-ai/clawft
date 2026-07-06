@@ -153,3 +153,19 @@ async fn project_signals_topic_continuity_follows_the_classifier_carry() {
     let s = tier.project_interrupt_signals("fresh-conv", "also make it blue", None, true);
     assert!(!s.topically_continuous);
 }
+
+#[tokio::test]
+async fn live_interrupt_phrase_routes_to_refine() {
+    // The exact live-smoke phrase that (2026-07-06) pruned WITHOUT resubmitting
+    // — pin the projection + routing end to end.
+    let conv = "w21-c4";
+    let (tier, _chain, _loop, _impulses) = wired(conv);
+    let text = "hold on, actually just give me one plain-text sentence about rivers instead";
+    let s = tier.project_interrupt_signals(conv, text, None, true);
+    let action = crate::interrupt_router::InterruptRouter::new().route(&s);
+    assert!(
+        matches!(action, crate::interrupt_router::InterruptAction::Refine { .. }),
+        "expected Refine, got {action:?} (intent={:?})",
+        s.intent
+    );
+}
