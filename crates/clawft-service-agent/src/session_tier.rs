@@ -493,6 +493,23 @@ impl SessionTier {
         true
     }
 
+    /// Wave 2 §W2.3: read the goal text stashed on a turn node's metadata under
+    /// `"goal"` (the §W2.1 reply submitter writes it at register time). Lets the
+    /// Refine executor reconstruct "original goal + amendment" from the pruned
+    /// reply's seq deterministically — no lineage walk, no race. `None` when the
+    /// forest/node/key is absent.
+    pub fn goal_for(&self, conv_id: &str, seq: u64) -> Option<String> {
+        let forest = self.forest.as_ref()?;
+        let node = self.conv_forest(conv_id).node_for(seq)?;
+        forest
+            .causal
+            .get_node(node)?
+            .metadata
+            .get("goal")?
+            .as_str()
+            .map(str::to_owned)
+    }
+
     /// Conversation ids with a live session view (ADR-058 Phase 5, deferred
     /// step 4). Lets the daemon enumerate active conversations — e.g. an
     /// idle-conversation reaper, or a shutdown sweep that promotes each before

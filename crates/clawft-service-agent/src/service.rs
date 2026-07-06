@@ -32,6 +32,7 @@
 //! production use a one-liner: `Arc::new(AgentService::new(loop))`.
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -118,6 +119,18 @@ const AGENT_CHAT_CHANNEL: &str = "agent.chat";
 /// resolver something to key on.
 const DEFAULT_SENDER_ID: &str = "panel";
 
+/// Wave 2 §W2.3: the register-early/commit-late reply submitter the interrupt
+/// executor's Refine arm uses to resubmit a steered turn. Implemented by the
+/// §W2.1 loop and injected via [`AgentService::set_reply_submitter`]; a trait so
+/// `service.rs` owns the executor seam while the loop owns the submit path.
+#[async_trait]
+pub trait ReplySubmitter: Send + Sync {
+    /// Submit a new assistant reply for `conv_id` (register Frontier now, commit
+    /// on generation-finalize). Returns the reply turn's chain sequence — the
+    /// amendment turn's seq for the `Contradicts` edge — or `None` on failure.
+    async fn submit_reply(&self, conv_id: &str, goal_text: &str) -> Option<u64>;
+}
+
 /// Daemon-side dispatcher around an [`AgentLoopHandle`].
 ///
 /// See module docs for the full responsibility list. Generic over
@@ -145,6 +158,9 @@ pub struct AgentService<H: AgentLoopHandle> {
     /// the daemon's `agent.chat.end` signal can drive conversation-end
     /// promotion (Phase 5 deferred step 4) without reaching into the loop.
     session_tier: Option<Arc<SessionTier>>,
+    /// Wave 2 §W2.3: the §W2.1 reply submitter, injected after wiring. Absent ⇒
+    /// the interrupt executor's Refine arm degrades to cancel-only (no resubmit).
+    reply_submitter: OnceLock<Arc<dyn ReplySubmitter>>,
 }
 
 impl<H: AgentLoopHandle> AgentService<H> {
@@ -159,7 +175,15 @@ impl<H: AgentLoopHandle> AgentService<H> {
             drain: Arc::new(Notify::new()),
             cost_budget: None,
             session_tier: None,
+            reply_submitter: OnceLock::new(),
         }
+    }
+
+    /// Inject the §W2.1 [`ReplySubmitter`] (register-early/commit-late reply
+    /// path) so the interrupt executor's Refine arm can resubmit a steered turn.
+    /// Write-once (idempotent); the daemon wiring calls it after the loop exists.
+    pub fn set_reply_submitter(&self, submitter: Arc<dyn ReplySubmitter>) {
+        let _ = self.reply_submitter.set(submitter);
     }
 
     /// Attach the L2 [`SessionTier`] so [`Self::end_conversation`] can drive
@@ -385,9 +409,38 @@ impl<H: AgentLoopHandle> AgentService<H> {
             // sets pruned_seq + amendment_seq + contradicts + witnessed. Held
             // together (no prune without the resubmit) so a partial Refine never
             // discards the in-flight work without replacing it.
-            InterruptAction::Refine { amendment: _ } => {
+            InterruptAction::Refine { amendment } => {
                 self.cancel(&ctx.conv_id);
-                let _ = (tier, ctx.in_flight_seq); // wired in the resubmit follow-up
+                // Conservative cancel-and-resubmit (§W2.4), held atomic so no
+                // steer is dropped: only when the §W2.1 reply submitter is wired
+                // AND there is an in-flight reply do we resubmit → prune old →
+                // Contradicts → witness; otherwise degrade to cancel-only.
+                if let (Some(submitter), Some(in_flight)) =
+                    (self.reply_submitter.get(), ctx.in_flight_seq)
+                {
+                    // Reconstruct "original goal + amendment" — the goal is
+                    // stashed on the in-flight reply node's metadata (§W2.1).
+                    let goal = tier.goal_for(&ctx.conv_id, in_flight).unwrap_or_default();
+                    let combined = if goal.is_empty() {
+                        amendment.clone()
+                    } else {
+                        format!("{goal}\n\n[amendment] {amendment}")
+                    };
+                    if let Some(amendment_seq) =
+                        submitter.submit_reply(&ctx.conv_id, &combined).await
+                    {
+                        out.amendment_seq = Some(amendment_seq);
+                        // Prune the OLD reply explicitly (robust to the amendment
+                        // now being current_turn) and draw Contradicts(new→old).
+                        out.pruned_seq = tier.emit_cancel_prune(
+                            &ctx.conv_id,
+                            Some(in_flight),
+                            Some(amendment_seq),
+                        );
+                        out.contradicts = out.pruned_seq.is_some();
+                        out.witnessed = tier.witness_cancel(&ctx.conv_id, out.pruned_seq);
+                    }
+                }
             }
             // BACKCHANNEL: a "mm-hmm" is NOT a turn. FOLLOW-UP: emit the
             // `Backchannel` Continuer impulse once its payload contract is pinned.
