@@ -69,7 +69,22 @@ pub async fn run_live_observed(
 ) -> Result<(), VoiceError> {
     // ONE shared AEC: played audio (render reference) ⇄ captured mic (subtract)
     // ⇄ barge-in flush. The single handle is what makes echo cancellation close.
-    let aec = Arc::new(Mutex::new(AecProcessor::new()));
+    //
+    // Listen-only NEVER plays, so the render reference is always empty and the
+    // WebRTC APM would run pure NS + AGC on the mic — at low SNR its noise
+    // suppressor eats marginal speech below the VAD gate, which deafened
+    // `weft voice listen` while raw test-mic heard fine. Bypass the APM in that
+    // mode; talk mode keeps the real AEC for genuine playback echo.
+    let aec = Arc::new(Mutex::new(if config.listen_only {
+        AecProcessor::passthrough()
+    } else {
+        AecProcessor::new()
+    }));
+    tracing::info!(
+        listen_only = config.listen_only,
+        aec = %aec.lock().unwrap().label(),
+        "voice capture AEC configured"
+    );
 
     // Output sink (also feeds the render reference) + its cpal stream.
     let sink = Arc::new(AecTtsSink::new(aec.clone()));

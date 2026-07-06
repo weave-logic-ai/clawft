@@ -627,6 +627,12 @@ pub struct TalkModeController<M: EndpointModel> {
     /// agree; while sustaining, the energy hysteresis/hangover alone holds the
     /// gate so unvoiced consonants aren't punched out.
     voiced_run: bool,
+    /// One-shot latch: log the armed floor + onset the first frame after
+    /// startup calibration completes, so every session's report shows what the
+    /// gate armed at.
+    armed_logged: bool,
+    /// Throttle counter for the per-frame voiceness diagnostic.
+    dbg_frames: u32,
 }
 
 impl<M: EndpointModel> TalkModeController<M> {
@@ -669,6 +675,8 @@ impl<M: EndpointModel> TalkModeController<M> {
             noise_floor: NoiseFloor::new(VAD_NOISE_MARGIN_DB, config_sr),
             voiceness: Arc::new(SpectralVoiceness::new()),
             voiced_run: false,
+            armed_logged: false,
+            dbg_frames: 0,
         }
     }
 
@@ -709,14 +717,45 @@ impl<M: EndpointModel> TalkModeController<M> {
         // run, but sustain on energy hysteresis alone so unvoiced consonants
         // aren't punched out (their broadband attack scores low, and pre-roll
         // recovers a fricative that led the onset).
+        let mut vscore = -1.0f32; // -1 = not scored (sustaining or silent)
         let voiced = if self.voiced_run {
             energy_voiced
         } else if energy_voiced {
-            self.voiceness.score(frame, self.config.sample_rate) >= VOICENESS_MIN
+            vscore = self.voiceness.score(frame, self.config.sample_rate);
+            vscore >= VOICENESS_MIN
         } else {
             false
         };
         self.voiced_run = voiced;
+        // Diagnostic: when the energy gate opens, log what voiceness decided —
+        // this is what reveals a listen path where energy sees speech but the
+        // spectral gate rejects it (e.g. resampled mic speech scoring low).
+        // Throttled so it can't flood at the frame rate.
+        if vscore >= 0.0 {
+            self.dbg_frames = self.dbg_frames.wrapping_add(1);
+            if self.dbg_frames % 10 == 1 {
+                debug!(
+                    rms_dbfs,
+                    floor_dbfs = self.noise_floor.floor_dbfs(),
+                    voiceness = vscore,
+                    voiceness_min = VOICENESS_MIN,
+                    passed = voiced,
+                    "energy-voiced frame: voiceness verdict"
+                );
+            }
+        }
+        // One-shot: announce the armed gate the moment calibration completes, so
+        // every session's log shows the floor + onset the VAD is running with.
+        if !self.armed_logged && self.noise_floor.calibrated() {
+            self.armed_logged = true;
+            let floor = self.noise_floor.floor_dbfs();
+            info!(
+                floor_dbfs = floor,
+                onset_dbfs = floor + VAD_NOISE_MARGIN_DB,
+                voiceness_min = VOICENESS_MIN,
+                "voice gate armed"
+            );
+        }
         (voiced, rms_dbfs, self.noise_floor.floor_dbfs())
     }
 

@@ -345,6 +345,14 @@ pub fn run_capture(
     let mut down_16k = LinResampler::new(in_rate, TARGET_SR);
     let mut scratch: Vec<f32> = Vec::new();
     let mut wire: Vec<f32> = Vec::new();
+    // Pre/post-AEC level accounting, logged ~every 2 s. If post is materially
+    // below pre, the AEC is attenuating the mic (the round-8 listen-vs-test-mic
+    // delta); on the passthrough (listen-only) path they should track ±~1 dB.
+    let mut pre_ss = 0.0f64;
+    let mut pre_n = 0u64;
+    let mut post_ss = 0.0f64;
+    let mut post_n = 0u64;
+    let mut last_rms_log = std::time::Instant::now();
     while !cancel.load(Ordering::Relaxed) {
         scratch.clear();
         {
@@ -361,7 +369,29 @@ pub fn run_capture(
             .iter()
             .map(|&s| (s.clamp(-1.0, 1.0) * 32_767.0) as i16)
             .collect();
+        pre_ss += mic.iter().map(|&s| f64::from(s) * f64::from(s)).sum::<f64>();
+        pre_n += mic.len() as u64;
         let cleaned = aec.lock().unwrap().process_capture(&mic);
+        post_ss += cleaned
+            .iter()
+            .map(|&s| f64::from(s) * f64::from(s))
+            .sum::<f64>();
+        post_n += cleaned.len() as u64;
+        if last_rms_log.elapsed() >= std::time::Duration::from_secs(2) && pre_n > 0 && post_n > 0 {
+            let pre_db = 20.0 * ((pre_ss / pre_n as f64).sqrt() / 32_768.0).log10();
+            let post_db = 20.0 * ((post_ss / post_n as f64).sqrt() / 32_768.0).log10();
+            tracing::info!(
+                pre_aec_dbfs = pre_db,
+                post_aec_dbfs = post_db,
+                delta_db = post_db - pre_db,
+                "capture level (pre vs post AEC)"
+            );
+            pre_ss = 0.0;
+            pre_n = 0;
+            post_ss = 0.0;
+            post_n = 0;
+            last_rms_log = std::time::Instant::now();
+        }
         if !cleaned.is_empty() {
             processor.push(cleaned);
         }

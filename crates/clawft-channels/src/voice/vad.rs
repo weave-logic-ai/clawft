@@ -238,6 +238,11 @@ const FLOOR_CONVERGE_FRAMES: u32 = 10;
 /// inside this window loses only the opening ~half second.
 const CALIB_MS: u32 = 500;
 
+/// Calibration-window dBFS spread above which the window is deemed unstable
+/// (speech/movement contaminated the assumed-silent seed) and a warning is
+/// logged. Room tone alone sits within a few dB; speech spikes 15+ dB over it.
+const CALIB_UNSTABLE_STDDEV_DB: f32 = 6.0;
+
 /// Hangover tail: once voiced, stay in capture until this much CONTINUOUS
 /// below-threshold audio, so brief intra-word dips (stop closures, unvoiced
 /// consonants) don't split an utterance.
@@ -299,8 +304,21 @@ impl NoiseFloor {
             self.calib_frames.push(dbfs);
             self.calib_samples = self.calib_samples.saturating_add(frame_len);
             if self.calib_samples >= self.calib_target_samples {
-                self.floor_dbfs = median(&self.calib_frames);
+                // Seed from the 20th percentile (≈ the quietest frames), not the
+                // median: if the window was contaminated by speech/movement at
+                // launch, p20 still lands near the true room floor rather than
+                // speech level. A high-variance window means exactly that — warn,
+                // and the stuck-open watchdog recovers if the seed is still wrong.
+                self.floor_dbfs = percentile(&self.calib_frames, 20);
                 self.calibrated = true;
+                let spread = stddev(&self.calib_frames);
+                if spread > CALIB_UNSTABLE_STDDEV_DB {
+                    tracing::warn!(
+                        floor_dbfs = self.floor_dbfs,
+                        stddev_db = spread,
+                        "noise-floor calibration window unstable (speech/movement at launch?) — seeded from p20"
+                    );
+                }
             }
             return false;
         }
@@ -391,6 +409,12 @@ impl NoiseFloor {
         self.recalibrations
     }
 
+    /// Whether startup calibration has completed (the floor is seeded). Callers
+    /// use the transition to log the armed floor + onset once at session start.
+    pub fn calibrated(&self) -> bool {
+        self.calibrated
+    }
+
     /// Whether the floor has observed enough real silence to be a trustworthy
     /// noise estimate. Until this is true (e.g. the very first turn of a
     /// speech-first session), any SNR derived from the floor is unreliable and
@@ -400,14 +424,27 @@ impl NoiseFloor {
     }
 }
 
-/// Median of a dBFS slice (used to seed the floor from the calibration window).
-fn median(vals: &[f32]) -> f32 {
+/// `pct`-th percentile of a dBFS slice (seeds the floor from the calibration
+/// window's quiet end). `-100` for an empty slice.
+fn percentile(vals: &[f32], pct: usize) -> f32 {
     if vals.is_empty() {
         return -100.0;
     }
     let mut v = vals.to_vec();
     v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    v[v.len() / 2]
+    let idx = v.len().saturating_sub(1) * pct / 100;
+    v[idx]
+}
+
+/// Standard deviation of a dBFS slice — the calibration-window stability check
+/// (a high spread means speech/movement contaminated the assumed-silent window).
+fn stddev(vals: &[f32]) -> f32 {
+    if vals.len() < 2 {
+        return 0.0;
+    }
+    let n = vals.len() as f32;
+    let mean = vals.iter().sum::<f32>() / n;
+    (vals.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / n).sqrt()
 }
 
 #[cfg(test)]
@@ -629,6 +666,22 @@ mod tests {
             (nf.floor_dbfs() - (-40.0)).abs() < 1.0,
             "floor seeded to room tone, got {}",
             nf.floor_dbfs()
+        );
+    }
+
+    #[test]
+    fn calibration_seeds_from_quiet_end_when_window_contaminated() {
+        // User talking/moving through the 500 ms calibration window: most frames
+        // are speech-loud, a brief gap is the true floor. p20 must seed near the
+        // quiet floor, not the contaminated median (which would wedge the gate).
+        let mut nf = NoiseFloor::new(4.0, 16_000);
+        for &d in &[-28.0f32, -28.0, -28.0, -28.0, -56.0] {
+            assert!(!nf.classify(d, F100), "calibration window is non-voiced");
+        }
+        let floor = nf.floor_dbfs();
+        assert!(
+            (floor - (-56.0)).abs() < 3.0,
+            "contaminated calibration must seed near the quiet floor, got {floor}"
         );
     }
 

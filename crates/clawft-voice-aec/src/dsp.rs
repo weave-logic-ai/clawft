@@ -195,6 +195,8 @@ pub(crate) fn make_aec() -> Box<dyn Aec> {
 /// frame boundary — callers should treat the returned `Vec` as a stream.
 pub struct AecProcessor {
     aec: Box<dyn Aec>,
+    /// Whether the active canceller does real work (false = passthrough).
+    active: bool,
     up_ref: LinResampler,    // 16k -> 48k (render reference)
     up_cap: LinResampler,    // 16k -> 48k (capture)
     down_wire: LinResampler, // 48k cleaned -> 16k wire
@@ -209,10 +211,30 @@ impl Default for AecProcessor {
 }
 
 impl AecProcessor {
-    /// Build a processor for the 16 kHz mono wire format.
+    /// Build a processor for the 16 kHz mono wire format (real AEC3 when the
+    /// `webrtc-aec` feature is on).
     pub fn new() -> Self {
+        Self::with_aec(make_aec(), cfg!(feature = "webrtc-aec"))
+    }
+
+    /// Build a processor that does **no** echo cancellation, noise suppression,
+    /// or AGC — only the resample round-trip (level-preserving).
+    ///
+    /// Use for listen-only capture. There is no playback to cancel, so the
+    /// render reference is always empty; the WebRTC APM would then run pure
+    /// NS + AGC on the mic, and at low SNR its noise suppressor cannot tell
+    /// marginal speech from room tone and attenuates it below the VAD gate.
+    /// That deafened `weft voice listen` (WebRTC path) while raw `test-mic`
+    /// (no APM) heard the same voice fine. Talk mode keeps the real AEC — it
+    /// has genuine playback echo to remove.
+    pub fn passthrough() -> Self {
+        Self::with_aec(Box::new(Passthrough), false)
+    }
+
+    fn with_aec(aec: Box<dyn Aec>, active: bool) -> Self {
         Self {
-            aec: make_aec(),
+            aec,
+            active,
             up_ref: LinResampler::new(TARGET_SR, APM_SR),
             up_cap: LinResampler::new(TARGET_SR, APM_SR),
             down_wire: LinResampler::new(APM_SR, TARGET_SR),
@@ -226,9 +248,10 @@ impl AecProcessor {
         self.aec.label()
     }
 
-    /// Whether real echo cancellation is active (false = passthrough).
+    /// Whether real echo cancellation is active (false = passthrough / listen-
+    /// only bypass).
     pub fn is_active(&self) -> bool {
-        cfg!(feature = "webrtc-aec")
+        self.active
     }
 
     /// Push far-end (playback) PCM — 16 kHz mono `int16`. These samples are
@@ -352,5 +375,43 @@ mod tests {
     fn is_active_matches_feature() {
         let p = AecProcessor::new();
         assert_eq!(p.is_active(), cfg!(feature = "webrtc-aec"));
+    }
+
+    #[test]
+    fn passthrough_is_never_active() {
+        assert!(!AecProcessor::passthrough().is_active());
+    }
+
+    #[test]
+    fn passthrough_preserves_rms_within_1db() {
+        // The listen-only bypass must NOT attenuate: post-AEC RMS parity within
+        // ~1 dB of the input (the resample round-trip is the only processing).
+        // This is the property the WebRTC NS+AGC path violates on marginal
+        // speech — the round-8 listen-vs-test-mic delta.
+        fn rms_dbfs(s: &[i16]) -> f32 {
+            let ss: f64 = s.iter().map(|&x| (x as f64).powi(2)).sum();
+            let r = (ss / s.len().max(1) as f64).sqrt();
+            20.0 * (r / 32_768.0).log10() as f32
+        }
+        let mut p = AecProcessor::passthrough();
+        // 400 Hz in-band tone at ~-14 dBFS, fed in 100 ms chunks.
+        let chunk: Vec<i16> = (0..1_600)
+            .map(|i| {
+                let t = i as f32 / 16_000.0;
+                ((std::f32::consts::TAU * 400.0 * t).sin() * 6_000.0) as i16
+            })
+            .collect();
+        let in_dbfs = rms_dbfs(&chunk);
+        let mut out: Vec<i16> = Vec::new();
+        for _ in 0..10 {
+            out.extend(p.process_capture(&chunk));
+        }
+        // Drop the resampler warm-up head where the round-trip ramps.
+        let steady = &out[out.len() / 4..];
+        let out_dbfs = rms_dbfs(steady);
+        assert!(
+            (out_dbfs - in_dbfs).abs() < 1.0,
+            "passthrough must preserve level: in {in_dbfs:.1} vs out {out_dbfs:.1} dBFS"
+        );
     }
 }
