@@ -497,3 +497,90 @@ run `weft voice talk` (recorder connected), speak a few turns, and confirm via
 validates the entire daemon-side commit+classify+serve foundation the record rides on, and lets
 Coder-A/Coder-B fan out against a frozen schema — turning the rest of Wave 1 into additive work
 (STT decode enrichment → prosody/SER → the record wire → the surface) against a known-good base.
+
+---
+
+## Appendix A — As-Built: the live VAD gate (post-`weft voice listen` hardening)
+
+Bringing `weft voice listen` up on real hardware took a long debug arc (2026-07-06)
+in which each fix exposed the next failure. This appendix records the as-built VAD
+so the next person doesn't re-derive it, and the three testing rules that would have
+caught the whole class up front. Code: `crates/clawft-channels/src/voice/{vad,voiceness,talkmode}.rs`,
+`crates/clawft-voice-aec/src/device.rs`. Verified end-to-end (say-loop, both test
+sentences transcribed in single turns, conf 0.97-0.98) at commit `19e1c6f8`; the
+gate-reference quality fix landed on top.
+
+### The two-stage voiced gate
+
+The voiced decision is `energy_gate AND voiceness`, evaluated per capture frame in
+`talkmode.rs::level()`:
+
+- **Energy gate (`vad.rs::NoiseFloor`)** — Schmitt trigger: strict onset at
+  `gate_floor + 10 dB`, loose sustain at `gate_floor + 5 dB`, 400 ms hangover, floor
+  FROZEN while voiced (learns only from genuine silence). TWO floor estimates:
+  `floor_dbfs` (quiet-p10, asymmetric fast-down) is the **SNR reference only**;
+  `gate_floor_dbfs` (typical ambient, symmetric EMA) is the **onset/sustain
+  reference** — the quiet floor drifts below the room's typical level, which drops
+  the gate under the room's own peaks (Wall 5 + its sustain caveat). Startup
+  **calibration** seeds the floor from the first 500 ms of *real* audio (dead frames
+  `< -80 dBFS` excluded so cpal's pre-spin-up zeros can't seed it), p20 of the
+  window, clamped to `-65 dBFS`, extending up to 3 s if the window is unstable
+  (stddev `> 6 dB`). A **stuck-open watchdog** recalibrates from the recent typical
+  if voicing runs `> 15 s` with no genuine-silence frame.
+- **Voiceness (`voiceness.rs::SpectralVoiceness`)** — model-free speech-band
+  (300-3400 Hz) energy ratio, with the denominator starting at 180 Hz to exclude
+  HVAC/handling LF rumble. Accumulates a rolling 512-sample buffer across calls and
+  windows to the ACTUAL sample count, so it works on the small (~80-160 sample)
+  frames live capture delivers. `Voiceness` is a trait seam; a Silero-VAD ONNX
+  backend drops in via `TalkModeController::with_voiceness()` (Wave 3 barge-in reuses
+  it). Threshold 0.5; broadband/rumble score ~0.4.
+- **Capture path (`device.rs::run_capture`)** — device → downmix → native→16k
+  resample → (AEC bypassed when no real echo canceller is active) → `CaptureProcessor`
+  (forwards every frame) → the gate. Three `tracing::info` level probes (`capture
+  level probes`, `voice gate armed`, `voice gate input probe`) trace the signal from
+  device to gate; ship them with any future gate change.
+
+Tunables (as-built): onset margin 10 dB, sustain 5 dB, hangover 400 ms, voiceness_min
+0.5, LF-cut 180 Hz, dead-frame `-80`, floor clamp `-65`, calib 500 ms / extend 3 s,
+watchdog 15 s. NOTE hot input gain remains a **misconfiguration** (`weft voice
+test-mic` flags it) — the gate is tuned for sane gain (floor ~-50, speech 25-35 dB
+over it), not for a hot floor that manufactures a false low-SNR corner.
+
+### Appendix B — The five walls (post-mortem)
+
+The deafness was not one bug; it was a stack, each exposed by the previous fix:
+
+1. **Wall 3 (original deafness)** — startup calibration seeded the floor from cpal's
+   pre-spin-up digital-silence frames → floor `-97` → room reads as permanent speech
+   → no endpoint → deaf. Fix: exclude dead frames + clamp + extend.
+2. **Wall 2 (voiceness veto)** — the round-8 spectral gate windowed the tiny live
+   frames with a fixed 2048-pt Hann whose leading coefficients are ~0 → speech scored
+   ~0 → every onset vetoed. Fix: rolling buffer + right-sized window.
+3. **Wall 4 (LF rumble)** — the voiceness ratio summed the whole spectrum in the
+   denominator; sub-300 Hz room rumble swamped it → clean speech scored 0.003-0.076.
+   Fix: exclude `< 180 Hz` from the denominator.
+4. **Wall 5 (margin too tight)** — the round-8 relaxation to a 4 dB onset margin
+   (for a "5 dB SNR corner" that was a hot-gain artifact) sat below a quiet room's own
+   7 dB dynamic swing → gate voiced forever → utterance never ends. Fix: restore 10 dB.
+5. **Sustain caveat (fix #2)** — even at 10 dB, the fast-down quiet floor drifts below
+   typical, dropping the sustain gate under room peaks so a finished utterance's
+   trailing room holds it open until the watchdog (~15 s). Fix: gate off the typical-
+   ambient reference, not the quiet floor.
+
+### Appendix C — The three synthetic-blind-spot rules (MANDATORY for voice-path DSP tests)
+
+Every wall above hid behind clean synthetic test signals. A voice-path DSP test that
+does not satisfy ALL THREE is not a real test:
+
+1. **Realistic frame sizes.** Feed small/variable frames (~80-160 samples), NOT the
+   convenient 1600-sample (100 ms) frames — live capture drains its queue every 5 ms.
+   (Would have caught Wall 2.)
+2. **cpal startup-zero prefix.** Prepend ~200-300 ms of near-digital-silence before
+   the room tone in any calibration test. (Would have caught Wall 3.)
+3. **Sub-300 Hz LF rumble.** Sum a 60/120 Hz rumble component into any "room" or
+   "speech" signal — real mics are LF-dominated. (Would have caught Wall 4.)
+
+And the meta-lesson: **when you relax a threshold to cope with a specific bad state,
+re-tighten it once the root cause of that state is fixed elsewhere** — the 4 dB margin
+and the voiceness gate were both round-8 accommodations for a hot-gain artifact that
+later became walls of their own.
