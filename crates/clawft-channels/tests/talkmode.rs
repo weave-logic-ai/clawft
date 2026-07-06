@@ -217,6 +217,25 @@ fn quiet_frame() -> Vec<i16> {
         .map(|i| if i % 2 == 0 { 100 } else { -100 })
         .collect()
 }
+/// Room-tone frame (~-55 dBFS) for the noise-floor STARTUP CALIBRATION window.
+/// Real capture always opens with room tone before the user speaks; the gate
+/// seeds its floor from the first ~500 ms (assumed non-speech), so a test that
+/// opens straight into `voiced_frame` would poison the seed with speech level.
+/// Kept above `quiet_frame` so the calibrated onset gate still leaves the
+/// pre-onset attack sub-threshold.
+fn room_tone_frame() -> Vec<i16> {
+    (0..1_600)
+        .map(|i| if i % 2 == 0 { 58 } else { -58 })
+        .collect()
+}
+
+/// Feed the ~500 ms noise-floor calibration window (six room-tone frames) so the
+/// gate seats its floor before any speech arrives — mirrors real capture.
+async fn calibrate(tx: &mpsc::Sender<Vec<i16>>) {
+    for _ in 0..6 {
+        tx.send(room_tone_frame()).await.unwrap();
+    }
+}
 
 fn endpointer() -> SemanticEndpointer<HeuristicEndpoint> {
     // short=100ms, max=300ms, threshold 0.5. With no streaming partial the
@@ -268,6 +287,9 @@ async fn full_pipeline_speculative_then_committed() {
     let cancel = CancellationToken::new();
     let run_cancel = cancel.clone();
     let handle = tokio::spawn(async move { ctrl.run(rx, run_cancel).await });
+
+    // Seat the noise-floor from room tone before any speech (startup calibration).
+    calibrate(&tx).await;
 
     // One utterance (300 ms voiced — clears the 250 ms min-turn guard)
     // then silence to cross the ceiling.
@@ -435,6 +457,9 @@ async fn barge_in_flushes_and_emits_interrupted() {
     let run_cancel = cancel.clone();
     let handle = tokio::spawn(async move { ctrl.run(rx, run_cancel).await });
 
+    // Seat the noise-floor from room tone before any speech (startup calibration).
+    calibrate(&tx).await;
+
     // Utterance (≥ the 250 ms min-turn guard) + silence to finalize.
     tx.send(voiced_frame()).await.unwrap();
     tx.send(voiced_frame()).await.unwrap();
@@ -502,6 +527,9 @@ async fn listen_only_records_the_turn_but_skips_the_brain() {
     let cancel = CancellationToken::new();
     let run_cancel = cancel.clone();
     let handle = tokio::spawn(async move { ctrl.run(rx, run_cancel).await });
+
+    // Seat the noise-floor from room tone before any speech (startup calibration).
+    calibrate(&tx).await;
 
     tx.send(voiced_frame()).await.unwrap();
     tx.send(voiced_frame()).await.unwrap();
@@ -581,6 +609,9 @@ async fn listen_only_cycles_multiple_turns() {
     let run_cancel = cancel.clone();
     let handle = tokio::spawn(async move { ctrl.run(rx, run_cancel).await });
 
+    // Seat the noise-floor from room tone before any speech (startup calibration).
+    calibrate(&tx).await;
+
     let turns = |obs: &RecordingObserver| {
         obs.snapshot()
             .iter()
@@ -656,6 +687,9 @@ async fn listen_only_decodes_both_utterances_through_slow_decode() {
     let cancel = CancellationToken::new();
     let run_cancel = cancel.clone();
     let handle = tokio::spawn(async move { ctrl.run(rx, run_cancel).await });
+
+    // Seat the noise-floor from room tone before any speech (startup calibration).
+    calibrate(&tx).await;
 
     let turns = |obs: &RecordingObserver| {
         obs.snapshot()
@@ -735,6 +769,9 @@ async fn listen_only_marks_unknown_without_polluting_registry() {
     let run_cancel = cancel.clone();
     let handle = tokio::spawn(async move { ctrl.run(rx, run_cancel).await });
 
+    // Seat the noise-floor from room tone before any speech (startup calibration).
+    calibrate(&tx).await;
+
     for _ in 0..3 {
         tx.send(voiced_frame()).await.unwrap();
     }
@@ -808,6 +845,9 @@ async fn preroll_prepends_pre_onset_audio_to_utterance() {
     let run_cancel = cancel.clone();
     let handle = tokio::spawn(async move { ctrl.run(rx, run_cancel).await });
 
+    // Seat the noise-floor from room tone before any speech (startup calibration).
+    calibrate(&tx).await;
+
     // 2 quiet (pre-onset attack) → 3 voiced → 4 silence (finalize).
     for _ in 0..2 {
         tx.send(quiet_frame()).await.unwrap();
@@ -864,6 +904,9 @@ async fn talk_mode_no_self_id_is_unknown_without_pollution() {
     let cancel = CancellationToken::new();
     let run_cancel = cancel.clone();
     let handle = tokio::spawn(async move { ctrl.run(rx, run_cancel).await });
+
+    // Seat the noise-floor from room tone before any speech (startup calibration).
+    calibrate(&tx).await;
 
     for _ in 0..3 {
         tx.send(voiced_frame()).await.unwrap();

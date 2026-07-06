@@ -42,6 +42,10 @@ pub use audio::AecAudioControl;
 // (turn recording via `agent.turn.record`) without a direct
 // clawft-channels dependency.
 pub use clawft_channels::voice::talkmode::{ConversationEvent, ConversationObserver};
+// Re-exported so `weft voice test-mic` can replay the exact Talk-Mode voiced
+// gate (startup calibration, floor freeze, stuck-open watchdog) over the mic
+// probe so the user can self-diagnose input gain against the real gate.
+pub use clawft_channels::voice::vad::NoiseFloor;
 pub use ecc::EccConversationObserver;
 pub use forest::{KernelImpulseSink, LoopObserver, TalkForest};
 pub use llm::LocalProviderVoiceLlm;

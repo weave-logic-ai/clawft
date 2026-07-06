@@ -220,9 +220,11 @@ async fn handle_listen() -> anyhow::Result<()> {
 /// meter plus a verdict against the Talk-Mode VAD threshold (-45 dBFS).
 async fn handle_test_mic(duration: u32) -> anyhow::Result<()> {
     use clawft_voice_talk::live::{list_input_devices, mic_probe};
+    use clawft_voice_talk::NoiseFloor;
 
-    /// Talk-Mode's default VAD onset threshold (TalkConfig::default).
-    const VAD_THRESHOLD_DBFS: f32 = -45.0;
+    /// Talk-Mode's adaptive-gate onset margin over the tracked floor
+    /// (`VAD_NOISE_MARGIN_DB` in clawft-channels::voice::talkmode).
+    const VAD_NOISE_MARGIN_DB: f32 = 8.0;
 
     println!("Input devices:");
     for name in list_input_devices() {
@@ -238,37 +240,63 @@ async fn handle_test_mic(duration: u32) -> anyhow::Result<()> {
         "Opened: {} ({} Hz, {} ch)\n",
         report.device, report.native_rate, report.channels
     );
+
+    // Replay the ACTUAL Talk-Mode voiced gate over the 500 ms probe windows so
+    // the columns are exactly what the live loop would decide at this gain:
+    // startup calibration seeds the floor from the first window (assumed
+    // non-speech), then each window prints its RMS, the tracked floor, and the
+    // gate verdict. This is the round-7 self-diagnosis lever.
+    let mut gate = NoiseFloor::new(VAD_NOISE_MARGIN_DB, report.native_rate);
+    let window_len = u64::from(report.native_rate) / 2; // ~500 ms per probe window
+    println!("   time     rms      floor    gate");
     for (i, db) in report.windows_dbfs.iter().enumerate() {
-        let over = *db >= VAD_THRESHOLD_DBFS;
+        let voiced = gate.classify(*db, window_len);
+        let floor = gate.floor_dbfs();
         let bar_len = ((db + 90.0).max(0.0) / 2.0) as usize;
+        let verdict = if i == 0 {
+            "calibrating"
+        } else if voiced {
+            "<< VOICE"
+        } else {
+            "silence"
+        };
         println!(
-            "  {:>4.1}s  {:>7.1} dBFS  {}{}",
+            "  {:>4.1}s  {:>7.1}  {:>7.1}   {:<11} {}",
             (i as f32 + 1.0) * 0.5,
             db,
-            "█".repeat(bar_len.min(40)),
-            if over { "  << voice" } else { "" },
+            floor,
+            verdict,
+            "█".repeat(bar_len.min(30)),
         );
     }
     println!();
     if report.windows_dbfs.is_empty() {
         println!("NO AUDIO DELIVERED — the device produced no samples at all.");
         println!("Check System Settings → Privacy & Security → Microphone for your terminal.");
-    } else if report.peak_dbfs < VAD_THRESHOLD_DBFS {
+        return Ok(());
+    }
+
+    let final_floor = gate.floor_dbfs();
+    let onset = final_floor + VAD_NOISE_MARGIN_DB;
+    let headroom = report.peak_dbfs - onset;
+    println!(
+        "Calibrated floor {final_floor:.1} dBFS → voice onset ~{onset:.1} dBFS. \
+         Loudest window {:.1} dBFS ({headroom:+.1} dB vs onset).",
+        report.peak_dbfs
+    );
+    if headroom < 3.0 {
         println!(
-            "Peak {:.1} dBFS is BELOW the Talk-Mode VAD threshold ({VAD_THRESHOLD_DBFS} dBFS) — \
-             the voice loop will never trigger at this level.",
-            report.peak_dbfs
+            "Speech barely clears the gate — RAISE input volume in System Settings → \
+             Sound → Input (or move closer). Marginal gain also hurts speaker ID."
         );
+    } else if final_floor > -35.0 {
         println!(
-            "Fix: raise input volume in System Settings → Sound → Input, or select a \
-             different mic (this probe used the system default)."
+            "Floor is high ({final_floor:.1} dBFS) — the room is loud or gain is hot. \
+             The gate calibrated to it and speech clears it, but consider lowering gain \
+             slightly if background sounds trip the gate."
         );
     } else {
-        println!(
-            "Peak {:.1} dBFS clears the VAD threshold ({VAD_THRESHOLD_DBFS} dBFS) — \
-             the voice loop should hear you on this device.",
-            report.peak_dbfs
-        );
+        println!("Gain looks healthy: speech clears the adaptive gate with margin to spare.");
     }
     Ok(())
 }
@@ -317,6 +345,10 @@ async fn spawn_turn_recorder(
     use clawft_rpc::{DaemonClient, Request};
 
     let mut client = DaemonClient::connect().await?;
+    // Warn once if this binary and the daemon were built from different trees
+    // (covers `weft voice talk` and `weft voice listen`, which both anchor
+    // turns through this recorder).
+    super::daemon_guard::warn_on_build_mismatch(&mut client).await;
     let (tx, mut rx) =
         tokio::sync::mpsc::unbounded_channel::<(&'static str, String, Option<serde_json::Value>)>();
 
