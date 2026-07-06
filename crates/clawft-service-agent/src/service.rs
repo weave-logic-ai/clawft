@@ -45,6 +45,7 @@ use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+use crate::interrupt_router::{InterruptAction, InterruptCtx, InterruptOutcome};
 use crate::protocol::{AgentChatParams, AgentChatResult};
 use crate::session_tier::SessionTier;
 use clawft_types::agent_chat::{AGENT_LOOP_RESULT_META_KEY, AgentLoopResultMeta};
@@ -341,6 +342,61 @@ impl<H: AgentLoopHandle> AgentService<H> {
             token.cancel();
             self.cancel_tokens.insert(conv_id.to_string(), token);
         }
+    }
+
+    /// Wave 2 §W2.3: execute the [`InterruptAction`] the daemon-side router
+    /// produced for a during-busy utterance, returning what it left on the
+    /// forest ([`InterruptOutcome`] — read by the §W2.6 surface + §W2.7 exit
+    /// test). The router calls this in-process after `route()`; idle turns
+    /// ([`InterruptAction::Turn`]) never reach here (dispatched as a normal
+    /// `agent.chat`). Cancel semantics stay as-landed — inline children unwind
+    /// with the cancelled turn, detached spawns survive (M4 D5, unchanged).
+    pub async fn execute_interrupt(
+        &self,
+        action: InterruptAction,
+        ctx: InterruptCtx,
+    ) -> InterruptOutcome {
+        let mut out = InterruptOutcome::default();
+        // Without a forest-joined session tier there is nothing to prune or
+        // witness — a STOP/Refine degrades to the bare token cancel.
+        let Some(tier) = self.session_tier.as_ref() else {
+            if matches!(action, InterruptAction::Stop | InterruptAction::Refine { .. }) {
+                self.cancel(&ctx.conv_id);
+            }
+            return out;
+        };
+        match action {
+            // Idle — the router dispatches these as a normal turn; no-op here.
+            InterruptAction::Turn => {}
+            // STOP: cancel the running dispatch, prune the in-flight node to a
+            // `Pruned` tombstone (claim-less ⇒ floor open), witness the cancel.
+            InterruptAction::Stop => {
+                self.cancel(&ctx.conv_id);
+                out.pruned_seq = tier.emit_cancel_prune(&ctx.conv_id, None);
+                out.witnessed = tier.witness_cancel(&ctx.conv_id, out.pruned_seq);
+            }
+            // REFINE (conservative cancel-and-resubmit, §W2.4): cancel now.
+            // FOLLOW-UP (lands atomically so no steer is dropped): assemble
+            // original-goal (from ctx.in_flight_seq) + amendment, submit as a new
+            // turn, then emit_cancel_prune(conv, Some(amendment_seq)) so the loop
+            // prunes the old in-flight AND draws Contradicts(amendment→pruned) —
+            // sets pruned_seq + amendment_seq + contradicts + witnessed. Held
+            // together (no prune without the resubmit) so a partial Refine never
+            // discards the in-flight work without replacing it.
+            InterruptAction::Refine { amendment: _ } => {
+                self.cancel(&ctx.conv_id);
+                let _ = (tier, ctx.in_flight_seq); // wired in the resubmit follow-up
+            }
+            // BACKCHANNEL: a "mm-hmm" is NOT a turn. FOLLOW-UP: emit the
+            // `Backchannel` Continuer impulse once its payload contract is pinned.
+            InterruptAction::Backchannel => {}
+            // QUEUE: hold behind the in-flight turn; resubmit on its commit.
+            // FOLLOW-UP: daemon-side queue drained by the commit path.
+            InterruptAction::Queue => {
+                out.queued = true;
+            }
+        }
+        out
     }
 
     /// Begin shutdown.

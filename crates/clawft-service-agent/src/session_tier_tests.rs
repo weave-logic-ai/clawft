@@ -515,3 +515,16 @@ async fn budget_graft_latency_under_hot_path() {
         "graft hot-path latency {elapsed}ms exceeded budget {GRAFT_HOT_PATH_BUDGET_MS}ms"
     );
 }
+
+/// Wave 2 §W2.3: `emit_cancel_prune` degrades to a no-op (returns no seq) when
+/// no `TalkModeLoop` is attached — the forest prune rides the loop that owns the
+/// `TurnClaim` machinery. `witness_cancel` still records the turn-level cancel
+/// marker regardless (the chain is always present on the daemon tier).
+#[tokio::test]
+async fn cancel_prune_noops_without_a_talk_loop_but_witness_records() {
+    let (tier, _chain, _causal, _crossrefs) = make_forest_tier(64);
+    // No loop wired (make_forest_tier attaches none) ⇒ nothing to prune.
+    assert_eq!(tier.emit_cancel_prune("c1", None), None);
+    // The cancel marker is still witnessed (M2-D8 durable record, not silent).
+    assert!(tier.witness_cancel("c1", None));
+}

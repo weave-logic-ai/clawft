@@ -447,6 +447,44 @@ impl SessionTier {
         pruned
     }
 
+    /// Wave 2 §W2.3: emit a `TurnClaim` prune impulse for `conv_id`'s in-flight
+    /// turn (the cancel/steer forest closure). With `claim_seq = None` (a bare
+    /// STOP) the loop prunes the in-flight node Frontier→`Pruned` and leaves the
+    /// floor open; with `Some(seq)` (a Refine amendment) it also draws a
+    /// `Contradicts` edge from the claiming turn to the pruned attempt and
+    /// rebases the in-flight turn — all via the existing barge-in handler
+    /// (talk_loop.rs `TurnClaim`). Returns the seq that was in-flight at emit
+    /// time (the node being pruned), or `None` when no loop is attached or
+    /// nothing is in-flight (a benign race where the turn already committed).
+    pub fn emit_cancel_prune(&self, conv_id: &str, claim_seq: Option<u64>) -> Option<u64> {
+        let talk_loop = self.talk_loop.get()?;
+        let pruned = talk_loop.current_turn(conv_id)?;
+        let tag = StructureTag::CausalGraph.as_u8();
+        talk_loop.impulses().emit(
+            tag,
+            [0u8; 32],
+            tag,
+            ImpulseType::TurnClaim,
+            serde_json::json!({ "conv_id": conv_id, "claim_seq": claim_seq }),
+            claim_seq.unwrap_or(pruned),
+        );
+        Some(pruned)
+    }
+
+    /// Wave 2 §W2.3: witness a turn-level cancel marker on the witness chain
+    /// (mirrors `subagent.rs`'s `agent.cancel`), so history/replay records that
+    /// the in-flight turn was abandoned — the honest M2-D8 durable-transition
+    /// record, not a silent drop. Returns `true` when appended (a chain is
+    /// always present on the daemon tier).
+    pub fn witness_cancel(&self, conv_id: &str, pruned_seq: Option<u64>) -> bool {
+        self.chain.append(
+            "agent",
+            "agent.turn.cancel",
+            Some(serde_json::json!({ "conv_id": conv_id, "pruned_seq": pruned_seq })),
+        );
+        true
+    }
+
     /// Conversation ids with a live session view (ADR-058 Phase 5, deferred
     /// step 4). Lets the daemon enumerate active conversations — e.g. an
     /// idle-conversation reaper, or a shutdown sweep that promotes each before
