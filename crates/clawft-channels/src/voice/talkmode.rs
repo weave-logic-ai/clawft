@@ -344,10 +344,16 @@ impl Decoder {
     }
 
     /// Attribute the utterance to a speaker, returning the full
-    /// [`SpeakerAnalysis`] (id / name / near-miss cosine / action / dim) plus
-    /// the private LLM context. Listen-only never auto-enrolls (no registry
-    /// pollution); talk mode enrolls a session speaker on a non-match.
-    async fn attribute_speaker(&self, utt: &Utterance) -> (SpeakerAnalysis, Option<String>) {
+    /// [`SpeakerAnalysis`] plus the private LLM context. A confident match is
+    /// `Identified`; otherwise the turn is `Unknown` and NO profile is written —
+    /// the only enrollment path is a spoken self-ID ("my name is X"), and only
+    /// in talk mode. This closes the registry-pollution leak at its source:
+    /// neither mode ever persists a placeholder "unknown speaker".
+    async fn attribute_speaker(
+        &self,
+        utt: &Utterance,
+        text: &str,
+    ) -> (SpeakerAnalysis, Option<String>) {
         let Some(embedder) = self.embedder.clone() else {
             return (SpeakerAnalysis::default(), None);
         };
@@ -359,15 +365,19 @@ impl Decoder {
             }
         };
         let embedding_dim = embedder.dim() as u32;
-        // Lock once for the read + optional enroll; release before the observer
-        // event / persist so those never run under the lock.
-        let (analysis, enrolled) = {
+        let spoken_name = extract_spoken_name(text);
+        // Lock once for the read + optional attribute/enroll/rename; release
+        // before the observer event / persist so those never run under the lock.
+        let (analysis, persist, enrolled) = {
             let mut reg = self.registry.lock().expect("speaker registry poisoned");
             let threshold = reg.threshold();
             let best = reg.best_match(&emb);
             let near_score = best.as_ref().map(|(_, s)| *s).unwrap_or(0.0);
             if let Some((id, score)) = best.filter(|(_, s)| *s >= threshold) {
+                // Confident match — fold in the embedding; a spoken self-ID
+                // renames this existing speaker (not a new profile).
                 reg.attribute(&id, &emb);
+                let renamed = spoken_name.as_ref().is_some_and(|n| reg.rename(&id, n.clone()));
                 let name = reg.get(&id).map(|n| n.name.clone());
                 (
                     SpeakerAnalysis {
@@ -378,9 +388,28 @@ impl Decoder {
                         action: SpeakerAction::Identified,
                         embedding_dim,
                     },
+                    renamed,
                     None,
                 )
-            } else if self.config.listen_only {
+            } else if !self.config.listen_only && spoken_name.is_some() {
+                // Talk mode + a spoken self-ID + no match → a DELIBERATE
+                // enrollment under the real name (never a placeholder).
+                let name = spoken_name.clone().unwrap();
+                let id = reg.enroll(name.clone(), &emb);
+                (
+                    SpeakerAnalysis {
+                        id: Some(id.clone()),
+                        name: Some(name.clone()),
+                        score: near_score,
+                        threshold,
+                        action: SpeakerAction::Enrolled,
+                        embedding_dim,
+                    },
+                    true,
+                    Some((id, name)),
+                )
+            } else {
+                // No confident match and no self-ID → Unknown, persist nothing.
                 (
                     SpeakerAnalysis {
                         id: None,
@@ -390,27 +419,17 @@ impl Decoder {
                         action: SpeakerAction::Unknown,
                         embedding_dim,
                     },
+                    false,
                     None,
-                )
-            } else {
-                let id = reg.enroll(self.config.default_speaker_name.clone(), &emb);
-                let name = reg.get(&id).map(|n| n.name.clone());
-                (
-                    SpeakerAnalysis {
-                        id: Some(id.clone()),
-                        name: name.clone(),
-                        score: near_score,
-                        threshold,
-                        action: SpeakerAction::Enrolled,
-                        embedding_dim,
-                    },
-                    Some((id, name.unwrap_or_default())),
                 )
             }
         };
         if let Some((id, name)) = enrolled {
+            info!(speaker = %id, %name, "talk-mode speaker enrolled by spoken name");
             self.observer
                 .observe(ConversationEvent::SpeakerEnrolled { id, name });
+        }
+        if persist {
             self.persist_registry();
         }
         let ctx = analysis.id.as_ref().zip(analysis.name.as_ref()).map(|(id, n)| {
@@ -541,22 +560,11 @@ impl Decoder {
         let text = detail.text.clone();
         info!(transcript = %text, "talk-mode user turn");
 
-        let (speaker, speaker_ctx) = self.attribute_speaker(&utt).await;
+        // Attribution handles identify / spoken-self-ID enroll / rename inline;
+        // it never writes a placeholder profile.
+        let (speaker, speaker_ctx) = self.attribute_speaker(&utt, &text).await;
         let speaker_id = speaker.id.clone();
         let speaker_name = speaker.name.clone();
-
-        // Spoken self-enrollment: a voice naming itself upgrades its placeholder.
-        if let (Some(id), Some(name)) = (&speaker_id, extract_spoken_name(&text)) {
-            let renamed = self
-                .registry
-                .lock()
-                .expect("speaker registry poisoned")
-                .rename(id, name.clone());
-            if renamed {
-                info!(speaker = %id, %name, "talk-mode speaker self-enrolled by name");
-                self.persist_registry();
-            }
-        }
 
         let voice_analysis = self.build_voice_analysis(
             &utt,
