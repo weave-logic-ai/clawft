@@ -564,13 +564,19 @@ The deafness was not one bug; it was a stack, each exposed by the previous fix:
    7 dB dynamic swing → gate voiced forever → utterance never ends. Fix: restore 10 dB.
 5. **Sustain caveat (fix #2)** — even at 10 dB, the fast-down quiet floor drifts below
    typical, dropping the sustain gate under room peaks so a finished utterance's
-   trailing room holds it open until the watchdog (~15 s). Fix: gate off the typical-
-   ambient reference, not the quiet floor.
+   trailing room holds it open until the watchdog (~15 s). Fix: gate off a separate
+   typical-ambient reference (`gate_floor_dbfs`), not the quiet floor.
+6. **fix#2 regression (time constant)** — the typical-ambient reference learned only
+   in the genuine-silence branch, so once the room HELD the gate open it froze and
+   never rose → the room held the gate to the 15 s watchdog, merging two utterances
+   across a 7 s gap. Fix: learn the reference from ANY below-onset frame (incl.
+   sustain/hangover-held), frame-rate-independent (scaled by frame duration, ~1 s
+   time constant).
 
-### Appendix C — The three synthetic-blind-spot rules (MANDATORY for voice-path DSP tests)
+### Appendix C — The four synthetic-blind-spot rules (MANDATORY for voice-path DSP tests)
 
 Every wall above hid behind clean synthetic test signals. A voice-path DSP test that
-does not satisfy ALL THREE is not a real test:
+does not satisfy ALL FOUR is not a real test:
 
 1. **Realistic frame sizes.** Feed small/variable frames (~80-160 samples), NOT the
    convenient 1600-sample (100 ms) frames — live capture drains its queue every 5 ms.
@@ -579,6 +585,13 @@ does not satisfy ALL THREE is not a real test:
    the room tone in any calibration test. (Would have caught Wall 3.)
 3. **Sub-300 Hz LF rumble.** Sum a 60/120 Hz rumble component into any "room" or
    "speech" signal — real mics are LF-dominated. (Would have caught Wall 4.)
+4. **Realistic time-domain cadence + state.** Any test of an adaptive time constant
+   (EMA, learning rate, decay) must feed frames at the live CADENCE (~10 ms) and
+   exercise the state the timer actually runs in — a per-frame rate that settles in a
+   100 ms-frame unit test can be ~10× too slow live, and a reference that only learns
+   in one branch stays frozen if the live signal sits in another. (Would have caught
+   the fix#2 regression below.) Prefer time-based constants scaled by frame duration
+   over bare per-frame rates.
 
 And the meta-lesson: **when you relax a threshold to cope with a specific bad state,
 re-tighten it once the root cause of that state is fixed elsewhere** — the 4 dB margin
