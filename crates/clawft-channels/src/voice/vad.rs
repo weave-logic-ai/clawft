@@ -772,6 +772,38 @@ mod tests {
     }
 
     #[test]
+    fn room_dynamics_stay_unvoiced_only_speech_voices() {
+        // Wall 5: the floor tracks the quiet-p10 (~-50) but room tone swings ~7 dB
+        // up to its peaks (~-43/-46). The onset margin must sit ABOVE those peaks
+        // so the room never self-triggers — else the gate reads voiced forever
+        // and the endpointer never sees the silence it needs to finalize a turn.
+        let mut nf = NoiseFloor::new(10.0, 16_000); // production margin
+        for _ in 0..6 {
+            nf.classify(-50.0, F100); // calibrate at the quiet room level
+        }
+        // Room fluctuates around -50 up to -46 peaks — must stay UNVOICED.
+        let mut any_voiced = false;
+        for i in 0..40 {
+            let d = if i % 2 == 0 { -46.0 } else { -54.0 };
+            if nf.classify(d, F100) {
+                any_voiced = true;
+            }
+        }
+        assert!(!any_voiced, "room dynamics must not cross the onset gate");
+        // Real speech clears easily.
+        assert!(nf.classify(-25.0, F100), "speech clears the gate");
+        // After speech, room tone returns → the gate must CLOSE (past the 400 ms
+        // hangover) so the endpoint can fire and the turn finalizes.
+        let mut closed = false;
+        for _ in 0..10 {
+            if !nf.classify(-50.0, F100) {
+                closed = true;
+            }
+        }
+        assert!(closed, "gate closes on room tone after speech so the endpoint fires");
+    }
+
+    #[test]
     fn watchdog_fires_from_a_learned_down_low_floor() {
         // Wall-3 safety net: the seed now clamps at -65, but the tracker can still
         // LEARN the floor far down over genuine near-silence. If room tone then

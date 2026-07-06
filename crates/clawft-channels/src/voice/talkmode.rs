@@ -52,13 +52,16 @@ use super::vad::{EnergyVad, NoiseFloor};
 use super::voiceness::{SpectralVoiceness, Voiceness};
 
 /// How far above the tracked room-tone floor a frame must sit to count as
-/// voice. Relaxed to 4 dB (from 8) so quiet speech only ~5 dB over a hot room
-/// floor still clears the ONSET gate — the spectral voiceness AND-gate
-/// ([`Voiceness`](super::voiceness::Voiceness)) is what now keeps broadband
-/// room tone out at this lower margin, a job energy alone cannot do at ~5 dB
-/// SNR. The Schmitt-trigger sustain (`margin/2`) and 400 ms hangover are
-/// unchanged.
-const VAD_NOISE_MARGIN_DB: f32 = 4.0;
+/// voice. 10 dB, above a quiet room's own dynamic swing: the floor tracks the
+/// quiet-p10 (~-50 dBFS at sane gain) but room tone fluctuates ~7 dB up to its
+/// peaks (~-43), so a tighter gate lets the room cross its own onset and the
+/// utterance never ends (Wall 5). The round-8 relaxation to 4 dB chased a "5 dB
+/// SNR corner" that was an ARTIFACT of a hot input gain (floor -37); at sane
+/// gain real speech runs 25–35 dB over the floor (peaks -25..-13), so 10 dB
+/// keeps room peaks out while speech clears by 15+ dB. Voiceness stays as the
+/// AND-gate for broadband bursts that DO cross. Sustain (`margin/2`) + 400 ms
+/// hangover unchanged.
+const VAD_NOISE_MARGIN_DB: f32 = 10.0;
 
 /// Minimum spectral speech-band ratio a frame must show to START an utterance.
 /// Broadband room tone scores ~its bandwidth fraction (~0.4); voiced speech
