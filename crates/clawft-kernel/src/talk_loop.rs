@@ -407,7 +407,12 @@ impl TalkModeLoop {
                 let Some(conv) = self.impulse_conv(imp) else {
                     return;
                 };
-                let pruned = self.current_turn(&conv);
+                // Wave 2 §W2.3: an explicit `prune_seq` targets a specific node
+                // (cancel/refine — the reply captured at decision time, robust to
+                // `current_turn` moving after a resubmit registers the amendment).
+                // Absent (the barge-in path emits no `prune_seq`) ⇒ the
+                // conversation's in-flight turn, unchanged.
+                let pruned = payload_u64(imp, "prune_seq").or_else(|| self.current_turn(&conv));
                 if let Some(prune_seq) = pruned
                     && self.prune_turn(prune_seq)
                 {

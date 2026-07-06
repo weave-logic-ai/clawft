@@ -456,19 +456,27 @@ impl SessionTier {
     /// (talk_loop.rs `TurnClaim`). Returns the seq that was in-flight at emit
     /// time (the node being pruned), or `None` when no loop is attached or
     /// nothing is in-flight (a benign race where the turn already committed).
-    pub fn emit_cancel_prune(&self, conv_id: &str, claim_seq: Option<u64>) -> Option<u64> {
+    pub fn emit_cancel_prune(
+        &self,
+        conv_id: &str,
+        prune_seq: Option<u64>,
+        claim_seq: Option<u64>,
+    ) -> Option<u64> {
         let talk_loop = self.talk_loop.get()?;
-        let pruned = talk_loop.current_turn(conv_id)?;
+        // Prune the explicitly-targeted node (the reply captured at the interrupt
+        // decision, robust to `current_turn` moving after a Refine resubmit) or,
+        // absent a target, the conversation's current in-flight turn.
+        let target = prune_seq.or_else(|| talk_loop.current_turn(conv_id))?;
         let tag = StructureTag::CausalGraph.as_u8();
         talk_loop.impulses().emit(
             tag,
             [0u8; 32],
             tag,
             ImpulseType::TurnClaim,
-            serde_json::json!({ "conv_id": conv_id, "claim_seq": claim_seq }),
-            claim_seq.unwrap_or(pruned),
+            serde_json::json!({ "conv_id": conv_id, "prune_seq": target, "claim_seq": claim_seq }),
+            claim_seq.unwrap_or(target),
         );
-        Some(pruned)
+        Some(target)
     }
 
     /// Wave 2 §W2.3: witness a turn-level cancel marker on the witness chain

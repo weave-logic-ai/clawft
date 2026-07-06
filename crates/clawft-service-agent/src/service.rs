@@ -372,7 +372,9 @@ impl<H: AgentLoopHandle> AgentService<H> {
             // `Pruned` tombstone (claim-less ⇒ floor open), witness the cancel.
             InterruptAction::Stop => {
                 self.cancel(&ctx.conv_id);
-                out.pruned_seq = tier.emit_cancel_prune(&ctx.conv_id, None);
+                // Prune the node that was in-flight at the router's decision
+                // (ctx.in_flight_seq), robust to any turn that registered after.
+                out.pruned_seq = tier.emit_cancel_prune(&ctx.conv_id, ctx.in_flight_seq, None);
                 out.witnessed = tier.witness_cancel(&ctx.conv_id, out.pruned_seq);
             }
             // REFINE (conservative cancel-and-resubmit, §W2.4): cancel now.
