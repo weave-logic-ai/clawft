@@ -46,6 +46,36 @@ pub enum InterruptAction {
     Queue,
 }
 
+/// What the executor ([`AgentService::execute_interrupt`]) needs to act on a
+/// non-`Turn` [`InterruptAction`]: the conversation and the in-flight turn seq
+/// (from `talk_loop::current_turn`) it prunes / amends / queues behind.
+#[derive(Debug, Clone)]
+pub struct InterruptCtx {
+    /// Conversation the interrupt lands in.
+    pub conv_id: String,
+    /// The in-flight (Frontier, uncommitted) turn's sequence, if any — the node
+    /// the executor prunes to a tombstone and (for Refine) reads the original
+    /// goal from. `None` only in a benign race where the turn committed between
+    /// the busy read and dispatch.
+    pub in_flight_seq: Option<u64>,
+}
+
+/// What the executor did — the surface (§W2.6) and the exit test (§W2.7) read
+/// this to render / assert what the cancel left on the forest.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InterruptOutcome {
+    /// The in-flight node pruned to a `Pruned` tombstone, if any.
+    pub pruned_seq: Option<u64>,
+    /// The new amendment turn's seq (Refine only).
+    pub amendment_seq: Option<u64>,
+    /// Whether a `Contradicts` edge (amendment → pruned attempt) was drawn.
+    pub contradicts: bool,
+    /// Whether a turn-level cancel marker was witnessed on the chain.
+    pub witnessed: bool,
+    /// Whether the utterance was queued behind the in-flight turn.
+    pub queued: bool,
+}
+
 /// The signals the router decides on — all projected by the caller from Wave 1 /
 /// classification outputs so the router itself has no upstream deps and is
 /// deterministically testable.
