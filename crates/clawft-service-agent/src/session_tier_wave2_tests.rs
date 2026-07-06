@@ -55,6 +55,7 @@ async fn register_reply_frontier_is_busy_without_eou_and_stashes_goal() {
 
     let seq = tier
         .register_reply_frontier(conv, "sort the list")
+        .await
         .expect("forest + loop attached");
 
     // The attempt is the conversation's in-flight turn — the durable busy
@@ -89,7 +90,7 @@ async fn register_reply_frontier_none_without_forest_or_loop() {
     let embedder: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbeddingProvider::new(64));
     let chain = Arc::new(ChainManager::new(0, 1000));
     let tier = SessionTier::new(embedder, chain, None);
-    assert!(tier.register_reply_frontier("c", "goal").is_none());
+    assert!(tier.register_reply_frontier("c", "goal").await.is_none());
 }
 
 #[tokio::test]

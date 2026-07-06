@@ -14,11 +14,11 @@ use clawft_service_agent::{
 use clawft_types::event::{InboundMessage, OutboundMessage};
 
 use clawft_kernel::chain::ChainManager;
-use clawft_kernel::context_graft::SessionView;
+use clawft_kernel::context_graft::NodeState;
 use clawft_kernel::embedding::{EmbeddingProvider, MockEmbeddingProvider};
 use clawft_kernel::{
-    CausalGraph, CognitiveTick, CognitiveTickConfig, CrossRefStore, ImpulseQueue,
-    SingleViewResolver, TalkModeConfig, TalkModeLoop, ViewResolver,
+    CausalGraph, CognitiveTick, CognitiveTickConfig, CrossRefStore, ImpulseQueue, TalkModeConfig,
+    TalkModeLoop, ViewResolver,
 };
 
 /// Loop handle stub — `execute_interrupt` never reaches it (the Refine arm
@@ -49,33 +49,41 @@ struct RegisterOnlySubmitter {
 #[async_trait]
 impl ReplySubmitter for RegisterOnlySubmitter {
     async fn submit_reply(&self, conv_id: &str, goal_text: &str) -> Option<u64> {
-        self.tier.register_reply_frontier(conv_id, goal_text)
+        self.tier.register_reply_frontier(conv_id, goal_text).await
     }
 }
 
-fn wired(conv: &str) -> (Arc<SessionTier>, Arc<ChainManager>, Arc<TalkModeLoop>) {
+fn wired(_conv: &str) -> (Arc<SessionTier>, Arc<ChainManager>, Arc<TalkModeLoop>) {
     let embedder: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbeddingProvider::new(64));
     let chain = Arc::new(ChainManager::new(0, 1000));
     let causal = Arc::new(CausalGraph::new());
     let crossrefs = Arc::new(CrossRefStore::new());
     let impulses = Arc::new(ImpulseQueue::new());
-    let resolver: Arc<dyn ViewResolver> =
-        Arc::new(SingleViewResolver::new(Arc::new(SessionView::new(conv, 64))));
+    // The daemon shape (M2 D4): the loop resolves the TIER'S OWN view through
+    // the Weak resolver. Load-bearing for these tests — every node-state
+    // transition (commit / prune) is gated by the view chunk, so a fixture
+    // with a detached view would let a silently no-oping transition pass.
+    let tier = Arc::new(
+        SessionTier::new(embedder, chain.clone(), None)
+            .with_forest(causal.clone(), crossrefs.clone()),
+    );
+    let resolver = SessionTier::weak_view_resolver(&tier);
     let tick = Arc::new(CognitiveTick::new(CognitiveTickConfig::default()));
     let talk_loop = Arc::new(TalkModeLoop::new(
         impulses,
-        causal.clone(),
-        crossrefs.clone(),
+        causal,
+        crossrefs,
         resolver,
         tick,
         TalkModeConfig::default(),
     ));
-    let tier = Arc::new(
-        SessionTier::new(embedder, chain.clone(), None)
-            .with_forest(causal, crossrefs)
-            .with_talk_loop(talk_loop.clone()),
-    );
+    tier.set_talk_loop(talk_loop.clone());
     (tier, chain, talk_loop)
+}
+
+/// The view-chunk state for `seq` — the authoritative substrate.
+fn view_state(tier: &Arc<SessionTier>, conv: &str, seq: u64) -> Option<NodeState> {
+    ViewResolver::view_for(&**tier, conv).and_then(|v| v.chunk(seq).map(|c| c.state))
 }
 
 #[tokio::test]
@@ -89,6 +97,7 @@ async fn refine_resubmits_prunes_old_and_witnesses() {
     // An in-flight reply attempt (what §W2.1 registers when the turn starts).
     let old = tier
         .register_reply_frontier(conv, "sort the list")
+        .await
         .expect("attempt registered");
     assert_eq!(talk_loop.current_turn(conv), Some(old));
 
@@ -126,6 +135,34 @@ async fn refine_resubmits_prunes_old_and_witnesses() {
         .iter()
         .any(|e| e.kind == "agent.turn.cancel");
     assert!(cancel_witnessed, "cancel marker witnessed on the chain");
+
+    // The transitions must LAND, not just emit: one tick drains the TurnClaim
+    // and tombstones the old attempt; the amendment stays Frontier (in flight).
+    talk_loop.tick();
+    assert_eq!(
+        view_state(&tier, conv, old),
+        Some(NodeState::Pruned),
+        "old attempt tombstoned on the view after the tick"
+    );
+    assert_eq!(
+        view_state(&tier, conv, new),
+        Some(NodeState::Frontier),
+        "amendment attempt still in flight"
+    );
+
+    // Commit-late on the amendment's finalize lands too.
+    tier.commit_reply_frontier(conv, new);
+    talk_loop.tick();
+    assert_eq!(
+        view_state(&tier, conv, new),
+        Some(NodeState::Committed),
+        "amendment attempt commits on finalize"
+    );
+    assert_eq!(
+        talk_loop.current_turn(conv),
+        None,
+        "commit clears the in-flight slot — the conv reads idle again"
+    );
 }
 
 #[tokio::test]
@@ -138,6 +175,7 @@ async fn stop_prunes_and_witnesses_without_resubmit() {
 
     let old = tier
         .register_reply_frontier(conv, "write a poem")
+        .await
         .expect("attempt registered");
 
     let outcome = service
@@ -165,4 +203,12 @@ async fn stop_prunes_and_witnesses_without_resubmit() {
         .iter()
         .any(|e| e.kind == "agent.turn.cancel");
     assert!(cancel_witnessed);
+
+    // The prune LANDS on the authoritative view after the tick.
+    talk_loop.tick();
+    assert_eq!(
+        view_state(&tier, conv, old),
+        Some(NodeState::Pruned),
+        "STOP tombstones the attempt on the view"
+    );
 }

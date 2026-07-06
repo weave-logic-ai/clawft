@@ -507,7 +507,7 @@ impl SessionTier {
     ///
     /// Returns the minted chain seq, or `None` when the forest or talk loop is
     /// not attached (no busy state to maintain — the caller just dispatches).
-    pub fn register_reply_frontier(&self, conv_id: &str, goal_text: &str) -> Option<u64> {
+    pub async fn register_reply_frontier(&self, conv_id: &str, goal_text: &str) -> Option<u64> {
         let forest = self.forest.as_ref()?;
         let talk_loop = self.talk_loop.get()?;
         let event = self.chain.append(
@@ -516,6 +516,25 @@ impl SessionTier {
             Some(serde_json::json!({ "conv_id": conv_id, "goal": goal_text })),
         );
         let chain_seq = event.sequence;
+        // Index the attempt into the conversation's SessionView as a Frontier
+        // chunk. LOAD-BEARING: the view is the source of truth that gates every
+        // node-state transition (`mirror_state`) — without a chunk the loop can
+        // neither commit the attempt on finalize nor prune it on STOP/Refine
+        // (both would silently no-op and strand the node Frontier).
+        if let Err(e) = self
+            .view(conv_id)
+            .index_chunk(
+                &*self.embedder,
+                self.store.as_deref(),
+                chain_seq,
+                "agent.reply.attempt",
+                goal_text,
+                self.inline_max,
+            )
+            .await
+        {
+            warn!(conv_id, chain_seq, error = %e, "session_tier: failed to index reply attempt");
+        }
         let conv_forest = self.conv_forest(conv_id);
         let node = session_forest::dual_write_turn(
             &forest.causal,

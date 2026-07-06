@@ -64,9 +64,10 @@ impl<H: AgentLoopHandle> ReplySubmitter for DaemonReplySubmitter<H> {
         // Register the attempt Frontier first (this IS the busy state and the
         // prune/Contradicts target); degrade to dispatch-only when the tier or
         // forest isn't attached.
-        let seq = agent
-            .session_tier()
-            .and_then(|tier| tier.register_reply_frontier(conv_id, goal_text));
+        let seq = match agent.session_tier() {
+            Some(tier) => tier.register_reply_frontier(conv_id, goal_text).await,
+            None => None,
+        };
         let params = AgentChatParams {
             messages: vec![AgentChatMessage {
                 role: "user".into(),

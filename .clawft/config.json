@@ -23,7 +23,10 @@
           "groq/llama-3.1-8b",
           "deepseek/deepseek-chat"
         ],
-        "complexity_range": [0.0, 0.3],
+        "complexity_range": [
+          0.0,
+          0.3
+        ],
         "cost_per_1k_tokens": 0.0,
         "max_context_tokens": 8192
       },
@@ -34,7 +37,10 @@
           "groq/llama-3.3-70b",
           "openai/gpt-4o-mini"
         ],
-        "complexity_range": [0.0, 0.7],
+        "complexity_range": [
+          0.0,
+          0.7
+        ],
         "cost_per_1k_tokens": 0.001,
         "max_context_tokens": 16384
       },
@@ -44,7 +50,10 @@
           "anthropic/claude-sonnet-4-20250514",
           "openai/gpt-4o"
         ],
-        "complexity_range": [0.3, 1.0],
+        "complexity_range": [
+          0.3,
+          1.0
+        ],
         "cost_per_1k_tokens": 0.01,
         "max_context_tokens": 200000
       },
@@ -54,7 +63,10 @@
           "anthropic/claude-opus-4-5",
           "openai/o1"
         ],
-        "complexity_range": [0.7, 1.0],
+        "complexity_range": [
+          0.7,
+          1.0
+        ],
         "cost_per_1k_tokens": 0.05,
         "max_context_tokens": 200000
       }
@@ -73,15 +85,20 @@
         "escalation_allowed": false,
         "escalation_threshold": 1.0,
         "model_override": false,
-        "cost_budget_daily_usd": 0.10,
-        "cost_budget_monthly_usd": 2.00
+        "cost_budget_daily_usd": 0.1,
+        "cost_budget_monthly_usd": 2.0
       },
       "user": {
         "level": 1,
         "max_tier": "standard",
         "tool_access": [
-          "read_file", "write_file", "edit_file", "list_dir",
-          "web_search", "web_fetch", "message"
+          "read_file",
+          "write_file",
+          "edit_file",
+          "list_dir",
+          "web_search",
+          "web_fetch",
+          "message"
         ],
         "max_context_tokens": 16384,
         "max_output_tokens": 4096,
@@ -90,13 +107,15 @@
         "escalation_allowed": true,
         "escalation_threshold": 0.6,
         "model_override": false,
-        "cost_budget_daily_usd": 5.00,
-        "cost_budget_monthly_usd": 100.00
+        "cost_budget_daily_usd": 5.0,
+        "cost_budget_monthly_usd": 100.0
       },
       "admin": {
         "level": 2,
         "max_tier": "elite",
-        "tool_access": ["*"],
+        "tool_access": [
+          "*"
+        ],
         "max_context_tokens": 200000,
         "max_output_tokens": 16384,
         "rate_limit": 0,
@@ -108,11 +127,24 @@
         "cost_budget_monthly_usd": 0.0
       },
       "channels": {
-        "cli": { "level": 2 },
-        "agent.chat": { "level": 2, "tool_access": ["*"] },
-        "telegram": { "level": 1 },
-        "discord": { "level": 0 },
-        "slack": { "level": 0 }
+        "cli": {
+          "level": 2
+        },
+        "agent.chat": {
+          "level": 2,
+          "tool_access": [
+            "*"
+          ]
+        },
+        "telegram": {
+          "level": 1
+        },
+        "discord": {
+          "level": 0
+        },
+        "slack": {
+          "level": 0
+        }
       }
     },
     "escalation": {
@@ -136,15 +168,22 @@
     "port": 18790,
     "apiEnabled": true,
     "apiPort": 18789,
-    "corsOrigins": ["http://localhost:5173"]
+    "corsOrigins": [
+      "http://localhost:5173"
+    ]
   },
   "kernel": {
     "agent": {
       "anchor_chain": true,
       "anchor_causal": true,
       "talk_loop": true,
-      "subagents": { "governance_grant": true },
-      "classification": { "mode": "keyword" }
+      "subagents": {
+        "governance_grant": true
+      },
+      "classification": {
+        "mode": "keyword"
+      },
+      "voice_loop": true
     }
   }
 }
