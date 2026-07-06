@@ -274,7 +274,7 @@ async fn full_pipeline_speculative_then_committed() {
     tx.send(voiced_frame()).await.unwrap();
     tx.send(voiced_frame()).await.unwrap();
     tx.send(voiced_frame()).await.unwrap();
-    for _ in 0..4 {
+    for _ in 0..9 {
         tx.send(silent_frame()).await.unwrap();
     }
     // Keep feeding silence so the speak loop's frame monitor sees no barge-in.
@@ -439,7 +439,7 @@ async fn barge_in_flushes_and_emits_interrupted() {
     tx.send(voiced_frame()).await.unwrap();
     tx.send(voiced_frame()).await.unwrap();
     tx.send(voiced_frame()).await.unwrap();
-    for _ in 0..4 {
+    for _ in 0..9 {
         tx.send(silent_frame()).await.unwrap();
     }
     // Wait until the committed answer starts streaming, then BARGE IN.
@@ -506,7 +506,7 @@ async fn listen_only_records_the_turn_but_skips_the_brain() {
     tx.send(voiced_frame()).await.unwrap();
     tx.send(voiced_frame()).await.unwrap();
     tx.send(voiced_frame()).await.unwrap();
-    for _ in 0..6 {
+    for _ in 0..9 {
         tx.send(silent_frame()).await.unwrap();
     }
 
@@ -596,7 +596,7 @@ async fn listen_only_cycles_multiple_turns() {
         for _ in 0..3 {
             tx.send(voiced_frame()).await.unwrap();
         }
-        for _ in 0..4 {
+        for _ in 0..9 {
             tx.send(silent_frame()).await.unwrap();
         }
         wait_until(|| turns(&observer) >= turn).await;
@@ -670,13 +670,13 @@ async fn listen_only_decodes_both_utterances_through_slow_decode() {
     for _ in 0..3 {
         tx.send(voiced_frame()).await.unwrap();
     }
-    for _ in 0..4 {
+    for _ in 0..9 {
         tx.send(silent_frame()).await.unwrap();
     }
     for _ in 0..3 {
         tx.send(voiced_frame()).await.unwrap();
     }
-    for _ in 0..4 {
+    for _ in 0..9 {
         tx.send(silent_frame()).await.unwrap();
     }
 
@@ -738,7 +738,7 @@ async fn listen_only_marks_unknown_without_polluting_registry() {
     for _ in 0..3 {
         tx.send(voiced_frame()).await.unwrap();
     }
-    for _ in 0..4 {
+    for _ in 0..9 {
         tx.send(silent_frame()).await.unwrap();
     }
     wait_until(|| observer.has(|e| matches!(e, ConversationEvent::UserTurn { .. }))).await;
@@ -815,7 +815,7 @@ async fn preroll_prepends_pre_onset_audio_to_utterance() {
     for _ in 0..3 {
         tx.send(voiced_frame()).await.unwrap();
     }
-    for _ in 0..4 {
+    for _ in 0..9 {
         tx.send(silent_frame()).await.unwrap();
     }
     wait_until(|| observer.has(|e| matches!(e, ConversationEvent::UserTurn { .. }))).await;
@@ -868,7 +868,7 @@ async fn talk_mode_no_self_id_is_unknown_without_pollution() {
     for _ in 0..3 {
         tx.send(voiced_frame()).await.unwrap();
     }
-    for _ in 0..4 {
+    for _ in 0..9 {
         tx.send(silent_frame()).await.unwrap();
     }
     wait_until(|| observer.has(|e| matches!(e, ConversationEvent::UserTurn { .. }))).await;

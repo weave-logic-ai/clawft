@@ -178,72 +178,81 @@ pub struct NoiseFloor {
     floor_dbfs: f32,
     margin_db: f32,
     initialized: bool,
-    /// Count of observed frames judged quiet (below the current threshold).
-    /// The floor is only a trustworthy noise estimate once it has seen real
-    /// silence to fall to — before that (e.g. a session that opens on speech)
-    /// `floor` sits at the init cap and any SNR derived from it is bogus. See
-    /// [`converged`](Self::converged).
+    /// Whether the gate currently reads speech (drives the sustain hysteresis
+    /// threshold and the floor freeze).
+    in_speech: bool,
+    /// Remaining hangover (samples): while > 0 a below-threshold frame is still
+    /// treated as voiced so a brief intra-word dip doesn't close the gate.
+    hangover_remaining: u64,
+    /// Hangover length in samples (from the sample rate).
+    hangover_samples: u64,
+    /// Count of frames judged genuine silence. The floor only learns from these
+    /// (see [`converged`](Self::converged)).
     quiet_frames: u32,
 }
 
-/// Quiet frames the floor must observe before it is a trustworthy noise
-/// estimate. The floor falls at 0.3/frame, so ~10 quiet frames converges it to
-/// within a few percent of the true room tone — until then SNR is flagged
-/// unreliable in the record.
+/// Silence frames the floor must observe before it is a trustworthy noise
+/// estimate — until then SNR is flagged unreliable in the record.
 const FLOOR_CONVERGE_FRAMES: u32 = 10;
 
 /// Initialization ceiling for the tracked floor: even when the very first
 /// frame is already speech (a session started mid-utterance), the floor
-/// starts no higher than this, so that first utterance still clears the
-/// gate (the -45 dBFS default threshold minus the margin).
+/// starts no higher than this so that first utterance still clears the gate.
 const INIT_MAX_FLOOR_DBFS: f32 = -53.0;
 
-/// Frames within this many dB above the floor are ambient drift (fans
-/// spinning up, HVAC) and pull the floor up at a moderate rate; frames
-/// beyond it are speech and barely move it.
-const DRIFT_BAND_DB: f32 = 18.0;
+/// Hangover tail: once voiced, stay in capture until this much CONTINUOUS
+/// below-threshold audio, so brief intra-word dips (stop closures, unvoiced
+/// consonants) don't split an utterance.
+const HANGOVER_MS: u32 = 400;
 
 impl NoiseFloor {
-    /// `margin_db` is how far above the tracked floor a frame must be to
-    /// count as voice (8–10 dB works well for speech at conversational
-    /// distance).
-    pub fn new(margin_db: f32) -> Self {
+    /// `margin_db` is the strict onset margin over the tracked floor a frame
+    /// must clear to START speech (8–10 dB at conversational distance); the
+    /// loose sustain threshold is half that. `sample_rate` sizes the hangover.
+    pub fn new(margin_db: f32, sample_rate: u32) -> Self {
         Self {
             floor_dbfs: -100.0,
             margin_db,
             initialized: false,
+            in_speech: false,
+            hangover_remaining: 0,
+            hangover_samples: u64::from(sample_rate) * u64::from(HANGOVER_MS) / 1_000,
             quiet_frames: 0,
         }
     }
 
-    /// Feed one frame's dBFS and return the updated voice threshold
-    /// (`floor + margin`, clamped to [-100, 0]).
-    pub fn observe(&mut self, dbfs: f32) -> f32 {
-        // A frame below the current threshold is silence/room-tone — the
-        // evidence the floor needs to converge.
-        if self.initialized && dbfs < self.threshold_dbfs() {
-            self.quiet_frames = self.quiet_frames.saturating_add(1);
-        }
+    /// Classify one frame as voiced. Applies a **Schmitt-trigger** gate (strict
+    /// onset at `floor+margin`, loose sustain at `floor+margin/2`), a
+    /// **hangover** tail so intra-word dips don't close the gate, and — the key
+    /// discipline — **freezes the floor while in speech/hangover**, learning it
+    /// ONLY from genuine silence (fast down, very slow up). Without the freeze,
+    /// sustained quiet speech drags the floor up under itself until only word
+    /// attacks clear the gate and the rest of the sentence reads as silence.
+    pub fn classify(&mut self, dbfs: f32, frame_len: u64) -> bool {
         if !self.initialized {
-            // Cap the seed: a session that opens on speech must not
-            // calibrate the floor to speech level and gate itself deaf.
             self.floor_dbfs = dbfs.min(INIT_MAX_FLOOR_DBFS);
             self.initialized = true;
-        } else {
-            let delta = dbfs - self.floor_dbfs;
-            if delta < 0.0 {
-                // Fall fast: quieter evidence is authoritative for a floor.
-                self.floor_dbfs += delta * 0.3;
-            } else if delta < DRIFT_BAND_DB {
-                // Near-floor drift: ambient got louder — adapt within ~1-2 s
-                // so a loud room cannot read as permanent speech.
-                self.floor_dbfs += delta * 0.08;
-            } else {
-                // Speech: barely moves the floor.
-                self.floor_dbfs += delta * 0.002;
-            }
         }
-        self.threshold_dbfs()
+        let onset = (self.floor_dbfs + self.margin_db).clamp(-100.0, 0.0);
+        let sustain = (self.floor_dbfs + self.margin_db * 0.5).clamp(-100.0, 0.0);
+        let gate = if self.in_speech { sustain } else { onset };
+
+        if dbfs >= gate {
+            self.in_speech = true;
+            self.hangover_remaining = self.hangover_samples;
+            true
+        } else if self.hangover_remaining > 0 {
+            self.hangover_remaining = self.hangover_remaining.saturating_sub(frame_len);
+            true
+        } else {
+            // Genuine silence: leave speech and LEARN the floor (asymmetric —
+            // fast toward quieter evidence, very slow upward for ambient drift).
+            self.in_speech = false;
+            let delta = dbfs - self.floor_dbfs;
+            self.floor_dbfs += if delta < 0.0 { delta * 0.3 } else { delta * 0.02 };
+            self.quiet_frames = self.quiet_frames.saturating_add(1);
+            false
+        }
     }
 
     /// Current voice threshold (`floor + margin`).
@@ -372,72 +381,102 @@ mod tests {
         assert!(!vad.in_speech());
     }
 
+    const F100: u64 = 1_600; // 100 ms @ 16 kHz
+
     #[test]
-    fn noise_floor_adapts_to_loud_room() {
-        // The live failure: -38 dBFS room tone vs a fixed -45 gate. The
-        // tracker must lift the threshold above the room tone so ambient
-        // reads as silence, while conversational speech (-20 dBFS) still
-        // clears it.
-        let mut nf = NoiseFloor::new(8.0);
-        let mut thr = 0.0;
-        for _ in 0..50 {
-            thr = nf.observe(-38.0);
+    fn floor_frozen_through_quiet_speech_no_truncation() {
+        // Round-6 acceptance: at low SNR a full sentence stays ONE open
+        // utterance and the floor stays flat across it. Learn a low floor from
+        // leading silence, then feed 3 s of quiet speech (~10 dB over floor)
+        // with periodic intra-word dips — every frame must read voiced and the
+        // floor must not creep up under the speech.
+        let mut nf = NoiseFloor::new(8.0, 16_000);
+        for _ in 0..20 {
+            nf.classify(-65.0, F100); // leading silence
         }
+        let floor_before = nf.floor_dbfs();
+        assert!(floor_before < -60.0, "floor learned from silence: {floor_before}");
+
+        let mut voiced = 0;
+        for i in 0..30 {
+            // Speech at -55 with a brief dip to -63 (below the sustain gate) —
+            // the hangover must bridge it.
+            let dbfs = if i % 5 == 4 { -63.0 } else { -55.0 };
+            if nf.classify(dbfs, F100) {
+                voiced += 1;
+            }
+        }
+        assert_eq!(voiced, 30, "every quiet-speech frame (incl. dips) stays voiced");
+        let floor_after = nf.floor_dbfs();
         assert!(
-            thr > -38.0,
-            "threshold {thr} must sit above the room tone (-38)"
+            (floor_after - floor_before).abs() < 2.0,
+            "floor must stay flat through speech: {floor_before} -> {floor_after}"
         );
-        assert!(-20.0 >= thr, "speech at -20 dBFS must clear threshold {thr}");
     }
 
     #[test]
-    fn noise_floor_survives_speech_first_startup() {
-        // A session that opens on speech (-15 dBFS) must not calibrate the
-        // floor to speech level: the init cap keeps the first utterance
-        // above the gate.
-        let mut nf = NoiseFloor::new(8.0);
-        let thr = nf.observe(-15.0);
+    fn floor_flat_across_speech_heavy_session() {
+        // Acceptance: floor delta < 2 dB before vs after 10 utterances.
+        let mut nf = NoiseFloor::new(8.0, 16_000);
+        for _ in 0..15 {
+            nf.classify(-65.0, F100); // establish the floor
+        }
+        let before = nf.floor_dbfs();
+        for _ in 0..10 {
+            for _ in 0..15 {
+                nf.classify(-55.0, F100); // ~1.5 s of speech
+            }
+            for _ in 0..8 {
+                nf.classify(-65.0, F100); // inter-utterance silence
+            }
+        }
+        let after = nf.floor_dbfs();
         assert!(
-            -15.0 >= thr,
-            "first speech frame must clear threshold {thr}"
+            (after - before).abs() < 2.0,
+            "floor drifted across a speech-heavy session: {before} -> {after}"
         );
+    }
+
+    #[test]
+    fn hysteresis_strict_onset_loose_sustain() {
+        let mut nf = NoiseFloor::new(8.0, 16_000);
+        for _ in 0..10 {
+            nf.classify(-65.0, F100); // floor ~-65 at rest
+        }
+        // At rest a -60 frame (+5 over floor) is BELOW the strict onset gate
+        // (floor+8 ≈ -57) → not voiced.
+        assert!(!nf.classify(-60.0, F100), "onset gate is strict");
+        // A -55 frame (+10) clears onset and enters speech.
+        assert!(nf.classify(-55.0, F100), "-55 clears onset");
+        // Now a -60 frame stays voiced — the sustain gate (floor+4) is looser.
+        assert!(nf.classify(-60.0, F100), "sustain gate is loose");
+    }
+
+    #[test]
+    fn hangover_bridges_dips_then_closes() {
+        let mut nf = NoiseFloor::new(8.0, 16_000);
+        for _ in 0..10 {
+            nf.classify(-65.0, F100);
+        }
+        nf.classify(-55.0, F100); // enter speech → 400 ms hangover
+        // A deep dip well below the sustain gate stays voiced for <400 ms.
+        for ms in 1..=4 {
+            assert!(nf.classify(-90.0, F100), "dip at {}00ms within hangover", ms);
+        }
+        // 5th consecutive 100 ms silence exceeds the 400 ms tail → gate closes.
+        assert!(!nf.classify(-90.0, F100), "gate closes after 400ms continuous silence");
     }
 
     #[test]
     fn noise_floor_converges_only_after_seeing_silence() {
-        // SNR honesty: a speech-first session's floor is NOT converged until it
-        // has observed real silence — so an early-turn SNR reads as unreliable.
-        let mut nf = NoiseFloor::new(8.0);
+        let mut nf = NoiseFloor::new(8.0, 16_000);
         assert!(!nf.converged(), "fresh floor is unconverged");
-        nf.observe(-20.0); // opens on speech → floor pinned at the init cap
+        nf.classify(-20.0, F100); // opens on speech → floor pinned at the init cap
         assert!(!nf.converged(), "speech-first init is not converged");
-        for _ in 0..FLOOR_CONVERGE_FRAMES {
-            nf.observe(-70.0); // room tone
+        // Enough genuine-silence frames (past the hangover) converge it.
+        for _ in 0..(FLOOR_CONVERGE_FRAMES + 5) {
+            nf.classify(-70.0, F100);
         }
         assert!(nf.converged(), "floor converges once it has seen silence");
-    }
-
-    #[test]
-    fn noise_floor_rises_slowly_through_speech() {
-        // A burst of speech frames must not drag the floor up to speech
-        // level — the threshold stays low enough that the post-speech room
-        // tone reads as silence again.
-        let mut nf = NoiseFloor::new(8.0);
-        for _ in 0..50 {
-            nf.observe(-60.0); // quiet room
-        }
-        for _ in 0..40 {
-            nf.observe(-20.0); // 4s of speech at 100ms frames
-        }
-        let thr = nf.threshold_dbfs();
-        assert!(
-            thr < -35.0,
-            "threshold {thr} crept too high through speech"
-        );
-        // Back in the quiet room the floor falls again quickly.
-        for _ in 0..10 {
-            nf.observe(-60.0);
-        }
-        assert!(nf.floor_dbfs() < -50.0, "floor {} should re-fall", nf.floor_dbfs());
     }
 }

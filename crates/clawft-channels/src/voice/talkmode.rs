@@ -624,6 +624,7 @@ impl<M: EndpointModel> TalkModeController<M> {
         observer: Arc<dyn ConversationObserver>,
         config: TalkModeConfig,
     ) -> Self {
+        let config_sr = config.sample_rate;
         let decoder = Decoder {
             stt,
             embedder,
@@ -644,7 +645,7 @@ impl<M: EndpointModel> TalkModeController<M> {
             observer,
             config,
             decoder,
-            noise_floor: NoiseFloor::new(VAD_NOISE_MARGIN_DB),
+            noise_floor: NoiseFloor::new(VAD_NOISE_MARGIN_DB, config_sr),
         }
     }
 
@@ -668,9 +669,11 @@ impl<M: EndpointModel> TalkModeController<M> {
     /// noise-floor tracker, so call exactly once per captured frame.
     fn level(&mut self, frame: &[i16]) -> (bool, f32, f32) {
         let rms_dbfs = EnergyVad::rms_dbfs(frame);
-        let adaptive = self.noise_floor.observe(rms_dbfs);
-        let voiced = rms_dbfs >= adaptive.max(self.config.vad_threshold_dbfs);
-        (voiced, rms_dbfs, adaptive)
+        // Schmitt-trigger + hangover + floor-freeze gate. Purely floor-relative
+        // (no fixed dBFS floor) so a quiet mic still voices — the frozen floor
+        // stays honest instead of chasing quiet speech up and gating it out.
+        let voiced = self.noise_floor.classify(rms_dbfs, frame.len() as u64);
+        (voiced, rms_dbfs, self.noise_floor.floor_dbfs())
     }
 
     /// Run the conversation loop until `cancel` fires or the capture channel
