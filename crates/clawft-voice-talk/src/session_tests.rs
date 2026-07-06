@@ -96,8 +96,31 @@ impl TtsSink for RecordingSink {
 }
 
 fn voiced_frame(len: usize) -> Vec<i16> {
+    // In-band harmonic tone (fundamental + low harmonics + a formant) so the
+    // frame clears BOTH stages of the round-8 gate: loud enough for the energy
+    // gate and concentrated in 300–3400 Hz for the spectral voiceness AND-gate.
+    // (A ±amplitude square alternation is a Nyquist tone — energy passes but
+    // voiceness scores ~0.)
+    use std::f32::consts::TAU;
+    const SR: f32 = 16_000.0;
+    let partials = [180.0f32, 360.0, 540.0, 900.0, 1400.0];
     (0..len)
-        .map(|i| if i % 2 == 0 { 6_000 } else { -6_000 })
+        .map(|i| {
+            let t = i as f32 / SR;
+            let s: f32 = partials.iter().map(|&f| (TAU * f * t).sin()).sum();
+            (s / partials.len() as f32 * 20_000.0) as i16
+        })
+        .collect()
+}
+
+/// Room-tone frame (~-55 dBFS) for the noise-floor STARTUP CALIBRATION window.
+/// The gate seeds its floor from the first ~500 ms (assumed non-speech), so a
+/// test that opens straight into `voiced_frame` would have its speech eaten as
+/// calibration and poison the floor seed (same idiom as
+/// `clawft-channels/tests/talkmode.rs`).
+fn room_tone_frame(len: usize) -> Vec<i16> {
+    (0..len)
+        .map(|i| if i % 2 == 0 { 58 } else { -58 })
         .collect()
 }
 
@@ -129,16 +152,25 @@ async fn assembled_pipeline_runs_a_full_turn_end_to_end() {
     let forest = session.forest().clone();
     let TalkSession { mut controller, .. } = session;
 
-    // Scripted capture: ~300 ms voiced (builds the utterance) then ~400 ms
-    // silence (crosses the 250 ms endpoint threshold → AlwaysComplete finalizes).
-    // `tx` stays open for the whole turn so the barge-in monitor never sees a
-    // closed channel mid-render (a live mic streams continuously).
+    // Scripted capture, mirroring what the round-8 gate needs from real audio:
+    // ~600 ms room tone (seats the startup-calibration noise floor — real
+    // capture always opens with room tone), then ~600 ms voiced (builds the
+    // utterance; clears the 400 ms min-voiced endpoint gate AND the 500 ms
+    // short-audio discount window so AlwaysComplete's prob isn't halved), then
+    // ~800 ms silence — the first 400 ms is eaten by the VAD hangover tail
+    // (still reported voiced), the rest crosses the 250 ms endpoint threshold →
+    // AlwaysComplete finalizes. `tx` stays open for the whole turn so the
+    // barge-in monitor never sees a closed channel mid-render (a live mic
+    // streams continuously).
     let (tx, rx) = mpsc::channel::<Vec<i16>>(64);
     let frame = 1_600usize; // 100 ms @ 16 kHz
-    for _ in 0..3 {
+    for _ in 0..6 {
+        tx.send(room_tone_frame(frame)).await.unwrap();
+    }
+    for _ in 0..6 {
         tx.send(voiced_frame(frame)).await.unwrap();
     }
-    for _ in 0..4 {
+    for _ in 0..8 {
         tx.send(vec![0i16; frame]).await.unwrap();
     }
 
