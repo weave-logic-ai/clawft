@@ -41,6 +41,18 @@ const FFT_SIZE: usize = 2048;
 const SPEECH_LO_HZ: f32 = 300.0;
 const SPEECH_HI_HZ: f32 = 3400.0;
 
+/// Low-frequency cutoff EXCLUDED from the ratio's denominator. Real mic capture
+/// is dominated by sub-300 Hz rumble — HVAC, handling, desk/room LF — that has
+/// nothing to do with voice. Counting it in the total swamps the denominator so
+/// even clean speech scores ~0 (the live 0.003–0.076 the probes caught, "Wall
+/// 4"). Excluding everything below this makes the ratio reflect voice-band shape,
+/// not room rumble. Kept below the speech band's 300 Hz so no speech energy in
+/// 180–300 Hz distorts the denominator either way. Set at 180 (not 120) so the
+/// 120 Hz mains/HVAC line AND its window leakage fall fully below the cut;
+/// excluding a little more sub-speech-band energy only helps real voice (whose
+/// distinctive energy is the 300–3400 Hz formants), never hurts it.
+const LF_CUTOFF_HZ: f32 = 180.0;
+
 /// Samples analysed per score — a rolling window of the most recent audio
 /// (~32 ms at 16 kHz). The live capture path delivers small, variable frames
 /// (~80–160 samples per 5 ms drain), FAR shorter than a usable analysis frame;
@@ -123,12 +135,17 @@ impl Voiceness for SpectralVoiceness {
         let bin_hz = sample_rate as f32 / FFT_SIZE as f32;
         let lo = (SPEECH_LO_HZ / bin_hz).round() as usize;
         let hi = ((SPEECH_HI_HZ / bin_hz).round() as usize).min(FFT_SIZE / 2 - 1);
+        // Denominator starts above the LF rumble band (also skips DC): sub-120 Hz
+        // room/HVAC/handling energy must not count toward `total`, or it swamps
+        // the ratio (Wall 4).
+        let total_lo = ((LF_CUTOFF_HZ / bin_hz).ceil() as usize).max(1);
 
         let mut speech = 0.0f32;
         let mut total = 0.0f32;
-        // Skip DC (bin 0): a capture DC offset is not voice and would inflate
-        // `total` toward the low end, deflating the ratio.
-        for (k, c) in buf.iter().enumerate().take(FFT_SIZE / 2).skip(1) {
+        for (k, c) in buf.iter().enumerate().take(FFT_SIZE / 2) {
+            if k < total_lo {
+                continue;
+            }
             let p = c.re * c.re + c.im * c.im;
             total += p;
             if k >= lo && k <= hi {
@@ -178,6 +195,23 @@ mod tests {
     fn rms(frame: &[i16]) -> f32 {
         let s: f64 = frame.iter().map(|&x| (x as f64).powi(2)).sum();
         (s / frame.len() as f64).sqrt() as f32
+    }
+
+    /// Sub-300 Hz LF rumble (60 + 120 Hz) — the HVAC/handling/room energy that
+    /// dominates real mic capture and swamped the old denominator ("Wall 4").
+    /// Every voice-path DSP test must include this so it can't pass on the clean,
+    /// LF-free signals that hid the bug.
+    fn rumble(len: usize, amp: f32) -> Vec<i16> {
+        (0..len)
+            .map(|i| {
+                let t = i as f32 / SR as f32;
+                (((TAU * 60.0 * t).sin() + (TAU * 120.0 * t).sin()) * 0.5 * amp) as i16
+            })
+            .collect()
+    }
+
+    fn mix(a: &[i16], b: &[i16]) -> Vec<i16> {
+        a.iter().zip(b).map(|(&x, &y)| x.saturating_add(y)).collect()
     }
 
     #[test]
@@ -265,5 +299,39 @@ mod tests {
             last = v.score(chunk, SR);
         }
         assert!(last < 0.5, "broadband in small frames stays low, got {last}");
+    }
+
+    #[test]
+    fn speech_over_lf_rumble_still_scores_high() {
+        // Wall 4: real capture is dominated by sub-300 Hz rumble. Even with the
+        // rumble LOUDER than the speech, excluding it from the denominator must
+        // let clean voice-band speech clear the gate. Under the old full-band
+        // denominator this scored ~0.003–0.076 (the live probe values).
+        let v = SpectralVoiceness::new();
+        let speech = speechlike(1_600, 4_000.0);
+        let rum = rumble(1_600, 14_000.0); // rumble louder than speech
+        let signal = mix(&speech, &rum);
+        let mut last = 0.0;
+        for chunk in signal.chunks(80) {
+            last = v.score(chunk, SR);
+        }
+        assert!(
+            last > 0.5,
+            "speech buried under LF rumble must still score high, got {last}"
+        );
+    }
+
+    #[test]
+    fn lf_rumble_alone_scores_low() {
+        // The LF exclusion must not make pure rumble read as speech: with the
+        // rumble gone from the denominator, its residual voice-band energy is
+        // tiny, so the ratio stays low.
+        let v = SpectralVoiceness::new();
+        let rum = rumble(1_600, 14_000.0);
+        let mut last = 1.0;
+        for chunk in rum.chunks(80) {
+            last = v.score(chunk, SR);
+        }
+        assert!(last < 0.5, "LF rumble alone must not read as speech, got {last}");
     }
 }
