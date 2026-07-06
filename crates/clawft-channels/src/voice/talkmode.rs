@@ -631,8 +631,8 @@ pub struct TalkModeController<M: EndpointModel> {
     /// startup calibration completes, so every session's report shows what the
     /// gate armed at.
     armed_logged: bool,
-    /// Throttle counter for the per-frame voiceness diagnostic.
-    dbg_frames: u32,
+    /// Time throttle for the gate-input level probe.
+    last_probe: Option<Instant>,
 }
 
 impl<M: EndpointModel> TalkModeController<M> {
@@ -676,7 +676,7 @@ impl<M: EndpointModel> TalkModeController<M> {
             voiceness: Arc::new(SpectralVoiceness::new()),
             voiced_run: false,
             armed_logged: false,
-            dbg_frames: 0,
+            last_probe: None,
         }
     }
 
@@ -727,21 +727,27 @@ impl<M: EndpointModel> TalkModeController<M> {
             energy_voiced && vscore >= VOICENESS_MIN
         };
         self.voiced_run = voiced;
-        // Diagnostic: when the energy gate is open, log what voiceness decided —
-        // reveals a listen path where energy sees speech but the spectral gate
-        // rejects it. Throttled so it can't flood at the frame rate.
-        if energy_voiced {
-            self.dbg_frames = self.dbg_frames.wrapping_add(1);
-            if self.dbg_frames % 10 == 1 {
-                debug!(
-                    rms_dbfs,
-                    floor_dbfs = self.noise_floor.floor_dbfs(),
-                    voiceness = vscore,
-                    voiceness_min = VOICENESS_MIN,
-                    passed = voiced,
-                    "energy-voiced frame: voiceness verdict"
-                );
-            }
+        // Gate-input level probe (throttled ~2 s) — the third of the three level
+        // probes (entry/resampled/cleaned live in run_capture). Logs the dbfs
+        // NoiseFloor.classify actually receives, the tracked floor, and the
+        // voiceness verdict, so the listen path can be compared against
+        // test-mic's raw levels and any signal loss between capture and the gate
+        // is convicted. Logged even during silence — a gate input far below
+        // test-mic's speech level while the user is talking IS the smoking gun.
+        if self
+            .last_probe
+            .is_none_or(|t| t.elapsed() >= Duration::from_secs(2))
+        {
+            self.last_probe = Some(Instant::now());
+            info!(
+                classify_dbfs = rms_dbfs,
+                floor_dbfs = self.noise_floor.floor_dbfs(),
+                voiceness = vscore,
+                voiceness_min = VOICENESS_MIN,
+                energy_voiced,
+                voiced,
+                "voice gate input probe"
+            );
         }
         // One-shot: announce the armed gate the moment calibration completes, so
         // every session's log shows the floor + onset the VAD is running with.

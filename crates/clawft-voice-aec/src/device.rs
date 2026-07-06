@@ -345,9 +345,14 @@ pub fn run_capture(
     let mut down_16k = LinResampler::new(in_rate, TARGET_SR);
     let mut scratch: Vec<f32> = Vec::new();
     let mut wire: Vec<f32> = Vec::new();
-    // Pre/post-AEC level accounting, logged ~every 2 s. If post is materially
-    // below pre, the AEC is attenuating the mic (the round-8 listen-vs-test-mic
-    // delta); on the passthrough (listen-only) path they should track ±~1 dB.
+    // Three level probes, logged ~every 2 s, to triangulate any listen-path
+    // signal loss against test-mic's healthy raw levels:
+    //   entry     — native, post-downmix, PRE-resample (`scratch`, normalized f32)
+    //   resampled — after native→16k (`mic`, pre-AEC)
+    //   cleaned   — after process_capture (post-AEC; == mic on the bypass path)
+    // If any stage drops materially below the previous, that seam is the loss.
+    let mut entry_ss = 0.0f64;
+    let mut entry_n = 0u64;
     let mut pre_ss = 0.0f64;
     let mut pre_n = 0u64;
     let mut post_ss = 0.0f64;
@@ -363,12 +368,16 @@ pub fn run_capture(
             std::thread::sleep(std::time::Duration::from_millis(5));
             continue;
         }
+        // Probe 1: native, post-downmix, pre-resample (scratch is normalized f32).
+        entry_ss += scratch.iter().map(|&s| f64::from(s) * f64::from(s)).sum::<f64>();
+        entry_n += scratch.len() as u64;
         wire.clear();
         down_16k.process(&scratch, &mut wire);
         let mic: Vec<i16> = wire
             .iter()
             .map(|&s| (s.clamp(-1.0, 1.0) * 32_767.0) as i16)
             .collect();
+        // Probe 2: after native→16k resample (pre-AEC).
         pre_ss += mic.iter().map(|&s| f64::from(s) * f64::from(s)).sum::<f64>();
         pre_n += mic.len() as u64;
         let cleaned = {
@@ -388,15 +397,25 @@ pub fn run_capture(
             .map(|&s| f64::from(s) * f64::from(s))
             .sum::<f64>();
         post_n += cleaned.len() as u64;
-        if last_rms_log.elapsed() >= std::time::Duration::from_secs(2) && pre_n > 0 && post_n > 0 {
+        if last_rms_log.elapsed() >= std::time::Duration::from_secs(2)
+            && entry_n > 0
+            && pre_n > 0
+            && post_n > 0
+        {
+            // scratch is already normalized f32 [-1,1]; mic/cleaned are i16.
+            let entry_db = 20.0 * (entry_ss / entry_n as f64).sqrt().log10();
             let pre_db = 20.0 * ((pre_ss / pre_n as f64).sqrt() / 32_768.0).log10();
             let post_db = 20.0 * ((post_ss / post_n as f64).sqrt() / 32_768.0).log10();
             tracing::info!(
-                pre_aec_dbfs = pre_db,
-                post_aec_dbfs = post_db,
-                delta_db = post_db - pre_db,
-                "capture level (pre vs post AEC)"
+                entry_dbfs = entry_db,
+                resampled_dbfs = pre_db,
+                cleaned_dbfs = post_db,
+                resample_delta_db = pre_db - entry_db,
+                aec_delta_db = post_db - pre_db,
+                "capture level probes (entry → resampled → cleaned)"
             );
+            entry_ss = 0.0;
+            entry_n = 0;
             pre_ss = 0.0;
             pre_n = 0;
             post_ss = 0.0;
