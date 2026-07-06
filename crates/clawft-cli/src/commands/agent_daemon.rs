@@ -51,9 +51,13 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(750);
 /// falls back to the in-process loop).
 pub async fn detect() -> Option<DaemonClient> {
     // A probe timeout (Err) collapses to `None` — same as "no daemon".
-    tokio::time::timeout(PROBE_TIMEOUT, DaemonClient::connect())
+    let mut client = tokio::time::timeout(PROBE_TIMEOUT, DaemonClient::connect())
         .await
-        .unwrap_or_default()
+        .unwrap_or_default()?;
+    // Surface a stale-binary/daemon pairing before the session starts
+    // (once per process, non-fatal).
+    crate::commands::daemon_guard::warn_on_build_mismatch(&mut client).await;
+    Some(client)
 }
 
 /// Send one user turn through the daemon's `agent.chat` RPC.

@@ -11,6 +11,26 @@ pub use clawft_rpc::{Request, Response, log_path, pid_path, runtime_dir, socket_
 
 // ── Typed result structs ───────────────────────────────────
 
+/// Build provenance stamp reported by the running daemon (installer DX).
+///
+/// The daemon fills these from the git stamp baked into `weaver` at build
+/// time (see `crates/clawft-weave/build.rs`). The CLI compares `sha`
+/// against its own baked `BUILD_GIT_HASH` and warns on divergence, so a
+/// stale installed binary talking to a freshly-built daemon (or the
+/// reverse) is surfaced instead of silently misbehaving.
+///
+/// `Default` (all-empty) is what older daemons that predate this field
+/// deserialize to, via the `#[serde(default)]` on `KernelStatusResult`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BuildStamp {
+    /// Git short hash with an optional `-dirty` suffix (e.g. `14145f16-dirty`).
+    pub sha: String,
+    /// UTC build timestamp (e.g. `2026-07-05T17:20:00Z`).
+    pub timestamp: String,
+    /// Package version (e.g. `0.6.20`).
+    pub version: String,
+}
+
 /// Result of `kernel.status`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KernelStatusResult {
@@ -20,6 +40,11 @@ pub struct KernelStatusResult {
     pub service_count: usize,
     pub max_processes: u32,
     pub health_check_interval_secs: u64,
+    /// Build provenance of the running daemon. `#[serde(default)]` keeps
+    /// the wire format backward-compatible: responses from older daemons
+    /// (no `build` key) deserialize with an all-empty stamp.
+    #[serde(default)]
+    pub build: BuildStamp,
 }
 
 /// A single process entry for `kernel.ps`.

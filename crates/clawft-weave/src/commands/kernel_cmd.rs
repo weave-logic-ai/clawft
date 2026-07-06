@@ -354,6 +354,12 @@ fn print_daemon_status(result: &protocol::KernelStatusResult, pid: Option<u32>) 
     println!("Services:   {}", result.service_count);
     println!("Max procs:  {}", result.max_processes);
     println!("Health chk: {}s", result.health_check_interval_secs);
+    if !result.build.sha.is_empty() {
+        println!(
+            "Build:      {} ({} {})",
+            result.build.version, result.build.sha, result.build.timestamp
+        );
+    }
     println!("Socket:     {}", protocol::socket_path().display());
     println!("Log:        {}", protocol::log_path().display());
 

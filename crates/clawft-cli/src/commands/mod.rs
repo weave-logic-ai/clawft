@@ -15,6 +15,7 @@ pub mod assess_cmd;
 pub mod channels;
 pub mod config_cmd;
 pub mod cron;
+pub mod daemon_guard;
 pub mod gateway;
 pub mod help_cmd;
 #[cfg(feature = "services")]

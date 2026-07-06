@@ -14,12 +14,19 @@ use clap::{Parser, Subcommand};
 
 use clawft_weave::commands;
 
+/// Full version string (package version + git stamp), baked by `build.rs`.
+///
+/// Format: `0.6.20 (14145f16-dirty 2026-07-05T17:20Z)`. Surfaced via
+/// `weaver --version`; the daemon reports the same stamp over
+/// `kernel.status` so a stale binary/daemon pairing is caught.
+const BUILD_VERSION: &str = env!("BUILD_VERSION");
+
 /// WeftOS operator CLI.
 #[derive(Parser)]
 #[command(
     name = "weaver",
     about = "WeftOS operator CLI — kernel, agents, and system management",
-    version,
+    version = BUILD_VERSION,
     disable_help_subcommand = true
 )]
 struct Cli {

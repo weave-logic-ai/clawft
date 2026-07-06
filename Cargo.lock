@@ -1112,6 +1112,7 @@ dependencies = [
  "jsonwebtoken",
  "mockito",
  "reqwest 0.12.28",
+ "rustfft",
  "rustls-pki-types",
  "serde",
  "serde_json",

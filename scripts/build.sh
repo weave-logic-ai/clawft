@@ -22,6 +22,9 @@ FEATURES=""
 VERBOSE=false
 DRY_RUN=false
 FORCE=false
+DEBUG=false
+NO_FAIL_FAST=false
+PREFIX=""
 SERVE_PORT=""
 WASM_PANEL_MAX_RAW_KB=""
 WASM_PANEL_MAX_GZ_KB=""
@@ -142,6 +145,167 @@ cmd_native_debug() {
     timer_end
     report_binary_size "target/debug/weft" "Native binary (weft, debug)"
     report_binary_size "target/debug/weaver" "Native binary (weave, debug)"
+}
+
+# ── Build stamp env ─────────────────────────────────────────────────
+# Export GIT_SHA / GIT_DIRTY / BUILD_TS so the CLI + weaver build.rs bake
+# an authoritative, freshly-timestamped provenance stamp into the binary
+# (see crates/clawft-cli/build.rs and crates/clawft-weave/build.rs). A
+# fresh BUILD_TS each call also forces `cargo` to re-run those build
+# scripts (rerun-if-env-changed=BUILD_TS), so `install` always re-stamps.
+export_build_stamp() {
+    local sha dirty ts
+    sha="$(git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)"
+    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then dirty=1; else dirty=0; fi
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    export GIT_SHA="$sha"
+    export GIT_DIRTY="$dirty"
+    export BUILD_TS="$ts"
+    info "Build stamp: ${sha}$([ "$dirty" = 1 ] && echo '-dirty') @ ${ts}"
+}
+
+# List a binary's top-level subcommands, one per line, sorted. Best-effort:
+# empty output if the binary is missing or won't run (e.g. an unsigned
+# stale copy macOS SIGKILLs). Parses the clap `Commands:` help block.
+probe_subcommands() {
+    local bin="$1"
+    [ -x "$bin" ] || return 0
+    "$bin" --help 2>/dev/null \
+        | sed -n '/^Commands:/,/^$/p' \
+        | grep -E '^[[:space:]]+[a-z]' \
+        | awk '{print $1}' \
+        | sort -u
+}
+
+# Guard against silently stripping features on reinstall (WEFT-643).
+#
+# If the currently-installed binary answers to subcommands the freshly-built
+# one does not, this install would drop a feature the user relies on — the
+# exact `voice`-subcommand regression that motivated this guard. Refuse
+# (non-zero) so the caller aborts, unless --force. Fails open when the old
+# binary can't be probed (nothing to compare).
+check_feature_regression() {
+    local name="$1" new_bin="$2" installed="$3"
+    [ -x "$installed" ] || return 0
+    local old_cmds new_cmds dropped
+    old_cmds="$(probe_subcommands "$installed")"
+    new_cmds="$(probe_subcommands "$new_bin")"
+    [ -z "$old_cmds" ] && return 0
+    dropped="$(comm -23 <(printf '%s\n' "$old_cmds") <(printf '%s\n' "$new_cmds"))"
+    if [ -n "$dropped" ]; then
+        fail "install would DROP $name subcommand(s): $(echo $dropped | tr '\n' ' ')"
+        info "the installed $name exposes features this build omits."
+        info "re-run with the matching features (e.g. --features voice-onnx),"
+        info "or pass --force to install the reduced build anyway."
+        return 1
+    fi
+    return 0
+}
+
+# Atomically install a freshly-built binary into the destination directory.
+#
+# Copies to a temp file in the destination directory, then `mv` (same-fs
+# rename) swaps it into place — an atomic replace that also sidesteps the
+# ETXTBSY "text file busy" failure of overwriting a running binary.
+install_binary() {
+    local name="$1" src="$2" dst_dir="$3"
+    local dst="$dst_dir/$name"
+    if [ ! -f "$src" ]; then
+        fail "built binary missing: $src"
+        return 1
+    fi
+    if [ "$DRY_RUN" = true ]; then
+        printf "  ${YELLOW}DRY${NC}   install %s -> %s (atomic)\n" "$src" "$dst"
+        return 0
+    fi
+    local tmp="${dst}.new.$$"
+    if cp "$src" "$tmp" && chmod +x "$tmp" && mv -f "$tmp" "$dst"; then
+        # macOS SIGKILLs (Killed: 9) a freshly-replaced binary in ~/.cargo/bin
+        # — even with identical bytes and an otherwise-valid signature — until
+        # its code signature is refreshed against the new inode. Force an
+        # ad-hoc re-sign so the reinstalled binary actually runs; without this
+        # every reinstall produces a phantom "binary won't run". (WEFT-643)
+        if [ "$(uname -s)" = "Darwin" ] && command -v codesign >/dev/null 2>&1; then
+            if codesign --force -s - "$dst" 2>/dev/null; then
+                pass "installed $name -> $dst (re-signed ad-hoc)"
+            else
+                skip "installed $name -> $dst (ad-hoc re-sign failed — may not run)"
+            fi
+        else
+            pass "installed $name -> $dst"
+        fi
+    else
+        rm -f "$tmp" 2>/dev/null || true
+        fail "failed to install $name to $dst"
+        return 1
+    fi
+}
+
+# Build weft + weaver and install both to ~/.cargo/bin (WEFT installer DX).
+#
+# Fixes the stale-binary trap: a divergent installed binary silently drifts
+# from a fresh build. `install` rebuilds both bins with a fresh provenance
+# stamp and atomically replaces the installed copies, then prints the
+# installed versions so the stamp is visible. Release by default;
+# `install --debug` uses the debug profile for the fast-iteration path.
+#
+# Honors --features exactly like `native` / `native-debug`. This machine's
+# working configuration is `--features voice-onnx` (the `voice` subcommand
+# stack); installing without it strips voice, so a feature-regression guard
+# refuses to drop subcommands the installed binary already exposes unless
+# --force is given.
+#
+# --prefix DIR installs into DIR instead of ~/.cargo/bin — use it to verify
+# an install without disturbing the user's live binary.
+cmd_install() {
+    local profile
+    if [ "$DEBUG" = true ]; then profile="debug"; else profile="release"; fi
+    local bindir="${PREFIX:-${CARGO_HOME:-$HOME/.cargo}/bin}"
+    header "Installing weft + weaver to $bindir (profile: $profile)"
+
+    export_build_stamp
+
+    timer_start
+    local args=(cargo build --bin weft --bin weaver)
+    [ "$profile" = "release" ] && args+=(--profile release)
+    [ -n "$FEATURES" ] && args+=(--features "$FEATURES")
+    run_cmd "${args[@]}"
+    timer_end
+
+    local srcdir="target/$profile"
+
+    # Feature-regression guard: never silently strip subcommands the
+    # installed binary already has (the `voice` incident). --force overrides.
+    if [ "$FORCE" != true ] && [ "$DRY_RUN" != true ]; then
+        local regressed=0
+        check_feature_regression weft   "$srcdir/weft"   "$bindir/weft"   || regressed=1
+        check_feature_regression weaver "$srcdir/weaver" "$bindir/weaver" || regressed=1
+        if [ "$regressed" -gt 0 ]; then
+            fail "aborting install to avoid a feature downgrade (use --force to override)"
+            return 1
+        fi
+    fi
+
+    if [ "$DRY_RUN" != true ]; then
+        mkdir -p "$bindir"
+    fi
+
+    local failed=0
+    install_binary weft   "$srcdir/weft"   "$bindir" || failed=$((failed + 1))
+    install_binary weaver "$srcdir/weaver" "$bindir" || failed=$((failed + 1))
+
+    if [ "$failed" -gt 0 ]; then
+        fail "$failed binary install(s) failed"
+        return 1
+    fi
+
+    if [ "$DRY_RUN" != true ]; then
+        header "Installed versions"
+        info "weft:   $("$bindir/weft" --version 2>/dev/null || echo '??')"
+        info "weaver: $("$bindir/weaver" --version 2>/dev/null || echo '??')"
+        info "If a daemon is running, restart it: weaver kernel restart"
+    fi
+    pass "install complete"
 }
 
 # Build the native egui GUI binary (`weft-gui-egui`). Lives in
@@ -331,11 +495,18 @@ cmd_all() {
 # does not run doctests, so those get a separate `cargo test --doc` pass.
 # Falls back to plain `cargo test` when cargo-nextest isn't installed
 # (install: `curl -LsSf https://get.nexte.st/latest/mac | tar zxf - -C ~/.cargo/bin`).
+#
+# --no-fail-fast runs the whole suite even after a failure — needed for an
+# honest full-suite verdict on a dev box where a known-environmental failure
+# (e.g. the clawft-rpc no-daemon tests while a daemon is running) would
+# otherwise fail-fast and mask the remaining tests.
 workspace_test() {
+    local extra=()
+    [ "$NO_FAIL_FAST" = true ] && extra+=(--no-fail-fast)
     if command -v cargo-nextest >/dev/null 2>&1; then
-        cargo nextest run --workspace && cargo test --workspace --doc
+        cargo nextest run --workspace "${extra[@]}" && cargo test --workspace --doc "${extra[@]}"
     else
-        cargo test --workspace
+        cargo test --workspace "${extra[@]}"
     fi
 }
 
@@ -786,6 +957,14 @@ ${BOLD}Usage:${NC} scripts/build.sh <command> [options]
 ${BOLD}Commands:${NC}
   native          Build native CLI binary (release)
   native-debug    Build native CLI binary (debug, fast)
+  install         Build weft + weaver and install both to ~/.cargo/bin
+                  (atomic replace, ad-hoc re-sign on macOS, fresh git build
+                  stamp, prints versions). Release by default; --debug for
+                  the fast-iteration profile. Honors --features — this
+                  machine's working config is --features voice-onnx.
+                  Refuses to drop subcommands the installed binary has
+                  (--force overrides). --prefix DIR installs elsewhere (for
+                  verification). Restart the daemon afterward if running.
   gui-egui        Build native egui GUI binary (weft-gui-egui, requires --features native)
   wasi            Build WASM for WASI (wasm32-wasip2)
   browser         Build WASM for browser (wasm32-unknown-unknown)
@@ -820,13 +999,21 @@ ${BOLD}Commands:${NC}
 ${BOLD}Options:${NC}
   --features <f>  Extra features to enable (e.g. --features voice,channels)
   --profile <p>   Cargo profile: debug, release, release-wasm (default varies)
-  --force, -f     Force rebuild even if artifacts are up-to-date
+  --force, -f     Force rebuild even if artifacts are up-to-date; for
+                  install, override the feature-downgrade guard
+  --debug         Use the debug profile (install command)
+  --no-fail-fast  Keep running tests after a failure (test command) — full
+                  verdict when a known-environmental failure would fail-fast
+  --prefix <dir>  Install into <dir> instead of ~/.cargo/bin (install command)
   --verbose       Show full cargo output
   --dry-run       Print commands without executing
   --help          Show this help
 
 ${BOLD}Examples:${NC}
   scripts/build.sh native                          # Release CLI binary
+  scripts/build.sh install --features voice-onnx    # Install with voice (this machine)
+  scripts/build.sh install --debug                  # Fast-iteration install
+  scripts/build.sh install --prefix /tmp/wprefix    # Verify install off ~/.cargo/bin
   scripts/build.sh native --features voice          # CLI with voice
   scripts/build.sh gui-egui                         # Native egui GUI (release)
   scripts/build.sh gui-egui --profile debug         # Native egui GUI (debug)
@@ -881,6 +1068,18 @@ parse_args() {
                 FORCE=true
                 shift
                 ;;
+            --debug)
+                DEBUG=true
+                shift
+                ;;
+            --no-fail-fast)
+                NO_FAIL_FAST=true
+                shift
+                ;;
+            --prefix)
+                PREFIX="${2:?'--prefix requires a directory'}"
+                shift 2
+                ;;
             --verbose)
                 VERBOSE=true
                 shift
@@ -909,6 +1108,7 @@ main() {
     case "$COMMAND" in
         native)       cmd_native ;;
         native-debug) cmd_native_debug ;;
+        install)      cmd_install ;;
         gui-egui)     cmd_gui_egui ;;
         wasi)         cmd_wasi ;;
         browser)      cmd_browser ;;

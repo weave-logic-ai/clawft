@@ -1,28 +1,26 @@
-//! Build-time stamp emission for the `weaver` binary.
+//! Build-time stamp emission for the `weft` binary.
 //!
-//! Captures the current git short hash (+ `-dirty` flag) and a UTC build
-//! timestamp and exposes them to the crate via `env!("BUILD_GIT_HASH")`,
-//! `env!("BUILD_TIMESTAMP")`, and the composed `env!("BUILD_VERSION")`
-//! (`<pkg> (<hash> <ts>)`). `BUILD_GIT_HASH`/`BUILD_TIMESTAMP` feed the
-//! daemon's startup banner + `weaver version`; `BUILD_VERSION` is the
-//! `weaver --version` string and the daemon's `kernel.status` build stamp,
-//! so a stale binary talking to a fresh daemon is caught instead of
-//! silently misbehaving.
+//! Mirrors `crates/clawft-weave/build.rs` so `weft` and `weaver` carry the
+//! same provenance convention. Exposes the git short hash (+ `-dirty`), a
+//! UTC build timestamp, and the composed `BUILD_VERSION` (`<pkg> (<hash>
+//! <ts>)`) via `env!`:
+//!
+//! - `env!("BUILD_GIT_HASH")` — short hash, consumed by the daemon-mismatch
+//!   guard to compare against the daemon's stamp.
+//! - `env!("BUILD_TIMESTAMP")` — UTC compile time.
+//! - `env!("BUILD_VERSION")` — the `weft --version` string.
 //!
 //! `scripts/build.sh install` (and `native` / `native-debug`) export
 //! `GIT_SHA`, `GIT_DIRTY`, and `BUILD_TS` so the stamp is authoritative and
-//! re-stamped on every install (a fresh `BUILD_TS` each run forces the
-//! re-run below). A plain `cargo build` falls back to invoking `git`
-//! directly, and to `unknown` when git is unavailable (tarball / sandboxed
-//! CI). All failure modes are non-fatal.
+//! re-stamped on every install. A plain `cargo build` falls back to `git`,
+//! and to `unknown` when git is unavailable. All failure modes are
+//! non-fatal. The `--short=8` width and dirty logic match the weaver build
+//! script exactly so the two hashes are directly comparable at runtime.
 
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
-    // Re-run when HEAD/refs move (plain builds pick up commits) or when
-    // build.sh varies the stamping env (a fresh BUILD_TS each install
-    // forces a re-stamp).
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/refs");
     println!("cargo:rerun-if-env-changed=GIT_SHA");
@@ -35,9 +33,6 @@ fn main() {
     let ts = build_timestamp();
     println!("cargo:rustc-env=BUILD_TIMESTAMP={ts}");
 
-    // Composed version string used by clap `--version` and the daemon's
-    // build stamp. Keeps the package version front-and-centre with the
-    // provenance in parentheses: `0.6.20 (14145f16-dirty 2026-07-05T17:20Z)`.
     let pkg = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
     println!("cargo:rustc-env=BUILD_VERSION={pkg} ({hash_full} {ts})");
 }
@@ -55,9 +50,6 @@ fn is_truthy(v: &str) -> bool {
 }
 
 /// Resolve the short git hash with an optional `-dirty` suffix.
-///
-/// `GIT_SHA` / `GIT_DIRTY` env overrides (set by `scripts/build.sh`) win;
-/// otherwise falls back to `git`, and to `unknown` when git is unavailable.
 fn build_git_hash() -> String {
     let sha = env_override("GIT_SHA")
         .or_else(git_short_hash)
@@ -73,8 +65,8 @@ fn build_git_hash() -> String {
     }
 }
 
-/// Resolve the build timestamp: `BUILD_TS` env override (set by
-/// `scripts/build.sh`) wins; otherwise a UTC stamp of the compile time.
+/// Resolve the build timestamp: `BUILD_TS` env override wins; otherwise a
+/// UTC stamp of the compile time.
 fn build_timestamp() -> String {
     if let Some(ts) = env_override("BUILD_TS") {
         return ts;
@@ -113,8 +105,8 @@ fn git_is_dirty() -> Option<bool> {
     Some(!out.stdout.is_empty())
 }
 
-/// Convert unix-seconds to `YYYY-MM-DDTHH:MM:SSZ` UTC. Pure-stdlib so
-/// the build script doesn't grow chrono / time deps.
+/// Convert unix-seconds to `YYYY-MM-DDTHH:MM:SSZ` UTC. Pure-stdlib so the
+/// build script doesn't grow chrono / time deps.
 fn format_unix_secs(secs: u64) -> String {
     let days = secs / 86_400;
     let rem = secs % 86_400;

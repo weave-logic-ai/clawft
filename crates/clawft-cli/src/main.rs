@@ -18,12 +18,19 @@ pub mod interactive;
 mod markdown;
 mod mcp_tools;
 
+/// Full version string (package version + git stamp), baked by `build.rs`.
+///
+/// Format: `0.6.20 (14145f16-dirty 2026-07-05T17:20Z)`. Surfaced via
+/// `weft --version` so an installed binary reports exactly which tree
+/// produced it — the load-bearing signal for the daemon-mismatch guard.
+const BUILD_VERSION: &str = env!("BUILD_VERSION");
+
 /// clawft AI assistant CLI.
 #[derive(Parser)]
 #[command(
     name = "weft",
     about = "clawft AI assistant CLI",
-    version,
+    version = BUILD_VERSION,
     disable_help_subcommand = true
 )]
 struct Cli {
@@ -480,8 +487,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Voice(args) => commands::voice::handle_voice(args).await?,
         Commands::Help(args) => commands::help_cmd::run(args)?,
         Commands::Update => {
-            let version = env!("CARGO_PKG_VERSION");
-            println!("weft v{version}");
+            println!("weft v{BUILD_VERSION}");
             println!();
             // Check if weaver is available and delegate
             let weaver = std::process::Command::new("weaver")

@@ -40,6 +40,8 @@ pub async fn handle_watch(conv_id: String, json: bool, interval_ms: u64) -> anyh
              (and enable [kernel.agent.classification] mode = \"keyword\")"
         )
     })?;
+    // Warn once if this binary and the daemon were built from different trees.
+    super::daemon_guard::warn_on_build_mismatch(&mut client).await;
 
     if !json {
         println!(

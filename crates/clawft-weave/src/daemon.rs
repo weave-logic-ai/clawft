@@ -3993,6 +3993,14 @@ async fn dispatch(
                 service_count: k.services().len(),
                 max_processes: k.kernel_config().max_processes,
                 health_check_interval_secs: k.kernel_config().health_check_interval_secs,
+                // Build provenance baked into this `weaver` binary at compile
+                // time (crates/clawft-weave/build.rs). The CLI compares `sha`
+                // against its own stamp to catch stale binary/daemon pairings.
+                build: crate::protocol::BuildStamp {
+                    sha: env!("BUILD_GIT_HASH").to_owned(),
+                    timestamp: env!("BUILD_TIMESTAMP").to_owned(),
+                    version: env!("CARGO_PKG_VERSION").to_owned(),
+                },
             };
             Response::success(serde_json::to_value(result).unwrap())
         }
