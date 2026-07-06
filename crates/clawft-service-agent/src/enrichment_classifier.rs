@@ -51,7 +51,7 @@ You label one conversation turn for a graph view. Reply with JSON only:\n\
 \n\
 act — the dialogue move:\n\
   question: asks for info      clarification-request: asks the other to clarify\n\
-  clarification-provide: clarifies your own prior turn    command: asks for an action\n\
+  clarification-provide: clarifies your own prior turn    command: asks for an action (incl. \"you should/need to <verb>\" advice)\n\
   comment: asserts a fact      correction: fixes a prior turn\n\
   feedback: evaluates the assistant   acknowledgment: ok / got it / makes sense\n\
   social: greeting / thanks    meta: talks about the conversation itself\n\

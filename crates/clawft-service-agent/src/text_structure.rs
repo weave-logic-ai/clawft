@@ -392,6 +392,8 @@ mod tests {
     fn utterance_shape_flags() {
         let s = extract_structure("fix the bug and then run the tests", &[]);
         assert!(s.shape.multi_part);
+        // Live voice-session positive: sequenced request fires multi_part.
+        assert!(extract_structure("pull the config then restart the daemon", &[]).shape.multi_part);
         let s = extract_structure("if the build fails, revert", &[]);
         assert!(s.shape.conditional);
         let s = extract_structure("use that one like before", &[]);

@@ -214,9 +214,23 @@ const META_PHRASES: &[&str] = &[
     "reset",
 ];
 
-/// Evaluative feedback phrases → [`RefinedAct::Feedback`].
-const FEEDBACK_PHRASES: &[&str] = &[
+/// Second-person modal advice → [`RefinedAct::Command`]. Live voice-session
+/// calibration: "you should/need to <verb>" reads as a softened directive, not
+/// evaluative feedback (design §D2.1).
+const SECOND_PERSON_DIRECTIVE: &[&str] = &[
     "you should",
+    "you need to",
+    "you've got to",
+    "you have to",
+    "you gotta",
+    "you must",
+    "you ought to",
+];
+
+/// Evaluative feedback phrases → [`RefinedAct::Feedback`]. Note: second-person
+/// "you should <verb>" is a directive ([`SECOND_PERSON_DIRECTIVE`]); only the
+/// third-person "it should" and the praise lexicon stay feedback.
+const FEEDBACK_PHRASES: &[&str] = &[
     "it should",
     "that works",
     "that's good",
@@ -303,6 +317,11 @@ fn classify_refined(text: &str) -> RefinedAct {
     if ACK_CUES.contains(&first) || ACK_PHRASES.iter().any(|p| lower.contains(p)) {
         return RefinedAct::Acknowledgment;
     }
+    // Second-person modal advice ("you should X") is a softened command, checked
+    // before feedback so it lands as a directive (live-session calibration).
+    if SECOND_PERSON_DIRECTIVE.iter().any(|p| lower.contains(p)) {
+        return RefinedAct::Command;
+    }
     if FEEDBACK_PHRASES.iter().any(|p| lower.contains(p)) {
         return RefinedAct::Feedback;
     }
@@ -354,9 +373,31 @@ mod tests {
     #[test]
     fn correction_feedback_social_meta() {
         assert_eq!(act("no, that is wrong"), RefinedAct::Correction);
-        assert_eq!(act("you should use a HashMap"), RefinedAct::Feedback);
+        assert_eq!(act("looks good to me"), RefinedAct::Feedback);
+        assert_eq!(act("that works nicely"), RefinedAct::Feedback);
         assert_eq!(act("thanks so much"), RefinedAct::Social);
         assert_eq!(act("start over please"), RefinedAct::Meta);
+    }
+
+    #[test]
+    fn second_person_advice_is_command() {
+        // Live voice-session calibration: "you should <verb>" reads as a softened
+        // directive, not evaluative feedback.
+        assert_eq!(act("You should figure this out quickly."), RefinedAct::Command);
+        assert_eq!(act("you should use a HashMap"), RefinedAct::Command);
+        assert_eq!(act("you need to fix the parser"), RefinedAct::Command);
+        assert_eq!(act("you have to restart the daemon"), RefinedAct::Command);
+        assert_eq!(
+            classify_act("you should refactor this").class,
+            SpeechActClass::Directive
+        );
+    }
+
+    #[test]
+    fn disfluent_question_still_question() {
+        // Live calibration: disfluencies/false-starts don't break the '?'
+        // interrogative signal.
+        assert_eq!(act("That uh that what do you call it?"), RefinedAct::Question);
     }
 
     #[test]

@@ -163,10 +163,10 @@ gave us. Each maps deterministically up to a `class` and down to a v1 `intent`:
 | `question` | interrogative | question | `?` without a clarification cue |
 | `clarification-request` | interrogative | question | "what do you mean", "which one", "you mean …?", "to clarify …?" |
 | `clarification-provide` | assertive | statement | "i mean", "i meant", "in other words", "to be clear" |
-| `command` | directive | request | verb-initial imperative |
+| `command` | directive | request | verb-initial imperative; second-person advice ("you should / need to / have to `<verb>`") |
 | `comment` | assertive | statement | declarative default |
 | `correction` | assertive | correction | leading no / actually / wait, "that's wrong" |
-| `feedback` | expressive | feedback | "you should", praise lexicon |
+| `feedback` | expressive | feedback | praise / evaluation lexicon ("looks good", "lgtm", "it should") |
 | `acknowledgment` | expressive | social | "ok", "got it", "makes sense", "sounds good" |
 | `social` | expressive | social | greeting / thanks / farewell |
 | `meta` | directive | meta | "start over", "nevermind", "new topic" |
