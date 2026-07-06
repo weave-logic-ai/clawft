@@ -397,7 +397,7 @@ pub fn run_capture(
             .map(|&s| f64::from(s) * f64::from(s))
             .sum::<f64>();
         post_n += cleaned.len() as u64;
-        if last_rms_log.elapsed() >= std::time::Duration::from_secs(2)
+        if last_rms_log.elapsed() >= std::time::Duration::from_secs(1)
             && entry_n > 0
             && pre_n > 0
             && post_n > 0

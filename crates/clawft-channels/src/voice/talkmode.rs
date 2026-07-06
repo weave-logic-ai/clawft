@@ -736,7 +736,7 @@ impl<M: EndpointModel> TalkModeController<M> {
         // test-mic's speech level while the user is talking IS the smoking gun.
         if self
             .last_probe
-            .is_none_or(|t| t.elapsed() >= Duration::from_secs(2))
+            .is_none_or(|t| t.elapsed() >= Duration::from_secs(1))
         {
             self.last_probe = Some(Instant::now());
             info!(
