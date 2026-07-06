@@ -747,6 +747,7 @@ impl<M: EndpointModel> TalkModeController<M> {
             info!(
                 classify_dbfs = rms_dbfs,
                 floor_dbfs = self.noise_floor.floor_dbfs(),
+                gate_floor_dbfs = self.noise_floor.gate_floor_dbfs(),
                 voiceness = vscore,
                 voiceness_min = VOICENESS_MIN,
                 energy_voiced,
@@ -760,10 +761,10 @@ impl<M: EndpointModel> TalkModeController<M> {
         // every session's log shows the floor + onset the VAD is running with.
         if !self.armed_logged && self.noise_floor.calibrated() {
             self.armed_logged = true;
-            let floor = self.noise_floor.floor_dbfs();
             info!(
-                floor_dbfs = floor,
-                onset_dbfs = floor + VAD_NOISE_MARGIN_DB,
+                floor_dbfs = self.noise_floor.floor_dbfs(),
+                gate_floor_dbfs = self.noise_floor.gate_floor_dbfs(),
+                onset_dbfs = self.noise_floor.gate_floor_dbfs() + VAD_NOISE_MARGIN_DB,
                 voiceness_min = VOICENESS_MIN,
                 "voice gate armed"
             );

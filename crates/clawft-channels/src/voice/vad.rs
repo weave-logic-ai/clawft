@@ -188,7 +188,17 @@ impl EnergyVad {
 ///   micro-pauses, so continuous voicing that long means the floor is wrong).
 #[derive(Debug)]
 pub struct NoiseFloor {
+    /// Quiet-p10 noise floor — tracks the QUIETEST recent ambient (asymmetric,
+    /// fast-down). Kept for SNR reporting ([`floor_dbfs`](Self::floor_dbfs)).
     floor_dbfs: f32,
+    /// TYPICAL-ambient gate reference — a symmetric EMA that settles at the
+    /// room's median level, not its quietest. The onset/sustain gate is computed
+    /// from THIS, not `floor_dbfs`: the fast-down floor drifts below the room's
+    /// typical, dropping the gate under the room's own PEAKS so a finished
+    /// utterance's trailing room re-crosses onset / holds sustain until the
+    /// watchdog (the Wall-5 sustain caveat). Referencing the typical level keeps
+    /// room peaks below both thresholds by construction.
+    gate_floor_dbfs: f32,
     margin_db: f32,
     /// Whether startup calibration has completed (floor seeded from the first
     /// `CALIB_MS`). Until then `classify` buffers frames and reports non-voiced.
@@ -282,6 +292,12 @@ const WATCHDOG_WINDOW_MS: u32 = 5_000;
 /// tenth ≈ the true room tone even while the mean is dominated by speech).
 const WATCHDOG_PCT: usize = 10;
 
+/// Symmetric EMA rate for the typical-ambient gate reference: slow enough that a
+/// short utterance's frames barely move it, fast enough to settle at the room's
+/// median over a few seconds of genuine silence. Symmetric (unlike the quiet
+/// floor's fast-down) so it tracks the TYPICAL level, not the quietest.
+const GATE_LEARN_RATE: f32 = 0.05;
+
 impl NoiseFloor {
     /// `margin_db` is the strict onset margin over the tracked floor a frame
     /// must clear to START speech (8–10 dB at conversational distance); the
@@ -291,6 +307,7 @@ impl NoiseFloor {
         let sr = u64::from(sample_rate);
         Self {
             floor_dbfs: -100.0,
+            gate_floor_dbfs: -100.0,
             margin_db,
             calibrated: false,
             calib_frames: Vec::new(),
@@ -347,6 +364,10 @@ impl NoiseFloor {
             // tone even if speech contaminated the window), clamped to a physical
             // floor so a stray dead frame can't arm the onset absurdly low.
             self.floor_dbfs = percentile(&self.calib_frames, 20).clamp(FLOOR_MIN_DBFS, 0.0);
+            // Seed the gate reference from the SAME quiet p20 (contamination-safe
+            // — never from the p50, which speech in the window would poison); it
+            // learns UP to the typical ambient over the session.
+            self.gate_floor_dbfs = self.floor_dbfs;
             self.calibrated = true;
             if spread > CALIB_UNSTABLE_STDDEV_DB {
                 tracing::warn!(
@@ -365,22 +386,27 @@ impl NoiseFloor {
         // p10 of the recent window before this frame's gate decision so the very
         // frame that tripped the watchdog is re-judged against the true floor.
         if self.voiced_run_samples >= self.watchdog_samples {
-            let recalibrated = self.recent_percentile(WATCHDOG_PCT);
-            let old = self.floor_dbfs;
-            self.floor_dbfs = recalibrated;
+            let quiet = self.recent_percentile(WATCHDOG_PCT);
+            let typical = self.recent_percentile(50);
+            let old = self.gate_floor_dbfs;
+            self.floor_dbfs = quiet;
+            self.gate_floor_dbfs = typical.max(quiet);
             self.in_speech = false;
             self.hangover_remaining = 0;
             self.voiced_run_samples = 0;
             self.recalibrations = self.recalibrations.saturating_add(1);
             tracing::warn!(
-                old_floor_dbfs = old,
-                new_floor_dbfs = recalibrated,
-                "noise-floor watchdog: gate stuck open — recalibrated from quiet p10"
+                old_gate_floor_dbfs = old,
+                new_gate_floor_dbfs = self.gate_floor_dbfs,
+                new_floor_dbfs = quiet,
+                "noise-floor watchdog: gate stuck open — recalibrated to recent typical"
             );
         }
 
-        let onset = (self.floor_dbfs + self.margin_db).clamp(-100.0, 0.0);
-        let sustain = (self.floor_dbfs + self.margin_db * 0.5).clamp(-100.0, 0.0);
+        // Gate off the TYPICAL-ambient reference so room peaks stay below both
+        // thresholds (Wall-5 fix); the quiet floor is for SNR only.
+        let onset = (self.gate_floor_dbfs + self.margin_db).clamp(-100.0, 0.0);
+        let sustain = (self.gate_floor_dbfs + self.margin_db * 0.5).clamp(-100.0, 0.0);
         let gate = if self.in_speech { sustain } else { onset };
 
         if dbfs >= gate {
@@ -393,12 +419,17 @@ impl NoiseFloor {
             self.voiced_run_samples = self.voiced_run_samples.saturating_add(frame_len);
             true
         } else {
-            // Genuine silence: leave speech and LEARN the floor (asymmetric —
-            // fast toward quieter evidence, very slow upward for ambient drift).
+            // Genuine silence: leave speech and LEARN both trackers. The quiet
+            // floor is asymmetric (fast toward quieter evidence, very slow up) so
+            // it settles at the p10 for SNR; the gate reference is a SYMMETRIC EMA
+            // so it settles at the TYPICAL ambient. Keep the gate ref at or above
+            // the quiet floor (it can never read below the quietest).
             self.in_speech = false;
             self.voiced_run_samples = 0;
             let delta = dbfs - self.floor_dbfs;
             self.floor_dbfs += if delta < 0.0 { delta * 0.3 } else { delta * 0.02 };
+            self.gate_floor_dbfs += (dbfs - self.gate_floor_dbfs) * GATE_LEARN_RATE;
+            self.gate_floor_dbfs = self.gate_floor_dbfs.max(self.floor_dbfs);
             self.quiet_frames = self.quiet_frames.saturating_add(1);
             false
         }
@@ -427,14 +458,20 @@ impl NoiseFloor {
         vals[idx]
     }
 
-    /// Current voice threshold (`floor + margin`).
+    /// Current voice onset threshold (`gate_floor + margin`).
     pub fn threshold_dbfs(&self) -> f32 {
-        (self.floor_dbfs + self.margin_db).clamp(-100.0, 0.0)
+        (self.gate_floor_dbfs + self.margin_db).clamp(-100.0, 0.0)
     }
 
-    /// Current tracked floor.
+    /// Current tracked QUIET floor (p10) — the SNR reference.
     pub fn floor_dbfs(&self) -> f32 {
         self.floor_dbfs
+    }
+
+    /// Current TYPICAL-ambient gate reference — the onset/sustain are computed
+    /// from this (`gate_floor + margin` / `+ margin/2`).
+    pub fn gate_floor_dbfs(&self) -> f32 {
+        self.gate_floor_dbfs
     }
 
     /// How many times the stuck-open watchdog has force-recalibrated the floor
@@ -801,6 +838,42 @@ mod tests {
             }
         }
         assert!(closed, "gate closes on room tone after speech so the endpoint fires");
+    }
+
+    #[test]
+    fn gate_reference_tracks_typical_not_quiet_so_room_peaks_dont_sustain() {
+        // Wall-5 caveat (fix #2): the quiet floor (fast-down) drifts BELOW the
+        // room's typical level, which would drop the sustain gate under the room's
+        // peaks and hold a finished utterance open until the watchdog. The gate
+        // reference tracks the TYPICAL ambient instead, so room peaks stay below
+        // sustain and the gate closes. RED under the old floor-based gate.
+        let mut nf = NoiseFloor::new(10.0, 16_000);
+        for _ in 0..6 {
+            nf.classify(-47.0, F100); // calibrate at the typical room level
+        }
+        // Mostly-typical room with occasional quiet dips pulls the fast-down floor
+        // below typical; the gate reference should hold near -47.
+        for i in 0..60 {
+            let d = if i % 6 == 0 { -55.0 } else { -47.0 };
+            nf.classify(d, F100);
+        }
+        let quiet = nf.floor_dbfs();
+        let gate = nf.gate_floor_dbfs();
+        assert!(
+            quiet < gate - 2.0,
+            "quiet floor must drift below the gate ref: quiet {quiet} gate {gate}"
+        );
+        assert!((gate - (-47.0)).abs() < 3.0, "gate ref stays near typical, got {gate}");
+        // Speech opens the gate; a trailing room PEAK (-44, above the quiet floor's
+        // sustain but below the typical-referenced sustain) must CLOSE it.
+        assert!(nf.classify(-20.0, F100), "speech opens the gate");
+        let mut closed = false;
+        for _ in 0..10 {
+            if !nf.classify(-44.0, F100) {
+                closed = true;
+            }
+        }
+        assert!(closed, "room peak below the typical-referenced sustain closes the gate");
     }
 
     #[test]
