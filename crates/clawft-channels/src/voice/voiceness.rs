@@ -41,11 +41,24 @@ const FFT_SIZE: usize = 2048;
 const SPEECH_LO_HZ: f32 = 300.0;
 const SPEECH_HI_HZ: f32 = 3400.0;
 
+/// Samples analysed per score — a rolling window of the most recent audio
+/// (~32 ms at 16 kHz). The live capture path delivers small, variable frames
+/// (~80–160 samples per 5 ms drain), FAR shorter than a usable analysis frame;
+/// scoring each in isolation with a fixed window crushed them to near-silence
+/// (the round-9 deafness bug). Accumulating into this rolling buffer makes the
+/// score independent of how the stream is chunked.
+const ANALYSIS_SAMPLES: usize = 512;
+
+/// Below this many buffered samples the spectral estimate is meaningless; return
+/// a passing score so the warm-up (≤ one frame) can't deafen the gate.
+const MIN_ANALYSIS_SAMPLES: usize = 64;
+
 /// Model-free voiceness via the speech-band energy ratio.
 pub struct SpectralVoiceness {
     fft: std::sync::Arc<dyn rustfft::Fft<f32>>,
-    /// Precomputed Hann window over `FFT_SIZE`.
-    window: Vec<f32>,
+    /// Rolling buffer of the most recent normalized samples across `score`
+    /// calls, so tiny capture frames accumulate into a real analysis window.
+    recent: std::sync::Mutex<std::collections::VecDeque<f32>>,
 }
 
 impl std::fmt::Debug for SpectralVoiceness {
@@ -61,18 +74,15 @@ impl Default for SpectralVoiceness {
 }
 
 impl SpectralVoiceness {
-    /// Build the scorer (plans the FFT and the Hann window once).
+    /// Build the scorer (plans the FFT once).
     pub fn new() -> Self {
         let fft = rustfft::FftPlanner::<f32>::new().plan_fft_forward(FFT_SIZE);
-        // Periodic Hann window — reduces spectral leakage so the band ratio
-        // reflects real energy distribution, not sinc side-lobes.
-        let window = (0..FFT_SIZE)
-            .map(|n| {
-                let x = std::f32::consts::PI * n as f32 / FFT_SIZE as f32;
-                x.sin().powi(2)
-            })
-            .collect();
-        Self { fft, window }
+        Self {
+            fft,
+            recent: std::sync::Mutex::new(std::collections::VecDeque::with_capacity(
+                ANALYSIS_SAMPLES,
+            )),
+        }
     }
 }
 
@@ -82,11 +92,30 @@ impl Voiceness for SpectralVoiceness {
         if frame.is_empty() || sample_rate == 0 {
             return 0.0;
         }
-        // Window + zero-pad into the FFT buffer.
+        // Append this frame to the rolling buffer, keeping the most recent
+        // ANALYSIS_SAMPLES; then snapshot into the FFT input under the lock.
         let mut buf = vec![Complex::<f32>::new(0.0, 0.0); FFT_SIZE];
-        let n = frame.len().min(FFT_SIZE);
-        for i in 0..n {
-            buf[i].re = (frame[i] as f32 / 32_768.0) * self.window[i];
+        let n;
+        {
+            let mut recent = self.recent.lock().expect("voiceness buffer poisoned");
+            for &s in frame {
+                recent.push_back(f32::from(s) / 32_768.0);
+            }
+            while recent.len() > ANALYSIS_SAMPLES {
+                recent.pop_front();
+            }
+            n = recent.len();
+            if n < MIN_ANALYSIS_SAMPLES {
+                return 1.0; // warm-up: not enough audio to judge — don't block
+            }
+            // Periodic Hann sized to the ACTUAL sample count (not FFT_SIZE) so a
+            // short window isn't multiplied by a mismatched window's near-zero
+            // head — the crux of the round-9 fix.
+            let denom = n as f32;
+            for (i, &s) in recent.iter().enumerate() {
+                let w = (std::f32::consts::PI * i as f32 / denom).sin().powi(2);
+                buf[i].re = s * w;
+            }
         }
         self.fft.process(&mut buf);
 
@@ -201,6 +230,40 @@ mod tests {
     fn empty_and_silent_score_zero() {
         let v = SpectralVoiceness::new();
         assert_eq!(v.score(&[], SR), 0.0);
+        // Silence needs enough buffered samples to be judged (not warm-up).
+        for _ in 0..8 {
+            v.score(&[0i16; 1_600], SR);
+        }
         assert_eq!(v.score(&[0i16; 1_600], SR), 0.0);
+    }
+
+    #[test]
+    fn small_frames_still_score_speech_high() {
+        // The round-9 deafness bug: live capture delivers ~80-sample frames, and
+        // a fixed 2048-window crushed them to ~0 so speech scored low and every
+        // onset was blocked. The rolling buffer must accumulate small frames so
+        // speech still scores high regardless of chunking.
+        let v = SpectralVoiceness::new();
+        let full = speechlike(1_600, 6_000.0);
+        let mut last = 0.0;
+        for chunk in full.chunks(80) {
+            last = v.score(chunk, SR);
+        }
+        assert!(
+            last > 0.7,
+            "speech fed as 80-sample frames must still score high, got {last}"
+        );
+    }
+
+    #[test]
+    fn small_frames_noise_still_scores_low() {
+        // The small-frame fix must not also start passing broadband noise.
+        let v = SpectralVoiceness::new();
+        let full = broadband(1_600, 6_000.0, 5);
+        let mut last = 1.0;
+        for chunk in full.chunks(80) {
+            last = v.score(chunk, SR);
+        }
+        assert!(last < 0.5, "broadband in small frames stays low, got {last}");
     }
 }

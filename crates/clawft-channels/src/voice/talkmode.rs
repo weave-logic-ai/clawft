@@ -712,26 +712,25 @@ impl<M: EndpointModel> TalkModeController<M> {
         // (no fixed dBFS floor) so a quiet mic still voices — the frozen floor
         // stays honest instead of chasing quiet speech up and gating it out.
         let energy_voiced = self.noise_floor.classify(rms_dbfs, frame.len() as u64);
-        // Voiceness AND-gate. At the relaxed 4 dB margin the energy gate alone
-        // would admit broadband room tone; require spectral voiceness to START a
-        // run, but sustain on energy hysteresis alone so unvoiced consonants
-        // aren't punched out (their broadband attack scores low, and pre-roll
-        // recovers a fricative that led the onset).
-        let mut vscore = -1.0f32; // -1 = not scored (sustaining or silent)
+        // Score voiceness on EVERY frame so its rolling analysis buffer stays
+        // warm: the live path delivers tiny (~80–160 sample) frames, and a cold
+        // or stale buffer at onset would misjudge. The score is only USED to
+        // gate the onset — require spectral voiceness (not just energy at the
+        // relaxed 4 dB margin) to START a run so broadband room tone stays out;
+        // once voiced, sustain on the energy hysteresis alone so unvoiced
+        // consonants aren't punched out (they score low, and pre-roll recovers a
+        // fricative that led the onset).
+        let vscore = self.voiceness.score(frame, self.config.sample_rate);
         let voiced = if self.voiced_run {
             energy_voiced
-        } else if energy_voiced {
-            vscore = self.voiceness.score(frame, self.config.sample_rate);
-            vscore >= VOICENESS_MIN
         } else {
-            false
+            energy_voiced && vscore >= VOICENESS_MIN
         };
         self.voiced_run = voiced;
-        // Diagnostic: when the energy gate opens, log what voiceness decided —
-        // this is what reveals a listen path where energy sees speech but the
-        // spectral gate rejects it (e.g. resampled mic speech scoring low).
-        // Throttled so it can't flood at the frame rate.
-        if vscore >= 0.0 {
+        // Diagnostic: when the energy gate is open, log what voiceness decided —
+        // reveals a listen path where energy sees speech but the spectral gate
+        // rejects it. Throttled so it can't flood at the frame rate.
+        if energy_voiced {
             self.dbg_frames = self.dbg_frames.wrapping_add(1);
             if self.dbg_frames % 10 == 1 {
                 debug!(

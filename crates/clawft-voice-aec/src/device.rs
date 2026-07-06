@@ -371,7 +371,18 @@ pub fn run_capture(
             .collect();
         pre_ss += mic.iter().map(|&s| f64::from(s) * f64::from(s)).sum::<f64>();
         pre_n += mic.len() as u64;
-        let cleaned = aec.lock().unwrap().process_capture(&mic);
+        let cleaned = {
+            let mut guard = aec.lock().unwrap();
+            if guard.is_active() {
+                guard.process_capture(&mic)
+            } else {
+                // No real echo canceller (passthrough / listen-only bypass):
+                // skip the 16k→48k→16k APM round-trip entirely and forward the
+                // mic straight through. Removes a pointless resample stage and a
+                // suspect from the listen-vs-test-mic delta.
+                mic
+            }
+        };
         post_ss += cleaned
             .iter()
             .map(|&s| f64::from(s) * f64::from(s))
