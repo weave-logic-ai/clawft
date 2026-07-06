@@ -44,6 +44,7 @@
 pub mod enrich_queue;
 pub mod dialogue_act;
 pub mod enrichment_classifier;
+pub mod interrupt_router;
 pub mod kernel_gate;
 pub mod protocol;
 pub mod service;
@@ -62,6 +63,7 @@ pub use enrichment_classifier::{
     parse_enrichment_envelope, EnrichmentClassifier, DEFAULT_ENRICHMENT_MAX_TOKENS,
     ENRICHMENT_SYSTEM_PROMPT,
 };
+pub use interrupt_router::{InterruptAction, InterruptRouter, InterruptSignals};
 pub use kernel_gate::KernelEffectGate;
 pub use text_structure::{Argument, EntityKind, EntitySpan, Structure, UtteranceShape};
 pub use protocol::{AgentChatMessage, AgentChatParams, AgentChatResult, AgentChatToolCall};
