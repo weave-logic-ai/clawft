@@ -203,8 +203,19 @@ impl RecordingObserver {
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 fn voiced_frame() -> Vec<i16> {
+    // In-band harmonic tone (fundamental + low harmonics + a formant), loud
+    // enough to clear the energy gate and concentrated in 300–3400 Hz so it
+    // also clears the spectral voiceness AND-gate. A plain Nyquist tone would
+    // pass energy but score ~0 on voiceness (out of the speech band).
+    use std::f32::consts::TAU;
+    const SR: f32 = 16_000.0;
+    let partials = [180.0f32, 360.0, 540.0, 900.0, 1400.0];
     (0..1_600)
-        .map(|i| if i % 2 == 0 { 8_000 } else { -8_000 })
+        .map(|i| {
+            let t = i as f32 / SR;
+            let s: f32 = partials.iter().map(|&f| (TAU * f * t).sin()).sum();
+            (s / partials.len() as f32 * 20_000.0) as i16
+        })
         .collect()
 }
 fn silent_frame() -> Vec<i16> {
@@ -235,6 +246,19 @@ async fn calibrate(tx: &mpsc::Sender<Vec<i16>>) {
     for _ in 0..6 {
         tx.send(room_tone_frame()).await.unwrap();
     }
+}
+/// Loud broadband-noise frame (~-14 dBFS) — energy well ABOVE the onset gate but
+/// spectrally flat, so the spectral voiceness AND-gate must reject it. This is
+/// the round-8 case energy-only VAD false-fires on. Deterministic LCG.
+fn noise_frame(seed: u32) -> Vec<i16> {
+    let mut state = seed.wrapping_mul(2_654_435_761).max(1);
+    (0..1_600)
+        .map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let u = (state >> 8) as f32 / (1u32 << 24) as f32; // [0,1)
+            ((u - 0.5) * 2.0 * 6_000.0) as i16
+        })
+        .collect()
 }
 
 fn endpointer() -> SemanticEndpointer<HeuristicEndpoint> {
@@ -936,4 +960,67 @@ async fn talk_mode_no_self_id_is_unknown_without_pollution() {
         .expect("user turn recorded");
     assert_eq!(va.speaker.action, SpeakerAction::Unknown);
     assert!(va.speaker.id.is_none());
+}
+
+#[tokio::test]
+async fn loud_broadband_noise_produces_no_turn() {
+    // Round-8 end-to-end: broadband room tone LOUDER than the onset gate (energy
+    // VAD would false-fire and finalize junk turns) must produce NO utterance —
+    // the spectral voiceness AND-gate rejects it because it isn't voice-shaped.
+    let recorded = Arc::new(AtomicUsize::new(0));
+    let observer = Arc::new(RecordingObserver::default());
+    let sink = Arc::new(RecordingSink::default());
+    let audio = Arc::new(CountingAudio::default());
+    let tts = DualLayerTts::new(
+        Arc::new(ImmediateEngine(TtsTier::Fast)),
+        Arc::new(ImmediateEngine(TtsTier::Slow)),
+    )
+    .unwrap();
+
+    let mut ctrl = TalkModeController::new(
+        endpointer(),
+        Arc::new(LenRecordingStt(recorded.clone())),
+        Some(Arc::new(MockEmbedder)),
+        SpeakerRegistry::new(0.45),
+        VoiceAnswerPolicy::default(),
+        Arc::new(MockLlm("unused")),
+        tts,
+        sink.clone(),
+        audio.clone(),
+        observer.clone() as Arc<dyn ConversationObserver>,
+        TalkModeConfig {
+            listen_only: true,
+            ..Default::default()
+        },
+    );
+
+    let (tx, rx) = mpsc::channel::<Vec<i16>>(64);
+    let cancel = CancellationToken::new();
+    let run_cancel = cancel.clone();
+    let handle = tokio::spawn(async move { ctrl.run(rx, run_cancel).await });
+
+    calibrate(&tx).await;
+    // A second of loud broadband noise, then silence — well above the energy
+    // gate the whole time.
+    for i in 0..10 {
+        tx.send(noise_frame(i + 1)).await.unwrap();
+    }
+    for _ in 0..9 {
+        tx.send(silent_frame()).await.unwrap();
+    }
+    // Give the loop time to process; there is nothing to wait FOR (the point is
+    // that no turn ever fires), so drain deterministically then assert.
+    cancel.cancel();
+    drop(tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+
+    assert_eq!(
+        recorded.load(Ordering::SeqCst),
+        0,
+        "broadband noise above the energy gate must not reach STT"
+    );
+    assert!(
+        !observer.has(|e| matches!(e, ConversationEvent::UserTurn { .. })),
+        "broadband noise must not finalize a user turn"
+    );
 }

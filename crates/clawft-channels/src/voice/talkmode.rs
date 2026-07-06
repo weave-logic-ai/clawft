@@ -49,11 +49,24 @@ use super::stt::{SttBackend, Utterance};
 use super::tts::{DualLayerTts, TtsSink};
 use super::turn::{EndpointModel, EndpointSnapshot, SemanticEndpointer, TurnDecision};
 use super::vad::{EnergyVad, NoiseFloor};
+use super::voiceness::{SpectralVoiceness, Voiceness};
 
 /// How far above the tracked room-tone floor a frame must sit to count as
-/// voice. 8 dB keeps conversational speech (typically 15–25 dB above room
-/// tone) comfortably inside while HVAC/fan drift stays out.
-const VAD_NOISE_MARGIN_DB: f32 = 8.0;
+/// voice. Relaxed to 4 dB (from 8) so quiet speech only ~5 dB over a hot room
+/// floor still clears the ONSET gate — the spectral voiceness AND-gate
+/// ([`Voiceness`](super::voiceness::Voiceness)) is what now keeps broadband
+/// room tone out at this lower margin, a job energy alone cannot do at ~5 dB
+/// SNR. The Schmitt-trigger sustain (`margin/2`) and 400 ms hangover are
+/// unchanged.
+const VAD_NOISE_MARGIN_DB: f32 = 4.0;
+
+/// Minimum spectral speech-band ratio a frame must show to START an utterance.
+/// Broadband room tone scores ~its bandwidth fraction (~0.4); voiced speech
+/// scores ~0.8–0.95, and stays above this even mixed with noise a few dB below
+/// it. Applied only at onset — once voiced, the energy hysteresis/hangover
+/// sustains through unvoiced consonants (fricatives are broadband and would
+/// score low), and pre-roll recovers a fricative that preceded the onset.
+const VOICENESS_MIN: f32 = 0.5;
 
 /// Minimum voiced audio (ms) for a finalized turn to reach STT. Shorter
 /// captures are noise blips or playback reverb tails, not words.
@@ -606,6 +619,14 @@ pub struct TalkModeController<M: EndpointModel> {
     /// silence-based endpointer (observed live: -37 dBFS room vs the
     /// -45 dBFS fixed default — turns never finalized).
     noise_floor: NoiseFloor,
+    /// Spectral voiceness gate — the "voice vs broadband noise" decision the
+    /// energy floor can't make at ~5 dB SNR. AND-ed with the energy gate at
+    /// utterance onset (see [`level`](Self::level)).
+    voiceness: Arc<dyn Voiceness>,
+    /// Whether we're mid-voiced-run: at onset both energy AND voiceness must
+    /// agree; while sustaining, the energy hysteresis/hangover alone holds the
+    /// gate so unvoiced consonants aren't punched out.
+    voiced_run: bool,
 }
 
 impl<M: EndpointModel> TalkModeController<M> {
@@ -646,7 +667,17 @@ impl<M: EndpointModel> TalkModeController<M> {
             config,
             decoder,
             noise_floor: NoiseFloor::new(VAD_NOISE_MARGIN_DB, config_sr),
+            voiceness: Arc::new(SpectralVoiceness::new()),
+            voiced_run: false,
         }
+    }
+
+    /// Inject a voiceness backend (the [`Voiceness`] seam). Defaults to the
+    /// model-free [`SpectralVoiceness`]; a Silero-VAD ONNX backend overrides it
+    /// once the model is staged, without touching the energy floor/watchdog.
+    pub fn with_voiceness(mut self, voiceness: Arc<dyn Voiceness>) -> Self {
+        self.voiceness = voiceness;
+        self
     }
 
     /// Inject a speech-emotion model (§W1.2 SER seam). By default the
@@ -672,7 +703,20 @@ impl<M: EndpointModel> TalkModeController<M> {
         // Schmitt-trigger + hangover + floor-freeze gate. Purely floor-relative
         // (no fixed dBFS floor) so a quiet mic still voices — the frozen floor
         // stays honest instead of chasing quiet speech up and gating it out.
-        let voiced = self.noise_floor.classify(rms_dbfs, frame.len() as u64);
+        let energy_voiced = self.noise_floor.classify(rms_dbfs, frame.len() as u64);
+        // Voiceness AND-gate. At the relaxed 4 dB margin the energy gate alone
+        // would admit broadband room tone; require spectral voiceness to START a
+        // run, but sustain on energy hysteresis alone so unvoiced consonants
+        // aren't punched out (their broadband attack scores low, and pre-roll
+        // recovers a fricative that led the onset).
+        let voiced = if self.voiced_run {
+            energy_voiced
+        } else if energy_voiced {
+            self.voiceness.score(frame, self.config.sample_rate) >= VOICENESS_MIN
+        } else {
+            false
+        };
+        self.voiced_run = voiced;
         (voiced, rms_dbfs, self.noise_floor.floor_dbfs())
     }
 

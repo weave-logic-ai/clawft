@@ -223,8 +223,11 @@ async fn handle_test_mic(duration: u32) -> anyhow::Result<()> {
     use clawft_voice_talk::NoiseFloor;
 
     /// Talk-Mode's adaptive-gate onset margin over the tracked floor
-    /// (`VAD_NOISE_MARGIN_DB` in clawft-channels::voice::talkmode).
-    const VAD_NOISE_MARGIN_DB: f32 = 8.0;
+    /// (`VAD_NOISE_MARGIN_DB` in clawft-channels::voice::talkmode). Kept in sync:
+    /// the live gate also AND-gates spectral voiceness, so a window here reading
+    /// over-threshold on energy alone may still be silence at the mic if it's
+    /// broadband — the summary line notes that.
+    const VAD_NOISE_MARGIN_DB: f32 = 4.0;
 
     println!("Input devices:");
     for name in list_input_devices() {

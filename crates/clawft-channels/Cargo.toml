@@ -34,7 +34,7 @@ teams = ["dep:axum", "dep:jsonwebtoken"]
 # default `voice` build uses fake audio sources so CI passes without
 # alsa / CoreAudio / WASAPI dev headers; `voice-real-audio` opts cpal
 # in; `real-audio-test` enables the cpal-touching tests too.
-voice = []
+voice = ["dep:rustfft"]
 voice-real-audio = ["voice", "dep:cpal"]
 real-audio-test = ["voice-real-audio"]
 
@@ -75,6 +75,8 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"
 webpki-roots = { version = "1.0", optional = true }
 rustls-pki-types = { version = "1", optional = true }
 cpal = { version = "0.15", optional = true }
+# Voice-only: per-frame speech-band spectral voiceness gate (VAD at low SNR).
+rustfft = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

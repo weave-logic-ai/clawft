@@ -51,6 +51,7 @@ pub mod tts;
 pub mod turn;
 pub mod types;
 pub mod vad;
+pub mod voiceness;
 pub mod wav;
 
 pub use analysis::{
@@ -82,3 +83,4 @@ pub use tts::{
 pub use turn::{EndpointModel, HeuristicEndpoint, SemanticEndpointer, TurnDecision};
 pub use types::{VoiceAdapterConfig, VoiceError};
 pub use vad::{EnergyVad, VadEvent};
+pub use voiceness::{SpectralVoiceness, Voiceness};
