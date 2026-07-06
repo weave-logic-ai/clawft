@@ -200,6 +200,9 @@ pub struct NoiseFloor {
     /// room peaks below both thresholds by construction.
     gate_floor_dbfs: f32,
     margin_db: f32,
+    /// Capture sample rate — frames the gate-reference learning by frame
+    /// duration so its time constant is frame-size independent.
+    sample_rate: u32,
     /// Whether startup calibration has completed (floor seeded from the first
     /// `CALIB_MS`). Until then `classify` buffers frames and reports non-voiced.
     calibrated: bool,
@@ -292,11 +295,15 @@ const WATCHDOG_WINDOW_MS: u32 = 5_000;
 /// tenth ≈ the true room tone even while the mean is dominated by speech).
 const WATCHDOG_PCT: usize = 10;
 
-/// Symmetric EMA rate for the typical-ambient gate reference: slow enough that a
-/// short utterance's frames barely move it, fast enough to settle at the room's
-/// median over a few seconds of genuine silence. Symmetric (unlike the quiet
-/// floor's fast-down) so it tracks the TYPICAL level, not the quietest.
-const GATE_LEARN_RATE: f32 = 0.05;
+/// Time constant (seconds) for the typical-ambient gate reference to settle
+/// (~63%). Learned from ANY below-onset frame (see `classify`), FRAME-RATE
+/// INDEPENDENT (scaled by frame duration), so ~1 s of ambient lifts it whether
+/// capture delivers 10 ms or 100 ms frames — the fix#2-regression was the
+/// reference frozen while the room held the gate, and a per-frame rate that only
+/// settled at one frame size. ~1 s: fast enough that a room-held gate closes in a
+/// couple seconds, slow enough that a brief mid-utterance ambient dip barely
+/// moves it.
+const GATE_TIME_CONSTANT_S: f32 = 1.0;
 
 impl NoiseFloor {
     /// `margin_db` is the strict onset margin over the tracked floor a frame
@@ -309,6 +316,7 @@ impl NoiseFloor {
             floor_dbfs: -100.0,
             gate_floor_dbfs: -100.0,
             margin_db,
+            sample_rate: sample_rate.max(1),
             calibrated: false,
             calib_frames: Vec::new(),
             calib_samples: 0,
@@ -409,6 +417,20 @@ impl NoiseFloor {
         let sustain = (self.gate_floor_dbfs + self.margin_db * 0.5).clamp(-100.0, 0.0);
         let gate = if self.in_speech { sustain } else { onset };
 
+        // Learn the gate reference from ANY below-onset (ambient) frame — even one
+        // currently HOLDING the gate open via sustain/hangover. Freezing it during
+        // a room-held gate is what let the room keep the gate open for the full
+        // 15 s watchdog window (the fix#2 regression); keeping it learning lifts
+        // sustain above the room within ~1 s so the gate closes. Real speech
+        // (above onset) leaves it frozen. Scaled by frame duration → the ~1 s time
+        // constant holds whether capture delivers 10 ms or 100 ms frames.
+        if dbfs < onset {
+            let alpha = (frame_len as f32 / self.sample_rate as f32 / GATE_TIME_CONSTANT_S)
+                .clamp(0.0, 1.0);
+            self.gate_floor_dbfs += (dbfs - self.gate_floor_dbfs) * alpha;
+            self.gate_floor_dbfs = self.gate_floor_dbfs.max(self.floor_dbfs);
+        }
+
         if dbfs >= gate {
             self.in_speech = true;
             self.hangover_remaining = self.hangover_samples;
@@ -419,17 +441,13 @@ impl NoiseFloor {
             self.voiced_run_samples = self.voiced_run_samples.saturating_add(frame_len);
             true
         } else {
-            // Genuine silence: leave speech and LEARN both trackers. The quiet
-            // floor is asymmetric (fast toward quieter evidence, very slow up) so
-            // it settles at the p10 for SNR; the gate reference is a SYMMETRIC EMA
-            // so it settles at the TYPICAL ambient. Keep the gate ref at or above
-            // the quiet floor (it can never read below the quietest).
+            // Genuine silence: the quiet floor learns here (asymmetric — fast
+            // toward quieter evidence, very slow up, settling at the p10 for SNR);
+            // the gate reference already learned above from this below-onset frame.
             self.in_speech = false;
             self.voiced_run_samples = 0;
             let delta = dbfs - self.floor_dbfs;
             self.floor_dbfs += if delta < 0.0 { delta * 0.3 } else { delta * 0.02 };
-            self.gate_floor_dbfs += (dbfs - self.gate_floor_dbfs) * GATE_LEARN_RATE;
-            self.gate_floor_dbfs = self.gate_floor_dbfs.max(self.floor_dbfs);
             self.quiet_frames = self.quiet_frames.saturating_add(1);
             false
         }
@@ -874,6 +892,35 @@ mod tests {
             }
         }
         assert!(closed, "room peak below the typical-referenced sustain closes the gate");
+    }
+
+    #[test]
+    fn room_held_gate_closes_within_seconds_via_learning_not_watchdog() {
+        // fix#2-regression (Wall-5 time constant): when the room HOLDS the gate
+        // open via sustain, the gate reference must keep learning UP (below-onset
+        // ambient, not speech) so sustain rises above the room and the gate CLOSES
+        // within a couple seconds — NOT frozen until the 15 s watchdog (which
+        // merged two say sentences across a 7 s gap into one turn). RED under the
+        // learn-only-in-genuine-silence behaviour.
+        let mut nf = NoiseFloor::new(10.0, 16_000);
+        for _ in 0..6 {
+            nf.classify(-50.0, F100); // calibrate LOW (quiet p10 -50)
+        }
+        assert!((nf.gate_floor_dbfs() - (-50.0)).abs() < 1.0, "gate ref seeds at the quiet floor");
+        assert!(nf.classify(-20.0, F100), "speech opens the gate");
+        // The room at its TYPICAL -42 now HOLDS the gate via sustain (gate_floor+5
+        // = -45; -42 > -45). The reference must rise and the gate close well before
+        // the 15 s watchdog.
+        let mut closed_at = None;
+        for i in 0..40 {
+            if !nf.classify(-42.0, F100) {
+                closed_at = Some(i);
+                break;
+            }
+        }
+        let closed = closed_at.expect("a room-held gate must close via learning within the window");
+        assert!(closed < 30, "gate closed in {closed} frames (~{}s), not the 15 s watchdog", closed / 10);
+        assert_eq!(nf.recalibrations(), 0, "closed via the gate ref rising, not the watchdog");
     }
 
     #[test]
