@@ -399,3 +399,57 @@ async fn end_conversation_no_tier_is_noop() {
     // No tier attached → end_conversation is a clean no-op.
     assert!(svc.end_conversation("whatever", Some("fact")).is_none());
 }
+
+#[tokio::test]
+async fn cancel_of_in_flight_turn_does_not_kill_the_queued_resubmit() {
+    // Wave 2 §W2.4 live shape: dispatch A is in flight; dispatch B (the
+    // amendment resubmit) clones the conv token and queues on the conv lock;
+    // cancel() kills A (which re-arms the map token on its way out). B's
+    // LOCAL clone is the tripped token — the stale-clone re-read must adopt
+    // the re-armed map token so the steer actually generates.
+    let release = Arc::new(Notify::new());
+    let stub = Arc::new(StubHandle::new(Arc::clone(&release)));
+    let svc = Arc::new(AgentService::new(Arc::clone(&stub)));
+
+    // A: enters handle_turn and blocks on `release`.
+    let svc_a = Arc::clone(&svc);
+    let a = tokio::spawn(async move { svc_a.dispatch(params_for("c-steer", "essay")).await });
+    let deadline = std::time::Instant::now() + Duration::from_millis(200);
+    while stub.in_progress.load(Ordering::Acquire) == 0 {
+        if std::time::Instant::now() > deadline {
+            panic!("A never entered handle_turn");
+        }
+        tokio::task::yield_now().await;
+    }
+
+    // B: clones the (soon-to-be-tripped) token, then queues on the conv lock.
+    let svc_b = Arc::clone(&svc);
+    let b = tokio::spawn(async move { svc_b.dispatch(params_for("c-steer", "amendment")).await });
+    // Give B a beat to pass token-clone and block on the lock.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // The executor's cancel: A dies, re-arming the map token.
+    svc.cancel("c-steer");
+    match a.await.unwrap() {
+        Err(AgentServiceError::Cancelled(id)) => assert_eq!(id, "c-steer"),
+        other => panic!("expected A cancelled, got {other:?}"),
+    }
+
+    // B must RUN (not die on its stale clone). Keep releasing the stub until
+    // B finishes — B enters handle_turn only after acquiring the conv lock.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !b.is_finished() {
+        if std::time::Instant::now() > deadline {
+            panic!("B never finished — stale token killed the resubmit?");
+        }
+        release.notify_waiters();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    match b.await.unwrap() {
+        Ok(result) => assert!(
+            result.assistant_text.contains("amendment"),
+            "{result:?}"
+        ),
+        other => panic!("expected B to generate the steer, got {other:?}"),
+    }
+}

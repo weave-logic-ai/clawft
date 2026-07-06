@@ -317,6 +317,24 @@ impl<H: AgentLoopHandle> AgentService<H> {
             return Err(AgentServiceError::ShuttingDown);
         }
 
+        // Stale-clone check (Wave 2 §W2.4): the interrupt executor cancels the
+        // in-flight turn and immediately resubmits the amendment; the resubmit
+        // cloned the conv's token ABOVE, then queued on the lock while the
+        // cancelled turn unwound. The dying dispatch re-arms the MAP on its
+        // way out, so only our local clone is stale — re-read the map and
+        // adopt the current token. When the map still holds the tripped token
+        // (a `cancel()` pre-armed on an idle conv, racing the next
+        // `agent.chat`), the re-read returns that same token and this dispatch
+        // is still cancelled — the C2-spike-parity semantics stay pinned.
+        let cancel = if cancel.is_cancelled() {
+            self.cancel_tokens
+                .entry(conv_id.clone())
+                .or_default()
+                .clone()
+        } else {
+            cancel
+        };
+
         // Bump in-flight only once we've actually committed to
         // running the loop. The drop-guard rolls it back.
         let _flight = InFlightGuard::new(Arc::clone(&self.in_flight), Arc::clone(&self.drain));
