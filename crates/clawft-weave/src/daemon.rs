@@ -225,6 +225,14 @@ fn daemon_turn_sink() -> Option<Arc<dyn clawft_core::agent::sink::ConversationSi
 /// `TalkModeLoop::end_conversation`. Set once at boot alongside `DAEMON_AGENT`.
 static DAEMON_TALK_LOOP: OnceLock<Arc<clawft_kernel::TalkModeLoop>> = OnceLock::new();
 
+/// Voice Wave 2 §W2.1: the non-blocking voice→agent loop router. Set at boot
+/// ONLY when `[kernel.agent].voice_loop` is on and its `talk_loop`
+/// prerequisite holds — its presence IS the gate the `agent.turn.record` arm
+/// consults before routing recorded user turns through the interrupt brain.
+static DAEMON_VOICE_LOOP: OnceLock<
+    Arc<crate::voice_loop::VoiceLoop<clawft_core::agent::loop_core::AgentLoop<NativePlatform>>>,
+> = OnceLock::new();
+
 /// Phase B (classification-design §D4): the bounded async-enrichment queue and
 /// its cheap-model classifier, wired at boot only when
 /// `[kernel.agent.classification] mode = full`. `index_turn` (via the session
@@ -1624,6 +1632,30 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
         // OnceLock set — mirrors the A2ARouter gate late-wiring. Without this the
         // spawner can't dispatch child conversations.
         subagent_spawner.set_service(Arc::downgrade(&service));
+        // Voice Wave 2 §W2.1: wire the register-early/commit-late reply
+        // submitter + the interrupt-routing loop. Gated on `voice_loop` with
+        // the `talk_loop` prerequisite (busy state + forest closures ride the
+        // hosted loop) — inert with a warning otherwise, mirroring the
+        // talk_loop validation precedent.
+        if anchor_cfg.voice_loop {
+            if anchor_cfg.talk_loop && anchor_cfg.anchor_chain && anchor_cfg.anchor_causal {
+                service.set_reply_submitter(Arc::new(
+                    crate::voice_loop::DaemonReplySubmitter::new(Arc::downgrade(&service)),
+                ));
+                let _ = DAEMON_VOICE_LOOP.set(Arc::new(crate::voice_loop::VoiceLoop::new(
+                    Arc::downgrade(&service),
+                )));
+                info!(
+                    "voice loop wired (§W2.1): recorded user turns route through the \
+                     interrupt router; idle turns generate text replies off-path"
+                );
+            } else {
+                warn!(
+                    "[kernel.agent] voice_loop=true requires talk_loop + anchor_chain + \
+                     anchor_causal; voice loop is inert"
+                );
+            }
+        }
         let _ = DAEMON_AGENT.set(service);
         info!("agent service wired (agent.chat dispatches through clawft-service-agent)");
         info!("subagent spawner wired (agent_spawn dispatches child conversations)");
@@ -4997,6 +5029,14 @@ async fn dispatch(
                      (agent service did not boot — check daemon log)",
                 );
             };
+            // Voice Wave 2 §W2.1: capture the busy state BEFORE recording —
+            // anchoring registers every turn with the talk loop, so a read
+            // after `append_turn` would see the just-recorded user turn, not
+            // the in-flight reply the router decides against.
+            let in_flight_before = DAEMON_VOICE_LOOP
+                .get()
+                .and_then(|_| DAEMON_TALK_LOOP.get())
+                .and_then(|l| l.current_turn(&p.conv_id));
             let mut recorded = 0usize;
             for t in &p.turns {
                 let turn = clawft_core::agent::sink::Turn {
@@ -5033,6 +5073,23 @@ async fn dispatch(
             // idle reaper just like agent.chat.
             if let Some(activity) = DAEMON_CONV_ACTIVITY.get() {
                 activity.insert(p.conv_id.clone(), std::time::Instant::now());
+            }
+            // Voice Wave 2 §W2.1: route each recorded USER utterance through
+            // the interrupt brain (idle → off-path text reply; busy → STOP/
+            // Refine/Backchannel/Queue against the in-flight turn). Presence
+            // of DAEMON_VOICE_LOOP is the `[kernel.agent].voice_loop` gate.
+            // Never fails the record — the turns above are already durable.
+            if let Some(voice_loop) = DAEMON_VOICE_LOOP.get() {
+                for t in p.turns.iter().filter(|t| t.role == "user") {
+                    voice_loop
+                        .route_user_turn(
+                            &p.conv_id,
+                            &t.content,
+                            t.voice_analysis.as_ref(),
+                            in_flight_before,
+                        )
+                        .await;
+                }
             }
             match serde_json::to_value(crate::protocol::AgentTurnRecordResult { recorded }) {
                 Ok(v) => Response::success(v),

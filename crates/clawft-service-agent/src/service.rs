@@ -186,6 +186,12 @@ impl<H: AgentLoopHandle> AgentService<H> {
         let _ = self.reply_submitter.set(submitter);
     }
 
+    /// The wired §W2.1 [`ReplySubmitter`], if any — the voice loop's idle-turn
+    /// path dispatches replies through the same submitter the Refine arm uses.
+    pub fn reply_submitter(&self) -> Option<Arc<dyn ReplySubmitter>> {
+        self.reply_submitter.get().cloned()
+    }
+
     /// Attach the L2 [`SessionTier`] so [`Self::end_conversation`] can drive
     /// conversation-end promotion (ADR-058 Phase 5 deferred step 4). Pass the
     /// same `Arc<SessionTier>` the agent loop grafts from and the turn anchor

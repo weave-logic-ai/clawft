@@ -856,7 +856,12 @@ impl<P: Platform> AgentLoop<P> {
         //     durable store. Errors are logged and swallowed: a sink write
         //     hiccup must never abort the LLM turn (design §6, degrade
         //     don't crash); the next turn simply hydrates without it.
-        self.sink_append_plain(&conv_id, "user", &msg.content).await;
+        //     Skipped when the caller already recorded it (voice §W2.1: the
+        //     turn landed via `agent.turn.record` WITH its voice decomposition
+        //     — a second plain append would double it on the sink + forest).
+        if !Self::user_turn_already_recorded(&msg) {
+            self.sink_append_plain(&conv_id, "user", &msg.content).await;
+        }
 
         // 4. Context messages are already pipeline::traits::LlmMessage (B2 unification).
         let mut messages: Vec<LlmMessage> = context_messages;
@@ -1223,7 +1228,9 @@ impl<P: Platform> AgentLoop<P> {
             let body = format!(
                 "Delegation refused: maximum recursive delegation depth ({cap}) reached at hop {next_depth}. Override via CLAWFT_DELEGATION_DEPTH if intentional."
             );
-            self.sink_append_plain(&conv_id, "user", &msg.content).await;
+            if !Self::user_turn_already_recorded(msg) {
+                self.sink_append_plain(&conv_id, "user", &msg.content).await;
+            }
             self.sink_append_plain(&conv_id, "assistant", &body).await;
             return Ok(OutboundMessage {
                 channel: msg.channel.clone(),
@@ -1241,8 +1248,11 @@ impl<P: Platform> AgentLoop<P> {
             obj.insert(DELEGATION_DEPTH_KEY.into(), serde_json::json!(next_depth));
         }
 
-        // Record the user turn to the sink for history.
-        self.sink_append_plain(&conv_id, "user", &msg.content).await;
+        // Record the user turn to the sink for history (unless the caller
+        // already did — see `user_turn_already_recorded`).
+        if !Self::user_turn_already_recorded(msg) {
+            self.sink_append_plain(&conv_id, "user", &msg.content).await;
+        }
 
         // Resolve auth context for permission checks.
         let auth = self.resolve_auth_context(msg);
@@ -1371,6 +1381,18 @@ impl<P: Platform> AgentLoop<P> {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         format!("turn-{ts}-{seq:08x}", ts = Self::now_ms(), seq = seq)
+    }
+
+    /// True when the caller already persisted this user turn to the sink
+    /// (metadata `user_turn_recorded = true`). The voice §W2.1 loop records
+    /// the user turn via `agent.turn.record` first (carrying the Wave-1
+    /// `voice_analysis` decomposition the plain append here would drop), then
+    /// dispatches with this flag so the turn isn't recorded twice.
+    fn user_turn_already_recorded(msg: &InboundMessage) -> bool {
+        msg.metadata
+            .get("user_turn_recorded")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
     }
 
     /// Append a plain (no tool metadata) role turn to the conversation

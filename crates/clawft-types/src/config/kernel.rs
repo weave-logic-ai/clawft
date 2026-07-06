@@ -288,6 +288,22 @@ pub struct AgentAnchorConfig {
     )]
     pub talk_loop_idle_secs: Option<u64>,
 
+    /// Voice Wave 2 §W2.1: the non-blocking voice→agent loop. When true, a
+    /// `user` turn recorded via `agent.turn.record` is routed through the
+    /// interrupt router: idle ⇒ a text reply is generated (`agent.chat`
+    /// through the daemon service, capture never blocks on it); busy ⇒ the
+    /// utterance is classified as STOP / Refine / Backchannel / Queue and
+    /// executed against the in-flight turn (cancel→prune→witness,
+    /// cancel-and-resubmit-with-amendment + `Contradicts`).
+    ///
+    /// Structurally requires [`talk_loop`] (busy-state + forest closures ride
+    /// the loop); the daemon treats this as inert and logs a warning when the
+    /// prerequisites are off, mirroring the `talk_loop` precedent.
+    ///
+    /// [`talk_loop`]: Self::talk_loop
+    #[serde(default, alias = "voiceLoop")]
+    pub voice_loop: bool,
+
     /// Agent-initiated subagent spawning (M4 D1/D5). Maps 1:1 onto
     /// `clawft_service_agent::SubagentConfig`, which the daemon builds from
     /// this block at agent-service boot. Absent ⇒ the defaults below (spawning

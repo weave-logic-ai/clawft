@@ -493,6 +493,133 @@ impl SessionTier {
         true
     }
 
+    /// Wave 2 §W2.1: register an in-flight reply attempt — the
+    /// register-early half of the register-early/commit-late reply path.
+    ///
+    /// Mints a chain seq by witnessing `agent.reply.register`, dual-writes an
+    /// `assistant` attempt node onto the forest with the original goal stashed
+    /// at `metadata["goal"]` (what [`Self::goal_for`] reads), and registers it
+    /// with the talk loop so it becomes `conv_id`'s in-flight turn — the
+    /// durable busy state the interrupt router keys on. Deliberately does NOT
+    /// emit the `EndOfUtterance` commit impulse (unlike [`Self::index_turn`]):
+    /// the node stays Frontier until [`Self::commit_reply_frontier`] (normal
+    /// finalize) or a STOP/Refine prune tombstones it.
+    ///
+    /// Returns the minted chain seq, or `None` when the forest or talk loop is
+    /// not attached (no busy state to maintain — the caller just dispatches).
+    pub fn register_reply_frontier(&self, conv_id: &str, goal_text: &str) -> Option<u64> {
+        let forest = self.forest.as_ref()?;
+        let talk_loop = self.talk_loop.get()?;
+        let event = self.chain.append(
+            "agent",
+            "agent.reply.register",
+            Some(serde_json::json!({ "conv_id": conv_id, "goal": goal_text })),
+        );
+        let chain_seq = event.sequence;
+        let conv_forest = self.conv_forest(conv_id);
+        let node = session_forest::dual_write_turn(
+            &forest.causal,
+            &forest.crossrefs,
+            &conv_forest,
+            conv_id,
+            chain_seq,
+            "assistant",
+            goal_text,
+            DEFAULT_TURN_COHERENCE,
+            None,
+            None,
+            Some(goal_text),
+            None,
+        );
+        // Stash the goal on the node itself so `goal_for` reconstructs
+        // "original goal + amendment" without a lineage walk. `kind` marks the
+        // node as a reply ATTEMPT (distinct from a committed reply-text turn)
+        // for the §W2.6 surface.
+        let mut patch = serde_json::Map::new();
+        patch.insert(
+            "goal".into(),
+            serde_json::Value::String(goal_text.to_string()),
+        );
+        patch.insert("kind".into(), serde_json::Value::String("reply-attempt".into()));
+        forest.causal.merge_node_metadata(node, &patch);
+        let uid = session_forest::turn_universal_id(conv_id, chain_seq, goal_text);
+        talk_loop.register_turn(chain_seq, node, uid, conv_id);
+        Some(chain_seq)
+    }
+
+    /// Wave 2 §W2.1: commit a previously-registered reply attempt — the
+    /// commit-late half. Emits the attempt's `EndOfUtterance` so the loop's
+    /// next tick transitions it Frontier→Committed (identical impulse shape to
+    /// [`Self::index_turn`]'s). Call on generation-finalize; a cancelled
+    /// attempt is instead pruned by the interrupt executor and must NOT be
+    /// committed. No-op without a talk loop.
+    pub fn commit_reply_frontier(&self, conv_id: &str, chain_seq: u64) {
+        let Some(talk_loop) = self.talk_loop.get() else {
+            return;
+        };
+        let tag = StructureTag::CausalGraph.as_u8();
+        talk_loop.impulses().emit(
+            tag,
+            [0u8; 32],
+            tag,
+            ImpulseType::EndOfUtterance,
+            serde_json::json!({ "chain_seq": chain_seq, "conv_id": conv_id }),
+            chain_seq,
+        );
+    }
+
+    /// Wave 2 §W2.1: project a finalized utterance into the
+    /// [`InterruptSignals`] the router decides on, from the same sources
+    /// `index_turn` classifies with. `busy` is supplied by the caller (read
+    /// from `talk_loop::current_turn` BEFORE the utterance was recorded —
+    /// recording registers the user turn and overwrites the in-flight read).
+    ///
+    /// - `intent` — the keyword dialogue-act classifier (always available).
+    /// - `is_backchannel` — the Wave-1 wire decomposition's
+    ///   `paralinguistics.class == "backchannel_candidate"`.
+    /// - `is_short` — ≤ 3 words (a short `Social` while busy is
+    ///   backchannel-grade).
+    /// - `topically_continuous` — the turn classifier's continuity carry: the
+    ///   utterance classifies to the conversation's current topic. `false`
+    ///   when classification is off (conservative — an unknowable Request
+    ///   queues rather than steering a cancel).
+    pub fn project_interrupt_signals(
+        &self,
+        conv_id: &str,
+        text: &str,
+        voice_analysis: Option<&serde_json::Value>,
+        busy: bool,
+    ) -> crate::interrupt_router::InterruptSignals {
+        let intent = crate::dialogue_act::classify_act(text).intent();
+        let is_backchannel = voice_analysis
+            .and_then(|va| va.get("paralinguistics"))
+            .and_then(|p| p.get("class"))
+            .and_then(|c| c.as_str())
+            .is_some_and(|c| c == "backchannel_candidate");
+        let is_short = text.split_whitespace().count() <= 3;
+        let topically_continuous = match (&self.classifier, &self.forest) {
+            (Some(classifier), Some(_)) => {
+                let conv_forest = self.conv_forest(conv_id);
+                let prev_topic = conv_forest.last_topic();
+                match prev_topic {
+                    Some(prev) => {
+                        classifier.classify("user", text, Some(prev.as_str())).topic == prev
+                    }
+                    None => false,
+                }
+            }
+            _ => false,
+        };
+        crate::interrupt_router::InterruptSignals {
+            text: text.to_string(),
+            intent,
+            is_backchannel,
+            is_short,
+            busy,
+            topically_continuous,
+        }
+    }
+
     /// Wave 2 §W2.3: read the goal text stashed on a turn node's metadata under
     /// `"goal"` (the §W2.1 reply submitter writes it at register time). Lets the
     /// Refine executor reconstruct "original goal + amendment" from the pruned
@@ -653,3 +780,7 @@ impl ViewResolver for WeakTierResolver {
 #[cfg(test)]
 #[path = "session_tier_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "session_tier_wave2_tests.rs"]
+mod wave2_tests;

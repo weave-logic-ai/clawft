@@ -22,4 +22,5 @@ pub mod protocol;
 pub mod rvf_codec;
 #[cfg(feature = "rvf-rpc")]
 pub mod rvf_rpc;
+pub mod voice_loop;
 pub mod voice_router;
