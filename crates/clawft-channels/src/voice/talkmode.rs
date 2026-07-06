@@ -739,6 +739,8 @@ impl<M: EndpointModel> TalkModeController<M> {
             .is_none_or(|t| t.elapsed() >= Duration::from_secs(1))
         {
             self.last_probe = Some(Instant::now());
+            let voiced_run_ms = self.noise_floor.voiced_run_samples() * 1_000
+                / u64::from(self.config.sample_rate.max(1));
             info!(
                 classify_dbfs = rms_dbfs,
                 floor_dbfs = self.noise_floor.floor_dbfs(),
@@ -746,6 +748,8 @@ impl<M: EndpointModel> TalkModeController<M> {
                 voiceness_min = VOICENESS_MIN,
                 energy_voiced,
                 voiced,
+                voiced_run_ms,
+                watchdog_recals = self.noise_floor.recalibrations(),
                 "voice gate input probe"
             );
         }

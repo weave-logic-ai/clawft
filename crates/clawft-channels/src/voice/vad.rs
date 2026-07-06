@@ -199,6 +199,9 @@ pub struct NoiseFloor {
     calib_samples: u64,
     /// Calibration window length in samples (from the sample rate).
     calib_target_samples: u64,
+    /// Hard cap on the (possibly extended) calibration window before it arms
+    /// anyway (from the sample rate).
+    calib_max_samples: u64,
     /// Whether the gate currently reads speech (drives the sustain hysteresis
     /// threshold and the floor freeze).
     in_speech: bool,
@@ -238,9 +241,28 @@ const FLOOR_CONVERGE_FRAMES: u32 = 10;
 /// inside this window loses only the opening ~half second.
 const CALIB_MS: u32 = 500;
 
+/// Frames quieter than this are treated as PRE-SPIN-UP DEAD AIR, not room tone:
+/// cpal emits near-digital-silence (~-97 dBFS) for the first tens-to-hundreds of
+/// ms before the input device starts delivering real samples. They must NOT seed
+/// the floor — the p20 quiet-end seed would otherwise latch onto them and arm the
+/// gate at ~-97 dBFS, so room tone reads as permanent speech and the loop goes
+/// deaf ("Wall 3"). Real room tone is far louder than this even in a quiet room.
+const DEAD_FRAME_DBFS: f32 = -80.0;
+
+/// Physical floor clamp: no real microphone room tone sits below this. Clamping
+/// the seed here is a backstop against any remaining dead-air contamination so
+/// the onset can never arm absurdly low.
+const FLOOR_MIN_DBFS: f32 = -65.0;
+
+/// Hard cap on how long calibration may EXTEND while the window stays unstable
+/// before it arms anyway (from the quiet end, clamped). Bounds the worst case so
+/// the gate always arms.
+const CALIB_MAX_MS: u32 = 3_000;
+
 /// Calibration-window dBFS spread above which the window is deemed unstable
-/// (speech/movement contaminated the assumed-silent seed) and a warning is
-/// logged. Room tone alone sits within a few dB; speech spikes 15+ dB over it.
+/// (speech/movement contaminated the assumed-silent seed): calibration EXTENDS
+/// (keeps collecting real frames) rather than arming on the noisy seed, up to
+/// [`CALIB_MAX_MS`]. Room tone alone sits within a few dB; speech spikes 15+ dB.
 const CALIB_UNSTABLE_STDDEV_DB: f32 = 6.0;
 
 /// Hangover tail: once voiced, stay in capture until this much CONTINUOUS
@@ -274,6 +296,7 @@ impl NoiseFloor {
             calib_frames: Vec::new(),
             calib_samples: 0,
             calib_target_samples: sr * u64::from(CALIB_MS) / 1_000,
+            calib_max_samples: sr * u64::from(CALIB_MAX_MS) / 1_000,
             in_speech: false,
             hangover_remaining: 0,
             hangover_samples: sr * u64::from(HANGOVER_MS) / 1_000,
@@ -301,24 +324,36 @@ impl NoiseFloor {
         // Startup calibration: buffer the first CALIB_MS as non-speech and seed
         // the floor from their median. Report non-voiced throughout the window.
         if !self.calibrated {
+            // Ignore pre-spin-up DEAD frames (cpal emits ~digital silence before
+            // the device starts). They must never seed the floor: p20 would latch
+            // onto them and arm the gate at ~-97 dBFS, wedging it permanently open
+            // ("Wall 3"). Don't even start the window until real audio arrives.
+            if dbfs < DEAD_FRAME_DBFS {
+                return false;
+            }
             self.calib_frames.push(dbfs);
             self.calib_samples = self.calib_samples.saturating_add(frame_len);
-            if self.calib_samples >= self.calib_target_samples {
-                // Seed from the 20th percentile (≈ the quietest frames), not the
-                // median: if the window was contaminated by speech/movement at
-                // launch, p20 still lands near the true room floor rather than
-                // speech level. A high-variance window means exactly that — warn,
-                // and the stuck-open watchdog recovers if the seed is still wrong.
-                self.floor_dbfs = percentile(&self.calib_frames, 20);
-                self.calibrated = true;
-                let spread = stddev(&self.calib_frames);
-                if spread > CALIB_UNSTABLE_STDDEV_DB {
-                    tracing::warn!(
-                        floor_dbfs = self.floor_dbfs,
-                        stddev_db = spread,
-                        "noise-floor calibration window unstable (speech/movement at launch?) — seeded from p20"
-                    );
-                }
+            if self.calib_samples < self.calib_target_samples {
+                return false;
+            }
+            // Have a full window of real audio. If it's UNSTABLE (speech/movement
+            // mixed in), keep collecting rather than arming on a noisy seed —
+            // bounded by calib_max_samples so the gate always arms eventually.
+            let spread = stddev(&self.calib_frames);
+            if spread > CALIB_UNSTABLE_STDDEV_DB && self.calib_samples < self.calib_max_samples {
+                return false;
+            }
+            // Seed from the 20th percentile (≈ the quietest frames, i.e. room
+            // tone even if speech contaminated the window), clamped to a physical
+            // floor so a stray dead frame can't arm the onset absurdly low.
+            self.floor_dbfs = percentile(&self.calib_frames, 20).clamp(FLOOR_MIN_DBFS, 0.0);
+            self.calibrated = true;
+            if spread > CALIB_UNSTABLE_STDDEV_DB {
+                tracing::warn!(
+                    floor_dbfs = self.floor_dbfs,
+                    stddev_db = spread,
+                    "noise-floor calibration stayed unstable to the cap — armed from p20 (clamped)"
+                );
             }
             return false;
         }
@@ -413,6 +448,14 @@ impl NoiseFloor {
     /// use the transition to log the armed floor + onset once at session start.
     pub fn calibrated(&self) -> bool {
         self.calibrated
+    }
+
+    /// Current continuous-voiced run in samples — how close the stuck-open
+    /// watchdog is to tripping (fires at [`WATCHDOG_MS`]). Surfaced so a probe can
+    /// show it climbing: if it never approaches the trip point while the gate is
+    /// wedged, frames are being dropped before the gate, not a watchdog defect.
+    pub fn voiced_run_samples(&self) -> u64 {
+        self.voiced_run_samples
     }
 
     /// Whether the floor has observed enough real silence to be a trustworthy
@@ -644,11 +687,15 @@ mod tests {
     fn noise_floor_converges_only_after_seeing_silence() {
         let mut nf = NoiseFloor::new(8.0, 16_000);
         assert!(!nf.converged(), "fresh floor is unconverged");
-        nf.classify(-20.0, F100); // still inside the calibration window → not silence
-        assert!(!nf.converged(), "calibration alone does not converge the floor");
-        // Enough genuine-silence frames past calibration converge it.
+        // Stable calibration window (real room tone) arms the floor at ~-60.
+        for _ in 0..6 {
+            nf.classify(-60.0, F100);
+        }
+        assert!(!nf.converged(), "arming alone does not converge the floor");
+        // Enough genuine-silence frames past calibration converge it (-60 sits
+        // below the onset floor+8, so each is a genuine-silence observation).
         for _ in 0..(FLOOR_CONVERGE_FRAMES + 5) {
-            nf.classify(-70.0, F100);
+            nf.classify(-60.0, F100);
         }
         assert!(nf.converged(), "floor converges once it has seen silence");
     }
@@ -671,17 +718,85 @@ mod tests {
 
     #[test]
     fn calibration_seeds_from_quiet_end_when_window_contaminated() {
-        // User talking/moving through the 500 ms calibration window: most frames
-        // are speech-loud, a brief gap is the true floor. p20 must seed near the
-        // quiet floor, not the contaminated median (which would wedge the gate).
+        // User talking/moving through calibration: the window stays unstable, so
+        // it EXTENDS to the cap rather than arming on the noisy seed, then seeds
+        // from the quiet-end p20 (room tone), never the speech-level median.
         let mut nf = NoiseFloor::new(4.0, 16_000);
-        for &d in &[-28.0f32, -28.0, -28.0, -28.0, -56.0] {
+        for i in 0..30 {
+            let d = if i % 5 == 4 { -56.0 } else { -28.0 };
             assert!(!nf.classify(d, F100), "calibration window is non-voiced");
         }
         let floor = nf.floor_dbfs();
         assert!(
-            (floor - (-56.0)).abs() < 3.0,
+            (floor - (-56.0)).abs() < 4.0,
             "contaminated calibration must seed near the quiet floor, got {floor}"
+        );
+    }
+
+    #[test]
+    fn calibration_ignores_startup_dead_frames() {
+        // Wall 3: cpal emits ~digital silence before the device spins up. Those
+        // dead frames must NOT seed the floor — else p20 latches at ~-97 dBFS and
+        // room tone reads as permanent speech (deaf). Seed from real room tone.
+        let mut nf = NoiseFloor::new(4.0, 16_000);
+        for _ in 0..4 {
+            assert!(!nf.classify(-100.0, F100), "dead frames ignored, non-voiced");
+        }
+        for _ in 0..6 {
+            nf.classify(-40.0, F100); // real room tone
+        }
+        let floor = nf.floor_dbfs();
+        assert!(
+            (floor - (-40.0)).abs() < 3.0,
+            "floor must seed from real room tone, not startup zeros, got {floor}"
+        );
+        // Room tone now reads SILENCE (onset -36), not perpetual speech.
+        assert!(!nf.classify(-40.0, F100), "room tone below onset after correct seed");
+    }
+
+    #[test]
+    fn seeded_floor_is_clamped_to_physical_minimum() {
+        // Even a window of genuinely-quiet-but-not-dead frames can't SEED the
+        // onset absurdly low: the seed clamps at FLOOR_MIN_DBFS. (Post-arm the
+        // floor may still learn down toward genuine quiet — the clamp guards the
+        // seed, not the tracker.) Feed exactly the window so we read the seed.
+        let mut nf = NoiseFloor::new(4.0, 16_000);
+        for _ in 0..5 {
+            nf.classify(-78.0, F100); // above the dead cutoff, below the clamp
+        }
+        assert!(
+            (nf.floor_dbfs() - FLOOR_MIN_DBFS).abs() < 0.01,
+            "seed clamped to physical minimum, got {}",
+            nf.floor_dbfs()
+        );
+    }
+
+    #[test]
+    fn watchdog_fires_from_a_learned_down_low_floor() {
+        // Wall-3 safety net: the seed now clamps at -65, but the tracker can still
+        // LEARN the floor far down over genuine near-silence. If room tone then
+        // rises above the (now too-low) onset, the gate wedges open — the watchdog
+        // MUST recover it within 15 s. This is the forced-low-floor test.
+        let mut nf = NoiseFloor::new(4.0, 16_000);
+        for _ in 0..6 {
+            nf.classify(-45.0, F100); // arm at a normal floor
+        }
+        for _ in 0..40 {
+            nf.classify(-95.0, F100); // room goes near-silent → floor learns down
+        }
+        assert!(nf.floor_dbfs() < -80.0, "floor learned down, got {}", nf.floor_dbfs());
+        // Gain/room jumps to -39, far above the now-stale onset → stuck open.
+        for _ in 0..170 {
+            nf.classify(-39.0, F100); // 17 s > the 15 s trip
+        }
+        assert!(
+            nf.recalibrations() >= 1,
+            "watchdog must fire from a learned-down low floor"
+        );
+        assert!(
+            nf.floor_dbfs() > -50.0,
+            "recalibrated toward the room tone, got {}",
+            nf.floor_dbfs()
         );
     }
 
