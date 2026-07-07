@@ -1639,11 +1639,22 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
         // talk_loop validation precedent.
         if anchor_cfg.voice_loop {
             if anchor_cfg.talk_loop && anchor_cfg.anchor_chain && anchor_cfg.anchor_causal {
+                // Shared per-conv utterance queue (WEFT-650): the loop's
+                // Queue arm pushes; the submitter drains one utterance on each
+                // reply commit/failure. Both sides MUST share this Arc — the
+                // 1-arg constructors build private queues and the drain never
+                // fires.
+                let voice_queues: Arc<crate::voice_loop::VoiceQueues> =
+                    Arc::new(dashmap::DashMap::new());
                 service.set_reply_submitter(Arc::new(
-                    crate::voice_loop::DaemonReplySubmitter::new(Arc::downgrade(&service)),
+                    crate::voice_loop::DaemonReplySubmitter::with_queues(
+                        Arc::downgrade(&service),
+                        voice_queues.clone(),
+                    ),
                 ));
-                let _ = DAEMON_VOICE_LOOP.set(Arc::new(crate::voice_loop::VoiceLoop::new(
+                let _ = DAEMON_VOICE_LOOP.set(Arc::new(crate::voice_loop::VoiceLoop::with_queues(
                     Arc::downgrade(&service),
+                    voice_queues,
                 )));
                 info!(
                     "voice loop wired (§W2.1): recorded user turns route through the \
@@ -6084,6 +6095,18 @@ async fn dispatch(
                 // node-detail can distinguish an analysed voice turn from a
                 // text one without a schema change.
                 let voice_analysis = meta.get("voice_analysis").cloned().unwrap_or(serde_json::Value::Null);
+                // Wave 2 §W2.6: an in-flight reply is an ATTEMPT node —
+                // `register_reply_frontier` (session_tier.rs) stashes
+                // `metadata.kind = "reply-attempt"` and `metadata.goal` on the
+                // node itself, and neither is in `PROTECTED_METADATA_KEYS`, so
+                // both survive the node's full frontier→committed/pruned
+                // lifecycle untouched. The top-level `"kind"` key above already
+                // mirrors `state` (viewer compatibility, unchanged); project
+                // the attempt marker + goal as ADDITIVE flat keys (the
+                // 422c40ea parity lesson) so the watch surface can render
+                // attempt lifecycle without a schema break.
+                let is_attempt = meta.get("kind").and_then(|v| v.as_str()) == Some("reply-attempt");
+                let goal = meta.get("goal").and_then(|v| v.as_str()).unwrap_or("");
                 nodes_json.push(serde_json::json!({
                     "id": uid,
                     "label": node.label,
@@ -6096,6 +6119,8 @@ async fn dispatch(
                     "ts_ms": ts_ms,
                     "classification": classification,
                     "voice_analysis": voice_analysis,
+                    "attempt": is_attempt,
+                    "goal": goal,
                 }));
             }
 
@@ -7022,5 +7047,94 @@ mod tests {
         assert_eq!(node["classification"]["tier"], serde_json::json!("voice"));
         assert_eq!(node["classification"]["emotion"]["arousal"], serde_json::json!(0.92));
         assert_eq!(node["text"], serde_json::json!("stop"), "turn text surfaced");
+    }
+
+    /// Wave 2 §W2.6 — `conversation.graph` projects the reply-attempt marker
+    /// + goal as additive flat keys.
+    ///
+    /// `register_reply_frontier` (session_tier.rs) stashes
+    /// `metadata.kind = "reply-attempt"` and `metadata.goal` on the attempt
+    /// node; neither is in `PROTECTED_METADATA_KEYS`, so both survive a
+    /// `set_node_state` transition untouched. This pins the read side: a node
+    /// with that metadata shape projects `"attempt": true` and
+    /// `"goal": <text>` regardless of its `state`, while the pre-existing
+    /// `"kind"` key keeps mirroring `state` (viewer compatibility). A plain
+    /// committed turn (no `metadata.kind`) projects `"attempt": false` and an
+    /// empty `"goal"`.
+    #[cfg(feature = "ecc")]
+    #[tokio::test]
+    async fn conversation_graph_projects_reply_attempt_marker_and_goal() {
+        use clawft_kernel::crossref::{StructureTag, UniversalNodeId};
+        use clawft_kernel::Kernel;
+        use clawft_platform::NativePlatform;
+        use clawft_types::config::{Config, KernelConfig};
+        use std::sync::Arc;
+
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(Config::default(), KernelConfig::default(), platform)
+            .await
+            .expect("kernel boots");
+        let causal = kernel.ecc_causal().expect("causal graph present").clone();
+
+        let attempt_uid = UniversalNodeId::new(
+            &StructureTag::CausalGraph,
+            b"attempt-graph",
+            1,
+            b"goal text",
+            b"turn",
+        );
+        causal.add_node(
+            "turn:attempt-graph:1".into(),
+            serde_json::json!({
+                "conv_id": "attempt-graph", "chain_seq": 1, "role": "assistant",
+                "state": "frontier", "uid": attempt_uid.to_string(),
+                "text": "what's the weather", "kind": "reply-attempt",
+                "goal": "what's the weather",
+            }),
+        );
+        let plain_uid = UniversalNodeId::new(
+            &StructureTag::CausalGraph,
+            b"attempt-graph",
+            2,
+            b"hey",
+            b"turn",
+        );
+        causal.add_node(
+            "turn:attempt-graph:2".into(),
+            serde_json::json!({
+                "conv_id": "attempt-graph", "chain_seq": 2, "role": "user",
+                "state": "committed", "uid": plain_uid.to_string(),
+                "text": "hey",
+            }),
+        );
+
+        let kernel = Arc::new(tokio::sync::RwLock::new(kernel));
+        let (shutdown_tx, _rx) = watch::channel(false);
+        let resp = dispatch(
+            "conversation.graph".into(),
+            serde_json::json!({ "conv_id": "attempt-graph" }),
+            kernel,
+            shutdown_tx,
+        )
+        .await;
+        assert!(resp.ok, "handler ok: {:?}", resp.error);
+        let result = resp.result.expect("result present");
+        let nodes = result["nodes"].as_array().expect("nodes array");
+
+        let attempt = nodes
+            .iter()
+            .find(|n| n["id"].as_str() == Some(attempt_uid.to_string().as_str()))
+            .expect("attempt node projected");
+        assert_eq!(attempt["attempt"], serde_json::json!(true), "attempt marker projected");
+        assert_eq!(attempt["goal"], serde_json::json!("what's the weather"));
+        assert_eq!(attempt["state"], serde_json::json!("frontier"));
+        assert_eq!(attempt["kind"], serde_json::json!("frontier"), "kind still mirrors state");
+
+        let plain = nodes
+            .iter()
+            .find(|n| n["id"].as_str() == Some(plain_uid.to_string().as_str()))
+            .expect("plain turn node projected");
+        assert_eq!(plain["attempt"], serde_json::json!(false), "no attempt marker on a plain turn");
+        assert_eq!(plain["goal"], serde_json::json!(""), "no goal on a plain turn");
     }
 }

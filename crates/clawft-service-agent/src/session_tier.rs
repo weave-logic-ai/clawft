@@ -656,6 +656,35 @@ impl SessionTier {
             .map(str::to_owned)
     }
 
+    /// Wave 2 §W2.2/§W2.6 (WEFT-650): emit a `Backchannel` impulse for
+    /// `conv_id` — a listener acknowledgment ("mm-hmm", "ok") that landed
+    /// while the agent is busy. The loop's next tick
+    /// (`talk_loop.rs::mutate`, `ImpulseType::Backchannel`) draws a
+    /// `Continuer` cross-ref from the listener (the user speaker node) to the
+    /// conversation's in-flight turn. A backchannel is a Continuer cross-ref,
+    /// **NEVER a turn** (ADR-062) — the agent keeps working uninterrupted.
+    ///
+    /// Returns `false` (no-op) when no talk loop is attached; non-fatal by
+    /// construction — a missed backchannel never blocks the busy work it
+    /// acknowledges.
+    pub fn emit_backchannel(&self, conv_id: &str) -> bool {
+        let Some(talk_loop) = self.talk_loop.get() else {
+            return false;
+        };
+        let hlc = talk_loop.current_turn(conv_id).unwrap_or(0);
+        let listener = session_forest::speaker_universal_id(conv_id, "user");
+        let tag = StructureTag::CausalGraph.as_u8();
+        talk_loop.impulses().emit(
+            tag,
+            *listener.as_bytes(),
+            tag,
+            ImpulseType::Backchannel,
+            serde_json::json!({ "conv_id": conv_id }),
+            hlc,
+        );
+        true
+    }
+
     /// Conversation ids with a live session view (ADR-058 Phase 5, deferred
     /// step 4). Lets the daemon enumerate active conversations — e.g. an
     /// idle-conversation reaper, or a shutdown sweep that promotes each before

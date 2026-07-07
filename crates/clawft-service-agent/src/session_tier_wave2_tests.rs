@@ -8,7 +8,7 @@ use clawft_kernel::chain::ChainManager;
 use clawft_kernel::context_graft::SessionView;
 use clawft_kernel::embedding::MockEmbeddingProvider;
 use clawft_kernel::{
-    CausalGraph, CognitiveTick, CognitiveTickConfig, CrossRefStore, ImpulseQueue,
+    CausalGraph, CognitiveTick, CognitiveTickConfig, CrossRefStore, CrossRefType, ImpulseQueue,
     SingleViewResolver, TalkModeConfig, TalkModeLoop,
 };
 use serde_json::json;
@@ -25,6 +25,7 @@ fn wired(
     Arc<ChainManager>,
     Arc<TalkModeLoop>,
     Arc<ImpulseQueue>,
+    Arc<CrossRefStore>,
 ) {
     let embedder: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbeddingProvider::new(64));
     let chain = Arc::new(ChainManager::new(0, 1000));
@@ -43,15 +44,15 @@ fn wired(
         TalkModeConfig::default(),
     ));
     let tier = SessionTier::new(embedder, chain.clone(), None)
-        .with_forest(causal, crossrefs)
+        .with_forest(causal, crossrefs.clone())
         .with_talk_loop(talk_loop.clone());
-    (tier, chain, talk_loop, impulses)
+    (tier, chain, talk_loop, impulses, crossrefs)
 }
 
 #[tokio::test]
 async fn register_reply_frontier_is_busy_without_eou_and_stashes_goal() {
     let conv = "w21-c1";
-    let (tier, _chain, talk_loop, impulses) = wired(conv);
+    let (tier, _chain, talk_loop, impulses, _crossrefs) = wired(conv);
 
     let seq = tier
         .register_reply_frontier(conv, "sort the list")
@@ -96,7 +97,7 @@ async fn register_reply_frontier_none_without_forest_or_loop() {
 #[tokio::test]
 async fn project_signals_intent_backchannel_short_and_busy() {
     let conv = "w21-c2";
-    let (tier, _chain, _loop, _impulses) = wired(conv);
+    let (tier, _chain, _loop, _impulses, _crossrefs) = wired(conv);
 
     // Correction cue → Intent::Correction (the Refine trigger).
     let s = tier.project_interrupt_signals(conv, "actually make it blue", None, true);
@@ -126,7 +127,7 @@ async fn project_signals_intent_backchannel_short_and_busy() {
 #[tokio::test]
 async fn project_signals_topic_continuity_follows_the_classifier_carry() {
     let conv = "w21-c3";
-    let (tier, chain, _loop, _impulses) = wired(conv);
+    let (tier, chain, _loop, _impulses, _crossrefs) = wired(conv);
     let tier = tier.with_classifier(Arc::new(KeywordTurnClassifier::new()));
 
     // Seed the conversation's topic via a normal indexed turn.
@@ -155,11 +156,50 @@ async fn project_signals_topic_continuity_follows_the_classifier_carry() {
 }
 
 #[tokio::test]
+async fn emit_backchannel_draws_a_continuer_never_a_turn() {
+    // WEFT-650: a backchannel ("mm-hmm") while busy must land as a Continuer
+    // cross-ref to the in-flight turn — never a new turn node.
+    let conv = "w22-bc1";
+    let (tier, _chain, talk_loop, _impulses, crossrefs) = wired(conv);
+
+    let in_flight = tier
+        .register_reply_frontier(conv, "sort the list")
+        .await
+        .expect("forest + loop attached");
+    assert_eq!(talk_loop.current_turn(conv), Some(in_flight));
+
+    assert!(tier.emit_backchannel(conv), "talk loop is attached");
+    let result = talk_loop.tick();
+    assert_eq!(result.backchannels, 1, "exactly one Continuer this tick");
+    assert_eq!(result.commits, 0, "a backchannel commits no turn");
+
+    // The in-flight attempt is still busy — a backchannel never displaces it.
+    assert_eq!(talk_loop.current_turn(conv), Some(in_flight));
+
+    // The Continuer cross-ref landed on the store, targeting the in-flight
+    // turn's uid (never minting a turn node of its own).
+    let continuers: Vec<_> = crossrefs
+        .all()
+        .into_iter()
+        .filter(|cr| cr.ref_type == CrossRefType::Continuer)
+        .collect();
+    assert_eq!(continuers.len(), 1, "one Continuer landed");
+}
+
+#[tokio::test]
+async fn emit_backchannel_is_a_noop_without_a_talk_loop() {
+    let embedder: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbeddingProvider::new(64));
+    let chain = Arc::new(ChainManager::new(0, 1000));
+    let tier = SessionTier::new(embedder, chain, None);
+    assert!(!tier.emit_backchannel("c"));
+}
+
+#[tokio::test]
 async fn live_interrupt_phrase_routes_to_refine() {
     // The exact live-smoke phrase that (2026-07-06) pruned WITHOUT resubmitting
     // — pin the projection + routing end to end.
     let conv = "w21-c4";
-    let (tier, _chain, _loop, _impulses) = wired(conv);
+    let (tier, _chain, _loop, _impulses, _crossrefs) = wired(conv);
     let text = "hold on, actually just give me one plain-text sentence about rivers instead";
     let s = tier.project_interrupt_signals(conv, text, None, true);
     let action = crate::interrupt_router::InterruptRouter::new().route(&s);

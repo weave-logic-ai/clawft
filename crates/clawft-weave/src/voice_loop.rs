@@ -16,9 +16,11 @@
 //!     │                     generation off-path; capture NEVER blocks on it
 //!     ├─ Stop / Refine    → AgentService::execute_interrupt (§W2.3/§W2.4:
 //!     │                     cancel → prune tombstone → Contradicts → witness)
-//!     ├─ Backchannel      → no turn (Continuer impulse emission = WEFT-650)
-//!     └─ Queue            → recorded, held behind the in-flight turn
-//!                           (commit-drain = WEFT-650)
+//!     ├─ Backchannel      → no turn — executor emits `Backchannel 0x60`, the
+//!     │                     loop draws a `Continuer` cross-ref (§W2.6)
+//!     └─ Queue            → recorded, held behind the in-flight turn in the
+//!                           shared [`VoiceQueues`]; the submitter drains one
+//!                           on each reply commit/failure (§W2.6)
 //! ```
 //!
 //! [`DaemonReplySubmitter`] is the §W2.1 register-early/commit-late reply path:
@@ -30,9 +32,11 @@
 //! interrupt executor's prune; on any other failure it prunes + witnesses so
 //! no attempt dangles.
 
-use std::sync::Weak;
+use std::collections::VecDeque;
+use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
+use dashmap::DashMap;
 use tracing::{debug, info, warn};
 
 use clawft_service_agent::interrupt_router::{InterruptAction, InterruptCtx, InterruptRouter};
@@ -41,19 +45,63 @@ use clawft_service_agent::{
     ReplySubmitter,
 };
 
+/// Bounded per-conversation FIFO of utterance texts routed to
+/// [`InterruptAction::Queue`] (§W2.2 row 4, WEFT-650) — utterances that
+/// arrived while the agent was busy on a topically-discontinuous ask. Held
+/// behind the in-flight reply and drained one at a time once it finalizes
+/// (commits) or fails; see [`enqueue_utterance`] and the drain in
+/// [`DaemonReplySubmitter::submit_reply`]'s spawned dispatch task.
+pub type VoiceQueues = DashMap<String, VecDeque<String>>;
+
+/// Cap on a single conversation's queued backlog. This is a human speaking
+/// backlog, not a work queue — a runaway talker drops the oldest utterance
+/// (with a warning) rather than growing state without bound.
+const VOICE_QUEUE_CAP: usize = 8;
+
+/// Push `text` onto `conv_id`'s queue, dropping the oldest queued utterance
+/// (with a `warn!`) once the conversation is already at [`VOICE_QUEUE_CAP`].
+pub fn enqueue_utterance(queues: &VoiceQueues, conv_id: &str, text: &str) {
+    let mut q = queues.entry(conv_id.to_string()).or_default();
+    if q.len() >= VOICE_QUEUE_CAP {
+        let dropped = q.pop_front();
+        warn!(
+            conv_id,
+            dropped = ?dropped,
+            cap = VOICE_QUEUE_CAP,
+            "voice loop: queue full, dropping oldest queued utterance"
+        );
+    }
+    q.push_back(text.to_string());
+}
+
 /// The §W2.1 register-early/commit-late reply submitter (daemon side).
 ///
 /// Holds a `Weak` back-reference to the service that owns it (the service
 /// holds the submitter via `set_reply_submitter`, so a strong reference here
 /// would be an `Arc` cycle — the same shape as the subagent spawner's
-/// late-wired `Weak`).
+/// late-wired `Weak`), plus the [`VoiceQueues`] shared with [`VoiceLoop`] so a
+/// commit/failure can drain the conversation's next queued utterance
+/// (WEFT-650).
 pub struct DaemonReplySubmitter<H: AgentLoopHandle> {
     agent: Weak<AgentService<H>>,
+    queues: Arc<VoiceQueues>,
 }
 
 impl<H: AgentLoopHandle> DaemonReplySubmitter<H> {
+    /// Back-compat constructor: a private, unshared queue. Nothing else can
+    /// push onto it, so the Queue-arm drain never fires — equivalent to the
+    /// pre-WEFT-650 behaviour. Daemon wiring should use
+    /// [`Self::with_queues`], sharing the same `Arc<VoiceQueues>` passed to
+    /// [`VoiceLoop::with_queues`], so utterances routed to
+    /// [`InterruptAction::Queue`] actually drain on commit/failure.
     pub fn new(agent: Weak<AgentService<H>>) -> Self {
-        Self { agent }
+        Self::with_queues(agent, Arc::new(DashMap::new()))
+    }
+
+    /// Build a submitter sharing `queues` with a [`VoiceLoop`] — the wiring
+    /// the WEFT-650 Queue-arm drain depends on.
+    pub fn with_queues(agent: Weak<AgentService<H>>, queues: Arc<VoiceQueues>) -> Self {
+        Self { agent, queues }
     }
 }
 
@@ -61,65 +109,105 @@ impl<H: AgentLoopHandle> DaemonReplySubmitter<H> {
 impl<H: AgentLoopHandle> ReplySubmitter for DaemonReplySubmitter<H> {
     async fn submit_reply(&self, conv_id: &str, goal_text: &str) -> Option<u64> {
         let agent = self.agent.upgrade()?;
-        // Register the attempt Frontier first (this IS the busy state and the
-        // prune/Contradicts target); degrade to dispatch-only when the tier or
-        // forest isn't attached.
-        let seq = match agent.session_tier() {
-            Some(tier) => tier.register_reply_frontier(conv_id, goal_text).await,
-            None => None,
-        };
-        let params = AgentChatParams {
-            messages: vec![AgentChatMessage {
-                role: "user".into(),
-                content: goal_text.to_string(),
-            }],
-            temperature: None,
-            max_tokens: None,
-            conv_id: conv_id.to_string(),
-            // The spoken user turn already landed via `agent.turn.record`
-            // (with its Wave-1 voice decomposition); the submitted goal text
-            // is that turn (or, on a Refine, the synthetic goal+amendment the
-            // attempt node's metadata carries) — recording it again as a
-            // plain user turn would double it on the sink and the forest.
-            metadata: Some(
-                [(
-                    "user_turn_recorded".to_string(),
-                    serde_json::Value::Bool(true),
-                )]
-                .into_iter()
-                .collect(),
-            ),
-        };
-        // Off-path generation: capture never blocks on the reply (§W2.1).
-        let conv = conv_id.to_string();
-        tokio::spawn(async move {
-            match agent.dispatch(params).await {
-                Ok(_) => {
-                    // Generation finalized — commit the attempt Frontier
-                    // (commit-late). The reply text itself landed through the
-                    // loop's sink → index_turn path as its own committed turn.
-                    if let (Some(tier), Some(seq)) = (agent.session_tier(), seq) {
-                        tier.commit_reply_frontier(&conv, seq);
-                    }
+        dispatch_reply(agent, self.queues.clone(), conv_id.to_string(), goal_text.to_string()).await
+    }
+}
+
+/// Register-early/commit-late reply dispatch (§W2.1), plus the WEFT-650
+/// drain-on-finalize: once the spawned `agent.chat` generation commits or
+/// fails, pop `conv_id`'s next queued utterance (if any) and resubmit it
+/// through this same path. A `Cancelled` attempt does NOT drain — the
+/// Refine resubmit that caused the cancel will drain when IT finalizes,
+/// so a queued utterance is never double-drained by both the pruned
+/// attempt and its replacement.
+///
+/// Free function (rather than a `&self` method) so the drain can recurse by
+/// spawning a fresh call rather than needing an `Arc<Self>` handle back to
+/// the submitter.
+async fn dispatch_reply<H: AgentLoopHandle>(
+    agent: Arc<AgentService<H>>,
+    queues: Arc<VoiceQueues>,
+    conv_id: String,
+    goal_text: String,
+) -> Option<u64> {
+    // Register the attempt Frontier first (this IS the busy state and the
+    // prune/Contradicts target); degrade to dispatch-only when the tier or
+    // forest isn't attached.
+    let seq = match agent.session_tier() {
+        Some(tier) => tier.register_reply_frontier(&conv_id, &goal_text).await,
+        None => None,
+    };
+    let params = AgentChatParams {
+        messages: vec![AgentChatMessage {
+            role: "user".into(),
+            content: goal_text.clone(),
+        }],
+        temperature: None,
+        max_tokens: None,
+        conv_id: conv_id.clone(),
+        // The spoken user turn already landed via `agent.turn.record`
+        // (with its Wave-1 voice decomposition); the submitted goal text
+        // is that turn (or, on a Refine, the synthetic goal+amendment the
+        // attempt node's metadata carries) — recording it again as a
+        // plain user turn would double it on the sink and the forest.
+        metadata: Some(
+            [(
+                "user_turn_recorded".to_string(),
+                serde_json::Value::Bool(true),
+            )]
+            .into_iter()
+            .collect(),
+        ),
+    };
+    // Off-path generation: capture never blocks on the reply (§W2.1).
+    let conv = conv_id.clone();
+    tokio::spawn(async move {
+        match agent.dispatch(params).await {
+            Ok(_) => {
+                // Generation finalized — commit the attempt Frontier
+                // (commit-late). The reply text itself landed through the
+                // loop's sink → index_turn path as its own committed turn.
+                if let (Some(tier), Some(seq)) = (agent.session_tier(), seq) {
+                    tier.commit_reply_frontier(&conv, seq);
                 }
-                Err(AgentServiceError::Cancelled(_)) => {
-                    // A STOP/Refine interrupted this attempt: the executor
-                    // owns the forest closure (prune tombstone + Contradicts
-                    // + witness) — nothing to do here.
-                    debug!(conv_id = %conv, "voice loop: reply attempt cancelled (executor owns the prune)");
-                }
-                Err(e) => {
-                    // Genuine failure — prune + witness the dangling attempt
-                    // so the forest never holds a silently-abandoned Frontier.
-                    warn!(conv_id = %conv, error = %e, "voice loop: reply dispatch failed; pruning attempt");
-                    if let (Some(tier), Some(seq)) = (agent.session_tier(), seq) {
-                        let pruned = tier.emit_cancel_prune(&conv, Some(seq), None);
-                        tier.witness_cancel(&conv, pruned);
-                    }
-                }
+                drain_next(agent, queues, conv);
             }
+            Err(AgentServiceError::Cancelled(_)) => {
+                // A STOP/Refine interrupted this attempt: the executor
+                // owns the forest closure (prune tombstone + Contradicts
+                // + witness) — nothing to do here, and no drain (the
+                // resubmit that caused the cancel drains on ITS finalize).
+                debug!(conv_id = %conv, "voice loop: reply attempt cancelled (executor owns the prune)");
+            }
+            Err(e) => {
+                // Genuine failure — prune + witness the dangling attempt
+                // so the forest never holds a silently-abandoned Frontier.
+                warn!(conv_id = %conv, error = %e, "voice loop: reply dispatch failed; pruning attempt");
+                if let (Some(tier), Some(seq)) = (agent.session_tier(), seq) {
+                    let pruned = tier.emit_cancel_prune(&conv, Some(seq), None);
+                    tier.witness_cancel(&conv, pruned);
+                }
+                drain_next(agent, queues, conv);
+            }
+        }
+    });
+    seq
+}
+
+/// Pop `conv_id`'s next queued utterance (if any) and resubmit it through
+/// [`dispatch_reply`] on a fresh spawned task — the WEFT-650 drain-on-commit.
+/// A no-op when the conversation has nothing queued.
+fn drain_next<H: AgentLoopHandle>(
+    agent: Arc<AgentService<H>>,
+    queues: Arc<VoiceQueues>,
+    conv_id: String,
+) {
+    let next = queues.get_mut(&conv_id).and_then(|mut q| q.pop_front());
+    if let Some(text) = next {
+        info!(conv_id = %conv_id, "voice loop: draining queued utterance on commit");
+        tokio::spawn(async move {
+            dispatch_reply(agent, queues, conv_id, text).await;
         });
-        seq
     }
 }
 
@@ -130,13 +218,29 @@ impl<H: AgentLoopHandle> ReplySubmitter for DaemonReplySubmitter<H> {
 pub struct VoiceLoop<H: AgentLoopHandle> {
     agent: Weak<AgentService<H>>,
     router: InterruptRouter,
+    /// Shared with the daemon's [`DaemonReplySubmitter`] — the Queue arm
+    /// pushes here; the submitter's spawned dispatch task drains it on
+    /// commit/failure (WEFT-650).
+    queues: Arc<VoiceQueues>,
 }
 
 impl<H: AgentLoopHandle> VoiceLoop<H> {
+    /// Back-compat constructor: a private, unshared queue — a Queue-arm
+    /// utterance is recorded but never drains (equivalent to pre-WEFT-650
+    /// behaviour). Daemon wiring should use [`Self::with_queues`], sharing
+    /// the same `Arc<VoiceQueues>` passed to
+    /// [`DaemonReplySubmitter::with_queues`].
     pub fn new(agent: Weak<AgentService<H>>) -> Self {
+        Self::with_queues(agent, Arc::new(DashMap::new()))
+    }
+
+    /// Build a loop sharing `queues` with a [`DaemonReplySubmitter`] — the
+    /// wiring the WEFT-650 Queue-arm drain depends on.
+    pub fn with_queues(agent: Weak<AgentService<H>>, queues: Arc<VoiceQueues>) -> Self {
         Self {
             agent,
             router: InterruptRouter::new(),
+            queues,
         }
     }
 
@@ -185,15 +289,27 @@ impl<H: AgentLoopHandle> VoiceLoop<H> {
                     warn!(conv_id, "voice loop: no reply submitter wired; turn recorded only");
                 }
             }
-            InterruptAction::Backchannel => {
-                // Never a turn. The Continuer-crossref impulse emission is the
-                // WEFT-650 (§W2.6) follow-up; the decomposition is already on
-                // the recorded turn.
-                debug!(conv_id, "voice loop: backchannel — agent keeps working");
+            action @ InterruptAction::Backchannel => {
+                // Never a turn: the executor emits the `Backchannel` impulse →
+                // the loop's next tick draws a `Continuer` cross-ref onto the
+                // in-flight turn (ADR-062; no-op when the turn commits first —
+                // a benign race). The agent keeps working.
+                agent
+                    .execute_interrupt(
+                        action,
+                        InterruptCtx {
+                            conv_id: conv_id.to_string(),
+                            in_flight_seq: in_flight_before,
+                        },
+                    )
+                    .await;
+                debug!(conv_id, "voice loop: backchannel — Continuer emitted, agent keeps working");
             }
             InterruptAction::Queue => {
-                // Recorded and held behind the in-flight turn. The
-                // drain-on-commit executor is the WEFT-650 follow-up.
+                // Recorded and held behind the in-flight turn; drained by
+                // `DaemonReplySubmitter`'s dispatch task once it commits or
+                // fails (WEFT-650).
+                enqueue_utterance(&self.queues, conv_id, text);
                 debug!(conv_id, "voice loop: queued behind in-flight turn");
             }
             action @ (InterruptAction::Stop | InterruptAction::Refine { .. }) => {
@@ -216,5 +332,57 @@ impl<H: AgentLoopHandle> VoiceLoop<H> {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+
+    #[test]
+    fn enqueue_preserves_fifo_order() {
+        let queues: VoiceQueues = DashMap::new();
+        enqueue_utterance(&queues, "c1", "first");
+        enqueue_utterance(&queues, "c1", "second");
+        enqueue_utterance(&queues, "c1", "third");
+
+        let mut q = queues.get_mut("c1").unwrap();
+        assert_eq!(q.pop_front().as_deref(), Some("first"));
+        assert_eq!(q.pop_front().as_deref(), Some("second"));
+        assert_eq!(q.pop_front().as_deref(), Some("third"));
+        assert!(q.pop_front().is_none());
+    }
+
+    #[test]
+    fn enqueue_is_scoped_per_conversation() {
+        let queues: VoiceQueues = DashMap::new();
+        enqueue_utterance(&queues, "c1", "c1-text");
+        enqueue_utterance(&queues, "c2", "c2-text");
+
+        assert_eq!(queues.get("c1").unwrap().len(), 1);
+        assert_eq!(queues.get("c2").unwrap().len(), 1);
+        assert_eq!(
+            queues.get("c1").unwrap().front().map(String::as_str),
+            Some("c1-text")
+        );
+    }
+
+    #[test]
+    fn enqueue_drops_oldest_once_over_cap() {
+        let queues: VoiceQueues = DashMap::new();
+        // Fill past the cap by a few — every push beyond VOICE_QUEUE_CAP
+        // must evict exactly one (the oldest), never grow unbounded.
+        for i in 0..(VOICE_QUEUE_CAP + 3) {
+            enqueue_utterance(&queues, "c1", &format!("msg-{i}"));
+        }
+        let q = queues.get("c1").unwrap();
+        assert_eq!(q.len(), VOICE_QUEUE_CAP, "queue stays capped");
+        // The oldest three (msg-0..msg-2) were dropped; the FIFO now starts
+        // at msg-3.
+        assert_eq!(q.front().map(String::as_str), Some("msg-3"));
+        assert_eq!(
+            q.back().map(String::as_str),
+            Some(format!("msg-{}", VOICE_QUEUE_CAP + 2).as_str())
+        );
     }
 }

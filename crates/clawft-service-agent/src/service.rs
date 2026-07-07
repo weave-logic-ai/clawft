@@ -466,11 +466,17 @@ impl<H: AgentLoopHandle> AgentService<H> {
                     }
                 }
             }
-            // BACKCHANNEL: a "mm-hmm" is NOT a turn. FOLLOW-UP: emit the
-            // `Backchannel` Continuer impulse once its payload contract is pinned.
-            InterruptAction::Backchannel => {}
-            // QUEUE: hold behind the in-flight turn; resubmit on its commit.
-            // FOLLOW-UP: daemon-side queue drained by the commit path.
+            // BACKCHANNEL: a "mm-hmm" is NOT a turn — emit the `Backchannel`
+            // impulse so the loop's next tick draws a Continuer cross-ref to
+            // the in-flight turn (WEFT-650). Non-fatal: a missed emit (no
+            // talk loop) never blocks the busy work it acknowledges.
+            InterruptAction::Backchannel => {
+                tier.emit_backchannel(&ctx.conv_id);
+            }
+            // QUEUE: hold behind the in-flight turn; the §W2.1 loop's shared
+            // VoiceQueues holds the utterance and the reply submitter drains
+            // one on each commit/failure (clawft-weave voice_loop.rs). The
+            // executor only reports the decision.
             InterruptAction::Queue => {
                 out.queued = true;
             }
