@@ -383,8 +383,16 @@ impl TalkModeLoop {
             ImpulseType::Backchannel => {
                 // THE load-bearing invariant: a backchannel is a Continuer
                 // cross-ref to the current speaker node — NEVER a turn node.
+                //
+                // An explicit payload `turn_seq` names the floor-holding turn
+                // (Wave 2 §W2.6: the voice loop targets the in-flight reply
+                // ATTEMPT captured at routing time — `current_turn` may have
+                // been overwritten by the backchannel utterance's own
+                // registration by the time this tick drains). Absent that,
+                // fall back to the conversation's current turn.
                 if let Some(conv) = self.impulse_conv(imp)
-                    && let Some(current) = self.current_turn(&conv)
+                    && let Some(current) =
+                        payload_u64(imp, "turn_seq").or_else(|| self.current_turn(&conv))
                     && let Some(turn) = self.lineage.get(&current)
                 {
                     let listener = UniversalNodeId::from_bytes(imp.source_node);

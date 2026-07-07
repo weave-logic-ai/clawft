@@ -471,7 +471,7 @@ impl<H: AgentLoopHandle> AgentService<H> {
             // the in-flight turn (WEFT-650). Non-fatal: a missed emit (no
             // talk loop) never blocks the busy work it acknowledges.
             InterruptAction::Backchannel => {
-                tier.emit_backchannel(&ctx.conv_id);
+                tier.emit_backchannel(&ctx.conv_id, ctx.in_flight_seq);
             }
             // QUEUE: hold behind the in-flight turn; the §W2.1 loop's shared
             // VoiceQueues holds the utterance and the reply submitter drains

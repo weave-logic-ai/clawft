@@ -5,11 +5,10 @@
 
 use super::*;
 use clawft_kernel::chain::ChainManager;
-use clawft_kernel::context_graft::SessionView;
 use clawft_kernel::embedding::MockEmbeddingProvider;
 use clawft_kernel::{
     CausalGraph, CognitiveTick, CognitiveTickConfig, CrossRefStore, CrossRefType, ImpulseQueue,
-    SingleViewResolver, TalkModeConfig, TalkModeLoop,
+    TalkModeConfig, TalkModeLoop,
 };
 use serde_json::json;
 
@@ -17,35 +16,39 @@ use crate::dialogue_act::Intent;
 use crate::turn_classifier::KeywordTurnClassifier;
 
 /// Forest-joined tier + hosted loop over a queue we hold, so register/commit
-/// emissions are observable. Mirrors `index_turn_registers_and_emits_one_eou`.
-fn wired(
-    conv: &str,
-) -> (
-    SessionTier,
+/// emissions are observable. Daemon shape (M2 D4): the loop resolves the
+/// TIER'S OWN view through the Weak resolver — a detached view would let a
+/// silently no-oping commit/prune pass (the exact blind spot that hid the
+/// register-without-view-chunk bug).
+type Wired = (
+    Arc<SessionTier>,
     Arc<ChainManager>,
     Arc<TalkModeLoop>,
     Arc<ImpulseQueue>,
     Arc<CrossRefStore>,
-) {
+);
+
+fn wired(_conv: &str) -> Wired {
     let embedder: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbeddingProvider::new(64));
     let chain = Arc::new(ChainManager::new(0, 1000));
     let causal = Arc::new(CausalGraph::new());
     let crossrefs = Arc::new(CrossRefStore::new());
     let impulses = Arc::new(ImpulseQueue::new());
-    let resolver: Arc<dyn ViewResolver> =
-        Arc::new(SingleViewResolver::new(Arc::new(SessionView::new(conv, 64))));
+    let tier = Arc::new(
+        SessionTier::new(embedder, chain.clone(), None)
+            .with_forest(causal.clone(), crossrefs.clone()),
+    );
+    let resolver = SessionTier::weak_view_resolver(&tier);
     let tick = Arc::new(CognitiveTick::new(CognitiveTickConfig::default()));
     let talk_loop = Arc::new(TalkModeLoop::new(
         impulses.clone(),
-        causal.clone(),
+        causal,
         crossrefs.clone(),
         resolver,
         tick,
         TalkModeConfig::default(),
     ));
-    let tier = SessionTier::new(embedder, chain.clone(), None)
-        .with_forest(causal, crossrefs.clone())
-        .with_talk_loop(talk_loop.clone());
+    tier.set_talk_loop(talk_loop.clone());
     (tier, chain, talk_loop, impulses, crossrefs)
 }
 
@@ -127,8 +130,15 @@ async fn project_signals_intent_backchannel_short_and_busy() {
 #[tokio::test]
 async fn project_signals_topic_continuity_follows_the_classifier_carry() {
     let conv = "w21-c3";
-    let (tier, chain, _loop, _impulses, _crossrefs) = wired(conv);
-    let tier = tier.with_classifier(Arc::new(KeywordTurnClassifier::new()));
+    // Classifier attaches before Arc-wrapping (builder by-value); no loop
+    // needed — topic carry is index-side only.
+    let embedder: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbeddingProvider::new(64));
+    let chain = Arc::new(ChainManager::new(0, 1000));
+    let causal = Arc::new(CausalGraph::new());
+    let crossrefs = Arc::new(CrossRefStore::new());
+    let tier = SessionTier::new(embedder, chain.clone(), None)
+        .with_forest(causal, crossrefs)
+        .with_classifier(Arc::new(KeywordTurnClassifier::new()));
 
     // Seed the conversation's topic via a normal indexed turn.
     let ev = chain.append("agent", "agent.chat.turn", Some(json!({})));
@@ -168,7 +178,7 @@ async fn emit_backchannel_draws_a_continuer_never_a_turn() {
         .expect("forest + loop attached");
     assert_eq!(talk_loop.current_turn(conv), Some(in_flight));
 
-    assert!(tier.emit_backchannel(conv), "talk loop is attached");
+    assert!(tier.emit_backchannel(conv, Some(in_flight)), "talk loop is attached");
     let result = talk_loop.tick();
     assert_eq!(result.backchannels, 1, "exactly one Continuer this tick");
     assert_eq!(result.commits, 0, "a backchannel commits no turn");
@@ -187,11 +197,51 @@ async fn emit_backchannel_draws_a_continuer_never_a_turn() {
 }
 
 #[tokio::test]
+async fn backchannel_targets_the_attempt_even_after_current_turn_moves() {
+    // The live w26-probe bug shape: a mid-flight recorded turn (the "mm-hmm"
+    // utterance itself) overwrites `current_turn` and its commit-tick CLEARS
+    // it — so a Continuer relying on `current_turn` at drain time targets the
+    // wrong node or drops. The explicit `turn_seq` payload must pin the
+    // in-flight attempt regardless.
+    let conv = "w22-bc2";
+    let (tier, chain, talk_loop, _impulses, crossrefs) = wired(conv);
+
+    let attempt = tier
+        .register_reply_frontier(conv, "write the essay")
+        .await
+        .expect("attempt registered");
+
+    // The backchannel utterance is recorded like any turn: it registers
+    // (overwriting current_turn) and commits on the next tick (clearing it).
+    let ev = chain.append("agent", "agent.chat.turn", Some(json!({})));
+    tier.index_turn(conv, ev.sequence, "agent.chat.turn", "user", "mm-hmm", None)
+        .await;
+    talk_loop.tick();
+    assert_eq!(
+        talk_loop.current_turn(conv),
+        None,
+        "the recorded turn's commit cleared current_turn — the bug precondition"
+    );
+
+    // Explicit target still lands the Continuer on the attempt.
+    assert!(tier.emit_backchannel(conv, Some(attempt)));
+    let result = talk_loop.tick();
+    assert_eq!(result.backchannels, 1, "Continuer landed via explicit turn_seq");
+    let attempt_uid = crate::session_forest::turn_universal_id(conv, attempt, "write the essay");
+    let continuer_hits_attempt = crossrefs
+        .all()
+        .into_iter()
+        .filter(|cr| cr.ref_type == CrossRefType::Continuer)
+        .any(|cr| cr.target == attempt_uid && cr.chain_seq == attempt);
+    assert!(continuer_hits_attempt, "Continuer targets the in-flight attempt");
+}
+
+#[tokio::test]
 async fn emit_backchannel_is_a_noop_without_a_talk_loop() {
     let embedder: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbeddingProvider::new(64));
     let chain = Arc::new(ChainManager::new(0, 1000));
     let tier = SessionTier::new(embedder, chain, None);
-    assert!(!tier.emit_backchannel("c"));
+    assert!(!tier.emit_backchannel("c", None));
 }
 
 #[tokio::test]

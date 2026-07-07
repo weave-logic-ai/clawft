@@ -667,11 +667,15 @@ impl SessionTier {
     /// Returns `false` (no-op) when no talk loop is attached; non-fatal by
     /// construction — a missed backchannel never blocks the busy work it
     /// acknowledges.
-    pub fn emit_backchannel(&self, conv_id: &str) -> bool {
+    pub fn emit_backchannel(&self, conv_id: &str, turn_seq: Option<u64>) -> bool {
         let Some(talk_loop) = self.talk_loop.get() else {
             return false;
         };
-        let hlc = talk_loop.current_turn(conv_id).unwrap_or(0);
+        // Explicit target: the floor-holding turn captured at routing time
+        // (the in-flight reply attempt). `current_turn` is only a fallback —
+        // by the time the tick drains this impulse, the backchannel
+        // utterance's own registration may have overwritten it.
+        let target = turn_seq.or_else(|| talk_loop.current_turn(conv_id));
         let listener = session_forest::speaker_universal_id(conv_id, "user");
         let tag = StructureTag::CausalGraph.as_u8();
         talk_loop.impulses().emit(
@@ -679,8 +683,8 @@ impl SessionTier {
             *listener.as_bytes(),
             tag,
             ImpulseType::Backchannel,
-            serde_json::json!({ "conv_id": conv_id }),
-            hlc,
+            serde_json::json!({ "conv_id": conv_id, "turn_seq": target }),
+            target.unwrap_or(0),
         );
         true
     }

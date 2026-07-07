@@ -1644,17 +1644,16 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                 // reply commit/failure. Both sides MUST share this Arc — the
                 // 1-arg constructors build private queues and the drain never
                 // fires.
-                let voice_queues: Arc<crate::voice_loop::VoiceQueues> =
-                    Arc::new(dashmap::DashMap::new());
+                let voice_shared = Arc::new(crate::voice_loop::VoiceShared::default());
                 service.set_reply_submitter(Arc::new(
-                    crate::voice_loop::DaemonReplySubmitter::with_queues(
+                    crate::voice_loop::DaemonReplySubmitter::with_shared(
                         Arc::downgrade(&service),
-                        voice_queues.clone(),
+                        voice_shared.clone(),
                     ),
                 ));
-                let _ = DAEMON_VOICE_LOOP.set(Arc::new(crate::voice_loop::VoiceLoop::with_queues(
+                let _ = DAEMON_VOICE_LOOP.set(Arc::new(crate::voice_loop::VoiceLoop::with_shared(
                     Arc::downgrade(&service),
-                    voice_queues,
+                    voice_shared,
                 )));
                 info!(
                     "voice loop wired (§W2.1): recorded user turns route through the \
@@ -5044,10 +5043,12 @@ async fn dispatch(
             // anchoring registers every turn with the talk loop, so a read
             // after `append_turn` would see the just-recorded user turn, not
             // the in-flight reply the router decides against.
-            let in_flight_before = DAEMON_VOICE_LOOP
-                .get()
-                .and_then(|_| DAEMON_TALK_LOOP.get())
-                .and_then(|l| l.current_turn(&p.conv_id));
+            // Busy read from the voice loop's OWN attempt tracker —
+            // `talk_loop::current_turn` is overwritten by every anchored
+            // turn's registration and cleared by its commit-tick, so it goes
+            // idle mid-generation the moment a backchannel or queued ask is
+            // recorded (found live, conv w26-probe).
+            let in_flight_before = DAEMON_VOICE_LOOP.get().and_then(|vl| vl.in_flight(&p.conv_id));
             let mut recorded = 0usize;
             for t in &p.turns {
                 let turn = clawft_core::agent::sink::Turn {

@@ -5,8 +5,9 @@
 //!
 //! ```text
 //!   agent.turn.record (user)                       [gate: kernel.agent.voice_loop]
-//!     │  1. busy read: talk_loop::current_turn(conv) — BEFORE the record
-//!     │     (index_turn registers every anchored turn, overwriting the read)
+//!     │  1. busy read: VoiceLoop::in_flight(conv) — the loop's OWN attempt
+//!     │     tracker, read BEFORE the record (talk_loop::current_turn is
+//!     │     overwritten by every anchored turn's registration)
 //!     │  2. record as today (sink → anchor → index_turn, voice_analysis intact)
 //!     ▼
 //!   SessionTier::project_interrupt_signals ── InterruptRouter::route
@@ -53,6 +54,38 @@ use clawft_service_agent::{
 /// [`DaemonReplySubmitter::submit_reply`]'s spawned dispatch task.
 pub type VoiceQueues = DashMap<String, VecDeque<String>>;
 
+/// The voice loop's OWN busy axis: conv → the in-flight reply attempt's seq.
+///
+/// `talk_loop::current_turn` is NOT a reliable busy read for the voice loop:
+/// `index_turn` registers EVERY anchored turn (a mid-flight backchannel or
+/// queued ask overwrites the pointer), and that turn's commit-tick then clears
+/// it — wiping the busy state while the attempt is still generating (found
+/// live, conv w26-probe). This map is maintained on the attempt lifecycle
+/// only: set on register, cleared on finalize (commit/failure) and on a Stop
+/// prune; a Refine resubmit overwrites it with the amendment's seq.
+pub type InFlightAttempts = DashMap<String, u64>;
+
+/// State shared between [`VoiceLoop`] (router half) and
+/// [`DaemonReplySubmitter`] (dispatch half): the queued-utterance FIFOs and
+/// the in-flight attempt tracker. One `Arc<VoiceShared>` per daemon, built at
+/// boot and handed to both constructors.
+#[derive(Default)]
+pub struct VoiceShared {
+    /// Queue-arm backlog, drained on reply finalize.
+    pub queues: VoiceQueues,
+    /// The busy axis (see [`InFlightAttempts`]).
+    pub in_flight: InFlightAttempts,
+}
+
+impl VoiceShared {
+    /// Clear `conv_id`'s in-flight entry only if it still names `seq` —
+    /// finalize/prune paths use this so a stale task can never clobber the
+    /// amendment that replaced it.
+    fn clear_in_flight(&self, conv_id: &str, seq: u64) {
+        self.in_flight.remove_if(conv_id, |_, v| *v == seq);
+    }
+}
+
 /// Cap on a single conversation's queued backlog. This is a human speaking
 /// backlog, not a work queue — a runaway talker drops the oldest utterance
 /// (with a warning) rather than growing state without bound.
@@ -84,24 +117,22 @@ pub fn enqueue_utterance(queues: &VoiceQueues, conv_id: &str, text: &str) {
 /// (WEFT-650).
 pub struct DaemonReplySubmitter<H: AgentLoopHandle> {
     agent: Weak<AgentService<H>>,
-    queues: Arc<VoiceQueues>,
+    shared: Arc<VoiceShared>,
 }
 
 impl<H: AgentLoopHandle> DaemonReplySubmitter<H> {
-    /// Back-compat constructor: a private, unshared queue. Nothing else can
-    /// push onto it, so the Queue-arm drain never fires — equivalent to the
-    /// pre-WEFT-650 behaviour. Daemon wiring should use
-    /// [`Self::with_queues`], sharing the same `Arc<VoiceQueues>` passed to
-    /// [`VoiceLoop::with_queues`], so utterances routed to
-    /// [`InterruptAction::Queue`] actually drain on commit/failure.
+    /// Back-compat constructor: private, unshared state. Nothing else can
+    /// push onto its queue or read its busy axis — daemon wiring must use
+    /// [`Self::with_shared`], sharing the same `Arc<VoiceShared>` passed to
+    /// [`VoiceLoop::with_shared`].
     pub fn new(agent: Weak<AgentService<H>>) -> Self {
-        Self::with_queues(agent, Arc::new(DashMap::new()))
+        Self::with_shared(agent, Arc::new(VoiceShared::default()))
     }
 
-    /// Build a submitter sharing `queues` with a [`VoiceLoop`] — the wiring
-    /// the WEFT-650 Queue-arm drain depends on.
-    pub fn with_queues(agent: Weak<AgentService<H>>, queues: Arc<VoiceQueues>) -> Self {
-        Self { agent, queues }
+    /// Build a submitter sharing state with a [`VoiceLoop`] — the wiring the
+    /// WEFT-650 Queue-arm drain and the busy axis depend on.
+    pub fn with_shared(agent: Weak<AgentService<H>>, shared: Arc<VoiceShared>) -> Self {
+        Self { agent, shared }
     }
 }
 
@@ -109,7 +140,7 @@ impl<H: AgentLoopHandle> DaemonReplySubmitter<H> {
 impl<H: AgentLoopHandle> ReplySubmitter for DaemonReplySubmitter<H> {
     async fn submit_reply(&self, conv_id: &str, goal_text: &str) -> Option<u64> {
         let agent = self.agent.upgrade()?;
-        dispatch_reply(agent, self.queues.clone(), conv_id.to_string(), goal_text.to_string()).await
+        dispatch_reply(agent, self.shared.clone(), conv_id.to_string(), goal_text.to_string()).await
     }
 }
 
@@ -126,7 +157,7 @@ impl<H: AgentLoopHandle> ReplySubmitter for DaemonReplySubmitter<H> {
 /// the submitter.
 async fn dispatch_reply<H: AgentLoopHandle>(
     agent: Arc<AgentService<H>>,
-    queues: Arc<VoiceQueues>,
+    shared: Arc<VoiceShared>,
     conv_id: String,
     goal_text: String,
 ) -> Option<u64> {
@@ -137,6 +168,12 @@ async fn dispatch_reply<H: AgentLoopHandle>(
         Some(tier) => tier.register_reply_frontier(&conv_id, &goal_text).await,
         None => None,
     };
+    // The voice loop's busy axis: this conv now has an in-flight attempt.
+    // (A Refine resubmit lands here too, overwriting the pruned attempt's
+    // entry with the amendment's seq.)
+    if let Some(s) = seq {
+        shared.in_flight.insert(conv_id.clone(), s);
+    }
     let params = AgentChatParams {
         messages: vec![AgentChatMessage {
             role: "user".into(),
@@ -169,8 +206,9 @@ async fn dispatch_reply<H: AgentLoopHandle>(
                 // loop's sink → index_turn path as its own committed turn.
                 if let (Some(tier), Some(seq)) = (agent.session_tier(), seq) {
                     tier.commit_reply_frontier(&conv, seq);
+                    shared.clear_in_flight(&conv, seq);
                 }
-                drain_next(agent, queues, conv);
+                drain_next(agent, shared, conv);
             }
             Err(AgentServiceError::Cancelled(_)) => {
                 // A STOP/Refine interrupted this attempt: the executor
@@ -186,8 +224,9 @@ async fn dispatch_reply<H: AgentLoopHandle>(
                 if let (Some(tier), Some(seq)) = (agent.session_tier(), seq) {
                     let pruned = tier.emit_cancel_prune(&conv, Some(seq), None);
                     tier.witness_cancel(&conv, pruned);
+                    shared.clear_in_flight(&conv, seq);
                 }
-                drain_next(agent, queues, conv);
+                drain_next(agent, shared, conv);
             }
         }
     });
@@ -199,14 +238,14 @@ async fn dispatch_reply<H: AgentLoopHandle>(
 /// A no-op when the conversation has nothing queued.
 fn drain_next<H: AgentLoopHandle>(
     agent: Arc<AgentService<H>>,
-    queues: Arc<VoiceQueues>,
+    shared: Arc<VoiceShared>,
     conv_id: String,
 ) {
-    let next = queues.get_mut(&conv_id).and_then(|mut q| q.pop_front());
+    let next = shared.queues.get_mut(&conv_id).and_then(|mut q| q.pop_front());
     if let Some(text) = next {
         info!(conv_id = %conv_id, "voice loop: draining queued utterance on commit");
         tokio::spawn(async move {
-            dispatch_reply(agent, queues, conv_id, text).await;
+            dispatch_reply(agent, shared, conv_id, text).await;
         });
     }
 }
@@ -218,30 +257,36 @@ fn drain_next<H: AgentLoopHandle>(
 pub struct VoiceLoop<H: AgentLoopHandle> {
     agent: Weak<AgentService<H>>,
     router: InterruptRouter,
-    /// Shared with the daemon's [`DaemonReplySubmitter`] — the Queue arm
-    /// pushes here; the submitter's spawned dispatch task drains it on
-    /// commit/failure (WEFT-650).
-    queues: Arc<VoiceQueues>,
+    /// Shared with the daemon's [`DaemonReplySubmitter`]: the Queue arm
+    /// pushes onto `shared.queues` (drained on the submitter's
+    /// commit/failure) and the busy axis reads `shared.in_flight`.
+    shared: Arc<VoiceShared>,
 }
 
 impl<H: AgentLoopHandle> VoiceLoop<H> {
-    /// Back-compat constructor: a private, unshared queue — a Queue-arm
-    /// utterance is recorded but never drains (equivalent to pre-WEFT-650
-    /// behaviour). Daemon wiring should use [`Self::with_queues`], sharing
-    /// the same `Arc<VoiceQueues>` passed to
-    /// [`DaemonReplySubmitter::with_queues`].
+    /// Back-compat constructor: private, unshared state — the Queue arm
+    /// records but never drains and the busy axis reads empty. Daemon wiring
+    /// must use [`Self::with_shared`], sharing the same `Arc<VoiceShared>`
+    /// passed to [`DaemonReplySubmitter::with_shared`].
     pub fn new(agent: Weak<AgentService<H>>) -> Self {
-        Self::with_queues(agent, Arc::new(DashMap::new()))
+        Self::with_shared(agent, Arc::new(VoiceShared::default()))
     }
 
-    /// Build a loop sharing `queues` with a [`DaemonReplySubmitter`] — the
-    /// wiring the WEFT-650 Queue-arm drain depends on.
-    pub fn with_queues(agent: Weak<AgentService<H>>, queues: Arc<VoiceQueues>) -> Self {
+    /// Build a loop sharing state with the [`DaemonReplySubmitter`] — the
+    /// wiring the Queue-arm drain and the busy axis depend on.
+    pub fn with_shared(agent: Weak<AgentService<H>>, shared: Arc<VoiceShared>) -> Self {
         Self {
             agent,
             router: InterruptRouter::new(),
-            queues,
+            shared,
         }
+    }
+
+    /// The conversation's in-flight reply attempt seq, if any — the voice
+    /// loop's busy axis (see [`InFlightAttempts`]). The daemon's
+    /// `agent.turn.record` arm reads this BEFORE recording the utterance.
+    pub fn in_flight(&self, conv_id: &str) -> Option<u64> {
+        self.shared.in_flight.get(conv_id).map(|e| *e.value())
     }
 
     /// Route one just-recorded `user` utterance. `in_flight_before` is the
@@ -309,7 +354,7 @@ impl<H: AgentLoopHandle> VoiceLoop<H> {
                 // Recorded and held behind the in-flight turn; drained by
                 // `DaemonReplySubmitter`'s dispatch task once it commits or
                 // fails (WEFT-650).
-                enqueue_utterance(&self.queues, conv_id, text);
+                enqueue_utterance(&self.shared.queues, conv_id, text);
                 debug!(conv_id, "voice loop: queued behind in-flight turn");
             }
             action @ (InterruptAction::Stop | InterruptAction::Refine { .. }) => {
@@ -322,6 +367,16 @@ impl<H: AgentLoopHandle> VoiceLoop<H> {
                         },
                     )
                     .await;
+                // Busy-axis maintenance: a Refine's resubmit already replaced
+                // the tracker entry with the amendment's seq (dispatch_reply
+                // inserts on register); a bare Stop prunes without a
+                // replacement, so clear the pruned attempt — the conv reads
+                // idle again. remove-if-equal keeps a just-inserted amendment
+                // entry safe either way.
+                if let (Some(pruned), true) = (outcome.pruned_seq, outcome.amendment_seq.is_none())
+                {
+                    self.shared.clear_in_flight(conv_id, pruned);
+                }
                 info!(
                     conv_id,
                     pruned_seq = ?outcome.pruned_seq,
@@ -338,6 +393,25 @@ impl<H: AgentLoopHandle> VoiceLoop<H> {
 #[cfg(test)]
 mod queue_tests {
     use super::*;
+
+    #[test]
+    fn in_flight_tracker_set_clear_and_stale_guard() {
+        let shared = VoiceShared::default();
+        // Register sets the busy axis.
+        shared.in_flight.insert("c1".into(), 10);
+        assert_eq!(shared.in_flight.get("c1").map(|e| *e.value()), Some(10));
+        // A stale finalize (older attempt) must not clobber a replacement.
+        shared.in_flight.insert("c1".into(), 12); // Refine resubmit overwrote
+        shared.clear_in_flight("c1", 10); // old attempt's task finalizes late
+        assert_eq!(
+            shared.in_flight.get("c1").map(|e| *e.value()),
+            Some(12),
+            "stale clear must not remove the amendment's entry"
+        );
+        // The matching finalize clears it — conv reads idle.
+        shared.clear_in_flight("c1", 12);
+        assert!(shared.in_flight.get("c1").is_none());
+    }
 
     #[test]
     fn enqueue_preserves_fifo_order() {
