@@ -1320,6 +1320,8 @@ dependencies = [
  "ort",
  "parking_lot",
  "rand 0.8.5",
+ "rand_chacha 0.3.1",
+ "rand_distr",
  "reqwest 0.12.28",
  "ruvector-cluster",
  "ruvector-diskann",

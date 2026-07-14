@@ -28,6 +28,8 @@ PREFIX=""
 SERVE_PORT=""
 WASM_PANEL_MAX_RAW_KB=""
 WASM_PANEL_MAX_GZ_KB=""
+BENCH_CRATE=""
+BENCH_NAME=""
 COMMAND=""
 
 # ── Reporting helpers ────────────────────────────────────────────────
@@ -726,6 +728,30 @@ cmd_clippy() {
     timer_end
 }
 
+cmd_bench() {
+    local crate="$1" name="$2"
+    if [ -z "$crate" ] || [ -z "$name" ]; then
+        fail "usage: scripts/build.sh bench <crate> <bench-name> [--features f]"
+        return 1
+    fi
+    header "Running cargo bench -p $crate --bench $name${FEATURES:+ --features $FEATURES}"
+    timer_start
+    if [ "$DRY_RUN" = true ]; then
+        printf "  ${YELLOW}DRY${NC}   cargo bench -p %s --bench %s%s\n" \
+            "$crate" "$name" "${FEATURES:+ --features $FEATURES}"
+    else
+        # Benches print their own report (e.g. vector_backend_bench emits
+        # JSON lines + a human table) — don't route through run_cmd, which
+        # tails build logs to 5 lines and would truncate that report.
+        if [ -n "$FEATURES" ]; then
+            cargo bench -p "$crate" --bench "$name" --features "$FEATURES"
+        else
+            cargo bench -p "$crate" --bench "$name"
+        fi
+    fi
+    timer_end
+}
+
 cmd_clean() {
     header "Cleaning build artifacts"
     run_cmd cargo clean
@@ -854,6 +880,15 @@ cmd_audit() {
     timer_end
 }
 
+# ── Gate check 13 helper: clawft-kernel diskann + bench feature matrix ──
+check_kernel_diskann_and_bench_matrix() {
+    # --tests included deliberately: cfg-gated test modules rot separately
+    # from the lib (found live: stub-only cosine_distance tests failed to
+    # compile under --features diskann while the lib checked clean).
+    cargo check -p clawft-kernel --features diskann --tests --benches \
+        && cargo check -p clawft-kernel --tests --benches
+}
+
 # ── Gate: full phase-gate checks ────────────────────────────────────
 cmd_gate() {
     header "Phase Gate — 13 checks"
@@ -976,8 +1011,12 @@ cmd_gate() {
     # NOT in kernel defaults; without this compile check the real backend's
     # cfg-gated code can rot while every default build silently uses the
     # brute-force stub. (The default-features side is covered by check 1.)
-    run_gate_check 13 "diskann feature compile (clawft-kernel)" \
-        cargo check -p clawft-kernel --features diskann
+    # Also compile-checks vector_backend_bench (WEFT-366) under both
+    # feature states — `cargo check --workspace` (check 1 / cmd_check)
+    # does not build [[bench]] targets by default, so without `--benches`
+    # here the bench's diskann-gated arm could silently bit-rot.
+    run_gate_check 13 "diskann + bench feature compile (clawft-kernel)" \
+        check_kernel_diskann_and_bench_matrix
 
     # Summary
     echo ""
@@ -1045,6 +1084,11 @@ ${BOLD}Commands:${NC}
                   Followups: WEFT-551 (wasmtime), WEFT-552 (rustls-webpki),
                   WEFT-553 (unmaintained + unsound rand).
   gate            Run full phase gate (12 checks, includes cargo audit)
+  bench <crate> <name>
+                  Run a `[[bench]] harness = false` target (e.g.
+                  scripts/build.sh bench clawft-kernel vector_backend_bench
+                  --features diskann). Prints the bench's own report
+                  in full (not truncated like other commands' output).
   serve [port]    Serve browser test harness (default: 8080)
   clean           Clean all build artifacts
 
@@ -1095,6 +1139,19 @@ parse_args() {
     if [ "$COMMAND" = "serve" ] && [ $# -gt 0 ] && [[ "$1" =~ ^[0-9]+$ ]]; then
         SERVE_PORT="$1"
         shift
+    fi
+
+    # Capture positional args for bench command:
+    #   scripts/build.sh bench <crate> <bench-name> [--features f]
+    if [ "$COMMAND" = "bench" ]; then
+        if [ $# -gt 0 ] && [[ "$1" != --* ]]; then
+            BENCH_CRATE="$1"
+            shift
+        fi
+        if [ $# -gt 0 ] && [[ "$1" != --* ]]; then
+            BENCH_NAME="$1"
+            shift
+        fi
     fi
 
     # Capture optional positional budget overrides for wasm-panel:
@@ -1181,6 +1238,7 @@ main() {
         clippy)       cmd_clippy ;;
         audit)        cmd_audit ;;
         gate)         cmd_gate ;;
+        bench)        cmd_bench "$BENCH_CRATE" "$BENCH_NAME" ;;
         serve)        cmd_serve "$SERVE_PORT" ;;
         clean)        cmd_clean ;;
         --help|-h)    usage ;;

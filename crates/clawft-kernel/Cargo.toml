@@ -137,3 +137,14 @@ clawft-types = { workspace = true }
 insta = { workspace = true }
 tempfile = { workspace = true }
 wiremock = "0.6"
+# WEFT-366 vector_backend_bench: clustered-gaussian synthetic corpus
+# generation (see benches/vector_backend_bench.rs). rand_chacha/rand_distr
+# pinned locally, matching the clawft-casestudy-gen-qsr precedent.
+rand = { workspace = true }
+rand_chacha = "0.3"
+rand_distr = "0.4"
+
+[[bench]]
+name = "vector_backend_bench"
+harness = false
+required-features = ["ecc"]

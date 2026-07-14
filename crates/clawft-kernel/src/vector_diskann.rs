@@ -719,12 +719,18 @@ mod tests {
         assert_eq!(b.len(), 2);
     }
 
+    // `cosine_distance` is the STUB's scoring fn (cfg(not(diskann))) — the
+    // real backend scores inside ruvector-diskann. Gate its tests the same
+    // way or the `--features diskann` test build fails to compile (the
+    // feature-rot class WEFT-656's gate check exists to catch).
+    #[cfg(not(feature = "diskann"))]
     #[test]
     fn cosine_distance_identical() {
         let d = cosine_distance(&[1.0, 0.0], &[1.0, 0.0]);
         assert!(d.abs() < 0.001);
     }
 
+    #[cfg(not(feature = "diskann"))]
     #[test]
     fn cosine_distance_orthogonal() {
         let d = cosine_distance(&[1.0, 0.0], &[0.0, 1.0]);
