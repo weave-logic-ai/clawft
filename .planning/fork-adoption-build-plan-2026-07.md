@@ -167,6 +167,16 @@ provided: `VectorBackend` trait with HNSW / DiskANN / Hybrid backends
   brute-force ground truth, insert throughput, query p50/p95, RSS, on-disk
   size. Fixed-seed synthetic + one real corpus (docs/brain embeddings).
   Publish results to `docs/brain/` and record the verdict here.
+- **Phase 3 VERDICT (recorded 2026-07-14, WEFT-366 closed):** HNSW stays
+  the live/primary backend; **DiskANN = come back to it** (deferred, not
+  disqualified) — query profile wins at 10K (0.994 recall, p50 363µs vs
+  HNSW 0.943/398µs) but `ruvector-diskann`'s serial Vamana build (128s @
+  10K/384d, one core; hours projected @1M) is wrong for the streaming ECC
+  workload. Revisit when upstream ships parallel/incremental build, when
+  WEFT-660 (search id=0) + WEFT-661 (hybrid cross-metric merge, recall
+  0.113) land, or when an off-path cold-snapshot tier materializes. Full
+  results: `docs/brain/vector-backend-bench-2026-07.md`. 500K/1M ladder
+  deliberately not run; harness is ready when revisit triggers.
 - **Phase 4 — Watch items (no build).** `ruvector-rabitq` (listed in
   `.planning/ruv/crate-index.md`): if real, it closes zvec's quantization
   edge — evaluate after Phase 3 baselines exist. Hybrid/FTS (BM25+dense
