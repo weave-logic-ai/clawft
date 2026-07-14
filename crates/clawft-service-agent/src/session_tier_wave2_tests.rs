@@ -114,6 +114,23 @@ async fn project_signals_intent_backchannel_short_and_busy() {
     assert!(s.is_backchannel);
     assert!(s.is_short, "≤3 words is short");
 
+    // WEFT-659: the non-lexical class set was widened past bare
+    // `backchannel_candidate` — laughter and hesitation fillers are also
+    // listener sounds, never a turn.
+    let va = json!({ "paralinguistics": { "class": "laughter_candidate" } });
+    let s = tier.project_interrupt_signals(conv, "haha", Some(&va), true);
+    assert!(s.is_backchannel, "laughter_candidate must project as backchannel");
+
+    let va = json!({ "paralinguistics": { "class": "filler" } });
+    let s = tier.project_interrupt_signals(conv, "um", Some(&va), true);
+    assert!(s.is_backchannel, "filler must project as backchannel");
+
+    // `unknown` is deliberately excluded — an unclassified sound is not
+    // assumed to be a listener acknowledgment.
+    let va = json!({ "paralinguistics": { "class": "unknown" } });
+    let s = tier.project_interrupt_signals(conv, "huh", Some(&va), true);
+    assert!(!s.is_backchannel, "unknown class must not project as backchannel");
+
     // Plain speech class is not a backchannel; busy passes through.
     let va = json!({ "paralinguistics": { "class": "speech" } });
     let s = tier.project_interrupt_signals(

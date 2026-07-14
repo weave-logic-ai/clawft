@@ -169,6 +169,11 @@ impl ConversationObserver for LiveRenderObserver {
             ConversationEvent::SpeculativeFiller { text } => {
                 println!("  … {text}");
             }
+            // A turn was gated before the reply slot ran (WEFT-659) — no ack,
+            // no filler, no brain reply. Surfaced so the watch view shows why.
+            ConversationEvent::TurnGated { reason } => {
+                println!("  ⊘ turn gated ({reason})");
+            }
             // Listen-only never fires these; a full talk loop supersedes the ack
             // with the committed reply and prunes on barge-in.
             ConversationEvent::SpeculativeReply { .. } | ConversationEvent::Interrupted => {}

@@ -140,10 +140,14 @@ impl ConversationObserver for EccConversationObserver {
             // §W1.4 process events are surface-only — not committed graph
             // nodes. SpeculativeFiller (WEFT-658) joins this group: it's an
             // ephemeral "thinking" line, not a reply the ECC forest tracks.
+            // TurnGated (WEFT-659) joins it too: the gated turn's `UserTurn`
+            // already recorded the decomposition; this is just the "why no
+            // reply followed" explanation for the surface.
             ConversationEvent::EndpointFired { .. }
             | ConversationEvent::PartialTranscript { .. }
             | ConversationEvent::CaptureLevel { .. }
-            | ConversationEvent::SpeculativeFiller { .. } => {}
+            | ConversationEvent::SpeculativeFiller { .. }
+            | ConversationEvent::TurnGated { .. } => {}
             ConversationEvent::Interrupted => {
                 let i = self.graph.add_node(
                     "interrupted".to_string(),

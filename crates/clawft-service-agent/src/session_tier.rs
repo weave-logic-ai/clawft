@@ -595,7 +595,11 @@ impl SessionTier {
     ///
     /// - `intent` — the keyword dialogue-act classifier (always available).
     /// - `is_backchannel` — the Wave-1 wire decomposition's
-    ///   `paralinguistics.class == "backchannel_candidate"`.
+    ///   `paralinguistics.class` is one of the non-lexical classes
+    ///   (WEFT-659: `backchannel_candidate`, `laughter_candidate`, `filler`
+    ///   — a listener sound, never a request). Kept in lock-step with
+    ///   `clawft-weave/src/voice_loop.rs`'s `NONLEXICAL_PARALINGUISTIC_CLASSES`,
+    ///   which gates the idle case before this projection even runs.
     /// - `is_short` — ≤ 3 words (a short `Social` while busy is
     ///   backchannel-grade).
     /// - `topically_continuous` — the turn classifier's continuity carry: the
@@ -610,11 +614,14 @@ impl SessionTier {
         busy: bool,
     ) -> crate::interrupt_router::InterruptSignals {
         let intent = crate::dialogue_act::classify_act(text).intent();
+        // WEFT-659: widened from `backchannel_candidate` alone to all three
+        // non-lexical classes — a listener sound is never a turn regardless
+        // of which one the wire decomposition tagged it.
         let is_backchannel = voice_analysis
             .and_then(|va| va.get("paralinguistics"))
             .and_then(|p| p.get("class"))
             .and_then(|c| c.as_str())
-            .is_some_and(|c| c == "backchannel_candidate");
+            .is_some_and(|c| matches!(c, "backchannel_candidate" | "laughter_candidate" | "filler"));
         let is_short = text.split_whitespace().count() <= 3;
         let topically_continuous = match (&self.classifier, &self.forest) {
             (Some(classifier), Some(_)) => {

@@ -34,8 +34,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::analysis::{
-    AudioAnalysis, EndpointAnalysis, SpeakerAction, SpeakerAnalysis, SttAnalysis, SttPath,
-    TokenAnalysis, VoiceAnalysis,
+    AudioAnalysis, EndpointAnalysis, ParalinguisticClass, SpeakerAction, SpeakerAnalysis,
+    SttAnalysis, SttPath, TokenAnalysis, VoiceAnalysis,
 };
 use super::capture::CaptureMetrics;
 use super::paralinguistics::{classify_paralinguistics, ParalinguisticInput};
@@ -190,6 +190,20 @@ pub enum ConversationEvent {
     SpeculativeFiller {
         /// Filler text spoken by the fast TTS layer.
         text: String,
+    },
+    /// A turn was gated before the reply slot ran — no ack, no filler, no
+    /// `VoiceLlm::complete`, no spoken reply (WEFT-659). The turn still
+    /// finalizes and records/observes as [`UserTurn`](Self::UserTurn)
+    /// normally (the decomposition on the graph is wanted either way); this
+    /// is a companion, surface-only §W1.4 process event explaining *why* no
+    /// reply followed. Grouped with [`SpeculativeFiller`](Self::SpeculativeFiller)
+    /// wherever observers treat process events as surface-only.
+    TurnGated {
+        /// Why the reply slot was skipped: `"non_lexical"` (paralinguistics
+        /// classified the turn as backchannel/laughter/filler) or
+        /// `"unclear"` ([`utterance_clarity`] failed — a spoken
+        /// clarification request was the only audio emitted).
+        reason: String,
     },
     /// The grounded answer — the **Committed** node that supersedes the ack.
     CommittedReply {
@@ -557,9 +571,12 @@ impl Decoder {
     }
 
     /// Full decode of one finalized utterance: STT → speaker → record → emit
-    /// `UserTurn`. Returns `(transcript, private speaker context)` for talk-mode
-    /// follow-up, or `None` when the turn is dropped (empty transcript / error).
-    async fn decode_and_emit(&self, turn: FinalizedTurn) -> Option<(String, Option<String>)> {
+    /// `UserTurn`. Returns the [`DecodedTurn`] (transcript, private speaker
+    /// context, and the produced `VoiceAnalysis` — threaded back so the
+    /// talk-mode reply slot can gate on it per WEFT-659 without re-deriving
+    /// what this method already computed), or `None` when the turn is
+    /// dropped (empty transcript / error).
+    async fn decode_and_emit(&self, turn: FinalizedTurn) -> Option<DecodedTurn> {
         let sr = self.config.sample_rate;
         let utt = Utterance {
             samples: turn.samples,
@@ -608,9 +625,128 @@ impl Decoder {
             text: text.clone(),
             speaker: speaker_id,
             speaker_name,
-            voice_analysis: Some(Box::new(voice_analysis)),
+            voice_analysis: Some(Box::new(voice_analysis.clone())),
         });
-        Some((text, speaker_ctx))
+        Some(DecodedTurn {
+            text,
+            speaker_ctx,
+            analysis: voice_analysis,
+        })
+    }
+}
+
+/// The result of [`Decoder::decode_and_emit`]: the transcript, private
+/// speaker context for the LLM system prompt, and the full per-utterance
+/// [`VoiceAnalysis`] threaded back to the caller (not just emitted on the
+/// observer) so `talk_turn` can gate the reply slot on it (WEFT-659).
+struct DecodedTurn {
+    text: String,
+    speaker_ctx: Option<String>,
+    analysis: VoiceAnalysis,
+}
+
+// ── Reply-slot gate (WEFT-659): non-lexical + unclear ───────────────────
+//
+// Two independent reasons `talk_turn` may skip the ENTIRE reply slot (ack,
+// filler, `VoiceLlm::complete`, spoken answer) for an otherwise-finalized
+// turn. The turn still finalizes/records/observes as `UserTurn` — only the
+// reply slot is skipped, and a `ConversationEvent::TurnGated` explains why.
+
+/// Whether an utterance's transcript is trustworthy enough to hand to the
+/// grounded LLM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Clarity {
+    /// Confident enough to answer.
+    Clear,
+    /// Confidence/SNR combination says the transcript is likely wrong; ask
+    /// the user to repeat rather than answer garbage.
+    Unclear,
+}
+
+/// Utterances at/above this word count with mean confidence below
+/// [`CLARITY_LONG_CONF_MIN`] are unclear — a long transcript is far more
+/// likely to contain a substantive misrecognition than a one-word answer.
+const CLARITY_LONG_WORD_COUNT: usize = 4;
+/// Mean-confidence floor for the long-utterance rule.
+const CLARITY_LONG_CONF_MIN: f32 = 0.55;
+/// Below this mean confidence, ANY utterance (regardless of length) is
+/// unclear. Live-trace calibration: "No." (1 word, conf 0.44) must stay
+/// CLEAR, so this floor sits well below that, not at it.
+const CLARITY_ABSOLUTE_CONF_MIN: f32 = 0.30;
+/// A converged noise floor with SNR below this corroborates a borderline
+/// confidence score (the mic really was struggling): combined with
+/// [`CLARITY_LOW_SNR_CONF_MIN`] this catches turns the two floors above
+/// individually let through.
+const CLARITY_LOW_SNR_DB: f32 = 5.0;
+/// Confidence floor for the low-SNR rule (higher than
+/// [`CLARITY_LONG_CONF_MIN`] — a bad mic environment needs more headroom
+/// before its transcript is trusted).
+const CLARITY_LOW_SNR_CONF_MIN: f32 = 0.70;
+
+/// Rate `analysis`'s transcript-worthiness. Deliberately expressible from
+/// wire-level [`VoiceAnalysis`] fields only (`stt.token_conf_mean`,
+/// `audio.snr_db`, `audio.noise_floor_converged`) plus the transcript's word
+/// count, so the daemon side can mirror this exact rule from the JSON
+/// record without re-deriving it from raw audio. `transcript` supplies the
+/// word count (not itself a `VoiceAnalysis` field).
+///
+/// Calibrated against live hot-mic traces (WEFT-659):
+/// - "No." (1 word, conf 0.44, SNR 6.4 dB) → Clear (short answers are
+///   allowed low confidence).
+/// - "What question did you hear?" (conf 0.98, SNR 16.3 dB) → Clear.
+/// - A 12-word utterance at conf ≈0.45 → Unclear (long + shaky = likely
+///   garbled).
+pub fn utterance_clarity(analysis: &VoiceAnalysis, transcript: &str) -> Clarity {
+    let word_count = transcript.split_whitespace().count();
+    let conf_mean = analysis.stt.token_conf_mean;
+    let snr_db = analysis.audio.snr_db;
+
+    if word_count >= CLARITY_LONG_WORD_COUNT && conf_mean < CLARITY_LONG_CONF_MIN {
+        return Clarity::Unclear;
+    }
+    if conf_mean < CLARITY_ABSOLUTE_CONF_MIN {
+        return Clarity::Unclear;
+    }
+    if snr_db < CLARITY_LOW_SNR_DB
+        && analysis.audio.noise_floor_converged
+        && conf_mean < CLARITY_LOW_SNR_CONF_MIN
+    {
+        return Clarity::Unclear;
+    }
+    Clarity::Clear
+}
+
+/// Whether a finalized turn should engage the grounded brain (ack + filler +
+/// LLM + spoken answer), or be gated before any of that runs. Pure and
+/// unit-tested; [`TalkModeController::talk_turn`] consumes the verdict and
+/// owns the actual async speak/skip behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Engage {
+    /// Run the full reply slot.
+    Engage,
+    /// Skip the reply slot: paralinguistics classified this as a
+    /// non-lexical vocalization (backchannel/laughter/filler), not speech
+    /// addressed to the assistant.
+    GateNonLexical,
+    /// Skip the reply slot: [`utterance_clarity`] says the transcript isn't
+    /// trustworthy; speak a clarification request instead.
+    GateUnclear,
+}
+
+/// The gate `talk_turn` consults before running the reply slot. Non-lexical
+/// paralinguistics wins over the clarity check — a backchannel is never
+/// "unclear", it simply isn't addressed to us — so it must be checked FIRST,
+/// before the (expensive to be wrong about) unclear path even runs.
+pub fn should_engage_brain(analysis: &VoiceAnalysis, transcript: &str) -> Engage {
+    match analysis.paralinguistics.class {
+        ParalinguisticClass::BackchannelCandidate
+        | ParalinguisticClass::LaughterCandidate
+        | ParalinguisticClass::Filler => return Engage::GateNonLexical,
+        ParalinguisticClass::Speech | ParalinguisticClass::Unknown => {}
+    }
+    match utterance_clarity(analysis, transcript) {
+        Clarity::Unclear => Engage::GateUnclear,
+        Clarity::Clear => Engage::Engage,
     }
 }
 
@@ -654,6 +790,10 @@ pub struct TalkModeController<M: EndpointModel> {
     /// `ack_counter` (a turn speaks at most one filler, but not every turn
     /// speaks one, so the two counters drift apart over a session).
     filler_counter: u32,
+    /// Turn counter driving [`pick_clarification`]'s pool rotation
+    /// (WEFT-659 unclear gate), independent of the other two — a
+    /// clarification is spoken only on `Engage::GateUnclear` turns.
+    clarification_counter: u32,
 }
 
 impl<M: EndpointModel> TalkModeController<M> {
@@ -700,6 +840,7 @@ impl<M: EndpointModel> TalkModeController<M> {
             last_probe: None,
             ack_counter: 0,
             filler_counter: 0,
+            clarification_counter: 0,
         }
     }
 
@@ -803,6 +944,7 @@ impl<M: EndpointModel> TalkModeController<M> {
             let warm: Vec<String> = ACK_SHORT_POOL
                 .iter()
                 .chain(ACK_LONG_POOL.iter())
+                .chain(CLARIFICATION_POOL.iter())
                 .map(|s| s.to_string())
                 .collect();
             self.tts.spawn_warm_acks(warm);
@@ -960,9 +1102,43 @@ impl<M: EndpointModel> TalkModeController<M> {
         frames: &mut mpsc::Receiver<Vec<i16>>,
         cancel: &CancellationToken,
     ) {
-        let Some((text, speaker_ctx)) = self.decoder.decode_and_emit(turn).await else {
+        let Some(decoded) = self.decoder.decode_and_emit(turn).await else {
             return; // empty transcript / STT error — turn dropped (UserTurn not emitted)
         };
+        let DecodedTurn {
+            text,
+            speaker_ctx,
+            analysis,
+        } = decoded;
+
+        // The non-lexical / unclear gate (WEFT-659): decide BEFORE any of the
+        // reply slot runs — no ack, no filler, no `VoiceLlm::complete`, no
+        // spoken reply. The turn already finalized/recorded above regardless.
+        match should_engage_brain(&analysis, &text) {
+            Engage::Engage => {}
+            Engage::GateNonLexical => {
+                debug!(transcript = %text, "talk-mode turn gated: non-lexical");
+                self.observer.observe(ConversationEvent::TurnGated {
+                    reason: "non_lexical".into(),
+                });
+                return;
+            }
+            Engage::GateUnclear => {
+                debug!(transcript = %text, "talk-mode turn gated: unclear");
+                self.observer.observe(ConversationEvent::TurnGated {
+                    reason: "unclear".into(),
+                });
+                let clarification = pick_clarification(self.clarification_counter);
+                self.clarification_counter = self.clarification_counter.wrapping_add(1);
+                speak_while_draining(
+                    self.tts.speak_ack(&clarification, self.sink.clone(), cancel.clone()),
+                    frames,
+                    cancel,
+                )
+                .await;
+                return;
+            }
+        }
 
         // Fast ack = Speculative spoken node (6.4 fast layer covers latency).
         // Rotated through the pool (WEFT-658 hot-mic feedback: talk mode said
@@ -1177,14 +1353,14 @@ pub fn contextual_ack(transcript: &str) -> String {
 /// talk loop uses [`pick_ack`] instead, which rotates through this pool.
 /// Closed set (no transcript interpolation) so [`DualLayerTts`] can
 /// pre-render every entry through the SLOW tier at session start.
-pub const ACK_SHORT_POOL: &[&str] = &[ACK_SHORT, "Hmm.", "Right.", "On it.", "Sure."];
+pub const ACK_SHORT_POOL: &[&str] = &[ACK_SHORT, "Mm-hm.", "Okay.", "Sure — sec.", "Got it."];
 /// Long-ask ack pool — same closed-set / pre-render contract as
 /// [`ACK_SHORT_POOL`].
 pub const ACK_LONG_POOL: &[&str] = &[
     ACK_LONG,
-    "Good question, give me a moment.",
-    "Let me think about that.",
-    "Okay, looking now.",
+    "Okay, let me think.",
+    "Good question — one moment.",
+    "Alright, let me look.",
 ];
 
 /// Pick an ack for `transcript`, rotating through the short/long pool (the
@@ -1271,13 +1447,31 @@ pub fn extract_subject(transcript: &str) -> Option<String> {
 /// in), so unlike the closed ack pools it is always rendered on the fly
 /// through the FAST tier rather than pre-rendered/cached.
 const FILLER_TEMPLATES: &[&str] = &[
-    "Let me look at {subject}.",
-    "Checking on {subject} now.",
-    "Thinking about {subject}.",
+    "Let me look at {subject} for a second.",
+    "Okay — checking {subject}.",
+    "Thinking about {subject}…",
 ];
 /// Fallback filler pool for utterances with no extractable subject (short
 /// greetings, all-stopword asks).
-const FILLER_FALLBACK_POOL: &[&str] = &["Working on it.", "Still with you.", "One more moment."];
+const FILLER_FALLBACK_POOL: &[&str] = &["Give me a moment.", "Almost there.", "Still with you."];
+
+/// Clarification pool spoken when [`Engage::GateUnclear`] fires (WEFT-659):
+/// the STT confidence/SNR combination says the transcript is unreliable, so
+/// rather than answer garbage the turn asks the user to repeat themselves.
+/// Closed set (no transcript interpolation), same pre-render contract as
+/// [`ACK_SHORT_POOL`] — added to the warm set in
+/// [`TalkModeController::run`].
+pub const CLARIFICATION_POOL: &[&str] = &[
+    "Sorry, I didn't catch that — say it again?",
+    "I lost you there, one more time?",
+    "Didn't quite hear that — could you repeat it?",
+];
+
+/// Pick a clarification for the unclear gate, rotating like [`pick_ack`] so
+/// consecutive gated turns don't repeat the same line.
+pub fn pick_clarification(counter: u32) -> String {
+    CLARIFICATION_POOL[counter as usize % CLARIFICATION_POOL.len()].to_string()
+}
 
 /// How long to wait after the ack for the grounded answer before speaking a
 /// filler (WEFT-658: "buys the (slow) brain thinking time and opens natural
@@ -1390,9 +1584,9 @@ mod tests {
     #[test]
     fn pick_filler_uses_subject_template_when_available() {
         let f = pick_filler("tell me about Puyo please", 0);
-        assert_eq!(f, "Let me look at Puyo.");
+        assert_eq!(f, "Let me look at Puyo for a second.");
         let f2 = pick_filler("tell me about Puyo please", 1);
-        assert_eq!(f2, "Checking on Puyo now.");
+        assert_eq!(f2, "Okay — checking Puyo.");
     }
 
     #[test]
@@ -1436,5 +1630,205 @@ mod tests {
         // elapsed time.
         assert!(!should_speak_filler(Duration::from_millis(1_500), true));
         assert!(!should_speak_filler(Duration::from_millis(5_000), true));
+    }
+
+    // ── pick_clarification (WEFT-659 unclear-gate pool rotation) ────────
+
+    #[test]
+    fn pick_clarification_rotates_without_immediate_repeat() {
+        let mut prev: Option<String> = None;
+        for i in 0..10 {
+            let c = pick_clarification(i);
+            if let Some(p) = &prev {
+                assert_ne!(*p, c, "immediate repeat at counter {i}");
+            }
+            prev = Some(c);
+        }
+    }
+
+    #[test]
+    fn pick_clarification_cycles_through_every_entry() {
+        let picks: std::collections::HashSet<String> =
+            (0..CLARIFICATION_POOL.len() as u32).map(pick_clarification).collect();
+        assert_eq!(picks.len(), CLARIFICATION_POOL.len(), "a full cycle visits every entry once");
+    }
+}
+
+/// WEFT-659: the reply-slot gate — `utterance_clarity` calibration and the
+/// `should_engage_brain` decision tree it feeds.
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+    use super::super::analysis::{
+        AudioAnalysis, EmotionAnalysis, EndpointAnalysis, ParalinguisticClass,
+        ParalinguisticsAnalysis, ProsodyAnalysis, SpeakerAnalysis, SttAnalysis, SttPath,
+        VoiceAnalysis,
+    };
+
+    /// Build a `VoiceAnalysis` exercising only the fields `utterance_clarity`
+    /// / `should_engage_brain` read; everything else defaulted.
+    fn analysis_with(
+        conf_mean: f32,
+        snr_db: f32,
+        noise_floor_converged: bool,
+        class: ParalinguisticClass,
+    ) -> VoiceAnalysis {
+        VoiceAnalysis::new(
+            SttAnalysis {
+                model: "test".into(),
+                latency_ms: 0,
+                path: SttPath::Native,
+                tokens: vec![],
+                token_conf_mean: conf_mean,
+                token_conf_min: conf_mean,
+            },
+            EndpointAnalysis {
+                completion_prob: 1.0,
+                source: "heuristic".into(),
+                silence_tail_ms: 0,
+                latency_ms: 0,
+            },
+            SpeakerAnalysis::default(),
+            AudioAnalysis {
+                snr_db,
+                noise_floor_converged,
+                ..AudioAnalysis::default()
+            },
+            ProsodyAnalysis::default(),
+            EmotionAnalysis::default(),
+            ParalinguisticsAnalysis {
+                class,
+                ..ParalinguisticsAnalysis::default()
+            },
+        )
+    }
+
+    // ── utterance_clarity calibration (WEFT-659 live-trace cases) ───────
+
+    #[test]
+    fn short_low_confidence_answer_is_clear() {
+        // "No." — 1 word, conf 0.44, SNR 6.4 dB. Must stay CLEAR.
+        let a = analysis_with(0.44, 6.4, true, ParalinguisticClass::Speech);
+        assert_eq!(utterance_clarity(&a, "No."), Clarity::Clear);
+    }
+
+    #[test]
+    fn high_confidence_question_is_clear() {
+        let a = analysis_with(0.98, 16.3, true, ParalinguisticClass::Speech);
+        assert_eq!(utterance_clarity(&a, "What question did you hear?"), Clarity::Clear);
+    }
+
+    #[test]
+    fn long_low_confidence_utterance_is_unclear() {
+        let a = analysis_with(0.45, 10.0, true, ParalinguisticClass::Speech);
+        let transcript =
+            "this is a twelve word utterance spoken with shaky recognition confidence today";
+        assert_eq!(utterance_clarity(&a, transcript), Clarity::Unclear);
+    }
+
+    #[test]
+    fn live_trace_garbage_stt_is_unclear() {
+        // The hot-mic feedback trace: engaged the full brain despite
+        // conf_mean 0.44 / conf_min 0.34 / SNR 6.4 dB. Must gate now.
+        let a = analysis_with(0.44, 6.4, true, ParalinguisticClass::Speech);
+        let transcript = "If that shoes is a some sort of weird gap in those yellow tree store";
+        assert_eq!(utterance_clarity(&a, transcript), Clarity::Unclear);
+        assert_eq!(should_engage_brain(&a, transcript), Engage::GateUnclear);
+    }
+
+    // ── boundaries ────────────────────────────────────────────────────
+
+    #[test]
+    fn long_word_count_boundary_below_conf_floor_is_unclear() {
+        let a = analysis_with(0.54, 10.0, true, ParalinguisticClass::Speech);
+        assert_eq!(utterance_clarity(&a, "one two three four"), Clarity::Unclear);
+    }
+
+    #[test]
+    fn long_word_count_boundary_at_conf_floor_is_clear() {
+        let a = analysis_with(0.55, 10.0, true, ParalinguisticClass::Speech);
+        assert_eq!(utterance_clarity(&a, "one two three four"), Clarity::Clear);
+    }
+
+    #[test]
+    fn below_long_word_count_threshold_the_long_rule_does_not_apply() {
+        // 3 words, low confidence: the long-utterance rule needs >= 4 words,
+        // and this clears the absolute + SNR floors, so it stays Clear.
+        let a = analysis_with(0.40, 10.0, true, ParalinguisticClass::Speech);
+        assert_eq!(utterance_clarity(&a, "one two three"), Clarity::Clear);
+    }
+
+    #[test]
+    fn absolute_confidence_floor_is_unclear_regardless_of_length() {
+        let a = analysis_with(0.29, 20.0, true, ParalinguisticClass::Speech);
+        assert_eq!(utterance_clarity(&a, "hi"), Clarity::Unclear);
+    }
+
+    #[test]
+    fn absolute_confidence_floor_boundary_is_clear() {
+        let a = analysis_with(0.30, 20.0, true, ParalinguisticClass::Speech);
+        assert_eq!(utterance_clarity(&a, "hi"), Clarity::Clear);
+    }
+
+    #[test]
+    fn low_snr_converged_low_confidence_is_unclear() {
+        let a = analysis_with(0.60, 3.0, true, ParalinguisticClass::Speech);
+        assert_eq!(utterance_clarity(&a, "can you hear me now"), Clarity::Unclear);
+    }
+
+    #[test]
+    fn low_snr_unconverged_floor_does_not_apply() {
+        // Same confidence/SNR as above, but the noise floor hasn't converged
+        // — SNR is unreliable, so this rule must not fire.
+        let a = analysis_with(0.60, 3.0, false, ParalinguisticClass::Speech);
+        assert_eq!(utterance_clarity(&a, "can you hear me now"), Clarity::Clear);
+    }
+
+    #[test]
+    fn low_snr_high_confidence_is_clear() {
+        let a = analysis_with(0.75, 3.0, true, ParalinguisticClass::Speech);
+        assert_eq!(utterance_clarity(&a, "can you hear me now"), Clarity::Clear);
+    }
+
+    // ── should_engage_brain gate ─────────────────────────────────────────
+
+    #[test]
+    fn clear_speech_engages() {
+        let a = analysis_with(0.9, 15.0, true, ParalinguisticClass::Speech);
+        assert_eq!(should_engage_brain(&a, "what time is it"), Engage::Engage);
+    }
+
+    #[test]
+    fn unknown_class_still_uses_the_clarity_rule() {
+        let a = analysis_with(0.9, 15.0, true, ParalinguisticClass::Unknown);
+        assert_eq!(should_engage_brain(&a, "hello there"), Engage::Engage);
+    }
+
+    #[test]
+    fn backchannel_gates_non_lexical_even_when_confidently_clear() {
+        // Non-lexical must win over clarity — a confidently-transcribed
+        // "mm-hmm" is still not a question addressed to the assistant.
+        let a = analysis_with(0.95, 15.0, true, ParalinguisticClass::BackchannelCandidate);
+        assert_eq!(should_engage_brain(&a, "mm"), Engage::GateNonLexical);
+    }
+
+    #[test]
+    fn laughter_gates_non_lexical() {
+        let a = analysis_with(0.95, 15.0, true, ParalinguisticClass::LaughterCandidate);
+        assert_eq!(should_engage_brain(&a, ""), Engage::GateNonLexical);
+    }
+
+    #[test]
+    fn filler_gates_non_lexical() {
+        // The live feedback: "Mm." was tagged Filler yet still got a brain
+        // reply. Must gate now.
+        let a = analysis_with(0.95, 15.0, true, ParalinguisticClass::Filler);
+        assert_eq!(should_engage_brain(&a, "Mm."), Engage::GateNonLexical);
+    }
+
+    #[test]
+    fn unclear_speech_gates_unclear() {
+        let a = analysis_with(0.2, 15.0, true, ParalinguisticClass::Speech);
+        assert_eq!(should_engage_brain(&a, "garbled nonsense here"), Engage::GateUnclear);
     }
 }

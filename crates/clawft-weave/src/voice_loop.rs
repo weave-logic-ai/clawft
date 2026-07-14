@@ -140,7 +140,58 @@ impl<H: AgentLoopHandle> DaemonReplySubmitter<H> {
 impl<H: AgentLoopHandle> ReplySubmitter for DaemonReplySubmitter<H> {
     async fn submit_reply(&self, conv_id: &str, goal_text: &str) -> Option<u64> {
         let agent = self.agent.upgrade()?;
-        dispatch_reply(agent, self.shared.clone(), conv_id.to_string(), goal_text.to_string()).await
+        dispatch_reply(
+            agent,
+            self.shared.clone(),
+            conv_id.to_string(),
+            goal_text.to_string(),
+        )
+        .await
+    }
+}
+
+/// Voice-shaped reply system message (WEFT-659): every voice-loop dispatch
+/// gets this so replies read as spoken conversation, not TEXT chat (live
+/// feedback: markdown lists / "Could you please rephrase..." replies).
+/// Spirit-parity with clawft-channels' `VoiceAnswerPolicy::system_policy`;
+/// not imported (avoids a weave→channels dep).
+const VOICE_REPLY_SYSTEM_MESSAGE: &str = "You are replying through a text-to-speech voice interface in a live spoken conversation. Reply in at most three short spoken sentences. Plain conversational prose only — no markdown, no lists, no headings, no code blocks. If you truly cannot parse the request, ask one brief clarifying question.";
+
+/// Build a voice-loop dispatch's [`AgentChatParams`]: voice system message
+/// leads `messages`, then the goal text, plus `user_turn_recorded` (§W2.1 —
+/// stops double-recording the already-landed spoken turn). Pure fn.
+///
+/// SURPRISE: `inbound_from_params` (service.rs) only reads the LAST
+/// `role == "user"` message off `messages`, silently dropping a leading
+/// `system` one before it reaches the LLM. So the voice message is ALSO
+/// threaded through `metadata["skill_instructions"]`, which `loop_core.rs`
+/// ("4b.") actually splices in. Both must stay populated: `messages[0]` for
+/// shape/tests, metadata for delivery.
+fn voice_dispatch_params(conv_id: &str, goal_text: &str) -> AgentChatParams {
+    let metadata = serde_json::Map::from_iter([
+        (
+            "user_turn_recorded".to_string(),
+            serde_json::Value::Bool(true),
+        ),
+        (
+            "skill_instructions".to_string(),
+            serde_json::Value::String(VOICE_REPLY_SYSTEM_MESSAGE.to_string()),
+        ),
+    ]);
+    let system = AgentChatMessage {
+        role: "system".into(),
+        content: VOICE_REPLY_SYSTEM_MESSAGE.into(),
+    };
+    let user = AgentChatMessage {
+        role: "user".into(),
+        content: goal_text.to_string(),
+    };
+    AgentChatParams {
+        messages: vec![system, user],
+        temperature: None,
+        max_tokens: None,
+        conv_id: conv_id.to_string(),
+        metadata: Some(metadata),
     }
 }
 
@@ -174,28 +225,9 @@ async fn dispatch_reply<H: AgentLoopHandle>(
     if let Some(s) = seq {
         shared.in_flight.insert(conv_id.clone(), s);
     }
-    let params = AgentChatParams {
-        messages: vec![AgentChatMessage {
-            role: "user".into(),
-            content: goal_text.clone(),
-        }],
-        temperature: None,
-        max_tokens: None,
-        conv_id: conv_id.clone(),
-        // The spoken user turn already landed via `agent.turn.record`
-        // (with its Wave-1 voice decomposition); the submitted goal text
-        // is that turn (or, on a Refine, the synthetic goal+amendment the
-        // attempt node's metadata carries) — recording it again as a
-        // plain user turn would double it on the sink and the forest.
-        metadata: Some(
-            [(
-                "user_turn_recorded".to_string(),
-                serde_json::Value::Bool(true),
-            )]
-            .into_iter()
-            .collect(),
-        ),
-    };
+    // See `voice_dispatch_params` for the voice-shaping + double-record
+    // guard this builds (§W2.1 / WEFT-659).
+    let params = voice_dispatch_params(&conv_id, &goal_text);
     // Off-path generation: capture never blocks on the reply (§W2.1).
     let conv = conv_id.clone();
     tokio::spawn(async move {
@@ -241,13 +273,83 @@ fn drain_next<H: AgentLoopHandle>(
     shared: Arc<VoiceShared>,
     conv_id: String,
 ) {
-    let next = shared.queues.get_mut(&conv_id).and_then(|mut q| q.pop_front());
+    let next = shared
+        .queues
+        .get_mut(&conv_id)
+        .and_then(|mut q| q.pop_front());
     if let Some(text) = next {
         info!(conv_id = %conv_id, "voice loop: draining queued utterance on commit");
         tokio::spawn(async move {
             dispatch_reply(agent, shared, conv_id, text).await;
         });
     }
+}
+
+/// Non-lexical paralinguistic classes (WEFT-659): a listener sound, not a
+/// request. Lock-step with `SessionTier::project_interrupt_signals`'s
+/// widened `is_backchannel` (session_tier.rs) — same classes route to
+/// `InterruptAction::Backchannel` while busy.
+const NONLEXICAL_PARALINGUISTIC_CLASSES: [&str; 3] =
+    ["backchannel_candidate", "laughter_candidate", "filler"];
+
+/// `voice_analysis.paralinguistics.class`, if one of
+/// [`NONLEXICAL_PARALINGUISTIC_CLASSES`]; `None` otherwise (incl. absent).
+fn nonlexical_paralinguistic_class(voice_analysis: Option<&serde_json::Value>) -> Option<&str> {
+    let class = voice_analysis?
+        .get("paralinguistics")?
+        .get("class")?
+        .as_str()?;
+    NONLEXICAL_PARALINGUISTIC_CLASSES
+        .contains(&class)
+        .then_some(class)
+}
+
+/// `voice_analysis.stt.token_conf_mean`, if present.
+fn stt_token_conf_mean(voice_analysis: Option<&serde_json::Value>) -> Option<f64> {
+    voice_analysis?.get("stt")?.get("token_conf_mean")?.as_f64()
+}
+
+/// `voice_analysis.audio.snr_db`, if present.
+fn audio_snr_db(voice_analysis: Option<&serde_json::Value>) -> Option<f64> {
+    voice_analysis?.get("audio")?.get("snr_db")?.as_f64()
+}
+
+/// `voice_analysis.audio.noise_floor_converged`, if present.
+fn audio_noise_floor_converged(voice_analysis: Option<&serde_json::Value>) -> Option<bool> {
+    voice_analysis?
+        .get("audio")?
+        .get("noise_floor_converged")?
+        .as_bool()
+}
+
+/// Daemon-side clarity gate (WEFT-659). Mirrors the client rule EXACTLY —
+/// `clawft-channels/src/voice/talkmode.rs`'s `utterance_clarity` is
+/// canonical, the two MUST stay in lock-step (live feedback: token-conf mean
+/// 0.44, SNR 6.4dB routed a full agent-loop reply to garbage STT). Missing
+/// fields (no `voice_analysis`, no `stt.token_conf_mean`) are always CLEAR.
+/// - `word_count >= 4 && token_conf_mean < 0.55` → unclear
+/// - `token_conf_mean < 0.30` → unclear
+/// - `snr_db < 5.0 && noise_floor_converged && token_conf_mean < 0.70` → unclear
+fn is_unclear_utterance(text: &str, voice_analysis: Option<&serde_json::Value>) -> bool {
+    let Some(token_conf_mean) = stt_token_conf_mean(voice_analysis) else {
+        return false;
+    };
+    let word_count = text.split_whitespace().count();
+    if word_count >= 4 && token_conf_mean < 0.55 {
+        return true;
+    }
+    if token_conf_mean < 0.30 {
+        return true;
+    }
+    if let (Some(snr_db), Some(true)) = (
+        audio_snr_db(voice_analysis),
+        audio_noise_floor_converged(voice_analysis),
+    ) && snr_db < 5.0
+        && token_conf_mean < 0.70
+    {
+        return true;
+    }
+    false
 }
 
 /// The routing half: consumes one recorded user utterance and drives the
@@ -311,6 +413,36 @@ impl<H: AgentLoopHandle> VoiceLoop<H> {
         let Some(tier) = agent.session_tier() else {
             return;
         };
+
+        // Non-lexical gate (WEFT-659), BEFORE routing: idle → skip dispatch
+        // (live feedback: "Mm." tagged `filler` got a full reply while
+        // idle). Busy → fall through: the router's widened `is_backchannel`
+        // (same class set) routes to `Backchannel`.
+        if let Some(class) = nonlexical_paralinguistic_class(voice_analysis)
+            && in_flight_before.is_none()
+        {
+            debug!(
+                conv_id,
+                class, "voice loop: non-lexical utterance while idle — no dispatch"
+            );
+            return;
+        }
+
+        // Unclear gate (WEFT-659), after the non-lexical check: skip on a
+        // low-confidence decomposition — no synthetic reply, the talk-mode
+        // client speaks its own clarification.
+        if is_unclear_utterance(text, voice_analysis) {
+            warn!(
+                conv_id,
+                word_count = text.split_whitespace().count(),
+                token_conf_mean = ?stt_token_conf_mean(voice_analysis),
+                snr_db = ?audio_snr_db(voice_analysis),
+                noise_floor_converged = ?audio_noise_floor_converged(voice_analysis),
+                "voice loop: utterance below clarity threshold — skipping dispatch"
+            );
+            return;
+        }
+
         let signals = tier.project_interrupt_signals(
             conv_id,
             text,
@@ -331,7 +463,10 @@ impl<H: AgentLoopHandle> VoiceLoop<H> {
                 if let Some(submitter) = agent.reply_submitter() {
                     submitter.submit_reply(conv_id, text).await;
                 } else {
-                    warn!(conv_id, "voice loop: no reply submitter wired; turn recorded only");
+                    warn!(
+                        conv_id,
+                        "voice loop: no reply submitter wired; turn recorded only"
+                    );
                 }
             }
             action @ InterruptAction::Backchannel => {
@@ -348,7 +483,10 @@ impl<H: AgentLoopHandle> VoiceLoop<H> {
                         },
                     )
                     .await;
-                debug!(conv_id, "voice loop: backchannel — Continuer emitted, agent keeps working");
+                debug!(
+                    conv_id,
+                    "voice loop: backchannel — Continuer emitted, agent keeps working"
+                );
             }
             InterruptAction::Queue => {
                 // Recorded and held behind the in-flight turn; drained by
@@ -391,72 +529,5 @@ impl<H: AgentLoopHandle> VoiceLoop<H> {
 }
 
 #[cfg(test)]
-mod queue_tests {
-    use super::*;
-
-    #[test]
-    fn in_flight_tracker_set_clear_and_stale_guard() {
-        let shared = VoiceShared::default();
-        // Register sets the busy axis.
-        shared.in_flight.insert("c1".into(), 10);
-        assert_eq!(shared.in_flight.get("c1").map(|e| *e.value()), Some(10));
-        // A stale finalize (older attempt) must not clobber a replacement.
-        shared.in_flight.insert("c1".into(), 12); // Refine resubmit overwrote
-        shared.clear_in_flight("c1", 10); // old attempt's task finalizes late
-        assert_eq!(
-            shared.in_flight.get("c1").map(|e| *e.value()),
-            Some(12),
-            "stale clear must not remove the amendment's entry"
-        );
-        // The matching finalize clears it — conv reads idle.
-        shared.clear_in_flight("c1", 12);
-        assert!(shared.in_flight.get("c1").is_none());
-    }
-
-    #[test]
-    fn enqueue_preserves_fifo_order() {
-        let queues: VoiceQueues = DashMap::new();
-        enqueue_utterance(&queues, "c1", "first");
-        enqueue_utterance(&queues, "c1", "second");
-        enqueue_utterance(&queues, "c1", "third");
-
-        let mut q = queues.get_mut("c1").unwrap();
-        assert_eq!(q.pop_front().as_deref(), Some("first"));
-        assert_eq!(q.pop_front().as_deref(), Some("second"));
-        assert_eq!(q.pop_front().as_deref(), Some("third"));
-        assert!(q.pop_front().is_none());
-    }
-
-    #[test]
-    fn enqueue_is_scoped_per_conversation() {
-        let queues: VoiceQueues = DashMap::new();
-        enqueue_utterance(&queues, "c1", "c1-text");
-        enqueue_utterance(&queues, "c2", "c2-text");
-
-        assert_eq!(queues.get("c1").unwrap().len(), 1);
-        assert_eq!(queues.get("c2").unwrap().len(), 1);
-        assert_eq!(
-            queues.get("c1").unwrap().front().map(String::as_str),
-            Some("c1-text")
-        );
-    }
-
-    #[test]
-    fn enqueue_drops_oldest_once_over_cap() {
-        let queues: VoiceQueues = DashMap::new();
-        // Fill past the cap by a few — every push beyond VOICE_QUEUE_CAP
-        // must evict exactly one (the oldest), never grow unbounded.
-        for i in 0..(VOICE_QUEUE_CAP + 3) {
-            enqueue_utterance(&queues, "c1", &format!("msg-{i}"));
-        }
-        let q = queues.get("c1").unwrap();
-        assert_eq!(q.len(), VOICE_QUEUE_CAP, "queue stays capped");
-        // The oldest three (msg-0..msg-2) were dropped; the FIFO now starts
-        // at msg-3.
-        assert_eq!(q.front().map(String::as_str), Some("msg-3"));
-        assert_eq!(
-            q.back().map(String::as_str),
-            Some(format!("msg-{}", VOICE_QUEUE_CAP + 2).as_str())
-        );
-    }
-}
+#[path = "voice_loop_tests.rs"]
+mod tests;
