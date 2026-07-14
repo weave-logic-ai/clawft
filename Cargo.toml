@@ -66,6 +66,11 @@ members = [
     # Kokoro inference lives behind the `onnx` feature. Implements the
     # clawft-channels TtsEngine seam without cpal/llm/kernel.
     "crates/clawft-voice-tts",
+    # Branchable, checkpointable memory over rvf-runtime::RvfStore — the
+    # Rust port of agenticow's COW orchestration (WEFT-616 Phase 1, see
+    # .planning/ruv/integration/agenticow-integration-plan.md). Standalone;
+    # no hermes-loop or exochain wiring yet (Phases 2-3).
+    "crates/clawft-cow-memory",
 ]
 exclude = [
     "gui/src-tauri",
@@ -287,6 +292,7 @@ clawft-service-llm = { version = "0.6.20", path = "crates/clawft-service-llm" }
 clawft-service-terminal = { version = "0.6.20", path = "crates/clawft-service-terminal" }
 clawft-service-classify = { version = "0.6.20", path = "crates/clawft-service-classify" }
 clawft-service-agent = { version = "0.6.20", path = "crates/clawft-service-agent" }
+clawft-cow-memory = { version = "0.6.20", path = "crates/clawft-cow-memory" }
 
 # EML (exp-ln) function approximation
 eml-core = { version = "0.1.0", path = "crates/eml-core" }

@@ -152,7 +152,16 @@ impl RvfStore {
     }
 
     /// Ingest (add) an entry into the store.
-    pub fn ingest(&mut self, id: String, embedding: Vec<f32>, metadata: serde_json::Value) {
+    ///
+    /// Infallible in the stub, but `Result`-returning to match the
+    /// `rvf_real` backend's signature (which can fail on I/O or dimension
+    /// errors) -- see `embeddings::rvf_backend`.
+    pub fn ingest(
+        &mut self,
+        id: String,
+        embedding: Vec<f32>,
+        metadata: serde_json::Value,
+    ) -> Result<(), RvfError> {
         // Remove existing entry with same ID (upsert semantics)
         self.entries.retain(|e| e.id != id);
         self.entries.push(RvfEntry {
@@ -160,6 +169,7 @@ impl RvfStore {
             embedding,
             metadata,
         });
+        Ok(())
     }
 
     /// Query the store for the top-k most similar entries.
@@ -193,17 +203,21 @@ impl RvfStore {
     }
 
     /// Delete an entry by ID. Returns `true` if an entry was removed.
-    pub fn delete(&mut self, id: &str) -> bool {
+    ///
+    /// Infallible in the stub, but `Result`-returning to match `rvf_real`
+    /// (a real delete can fail on I/O).
+    pub fn delete(&mut self, id: &str) -> Result<bool, RvfError> {
         let before = self.entries.len();
         self.entries.retain(|e| e.id != id);
-        self.entries.len() < before
+        Ok(self.entries.len() < before)
     }
 
     /// Persist the store to its file path (if set).
     ///
     /// This is analogous to RVF compaction -- in the stub, it simply
-    /// serializes all entries to JSON.
-    pub fn compact(&self) -> Result<(), RvfError> {
+    /// serializes all entries to JSON. `&mut self` to match `rvf_real`,
+    /// whose real `RvfStore::compact` requires exclusive access.
+    pub fn compact(&mut self) -> Result<(), RvfError> {
         let Some(ref path) = self.path else {
             return Ok(()); // no path, nothing to persist
         };
@@ -284,16 +298,20 @@ mod tests {
     #[test]
     fn ingest_and_query() {
         let mut store = RvfStore::create(None);
-        store.ingest(
-            "doc1".into(),
-            vec![1.0, 0.0, 0.0],
-            serde_json::json!({"text": "hello"}),
-        );
-        store.ingest(
-            "doc2".into(),
-            vec![0.0, 1.0, 0.0],
-            serde_json::json!({"text": "world"}),
-        );
+        store
+            .ingest(
+                "doc1".into(),
+                vec![1.0, 0.0, 0.0],
+                serde_json::json!({"text": "hello"}),
+            )
+            .unwrap();
+        store
+            .ingest(
+                "doc2".into(),
+                vec![0.0, 1.0, 0.0],
+                serde_json::json!({"text": "world"}),
+            )
+            .unwrap();
 
         let results = store.query(&[1.0, 0.0, 0.0], 1);
         assert_eq!(results.len(), 1);
@@ -304,9 +322,9 @@ mod tests {
     #[test]
     fn query_ordering() {
         let mut store = RvfStore::create(None);
-        store.ingest("a".into(), vec![1.0, 0.0], serde_json::json!({}));
-        store.ingest("b".into(), vec![0.7, 0.7], serde_json::json!({}));
-        store.ingest("c".into(), vec![0.0, 1.0], serde_json::json!({}));
+        store.ingest("a".into(), vec![1.0, 0.0], serde_json::json!({})).unwrap();
+        store.ingest("b".into(), vec![0.7, 0.7], serde_json::json!({})).unwrap();
+        store.ingest("c".into(), vec![0.0, 1.0], serde_json::json!({})).unwrap();
 
         let results = store.query(&[1.0, 0.0], 3);
         assert_eq!(results[0].id, "a");
@@ -317,19 +335,23 @@ mod tests {
     #[test]
     fn delete_entry() {
         let mut store = RvfStore::create(None);
-        store.ingest("doc1".into(), vec![1.0], serde_json::json!({}));
-        store.ingest("doc2".into(), vec![0.0], serde_json::json!({}));
+        store.ingest("doc1".into(), vec![1.0], serde_json::json!({})).unwrap();
+        store.ingest("doc2".into(), vec![0.0], serde_json::json!({})).unwrap();
 
-        assert!(store.delete("doc1"));
+        assert!(store.delete("doc1").unwrap());
         assert_eq!(store.len(), 1);
-        assert!(!store.delete("doc1")); // already gone
+        assert!(!store.delete("doc1").unwrap()); // already gone
     }
 
     #[test]
     fn upsert_semantics() {
         let mut store = RvfStore::create(None);
-        store.ingest("doc1".into(), vec![1.0, 0.0], serde_json::json!({"v": 1}));
-        store.ingest("doc1".into(), vec![0.0, 1.0], serde_json::json!({"v": 2}));
+        store
+            .ingest("doc1".into(), vec![1.0, 0.0], serde_json::json!({"v": 1}))
+            .unwrap();
+        store
+            .ingest("doc1".into(), vec![0.0, 1.0], serde_json::json!({"v": 2}))
+            .unwrap();
 
         assert_eq!(store.len(), 1);
         let entry = store.get("doc1").unwrap();
@@ -344,16 +366,20 @@ mod tests {
         // Create, ingest, compact
         {
             let mut store = RvfStore::create(Some(&path));
-            store.ingest(
-                "doc1".into(),
-                vec![1.0, 0.0, 0.0],
-                serde_json::json!({"text": "hello"}),
-            );
-            store.ingest(
-                "doc2".into(),
-                vec![0.0, 1.0, 0.0],
-                serde_json::json!({"text": "world"}),
-            );
+            store
+                .ingest(
+                    "doc1".into(),
+                    vec![1.0, 0.0, 0.0],
+                    serde_json::json!({"text": "hello"}),
+                )
+                .unwrap();
+            store
+                .ingest(
+                    "doc2".into(),
+                    vec![0.0, 1.0, 0.0],
+                    serde_json::json!({"text": "world"}),
+                )
+                .unwrap();
             store.compact().unwrap();
         }
 
@@ -389,7 +415,7 @@ mod tests {
     #[test]
     fn query_top_k_zero() {
         let mut store = RvfStore::create(None);
-        store.ingest("x".into(), vec![1.0], serde_json::json!({}));
+        store.ingest("x".into(), vec![1.0], serde_json::json!({})).unwrap();
         let results = store.query(&[1.0], 0);
         assert!(results.is_empty());
     }
@@ -397,11 +423,13 @@ mod tests {
     #[test]
     fn get_entry_by_id() {
         let mut store = RvfStore::create(None);
-        store.ingest(
-            "doc1".into(),
-            vec![1.0, 2.0],
-            serde_json::json!({"key": "value"}),
-        );
+        store
+            .ingest(
+                "doc1".into(),
+                vec![1.0, 2.0],
+                serde_json::json!({"key": "value"}),
+            )
+            .unwrap();
 
         let entry = store.get("doc1");
         assert!(entry.is_some());
@@ -455,7 +483,7 @@ mod tests {
 
     #[test]
     fn compact_without_path_is_noop() {
-        let store = RvfStore::create(None);
+        let mut store = RvfStore::create(None);
         assert!(store.compact().is_ok());
     }
 }

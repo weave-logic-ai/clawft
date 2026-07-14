@@ -1189,6 +1189,7 @@ dependencies = [
  "hmac",
  "instant-distance",
  "js-sys",
+ "libc",
  "notify",
  "percent-encoding",
  "rand 0.8.5",
@@ -1211,6 +1212,19 @@ dependencies = [
  "uuid",
  "wasm-bindgen-futures",
  "wiremock",
+]
+
+[[package]]
+name = "clawft-cow-memory"
+version = "0.6.20"
+dependencies = [
+ "libc",
+ "rand 0.8.5",
+ "rvf-runtime",
+ "rvf-types",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

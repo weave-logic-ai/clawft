@@ -43,7 +43,9 @@ browser = [
     "dep:futures-channel",
 ]
 vector-memory = ["dep:rand", "dep:instant-distance"]
-rvf = ["vector-memory", "dep:rvf-runtime", "dep:rvf-types", "dep:reqwest"]
+# `dep:libc` backs `embeddings::macos_errno_shim` -- see that module's docs
+# for why `rvf-runtime` 0.2.0 needs it on macOS.
+rvf = ["vector-memory", "dep:rvf-runtime", "dep:rvf-types", "dep:reqwest", "dep:libc"]
 signing = ["dep:ed25519-dalek", "dep:rand"]
 # agent-core-v1 Phase E2: enables EmbeddingRouter's production index
 # backed by ruvector-diskann@2.1 (Vamana + PQ + mmap). When the feature
@@ -103,6 +105,10 @@ tiktoken-rs = { workspace = true, optional = true }
 tokenizers = { workspace = true, optional = true }
 rvf-runtime = { workspace = true, optional = true }
 rvf-types = { workspace = true, optional = true }
+# macOS-only link-time shim for an rvf-runtime 0.2.0 portability bug --
+# see `embeddings::macos_errno_shim` module docs. Gated by the `rvf`
+# feature above (only pulled in where rvf-runtime is actually linked).
+libc = { version = "0.2", optional = true }
 # E2 EmbeddingRouter: workspace-pinned at 2.1 (Cargo.toml:176). Vamana
 # graph + PQ + mmap; same crate the kernel uses in vector_diskann.rs.
 ruvector-diskann = { workspace = true, optional = true }

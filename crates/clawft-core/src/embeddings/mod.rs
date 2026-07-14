@@ -12,6 +12,14 @@ pub mod hash_embedder;
 pub mod hnsw_store;
 #[cfg(feature = "vector-memory")]
 pub mod micro_hnsw;
+// `rvf_stub` has no dependency on the real `rvf-runtime` crate (just serde +
+// tracing, both unconditional deps), so it is gated on the broader
+// `vector-memory` feature rather than `rvf`. This keeps it available as the
+// vector-memory backend for builds that can't link `rvf-runtime` (wasm,
+// browser, no-default) -- see `rvf_backend` below for how the two
+// implementations are selected.
+#[cfg(feature = "vector-memory")]
+pub mod rvf_stub;
 
 #[cfg(feature = "rvf")]
 pub mod api_embedder;
@@ -20,9 +28,29 @@ pub mod progressive;
 #[cfg(feature = "rvf")]
 pub mod quantization;
 #[cfg(feature = "rvf")]
-pub mod rvf_stub;
+pub mod rvf_real;
 #[cfg(feature = "rvf")]
 pub mod witness;
+
+// Link-time fix for an rvf-runtime 0.2.0 portability bug on macOS -- see
+// the module docs. Not part of the public surface.
+#[cfg(all(feature = "rvf", target_os = "macos"))]
+mod macos_errno_shim;
+
+/// Backend-selecting alias: real `rvf-runtime`-backed store when the `rvf`
+/// feature is enabled (native builds that can link the crate), the in-memory
+/// stub otherwise. Consumers should import [`RvfStore`]/[`RvfError`] from
+/// here rather than reaching into `rvf_real`/`rvf_stub` directly, so they
+/// automatically follow whichever backend the active feature set selects.
+///
+/// See `crates/clawft-core/src/embeddings/rvf_real.rs` module docs for the
+/// on-disk layout and the real-vs-stub semantic gaps this bridges.
+pub mod rvf_backend {
+    #[cfg(feature = "rvf")]
+    pub use super::rvf_real::{RvfEntry, RvfError, RvfQueryResult, RvfStore};
+    #[cfg(all(feature = "vector-memory", not(feature = "rvf")))]
+    pub use super::rvf_stub::{RvfEntry, RvfError, RvfQueryResult, RvfStore};
+}
 
 use async_trait::async_trait;
 use std::fmt;

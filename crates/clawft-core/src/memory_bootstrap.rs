@@ -12,7 +12,7 @@ use std::path::Path;
 use tracing::{debug, info, warn};
 
 use crate::embeddings::Embedder;
-use crate::embeddings::rvf_stub::{RvfError, RvfStore};
+use crate::embeddings::rvf_backend::{RvfError, RvfStore};
 
 /// Errors that can occur during memory bootstrap.
 #[non_exhaustive]
@@ -141,8 +141,16 @@ pub async fn bootstrap_memory_index(
                     "text": trimmed,
                     "char_count": trimmed.len(),
                 });
-                store.ingest(id, embedding, metadata);
-                indexed += 1;
+                match store.ingest(id, embedding, metadata) {
+                    Ok(()) => indexed += 1,
+                    Err(e) => {
+                        warn!(
+                            section = i,
+                            error = %e,
+                            "failed to ingest section, skipping"
+                        );
+                    }
+                }
             }
             Err(e) => {
                 warn!(
