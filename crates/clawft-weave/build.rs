@@ -28,6 +28,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=GIT_SHA");
     println!("cargo:rerun-if-env-changed=GIT_DIRTY");
     println!("cargo:rerun-if-env-changed=BUILD_TS");
+    println!("cargo:rerun-if-env-changed=BUILD_FEATURES");
 
     let hash_full = build_git_hash();
     println!("cargo:rustc-env=BUILD_GIT_HASH={hash_full}");
@@ -39,7 +40,16 @@ fn main() {
     // build stamp. Keeps the package version front-and-centre with the
     // provenance in parentheses: `0.6.20 (14145f16-dirty 2026-07-05T17:20Z)`.
     let pkg = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
-    println!("cargo:rustc-env=BUILD_VERSION={pkg} ({hash_full} {ts})");
+    // Cargo-feature suffix (WEFT-656): `scripts/build.sh` exports
+    // BUILD_FEATURES so `--version` reads `0.6.20 (<sha> <ts>) [voice-onnx]`
+    // and the install guard can refuse a build that drops a feature the
+    // installed binary has (e.g. diskann, whose absence silently degrades
+    // the vector backend to a brute-force stub). Plain cargo builds carry
+    // no suffix.
+    let feats = env_override("BUILD_FEATURES")
+        .map(|f| format!(" [{f}]"))
+        .unwrap_or_default();
+    println!("cargo:rustc-env=BUILD_VERSION={pkg} ({hash_full} {ts}){feats}");
 }
 
 /// Read an env var, treating empty/whitespace as absent.

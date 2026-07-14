@@ -4,6 +4,33 @@
 //! `ruvector-diskann` crate (Vamana graph + PQ + mmap persistence).
 //! Without it, a brute-force stub performs linear scans in memory.
 //!
+//! ## Feature/config mismatch (WEFT-656)
+//!
+//! `diskann` is **not** part of `clawft-kernel`'s default feature set
+//! (see `crates/clawft-kernel/Cargo.toml`: `diskann = ["ecc",
+//! "dep:ruvector-diskann"]`, not listed under `default`). If
+//! `kernel_config.vector.backend` selects `DiskAnn` or `Hybrid` but the
+//! binary was built without `--features diskann`, [`DiskAnnBackend`]
+//! **silently** falls back to the brute-force stub below: correctness is
+//! preserved (searches still return correct nearest neighbors), but recall
+//! quality and latency degrade from Vamana-graph ANN to an O(n) linear
+//! scan, with no visible signal by default.
+//!
+//! `Kernel::boot` (`boot.rs`, `BootPhase::Ecc`) detects this mismatch at
+//! boot time by calling [`diskann_feature_status`] with
+//! `cfg!(feature = "diskann")`:
+//!
+//! - **non-strict** (default, `vector.strict = false`): boot emits a
+//!   `Warn`-level [`crate::console::BootEvent`] naming the stub and how to
+//!   fix it, then continues with the degraded stub.
+//! - **strict** (`vector.strict = true`): the same mismatch aborts boot
+//!   with `KernelError::Boot`, so a misconfigured deployment fails loudly
+//!   instead of silently running O(n) scans.
+//!
+//! [`diskann_feature_status`] is a pure function (no I/O, no kernel/boot
+//! types) so the warn/fail decision is unit-testable without booting a
+//! kernel; see the `feature_status_*` tests below.
+//!
 //! ## Hardening features (Cognitum Seed WS1)
 //!
 //! - **Epoch-based versioning**: monotonic epoch bumped on every mutation.
@@ -22,7 +49,56 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "diskann")]
 use ruvector_diskann::{DiskAnnConfig as RealDiskAnnConfig, DiskAnnIndex};
 
+use clawft_types::config::VectorBackendKind;
+
 use crate::vector_backend::{SearchResult, VectorBackend, VectorError, VectorResult};
+
+// ── Feature/config mismatch (WEFT-656) ──────────────────────────────────
+
+/// Outcome of reconciling a configured [`VectorBackendKind`] against
+/// whether the `diskann` cargo feature was actually compiled in.
+///
+/// See the module docs for the mismatch this guards against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskAnnFeatureStatus {
+    /// The backend doesn't need `diskann` (e.g. plain HNSW), or the
+    /// feature is compiled in — no mismatch.
+    Ok,
+    /// `DiskAnn`/`Hybrid` configured without the feature: falls back to
+    /// the brute-force stub. `vector.strict = false` (default): warn and
+    /// continue.
+    StubDegraded,
+    /// Same mismatch, but `vector.strict = true`: boot must fail rather
+    /// than silently downgrade to O(n) scans.
+    StubRejected,
+}
+
+/// Decide what should happen when `configured_kind` is booted in a build
+/// where `feature_compiled` tells whether the `diskann` cargo feature is
+/// present, honoring the `vector.strict` config knob.
+///
+/// Pure and side-effect free by design — `Kernel::boot` calls this with
+/// `cfg!(feature = "diskann")` and turns the result into a
+/// [`crate::console::BootEvent`] or a `KernelError::Boot`; keeping the
+/// decision itself free of kernel/boot types makes it testable without
+/// booting a kernel.
+pub fn diskann_feature_status(
+    configured_kind: VectorBackendKind,
+    feature_compiled: bool,
+    strict: bool,
+) -> DiskAnnFeatureStatus {
+    let needs_diskann = matches!(
+        configured_kind,
+        VectorBackendKind::DiskAnn | VectorBackendKind::Hybrid
+    );
+    if !needs_diskann || feature_compiled {
+        DiskAnnFeatureStatus::Ok
+    } else if strict {
+        DiskAnnFeatureStatus::StubRejected
+    } else {
+        DiskAnnFeatureStatus::StubDegraded
+    }
+}
 
 // ── Configuration ────────────────────────────────────────────────────────
 
@@ -538,6 +614,56 @@ mod tests {
             max_points: 100,
             ..DiskAnnConfig::default()
         })
+    }
+
+    // ── Feature/config mismatch (WEFT-656) ─────────────────────────────
+
+    #[test]
+    fn feature_status_ok_when_feature_compiled() {
+        assert_eq!(
+            diskann_feature_status(VectorBackendKind::DiskAnn, true, false),
+            DiskAnnFeatureStatus::Ok
+        );
+        assert_eq!(
+            diskann_feature_status(VectorBackendKind::Hybrid, true, true),
+            DiskAnnFeatureStatus::Ok
+        );
+    }
+
+    #[test]
+    fn feature_status_ok_for_hnsw_regardless_of_feature_or_strict() {
+        assert_eq!(
+            diskann_feature_status(VectorBackendKind::Hnsw, false, false),
+            DiskAnnFeatureStatus::Ok
+        );
+        assert_eq!(
+            diskann_feature_status(VectorBackendKind::Hnsw, false, true),
+            DiskAnnFeatureStatus::Ok
+        );
+    }
+
+    #[test]
+    fn feature_status_degraded_when_missing_and_not_strict() {
+        assert_eq!(
+            diskann_feature_status(VectorBackendKind::DiskAnn, false, false),
+            DiskAnnFeatureStatus::StubDegraded
+        );
+        assert_eq!(
+            diskann_feature_status(VectorBackendKind::Hybrid, false, false),
+            DiskAnnFeatureStatus::StubDegraded
+        );
+    }
+
+    #[test]
+    fn feature_status_rejected_when_missing_and_strict() {
+        assert_eq!(
+            diskann_feature_status(VectorBackendKind::DiskAnn, false, true),
+            DiskAnnFeatureStatus::StubRejected
+        );
+        assert_eq!(
+            diskann_feature_status(VectorBackendKind::Hybrid, false, true),
+            DiskAnnFeatureStatus::StubRejected
+        );
     }
 
     #[test]

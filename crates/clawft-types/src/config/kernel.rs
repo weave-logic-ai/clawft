@@ -1110,6 +1110,9 @@ impl Default for VectorHybridConfig {
 /// ```toml
 /// [kernel.vector]
 /// backend = "hybrid"
+/// # Fail boot (instead of warning) if `backend` needs the `diskann`
+/// # cargo feature and the binary wasn't built with it.
+/// strict = false
 ///
 /// [kernel.vector.hnsw]
 /// ef_construction = 200
@@ -1128,6 +1131,15 @@ pub struct VectorConfig {
     /// Which backend to use.
     #[serde(default)]
     pub backend: VectorBackendKind,
+
+    /// When `true`, boot fails with an error instead of silently falling
+    /// back to the brute-force stub if `backend` is `DiskAnn`/`Hybrid` but
+    /// the kernel was not compiled with the `diskann` cargo feature
+    /// (default: `false` — warn and continue with the degraded stub).
+    ///
+    /// See `clawft_kernel::vector_diskann` module docs (WEFT-656).
+    #[serde(default)]
+    pub strict: bool,
 
     /// HNSW-specific settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]

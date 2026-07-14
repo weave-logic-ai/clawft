@@ -34,6 +34,27 @@ use crate::supervisor::AgentSupervisor;
 use crate::topic::TopicRouter;
 use clawft_types::config::KernelConfig;
 
+/// Boot-time warning emitted when `vector.backend` needs the `diskann`
+/// cargo feature but the kernel was built without it (WEFT-656). See
+/// `vector_diskann` module docs for the full mismatch story.
+#[cfg(feature = "ecc")]
+const DISKANN_FEATURE_MISMATCH_WARNING: &str = "vector.backend requires the \
+    `diskann` cargo feature (DiskAnn or Hybrid) but this kernel binary was \
+    built WITHOUT it — DiskAnnBackend is silently degrading to a \
+    brute-force O(n) linear-scan stub instead of real Vamana-graph ANN \
+    search. Rebuild with `--features diskann` for the real backend, or set \
+    `vector.strict = true` in kernel config to turn this into a boot error \
+    instead of a silent degrade.";
+
+/// Boot-time error emitted for the same mismatch when `vector.strict =
+/// true`: refuse to boot into a silently degraded vector backend.
+#[cfg(feature = "ecc")]
+const DISKANN_FEATURE_MISMATCH_ERROR: &str = "vector.backend requires the \
+    `diskann` cargo feature (DiskAnn or Hybrid) but this kernel binary was \
+    built WITHOUT it, and `vector.strict = true` refuses to silently fall \
+    back to the brute-force O(n) stub. Rebuild with `--features diskann`, \
+    or set `vector.strict = false` to accept the degraded stub.";
+
 /// Kernel lifecycle state.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1441,7 +1462,9 @@ impl<P: Platform> Kernel<P> {
             use crate::impulse::ImpulseQueue;
             use crate::service::SystemService;
             use crate::vector_backend::VectorBackend;
-            use crate::vector_diskann::{DiskAnnBackend, DiskAnnConfig};
+            use crate::vector_diskann::{
+                DiskAnnBackend, DiskAnnConfig, DiskAnnFeatureStatus, diskann_feature_status,
+            };
             use crate::vector_hnsw::HnswBackend;
             use crate::vector_hybrid::{HybridBackend, HybridConfig};
 
@@ -1457,9 +1480,28 @@ impl<P: Platform> Kernel<P> {
 
             // Construct the vector backend based on kernel config.
             let vector_config = kernel_config.vector.clone();
+            let vector_strict = vector_config.as_ref().map(|v| v.strict).unwrap_or(false);
             let vector_backend: Arc<dyn VectorBackend> =
                 match vector_config.as_ref().map(|v| v.backend) {
                     Some(clawft_types::config::VectorBackendKind::DiskAnn) => {
+                        match diskann_feature_status(
+                            clawft_types::config::VectorBackendKind::DiskAnn,
+                            cfg!(feature = "diskann"),
+                            vector_strict,
+                        ) {
+                            DiskAnnFeatureStatus::StubRejected => {
+                                return Err(KernelError::Boot(
+                                    DISKANN_FEATURE_MISMATCH_ERROR.to_string(),
+                                ));
+                            }
+                            DiskAnnFeatureStatus::StubDegraded => {
+                                boot_log.push(BootEvent::warn(
+                                    BootPhase::Ecc,
+                                    DISKANN_FEATURE_MISMATCH_WARNING,
+                                ));
+                            }
+                            DiskAnnFeatureStatus::Ok => {}
+                        }
                         let da_cfg = vector_config
                             .as_ref()
                             .and_then(|v| v.diskann.as_ref())
@@ -1475,11 +1517,33 @@ impl<P: Platform> Kernel<P> {
                             .unwrap_or_default();
                         boot_log.push(BootEvent::info(
                             BootPhase::Ecc,
-                            "Vector backend: DiskANN (stub)",
+                            if cfg!(feature = "diskann") {
+                                "Vector backend: DiskANN (real: Vamana graph + PQ)"
+                            } else {
+                                "Vector backend: DiskANN (STUB: brute-force O(n) linear scan)"
+                            },
                         ));
                         Arc::new(DiskAnnBackend::new(da_cfg))
                     }
                     Some(clawft_types::config::VectorBackendKind::Hybrid) => {
+                        match diskann_feature_status(
+                            clawft_types::config::VectorBackendKind::Hybrid,
+                            cfg!(feature = "diskann"),
+                            vector_strict,
+                        ) {
+                            DiskAnnFeatureStatus::StubRejected => {
+                                return Err(KernelError::Boot(
+                                    DISKANN_FEATURE_MISMATCH_ERROR.to_string(),
+                                ));
+                            }
+                            DiskAnnFeatureStatus::StubDegraded => {
+                                boot_log.push(BootEvent::warn(
+                                    BootPhase::Ecc,
+                                    DISKANN_FEATURE_MISMATCH_WARNING,
+                                ));
+                            }
+                            DiskAnnFeatureStatus::Ok => {}
+                        }
                         let hnsw_cfg = vector_config
                             .as_ref()
                             .and_then(|v| v.hnsw.as_ref())
@@ -1514,8 +1578,14 @@ impl<P: Platform> Kernel<P> {
                         boot_log.push(BootEvent::info(
                             BootPhase::Ecc,
                             format!(
-                                "Vector backend: Hybrid (hot={}, threshold={})",
-                                hybrid_cfg.hot_capacity, hybrid_cfg.promotion_threshold
+                                "Vector backend: Hybrid (hot={}, threshold={}, cold={})",
+                                hybrid_cfg.hot_capacity,
+                                hybrid_cfg.promotion_threshold,
+                                if cfg!(feature = "diskann") {
+                                    "DiskANN real"
+                                } else {
+                                    "DiskANN STUB"
+                                },
                             ),
                         ));
                         Arc::new(HybridBackend::new(hnsw_cfg, da_cfg, hybrid_cfg))
@@ -2895,6 +2965,71 @@ mod tests {
         assert!(
             kernel.ecc_impulses().is_some(),
             "impulse queue must be accessible"
+        );
+    }
+
+    // ── vector.strict / diskann feature mismatch (WEFT-656) ─────────────
+    //
+    // These assert against the actual compiled feature set (via
+    // `#[cfg(not(feature = "diskann"))]`) rather than injecting a fake
+    // mismatch, so they only run meaningfully in the default build (ecc
+    // on, diskann off) where the mismatch is real.
+
+    #[cfg(all(feature = "ecc", not(feature = "diskann")))]
+    #[tokio::test]
+    async fn boot_vector_strict_diskann_without_feature_fails() {
+        let platform = Arc::new(NativePlatform::new());
+        let mut kconfig = test_kernel_config();
+        kconfig.vector = Some(clawft_types::config::VectorConfig {
+            backend: clawft_types::config::VectorBackendKind::DiskAnn,
+            strict: true,
+            ..Default::default()
+        });
+        let result = Kernel::boot(test_config(), kconfig, platform).await;
+        assert!(
+            result.is_err(),
+            "boot must fail when vector.strict=true and the diskann feature \
+             is not compiled in"
+        );
+    }
+
+    #[cfg(all(feature = "ecc", not(feature = "diskann")))]
+    #[tokio::test]
+    async fn boot_vector_strict_hybrid_without_feature_fails() {
+        let platform = Arc::new(NativePlatform::new());
+        let mut kconfig = test_kernel_config();
+        kconfig.vector = Some(clawft_types::config::VectorConfig {
+            backend: clawft_types::config::VectorBackendKind::Hybrid,
+            strict: true,
+            ..Default::default()
+        });
+        let result = Kernel::boot(test_config(), kconfig, platform).await;
+        assert!(
+            result.is_err(),
+            "boot must fail for Hybrid too — it wraps DiskAnnBackend as its \
+             cold tier"
+        );
+    }
+
+    #[cfg(all(feature = "ecc", not(feature = "diskann")))]
+    #[tokio::test]
+    async fn boot_vector_non_strict_diskann_without_feature_warns_and_boots() {
+        let platform = Arc::new(NativePlatform::new());
+        let mut kconfig = test_kernel_config();
+        kconfig.vector = Some(clawft_types::config::VectorConfig {
+            backend: clawft_types::config::VectorBackendKind::DiskAnn,
+            strict: false,
+            ..Default::default()
+        });
+        let kernel = Kernel::boot(test_config(), kconfig, platform)
+            .await
+            .unwrap();
+        let warned = kernel.boot_log().events().iter().any(|e| {
+            e.level == crate::console::LogLevel::Warn && e.message.contains("diskann")
+        });
+        assert!(
+            warned,
+            "expected a Warn boot event naming the diskann feature mismatch"
         );
     }
 

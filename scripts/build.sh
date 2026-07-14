@@ -161,7 +161,13 @@ export_build_stamp() {
     export GIT_SHA="$sha"
     export GIT_DIRTY="$dirty"
     export BUILD_TS="$ts"
-    info "Build stamp: ${sha}$([ "$dirty" = 1 ] && echo '-dirty') @ ${ts}"
+    # Feature list rides the version stamp (WEFT-656): `--version` becomes
+    # `0.6.20 (<sha> <ts>) [voice-onnx]`, so the install guard below can
+    # refuse a build that silently drops a cargo feature (e.g. diskann —
+    # whose absence degrades the vector backend to a brute-force stub) that
+    # the installed binary was built with.
+    export BUILD_FEATURES="$FEATURES"
+    info "Build stamp: ${sha}$([ "$dirty" = 1 ] && echo '-dirty') @ ${ts}${FEATURES:+ [$FEATURES]}"
 }
 
 # List a binary's top-level subcommands, one per line, sorted. Best-effort:
@@ -197,6 +203,37 @@ check_feature_regression() {
         info "the installed $name exposes features this build omits."
         info "re-run with the matching features (e.g. --features voice-onnx),"
         info "or pass --force to install the reduced build anyway."
+        return 1
+    fi
+    return 0
+}
+
+# Cargo-feature regression guard (WEFT-656): compare the INSTALLED binary's
+# `--version` feature suffix (`0.6.20 (<sha> <ts>) [voice-onnx,diskann]`,
+# baked by build.rs from BUILD_FEATURES) against this invocation's $FEATURES.
+# Refuse (non-zero) when the installed binary carries a feature this build
+# was invoked without — the exact silent-stub trap the subcommand probe
+# can't see. Fails open when the installed binary is missing, won't run, or
+# predates the suffix (no brackets = nothing to compare).
+check_version_feature_regression() {
+    local name="$1" installed="$2"
+    [ -x "$installed" ] || return 0
+    local ver installed_feats
+    ver="$("$installed" --version 2>/dev/null)" || return 0
+    installed_feats="$(printf '%s' "$ver" | sed -n 's/.*\[\(.*\)\].*/\1/p')"
+    [ -z "$installed_feats" ] && return 0
+    local missing=""
+    local feat
+    for feat in $(printf '%s' "$installed_feats" | tr ',' ' '); do
+        case ",$FEATURES," in
+            *",$feat,"*) ;;
+            *) missing="$missing $feat" ;;
+        esac
+    done
+    if [ -n "$missing" ]; then
+        fail "install would DROP $name cargo feature(s):$missing"
+        info "the installed $name was built with [--features $installed_feats];"
+        info "re-run with the same features, or pass --force to downgrade anyway."
         return 1
     fi
     return 0
@@ -280,6 +317,14 @@ cmd_install() {
         local regressed=0
         check_feature_regression weft   "$srcdir/weft"   "$bindir/weft"   || regressed=1
         check_feature_regression weaver "$srcdir/weaver" "$bindir/weaver" || regressed=1
+        # Cargo-feature guard (WEFT-656): the subcommand probe can't see
+        # features that change BEHAVIOR without adding subcommands (diskann:
+        # its absence silently degrades the vector backend to a brute-force
+        # stub). The installed binary's `--version` carries a `[features]`
+        # suffix (baked by build.rs from BUILD_FEATURES); refuse to replace
+        # it with a build that drops any of those features.
+        check_version_feature_regression weft   "$bindir/weft"   || regressed=1
+        check_version_feature_regression weaver "$bindir/weaver" || regressed=1
         if [ "$regressed" -gt 0 ]; then
             fail "aborting install to avoid a feature downgrade (use --force to override)"
             return 1
@@ -811,8 +856,8 @@ cmd_audit() {
 
 # ── Gate: full phase-gate checks ────────────────────────────────────
 cmd_gate() {
-    header "Phase Gate — 12 checks"
-    local total=12 passed=0 failed=0 skipped=0
+    header "Phase Gate — 13 checks"
+    local total=13 passed=0 failed=0 skipped=0
 
     run_gate_check() {
         local num="$1" label="$2"
@@ -927,6 +972,13 @@ cmd_gate() {
         skipped=$((skipped + 1))
     fi
 
+    # 13. diskann feature matrix (WEFT-656): the `diskann` cargo feature is
+    # NOT in kernel defaults; without this compile check the real backend's
+    # cfg-gated code can rot while every default build silently uses the
+    # brute-force stub. (The default-features side is covered by check 1.)
+    run_gate_check 13 "diskann feature compile (clawft-kernel)" \
+        cargo check -p clawft-kernel --features diskann
+
     # Summary
     echo ""
     printf "${BOLD}═══════════════════════════════════════${NC}\n"
@@ -997,7 +1049,11 @@ ${BOLD}Commands:${NC}
   clean           Clean all build artifacts
 
 ${BOLD}Options:${NC}
-  --features <f>  Extra features to enable (e.g. --features voice,channels)
+  --features <f>  Extra features to enable (e.g. --features voice,channels).
+                  Notable: voice-onnx (native STT/TTS — this machine's working
+                  config); diskann (real DiskANN vector backend — WITHOUT it a
+                  diskann/hybrid vector config silently degrades to a brute-
+                  force stub; the kernel warns at boot, vector.strict errors)
   --profile <p>   Cargo profile: debug, release, release-wasm (default varies)
   --force, -f     Force rebuild even if artifacts are up-to-date; for
                   install, override the feature-downgrade guard
