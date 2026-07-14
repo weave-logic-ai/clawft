@@ -330,5 +330,71 @@ unscoped behaviour change for all deployments.
 
 ---
 
+## 6. Amendment (2026-07-14) — Retained-output review gate (WEFT-653, shepherd pattern)
+
+Extends D3/D6 with a **review gate** between generation and commit — shepherd's
+`select / release / discard` proposal seam ("run the output without applying it;
+keep or throw it away; the trace remembers either way"), mapped onto machinery
+that now exists post-Wave-2.
+
+### D9 — Gated lifecycle: hold at Frontier; Discarded IS Pruned-with-witness
+
+The original sketch said `Frontier → Speculative → (review) → Committed |
+Discarded`. The as-built state spine makes a smaller, honest mapping possible —
+**no new `NodeState` and no new hold state**:
+
+- **The proposal is the turn's Frontier.** Wave 2's register-early/commit-late
+  reply path (`SessionTier::register_reply_frontier` / `commit_reply_frontier`)
+  already produces exactly the needed shape: the turn's nodes land Frontier and
+  stay there until an explicit commit EOU. The review gate is a **policy on who
+  emits that EOU** — nothing structural.
+- **`review` mode**: the loop/submitter withholds the finalize EOU; the turn
+  parks at Frontier awaiting `accept` / `discard`.
+- **Accept** ⇒ emit the commit EOU (`commit_reply_frontier`) — Frontier→Committed
+  via the existing `mirror_state` spine.
+- **Discard** ⇒ `emit_cancel_prune` + `witness_cancel` — Frontier→**Pruned**
+  tombstone with a chain-witnessed discard event. `Discarded` is not a new
+  state; it is the Wave-2 prune, reached deliberately instead of via interrupt.
+  Discard ≠ delete: the partial trace **remains on the graph and chain**
+  (shepherd's "artifacts persist across cancellation" — already the M2-D8 rule).
+- Legal-transition table (`context_graft_state.rs`) is already sufficient:
+  `Frontier→Committed` and `Frontier→Pruned` are the only arrows the gate uses.
+
+### D10 — Policy config + timeout guard
+
+`[kernel.agent.proposal]`: `mode = "auto"` (default — today's behavior, commit
+on finalize) `| "review"` (hold at Frontier until accept/discard);
+`timeout_secs` (default 600) — a parked proposal past the deadline is
+**discarded** (prune + witness kind `proposal.timeout`), never silently
+committed: fail-closed, matching deny-by-default governance. The idle reaper
+(D6) treats parked proposals as activity until timeout so a conv under review
+isn't reaped mid-decision.
+
+### D11 — The invariant, codified
+
+**A changeset is a view over the trace, never a second store.** The
+`TurnProposal` (Phase 2) is a *read model* — a projection over a `chain_seq`
+range (nodes, crossrefs, witnessed side-effects) — not a staging area. This is
+the same rule as "SessionView is a view" (D4) and M3's one-store outcome, and
+it is what keeps accept/discard O(1) state transitions rather than data moves.
+
+### Phase 2 preview (WEFT-654) — TurnProposal + RPCs
+
+`agent.proposal.list` (parked proposals: conv, seq range, goal, age),
+`agent.proposal.accept {conv_id, seq}` → commit EOU, `agent.proposal.discard
+{conv_id, seq, reason?}` → prune + witness. Served like `conversation.graph`
+(flat keys). The voice loop's attempt nodes make proposals **renderable on the
+watch surface for free** (◇ attempt already renders; a parked proposal is an
+attempt that outlives generation).
+
+### Phase 3 preview (WEFT-655) — cancellation alignment
+
+Stop/Refine executors and proposal-discard converge on one closure:
+cancel → prune tombstone → witness (+ `Contradicts` when a replacement exists).
+Phase 3 is an audit + tests asserting the discard path and the interrupt path
+leave byte-identical forest/chain shapes, not new machinery.
+
+---
+
 See `m2-daemon-ecc-loop-plan.md` for the file-level change plan, test plan, and the
 phased implementation order for the M2 swarm.
