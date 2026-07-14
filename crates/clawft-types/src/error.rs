@@ -102,6 +102,19 @@ pub enum ClawftError {
         /// Accumulated value at the moment of the trip.
         used: f64,
     },
+
+    /// A `clawft-cow-memory` checkpoint/rollback/promote operation failed
+    /// (WEFT-616 Phase 2: per-turn COW memory checkpointing).
+    ///
+    /// `clawft-types` does not depend on `clawft-cow-memory` (wrong
+    /// direction — `clawft-cow-memory` has no `clawft-*` deps at all), so
+    /// this wraps the underlying `CowMemoryError`'s message rather than
+    /// using `#[from]`. Constructed in `clawft-core`.
+    #[error("cow memory error: {reason}")]
+    CowMemory {
+        /// `Display` of the underlying `clawft_cow_memory::CowMemoryError`.
+        reason: String,
+    },
 }
 
 /// Channel-specific error type.

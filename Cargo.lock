@@ -1175,6 +1175,7 @@ version = "0.6.20"
 dependencies = [
  "async-trait",
  "chrono",
+ "clawft-cow-memory",
  "clawft-llm",
  "clawft-platform",
  "clawft-plugin",

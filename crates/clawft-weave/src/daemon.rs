@@ -491,6 +491,19 @@ async fn build_embedding_router_or_warn(
 ///
 /// Boots the kernel, binds to a Unix socket, and serves requests
 /// until shutdown is requested (via `kernel.shutdown` RPC or signal).
+/// Open an existing `BranchableMemory` lineage at `dir`, or create a fresh
+/// one (WEFT-616 Phase 2). Open-then-create keeps restarts idempotent; the
+/// 384 dimension matches the brain's embedding width (rvf_real's default).
+fn open_or_create_cow_memory(
+    dir: &std::path::Path,
+) -> Result<clawft_core::clawft_cow_memory::BranchableMemory, String> {
+    use clawft_core::clawft_cow_memory::BranchableMemory;
+    match BranchableMemory::open(dir) {
+        Ok(mem) => Ok(mem),
+        Err(_) => BranchableMemory::create(dir, 384).map_err(|e| e.to_string()),
+    }
+}
+
 pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<()> {
     let socket_path = protocol::socket_path();
 
@@ -531,6 +544,11 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
     // survives `Kernel::boot` taking ownership of `config`. The voice
     // consumer wires further below, after the agent service is up.
     let voice_consumer_cfg = config.voice.consumer.clone();
+
+    // WEFT-616 Phase 2: snapshot the per-turn COW memory config; wired
+    // onto the agent loop after `build_daemon_agent_loop` (late set —
+    // the operator's loaded AgentsConfig is only in scope here).
+    let cow_memory_cfg = config.agents.cow_memory.clone();
 
     // Boot kernel
     let platform = NativePlatform::new();
@@ -1618,6 +1636,32 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
             }),
         )
         .await;
+
+        // WEFT-616 Phase 2: attach the per-turn COW memory bracket when the
+        // operator enabled it. Fail-open with a loud warning — a broken COW
+        // store must not take the whole agent service down (the bracket is
+        // isolation infrastructure, not the reply path).
+        if cow_memory_cfg.enabled {
+            // Tilde-expand via the same idiom the skill dir uses (dirs::home_dir).
+            let path = if let Some(rest) = cow_memory_cfg.path.strip_prefix("~/") {
+                dirs::home_dir()
+                    .map(|h| h.join(rest).display().to_string())
+                    .unwrap_or_else(|| cow_memory_cfg.path.clone())
+            } else {
+                cow_memory_cfg.path.clone()
+            };
+            match std::fs::create_dir_all(&path).map_err(|e| e.to_string()).and_then(|_| {
+                open_or_create_cow_memory(std::path::Path::new(&path))
+            }) {
+                Ok(mem) => {
+                    agent_loop.set_cow_memory(std::sync::Arc::new(std::sync::Mutex::new(mem)));
+                    info!(path = %path, "cow memory wired (WEFT-616 Phase 2): per-turn checkpoint/promote/rollback active");
+                }
+                Err(e) => {
+                    warn!(path = %path, error = %e, "cow memory enabled but failed to open — turns run WITHOUT the checkpoint bracket");
+                }
+            }
+        }
 
         // ADR-058 Phase 5 deferred step 4: also hand the SAME tier to the
         // service so the `agent.chat.end` signal can drive conversation-end

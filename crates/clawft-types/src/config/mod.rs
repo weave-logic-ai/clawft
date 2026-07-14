@@ -176,6 +176,45 @@ pub struct AgentsConfig {
     /// reset via `agent.chat.reset_budget`.
     #[serde(default, alias = "costBudget")]
     pub cost_budget: CostBudgetConfig,
+
+    /// Per-turn COW memory checkpointing (WEFT-616 Phase 2).
+    ///
+    /// When enabled, [`AgentLoop::handle_turn`](../../clawft_core/agent/loop_core/struct.AgentLoop.html#method.handle_turn)
+    /// (clawft-core, `rvf` feature) checkpoints a `clawft-cow-memory`
+    /// `BranchableMemory` before each turn, promotes it on success, and
+    /// rolls it back on turn failure. Off by default: `enabled: false`
+    /// means the loop's `cow_memory` handle stays absent and turn
+    /// behavior is unchanged from before this option existed.
+    #[serde(default, alias = "cowMemory")]
+    pub cow_memory: CowMemoryConfig,
+}
+
+/// Per-turn COW memory checkpointing config (WEFT-616 Phase 2). See
+/// [`AgentsConfig::cow_memory`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CowMemoryConfig {
+    /// Whether per-turn COW memory checkpointing is enabled. Default
+    /// `false` — zero behavior change until an operator opts in.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Directory for the `BranchableMemory` lineage's `.rvf` files.
+    /// Only consulted when `enabled` is `true`.
+    #[serde(default = "default_cow_memory_path")]
+    pub path: String,
+}
+
+fn default_cow_memory_path() -> String {
+    "~/.clawft/workspace/cow_memory".into()
+}
+
+impl Default for CowMemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: default_cow_memory_path(),
+        }
+    }
 }
 
 /// Per-conversation cost circuit-breaker config (WEFT-322).

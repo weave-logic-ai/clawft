@@ -415,6 +415,17 @@ pub struct AgentLoop<P: Platform> {
     /// to use `chat_id` verbatim; CLI / channel callers leave it `false` and
     /// get the canonical session-key `conv_id`.
     chat_id_is_conv_id: bool,
+    /// Optional per-turn COW memory checkpoint (WEFT-616 Phase 2).
+    ///
+    /// When set, [`Self::handle_turn`] brackets the turn with
+    /// `clawft-cow-memory::BranchableMemory::checkpoint` /
+    /// `promote`/`rollback` (see [`super::turn_checkpoint`]). Attached via
+    /// [`Self::with_cow_memory`], driven by `AgentsConfig::cow_memory`
+    /// (`clawft_types::config::CowMemoryConfig`) at whatever layer
+    /// constructs the loop -- `None` (default) is the same "feature
+    /// absent" pattern as `sandbox`/`gate`: zero behavior change.
+    #[cfg(feature = "rvf")]
+    cow_memory: std::sync::OnceLock<Arc<std::sync::Mutex<clawft_cow_memory::BranchableMemory>>>,
 }
 
 impl<P: Platform> AgentLoop<P> {
@@ -467,6 +478,8 @@ impl<P: Platform> AgentLoop<P> {
             cost_budget: None,
             graft_provider: None,
             chat_id_is_conv_id: false,
+            #[cfg(feature = "rvf")]
+            cow_memory: std::sync::OnceLock::new(),
         }
     }
 
@@ -631,6 +644,37 @@ impl<P: Platform> AgentLoop<P> {
         self
     }
 
+    /// Attach a per-turn COW memory checkpoint (WEFT-616 Phase 2).
+    ///
+    /// When set, [`Self::handle_turn`] checkpoints `mem` before the turn,
+    /// promotes it on success, and rolls it back to the pre-turn checkpoint
+    /// on failure -- see [`super::turn_checkpoint::with_turn_checkpoint`].
+    /// Without this attached (default), `handle_turn` behaves exactly as it
+    /// did before this option existed. Construction of the `BranchableMemory`
+    /// itself (from `AgentsConfig::cow_memory`'s `enabled`/`path`) is the
+    /// caller's job -- this builder only attaches an already-open handle,
+    /// mirroring [`Self::with_sandbox`]/[`Self::with_gate`].
+    #[cfg(feature = "rvf")]
+    pub fn with_cow_memory(
+        self,
+        mem: Arc<std::sync::Mutex<clawft_cow_memory::BranchableMemory>>,
+    ) -> Self {
+        let _ = self.cow_memory.set(mem);
+        self
+    }
+
+    /// Late-wire the per-turn COW memory after the loop is `Arc`-wrapped —
+    /// the daemon boot path (`build_daemon_agent_loop` returns an `Arc`, and
+    /// the operator's `AgentsConfig::cow_memory` is only in scope there).
+    /// Write-once, same idiom as the reply-submitter/spawner late wiring.
+    #[cfg(feature = "rvf")]
+    pub fn set_cow_memory(
+        &self,
+        mem: Arc<std::sync::Mutex<clawft_cow_memory::BranchableMemory>>,
+    ) {
+        let _ = self.cow_memory.set(mem);
+    }
+
     /// Resolve the conversation id for `msg` under the configured key scheme
     /// (M3 §D5). Either the canonical session key `"{channel}:{chat_id}"`
     /// (default) or the bare `chat_id` when [`Self::chat_id_is_conv_id`] is
@@ -764,7 +808,34 @@ impl<P: Platform> AgentLoop<P> {
     /// the tool execution loop, and session persistence. Auto-delegation
     /// short-circuits the local LLM pipeline and returns the delegate's
     /// response as the reply.
+    ///
+    /// When a [`Self::with_cow_memory`] handle is attached, this brackets
+    /// [`Self::handle_turn_inner`] with a checkpoint/promote/rollback cycle
+    /// (WEFT-616 Phase 2, [`super::turn_checkpoint::with_turn_checkpoint`]).
+    /// Without one attached (default), this calls straight through with no
+    /// added behavior -- byte-identical to the pre-Phase-2 `handle_turn`.
     pub async fn handle_turn(&self, msg: InboundMessage) -> clawft_types::Result<OutboundMessage> {
+        #[cfg(feature = "rvf")]
+        if let Some(mem) = self.cow_memory.get().cloned() {
+            let label = format!("turn:{}:{}", msg.channel, msg.chat_id);
+            return super::turn_checkpoint::with_turn_checkpoint(&mem, label, move || {
+                self.handle_turn_inner(msg)
+            })
+            .await;
+        }
+        self.handle_turn_inner(msg).await
+    }
+
+    /// The actual per-turn pipeline: session lookup, context building,
+    /// pipeline invocation, the tool execution loop, and session
+    /// persistence. Extracted from [`Self::handle_turn`] so the COW memory
+    /// checkpoint bracket (WEFT-616 Phase 2) can wrap it without disturbing
+    /// its body -- see that method's doc comment for the full behavior
+    /// description; this one is unchanged from before the wrap existed.
+    async fn handle_turn_inner(
+        &self,
+        msg: InboundMessage,
+    ) -> clawft_types::Result<OutboundMessage> {
         // WEFT-178: Resolve the routed agent_id BEFORE building the
         // session key / context so the rest of the turn observes the
         // correct identity. The router is consulted only when one is
@@ -4760,5 +4831,119 @@ mod tests {
             .metadata
             .insert(SPAWN_DEPTH_KEY.to_string(), serde_json::json!(3));
         assert_eq!(read_spawn_depth(&with_depth), 3);
+    }
+
+    // ── WEFT-616 Phase 2: cow-memory checkpoint bracket ────────────────
+
+    /// Without [`AgentLoop::with_cow_memory`] attached, `handle_turn`
+    /// behaves exactly as before Phase 2 -- no field to check here beyond
+    /// "it still succeeds"; every other `handle_turn_*` test in this module
+    /// already proves this since none of them attach a cow-memory handle.
+    #[cfg(feature = "rvf")]
+    #[tokio::test]
+    async fn handle_turn_disabled_cow_memory_is_unaffected() {
+        let transport = Arc::new(E2eRecordingTransport::new());
+        let (agent, dir) =
+            make_agent_loop(transport.clone() as Arc<dyn LlmTransport>, "cow_off").await;
+
+        let inbound = InboundMessage {
+            channel: "test".into(),
+            sender_id: "user1".into(),
+            chat_id: "cow-off-chat".into(),
+            content: "hello".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        let result = agent.handle_turn(inbound).await;
+        assert!(result.is_ok(), "turn without cow_memory attached: {result:?}");
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// A successful turn checkpoints, runs, and promotes: the checkpoint
+    /// chain collapses back to depth 0 (working re-derived from base) and
+    /// the loop's reply is unaffected by the memory bracket.
+    #[cfg(feature = "rvf")]
+    #[tokio::test]
+    async fn handle_turn_success_checkpoints_and_promotes() {
+        let transport = Arc::new(E2eRecordingTransport::new());
+        let (mut agent, dir) =
+            make_agent_loop(transport.clone() as Arc<dyn LlmTransport>, "cow_ok").await;
+
+        let mem = clawft_cow_memory::BranchableMemory::create(dir.join("cow_memory"), 4)
+            .expect("create BranchableMemory");
+        let mem = Arc::new(std::sync::Mutex::new(mem));
+        agent = agent.with_cow_memory(mem.clone());
+
+        let inbound = InboundMessage {
+            channel: "test".into(),
+            sender_id: "user1".into(),
+            chat_id: "cow-ok-chat".into(),
+            content: "hello".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        let result = agent.handle_turn(inbound).await;
+        assert!(result.is_ok(), "turn with cow_memory attached: {result:?}");
+
+        let status = mem.lock().unwrap().status();
+        assert_eq!(
+            status.own_checkpoint_depth, 0,
+            "a successful turn's checkpoint must be collapsed by promote()"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// A failing turn checkpoints, runs, and rolls back: the checkpoint
+    /// chain also collapses back to depth 0 (working re-derived from the
+    /// pre-turn checkpoint, discarding it), and the turn's own error is
+    /// what the caller sees -- not a memory-layer error.
+    #[cfg(feature = "rvf")]
+    #[tokio::test]
+    async fn handle_turn_failure_checkpoints_and_rolls_back() {
+        struct AlwaysErrTransport;
+        #[async_trait]
+        impl LlmTransport for AlwaysErrTransport {
+            async fn complete(&self, _request: &TransportRequest) -> clawft_types::Result<LlmResponse> {
+                Err(ClawftError::Provider {
+                    message: "simulated provider failure".into(),
+                })
+            }
+        }
+
+        let transport = Arc::new(AlwaysErrTransport);
+        let (mut agent, dir) =
+            make_agent_loop(transport as Arc<dyn LlmTransport>, "cow_err").await;
+
+        let mem = clawft_cow_memory::BranchableMemory::create(dir.join("cow_memory"), 4)
+            .expect("create BranchableMemory");
+        let mem = Arc::new(std::sync::Mutex::new(mem));
+        agent = agent.with_cow_memory(mem.clone());
+
+        let inbound = InboundMessage {
+            channel: "test".into(),
+            sender_id: "user1".into(),
+            chat_id: "cow-err-chat".into(),
+            content: "hello".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        let result = agent.handle_turn(inbound).await;
+        assert!(
+            result.is_err(),
+            "a provider failure must still surface as the turn's error"
+        );
+
+        let status = mem.lock().unwrap().status();
+        assert_eq!(
+            status.own_checkpoint_depth, 0,
+            "a failed turn's checkpoint must be collapsed by rollback()"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

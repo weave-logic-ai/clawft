@@ -27,4 +27,6 @@ pub mod spawn;
 pub mod spawn_context;
 pub mod system_prompt;
 pub mod tokenizer;
+#[cfg(feature = "rvf")]
+pub mod turn_checkpoint;
 pub mod verification;

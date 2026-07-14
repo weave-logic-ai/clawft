@@ -27,6 +27,10 @@ pub mod agent;
 pub mod agent_bus;
 pub mod agent_routing;
 pub mod bootstrap;
+/// Re-export so daemon wiring can name `BranchableMemory` without a direct
+/// dependency on the cow crate (WEFT-616 Phase 2 late wiring).
+#[cfg(feature = "rvf")]
+pub use clawft_cow_memory;
 pub mod bus;
 pub mod chain_event;
 pub mod clawft_md;

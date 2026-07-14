@@ -45,7 +45,7 @@ browser = [
 vector-memory = ["dep:rand", "dep:instant-distance"]
 # `dep:libc` backs `embeddings::macos_errno_shim` -- see that module's docs
 # for why `rvf-runtime` 0.2.0 needs it on macOS.
-rvf = ["vector-memory", "dep:rvf-runtime", "dep:rvf-types", "dep:reqwest", "dep:libc"]
+rvf = ["vector-memory", "dep:rvf-runtime", "dep:rvf-types", "dep:reqwest", "dep:libc", "dep:clawft-cow-memory"]
 signing = ["dep:ed25519-dalek", "dep:rand"]
 # agent-core-v1 Phase E2: enables EmbeddingRouter's production index
 # backed by ruvector-diskann@2.1 (Vamana + PQ + mmap). When the feature
@@ -105,6 +105,11 @@ tiktoken-rs = { workspace = true, optional = true }
 tokenizers = { workspace = true, optional = true }
 rvf-runtime = { workspace = true, optional = true }
 rvf-types = { workspace = true, optional = true }
+# WEFT-616 Phase 2: per-turn COW memory checkpointing (BranchableMemory).
+# No clawft-* deps of its own; safe in the clawft-core -> clawft-cow-memory
+# direction. Gated behind `rvf` since it links rvf-runtime and needs the
+# same macOS errno shim story both crates carry.
+clawft-cow-memory = { workspace = true, optional = true }
 # macOS-only link-time shim for an rvf-runtime 0.2.0 portability bug --
 # see `embeddings::macos_errno_shim` module docs. Gated by the `rvf`
 # feature above (only pulled in where rvf-runtime is actually linked).
