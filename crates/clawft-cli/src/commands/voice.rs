@@ -5,6 +5,8 @@
 
 use clap::{Args, Subcommand};
 
+use super::voice_daemon_brain::BrainMode;
+
 #[derive(Debug, Args)]
 pub struct VoiceArgs {
     #[command(subcommand)]
@@ -31,7 +33,14 @@ pub enum VoiceCommand {
     },
 
     /// Start Talk Mode (continuous voice conversation).
-    Talk,
+    Talk {
+        /// Which brain speaks the reply (WEFT-614 lite): `auto` prefers a
+        /// reachable kernel daemon's own §W2.1 voice-loop reply, falling
+        /// back to the local bare-Hermes brain; `daemon` forces it (errors
+        /// if unreachable); `local` forces the pre-WEFT-614 local brain.
+        #[arg(long, value_enum, default_value = "auto")]
+        brain: BrainMode,
+    },
 
     /// Listen-only mode (§W1.4): record + decompose + classify every turn WITHOUT
     /// the LLM brain or audio out, rendering the live process stream (partials,
@@ -80,8 +89,8 @@ pub async fn handle_voice(args: VoiceArgs) -> anyhow::Result<()> {
             println!("Speaker test not yet implemented (requires sherpa-rs TTS)");
             println!("Would speak: \"{}\"", text);
         }
-        VoiceCommand::Talk => {
-            handle_talk().await?;
+        VoiceCommand::Talk { brain } => {
+            handle_talk(brain).await?;
         }
         VoiceCommand::Listen => {
             handle_listen().await?;
@@ -114,8 +123,8 @@ pub async fn handle_voice(args: VoiceArgs) -> anyhow::Result<()> {
 /// degrades gracefully); real transcription/synthesis needs the staged ONNX
 /// models and the `voice-onnx` build feature (`weft` built with `--features
 /// voice-onnx`) plus live Hermes at `:8090`.
-async fn handle_talk() -> anyhow::Result<()> {
-    use clawft_voice_talk::{TalkConfig, live::run_live_observed};
+async fn handle_talk(brain: BrainMode) -> anyhow::Result<()> {
+    use clawft_voice_talk::{TalkConfig, live::run_live_observed_with_llm};
     use tokio_util::sync::CancellationToken;
 
     println!("=== ClawFT Talk Mode (native ECC graph-walk) ===");
@@ -128,11 +137,19 @@ async fn handle_talk() -> anyhow::Result<()> {
         ..TalkConfig::default()
     };
 
-    // Mirror committed turns to the kernel daemon's `agent.turn.record`
-    // RPC so the exchange lands on the substrate JSONL and anchors to the
-    // witness chain / HNSW / causal graph per `[kernel.agent]`. Best-effort:
-    // without a running daemon the conversation still works, unanchored.
-    let recorder = spawn_turn_recorder(config.conv_id.clone()).await;
+    // WEFT-614 lite: which brain generates the spoken reply, and whether the
+    // recorder should ALSO mirror it (daemon-brain mode already anchors the
+    // reply through the daemon's own sink — mirroring again would double it).
+    let (llm_override, mirror_assistant) =
+        super::voice_daemon_brain::resolve_brain(brain, &config.conv_id).await?;
+
+    // Mirror the user turn (always) — and the assistant reply, unless the
+    // daemon brain already anchored it — to the kernel daemon's
+    // `agent.turn.record` RPC so the exchange lands on the substrate JSONL
+    // and anchors to the witness chain / HNSW / causal graph per
+    // `[kernel.agent]`. Best-effort: without a running daemon the
+    // conversation still works, unanchored.
+    let recorder = spawn_turn_recorder(config.conv_id.clone(), mirror_assistant).await;
     match &recorder {
         Some(_) => println!("Turn anchoring: ON (daemon connected — turns recorded on chain)"),
         None => println!(
@@ -150,7 +167,7 @@ async fn handle_talk() -> anyhow::Result<()> {
         }
     });
 
-    run_live_observed(config, None, cancel, recorder)
+    run_live_observed_with_llm(config, None, cancel, recorder, llm_override)
         .await
         .map_err(|e| anyhow::anyhow!("talk mode: {e}"))?;
 
@@ -179,8 +196,10 @@ async fn handle_listen() -> anyhow::Result<()> {
         ..TalkConfig::default()
     };
 
-    // Anchor finalized turns to the daemon (best-effort) AND render them live.
-    let recorder = spawn_turn_recorder(config.conv_id.clone()).await;
+    // Anchor finalized turns to the daemon (best-effort) AND render them
+    // live. Listen mode always mirrors both roles (unaffected by WEFT-614's
+    // daemon-brain mirror suppression, which only applies to `weft voice talk`).
+    let recorder = spawn_turn_recorder(config.conv_id.clone(), true).await;
     match &recorder {
         Some(_) => println!("Turn anchoring: ON (turns recorded on the chain)"),
         None => println!(
@@ -307,8 +326,15 @@ async fn handle_test_mic(duration: u32) -> anyhow::Result<()> {
 /// Non-blocking [`ConversationObserver`] that forwards user / committed-
 /// assistant turns into an unbounded queue; a background poster task posts
 /// each to the daemon's `agent.turn.record` RPC.
+///
+/// `mirror_assistant` gates the `CommittedReply` arm (WEFT-614 lite): in
+/// daemon-brain mode the reply IS the daemon's own voice-loop output, which
+/// the daemon already anchored through its own sink when it committed the
+/// node — mirroring it again here would double-anchor the same turn. The
+/// user turn is always mirrored regardless.
 struct TurnRecordObserver {
     tx: tokio::sync::mpsc::UnboundedSender<(&'static str, String, Option<serde_json::Value>)>,
+    mirror_assistant: bool,
 }
 
 impl clawft_voice_talk::ConversationObserver for TurnRecordObserver {
@@ -329,9 +355,13 @@ impl clawft_voice_talk::ConversationObserver for TurnRecordObserver {
                     .and_then(|v| serde_json::to_value(v).ok());
                 ("user", text, va)
             }
-            ConversationEvent::CommittedReply { answer } => ("assistant", answer, None),
+            ConversationEvent::CommittedReply { answer } if self.mirror_assistant => {
+                ("assistant", answer, None)
+            }
             // Speculative acks are superseded by the committed reply and
-            // barge-ins prune in-forest; neither is a durable turn.
+            // barge-ins prune in-forest; neither is a durable turn. A
+            // committed reply with mirroring suppressed is likewise skipped
+            // — the daemon already anchored it.
             _ => return,
         };
         // Receiver gone (daemon died and the poster exited) — drop silently;
@@ -341,9 +371,11 @@ impl clawft_voice_talk::ConversationObserver for TurnRecordObserver {
 }
 
 /// Connect to the kernel daemon and spawn the poster task. Returns `None`
-/// (anchoring disabled) when no daemon is reachable.
+/// (anchoring disabled) when no daemon is reachable. `mirror_assistant` see
+/// [`TurnRecordObserver`].
 async fn spawn_turn_recorder(
     conv_id: String,
+    mirror_assistant: bool,
 ) -> Option<std::sync::Arc<dyn clawft_voice_talk::ConversationObserver>> {
     use clawft_rpc::{DaemonClient, Request};
 
@@ -398,7 +430,10 @@ async fn spawn_turn_recorder(
         }
     });
 
-    Some(std::sync::Arc::new(TurnRecordObserver { tx }))
+    Some(std::sync::Arc::new(TurnRecordObserver {
+        tx,
+        mirror_assistant,
+    }))
 }
 
 /// Run the wake word daemon -- continuously listen for "Hey Weft".

@@ -67,6 +67,27 @@ pub async fn run_live_observed(
         std::sync::Arc<dyn clawft_channels::voice::talkmode::ConversationObserver>,
     >,
 ) -> Result<(), VoiceError> {
+    run_live_observed_with_llm(config, input_device, cancel, extra_observer, None).await
+}
+
+/// [`run_live_observed`] with an optional override for the native stack's
+/// `VoiceLlm` binding (default: Hermes via [`LocalProviderVoiceLlm`](crate::LocalProviderVoiceLlm)).
+///
+/// WEFT-614 lite: `weft voice talk --brain daemon|auto` swaps in an adapter
+/// that never calls an LLM itself — it waits for the kernel daemon's own
+/// §W2.1 voice loop to commit a reply and hands its text back, so the daemon
+/// (which already sees the mirrored user turn via `agent.turn.record`) is
+/// the ONLY brain that speaks, instead of racing a second, weaker local
+/// completion against it.
+pub async fn run_live_observed_with_llm(
+    config: TalkConfig,
+    input_device: Option<String>,
+    cancel: CancellationToken,
+    extra_observer: Option<
+        std::sync::Arc<dyn clawft_channels::voice::talkmode::ConversationObserver>,
+    >,
+    llm_override: Option<std::sync::Arc<dyn clawft_channels::voice::policy::VoiceLlm>>,
+) -> Result<(), VoiceError> {
     // ONE shared AEC: played audio (render reference) ⇄ captured mic (subtract)
     // ⇄ barge-in flush. The single handle is what makes echo cancellation close.
     //
@@ -97,7 +118,10 @@ pub async fn run_live_observed(
 
     // Native component stack (Hermes brain, parakeet/smart-turn/ECAPA, Kokoro+
     // Orpheus TTS). The smart-turn SemanticEndpointer inside is THE endpointer.
-    let components = native_components(&config, sink_dyn, audio)?;
+    let mut components = native_components(&config, sink_dyn, audio)?;
+    if let Some(llm) = llm_override {
+        components.llm = llm;
+    }
     let session = TalkSession::assemble_observed(config.clone(), components, extra_observer);
 
     // Capture → AEC → CaptureProcessor: forwards cleaned frames to the

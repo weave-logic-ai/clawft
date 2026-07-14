@@ -137,10 +137,13 @@ impl ConversationObserver for EccConversationObserver {
                 }
                 st.last_reply = Some(c);
             }
-            // §W1.4 process events are surface-only — not committed graph nodes.
+            // §W1.4 process events are surface-only — not committed graph
+            // nodes. SpeculativeFiller (WEFT-658) joins this group: it's an
+            // ephemeral "thinking" line, not a reply the ECC forest tracks.
             ConversationEvent::EndpointFired { .. }
             | ConversationEvent::PartialTranscript { .. }
-            | ConversationEvent::CaptureLevel { .. } => {}
+            | ConversationEvent::CaptureLevel { .. }
+            | ConversationEvent::SpeculativeFiller { .. } => {}
             ConversationEvent::Interrupted => {
                 let i = self.graph.add_node(
                     "interrupted".to_string(),

@@ -366,10 +366,13 @@ impl ConversationObserver for LoopObserver {
                 // Drive the floor: the barge-in claims back the floor.
                 self.emit_claim();
             }
-            // §W1.4 process events are surface-only — not committed graph nodes.
+            // §W1.4 process events are surface-only — not committed graph
+            // nodes. SpeculativeFiller (WEFT-658) joins this group: it's an
+            // ephemeral "thinking" line, not a reply the loop tracks.
             ConversationEvent::EndpointFired { .. }
             | ConversationEvent::PartialTranscript { .. }
-            | ConversationEvent::CaptureLevel { .. } => {}
+            | ConversationEvent::CaptureLevel { .. }
+            | ConversationEvent::SpeculativeFiller { .. } => {}
         }
     }
 }

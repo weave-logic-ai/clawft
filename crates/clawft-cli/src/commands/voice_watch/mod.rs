@@ -164,6 +164,11 @@ impl ConversationObserver for LiveRenderObserver {
                 rms_dbfs: _,
                 floor_dbfs: _,
             } => {}
+            // The "thinking" filler spoken when the answer is slow to land
+            // (WEFT-658) — surfaced the same way the partial transcript is.
+            ConversationEvent::SpeculativeFiller { text } => {
+                println!("  … {text}");
+            }
             // Listen-only never fires these; a full talk loop supersedes the ack
             // with the committed reply and prunes on barge-in.
             ConversationEvent::SpeculativeReply { .. } | ConversationEvent::Interrupted => {}

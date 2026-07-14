@@ -180,6 +180,17 @@ pub enum ConversationEvent {
         /// Ack text spoken by the fast TTS layer.
         ack: String,
     },
+    /// A contextual filler spoken when the grounded answer hasn't landed
+    /// within the filler gate (~1.5 s after the ack) — buys the (slow) brain
+    /// thinking time and opens a natural interruption window (WEFT-658).
+    /// Dynamic, subject-derived text rendered on the fly through the FAST
+    /// tier, so unlike [`SpeculativeReply`](Self::SpeculativeReply) it is
+    /// never pre-rendered/cached. Spoken at most once per turn; surface-only
+    /// like the other §W1.4 process events — not a durable graph node.
+    SpeculativeFiller {
+        /// Filler text spoken by the fast TTS layer.
+        text: String,
+    },
     /// The grounded answer — the **Committed** node that supersedes the ack.
     CommittedReply {
         /// Answer text (already shaped by the spoken-answer policy).
@@ -636,6 +647,13 @@ pub struct TalkModeController<M: EndpointModel> {
     armed_logged: bool,
     /// Time throttle for the gate-input level probe.
     last_probe: Option<Instant>,
+    /// Turn counter driving [`pick_ack`]'s pool rotation — advances once per
+    /// spoken turn so back-to-back acks never repeat (WEFT-658).
+    ack_counter: u32,
+    /// Turn counter driving [`pick_filler`]'s pool rotation, independent of
+    /// `ack_counter` (a turn speaks at most one filler, but not every turn
+    /// speaks one, so the two counters drift apart over a session).
+    filler_counter: u32,
 }
 
 impl<M: EndpointModel> TalkModeController<M> {
@@ -680,6 +698,8 @@ impl<M: EndpointModel> TalkModeController<M> {
             voiced_run: false,
             armed_logged: false,
             last_probe: None,
+            ack_counter: 0,
+            filler_counter: 0,
         }
     }
 
@@ -780,8 +800,12 @@ impl<M: EndpointModel> TalkModeController<M> {
         // warm beats; fast-tier fallback covers the race. Skipped in listen-only
         // mode — that path never speaks, so it does zero synthesis.
         if !self.config.listen_only {
-            self.tts
-                .spawn_warm_acks(vec![ACK_SHORT.to_string(), ACK_LONG.to_string()]);
+            let warm: Vec<String> = ACK_SHORT_POOL
+                .iter()
+                .chain(ACK_LONG_POOL.iter())
+                .map(|s| s.to_string())
+                .collect();
+            self.tts.spawn_warm_acks(warm);
         }
 
         // Listen-only decode worker: the capture loop hands finalized utterances
@@ -926,9 +950,10 @@ impl<M: EndpointModel> TalkModeController<M> {
     }
 
     /// One talk-mode turn: decode + emit the `UserTurn` (via the shared
-    /// [`Decoder`]), then ack → grounded answer → speak with barge-in. Talk mode
-    /// decodes inline (it must produce the reply anyway); listen-only runs the
-    /// same decode off-loop in the worker.
+    /// [`Decoder`]), then ack → (race the grounded answer against the filler
+    /// gate) → speak with barge-in. Talk mode decodes inline (it must
+    /// produce the reply anyway); listen-only runs the same decode off-loop
+    /// in the worker.
     async fn talk_turn(
         &mut self,
         turn: FinalizedTurn,
@@ -940,16 +965,76 @@ impl<M: EndpointModel> TalkModeController<M> {
         };
 
         // Fast ack = Speculative spoken node (6.4 fast layer covers latency).
-        let ack = contextual_ack(&text);
+        // Rotated through the pool (WEFT-658 hot-mic feedback: talk mode said
+        // the same "Okay, one sec." on every turn) — the counter advances
+        // once per turn, so back-to-back picks from the same pool never
+        // repeat verbatim.
+        let ack = pick_ack(&text, self.ack_counter);
+        self.ack_counter = self.ack_counter.wrapping_add(1);
         self.observer
             .observe(ConversationEvent::SpeculativeReply { ack: ack.clone() });
 
-        // Grounded answer, shaped short by the spoken-answer policy (6.3).
-        let answer = match self
-            .policy
-            .answer(self.llm.as_ref(), &self.config.base_system, &text, speaker_ctx)
-            .await
-        {
+        // Speak the ack RIGHT AWAY instead of waiting for the LLM, so it
+        // actually covers the generation latency rather than playing
+        // back-to-back with the answer once both happen to be ready.
+        speak_while_draining(
+            self.tts.speak_ack(&ack, self.sink.clone(), cancel.clone()),
+            frames,
+            cancel,
+        )
+        .await;
+        if cancel.is_cancelled() {
+            return;
+        }
+
+        // Grounded answer, shaped short by the spoken-answer policy (6.3) —
+        // cloned inputs so the future owns everything and doesn't hold a
+        // `self` borrow across the loop below (which also mutates
+        // `self.filler_counter` and reads `self.observer`/`self.tts`).
+        let policy = self.policy.clone();
+        let llm = self.llm.clone();
+        let base_system = self.config.base_system.clone();
+        let transcript = text.clone();
+        let answer_fut =
+            async move { policy.answer(llm.as_ref(), &base_system, &transcript, speaker_ctx).await };
+        tokio::pin!(answer_fut);
+
+        // Race the answer against the filler gate: if the LLM hasn't
+        // returned within FILLER_GATE_DELAY, speak one contextual filler
+        // (fast tier, dynamic text) so the wait doesn't read as dead air —
+        // this also opens a natural interruption window (WEFT-658). `biased`
+        // polls the answer branch first on every wakeup, so a reply that
+        // lands at (or just before) the gate is taken over the filler —
+        // "skip it if the reply arrives while queued/being decided".
+        let mut filler_spoken = false;
+        let gate_start = std::time::Instant::now();
+        let answer_result = loop {
+            tokio::select! {
+                biased;
+                res = &mut answer_fut => break res,
+                _ = tokio::time::sleep(FILLER_GATE_DELAY), if !filler_spoken => {
+                    filler_spoken = true;
+                    if should_speak_filler(gate_start.elapsed(), false) {
+                        let filler = pick_filler(&text, self.filler_counter);
+                        self.filler_counter = self.filler_counter.wrapping_add(1);
+                        self.observer.observe(ConversationEvent::SpeculativeFiller {
+                            text: filler.clone(),
+                        });
+                        speak_while_draining(
+                            self.tts.speak_filler(&filler, self.sink.clone(), cancel.clone()),
+                            frames,
+                            cancel,
+                        )
+                        .await;
+                    }
+                }
+            }
+        };
+        if cancel.is_cancelled() {
+            return;
+        }
+
+        let answer = match answer_result {
             Ok(a) if !a.trim().is_empty() => a,
             Ok(_) => {
                 warn!("talk-mode LLM returned an empty answer; turn dropped");
@@ -965,16 +1050,20 @@ impl<M: EndpointModel> TalkModeController<M> {
             answer: answer.clone(),
         });
 
-        // Speak ack then stream the answer (6.4); monitor for barge-in.
-        self.speak_with_barge_in(&ack, &answer, frames, cancel).await;
+        // Stream the answer (6.4); monitor for barge-in. The ack (and any
+        // filler) have already been spoken by now.
+        self.speak_answer_with_barge_in(&answer, frames, cancel)
+            .await;
     }
 
-    /// Play the fast ack then stream the answer; a sustained voiced run during
-    /// playback is a barge-in → cancel TTS (flushes the sink) + flush the AEC
-    /// render reference + emit `Interrupted`.
-    async fn speak_with_barge_in(
+    /// Stream the grounded answer, monitoring for barge-in: a sustained
+    /// voiced run during playback is a barge-in → cancel TTS (flushes the
+    /// sink) + flush the AEC render reference + emit `Interrupted`. Barge-in
+    /// coverage lives here (the long stretch) rather than on the brief
+    /// ack/filler steps — see [`speak_while_draining`] and WEFT-658's "no new
+    /// interrupt machinery" constraint.
+    async fn speak_answer_with_barge_in(
         &self,
-        ack: &str,
         answer: &str,
         frames: &mut mpsc::Receiver<Vec<i16>>,
         cancel: &CancellationToken,
@@ -987,13 +1076,9 @@ impl<M: EndpointModel> TalkModeController<M> {
             .max(self.config.vad_threshold_dbfs);
         let speak_started = std::time::Instant::now();
         let turn_cancel = cancel.child_token();
-        let ack_owned = ack.to_string();
-        let speak = self.tts.speak(
-            Some(ack_owned.as_str()),
-            answer,
-            self.sink.clone(),
-            turn_cancel.clone(),
-        );
+        let speak = self
+            .tts
+            .speak_answer(answer, self.sink.clone(), turn_cancel.clone());
         tokio::pin!(speak);
 
         let mut voiced_run: u32 = 0;
@@ -1086,6 +1171,145 @@ pub fn contextual_ack(transcript: &str) -> String {
     }
 }
 
+/// Short-ask ack pool (WEFT-658: talk mode said "One sec." on every turn —
+/// this rotates it). `ACK_SHORT` is kept as the first entry so existing
+/// callers of the single-string [`contextual_ack`] see no change; the live
+/// talk loop uses [`pick_ack`] instead, which rotates through this pool.
+/// Closed set (no transcript interpolation) so [`DualLayerTts`] can
+/// pre-render every entry through the SLOW tier at session start.
+pub const ACK_SHORT_POOL: &[&str] = &[ACK_SHORT, "Hmm.", "Right.", "On it.", "Sure."];
+/// Long-ask ack pool — same closed-set / pre-render contract as
+/// [`ACK_SHORT_POOL`].
+pub const ACK_LONG_POOL: &[&str] = &[
+    ACK_LONG,
+    "Good question, give me a moment.",
+    "Let me think about that.",
+    "Okay, looking now.",
+];
+
+/// Pick an ack for `transcript`, rotating through the short/long pool (the
+/// short-vs-long heuristic is unchanged from [`contextual_ack`]) so
+/// consecutive turns don't repeat the same line. `counter` is a
+/// monotonically incrementing per-controller turn count (see
+/// [`TalkModeController::talk_turn`]) — since it advances by exactly one
+/// between calls, indexing `pool[counter % pool.len()]` guarantees the
+/// immediately-previous pick from either pool is never repeated verbatim
+/// (deterministic, no RNG, easy to test).
+pub fn pick_ack(transcript: &str, counter: u32) -> String {
+    let words = transcript.split_whitespace().count();
+    let pool: &[&str] = if words <= 3 { ACK_SHORT_POOL } else { ACK_LONG_POOL };
+    pool[counter as usize % pool.len()].to_string()
+}
+
+/// Await `speak` (an ack or filler TTS render) while draining mic frames
+/// concurrently, so the capture channel doesn't back up during the short
+/// playback (mirrors the answer path's frame consumption — unconsumed
+/// frames would otherwise flood "frame channel full" warnings). No barge-in
+/// monitoring here: these are brief utterances, and barge-in coverage stays
+/// on the long answer path (see
+/// [`TalkModeController::speak_answer_with_barge_in`]) per WEFT-658's "no
+/// new interrupt machinery" constraint.
+async fn speak_while_draining<F>(
+    speak: F,
+    frames: &mut mpsc::Receiver<Vec<i16>>,
+    cancel: &CancellationToken,
+) where
+    F: std::future::Future<Output = Result<(), super::types::VoiceError>>,
+{
+    tokio::pin!(speak);
+    loop {
+        tokio::select! {
+            res = &mut speak => {
+                if let Err(e) = res {
+                    warn!(error = %e, "talk-mode TTS error");
+                }
+                break;
+            }
+            _ = cancel.cancelled() => break,
+            maybe = frames.recv() => {
+                if maybe.is_none() {
+                    break; // capture channel closed
+                }
+            }
+        }
+    }
+}
+
+/// Stopwords/question-scaffolding filtered out when extracting a short
+/// subject phrase from a transcript for the contextual filler. Deliberately
+/// small and keyword-simple (not NLP) — just enough to drop "what is" /
+/// "can you tell me about" / greetings and leave the content words.
+const SUBJECT_STOPWORDS: &[&str] = &[
+    "a", "an", "the", "is", "are", "was", "were", "am", "be", "been", "what", "who", "when",
+    "where", "why", "how", "which", "can", "could", "would", "should", "will", "do", "does",
+    "did", "you", "me", "please", "tell", "explain", "about", "know", "think", "i", "to", "of",
+    "for", "on", "in", "at", "with", "and", "now", "hi", "hello", "hey", "yo", "thanks", "thank",
+    "ok", "okay",
+];
+
+/// Extract a short subject phrase (≤4 content words) from a transcript for
+/// the contextual filler ("Let me look at {subject}."). Strips
+/// stopwords/question scaffolding and keeps the first content words.
+/// Returns `None` when nothing survives (greeting-only / all-stopword
+/// utterances) — the filler falls back to [`FILLER_FALLBACK_POOL`].
+pub fn extract_subject(transcript: &str) -> Option<String> {
+    let content: Vec<&str> = transcript
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\''))
+        .filter(|w| !w.is_empty() && !SUBJECT_STOPWORDS.contains(&w.to_lowercase().as_str()))
+        .take(4)
+        .collect();
+    if content.is_empty() {
+        None
+    } else {
+        Some(content.join(" "))
+    }
+}
+
+/// Filler templates spoken when the grounded answer hasn't landed within
+/// [`FILLER_GATE_DELAY`] — dynamic text (the extracted subject is spliced
+/// in), so unlike the closed ack pools it is always rendered on the fly
+/// through the FAST tier rather than pre-rendered/cached.
+const FILLER_TEMPLATES: &[&str] = &[
+    "Let me look at {subject}.",
+    "Checking on {subject} now.",
+    "Thinking about {subject}.",
+];
+/// Fallback filler pool for utterances with no extractable subject (short
+/// greetings, all-stopword asks).
+const FILLER_FALLBACK_POOL: &[&str] = &["Working on it.", "Still with you.", "One more moment."];
+
+/// How long to wait after the ack for the grounded answer before speaking a
+/// filler (WEFT-658: "buys the (slow) brain thinking time and opens natural
+/// interruption windows").
+const FILLER_GATE_DELAY: Duration = Duration::from_millis(1_500);
+
+/// Pick a contextual filler for `transcript`, rotating like [`pick_ack`].
+/// Splices the extracted subject into a template, or falls back to a
+/// subject-less variant when nothing survives extraction.
+pub fn pick_filler(transcript: &str, counter: u32) -> String {
+    match extract_subject(transcript) {
+        Some(subject) => {
+            let idx = counter as usize % FILLER_TEMPLATES.len();
+            FILLER_TEMPLATES[idx].replace("{subject}", &subject)
+        }
+        None => {
+            let idx = counter as usize % FILLER_FALLBACK_POOL.len();
+            FILLER_FALLBACK_POOL[idx].to_string()
+        }
+    }
+}
+
+/// The pure filler gate decision: speak a filler only once the grounded
+/// answer's wait has crossed [`FILLER_GATE_DELAY`] AND it still hasn't
+/// arrived. Kept as a standalone, synchronously-testable function per
+/// WEFT-658 — the timing itself (the actual sleep/select race) lives in
+/// [`TalkModeController::talk_turn`]; this is the rule it enforces, so it
+/// can be unit-tested without spinning up the async path.
+pub fn should_speak_filler(elapsed: Duration, reply_ready: bool) -> bool {
+    !reply_ready && elapsed >= FILLER_GATE_DELAY
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1103,5 +1327,114 @@ mod tests {
         assert_eq!(contextual_ack("tell me about Puyo please"), ACK_LONG);
         assert_eq!(contextual_ack("can you explain the thing now"), ACK_LONG);
         assert_eq!(contextual_ack("quick question"), ACK_SHORT);
+    }
+
+    // ── pick_ack (WEFT-658 pool rotation) ──────────────────────────────
+
+    #[test]
+    fn pick_ack_preserves_the_short_long_heuristic() {
+        assert!(ACK_SHORT_POOL.contains(&pick_ack("hi", 0).as_str()));
+        assert!(ACK_SHORT_POOL.contains(&pick_ack("what time", 3).as_str()));
+        assert!(ACK_SHORT_POOL.contains(&pick_ack("quick question", 7).as_str()));
+        assert!(ACK_LONG_POOL.contains(&pick_ack("tell me about Puyo please", 0).as_str()));
+        assert!(ACK_LONG_POOL.contains(&pick_ack("can you explain the thing now", 2).as_str()));
+    }
+
+    #[test]
+    fn pick_ack_never_repeats_the_immediately_previous_pick() {
+        // Consecutive turns (counter advancing by 1 each time) — regardless
+        // of which pool a given turn lands in, back-to-back picks must
+        // differ (the pools are disjoint strings, and same-pool neighbors
+        // land on different indices since the counter always advances by 1).
+        let mut prev: Option<String> = None;
+        for i in 0..20 {
+            let text = if i % 3 == 0 { "hi" } else { "tell me a long story please" };
+            let ack = pick_ack(text, i);
+            if let Some(p) = &prev {
+                assert_ne!(*p, ack, "immediate repeat at counter {i}");
+            }
+            prev = Some(ack);
+        }
+    }
+
+    #[test]
+    fn pick_ack_cycles_through_every_pool_entry() {
+        let picks: std::collections::HashSet<String> = (0..ACK_LONG_POOL.len() as u32)
+            .map(|i| pick_ack("tell me about the weather today please", i))
+            .collect();
+        assert_eq!(picks.len(), ACK_LONG_POOL.len(), "a full cycle visits every entry once");
+    }
+
+    // ── extract_subject / pick_filler ──────────────────────────────────
+
+    #[test]
+    fn extract_subject_strips_question_scaffolding() {
+        assert_eq!(extract_subject("tell me about Puyo please"), Some("Puyo".to_string()));
+        assert_eq!(
+            extract_subject("what is the capital of France"),
+            Some("capital France".to_string())
+        );
+        assert_eq!(
+            extract_subject("can you explain the thing now"),
+            Some("thing".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_subject_none_for_greetings_and_all_stopwords() {
+        assert_eq!(extract_subject("hi"), None);
+        assert_eq!(extract_subject("thanks"), None);
+        assert_eq!(extract_subject("can you please"), None);
+    }
+
+    #[test]
+    fn pick_filler_uses_subject_template_when_available() {
+        let f = pick_filler("tell me about Puyo please", 0);
+        assert_eq!(f, "Let me look at Puyo.");
+        let f2 = pick_filler("tell me about Puyo please", 1);
+        assert_eq!(f2, "Checking on Puyo now.");
+    }
+
+    #[test]
+    fn pick_filler_falls_back_when_no_subject() {
+        let f = pick_filler("hi", 0);
+        assert!(FILLER_FALLBACK_POOL.contains(&f.as_str()));
+    }
+
+    #[test]
+    fn pick_filler_rotates_without_immediate_repeat() {
+        let mut prev: Option<String> = None;
+        for i in 0..10 {
+            let f = pick_filler("tell me about Puyo please", i);
+            if let Some(p) = &prev {
+                assert_ne!(*p, f, "immediate repeat at counter {i}");
+            }
+            prev = Some(f);
+        }
+    }
+
+    // ── should_speak_filler gate ────────────────────────────────────────
+
+    #[test]
+    fn should_speak_filler_waits_for_the_gate() {
+        assert!(!should_speak_filler(Duration::from_millis(500), false), "too early");
+        assert!(!should_speak_filler(Duration::from_millis(1_499), false), "still too early");
+        assert!(
+            should_speak_filler(Duration::from_millis(1_500), false),
+            "gate elapsed, reply not ready"
+        );
+        assert!(
+            should_speak_filler(Duration::from_millis(3_000), false),
+            "well past the gate, reply not ready"
+        );
+    }
+
+    #[test]
+    fn should_speak_filler_skips_when_the_reply_already_arrived() {
+        // "if the reply arrives while the filler is queued/being decided,
+        // skip it" (WEFT-658) — modeled by reply_ready=true regardless of
+        // elapsed time.
+        assert!(!should_speak_filler(Duration::from_millis(1_500), true));
+        assert!(!should_speak_filler(Duration::from_millis(5_000), true));
     }
 }

@@ -34,6 +34,8 @@ pub mod ui_cmd;
 #[cfg(feature = "voice")]
 pub mod voice;
 #[cfg(feature = "voice")]
+pub mod voice_daemon_brain;
+#[cfg(feature = "voice")]
 pub mod voice_watch;
 pub mod workspace_cmd;
 

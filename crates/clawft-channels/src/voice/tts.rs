@@ -305,7 +305,10 @@ impl DualLayerTts {
 
     /// Speak `ack` (optional, fast layer, covers latency) then stream `answer`
     /// (slow layer, gap-free, chunk-by-chunk) to `sink`. On `cancel` (barge-
-    /// in) the producer stops and the sink is flushed.
+    /// in) the producer stops and the sink is flushed. Thin composition of
+    /// [`speak_ack`](Self::speak_ack) + [`speak_answer`](Self::speak_answer) —
+    /// kept as a single call for callers that don't need to interleave
+    /// anything (e.g. a filler) between the two.
     pub async fn speak(
         &self,
         ack: Option<&str>,
@@ -313,41 +316,96 @@ impl DualLayerTts {
         sink: Arc<dyn TtsSink>,
         cancel: CancellationToken,
     ) -> Result<(), VoiceError> {
-        // ACK: prefer the pre-rendered slow-voice cache (single-voice
-        // consistency — the ack speaks in the answer's own voice, instantly);
-        // fall back to the FAST layer for uncached acks so the loop never
-        // goes silent while the slow answer renders.
         if let Some(ack) = ack {
-            if cancel.is_cancelled() {
-                sink.flush().await;
-                return Ok(());
-            }
-            let cached = self.ack_cache.lock().unwrap().get(ack).cloned();
-            if let Some(chunks) = cached {
-                for chunk in &chunks {
-                    if cancel.is_cancelled() {
-                        break;
-                    }
-                    sink.play_chunk(chunk).await?;
-                }
-            } else {
-                let (atx, mut arx) = mpsc::channel::<TtsChunk>(4);
-                let fast = self.fast.clone();
-                let ack_text = ack.to_string();
-                let ack_cancel = cancel.clone();
-                let producer = tokio::spawn(async move {
-                    let _ = fast.synthesize_stream(&ack_text, atx, ack_cancel).await;
-                });
-                while let Some(chunk) = arx.recv().await {
-                    if cancel.is_cancelled() {
-                        break;
-                    }
-                    sink.play_chunk(&chunk).await?;
-                }
-                let _ = producer.await;
-            }
+            self.speak_ack(ack, sink.clone(), cancel.clone()).await?;
         }
+        self.speak_answer(answer, sink, cancel).await
+    }
 
+    /// Speak `ack` alone (fast layer, covers latency): prefer the
+    /// pre-rendered slow-voice cache (single-voice consistency — the ack
+    /// speaks in the answer's own voice, instantly); fall back to the FAST
+    /// layer for uncached acks so the loop never goes silent while the slow
+    /// answer renders. Split out from [`speak`](Self::speak) so a caller can
+    /// speak the ack immediately (before the grounded answer even starts
+    /// generating) instead of only once both are ready.
+    pub async fn speak_ack(
+        &self,
+        ack: &str,
+        sink: Arc<dyn TtsSink>,
+        cancel: CancellationToken,
+    ) -> Result<(), VoiceError> {
+        if cancel.is_cancelled() {
+            sink.flush().await;
+            return Ok(());
+        }
+        let cached = self.ack_cache.lock().unwrap().get(ack).cloned();
+        if let Some(chunks) = cached {
+            for chunk in &chunks {
+                if cancel.is_cancelled() {
+                    break;
+                }
+                sink.play_chunk(chunk).await?;
+            }
+        } else {
+            let (atx, mut arx) = mpsc::channel::<TtsChunk>(4);
+            let fast = self.fast.clone();
+            let ack_text = ack.to_string();
+            let ack_cancel = cancel.clone();
+            let producer = tokio::spawn(async move {
+                let _ = fast.synthesize_stream(&ack_text, atx, ack_cancel).await;
+            });
+            while let Some(chunk) = arx.recv().await {
+                if cancel.is_cancelled() {
+                    break;
+                }
+                sink.play_chunk(&chunk).await?;
+            }
+            let _ = producer.await;
+        }
+        Ok(())
+    }
+
+    /// Speak dynamic filler text (e.g. "Checking on {subject} now.") through
+    /// the FAST tier only. Unlike [`speak_ack`](Self::speak_ack), fillers are
+    /// never cached — the subject is spliced in per-turn, so there is no
+    /// fixed closed set to pre-render.
+    pub async fn speak_filler(
+        &self,
+        filler: &str,
+        sink: Arc<dyn TtsSink>,
+        cancel: CancellationToken,
+    ) -> Result<(), VoiceError> {
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
+        let (tx, mut rx) = mpsc::channel::<TtsChunk>(4);
+        let fast = self.fast.clone();
+        let text = filler.to_string();
+        let fcancel = cancel.clone();
+        let producer = tokio::spawn(async move {
+            let _ = fast.synthesize_stream(&text, tx, fcancel).await;
+        });
+        while let Some(chunk) = rx.recv().await {
+            if cancel.is_cancelled() {
+                break;
+            }
+            sink.play_chunk(&chunk).await?;
+        }
+        let _ = producer.await;
+        Ok(())
+    }
+
+    /// Stream the expressive `answer` alone (slow layer, gap-free,
+    /// chunk-by-chunk) to `sink`. Split out from [`speak`](Self::speak) so a
+    /// caller can speak the ack (and an optional filler) up front and only
+    /// start this once the grounded answer text is ready.
+    pub async fn speak_answer(
+        &self,
+        answer: &str,
+        sink: Arc<dyn TtsSink>,
+        cancel: CancellationToken,
+    ) -> Result<(), VoiceError> {
         if cancel.is_cancelled() {
             sink.flush().await;
             return Ok(());
