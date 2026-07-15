@@ -202,10 +202,25 @@ pub struct CowMemoryConfig {
     /// Only consulted when `enabled` is `true`.
     #[serde(default = "default_cow_memory_path")]
     pub path: String,
+
+    /// Whether a turn's user/assistant exchange is embedded and ingested
+    /// into the checkpointed `working` node before `promote`/`rollback`
+    /// (WEFT-616 Phase 3 write-routing). Default `true` — the checkpoint
+    /// bracket exists to protect real writes, and ingesting the turn's own
+    /// exchange is the first (and currently only) source of those writes.
+    /// Only consulted when `enabled` is also `true`; set `false` to keep
+    /// the bracket active (still protecting whatever tools/graphify write
+    /// directly into the lineage) without the automatic exchange ingest.
+    #[serde(default = "default_ingest_turns", alias = "ingestTurns")]
+    pub ingest_turns: bool,
 }
 
 fn default_cow_memory_path() -> String {
     "~/.clawft/workspace/cow_memory".into()
+}
+
+fn default_ingest_turns() -> bool {
+    true
 }
 
 impl Default for CowMemoryConfig {
@@ -213,6 +228,7 @@ impl Default for CowMemoryConfig {
         Self {
             enabled: false,
             path: default_cow_memory_path(),
+            ingest_turns: default_ingest_turns(),
         }
     }
 }

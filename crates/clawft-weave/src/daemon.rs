@@ -1654,8 +1654,40 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                 open_or_create_cow_memory(std::path::Path::new(&path))
             }) {
                 Ok(mem) => {
-                    agent_loop.set_cow_memory(std::sync::Arc::new(std::sync::Mutex::new(mem)));
+                    agent_loop.set_cow_memory(
+                        std::sync::Arc::new(std::sync::Mutex::new(mem)),
+                        cow_memory_cfg.ingest_turns,
+                    );
                     info!(path = %path, "cow memory wired (WEFT-616 Phase 2): per-turn checkpoint/promote/rollback active");
+
+                    // WEFT-616 Phase 3: witness the bracket's transitions on
+                    // the exochain (DualStateBridge, plan §7). A ledger with
+                    // no cow-memory bracket to observe is pointless, so this
+                    // only wires up alongside a successful cow-attach above,
+                    // and only when a chain manager is actually present.
+                    #[cfg(feature = "exochain")]
+                    {
+                        let chain = kernel.read().await.chain_manager().cloned();
+                        match chain {
+                            Some(chain) => {
+                                agent_loop.set_turn_ledger(std::sync::Arc::new(
+                                    crate::turn_ledger::DaemonTurnLedger::new(chain),
+                                ));
+                                info!(
+                                    "turn ledger wired (WEFT-616 Phase 3): cow-memory \
+                                     checkpoint/revert/promote transitions witnessed on the \
+                                     exochain"
+                                );
+                            }
+                            None => {
+                                warn!(
+                                    "cow memory wired but no chain manager available — \
+                                     turn bracket transitions will not be witnessed \
+                                     (exochain anchoring is off)"
+                                );
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     warn!(path = %path, error = %e, "cow memory enabled but failed to open — turns run WITHOUT the checkpoint bracket");

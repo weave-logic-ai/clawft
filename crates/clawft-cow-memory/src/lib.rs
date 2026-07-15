@@ -51,6 +51,7 @@ mod ops;
 
 pub use branchable_memory::{
     BranchableMemory, LineageEntry, MemoryDiff, MemoryStatus, NodeRole, PromoteReport, VectorItem,
+    VectorTags,
 };
 pub use chain_walk::ScoredId;
 pub use error::{CowMemoryError, Result};

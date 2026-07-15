@@ -425,7 +425,8 @@ pub struct AgentLoop<P: Platform> {
     /// constructs the loop -- `None` (default) is the same "feature
     /// absent" pattern as `sandbox`/`gate`: zero behavior change.
     #[cfg(feature = "rvf")]
-    cow_memory: std::sync::OnceLock<Arc<std::sync::Mutex<clawft_cow_memory::BranchableMemory>>>,
+    cow_memory:
+        std::sync::OnceLock<(Arc<std::sync::Mutex<clawft_cow_memory::BranchableMemory>>, bool)>,
     /// Chain-side witness of the bracket (WEFT-616 Phase 3, DualStateBridge).
     /// Late-wired by the daemon over ChainManager; absent = no chain coupling
     /// (memory semantics unchanged). Not feature-gated — the trait is pure.
@@ -664,7 +665,7 @@ impl<P: Platform> AgentLoop<P> {
         self,
         mem: Arc<std::sync::Mutex<clawft_cow_memory::BranchableMemory>>,
     ) -> Self {
-        let _ = self.cow_memory.set(mem);
+        let _ = self.cow_memory.set((mem, true));
         self
     }
 
@@ -673,11 +674,16 @@ impl<P: Platform> AgentLoop<P> {
     /// the operator's `AgentsConfig::cow_memory` is only in scope there).
     /// Write-once, same idiom as the reply-submitter/spawner late wiring.
     #[cfg(feature = "rvf")]
+    /// `ingest_turns` = `CowMemoryConfig::ingest_turns`: when true, each
+    /// successful turn's exchange (user text + reply) is hash-embedded and
+    /// ingested into the checkpointed `working` node before promote — the
+    /// Phase-3 write routing that makes the bracket protect real data.
     pub fn set_cow_memory(
         &self,
         mem: Arc<std::sync::Mutex<clawft_cow_memory::BranchableMemory>>,
+        ingest_turns: bool,
     ) {
-        let _ = self.cow_memory.set(mem);
+        let _ = self.cow_memory.set((mem, ingest_turns));
     }
 
     /// Late-wire the chain-side [`TurnLedger`] (WEFT-616 Phase 3). Write-once;
@@ -830,13 +836,33 @@ impl<P: Platform> AgentLoop<P> {
     /// added behavior -- byte-identical to the pre-Phase-2 `handle_turn`.
     pub async fn handle_turn(&self, msg: InboundMessage) -> clawft_types::Result<OutboundMessage> {
         #[cfg(feature = "rvf")]
-        if let Some(mem) = self.cow_memory.get().cloned() {
+        if let Some((mem, ingest_turns)) = self.cow_memory.get().cloned() {
             let label = format!("turn:{}:{}", msg.channel, msg.chat_id);
+            // Capture the exchange inputs before `msg` moves into the turn.
+            let user_text = msg.content.clone();
+            let channel = msg.channel.clone();
+            let chat_id = msg.chat_id.clone();
+            // Dimension comes from the attached lineage so the hash embedder
+            // always matches the store (the daemon creates at 384; tests may
+            // attach smaller stores).
+            let dim = {
+                let guard = mem.lock().unwrap_or_else(|p| p.into_inner());
+                guard.dimension()
+            };
+            let items_on_ok = move |out: &OutboundMessage| {
+                if !ingest_turns {
+                    return Vec::new();
+                }
+                super::turn_checkpoint::exchange_items(
+                    dim, &channel, &chat_id, &user_text, &out.content,
+                )
+            };
             return super::turn_checkpoint::with_turn_checkpoint(
                 &mem,
                 self.turn_ledger.get(),
                 label,
                 move || self.handle_turn_inner(msg),
+                items_on_ok,
             )
             .await;
         }

@@ -5,13 +5,18 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::branchable_memory::{BranchableMemory, PromoteReport};
+use crate::branchable_memory::{BranchableMemory, PromoteReport, VectorTags};
 use crate::error::{CowMemoryError, Result};
 use crate::node::{self, CheckpointId, MemoryNode};
 
-/// One node's owned edits/texts/tombstones, snapshotted for replay in
+/// One node's owned edits/texts/tags/tombstones, snapshotted for replay in
 /// `promote` (see its doc comment for why this is a clone-first pass).
-type NodeReplaySnapshot = (HashMap<u64, Vec<f32>>, HashMap<u64, String>, HashSet<u64>);
+type NodeReplaySnapshot = (
+    HashMap<u64, Vec<f32>>,
+    HashMap<u64, String>,
+    HashMap<u64, VectorTags>,
+    HashSet<u64>,
+);
 
 /// Which point in `self`'s current lineage a `branch`/`fork` reads from.
 enum ForkSource {
@@ -132,6 +137,13 @@ impl BranchableMemory {
     /// `compact` would drop the re-ingested data too). Flagged as a Phase 2
     /// open question rather than solved here.
     pub fn promote(&mut self) -> Result<PromoteReport> {
+        // Captured before the replay/collapse below removes `working`'s
+        // backing file -- this is the lineage id a chain witness needs for
+        // the "what got promoted" side of `TurnLedger::on_promote`
+        // (WEFT-616 Phase 3), and it would otherwise be unrecoverable once
+        // `promote` returns.
+        let child_id = *self.working.store.file_id();
+
         // Snapshot each node's edits/tombstones as owned data first. This
         // sidesteps needing simultaneous `&mut` borrows of `base` and of
         // `ancestors`/`working` to do the replay in one pass -- the clone
@@ -141,18 +153,20 @@ impl BranchableMemory {
             replay.push((
                 node.edit_log.clone(),
                 node.texts.clone(),
+                node.tags.clone(),
                 node.tombstones.clone(),
             ));
         }
         replay.push((
             self.working.edit_log.clone(),
             self.working.texts.clone(),
+            self.working.tags.clone(),
             self.working.tombstones.clone(),
         ));
 
         let mut ingested = 0usize;
         let mut deleted = 0usize;
-        for (edit_log, texts, tombstones) in &replay {
+        for (edit_log, texts, tags, tombstones) in &replay {
             if !edit_log.is_empty() {
                 let ids: Vec<u64> = edit_log.keys().copied().collect();
                 let vectors: Vec<&[f32]> = ids.iter().map(|id| edit_log[id].as_slice()).collect();
@@ -161,6 +175,9 @@ impl BranchableMemory {
                 for id in &ids {
                     if let Some(text) = texts.get(id) {
                         self.base.texts.insert(*id, text.clone());
+                    }
+                    if let Some(t) = tags.get(id) {
+                        self.base.tags.insert(*id, t.clone());
                     }
                 }
             }
@@ -174,6 +191,12 @@ impl BranchableMemory {
                 self.base.tombstones.extend(ids.iter().copied());
             }
         }
+
+        // `base` is mutated in place above (ingest/delete), never
+        // re-derived, so its `file_id` is stable -- captured after the
+        // replay purely for locality with the report it feeds.
+        let parent_id = *self.base.store.file_id();
+        let parent_hash = *self.base.store.last_witness_hash();
 
         let discarded_ancestors = std::mem::take(&mut self.ancestors);
         let new_id = CheckpointId::alloc();
@@ -196,7 +219,13 @@ impl BranchableMemory {
             MemoryNode::remove_file_best_effort(path);
         }
 
-        Ok(PromoteReport { ingested, deleted })
+        Ok(PromoteReport {
+            ingested,
+            deleted,
+            child_id,
+            parent_id,
+            parent_hash,
+        })
     }
 
     /// Fork off the current tip: a brand-new, independent `BranchableMemory`

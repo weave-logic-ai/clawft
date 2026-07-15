@@ -15,6 +15,14 @@ use crate::id_gen::next_vector_id;
 use crate::node::{CheckpointId, MemoryNode};
 use crate::normalize::l2_normalize;
 
+/// Free-form provenance tags carried alongside a vector, the same way
+/// [`VectorItem::text`] is: an in-process side-channel, not persisted into
+/// the `.rvf` file itself (see the crate-level "What is *not* durable"
+/// section). This crate does not interpret the keys -- callers pick their
+/// own vocabulary (e.g. the turn-checkpoint bracket uses
+/// `role`/`turn`/`channel`/`chat_id`/`ts_ms`).
+pub type VectorTags = std::collections::HashMap<String, String>;
+
 /// A vector to ingest. `id`, left `None`, is auto-assigned from the
 /// process-wide monotonic counter (`crate::id_gen`) so it cannot collide
 /// with an id assigned in a sibling fork of the same lineage.
@@ -25,6 +33,8 @@ pub struct VectorItem {
     /// `texts` map). Not persisted into the `.rvf` file; survives only as
     /// long as this process's `BranchableMemory` does.
     pub text: Option<String>,
+    /// Free-form tags -- see [`VectorTags`]. Empty by default.
+    pub tags: VectorTags,
 }
 
 impl VectorItem {
@@ -33,6 +43,7 @@ impl VectorItem {
             id: None,
             vector,
             text: None,
+            tags: VectorTags::new(),
         }
     }
 
@@ -45,13 +56,39 @@ impl VectorItem {
         self.text = Some(text.into());
         self
     }
+
+    pub fn with_tags(mut self, tags: VectorTags) -> Self {
+        self.tags = tags;
+        self
+    }
 }
 
-/// What `promote` moved into `base`.
+/// What `promote` moved into `base`, plus the lineage identifiers a chain
+/// witness needs to record the merge (WEFT-616 Phase 3, `TurnLedger::on_promote`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PromoteReport {
     pub ingested: usize,
     pub deleted: usize,
+    /// `file_id` of the `working` node this promote collapsed into `base`,
+    /// captured before the collapse removes its backing `.rvf` file -- it
+    /// remains a valid provenance pointer for a witness even though the
+    /// file itself is gone by the time this returns.
+    pub child_id: [u8; 16],
+    /// `file_id` of `base` after this promote's replay. Stable across the
+    /// call in practice: `base` is mutated in place (ingest/delete), never
+    /// re-derived, and `RvfStore::file_id` does not change on mutation.
+    pub parent_id: [u8; 16],
+    /// `base`'s witness-chain hash at promote time (`RvfStore::last_witness_hash`).
+    ///
+    /// **Caveat:** `rvf-runtime` 0.2.0's `StoreStatus` carries no general
+    /// content hash, and the plain `ingest_batch`/`delete` calls `promote`
+    /// itself makes never update this field -- only explicit witness
+    /// recording does (e.g. `query_audited`). Until a lineage's stores are
+    /// opened with witnessing enabled, this is `[0; 32]` in practice: a
+    /// real accessor honestly reporting "no witness recorded yet," not a
+    /// fabricated hash. Callers that need a real merge hash must wire
+    /// witness recording into the lineage first.
+    pub parent_hash: [u8; 32],
 }
 
 /// What changed in `working` relative to its immediate parent -- i.e. what
@@ -299,6 +336,9 @@ impl BranchableMemory {
             if let Some(text) = &items[i].text {
                 self.working.texts.insert(id, text.clone());
             }
+            if !items[i].tags.is_empty() {
+                self.working.tags.insert(id, items[i].tags.clone());
+            }
         }
 
         Ok(ids)
@@ -327,6 +367,7 @@ impl BranchableMemory {
         for id in ids {
             self.working.edit_log.remove(id);
             self.working.texts.remove(id);
+            self.working.tags.remove(id);
         }
         self.working.tombstones.extend(ids.iter().copied());
         Ok(())

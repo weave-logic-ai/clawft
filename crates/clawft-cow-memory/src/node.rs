@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rvf_runtime::RvfStore;
 use rvf_types::DerivationType;
 
+use crate::branchable_memory::VectorTags;
 use crate::error::{CowMemoryError, Result};
 
 static NODE_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -53,6 +54,9 @@ pub(crate) struct MemoryNode {
     /// Optional text payload carried alongside a vector id (agenticow's
     /// `texts` map). Not persisted into the `.rvf` file itself.
     pub(crate) texts: HashMap<u64, String>,
+    /// Free-form tags carried alongside a vector id -- see
+    /// [`VectorTags`]. Not persisted into the `.rvf` file itself.
+    pub(crate) tags: HashMap<u64, VectorTags>,
 }
 
 impl MemoryNode {
@@ -107,6 +111,7 @@ impl MemoryNode {
             edit_log: HashMap::new(),
             tombstones: self.tombstones.clone(),
             texts: self.texts.clone(),
+            tags: self.tags.clone(),
         })
     }
 
@@ -155,6 +160,7 @@ impl MemoryNode {
             edit_log: HashMap::new(),
             tombstones: HashSet::new(),
             texts: HashMap::new(),
+            tags: HashMap::new(),
         }
     }
 }

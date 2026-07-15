@@ -22,5 +22,7 @@ pub mod protocol;
 pub mod rvf_codec;
 #[cfg(feature = "rvf-rpc")]
 pub mod rvf_rpc;
+#[cfg(feature = "exochain")]
+pub mod turn_ledger;
 pub mod voice_loop;
 pub mod voice_router;

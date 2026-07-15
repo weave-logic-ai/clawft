@@ -50,15 +50,23 @@ use super::turn_ledger::TurnLedger;
 /// names the checkpoint (visible via [`BranchableMemory::lineage`] for
 /// debugging/audit) -- callers should pass something that identifies the
 /// turn (e.g. `"turn:{channel}:{chat_id}"`).
-pub(crate) async fn with_turn_checkpoint<F, Fut, T>(
+/// `items_on_ok` produces the turn's memory writes from its successful
+/// result — called between turn-Ok and `promote()` so the writes land in
+/// the checkpointed `working` node and are therefore covered by the same
+/// promote/rollback the turn is. An empty vec skips the ingest. Ingest
+/// failure logs loudly but never fails the turn (the reply is not memory
+/// infrastructure's to withhold) — the promote proceeds without the items.
+pub(crate) async fn with_turn_checkpoint<F, Fut, T, I>(
     mem: &Arc<Mutex<BranchableMemory>>,
     ledger: Option<&Arc<dyn TurnLedger>>,
     label: impl Into<String>,
     turn: F,
+    items_on_ok: I,
 ) -> clawft_types::Result<T>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = clawft_types::Result<T>>,
+    I: FnOnce(&T) -> Vec<clawft_cow_memory::VectorItem>,
 {
     let label: String = label.into();
     // `rollback(Some(id))` discards everything *newer* than `id` but keeps
@@ -92,26 +100,46 @@ where
     let result = turn().await;
 
     match &result {
-        Ok(_) => {
-            let promoted = {
+        Ok(val) => {
+            // Phase 3 write routing: the turn's memory writes land in the
+            // checkpointed `working` node BEFORE promote, so promote carries
+            // them and a (hypothetical) failure after this point would still
+            // discard them with the branch — the bracket protects real data.
+            let items = items_on_ok(val);
+            let (promoted, lineage) = {
                 let mut guard = mem.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                if !items.is_empty()
+                    && let Err(e) = guard.ingest(&items)
+                {
+                    error!(
+                        error = %e,
+                        label,
+                        "clawft-cow-memory: turn-exchange ingest failed; \
+                         promoting without the exchange"
+                    );
+                }
                 match guard.promote() {
-                    Ok(_report) => true,
+                    Ok(report) => (
+                        true,
+                        Some(super::turn_ledger::PromotedLineage {
+                            child_id: report.child_id,
+                            parent_id: report.parent_id,
+                            parent_hash: report.parent_hash,
+                            mutation_count: (report.ingested + report.deleted) as u32,
+                        }),
+                    ),
                     Err(e) => {
                         error!(
                             error = %e,
                             "clawft-cow-memory: promote failed after successful turn; \
                              checkpoint chain left in place for the next turn to build on"
                         );
-                        false
+                        (false, None)
                     }
                 }
             };
             if let Some(ledger) = ledger {
-                // Lineage ids: supplied once BranchableMemory exposes file
-                // ids (Phase 3 write-routing work); None downgrades the
-                // witness to a plain promote event.
-                ledger.on_promote(&label, promoted, None);
+                ledger.on_promote(&label, promoted, lineage);
             }
         }
         Err(turn_err) => {
@@ -140,6 +168,42 @@ where
     result
 }
 
+/// Build the memory writes for one successful exchange (Phase 3 write
+/// routing): two entries — the user utterance and the assistant reply —
+/// hash-embedded at the lineage's own dimension (deterministic, model-free;
+/// the same zero-dependency default `memory_bootstrap` falls back to), each
+/// carrying its text payload and {channel, chat_id, role} tags. Two entries
+/// rather than one concatenated document so a recall hit identifies WHO said
+/// the matched text — mirroring how the kernel tier indexes user/assistant
+/// turns separately.
+pub(crate) fn exchange_items(
+    dim: u16,
+    channel: &str,
+    chat_id: &str,
+    user_text: &str,
+    reply_text: &str,
+) -> Vec<clawft_cow_memory::VectorItem> {
+    use clawft_cow_memory::VectorItem;
+    let embedder = crate::embeddings::hash_embedder::HashEmbedder::new(dim as usize);
+    let mut tags = clawft_cow_memory::VectorTags::new();
+    tags.insert("channel".into(), channel.to_string());
+    tags.insert("chat_id".into(), chat_id.to_string());
+    let mut items = Vec::with_capacity(2);
+    for (role, text) in [("user", user_text), ("assistant", reply_text)] {
+        if text.trim().is_empty() {
+            continue;
+        }
+        let mut t = tags.clone();
+        t.insert("role".into(), role.to_string());
+        items.push(
+            VectorItem::new(embedder.compute_embedding(text))
+                .with_text(text)
+                .with_tags(t),
+        );
+    }
+    items
+}
+
 fn cow_err(e: clawft_cow_memory::CowMemoryError) -> ClawftError {
     ClawftError::CowMemory {
         reason: e.to_string(),
@@ -166,11 +230,11 @@ mod tests {
                 .unwrap()
                 .push(format!("revert:{label}:rolled_back={rolled_back}"));
         }
-        fn on_promote(&self, label: &str, promoted: bool, _lineage: Option<super::super::turn_ledger::PromotedLineage>) {
-            self.events
-                .lock()
-                .unwrap()
-                .push(format!("promote:{label}:promoted={promoted}"));
+        fn on_promote(&self, label: &str, promoted: bool, lineage: Option<super::super::turn_ledger::PromotedLineage>) {
+            self.events.lock().unwrap().push(format!(
+                "promote:{label}:promoted={promoted}:lineage={}",
+                lineage.is_some()
+            ));
         }
     }
 
@@ -182,11 +246,11 @@ mod tests {
         let ledger: Arc<dyn TurnLedger> = concrete.clone();
 
         let ok: clawft_types::Result<u8> =
-            with_turn_checkpoint(&mem, Some(&ledger), "t-ok", || async { Ok(1u8) }).await;
+            with_turn_checkpoint(&mem, Some(&ledger), "t-ok", || async { Ok(1u8) }, no_items).await;
         assert!(ok.is_ok());
         let err: clawft_types::Result<u8> = with_turn_checkpoint(&mem, Some(&ledger), "t-err", || async {
             Err(ClawftError::CowMemory { reason: "boom".into() })
-        })
+        }, no_items)
         .await;
         assert!(err.is_err());
 
@@ -195,13 +259,85 @@ mod tests {
             events,
             vec![
                 "checkpoint:t-ok".to_string(),
-                "promote:t-ok:promoted=true".to_string(),
+                "promote:t-ok:promoted=true:lineage=true".to_string(),
                 "checkpoint:t-err".to_string(),
                 "revert:t-err:rolled_back=true".to_string(),
             ],
             "append-only witness order: checkpoint precedes its outcome, \
              revert witnesses the discard"
         );
+    }
+
+    #[tokio::test]
+    async fn exchange_ingest_promotes_on_ok_and_adds_nothing_on_err() {
+        // THE Phase-3 exit test: a successful turn's exchange is queryable
+        // after promote; a failed turn adds nothing (its branch is
+        // discarded and items_on_ok is never called on Err).
+        let dir = TempDir::new().unwrap();
+        let mem = test_mem(&dir); // dim 4
+        let items = |reply: &'static str| {
+            move |_: &String| exchange_items(4, "cli", "c1", "hello loom", reply)
+        };
+
+        let ok: clawft_types::Result<String> = with_turn_checkpoint(
+            &mem,
+            None,
+            "t-ok",
+            || async { Ok("threads woven".to_string()) },
+            items("threads woven"),
+        )
+        .await;
+        assert!(ok.is_ok());
+        {
+            let guard = mem.lock().unwrap();
+            let probe = crate::embeddings::hash_embedder::HashEmbedder::new(4)
+                .compute_embedding("threads woven");
+            let hits = guard.query(&probe, 4).expect("query");
+            assert!(!hits.is_empty(), "promoted exchange must be queryable");
+        }
+
+        let before = {
+            let guard = mem.lock().unwrap();
+            let s = guard.status();
+            s.base.total_vectors + s.working.total_vectors
+        };
+        let err: clawft_types::Result<String> = with_turn_checkpoint(
+            &mem,
+            None,
+            "t-err",
+            || async {
+                Err(ClawftError::Timeout {
+                    operation: "boom".into(),
+                })
+            },
+            items("never spoken"),
+        )
+        .await;
+        assert!(err.is_err());
+        let after = {
+            let guard = mem.lock().unwrap();
+            let s = guard.status();
+            s.base.total_vectors + s.working.total_vectors
+        };
+        assert_eq!(before, after, "a failed turn must add nothing to memory");
+    }
+
+    #[test]
+    fn exchange_items_shape() {
+        let items = exchange_items(8, "cli", "c1", "ask", "answer");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].tags.get("role").map(String::as_str), Some("user"));
+        assert_eq!(
+            items[1].tags.get("role").map(String::as_str),
+            Some("assistant")
+        );
+        assert!(items.iter().all(|i| i.vector.len() == 8));
+        assert_eq!(exchange_items(8, "cli", "c1", "ask", "  ").len(), 1);
+    }
+
+    /// The no-write items closure for tests that drive their own ingests.
+    fn no_items<T>(_: &T) -> Vec<clawft_cow_memory::VectorItem> {
+        Vec::new()
     }
 
     fn test_mem(dir: &TempDir) -> Arc<Mutex<BranchableMemory>> {
@@ -222,7 +358,7 @@ mod tests {
                     reason: e.to_string(),
                 })?;
             Ok(())
-        })
+        }, no_items)
         .await;
 
         assert!(result.is_ok());
@@ -249,7 +385,7 @@ mod tests {
             Err(ClawftError::Timeout {
                 operation: "simulated turn failure".into(),
             })
-        })
+        }, no_items)
         .await;
 
         assert!(result.is_err());
