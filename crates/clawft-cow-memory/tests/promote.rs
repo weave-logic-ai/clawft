@@ -86,3 +86,23 @@ fn promote_replays_tombstones_into_base() {
         "id must stay hidden after the delete is promoted into base itself"
     );
 }
+
+/// WEFT-616 Phase 3: `PromoteReport::parent_hash` is REAL — RVF's default
+/// `witness_ingest = true` appends a witness entry on promote's replay and
+/// advances `last_witness_hash`. Regression-guards the lineage records the
+/// DaemonTurnLedger writes via `record_lineage` (a stale doc once claimed
+/// this was always zeroed; this test keeps the truth pinned).
+#[test]
+fn promote_report_parent_hash_probe() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut mem = clawft_cow_memory::BranchableMemory::create(dir.path(), 4).unwrap();
+    mem.ingest(&[clawft_cow_memory::VectorItem::new(vec![1.0, 0.0, 0.0, 0.0])])
+        .unwrap();
+    let report = mem.promote().unwrap();
+    assert!(report.ingested >= 1);
+    assert_ne!(
+        report.parent_hash, [0u8; 32],
+        "promote-with-ingest must advance base's witness hash \
+         (RVF default witness_ingest=true)"
+    );
+}

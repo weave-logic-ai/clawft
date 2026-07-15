@@ -89,11 +89,11 @@ impl TurnLedger for DaemonTurnLedger {
         }
     }
 
-    /// With `lineage`, this is a full [`ChainManager::record_lineage`]
-    /// witness — chain-verifiable via `verify_lineage()`. Without it (the
-    /// current production call site always passes `None` until
-    /// `BranchableMemory::promote` exposes file ids — see
-    /// `turn_checkpoint.rs`), this downgrades honestly to a plain
+    /// With `lineage` (the production path — `with_turn_checkpoint` fills it
+    /// from `PromoteReport`, and `parent_hash` is real: RVF witnesses every
+    /// ingest/delete by default), this is a full
+    /// [`ChainManager::record_lineage`] witness — chain-verifiable via
+    /// `verify_lineage()`. Without it, this downgrades honestly to a plain
     /// `cow.turn.promoted` event: still witnessed, just not verifiable
     /// lineage.
     ///

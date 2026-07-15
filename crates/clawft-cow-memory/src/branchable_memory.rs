@@ -80,14 +80,17 @@ pub struct PromoteReport {
     pub parent_id: [u8; 16],
     /// `base`'s witness-chain hash at promote time (`RvfStore::last_witness_hash`).
     ///
-    /// **Caveat:** `rvf-runtime` 0.2.0's `StoreStatus` carries no general
-    /// content hash, and the plain `ingest_batch`/`delete` calls `promote`
-    /// itself makes never update this field -- only explicit witness
-    /// recording does (e.g. `query_audited`). Until a lineage's stores are
-    /// opened with witnessing enabled, this is `[0; 32]` in practice: a
-    /// real accessor honestly reporting "no witness recorded yet," not a
-    /// fabricated hash. Callers that need a real merge hash must wire
-    /// witness recording into the lineage first.
+    /// POPULATED in practice: `RvfOptions`' default `WitnessConfig` has
+    /// `witness_ingest`/`witness_delete` = `true`, so the `ingest_batch`/
+    /// `delete` calls `promote`'s replay makes append witness entries and
+    /// advance this hash (verified by `promote_report_parent_hash_probe`).
+    /// Narrow residuals, all upstream `rvf-runtime` 0.2 semantics:
+    /// - a promote that replays NOTHING leaves the previous value ([0; 32]
+    ///   only if `base` has never witnessed anything);
+    /// - `RvfStore::open()` re-initializes the in-memory hash to zeros — a
+    ///   reopened lineage's witness chain restarts at its next append
+    ///   rather than resuming (upstream wart, noted on WEFT-662);
+    /// - `compact()` resets it by design (file rewritten).
     pub parent_hash: [u8; 32],
 }
 
