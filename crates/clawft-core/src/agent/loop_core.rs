@@ -426,6 +426,10 @@ pub struct AgentLoop<P: Platform> {
     /// absent" pattern as `sandbox`/`gate`: zero behavior change.
     #[cfg(feature = "rvf")]
     cow_memory: std::sync::OnceLock<Arc<std::sync::Mutex<clawft_cow_memory::BranchableMemory>>>,
+    /// Chain-side witness of the bracket (WEFT-616 Phase 3, DualStateBridge).
+    /// Late-wired by the daemon over ChainManager; absent = no chain coupling
+    /// (memory semantics unchanged). Not feature-gated — the trait is pure.
+    turn_ledger: std::sync::OnceLock<Arc<dyn super::turn_ledger::TurnLedger>>,
 }
 
 impl<P: Platform> AgentLoop<P> {
@@ -480,6 +484,7 @@ impl<P: Platform> AgentLoop<P> {
             chat_id_is_conv_id: false,
             #[cfg(feature = "rvf")]
             cow_memory: std::sync::OnceLock::new(),
+            turn_ledger: std::sync::OnceLock::new(),
         }
     }
 
@@ -675,6 +680,15 @@ impl<P: Platform> AgentLoop<P> {
         let _ = self.cow_memory.set(mem);
     }
 
+    /// Late-wire the chain-side [`TurnLedger`] (WEFT-616 Phase 3). Write-once;
+    /// only consulted when a cow-memory bracket is active — the ledger
+    /// witnesses bracket transitions, it has nothing to observe without one.
+    ///
+    /// [`TurnLedger`]: super::turn_ledger::TurnLedger
+    pub fn set_turn_ledger(&self, ledger: Arc<dyn super::turn_ledger::TurnLedger>) {
+        let _ = self.turn_ledger.set(ledger);
+    }
+
     /// Resolve the conversation id for `msg` under the configured key scheme
     /// (M3 §D5). Either the canonical session key `"{channel}:{chat_id}"`
     /// (default) or the bare `chat_id` when [`Self::chat_id_is_conv_id`] is
@@ -818,9 +832,12 @@ impl<P: Platform> AgentLoop<P> {
         #[cfg(feature = "rvf")]
         if let Some(mem) = self.cow_memory.get().cloned() {
             let label = format!("turn:{}:{}", msg.channel, msg.chat_id);
-            return super::turn_checkpoint::with_turn_checkpoint(&mem, label, move || {
-                self.handle_turn_inner(msg)
-            })
+            return super::turn_checkpoint::with_turn_checkpoint(
+                &mem,
+                self.turn_ledger.get(),
+                label,
+                move || self.handle_turn_inner(msg),
+            )
             .await;
         }
         self.handle_turn_inner(msg).await

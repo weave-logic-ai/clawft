@@ -42,6 +42,8 @@ use clawft_cow_memory::BranchableMemory;
 use clawft_types::error::ClawftError;
 use tracing::error;
 
+use super::turn_ledger::TurnLedger;
+
 /// Run `turn` bracketed by a checkpoint/promote/rollback cycle on `mem`.
 ///
 /// `turn` is called at most once, after the checkpoint succeeds. `label`
@@ -50,6 +52,7 @@ use tracing::error;
 /// turn (e.g. `"turn:{channel}:{chat_id}"`).
 pub(crate) async fn with_turn_checkpoint<F, Fut, T>(
     mem: &Arc<Mutex<BranchableMemory>>,
+    ledger: Option<&Arc<dyn TurnLedger>>,
     label: impl Into<String>,
     turn: F,
 ) -> clawft_types::Result<T>
@@ -57,6 +60,7 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = clawft_types::Result<T>>,
 {
+    let label: String = label.into();
     // `rollback(Some(id))` discards everything *newer* than `id` but keeps
     // `id` itself (it is a "roll back to this point", not "roll back past
     // it") -- see `ops.rs::rollback`'s doc comment. So targeting the
@@ -77,30 +81,58 @@ where
 
     {
         let mut guard = mem.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.checkpoint(label).map_err(cow_err)?;
+        guard.checkpoint(label.clone()).map_err(cow_err)?;
+    }
+    // Witness AFTER the memory checkpoint succeeded — the chain must never
+    // claim a checkpoint that doesn't exist (WEFT-616 Phase 3, §7).
+    if let Some(ledger) = ledger {
+        ledger.on_checkpoint(&label);
     }
 
     let result = turn().await;
 
     match &result {
         Ok(_) => {
-            let mut guard = mem.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Err(e) = guard.promote() {
-                error!(
-                    error = %e,
-                    "clawft-cow-memory: promote failed after successful turn; \
-                     checkpoint chain left in place for the next turn to build on"
-                );
+            let promoted = {
+                let mut guard = mem.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                match guard.promote() {
+                    Ok(_report) => true,
+                    Err(e) => {
+                        error!(
+                            error = %e,
+                            "clawft-cow-memory: promote failed after successful turn; \
+                             checkpoint chain left in place for the next turn to build on"
+                        );
+                        false
+                    }
+                }
+            };
+            if let Some(ledger) = ledger {
+                // Lineage ids: supplied once BranchableMemory exposes file
+                // ids (Phase 3 write-routing work); None downgrades the
+                // witness to a plain promote event.
+                ledger.on_promote(&label, promoted, None);
             }
         }
-        Err(_) => {
-            let mut guard = mem.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Err(e) = guard.rollback(pre_turn_head) {
-                error!(
-                    error = %e,
-                    "clawft-cow-memory: rollback failed after turn error; \
-                     original turn error still returned to the caller"
-                );
+        Err(turn_err) => {
+            let rolled_back = {
+                let mut guard = mem.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                match guard.rollback(pre_turn_head) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        error!(
+                            error = %e,
+                            "clawft-cow-memory: rollback failed after turn error; \
+                             original turn error still returned to the caller"
+                        );
+                        false
+                    }
+                }
+            };
+            if let Some(ledger) = ledger {
+                // Append-only compensation: memory was discarded; the FACT of
+                // the revert is witnessed forever (never truncate history).
+                ledger.on_revert(&label, &turn_err.to_string(), rolled_back);
             }
         }
     }
@@ -119,6 +151,59 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// Recording ledger: captures the bracket's witness sequence.
+    #[derive(Default)]
+    struct RecordingLedger {
+        events: Mutex<Vec<String>>,
+    }
+    impl TurnLedger for RecordingLedger {
+        fn on_checkpoint(&self, label: &str) {
+            self.events.lock().unwrap().push(format!("checkpoint:{label}"));
+        }
+        fn on_revert(&self, label: &str, _err: &str, rolled_back: bool) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("revert:{label}:rolled_back={rolled_back}"));
+        }
+        fn on_promote(&self, label: &str, promoted: bool, _lineage: Option<super::super::turn_ledger::PromotedLineage>) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("promote:{label}:promoted={promoted}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn ledger_witness_sequence_ok_and_err() {
+        let dir = TempDir::new().unwrap();
+        let mem = Arc::new(Mutex::new(BranchableMemory::create(dir.path(), 4).unwrap()));
+        let concrete = Arc::new(RecordingLedger::default());
+        let ledger: Arc<dyn TurnLedger> = concrete.clone();
+
+        let ok: clawft_types::Result<u8> =
+            with_turn_checkpoint(&mem, Some(&ledger), "t-ok", || async { Ok(1u8) }).await;
+        assert!(ok.is_ok());
+        let err: clawft_types::Result<u8> = with_turn_checkpoint(&mem, Some(&ledger), "t-err", || async {
+            Err(ClawftError::CowMemory { reason: "boom".into() })
+        })
+        .await;
+        assert!(err.is_err());
+
+        let events = concrete.events.lock().unwrap().clone();
+        assert_eq!(
+            events,
+            vec![
+                "checkpoint:t-ok".to_string(),
+                "promote:t-ok:promoted=true".to_string(),
+                "checkpoint:t-err".to_string(),
+                "revert:t-err:rolled_back=true".to_string(),
+            ],
+            "append-only witness order: checkpoint precedes its outcome, \
+             revert witnesses the discard"
+        );
+    }
+
     fn test_mem(dir: &TempDir) -> Arc<Mutex<BranchableMemory>> {
         let mem = BranchableMemory::create(dir.path(), 4).expect("create BranchableMemory");
         Arc::new(Mutex::new(mem))
@@ -129,7 +214,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mem = test_mem(&dir);
 
-        let result: clawft_types::Result<()> = with_turn_checkpoint(&mem, "t1", || async {
+        let result: clawft_types::Result<()> = with_turn_checkpoint(&mem, None, "t1", || async {
             let mut guard = mem.lock().unwrap();
             guard
                 .ingest(&[clawft_cow_memory::VectorItem::new(vec![1.0, 0.0, 0.0, 0.0])])
@@ -153,7 +238,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mem = test_mem(&dir);
 
-        let result: clawft_types::Result<()> = with_turn_checkpoint(&mem, "t1", || async {
+        let result: clawft_types::Result<()> = with_turn_checkpoint(&mem, None, "t1", || async {
             let mut guard = mem.lock().unwrap();
             guard
                 .ingest(&[clawft_cow_memory::VectorItem::new(vec![1.0, 0.0, 0.0, 0.0])])
