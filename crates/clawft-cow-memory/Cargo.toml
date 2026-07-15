@@ -13,6 +13,8 @@ rvf-runtime = { workspace = true }
 rvf-types = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 # macOS-only: provides the `__errno_location` symbol rvf-runtime's
 # `locking.rs` unconditionally references (a glibc/Linux name; macOS's libc
 # exports `__error` instead). See `src/macos_errno_shim.rs`.

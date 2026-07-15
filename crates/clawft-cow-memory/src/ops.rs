@@ -5,9 +5,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::branchable_memory::{BranchableMemory, PromoteReport, VectorTags};
+use crate::branchable_memory::BranchableMemory;
 use crate::error::{CowMemoryError, Result};
 use crate::node::{self, CheckpointId, MemoryNode};
+use crate::types::{PromoteReport, VectorTags};
 
 /// One node's owned edits/texts/tags/tombstones, snapshotted for replay in
 /// `promote` (see its doc comment for why this is a clone-first pass).
@@ -36,23 +37,86 @@ impl BranchableMemory {
     /// `MemoryNode::derive_from`).
     pub fn checkpoint(&mut self, label: impl Into<String>) -> Result<CheckpointId> {
         let label = label.into();
-        self.working.freeze()?;
-        let checkpoint_id = self.working.id;
+        let current = self.working.as_mut().ok_or(CowMemoryError::Paused)?;
+        current.freeze()?;
+        let checkpoint_id = current.id;
 
         let new_id = CheckpointId::alloc();
         let new_path = self.dir.join(format!("node-{}.working.rvf", new_id.0));
         let new_working = MemoryNode::derive_from(
             new_id,
-            &self.working.store,
+            &self.working.as_ref().expect("checked above").store,
             &new_path,
             self.opts.clone(),
             Some("working".into()),
         )?;
 
-        let mut frozen = std::mem::replace(&mut self.working, new_working);
+        let mut frozen = self.working.replace(new_working).expect("checked above");
         frozen.label = Some(label);
         self.ancestors.insert(0, frozen);
+        self.write_manifest()?;
         Ok(checkpoint_id)
+    }
+
+    /// Freeze `working` into the ancestors chain -- exactly like
+    /// `checkpoint` -- but do NOT derive a fresh writable child afterward:
+    /// the lineage is parked. `query`/`diff`/`lineage`/`status` still walk
+    /// the (now `working`-less) chain fine; `ingest`/`delete`/`checkpoint`/
+    /// `rollback`/`promote`/`branch` fail closed with
+    /// [`CowMemoryError::Paused`] until [`Self::resume`]. Idempotent:
+    /// pausing an already-paused lineage is a no-op `Ok(())`.
+    ///
+    /// Durable: writes a manifest recording the parked state, so a
+    /// `pause` → process exit → [`Self::open`] round-trip reopens still
+    /// paused (see `crate::manifest`).
+    pub fn pause(&mut self, label: impl Into<String>) -> Result<()> {
+        let Some(mut working) = self.working.take() else {
+            return Ok(());
+        };
+        if let Err(e) = working.freeze() {
+            // Put it back so a failed freeze doesn't strand the lineage in
+            // a working-less-but-not-actually-paused limbo.
+            self.working = Some(working);
+            return Err(e);
+        }
+        working.label = Some(label.into());
+        self.ancestors.insert(0, working);
+        self.write_manifest()?;
+        Ok(())
+    }
+
+    /// Derive a fresh, empty, writable `working` from the current head
+    /// (this lineage's newest checkpoint, or `base` if there is none) --
+    /// O(1) regardless of lineage size, the same `derive`-not-copy
+    /// guarantee as every other node derivation in this crate (see
+    /// `MemoryNode::derive_from`): the returned `working` starts with zero
+    /// vectors of its own. Idempotent: resuming a lineage that isn't
+    /// paused is a no-op `Ok(())`.
+    pub fn resume(&mut self) -> Result<()> {
+        if self.working.is_some() {
+            return Ok(());
+        }
+        let new_id = CheckpointId::alloc();
+        let new_path = self.dir.join(format!("node-{}.working.rvf", new_id.0));
+        let new_working = match self.ancestors.first() {
+            Some(head) => MemoryNode::derive_from(
+                new_id,
+                &head.store,
+                &new_path,
+                self.opts.clone(),
+                Some("working".into()),
+            )?,
+            None => MemoryNode::derive_from(
+                new_id,
+                &self.base.store,
+                &new_path,
+                self.opts.clone(),
+                Some("working".into()),
+            )?,
+        };
+        self.working = Some(new_working);
+        self.write_manifest()?;
+        Ok(())
     }
 
     /// Discard `working` and every checkpoint newer than `to`, then derive
@@ -66,6 +130,9 @@ impl BranchableMemory {
     /// or an `inherited` node (frozen forever from a source lineage,
     /// nothing to "roll back to" there -- fork from it again instead).
     pub fn rollback(&mut self, to: Option<CheckpointId>) -> Result<()> {
+        if self.working.is_none() {
+            return Err(CowMemoryError::Paused);
+        }
         let target_idx = match to {
             None => None,
             Some(id) => Some(
@@ -102,7 +169,7 @@ impl BranchableMemory {
                 Some("working".into()),
             )?,
         };
-        let old_working = std::mem::replace(&mut self.working, new_working);
+        let old_working = self.working.replace(new_working).expect("checked above");
 
         let mut to_remove: Vec<PathBuf> = discarded.iter().map(|n| n.path.clone()).collect();
         to_remove.push(old_working.path.clone());
@@ -112,6 +179,7 @@ impl BranchableMemory {
             MemoryNode::remove_file_best_effort(path);
         }
 
+        self.write_manifest()?;
         Ok(())
     }
 
@@ -137,12 +205,14 @@ impl BranchableMemory {
     /// `compact` would drop the re-ingested data too). Flagged as a Phase 2
     /// open question rather than solved here.
     pub fn promote(&mut self) -> Result<PromoteReport> {
+        let working = self.working.as_ref().ok_or(CowMemoryError::Paused)?;
+
         // Captured before the replay/collapse below removes `working`'s
         // backing file -- this is the lineage id a chain witness needs for
         // the "what got promoted" side of `TurnLedger::on_promote`
         // (WEFT-616 Phase 3), and it would otherwise be unrecoverable once
         // `promote` returns.
-        let child_id = *self.working.store.file_id();
+        let child_id = *working.store.file_id();
 
         // Snapshot each node's edits/tombstones as owned data first. This
         // sidesteps needing simultaneous `&mut` borrows of `base` and of
@@ -158,10 +228,10 @@ impl BranchableMemory {
             ));
         }
         replay.push((
-            self.working.edit_log.clone(),
-            self.working.texts.clone(),
-            self.working.tags.clone(),
-            self.working.tombstones.clone(),
+            working.edit_log.clone(),
+            working.texts.clone(),
+            working.tags.clone(),
+            working.tombstones.clone(),
         ));
 
         let mut ingested = 0usize;
@@ -208,7 +278,7 @@ impl BranchableMemory {
             self.opts.clone(),
             Some("working".into()),
         )?;
-        let old_working = std::mem::replace(&mut self.working, new_working);
+        let old_working = self.working.replace(new_working).expect("checked above");
 
         let mut to_remove: Vec<PathBuf> =
             discarded_ancestors.iter().map(|n| n.path.clone()).collect();
@@ -219,6 +289,7 @@ impl BranchableMemory {
             MemoryNode::remove_file_best_effort(path);
         }
 
+        self.write_manifest()?;
         Ok(PromoteReport {
             ingested,
             deleted,
@@ -235,6 +306,9 @@ impl BranchableMemory {
     /// `self`, and vice versa (agenticow's "isolated per-actor view" /
     /// cubecow's "clone").
     pub fn branch(&self, path: impl AsRef<Path>) -> Result<BranchableMemory> {
+        if self.working.is_none() {
+            return Err(CowMemoryError::Paused);
+        }
         self.spawn_independent(ForkSource::Head, path.as_ref())
     }
 
@@ -261,7 +335,15 @@ impl BranchableMemory {
         let mut inherited: Vec<MemoryNode> = Vec::new();
         match source {
             ForkSource::Head => {
-                inherited.push(self.working.open_readonly_snapshot()?);
+                // `branch()` (the only caller that reaches `ForkSource::Head`)
+                // already fails closed with `Paused` when `self.working` is
+                // `None`, so this is always `Some` here.
+                inherited.push(
+                    self.working
+                        .as_ref()
+                        .expect("ForkSource::Head requires working; branch() checks paused")
+                        .open_readonly_snapshot()?,
+                );
                 for n in &self.ancestors {
                     inherited.push(n.open_readonly_snapshot()?);
                 }
@@ -306,13 +388,15 @@ impl BranchableMemory {
             Some("working".into()),
         )?;
 
-        Ok(BranchableMemory {
+        let child = BranchableMemory {
             dir: target_dir.to_path_buf(),
             opts: self.opts.clone(),
-            working: new_working,
+            working: Some(new_working),
             ancestors: Vec::new(),
             base: new_base,
             inherited,
-        })
+        };
+        child.write_manifest()?;
+        Ok(child)
     }
 }

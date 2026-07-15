@@ -11,8 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rvf_runtime::RvfStore;
 use rvf_types::DerivationType;
 
-use crate::branchable_memory::VectorTags;
 use crate::error::{CowMemoryError, Result};
+use crate::types::VectorTags;
 
 static NODE_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -32,6 +32,19 @@ impl CheckpointId {
     /// up front, so the id has to exist first.
     pub(crate) fn alloc() -> Self {
         Self(NODE_SEQ.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Peek the next id this process would hand out, without allocating it
+    /// -- used to stamp a watermark into the lineage manifest
+    /// (`crate::manifest`).
+    pub(crate) fn watermark() -> u64 {
+        NODE_SEQ.load(Ordering::Relaxed)
+    }
+
+    /// Bump the process-wide counter past `min` -- mirrors
+    /// `id_gen::bump_watermark`, see its doc comment for why `fetch_max`.
+    pub(crate) fn bump_watermark(min: u64) {
+        NODE_SEQ.fetch_max(min, Ordering::Relaxed);
     }
 }
 

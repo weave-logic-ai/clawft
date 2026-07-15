@@ -425,8 +425,11 @@ pub struct AgentLoop<P: Platform> {
     /// constructs the loop -- `None` (default) is the same "feature
     /// absent" pattern as `sandbox`/`gate`: zero behavior change.
     #[cfg(feature = "rvf")]
-    cow_memory:
-        std::sync::OnceLock<(Arc<std::sync::Mutex<clawft_cow_memory::BranchableMemory>>, bool)>,
+    cow_memory: std::sync::OnceLock<(
+        Arc<std::sync::Mutex<clawft_cow_memory::BranchableMemory>>,
+        bool, // ingest_turns
+        bool, // tool_cadence (WEFT-652: checkpoint at tool-call boundaries)
+    )>,
     /// Chain-side witness of the bracket (WEFT-616 Phase 3, DualStateBridge).
     /// Late-wired by the daemon over ChainManager; absent = no chain coupling
     /// (memory semantics unchanged). Not feature-gated — the trait is pure.
@@ -665,7 +668,7 @@ impl<P: Platform> AgentLoop<P> {
         self,
         mem: Arc<std::sync::Mutex<clawft_cow_memory::BranchableMemory>>,
     ) -> Self {
-        let _ = self.cow_memory.set((mem, true));
+        let _ = self.cow_memory.set((mem, true, false));
         self
     }
 
@@ -678,12 +681,17 @@ impl<P: Platform> AgentLoop<P> {
     /// successful turn's exchange (user text + reply) is hash-embedded and
     /// ingested into the checkpointed `working` node before promote — the
     /// Phase-3 write routing that makes the bracket protect real data.
+    /// `tool_cadence` = `CowMemoryConfig::cadence == Tool`: additionally
+    /// checkpoint at every tool-call boundary (WEFT-652 event-level
+    /// snapshots) — each mid-turn point becomes a rollback target; they
+    /// collapse at the turn's promote.
     pub fn set_cow_memory(
         &self,
         mem: Arc<std::sync::Mutex<clawft_cow_memory::BranchableMemory>>,
         ingest_turns: bool,
+        tool_cadence: bool,
     ) {
-        let _ = self.cow_memory.set((mem, ingest_turns));
+        let _ = self.cow_memory.set((mem, ingest_turns, tool_cadence));
     }
 
     /// Late-wire the chain-side [`TurnLedger`] (WEFT-616 Phase 3). Write-once;
@@ -836,7 +844,7 @@ impl<P: Platform> AgentLoop<P> {
     /// added behavior -- byte-identical to the pre-Phase-2 `handle_turn`.
     pub async fn handle_turn(&self, msg: InboundMessage) -> clawft_types::Result<OutboundMessage> {
         #[cfg(feature = "rvf")]
-        if let Some((mem, ingest_turns)) = self.cow_memory.get().cloned() {
+        if let Some((mem, ingest_turns, _tool_cadence)) = self.cow_memory.get().cloned() {
             let label = format!("turn:{}:{}", msg.channel, msg.chat_id);
             // Capture the exchange inputs before `msg` moves into the turn.
             let user_text = msg.content.clone();
@@ -1661,6 +1669,30 @@ impl<P: Platform> AgentLoop<P> {
         let workspace = self.workspace_path();
 
         for iteration in 0..max_iterations {
+            // WEFT-652 (cubecow event-level snapshots): under tool cadence,
+            // checkpoint at each tool-call boundary — iteration 0 is covered
+            // by the turn bracket's own checkpoint, so this fires from the
+            // first boundary onward. Failure logs and continues: an
+            // event-level snapshot is an OPPORTUNITY for finer rollback, not
+            // a gate on the turn (the turn-level bracket still guards the
+            // whole turn). Witnessed like every checkpoint.
+            #[cfg(feature = "rvf")]
+            if iteration > 0
+                && let Some((mem, _, true)) = self.cow_memory.get()
+            {
+                let label = format!("tool:{conv_id}:{iteration}");
+                let ok = {
+                    let mut guard = mem.lock().unwrap_or_else(|p| p.into_inner());
+                    guard.checkpoint(label.clone()).map_err(|e| {
+                        tracing::error!(error = %e, label, "tool-boundary checkpoint failed; continuing turn");
+                    })
+                    .is_ok()
+                };
+                if ok && let Some(ledger) = self.turn_ledger.get() {
+                    ledger.on_checkpoint(&label);
+                }
+            }
+
             // WEFT-322: per-conversation cost circuit-breaker.
             // Check BEFORE the LLM call so a tripped budget never burns
             // an extra request. The check honours circuit_open from a
@@ -2400,6 +2432,74 @@ mod tests {
         let outbound = agent.handle_turn(msg).await.unwrap();
 
         assert_eq!(outbound.content, "tool result processed");
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// WEFT-652: under tool cadence, each tool-call boundary takes a
+    /// witnessed mid-turn checkpoint (iteration ≥ 1); the turn's promote
+    /// collapses them. Observed through a recording TurnLedger — the
+    /// checkpoints themselves are collapsed by promote, so the witness
+    /// stream is the durable evidence.
+    #[cfg(feature = "rvf")]
+    #[tokio::test]
+    async fn tool_cadence_checkpoints_are_witnessed_per_boundary() {
+        use crate::agent::turn_ledger::{PromotedLineage, TurnLedger};
+
+        #[derive(Default)]
+        struct Rec(std::sync::Mutex<Vec<String>>);
+        impl TurnLedger for Rec {
+            fn on_checkpoint(&self, label: &str) {
+                self.0.lock().unwrap().push(format!("cp:{label}"));
+            }
+            fn on_revert(&self, label: &str, _e: &str, _r: bool) {
+                self.0.lock().unwrap().push(format!("rv:{label}"));
+            }
+            fn on_promote(&self, label: &str, _p: bool, _l: Option<PromotedLineage>) {
+                self.0.lock().unwrap().push(format!("pr:{label}"));
+            }
+        }
+
+        // MockToolTransport: one tool round-trip then a final answer — so
+        // exactly one iteration boundary at iteration 1.
+        let transport = Arc::new(MockToolTransport::new());
+        let (agent, dir) = make_agent_loop(transport, "tool_cadence").await;
+        let cow_dir = tempfile::TempDir::new().unwrap();
+        let mem = clawft_cow_memory::BranchableMemory::create(cow_dir.path(), 4).unwrap();
+        agent.cow_memory.set((Arc::new(std::sync::Mutex::new(mem)), false, true)).ok();
+        let rec = Arc::new(Rec::default());
+        agent.set_turn_ledger(rec.clone());
+
+        let inbound = InboundMessage {
+            channel: "test".into(),
+            sender_id: "user1".into(),
+            chat_id: "chat1".into(),
+            content: "use echo tool".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        agent.bus.publish_inbound(inbound).unwrap();
+        let msg = agent.bus.consume_inbound().await.unwrap();
+        let outbound = agent.handle_turn(msg).await.unwrap();
+        assert_eq!(outbound.content, "tool result processed");
+
+        let events = rec.0.lock().unwrap().clone();
+        assert!(
+            events.iter().any(|e| e.starts_with("cp:turn:test:chat1")),
+            "turn checkpoint witnessed: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| e.starts_with("cp:tool:") && e.contains(":1")),
+            "tool-boundary checkpoint witnessed at iteration 1: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| e.starts_with("pr:turn:test:chat1")),
+            "promote witnessed and collapses the mid-turn checkpoints: {events:?}"
+        );
+        // Order: turn cp before tool cp before promote.
+        let idx = |pfx: &str| events.iter().position(|e| e.starts_with(pfx)).unwrap();
+        assert!(idx("cp:turn:") < idx("cp:tool:") && idx("cp:tool:") < idx("pr:turn:"));
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

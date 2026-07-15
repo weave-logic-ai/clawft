@@ -89,6 +89,15 @@ where
 
     {
         let mut guard = mem.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        // WEFT-652 AutoResume: a parked lineage (idle-reaper AutoPause, or a
+        // reopened manifest that was paused) rehydrates on demand — an O(1)
+        // derive of a fresh working child. The turn is the "impulse" the
+        // plan describes; the subsequent checkpoint witness records the
+        // wake-up on chain implicitly.
+        if guard.is_paused() {
+            tracing::info!(label, "cow memory: auto-resuming parked lineage for incoming turn");
+            guard.resume().map_err(cow_err)?;
+        }
         guard.checkpoint(label.clone()).map_err(cow_err)?;
     }
     // Witness AFTER the memory checkpoint succeeded — the chain must never
@@ -333,6 +342,32 @@ mod tests {
         );
         assert!(items.iter().all(|i| i.vector.len() == 8));
         assert_eq!(exchange_items(8, "cli", "c1", "ask", "  ").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn bracket_auto_resumes_a_parked_lineage() {
+        // WEFT-652 AutoResume: an idle-autopaused (or reopened-paused)
+        // lineage rehydrates on the next turn instead of failing closed.
+        let dir = TempDir::new().unwrap();
+        let mem = test_mem(&dir);
+        {
+            let mut guard = mem.lock().unwrap();
+            guard.pause("test-park").expect("pause");
+            assert!(guard.is_paused());
+        }
+        let items = |_: &String| exchange_items(4, "cli", "c1", "wake up", "awake");
+        let out: clawft_types::Result<String> =
+            with_turn_checkpoint(&mem, None, "t-wake", || async { Ok("awake".to_string()) }, items)
+                .await;
+        assert!(out.is_ok(), "turn on a parked lineage must auto-resume, not fail");
+        let guard = mem.lock().unwrap();
+        assert!(!guard.is_paused(), "lineage resumed");
+        let probe =
+            crate::embeddings::hash_embedder::HashEmbedder::new(4).compute_embedding("awake");
+        assert!(
+            !guard.query(&probe, 4).expect("query").is_empty(),
+            "post-resume exchange promoted and queryable"
+        );
     }
 
     /// The no-write items closure for tests that drive their own ingests.

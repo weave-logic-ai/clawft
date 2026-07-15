@@ -213,6 +213,27 @@ pub struct CowMemoryConfig {
     /// directly into the lineage) without the automatic exchange ingest.
     #[serde(default = "default_ingest_turns", alias = "ingestTurns")]
     pub ingest_turns: bool,
+
+    /// Checkpoint cadence (WEFT-652, cubecow event-level snapshots).
+    /// `turn` (default): one checkpoint per turn — the Phase-2 bracket.
+    /// `tool`: additionally checkpoint at every tool-call boundary inside
+    /// the turn (each loop iteration), so any mid-turn point is a rollback
+    /// target; subagent spawns are tool calls, so this covers spawn
+    /// boundaries too. Mid-turn checkpoints collapse at the turn's promote.
+    /// ~8ms per checkpoint (fsync-dominated) — trivial next to an LLM call.
+    #[serde(default)]
+    pub cadence: CowCadence,
+}
+
+/// See [`CowMemoryConfig::cadence`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CowCadence {
+    /// One checkpoint per turn (Phase 2 behavior).
+    #[default]
+    Turn,
+    /// Turn checkpoint + one per tool-call boundary (cubecow event-level).
+    Tool,
 }
 
 fn default_cow_memory_path() -> String {
@@ -229,6 +250,7 @@ impl Default for CowMemoryConfig {
             enabled: false,
             path: default_cow_memory_path(),
             ingest_turns: default_ingest_turns(),
+            cadence: CowCadence::default(),
         }
     }
 }

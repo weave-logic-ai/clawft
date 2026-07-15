@@ -35,6 +35,19 @@ impl DaemonTurnLedger {
     pub fn new(chain: Arc<ChainManager>) -> Self {
         Self { chain }
     }
+
+    /// Witness an idle-reaper AutoPause (WEFT-652) — inherent (not on the
+    /// trait: pause is a daemon lifecycle event, not a turn transition).
+    /// The matching resume is witnessed implicitly by the next turn's
+    /// `cow.turn.checkpoint` (the bracket auto-resumes on demand).
+    pub fn witness_autopause(&self, idle_secs: u64) {
+        self.chain.append(
+            "turn_ledger",
+            "cow.memory.paused",
+            Some(serde_json::json!({ "reason": "idle", "idle_secs": idle_secs })),
+        );
+        info!(idle_secs, "cow.memory.paused witnessed (idle autopause)");
+    }
 }
 
 impl TurnLedger for DaemonTurnLedger {

@@ -14,135 +14,7 @@ use crate::error::{CowMemoryError, Result};
 use crate::id_gen::next_vector_id;
 use crate::node::{CheckpointId, MemoryNode};
 use crate::normalize::l2_normalize;
-
-/// Free-form provenance tags carried alongside a vector, the same way
-/// [`VectorItem::text`] is: an in-process side-channel, not persisted into
-/// the `.rvf` file itself (see the crate-level "What is *not* durable"
-/// section). This crate does not interpret the keys -- callers pick their
-/// own vocabulary (e.g. the turn-checkpoint bracket uses
-/// `role`/`turn`/`channel`/`chat_id`/`ts_ms`).
-pub type VectorTags = std::collections::HashMap<String, String>;
-
-/// A vector to ingest. `id`, left `None`, is auto-assigned from the
-/// process-wide monotonic counter (`crate::id_gen`) so it cannot collide
-/// with an id assigned in a sibling fork of the same lineage.
-pub struct VectorItem {
-    pub id: Option<u64>,
-    pub vector: Vec<f32>,
-    /// Optional text payload carried alongside the vector (agenticow's
-    /// `texts` map). Not persisted into the `.rvf` file; survives only as
-    /// long as this process's `BranchableMemory` does.
-    pub text: Option<String>,
-    /// Free-form tags -- see [`VectorTags`]. Empty by default.
-    pub tags: VectorTags,
-}
-
-impl VectorItem {
-    pub fn new(vector: Vec<f32>) -> Self {
-        Self {
-            id: None,
-            vector,
-            text: None,
-            tags: VectorTags::new(),
-        }
-    }
-
-    pub fn with_id(mut self, id: u64) -> Self {
-        self.id = Some(id);
-        self
-    }
-
-    pub fn with_text(mut self, text: impl Into<String>) -> Self {
-        self.text = Some(text.into());
-        self
-    }
-
-    pub fn with_tags(mut self, tags: VectorTags) -> Self {
-        self.tags = tags;
-        self
-    }
-}
-
-/// What `promote` moved into `base`, plus the lineage identifiers a chain
-/// witness needs to record the merge (WEFT-616 Phase 3, `TurnLedger::on_promote`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct PromoteReport {
-    pub ingested: usize,
-    pub deleted: usize,
-    /// `file_id` of the `working` node this promote collapsed into `base`,
-    /// captured before the collapse removes its backing `.rvf` file -- it
-    /// remains a valid provenance pointer for a witness even though the
-    /// file itself is gone by the time this returns.
-    pub child_id: [u8; 16],
-    /// `file_id` of `base` after this promote's replay. Stable across the
-    /// call in practice: `base` is mutated in place (ingest/delete), never
-    /// re-derived, and `RvfStore::file_id` does not change on mutation.
-    pub parent_id: [u8; 16],
-    /// `base`'s witness-chain hash at promote time (`RvfStore::last_witness_hash`).
-    ///
-    /// POPULATED in practice: `RvfOptions`' default `WitnessConfig` has
-    /// `witness_ingest`/`witness_delete` = `true`, so the `ingest_batch`/
-    /// `delete` calls `promote`'s replay makes append witness entries and
-    /// advance this hash (verified by `promote_report_parent_hash_probe`).
-    /// Narrow residuals, all upstream `rvf-runtime` 0.2 semantics:
-    /// - a promote that replays NOTHING leaves the previous value ([0; 32]
-    ///   only if `base` has never witnessed anything);
-    /// - `RvfStore::open()` re-initializes the in-memory hash to zeros — a
-    ///   reopened lineage's witness chain restarts at its next append
-    ///   rather than resuming (upstream wart, noted on WEFT-662);
-    /// - `compact()` resets it by design (file rewritten).
-    pub parent_hash: [u8; 32],
-}
-
-/// What changed in `working` relative to its immediate parent -- i.e. what
-/// this turn has done so far (plan §3: "what changed this turn").
-#[derive(Clone, Debug, Default)]
-pub struct MemoryDiff {
-    pub added: Vec<u64>,
-    pub deleted: Vec<u64>,
-}
-
-/// A node's position in the lineage, as reported by [`BranchableMemory::lineage`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NodeRole {
-    /// The current writable tip.
-    Working,
-    /// A frozen checkpoint between `working` and `base`, newest to oldest.
-    Checkpoint,
-    /// This lineage's own writable, promotable root.
-    Base,
-    /// A read-only node inherited from the source lineage at fork time
-    /// (empty unless this `BranchableMemory` was produced by `branch`/`fork`).
-    Inherited,
-}
-
-/// One entry in [`BranchableMemory::lineage`]'s provenance walk.
-#[derive(Clone, Debug)]
-pub struct LineageEntry {
-    pub role: NodeRole,
-    pub id: CheckpointId,
-    pub label: Option<String>,
-    pub file_id: [u8; 16],
-    pub parent_id: [u8; 16],
-    pub lineage_depth: u32,
-    pub created_at_ms: u64,
-    /// Vectors ingested directly at this node (0 for `Inherited` nodes,
-    /// whose edit-log is not carried forward -- see `MemoryNode::open_readonly_snapshot`).
-    pub mutation_count: usize,
-    pub tombstone_count: usize,
-}
-
-/// Snapshot of store health across the lineage, mirroring agenticow's
-/// `status()` (plan §3) but reporting `working` and `base` separately since
-/// there is no single `RvfStore` that represents "the whole lineage."
-#[derive(Clone, Debug)]
-pub struct MemoryStatus {
-    pub dimension: u16,
-    pub own_checkpoint_depth: usize,
-    pub inherited_depth: usize,
-    pub working: rvf_runtime::StoreStatus,
-    pub base: rvf_runtime::StoreStatus,
-}
+use crate::types::{LineageEntry, MemoryDiff, MemoryStatus, NodeRole, VectorItem};
 
 /// A branchable, checkpointable, chain-walk-queryable view over an RVF
 /// vector lineage -- the Rust port of agenticow's `RvfDatabase` orchestration
@@ -172,18 +44,31 @@ pub struct MemoryStatus {
 ///
 /// # What is *not* durable across a process restart
 ///
-/// The `.rvf` files themselves are durable (fsynced per write). The
+/// The `.rvf` files themselves are durable (fsynced per write). Most of the
 /// crate-level bookkeeping that makes chain-walk correct -- each node's
-/// tombstone set, ingest edit-log, and text payloads, plus which files are
-/// `ancestors` vs `inherited` vs `base` -- lives only in this struct. There
-/// is no `save`/`load` manifest yet (agenticow's `index.js` has one; the
-/// integration plan lists it as a later row in §3, and Phase 3's risk list
-/// flags orphaned `.rvf` files on crash as open). [`BranchableMemory::open`]
-/// is a best-effort partial reopen (base only) documented at its call site.
+/// tombstone set, plus which files are `ancestors` vs `inherited` vs `base`
+/// -- is now also durable, via a `manifest.json` this crate writes on every
+/// topology change and [`BranchableMemory::open`] restores from (see
+/// `crate::manifest` for the exact contract, including what still isn't
+/// restored: `working`'s uncommitted edits, and every node's `edit_log`/
+/// `texts`/`tags`). A lineage that predates this manifest, or was never
+/// checkpointed/paused/etc., falls back to the original lossy base-only
+/// reopen.
+///
+/// # Parked lineages
+///
+/// [`BranchableMemory::pause`] freezes `working` into `ancestors` without
+/// deriving a fresh child, leaving `working` as `None` -- see that method's
+/// doc comment. `chain_priority_order` and every read (`query`/`diff`/
+/// `lineage`/`status`) simply skip a `None` `working`; every write
+/// (`ingest`/`delete`/`checkpoint`/`rollback`/`promote`/`branch`) fails
+/// closed with [`crate::CowMemoryError::Paused`] until [`BranchableMemory::resume`].
 pub struct BranchableMemory {
     pub(crate) dir: PathBuf,
     pub(crate) opts: RvfOptions,
-    pub(crate) working: MemoryNode,
+    /// `None` while the lineage is parked (see "Parked lineages" above);
+    /// `Some` otherwise, always.
+    pub(crate) working: Option<MemoryNode>,
     pub(crate) ancestors: Vec<MemoryNode>,
     pub(crate) base: MemoryNode,
     pub(crate) inherited: Vec<MemoryNode>,
@@ -228,28 +113,37 @@ impl BranchableMemory {
             Some("working".into()),
         )?;
 
-        Ok(Self {
+        let mem = Self {
             dir,
             opts,
-            working,
+            working: Some(working),
             ancestors: Vec::new(),
             base,
             inherited: Vec::new(),
-        })
+        };
+        mem.write_manifest()?;
+        Ok(mem)
     }
 
-    /// Best-effort reopen of a lineage previously created at `dir`.
+    /// Reopen a lineage previously created at `dir`.
     ///
-    /// **Lossy.** Only `base` is reopened from disk; any checkpoints
-    /// (`ancestors`), any fork/branch inheritance (`inherited`), and every
-    /// node's tombstones/edit-log/texts are gone -- they only ever lived in
-    /// the `BranchableMemory` struct of the process that created them, not
-    /// in the `.rvf` files. A fresh `working` is derived from the reopened
-    /// `base`. This is enough to keep using a lineage's *promoted* content
-    /// after a restart; it is not crash recovery for an in-flight turn
-    /// (that is Phase 3 scope per the integration plan's risk table).
+    /// If `dir` has a `manifest.json` (written by every topology-changing
+    /// operation since this lineage was created -- see `crate::manifest`),
+    /// the **full** lineage is restored: `base`, this lineage's own
+    /// checkpoint chain, anything it inherited from a fork/branch source,
+    /// every node's tombstones, and whether it was left paused. Without a
+    /// manifest (a pre-manifest lineage, or one that was never
+    /// checkpointed/paused/etc. before this reopen), this falls back to the
+    /// original **lossy** behavior: only `base` is reopened, a fresh
+    /// `working` is derived from it, and everything else is gone. Neither
+    /// path is full crash recovery for an in-flight (not yet checkpointed)
+    /// turn -- see `crate::manifest`'s "What is NOT restored" section.
     pub fn open(dir: impl AsRef<Path>) -> Result<Self> {
         let dir = dir.as_ref().to_path_buf();
+        if let Some(restored) = Self::open_with_manifest(&dir)? {
+            return Ok(restored);
+        }
+
         let base_path = Self::find_base_file(&dir)?;
         let base_store = rvf_runtime::RvfStore::open(&base_path)?;
         let opts = RvfOptions {
@@ -274,7 +168,7 @@ impl BranchableMemory {
         Ok(Self {
             dir,
             opts,
-            working,
+            working: Some(working),
             ancestors: Vec::new(),
             base,
             inherited: Vec::new(),
@@ -312,6 +206,9 @@ impl BranchableMemory {
         if items.is_empty() {
             return Ok(Vec::new());
         }
+        if self.working.is_none() {
+            return Err(CowMemoryError::Paused);
+        }
 
         let dim = self.opts.dimension as usize;
         let mut normalized: Vec<Vec<f32>> = Vec::with_capacity(items.len());
@@ -327,20 +224,21 @@ impl BranchableMemory {
             ids.push(item.id.unwrap_or_else(next_vector_id));
         }
 
+        let working = self.working.as_mut().expect("checked above");
         let refs: Vec<&[f32]> = normalized.iter().map(|v| v.as_slice()).collect();
-        self.working.store.ingest_batch(&refs, &ids, None)?;
+        working.store.ingest_batch(&refs, &ids, None)?;
 
         for i in 0..items.len() {
             let id = ids[i];
-            self.working.edit_log.insert(id, normalized[i].clone());
+            working.edit_log.insert(id, normalized[i].clone());
             // Re-ingesting a previously-tombstoned id (within this same
             // node) un-hides it -- the fresh write is what should be seen.
-            self.working.tombstones.remove(&id);
+            working.tombstones.remove(&id);
             if let Some(text) = &items[i].text {
-                self.working.texts.insert(id, text.clone());
+                working.texts.insert(id, text.clone());
             }
             if !items[i].tags.is_empty() {
-                self.working.tags.insert(id, items[i].tags.clone());
+                working.tags.insert(id, items[i].tags.clone());
             }
         }
 
@@ -367,12 +265,13 @@ impl BranchableMemory {
         if ids.is_empty() {
             return Ok(());
         }
+        let working = self.working.as_mut().ok_or(CowMemoryError::Paused)?;
         for id in ids {
-            self.working.edit_log.remove(id);
-            self.working.texts.remove(id);
-            self.working.tags.remove(id);
+            working.edit_log.remove(id);
+            working.texts.remove(id);
+            working.tags.remove(id);
         }
-        self.working.tombstones.extend(ids.iter().copied());
+        working.tombstones.extend(ids.iter().copied());
         Ok(())
     }
 
@@ -400,7 +299,12 @@ impl BranchableMemory {
     pub(crate) fn chain_priority_order(&self) -> Vec<&MemoryNode> {
         let mut v: Vec<&MemoryNode> =
             Vec::with_capacity(1 + self.ancestors.len() + 1 + self.inherited.len());
-        v.push(&self.working);
+        // `None` while paused (see `pause`'s doc comment) -- the frozen
+        // former `working` is already the newest entry in `ancestors` at
+        // that point, so simply skipping it here still walks every vector.
+        if let Some(working) = &self.working {
+            v.push(working);
+        }
         v.extend(self.ancestors.iter());
         v.push(&self.base);
         v.extend(self.inherited.iter());
@@ -410,20 +314,28 @@ impl BranchableMemory {
     /// What `working` has added/deleted relative to its immediate parent --
     /// "what this turn changed" (plan §3). Does not look at ancestors
     /// checkpointed earlier in this same turn; call `checkpoint`-by-
-    /// `checkpoint` if that finer granularity is needed.
+    /// `checkpoint` if that finer granularity is needed. Returns the empty
+    /// diff while paused (see `pause`'s doc comment) -- there is no live
+    /// `working` to have pending changes.
     pub fn diff(&self) -> MemoryDiff {
-        let mut added: Vec<u64> = self.working.edit_log.keys().copied().collect();
+        let Some(working) = &self.working else {
+            return MemoryDiff::default();
+        };
+        let mut added: Vec<u64> = working.edit_log.keys().copied().collect();
         added.sort_unstable();
-        let mut deleted: Vec<u64> = self.working.tombstones.iter().copied().collect();
+        let mut deleted: Vec<u64> = working.tombstones.iter().copied().collect();
         deleted.sort_unstable();
         MemoryDiff { added, deleted }
     }
 
     /// Walk the full provenance chain, newest to oldest, `Working` first
-    /// and the inherited fork source (if any) last.
+    /// (omitted while paused -- see `pause`'s doc comment) and the
+    /// inherited fork source (if any) last.
     pub fn lineage(&self) -> Vec<LineageEntry> {
         let mut out = Vec::with_capacity(1 + self.ancestors.len() + 1 + self.inherited.len());
-        out.push(Self::describe(&self.working, NodeRole::Working));
+        if let Some(working) = &self.working {
+            out.push(Self::describe(working, NodeRole::Working));
+        }
         out.extend(
             self.ancestors
                 .iter()
@@ -453,12 +365,26 @@ impl BranchableMemory {
     }
 
     pub fn status(&self) -> MemoryStatus {
+        let working_status = match &self.working {
+            Some(working) => working.store.status(),
+            None => self
+                .ancestors
+                .first()
+                .map(|n| n.store.status())
+                .unwrap_or_else(|| self.base.store.status()),
+        };
         MemoryStatus {
             dimension: self.opts.dimension,
             own_checkpoint_depth: self.ancestors.len(),
             inherited_depth: self.inherited.len(),
-            working: self.working.store.status(),
+            working: working_status,
             base: self.base.store.status(),
+            paused: self.working.is_none(),
         }
+    }
+
+    /// `true` if this lineage is parked -- see [`BranchableMemory::pause`].
+    pub fn is_paused(&self) -> bool {
+        self.working.is_none()
     }
 }

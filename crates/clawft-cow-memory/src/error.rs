@@ -38,6 +38,23 @@ pub enum CowMemoryError {
     /// `ingest` was called with mismatched parallel-array lengths.
     #[error("ingest item count mismatch: {vectors} vectors vs {ids} ids")]
     IngestArityMismatch { vectors: usize, ids: usize },
+
+    /// A write (`ingest`/`delete`/`checkpoint`/`rollback`/`promote`) or a
+    /// `working`-dependent fork (`branch`) was attempted while the lineage
+    /// is parked via `BranchableMemory::pause`. Call `resume()` first.
+    #[error("BranchableMemory is paused; call resume() before writing")]
+    Paused,
+
+    /// The lineage manifest at `path` exists but could not be trusted --
+    /// unparseable JSON or an unsupported `schema_version` (a node file it
+    /// names being missing/unreadable instead surfaces as the underlying
+    /// `Rvf`/`Io` variant). Never a silent partial restore -- see
+    /// `crate::manifest`.
+    #[error("lineage manifest at {path} is corrupt: {reason}")]
+    ManifestCorrupt {
+        path: std::path::PathBuf,
+        reason: String,
+    },
 }
 
 impl From<rvf_types::RvfError> for CowMemoryError {

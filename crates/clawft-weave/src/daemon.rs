@@ -229,6 +229,14 @@ static DAEMON_TALK_LOOP: OnceLock<Arc<clawft_kernel::TalkModeLoop>> = OnceLock::
 /// ONLY when `[kernel.agent].voice_loop` is on and its `talk_loop`
 /// prerequisite holds — its presence IS the gate the `agent.turn.record` arm
 /// consults before routing recorded user turns through the interrupt brain.
+/// WEFT-652 AutoPause: the attached cow lineage + its chain witness, stashed
+/// so the idle reaper can park the lineage when the daemon goes fully idle.
+/// The bracket auto-resumes on the next turn (clawft-core turn_checkpoint).
+static DAEMON_COW_MEMORY: OnceLock<
+    Arc<std::sync::Mutex<clawft_core::clawft_cow_memory::BranchableMemory>>,
+> = OnceLock::new();
+static DAEMON_TURN_LEDGER: OnceLock<Arc<crate::turn_ledger::DaemonTurnLedger>> = OnceLock::new();
+
 static DAEMON_VOICE_LOOP: OnceLock<
     Arc<crate::voice_loop::VoiceLoop<clawft_core::agent::loop_core::AgentLoop<NativePlatform>>>,
 > = OnceLock::new();
@@ -1654,9 +1662,12 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                 open_or_create_cow_memory(std::path::Path::new(&path))
             }) {
                 Ok(mem) => {
+                    let cow_handle = std::sync::Arc::new(std::sync::Mutex::new(mem));
+                    let _ = DAEMON_COW_MEMORY.set(cow_handle.clone());
                     agent_loop.set_cow_memory(
-                        std::sync::Arc::new(std::sync::Mutex::new(mem)),
+                        cow_handle,
                         cow_memory_cfg.ingest_turns,
+                        cow_memory_cfg.cadence == clawft_types::config::CowCadence::Tool,
                     );
                     info!(path = %path, "cow memory wired (WEFT-616 Phase 2): per-turn checkpoint/promote/rollback active");
 
@@ -1670,9 +1681,10 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                         let chain = kernel.read().await.chain_manager().cloned();
                         match chain {
                             Some(chain) => {
-                                agent_loop.set_turn_ledger(std::sync::Arc::new(
-                                    crate::turn_ledger::DaemonTurnLedger::new(chain),
-                                ));
+                                let daemon_ledger =
+                                    std::sync::Arc::new(crate::turn_ledger::DaemonTurnLedger::new(chain));
+                                let _ = DAEMON_TURN_LEDGER.set(daemon_ledger.clone());
+                                agent_loop.set_turn_ledger(daemon_ledger);
                                 info!(
                                     "turn ledger wired (WEFT-616 Phase 3): cow-memory \
                                      checkpoint/revert/promote transitions witnessed on the \
@@ -2332,6 +2344,29 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                             reaper_loop.end_conversation(&conv_id);
                             activity.remove(&conv_id);
                             info!(conv_id = %conv_id, "M2 reaper: ended idle talk conversation");
+                        }
+                        // WEFT-652 AutoPause: with NO conversations left
+                        // active, park the cow lineage — freeze working (no
+                        // fresh derive) so the daemon idles without an open
+                        // writer chain. The next turn's bracket auto-resumes
+                        // (O(1) derive). Best-effort: pause failure only logs.
+                        if activity.is_empty()
+                            && let Some(cow) = DAEMON_COW_MEMORY.get()
+                        {
+                            let mut guard = cow.lock().unwrap_or_else(|p| p.into_inner());
+                            if !guard.is_paused() {
+                                match guard.pause("autopause:idle") {
+                                    Ok(()) => {
+                                        if let Some(ledger) = DAEMON_TURN_LEDGER.get() {
+                                            ledger.witness_autopause(idle.as_secs());
+                                        }
+                                        info!("cow memory: autopaused (daemon idle)");
+                                    }
+                                    Err(e) => {
+                                        warn!(error = %e, "cow memory: autopause failed; lineage stays live");
+                                    }
+                                }
+                            }
                         }
                     }
                     _ = reaper_shutdown_rx.changed() => {

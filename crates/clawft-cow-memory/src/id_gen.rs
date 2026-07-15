@@ -18,6 +18,23 @@ pub fn next_vector_id() -> u64 {
     GLOBAL_VECTOR_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Peek the next id this process would hand out, without allocating it --
+/// used to stamp a watermark into the lineage manifest (`crate::manifest`)
+/// so a restored lineage's ids are known even before this process ever
+/// calls `next_vector_id()` again.
+pub(crate) fn watermark() -> u64 {
+    GLOBAL_VECTOR_ID.load(Ordering::Relaxed)
+}
+
+/// Bump the process-wide counter so it never hands out an id already used
+/// by a lineage being restored from a manifest -- a no-op if `min` is not
+/// past the current value. `fetch_max` rather than a plain store: several
+/// lineages can be `open()`ed in the same process, each with its own
+/// watermark, and the counter must end up past all of them.
+pub(crate) fn bump_watermark(min: u64) {
+    GLOBAL_VECTOR_ID.fetch_max(min, Ordering::Relaxed);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

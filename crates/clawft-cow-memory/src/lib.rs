@@ -18,21 +18,32 @@
 //!   `base`.
 //! - `branch()` / `fork()` -- independent lineages that share read-only
 //!   history but never leak writes back to their source.
+//! - `pause()` / `resume()` -- park a lineage in place (freeze `working`
+//!   without deriving a fresh child) for AutoPause/AutoResume idle-loop
+//!   parking; reads keep working through the chain-walk while parked,
+//!   writes fail closed with [`CowMemoryError::Paused`] until `resume()`.
 //! - `ingest()` / `delete()` / `query()` -- the read/write surface, with a
 //!   manual chain-walk merge on `query()` standing in for the native
 //!   cross-COW-boundary read-through that only ships today inside
 //!   `@ruvector/rvf-node`'s `linux-x64-gnu` binary (integration plan §6) --
 //!   above the published Rust `rvf-runtime` crate this module builds on.
 //! - `diff()` / `lineage()` / `status()` -- introspection.
+//! - A durable lineage manifest (`crate::manifest`), written on every
+//!   topology change, that makes [`BranchableMemory::open`] restore the
+//!   *full* lineage (base, checkpoints, inherited chain, tombstones, id
+//!   watermarks) rather than the base-only reopen from before -- see that
+//!   module's docs for exactly what is and isn't restored.
 //!
 //! # Not yet in scope (see the integration plan's later phases)
 //!
 //! - Hermes-loop wiring (`AgentLoop::handle_turn` checkpoint/promote/rollback
 //!   bracketing) -- Phase 2.
 //! - `ChainManager`/exochain witness coupling -- Phase 3.
-//! - Crash recovery / orphaned-file reaping across a process restart --
-//!   Phase 3 risk item; [`BranchableMemory::open`] is an explicitly lossy
-//!   partial reopen, not that.
+//! - Crash recovery for an in-flight (not yet checkpointed/paused) turn --
+//!   the manifest closes the *topology* half of this gap (see
+//!   `crate::manifest`), but `working`'s uncommitted edits between
+//!   checkpoints are still lost on an unclean restart, by design (a
+//!   manifest write is not triggered per-`ingest`).
 //! - The `embedder_id` stamp-and-enforce discipline the plan calls for
 //!   (§3, "DESIGN CONSTRAINT") -- `RvfOptions` has no field for it and this
 //!   crate does not yet add a sidecar for one; see the crate's test/report
@@ -45,17 +56,19 @@ mod error;
 mod id_gen;
 #[cfg(target_os = "macos")]
 mod macos_errno_shim;
+mod manifest;
 mod node;
 mod normalize;
 mod ops;
+mod types;
 
-pub use branchable_memory::{
-    BranchableMemory, LineageEntry, MemoryDiff, MemoryStatus, NodeRole, PromoteReport, VectorItem,
-    VectorTags,
-};
+pub use branchable_memory::BranchableMemory;
 pub use chain_walk::ScoredId;
 pub use error::{CowMemoryError, Result};
 pub use node::CheckpointId;
+pub use types::{
+    LineageEntry, MemoryDiff, MemoryStatus, NodeRole, PromoteReport, VectorItem, VectorTags,
+};
 
 // Re-exported so callers can build advanced `RvfOptions` (HNSW parameters,
 // witness config, security policy) for `BranchableMemory::create_with_options`
