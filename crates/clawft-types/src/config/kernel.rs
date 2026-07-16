@@ -312,6 +312,19 @@ pub struct AgentAnchorConfig {
     #[serde(default)]
     pub subagents: SubagentsConfig,
 
+    /// Retained-output review gate (WEFT-653 D10 / WEFT-654). `mode =
+    /// "review"` holds each successful turn's memory promote (and, where the
+    /// register-early machinery exists, its forest commit) as a PENDING
+    /// PROPOSAL until `agent.proposal.accept` (= promote, witnessed) or
+    /// `agent.proposal.discard` (= rollback + witnessed prune). A proposal
+    /// past `timeout_secs` is DISCARDED, never silently committed
+    /// (fail-closed, deny-by-default parity). NOTE: the loop's cow lineage is
+    /// global, so a pending proposal holds the WHOLE loop — new dispatches
+    /// fail fast with a typed error until the reviewer decides. Absent ⇒
+    /// `auto` (today's behavior: promote on finalize).
+    #[serde(default)]
+    pub proposal: ProposalConfig,
+
     /// Turn classification & labeling (ADR-067 P2, classification-design §D6).
     /// Gates the `TurnClassifier` the L2 tier runs at `index_turn` so every
     /// committed turn node carries a 4-axis `classification` blob. Absent ⇒
@@ -319,6 +332,33 @@ pub struct AgentAnchorConfig {
     /// conservative `talk_loop=false` precedent.
     #[serde(default)]
     pub classification: ClassificationConfig,
+}
+
+/// See [`AgentAnchorConfig::proposal`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProposalConfig {
+    /// `auto` (default) or `review`.
+    #[serde(default)]
+    pub mode: ProposalMode,
+    /// Seconds a pending proposal may wait before being auto-DISCARDED
+    /// (fail-closed). `None` ⇒ 600.
+    #[serde(
+        default,
+        alias = "timeoutSecs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub timeout_secs: Option<u64>,
+}
+
+/// See [`AgentAnchorConfig::proposal`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProposalMode {
+    /// Commit/promote on finalize — today's behavior.
+    #[default]
+    Auto,
+    /// Hold each successful turn as a pending proposal for accept/discard.
+    Review,
 }
 
 impl AgentAnchorConfig {

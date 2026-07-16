@@ -115,6 +115,15 @@ pub enum ClawftError {
         /// `Display` of the underlying `clawft_cow_memory::CowMemoryError`.
         reason: String,
     },
+
+    /// A review-mode proposal is pending (WEFT-654): the loop's cow lineage
+    /// holds an undecided turn — accept or discard it before dispatching
+    /// another. Constructed in `clawft-core::agent::loop_core`.
+    #[error("a pending proposal (`{label}`) awaits accept/discard before new turns can run")]
+    ProposalPending {
+        /// The held turn's bracket label (e.g. `turn:agent.chat:conv`).
+        label: String,
+    },
 }
 
 /// Channel-specific error type.

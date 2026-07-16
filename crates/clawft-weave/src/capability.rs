@@ -86,6 +86,11 @@ pub fn required_capability(method: &str) -> Capability {
         "terminal.write" => Capability::Write,
         "terminal.resize" => Capability::Write,
         "terminal.close" => Capability::Write,
+        // WEFT-654 review gate: accept/discard mutate the loop's held
+        // proposal (promote or prune + witness) — same class as the other
+        // state-mutating agent verbs above.
+        "agent.proposal.accept" => Capability::Write,
+        "agent.proposal.discard" => Capability::Write,
 
         // ── Chat: LLM-conversational verbs ──────────────────────────
         "agent.chat" => Capability::Chat,
@@ -108,6 +113,7 @@ pub fn required_capability(method: &str) -> Capability {
         | "chain.verify"
         | "agent.inspect"
         | "agent.list"
+        | "agent.proposal.list"
         | "control.list"
         | "node.identity"
         | "substrate.read"

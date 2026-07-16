@@ -44,6 +44,73 @@ use tracing::error;
 
 use super::turn_ledger::TurnLedger;
 
+/// A review-mode turn whose memory promote (and any forest commit the
+/// caller owns) is HELD pending `accept`/`discard` (WEFT-654, design D9/D10).
+/// Opaque outside this module except for the label and age — the rollback
+/// target stays private so callers can't half-apply a decision.
+#[derive(Debug)]
+pub struct HeldTurn {
+    pub label: String,
+    pre_turn_head: Option<clawft_cow_memory::CheckpointId>,
+    pub created_at: std::time::Instant,
+}
+
+/// Accept a held proposal: promote the checkpoint chain into base and
+/// witness the lineage — the same closure an auto-mode turn gets at
+/// finalize, just human-gated (accept = promote).
+pub fn accept_held(
+    mem: &Arc<Mutex<BranchableMemory>>,
+    ledger: Option<&Arc<dyn TurnLedger>>,
+    held: HeldTurn,
+) -> clawft_types::Result<()> {
+    let mut guard = mem.lock().unwrap_or_else(|p| p.into_inner());
+    let report = guard.promote().map_err(cow_err)?;
+    if let Some(ledger) = ledger {
+        ledger.on_promote(
+            &held.label,
+            true,
+            Some(super::turn_ledger::PromotedLineage {
+                child_id: report.child_id,
+                parent_id: report.parent_id,
+                parent_hash: report.parent_hash,
+                mutation_count: (report.ingested + report.deleted) as u32,
+            }),
+        );
+    }
+    Ok(())
+}
+
+/// Discard a held proposal: roll the lineage back to the pre-turn head and
+/// witness the compensating revert (discard = rollback; the fact of the
+/// discard is on chain forever — discard ≠ delete).
+pub fn discard_held(
+    mem: &Arc<Mutex<BranchableMemory>>,
+    ledger: Option<&Arc<dyn TurnLedger>>,
+    held: HeldTurn,
+    reason: &str,
+) -> clawft_types::Result<()> {
+    let rolled_back = {
+        let mut guard = mem.lock().unwrap_or_else(|p| p.into_inner());
+        match guard.rollback(held.pre_turn_head) {
+            Ok(()) => true,
+            Err(e) => {
+                error!(error = %e, label = %held.label, "discard rollback failed");
+                false
+            }
+        }
+    };
+    if let Some(ledger) = ledger {
+        ledger.on_revert(&held.label, reason, rolled_back);
+    }
+    if rolled_back {
+        Ok(())
+    } else {
+        Err(ClawftError::CowMemory {
+            reason: "discard rollback failed; lineage may hold the undecided chain".into(),
+        })
+    }
+}
+
 /// Run `turn` bracketed by a checkpoint/promote/rollback cycle on `mem`.
 ///
 /// `turn` is called at most once, after the checkpoint succeeds. `label`
@@ -56,12 +123,17 @@ use super::turn_ledger::TurnLedger;
 /// promote/rollback the turn is. An empty vec skips the ingest. Ingest
 /// failure logs loudly but never fails the turn (the reply is not memory
 /// infrastructure's to withhold) — the promote proceeds without the items.
+/// `review`: hold instead of promote on Ok (WEFT-654). The held turn is
+/// written into `held_out` for the caller to register; everything else
+/// (ingest, ledger checkpoint witness, Err rollback) behaves identically.
 pub(crate) async fn with_turn_checkpoint<F, Fut, T, I>(
     mem: &Arc<Mutex<BranchableMemory>>,
     ledger: Option<&Arc<dyn TurnLedger>>,
     label: impl Into<String>,
     turn: F,
     items_on_ok: I,
+    review: bool,
+    held_out: &mut Option<HeldTurn>,
 ) -> clawft_types::Result<T>
 where
     F: FnOnce() -> Fut,
@@ -115,6 +187,23 @@ where
             // them and a (hypothetical) failure after this point would still
             // discard them with the branch — the bracket protects real data.
             let items = items_on_ok(val);
+            if review {
+                // WEFT-654 review mode: ingest, then HOLD — no promote, no
+                // promote witness. The decision (accept = promote / discard
+                // = rollback) belongs to the reviewer; timeout discards.
+                let mut guard = mem.lock().unwrap_or_else(|p| p.into_inner());
+                if !items.is_empty()
+                    && let Err(e) = guard.ingest(&items)
+                {
+                    error!(error = %e, label, "review-mode ingest failed; holding without the exchange");
+                }
+                *held_out = Some(HeldTurn {
+                    label,
+                    pre_turn_head,
+                    created_at: std::time::Instant::now(),
+                });
+                return result;
+            }
             let (promoted, lineage) = {
                 let mut guard = mem.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 if !items.is_empty()
@@ -227,20 +316,25 @@ mod tests {
     /// Recording ledger: captures the bracket's witness sequence.
     #[derive(Default)]
     struct RecordingLedger {
-        events: Mutex<Vec<String>>,
+        log: Mutex<Vec<String>>,
+    }
+    impl RecordingLedger {
+        fn events(&self) -> Vec<String> {
+            self.log.lock().unwrap().clone()
+        }
     }
     impl TurnLedger for RecordingLedger {
         fn on_checkpoint(&self, label: &str) {
-            self.events.lock().unwrap().push(format!("checkpoint:{label}"));
+            self.log.lock().unwrap().push(format!("checkpoint:{label}"));
         }
         fn on_revert(&self, label: &str, _err: &str, rolled_back: bool) {
-            self.events
+            self.log
                 .lock()
                 .unwrap()
                 .push(format!("revert:{label}:rolled_back={rolled_back}"));
         }
         fn on_promote(&self, label: &str, promoted: bool, lineage: Option<super::super::turn_ledger::PromotedLineage>) {
-            self.events.lock().unwrap().push(format!(
+            self.log.lock().unwrap().push(format!(
                 "promote:{label}:promoted={promoted}:lineage={}",
                 lineage.is_some()
             ));
@@ -255,15 +349,15 @@ mod tests {
         let ledger: Arc<dyn TurnLedger> = concrete.clone();
 
         let ok: clawft_types::Result<u8> =
-            with_turn_checkpoint(&mem, Some(&ledger), "t-ok", || async { Ok(1u8) }, no_items).await;
+            with_turn_checkpoint(&mem, Some(&ledger), "t-ok", || async { Ok(1u8) }, no_items, false, &mut None).await;
         assert!(ok.is_ok());
         let err: clawft_types::Result<u8> = with_turn_checkpoint(&mem, Some(&ledger), "t-err", || async {
             Err(ClawftError::CowMemory { reason: "boom".into() })
-        }, no_items)
+        }, no_items, false, &mut None)
         .await;
         assert!(err.is_err());
 
-        let events = concrete.events.lock().unwrap().clone();
+        let events = concrete.events();
         assert_eq!(
             events,
             vec![
@@ -294,6 +388,8 @@ mod tests {
             "t-ok",
             || async { Ok("threads woven".to_string()) },
             items("threads woven"),
+            false,
+            &mut None,
         )
         .await;
         assert!(ok.is_ok());
@@ -320,6 +416,8 @@ mod tests {
                 })
             },
             items("never spoken"),
+            false,
+            &mut None,
         )
         .await;
         assert!(err.is_err());
@@ -357,7 +455,7 @@ mod tests {
         }
         let items = |_: &String| exchange_items(4, "cli", "c1", "wake up", "awake");
         let out: clawft_types::Result<String> =
-            with_turn_checkpoint(&mem, None, "t-wake", || async { Ok("awake".to_string()) }, items)
+            with_turn_checkpoint(&mem, None, "t-wake", || async { Ok("awake".to_string()) }, items, false, &mut None)
                 .await;
         assert!(out.is_ok(), "turn on a parked lineage must auto-resume, not fail");
         let guard = mem.lock().unwrap();
@@ -367,6 +465,78 @@ mod tests {
         assert!(
             !guard.query(&probe, 4).expect("query").is_empty(),
             "post-resume exchange promoted and queryable"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_mode_holds_then_accept_promotes_witnessed() {
+        // WEFT-654: review holds (no promote, no promote witness), accept =
+        // promote with lineage witnessed — the human-gated finalize.
+        let dir = TempDir::new().unwrap();
+        let mem = test_mem(&dir);
+        let concrete = Arc::new(RecordingLedger::default());
+        let ledger: Arc<dyn TurnLedger> = concrete.clone();
+        let items = |_: &String| exchange_items(4, "cli", "c1", "hold me", "held reply");
+
+        let mut held = None;
+        let out: clawft_types::Result<String> = with_turn_checkpoint(
+            &mem, Some(&ledger), "t-hold", || async { Ok("held reply".to_string()) },
+            items, true, &mut held,
+        )
+        .await;
+        assert!(out.is_ok());
+        let held = held.expect("review mode must yield a HeldTurn");
+        assert_eq!(held.label, "t-hold");
+        {
+            let events = concrete.events();
+            assert!(events.iter().any(|e| e.starts_with("checkpoint:t-hold")));
+            assert!(
+                !events.iter().any(|e| e.starts_with("promote:")),
+                "no promote witness while held: {events:?}"
+            );
+        }
+        // Held writes are visible via the chain-walk (working holds them)…
+        let probe = crate::embeddings::hash_embedder::HashEmbedder::new(4)
+            .compute_embedding("held reply");
+        assert!(!mem.lock().unwrap().query(&probe, 4).unwrap().is_empty());
+
+        accept_held(&mem, Some(&ledger), held).expect("accept");
+        let events = concrete.events();
+        assert!(
+            events.iter().any(|e| e.starts_with("promote:t-hold:promoted=true:lineage=true")),
+            "accept promotes with lineage witnessed: {events:?}"
+        );
+        // …and remain queryable after promote.
+        assert!(!mem.lock().unwrap().query(&probe, 4).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn review_mode_discard_rolls_back_witnessed() {
+        let dir = TempDir::new().unwrap();
+        let mem = test_mem(&dir);
+        let concrete = Arc::new(RecordingLedger::default());
+        let ledger: Arc<dyn TurnLedger> = concrete.clone();
+        let items = |_: &String| exchange_items(4, "cli", "c1", "hold me", "unwanted");
+
+        let mut held = None;
+        let _: clawft_types::Result<String> = with_turn_checkpoint(
+            &mem, Some(&ledger), "t-no", || async { Ok("unwanted".to_string()) },
+            items, true, &mut held,
+        )
+        .await;
+        let held = held.expect("held");
+
+        discard_held(&mem, Some(&ledger), held, "reviewer said no").expect("discard");
+        let events = concrete.events();
+        assert!(
+            events.iter().any(|e| e.starts_with("revert:t-no:rolled_back=true")),
+            "discard witnesses the revert: {events:?}"
+        );
+        let probe = crate::embeddings::hash_embedder::HashEmbedder::new(4)
+            .compute_embedding("unwanted");
+        assert!(
+            mem.lock().unwrap().query(&probe, 4).unwrap().is_empty(),
+            "discarded exchange must vanish"
         );
     }
 
@@ -393,7 +563,7 @@ mod tests {
                     reason: e.to_string(),
                 })?;
             Ok(())
-        }, no_items)
+        }, no_items, false, &mut None)
         .await;
 
         assert!(result.is_ok());
@@ -420,7 +590,7 @@ mod tests {
             Err(ClawftError::Timeout {
                 operation: "simulated turn failure".into(),
             })
-        }, no_items)
+        }, no_items, false, &mut None)
         .await;
 
         assert!(result.is_err());

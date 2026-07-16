@@ -634,6 +634,50 @@ pub use clawft_types::agent_chat::{
     AgentTurnRecordResult, RecordedTurn, SpawnedTaskSummary,
 };
 
+// ── Agent proposal (WEFT-654 review gate, D9-D11) ──────────
+//
+// `agent.proposal.{list,accept,discard}` — served against the single
+// daemon-hosted `AgentLoop` (via `daemon_agent_loop()`, not
+// `AgentService`/`AgentLoopHandle`, which doesn't expose the review-gate
+// methods). These types are local to `clawft-weave`: unlike `agent.chat`'s
+// wire types, nothing outside the daemon needs to share this shape.
+
+/// One parked proposal in `agent.proposal.list`'s result. The loop's cow
+/// lineage is global, so today there is at most one — the list shape stays
+/// forward-compatible with per-conversation holds (design D9-D11 Phase 2
+/// preview).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentProposalInfo {
+    /// The held turn's bracket label (e.g. `turn:agent.chat:conv-id`).
+    pub label: String,
+    /// How long the proposal has been parked, in whole seconds.
+    pub age_secs: u64,
+}
+
+/// Result of `agent.proposal.list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentProposalListResult {
+    pub pending: Vec<AgentProposalInfo>,
+}
+
+/// Params for `agent.proposal.discard`. `reason` defaults to
+/// `"operator discard"` when omitted; the timeout sweep (idle reaper) calls
+/// `discard_pending` directly with `"timeout"` rather than going through
+/// this RPC.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentProposalDiscardParams {
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Result of `agent.proposal.accept` / `agent.proposal.discard` — echoes
+/// the decided proposal's label back so the caller can confirm which hold
+/// was resolved.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentProposalDecisionResult {
+    pub label: String,
+}
+
 // ── Terminal RPCs ─────────────────────────────────────────
 //
 // PTY-backed shell sessions hosted in the daemon. The egui Explorer

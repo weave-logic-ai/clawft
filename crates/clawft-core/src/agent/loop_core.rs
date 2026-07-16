@@ -280,6 +280,19 @@ fn spawned_task_from_result(name: &str, result_json: &str) -> Option<SpawnedTask
 /// 6. **Respond**: Extract the final text response and dispatch an
 ///    [`OutboundMessage`] to the bus.
 /// 7. **Persist**: Save the updated session and append to history.
+/// The loop's COW-memory attachment (WEFT-616 Phase 2 + 652 + 654).
+#[cfg(feature = "rvf")]
+#[derive(Clone)]
+pub struct CowAttachment {
+    pub mem: Arc<std::sync::Mutex<clawft_cow_memory::BranchableMemory>>,
+    /// Ingest each successful turn's exchange pre-promote (Phase 3).
+    pub ingest_turns: bool,
+    /// Checkpoint at tool-call boundaries too (WEFT-652).
+    pub tool_cadence: bool,
+    /// Hold successful turns as pending proposals (WEFT-654 review gate).
+    pub review: bool,
+}
+
 pub struct AgentLoop<P: Platform> {
     config: AgentsConfig,
     platform: Arc<P>,
@@ -425,11 +438,12 @@ pub struct AgentLoop<P: Platform> {
     /// constructs the loop -- `None` (default) is the same "feature
     /// absent" pattern as `sandbox`/`gate`: zero behavior change.
     #[cfg(feature = "rvf")]
-    cow_memory: std::sync::OnceLock<(
-        Arc<std::sync::Mutex<clawft_cow_memory::BranchableMemory>>,
-        bool, // ingest_turns
-        bool, // tool_cadence (WEFT-652: checkpoint at tool-call boundaries)
-    )>,
+    cow_memory: std::sync::OnceLock<CowAttachment>,
+    /// WEFT-654 review mode: the currently HELD turn awaiting
+    /// accept/discard. At most one — a pending hold fails new dispatches
+    /// closed (the loop's lineage is global; see ProposalConfig docs).
+    #[cfg(feature = "rvf")]
+    pending_hold: std::sync::Mutex<Option<super::turn_checkpoint::HeldTurn>>,
     /// Chain-side witness of the bracket (WEFT-616 Phase 3, DualStateBridge).
     /// Late-wired by the daemon over ChainManager; absent = no chain coupling
     /// (memory semantics unchanged). Not feature-gated — the trait is pure.
@@ -488,6 +502,8 @@ impl<P: Platform> AgentLoop<P> {
             chat_id_is_conv_id: false,
             #[cfg(feature = "rvf")]
             cow_memory: std::sync::OnceLock::new(),
+            #[cfg(feature = "rvf")]
+            pending_hold: std::sync::Mutex::new(None),
             turn_ledger: std::sync::OnceLock::new(),
         }
     }
@@ -668,7 +684,12 @@ impl<P: Platform> AgentLoop<P> {
         self,
         mem: Arc<std::sync::Mutex<clawft_cow_memory::BranchableMemory>>,
     ) -> Self {
-        let _ = self.cow_memory.set((mem, true, false));
+        let _ = self.cow_memory.set(CowAttachment {
+            mem,
+            ingest_turns: true,
+            tool_cadence: false,
+            review: false,
+        });
         self
     }
 
@@ -681,17 +702,54 @@ impl<P: Platform> AgentLoop<P> {
     /// successful turn's exchange (user text + reply) is hash-embedded and
     /// ingested into the checkpointed `working` node before promote — the
     /// Phase-3 write routing that makes the bracket protect real data.
-    /// `tool_cadence` = `CowMemoryConfig::cadence == Tool`: additionally
-    /// checkpoint at every tool-call boundary (WEFT-652 event-level
-    /// snapshots) — each mid-turn point becomes a rollback target; they
-    /// collapse at the turn's promote.
-    pub fn set_cow_memory(
-        &self,
-        mem: Arc<std::sync::Mutex<clawft_cow_memory::BranchableMemory>>,
-        ingest_turns: bool,
-        tool_cadence: bool,
-    ) {
-        let _ = self.cow_memory.set((mem, ingest_turns, tool_cadence));
+    /// Attach the loop's COW memory with its settings (WEFT-616/652/654).
+    pub fn set_cow_memory(&self, attachment: CowAttachment) {
+        let _ = self.cow_memory.set(attachment);
+    }
+
+    /// The held review-mode proposal's (label, age), if any (WEFT-654).
+    #[cfg(feature = "rvf")]
+    pub fn pending_hold_info(&self) -> Option<(String, std::time::Duration)> {
+        self.pending_hold
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map(|h| (h.label.clone(), h.created_at.elapsed()))
+    }
+
+    /// Accept the held proposal: promote + witness (WEFT-654; accept = promote).
+    #[cfg(feature = "rvf")]
+    pub fn accept_pending(&self) -> clawft_types::Result<String> {
+        let held = self
+            .pending_hold
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+            .ok_or_else(|| clawft_types::ClawftError::CowMemory {
+                reason: "no pending proposal".into(),
+            })?;
+        let label = held.label.clone();
+        let att = self.cow_memory.get().expect("hold exists ⇒ attachment exists");
+        super::turn_checkpoint::accept_held(&att.mem, self.turn_ledger.get(), held)?;
+        Ok(label)
+    }
+
+    /// Discard the held proposal: rollback + witnessed revert (WEFT-654;
+    /// discard = rollback; the fact of the discard stays on chain).
+    #[cfg(feature = "rvf")]
+    pub fn discard_pending(&self, reason: &str) -> clawft_types::Result<String> {
+        let held = self
+            .pending_hold
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+            .ok_or_else(|| clawft_types::ClawftError::CowMemory {
+                reason: "no pending proposal".into(),
+            })?;
+        let label = held.label.clone();
+        let att = self.cow_memory.get().expect("hold exists ⇒ attachment exists");
+        super::turn_checkpoint::discard_held(&att.mem, self.turn_ledger.get(), held, reason)?;
+        Ok(label)
     }
 
     /// Late-wire the chain-side [`TurnLedger`] (WEFT-616 Phase 3). Write-once;
@@ -844,7 +902,12 @@ impl<P: Platform> AgentLoop<P> {
     /// added behavior -- byte-identical to the pre-Phase-2 `handle_turn`.
     pub async fn handle_turn(&self, msg: InboundMessage) -> clawft_types::Result<OutboundMessage> {
         #[cfg(feature = "rvf")]
-        if let Some((mem, ingest_turns, _tool_cadence)) = self.cow_memory.get().cloned() {
+        if let Some(att) = self.cow_memory.get().cloned() {
+            // WEFT-654: one undecided proposal fails new dispatches closed.
+            if let Some((label, _)) = self.pending_hold_info() {
+                return Err(clawft_types::ClawftError::ProposalPending { label });
+            }
+            let CowAttachment { mem, ingest_turns, review, .. } = att;
             let label = format!("turn:{}:{}", msg.channel, msg.chat_id);
             // Capture the exchange inputs before `msg` moves into the turn.
             let user_text = msg.content.clone();
@@ -865,14 +928,22 @@ impl<P: Platform> AgentLoop<P> {
                     dim, &channel, &chat_id, &user_text, &out.content,
                 )
             };
-            return super::turn_checkpoint::with_turn_checkpoint(
+            let mut held = None;
+            let out = super::turn_checkpoint::with_turn_checkpoint(
                 &mem,
                 self.turn_ledger.get(),
                 label,
                 move || self.handle_turn_inner(msg),
                 items_on_ok,
+                review,
+                &mut held,
             )
             .await;
+            if let Some(h) = held {
+                tracing::info!(label = %h.label, "review mode: turn held pending accept/discard");
+                *self.pending_hold.lock().unwrap_or_else(|p| p.into_inner()) = Some(h);
+            }
+            return out;
         }
         self.handle_turn_inner(msg).await
     }
@@ -1678,8 +1749,10 @@ impl<P: Platform> AgentLoop<P> {
             // whole turn). Witnessed like every checkpoint.
             #[cfg(feature = "rvf")]
             if iteration > 0
-                && let Some((mem, _, true)) = self.cow_memory.get()
+                && let Some(att) = self.cow_memory.get()
+                && att.tool_cadence
             {
+                let mem = &att.mem;
                 let label = format!("tool:{conv_id}:{iteration}");
                 let ok = {
                     let mut guard = mem.lock().unwrap_or_else(|p| p.into_inner());
@@ -2466,7 +2539,15 @@ mod tests {
         let (agent, dir) = make_agent_loop(transport, "tool_cadence").await;
         let cow_dir = tempfile::TempDir::new().unwrap();
         let mem = clawft_cow_memory::BranchableMemory::create(cow_dir.path(), 4).unwrap();
-        agent.cow_memory.set((Arc::new(std::sync::Mutex::new(mem)), false, true)).ok();
+        agent
+            .cow_memory
+            .set(CowAttachment {
+                mem: Arc::new(std::sync::Mutex::new(mem)),
+                ingest_turns: false,
+                tool_cadence: true,
+                review: false,
+            })
+            .ok();
         let rec = Arc::new(Rec::default());
         agent.set_turn_ledger(rec.clone());
 
@@ -2500,6 +2581,60 @@ mod tests {
         // Order: turn cp before tool cp before promote.
         let idx = |pfx: &str| events.iter().position(|e| e.starts_with(pfx)).unwrap();
         assert!(idx("cp:turn:") < idx("cp:tool:") && idx("cp:tool:") < idx("pr:turn:"));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// WEFT-654: review mode holds turn 1, fails turn 2 closed with
+    /// ProposalPending, and accept_pending unblocks turn 3.
+    #[cfg(feature = "rvf")]
+    #[tokio::test]
+    async fn review_mode_guards_dispatch_until_accept() {
+        let transport = Arc::new(MockTransport::new("Hello from LLM!"));
+        let (agent, dir) = make_agent_loop(transport, "review_guard").await;
+        let cow_dir = tempfile::TempDir::new().unwrap();
+        let mem = clawft_cow_memory::BranchableMemory::create(cow_dir.path(), 4).unwrap();
+        agent
+            .cow_memory
+            .set(CowAttachment {
+                mem: Arc::new(std::sync::Mutex::new(mem)),
+                ingest_turns: true,
+                tool_cadence: false,
+                review: true,
+            })
+            .ok();
+
+        let msg = |content: &str| InboundMessage {
+            channel: "test".into(),
+            sender_id: "user1".into(),
+            chat_id: "chat1".into(),
+            content: content.into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+
+        // Turn 1 succeeds and is HELD.
+        let out1 = agent.handle_turn(msg("first")).await;
+        assert!(out1.is_ok());
+        let (label, _age) = agent.pending_hold_info().expect("turn 1 held");
+        assert_eq!(label, "turn:test:chat1");
+
+        // Turn 2 fails closed while the proposal is pending.
+        let out2 = agent.handle_turn(msg("second")).await;
+        assert!(
+            matches!(out2, Err(clawft_types::ClawftError::ProposalPending { .. })),
+            "pending proposal must fail new dispatches closed: {out2:?}"
+        );
+
+        // Accept = promote; the loop is open again.
+        let accepted = agent.accept_pending().expect("accept");
+        assert_eq!(accepted, "turn:test:chat1");
+        assert!(agent.pending_hold_info().is_none());
+        let out3 = agent.handle_turn(msg("third")).await;
+        assert!(out3.is_ok(), "accepted loop takes turns again: {out3:?}");
+        // turn 3 is itself held now (review stays on) — discard it to end clean.
+        let _ = agent.discard_pending("test teardown");
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

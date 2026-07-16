@@ -79,6 +79,47 @@ fn daemon_agent() -> Option<Arc<DaemonAgentService>> {
     DAEMON_AGENT.get().cloned()
 }
 
+/// WEFT-654: daemon-wide handle to the concrete [`AgentLoop`] behind
+/// `DAEMON_AGENT`, stashed separately because `AgentLoopHandle` (the trait
+/// `AgentService<H>` is generic over) doesn't expose the review-gate
+/// surface (`pending_hold_info` / `accept_pending` / `discard_pending` —
+/// see `clawft-core/src/agent/loop_core.rs`). Set once at boot alongside
+/// `DAEMON_AGENT`, from the same `Arc` before it moves into
+/// `AgentService::new`. The `agent.proposal.*` RPC arms read this instead
+/// of `daemon_agent()`.
+///
+/// [`AgentLoop`]: clawft_core::agent::loop_core::AgentLoop
+static DAEMON_AGENT_LOOP: OnceLock<Arc<clawft_core::agent::loop_core::AgentLoop<NativePlatform>>> =
+    OnceLock::new();
+
+fn daemon_agent_loop() -> Option<Arc<clawft_core::agent::loop_core::AgentLoop<NativePlatform>>> {
+    DAEMON_AGENT_LOOP.get().cloned()
+}
+
+/// WEFT-654: format `AgentLoop::pending_hold_info`'s `(label, age)` into the
+/// `agent.proposal.list` wire shape. A pure function (no `AgentLoop`
+/// dependency) so the list/forward-compat shape is unit-testable without
+/// standing up a real loop — see the `tests` module below.
+fn proposal_list_result(pending: Option<(String, std::time::Duration)>) -> AgentProposalListResult {
+    AgentProposalListResult {
+        pending: pending
+            .into_iter()
+            .map(|(label, age)| AgentProposalInfo {
+                label,
+                age_secs: age.as_secs(),
+            })
+            .collect(),
+    }
+}
+
+/// WEFT-654: resolve `agent.proposal.discard`'s reason — the caller-supplied
+/// string, or `"operator discard"` when omitted. Pulled out so the default
+/// is unit-testable on its own (the timeout sweep bypasses this and calls
+/// `discard_pending("timeout")` directly).
+fn proposal_discard_reason(params: &AgentProposalDiscardParams) -> &str {
+    params.reason.as_deref().unwrap_or("operator discard")
+}
+
 /// M4 Phase C.1/D5: daemon-wide handles to the subagent spawn substrate.
 /// The `SpawnRegistry` backs the parent-end cascade (it knows a parent
 /// conversation's still-running children); the `SubagentSpawner` trait object
@@ -237,6 +278,15 @@ static DAEMON_COW_MEMORY: OnceLock<
 > = OnceLock::new();
 static DAEMON_TURN_LEDGER: OnceLock<Arc<crate::turn_ledger::DaemonTurnLedger>> = OnceLock::new();
 
+/// WEFT-654 D10: `[kernel.agent.proposal].timeout_secs` (default 600),
+/// snapshotted as a `Duration` where `anchor_cfg` is read so the M2 idle
+/// reaper — which runs outside that scope — can enforce the fail-closed
+/// timeout guard without re-reading the kernel config. Set once regardless
+/// of whether cow-memory/review actually attached; the reaper only acts on
+/// it when `AgentLoop::pending_hold_info` returns `Some`, so an unused
+/// timeout with no cow attachment is inert.
+static DAEMON_PROPOSAL_TIMEOUT: OnceLock<std::time::Duration> = OnceLock::new();
+
 static DAEMON_VOICE_LOOP: OnceLock<
     Arc<crate::voice_loop::VoiceLoop<clawft_core::agent::loop_core::AgentLoop<NativePlatform>>>,
 > = OnceLock::new();
@@ -319,12 +369,12 @@ use clawft_platform::NativePlatform;
 use clawft_types::config::{Config, KernelConfig};
 
 use crate::protocol::{
-    self, AgentChatParams, AgentInspectResult, AgentRestartParams, AgentSendParams,
-    AgentSpawnParams, AgentSpawnResult, AgentStopParams, AgentTurnRecordParams,
-    ClusterJoinParams, ClusterLeaveParams,
-    ClusterNodeInfo, ClusterStatusResult, CronAddParams, CronJobInfo, CronRemoveParams,
-    IpcPublishParams, IpcSubscribeParams, IpcTopicInfo, KernelStatusResult, LogEntry, LogsParams,
-    ProcessInfo, Request, Response, ServiceInfo,
+    self, AgentChatParams, AgentInspectResult, AgentProposalDecisionResult,
+    AgentProposalDiscardParams, AgentProposalInfo, AgentProposalListResult, AgentRestartParams,
+    AgentSendParams, AgentSpawnParams, AgentSpawnResult, AgentStopParams, AgentTurnRecordParams,
+    ClusterJoinParams, ClusterLeaveParams, ClusterNodeInfo, ClusterStatusResult, CronAddParams,
+    CronJobInfo, CronRemoveParams, IpcPublishParams, IpcSubscribeParams, IpcTopicInfo,
+    KernelStatusResult, LogEntry, LogsParams, ProcessInfo, Request, Response, ServiceInfo,
 };
 #[cfg(feature = "exochain")]
 use crate::protocol::{
@@ -1196,6 +1246,11 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
             let k = kernel.read().await;
             k.kernel_config().agent.clone().unwrap_or_default()
         };
+        // WEFT-654 D10: snapshot the proposal timeout for the M2 reaper
+        // (out of `anchor_cfg`'s scope by the time the reaper spawns).
+        let _ = DAEMON_PROPOSAL_TIMEOUT.set(std::time::Duration::from_secs(
+            anchor_cfg.proposal.timeout_secs.unwrap_or(600),
+        ));
         let (agent_sink, session_tier): (
             Arc<dyn clawft_core::agent::sink::ConversationSink>,
             Option<Arc<clawft_service_agent::SessionTier>>,
@@ -1645,6 +1700,12 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
         )
         .await;
 
+        // WEFT-654: stash the concrete loop `Arc` before it moves into
+        // `AgentService::new` below — `agent.proposal.*` RPC arms need the
+        // review-gate methods (`pending_hold_info`/`accept_pending`/
+        // `discard_pending`) that `AgentLoopHandle` doesn't expose.
+        let _ = DAEMON_AGENT_LOOP.set(agent_loop.clone());
+
         // WEFT-616 Phase 2: attach the per-turn COW memory bracket when the
         // operator enabled it. Fail-open with a loud warning — a broken COW
         // store must not take the whole agent service down (the bracket is
@@ -1664,12 +1725,24 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                 Ok(mem) => {
                     let cow_handle = std::sync::Arc::new(std::sync::Mutex::new(mem));
                     let _ = DAEMON_COW_MEMORY.set(cow_handle.clone());
-                    agent_loop.set_cow_memory(
-                        cow_handle,
-                        cow_memory_cfg.ingest_turns,
-                        cow_memory_cfg.cadence == clawft_types::config::CowCadence::Tool,
+                    // WEFT-654: `review` comes off the kernel-config anchor
+                    // block (`anchor_cfg.proposal.mode`), not `cow_memory_cfg`
+                    // — the review gate is a policy over the SAME lineage,
+                    // configured in `[kernel.agent.proposal]` rather than
+                    // `[agents.cow_memory]`.
+                    agent_loop.set_cow_memory(clawft_core::agent::loop_core::CowAttachment {
+                        mem: cow_handle,
+                        ingest_turns: cow_memory_cfg.ingest_turns,
+                        tool_cadence: cow_memory_cfg.cadence
+                            == clawft_types::config::CowCadence::Tool,
+                        review: anchor_cfg.proposal.mode
+                            == clawft_types::config::ProposalMode::Review,
+                    });
+                    info!(
+                        path = %path,
+                        review = anchor_cfg.proposal.mode == clawft_types::config::ProposalMode::Review,
+                        "cow memory wired (WEFT-616 Phase 2 / WEFT-654): per-turn checkpoint/promote/rollback active"
                     );
-                    info!(path = %path, "cow memory wired (WEFT-616 Phase 2): per-turn checkpoint/promote/rollback active");
 
                     // WEFT-616 Phase 3: witness the bracket's transitions on
                     // the exochain (DualStateBridge, plan §7). A ledger with
@@ -2344,6 +2417,36 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                             reaper_loop.end_conversation(&conv_id);
                             activity.remove(&conv_id);
                             info!(conv_id = %conv_id, "M2 reaper: ended idle talk conversation");
+                        }
+                        // WEFT-654 D10: fail-closed timeout guard on a parked
+                        // review-mode proposal. A hold past its
+                        // `[kernel.agent.proposal].timeout_secs` deadline is
+                        // DISCARDED (prune + witness), never silently
+                        // committed — same fail-closed posture as the rest
+                        // of governance. Runs every tick regardless of
+                        // conversation idleness: the loop's cow lineage is
+                        // global, so a held proposal blocks ALL new
+                        // dispatches (D9) — a conv "under review" already
+                        // can't go idle-active in the ordinary sense, it's
+                        // parked until accept/discard/timeout resolves it.
+                        if let (Some(loop_handle), Some(timeout)) =
+                            (daemon_agent_loop(), DAEMON_PROPOSAL_TIMEOUT.get())
+                            && let Some((label, age)) = loop_handle.pending_hold_info()
+                            && age > *timeout
+                        {
+                            match loop_handle.discard_pending("timeout") {
+                                Ok(_) => warn!(
+                                    label = %label,
+                                    age_secs = age.as_secs(),
+                                    timeout_secs = timeout.as_secs(),
+                                    "M2 reaper: proposal timed out — discarded (fail-closed)"
+                                ),
+                                Err(e) => warn!(
+                                    label = %label,
+                                    error = %e,
+                                    "M2 reaper: proposal timeout discard failed"
+                                ),
+                            }
                         }
                         // WEFT-652 AutoPause: with NO conversations left
                         // active, park the cow lineage — freeze working (no
@@ -5219,6 +5322,63 @@ async fn dispatch(
                 Err(e) => Response::error(format!("agent.turn.record: {e}")),
             }
         }
+        "agent.proposal.list" => {
+            // WEFT-654 D9-D11: list the held review-mode proposal (0 or 1
+            // today; the wire shape is a list for the per-conv Phase 2
+            // preview). Reads `DAEMON_AGENT_LOOP` directly — `AgentService`'s
+            // `AgentLoopHandle` trait doesn't expose the review-gate surface.
+            let Some(loop_handle) = daemon_agent_loop() else {
+                return Response::error("agent service not wired");
+            };
+            let result = proposal_list_result(loop_handle.pending_hold_info());
+            match serde_json::to_value(result) {
+                Ok(v) => Response::success(v),
+                Err(e) => Response::error(format!("agent.proposal.list: {e}")),
+            }
+        }
+        "agent.proposal.accept" => {
+            // Accept = promote + witness (D9). Fails cleanly when there's no
+            // hold to accept (`ClawftError::CowMemory`, "no pending
+            // proposal") rather than panicking.
+            let Some(loop_handle) = daemon_agent_loop() else {
+                return Response::error("agent service not wired");
+            };
+            match loop_handle.accept_pending() {
+                Ok(label) => {
+                    info!(label = %label, "agent.proposal.accept: proposal accepted");
+                    match serde_json::to_value(AgentProposalDecisionResult { label }) {
+                        Ok(v) => Response::success(v),
+                        Err(e) => Response::error(format!("agent.proposal.accept: {e}")),
+                    }
+                }
+                Err(e) => Response::error(format!("agent.proposal.accept: {e}")),
+            }
+        }
+        "agent.proposal.discard" => {
+            // Discard = rollback + witnessed prune (D9); `Discarded` is not
+            // a new state, it's the Wave-2 prune reached deliberately. The
+            // partial trace stays on the graph/chain (discard ≠ delete).
+            let Some(loop_handle) = daemon_agent_loop() else {
+                return Response::error("agent service not wired");
+            };
+            let discard_params: AgentProposalDiscardParams = match serde_json::from_value(params) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Response::error(format!("agent.proposal.discard: invalid params: {e}"));
+                }
+            };
+            let reason = proposal_discard_reason(&discard_params).to_string();
+            match loop_handle.discard_pending(&reason) {
+                Ok(label) => {
+                    warn!(label = %label, reason = %reason, "agent.proposal.discard: proposal discarded");
+                    match serde_json::to_value(AgentProposalDecisionResult { label }) {
+                        Ok(v) => Response::success(v),
+                        Err(e) => Response::error(format!("agent.proposal.discard: {e}")),
+                    }
+                }
+                Err(e) => Response::error(format!("agent.proposal.discard: {e}")),
+            }
+        }
         "terminal.spawn" => handle_terminal_spawn(params, kernel).await,
         "terminal.write" => handle_terminal_write(params, kernel).await,
         "terminal.resize" => handle_terminal_resize(params, kernel).await,
@@ -7248,5 +7408,104 @@ mod tests {
             .expect("plain turn node projected");
         assert_eq!(plain["attempt"], serde_json::json!(false), "no attempt marker on a plain turn");
         assert_eq!(plain["goal"], serde_json::json!(""), "no goal on a plain turn");
+    }
+
+    // ── WEFT-654: agent.proposal RPC wire shape ─────────────────────────
+    //
+    // Standing up a real `AgentLoop` with a review-mode cow attachment is
+    // impractical here (it needs a live `Platform`/`ToolRegistry`/LLM
+    // transport, and the review-gate mocks in
+    // `clawft-core::agent::loop_core::tests` are private to that crate).
+    // What's covered instead: the pure wire-shape helpers
+    // (`proposal_list_result`/`proposal_discard_reason`), the capability
+    // classification, and — via a real UDS round trip, mirroring
+    // `tests/agent_chat_dispatch.rs` — the "not wired" error path for all
+    // three arms. The hold/accept/discard state machine itself
+    // (checkpoint → hold → promote | rollback + witness) is covered by
+    // `clawft-core`'s `turn_checkpoint` tests.
+
+    #[test]
+    fn proposal_list_result_empty_when_no_hold() {
+        let result = proposal_list_result(None);
+        assert!(result.pending.is_empty());
+    }
+
+    #[test]
+    fn proposal_list_result_shapes_the_held_proposal() {
+        let result = proposal_list_result(Some((
+            "turn:agent.chat:conv-1".to_string(),
+            std::time::Duration::from_secs(42),
+        )));
+        assert_eq!(result.pending.len(), 1);
+        assert_eq!(result.pending[0].label, "turn:agent.chat:conv-1");
+        assert_eq!(result.pending[0].age_secs, 42);
+    }
+
+    #[test]
+    fn proposal_discard_reason_defaults_when_omitted() {
+        let params = AgentProposalDiscardParams { reason: None };
+        assert_eq!(proposal_discard_reason(&params), "operator discard");
+    }
+
+    #[test]
+    fn proposal_discard_reason_honors_caller_value() {
+        let params = AgentProposalDiscardParams {
+            reason: Some("bad output".to_string()),
+        };
+        assert_eq!(proposal_discard_reason(&params), "bad output");
+    }
+
+    #[test]
+    fn proposal_discard_params_deserialize_without_reason() {
+        let params: AgentProposalDiscardParams = serde_json::from_value(serde_json::json!({}))
+            .expect("empty object deserializes (reason optional)");
+        assert_eq!(params.reason, None);
+    }
+
+    #[test]
+    fn proposal_capabilities_classified() {
+        assert_eq!(
+            crate::capability::required_capability("agent.proposal.list"),
+            crate::capability::Capability::Read
+        );
+        assert_eq!(
+            crate::capability::required_capability("agent.proposal.accept"),
+            crate::capability::Capability::Write
+        );
+        assert_eq!(
+            crate::capability::required_capability("agent.proposal.discard"),
+            crate::capability::Capability::Write
+        );
+    }
+
+    #[tokio::test]
+    async fn proposal_rpcs_error_cleanly_when_agent_loop_not_wired() {
+        // Mirrors `tests/agent_chat_dispatch.rs`'s "not wired" check: no
+        // boot happened in this test, so `DAEMON_AGENT_LOOP` is unset —
+        // every `agent.proposal.*` arm must surface a typed error rather
+        // than panic.
+        let platform = Arc::new(NativePlatform::new());
+        let kernel = Kernel::boot(Config::default(), KernelConfig::default(), platform)
+            .await
+            .expect("kernel boots");
+        let kernel = Arc::new(tokio::sync::RwLock::new(kernel));
+        let (shutdown_tx, _rx) = watch::channel(false);
+
+        for (method, params) in [
+            ("agent.proposal.list", serde_json::json!({})),
+            ("agent.proposal.accept", serde_json::json!({})),
+            ("agent.proposal.discard", serde_json::json!({"reason": "x"})),
+        ] {
+            let resp = dispatch(method.into(), params, kernel.clone(), shutdown_tx.clone()).await;
+            assert!(
+                !resp.ok,
+                "{method} should error when agent loop isn't wired"
+            );
+            let err = resp.error.expect("error message present");
+            assert!(
+                err.contains("not wired"),
+                "{method}: unexpected error message: {err}"
+            );
+        }
     }
 }

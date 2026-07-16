@@ -32,6 +32,32 @@
 //! the commit (`commit_reply_frontier`); on cancel it leaves the node to the
 //! interrupt executor's prune; on any other failure it prunes + witnesses so
 //! no attempt dangles.
+//!
+//! ## WEFT-654 review-gate / voice-attempt asymmetry (known gap, tracked as
+//! ## a WEFT-655 follow-up)
+//!
+//! `dispatch_reply`'s `Ok` arm below (`agent.dispatch(...)` finalize) always
+//! calls `tier.commit_reply_frontier` immediately — the forest commit path
+//! is unaware of `[kernel.agent.proposal].mode = "review"`. Meanwhile the
+//! SAME turn's memory-side promote is held at the `AgentLoop`'s cow-memory
+//! bracket (D9: `handle_turn` parks it pending `agent.proposal.accept` /
+//! `discard`). So in review mode a voice-originated reply's **forest**
+//! commits right away while its **memory promote** stays pending — the two
+//! halves of the turn (chain/causal-graph state vs. cow-memory state) can
+//! disagree about whether the turn is "done" until the reviewer decides.
+//!
+//! This wasn't wired shut because `AgentService`'s `AgentLoopHandle` trait
+//! (which `DaemonReplySubmitter`/`VoiceLoop` hold as a `Weak<AgentService<H>>`)
+//! doesn't expose `pending_hold_info`/`accept_pending`/`discard_pending` —
+//! only the concrete `AgentLoop` does (see `daemon::DAEMON_AGENT_LOOP`).
+//! Threading that back-reference through here would mean either widening
+//! `AgentLoopHandle` (a trait `clawft-service-agent` owns, used by every
+//! caller, not just voice) or giving the voice loop its own separate
+//! `Weak<AgentLoop<NativePlatform>>` back-channel purely for this one
+//! coupling — both are more machinery than a single-daemon, one-hold-at-
+//! a-time gate justifies right now. Left as-is (today's commit-on-finalize
+//! forest behavior, unconditionally) rather than building something
+//! fragile; auto mode (the default) is completely unaffected.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Weak};
@@ -236,6 +262,10 @@ async fn dispatch_reply<H: AgentLoopHandle>(
                 // Generation finalized — commit the attempt Frontier
                 // (commit-late). The reply text itself landed through the
                 // loop's sink → index_turn path as its own committed turn.
+                // WEFT-654: unconditional even under review-mode cow memory
+                // — the forest commit and the memory promote hold are not
+                // coupled here. See the module-level doc comment (WEFT-655
+                // follow-up) for why and what a real fix needs.
                 if let (Some(tier), Some(seq)) = (agent.session_tier(), seq) {
                     tier.commit_reply_frontier(&conv, seq);
                     shared.clear_in_flight(&conv, seq);
