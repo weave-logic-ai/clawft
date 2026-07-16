@@ -110,6 +110,11 @@ pub struct InterruptRouter {
 /// the normalized (lowercased, punctuation-stripped) transcript as a whole
 /// utterance OR as a leading phrase (so "hold on, actually …" still trips it).
 /// These are only interrupts *while busy* — idle, "stop" is just a word.
+///
+/// **Mirrored** as `WINDOW_STOP_PHRASES` in
+/// `crates/clawft-channels/src/voice/talkmode.rs` (WEFT-615's inter-sentence
+/// playback-window bare-stop swallow) — that crate cannot depend on this one.
+/// **KEEP IN SYNC**: a change here should be mirrored there.
 const STOP_PHRASES: &[&str] = &[
     "stop",
     "hold on",

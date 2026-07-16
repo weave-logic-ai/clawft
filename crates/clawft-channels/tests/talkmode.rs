@@ -78,6 +78,28 @@ impl SttBackend for LenRecordingStt {
     }
 }
 
+/// STT returning a DIFFERENT fixed transcript per call (cycles to the last
+/// entry once exhausted) — lets a test drive a specific transcript for a
+/// WEFT-615 window-interrupt-seeded follow-up turn, distinct from the
+/// utterance that triggered the window.
+struct SequencedStt {
+    texts: Vec<&'static str>,
+    call: AtomicUsize,
+}
+#[async_trait]
+impl SttBackend for SequencedStt {
+    async fn warm(&self) -> Result<(), VoiceError> {
+        Ok(())
+    }
+    async fn transcribe(&self, _utt: &Utterance) -> Result<String, VoiceError> {
+        let i = self.call.fetch_add(1, Ordering::SeqCst);
+        Ok(self.texts[i.min(self.texts.len() - 1)].to_string())
+    }
+    fn model(&self) -> SttModel {
+        SttModel::ParakeetEnglish
+    }
+}
+
 struct MockLlm(&'static str);
 #[async_trait]
 impl VoiceLlm for MockLlm {
@@ -1022,5 +1044,378 @@ async fn loud_broadband_noise_produces_no_turn() {
     assert!(
         !observer.has(|e| matches!(e, ConversationEvent::UserTurn { .. })),
         "broadband noise must not finalize a user turn"
+    );
+}
+
+// ── WEFT-615: inter-sentence listening windows ───────────────────────────
+
+#[tokio::test]
+async fn window_onset_cancels_remaining_sentences_and_emits_interrupted() {
+    let observer = Arc::new(RecordingObserver::default());
+    let sink = Arc::new(RecordingSink::default());
+    let audio = Arc::new(CountingAudio::default());
+
+    let tts = DualLayerTts::new(
+        Arc::new(ImmediateEngine(TtsTier::Fast)),
+        Arc::new(ImmediateEngine(TtsTier::Slow)),
+    )
+    .unwrap();
+
+    let mut ctrl = TalkModeController::new(
+        endpointer(),
+        Arc::new(MockStt("what's the weather today")),
+        None,
+        SpeakerRegistry::new(0.45),
+        VoiceAnswerPolicy::default(),
+        Arc::new(MockLlm("First sentence. Second sentence.")),
+        tts,
+        sink.clone(),
+        audio.clone(),
+        observer.clone() as Arc<dyn ConversationObserver>,
+        TalkModeConfig {
+            sentence_window_ms: 300,
+            barge_in_frames: 3,
+            ..Default::default()
+        },
+    );
+
+    let (tx, rx) = mpsc::channel::<Vec<i16>>(64);
+    let cancel = CancellationToken::new();
+    let run_cancel = cancel.clone();
+    let handle = tokio::spawn(async move { ctrl.run(rx, run_cancel).await });
+
+    calibrate(&tx).await;
+    for _ in 0..3 {
+        tx.send(voiced_frame()).await.unwrap();
+    }
+    for _ in 0..9 {
+        tx.send(silent_frame()).await.unwrap();
+    }
+
+    wait_until(|| observer.has(|e| matches!(e, ConversationEvent::CommittedReply { .. }))).await;
+    // The ack + the first sentence must have played (2 chunks) before the
+    // window between sentence 1 and 2 is open to barge into.
+    wait_until(|| sink.chunks.load(Ordering::SeqCst) >= 2).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // The onset: barge_in_frames=3 consecutive voiced frames inside the window.
+    for _ in 0..3 {
+        tx.send(voiced_frame()).await.unwrap();
+    }
+
+    wait_until(|| observer.has(|e| matches!(e, ConversationEvent::Interrupted))).await;
+    cancel.cancel();
+    drop(tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+
+    assert_eq!(
+        sink.chunks.load(Ordering::SeqCst),
+        2,
+        "the second sentence must never be spoken after a window onset"
+    );
+    assert!(
+        audio.0.load(Ordering::SeqCst) >= 1,
+        "a window onset must flush the AEC render reference like the continuous barge path"
+    );
+}
+
+#[tokio::test]
+async fn sentence_window_ms_zero_keeps_old_single_shot_behavior() {
+    // `sentence_window_ms: 0` must disable windows entirely: a multi-sentence
+    // answer plays as ONE `speak_answer_with_barge_in` call over the whole
+    // text, with no drain-and-listen pause between sentences and no
+    // `Interrupted`/AEC-flush machinery touched.
+    let observer = Arc::new(RecordingObserver::default());
+    let sink = Arc::new(RecordingSink::default());
+    let audio = Arc::new(CountingAudio::default());
+    let tts = DualLayerTts::new(
+        Arc::new(ImmediateEngine(TtsTier::Fast)),
+        Arc::new(ImmediateEngine(TtsTier::Slow)),
+    )
+    .unwrap();
+
+    let mut ctrl = TalkModeController::new(
+        endpointer(),
+        Arc::new(MockStt("tell me something")),
+        None,
+        SpeakerRegistry::new(0.45),
+        VoiceAnswerPolicy::default(),
+        Arc::new(MockLlm("First sentence. Second sentence.")),
+        tts,
+        sink.clone(),
+        audio.clone(),
+        observer.clone() as Arc<dyn ConversationObserver>,
+        TalkModeConfig {
+            sentence_window_ms: 0,
+            ..Default::default()
+        },
+    );
+
+    let (tx, rx) = mpsc::channel::<Vec<i16>>(64);
+    let cancel = CancellationToken::new();
+    let run_cancel = cancel.clone();
+    let handle = tokio::spawn(async move { ctrl.run(rx, run_cancel).await });
+
+    calibrate(&tx).await;
+    for _ in 0..3 {
+        tx.send(voiced_frame()).await.unwrap();
+    }
+    for _ in 0..9 {
+        tx.send(silent_frame()).await.unwrap();
+    }
+
+    wait_until(|| observer.has(|e| matches!(e, ConversationEvent::CommittedReply { .. }))).await;
+    // Ack + both sentences of the answer, all through one single-shot call.
+    wait_until(|| sink.chunks.load(Ordering::SeqCst) >= 3).await;
+    cancel.cancel();
+    drop(tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+
+    assert!(
+        !observer.has(|e| matches!(e, ConversationEvent::Interrupted)),
+        "disabled windows must never emit Interrupted on their own"
+    );
+    assert_eq!(
+        audio.0.load(Ordering::SeqCst),
+        0,
+        "disabled windows must never touch the AEC render reference"
+    );
+}
+
+#[tokio::test]
+async fn single_sentence_reply_takes_no_window() {
+    // Windows are ENABLED (sentence_window_ms > 0), but a single-sentence
+    // reply has nothing to interrupt between, so it must complete near-
+    // instantly rather than pausing for the window's full duration.
+    let observer = Arc::new(RecordingObserver::default());
+    let sink = Arc::new(RecordingSink::default());
+    let audio = Arc::new(CountingAudio::default());
+    let tts = DualLayerTts::new(
+        Arc::new(ImmediateEngine(TtsTier::Fast)),
+        Arc::new(ImmediateEngine(TtsTier::Slow)),
+    )
+    .unwrap();
+
+    let mut ctrl = TalkModeController::new(
+        endpointer(),
+        Arc::new(MockStt("quick question")),
+        None,
+        SpeakerRegistry::new(0.45),
+        VoiceAnswerPolicy::default(),
+        Arc::new(MockLlm("Just one sentence.")),
+        tts,
+        sink.clone(),
+        audio.clone(),
+        observer.clone() as Arc<dyn ConversationObserver>,
+        TalkModeConfig {
+            sentence_window_ms: 300,
+            ..Default::default()
+        },
+    );
+
+    let (tx, rx) = mpsc::channel::<Vec<i16>>(64);
+    let cancel = CancellationToken::new();
+    let run_cancel = cancel.clone();
+    let handle = tokio::spawn(async move { ctrl.run(rx, run_cancel).await });
+
+    calibrate(&tx).await;
+    for _ in 0..3 {
+        tx.send(voiced_frame()).await.unwrap();
+    }
+    for _ in 0..9 {
+        tx.send(silent_frame()).await.unwrap();
+    }
+
+    wait_until(|| observer.has(|e| matches!(e, ConversationEvent::CommittedReply { .. }))).await;
+    let start = std::time::Instant::now();
+    // Ack (1 chunk) already played by the time CommittedReply fires; this
+    // waits for the single sentence's own chunk.
+    wait_until(|| sink.chunks.load(Ordering::SeqCst) >= 2).await;
+    let elapsed = start.elapsed();
+    cancel.cancel();
+    drop(tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "a single-sentence reply must not open a {:?} inter-sentence window, took {elapsed:?}",
+        Duration::from_millis(300)
+    );
+    assert!(!observer.has(|e| matches!(e, ConversationEvent::Interrupted)));
+}
+
+#[tokio::test]
+async fn window_interrupt_bare_stop_is_swallowed_without_a_second_reply() {
+    let observer = Arc::new(RecordingObserver::default());
+    let sink = Arc::new(RecordingSink::default());
+    let audio = Arc::new(CountingAudio::default());
+    let tts = DualLayerTts::new(
+        Arc::new(ImmediateEngine(TtsTier::Fast)),
+        Arc::new(ImmediateEngine(TtsTier::Slow)),
+    )
+    .unwrap();
+
+    let mut ctrl = TalkModeController::new(
+        endpointer(),
+        Arc::new(SequencedStt {
+            texts: vec!["what's the weather today", "stop"],
+            call: AtomicUsize::new(0),
+        }),
+        None,
+        SpeakerRegistry::new(0.45),
+        VoiceAnswerPolicy::default(),
+        Arc::new(MockLlm("First sentence. Second sentence.")),
+        tts,
+        sink.clone(),
+        audio.clone(),
+        observer.clone() as Arc<dyn ConversationObserver>,
+        TalkModeConfig {
+            sentence_window_ms: 300,
+            barge_in_frames: 3,
+            ..Default::default()
+        },
+    );
+
+    let (tx, rx) = mpsc::channel::<Vec<i16>>(64);
+    let cancel = CancellationToken::new();
+    let run_cancel = cancel.clone();
+    let handle = tokio::spawn(async move { ctrl.run(rx, run_cancel).await });
+
+    calibrate(&tx).await;
+    for _ in 0..3 {
+        tx.send(voiced_frame()).await.unwrap();
+    }
+    for _ in 0..9 {
+        tx.send(silent_frame()).await.unwrap();
+    }
+
+    wait_until(|| observer.has(|e| matches!(e, ConversationEvent::CommittedReply { .. }))).await;
+    wait_until(|| sink.chunks.load(Ordering::SeqCst) >= 2).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // The onset of the "stop" utterance: barge_in_frames=3 voiced frames.
+    for _ in 0..3 {
+        tx.send(voiced_frame()).await.unwrap();
+    }
+    wait_until(|| observer.has(|e| matches!(e, ConversationEvent::Interrupted))).await;
+    // Silence to cross the endpointer's max-silence ceiling and finalize it.
+    for _ in 0..9 {
+        tx.send(silent_frame()).await.unwrap();
+    }
+
+    wait_until(|| {
+        observer.has(|e| matches!(e, ConversationEvent::TurnGated { reason } if reason == "playback_stop"))
+    })
+    .await;
+    cancel.cancel();
+    drop(tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+
+    let events = observer.snapshot();
+    let user_turns = events
+        .iter()
+        .filter(|e| matches!(e, ConversationEvent::UserTurn { .. }))
+        .count();
+    let committed = events
+        .iter()
+        .filter(|e| matches!(e, ConversationEvent::CommittedReply { .. }))
+        .count();
+    assert_eq!(
+        user_turns, 2,
+        "both the triggering utterance and the bare-stop utterance must finalize/record"
+    );
+    assert_eq!(
+        committed, 1,
+        "the bare-stop swallow must not produce a second ack/LLM/answer"
+    );
+}
+
+#[tokio::test]
+async fn window_interrupt_content_utterance_proceeds_as_a_normal_turn() {
+    // Contrast case for the bare-stop swallow above: a CONTENT utterance
+    // captured by the same window-onset mechanism is not a stop phrase, so
+    // it must proceed through the ordinary ack/LLM/answer reply slot.
+    let observer = Arc::new(RecordingObserver::default());
+    let sink = Arc::new(RecordingSink::default());
+    let audio = Arc::new(CountingAudio::default());
+    let tts = DualLayerTts::new(
+        Arc::new(ImmediateEngine(TtsTier::Fast)),
+        Arc::new(ImmediateEngine(TtsTier::Slow)),
+    )
+    .unwrap();
+
+    let mut ctrl = TalkModeController::new(
+        endpointer(),
+        Arc::new(SequencedStt {
+            texts: vec!["what's the weather today", "what about tomorrow"],
+            call: AtomicUsize::new(0),
+        }),
+        None,
+        SpeakerRegistry::new(0.45),
+        VoiceAnswerPolicy::default(),
+        Arc::new(MockLlm("First sentence. Second sentence.")),
+        tts,
+        sink.clone(),
+        audio.clone(),
+        observer.clone() as Arc<dyn ConversationObserver>,
+        TalkModeConfig {
+            sentence_window_ms: 300,
+            barge_in_frames: 3,
+            ..Default::default()
+        },
+    );
+
+    let (tx, rx) = mpsc::channel::<Vec<i16>>(64);
+    let cancel = CancellationToken::new();
+    let run_cancel = cancel.clone();
+    let handle = tokio::spawn(async move { ctrl.run(rx, run_cancel).await });
+
+    calibrate(&tx).await;
+    for _ in 0..3 {
+        tx.send(voiced_frame()).await.unwrap();
+    }
+    for _ in 0..9 {
+        tx.send(silent_frame()).await.unwrap();
+    }
+
+    wait_until(|| observer.has(|e| matches!(e, ConversationEvent::CommittedReply { .. }))).await;
+    wait_until(|| sink.chunks.load(Ordering::SeqCst) >= 2).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    for _ in 0..3 {
+        tx.send(voiced_frame()).await.unwrap();
+    }
+    wait_until(|| observer.has(|e| matches!(e, ConversationEvent::Interrupted))).await;
+    for _ in 0..9 {
+        tx.send(silent_frame()).await.unwrap();
+    }
+
+    let committed_count = |obs: &RecordingObserver| {
+        obs.snapshot()
+            .iter()
+            .filter(|e| matches!(e, ConversationEvent::CommittedReply { .. }))
+            .count()
+    };
+    wait_until(|| committed_count(&observer) >= 2).await;
+    cancel.cancel();
+    drop(tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+
+    let events = observer.snapshot();
+    let user_turns = events
+        .iter()
+        .filter(|e| matches!(e, ConversationEvent::UserTurn { .. }))
+        .count();
+    assert_eq!(user_turns, 2, "both utterances must finalize/record");
+    assert_eq!(
+        committed_count(&observer),
+        2,
+        "a content utterance after a window interrupt must proceed as a normal turn"
+    );
+    assert!(
+        !observer.has(
+            |e| matches!(e, ConversationEvent::TurnGated { reason } if reason == "playback_stop")
+        ),
+        "a content utterance must not be swallowed as a bare stop"
     );
 }

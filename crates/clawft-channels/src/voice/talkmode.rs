@@ -86,6 +86,12 @@ const BARGE_IN_MARGIN_DB: f32 = 15.0;
 /// the echo canceller converges on the new render signal.
 const BARGE_IN_GRACE_MS: u64 = 400;
 
+/// Default inter-sentence listening window (ms, WEFT-615 interim) — see
+/// [`TalkModeConfig::sentence_window_ms`]. No grace period is needed here
+/// (unlike [`BARGE_IN_GRACE_MS`]): nothing plays during the window, so
+/// there is no echo to converge past.
+const DEFAULT_SENTENCE_WINDOW_MS: u64 = 350;
+
 /// Minimum spacing between live `CaptureLevel` events (~10 Hz). The capture
 /// loop computes RMS + floor every frame, but the surface only needs a smooth
 /// meter — this caps observer traffic regardless of the device frame cadence.
@@ -200,9 +206,11 @@ pub enum ConversationEvent {
     /// wherever observers treat process events as surface-only.
     TurnGated {
         /// Why the reply slot was skipped: `"non_lexical"` (paralinguistics
-        /// classified the turn as backchannel/laughter/filler) or
-        /// `"unclear"` ([`utterance_clarity`] failed — a spoken
-        /// clarification request was the only audio emitted).
+        /// classified the turn as backchannel/laughter/filler), `"unclear"`
+        /// ([`utterance_clarity`] failed — a spoken clarification request
+        /// was the only audio emitted), or `"playback_stop"` (WEFT-615: an
+        /// inter-sentence listening window caught a bare STOP phrase — the
+        /// user just wanted silence, not a new turn).
         reason: String,
     },
     /// The grounded answer — the **Committed** node that supersedes the ack.
@@ -286,6 +294,21 @@ pub struct TalkModeConfig {
     /// ~400 ms in and cancelling every answer. Enable once AEC residual
     /// is tuned (tracked in Plane).
     pub barge_in_enabled: bool,
+    /// Inter-sentence listening window (ms, WEFT-615 interim): the spoken
+    /// answer is split into sentences ([`super::tts::split_sentences`]),
+    /// each played to completion; between sentences the sink is drained to
+    /// physical silence and this window listens for a sustained voiced
+    /// onset against the SAME frozen barge gate the continuous monitor uses
+    /// ([`BARGE_IN_MARGIN_DB`] over the noise floor, not learning). Because
+    /// nothing is playing during the window, it is echo-free BY PHYSICS —
+    /// no AEC/ERL tuning required — making it the SPEAKER-SAFE default,
+    /// unlike [`barge_in_enabled`](Self::barge_in_enabled) (continuous
+    /// monitoring DURING playback; open speakers echo the bot's own voice
+    /// back into the gate, so that stays headphones-only and off by
+    /// default). `0` disables windows entirely — the answer plays as one
+    /// single-shot call, byte-identical to the pre-WEFT-615 path. A single-
+    /// sentence reply never opens a window (nothing to interrupt between).
+    pub sentence_window_ms: u64,
     /// Listen-only mode (Wave 1 §W1.4): record + classify + store every turn
     /// (the recorder observer still fires `UserTurn` with the full
     /// `VoiceAnalysis`), but **skip the brain** — no ack, no LLM answer, no
@@ -305,6 +328,7 @@ impl Default for TalkModeConfig {
             speaker_store: None,
             barge_in_grace_ms: BARGE_IN_GRACE_MS,
             barge_in_enabled: false,
+            sentence_window_ms: DEFAULT_SENTENCE_WINDOW_MS,
             listen_only: false,
         }
     }
@@ -345,6 +369,13 @@ struct FinalizedTurn {
     endpoint: Option<EndpointSnapshot>,
     noise_floor_dbfs: f32,
     noise_floor_converged: bool,
+    /// Whether this utterance's onset was the captured tail of a WEFT-615
+    /// inter-sentence playback-window interrupt (vs an ordinary idle-mic
+    /// onset) — `talk_turn` scopes the bare-stop swallow
+    /// ([`is_bare_stop_phrase`]) to window interrupts only: "stop" said
+    /// while idle is an ordinary word (mirrors interrupt_router.rs's timing
+    /// axis — see [`WINDOW_STOP_PHRASES`]).
+    from_window_interrupt: bool,
 }
 
 /// The STT → speaker → record → emit pipeline for one finalized utterance,
@@ -989,6 +1020,12 @@ impl<M: EndpointModel> TalkModeController<M> {
         // gates on this, not `utt.len()`, since pre-roll prepends (mostly quiet)
         // pre-onset audio that would otherwise let a noise blip clear the gate.
         let mut voiced_samples: usize = 0;
+        // WEFT-615: set when `utt` was seeded from a playback-window
+        // interrupt's captured onset frames (see the `talk_turn` handoff
+        // below) rather than an ordinary idle-mic onset. Threaded onto the
+        // next `FinalizedTurn` so `talk_turn` can scope the bare-stop
+        // swallow to it; reset (taken) at every finalize.
+        let mut from_window_interrupt = false;
         let mut last_level: Option<Instant> = None;
         // Pre-onset ring: the last PREROLL_MS of raw frames, prepended to a new
         // utterance at onset so the below-gate word attack isn't clipped.
@@ -1030,6 +1067,7 @@ impl<M: EndpointModel> TalkModeController<M> {
                         TurnDecision::Finalize => {
                             let captured = std::mem::take(&mut utt);
                             let captured_voiced = std::mem::take(&mut voiced_samples);
+                            let captured_from_window = std::mem::take(&mut from_window_interrupt);
                             // Guard against ghost turns: noise blips and the
                             // reverb tail of our own playback can cross the
                             // gate for a few frames and finalize a sub-word
@@ -1055,6 +1093,7 @@ impl<M: EndpointModel> TalkModeController<M> {
                                     endpoint: snap,
                                     noise_floor_dbfs: self.noise_floor.floor_dbfs(),
                                     noise_floor_converged: self.noise_floor.converged(),
+                                    from_window_interrupt: captured_from_window,
                                 };
                                 if let (Some(q), Some(n)) = (&decode_queue, &decode_notify) {
                                     // Listen-only: hand off to the worker and keep
@@ -1069,8 +1108,33 @@ impl<M: EndpointModel> TalkModeController<M> {
                                     }
                                     n.notify_one();
                                 } else {
-                                    // Talk mode: decode inline, then reply.
-                                    self.talk_turn(turn, &mut frames, &cancel).await;
+                                    // Talk mode: decode inline, then reply. A
+                                    // non-empty return is the captured onset of a
+                                    // WEFT-615 playback-window interrupt (see
+                                    // `speak_answer_windowed`/`listen_window`):
+                                    // seed it straight into `utt` so the NEXT
+                                    // `frames.recv()` iteration continues this
+                                    // utterance exactly like an ordinary in-
+                                    // progress capture — no preroll needed, this
+                                    // audio already IS the onset.
+                                    let pending = self.talk_turn(turn, &mut frames, &cancel).await;
+                                    if !pending.is_empty() {
+                                        voiced_samples = pending.len();
+                                        // The endpointer never saw these frames
+                                        // (`listen_window` consumed them directly,
+                                        // bypassing `self.endpointer.observe`), so
+                                        // without this catch-up call its `active`
+                                        // flag stays false and the silence that
+                                        // follows would never finalize the turn —
+                                        // `SemanticEndpointer::observe` treats a
+                                        // silence frame as a no-op while no turn is
+                                        // in progress. One voiced replay call opens
+                                        // it, exactly as if these frames had arrived
+                                        // through the normal capture path.
+                                        let _ = self.endpointer.observe(&pending, true, "").await;
+                                        utt = pending;
+                                        from_window_interrupt = true;
+                                    }
                                 }
                             } else if !captured.is_empty() {
                                 debug!(
@@ -1093,23 +1157,48 @@ impl<M: EndpointModel> TalkModeController<M> {
 
     /// One talk-mode turn: decode + emit the `UserTurn` (via the shared
     /// [`Decoder`]), then ack → (race the grounded answer against the filler
-    /// gate) → speak with barge-in. Talk mode decodes inline (it must
-    /// produce the reply anyway); listen-only runs the same decode off-loop
-    /// in the worker.
+    /// gate) → speak with barge-in / inter-sentence windows. Talk mode
+    /// decodes inline (it must produce the reply anyway); listen-only runs
+    /// the same decode off-loop in the worker.
+    ///
+    /// Returns the captured onset frames of a WEFT-615 playback-window
+    /// interrupt (see [`speak_answer_windowed`](Self::speak_answer_windowed)),
+    /// for `run()` to seed straight into the next in-progress utterance;
+    /// empty in every other case (normal completion, continuous barge-in,
+    /// any of the existing gate/error early-outs).
     async fn talk_turn(
         &mut self,
         turn: FinalizedTurn,
         frames: &mut mpsc::Receiver<Vec<i16>>,
         cancel: &CancellationToken,
-    ) {
+    ) -> Vec<i16> {
+        let from_window_interrupt = turn.from_window_interrupt;
         let Some(decoded) = self.decoder.decode_and_emit(turn).await else {
-            return; // empty transcript / STT error — turn dropped (UserTurn not emitted)
+            return Vec::new(); // empty transcript / STT error — turn dropped (UserTurn not emitted)
         };
         let DecodedTurn {
             text,
             speaker_ctx,
             analysis,
         } = decoded;
+
+        // WEFT-615: an utterance whose ONSET was captured by a playback-
+        // window interrupt gets one extra gate before the usual non-lexical/
+        // unclear checks — a bare STOP phrase means the user just wanted
+        // silence, not a new turn: no ack, no LLM call, no spoken reply, and
+        // (unlike the gates below) no `TurnGated` follow-up speech either.
+        // Scoped strictly to `from_window_interrupt` turns — the same words
+        // said while idle are an ordinary turn (mirrors interrupt_router.rs's
+        // timing-axis rule; this crate cannot depend on that crate, so
+        // `WINDOW_STOP_PHRASES` is a local, explicitly-synced mirror of its
+        // `STOP_PHRASES`).
+        if from_window_interrupt && is_bare_stop_phrase(&text) {
+            debug!(transcript = %text, "talk-mode window interrupt: bare stop — swallowed");
+            self.observer.observe(ConversationEvent::TurnGated {
+                reason: "playback_stop".into(),
+            });
+            return Vec::new();
+        }
 
         // The non-lexical / unclear gate (WEFT-659): decide BEFORE any of the
         // reply slot runs — no ack, no filler, no `VoiceLlm::complete`, no
@@ -1121,7 +1210,7 @@ impl<M: EndpointModel> TalkModeController<M> {
                 self.observer.observe(ConversationEvent::TurnGated {
                     reason: "non_lexical".into(),
                 });
-                return;
+                return Vec::new();
             }
             Engage::GateUnclear => {
                 debug!(transcript = %text, "talk-mode turn gated: unclear");
@@ -1136,7 +1225,7 @@ impl<M: EndpointModel> TalkModeController<M> {
                     cancel,
                 )
                 .await;
-                return;
+                return Vec::new();
             }
         }
 
@@ -1160,7 +1249,7 @@ impl<M: EndpointModel> TalkModeController<M> {
         )
         .await;
         if cancel.is_cancelled() {
-            return;
+            return Vec::new();
         }
 
         // Grounded answer, shaped short by the spoken-answer policy (6.3) —
@@ -1207,18 +1296,18 @@ impl<M: EndpointModel> TalkModeController<M> {
             }
         };
         if cancel.is_cancelled() {
-            return;
+            return Vec::new();
         }
 
         let answer = match answer_result {
             Ok(a) if !a.trim().is_empty() => a,
             Ok(_) => {
                 warn!("talk-mode LLM returned an empty answer; turn dropped");
-                return;
+                return Vec::new();
             }
             Err(e) => {
                 warn!(error = %e, "talk-mode LLM failed");
-                return;
+                return Vec::new();
             }
         };
         info!(answer = %answer, "talk-mode committed reply");
@@ -1226,24 +1315,135 @@ impl<M: EndpointModel> TalkModeController<M> {
             answer: answer.clone(),
         });
 
-        // Stream the answer (6.4); monitor for barge-in. The ack (and any
+        // Stream the answer (6.4) sentence-by-sentence with inter-sentence
+        // listening windows (WEFT-615) plus continuous barge-in monitoring
+        // per sentence (`barge_in_enabled`, headphones). The ack (and any
         // filler) have already been spoken by now.
-        self.speak_answer_with_barge_in(&answer, frames, cancel)
-            .await;
+        self.speak_answer_windowed(&answer, frames, cancel).await
     }
 
-    /// Stream the grounded answer, monitoring for barge-in: a sustained
-    /// voiced run during playback is a barge-in → cancel TTS (flushes the
-    /// sink) + flush the AEC render reference + emit `Interrupted`. Barge-in
-    /// coverage lives here (the long stretch) rather than on the brief
-    /// ack/filler steps — see [`speak_while_draining`] and WEFT-658's "no new
-    /// interrupt machinery" constraint.
+    /// Stream the grounded answer (WEFT-615): split into sentences
+    /// ([`super::tts::split_sentences`]) and speak them one at a time via
+    /// [`speak_answer_with_barge_in`](Self::speak_answer_with_barge_in), so
+    /// each sentence keeps that call's exact tier-selection/fallback
+    /// semantics (SLOW-tier prebuffer-then-play, re-render through FAST on
+    /// zero audio) — just applied per sentence instead of to the whole
+    /// answer. Between sentences (once the sink is confirmed drained to
+    /// silence by that call) an inter-sentence [`listen_window`](Self::listen_window)
+    /// opens for `sentence_window_ms`. `0` or a single-sentence answer skips
+    /// all of this and calls [`speak_answer_with_barge_in`](Self::speak_answer_with_barge_in)
+    /// once with the whole text — byte-identical to the pre-WEFT-615 path
+    /// (nothing to interrupt between one sentence, and disabling windows
+    /// should disable every seam this feature adds).
+    ///
+    /// Returns the captured onset frames of a window interrupt for `run()`
+    /// to seed into the next in-progress utterance (see the `talk_turn`
+    /// caller); empty otherwise (normal completion, continuous barge-in, or
+    /// session cancel — all of which already left `Interrupted`/nothing
+    /// further to say).
+    async fn speak_answer_windowed(
+        &self,
+        answer: &str,
+        frames: &mut mpsc::Receiver<Vec<i16>>,
+        cancel: &CancellationToken,
+    ) -> Vec<i16> {
+        let sentences = super::tts::split_sentences(answer);
+        if self.config.sentence_window_ms == 0 || sentences.len() <= 1 {
+            self.speak_answer_with_barge_in(answer, frames, cancel).await;
+            return Vec::new();
+        }
+        let last = sentences.len() - 1;
+        for (i, sentence) in sentences.iter().enumerate() {
+            if cancel.is_cancelled() {
+                return Vec::new();
+            }
+            let interrupted = self
+                .speak_answer_with_barge_in(sentence, frames, cancel)
+                .await;
+            if interrupted || cancel.is_cancelled() || i == last {
+                return Vec::new();
+            }
+            if let Some(onset) = self.listen_window(frames, cancel).await {
+                debug!("talk-mode inter-sentence window onset — stopping remaining sentences");
+                self.audio.flush(); // AEC render reference, mirrors the continuous barge path
+                self.observer.observe(ConversationEvent::Interrupted);
+                return onset;
+            }
+        }
+        Vec::new()
+    }
+
+    /// Open one inter-sentence listening window (WEFT-615): the sink is
+    /// already silent (the preceding [`speak_answer_with_barge_in`](Self::speak_answer_with_barge_in)
+    /// call drained it), so this is echo-free BY PHYSICS — no AEC and no
+    /// [`BARGE_IN_GRACE_MS`] convergence period needed (nothing is playing
+    /// to converge past). Consumes mic frames against the SAME frozen barge
+    /// gate the continuous monitor uses (the noise floor is NOT advanced
+    /// here — same freeze rationale as [`speak_answer_with_barge_in`](Self::speak_answer_with_barge_in)).
+    ///
+    /// Returns the captured frames of a sustained voiced onset
+    /// ([`TalkModeConfig::barge_in_frames`] consecutive frames over the
+    /// gate) — the caller hands these to `run()`'s normal capture machinery
+    /// so the interrupting utterance is captured from its true onset, not
+    /// re-detected from scratch. `None` if `sentence_window_ms` elapses (or
+    /// `cancel` fires, or the capture channel closes) with no sustained
+    /// onset — the caller proceeds to the next sentence.
+    async fn listen_window(
+        &self,
+        frames: &mut mpsc::Receiver<Vec<i16>>,
+        cancel: &CancellationToken,
+    ) -> Option<Vec<i16>> {
+        let barge_gate = (self.noise_floor.floor_dbfs() + BARGE_IN_MARGIN_DB)
+            .max(self.config.vad_threshold_dbfs);
+        let deadline = tokio::time::sleep(Duration::from_millis(self.config.sentence_window_ms));
+        tokio::pin!(deadline);
+        let mut voiced_run: u32 = 0;
+        let mut captured: Vec<i16> = Vec::new();
+        loop {
+            tokio::select! {
+                _ = &mut deadline => return None,
+                _ = cancel.cancelled() => return None,
+                maybe = frames.recv() => {
+                    match maybe {
+                        Some(frame) => {
+                            if EnergyVad::rms_dbfs(&frame) >= barge_gate {
+                                voiced_run += 1;
+                                captured.extend_from_slice(&frame);
+                                if voiced_run >= self.config.barge_in_frames {
+                                    return Some(captured);
+                                }
+                            } else {
+                                voiced_run = 0;
+                                captured.clear();
+                            }
+                        }
+                        None => return None, // capture channel closed
+                    }
+                }
+            }
+        }
+    }
+
+    /// Stream one sentence (or, when windows are disabled/inapplicable, the
+    /// whole answer text) of the grounded answer, monitoring for CONTINUOUS
+    /// barge-in: a sustained voiced run during playback is a barge-in →
+    /// cancel TTS (flushes the sink) + flush the AEC render reference + emit
+    /// `Interrupted`. Gated behind [`TalkModeConfig::barge_in_enabled`]
+    /// (headphones only — see [`TalkModeConfig::sentence_window_ms`] for the
+    /// speaker-safe default). See [`speak_while_draining`] and WEFT-658's
+    /// "no new interrupt machinery" constraint.
+    ///
+    /// Returns `true` if this call's playback was interrupted (continuous
+    /// barge-in, session cancel, or the capture channel closing) — the
+    /// [`speak_answer_windowed`](Self::speak_answer_windowed) caller stops
+    /// there rather than starting the next sentence; `false` on normal
+    /// completion.
     async fn speak_answer_with_barge_in(
         &self,
         answer: &str,
         frames: &mut mpsc::Receiver<Vec<i16>>,
         cancel: &CancellationToken,
-    ) {
+    ) -> bool {
         // Snapshot the voiced gate for the playback window: the noise-floor
         // tracker must NOT learn from frames while the bot is speaking (its
         // own echo would lift the floor), so barge-in uses a frozen, steeper
@@ -1258,6 +1458,7 @@ impl<M: EndpointModel> TalkModeController<M> {
         tokio::pin!(speak);
 
         let mut voiced_run: u32 = 0;
+        let mut interrupted = false;
         loop {
             tokio::select! {
                 res = &mut speak => {
@@ -1267,6 +1468,7 @@ impl<M: EndpointModel> TalkModeController<M> {
                     break; // finished speaking, uninterrupted
                 }
                 _ = cancel.cancelled() => {
+                    interrupted = true;
                     turn_cancel.cancel();
                     let _ = (&mut speak).await;
                     break;
@@ -1287,7 +1489,7 @@ impl<M: EndpointModel> TalkModeController<M> {
                                     turn_cancel.cancel();        // TTS producer + sink flush
                                     self.observer.observe(ConversationEvent::Interrupted);
                                     let _ = (&mut speak).await;   // let it unwind
-                                    return;
+                                    return true;
                                 }
                             } else {
                                 voiced_run = 0;
@@ -1296,7 +1498,7 @@ impl<M: EndpointModel> TalkModeController<M> {
                         None => {
                             turn_cancel.cancel();
                             let _ = (&mut speak).await;
-                            return;
+                            return true;
                         }
                     }
                 }
@@ -1321,7 +1523,50 @@ impl<M: EndpointModel> TalkModeController<M> {
             }
         }
         while frames.try_recv().is_ok() {}
+        interrupted
     }
+}
+
+/// Local mirror of `clawft_service_agent::interrupt_router::STOP_PHRASES`
+/// (crates/clawft-service-agent/src/interrupt_router.rs) — this crate
+/// (clawft-channels) cannot depend on clawft-service-agent, so the bare-stop
+/// lexicon used to swallow a WEFT-615 playback-window interrupt is
+/// duplicated here. **KEEP IN SYNC**: a change to the source list should be
+/// mirrored here (and vice versa); see the matching note on
+/// `interrupt_router::STOP_PHRASES`.
+const WINDOW_STOP_PHRASES: &[&str] = &[
+    "stop",
+    "hold on",
+    "hold up",
+    "wait",
+    "wait wait",
+    "cancel",
+    "cancel that",
+    "never mind",
+    "nevermind",
+    "forget it",
+    "scratch that",
+    "abort",
+    "halt",
+    "belay that",
+    "quit",
+    "no wait",
+    "stop stop",
+];
+
+/// Whether `text`, once normalized (lowercased, whitespace-collapsed,
+/// trailing sentence punctuation stripped — mirrors
+/// `interrupt_router::normalize`), IS (in full) one of
+/// [`WINDOW_STOP_PHRASES`]. Used only to swallow a WEFT-615 playback-window
+/// interrupt's finalized utterance. Unlike the router's `stop_remainder`,
+/// there is no "stop that continues into a correction/request" branch here —
+/// a window interrupt is either a bare stop (swallowed) or an ordinary turn
+/// (proceeds); there is no Refine path in a playback interrupt.
+fn is_bare_stop_phrase(text: &str) -> bool {
+    let lowered = text.trim().to_lowercase();
+    let collapsed = lowered.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = collapsed.trim_end_matches(['.', '!', '?']).trim();
+    WINDOW_STOP_PHRASES.contains(&normalized)
 }
 
 /// Build a short *contextual* acknowledgment from the transcript (echo the
@@ -1507,6 +1752,34 @@ pub fn should_speak_filler(elapsed: Duration, reply_ready: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── is_bare_stop_phrase (WEFT-615 window-interrupt swallow lexicon) ──
+
+    #[test]
+    fn bare_stop_phrases_match_canonical_entries() {
+        for text in ["stop", "wait", "cancel", "never mind", "hold on", "abort"] {
+            assert!(is_bare_stop_phrase(text), "{text} must match");
+        }
+    }
+
+    #[test]
+    fn bare_stop_match_is_case_and_punctuation_insensitive() {
+        assert!(is_bare_stop_phrase("Stop."));
+        assert!(is_bare_stop_phrase("  WAIT!  "));
+        assert!(is_bare_stop_phrase("Never Mind?"));
+    }
+
+    #[test]
+    fn content_utterances_do_not_match() {
+        for text in [
+            "what's the weather today",
+            "stop the car please", // continues past the bare phrase — not a match
+            "stopwatch feature", // must not match on a mere prefix
+            "",
+        ] {
+            assert!(!is_bare_stop_phrase(text), "{text} must not match");
+        }
+    }
 
     #[test]
     fn ack_is_short_for_short_input() {
