@@ -396,7 +396,7 @@ fn audio_noise_floor_converged(voice_analysis: Option<&serde_json::Value>) -> Op
 /// fields (no `voice_analysis`, no `stt.token_conf_mean`) are always CLEAR.
 /// - `word_count >= 4 && token_conf_mean < 0.55` → unclear
 /// - `token_conf_mean < 0.30` → unclear
-/// - `snr_db < 5.0 && noise_floor_converged && token_conf_mean < 0.70` → unclear
+/// - `snr_db < 5.0 && noise_floor_converged && token_conf_mean < 0.50` → unclear
 fn is_unclear_utterance(text: &str, voice_analysis: Option<&serde_json::Value>) -> bool {
     let Some(token_conf_mean) = stt_token_conf_mean(voice_analysis) else {
         return false;
@@ -412,7 +412,7 @@ fn is_unclear_utterance(text: &str, voice_analysis: Option<&serde_json::Value>) 
         audio_snr_db(voice_analysis),
         audio_noise_floor_converged(voice_analysis),
     ) && snr_db < 5.0
-        && token_conf_mean < 0.70
+        && token_conf_mean < 0.50
     {
         return true;
     }

@@ -110,12 +110,17 @@ fn clarity_rule_floor_conf_below_030_is_always_unclear() {
 }
 
 #[test]
-fn clarity_rule_low_snr_converged_and_mid_conf_is_unclear() {
-    assert!(is_unclear_utterance("ok", Some(&va(0.65, 4.0, true))));
+fn clarity_rule_low_snr_converged_and_low_conf_is_unclear() {
+    // Threshold retuned 0.70 → 0.50 after the live 2026-07-16 mic run: the
+    // user's room RUNS at 3-6dB SNR, and a confident "Thank you." (conf
+    // 0.53, SNR 3.3) was spuriously gated → clarification → self-echo.
+    assert!(is_unclear_utterance("ok", Some(&va(0.45, 4.0, true))));
+    // Confident-enough speech in a merely-noisy room stays CLEAR.
+    assert!(!is_unclear_utterance("ok", Some(&va(0.53, 3.3, true))));
     // Noise floor not converged yet — the SNR clause doesn't fire.
-    assert!(!is_unclear_utterance("ok", Some(&va(0.65, 4.0, false))));
+    assert!(!is_unclear_utterance("ok", Some(&va(0.45, 4.0, false))));
     // SNR at/above the 5.0 floor doesn't fire.
-    assert!(!is_unclear_utterance("ok", Some(&va(0.65, 5.0, true))));
+    assert!(!is_unclear_utterance("ok", Some(&va(0.45, 5.0, true))));
 }
 
 #[test]

@@ -712,7 +712,7 @@ const CLARITY_LOW_SNR_DB: f32 = 5.0;
 /// Confidence floor for the low-SNR rule (higher than
 /// [`CLARITY_LONG_CONF_MIN`] — a bad mic environment needs more headroom
 /// before its transcript is trusted).
-const CLARITY_LOW_SNR_CONF_MIN: f32 = 0.70;
+const CLARITY_LOW_SNR_CONF_MIN: f32 = 0.50;
 
 /// Rate `analysis`'s transcript-worthiness. Deliberately expressible from
 /// wire-level [`VoiceAnalysis`] fields only (`stt.token_conf_mean`,
@@ -1225,6 +1225,12 @@ impl<M: EndpointModel> TalkModeController<M> {
                     cancel,
                 )
                 .await;
+                // Speaker must be SILENT and the capture channel clean before
+                // the mic re-opens: the clarification's audio tail leaked into
+                // capture live, got transcribed as a USER turn ("Sorry. I
+                // didn't catch that. Say it again?"), and the brain obeyed it
+                // by repeating the whole previous answer — a self-echo loop.
+                self.drain_sink_consuming(frames).await;
                 return Vec::new();
             }
         }
@@ -1352,25 +1358,66 @@ impl<M: EndpointModel> TalkModeController<M> {
             self.speak_answer_with_barge_in(answer, frames, cancel).await;
             return Vec::new();
         }
-        let last = sentences.len() - 1;
-        for (i, sentence) in sentences.iter().enumerate() {
+        // Render ONCE up front (the ack/filler already covered this latency —
+        // same prebuffer economics speak_answer always had); the windows
+        // interleave only PLAYBACK, so each inter-sentence gap is
+        // drain + window_ms, not a synthesis round-trip. Per-sentence
+        // re-rendering put seconds of dead air in every gap (found live).
+        let turn_cancel = cancel.child_token();
+        let chunks = match self.tts.render_answer(answer, turn_cancel.clone()).await {
+            Ok(c) if !c.is_empty() => c,
+            Ok(_) => return Vec::new(),
+            Err(e) => {
+                warn!(error = %e, "talk-mode TTS render error");
+                return Vec::new();
+            }
+        };
+        let last = chunks.len() - 1;
+        for (i, chunk) in chunks.iter().enumerate() {
             if cancel.is_cancelled() {
                 return Vec::new();
             }
-            let interrupted = self
-                .speak_answer_with_barge_in(sentence, frames, cancel)
-                .await;
-            if interrupted || cancel.is_cancelled() || i == last {
+            if let Err(e) = self.tts.play_chunk(chunk, &self.sink).await {
+                warn!(error = %e, "talk-mode chunk playback error");
                 return Vec::new();
+            }
+            // Speaker fully silent before the mic opens (echo-free window).
+            self.drain_sink_consuming(frames).await;
+            if i == last {
+                break;
             }
             if let Some(onset) = self.listen_window(frames, cancel).await {
                 debug!("talk-mode inter-sentence window onset — stopping remaining sentences");
                 self.audio.flush(); // AEC render reference, mirrors the continuous barge path
+                turn_cancel.cancel();
                 self.observer.observe(ConversationEvent::Interrupted);
                 return onset;
             }
         }
         Vec::new()
+    }
+
+    /// Wait for the sink to drain while consuming (and discarding) mic
+    /// frames — they contain our own voice; unconsumed they flood the
+    /// capture channel. Extracted from the tail of
+    /// [`speak_answer_with_barge_in`](Self::speak_answer_with_barge_in) so
+    /// every bot-speech path (answer, windowed chunks, clarification) can
+    /// re-open capture clean (a leaked tail became a self-echo turn live:
+    /// the bot transcribed its OWN clarification and obeyed it).
+    async fn drain_sink_consuming(&self, frames: &mut mpsc::Receiver<Vec<i16>>) {
+        let drained = self.sink.wait_drained();
+        tokio::pin!(drained);
+        loop {
+            tokio::select! {
+                _ = &mut drained => break,
+                maybe = frames.recv() => {
+                    if maybe.is_none() {
+                        break;
+                    }
+                }
+            }
+        }
+        while frames.try_recv().is_ok() {}
     }
 
     /// Open one inter-sentence listening window (WEFT-615): the sink is
@@ -1985,6 +2032,18 @@ mod gate_tests {
         assert_eq!(utterance_clarity(&a, "No."), Clarity::Clear);
     }
 
+    /// Live regression (2026-07-16 mic run): "Thank you." — 2 words, conf
+    /// 0.53, SNR 3.3dB in a room that RUNS at 3-6dB SNR — was unclear-gated
+    /// by the old conf<0.70 low-SNR arm and triggered a spurious
+    /// clarification (which then self-echoed). Low SNR alone must not gate
+    /// confident short utterances; the arm now requires conf < 0.50.
+    #[test]
+    fn live_thank_you_low_snr_but_confident_is_clear() {
+        let analysis = analysis_with(0.53, 3.3, true, ParalinguisticClass::Speech);
+        assert_eq!(utterance_clarity(&analysis, "Thank you."), Clarity::Clear);
+    }
+
+
     #[test]
     fn high_confidence_question_is_clear() {
         let a = analysis_with(0.98, 16.3, true, ParalinguisticClass::Speech);
@@ -2045,16 +2104,19 @@ mod gate_tests {
 
     #[test]
     fn low_snr_converged_low_confidence_is_unclear() {
-        let a = analysis_with(0.60, 3.0, true, ParalinguisticClass::Speech);
-        assert_eq!(utterance_clarity(&a, "can you hear me now"), Clarity::Unclear);
+        // Short utterance isolates the SNR arm (the ≥4-word arm can't fire).
+        // Threshold retuned 0.70 → 0.50 after the live 2026-07-16 run — see
+        // live_thank_you_low_snr_but_confident_is_clear.
+        let a = analysis_with(0.45, 3.0, true, ParalinguisticClass::Speech);
+        assert_eq!(utterance_clarity(&a, "ok now"), Clarity::Unclear);
     }
 
     #[test]
     fn low_snr_unconverged_floor_does_not_apply() {
         // Same confidence/SNR as above, but the noise floor hasn't converged
         // — SNR is unreliable, so this rule must not fire.
-        let a = analysis_with(0.60, 3.0, false, ParalinguisticClass::Speech);
-        assert_eq!(utterance_clarity(&a, "can you hear me now"), Clarity::Clear);
+        let a = analysis_with(0.45, 3.0, false, ParalinguisticClass::Speech);
+        assert_eq!(utterance_clarity(&a, "ok now"), Clarity::Clear);
     }
 
     #[test]

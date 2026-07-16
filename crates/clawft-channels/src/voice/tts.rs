@@ -400,6 +400,75 @@ impl DualLayerTts {
     /// chunk-by-chunk) to `sink`. Split out from [`speak`](Self::speak) so a
     /// caller can speak the ack (and an optional filler) up front and only
     /// start this once the grounded answer text is ready.
+    /// Fully render `answer` to chunks WITHOUT playing — the producer +
+    /// prebuffer half of [`Self::speak_answer`] (same slow-tier render, same
+    /// zero-audio fast-tier fallback). WEFT-615's windowed playback needs the
+    /// render and the playback separated: rendering once up front keeps the
+    /// old gap-free pipeline economics, while playback interleaves the
+    /// inter-sentence listening windows (per-sentence re-rendering serialized
+    /// synthesis into every gap — seconds of dead air, found live).
+    pub async fn render_answer(
+        &self,
+        answer: &str,
+        cancel: CancellationToken,
+    ) -> Result<Vec<TtsChunk>, VoiceError> {
+        if cancel.is_cancelled() || answer.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let (tx, mut rx) = mpsc::channel::<TtsChunk>(4);
+        let slow = self.slow.clone();
+        let answer_text = answer.to_string();
+        let prod_cancel = cancel.clone();
+        let producer =
+            tokio::spawn(
+                async move { slow.synthesize_stream(&answer_text, tx, prod_cancel).await },
+            );
+        let mut buffered: Vec<TtsChunk> = Vec::new();
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                maybe = rx.recv() => match maybe {
+                    Some(chunk) => buffered.push(chunk),
+                    None => break,
+                },
+            }
+        }
+        let slow_result = match producer.await {
+            Ok(r) => r,
+            Err(_) => Ok(()),
+        };
+        if buffered.is_empty() && !cancel.is_cancelled() {
+            tracing::warn!(
+                slow_error = %slow_result.as_ref().err().map(|e| e.to_string()).unwrap_or_else(|| "produced no chunks".into()),
+                "slow TTS tier produced no audio — rendering the answer through the fast tier"
+            );
+            let (ftx, mut frx) = mpsc::channel::<TtsChunk>(4);
+            let fast = self.fast.clone();
+            let text = answer.to_string();
+            let fcancel = cancel.clone();
+            let fprod = tokio::spawn(async move {
+                let _ = fast.synthesize_stream(&text, ftx, fcancel).await;
+            });
+            while let Some(chunk) = frx.recv().await {
+                if cancel.is_cancelled() {
+                    break;
+                }
+                buffered.push(chunk);
+            }
+            let _ = fprod.await;
+        }
+        Ok(buffered)
+    }
+
+    /// Play one pre-rendered chunk (windowed playback's per-sentence step).
+    pub async fn play_chunk(
+        &self,
+        chunk: &TtsChunk,
+        sink: &Arc<dyn TtsSink>,
+    ) -> Result<(), VoiceError> {
+        sink.play_chunk(chunk).await
+    }
+
     pub async fn speak_answer(
         &self,
         answer: &str,
