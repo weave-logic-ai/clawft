@@ -1,119 +1,113 @@
-# Handoff — Native voice Talk-Mode: working conversation loop, remaining polish
+# Handoff — Voice stack + COW/review-gate: current state, runbook, open items
 
-**Date:** 2026-07-03
+**Date:** 2026-07-16 (supersedes the 2026-07-03 version — that predates voice
+Wave 2 and the entire fork-adoption/COW track)
 **Repo:** `/Users/mathewbeane/weftos` (branch `feat/hermes-loop-base`)
-**Status:** `weft voice talk` holds a real spoken conversation end-to-end on this Mac:
-mic → adaptive VAD → smart-turn endpointing → parakeet STT → **Hermes-4.3-36B** (`:8090`)
-→ Orpheus TTS ("dan", single voice for ack + answer) → speaker, with every turn
-**anchored to the witness chain** via the daemon. One day of live shakedown took it from
-"never responds" to conversational; the remaining gaps are tracked and listed below.
+**Deployed:** daemon + binaries @ `4b037496` (version stamps carry
+`(sha ts) [features]` — WEFT-656). **Pending:** WEFT-615 round-2 mic
+confirmation (windowed playback pacing / self-echo fix / clarity retune).
 
-**The prime directive learned today:** `~/llm` voicelab (the Python lab, david profile,
-`~/llm/voicelab/configs/david.toml`) is the **tuned reference implementation**. Every
-substantive bug in the native port was a divergence from a decision the lab had already
-made. **When the native stack misbehaves, diff against the lab FIRST.**
+**Standing directives:** `~/llm` voicelab is still the tuned reference — diff
+against it first when the native voice stack misbehaves. Subagent model
+policy: sonnet default, fable escalation-only (memory: agent-model-routing).
 
 ---
 
-## Architecture (what runs where)
+## Architecture as of today
 
-| Stage | Impl | Endpoint / model |
+| Stage | Impl | Notes |
 |---|---|---|
-| Capture + AEC | cpal + `clawft-voice-aec` (`run_capture`, shared `AecProcessor`) | default input device |
-| VAD | `EnergyVad` + **adaptive `NoiseFloor`** (floor+8 dB, init cap -53) | in-process |
-| Endpointing | smart-turn v3.1 ONNX + `SemanticEndpointer` (500 ms check / 2500 ms ceiling) | `~/.weftos/models/smart-turn/` |
-| STT | parakeet-tdt-0.6b sherpa int8 | `~/.weftos/models/parakeet/…int8/` |
-| Speaker ID | ECAPA ONNX (self-exported) + persistent registry | `~/.weftos/models/ecapa/`, `~/.weftos/speakers.json` |
-| Brain | `LocalProviderVoiceLlm::hermes()` — **hermes-4.3-36b** | llama.cpp `:8090` (ADR-060, `~/llm/bin/serve-llamacpp`) |
-| TTS fast (fallback + uncached acks) | Kokoro ONNX, style = **am_michael** | `~/.weftos/models/kokoro/` (`kokoro.onnx`+`tokens.txt`+`style.bin`) |
-| TTS slow (answers + cached acks) | Orpheus via **Ollama** `orpheus-tts` voice **dan** + SNAC ONNX | `:11434` + `~/.weftos/models/snac/snac_24khz.onnx` |
-| Chain anchoring | `agent.turn.record` RPC → `SubstrateConversationSink` + `KernelTurnAnchor` | kernel daemon (`weaver kernel start`) |
+| Capture + VAD | cpal → two-stage gate (energy floor w/ startup calibration + watchdog, spectral voiceness AND-gate) | plan appendices A–C; Silero seam = WEFT-644 |
+| Endpointing | smart-turn v3.1 + SemanticEndpointer (min-voiced 400ms, short-audio discount 500ms) | |
+| STT | parakeet-tdt int8 | per-token conf feeds the clarity gate |
+| **Brain** | **daemon voice loop** via `weft voice talk --brain auto\|daemon\|local` (auto = probe; daemon = full agent loop w/ tools+grafts, voice-shaped replies) | local bare-prompt Hermes only as fallback |
+| Interrupt brain | Wave 2: router (busy×intent×paralinguistics) → Stop/Refine/Backchannel/Queue executors; attempt nodes (register-early/commit-late); Contradicts edges; own busy axis (`VoiceShared.in_flight`) | all live-verified |
+| Input gates | non-lexical (filler/backchannel/laughter → never engage brain) + unclear-STT (canonical `utterance_clarity` in talkmode.rs, wire-mirrored in voice_loop.rs — **KEEP IN LOCK-STEP**; low-SNR arm = conf<0.50 after live retune) | spurious-gate case pinned as test |
+| Ack/filler | rotating pools (pre-warmed), ack speaks BEFORE the LLM call, 1.5s-gated contextual filler | WEFT-658 |
+| **Playback interrupts** | WEFT-615 interim: answer pre-rendered ONCE (`render_answer`), played sentence-wise with ~350ms echo-free listening windows between (`sentence_window_ms`, 0=off); bare-stop swallowed (`WINDOW_STOP_PHRASES` — mirror of interrupt_router's lexicon, **KEEP IN SYNC**); content utterance seeds the next turn. Continuous in-playback barge-in = `barge_in_enabled` (headphones only). Full acoustic ERL floor = ADR-068 D1 / WEFT-628 end-state | round-2 deploy awaiting mic confirm |
+| TTS | Kokoro fast / Orpheus slow via Ollama, per-call tier selection intact | |
+| Chain/forest | every turn anchored; attempt lifecycle on `conversation.graph` (`attempt`/`goal` flat keys); `weft voice watch` renders ◇/⊘/◆/↯ + TurnGated | |
 
-Run: `weft voice talk` (or `RUST_LOG=info weft voice talk` to watch the turn lifecycle:
-`utterance captured` → `user turn transcript=` → `committed reply answer=`).
-Mic diagnosis: `weft voice test-mic --duration 5` (device list, dBFS meter, VAD verdict).
-Rebuild: `scripts/build.sh native --features voice-onnx` then install to `~/.cargo/bin`
-(atomic `cp`→`mv`; a running daemon/session keeps its old inode until restarted).
+## The COW / review-gate stack (fork-adoption track — ALL CLOSED)
 
-## What was fixed today (commit trail, all on `feat/hermes-loop-base`)
+- `clawft-cow-memory`: BranchableMemory over rvf-runtime — checkpoint/rollback/
+  promote/branch/fork, chain-walk reads (mandatory: RVF query ignores its own
+  COW), crate-owned tombstones (RVF delete bitmap is permanent), pause/resume,
+  durable manifest (full-topology reopen; restart id-collision fixed).
+- Turn bracket (`[agents] cow_memory { enabled, path, ingest_turns, cadence }`,
+  default OFF): checkpoint → turn → exchange-ingest → promote / rollback, all
+  chain-witnessed via TurnLedger→DaemonTurnLedger (record_lineage verifiable —
+  parent_hash is REAL, the zeroed-caveat was stale docs). `cadence="tool"` adds
+  witnessed checkpoints at every tool boundary. Idle AutoPause / on-demand
+  AutoResume.
+- Review gate (`[kernel.agent] proposal { mode = "auto"|"review", timeout_secs }`):
+  review holds each turn as a pending proposal; `agent.proposal.{list,accept,
+  discard}` — **accept = promote (lineage-witnessed), discard = rollback +
+  witnessed revert**; pending proposal fails new dispatches (typed
+  ProposalPending); timeout DISCARDS (fail-closed). One global lineage ⇒ one
+  hold parks the loop (the supervised-review contract).
+- Cancellation alignment (WEFT-655): cancel-drop / turn-error / discard = ONE
+  closure (BracketGuard fixes the select!-drop leak — see gotchas).
 
-1. `86bdfbca` — E2E test raced the loop's Frontier→Committed tick.
-2. `63dc49d4` — **`agent.turn.record` RPC**: voice turns anchor to substrate + chain
-   (WEFT-607 closed). `weft voice talk` prints "Turn anchoring: ON" when the daemon runs.
-3. `27d628b7` — **Kokoro spoke gibberish**: model eats espeak-ng IPA phonemes, engine fed
-   raw chars. Now shells out to `espeak-ng` (brew) per sentence. + turn-lifecycle info logs.
-4. `d8eb5ee3` — **deaf in a loud room**: fixed -45 dBFS gate vs -37 dBFS room tone; adaptive
-   `NoiseFloor`. + real `weft voice test-mic`.
-5. `0c563977` — slow-tier zero-audio fallback to fast tier; barge margin/grace; min-turn
-   guard (250 ms); `TtsSink::wait_drained` (capture resumed mid-playback and heard itself).
-6. `ba588b9f` — **Orpheus prompt missing `<|eot_id|>`** → zero audio tokens (WEFT-612 closed;
-   found by diffing the lab's `tts_orpheus_ollama.py`). + lab sampling params.
-7. `2c350f4b` — voicelab knob parity (500/2500 ms, cosine 0.45), spoken self-enrollment
-   ("my name is X"), persistent speaker registry (WEFT-611 closed).
-8. `55d33c92` — **barge-in now OPT-IN** (`barge_in_enabled`, default off): AEC residual of
-   the bot's own reply tripped the gate at grace expiry and cancelled every answer.
-9. `c22a8494` — drain mic during playback hold (channel-full warn flood); prebuffer the
-   slow tier (Ollama renders slower than realtime → stutter).
-10. `3fd12d3b` — whole-utterance SNAC decode (per-batch seams doubled syllables — same
-    artifact the lab documented).
-11. `37ae3046` — **THE audio-corruption root cause**: Ollama's stream opens with control
-    tokens (`custom_token_4,5,1`); counting them shifted the %7 SNAC slot phase → 251/251
-    codes invalid → pure noise. Lab drops `c<0` before phasing; now mirrored.
-12. `08df53a3` — **single-voice acks**: ack set is closed (2 strings), pre-rendered through
-    Orpheus at session start, played from cache. Subject-echo ack parked until WEFT-613.
+## Runbook
 
-## Verification tooling (use these before claiming anything works)
+```bash
+# LLM (36B needs the big context — 8192 default causes context-500s):
+~/llm/bin/serve-llamacpp ~/.cache/huggingface/hub/models--NousResearch--Hermes-4.3-36B-GGUF/snapshots/*/hermes-4_3_36b-Q8_0.gguf \
+  --port 8090 --alias hermes-4.3-36b --ctx 32768
 
-- **`crates/clawft-voice-talk/tests/speak_wav.rs`** (`--ignored`): drives the REAL
-  DualLayerTts (Kokoro + Orpheus/Ollama) into a WAV; whisper it back via
-  `~/llm/bin/whisper <wav> --model mlx-community/whisper-small.en-mlx`. This harness is
-  what isolated the phase bug ("audio exists" ≠ "audio is speech" — assert intelligibility).
-- `live_native_talk_session` (tests/assembly.rs, `--ignored`): WAV → full loop → committed
-  ECC turn. `live_orpheus_ollama`, `live_kokoro_synthesis*`: per-engine gates.
-- Live-session logs: `RUST_LOG=info,clawft_channels=debug` shows barge-in + blip drops.
-- **Do NOT run a live `weft voice talk` while the operator is testing** — two sessions
-  answer the same room and it reads as chaos (this happened; memory-noted).
+# Build + deploy (feature-stamped; guard refuses feature-dropping replacements):
+scripts/build.sh install --features voice-onnx && weaver kernel stop && weaver kernel start
+
+# Live:
+weft voice talk            # --brain auto picks the daemon brain
+weft voice watch weft-talk # graph surface alongside
+
+# Config (workspace .clawft/config.json): kernel.agent.{voice_loop=true,
+# talk_loop, anchor_chain, anchor_causal, classification.mode="keyword",
+# proposal.mode} + agents.cow_memory.{enabled,cadence}
+```
 
 ## Open items (Plane)
 
-- **WEFT-606** (0.8.x): daemon-hosted Talk-Mode tick service + real chain_seq/HLC in the
-  forest (the RPC bridge is the stepping stone).
-- **WEFT-613** (0.9.x): voice-matched fast tier — the david demo used a **Chatterbox clone
-  of dan** so both tiers were one voice; restores the subject-echo ack. *(Pending comment
-  correction: item text says am_onyx; operator confirms the demo cloned dan.)*
-- **WEFT-614** (0.9.x): grounded agent brain (web_search / tool-calling) — ride WEFT-606
-  and route the voice brain through the kernel agent loop.
-- **PENDING (Tailscale re-auth needed for `plane.sh` via aepod-xpc)**: file "Re-enable
-  barge-in" item — barge_in_enabled default-off until AEC echo-return-loss is verified;
-  leads: lab knobs (`barge_threshold=0.6 barge_min_s=0.30 barge_rms=0.012`) and
-  render-reference alignment (chunks push the AEC reference at queue time; playback happens
-  seconds later — likely misalignment). Plus the WEFT-613 dan-clone comment above.
-  Plane key: `ssh aepod@100.79.110.69` → `~/.claude.json` `mcpServers.plane.env.PLANE_API_KEY`.
+| Item | State |
+|---|---|
+| WEFT-615 | interim windows deployed @ 4b037496 — **awaiting mic re-test**; full ERL floor stays under WEFT-628 (ADR-068 D1) |
+| WEFT-628 | ADR-068 Phase 1 umbrella (edge/ERL/DuplexChannel) — not started |
+| WEFT-644 | Silero voiceness behind the trait seam |
+| WEFT-638 | retire TalkForest (voice → daemon-loop client) |
+| WEFT-651 | Hermes runaway identical tool calls (also SUCCESSFUL ones; also writes land in daemon CWD not workspace) |
+| WEFT-660/661 | vector: real-DiskANN search id=0; Hybrid cross-metric merge (recall 0.11) — DiskANN itself deferred "come back to it" (docs/brain/vector-backend-bench-2026-07.md) |
+| WEFT-662 | upstream rvf-runtime 0.2 report list: macOS __errno_location; open() resets metric AND witness hash; permanent delete bitmap; no vector-by-id read |
+| WEFT-663 | pre-existing wasm break: local_file_sink Send futures |
+| unfiled | default CI skips clawft-cli `voice` feature (watch module untested); review-mode voice queue drains next-turn not on-accept; system messages DROPPED by inbound_from_params (voice policy rides skill_instructions) |
 
-## Known polish gaps (unfiled observations)
+## Gotchas earned this session (the expensive ones)
 
-- **Answer latency**: prebuffered Orpheus means "One sec." → quiet render pause → answer.
-  Lab's `slow_lead_chunks` (stream with a one-sentence head start, seam-primed with
-  `context_frames=32`) is the latency fix if the pause annoys; `take_batch` was kept for it.
-- **STT quality**: parakeet int8 mishears through-air/speaker audio badly ("two plus two"
-  → "Ubazu"); direct voice is decent. Lab's speed tier used the same parakeet — but eval
-  vs whisper-large via the substrate whisper service is worth a look if mishearing persists.
-- Kokoro `style.bin` = one carved vector (voice 6 am_michael, row 60 of
-  `csukuangfj/kokoro-en-v0_19` voices.bin); proper per-length style rows would improve
-  prosody. Slight onset clip on the first word (noted at WEFT-608 closure).
-- Orpheus voice knob: `dan` today; alternatives `leo`/`zac` via
-  `native_dual_layer_with_ollama(url, model, voice)` — operator perceived dan as
-  "English accent"; awaiting verdict now that everything is one voice.
-- `weft voice talk` has no CLI flags yet (mic selection, voice, barge-in opt-in, RUST_LOG
-  presets) — everything is code defaults; a `--config`/flags pass would help the next
-  debugging session. `weft voice setup` is still a stub (models were staged by hand —
-  layout in the table above; sources: HF `csukuangfj/…parakeet…int8`, `pipecat-ai/smart-turn-v3`,
-  `csukuangfj/kokoro-en-v0_19`, `onnx-community/snac_24khz-ONNX`, ECAPA self-exported via
-  `~/llm/.venv` torch+speechbrain).
+1. **select!-drop class**: any bracket around cancellable work needs a Drop
+   guard — `tokio::select!` DROPS the losing future; Ok/Err arms are not
+   enough (WEFT-655 leak).
+2. **Fat-LTO duplicate `no_mangle`**: two crates defining the same extern "C"
+   symbol link fine in dev and DIE in release LTO ("failed to load bitcode",
+   real error one line above). One shim home: clawft-cow-memory.
+3. **Test fixtures must use `SessionTier::weak_view_resolver`** — a detached
+   SingleViewResolver view silently no-ops every commit/prune (bit twice).
+4. **`talk_loop::current_turn` is NOT a busy axis** — every anchored turn
+   overwrites it and its commit clears it; the voice loop keeps its own.
+5. **Bot speech → drain before reopening capture** (`drain_sink_consuming`)
+   or the tail becomes a self-echo user turn the brain OBEYS.
+6. **Per-sentence TTS calls serialize synthesis** — render once, window the
+   playback only.
+7. **Two deliberate cross-crate mirrors to keep in sync**: STOP lexicon
+   (interrupt_router ↔ talkmode WINDOW_STOP_PHRASES) and the clarity rule
+   (talkmode `utterance_clarity` ↔ voice_loop wire mirror).
+8. **Agent ops**: ~6 sonnet subagents died mid-task on transient API errors
+   this stretch — always inspect partial tree state and salvage (work was
+   consistently sound up to the cut); agents must use TARGETED fmt only
+   (whole-package cargo fmt collided with concurrent edits).
 
 ## Memory anchors
 
-`weftos-current-state` and `llm-lab-controller` memories hold the compressed version of
-this handoff; `weftos-operational-gotchas` has the config-overlay and test-environment
-traps (kernel daemon must be STOPPED for `clawft-rpc` no-daemon tests; mdns test needs
-multicast; `hnsw_eml::benchmark_full_report` legitimately runs ~22 min in debug).
+`weftos-current-state` (chronological session log, newest first) ·
+`agent-model-routing` · `weftos-voice-vad-architecture` ·
+`weftos-operational-gotchas` · `llm-lab-controller`.
