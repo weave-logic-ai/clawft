@@ -35,7 +35,12 @@ pub mod witness;
 // Link-time fix for an rvf-runtime 0.2.0 portability bug on macOS -- see
 // the module docs. Not part of the public surface.
 #[cfg(all(feature = "rvf", target_os = "macos"))]
-mod macos_errno_shim;
+// macOS `__errno_location` shim: DELIBERATELY NOT DEFINED HERE. The `rvf`
+// feature depends on `clawft-cow-memory`, whose `macos_errno_shim` provides
+// the one `#[no_mangle]` definition for the whole binary — defining a second
+// copy here breaks fat-LTO release links ("Linking globals named
+// '__errno_location': symbol multiply defined!", found live at WEFT-615
+// install). See clawft-cow-memory/src/macos_errno_shim.rs and WEFT-662.
 
 /// Backend-selecting alias: real `rvf-runtime`-backed store when the `rvf`
 /// feature is enabled (native builds that can link the crate), the in-memory
