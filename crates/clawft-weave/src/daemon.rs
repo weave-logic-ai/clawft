@@ -92,8 +92,166 @@ fn daemon_agent() -> Option<Arc<DaemonAgentService>> {
 static DAEMON_AGENT_LOOP: OnceLock<Arc<clawft_core::agent::loop_core::AgentLoop<NativePlatform>>> =
     OnceLock::new();
 
-fn daemon_agent_loop() -> Option<Arc<clawft_core::agent::loop_core::AgentLoop<NativePlatform>>> {
+/// `pub(crate)` (mirrors [`daemon_agent`]) so `voice_loop.rs` can reach the
+/// review-gate surface directly — WEFT-655 Gap A needs `pending_hold_info`
+/// from `dispatch_reply`'s Ok arm, which `AgentLoopHandle` doesn't expose.
+pub(crate) fn daemon_agent_loop(
+) -> Option<Arc<clawft_core::agent::loop_core::AgentLoop<NativePlatform>>> {
     DAEMON_AGENT_LOOP.get().cloned()
+}
+
+/// WEFT-655: the review-gate hold label a turn mints, pinned to
+/// `AgentLoop::handle_turn`'s `format!("turn:{}:{}", msg.channel,
+/// msg.chat_id)` (`clawft-core/src/agent/loop_core.rs`) where `channel` is
+/// always `AGENT_CHAT_CHANNEL` ("agent.chat") and `chat_id` is the `conv_id`
+/// passed to `AgentService::dispatch` (`inbound_from_params`,
+/// `clawft-service-agent/src/service.rs`). Every voice-loop dispatch goes
+/// through that exact path (`agent.dispatch(params)` in
+/// `voice_loop::dispatch_reply`), so this is the label to expect held for a
+/// voice-originated reply. Pure fn, pinned against the literal string in the
+/// `tests` module below so a rename on the core side breaks loudly here
+/// instead of silently missing the Gap A park.
+pub(crate) fn turn_hold_label(conv_id: &str) -> String {
+    format!("turn:agent.chat:{conv_id}")
+}
+
+/// WEFT-655 Gap A: conv_id + attempt seq for a voice-originated reply whose
+/// forest commit (`SessionTier::commit_reply_frontier`) was parked because
+/// this SAME turn's memory promote is held as a pending review-mode
+/// cow-memory proposal (`AgentLoop::handle_turn`, D9) — see `voice_loop`'s
+/// module doc for the full forest/memory asymmetry this closes. Keyed by the
+/// proposal's hold label ([`turn_hold_label`]) so the `agent.proposal.*` RPC
+/// arms and the timeout sweep can find/clear the matching attempt without
+/// threading anything through `clawft-service-agent`. Lazily initialized —
+/// cheap and empty on every daemon that never parks an attempt (no voice
+/// loop, or voice loop but never review mode).
+static DAEMON_PARKED_VOICE_ATTEMPTS: OnceLock<Arc<dashmap::DashMap<String, (String, u64)>>> =
+    OnceLock::new();
+
+fn daemon_parked_voice_attempts() -> Arc<dashmap::DashMap<String, (String, u64)>> {
+    DAEMON_PARKED_VOICE_ATTEMPTS
+        .get_or_init(|| Arc::new(dashmap::DashMap::new()))
+        .clone()
+}
+
+/// Park `(conv_id, seq)` under `label` (WEFT-655 Gap A). Overwrites any
+/// stale entry for the same label — there is only ever one hold at a time
+/// (D9 fails new dispatches closed while one is pending), so a second park
+/// under the same label can't happen in practice; last-write-wins is safe
+/// either way.
+pub(crate) fn park_voice_attempt(label: &str, conv_id: &str, seq: u64) {
+    daemon_parked_voice_attempts().insert(label.to_string(), (conv_id.to_string(), seq));
+}
+
+/// Take (remove) the parked attempt for `label`, if any — WEFT-655 Gap A.
+fn take_parked_voice_attempt(label: &str) -> Option<(String, u64)> {
+    daemon_parked_voice_attempts()
+        .remove(label)
+        .map(|(_, v)| v)
+}
+
+/// WEFT-655 Gap A: after a held proposal resolves as ACCEPTED
+/// (`agent.proposal.accept`), resolve any voice reply parked behind it —
+/// commits the forest attempt `dispatch_reply`'s Ok arm deferred, and clears
+/// the voice loop's busy axis for it. No-op when nothing was parked under
+/// `label` (the ordinary text-chat / no-voice case).
+///
+/// KNOWN GAP: this does NOT drain the conversation's queued voice utterances
+/// (WEFT-650's `VoiceQueues`) the way `dispatch_reply`'s ordinary finalize
+/// does. That drain lives behind `DaemonReplySubmitter`/`VoiceShared`,
+/// private to `voice_loop.rs`, with no seam an RPC arm can reach cleanly —
+/// widening it would mean exposing the drain (and the `Arc<AgentService>` it
+/// resubmits through) crate-wide for one caller. Anything queued during the
+/// hold stays parked and drains on the conversation's next ordinary turn
+/// instead of immediately on accept.
+fn resolve_parked_attempt_on_accept(label: &str) {
+    let Some((conv, seq)) = take_parked_voice_attempt(label) else {
+        return;
+    };
+    if let Some(tier) = daemon_agent().and_then(|a| a.session_tier().cloned()) {
+        tier.commit_reply_frontier(&conv, seq);
+    }
+    if let Some(voice_loop) = DAEMON_VOICE_LOOP.get() {
+        voice_loop.clear_parked_in_flight(&conv, seq);
+    }
+    info!(
+        conv_id = %conv,
+        seq,
+        label = %label,
+        "WEFT-655: parked voice attempt resolved on proposal accept (forest committed)"
+    );
+}
+
+/// WEFT-655 Gap A: after a held proposal resolves as DISCARDED (operator
+/// `agent.proposal.discard` RPC arm, or the fail-closed timeout sweep —
+/// [`run_proposal_timeout_sweep_tick`]), clear any voice reply parked behind
+/// it the SAME way a bare STOP interrupt does: prune tombstone + witnessed
+/// cancel (`SessionTier::emit_cancel_prune` / `witness_cancel`), then clear
+/// the voice busy axis. No-op when nothing was parked under `label`.
+fn cleanup_parked_attempt_on_discard(label: &str) {
+    let Some((conv, seq)) = take_parked_voice_attempt(label) else {
+        return;
+    };
+    if let Some(tier) = daemon_agent().and_then(|a| a.session_tier().cloned()) {
+        let pruned = tier.emit_cancel_prune(&conv, Some(seq), None);
+        tier.witness_cancel(&conv, pruned);
+    }
+    if let Some(voice_loop) = DAEMON_VOICE_LOOP.get() {
+        voice_loop.clear_parked_in_flight(&conv, seq);
+    }
+    info!(
+        conv_id = %conv,
+        seq,
+        label = %label,
+        "WEFT-655: parked voice attempt cleaned up on proposal discard (pruned + witnessed)"
+    );
+}
+
+/// Pure predicate for [`run_proposal_timeout_sweep_tick`]'s age check —
+/// pulled out so the age-vs-timeout boundary is unit-testable without a real
+/// loop/hold. Matches the original inline WEFT-654 D10 check (`age >
+/// timeout`, not `>=` — a hold exactly at the deadline survives one more
+/// tick).
+fn proposal_past_timeout(age: std::time::Duration, timeout: std::time::Duration) -> bool {
+    age > timeout
+}
+
+/// WEFT-654 D10 / WEFT-655 Gap B: one tick of the review-mode proposal
+/// fail-closed timeout guard — discard a hold past
+/// `[kernel.agent.proposal].timeout_secs`, never silently commit it, with
+/// the same Gap A parked-attempt cleanup the operator-driven discard RPC arm
+/// gets ([`cleanup_parked_attempt_on_discard`]). Shared between the M2
+/// reaper's inline call (hosted only when `talk_loop` is on) and the
+/// standalone sweep task hosted when it is not (see `run_daemon`'s boot
+/// wiring) — a review-mode hold gets fail-closed timeout coverage either
+/// way. No-op when nothing is held, or no loop/timeout is wired.
+fn run_proposal_timeout_sweep_tick() {
+    let (Some(loop_handle), Some(timeout)) = (daemon_agent_loop(), DAEMON_PROPOSAL_TIMEOUT.get())
+    else {
+        return;
+    };
+    let Some((label, age)) = loop_handle.pending_hold_info() else {
+        return;
+    };
+    if !proposal_past_timeout(age, *timeout) {
+        return;
+    }
+    match loop_handle.discard_pending("timeout") {
+        Ok(_) => {
+            cleanup_parked_attempt_on_discard(&label);
+            warn!(
+                label = %label,
+                age_secs = age.as_secs(),
+                timeout_secs = timeout.as_secs(),
+                "proposal timeout sweep: proposal timed out — discarded (fail-closed)"
+            );
+        }
+        Err(e) => warn!(
+            label = %label,
+            error = %e,
+            "proposal timeout sweep: proposal timeout discard failed"
+        ),
+    }
 }
 
 /// WEFT-654: format `AgentLoop::pending_hold_info`'s `(label, age)` into the
@@ -286,6 +444,13 @@ static DAEMON_TURN_LEDGER: OnceLock<Arc<crate::turn_ledger::DaemonTurnLedger>> =
 /// it when `AgentLoop::pending_hold_info` returns `Some`, so an unused
 /// timeout with no cow attachment is inert.
 static DAEMON_PROPOSAL_TIMEOUT: OnceLock<std::time::Duration> = OnceLock::new();
+
+/// WEFT-655 Gap B: `[kernel.agent.proposal].mode == "review"`, snapshotted
+/// alongside [`DAEMON_PROPOSAL_TIMEOUT`] (same `anchor_cfg` scope,
+/// out-of-scope by the time the M2 reaper / standalone sweep spawn below).
+/// The reaper-hosting `if let` decides whether to spawn the standalone
+/// timeout-sweep task by reading this rather than `anchor_cfg` directly.
+static DAEMON_PROPOSAL_REVIEW_MODE: OnceLock<bool> = OnceLock::new();
 
 static DAEMON_VOICE_LOOP: OnceLock<
     Arc<crate::voice_loop::VoiceLoop<clawft_core::agent::loop_core::AgentLoop<NativePlatform>>>,
@@ -1251,6 +1416,11 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
         let _ = DAEMON_PROPOSAL_TIMEOUT.set(std::time::Duration::from_secs(
             anchor_cfg.proposal.timeout_secs.unwrap_or(600),
         ));
+        // WEFT-655 Gap B: same reasoning, for whether review mode is on —
+        // the standalone timeout-sweep spawn point can't read `anchor_cfg`
+        // directly either.
+        let _ = DAEMON_PROPOSAL_REVIEW_MODE
+            .set(anchor_cfg.proposal.mode == clawft_types::config::ProposalMode::Review);
         let (agent_sink, session_tier): (
             Arc<dyn clawft_core::agent::sink::ConversationSink>,
             Option<Arc<clawft_service_agent::SessionTier>>,
@@ -2418,10 +2588,10 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                             activity.remove(&conv_id);
                             info!(conv_id = %conv_id, "M2 reaper: ended idle talk conversation");
                         }
-                        // WEFT-654 D10: fail-closed timeout guard on a parked
-                        // review-mode proposal. A hold past its
-                        // `[kernel.agent.proposal].timeout_secs` deadline is
-                        // DISCARDED (prune + witness), never silently
+                        // WEFT-654 D10 / WEFT-655 Gap B: fail-closed timeout
+                        // guard on a parked review-mode proposal. A hold past
+                        // its `[kernel.agent.proposal].timeout_secs` deadline
+                        // is DISCARDED (prune + witness), never silently
                         // committed — same fail-closed posture as the rest
                         // of governance. Runs every tick regardless of
                         // conversation idleness: the loop's cow lineage is
@@ -2429,25 +2599,10 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                         // dispatches (D9) — a conv "under review" already
                         // can't go idle-active in the ordinary sense, it's
                         // parked until accept/discard/timeout resolves it.
-                        if let (Some(loop_handle), Some(timeout)) =
-                            (daemon_agent_loop(), DAEMON_PROPOSAL_TIMEOUT.get())
-                            && let Some((label, age)) = loop_handle.pending_hold_info()
-                            && age > *timeout
-                        {
-                            match loop_handle.discard_pending("timeout") {
-                                Ok(_) => warn!(
-                                    label = %label,
-                                    age_secs = age.as_secs(),
-                                    timeout_secs = timeout.as_secs(),
-                                    "M2 reaper: proposal timed out — discarded (fail-closed)"
-                                ),
-                                Err(e) => warn!(
-                                    label = %label,
-                                    error = %e,
-                                    "M2 reaper: proposal timeout discard failed"
-                                ),
-                            }
-                        }
+                        // Body factored into `run_proposal_timeout_sweep_tick`
+                        // — shared with the standalone sweep task hosted
+                        // below when this reaper isn't (Gap B).
+                        run_proposal_timeout_sweep_tick();
                         // WEFT-652 AutoPause: with NO conversations left
                         // active, park the cow lineage — freeze working (no
                         // fresh derive) so the daemon idles without an open
@@ -2481,6 +2636,38 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                 }
             }
         });
+    } else if DAEMON_PROPOSAL_REVIEW_MODE.get().copied().unwrap_or(false) {
+        // WEFT-655 Gap B: the M2 reaper above — which normally carries the
+        // WEFT-654 D10 fail-closed proposal timeout guard
+        // (`run_proposal_timeout_sweep_tick`) — only exists when `talk_loop`
+        // was actually hosted (prereqs: `talk_loop` + chain + causal all on,
+        // and the tier ended up owning the forest). Review mode has no such
+        // prerequisite: an operator can turn on
+        // `[kernel.agent.proposal] mode = "review"` around cow-memory
+        // without ever enabling `talk_loop`, and a held proposal would then
+        // never time out. Host a minimal sweep-only task instead — same 60s
+        // tick, same shutdown_rx pattern as the reaper, but ONLY the timeout
+        // discard (no idle-conversation reaping, no autopause; those need
+        // the hosted loop this branch doesn't have).
+        let mut sweep_shutdown_rx = shutdown_rx.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => run_proposal_timeout_sweep_tick(),
+                    _ = sweep_shutdown_rx.changed() => {
+                        if *sweep_shutdown_rx.borrow() {
+                            debug!("standalone proposal timeout sweep shutting down");
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        info!(
+            "WEFT-655: standalone proposal timeout sweep hosted (review mode, \
+             no talk_loop reaper to carry it)"
+        );
     }
 
     // Phase B (classification-design §D4): drain the async enrichment queue.
@@ -5346,6 +5533,10 @@ async fn dispatch(
             match loop_handle.accept_pending() {
                 Ok(label) => {
                     info!(label = %label, "agent.proposal.accept: proposal accepted");
+                    // WEFT-655 Gap A: resolve a voice reply parked behind
+                    // this hold (commits its forest attempt) — no-op when
+                    // nothing was parked under this label.
+                    resolve_parked_attempt_on_accept(&label);
                     match serde_json::to_value(AgentProposalDecisionResult { label }) {
                         Ok(v) => Response::success(v),
                         Err(e) => Response::error(format!("agent.proposal.accept: {e}")),
@@ -5371,6 +5562,11 @@ async fn dispatch(
             match loop_handle.discard_pending(&reason) {
                 Ok(label) => {
                     warn!(label = %label, reason = %reason, "agent.proposal.discard: proposal discarded");
+                    // WEFT-655 Gap A: clean up a voice reply parked behind
+                    // this hold (prune tombstone + witnessed cancel) — same
+                    // closure the Stop interrupt uses. No-op when nothing
+                    // was parked under this label.
+                    cleanup_parked_attempt_on_discard(&label);
                     match serde_json::to_value(AgentProposalDecisionResult { label }) {
                         Ok(v) => Response::success(v),
                         Err(e) => Response::error(format!("agent.proposal.discard: {e}")),
@@ -7476,6 +7672,106 @@ mod tests {
             crate::capability::required_capability("agent.proposal.discard"),
             crate::capability::Capability::Write
         );
+    }
+
+    // ── WEFT-655: voice/review parity + standalone timeout sweep ────────
+
+    #[test]
+    fn turn_hold_label_matches_core_pin() {
+        // Pinned literal — `AgentLoop::handle_turn`'s
+        // `format!("turn:{}:{}", msg.channel, msg.chat_id)` with
+        // `channel = "agent.chat"` (AGENT_CHAT_CHANNEL). A rename on either
+        // side must break this test, not silently miss the Gap A park.
+        assert_eq!(turn_hold_label("conv-1"), "turn:agent.chat:conv-1");
+        assert_eq!(turn_hold_label(""), "turn:agent.chat:");
+    }
+
+    #[test]
+    fn park_and_take_voice_attempt_round_trips() {
+        let label = "turn:agent.chat:conv-park";
+        assert!(
+            take_parked_voice_attempt(label).is_none(),
+            "nothing parked yet"
+        );
+        park_voice_attempt(label, "conv-park", 7);
+        assert_eq!(
+            take_parked_voice_attempt(label),
+            Some(("conv-park".to_string(), 7))
+        );
+        // Take removes — a second take finds nothing.
+        assert!(take_parked_voice_attempt(label).is_none());
+    }
+
+    #[test]
+    fn park_voice_attempt_overwrites_stale_entry_for_same_label() {
+        let label = "turn:agent.chat:conv-overwrite";
+        park_voice_attempt(label, "conv-overwrite", 1);
+        park_voice_attempt(label, "conv-overwrite", 2);
+        assert_eq!(
+            take_parked_voice_attempt(label),
+            Some(("conv-overwrite".to_string(), 2)),
+            "last park wins"
+        );
+    }
+
+    #[test]
+    fn resolve_parked_attempt_on_accept_clears_the_park() {
+        // No `daemon_agent()`/`DAEMON_VOICE_LOOP` wired in this test binary
+        // (no daemon boot happened) — the tier/voice-loop side-effects
+        // degrade to no-ops, but the park itself must still clear.
+        let label = "turn:agent.chat:conv-accept";
+        park_voice_attempt(label, "conv-accept", 3);
+        resolve_parked_attempt_on_accept(label);
+        assert!(
+            take_parked_voice_attempt(label).is_none(),
+            "accept resolves (removes) the park"
+        );
+    }
+
+    #[test]
+    fn cleanup_parked_attempt_on_discard_clears_the_park() {
+        let label = "turn:agent.chat:conv-discard";
+        park_voice_attempt(label, "conv-discard", 4);
+        cleanup_parked_attempt_on_discard(label);
+        assert!(
+            take_parked_voice_attempt(label).is_none(),
+            "discard resolves (removes) the park"
+        );
+    }
+
+    #[test]
+    fn resolve_and_cleanup_are_noop_when_nothing_parked() {
+        // Must not panic when there's nothing under the label.
+        resolve_parked_attempt_on_accept("turn:agent.chat:never-parked");
+        cleanup_parked_attempt_on_discard("turn:agent.chat:never-parked");
+    }
+
+    #[test]
+    fn proposal_past_timeout_boundary() {
+        let timeout = std::time::Duration::from_secs(600);
+        assert!(!proposal_past_timeout(
+            std::time::Duration::from_secs(599),
+            timeout
+        ));
+        // Exactly at the deadline does NOT time out (`>`, not `>=`) —
+        // matches the original inline M2 reaper check.
+        assert!(!proposal_past_timeout(
+            std::time::Duration::from_secs(600),
+            timeout
+        ));
+        assert!(proposal_past_timeout(
+            std::time::Duration::from_secs(601),
+            timeout
+        ));
+    }
+
+    #[test]
+    fn run_proposal_timeout_sweep_tick_noop_without_loop_or_timeout() {
+        // No boot happened in this test binary path for this test (module
+        // statics are process-global, but this test doesn't depend on any
+        // prior test having booted one) — the important property is just
+        // that a missing loop/timeout never panics.
+        run_proposal_timeout_sweep_tick();
     }
 
     #[tokio::test]

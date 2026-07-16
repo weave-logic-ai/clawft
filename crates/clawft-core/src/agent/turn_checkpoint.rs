@@ -55,6 +55,53 @@ pub struct HeldTurn {
     pub created_at: std::time::Instant,
 }
 
+/// RAII alignment guard (WEFT-655): `AgentService::cancel` aborts a
+/// dispatch by DROPPING the `handle_turn` future at its `select!` — the
+/// bracket's Ok/Err arms never run. Without this guard the cancelled turn's
+/// checkpoint chain (and any mid-turn writes: tool-cadence checkpoints,
+/// tool-side ingests) would dangle, and the NEXT turn's promote would
+/// replay the cancelled partials into base — a silent leak. The guard rolls
+/// back to the pre-turn head and witnesses the compensating revert on drop,
+/// unless the bracket resolved normally and defused it — making the
+/// interrupt path and the proposal-discard path converge on the SAME
+/// closure: rollback + witnessed revert.
+struct BracketGuard {
+    mem: Arc<Mutex<BranchableMemory>>,
+    ledger: Option<Arc<dyn TurnLedger>>,
+    label: String,
+    pre_turn_head: Option<clawft_cow_memory::CheckpointId>,
+    armed: bool,
+}
+
+impl Drop for BracketGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let rolled_back = {
+            let mut guard = self.mem.lock().unwrap_or_else(|p| p.into_inner());
+            match guard.rollback(self.pre_turn_head) {
+                Ok(()) => true,
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        label = %self.label,
+                        "cancelled-turn rollback failed; checkpoint chain may dangle"
+                    );
+                    false
+                }
+            }
+        };
+        if let Some(ledger) = &self.ledger {
+            ledger.on_revert(
+                &self.label,
+                "turn cancelled (dispatch future dropped)",
+                rolled_back,
+            );
+        }
+    }
+}
+
 /// Accept a held proposal: promote the checkpoint chain into base and
 /// witness the lineage — the same closure an auto-mode turn gets at
 /// finalize, just human-gated (accept = promote).
@@ -178,7 +225,18 @@ where
         ledger.on_checkpoint(&label);
     }
 
+    // Armed until the bracket resolves: a cancel that drops this future
+    // mid-turn triggers the guard's rollback + revert witness (WEFT-655).
+    let mut cancel_guard = BracketGuard {
+        mem: Arc::clone(mem),
+        ledger: ledger.cloned(),
+        label: label.clone(),
+        pre_turn_head,
+        armed: true,
+    };
+
     let result = turn().await;
+    cancel_guard.armed = false;
 
     match &result {
         Ok(val) => {
@@ -538,6 +596,96 @@ mod tests {
             mem.lock().unwrap().query(&probe, 4).unwrap().is_empty(),
             "discarded exchange must vanish"
         );
+    }
+
+    #[tokio::test]
+    async fn cancelled_drop_rolls_back_and_witnesses_like_a_discard() {
+        // WEFT-655 THE alignment test: cancel (future drop), turn error, and
+        // proposal discard must converge on the same closure — memory rolled
+        // back to pre-turn state + a witnessed compensating revert. This
+        // reproduces AgentService::cancel's select!-drop shape exactly.
+        let dir = TempDir::new().unwrap();
+        let mem = test_mem(&dir);
+        let concrete = Arc::new(RecordingLedger::default());
+        let ledger: Arc<dyn TurnLedger> = concrete.clone();
+
+        // Baseline: one promoted vector so rollback has a real target state.
+        {
+            let mut g = mem.lock().unwrap();
+            g.ingest(&[clawft_cow_memory::VectorItem::new(vec![0.5, 0.5, 0.0, 0.0])])
+                .unwrap();
+            g.promote().unwrap();
+        }
+        let count = |mem: &Arc<Mutex<BranchableMemory>>| {
+            let g = mem.lock().unwrap();
+            let s = g.status();
+            s.base.total_vectors + s.working.total_vectors
+        };
+        let before = count(&mem);
+
+        // A turn that writes mid-flight then parks forever; we cancel by
+        // dropping the bracket future at a select!, like the service does.
+        let never = tokio::sync::Notify::new();
+        let mut held_slot = None;
+        let bracket = with_turn_checkpoint(
+            &mem,
+            Some(&ledger),
+            "t-cancelled",
+            || async {
+                {
+                    let mut g = mem.lock().unwrap();
+                    g.ingest(&[clawft_cow_memory::VectorItem::new(vec![
+                        0.0, 0.0, 1.0, 0.0,
+                    ])])
+                    .unwrap();
+                }
+                never.notified().await; // parked "generation"
+                Ok(String::from("unreachable"))
+            },
+            no_items,
+            false,
+            &mut held_slot,
+        );
+        tokio::select! {
+            biased;
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+            _ = bracket => panic!("bracket must not resolve"),
+        }
+        // The select! dropped the bracket future → guard fired.
+        assert_eq!(count(&mem), before, "cancelled turn leaves no memory residue");
+        let events = concrete.events();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.starts_with("revert:t-cancelled:rolled_back=true")),
+            "cancel witnesses the compensating revert like a discard: {events:?}"
+        );
+
+        // Parity: an errored turn and a discarded proposal produce the same
+        // end-state class — no residue + revert witness with their labels.
+        let _: clawft_types::Result<u8> = with_turn_checkpoint(
+            &mem, Some(&ledger), "t-err", || async {
+                Err(ClawftError::Timeout { operation: "boom".into() })
+            },
+            no_items, false, &mut None,
+        )
+        .await;
+        let mut held = None;
+        let _: clawft_types::Result<String> = with_turn_checkpoint(
+            &mem, Some(&ledger), "t-disc", || async { Ok("x".to_string()) },
+            |_: &String| exchange_items(4, "cli", "c1", "q", "x"), true, &mut held,
+        )
+        .await;
+        discard_held(&mem, Some(&ledger), held.unwrap(), "reviewer").unwrap();
+
+        assert_eq!(count(&mem), before, "all three paths leave identical memory state");
+        let events = concrete.events();
+        for lbl in ["t-cancelled", "t-err", "t-disc"] {
+            assert!(
+                events.iter().any(|e| e.starts_with(&format!("revert:{lbl}:rolled_back=true"))),
+                "{lbl} must witness its revert: {events:?}"
+            );
+        }
     }
 
     /// The no-write items closure for tests that drive their own ingests.

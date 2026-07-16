@@ -33,31 +33,45 @@
 //! interrupt executor's prune; on any other failure it prunes + witnesses so
 //! no attempt dangles.
 //!
-//! ## WEFT-654 review-gate / voice-attempt asymmetry (known gap, tracked as
-//! ## a WEFT-655 follow-up)
+//! ## WEFT-655: review-gate / voice-attempt parity (closes the WEFT-654 gap)
 //!
-//! `dispatch_reply`'s `Ok` arm below (`agent.dispatch(...)` finalize) always
-//! calls `tier.commit_reply_frontier` immediately — the forest commit path
-//! is unaware of `[kernel.agent.proposal].mode = "review"`. Meanwhile the
-//! SAME turn's memory-side promote is held at the `AgentLoop`'s cow-memory
-//! bracket (D9: `handle_turn` parks it pending `agent.proposal.accept` /
-//! `discard`). So in review mode a voice-originated reply's **forest**
-//! commits right away while its **memory promote** stays pending — the two
-//! halves of the turn (chain/causal-graph state vs. cow-memory state) can
-//! disagree about whether the turn is "done" until the reviewer decides.
+//! `dispatch_reply`'s `Ok` arm below (`agent.dispatch(...)` finalize) used to
+//! call `tier.commit_reply_frontier` unconditionally — the forest commit
+//! path was unaware of `[kernel.agent.proposal].mode = "review"`. Meanwhile
+//! the SAME turn's memory-side promote is held at the `AgentLoop`'s
+//! cow-memory bracket (D9: `handle_turn` parks it pending
+//! `agent.proposal.accept` / `discard`). So in review mode a
+//! voice-originated reply's **forest** would commit right away while its
+//! **memory promote** stayed pending — the two halves of the turn
+//! (chain/causal-graph state vs. cow-memory state) disagreed about whether
+//! the turn was "done" until the reviewer decided.
 //!
-//! This wasn't wired shut because `AgentService`'s `AgentLoopHandle` trait
-//! (which `DaemonReplySubmitter`/`VoiceLoop` hold as a `Weak<AgentService<H>>`)
-//! doesn't expose `pending_hold_info`/`accept_pending`/`discard_pending` —
-//! only the concrete `AgentLoop` does (see `daemon::DAEMON_AGENT_LOOP`).
-//! Threading that back-reference through here would mean either widening
-//! `AgentLoopHandle` (a trait `clawft-service-agent` owns, used by every
-//! caller, not just voice) or giving the voice loop its own separate
-//! `Weak<AgentLoop<NativePlatform>>` back-channel purely for this one
-//! coupling — both are more machinery than a single-daemon, one-hold-at-
-//! a-time gate justifies right now. Left as-is (today's commit-on-finalize
-//! forest behavior, unconditionally) rather than building something
-//! fragile; auto mode (the default) is completely unaffected.
+//! Closed by reaching `daemon::DAEMON_AGENT_LOOP` directly (the same way
+//! `AgentService`'s `AgentLoopHandle` trait sidesteps this everywhere else —
+//! it doesn't expose `pending_hold_info`/`accept_pending`/`discard_pending`,
+//! only the concrete `AgentLoop` does): after dispatch returns `Ok`, the Ok
+//! arm checks `daemon::daemon_agent_loop().pending_hold_info()` against this
+//! dispatch's own hold label (`daemon::turn_hold_label`, pinned to
+//! `AgentLoop::handle_turn`'s format string). A match means THIS turn is the
+//! one parked pending review — the arm skips `commit_reply_frontier` and the
+//! queue drain, and instead parks `(conv_id, seq)` in
+//! `daemon::DAEMON_PARKED_VOICE_ATTEMPTS`, keyed by the hold label. The
+//! `agent.proposal.accept`/`discard` RPC arms (and the D10 timeout sweep)
+//! take the parked entry back out and finish what this arm deferred:
+//! `commit_reply_frontier` on accept, `emit_cancel_prune` + `witness_cancel`
+//! (the SAME closure a bare STOP interrupt uses) on discard/timeout. See
+//! `daemon::{turn_hold_label, park_voice_attempt, take_parked_voice_attempt,
+//! resolve_parked_attempt_on_accept, cleanup_parked_attempt_on_discard}`.
+//!
+//! KNOWN GAP (documented, not reached for): the accept/discard resolution
+//! runs from an RPC arm in `daemon.rs`, which has no clean seam into
+//! `VoiceShared`'s queue drain (`drain_next`, below) — that lives behind
+//! `DaemonReplySubmitter`, private to this module, and draining means
+//! resubmitting through the `Arc<AgentService>` the RPC arm doesn't hold.
+//! A queued utterance parked during a review hold stays queued until the
+//! conversation's next ordinary turn drains it, rather than draining the
+//! instant the hold resolves. Auto mode (the default, no review gate) is
+//! completely unaffected either way.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Weak};
@@ -259,18 +273,41 @@ async fn dispatch_reply<H: AgentLoopHandle>(
     tokio::spawn(async move {
         match agent.dispatch(params).await {
             Ok(_) => {
-                // Generation finalized — commit the attempt Frontier
-                // (commit-late). The reply text itself landed through the
-                // loop's sink → index_turn path as its own committed turn.
-                // WEFT-654: unconditional even under review-mode cow memory
-                // — the forest commit and the memory promote hold are not
-                // coupled here. See the module-level doc comment (WEFT-655
-                // follow-up) for why and what a real fix needs.
-                if let (Some(tier), Some(seq)) = (agent.session_tier(), seq) {
-                    tier.commit_reply_frontier(&conv, seq);
-                    shared.clear_in_flight(&conv, seq);
+                // Generation finalized. WEFT-655: before committing, check
+                // whether THIS turn is the one a review-mode cow-memory hold
+                // just parked (`AgentLoop::handle_turn`, D9) — same label,
+                // same turn. If so the forest commit must wait for the
+                // reviewer too (module doc has the full asymmetry this
+                // avoids); park the attempt instead of committing/draining,
+                // and let `agent.proposal.accept`/`discard`/timeout finish
+                // it (`daemon::resolve_parked_attempt_on_accept` /
+                // `cleanup_parked_attempt_on_discard`).
+                let parked_label = seq.and_then(|s| {
+                    crate::daemon::daemon_agent_loop()
+                        .and_then(|loop_handle| loop_handle.pending_hold_info())
+                        .filter(|(label, _)| *label == crate::daemon::turn_hold_label(&conv))
+                        .map(|(label, _)| (label, s))
+                });
+                if let Some((label, s)) = parked_label {
+                    crate::daemon::park_voice_attempt(&label, &conv, s);
+                    info!(
+                        conv_id = %conv,
+                        label = %label,
+                        seq = s,
+                        "voice loop: forest commit parked behind a review-mode proposal hold (WEFT-655)"
+                    );
+                    // No commit_reply_frontier, no drain — the busy axis
+                    // (shared.in_flight) stays set until the hold resolves.
+                } else {
+                    // Commit the attempt Frontier (commit-late). The reply
+                    // text itself landed through the loop's sink →
+                    // index_turn path as its own committed turn.
+                    if let (Some(tier), Some(s)) = (agent.session_tier(), seq) {
+                        tier.commit_reply_frontier(&conv, s);
+                        shared.clear_in_flight(&conv, s);
+                    }
+                    drain_next(agent, shared, conv);
                 }
-                drain_next(agent, shared, conv);
             }
             Err(AgentServiceError::Cancelled(_)) => {
                 // A STOP/Refine interrupted this attempt: the executor
@@ -419,6 +456,17 @@ impl<H: AgentLoopHandle> VoiceLoop<H> {
     /// `agent.turn.record` arm reads this BEFORE recording the utterance.
     pub fn in_flight(&self, conv_id: &str) -> Option<u64> {
         self.shared.in_flight.get(conv_id).map(|e| *e.value())
+    }
+
+    /// WEFT-655 Gap A: clear the busy axis for an attempt that was parked
+    /// behind a review-mode proposal hold (`dispatch_reply`'s Ok arm) and
+    /// has now resolved — `daemon::resolve_parked_attempt_on_accept` /
+    /// `cleanup_parked_attempt_on_discard` call this from the
+    /// `agent.proposal.accept`/`discard` RPC arms and the timeout sweep,
+    /// mirroring what `dispatch_reply`'s Ok/Err arms do on an ordinary
+    /// finalize/prune (which this attempt skipped while parked).
+    pub(crate) fn clear_parked_in_flight(&self, conv_id: &str, seq: u64) {
+        self.shared.clear_in_flight(conv_id, seq);
     }
 
     /// Route one just-recorded `user` utterance. `in_flight_before` is the
