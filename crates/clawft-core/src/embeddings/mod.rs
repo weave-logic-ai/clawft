@@ -34,7 +34,6 @@ pub mod witness;
 
 // Link-time fix for an rvf-runtime 0.2.0 portability bug on macOS -- see
 // the module docs. Not part of the public surface.
-#[cfg(all(feature = "rvf", target_os = "macos"))]
 // macOS `__errno_location` shim: DELIBERATELY NOT DEFINED HERE. The `rvf`
 // feature depends on `clawft-cow-memory`, whose `macos_errno_shim` provides
 // the one `#[no_mangle]` definition for the whole binary — defining a second

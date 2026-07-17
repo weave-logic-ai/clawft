@@ -30,6 +30,7 @@ WASM_PANEL_MAX_RAW_KB=""
 WASM_PANEL_MAX_GZ_KB=""
 BENCH_CRATE=""
 BENCH_NAME=""
+TEST_PACKAGES=()
 COMMAND=""
 
 # ── Reporting helpers ────────────────────────────────────────────────
@@ -550,18 +551,33 @@ cmd_all() {
 workspace_test() {
     local extra=()
     [ "$NO_FAIL_FAST" = true ] && extra+=(--no-fail-fast)
+    # `scripts/build.sh test <pkg>…` scopes to the named packages; no
+    # packages means the whole workspace (the historical behavior).
+    local scope=(--workspace)
+    if [ ${#TEST_PACKAGES[@]} -gt 0 ]; then
+        scope=()
+        local pkg
+        for pkg in "${TEST_PACKAGES[@]}"; do
+            scope+=(-p "$pkg")
+        done
+    fi
+    # ${arr[@]+…} guard: macOS bash 3.2 + `set -u` errors on expanding an
+    # empty array without it.
     if command -v cargo-nextest >/dev/null 2>&1; then
-        cargo nextest run --workspace "${extra[@]}" && cargo test --workspace --doc "${extra[@]}"
+        cargo nextest run "${scope[@]}" ${extra[@]+"${extra[@]}"} \
+            && cargo test "${scope[@]}" --doc ${extra[@]+"${extra[@]}"}
     else
-        cargo test --workspace "${extra[@]}"
+        cargo test "${scope[@]}" ${extra[@]+"${extra[@]}"}
     fi
 }
 
 cmd_test() {
+    local scope_desc="--workspace"
+    [ ${#TEST_PACKAGES[@]} -gt 0 ] && scope_desc="${TEST_PACKAGES[*]}"
     if command -v cargo-nextest >/dev/null 2>&1; then
-        header "Running cargo nextest run --workspace (+ doctests)"
+        header "Running cargo nextest run ($scope_desc) (+ doctests)"
     else
-        header "Running cargo test --workspace (cargo-nextest not installed)"
+        header "Running cargo test ($scope_desc) (cargo-nextest not installed)"
     fi
     timer_start
     if [ "$DRY_RUN" = true ]; then
@@ -1067,7 +1083,7 @@ ${BOLD}Commands:${NC}
   releases-mdx    Regenerate docs/src/content/docs/weftos/vision/releases.mdx
                   from CHANGELOG.md (also runs as --check before commits)
   all             Build everything (native + wasi + browser + ui)
-  test            Run cargo test --workspace
+  test [pkg…]     Run cargo test --workspace (or scoped: test clawft-channels …)
   test-browser    Run browser WASM regression suite under headless Chrome
                   (WEFT-388 / M5-A). Requires wasm-pack + chromedriver.
   bundle-size     Gate browser WASM bundle (raw + gzip) against the
@@ -1139,6 +1155,15 @@ parse_args() {
     if [ "$COMMAND" = "serve" ] && [ $# -gt 0 ] && [[ "$1" =~ ^[0-9]+$ ]]; then
         SERVE_PORT="$1"
         shift
+    fi
+
+    # Capture positional args for test command (package scoping):
+    #   scripts/build.sh test [<package>…]
+    if [ "$COMMAND" = "test" ]; then
+        while [ $# -gt 0 ] && [[ "$1" != --* ]]; do
+            TEST_PACKAGES+=("$1")
+            shift
+        done
     fi
 
     # Capture positional args for bench command:
