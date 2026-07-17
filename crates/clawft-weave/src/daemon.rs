@@ -6483,6 +6483,43 @@ async fn dispatch(
         // identity/classification anchors), so a cross-conv edge is never
         // dangled against a node the projection did not emit.
         #[cfg(feature = "ecc")]
+        // Voice-loop decision trace (weft voice watch's process view): read
+        // incrementally by index. Companion to `conversation.graph` — the
+        // graph is WHAT was said, the trace is HOW the agent decided.
+        "voice.trace" => {
+            let conv_id = match params.get("conv_id").and_then(|v| v.as_str()) {
+                Some(c) if !c.is_empty() => c.to_string(),
+                _ => return Response::error("voice.trace requires a non-empty conv_id"),
+            };
+            let since = params.get("since").and_then(|v| v.as_u64());
+            let events = crate::voice_trace::voice_trace().read(&conv_id, since);
+            let next = events.last().map(|e| e.idx);
+            Response::success(serde_json::json!({
+                "conv_id": conv_id,
+                "events": events,
+                "next": next,
+            }))
+        }
+        // Client-posted process events (the talk client's half of the trace:
+        // cue tones, TTS render timing, playback interrupts). `kind` is
+        // namespaced with a `client_` prefix so daemon-side kinds can never
+        // be spoofed off-process.
+        "voice.trace.append" => {
+            let conv_id = match params.get("conv_id").and_then(|v| v.as_str()) {
+                Some(c) if !c.is_empty() => c.to_string(),
+                _ => return Response::error("voice.trace.append requires a non-empty conv_id"),
+            };
+            let kind = match params.get("kind").and_then(|v| v.as_str()) {
+                Some(k) if !k.is_empty() => format!("client_{k}"),
+                _ => return Response::error("voice.trace.append requires a non-empty kind"),
+            };
+            let detail = params
+                .get("detail")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            crate::voice_trace::voice_trace().record(&conv_id, &kind, detail);
+            Response::success(serde_json::json!({ "recorded": true }))
+        }
         "conversation.graph" => {
             let conv_id = match params.get("conv_id").and_then(|v| v.as_str()) {
                 Some(c) if !c.is_empty() => c.to_string(),

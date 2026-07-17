@@ -376,6 +376,8 @@ impl ConversationObserver for LoopObserver {
             | ConversationEvent::PartialTranscript { .. }
             | ConversationEvent::CaptureLevel { .. }
             | ConversationEvent::SpeculativeFiller { .. }
+            | ConversationEvent::CueTone { .. }
+            | ConversationEvent::TtsRendered { .. }
             | ConversationEvent::TurnGated { .. } => {}
         }
     }

@@ -640,19 +640,19 @@ fn result_from_outbound(outbound: OutboundMessage, _params: &AgentChatParams) ->
         iterations = meta.iterations,
         tool_calls = meta.tool_calls.len(),
         spawned_tasks = meta.spawned_tasks.len(),
-        "agent.chat result populated from OutboundMessage; tokens/model/identity_source default"
+        model = ?meta.model,
+        "agent.chat result populated from OutboundMessage; identity_source defaults"
     );
     AgentChatResult {
         assistant_text: outbound.content,
         tool_calls: meta.tool_calls,
         finish_reason,
         iterations: meta.iterations,
-        // Still not routed through the loop result; default until a
-        // token-accounting increment surfaces them.
-        prompt_tokens: 0,
-        completion_tokens: 0,
-        model: None,
+        prompt_tokens: meta.prompt_tokens,
+        completion_tokens: meta.completion_tokens,
+        model: meta.model,
         identity_source: None,
+        reasoning: meta.reasoning,
         spawned_tasks: meta.spawned_tasks,
     }
 }
@@ -810,6 +810,10 @@ mod tests {
                 child_conv_id: "sub:c:01HQ".into(),
                 status: "completed".into(),
             }],
+            model: Some("hermes-4.3-36b".into()),
+            prompt_tokens: 812,
+            completion_tokens: 96,
+            reasoning: None,
         };
         let mut metadata = HashMap::new();
         metadata.insert(

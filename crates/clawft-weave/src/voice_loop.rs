@@ -268,11 +268,41 @@ async fn dispatch_reply<H: AgentLoopHandle>(
     // See `voice_dispatch_params` for the voice-shaping + double-record
     // guard this builds (§W2.1 / WEFT-659).
     let params = voice_dispatch_params(&conv_id, &goal_text);
+    crate::voice_trace::voice_trace().record(
+        &conv_id,
+        "dispatch",
+        serde_json::json!({ "seq": seq, "goal": truncate_for_trace(&goal_text) }),
+    );
     // Off-path generation: capture never blocks on the reply (§W2.1).
     let conv = conv_id.clone();
     tokio::spawn(async move {
+        let brain_started = std::time::Instant::now();
         match agent.dispatch(params).await {
-            Ok(_) => {
+            Ok(result) => {
+                // The brain call's full accounting for the watch surface:
+                // which model answered, how long the whole tool loop took,
+                // what it did on the way, and what it "thought" (Hermes
+                // `<think>` reasoning, when the wire carries it).
+                crate::voice_trace::voice_trace().record(
+                    &conv,
+                    "brain",
+                    serde_json::json!({
+                        "seq": seq,
+                        "model": result.model,
+                        "duration_ms": brain_started.elapsed().as_millis() as u64,
+                        "iterations": result.iterations,
+                        "tool_calls": result
+                            .tool_calls
+                            .iter()
+                            .map(|t| t.name.clone())
+                            .collect::<Vec<_>>(),
+                        "prompt_tokens": result.prompt_tokens,
+                        "completion_tokens": result.completion_tokens,
+                        "finish_reason": result.finish_reason,
+                        "reasoning": result.reasoning,
+                        "answer": truncate_for_trace(&result.assistant_text),
+                    }),
+                );
                 // Generation finalized. WEFT-655: before committing, check
                 // whether THIS turn is the one a review-mode cow-memory hold
                 // just parked (`AgentLoop::handle_turn`, D9) — same label,
@@ -296,6 +326,11 @@ async fn dispatch_reply<H: AgentLoopHandle>(
                         seq = s,
                         "voice loop: forest commit parked behind a review-mode proposal hold (WEFT-655)"
                     );
+                    crate::voice_trace::voice_trace().record(
+                        &conv,
+                        "attempt",
+                        serde_json::json!({ "seq": s, "outcome": "parked_for_review" }),
+                    );
                     // No commit_reply_frontier, no drain — the busy axis
                     // (shared.in_flight) stays set until the hold resolves.
                 } else {
@@ -306,6 +341,11 @@ async fn dispatch_reply<H: AgentLoopHandle>(
                         tier.commit_reply_frontier(&conv, s);
                         shared.clear_in_flight(&conv, s);
                     }
+                    crate::voice_trace::voice_trace().record(
+                        &conv,
+                        "attempt",
+                        serde_json::json!({ "seq": seq, "outcome": "committed" }),
+                    );
                     drain_next(agent, shared, conv);
                 }
             }
@@ -315,11 +355,29 @@ async fn dispatch_reply<H: AgentLoopHandle>(
                 // + witness) — nothing to do here, and no drain (the
                 // resubmit that caused the cancel drains on ITS finalize).
                 debug!(conv_id = %conv, "voice loop: reply attempt cancelled (executor owns the prune)");
+                crate::voice_trace::voice_trace().record(
+                    &conv,
+                    "attempt",
+                    serde_json::json!({
+                        "seq": seq,
+                        "outcome": "cancelled",
+                        "duration_ms": brain_started.elapsed().as_millis() as u64,
+                    }),
+                );
             }
             Err(e) => {
                 // Genuine failure — prune + witness the dangling attempt
                 // so the forest never holds a silently-abandoned Frontier.
                 warn!(conv_id = %conv, error = %e, "voice loop: reply dispatch failed; pruning attempt");
+                crate::voice_trace::voice_trace().record(
+                    &conv,
+                    "brain_error",
+                    serde_json::json!({
+                        "seq": seq,
+                        "error": e.to_string(),
+                        "duration_ms": brain_started.elapsed().as_millis() as u64,
+                    }),
+                );
                 if let (Some(tier), Some(seq)) = (agent.session_tier(), seq) {
                     let pruned = tier.emit_cancel_prune(&conv, Some(seq), None);
                     tier.witness_cancel(&conv, pruned);
@@ -330,6 +388,18 @@ async fn dispatch_reply<H: AgentLoopHandle>(
         }
     });
     seq
+}
+
+/// Cap free text carried in a trace event — the trace is a decision log,
+/// not a transcript store (the graph already holds full turn text).
+fn truncate_for_trace(text: &str) -> String {
+    const MAX: usize = 160;
+    if text.chars().count() <= MAX {
+        text.to_string()
+    } else {
+        let head: String = text.chars().take(MAX).collect();
+        format!("{head}…")
+    }
 }
 
 /// Pop `conv_id`'s next queued utterance (if any) and resubmit it through
@@ -503,6 +573,11 @@ impl<H: AgentLoopHandle> VoiceLoop<H> {
                 conv_id,
                 class, "voice loop: non-lexical utterance while idle — no dispatch"
             );
+            crate::voice_trace::voice_trace().record(
+                conv_id,
+                "gate",
+                serde_json::json!({ "reason": "non_lexical", "class": class }),
+            );
             return;
         }
 
@@ -517,6 +592,16 @@ impl<H: AgentLoopHandle> VoiceLoop<H> {
                 snr_db = ?audio_snr_db(voice_analysis),
                 noise_floor_converged = ?audio_noise_floor_converged(voice_analysis),
                 "voice loop: utterance below clarity threshold — skipping dispatch"
+            );
+            crate::voice_trace::voice_trace().record(
+                conv_id,
+                "gate",
+                serde_json::json!({
+                    "reason": "unclear",
+                    "token_conf_mean": stt_token_conf_mean(voice_analysis),
+                    "snr_db": audio_snr_db(voice_analysis),
+                    "word_count": text.split_whitespace().count(),
+                }),
             );
             return;
         }
@@ -534,6 +619,21 @@ impl<H: AgentLoopHandle> VoiceLoop<H> {
             intent = ?signals.intent,
             action = ?action,
             "voice loop: routed utterance"
+        );
+        // The decision itself, for the watch surface: what the router chose
+        // and every signal it chose from.
+        crate::voice_trace::voice_trace().record(
+            conv_id,
+            "route",
+            serde_json::json!({
+                "action": format!("{action:?}"),
+                "busy": signals.busy,
+                "intent": format!("{:?}", signals.intent),
+                "is_backchannel": signals.is_backchannel,
+                "is_short": signals.is_short,
+                "topically_continuous": signals.topically_continuous,
+                "text": truncate_for_trace(text),
+            }),
         );
         match action {
             InterruptAction::Turn => {

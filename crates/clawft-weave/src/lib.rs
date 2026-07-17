@@ -26,3 +26,4 @@ pub mod rvf_rpc;
 pub mod turn_ledger;
 pub mod voice_loop;
 pub mod voice_router;
+pub mod voice_trace;

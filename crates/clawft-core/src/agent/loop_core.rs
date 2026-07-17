@@ -208,6 +208,15 @@ struct ToolLoopResult {
     /// Subagents spawned during the loop, detected from `agent_spawn`
     /// tool results (M4 D8).
     spawned_tasks: Vec<SpawnedTaskSummary>,
+    /// Model that answered, from the last response's `metadata["model"]`.
+    model: Option<String>,
+    /// Cumulative prompt/completion tokens across the loop's LLM calls.
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    /// Reasoning captured across iterations (`metadata["reasoning"]` — the
+    /// stripped Hermes `<think>` / llama.cpp `reasoning_content`), joined
+    /// in order. Observability only; never fed back into the prompt.
+    reasoning: Option<String>,
 }
 
 /// Truncate a string to at most `TOOL_PREVIEW_MAX_BYTES` bytes on a
@@ -280,6 +289,7 @@ fn spawned_task_from_result(name: &str, result_json: &str) -> Option<SpawnedTask
 /// 6. **Respond**: Extract the final text response and dispatch an
 ///    [`OutboundMessage`] to the bus.
 /// 7. **Persist**: Save the updated session and append to history.
+///
 /// The loop's COW-memory attachment (WEFT-616 Phase 2 + 652 + 654).
 #[cfg(feature = "rvf")]
 #[derive(Clone)]
@@ -1354,6 +1364,10 @@ impl<P: Platform> AgentLoop<P> {
             finish_reason: tool_result.finish_reason,
             iterations: tool_result.iterations,
             spawned_tasks: tool_result.spawned_tasks,
+            model: tool_result.model,
+            prompt_tokens: tool_result.prompt_tokens,
+            completion_tokens: tool_result.completion_tokens,
+            reasoning: tool_result.reasoning,
         };
         match serde_json::to_value(&result_meta) {
             Ok(v) => {
@@ -1737,6 +1751,11 @@ impl<P: Platform> AgentLoop<P> {
         // M4 D8: accumulate the real result enrichment across iterations.
         let mut tool_call_summaries: Vec<AgentChatToolCall> = Vec::new();
         let mut spawned_tasks: Vec<SpawnedTaskSummary> = Vec::new();
+        // Observability accounting across iterations (voice trace / watch).
+        let mut model: Option<String> = None;
+        let mut prompt_tokens: u32 = 0;
+        let mut completion_tokens: u32 = 0;
+        let mut reasoning_parts: Vec<String> = Vec::new();
         let workspace = self.workspace_path();
 
         for iteration in 0..max_iterations {
@@ -1795,6 +1814,17 @@ impl<P: Platform> AgentLoop<P> {
             }
 
             let response = self.pipeline.complete(&request).await?;
+
+            // Observability accounting (voice trace / watch): which model
+            // answered, cumulative tokens, and any captured reasoning.
+            if let Some(m) = response.metadata.get("model").and_then(|v| v.as_str()) {
+                model = Some(m.to_string());
+            }
+            prompt_tokens = prompt_tokens.saturating_add(response.usage.input_tokens);
+            completion_tokens = completion_tokens.saturating_add(response.usage.output_tokens);
+            if let Some(r) = response.metadata.get("reasoning").and_then(|v| v.as_str()) {
+                reasoning_parts.push(r.to_string());
+            }
 
             // WEFT-322: record this call's accounting against the budget.
             // The pipeline's `LlmResponse.usage` is the canonical token
@@ -1879,6 +1909,14 @@ impl<P: Platform> AgentLoop<P> {
                     // `iteration` is 0-based; this LLM round-trip ran.
                     iterations: (iteration as u32).saturating_add(1),
                     spawned_tasks,
+                    model,
+                    prompt_tokens,
+                    completion_tokens,
+                    reasoning: if reasoning_parts.is_empty() {
+                        None
+                    } else {
+                        Some(reasoning_parts.join("\n\n"))
+                    },
                 });
             }
 

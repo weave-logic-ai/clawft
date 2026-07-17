@@ -361,13 +361,30 @@ fn convert_response(resp: serde_json::Value) -> clawft_types::Result<LlmResponse
     // Build content blocks
     let mut content = Vec::new();
 
+    // Hybrid-reasoning capture: llama.cpp's OpenAI-compat endpoint surfaces
+    // template-parsed reasoning as `message.reasoning_content`; Hermes-style
+    // raw output carries it inline as `<think>…</think>` instead. Route
+    // either into `metadata["reasoning"]` (surfaced on `AgentChatResult` for
+    // the voice-trace/watch view) and keep reasoning OUT of the text
+    // content — a `<think>` block reaching a spoken reply is a bug.
+    let mut reasoning: Option<String> = message
+        .get("reasoning_content")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
     // Extract text content
     if let Some(text) = message.get("content").and_then(|v| v.as_str())
         && !text.is_empty()
     {
-        content.push(ContentBlock::Text {
-            text: text.to_string(),
-        });
+        let (cleaned, think) = clawft_llm::hermes::strip_think(text);
+        if reasoning.is_none() {
+            reasoning = think.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+        }
+        if !cleaned.trim().is_empty() {
+            content.push(ContentBlock::Text { text: cleaned });
+        }
     }
 
     // Extract tool calls
@@ -428,6 +445,9 @@ fn convert_response(resp: serde_json::Value) -> clawft_types::Result<LlmResponse
 
     let mut metadata = HashMap::new();
     metadata.insert("model".into(), serde_json::json!(model));
+    if let Some(r) = reasoning {
+        metadata.insert("reasoning".into(), serde_json::json!(r));
+    }
 
     Ok(LlmResponse {
         id,

@@ -365,16 +365,21 @@ async fn full_pipeline_speculative_then_committed() {
     let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
 
     let events = observer.snapshot();
-    // Order: SpeakerEnrolled → UserTurn → SpeculativeReply → CommittedReply.
+    // Order: SpeakerEnrolled → UserTurn → CueTone(ack) → CommittedReply.
     let spk = events
         .iter()
         .position(|e| matches!(e, ConversationEvent::SpeakerEnrolled { .. }));
     let usr = events
         .iter()
         .position(|e| matches!(e, ConversationEvent::UserTurn { .. }));
-    let spec = events
-        .iter()
-        .position(|e| matches!(e, ConversationEvent::SpeculativeReply { .. }));
+    let spec = events.iter().position(|e| {
+        matches!(
+            e,
+            ConversationEvent::CueTone {
+                kind: clawft_channels::voice::cue::CueKind::Ack
+            }
+        )
+    });
     let comm = events
         .iter()
         .position(|e| matches!(e, ConversationEvent::CommittedReply { .. }));
@@ -401,10 +406,10 @@ async fn full_pipeline_speculative_then_committed() {
     )), "endpoint source is the heuristic (no smart-turn model in this test)");
 
     assert!(spk < usr, "speaker enrolled before user turn");
-    assert!(usr < spec, "user turn before speculative ack");
+    assert!(usr < spec, "user turn before the ack cue");
     assert!(
         spec < comm,
-        "speculative ack must precede committed answer (the ECC handoff)"
+        "ack cue must precede committed answer (the ECC handoff)"
     );
 
     // The user turn is speaker-attributed (named, never spoken).
@@ -604,7 +609,10 @@ async fn listen_only_records_the_turn_but_skips_the_brain() {
     );
     // ...but the brain never runs: no ack, no committed reply, no audio out.
     assert!(
-        !observer.has(|e| matches!(e, ConversationEvent::SpeculativeReply { .. })),
+        !observer.has(|e| matches!(
+            e,
+            ConversationEvent::SpeculativeReply { .. } | ConversationEvent::CueTone { .. }
+        )),
         "listen-only must not ack"
     );
     assert!(

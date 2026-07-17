@@ -323,9 +323,27 @@ async fn handle_test_mic(duration: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// One queued post from the recorder observer: a durable turn for
+/// `agent.turn.record`, or a surface-only process event for
+/// `voice.trace.append` (the client half of the `weft voice watch` trace).
+enum RecorderPost {
+    Turn {
+        role: &'static str,
+        content: String,
+        voice_analysis: Option<serde_json::Value>,
+    },
+    Trace {
+        kind: &'static str,
+        detail: serde_json::Value,
+    },
+}
+
 /// Non-blocking [`ConversationObserver`] that forwards user / committed-
 /// assistant turns into an unbounded queue; a background poster task posts
-/// each to the daemon's `agent.turn.record` RPC.
+/// each to the daemon's `agent.turn.record` RPC. Process events (cue tones,
+/// TTS render timing, gates, interrupts) ride the same queue to
+/// `voice.trace.append`, so `weft voice watch` shows the client half of the
+/// turn alongside the daemon's own decision trace.
 ///
 /// `mirror_assistant` gates the `CommittedReply` arm (WEFT-614 lite): in
 /// daemon-brain mode the reply IS the daemon's own voice-loop output, which
@@ -333,14 +351,14 @@ async fn handle_test_mic(duration: u32) -> anyhow::Result<()> {
 /// node — mirroring it again here would double-anchor the same turn. The
 /// user turn is always mirrored regardless.
 struct TurnRecordObserver {
-    tx: tokio::sync::mpsc::UnboundedSender<(&'static str, String, Option<serde_json::Value>)>,
+    tx: tokio::sync::mpsc::UnboundedSender<RecorderPost>,
     mirror_assistant: bool,
 }
 
 impl clawft_voice_talk::ConversationObserver for TurnRecordObserver {
     fn observe(&self, event: clawft_voice_talk::ConversationEvent) {
         use clawft_voice_talk::ConversationEvent;
-        let triple = match event {
+        let post = match event {
             ConversationEvent::UserTurn {
                 text,
                 voice_analysis,
@@ -353,20 +371,46 @@ impl clawft_voice_talk::ConversationObserver for TurnRecordObserver {
                 let va = voice_analysis
                     .as_deref()
                     .and_then(|v| serde_json::to_value(v).ok());
-                ("user", text, va)
+                RecorderPost::Turn {
+                    role: "user",
+                    content: text,
+                    voice_analysis: va,
+                }
             }
             ConversationEvent::CommittedReply { answer } if self.mirror_assistant => {
-                ("assistant", answer, None)
+                RecorderPost::Turn {
+                    role: "assistant",
+                    content: answer,
+                    voice_analysis: None,
+                }
             }
-            // Speculative acks are superseded by the committed reply and
-            // barge-ins prune in-forest; neither is a durable turn. A
-            // committed reply with mirroring suppressed is likewise skipped
-            // — the daemon already anchored it.
+            // Client-side process events → the watch trace (surface-only,
+            // never anchored).
+            ConversationEvent::CueTone { kind } => RecorderPost::Trace {
+                kind: "cue",
+                detail: serde_json::json!({ "kind": kind.label() }),
+            },
+            ConversationEvent::TtsRendered { ms, chunks } => RecorderPost::Trace {
+                kind: "tts",
+                detail: serde_json::json!({ "ms": ms, "chunks": chunks }),
+            },
+            ConversationEvent::TurnGated { ref reason } => RecorderPost::Trace {
+                kind: "gate",
+                detail: serde_json::json!({ "reason": reason }),
+            },
+            ConversationEvent::Interrupted => RecorderPost::Trace {
+                kind: "interrupt",
+                detail: serde_json::json!({}),
+            },
+            // Speculative acks are superseded by the committed reply; a
+            // committed reply with mirroring suppressed is skipped — the
+            // daemon already anchored it. Per-frame events (partials, level
+            // meter) are too chatty for the trace.
             _ => return,
         };
         // Receiver gone (daemon died and the poster exited) — drop silently;
         // anchoring is best-effort by design.
-        let _ = self.tx.send(triple);
+        let _ = self.tx.send(post);
     }
 }
 
@@ -384,42 +428,60 @@ async fn spawn_turn_recorder(
     // (covers `weft voice talk` and `weft voice listen`, which both anchor
     // turns through this recorder).
     super::daemon_guard::warn_on_build_mismatch(&mut client).await;
-    let (tx, mut rx) =
-        tokio::sync::mpsc::unbounded_channel::<(&'static str, String, Option<serde_json::Value>)>();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RecorderPost>();
 
     tokio::spawn(async move {
-        while let Some((role, content, voice_analysis)) = rx.recv().await {
-            let mut turn = serde_json::json!({ "role": role, "content": content });
-            if let Some(va) = voice_analysis {
-                turn["voice_analysis"] = va;
-            }
-            let params = serde_json::json!({
-                "conv_id": conv_id,
-                "channel": "voice.talk",
-                "turns": [turn],
-            });
-            // One reconnect attempt per turn: a dropped socket loses no
+        while let Some(post) = rx.recv().await {
+            let (method, params) = match post {
+                RecorderPost::Turn {
+                    role,
+                    content,
+                    voice_analysis,
+                } => {
+                    let mut turn = serde_json::json!({ "role": role, "content": content });
+                    if let Some(va) = voice_analysis {
+                        turn["voice_analysis"] = va;
+                    }
+                    (
+                        "agent.turn.record",
+                        serde_json::json!({
+                            "conv_id": conv_id,
+                            "channel": "voice.talk",
+                            "turns": [turn],
+                        }),
+                    )
+                }
+                RecorderPost::Trace { kind, detail } => (
+                    "voice.trace.append",
+                    serde_json::json!({
+                        "conv_id": conv_id,
+                        "kind": kind,
+                        "detail": detail,
+                    }),
+                ),
+            };
+            // One reconnect attempt per post: a dropped socket loses no
             // event, a stopped daemon ends anchoring for the session.
             let mut posted = false;
             for attempt in 0..2 {
-                let request = Request::with_params("agent.turn.record", params.clone());
+                let request = Request::with_params(method, params.clone());
                 match client.call(request).await {
                     Ok(resp) => {
                         if let Err(e) = resp.into_result() {
-                            tracing::warn!(error = %e, role, "agent.turn.record rejected");
+                            tracing::warn!(error = %e, method, "voice recorder post rejected");
                         }
                         posted = true;
                         break;
                     }
                     Err(e) if attempt == 0 => {
-                        tracing::debug!(error = %e, "agent.turn.record transport error; reconnecting");
+                        tracing::debug!(error = %e, method, "voice recorder transport error; reconnecting");
                         match DaemonClient::connect().await {
                             Some(c) => client = c,
                             None => break,
                         }
                     }
                     Err(e) => {
-                        tracing::warn!(error = %e, "agent.turn.record transport error after reconnect");
+                        tracing::warn!(error = %e, method, "voice recorder transport error after reconnect");
                     }
                 }
             }

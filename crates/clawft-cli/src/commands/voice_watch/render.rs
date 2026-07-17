@@ -333,6 +333,121 @@ pub(super) fn render_voice_analysis(va: &Value) {
     }
 }
 
+/// Human-readable duration: `850ms` under a second, `6.2s` above.
+pub(super) fn fmt_ms(ms: u64) -> String {
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else {
+        format!("{:.1}s", ms as f64 / 1_000.0)
+    }
+}
+
+/// Render one poll's worth of `voice.trace` events — the decision/process
+/// feed: gates (and why), router verdicts, the brain call's accounting
+/// (model, wall time, tools, reasoning), and client-posted process events
+/// (`client_*`: cue tones, TTS render time, interrupts). `json` mode dumps
+/// each event as one raw line, mirroring the graph view's contract.
+pub(super) fn render_trace_events(val: &Value, json: bool) {
+    let Some(events) = val.get("events").and_then(Value::as_array) else {
+        return;
+    };
+    for event in events {
+        if json {
+            println!("{}", serde_json::to_string(event).unwrap_or_default());
+            continue;
+        }
+        for line in trace_lines(event) {
+            println!("{line}");
+        }
+    }
+}
+
+/// The human rendering of one trace event, possibly multi-line (the brain
+/// event carries reasoning on its own indented line). Unknown kinds fall
+/// back to a generic `kind: detail` line so a newer daemon never renders
+/// as silence.
+fn trace_lines(event: &Value) -> Vec<String> {
+    let kind = event.get("kind").and_then(Value::as_str).unwrap_or("?");
+    let d = event.get("detail").cloned().unwrap_or(Value::Null);
+    let s = |key: &str| d.get(key).and_then(Value::as_str).unwrap_or("—").to_string();
+    let n = |key: &str| d.get(key).and_then(Value::as_u64);
+    match kind {
+        "gate" | "client_gate" => {
+            let origin = if kind == "client_gate" { " (client)" } else { "" };
+            let mut line = format!("⊘ gate{origin}: {}", s("reason"));
+            if let Some(conf) = d.get("token_conf_mean").and_then(Value::as_f64) {
+                line.push_str(&format!(" · conf {conf:.2}"));
+            }
+            if let Some(snr) = d.get("snr_db").and_then(Value::as_f64) {
+                line.push_str(&format!(" · snr {snr:.1}dB"));
+            }
+            if d.get("class").is_some() {
+                line.push_str(&format!(" ({})", s("class")));
+            }
+            vec![line]
+        }
+        "route" => vec![format!(
+            "⟢ route → {} · busy={} · intent={} · “{}”",
+            s("action"),
+            d.get("busy").and_then(Value::as_bool).unwrap_or(false),
+            s("intent"),
+            truncate(&s("text"), 60),
+        )],
+        "dispatch" => {
+            let seq = n("seq").map(|v| format!("#{v}")).unwrap_or_default();
+            vec![format!("◇ dispatch {seq}: “{}”", truncate(&s("goal"), 60))]
+        }
+        "brain" => {
+            let mut line = format!("◆ brain: {}", s("model"));
+            if let Some(ms) = n("duration_ms") {
+                line.push_str(&format!(" · {}", fmt_ms(ms)));
+            }
+            if let Some(iters) = n("iterations") {
+                line.push_str(&format!(" · {iters} iteration(s)"));
+            }
+            if let (Some(pt), Some(ct)) = (n("prompt_tokens"), n("completion_tokens")) {
+                line.push_str(&format!(" · {pt}↑ {ct}↓ tok"));
+            }
+            let mut lines = vec![line];
+            if let Some(tools) = d.get("tool_calls").and_then(Value::as_array)
+                && !tools.is_empty()
+            {
+                let names: Vec<&str> = tools.iter().filter_map(Value::as_str).collect();
+                lines.push(format!("   tools: {}", names.join(", ")));
+            }
+            if let Some(think) = d.get("reasoning").and_then(Value::as_str)
+                && !think.trim().is_empty()
+            {
+                lines.push(format!("   think: {}", truncate(think.trim(), 300)));
+            }
+            lines
+        }
+        "brain_error" => {
+            let dur = n("duration_ms").map(|ms| format!(" ({})", fmt_ms(ms))).unwrap_or_default();
+            vec![format!("✗ brain error{dur}: {}", s("error"))]
+        }
+        "attempt" => {
+            // The committed transition already renders from the graph poll
+            // (◆ attempt #N committed) — only the outcomes the graph can't
+            // show get a trace line.
+            let outcome = s("outcome");
+            if outcome == "committed" {
+                return Vec::new();
+            }
+            let seq = n("seq").map(|v| format!("#{v}")).unwrap_or_default();
+            vec![format!("↦ attempt {seq} {outcome}")]
+        }
+        "client_cue" => vec![format!("♪ cue ({})", s("kind"))],
+        "client_tts" => {
+            let chunks = n("chunks").unwrap_or(0);
+            let ms = n("ms").unwrap_or(0);
+            vec![format!("♬ tts rendered: {chunks} chunk(s) in {}", fmt_ms(ms))]
+        }
+        "client_interrupt" => vec!["↯ interrupted (client barge-in)".to_string()],
+        other => vec![format!("· {other}: {d}")],
+    }
+}
+
 /// A fixed-width arousal meter. Arousal is `[-1, 1]` (0.5 ≈ neutral per the
 /// keyword floor); map to `[0, 1]` for the bar and mark the filled portion.
 fn arousal_bar(arousal: f64) -> String {
@@ -516,6 +631,58 @@ mod tests {
         let node = json!({ "chain_seq": 2, "role": "user" });
         let line = transition_line(&node, "frontier", "committed");
         assert!(line.contains("#2") && line.contains("frontier") && line.contains("committed"));
+    }
+
+    #[test]
+    fn fmt_ms_switches_units_at_one_second() {
+        assert_eq!(fmt_ms(850), "850ms");
+        assert_eq!(fmt_ms(6_200), "6.2s");
+    }
+
+    #[test]
+    fn trace_lines_render_route_gate_and_brain() {
+        let route = json!({ "kind": "route", "detail": {
+            "action": "Turn", "busy": false, "intent": "Ask", "text": "what is a weft"
+        }});
+        let lines = trace_lines(&route);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("Turn") && lines[0].contains("what is a weft"));
+
+        let gate = json!({ "kind": "gate", "detail": {
+            "reason": "unclear", "token_conf_mean": 0.44, "snr_db": 6.4
+        }});
+        let lines = trace_lines(&gate);
+        assert!(lines[0].contains("unclear") && lines[0].contains("0.44"));
+
+        let brain = json!({ "kind": "brain", "detail": {
+            "model": "hermes-4.3-36b", "duration_ms": 6200, "iterations": 2,
+            "prompt_tokens": 812, "completion_tokens": 96,
+            "tool_calls": ["fs_read", "memory_write"],
+            "reasoning": "the user asked about wefts"
+        }});
+        let lines = trace_lines(&brain);
+        assert!(lines[0].contains("hermes-4.3-36b") && lines[0].contains("6.2s"));
+        assert!(lines[1].contains("fs_read, memory_write"));
+        assert!(lines[2].contains("think: the user asked about wefts"));
+    }
+
+    #[test]
+    fn trace_lines_skip_committed_attempt_but_render_parked() {
+        let committed = json!({ "kind": "attempt", "detail": { "seq": 4, "outcome": "committed" }});
+        assert!(trace_lines(&committed).is_empty(), "graph poll already renders commits");
+        let parked = json!({ "kind": "attempt", "detail": { "seq": 4, "outcome": "parked_for_review" }});
+        assert!(trace_lines(&parked)[0].contains("parked_for_review"));
+    }
+
+    #[test]
+    fn trace_lines_render_client_process_events_and_unknown_kinds() {
+        let tts = json!({ "kind": "client_tts", "detail": { "ms": 1400, "chunks": 3 }});
+        assert!(trace_lines(&tts)[0].contains("3 chunk(s) in 1.4s"));
+        let cue = json!({ "kind": "client_cue", "detail": { "kind": "ack" }});
+        assert!(trace_lines(&cue)[0].contains("cue (ack)"));
+        // Unknown kinds never render as silence.
+        let unknown = json!({ "kind": "novel_thing", "detail": { "x": 1 }});
+        assert!(trace_lines(&unknown)[0].contains("novel_thing"));
     }
 
     #[test]

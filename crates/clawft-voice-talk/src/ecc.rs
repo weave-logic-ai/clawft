@@ -147,6 +147,8 @@ impl ConversationObserver for EccConversationObserver {
             | ConversationEvent::PartialTranscript { .. }
             | ConversationEvent::CaptureLevel { .. }
             | ConversationEvent::SpeculativeFiller { .. }
+            | ConversationEvent::CueTone { .. }
+            | ConversationEvent::TtsRendered { .. }
             | ConversationEvent::TurnGated { .. } => {}
             ConversationEvent::Interrupted => {
                 let i = self.graph.add_node(

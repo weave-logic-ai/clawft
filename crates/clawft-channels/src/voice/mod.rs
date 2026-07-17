@@ -39,6 +39,7 @@
 pub mod analysis;
 pub mod capture;
 pub mod channel;
+pub mod cue;
 pub mod edge_reflex;
 pub mod paralinguistics;
 pub mod policy;
@@ -73,6 +74,7 @@ pub use channel::{
 pub use policy::{ReasoningHint, VoiceAnswerPolicy, VoiceLlm, VoiceTurnRequest, estimate_tokens};
 pub use speaker::{SpeakerEmbedder, SpeakerId, SpeakerMatch, SpeakerNode, SpeakerRegistry, cosine};
 pub use stt::{SttBackend, SttModel, SubstrateStt, TranscriptResult, TranscriptToken, Utterance};
+pub use cue::{CueKind, cue_chunk};
 pub use talkmode::{
     AudioControl, ConversationEvent, ConversationObserver, NoopAudioControl, NoopObserver,
     TalkModeConfig, TalkModeController, contextual_ack,

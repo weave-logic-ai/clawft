@@ -174,6 +174,12 @@ pub struct AgentChatResult {
     /// leaves this `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_source: Option<String>,
+    /// Model reasoning captured across the tool loop (Hermes `<think>` /
+    /// llama.cpp `reasoning_content`), when the provider produced any —
+    /// surfaced for observability (`weft voice watch`), never part of the
+    /// spoken/printed reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
     /// Subagents spawned during the turn (M4 D8). Absent on the wire
     /// when empty; older clients that omit it deserialize to an empty
     /// vec, so the field is fully backward-compatible.
@@ -214,6 +220,20 @@ pub struct AgentLoopResultMeta {
     /// Subagents spawned during the turn.
     #[serde(default)]
     pub spawned_tasks: Vec<SpawnedTaskSummary>,
+    /// Model that actually answered (from the provider response), when the
+    /// pipeline reported one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Cumulative prompt tokens across the loop's LLM calls.
+    #[serde(default)]
+    pub prompt_tokens: u32,
+    /// Cumulative completion tokens across the loop's LLM calls.
+    #[serde(default)]
+    pub completion_tokens: u32,
+    /// Reasoning captured across the loop (see
+    /// [`AgentChatResult::reasoning`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 /// One externally-produced turn for the `agent.turn.record` RPC.
@@ -304,11 +324,13 @@ mod tests {
             completion_tokens: 0,
             model: None,
             identity_source: None,
+            reasoning: None,
             spawned_tasks: Vec::new(),
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(!json.contains("\"model\""));
         assert!(!json.contains("\"identity_source\""));
+        assert!(!json.contains("\"reasoning\""));
         assert!(json.contains("\"tool_calls\":[]"));
         // Empty spawned_tasks must not appear on the wire (backward-compat).
         assert!(!json.contains("\"spawned_tasks\""));
@@ -325,6 +347,7 @@ mod tests {
             completion_tokens: 0,
             model: None,
             identity_source: None,
+            reasoning: None,
             spawned_tasks: vec![SpawnedTaskSummary {
                 task_id: "task-1".into(),
                 child_conv_id: "sub:P:01HQ".into(),
@@ -374,6 +397,10 @@ mod tests {
                 child_conv_id: "sub:P:01HQ".into(),
                 status: "completed".into(),
             }],
+            model: Some("hermes-4.3-36b".into()),
+            prompt_tokens: 812,
+            completion_tokens: 96,
+            reasoning: Some("the user asked for a sum".into()),
         };
         let value = serde_json::to_value(&meta).unwrap();
         let back: AgentLoopResultMeta = serde_json::from_value(value).unwrap();
@@ -381,6 +408,10 @@ mod tests {
         assert_eq!(back.tool_calls.len(), 1);
         assert_eq!(back.spawned_tasks.len(), 1);
         assert_eq!(back.spawned_tasks[0].task_id, "t1");
+        assert_eq!(back.model.as_deref(), Some("hermes-4.3-36b"));
+        assert_eq!(back.prompt_tokens, 812);
+        assert_eq!(back.completion_tokens, 96);
+        assert_eq!(back.reasoning.as_deref(), Some("the user asked for a sum"));
     }
 
     #[test]

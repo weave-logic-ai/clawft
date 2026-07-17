@@ -191,10 +191,10 @@ async fn assembled_pipeline_runs_a_full_turn_end_to_end() {
         .expect("controller stopped")
         .expect("controller task did not panic");
 
-    // The render shell spoke (ack + answer chunks reached the sink).
+    // The render shell spoke (ack cue + answer chunks reached the sink).
     assert!(
         *sink.spoken.lock().unwrap() >= 2,
-        "ack + answer were spoken"
+        "ack cue + answer were played"
     );
 
     // The user turn was dual-written + registered (Frontier) — the observer's
@@ -204,10 +204,11 @@ async fn assembled_pipeline_runs_a_full_turn_end_to_end() {
     assert_eq!(r.commits, 1, "the P2 loop commits the user turn");
     assert_eq!(forest.view().state(1), Some(NodeState::Committed));
 
-    // The conversation landed on the graph: user turn + speculative + committed
-    // reply nodes (≥ 3), proving the full Speculative→Committed handoff wrote.
+    // The conversation landed on the graph: user turn + committed reply
+    // nodes (≥ 2). The ack is a cue tone now, not a spoken Speculative node,
+    // so no speculative reply node is expected on the graph.
     assert!(
-        forest.graph().node_count() >= 3,
-        "turn + speculative + committed nodes on the CausalGraph"
+        forest.graph().node_count() >= 2,
+        "turn + committed reply nodes on the CausalGraph"
     );
 }
