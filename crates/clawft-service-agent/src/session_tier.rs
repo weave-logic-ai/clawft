@@ -747,8 +747,27 @@ impl SessionTier {
 
     /// Render grafted items into a single system message, citing each item's
     /// chain sequence so the model (and audit) can trace the witness chain.
+    ///
+    /// Contentless recalls are dropped, not rendered: an empty/whitespace
+    /// `Inline` hit rendered as a bare `- [chain_seq N]` line, and the model
+    /// treated the scaffolding itself as a fact — talking about recalled
+    /// items it couldn't actually see, and even writing the debris back into
+    /// MEMORY.md (found live, 2026-07-17). `Blob`/`Reference` items are
+    /// skipped for the same reason: an opaque pointer gives the model nothing
+    /// but an invitation to hallucinate its contents.
     fn render_block(items: &[GraftedItem]) -> Vec<LlmMessage> {
-        if items.is_empty() {
+        let rendered: Vec<(u64, String)> = items
+            .iter()
+            .filter_map(|it| {
+                let text = match &it.content {
+                    GraftContent::Inline(t) => t.trim(),
+                    GraftContent::Blob(_) | GraftContent::Reference => return None,
+                };
+                (text.chars().any(char::is_alphanumeric))
+                    .then(|| (it.chain_seq, text.to_string()))
+            })
+            .collect();
+        if rendered.is_empty() {
             return Vec::new();
         }
         let mut body = String::from(
@@ -756,13 +775,8 @@ impl SessionTier {
              Earlier context retrieved for this turn. Each item cites its \
              ExoChain sequence (witness):\n\n",
         );
-        for it in items {
-            let text = match &it.content {
-                GraftContent::Inline(t) => t.clone(),
-                GraftContent::Blob(h) => format!("[content-addressed blob {h}]"),
-                GraftContent::Reference => "[recoverable from chain]".to_string(),
-            };
-            body.push_str(&format!("- [chain_seq {}] {}\n", it.chain_seq, text));
+        for (chain_seq, text) in &rendered {
+            body.push_str(&format!("- [chain_seq {chain_seq}] {text}\n"));
         }
         vec![LlmMessage {
             role: "system".into(),

@@ -195,6 +195,13 @@ impl<P: Platform + 'static> Tool for MemoryReadTool<P> {
 // MemoryWriteTool
 // ---------------------------------------------------------------------------
 
+/// Content that echoes the L2 graft block's rendering (`session_tier.rs`
+/// `render_block`) rather than stating a fact. Marker-based, deliberately
+/// narrow: only the two strings that rendering actually produces.
+fn is_graft_echo(content: &str) -> bool {
+    content.contains("[chain_seq ") || content.contains("# Recalled context")
+}
+
 /// Write to the workspace memory file.
 ///
 /// Supports `append` (default) and `overwrite` modes. Creates the file
@@ -244,6 +251,21 @@ impl<P: Platform + 'static> Tool for MemoryWriteTool<P> {
             .get("content")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidArgs("missing required field: content".to_string()))?;
+
+        // Refuse graft-echo: recalled-context blocks are the loop's own
+        // retrieval scaffolding. Written back into MEMORY.md they reload as
+        // "Relevant Memory" on every subsequent turn — a self-amplifying
+        // feedback loop observed live (a runaway tool loop appended 20 of
+        // them, most empty). The error text tells the model what to do
+        // instead, so a well-behaved retry still lands the actual fact.
+        if is_graft_echo(content) {
+            return Err(ToolError::InvalidArgs(
+                "memory_write rejects recalled-context blocks ('[chain_seq …]' / \
+                 '# Recalled context'): that text is retrieval output, not a fact. \
+                 State the fact to remember in your own words instead."
+                    .to_string(),
+            ));
+        }
 
         let mode = args
             .get("mode")
