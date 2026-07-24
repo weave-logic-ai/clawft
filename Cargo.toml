@@ -355,6 +355,16 @@ include = ["LICENSE", "README.md"]
 # Do not auto-include workspace crates — we mark distributable ones explicitly
 auto-includes = false
 
+# Dev profile drives every `scripts/build.sh test | check | clippy` run, so its
+# artifacts dominate target/debug (measured 2026-07-24: 190G, of which deps/
+# carried full DWARF for 500+ third-party crates). Dependencies get no
+# debuginfo — nobody steps into serde with a debugger — while workspace crates
+# keep the cargo default (debug = true) so lldb still works on clawft code.
+# Prune the orphaned incremental caches this profile leaves behind with
+# `scripts/build.sh clean-stale`.
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 opt-level = 3
 lto = true

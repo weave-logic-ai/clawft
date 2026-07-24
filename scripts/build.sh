@@ -30,6 +30,7 @@ WASM_PANEL_MAX_RAW_KB=""
 WASM_PANEL_MAX_GZ_KB=""
 BENCH_CRATE=""
 BENCH_NAME=""
+CLEAN_STALE_DAYS=""
 TEST_PACKAGES=()
 COMMAND=""
 
@@ -782,6 +783,61 @@ cmd_clean() {
     pass "Clean complete"
 }
 
+# Prune orphaned dev-profile incremental caches (WEFT: target-dir growth).
+#
+# Every dependency bump, feature-flag flip, or rustc update mints a fresh
+# incremental hash directory and abandons the previous one. Cargo never
+# garbage-collects these, so `target/debug/incremental` grows without bound on
+# a long-lived dev box — measured 2026-07-24 at 128G across 2,952 dirs, of
+# which only 213 belonged to the most recent build session.
+#
+# Pruning by mtime is safe: an incremental cache is pure derived state. The
+# worst case for deleting a live one is a slower next compile, never a wrong
+# build. Default threshold is 7 days; override with `--days N`.
+#
+# Space is reported as a df delta rather than a du sum: cargo hardlinks and
+# APFS-clones blocks between deps/ and incremental/, so per-directory du
+# double-counts shared extents (du said 117G for a set that freed less).
+cmd_clean_stale() {
+    local days="${CLEAN_STALE_DAYS:-7}"
+    local incr="$ROOT/target/debug/incremental"
+    header "Pruning incremental caches older than ${days}d"
+
+    if [ ! -d "$incr" ]; then
+        info "No target/debug/incremental — nothing to prune"
+        return 0
+    fi
+
+    local total stale
+    total=$(find "$incr" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+    stale=$(find "$incr" -mindepth 1 -maxdepth 1 -type d -mtime "+$days" | wc -l | tr -d ' ')
+    info "$stale of $total cache dirs older than ${days}d"
+
+    if [ "$stale" -eq 0 ]; then
+        pass "Nothing to prune"
+        return 0
+    fi
+
+    if [ "$DRY_RUN" = true ]; then
+        printf "  ${YELLOW}DRY${NC}   rm -rf %s stale dirs under target/debug/incremental\n" "$stale"
+        return 0
+    fi
+
+    local before after
+    before=$(df -k "$ROOT" | tail -1 | awk '{print $4}')
+    timer_start
+    # -n 200 keeps the argv under ARG_MAX when thousands of dirs are stale.
+    find "$incr" -mindepth 1 -maxdepth 1 -type d -mtime "+$days" -print0 \
+        | xargs -0 -n 200 rm -rf
+    timer_end
+    after=$(df -k "$ROOT" | tail -1 | awk '{print $4}')
+
+    awk -v b="$before" -v a="$after" \
+        'BEGIN { printf "  \033[0;36mINFO\033[0m  Reclaimed %.1f GB (free: %.1f -> %.1f GB)\n", \
+                 (a-b)/1048576, b/1048576, a/1048576 }'
+    pass "Pruned $stale stale incremental caches"
+}
+
 cmd_serve() {
     local port="${1:-8080}"
     local www_dir="$ROOT/crates/clawft-wasm/www"
@@ -1107,6 +1163,10 @@ ${BOLD}Commands:${NC}
                   in full (not truncated like other commands' output).
   serve [port]    Serve browser test harness (default: 8080)
   clean           Clean all build artifacts
+  clean-stale     Prune orphaned dev-profile incremental caches (safe: pure
+                  derived state; worst case is a slower next compile). Cargo
+                  never GCs these, so target/debug/incremental grows without
+                  bound. Default 7d threshold — override with --days
 
 ${BOLD}Options:${NC}
   --features <f>  Extra features to enable (e.g. --features voice,channels).
@@ -1121,6 +1181,7 @@ ${BOLD}Options:${NC}
   --no-fail-fast  Keep running tests after a failure (test command) — full
                   verdict when a known-environmental failure would fail-fast
   --prefix <dir>  Install into <dir> instead of ~/.cargo/bin (install command)
+  --days <n>      Age threshold in days (clean-stale command, default 7)
   --verbose       Show full cargo output
   --dry-run       Print commands without executing
   --help          Show this help
@@ -1218,6 +1279,10 @@ parse_args() {
                 PREFIX="${2:?'--prefix requires a directory'}"
                 shift 2
                 ;;
+            --days)
+                CLEAN_STALE_DAYS="${2:?'--days requires a number'}"
+                shift 2
+                ;;
             --verbose)
                 VERBOSE=true
                 shift
@@ -1266,6 +1331,7 @@ main() {
         bench)        cmd_bench "$BENCH_CRATE" "$BENCH_NAME" ;;
         serve)        cmd_serve "$SERVE_PORT" ;;
         clean)        cmd_clean ;;
+        clean-stale)  cmd_clean_stale ;;
         --help|-h)    usage ;;
         *)
             printf "${RED}Unknown command: %s${NC}\n" "$COMMAND"
