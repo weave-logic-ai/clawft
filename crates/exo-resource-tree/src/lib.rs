@@ -2,7 +2,9 @@
 //!
 //! Provides a tree-structured resource namespace with:
 //! - CRUD operations on typed resource nodes
-//! - Merkle hash integrity (bottom-up recomputation)
+//! - Merkle hash integrity with **incremental** path recompute
+//!   ([`ResourceTree::recompute_path`], WEFT-145) — O(depth) per mutation
+//! - Full-tree [`ResourceTree::recompute_all`] retained for bootstrap/checkpoints
 //! - DAG-backed mutation log for audit trail
 //! - Bootstrap from checkpoint or fresh namespace
 //!

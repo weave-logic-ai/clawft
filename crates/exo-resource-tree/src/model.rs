@@ -106,10 +106,20 @@ pub struct ResourceNode {
     pub created_at: DateTime<Utc>,
     /// When this node was last modified.
     pub updated_at: DateTime<Utc>,
+    /// Runtime dirty flag for incremental Merkle updates (WEFT-145).
+    ///
+    /// Not persisted — checkpoints store only committed hashes. Set by
+    /// [`crate::tree::ResourceTree::mark_dirty`] and cleared by
+    /// [`crate::tree::ResourceTree::recompute_dirty`] /
+    /// [`crate::tree::ResourceTree::recompute_all`].
+    #[serde(skip)]
+    pub dirty: bool,
 }
 
 impl ResourceNode {
     /// Create a new node with default metadata and zeroed Merkle hash.
+    ///
+    /// New nodes start `dirty` so the first path recompute materializes a hash.
     pub fn new(id: ResourceId, kind: ResourceKind, parent: Option<ResourceId>) -> Self {
         let now = Utc::now();
         Self {
@@ -122,6 +132,7 @@ impl ResourceNode {
             scoring: NodeScoring::default(),
             created_at: now,
             updated_at: now,
+            dirty: true,
         }
     }
 }
