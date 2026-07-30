@@ -166,6 +166,22 @@ pub struct AgentsConfig {
     #[serde(default)]
     pub defaults: AgentDefaults,
 
+    /// Root directory for agent identity files and daemon workspace paths
+    /// (WEFT-83 / MW-5).
+    ///
+    /// When set, the daemon loads `<workspace_root>/.clawft/{SOUL.md,IDENTITY.md}`
+    /// and roots file tools / sandbox paths there instead of the process CWD.
+    /// When `None` (default), falls back to `std::env::current_dir()` for
+    /// back-compat — same behaviour as pre-WEFT-83 daemons.
+    ///
+    /// Distinct from [`AgentDefaults::workspace`] (nanobot-style working
+    /// directory for file tools inside the agent loop) and from the skills
+    /// catalog root. Accepts absolute paths or `~/…` (expanded on native).
+    ///
+    /// TOML/JSON: `agents.workspace_root` / `agents.workspaceRoot`.
+    #[serde(default, alias = "workspaceRoot")]
+    pub workspace_root: Option<PathBuf>,
+
     /// Per-conversation cost circuit-breaker (WEFT-322).
     ///
     /// Caps the cumulative spend for a single `conv_id` so a confused
@@ -187,6 +203,56 @@ pub struct AgentsConfig {
     /// behavior is unchanged from before this option existed.
     #[serde(default, alias = "cowMemory")]
     pub cow_memory: CowMemoryConfig,
+}
+
+impl AgentsConfig {
+    /// Resolve the agent workspace root for identity loading and daemon
+    /// workspace paths (WEFT-83).
+    ///
+    /// * If [`Self::workspace_root`] is set, return it with optional `~/`
+    ///   expansion (native feature).
+    /// * Otherwise return `std::env::current_dir()`.
+    ///
+    /// Callers that already hold a preferred CWD override can pass it via
+    /// [`Self::resolve_workspace_root_or`].
+    pub fn resolve_workspace_root(&self) -> std::io::Result<PathBuf> {
+        self.resolve_workspace_root_or(None)
+    }
+
+    /// Like [`Self::resolve_workspace_root`], but uses `fallback` instead of
+    /// `current_dir()` when the config key is unset. Useful in tests and when
+    /// the daemon has already resolved CWD.
+    pub fn resolve_workspace_root_or(
+        &self,
+        fallback: Option<PathBuf>,
+    ) -> std::io::Result<PathBuf> {
+        if let Some(raw) = self.workspace_root.as_ref() {
+            return Ok(expand_agent_workspace_root(raw));
+        }
+        match fallback {
+            Some(p) => Ok(p),
+            None => std::env::current_dir(),
+        }
+    }
+}
+
+/// Expand `~/` on a configured workspace_root path (native only).
+fn expand_agent_workspace_root(raw: &std::path::Path) -> PathBuf {
+    let s = raw.to_string_lossy();
+    #[cfg(feature = "native")]
+    if let Some(rest) = s.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
+    // Also handle bare "~"
+    #[cfg(feature = "native")]
+    if s == "~"
+        && let Some(home) = dirs::home_dir()
+    {
+        return home;
+    }
+    raw.to_path_buf()
 }
 
 /// Per-turn COW memory checkpointing config (WEFT-616 Phase 2). See
@@ -807,6 +873,61 @@ mod tests {
         let path = cfg.workspace_path();
         // Should not start with "~" after expansion
         assert!(!path.to_string_lossy().starts_with('~'));
+    }
+
+    #[test]
+    fn workspace_root_defaults_to_none() {
+        let cfg = Config::default();
+        assert!(cfg.agents.workspace_root.is_none());
+        // Unset key → resolve uses the provided fallback (simulates CWD).
+        let fallback = PathBuf::from("/tmp/daemon-cwd");
+        let resolved = cfg
+            .agents
+            .resolve_workspace_root_or(Some(fallback.clone()))
+            .unwrap();
+        assert_eq!(resolved, fallback);
+    }
+
+    #[test]
+    fn workspace_root_deserialize_snake_and_camel() {
+        let snake = r#"{ "agents": { "workspace_root": "/home/user/proj-a" } }"#;
+        let cfg: Config = serde_json::from_str(snake).unwrap();
+        assert_eq!(
+            cfg.agents.workspace_root.as_deref(),
+            Some(std::path::Path::new("/home/user/proj-a"))
+        );
+
+        let camel = r#"{ "agents": { "workspaceRoot": "/home/user/proj-b" } }"#;
+        let cfg: Config = serde_json::from_str(camel).unwrap();
+        assert_eq!(
+            cfg.agents.workspace_root.as_deref(),
+            Some(std::path::Path::new("/home/user/proj-b"))
+        );
+
+        let resolved = cfg
+            .agents
+            .resolve_workspace_root_or(Some(PathBuf::from("/should-not-use")))
+            .unwrap();
+        assert_eq!(resolved, PathBuf::from("/home/user/proj-b"));
+    }
+
+    #[test]
+    fn workspace_root_prefers_config_over_fallback() {
+        // WEFT-83: two configured workspaces resolve independently of CWD.
+        let mut a = AgentsConfig::default();
+        a.workspace_root = Some(PathBuf::from("/workspaces/alpha"));
+        let mut b = AgentsConfig::default();
+        b.workspace_root = Some(PathBuf::from("/workspaces/beta"));
+
+        let cwd = PathBuf::from("/tmp");
+        assert_eq!(
+            a.resolve_workspace_root_or(Some(cwd.clone())).unwrap(),
+            PathBuf::from("/workspaces/alpha")
+        );
+        assert_eq!(
+            b.resolve_workspace_root_or(Some(cwd)).unwrap(),
+            PathBuf::from("/workspaces/beta")
+        );
     }
 
     #[test]

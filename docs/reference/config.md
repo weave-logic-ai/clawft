@@ -36,11 +36,12 @@ Source: `crates/clawft-types/src/config.rs`
 
 ## agents
 
-Agent defaults applied to all agents.
+Agent defaults and workspace root applied to all agents.
 
 ```json
 {
   "agents": {
+    "workspace_root": "/home/user/my-project",
     "defaults": {
       "workspace": "~/.nanobot/workspace",
       "model": "anthropic/claude-opus-4-5",
@@ -53,11 +54,18 @@ Agent defaults applied to all agents.
 }
 ```
 
+| Field            | Type            | Default | Description |
+|------------------|-----------------|---------|-------------|
+| `workspace_root` | string path / null | `null` | Daemon identity + tool workspace root (WEFT-83). When unset, process CWD is used. Alias: `workspaceRoot`. See [guides/agents.md](../guides/agents.md). |
+| `defaults`       | object          | (below) | Per-agent default settings. |
+| `cost_budget`    | object          | (defaults) | Per-conversation cost circuit-breaker. |
+| `cow_memory`     | object          | disabled | Per-turn COW memory checkpointing. |
+
 ### agents.defaults
 
 | Field               | Type    | Default                       | Description                                   |
 |---------------------|---------|-------------------------------|-----------------------------------------------|
-| `workspace`         | string  | `"~/.nanobot/workspace"`      | Working directory for agent file operations. `~` is expanded to the home directory. |
+| `workspace`         | string  | `"~/.nanobot/workspace"`      | Working directory for agent file operations. `~` is expanded to the home directory. Distinct from `agents.workspace_root`. |
 | `model`             | string  | `"anthropic/claude-opus-4-5"` | Default LLM model in `provider/model` format. See [Routers](#routers). |
 | `maxTokens`         | integer | `8192`                        | Maximum tokens in a single LLM response.      |
 | `temperature`       | float   | `0.7`                         | Sampling temperature (0.0 = deterministic, 1.0 = creative). |

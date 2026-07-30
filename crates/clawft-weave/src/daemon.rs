@@ -783,6 +783,11 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
     // the operator's loaded AgentsConfig is only in scope here).
     let cow_memory_cfg = config.agents.cow_memory.clone();
 
+    // WEFT-83: snapshot agent.workspace_root before `config` moves into
+    // Kernel::boot. When set, identity + tool workspace resolve from the
+    // configured root rather than process CWD (systemd / multi-workspace).
+    let agent_workspace_root = config.agents.workspace_root.clone();
+
     // Boot kernel
     let platform = NativePlatform::new();
     let kernel = Kernel::boot(config, kernel_config, Arc::new(platform)).await?;
@@ -1323,14 +1328,29 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
     // first time the user toggles it.
     let _agent_service_flag = control_flags.register(ControlKind::Service, "agent", true);
     if let Some(llm_for_agent) = DAEMON_LLM.get().cloned() {
-        // Workspace = daemon CWD. The C2 spike used the same
-        // resolution; a future config change will lift this into
-        // `agent.workspace_root`.
-        let workspace = match std::env::current_dir() {
-            Ok(p) => p,
-            Err(e) => {
-                warn!(error = %e, "agent service: cwd unavailable, skipping wiring");
-                return Err(anyhow::anyhow!("agent service: cwd unavailable: {e}"));
+        // WEFT-83: prefer `agents.workspace_root` when configured; fall
+        // back to process CWD for back-compat (pre-config-key behaviour).
+        let workspace = {
+            let agents = clawft_types::config::AgentsConfig {
+                workspace_root: agent_workspace_root,
+                ..Default::default()
+            };
+            match agents.resolve_workspace_root() {
+                Ok(p) => {
+                    if agents.workspace_root.is_some() {
+                        info!(
+                            workspace = %p.display(),
+                            "agent service: using agents.workspace_root"
+                        );
+                    }
+                    p
+                }
+                Err(e) => {
+                    warn!(error = %e, "agent service: workspace root unavailable, skipping wiring");
+                    return Err(anyhow::anyhow!(
+                        "agent service: workspace root unavailable: {e}"
+                    ));
+                }
             }
         };
 

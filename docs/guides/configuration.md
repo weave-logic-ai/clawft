@@ -252,6 +252,17 @@ section you do not need.
 
 ## Section Reference
 
+### agents
+
+Top-level agent container (see also [agents.md](./agents.md)).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `workspace_root` | string path or null | `null` | When set, daemon identity (`SOUL.md` / `IDENTITY.md`) and tool workspace resolve from this path instead of process CWD (WEFT-83). Accepts absolute paths or `~/…`. Alias: `workspaceRoot`. |
+| `defaults` | object | (see below) | Default settings applied to every agent instance. |
+| `cost_budget` | object | (circuit-breaker defaults) | Per-conversation spend caps. |
+| `cow_memory` | object | disabled | Per-turn COW memory checkpointing. |
+
 ### agents.defaults
 
 Default settings applied to every agent instance.
@@ -259,7 +270,7 @@ Default settings applied to every agent instance.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `model` | string | `"anthropic/claude-opus-4-5"` | LLM model identifier using `provider/model` syntax. |
-| `workspace` | string | `"~/.nanobot/workspace"` | Working directory for file tool operations. Tilde is expanded at runtime. |
+| `workspace` | string | `"~/.nanobot/workspace"` | Working directory for file tool operations. Tilde is expanded at runtime. Distinct from `agents.workspace_root` (daemon identity root). |
 | `max_tokens` | integer | `8192` | Maximum tokens in a single LLM response. |
 | `temperature` | float | `0.7` | Sampling temperature for LLM calls. |
 | `max_tool_iterations` | integer | `20` | Maximum tool-use rounds per message turn. |
