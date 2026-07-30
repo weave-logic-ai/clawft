@@ -1,15 +1,36 @@
 # Docker Deployment
 
-WeftOS ships a multi-arch Docker image based on `alpine:3.21`. The image
-contains a pre-built static musl `weft` binary downloaded from the matching
-GitHub Release at build time -- no compilation runs inside the image.
-Compressed size is ~15 MB; supported architectures are `linux/amd64` and
-`linux/arm64`.
+WeftOS ships a multi-arch Docker image based on `alpine:3.21`. The image is
+**self-contained**: a multi-stage build compiles a static musl `weft` binary
+from the repository tag (or local checkout), then copies it into a minimal
+Alpine runtime. There is no download of cargo-dist / GitHub Release assets at
+image-build time — the image tag is not coupled to whether platform binaries
+published successfully (WEFT-594 decision; see also WEFT-593).
+
+Compressed size is typically ~30–40 MB; supported architectures are
+`linux/amd64` and `linux/arm64`.
+
+## Strategy (WEFT-594)
+
+| Option | Chosen? | Why |
+|--------|---------|-----|
+| Download release musl tarball into Alpine | No | Couples image tag to cargo-dist binary publish; broke when the plan matrix was empty (v0.6.21 / WEFT-593). |
+| Self-contained multi-stage + QEMU multi-arch | No | arm64 Rust compile under QEMU is impractically slow in CI. |
+| Self-contained multi-stage + **native** multi-arch | **Yes** | Compile from source on `ubuntu-latest` (amd64) and `ubuntu-24.04-arm` (arm64); merge digests into one OCI manifest. No QEMU. |
+| Single-arch only | No | arm64 is first-class (Apple Silicon hosts, ARM cloud). |
+
+CI: `.github/workflows/release-docker.yml` — per-arch digests, then
+`docker buildx imagetools create` for `latest` and `vX.Y.Z`.
+
+Local: `Dockerfile` at the repo root (same self-contained multi-stage).
+Kernel-only variant: `crates/clawft-kernel/Dockerfile.alpine` (builds
+`weaver`, not the full CLI).
 
 ## Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) 20.10 or later (with
-  `buildx` for multi-arch builds).
+  `buildx` for multi-arch builds), **or** a compatible OCI runtime (see
+  [Local runtimes on macOS](#local-runtimes-on-macos) below).
 
 ## Quick Start
 
@@ -38,6 +59,10 @@ exploration but moves under you on every release.
 The container runs as the unprivileged `weft` user with `$HOME=/home/weft`.
 The canonical config + state directory inside the container is
 `/home/weft/.clawft` -- mount your host config there.
+
+The image ships a default `config.json` that enables the auth-gated REST/WS
+API on port 8080 so `weft gateway` starts out of the box. Only `/api/health`
+and the token-bootstrap path are public; other routes require a Bearer token.
 
 ### Mounting Config
 
@@ -131,46 +156,85 @@ before starting the new one.
 ## Health Checks
 
 The image declares a `HEALTHCHECK` that runs `weft status` every 30
-seconds. The same probe is shown in the compose example above. To check
-health from the host:
+seconds. The same probe is shown in the compose example above. The release
+pipeline additionally probes `GET /api/health` (WEFT-550) after publish.
+
+To check health from the host:
 
 ```bash
 docker inspect --format '{{.State.Health.Status}}' weft
 docker exec weft weft status --detailed
+curl -sS http://127.0.0.1:8080/api/health
 ```
 
 ## Building Locally
 
-The shipped `Dockerfile` downloads the published binary from the matching
-GitHub Release. To build a local image at a specific version:
+Build from the repo root (compiles inside Docker — no pre-built binary
+required):
+
+```bash
+# Host arch only (fast iteration)
+./scripts/build/docker-build.sh --tag dev --version dev
+
+# Or plain Docker / buildx
+docker build -t weft:dev --build-arg VERSION=dev .
+```
+
+Multi-arch locally requires a builder that can reach both platforms (on
+Apple Silicon, buildx can produce `linux/arm64` natively and `linux/amd64`
+via emulation — fine for one-off publishes, not what CI uses):
 
 ```bash
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  --build-arg VERSION=0.6.19 \
-  -t weftos:local .
+  --build-arg VERSION=0.8.0 \
+  -t weftos:local \
+  --load .
 ```
 
-To build against a release that hasn't been cut yet (development image),
-you would need to swap `Dockerfile` for one that compiles from source --
-see "Appendix: legacy build approaches" below.
+For a kernel-only image (`weaver`):
+
+```bash
+docker build -f crates/clawft-kernel/Dockerfile.alpine -t weft-kernel:dev .
+```
 
 ## CI / Release Pipeline
 
 The image is built and published by `.github/workflows/release-docker.yml`,
-triggered automatically when the `Release` workflow (cargo-dist) succeeds
-on a tag push. The workflow:
+triggered when the `Release` workflow (cargo-dist) succeeds on a tag push,
+or via `workflow_dispatch`. The workflow:
 
-1. Waits for the upstream `Release` workflow to finish (`workflow_run`
-   completed + success gate).
-2. Sets up QEMU and Buildx for multi-arch.
-3. Logs into GHCR using the workflow's `GITHUB_TOKEN`.
-4. Tags the resulting manifest with both `latest` and `vX.Y.Z`.
-5. Pushes a single multi-arch manifest covering `linux/amd64` and
-   `linux/arm64`.
+1. Gates on Release success (orchestration only — binaries are **not**
+   downloaded into the image).
+2. Checks out the release tag.
+3. Builds **natively** on `ubuntu-latest` (`linux/amd64`) and
+   `ubuntu-24.04-arm` (`linux/arm64`) — no QEMU for Rust compilation.
+4. Pushes per-platform digests, then creates a multi-arch manifest tagged
+   `latest` and `vX.Y.Z` on GHCR.
+5. Runs the post-publish `/api/health` smoke (WEFT-550).
 
-See `docs/deployment/release.md` for the full release flow and how Docker
-fits into the cargo-dist sub-release graph.
+See `docs/deployment/release.md` for how Docker fits into the full release
+graph.
+
+## Local runtimes on macOS
+
+The published artifact is a standard multi-arch OCI image. Any runtime that
+speaks OCI/GHCR can consume the same tags:
+
+| Runtime | Notes |
+|---------|--------|
+| **Docker Desktop** | Pulls the matching `linux/arm64` layer on Apple Silicon; `linux/amd64` via Rosetta/QEMU if forced with `--platform`. |
+| **OrbStack** | Drop-in Docker-compatible engine; uses the same `docker pull/run` commands against `ghcr.io/weave-logic-ai/weftos:*`. Prefer for lighter local resource use. |
+| **Apple container CLI** | Apple's OCI-oriented tooling (`container pull` / `container run`) can pull the same GHCR multi-arch image and run the `linux/arm64` manifest entry on Apple Silicon — same image digest family as Docker/OrbStack, not a separate build. |
+
+Example with Docker or OrbStack (identical CLI):
+
+```bash
+docker pull ghcr.io/weave-logic-ai/weftos:latest
+docker run --rm -p 8080:8080 ghcr.io/weave-logic-ai/weftos:latest gateway
+```
+
+There is no separate "Apple Silicon image" — multi-arch is the product.
 
 ## Security Considerations
 
@@ -229,56 +293,26 @@ docker run --rm \
 
 ## Appendix: Legacy Build Approaches (Historical)
 
-Earlier releases experimented with two different image layouts. They are
-preserved here only so operators upgrading from old documentation can map
-the new approach onto what they remember.
+Earlier releases used different image layouts. Kept only so operators
+upgrading from old documentation can map history.
+
+### Download-based Alpine (pre-self-contained, ~0.4.3–0.6.x)
+
+The root Dockerfile downloaded a cargo-dist musl tarball for `VERSION`
+from GitHub Releases and installed it into Alpine. Build was ~2 minutes
+and produced a ~15 MB image, but the image tag was coupled to binary
+publish success — empty cargo-dist matrices (WEFT-593) produced 404s at
+image build. Replaced by the self-contained multi-stage Dockerfile
+(WEFT-594).
 
 ### `FROM scratch` (pre-0.4.2, deprecated)
 
 Sprint 11 / 12 images were built `FROM scratch`, copying a single
 statically-linked musl binary into the empty filesystem (~5 MB compressed).
-The approach was dropped because:
+Dropped for lack of `ca-certificates`, `tzdata`, and a shell for ops.
 
-- No `ca-certificates` -- TLS to LLM providers required either baking
-  certs in or a sidecar.
-- No `tzdata` -- log timestamps and any `chrono::Local` calls fell back
-  to UTC silently.
-- No shell -- `docker exec ... bash` was impossible; only `weft`
-  subcommands worked, which made operational debugging painful.
-- Health checks had to call the `weft` binary itself; standard
-  busybox-style probes were unavailable.
+### `cargo-chef` multi-stage on Debian (proposed, never shipped)
 
-The current Alpine 3.21 base solves all four at the cost of ~10 MB.
-
-### `cargo-chef` multi-stage build (proposed, never shipped)
-
-A K2-era proposal documented in earlier revisions of this guide
-described a multi-stage `debian:bookworm-slim` image using `cargo-chef`
-for dependency caching:
-
-1. Chef stage installs `cargo-chef`.
-2. Planner emits a recipe from `Cargo.toml`.
-3. Builder cooks dependencies (cached layer), then builds the app.
-4. Runtime is `debian:bookworm-slim` plus the stripped binary,
-   `ca-certificates`, `libssl3`, `libgcc-s1`.
-
-This was never adopted as the shipping image. Reasons:
-
-- Build time on GitHub Actions runners exceeded 30 minutes for cold
-  caches, vs. ~2 minutes for "download the published musl binary"
-  (since CI already produces the musl binary as a cargo-dist artifact).
-- Debian-base image landed at ~50 MB compressed, ~3x larger than the
-  current Alpine layout.
-- Multi-arch via QEMU doubled build time again on `linux/arm64`.
-
-The current Dockerfile is the post-0.4.3 simplification: download the
-musl tarball produced by cargo-dist, install into `/usr/local/bin/`,
-declare the runtime user. It's reproducible (the binary matches the
-release artifact byte-for-byte), fast to build, and small enough to pull
-on a slow connection.
-
-If you need a fully-from-source image (e.g. for an unreleased commit),
-the cargo-chef recipe in git history is a reasonable starting point --
-but most use cases are better served by `cargo install --path crates/clawft-cli`
-on the host plus a thin runtime image, or by tagging a pre-release and
-letting the standard CI flow build the matching image.
+A K2-era proposal used `debian:bookworm-slim` + `cargo-chef`. Never
+adopted: longer cold builds, larger runtime (~50 MB), and QEMU multi-arch
+cost. The current Alpine self-contained layout is the shipping path.

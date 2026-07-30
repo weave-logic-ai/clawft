@@ -1,5 +1,22 @@
 name: Release (Docker)
 
+# Self-contained multi-arch image (WEFT-594).
+#
+# Strategy: the root Dockerfile is a multi-stage build that compiles `weft`
+# from the checkout (static musl, alpine runtime). It does NOT download
+# cargo-dist release assets — image tags are not coupled to published
+# binaries (see WEFT-593 / empty plan-matrix history).
+#
+# Multi-arch WITHOUT QEMU: each platform builds on a native runner
+# (ubuntu-latest → linux/amd64, ubuntu-24.04-arm → linux/arm64). Digests
+# are pushed per-platform, then a multi-arch manifest is assembled with
+# `docker buildx imagetools create`. Compiling Rust under QEMU arm64 was
+# impractically slow; native runners avoid that entirely.
+#
+# Still gated on the Release workflow so Docker only publishes when a tag
+# release orchestrates successfully — but the image build itself does not
+# need those binary artifacts.
+
 on:
   workflow_run:
     workflows: ["Release"]
@@ -16,7 +33,7 @@ permissions:
   packages: write
 
 jobs:
-  # Gate: only proceed if the Release workflow succeeded
+  # Gate: only proceed if the Release workflow succeeded (or manual dispatch)
   gate:
     name: Verify release succeeded
     runs-on: ubuntu-latest
@@ -42,23 +59,24 @@ jobs:
           echo "Building Docker image for v${VERSION}"
 
   # -------------------------------------------------------------------
-  # Multi-arch Docker build using pre-built musl binaries from release
+  # Per-arch native build (self-contained multi-stage Dockerfile)
   # -------------------------------------------------------------------
   docker:
-    name: Build & push multi-arch Docker image
-    runs-on: ubuntu-latest
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
     needs: [gate]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
         with:
           ref: "v${{ needs.gate.outputs.version }}"
-
-      - name: Set version
-        id: version
-        run: echo "VERSION=${{ needs.gate.outputs.version }}" >> "$GITHUB_OUTPUT"
-
-      - name: Set up QEMU (for arm64 layer)
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -75,41 +93,104 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Tags applied at merge; digests pushed here.
           tags: |
-            type=raw,value=${{ steps.version.outputs.VERSION }}
+            type=raw,value=${{ needs.gate.outputs.version }}
             type=raw,value=latest
 
-      - name: Build and push multi-arch image
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
+          # No QEMU — runner arch matches matrix.platform.
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          # Push by digest only; named tags come from the merge job.
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ steps.version.outputs.VERSION }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            VERSION=${{ needs.gate.outputs.version }}
+          cache-from: type=gha,scope=docker-${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=docker-${{ matrix.platform }}
 
-      - name: Verify image
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.platform }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # -------------------------------------------------------------------
+  # Multi-arch manifest (named tags)
+  # -------------------------------------------------------------------
+  merge:
+    name: Merge multi-arch manifest
+    runs-on: ubuntu-latest
+    needs: [gate, docker]
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create multi-arch manifest and push tags
+        working-directory: /tmp/digests
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          VERSION="${{ needs.gate.outputs.version }}"
+          # Each artifact file is named by the digest hex (no sha256: prefix).
+          digests=$(printf "${IMAGE}@sha256:%s " *)
+          # shellcheck disable=SC2086
+          docker buildx imagetools create \
+            -t "${IMAGE}:${VERSION}" \
+            -t "${IMAGE}:latest" \
+            $digests
+
+      - name: Inspect manifest
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          VERSION="${{ needs.gate.outputs.version }}"
+          docker buildx imagetools inspect "${IMAGE}:${VERSION}"
+
+      - name: Summary
         run: |
           echo "## Release Image" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
           echo "|----------|-------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Version | ${{ steps.version.outputs.VERSION }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Platforms | linux/amd64, linux/arm64 |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Version | ${{ needs.gate.outputs.version }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Platforms | linux/amd64, linux/arm64 (native runners, no QEMU) |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Strategy | Self-contained multi-stage (compile from tag) |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Registry | ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Base | Alpine 3.21 (musl, ~15MB) |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Base | Alpine 3.21 (musl, ~30–40 MB) |" >> "$GITHUB_STEP_SUMMARY"
 
   # -------------------------------------------------------------------
-  # Integration smoke test on the published image
+  # Integration smoke test on the published image (amd64 runner)
   # -------------------------------------------------------------------
   smoke-test:
     name: Post-publish smoke test
     runs-on: ubuntu-latest
-    needs: [gate, docker]
+    needs: [gate, merge]
     steps:
       - name: Log in to GHCR
         uses: docker/login-action@v3
