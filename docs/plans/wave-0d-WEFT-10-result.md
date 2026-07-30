@@ -3,7 +3,7 @@
 **Ticket:** WEFT-10  
 **Branch:** `wave0d/weft-10-workspace-ceiling`  
 **Base:** `release/0.8-staging`  
-**Commit:** `49236f19`  
+**Commit:** `98e673ca`  
 **Date:** 2026-07-30  
 **Agent:** coder-10 (wave-0d)
 
