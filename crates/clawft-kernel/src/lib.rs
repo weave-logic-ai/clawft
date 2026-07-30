@@ -206,6 +206,10 @@ pub mod http_api;
 pub mod tree_view;
 
 // ── Mesh networking modules (K6) ──────────────────────────────
+// WEFT-151: mesh_bootstrap / mesh_dedup / mesh_listener / mesh_log are
+// unit-tested library orphans (no boot/daemon/CLI callers). See each
+// module's "Status (WEFT-151 audit)" docs for wiring schedule. Do not
+// hard-delete; do not apply #[deprecated] under clippy -D warnings.
 #[cfg(feature = "mesh")]
 pub mod mesh;
 #[cfg(feature = "mesh")]

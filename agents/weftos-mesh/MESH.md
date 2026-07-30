@@ -26,10 +26,14 @@ The mesh subsystem follows a layered design, bottom to top:
 ```
 Layer 5: Distributed State  — mesh_process, mesh_service_adv, mesh_kad
 Layer 4: Sync Protocols     — mesh_chain, mesh_tree, mesh_heartbeat
-Layer 3: Service Resolution — mesh_service, mesh_discovery, mesh_bootstrap, mesh_mdns
-Layer 2: Framing & IPC      — mesh_framing, mesh_ipc, mesh_dedup
-Layer 1: Transport & Crypto — mesh (traits), mesh_noise, mesh_tcp, mesh_ws, mesh_listener
+Layer 3: Service Resolution — mesh_service, mesh_discovery, mesh_bootstrap*, mesh_mdns
+Layer 2: Framing & IPC      — mesh_framing, mesh_ipc, mesh_dedup*
+Layer 1: Transport & Crypto — mesh (traits), mesh_noise, mesh_tcp, mesh_ws, mesh_listener*
 ```
+
+`*` = **library orphan** (WEFT-151): unit-tested, re-exported, no production
+caller. Runtime today uses inline `boot.rs` accept/seed loops +
+`MeshRuntime` peer map. See module rustdoc *Status (WEFT-151 audit)*.
 
 ### Layer 1: Transport & Crypto
 
@@ -73,10 +77,11 @@ pub trait MeshTransport: Send + Sync + 'static {
 - `EncryptedChannel` wraps a `MeshStream` with encrypt/decrypt
 - `NoiseConfig` holds keypair and handshake state
 
-**Connection pooling** (`mesh_listener.rs`):
-- `MeshConnectionPool` manages active peer connections
-- `JoinRequest`/`JoinResponse` for cluster joining
+**Connection pooling** (`mesh_listener.rs`) — **ORPHAN (WEFT-151)**:
+- `MeshConnectionPool` manages active peer connections (not used by boot)
+- `JoinRequest`/`JoinResponse` for cluster joining (frame types exist; structs unused)
 - `PeerInfo` tracks connected peers
+- **Live path:** `boot.rs` accept loop + `MeshRuntime::{add_peer,peers}`
 
 ### Layer 2: Framing & IPC
 
@@ -101,14 +106,19 @@ Wire protocol: `[4-byte big-endian length][1-byte frame type][payload]`
 
 **Maximum message size**: 16 MiB (`MAX_MESSAGE_SIZE`)
 
-**Dedup** (`mesh_dedup.rs`): `DedupFilter` prevents processing duplicate messages (bloom filter based).
+**Dedup** (`mesh_dedup.rs`) — **ORPHAN (WEFT-151)**: `DedupFilter` is a
+time-bounded HashMap (not bloom); unit-tested; **not** called from
+`MeshRuntime` inbound path. Wire via `check_and_insert` on envelope id.
+
+Also **orphan**: `mesh_log.rs` (`LogAggregator`) — no observability RPC.
 
 ### Layer 3: Service Resolution
 
 **Files**: `mesh_service.rs`, `mesh_discovery.rs`, `mesh_bootstrap.rs`, `mesh_mdns.rs`
 
-- `DiscoveryCoordinator` manages multiple discovery backends
+- `DiscoveryCoordinator` manages multiple discovery backends (**itself only unit-tested**; no daemon registration)
 - `DiscoveryBackend` trait for pluggable discovery (mDNS, bootstrap, Kademlia, PEX)
+- `BootstrapDiscovery` / `PeerExchangeDiscovery` (`mesh_bootstrap.rs`) — **ORPHAN (WEFT-151)**; boot uses raw `seed_peers` connect loop
 - `ServiceResolutionCache` caches remote service endpoints
 - `ServiceResolveRequest`/`ServiceResolveResponse` for mesh-wide service lookup
 

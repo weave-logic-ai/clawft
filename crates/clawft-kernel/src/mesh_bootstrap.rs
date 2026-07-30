@@ -2,6 +2,21 @@
 //!
 //! The simplest discovery mechanism: connect to a preconfigured list
 //! of seed peer addresses. Always available, no extra dependencies.
+//!
+//! # Status (WEFT-151 audit)
+//!
+//! **Orphan — library only.** No production callers outside this module
+//! and re-exports. `boot.rs` connects `mesh_config.seed_peers` by
+//! iterating addresses and calling `MeshTransport::connect` directly;
+//! it never constructs [`BootstrapDiscovery`] or
+//! [`PeerExchangeDiscovery`]. [`crate::mesh_discovery::DiscoveryCoordinator`]
+//! is itself only exercised in its unit tests (no daemon registration).
+//!
+//! **Disposition:** keep as `DiscoveryBackend` implementations.
+//! **Wiring schedule (0.8.x):** in boot mesh init, build a
+//! `DiscoveryCoordinator`, `add_backend(Box::new(BootstrapDiscovery::new(seed_peers)))`,
+//! optionally PEX after handshake, and feed discovered peers into
+//! the existing seed-connect loop / `MeshRuntime`.
 
 use crate::mesh_discovery::{DiscoveredPeer, DiscoveryBackend, DiscoveryError, DiscoverySource};
 use async_trait::async_trait;
