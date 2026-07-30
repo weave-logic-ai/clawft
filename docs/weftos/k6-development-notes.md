@@ -116,25 +116,41 @@ mesh_service_adv --> ipc (GlobalPid)
                      |
 mesh_ipc ----------> ipc (KernelMessage, MessageTarget)
 mesh_service ------> (standalone types)
-mesh_dedup --------> (standalone, std only)
+mesh_dedup --------> (standalone, std only)          [ORPHAN WEFT-151]
                      |
 mesh_chain --------> (standalone types, chrono)
 mesh_tree ---------> (standalone types)
                      |
-mesh_discovery ----> (standalone trait)
-mesh_bootstrap ----> mesh_discovery (DiscoveryBackend)
+mesh_discovery ----> (standalone trait)              [coord unit-tested only]
+mesh_bootstrap ----> mesh_discovery (DiscoveryBackend) [ORPHAN WEFT-151]
                      |
 mesh_framing ------> mesh (MeshError, MeshStream, MAX_MESSAGE_SIZE)
 mesh_noise --------> mesh (MeshError, MeshStream)
-mesh_listener -----> mesh (MeshPeer, WeftHandshake)
+mesh_listener -----> mesh (MeshPeer, WeftHandshake)  [ORPHAN WEFT-151]
+mesh_log ----------> (standalone, dashmap/chrono)    [ORPHAN WEFT-151]
                      |
 mesh --------------> (root: traits, errors, handshake types)
+                     |
+mesh_runtime ------> mesh_ipc, mesh_heartbeat, mesh_kad, a2a  [LIVE]
+boot (mesh) -------> mesh_tcp/ws, mesh_noise, mesh_runtime     [LIVE]
                      |
 cluster -----------> (NodeIdentity, ClusterConfig extensions)
 ipc ---------------> (GlobalPid, MessageTarget::RemoteNode)
 chain -------------> (tail_from for replication)
 tree_manager ------> (snapshot, apply_remote_mutation)
 ```
+
+### WEFT-151 caller audit (2026-07-30)
+
+| Module | Unit tests | Production callers | Disposition |
+|--------|------------|--------------------|------------|
+| `mesh_log` | 11 | none (re-export only) | Schedule observability RPC wire-up |
+| `mesh_dedup` | 8 | none (re-export only) | Schedule `MeshRuntime` inbound `check_and_insert` |
+| `mesh_listener` | 12 | none; boot uses inline accept + `MeshRuntime` peers | Schedule pool/join consolidation with runtime |
+| `mesh_bootstrap` | 7 | none; boot iterates `seed_peers` directly | Schedule `DiscoveryCoordinator` + backends in boot |
+
+No `#[deprecated]` attributes (clippy `-D warnings` policy, WEFT-671). Full report:
+`docs/plans/wave-0g-WEFT-151-result.md`.
 
 ---
 

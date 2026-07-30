@@ -2,6 +2,18 @@
 //!
 //! [`LogAggregator`] collects log entries from mesh peers and provides
 //! a unified query interface that merges logs by timestamp.
+//!
+//! # Status (WEFT-151 audit)
+//!
+//! **Orphan — library only.** No production callers outside this module
+//! and the `clawft_kernel` re-export. Not used by `boot.rs`, daemon RPC,
+//! CLI, or `MeshRuntime`. Unit tests cover the API; no integration path.
+//!
+//! **Disposition:** keep as library surface for mesh observability.
+//! **Wiring schedule (0.8.x+):** attach to mesh admin / observability RPC
+//! (query remote peer logs) once a daemon mesh-status surface lands
+//! (related: WEFT-117 assess mesh-status). Do not remove; do not
+//! `#[deprecated]` (clippy deny-warnings — see WEFT-671).
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;

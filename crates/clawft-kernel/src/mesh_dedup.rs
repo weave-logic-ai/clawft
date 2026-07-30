@@ -3,6 +3,20 @@
 //! Prevents duplicate delivery of messages that may arrive via
 //! multiple paths in the mesh network. Uses a time-bounded set
 //! of recently seen message/envelope IDs.
+//!
+//! # Status (WEFT-151 audit)
+//!
+//! **Orphan — library only.** No production callers outside this module
+//! and re-exports (`clawft_kernel`, `weftos`). ADR-039 and K6 notes
+//! describe `DedupFilter` as the intended SWIM/IPC dedup path, but
+//! `MeshRuntime::handle_incoming` / `mesh_ipc` never call
+//! [`DedupFilter::check_and_insert`]. Unit tests only.
+//!
+//! **Disposition:** keep; schedule into runtime receive path.
+//! **Wiring schedule (0.8.x):** call `check_and_insert` on envelope
+//! (or message) id inside `MeshRuntime` inbound handling (and any
+//! future MeshAdapter). Intended default: [`DedupFilter::default_mesh`]
+//! (60s TTL, 10k entries).
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};

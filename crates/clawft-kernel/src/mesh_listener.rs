@@ -3,6 +3,23 @@
 //! Provides the [`MeshConnectionPool`] for tracking active peer
 //! connections, and the [`JoinRequest`] / [`JoinResponse`] types
 //! for cluster join negotiation.
+//!
+//! # Status (WEFT-151 audit)
+//!
+//! **Orphan — library only.** No production callers outside this module
+//! and re-exports. Runtime accept/connect lives **inline in**
+//! `boot.rs` (transport listen loop) and peer state lives in
+//! [`crate::mesh_runtime::MeshRuntime`] (`PeerConnection` DashMap),
+//! not [`MeshConnectionPool`]. `FrameType::JoinRequest` /
+//! `JoinResponse` exist in `mesh_framing` but never serialize these
+//! structs. Unit tests only.
+//!
+//! **Disposition:** keep as the intended shared pool + join protocol;
+//! consolidate with `MeshRuntime` peers rather than delete.
+//! **Wiring schedule (0.8.x):** either (a) replace `MeshRuntime` peer
+//! map with [`MeshConnectionPool`], or (b) wrap pool around runtime
+//! peers; drive join negotiation with JoinRequest / JoinResponse
+//! on first connect.
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
