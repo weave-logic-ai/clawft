@@ -11,6 +11,7 @@ pub mod graft;
 pub mod helpers;
 pub mod hydrate;
 pub mod identity;
+pub mod learning;
 pub mod local_file_sink;
 pub mod loop_core;
 pub mod memory;
