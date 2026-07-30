@@ -48,6 +48,7 @@ fn kernel_config_with_chain() -> KernelConfig {
             checkpoint_interval: 10_000,
             chain_id: 0,
             checkpoint_path: None,
+            external_anchor: None,
         }),
         resource_tree: Some(ResourceTreeConfig {
             enabled: true,

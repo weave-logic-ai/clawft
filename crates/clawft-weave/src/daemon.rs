@@ -8289,6 +8289,7 @@ mod tests {
             checkpoint_interval: 1000,
             chain_id: 0,
             checkpoint_path: None,
+            external_anchor: None,
         });
         let kernel = Kernel::boot(Config::default(), kcfg, platform)
             .await
@@ -8494,6 +8495,7 @@ mod tests {
             checkpoint_interval: 1000,
             chain_id: 0,
             checkpoint_path: None,
+            external_anchor: None,
         });
         let kernel = Kernel::boot(Config::default(), kcfg, platform)
             .await

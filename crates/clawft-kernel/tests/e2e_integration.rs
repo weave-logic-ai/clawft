@@ -63,6 +63,7 @@ fn exochain_kernel_config() -> KernelConfig {
             checkpoint_interval: 10_000,
             chain_id: 0,
             checkpoint_path: None,
+            external_anchor: None,
         }),
         resource_tree: Some(ResourceTreeConfig {
             enabled: true,

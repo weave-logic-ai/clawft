@@ -148,6 +148,8 @@ pub mod boot;
 pub mod capability;
 #[cfg(feature = "exochain")]
 pub mod chain;
+#[cfg(feature = "exochain")]
+pub mod chain_anchor;
 pub mod cluster;
 pub mod config;
 pub mod console;
@@ -310,6 +312,11 @@ pub use chain::{
     AnchorReceipt, ChainAnchor, ChainCheckpoint, ChainEvent, ChainLoggable, ChainManager,
     ChainStatus, ChainVerifyResult, CustodyAttestation, GovernanceDecisionEvent,
     IpcDeadLetterEvent, MockAnchor, RestartEvent,
+};
+#[cfg(feature = "exochain")]
+pub use chain_anchor::{
+    AnchorFrequencyPolicy, AnchoringController, ExternalIntentEntry, ExternalLedgerAnchor,
+    FileLedgerAnchor, FileLedgerEntry,
 };
 pub use clawft_types::config::{
     ClusterNetworkConfig, KernelConfig, PairingConfig, ProfilesConfig,

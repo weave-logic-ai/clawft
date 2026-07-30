@@ -905,6 +905,19 @@ pub struct ChainConfig {
         alias = "checkpointPath"
     )]
     pub checkpoint_path: Option<String>,
+
+    /// External chain-head anchoring (ADR-041 / WEFT-137).
+    ///
+    /// When set, the kernel builds an anchoring controller that periodically
+    /// (or on demand) anchors the ExoChain head hash to a non-mock ledger
+    /// backend (file ledger by default; external HTTP stub when a target
+    /// ledger is configured).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "externalAnchor"
+    )]
+    pub external_anchor: Option<ChainExternalAnchorConfig>,
 }
 
 fn default_true() -> bool {
@@ -921,6 +934,122 @@ impl Default for ChainConfig {
             checkpoint_interval: default_checkpoint_interval(),
             chain_id: 0,
             checkpoint_path: None,
+            external_anchor: None,
+        }
+    }
+}
+
+// ── External chain-head anchoring (ADR-041 / WEFT-137) ──────────────────
+
+/// Backend selection for the kernel `ChainAnchor` trait (ADR-041).
+///
+/// `File` is the useful default until an external public ledger
+/// (OpenTimestamps / Ethereum / etc.) is chosen for a deployment.
+/// `External` is a wired stub that persists intent locally and records
+/// an endpoint for future HTTP/gRPC submission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ChainAnchorBackend {
+    /// No external anchoring (controller not built even if config present).
+    #[default]
+    None,
+    /// Always-succeeding mock (tests / dry-run).
+    Mock,
+    /// Local append-only hash-linked ledger file (production-useful default).
+    File,
+    /// External ledger stub with real config wiring (endpoint + intent log).
+    External,
+}
+
+/// Configuration for chain-head external anchoring beyond MockAnchor.
+///
+/// Example TOML:
+/// ```toml
+/// [kernel.chain.external_anchor]
+/// backend = "file"
+/// ledger_path = "~/.clawft/chain/anchors.jsonl"
+/// min_interval_secs = 300
+/// min_events_between = 100
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainExternalAnchorConfig {
+    /// Ledger backend selection.
+    #[serde(default)]
+    pub backend: ChainAnchorBackend,
+
+    /// Path for the file ledger (File) or intent log (External).
+    ///
+    /// When `None` and backend is `File`/`External`, the kernel derives
+    /// `~/.clawft/chain/anchors.jsonl` (native) or fails closed (no home).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "ledgerPath"
+    )]
+    pub ledger_path: Option<String>,
+
+    /// Optional HTTP/gRPC endpoint for the External backend.
+    ///
+    /// When unset, External still writes a durable intent log so operators
+    /// can audit pending submissions. Network POST is best-effort once an
+    /// endpoint is set (stub records the intent + endpoint binding today).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+
+    /// Minimum wall-clock seconds between successful anchors (0 = no time gate).
+    #[serde(
+        default = "default_anchor_min_interval_secs",
+        alias = "minIntervalSecs"
+    )]
+    pub min_interval_secs: u64,
+
+    /// Minimum ExoChain event sequence delta between anchors (0 = no event gate).
+    #[serde(
+        default = "default_anchor_min_events",
+        alias = "minEventsBetween"
+    )]
+    pub min_events_between: u64,
+}
+
+fn default_anchor_min_interval_secs() -> u64 {
+    300
+}
+
+fn default_anchor_min_events() -> u64 {
+    100
+}
+
+impl Default for ChainExternalAnchorConfig {
+    fn default() -> Self {
+        Self {
+            backend: ChainAnchorBackend::File,
+            ledger_path: None,
+            endpoint: None,
+            min_interval_secs: default_anchor_min_interval_secs(),
+            min_events_between: default_anchor_min_events(),
+        }
+    }
+}
+
+impl ChainExternalAnchorConfig {
+    /// Effective ledger path, expanding a missing path to the default location.
+    pub fn effective_ledger_path(&self) -> Option<String> {
+        if let Some(ref p) = self.ledger_path {
+            return Some(p.clone());
+        }
+        #[cfg(feature = "native")]
+        {
+            dirs::home_dir().map(|h| {
+                h.join(".clawft")
+                    .join("chain")
+                    .join("anchors.jsonl")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        }
+        #[cfg(not(feature = "native"))]
+        {
+            None
         }
     }
 }
@@ -1524,5 +1653,59 @@ mod tests {
         assert_eq!(cfg.mode, ClassificationMode::Full);
         assert_eq!(cfg.model_override.as_deref(), Some("haiku-3.5"));
         assert_eq!(cfg.queue_bound, 128);
+    }
+
+    // ── WEFT-137 external chain-head anchor config ──────────────────
+
+    #[test]
+    fn chain_external_anchor_defaults() {
+        let cfg = ChainExternalAnchorConfig::default();
+        assert_eq!(cfg.backend, ChainAnchorBackend::File);
+        assert_eq!(cfg.min_interval_secs, 300);
+        assert_eq!(cfg.min_events_between, 100);
+        assert!(cfg.ledger_path.is_none());
+        assert!(cfg.endpoint.is_none());
+    }
+
+    #[test]
+    fn chain_config_external_anchor_serde() {
+        let json = r#"{
+            "enabled": true,
+            "external_anchor": {
+                "backend": "file",
+                "ledger_path": "/tmp/anchors.jsonl",
+                "min_interval_secs": 60,
+                "min_events_between": 10
+            }
+        }"#;
+        let cfg: ChainConfig = serde_json::from_str(json).unwrap();
+        let anchor = cfg.external_anchor.expect("present");
+        assert_eq!(anchor.backend, ChainAnchorBackend::File);
+        assert_eq!(anchor.ledger_path.as_deref(), Some("/tmp/anchors.jsonl"));
+        assert_eq!(anchor.min_interval_secs, 60);
+        assert_eq!(anchor.min_events_between, 10);
+    }
+
+    #[test]
+    fn chain_external_anchor_camel_case_and_external_backend() {
+        let json = r#"{
+            "backend": "external",
+            "ledgerPath": "/var/lib/weftos/intent.jsonl",
+            "endpoint": "https://ledger.example/anchor",
+            "minIntervalSecs": 0,
+            "minEventsBetween": 0
+        }"#;
+        let cfg: ChainExternalAnchorConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.backend, ChainAnchorBackend::External);
+        assert_eq!(
+            cfg.ledger_path.as_deref(),
+            Some("/var/lib/weftos/intent.jsonl")
+        );
+        assert_eq!(
+            cfg.endpoint.as_deref(),
+            Some("https://ledger.example/anchor")
+        );
+        assert_eq!(cfg.min_interval_secs, 0);
+        assert_eq!(cfg.min_events_between, 0);
     }
 }

@@ -87,12 +87,15 @@ impl std::fmt::Display for KernelState {
 // has fewer conditional fields (3 instead of 18) and init code
 // is easier to read.
 
-/// Exochain subsystem: chain manager, resource tree, and governance gate.
+/// Exochain subsystem: chain manager, resource tree, governance gate, and
+/// optional external chain-head anchor (WEFT-137 / ADR-041).
 #[cfg(feature = "exochain")]
 pub struct ChainSubsystem {
     pub(crate) chain_manager: Option<Arc<crate::chain::ChainManager>>,
     pub(crate) tree_manager: Option<Arc<crate::tree_manager::TreeManager>>,
     pub(crate) governance_gate: Option<Arc<dyn crate::gate::GateBackend>>,
+    /// External chain-head anchoring controller (file ledger / external stub).
+    pub(crate) chain_anchor: Option<Arc<crate::chain_anchor::AnchoringController>>,
 }
 
 /// ECC cognitive substrate: HNSW, causal graph, cognitive tick,
@@ -973,6 +976,70 @@ impl<P: Platform> Kernel<P> {
                 Some(cm)
             } else {
                 boot_log.push(BootEvent::info(BootPhase::Services, "Local chain disabled"));
+                None
+            }
+        };
+
+        // 8b′. External chain-head anchoring controller (WEFT-137 / ADR-041).
+        // Built from `kernel.chain.external_anchor` when present. Backend
+        // `file` is the useful default; `external` wires an intent-log stub.
+        #[cfg(feature = "exochain")]
+        let chain_anchor = {
+            let chain_config = kernel_config.chain.clone().unwrap_or_default();
+            if !chain_config.enabled {
+                None
+            } else if let Some(ref acfg) = chain_config.external_anchor {
+                match crate::chain_anchor::AnchoringController::from_config(acfg) {
+                    Ok(Some(ctrl)) => {
+                        boot_log.push(BootEvent::info(
+                            BootPhase::Services,
+                            format!(
+                                "Chain external anchor ready (backend={}, min_interval={}s, min_events={})",
+                                ctrl.backend_name(),
+                                acfg.min_interval_secs,
+                                acfg.min_events_between,
+                            ),
+                        ));
+                        // Best-effort initial head anchor when a chain exists.
+                        if let Some(ref cm) = chain_manager {
+                            match ctrl.try_anchor_chain_head(cm) {
+                                Ok(Some(receipt)) => {
+                                    boot_log.push(BootEvent::info(
+                                        BootPhase::Services,
+                                        format!(
+                                            "Chain head anchored at boot (tx_id={})",
+                                            receipt.tx_id
+                                        ),
+                                    ));
+                                }
+                                Ok(None) => {
+                                    // Policy suppressed (e.g. zero-event fresh chain
+                                    // still anchors when gates are zero; otherwise skip).
+                                }
+                                Err(e) => {
+                                    warn!(error = %e, "boot-time chain head anchor failed");
+                                }
+                            }
+                        }
+                        Some(Arc::new(ctrl))
+                    }
+                    Ok(None) => {
+                        boot_log.push(BootEvent::info(
+                            BootPhase::Services,
+                            "Chain external anchor configured as none — skipped",
+                        ));
+                        None
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "failed to build chain external anchor");
+                        boot_log.push(BootEvent::info(
+                            BootPhase::Services,
+                            format!("Chain external anchor unavailable: {e}"),
+                        ));
+                        None
+                    }
+                }
+            } else {
                 None
             }
         };
@@ -1966,6 +2033,7 @@ impl<P: Platform> Kernel<P> {
                 chain_manager,
                 tree_manager,
                 governance_gate,
+                chain_anchor,
             },
             #[cfg(feature = "ecc")]
             ecc: EccSubsystem {
@@ -2239,6 +2307,12 @@ impl<P: Platform> Kernel<P> {
         self.chain.governance_gate.as_ref()
     }
 
+    /// Get the external chain-head anchoring controller (WEFT-137), when configured.
+    #[cfg(feature = "exochain")]
+    pub fn chain_anchor(&self) -> Option<&Arc<crate::chain_anchor::AnchoringController>> {
+        self.chain.chain_anchor.as_ref()
+    }
+
     /// Get the ECC HNSW service (if ecc feature enabled).
     #[cfg(feature = "ecc")]
     pub fn ecc_hnsw(&self) -> Option<&Arc<crate::hnsw_service::HnswService>> {
@@ -2503,6 +2577,7 @@ mod tests {
                 checkpoint_interval: 10_000,
                 chain_id: 0,
                 checkpoint_path: None,
+                external_anchor: None,
             }),
             resource_tree: Some(ResourceTreeConfig {
                 enabled: true,
@@ -2974,6 +3049,7 @@ mod tests {
                 checkpoint_interval: 10_000,
                 chain_id: 0,
                 checkpoint_path: None,
+                external_anchor: None,
             }),
             resource_tree: Some(ResourceTreeConfig {
                 enabled: true,

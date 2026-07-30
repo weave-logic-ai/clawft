@@ -2272,8 +2272,15 @@ pub struct AnchorReceipt {
 
 /// Trait for anchoring chain state to an external ledger or store.
 ///
-/// Implementations might target Bitcoin (via OpenTimestamps), Ethereum,
-/// a ruvector root chain, or simply a mock for testing.
+/// Implementations:
+/// - [`MockAnchor`] — always-succeeds (tests)
+/// - [`crate::chain_anchor::FileLedgerAnchor`] — append-only hash-linked
+///   local ledger (production-useful default; WEFT-137)
+/// - [`crate::chain_anchor::ExternalLedgerAnchor`] — external-ledger stub
+///   with intent log + endpoint wiring (until a public ledger is chosen)
+///
+/// Frequency policy and config wiring live in
+/// [`crate::chain_anchor::AnchoringController`].
 pub trait ChainAnchor: Send + Sync {
     /// Anchor the given hash to the external backend.
     fn anchor(&self, hash: &[u8; 32]) -> Result<AnchorReceipt, String>;
