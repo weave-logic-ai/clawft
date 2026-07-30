@@ -42,14 +42,15 @@
     "package": "vsce package --allow-missing-repository",
     "pretest": "npm run compile && npm run compile-tests",
     "test": "node ./out-test/runTest.js",
-    "test:panel-auth": "npm run compile && node scripts/test-panel-auth.mjs"
+    "test:panel-auth": "npm run compile && node scripts/test-panel-auth.mjs",
+    "test:chip-a11y": "npx --yes tsx --test src/chipA11y.test.ts"
   },
   "devDependencies": {
     "@types/glob": "^8.1.0",
     "@types/mocha": "^10.0.6",
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
-    "@vscode/test-electron": "^2.4.0",
+    "@vscode/test-electron": "^3.1.0",
     "glob": "^10.3.10",
     "mocha": "^10.4.0",
     "typescript": "^5.4.0"

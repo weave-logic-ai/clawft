@@ -729,11 +729,10 @@ jobs:
         if: steps.filter.outputs.panel == 'true'
         run: cd extensions/vscode-weft-panel && npm run compile
 
-      # WEFT-486 / M6-B (SCAFFOLD): headless VSCode end-to-end smoke.
-      # Uses @vscode/test-electron under xvfb. The chip-icon DOM
-      # assertion is deferred to a 0.8.x followup (see test file
-      # header); today's suite asserts activation + command surface,
-      # which is enough to catch most regressions.
+      # WEFT-486 + WEFT-558: headless VSCode end-to-end smoke.
+      # Uses @vscode/test-electron under xvfb. Asserts activation,
+      # weft.openPanel, and chip-strip DOM (>=1 data-weft-chip with
+      # stable data-chip-id="kernel" via the mock a11y inject).
       - name: Install xvfb (headless GUI host)
         if: steps.filter.outputs.panel == 'true'
         run: |
@@ -741,6 +740,9 @@ jobs:
       - name: Compile test suite (tsc -p test/)
         if: steps.filter.outputs.panel == 'true'
         run: cd extensions/vscode-weft-panel && npm run compile-tests
+      - name: Chip a11y unit tests (no VSCode host)
+        if: steps.filter.outputs.panel == 'true'
+        run: cd extensions/vscode-weft-panel && npm run test:chip-a11y
       - name: Run VSCode E2E smoke (xvfb-run)
         if: steps.filter.outputs.panel == 'true'
         run: cd extensions/vscode-weft-panel && xvfb-run -a npm test
