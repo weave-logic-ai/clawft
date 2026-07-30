@@ -429,30 +429,10 @@ jobs:
         run: |
           # Ignores tracked as 0.8.x followups (must stay in sync with
           # CARGO_AUDIT_IGNORES in scripts/build.sh):
-          #   WEFT-551 wasmtime 33 → 46+ (19 IDs; risk acceptance WEFT-681,
-          #     review 2026-10-30)
+          #   WEFT-551 DONE — wasmtime 33 → 45.0.3 (19 IDs cleared)
           #   WEFT-552 rustls-webpki bump (3 IDs)
           #   WEFT-553 unmaintained + unsound rand (6 IDs)
           cargo audit --deny warnings \
-            --ignore RUSTSEC-2025-0118 \
-            --ignore RUSTSEC-2026-0006 \
-            --ignore RUSTSEC-2026-0020 \
-            --ignore RUSTSEC-2026-0021 \
-            --ignore RUSTSEC-2026-0085 \
-            --ignore RUSTSEC-2026-0086 \
-            --ignore RUSTSEC-2026-0087 \
-            --ignore RUSTSEC-2026-0088 \
-            --ignore RUSTSEC-2026-0089 \
-            --ignore RUSTSEC-2026-0091 \
-            --ignore RUSTSEC-2026-0092 \
-            --ignore RUSTSEC-2026-0093 \
-            --ignore RUSTSEC-2026-0094 \
-            --ignore RUSTSEC-2026-0095 \
-            --ignore RUSTSEC-2026-0096 \
-            --ignore RUSTSEC-2026-0114 \
-            --ignore RUSTSEC-2026-0149 \
-            --ignore RUSTSEC-2026-0182 \
-            --ignore RUSTSEC-2026-0188 \
             --ignore RUSTSEC-2026-0098 \
             --ignore RUSTSEC-2026-0099 \
             --ignore RUSTSEC-2026-0104 \

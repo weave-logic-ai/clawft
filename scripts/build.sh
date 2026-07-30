@@ -896,39 +896,13 @@ cmd_serve() {
 #
 # When a followup lands, drop the matching IDs from this array.
 #
-# WEFT-551 — wasmtime 33 → 46+ (19 advisories as of 2026-07-30; was 15 at
-#   gate cut). Real fix is the major bump; no in-range patch on 33.0.2.
-#   Tracking / risk acceptance for the 2026-06 deferral: WEFT-681.
-#   Review date: 2026-10-30 (or when WEFT-551 is claimed — whichever first).
+# WEFT-551 — DONE (wave0c): wasmtime/wasmtime-wasi 33.0.2 → 45.0.3.
+#   All 19 wasmtime/wasi RUSTSEC IDs cleared from cargo audit; ignores removed.
 # WEFT-552 — rustls-webpki bump (3 advisories)
 # WEFT-553 — unmaintained + unsound (6 advisories)
 CARGO_AUDIT_IGNORES=(
-    # WEFT-551 wasmtime / wasmtime-wasi 33.0.2 (must stay in sync with
+    # WEFT-552 rustls-webpki (must stay in sync with
     # .github/workflows/pr-gates.yml cargo-audit job)
-    --ignore RUSTSEC-2025-0118
-    --ignore RUSTSEC-2026-0006
-    --ignore RUSTSEC-2026-0020
-    --ignore RUSTSEC-2026-0021
-    --ignore RUSTSEC-2026-0085
-    --ignore RUSTSEC-2026-0086
-    --ignore RUSTSEC-2026-0087
-    --ignore RUSTSEC-2026-0088
-    --ignore RUSTSEC-2026-0089
-    --ignore RUSTSEC-2026-0091
-    --ignore RUSTSEC-2026-0092
-    --ignore RUSTSEC-2026-0093
-    --ignore RUSTSEC-2026-0094
-    --ignore RUSTSEC-2026-0095
-    --ignore RUSTSEC-2026-0096
-    # WEFT-551 (cont.) post-2026-04 disclosures; no in-range fix on 33.x.
-    # 0149 HIGH (path_open TRUNCATE bypasses FilePerms::WRITE) — prioritize
-    # in the bump. 0188 (2026-06-24) hardlink/rename FilePerms bypass added
-    # 2026-07-30 under WEFT-681 audit. Target floor for full clear: 46.0.1.
-    --ignore RUSTSEC-2026-0114
-    --ignore RUSTSEC-2026-0149
-    --ignore RUSTSEC-2026-0182
-    --ignore RUSTSEC-2026-0188
-    # WEFT-552 rustls-webpki
     --ignore RUSTSEC-2026-0098
     --ignore RUSTSEC-2026-0099
     --ignore RUSTSEC-2026-0104

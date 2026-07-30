@@ -36,8 +36,10 @@ impl WasmToolRunner {
         {
             let mut wt_config = wasmtime::Config::new();
             wt_config.consume_fuel(true);
-            wt_config.async_support(true);
-            // Memory limit is enforced per-store, not per-engine
+            // Memory limit is enforced per-store, not per-engine.
+            // (async_support was removed as a Config option in wasmtime 45+;
+            // async instantiation is always available when the async feature
+            // is enabled on the crate.)
             let engine =
                 wasmtime::Engine::new(&wt_config).expect("failed to create wasmtime engine");
             Self {
@@ -252,8 +254,8 @@ impl WasmToolRunner {
     ) -> Result<WasmToolResult, WasmError> {
         let started = std::time::Instant::now();
 
-        // Build a sync-only engine (the shared engine has async_support
-        // enabled, which forbids synchronous Instance::new).
+        // Build a dedicated engine for the sync path so fuel metering and
+        // module compilation stay isolated from the shared async engine.
         let mut sync_config = wasmtime::Config::new();
         sync_config.consume_fuel(true);
         let sync_engine = wasmtime::Engine::new(&sync_config)
@@ -317,7 +319,12 @@ impl WasmToolRunner {
         wasm_bytes: &[u8],
         input: serde_json::Value,
     ) -> Result<WasmToolResult, WasmError> {
+        // WEFT-551 / wasmtime 45+: pipes live under p2::pipe; builder and
+        // WASIp1 linker types moved to the crate root / p1 module (preview1
+        // was renamed to p1).
+        use wasmtime_wasi::p1::{self, WasiP1Ctx};
         use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
+        use wasmtime_wasi::WasiCtxBuilder;
 
         let started = std::time::Instant::now();
 
@@ -330,8 +337,8 @@ impl WasmToolRunner {
         let stderr_pipe = MemoryOutputPipe::new(65_536);
         let stdin_pipe = MemoryInputPipe::new(input_bytes);
 
-        // Build WASI preview1 context with stdio pipes
-        let wasi_ctx = wasmtime_wasi::p2::WasiCtxBuilder::new()
+        // Build WASI preview1 context with stdio pipes (no FS preopens).
+        let wasi_ctx = WasiCtxBuilder::new()
             .stdin(stdin_pipe)
             .stdout(stdout_pipe.clone())
             .stderr(stderr_pipe.clone())
@@ -344,8 +351,8 @@ impl WasmToolRunner {
             .map_err(|e| WasmError::WasmTrap(format!("set fuel: {e}")))?;
 
         // Link WASI preview1 functions (wasi_snapshot_preview1.*)
-        let mut linker = wasmtime::Linker::<wasmtime_wasi::preview1::WasiP1Ctx>::new(&self.engine);
-        wasmtime_wasi::preview1::add_to_linker_async(&mut linker, |ctx| ctx)
+        let mut linker = wasmtime::Linker::<WasiP1Ctx>::new(&self.engine);
+        p1::add_to_linker_async(&mut linker, |ctx| ctx)
             .map_err(|e| WasmError::CompilationFailed(format!("WASI linker: {e}")))?;
 
         // Compile the module (accepts both binary .wasm and text .wat)
