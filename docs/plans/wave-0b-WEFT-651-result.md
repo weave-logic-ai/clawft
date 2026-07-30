@@ -91,4 +91,5 @@ New coverage:
 
 ## Commit
 
-`c90080367afd22b292c8bfba0b2fb44c3c44c5db`
+- **Implementation:** `ea6ff4aa4bd24a54961f257fb8296bbb1e0fc3f7`
+- **Branch tip:** `wave0b/weft-651-tool-retry-breaker` (see `git log -1`)
