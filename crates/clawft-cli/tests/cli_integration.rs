@@ -534,3 +534,214 @@ fn memory_search_succeeds() {
 
     assert!(output.status.success(), "weft memory search should exit 0");
 }
+
+// ── 14. MCP add / list / remove (WEFT-188) ───────────────────────────
+
+#[test]
+fn mcp_help_output() {
+    let output = weft_bin()
+        .args(["mcp", "--help"])
+        .output()
+        .expect("failed to run weft");
+
+    assert!(output.status.success(), "weft mcp --help should exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("add") && stdout.contains("list") && stdout.contains("remove"),
+        "mcp help should list add/list/remove, got: {stdout}"
+    );
+}
+
+#[test]
+fn mcp_list_empty_succeeds() {
+    // CLAWFT_CONFIG points at nonexistent path (see weft_bin); list should
+    // still exit 0 with a friendly empty message.
+    let output = weft_bin()
+        .args(["mcp", "list"])
+        .output()
+        .expect("failed to run weft");
+
+    assert!(output.status.success(), "weft mcp list should exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("No MCP servers") || stdout.contains("MCP server"),
+        "mcp list should mention MCP servers, got: {stdout}"
+    );
+}
+
+#[test]
+fn mcp_add_list_remove_roundtrip() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = dir.path().join("config.json");
+    std::fs::write(&cfg, "{}\n").expect("write empty config");
+    let cfg_str = cfg.to_str().expect("utf8 path");
+
+    // add via --command / --arg / --env
+    let add = weft_bin()
+        .args([
+            "mcp",
+            "add",
+            "demo-srv",
+            "--command",
+            "npx",
+            "--arg",
+            "-y",
+            "--arg",
+            "@example/mcp-server",
+            "--env",
+            "TOKEN=secret",
+            "--internal-only=false",
+            "--config",
+            cfg_str,
+        ])
+        .output()
+        .expect("mcp add");
+    assert!(
+        add.status.success(),
+        "mcp add failed: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let add_out = String::from_utf8_lossy(&add.stdout);
+    assert!(
+        add_out.contains("Added MCP server") || add_out.contains("demo-srv"),
+        "add output unexpected: {add_out}"
+    );
+    assert!(
+        add_out.contains("Hint:") || add_out.contains("reload") || add_out.contains("Daemon"),
+        "add should surface reload hint or daemon message: {add_out}"
+    );
+
+    // file should contain the server
+    let written = std::fs::read_to_string(&cfg).expect("read config");
+    assert!(
+        written.contains("demo-srv") && written.contains("npx"),
+        "config should contain demo-srv: {written}"
+    );
+
+    // list
+    let list = weft_bin()
+        .args(["mcp", "list", "--config", cfg_str])
+        .output()
+        .expect("mcp list");
+    assert!(list.status.success(), "mcp list failed");
+    let list_out = String::from_utf8_lossy(&list.stdout);
+    assert!(
+        list_out.contains("demo-srv"),
+        "list should show demo-srv: {list_out}"
+    );
+
+    // remove
+    let remove = weft_bin()
+        .args(["mcp", "remove", "demo-srv", "--config", cfg_str])
+        .output()
+        .expect("mcp remove");
+    assert!(
+        remove.status.success(),
+        "mcp remove failed: {}",
+        String::from_utf8_lossy(&remove.stderr)
+    );
+    let after = std::fs::read_to_string(&cfg).expect("read config after remove");
+    // name should no longer be a server key (may still appear only if leftover elsewhere)
+    assert!(
+        !after.contains("\"demo-srv\"") && !after.contains("demo-srv"),
+        "config should no longer list demo-srv: {after}"
+    );
+}
+
+#[test]
+fn mcp_add_trailing_command_style() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = dir.path().join("config.json");
+    std::fs::write(&cfg, "{}\n").expect("write empty config");
+    let cfg_str = cfg.to_str().expect("utf8 path");
+
+    let add = weft_bin()
+        .args([
+            "mcp",
+            "add",
+            "trail-srv",
+            "--config",
+            cfg_str,
+            "--",
+            "uvx",
+            "my-mcp",
+        ])
+        .output()
+        .expect("mcp add trailing");
+    assert!(
+        add.status.success(),
+        "mcp add -- failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&add.stdout),
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let written = std::fs::read_to_string(&cfg).expect("read config");
+    assert!(
+        written.contains("trail-srv") && written.contains("uvx"),
+        "trailing add should write uvx server: {written}"
+    );
+}
+
+#[test]
+fn mcp_add_url_only() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = dir.path().join("config.json");
+    std::fs::write(&cfg, "{}\n").expect("write empty config");
+    let cfg_str = cfg.to_str().expect("utf8 path");
+
+    let add = weft_bin()
+        .args([
+            "mcp",
+            "add",
+            "remote",
+            "--url",
+            "https://mcp.example.com/sse",
+            "--config",
+            cfg_str,
+        ])
+        .output()
+        .expect("mcp add url");
+    assert!(
+        add.status.success(),
+        "mcp add --url failed: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let written = std::fs::read_to_string(&cfg).expect("read config");
+    assert!(
+        written.contains("https://mcp.example.com/sse"),
+        "url should be persisted: {written}"
+    );
+}
+
+#[test]
+fn mcp_remove_missing_fails() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = dir.path().join("config.json");
+    std::fs::write(&cfg, r#"{"tools":{"mcpServers":{}}}"#).expect("write config");
+    let cfg_str = cfg.to_str().expect("utf8 path");
+
+    let remove = weft_bin()
+        .args(["mcp", "remove", "does-not-exist", "--config", cfg_str])
+        .output()
+        .expect("mcp remove missing");
+    assert!(
+        !remove.status.success(),
+        "removing missing server should fail"
+    );
+}
+
+#[test]
+fn mcp_add_requires_transport() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = dir.path().join("config.json");
+    std::fs::write(&cfg, "{}\n").expect("write config");
+    let cfg_str = cfg.to_str().expect("utf8 path");
+
+    let add = weft_bin()
+        .args(["mcp", "add", "empty", "--config", cfg_str])
+        .output()
+        .expect("mcp add empty");
+    assert!(
+        !add.status.success(),
+        "add without command/url should fail"
+    );
+}

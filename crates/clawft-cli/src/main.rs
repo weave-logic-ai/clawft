@@ -4,6 +4,7 @@
 //!
 //! - `weft agent` -- Start an interactive agent session or send a single message.
 //! - `weft gateway` -- Start channels + agent loop (Telegram, Slack, etc.).
+//! - `weft mcp` -- Manage MCP server connections (add / list / remove).
 //! - `weft mcp-server` -- Run as an MCP tool server over stdio.
 //! - `weft status` -- Show configuration status and diagnostics.
 //! - `weft channels` -- Inspect channel configuration status.
@@ -50,6 +51,9 @@ enum Commands {
 
     /// Start the gateway (channels + agent loop).
     Gateway(commands::gateway::GatewayArgs),
+
+    /// Manage MCP server connections (add / list / remove).
+    Mcp(commands::mcp_cmd::McpArgs),
 
     /// Run as an MCP tool server over stdio.
     #[cfg(feature = "services")]
@@ -368,6 +372,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Agent(args) => commands::agent::run(args).await?,
         Commands::Gateway(args) => commands::gateway::run(args).await?,
+        Commands::Mcp(args) => commands::mcp_cmd::run(args).await?,
         #[cfg(feature = "services")]
         Commands::McpServer(args) => commands::mcp_server::run(args).await?,
         Commands::Status(args) => commands::status::run(args).await?,
@@ -557,6 +562,7 @@ mod tests {
         let sub_names: Vec<&str> = cmd.get_subcommands().map(|s| s.get_name()).collect();
         assert!(sub_names.contains(&"agent"));
         assert!(sub_names.contains(&"gateway"));
+        assert!(sub_names.contains(&"mcp"));
         assert!(sub_names.contains(&"mcp-server"));
         assert!(sub_names.contains(&"status"));
         assert!(sub_names.contains(&"channels"));
@@ -857,6 +863,60 @@ mod tests {
     }
 
     #[cfg(feature = "services")]
+    #[test]
+    // ── MCP manage subcommand parsing (WEFT-188) ───────────────────
+
+    #[test]
+    fn cli_mcp_list_parses() {
+        let result = Cli::try_parse_from(["weft", "mcp", "list"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_mcp_add_command_parses() {
+        let result = Cli::try_parse_from([
+            "weft",
+            "mcp",
+            "add",
+            "demo",
+            "--command",
+            "npx",
+            "--arg",
+            "-y",
+            "--arg",
+            "@example/mcp",
+            "--env",
+            "TOKEN=x",
+        ]);
+        assert!(result.is_ok(), "parse error: {}", result.err().unwrap());
+    }
+
+    #[test]
+    fn cli_mcp_add_url_parses() {
+        let result = Cli::try_parse_from([
+            "weft",
+            "mcp",
+            "add",
+            "remote",
+            "--url",
+            "https://mcp.example.com/sse",
+        ]);
+        assert!(result.is_ok(), "parse error: {}", result.err().unwrap());
+    }
+
+    #[test]
+    fn cli_mcp_add_trailing_parses() {
+        let result =
+            Cli::try_parse_from(["weft", "mcp", "add", "trail", "--", "uvx", "my-mcp"]);
+        assert!(result.is_ok(), "parse error: {}", result.err().unwrap());
+    }
+
+    #[test]
+    fn cli_mcp_remove_parses() {
+        let result = Cli::try_parse_from(["weft", "mcp", "remove", "demo"]);
+        assert!(result.is_ok());
+    }
+
     #[test]
     fn cli_mcp_server_parses() {
         let result = Cli::try_parse_from(["weft", "mcp-server"]);
