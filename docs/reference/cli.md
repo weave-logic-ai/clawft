@@ -955,7 +955,9 @@ weft workspace status
 
 ### weft workspace delete
 
-Delete a workspace from the registry. Files on disk are not removed.
+Delete a workspace from the registry. By default also removes `.clawft/` and
+`CLAWFT.md` at the workspace root (FR-W06). Use `--keep-data` for a
+registry-only delete. The project root and other user files are not removed.
 
 ```
 weft workspace delete <NAME> [OPTIONS]
@@ -965,6 +967,7 @@ weft workspace delete <NAME> [OPTIONS]
 |-------------------|-------------|
 | `<NAME>` | Workspace name to delete. Required. |
 | `--yes`, `-y` | Skip confirmation prompt. |
+| `--keep-data` | Keep workspace files on disk (registry-only delete). |
 
 ### weft workspace config
 
@@ -1059,7 +1062,7 @@ Reset workspace config:
 weft workspace config reset
 ```
 
-Delete a workspace (with confirmation):
+Delete a workspace (with confirmation; removes `.clawft/` + `CLAWFT.md`):
 
 ```
 weft workspace delete my-project
@@ -1069,6 +1072,12 @@ Delete a workspace without confirmation:
 
 ```
 weft workspace delete my-project -y
+```
+
+Registry-only delete (keep files on disk):
+
+```
+weft workspace delete my-project --keep-data -y
 ```
 
 ---

@@ -280,17 +280,63 @@ impl WorkspaceManager {
         })
     }
 
-    /// Delete a workspace by name.
+    /// Delete a workspace by name (FR-W06 / WEFT-86).
     ///
-    /// Removes the entry from the registry but does NOT delete files
-    /// from disk (that is the caller's responsibility).
-    pub fn delete(&mut self, name: &str) -> Result<()> {
+    /// Always removes the entry from the global registry. By default also
+    /// removes workspace metadata on disk: the `.clawft/` directory and
+    /// `CLAWFT.md` at the workspace root. Pass `keep_data = true` for a
+    /// registry-only delete (the pre-0.8 behavior).
+    ///
+    /// Does **not** delete the workspace project root or other user source
+    /// files outside those markers.
+    ///
+    /// Missing on-disk markers are treated as already gone (idempotent).
+    /// If file removal fails, the registry entry is left in place so the
+    /// caller can retry.
+    pub fn delete(&mut self, name: &str, keep_data: bool) -> Result<()> {
+        let path = self
+            .registry
+            .find_by_name(name)
+            .map(|e| e.path.clone())
+            .ok_or_else(|| ClawftError::ConfigInvalid {
+                reason: format!("workspace not found: {name}"),
+            })?;
+
+        if !keep_data {
+            Self::remove_workspace_data(&path)?;
+        }
+
         if !self.registry.remove_by_name(name) {
             return Err(ClawftError::ConfigInvalid {
                 reason: format!("workspace not found: {name}"),
             });
         }
         self.save_registry()?;
+        Ok(())
+    }
+
+    /// Remove FR-W06 project markers: `.clawft/` and `CLAWFT.md`.
+    fn remove_workspace_data(ws_root: &Path) -> Result<()> {
+        let dot_clawft = ws_root.join(".clawft");
+        if dot_clawft.exists() {
+            std::fs::remove_dir_all(&dot_clawft).map_err(|e| ClawftError::ConfigInvalid {
+                reason: format!(
+                    "failed to remove {}: {e}",
+                    dot_clawft.display()
+                ),
+            })?;
+        }
+
+        let clawft_md = ws_root.join("CLAWFT.md");
+        if clawft_md.exists() {
+            std::fs::remove_file(&clawft_md).map_err(|e| ClawftError::ConfigInvalid {
+                reason: format!(
+                    "failed to remove {}: {e}",
+                    clawft_md.display()
+                ),
+            })?;
+        }
+
         Ok(())
     }
 
@@ -554,14 +600,74 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn workspace_manager_delete() {
-        let (dir, registry_path) = temp_registry("delete");
+    fn workspace_manager_delete_removes_files_by_default() {
+        let (dir, registry_path) = temp_registry("delete-default");
         let mut wm = WorkspaceManager::with_registry_path(registry_path).unwrap();
 
-        wm.create("del-test", &dir).unwrap();
+        let ws_path = wm.create("del-test", &dir).unwrap();
+        // User content outside markers must survive.
+        let user_file = ws_path.join("src").join("main.rs");
+        std::fs::create_dir_all(user_file.parent().unwrap()).unwrap();
+        std::fs::write(&user_file, "fn main() {}").unwrap();
+        assert!(ws_path.join(".clawft").is_dir());
+        assert!(ws_path.join("CLAWFT.md").exists());
         assert_eq!(wm.list().len(), 1);
 
-        wm.delete("del-test").unwrap();
+        wm.delete("del-test", false).unwrap();
+        assert!(wm.list().is_empty());
+        assert!(
+            !ws_path.join(".clawft").exists(),
+            "default delete removes .clawft/"
+        );
+        assert!(
+            !ws_path.join("CLAWFT.md").exists(),
+            "default delete removes CLAWFT.md"
+        );
+        assert!(
+            user_file.exists(),
+            "default delete must not remove user source files"
+        );
+        assert!(
+            ws_path.is_dir(),
+            "default delete must not remove the project root"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn workspace_manager_delete_keep_data_registry_only() {
+        let (dir, registry_path) = temp_registry("delete-keep-data");
+        let mut wm = WorkspaceManager::with_registry_path(registry_path).unwrap();
+
+        let ws_path = wm.create("keep-test", &dir).unwrap();
+        assert!(ws_path.join(".clawft").is_dir());
+        assert!(ws_path.join("CLAWFT.md").exists());
+
+        wm.delete("keep-test", true).unwrap();
+        assert!(wm.list().is_empty());
+        assert!(
+            ws_path.join(".clawft").is_dir(),
+            "--keep-data leaves .clawft/ on disk"
+        );
+        assert!(
+            ws_path.join("CLAWFT.md").exists(),
+            "--keep-data leaves CLAWFT.md on disk"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn workspace_manager_delete_idempotent_when_markers_already_gone() {
+        let (dir, registry_path) = temp_registry("delete-already-gone");
+        let mut wm = WorkspaceManager::with_registry_path(registry_path).unwrap();
+
+        let ws_path = wm.create("gone-test", &dir).unwrap();
+        std::fs::remove_dir_all(ws_path.join(".clawft")).unwrap();
+        std::fs::remove_file(ws_path.join("CLAWFT.md")).unwrap();
+
+        wm.delete("gone-test", false).unwrap();
         assert!(wm.list().is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -572,7 +678,7 @@ pub(crate) mod tests {
         let (dir, registry_path) = temp_registry("delete-notfound");
         let mut wm = WorkspaceManager::with_registry_path(registry_path).unwrap();
 
-        let result = wm.delete("nonexistent");
+        let result = wm.delete("nonexistent", false);
         assert!(result.is_err());
 
         let _ = std::fs::remove_dir_all(&dir);

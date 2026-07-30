@@ -14,6 +14,7 @@
 //! weft workspace load my-project
 //! weft workspace status
 //! weft workspace delete my-project
+//! weft workspace delete my-project --keep-data
 //! weft workspace config set agents.defaults.model openai/gpt-4o
 //! weft workspace config get agents.defaults.model
 //! weft workspace config reset
@@ -63,7 +64,7 @@ pub enum WorkspaceAction {
     /// Show status of the current workspace.
     Status,
 
-    /// Delete a workspace from the registry.
+    /// Delete a workspace (registry + on-disk markers by default).
     Delete {
         /// Workspace name to delete.
         name: String,
@@ -71,6 +72,12 @@ pub enum WorkspaceAction {
         /// Skip confirmation prompt.
         #[arg(short = 'y', long)]
         yes: bool,
+
+        /// Keep workspace files on disk (registry-only delete).
+        ///
+        /// Default behavior (FR-W06) removes `.clawft/` and `CLAWFT.md`.
+        #[arg(long)]
+        keep_data: bool,
     },
 
     /// Manage workspace configuration.
@@ -113,7 +120,11 @@ pub async fn run(args: WorkspaceArgs) -> anyhow::Result<()> {
         WorkspaceAction::List { all } => ws_list_rpc(all).await,
         WorkspaceAction::Load { name_or_path } => ws_load_rpc(&name_or_path).await,
         WorkspaceAction::Status => ws_status_rpc().await,
-        WorkspaceAction::Delete { name, yes } => ws_delete_rpc(&name, yes).await,
+        WorkspaceAction::Delete {
+            name,
+            yes,
+            keep_data,
+        } => ws_delete_rpc(&name, yes, keep_data).await,
         WorkspaceAction::Config { action } => match action {
             WorkspaceConfigAction::Set { key, value } => ws_config_set_rpc(&key, &value).await,
             WorkspaceConfigAction::Get { key } => ws_config_get_rpc(&key).await,
@@ -218,12 +229,14 @@ async fn ws_status_rpc() -> anyhow::Result<()> {
     workspace_status()
 }
 
-async fn ws_delete_rpc(name: &str, skip_confirm: bool) -> anyhow::Result<()> {
+async fn ws_delete_rpc(name: &str, skip_confirm: bool, keep_data: bool) -> anyhow::Result<()> {
     if !skip_confirm {
-        eprint!(
-            "Delete workspace '{name}' from registry? \
-             (files on disk will NOT be removed) [y/N] "
-        );
+        let data_note = if keep_data {
+            "files on disk will be kept (--keep-data)"
+        } else {
+            "this will remove .clawft/ and CLAWFT.md (use --keep-data to keep them)"
+        };
+        eprint!("Delete workspace '{name}'? ({data_note}) [y/N] ");
         use std::io::Write;
         std::io::stderr().flush().ok();
 
@@ -236,15 +249,15 @@ async fn ws_delete_rpc(name: &str, skip_confirm: bool) -> anyhow::Result<()> {
     }
 
     if let Some(mut client) = DaemonClient::connect().await {
-        let params = serde_json::json!({ "name": name });
+        let params = serde_json::json!({ "name": name, "keep_data": keep_data });
         let req = Request::with_params("workspace.delete", params);
         let resp = client.call(req).await?;
         resp.into_result()?;
-        println!("Workspace '{name}' removed from registry.");
+        print_workspace_deleted(name, keep_data);
         return Ok(());
     }
     eprintln!("{NO_DAEMON_WARNING}");
-    workspace_delete_local(name)
+    workspace_delete_local(name, keep_data)
 }
 
 async fn ws_config_set_rpc(key: &str, value: &str) -> anyhow::Result<()> {
@@ -415,17 +428,27 @@ fn print_workspace_status(status: &WorkspaceStatus) {
     println!("  Skills:   {}", dot_clawft.join("skills").display());
 }
 
-/// Delete a workspace from the registry (local fallback, no confirmation —
-/// the caller has already handled the prompt).
-fn workspace_delete_local(name: &str) -> anyhow::Result<()> {
+/// Delete a workspace (local fallback, no confirmation — the caller has
+/// already handled the prompt).
+fn workspace_delete_local(name: &str, keep_data: bool) -> anyhow::Result<()> {
     let mut mgr = WorkspaceManager::new()
         .map_err(|e| anyhow::anyhow!("failed to initialize workspace manager: {e}"))?;
 
-    mgr.delete(name).map_err(|e| anyhow::anyhow!("{e}"))?;
+    mgr.delete(name, keep_data)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    println!("Workspace '{name}' removed from registry.");
-
+    print_workspace_deleted(name, keep_data);
     Ok(())
+}
+
+fn print_workspace_deleted(name: &str, keep_data: bool) {
+    if keep_data {
+        println!("Workspace '{name}' removed from registry (files kept on disk).");
+    } else {
+        println!(
+            "Workspace '{name}' deleted (registry entry, .clawft/, and CLAWFT.md removed)."
+        );
+    }
 }
 
 /// Set a workspace configuration key.
