@@ -97,6 +97,52 @@ Unit tests (no VSCode host):
 cd extensions/vscode-weft-panel && npm run test:panel-auth
 ```
 
+## 9. Chip-icon DOM assertion (WEFT-558)
+
+Tray chips paint **inside the egui canvas** (wasm), so a raw
+`webview.html` greper cannot see them. WEFT-558 closes that gap with a
+DOM-side a11y / E2E mirror:
+
+| Piece | Path |
+|-------|------|
+| Pure helpers | `src/chipA11y.ts` |
+| Host inject + snapshot | command `weft._test.chipStripSnapshot` (not in palette) |
+| E2E case | `test/suite/extension.test.ts` → `chip strip exposes >=1 chip element with stable id` |
+| Unit tests | `npm run test:chip-a11y` |
+
+Stable identifiers match tray `ChipId`s: `kernel`, `mesh`, `exochain`,
+`explorer`. Each chip is a visually-hidden
+
+```html
+<span data-weft-chip data-chip-id="kernel" data-chip-tone="ok" data-chip-label="Kernel">Kernel</span>
+```
+
+inside `#weft-chip-a11y[data-weft-status-strip]`.
+
+**How the E2E path works**
+
+1. `runTest.ts` sets `WEFT_PANEL_E2E=1` in the extension host env so the
+   initial HTML can seed the mock set.
+2. The suite opens the panel, then calls `weft._test.chipStripSnapshot`,
+   which re-injects `MOCK_E2E_CHIPS` into `panel.webview.html` and
+   parses them back.
+3. Asserts `chips.length >= 1` and a chip with `id === "kernel"`.
+
+**Local runs**
+
+```bash
+cd extensions/vscode-weft-panel
+npm run test:chip-a11y          # pure unit (no VSCode host)
+npm run pretest && npm test     # full headless host (needs xvfb on Linux)
+```
+
+CI: `vscode-panel-build` job in `.github/workflows/pr-gates.yml`
+(`xvfb-run -a npm test`).
+
+Production panels leave the strip **empty** (container only) unless
+`WEFT_PANEL_E2E=1`. The test command is host-only and never contributed
+to the command palette.
+
 ## Known gaps (deferred to M2 / M3)
 
 - No voice input — VSCode webviews can't expose `allow="microphone"`
@@ -107,7 +153,10 @@ cd extensions/vscode-weft-panel && npm run test:panel-auth
 - No `ThreadDock` primitive for per-agent parallel output.
 - Panel does not yet speak WSP-0.1 verbs (protocol-spec.md); raw
   kernel.* RPC only. WSP verbs land in M3.
+- Live tone sync from wasm → DOM a11y strip (today the E2E path uses
+  a mock inject; production canvas tones are still canvas-only).
 
 References:
 - Architecture & rationale: ADR-011, session-7 findings.
 - Protocol: `.planning/symposiums/compositional-ui/protocol-spec.md`.
+- Chip DOM followup: WEFT-558 / WEFT-486.

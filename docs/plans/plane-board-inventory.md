@@ -607,7 +607,7 @@
 | WEFT-555 | Done | high | 0.7.x | ws10-voice | E | strong | — | WEFT-207 | ws10: voice — wire substrate STT output into agent conversation + command input |
 | WEFT-556 | Cancelled | high | 0.7.x | ws10-voice | E | weak | — | — | ws10: SC-10 plugin voice capability — gate WASM plugins on voice capability + sub-perms |
 | WEFT-557 | Cancelled | high | 0.7.x | ws10-voice | E | ok | — | — | ws10: SC-4 voice permission flags — gate voice-triggered tool execution by Level 0/1/2 |
-| WEFT-558 | Todo | medium | 0.8.x | ws15-mcp | J | ok | WEFT-486 | WEFT-486 | ws15: VSCode panel E2E — chip-icon DOM assertion (followup to WEFT-486) |
+| WEFT-558 | Done | medium | 0.8.x | ws15-mcp | J | ok | WEFT-486 | WEFT-486 | ws15: VSCode panel E2E — chip-icon DOM assertion (followup to WEFT-486) |
 | WEFT-559 | Backlog | high | 0.9.x | ws15-mcp | J | weak | — | WEFT-483 | ws15: Windows named-pipe transport — implement DaemonClient + daemon listener for x86_64-p |
 | WEFT-560 | Backlog | low | 1.0.x | ws09-clawft-dashboard | F | strong | — | WEFT-311 | ws09: pwa — push notifications via VAPID + WS event bridge |
 | WEFT-561 | Backlog | low | 1.0.x | ws09-clawft-dashboard | F | strong | — | WEFT-315,WEFT-575 | ws09: ui — axe-core + Playwright a11y suite across all routes |
@@ -2733,12 +2733,12 @@
 
 #### WEFT-558 — ws15: VSCode panel E2E — chip-icon DOM assertion (followup to WEFT-486)
 
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: J · **AC**: ok
+- **State**: Done · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: J · **AC**: ok
 - **Labels**: tests, ws15-mcp
 - **Blocked by**: WEFT-486
 - **Blocks**: WEFT-486
-- **Gap**: Followup to WEFT-486 (M6-B SCAFFOLD). The end-to-end smoke harness shipped in WEFT-486 boots a headless VSCode host with @vscode/test-electron, asserts the extension activates, and asserts the weft.openPanel command resolves without throwing. The deferred piece is the chip-icon a
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
+- **Gap**: Closed — mock chip a11y overlay + `weft._test.chipStripSnapshot`; E2E asserts `data-chip-id="kernel"`. See `docs/plans/wave-0l-WEFT-558-result.md`.
+- **Plan**: Shipped on `wave0l/weft-558-chip-e2e`
 
 #### WEFT-497 — ws15: agent-core-chat feature flag — schedule removal post-D3 soak
 

@@ -29,6 +29,14 @@ import {
     issuePanelSession,
     type PanelSession,
 } from "./panelAuth";
+import {
+    MOCK_E2E_CHIPS,
+    injectMockChipsIntoHtml,
+    isE2eChipMode,
+    parseChipsFromHtml,
+    renderChipA11yHtml,
+    type ChipStripSnapshot,
+} from "./chipA11y";
 
 const VIEW_TYPE = "weft.panel";
 
@@ -175,6 +183,31 @@ export function activate(context: vscode.ExtensionContext): void {
         createOrShowPanel(context);
     });
     context.subscriptions.push(openCmd);
+
+    // WEFT-558: host-only test command (not in package.json contributes —
+    // stays out of the command palette). Injects the mock chip set into
+    // the live panel HTML and returns a parseable snapshot for the E2E
+    // suite. Production UI never calls this.
+    const chipSnapCmd = vscode.commands.registerCommand(
+        "weft._test.chipStripSnapshot",
+        (): ChipStripSnapshot => {
+            if (!currentPanel) {
+                throw new Error(
+                    "weft._test.chipStripSnapshot: panel not open — call weft.openPanel first",
+                );
+            }
+            // Inject known chips into the DOM-side a11y strip, then parse
+            // back from webview.html so the assertion path matches what
+            // an external HTML greper would see.
+            currentPanel.webview.html = injectMockChipsIntoHtml(
+                currentPanel.webview.html,
+                MOCK_E2E_CHIPS,
+            );
+            const chips = parseChipsFromHtml(currentPanel.webview.html);
+            return { chips, source: "html" };
+        },
+    );
+    context.subscriptions.push(chipSnapCmd);
 
     const serializer: vscode.WebviewPanelSerializer = {
         async deserializeWebviewPanel(panel: vscode.WebviewPanel): Promise<void> {
@@ -494,6 +527,14 @@ function renderHtml(context: vscode.ExtensionContext, webview: vscode.Webview): 
 
     const wasmNotFoundHint = wasmUri;
 
+    // WEFT-558: DOM-side chip strip. Empty in production (container only);
+    // seeded with MOCK_E2E_CHIPS when WEFT_PANEL_E2E=1 so the harness can
+    // assert without a second inject. The E2E command always re-injects
+    // for determinism regardless of this seed.
+    const chipStripHtml = renderChipA11yHtml(
+        isE2eChipMode() ? MOCK_E2E_CHIPS : [],
+    );
+
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -532,6 +573,7 @@ function renderHtml(context: vscode.ExtensionContext, webview: vscode.Webview): 
       <p>Expected at <code>${wasmNotFoundHint}</code>.</p>
     </div>
   </div>
+  ${chipStripHtml}
   <script nonce="${nonce}">
     // Bootstrap-level diagnostics: if the module script below fails to
     // parse/import (CSP, 404, syntax), neither its try/catch nor any

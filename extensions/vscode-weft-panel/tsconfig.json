@@ -6,6 +6,7 @@
     "outDir": "out",
     "rootDir": "src",
     "sourceMap": true,
+    "declaration": true,
     "strict": true,
     "noImplicitAny": true,
     "noImplicitReturns": true,

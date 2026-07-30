@@ -1,6 +1,6 @@
 // Mocha runner for the VSCode panel E2E test suite.
 // Loaded by `@vscode/test-electron` once the headless host has finished
-// activating the extension. WEFT-486 / M6-B (SCAFFOLD).
+// activating the extension. WEFT-486 + WEFT-558 (chip DOM assertion).
 import * as path from "node:path";
 import { glob } from "glob";
 // eslint-disable-next-line @typescript-eslint/no-require-imports

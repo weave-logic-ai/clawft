@@ -1,25 +1,19 @@
-// VSCode panel end-to-end smoke (WEFT-486 / M6-B SCAFFOLD).
+// VSCode panel end-to-end smoke (WEFT-486 / M6-B + WEFT-558 chip DOM).
 //
 // Boots a headless VSCode host with the WeftOS Dev Panel installed,
 // then exercises the extension's command surface and webview shell.
 //
-// Scope shipped today:
+// Scope:
 //   - Activation succeeds; the package's `weft.openPanel` command is
 //     registered.
 //   - `executeCommand("weft.openPanel")` resolves without throwing
 //     (panel construction completes; the webview HTML is assigned).
-//
-// SCAFFOLD — explicitly NOT shipped today (deferred to 0.8.x):
-//   - Chip-icon DOM assertion. The chip strip is rendered inside the
-//     egui canvas via the wasm bundle, so DOM-side `webview.html`
-//     introspection cannot see chip elements directly. Closing this
-//     gap requires either:
-//       (a) a test-only mock-provider injection that publishes a known
-//           chip set into a DOM-side overlay the test can query, or
-//       (b) a screenshot-diff harness running against the canvas.
-//     Tracked as a 0.8.x followup; this scaffold lets that work plug
-//     into an already-wired CI surface instead of standing one up
-//     from scratch later.
+//   - WEFT-558: chip strip exposes >=1 chip with a stable identifier
+//     via the DOM-side a11y overlay (`data-weft-chip` /
+//     `data-chip-id="kernel"`). Tray chips paint inside the egui
+//     canvas, so the harness uses a test-only mock inject
+//     (`weft._test.chipStripSnapshot`) that writes known chips into
+//     `#weft-chip-a11y` and parses them back from `webview.html`.
 //
 // The Mocha suite is loaded by `suite/index.ts`; the host is launched
 // by `runTest.ts` (under `xvfb-run` in CI).
@@ -71,18 +65,28 @@ suite("weft-panel: smoke", () => {
     });
 
     // ------------------------------------------------------------------
-    // SCAFFOLD: chip-icon assertion stub. Skipped until the 0.8.x
-    // followup lands a DOM-introspectable chip surface (see file header).
+    // WEFT-558: chip-icon DOM assertion (followup to WEFT-486 scaffold).
     // ------------------------------------------------------------------
-    test.skip("[0.8.x] chip strip exposes >=1 chip element", () => {
-        // Followup will:
-        //  1. Inject a mock-provider chip set into the webview via a
-        //     test-only postMessage hook OR enable the panel's debug
-        //     a11y overlay so chip ids land in the DOM.
-        //  2. Read panel.webview.html (or use a custom message round-trip)
-        //     to assert the chip elements / count.
-        //  3. Tear the panel down between tests so leakage doesn't
-        //     bleed across cases.
-        assert.fail("not yet implemented — see 0.8.x followup");
+    test("chip strip exposes >=1 chip element with stable id", async () => {
+        // Ensure the panel is open so currentPanel is set.
+        await vscode.commands.executeCommand("weft.openPanel");
+
+        const snap = (await vscode.commands.executeCommand(
+            "weft._test.chipStripSnapshot",
+        )) as { chips: Array<{ id: string; label: string; tone: string }>; source: string } | undefined;
+
+        assert.ok(snap, "chipStripSnapshot returned nothing");
+        assert.strictEqual(snap!.source, "html");
+        assert.ok(
+            Array.isArray(snap!.chips) && snap!.chips.length >= 1,
+            `expected >=1 chip, got ${JSON.stringify(snap!.chips)}`,
+        );
+        // Stable identifier — matches tray ChipId::Kernel / MOCK_E2E_CHIPS.
+        const kernel = snap!.chips.find((c) => c.id === "kernel");
+        assert.ok(
+            kernel,
+            `expected data-chip-id="kernel" among ${snap!.chips.map((c) => c.id).join(",")}`,
+        );
+        assert.strictEqual(kernel!.label, "Kernel");
     });
 });
