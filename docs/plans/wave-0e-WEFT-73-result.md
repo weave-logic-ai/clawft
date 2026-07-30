@@ -4,7 +4,7 @@
 **Branch:** `wave0e/weft-73-plugin-lifecycle-tests`  
 **Base:** `release/0.8-staging`  
 **Worktree:** `/Users/mathewbeane/.grok/worktrees/mathewbeane-weftos/subagent-019fb46e-5ef4-7621-9495-d5bb62542efc`  
-**Commit:** `05a1055f`  
+**Commit:** `e34611e7` (impl); branch tip includes docs pin  
 **Date:** 2026-07-30  
 **Agent:** coder-73 (wave-0e)
 
