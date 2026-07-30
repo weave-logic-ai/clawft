@@ -41,6 +41,7 @@
 #![deny(rust_2018_idioms)]
 #![warn(missing_docs)]
 
+pub mod atom_registry;
 pub mod enrich_queue;
 pub mod dialogue_act;
 pub mod enrichment_classifier;
@@ -57,6 +58,10 @@ pub mod substrate_sink;
 pub mod text_structure;
 pub mod turn_classifier;
 
+pub use atom_registry::{
+    AtomKey, AtomLocator, AtomRegistry, ConsistencyIssue, ConsistencyReport, Disposition,
+    IssueSeverity, ProjectionAuditRow,
+};
 pub use enrich_queue::{EnrichJob, EnrichQueue};
 pub use dialogue_act::{Act, Intent, RefinedAct, SpeechActClass};
 pub use enrichment_classifier::{
