@@ -15,7 +15,9 @@ categories = ["network-programming"]
 [features]
 default = ["native"]
 native = ["clawft-plugin/native"]
-email = []
+# Email channel: IMAP inbound (sync `imap` + native-tls via spawn_blocking)
+# and SMTP outbound (`lettre` async rustls). `mailparse` decodes RFC822.
+email = ["dep:imap", "dep:lettre", "dep:mailparse", "dep:native-tls"]
 whatsapp = ["dep:axum", "dep:hex"]
 # `signal` requires `clawft-plugin/native` for the tokio-backed
 # CancellationToken. The crate's `native` feature is on by default
@@ -77,6 +79,16 @@ rustls-pki-types = { version = "1", optional = true }
 cpal = { version = "0.15", optional = true }
 # Voice-only: per-frame speech-band spectral voiceness gate (VAD at low SNR).
 rustfft = { workspace = true, optional = true }
+# Email (feature `email`):
+# - imap 2.4: sync IMAP client (run under spawn_blocking)
+# - native-tls: TLS for imap connect / STARTTLS
+# - lettre: async SMTP with rustls (STARTTLS + implicit TLS)
+# - mailparse: RFC822 body/header decode for inbound
+# `tls` feature gates `imap::connect` / `connect_starttls` (native-tls).
+imap = { version = "2.4", default-features = false, features = ["tls"], optional = true }
+native-tls = { version = "0.2", optional = true }
+lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "smtp-transport", "tokio1", "tokio1-rustls-tls"], optional = true }
+mailparse = { version = "0.15", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

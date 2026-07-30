@@ -552,6 +552,7 @@ cmd_all() {
 workspace_test() {
     local extra=()
     [ "$NO_FAIL_FAST" = true ] && extra+=(--no-fail-fast)
+    [ -n "$FEATURES" ] && extra+=(--features "$FEATURES")
     # `scripts/build.sh test <pkg>…` scopes to the named packages; no
     # packages means the whole workspace (the historical behavior).
     local scope=(--workspace)
@@ -735,9 +736,13 @@ check_kernel_wasm_no_mesh() {
 }
 
 cmd_check() {
-    header "Running cargo check --workspace"
+    header "Running cargo check --workspace${FEATURES:+ --features $FEATURES}"
     timer_start
-    run_cmd cargo check --workspace
+    if [ -n "$FEATURES" ]; then
+        run_cmd cargo check --workspace --features "$FEATURES"
+    else
+        run_cmd cargo check --workspace
+    fi
     timer_end
 
     # WEFT-114: hard local twin of the PR-gates wasm-kernel-no-mesh job.
@@ -759,13 +764,18 @@ cmd_check() {
 }
 
 cmd_clippy() {
-    header "Running clippy (warnings as errors)"
+    header "Running clippy (warnings as errors)${FEATURES:+ --features $FEATURES}"
     timer_start
     if [ "$DRY_RUN" = true ]; then
-        printf "  ${YELLOW}DRY${NC}   cargo clippy --workspace -- -D warnings\n"
+        printf "  ${YELLOW}DRY${NC}   cargo clippy --workspace%s -- -D warnings\n" \
+            "${FEATURES:+ --features $FEATURES}"
     else
         # Always show full output — tail -5 hides warnings
-        cargo clippy --workspace -- -D warnings 2>&1
+        if [ -n "$FEATURES" ]; then
+            cargo clippy --workspace --features "$FEATURES" -- -D warnings 2>&1
+        else
+            cargo clippy --workspace -- -D warnings 2>&1
+        fi
     fi
     timer_end
 }
