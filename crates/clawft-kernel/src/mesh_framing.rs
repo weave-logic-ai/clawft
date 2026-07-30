@@ -2,17 +2,27 @@
 //!
 //! Each mesh frame is: `[4-byte big-endian length][1-byte message type][payload]`
 //! Maximum frame size is [`MAX_MESSAGE_SIZE`] (16 MiB).
+//!
+//! ## Frame type vs IPC encoding (ADR-031 / WEFT-683)
+//!
+//! `FrameType` is the **message kind** discriminator. It is orthogonal to
+//! how an `IpcMessage` payload is serialized — that is
+//! [`crate::mesh_ipc::MeshIpcEncoding`] (JSON shipped; RVF deferred behind
+//! `mesh-rvf`). See ADR-031 for the clarified layering.
 
 use crate::mesh::{MAX_MESSAGE_SIZE, MeshError, MeshStream};
 
 /// Mesh message types for framing dispatch.
+///
+/// Type bytes identify *what* the payload is, not *how* it is encoded.
+/// IPC payload encoding is [`crate::mesh_ipc::MeshIpcEncoding`].
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FrameType {
     /// WeftOS handshake payload.
     Handshake = 0x01,
-    /// KernelMessage (IPC).
+    /// KernelMessage IPC envelope (payload encoding: see `mesh_ipc`).
     IpcMessage = 0x02,
     /// Chain sync request/response.
     ChainSync = 0x03,
