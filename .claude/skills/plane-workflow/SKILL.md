@@ -108,10 +108,16 @@ What still works, verified empirically:
 So the 137 items sitting in 0.7.x can still be closed and commented
 normally — only cycle *membership* is frozen.
 
-**Current convention**: `0.8.x` is the live gate (2026-07-01 →
-2026-09-30). File all new work there regardless of which release it
-notionally targets; 0.7.x is now a frozen historical record. Version
-numbers are not load-bearing here — work from where we are.
+**Current convention (updated 2026-07-30)**:
+
+| Cycle | Role |
+|-------|------|
+| **0.7.x** | Frozen historical record only (Done/Cancelled). Do not file open work. |
+| **0.8.x** | **Publish / ship track.** File all work that must ship or burn down for the 0.8 publish. Open leftovers from 0.7 were absorbed here. |
+| **0.9.x** | **Beta-ready residual** (LeWM, deep K6 mesh, GA governance end-states). |
+| **1.0.x** | Long-horizon / research tail. |
+
+File new ship work into **0.8.x**. See `docs/plans/plane-cycle-reorg-2026-07-30.md`.
 
 ⚠ **The trap that caused this**: the "cycles are gates" model below
 fights Plane's semantics, which enforce dates and auto-complete on
