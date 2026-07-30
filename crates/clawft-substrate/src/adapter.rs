@@ -130,7 +130,10 @@ pub enum AdapterError {
         reason: String,
     },
     /// Permissions required by this topic have not been granted.
-    /// Governance integration is M1.6+; M1.5 never emits this.
+    ///
+    /// Emitted by [`crate::Substrate::subscribe_adapter`] when the
+    /// installed ADR-012 [`clawft_app::Gate`] denies the open (WEFT-429),
+    /// and by adapters that self-check grants inside [`OntologyAdapter::open`].
     #[error("permission denied: {0:?}")]
     PermissionDenied(Vec<PermissionReq>),
     /// Something else went wrong — carries a description.

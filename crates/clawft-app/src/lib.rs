@@ -12,9 +12,10 @@
 //! * Ontology adapter introspection — permission ↔ adapter consistency
 //!   (ADR-015 rule 6) is TODO'd until the ADR-017 / `clawft-adapter`
 //!   crate lands.
-//! * Real governance — [`lifecycle::governance::NoopGate`] and
-//!   [`lifecycle::governance::StrictGate`] are placeholders; ADR-012 /
-//!   M1.6+ owns the real gate.
+//! * Governance — [`lifecycle::governance::CapturePrivacyGate`] (ADR-012)
+//!   denies capture without a grant; [`lifecycle::governance::NoopGate`]
+//!   always grants. Wired through
+//!   `clawft_substrate::Substrate::subscribe_adapter` (WEFT-429).
 //!
 //! [adr]: https://github.com/weave-logic-ai/weftos/blob/development-0.7.0/.planning/symposiums/compositional-ui/adrs/adr-015-app-manifest.md
 
@@ -25,7 +26,10 @@ pub mod validation;
 
 pub use lifecycle::{
     AppLaunchRequest, AppLaunchResult, LaunchError, SessionConfig,
-    governance::{Gate, NoopGate, StrictGate},
+    governance::{
+        AdapterOpenResult, CapturePrivacyGate, Gate, NoopGate, StrictGate, infer_capture_permission,
+        is_capture, permission_covered,
+    },
 };
 pub use manifest::{AppManifest, EntryPoint, Input, Mode, Permission, SurfaceRef};
 pub use registry::{AppRegistry, InstalledApp, RegistryError};
