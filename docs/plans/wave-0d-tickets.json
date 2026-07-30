@@ -1,0 +1,56 @@
+{
+  "WEFT-154": {
+    "name": "ws05: Email channel \u2014 implement IMAP poll loop and SMTP outbound send",
+    "priority": "high",
+    "description": "Source\naudit: 05-channels.md (Stubbed runtime table; Task List #4)\ncode: crates/clawft-channels/src/email/channel.rs:166-217\nprior planning: .planning/sparc/phase4/06-channel-enhancements/02-phase-EEnterprise-email-gchat-teams.md\nProblem / gap\nThe Email ChannelAdapter ships with a passing test suite but the runtime is a stub. start() polls with debug!(\"polling for new emails (stub)\") and never opens an IMAP connection; send() fabricates a synthetic <ts-target@host> Message-ID without invoking SMTP. With --features email, the gateway will start cleanly, accept outbound send() calls, and silently drop every message. The Element-06 tracker reports this as complete; it is not.\nAcceptance criteria\n[ ] start() opens an IMAP connection (using imap crate behind the email feature), polls INBOX with IDLE or interval-based fetch, parses RFC822 messages, and emits real InboundMessage/MessagePayload events to the host\n[ ] send() constructs a MIME message via lettre and submits to SMTP with TLS; the returned message id is the real Message-ID returned by the server\n[ ] Auth supports both password/password_env and (at minimum) STARTTLS + implicit TLS\n[ ] Reconnect-with-backoff on transport errors; cancellation respected\n[ ] Unit + integration tests against a mock IMAP/SMTP harness (or an embedded test server)\n[ ] scripts/build.sh test and scripts/build.sh clippy --features email pass\n[ ] 04-element-06-tracker.md updated to reflect real I/O landed (no longer \"stub IMAP/SMTP runtime\")\nDependencies\nblocks: any production deployment of --features email\nblocked-by: none\nNotes\nE2 was tracked under E-Enterprise. The imap and lettre deps are not yet in clawft-channels/Cargo.toml. Channel-stub WARN headers and tracing::warn! on start() landed in this session (documentation half); this item is the real I/O implementation.",
+    "id": "798a4b0e-0399-4e7d-9f60-6fb48ae3c63d"
+  },
+  "WEFT-159": {
+    "name": "ws05: Matrix channel \u2014 implement /sync long-poll, room auto-join, and m.room.message send",
+    "priority": "high",
+    "description": "Source\naudit: 05-channels.md (Stubbed runtime table; Task List #5)\ncode: crates/clawft-channels/src/matrix/channel.rs:82-128\nprior planning: .planning/sparc/phase4/06-channel-enhancements/03-phase-EConsumer-whatsapp-signal-matrix.md\nProblem / gap\nMatrix adapter does not perform /sync long-polling; room auto-join and m.room.message parsing are absent. send() returns ${ts} without invoking PUT /_matrix/client/v3/rooms/{room}/send/m.room.message/{txn}.\nAcceptance criteria\n[ ] /sync long-poll loop with since token persistence and reconnect-with-backoff\n[ ] Auto-join rooms in the configured allow-list; parse m.room.message events into MessagePayload\n[ ] send() issues PUT /_matrix/client/v3/rooms/{room}/send/m.room.message/{txn} with idempotent transaction id and returns the real event id\n[ ] Cancellation respected; since token persisted to disk for resume\n[ ] scripts/build.sh test --features matrix passes; integration test against a mocked Matrix server\n[ ] Tracker entry updated\nDependencies\nblocks: any production deployment of --features matrix\nblocked-by: none\nNotes\nE5 in the SPARC tracker. since-token persistence avoids replaying the full timeline on every restart.",
+    "id": "b9aa48b8-0c26-43a6-96ff-9172961010fa"
+  },
+  "WEFT-253": {
+    "name": "ws08: chat panel \u2014 inline streaming via agent.chat_stream",
+    "priority": "high",
+    "description": "Source\nTask T08-60; src/explorer/chat.rs:23-32; Apr 25 user brief; chat-agent-v1.md \u00a714.\nProblem / gap\nChat panel is sync-only. Long answers feel frozen until full response. Daemon needs agent.chat_stream v1.1+ verb; panel needs incremental rendering.\nAcceptance criteria\n[ ] Add agent.chat_stream verb to extension allowlist (with appropriate timeout policy).\n[ ] Wire daemon-side streaming into chat panel; render tokens as they arrive.\n[ ] Surface heartbeat label or progress affordance during in-flight stream.\n[ ] Native + WASM transports both supported.\nDependencies\nBlocked-by: daemon-side agent.chat_stream RPC (workstream tracking \u2014 chat-agent v1.1).\nBlocks: T08-65 (heartbeat label).\nNotes\nMarked as 0.8.x \u2014 substantive UX feature, daemon-side dependency.",
+    "id": "770a6148-2564-40bf-80c2-2c7a041e344f"
+  },
+  "WEFT-10": {
+    "name": "ws01: bootstrap \u2014 split workspace from global at loader for PermissionResolver ceiling",
+    "priority": "medium",
+    "description": "Source\n.planning/reviews/0.7.0-release-gate/01-core-platform.md \u2014 TODO at crates/clawft-core/src/bootstrap.rs:633 and Task List row 3. Same root cause as ws06 MW-2.\nProblem / gap\nCurrent bootstrap.rs deep-merges the workspace overlay into a single Config upstream so workspace policy reaches PermissionResolver but enforce_workspace_ceiling never runs. Workspace permissions are not clamped against system-wide bounds. Acceptable for single-user kernels, blocks multi-tenant. Marked TODO(v1.1) in source.\nAcceptance criteria\n[ ] Loader returns (global: Config, workspace: Option<Config>) or equivalent.\n[ ] bootstrap calls PermissionResolver::new(global, Some(workspace)).\n[ ] enforce_workspace_ceiling clamps workspace permissions per FIX-04 rules (level<=1, no budget/rate-limit increases, tools subset of global).\n[ ] Test: workspace .clawft/config.json granting elevated perms is silently clamped, with audit-log warning emitted.\n[ ] Multi-tenant scenario covered by integration test.\nDependencies\nCross-listed with ws06 MW-2 (memory/workspace audit). Coordinate so the fix lands once.\nNotes\nSingle-tenant deploys are unaffected; promote to 0.7.x only if multi-tenant lands sooner.",
+    "id": "be3ae554-283e-480f-8ed0-6987c059338c"
+  },
+  "WEFT-83": {
+    "name": "ws06: identity \u2014 add agent.workspace_root config key (MW-5)",
+    "priority": "medium",
+    "description": "Source\n.planning/reviews/0.7.0-release-gate/06-memory-workspace.md \u2014 MW-5; WS-D6; crates/clawft-core/src/agent/identity.rs:175-179.\nProblem / gap\nThe workspace is the daemon CWD by default (plan \u00a715.4 \u2014 soon agent.workspace_root config key). Today daemon CWD is implicit. Adding the config key would let the daemon serve multiple workspaces without restart.\nAcceptance criteria\n[ ] agent.workspace_root: Option<PathBuf> added to AgentsConfig (or similar).\n[ ] IdentityLoader::new reads from the key when present, falls back to CWD.\n[ ] Test: configure two workspaces with different identities; daemon switches based on RPC arg.\n[ ] Documented in docs/guides/agents.md.\nDependencies\nNone.\nNotes\nDeferrable; multi-workspace daemon is a 0.8.x story.",
+    "id": "6b98485e-ff6f-437b-9993-64911abddba6"
+  },
+  "WEFT-114": {
+    "name": "ws02: ci \u2014 add cargo check --target wasm32-unknown-unknown (no mesh) to CI",
+    "priority": "medium",
+    "description": "Source\naudit: .planning/reviews/0.7.0-release-gate/02-kernel-governance.md Task List row #25\nprior: k6-test-strategy-review P0\nProblem / gap\nNo CI gate ensures clawft-kernel (mesh feature off) builds for wasm32-unknown-unknown. Browser builds risk silent breakage when non-browser code creeps into the default feature set.\nAcceptance criteria\n[ ] CI runs cargo check --target wasm32-unknown-unknown --no-default-features (or feature-equivalent).\n[ ] Failure blocks merge.\n[ ] Documented in scripts/build.sh.\nDependencies\nblocked-by: none\nNotes\nXS effort; pure CI plumbing.",
+    "id": "5cc5180a-b168-4855-a59c-4996c50511bc"
+  },
+  "WEFT-124": {
+    "name": "ws02: vector \u2014 wire VectorBackend into DemocritusLoop",
+    "priority": "medium",
+    "description": "Source\naudit: .planning/reviews/0.7.0-release-gate/02-kernel-governance.md Task List row #35\nprior: vector-hybrid Next steps\nProblem / gap\nDEMOCRITUS still consumes a raw HnswService. The new VectorBackend trait + Hybrid backend exists but is unused on the cognitive path. Switching unlocks DiskANN / Hybrid swap-in.\nAcceptance criteria\n[ ] DemocritusLoop consumes Arc<dyn VectorBackend>.\n[ ] Default binding is the existing HNSW backend (no behavior change).\n[ ] Tests confirm backend swap is wiring-only.\nDependencies\nblocks: row #37 (DiskANN) when upstream lands\nNotes\nS effort.",
+    "id": "68079ab1-bcef-4cf3-937f-cbe2dd43fb8a"
+  },
+  "WEFT-71": {
+    "name": "ws04: tests \u2014 add clawft.plugin.json schema roundtrip + version-compat test",
+    "priority": "medium",
+    "description": "Source\n.planning/reviews/0.7.0-release-gate/04-plugin-skills.md \u2014 Task 13; deferred item 8.\nProblem / gap\nThe crate ships PluginManifest::deserialize derived via serde, but crates/clawft-plugin/src/manifest.rs has no roundtrip / schema-version / forward-compat tests at the integration level.\nAcceptance criteria\n[ ] Roundtrip test: known-good manifest \u2192 deserialize \u2192 serialize \u2192 byte-equal.\n[ ] Forward-compat test: future-version field is preserved or ignored gracefully.\n[ ] Negative tests: malformed manifest, missing required fields, wrong schema version.\n[ ] Tests live in crates/clawft-plugin/tests/.\nDependencies\nPair with task 6 (manifest reconciliation).\nNotes\nP2; release-gate because the manifest is a public-API contract.",
+    "id": "7f7b3ff2-a38d-4095-8a29-fa0f2d5c02b1"
+  },
+  "WEFT-44": {
+    "name": "ws03: service-llm \u2014 handle non-string content (vision blocks / structured) in LlmClient",
+    "priority": "medium",
+    "description": "Source\n.planning/reviews/0.7.0-release-gate/03-pipeline-routing.md \u2014 Task 03-23; Q16; the recently-landed 8b05d868 covers null-content but not array content.\nCode: crates/clawft-service-llm/src/client.rs.\nProblem / gap\nThe null-content deserializer (8b05d868) covers the Nemotron tool-call case. OpenAI vision API and others emit content as an array of content blocks ([{type: \"text\", text: \"...\"}, {type: \"image_url\", ...}]). Current String field with null\u2192\"\" mapping does not handle that \u2014 calls fail with a serde error.\nAcceptance criteria\n[ ] Switch content to a typed enum: String | Array<ContentBlock> | Null.\n[ ] Consumer code adapts (most paths can flatten Array\u2192String for now).\n[ ] Test fixtures: OpenAI vision response, Anthropic-style blocks, Nemotron null.\n[ ] Backward-compat: existing string responses still parse.\nDependencies\nNone.\nNotes\nNot 0.7.0-blocker because vision is not yet a 0.7.0 feature, but extending the current String shape is cheap insurance.",
+    "id": "fe86f600-79a6-43f7-a3d1-3e0d2b58418c"
+  }
+}

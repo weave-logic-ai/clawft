@@ -5,26 +5,22 @@
 - **Total items**: 9 (E1-E6, E5a, E5b, plus E5 split into Matrix/IRC)
 - **Workstream**: E (Channel Enhancements)
 - **Timeline**: Weeks 4-8
-- **Status**: Trait-surface 9/9 landed; runtime 2/9 ship real network I/O.
-  E1 + E6 are production; E2/E3/E4/E5/E5a/E5b/E5-IRC are passing-test
-  stubs (no transport). See "Per-Item Status Table" and the
-  0.7.0-release-gate audit at
-  `.planning/reviews/0.7.0-release-gate/05-channels.md` for the full
-  list of stubbed surfaces.
+- **Status**: Trait-surface 9/9 landed; runtime 5/9 ship real network I/O
+  (E1, E2 email, E4 signal, E5a google-chat, E5-IRC, E6). Remaining
+  stubs: E3 whatsapp, E5 matrix, E5b teams. See "Per-Item Status Table"
+  and the 0.7.0-release-gate audit at
+  `.planning/reviews/0.7.0-release-gate/05-channels.md`.
 - **Dependencies**: 04/C1 (ChannelAdapter trait), 03/A4 (SecretRef), 03/B4 (CronService), 07/F6 (OAuth2 helper)
 - **Blocks**: None directly
 
 > **Correctness note (2026-04-28)**: an earlier version of this tracker
 > reported "9/9 complete" without distinguishing trait-surface from
 > runtime. That phrasing was misleading because the four
-> in-tree channels with real network I/O are Discord, Slack, Telegram,
-> and `web` (Discord and the heartbeat are the only Element-06
-> deliverables that actually transmit). The seven new channels
-> (`email`, `google_chat`, `teams`, `whatsapp`, `signal`, `matrix`,
-> `irc`) compile, validate config, accept `send()`, return synthetic
-> message IDs, and log a `debug!` line -- they do **not** transmit
-> messages. Each item below now carries an explicit
-> "Runtime status" column.
+> in-tree channels with real network I/O include Discord, Slack,
+> Telegram, `web`, plus Element-06 runtimes for email (WEFT-154),
+> Google Chat, Signal, and IRC. Remaining stubs (`teams`, `whatsapp`,
+> `matrix`) compile, validate config, and may still return synthetic
+> IDs. Each item below carries an explicit runtime status.
 
 ---
 
@@ -39,7 +35,7 @@ Element 06 has 9 channel items across 3 phases spanning Weeks 4-8.
 
 ### Week 5-7 (E-Enterprise -- 3 items)
 
-- [~] E2 -- Email channel (IMAP + SMTP + OAuth2 for Gmail) -- TRAIT 2026-02-20; **runtime stub** (poll loop logs `debug!`, `send()` fabricates Message-ID without SMTP)
+- [x] E2 -- Email channel (IMAP + SMTP + password/`password_env`) -- TRAIT 2026-02-20; **runtime ships 2026-07-30** (`WEFT-154`: IMAP UNSEEN poll via `imap`+native-tls under `spawn_blocking`, RFC822 parse via `mailparse`, SMTP via `lettre` STARTTLS/implicit TLS, reconnect backoff, mock IMAP/SMTP harness tests; OAuth2/XOAUTH2 still typed-only)
 - [x] E5a -- Google Chat Workspace API -- TRAIT 2026-02-20; **runtime ships 2026-04-28** (Pub/Sub `:pull` + `:acknowledge` loop with base64 event decode; `send()` POSTs `chat.googleapis.com/v1/{space}/messages` and parses `name`; `wiremock`-backed pull/ack/send tests)
 - [~] E5b -- Microsoft Teams Bot Framework -- TRAIT 2026-02-20; **runtime stub** (no Azure AD token acquisition; no Graph POST)
 
@@ -64,7 +60,7 @@ config; they MUST NOT be enabled in production.
 | Item | Description | Priority | Week | Crate(s) | Status | Owner | Branch | Key Deliverable |
 |------|-------------|----------|------|----------|--------|-------|--------|-----------------|
 | E1 | Discord Gateway Resume (OP 6) | P1 | 4-5 | clawft-channels/src/discord/channel.rs | **Done** | Agent-06 | sprint/phase-5 | Resume via stored session_id/resume_url; RESUMED handler; OP 9 resumable vs non-resumable |
-| E2 | Email channel (IMAP+SMTP+OAuth2) | P0 MVP | 5-7 | clawft-channels/src/email/ | **Planned (stub only -- does not transmit messages)** | Agent-06 | sprint/phase-5 | EmailChannelAdapter + EmailAdapterConfig + EmailAuth (Password/OAuth2) + factory; **runtime IMAP/SMTP integration pending** (`imap` + `lettre` not yet wired) |
+| E2 | Email channel (IMAP+SMTP+OAuth2) | P0 MVP | 5-7 | clawft-channels/src/email/ | **Done (runtime ships)** | Agent-06 / wave-0d | wave0d/weft-154-email-channel | EmailChannelAdapter real IMAP poll (`imap` crate, UNSEEN + BODY.PEEK, mark \Seen) + SMTP send (`lettre` MIME Message-ID); password + `password_env`; STARTTLS + implicit TLS; reconnect backoff; `ImapBackend`/`SmtpBackend` mock harness (46 tests). OAuth2/XOAUTH2 config typed, SASL follow-up |
 | E3 | WhatsApp Cloud API | P1 | 6-8 | clawft-channels/src/whatsapp/ | **Planned (stub only -- does not transmit messages)** | Agent-06 | sprint/phase-5 | WhatsAppChannelAdapter + SecretString for tokens + Cloud API REST; **webhook listener and POST to Cloud API pending** |
 | E4 | Signal subprocess bridge | P2 | 6-8 | clawft-channels/src/signal/ | **Done** (runtime ships) | Agent-06 / m3-signal | m3/m3-signal | SignalChannelAdapter spawns `signal-cli daemon --tcp <bind>` with `kill_on_drop`; opens `tokio::net::TcpStream`, runs newline-delimited JSON-RPC read-loop matching responses by id and forwarding `receive` notifications via `host.deliver_inbound`; mock-TCP integration tests for send + receive + timeout |
 | E5 | Matrix channel | P2 | 6-8 | clawft-channels/src/matrix/ | **Planned (stub only -- does not transmit messages)** | Agent-06 | sprint/phase-5 | MatrixChannelAdapter + SecretString access_token + auto_join_rooms; **`/sync` long-poll and `PUT /rooms/.../send/...` pending** |

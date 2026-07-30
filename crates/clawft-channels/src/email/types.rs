@@ -11,16 +11,28 @@ use clawft_types::secret::SecretString;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EmailAuth {
-    /// Username/password authentication. Credentials are stored via
-    /// [`SecretString`] and resolved from environment variables.
+    /// Username/password authentication.
+    ///
+    /// Prefer `password_env` (env-var name) in production configs so the
+    /// secret never lives in a config file. Inline `password` is accepted
+    /// for tests and local smoke runs; it is stored as [`SecretString`]
+    /// (redacted in Debug / Serialize).
     Password {
-        /// IMAP username (often the email address itself).
+        /// IMAP/SMTP username (often the email address itself).
         username: String,
-        /// IMAP password (via SecretString -- never logged or serialized).
+        /// Inline password (via SecretString -- never logged or serialized).
+        /// Used when non-empty; otherwise `password_env` is resolved.
+        #[serde(default)]
         password: SecretString,
+        /// Env var name holding the password. Used when `password` is empty.
+        #[serde(default, alias = "passwordEnv")]
+        password_env: Option<String>,
     },
     /// OAuth2 authentication for providers like Gmail.
     /// All secrets reference environment variable names, not raw values.
+    ///
+    /// XOAUTH2 SASL for IMAP/SMTP is a follow-up; password auth is the
+    /// supported path in WEFT-154.
     #[serde(rename = "oauth2")]
     OAuth2 {
         /// Env var name for the OAuth2 client ID.
@@ -44,6 +56,71 @@ impl Default for EmailAuth {
         Self::Password {
             username: String::new(),
             password: SecretString::default(),
+            password_env: None,
+        }
+    }
+}
+
+/// Resolved username/password credentials for IMAP and SMTP.
+#[derive(Clone)]
+pub struct ResolvedCredentials {
+    pub username: String,
+    pub password: SecretString,
+}
+
+impl std::fmt::Debug for ResolvedCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedCredentials")
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl EmailAuth {
+    /// Resolve concrete username/password credentials.
+    ///
+    /// - `Password`: uses inline `password` when non-empty; otherwise
+    ///   reads the env var named by `password_env`.
+    /// - `OAuth2`: not yet supported for the IMAP/SMTP runtime
+    ///   (returns an error directing callers to password auth).
+    pub fn resolve_password(&self) -> Result<ResolvedCredentials, String> {
+        match self {
+            Self::Password {
+                username,
+                password,
+                password_env,
+            } => {
+                if username.is_empty() {
+                    return Err("email auth: username is required".into());
+                }
+                let secret = if !password.is_empty() {
+                    password.clone()
+                } else if let Some(env_name) = password_env.as_deref() {
+                    let val = std::env::var(env_name).map_err(|_| {
+                        format!("email auth: env var `{env_name}` is unset")
+                    })?;
+                    if val.is_empty() {
+                        return Err(format!(
+                            "email auth: env var `{env_name}` is empty"
+                        ));
+                    }
+                    SecretString::new(val)
+                } else {
+                    return Err(
+                        "email auth: provide password or password_env".into(),
+                    );
+                };
+                Ok(ResolvedCredentials {
+                    username: username.clone(),
+                    password: secret,
+                })
+            }
+            Self::OAuth2 { .. } => Err(
+                "email auth: OAuth2/XOAUTH2 is not yet implemented for \
+                 IMAP/SMTP; use password or password_env auth"
+                    .into(),
+            ),
         }
     }
 }
@@ -186,6 +263,7 @@ mod tests {
             auth: EmailAuth::Password {
                 username: "user@gmail.com".into(),
                 password: SecretString::new("secret123"),
+                password_env: None,
             },
             mailbox: "INBOX".into(),
             poll_interval_secs: 30,
@@ -239,10 +317,85 @@ mod tests {
         let auth = EmailAuth::Password {
             username: "user".into(),
             password: SecretString::new("super-secret"),
+            password_env: None,
         };
         let debug_output = format!("{:?}", auth);
         assert!(!debug_output.contains("super-secret"));
         assert!(debug_output.contains("REDACTED"));
+    }
+
+    #[test]
+    fn resolve_password_inline() {
+        let auth = EmailAuth::Password {
+            username: "bot@test.com".into(),
+            password: SecretString::new("s3cret"),
+            password_env: None,
+        };
+        let creds = auth.resolve_password().unwrap();
+        assert_eq!(creds.username, "bot@test.com");
+        assert_eq!(creds.password.expose(), "s3cret");
+    }
+
+    #[test]
+    fn resolve_password_from_env() {
+        const ENV: &str = "CLAWFT_TEST_EMAIL_PASSWORD_RESOLVE";
+        // SAFETY: test-only env mutation on a uniquely-named var.
+        unsafe {
+            std::env::set_var(ENV, "from-env");
+        }
+        let auth = EmailAuth::Password {
+            username: "bot@test.com".into(),
+            password: SecretString::default(),
+            password_env: Some(ENV.into()),
+        };
+        let creds = auth.resolve_password().unwrap();
+        assert_eq!(creds.password.expose(), "from-env");
+        unsafe {
+            std::env::remove_var(ENV);
+        }
+    }
+
+    #[test]
+    fn resolve_password_missing_fails() {
+        let auth = EmailAuth::Password {
+            username: "bot@test.com".into(),
+            password: SecretString::default(),
+            password_env: None,
+        };
+        assert!(auth.resolve_password().is_err());
+    }
+
+    #[test]
+    fn resolve_oauth2_not_implemented() {
+        let auth = EmailAuth::OAuth2 {
+            client_id_env: "A".into(),
+            client_secret_env: "B".into(),
+            refresh_token_env: "C".into(),
+            token_url: default_google_token_url(),
+        };
+        let err = auth.resolve_password().unwrap_err();
+        assert!(err.contains("OAuth2"));
+    }
+
+    #[test]
+    fn password_env_serde_alias() {
+        let json = r#"{
+            "type": "password",
+            "username": "user@example.com",
+            "passwordEnv": "EMAIL_PASSWORD"
+        }"#;
+        let auth: EmailAuth = serde_json::from_str(json).unwrap();
+        match auth {
+            EmailAuth::Password {
+                username,
+                password_env,
+                ..
+            } => {
+                assert_eq!(username, "user@example.com");
+                assert_eq!(password_env.as_deref(), Some("EMAIL_PASSWORD"));
+            }
+            _ => panic!("expected Password"),
+        }
     }
 
     #[test]
