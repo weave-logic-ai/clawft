@@ -313,7 +313,11 @@ fn fresh_header(metadata: &serde_json::Value) -> String {
     serde_json::to_string(&header).unwrap_or_default()
 }
 
-#[async_trait]
+// Browser platform FS futures are `!Send` (see `clawft_platform::FileSystem`);
+// match `ConversationSink`'s browser `?Send` relaxation so LocalFileSink
+// compiles under `wasm32-unknown-unknown` without weakening native Send.
+#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
 impl<P: Platform + 'static> ConversationSink for LocalFileSink<P> {
     async fn lock_conversation(&self, _conv_id: &str) {
         // In-process CLI runs one turn at a time; the real per-conv mutex is
