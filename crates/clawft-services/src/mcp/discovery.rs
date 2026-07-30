@@ -14,12 +14,19 @@
 //!
 //! # Hot-reload protocol
 //!
-//! When `clawft.toml` changes:
+//! When the user config (`clawft.toml` / `config.json`) changes:
 //! 1. File watcher detects change (debounce 500ms).
 //! 2. Diff old and new server lists.
-//! 3. New servers: connect immediately.
+//! 3. New servers: register (connect on next session materialization).
 //! 4. Removed servers: drain in-flight calls (30s), then disconnect.
 //! 5. Changed servers: remove + add.
+//!
+//! # Process boot (WEFT-493)
+//!
+//! Long-lived hosts (`weft gateway`, `weft ui`) call
+//! [`boot_mcp_manager_with_watcher`] once at startup so the watcher is
+//! armed for the process lifetime. The WEFT-187 API alone is not enough
+//! without this callsite.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -608,6 +615,135 @@ pub fn start_config_watcher(
 ) -> std::result::Result<(McpConfigWatcherHandle, mpsc::Receiver<ConfigReloadResult>), notify::Error>
 {
     start_config_watcher_with_debounce(path, manager, Duration::from_millis(DEBOUNCE_MS))
+}
+
+// ── Daemon / gateway boot (WEFT-493) ─────────────────────────────────────────
+
+/// Host-side handle for MCP config hot-reload started at process boot.
+///
+/// Keep this value alive for the lifetime of the long-running process
+/// (gateway / daemon). Dropping it stops the file watcher.
+///
+/// The shared [`manager`](Self::manager) can be passed to runtime callers
+/// (list/status/RPC) so they observe the same registry the watcher updates.
+pub struct McpConfigWatcherBoot {
+    /// Shared manager seeded from the config path and updated on changes.
+    pub manager: SharedMcpServerManager,
+    /// Path being watched (absolute or as provided).
+    pub path: PathBuf,
+    /// Initial seed result (from first `reload_from_path`, if the file existed).
+    pub initial: ConfigReloadResult,
+    /// Drop / stop shuts down the background notify task.
+    handle: McpConfigWatcherHandle,
+}
+
+impl McpConfigWatcherBoot {
+    /// Stop the watcher (same as dropping the boot guard).
+    pub fn stop(self) {
+        self.handle.stop();
+    }
+
+    /// Shared manager handle (cheap clone).
+    pub fn manager(&self) -> SharedMcpServerManager {
+        Arc::clone(&self.manager)
+    }
+}
+
+/// Bootstrap [`McpServerManager`] and start the config file watcher (WEFT-493).
+///
+/// Call once at long-lived process boot (`weft gateway`, kernel daemon host,
+/// etc.). This is the production callsite for the WEFT-187 watcher API:
+///
+/// 1. Create an empty shared manager.
+/// 2. If `path` exists, seed via [`McpServerManager::reload_from_path`].
+/// 3. Start [`start_config_watcher`] (500ms debounce).
+/// 4. Spawn a background task that logs each [`ConfigReloadResult`].
+///
+/// The returned [`McpConfigWatcherBoot`] **must** be retained for the process
+/// lifetime; dropping it cancels the watcher.
+///
+/// # Errors
+///
+/// Returns [`notify::Error`] when the OS file watcher cannot be created.
+pub async fn boot_mcp_manager_with_watcher(
+    path: impl Into<PathBuf>,
+) -> std::result::Result<McpConfigWatcherBoot, notify::Error> {
+    let path = path.into();
+    let manager: SharedMcpServerManager = Arc::new(Mutex::new(McpServerManager::new()));
+
+    let initial = if path.exists() {
+        let mut mgr = manager.lock().await;
+        match mgr.reload_from_path(&path) {
+            Ok(r) => {
+                info!(
+                    path = %path.display(),
+                    added = r.added,
+                    removed = r.removed,
+                    changed = r.changed,
+                    validation_errors = r.validation_errors.len(),
+                    "MCP manager seeded from config at boot"
+                );
+                r
+            }
+            Err(e) => {
+                warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "MCP manager seed at boot failed; watching for a valid config"
+                );
+                ConfigReloadResult {
+                    validation_errors: vec![e.to_string()],
+                    ..Default::default()
+                }
+            }
+        }
+    } else {
+        info!(
+            path = %path.display(),
+            "MCP config path does not exist yet; watcher will apply on first write"
+        );
+        ConfigReloadResult::default()
+    };
+
+    let (handle, mut rx) = start_config_watcher(path.clone(), Arc::clone(&manager))?;
+
+    // Log reload outcomes so operators see hot-reload without an RPC.
+    tokio::spawn(async move {
+        while let Some(result) = rx.recv().await {
+            if result.validation_errors.is_empty() {
+                info!(
+                    added = result.added,
+                    removed = result.removed,
+                    changed = result.changed,
+                    "MCP config hot-reload (boot watcher)"
+                );
+            } else {
+                warn!(
+                    added = result.added,
+                    removed = result.removed,
+                    changed = result.changed,
+                    errors = ?result.validation_errors,
+                    "MCP config hot-reload completed with validation errors"
+                );
+            }
+        }
+    });
+
+    info!(
+        path = %path.display(),
+        servers = {
+            let mgr = manager.lock().await;
+            mgr.server_count()
+        },
+        "MCP config watcher started at boot (WEFT-493)"
+    );
+
+    Ok(McpConfigWatcherBoot {
+        manager,
+        path,
+        initial,
+        handle,
+    })
 }
 
 /// Start watching `path` with a custom debounce duration.
@@ -1297,10 +1433,22 @@ args = ["-y", "jira-mcp"]
         )
         .unwrap();
 
-        let result = tokio::time::timeout(Duration::from_secs(3), rx.recv())
-            .await
-            .expect("timeout waiting for reload event")
-            .expect("channel closed without result");
+        // FS events can emit multiple debounced reloads (including a zero-diff
+        // race if the write is observed mid-flight). Wait for a non-empty diff.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let mut result = None;
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
+                Ok(Some(r)) if r.added > 0 || r.removed > 0 || r.changed > 0 => {
+                    result = Some(r);
+                    break;
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => panic!("watcher channel closed without result"),
+                Err(_) => continue,
+            }
+        }
+        let result = result.expect("timeout waiting for non-empty reload event");
 
         assert_eq!(result.added, 1, "jira added: {result:?}");
         assert_eq!(result.removed, 1, "slack removed: {result:?}");
@@ -1314,6 +1462,101 @@ args = ["-y", "jira-mcp"]
         }
 
         handle.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn boot_mcp_manager_with_watcher_seeds_and_applies_edit() {
+        let dir = std::env::temp_dir().join(format!(
+            "clawft_mcp_boot_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+
+        std::fs::write(
+            &path,
+            r#"{
+  "tools": {
+    "mcp_servers": {
+      "alpha": { "command": "npx", "args": ["-y", "alpha-mcp"] }
+    }
+  }
+}"#,
+        )
+        .unwrap();
+
+        let boot = boot_mcp_manager_with_watcher(path.clone())
+            .await
+            .expect("boot watcher");
+        assert_eq!(boot.initial.added, 1);
+        assert_eq!(boot.path, path);
+        {
+            let mgr = boot.manager.lock().await;
+            assert_eq!(mgr.server_count(), 1);
+            assert!(mgr.get_server("alpha").is_some());
+        }
+
+        // Edit: remove alpha, add beta (drain-and-swap via apply_config_diff).
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        std::fs::write(
+            &path,
+            r#"{
+  "tools": {
+    "mcp_servers": {
+      "beta": { "command": "npx", "args": ["-y", "beta-mcp"] }
+    }
+  }
+}"#,
+        )
+        .unwrap();
+
+        // Poll manager until the watcher applies the edit (debounce + FS lag).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            {
+                let mgr = boot.manager.lock().await;
+                if mgr.get_server("beta").is_some() && mgr.get_server("alpha").is_none() {
+                    break;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("timeout waiting for boot watcher to apply config edit");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        boot.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn boot_mcp_manager_with_watcher_missing_file_still_starts() {
+        let dir = std::env::temp_dir().join(format!(
+            "clawft_mcp_boot_miss_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("missing-config.json");
+        assert!(!path.exists());
+
+        let boot = boot_mcp_manager_with_watcher(path.clone())
+            .await
+            .expect("boot watcher on missing path");
+        assert_eq!(boot.initial.added, 0);
+        {
+            let mgr = boot.manager.lock().await;
+            assert_eq!(mgr.server_count(), 0);
+        }
+        boot.stop();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

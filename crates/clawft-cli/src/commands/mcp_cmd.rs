@@ -2,8 +2,9 @@
 //!
 //! Thin CLI over the user config file (`tools.mcp_servers` /
 //! `tools.mcpServers`). Writes are atomic (tmp + rename). Hot-reload
-//! of a running daemon is best-effort (WEFT-187); when no reload RPC
-//! is available the CLI surfaces a restart/reload hint.
+//! of a running gateway is via the WEFT-493 config watcher (WEFT-187
+//! API). When no reload RPC is available the CLI surfaces a
+//! restart/reload hint.
 //!
 //! # Examples
 //!
@@ -99,8 +100,8 @@ pub enum McpAction {
 
 /// Hint printed after a successful config mutation when reload cannot be
 /// triggered via daemon RPC.
-const RELOAD_HINT: &str = "Hint: restart the agent/gateway/daemon, or wait for config \
-hot-reload (WEFT-187) to pick up the change.";
+const RELOAD_HINT: &str = "Hint: if gateway is running, the MCP config watcher \
+(WEFT-493) will pick this up shortly; otherwise restart the agent/gateway.";
 
 /// Run the `weft mcp` subcommand.
 pub async fn run(args: McpArgs) -> anyhow::Result<()> {

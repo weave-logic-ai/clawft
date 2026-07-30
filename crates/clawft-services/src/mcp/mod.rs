@@ -23,10 +23,11 @@ pub use transport::{
     TransportReconnect, TransportSpec, validate_command_path, validate_tempfile_path, validate_url,
 };
 
-// WEFT-187: MCP config hot-reload watcher surface.
+// WEFT-187 / WEFT-493: MCP config hot-reload watcher + daemon boot surface.
 pub use discovery::{
-    ConfigReloadResult, McpConfigWatcherHandle, SharedMcpServerManager, load_mcp_servers_from_path,
-    load_mcp_servers_from_str, start_config_watcher, start_config_watcher_with_debounce,
+    ConfigReloadResult, McpConfigWatcherBoot, McpConfigWatcherHandle, SharedMcpServerManager,
+    boot_mcp_manager_with_watcher, load_mcp_servers_from_path, load_mcp_servers_from_str,
+    start_config_watcher, start_config_watcher_with_debounce,
 };
 
 /// The MCP protocol version negotiated during initialize.
