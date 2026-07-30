@@ -5,9 +5,12 @@ description: Complete Docker deployment guide including image builds, configurat
 
 # Docker Deployment
 
-clawft ships as a minimal Alpine 3.21 Docker image containing pre-built musl
-binaries downloaded from GitHub Releases. The resulting image is approximately
-15 MB compressed. Multi-arch support covers `linux/amd64` and `linux/arm64`.
+WeftOS ships a minimal Alpine 3.21 Docker image built from a **self-contained
+multi-stage Dockerfile** (compiles static musl `weft` from the tag — no
+cargo-dist asset download; WEFT-594). Typical compressed size is ~30–40 MB.
+Multi-arch (`linux/amd64` + `linux/arm64`) is produced on native GitHub
+runners (no QEMU for arm64 Rust). Canonical operator guide:
+[docs/deployment/docker.md](https://github.com/weave-logic-ai/weftos/blob/master/docs/deployment/docker.md).
 
 ## Prerequisites
 
@@ -238,32 +241,38 @@ SIZE_BYTES=$(wc -c < target/release/weft)
 
 A size report is posted to the GitHub Actions step summary for visibility.
 
-### Multi-Arch Docker Release
+### Multi-Arch Docker Release (WEFT-594)
 
-The CI pipeline supports multi-architecture Docker image builds:
+Release images are published by `.github/workflows/release-docker.yml`:
+
+1. Self-contained multi-stage build of `weft` (static musl) on native runners
+   — `ubuntu-latest` → `linux/amd64`, `ubuntu-24.04-arm` → `linux/arm64`
+   (no QEMU for compilation).
+2. Per-platform digests merged with `docker buildx imagetools create` into
+   `ghcr.io/weave-logic-ai/weftos:latest` and `:vX.Y.Z`.
+3. Post-publish `GET /api/health` smoke (WEFT-550).
+
+Local host-arch build:
 
 ```bash
-docker buildx build --platform linux/amd64,linux/arm64 -t weft .
+./scripts/build/docker-build.sh --tag dev --version dev
+# or
+docker build -t weft:dev --build-arg VERSION=dev .
 ```
 
-The Dockerfile uses a multi-stage build with `cargo-chef` for dependency
-caching:
+The runtime is Alpine 3.21 + `ca-certificates` + `tzdata`, runs as non-root
+`weft`, and ships a default config enabling the auth-gated API on `:8080`.
 
-1. **Chef stage**: Install `cargo-chef` for dependency recipe extraction
-2. **Planner stage**: Generate the dependency recipe from `Cargo.toml`
-3. **Builder stage**: Cook dependencies (cached layer), then build the app
-4. **Runtime stage**: `debian:bookworm-slim` with only the stripped binary
-
-The runtime image includes `ca-certificates`, `libssl3`, and `libgcc-s1`
-(required by wasmtime). It runs as a non-root `weft` user.
+Same OCI multi-arch image works with Docker Desktop, OrbStack, and the
+Apple container CLI on macOS (pulls the `linux/arm64` layer natively on
+Apple Silicon).
 
 ### Docker Image Variants
 
 | Variant | Base | Features | Use Case |
 |---------|------|----------|----------|
-| Default | `debian:bookworm-slim` | Standard build | Production gateway |
-| WASM-enabled | `debian:bookworm-slim` | `--features wasm-plugins` | Plugins support |
-| Minimal | `debian:bookworm-slim` | `--no-default-features` | Smallest image, no delegation |
+| Default (root `Dockerfile`) | `alpine:3.21` | default CLI features (channels+services+delegate+api) | Production gateway / GHCR |
+| Kernel-only (`Dockerfile.alpine`) | `alpine:3.21` | `weaver` native | Kernel-only / compose under crates/clawft-kernel |
 
 To build with WASM plugin support:
 

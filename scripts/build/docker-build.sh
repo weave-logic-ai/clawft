@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Build a local Docker image for weft (clawft CLI).
 #
-# This wraps the canonical Dockerfile (which downloads a published
-# musl tarball from the matching GitHub Release). It is intended for
-# local smoke testing of the published-image path; the tag-driven
-# release-docker.yml workflow is what actually publishes images to
-# GHCR.
+# Wraps the canonical self-contained multi-stage Dockerfile (WEFT-594):
+# compiles static musl `weft` from the workspace inside the builder
+# stage — no GitHub Release asset download. Intended for local smoke
+# testing; release-docker.yml publishes multi-arch images to GHCR on
+# native amd64 + arm64 runners (no QEMU).
 #
 # Image name + tag are aligned with docker-compose.yml and the
-# release-docker.yml workflow (WEFT-441 / WEFT-450):
+# release-docker.yml workflow (WEFT-441 / WEFT-450 / WEFT-594):
 #   ghcr.io/weave-logic-ai/weftos:<tag>
 #
 # The host architecture is auto-detected and passed to buildx so the
@@ -21,7 +21,7 @@
 #                                   [--push]
 #
 # Examples:
-#   ./scripts/build/docker-build.sh --version 0.6.19
+#   ./scripts/build/docker-build.sh --tag dev --version dev
 #   ./scripts/build/docker-build.sh --tag v0.7.0 --version 0.7.0 --push
 #   ./scripts/build/docker-build.sh --platform linux/arm64 --version 0.7.0
 
@@ -161,8 +161,10 @@ docker buildx build \
 ok "Docker image built: $IMAGE_NAME"
 
 # --- Validate image size (only when loaded into local docker) ---
+# Self-contained multi-stage images land ~30–40 MB (Alpine + static weft);
+# the old download-based layout was ~15 MB. Bound is soft ceiling for bloat.
 if [ "$PUSH" != true ]; then
-    MAX_IMAGE_SIZE_MB=20
+    MAX_IMAGE_SIZE_MB=50
     IMAGE_SIZE_BYTES=$(docker image inspect "$IMAGE_NAME" --format='{{.Size}}' 2>/dev/null)
     IMAGE_SIZE_MB=$(echo "scale=2; $IMAGE_SIZE_BYTES / 1048576" | bc)
 

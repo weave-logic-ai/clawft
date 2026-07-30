@@ -158,18 +158,30 @@ sets `[package.metadata.docs.rs]` with `all-features = true`.
 
 ### 5. `Release (Docker)` -- `release-docker.yml`
 
-Triggered by the `Release` workflow's `workflow_run` event (so it only
-runs after cargo-dist succeeded -- otherwise the binary it pulls
-wouldn't exist yet). Builds and pushes:
+Triggered by the `Release` workflow's `workflow_run` event (orchestration
+gate: only publish Docker after a successful tag Release). The image
+itself is **self-contained** (WEFT-594): a multi-stage Dockerfile compiles
+`weft` from the tag checkout — it does **not** download cargo-dist musl
+tarballs, so image publish is not coupled to the binary matrix (WEFT-593).
+
+Multi-arch is built on **native runners** (no QEMU for arm64 Rust):
+
+| Runner            | Platform      |
+|-------------------|---------------|
+| `ubuntu-latest`   | `linux/amd64` |
+| `ubuntu-24.04-arm`| `linux/arm64` |
+
+Per-platform digests are merged with `docker buildx imagetools create`
+into:
 
 | Image                                        | Architectures               |
 |----------------------------------------------|-----------------------------|
 | `ghcr.io/weave-logic-ai/weftos:vX.Y.Z`       | `linux/amd64`, `linux/arm64`|
 | `ghcr.io/weave-logic-ai/weftos:latest`       | `linux/amd64`, `linux/arm64`|
 
-The image downloads the matching musl tarball produced by `Release` and
-installs it into Alpine 3.21 -- no compilation runs inside the image.
-See [`docker.md`](docker.md) for image internals.
+Post-publish smoke: `GET /api/health` (WEFT-550). See
+[`docker.md`](docker.md) for image internals, local builds, and macOS
+runtimes (Docker Desktop / OrbStack / Apple container CLI).
 
 ### 6. `Release Gate` -- `release-gate.yml`
 

@@ -1,10 +1,10 @@
 # Kernel-only Alpine image — builds the `weaver` binary from source.
 #
-# This is distinct from the repository-root `Dockerfile`, which downloads
-# pre-built musl binaries from GitHub Releases. Use this image when you need
-# a kernel-only deployment built from the current working tree (e.g. a local
-# crates/clawft-kernel/docker-compose.yml run, or testing a kernel patch
-# before tagging a release).
+# Distinct from the repository-root `Dockerfile`, which is also
+# self-contained multi-stage but builds the full `weft` CLI (gateway-
+# capable default features) for GHCR multi-arch releases (WEFT-594).
+# Use this image for kernel-only deploys from the working tree (e.g.
+# crates/clawft-kernel/docker-compose.yml, or testing a kernel patch).
 #
 # Build (from the workspace root):
 #   docker build -f crates/clawft-kernel/Dockerfile.alpine -t weft-kernel:dev .
@@ -12,8 +12,8 @@
 # Compose entry point:
 #   crates/clawft-kernel/docker-compose.yml (build context = workspace root)
 #
-# For end-user deployments prefer the root Dockerfile (smaller, no
-# compilation, multi-arch via cargo-dist).
+# For end-user gateway deployments prefer the root Dockerfile / GHCR image
+# (ghcr.io/weave-logic-ai/weftos).
 
 FROM rust:1.93-alpine AS builder
 # musl-dev only — weaver links fully static against musl. (Do NOT add
