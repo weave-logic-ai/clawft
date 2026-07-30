@@ -16,6 +16,10 @@
 //!   denies capture without a grant; [`lifecycle::governance::NoopGate`]
 //!   always grants. Wired through
 //!   `clawft_substrate::Substrate::subscribe_adapter` (WEFT-429).
+//! * Full ADR-015 §Lifecycle teardown hooks (surface drop, topic
+//!   unsubscribe, affordance revoke) — compositor M1.6+. Until then
+//!   [`lifecycle::LifecycleTeardownTombstone`] is emitted on
+//!   uninstall-while-enabled so consumers can subscribe (WEFT-412).
 //!
 //! [adr]: https://github.com/weave-logic-ai/weftos/blob/development-0.7.0/.planning/symposiums/compositional-ui/adrs/adr-015-app-manifest.md
 
@@ -25,12 +29,13 @@ pub mod registry;
 pub mod validation;
 
 pub use lifecycle::{
-    AppLaunchRequest, AppLaunchResult, LaunchError, SessionConfig,
+    AppLaunchRequest, AppLaunchResult, LaunchError, LifecycleTeardownTombstone, SessionConfig,
+    TeardownReason, TeardownTombstoneBus,
     governance::{
         AdapterOpenResult, CapturePrivacyGate, Gate, NoopGate, StrictGate, infer_capture_permission,
         is_capture, permission_covered,
     },
 };
 pub use manifest::{AppManifest, EntryPoint, Input, Mode, Permission, SurfaceRef};
-pub use registry::{AppRegistry, InstalledApp, RegistryError};
+pub use registry::{AppRegistry, InstalledApp, RegistryError, UninstallResult};
 pub use validation::{ValidationError, validate};
