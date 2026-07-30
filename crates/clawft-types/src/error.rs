@@ -124,6 +124,19 @@ pub enum ClawftError {
         /// The held turn's bracket label (e.g. `turn:agent.chat:conv`).
         label: String,
     },
+
+    /// The turn was cancelled via a [`CancellationToken`] (WEFT-323).
+    ///
+    /// Returned by `AgentLoop::handle_turn` / `run_tool_loop` when the
+    /// per-conversation cancel token is observed at an iteration boundary
+    /// (top of each tool-loop iteration). `AgentService::dispatch` maps
+    /// this to `AgentServiceError::Cancelled` so the wire response matches
+    /// the outer `select!` cancel path.
+    #[error("conversation `{conv_id}` was cancelled")]
+    Cancelled {
+        /// Conversation identifier whose cancel token was tripped.
+        conv_id: String,
+    },
 }
 
 /// Channel-specific error type.

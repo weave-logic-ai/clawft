@@ -27,7 +27,11 @@ struct NoopHandle;
 
 #[async_trait]
 impl AgentLoopHandle for NoopHandle {
-    async fn handle_turn(&self, msg: InboundMessage) -> Result<OutboundMessage, String> {
+    async fn handle_turn(
+        &self,
+        msg: InboundMessage,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<OutboundMessage, String> {
         Ok(OutboundMessage {
             channel: msg.channel,
             chat_id: msg.chat_id,

@@ -41,10 +41,29 @@ impl StubHandle {
     }
 }
 
+/// Decrements `in_progress` on drop so cancel-by-future-drop (outer
+/// `select!`) and cancel-by-token-observe (inner `select!`) both leave
+/// the counter accurate (WEFT-323 mid-turn test).
+struct InProgressGuard<'a> {
+    counter: &'a AtomicUsize,
+}
+impl Drop for InProgressGuard<'_> {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 #[async_trait]
 impl AgentLoopHandle for StubHandle {
-    async fn handle_turn(&self, msg: InboundMessage) -> Result<OutboundMessage, String> {
+    async fn handle_turn(
+        &self,
+        msg: InboundMessage,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<OutboundMessage, String> {
         let now = self.in_progress.fetch_add(1, Ordering::AcqRel) + 1;
+        let _guard = InProgressGuard {
+            counter: &self.in_progress,
+        };
         // Peak-concurrency tracking — CAS loop so we don't lose to a
         // racing peer.
         let mut peak = self.peak_concurrent.load(Ordering::Acquire);
@@ -59,8 +78,17 @@ impl AgentLoopHandle for StubHandle {
                 Err(actual) => peak = actual,
             }
         }
-        self.release.notified().await;
-        self.in_progress.fetch_sub(1, Ordering::AcqRel);
+        // WEFT-323: honor the per-conv cancel token (iteration-boundary
+        // equivalent for the stub). Outer select! still races this path.
+        tokio::select! {
+            _ = self.release.notified() => {}
+            _ = cancel.cancelled() => {
+                return Err(format!(
+                    "conversation `{}` was cancelled",
+                    msg.chat_id
+                ));
+            }
+        }
         Ok(OutboundMessage {
             channel: msg.channel,
             chat_id: msg.chat_id,
@@ -186,6 +214,62 @@ async fn cancel_aborts_in_flight_dispatch() {
 
     // Release the stub so its task tree drops cleanly.
     release.notify_waiters();
+}
+
+/// WEFT-323: cancel must break a multi-iteration turn at the boundary,
+/// not only when the outer `select!` drops a blocked future.
+///
+/// The stub simulates iteration-boundary observation by racing its
+/// release wait against the per-conv token. Cancel after the stub
+/// has entered `handle_turn` must surface as
+/// [`AgentServiceError::Cancelled`] without requiring the release
+/// Notify (i.e. mid-turn break via the threaded token path).
+#[tokio::test]
+async fn cancel_breaks_mid_turn_via_threaded_token() {
+    let release = Arc::new(Notify::new());
+    let stub = Arc::new(StubHandle::new(Arc::clone(&release)));
+    let svc = Arc::new(AgentService::new(Arc::clone(&stub)));
+
+    let svc_clone = Arc::clone(&svc);
+    let handle = tokio::spawn(async move {
+        svc_clone
+            .dispatch(params_for("c-mid-turn", "long-tool-loop"))
+            .await
+    });
+
+    let deadline = std::time::Instant::now() + Duration::from_millis(100);
+    while stub.in_progress.load(Ordering::Acquire) == 0 {
+        if std::time::Instant::now() > deadline {
+            panic!("stub never entered handle_turn");
+        }
+        tokio::task::yield_now().await;
+    }
+
+    // Trip the per-conv token while the turn is "in flight". The stub
+    // observes it via select! on cancel.cancelled() (standing in for
+    // run_tool_loop's iteration-boundary check); dispatch maps that
+    // to Cancelled and re-arms a fresh token.
+    svc.cancel("c-mid-turn");
+
+    let result = tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("dispatch must complete after cancel (mid-turn break)")
+        .expect("join ok");
+    match result {
+        Err(AgentServiceError::Cancelled(id)) => assert_eq!(id, "c-mid-turn"),
+        other => panic!("expected Cancelled mid-turn, got {:?}", other),
+    }
+
+    // Do NOT notify release — cancel alone must have broken the turn.
+    // Yield so the dropped future's InProgressGuard runs before we sample.
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        stub.in_progress.load(Ordering::Acquire),
+        0,
+        "mid-turn cancel must drop in_progress without release Notify"
+    );
 }
 
 #[tokio::test]

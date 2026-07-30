@@ -35,9 +35,19 @@ struct BlockingHandle {
 
 #[async_trait]
 impl AgentLoopHandle for BlockingHandle {
-    async fn handle_turn(&self, msg: InboundMessage) -> Result<OutboundMessage, String> {
+    async fn handle_turn(
+        &self,
+        msg: InboundMessage,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<OutboundMessage, String> {
         self.in_progress.fetch_add(1, Ordering::AcqRel);
-        self.release.notified().await;
+        tokio::select! {
+            _ = self.release.notified() => {}
+            _ = cancel.cancelled() => {
+                self.in_progress.fetch_sub(1, Ordering::AcqRel);
+                return Err(format!("conversation `{}` was cancelled", msg.chat_id));
+            }
+        }
         self.in_progress.fetch_sub(1, Ordering::AcqRel);
         Ok(OutboundMessage {
             channel: msg.channel,

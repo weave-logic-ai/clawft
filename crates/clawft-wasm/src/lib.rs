@@ -401,9 +401,14 @@ mod browser_entry {
             metadata: std::collections::HashMap::new(),
         };
 
+        // WEFT-323: browser path has no per-conv cancel RPC; mint a
+        // never-cancelled token so handle_turn's iteration-boundary
+        // check is a no-op. Same type AgentLoop uses (clawft_plugin
+        // re-export / stub under non-native).
+        let cancel = rt.agent.fresh_cancel_token();
         let outbound = rt
             .agent
-            .handle_turn(msg)
+            .handle_turn(msg, &cancel)
             .await
             .map_err(|e| JsValue::from_str(&format!("agent error: {e}")))?;
 
