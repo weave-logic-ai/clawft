@@ -230,6 +230,45 @@ jobs:
         run: cargo check --workspace
 
   # -------------------------------------------------------------------
+  # Kernel WASM no-mesh: clawft-kernel on wasm32-unknown-unknown with
+  # every default feature OFF (including mesh). HARD GATE (WEFT-114).
+  #
+  # Default features pull mesh (native transports). Without this gate,
+  # non-browser code can land in the kernel default feature set and
+  # only surface when a browser consumer tries to build. Local twin:
+  #   scripts/build.sh check
+  #   (or: cargo check -p clawft-kernel --target wasm32-unknown-unknown
+  #         --no-default-features)
+  # -------------------------------------------------------------------
+  wasm-kernel-no-mesh:
+    name: Kernel WASM check (no mesh)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-wasm-kernel-no-mesh-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-wasm-kernel-no-mesh-
+
+      # Documented entrypoint: scripts/build.sh check (runs this after
+      # workspace check). CI invokes the cargo form directly so the job
+      # stays focused and does not re-run the full native workspace check.
+      - name: Check clawft-kernel wasm32-unknown-unknown --no-default-features
+        run: cargo check -p clawft-kernel --target wasm32-unknown-unknown --no-default-features
+
+  # -------------------------------------------------------------------
   # Browser WASM regression suite (WEFT-388 / M5-A).
   #
   # Runs `crates/clawft-wasm/tests/browser_pipeline.rs` under headless

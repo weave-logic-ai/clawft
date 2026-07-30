@@ -25,6 +25,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "native")]
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -51,6 +52,11 @@ impl SubscriberId {
 /// A subscription sink — where a delivered topic message goes.
 ///
 /// See the module-level docs for a description of each variant.
+///
+/// [`SubscriberSink::ExternalStream`] requires the `native` feature
+/// (tokio mpsc). Without `native` (e.g. wasm32-unknown-unknown /
+/// `--no-default-features`), only [`SubscriberSink::PidInbox`] is
+/// available — WEFT-114.
 #[derive(Clone)]
 pub enum SubscriberSink {
     /// An in-kernel process inbox (existing PID-based delivery).
@@ -60,6 +66,9 @@ pub enum SubscriberSink {
     /// buffer including a trailing `\n`) and feeds it into this
     /// sender. A full channel is treated as back-pressure and the
     /// message is dropped for that client.
+    ///
+    /// Only available under the `native` feature (tokio runtime).
+    #[cfg(feature = "native")]
     ExternalStream(mpsc::Sender<Vec<u8>>),
 }
 
@@ -67,6 +76,7 @@ impl std::fmt::Debug for SubscriberSink {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SubscriberSink::PidInbox(pid) => write!(f, "PidInbox({pid})"),
+            #[cfg(feature = "native")]
             SubscriberSink::ExternalStream(_) => write!(f, "ExternalStream(..)"),
         }
     }
@@ -207,6 +217,7 @@ impl TopicRouter {
                             dead_ids.push(*id);
                         }
                     }
+                    #[cfg(feature = "native")]
                     SubscriberSink::ExternalStream(tx) => {
                         if tx.is_closed() {
                             dead_ids.push(*id);
@@ -242,6 +253,7 @@ impl TopicRouter {
             .into_iter()
             .filter_map(|(_, sink)| match sink {
                 SubscriberSink::PidInbox(pid) => Some(pid),
+                #[cfg(feature = "native")]
                 SubscriberSink::ExternalStream(_) => None,
             })
             .collect()
@@ -257,6 +269,7 @@ impl TopicRouter {
                 subs.iter()
                     .filter_map(|(_, sink)| match sink {
                         SubscriberSink::PidInbox(pid) => Some(*pid),
+                        #[cfg(feature = "native")]
                         SubscriberSink::ExternalStream(_) => None,
                     })
                     .collect()
@@ -318,7 +331,7 @@ impl TopicRouter {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
     use crate::capability::AgentCapabilities;

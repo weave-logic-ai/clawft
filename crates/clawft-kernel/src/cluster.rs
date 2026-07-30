@@ -211,7 +211,11 @@ impl ClusterConfig {
     /// feed the model when trained; pass `(0, 0.0, 0.0)` if not
     /// available.
     ///
+    /// Without the `ecc` feature this always returns
+    /// `self.heartbeat_interval_secs` (WEFT-114).
+    ///
     /// NOTE(eml-swap): wired — Finding #5 (GossipTimingModel).
+    #[cfg(feature = "ecc")]
     pub fn recommended_heartbeat_secs(
         &self,
         model: Option<&crate::eml_kernel::GossipTimingModel>,
@@ -226,6 +230,12 @@ impl ClusterConfig {
             }
             _ => self.heartbeat_interval_secs,
         }
+    }
+
+    /// Recommend heartbeat interval without EML (no `ecc` feature).
+    #[cfg(not(feature = "ecc"))]
+    pub fn recommended_heartbeat_secs(&self) -> u64 {
+        self.heartbeat_interval_secs
     }
 }
 
@@ -1289,6 +1299,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ecc")]
     fn recommended_heartbeat_falls_back_when_no_model() {
         // Finding #5: with no model, the recommendation must equal
         // the configured heartbeat_interval_secs.
@@ -1300,6 +1311,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ecc")]
     fn recommended_heartbeat_falls_back_when_untrained() {
         // Finding #5: an untrained model must not override the config.
         let config = ClusterConfig {
@@ -1315,6 +1327,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ecc")]
     fn recommended_heartbeat_uses_trained_model() {
         // Finding #5: with a trained model the recommendation comes
         // from the model's predict, not the config.

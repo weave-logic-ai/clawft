@@ -166,7 +166,11 @@ impl EffectVector {
     /// [`GovernanceScorerModel::predict`] which combines the five
     /// dimensions into a learned scalar.
     ///
+    /// Without the `ecc` feature the learned path is unavailable and
+    /// this always returns [`Self::magnitude`] (WEFT-114 no-mesh/wasm).
+    ///
     /// NOTE(eml-swap): wired — Finding #5 (GovernanceScorerModel).
+    #[cfg(feature = "ecc")]
     pub fn score(&self, model: Option<&crate::eml_kernel::GovernanceScorerModel>) -> f64 {
         match model {
             Some(m) => m.predict(
@@ -178,6 +182,12 @@ impl EffectVector {
             ),
             None => self.magnitude(),
         }
+    }
+
+    /// Composite score without EML (no `ecc` feature) — L2 magnitude only.
+    #[cfg(not(feature = "ecc"))]
+    pub fn score(&self) -> f64 {
+        self.magnitude()
     }
 
     /// Check if any dimension exceeds a threshold.
@@ -340,6 +350,8 @@ pub struct GovernanceEngine {
     /// trained the scorer's learned composite is used instead.
     /// Untrained scorers fall back to L2 (see
     /// [`EffectVector::score`]), so this is drop-in safe.
+    /// Only present under the `ecc` feature (WEFT-114).
+    #[cfg(feature = "ecc")]
     scorer: Option<crate::eml_kernel::GovernanceScorerModel>,
 }
 
@@ -350,6 +362,7 @@ impl GovernanceEngine {
             rules: Vec::new(),
             risk_threshold,
             human_approval_required,
+            #[cfg(feature = "ecc")]
             scorer: None,
         }
     }
@@ -360,6 +373,7 @@ impl GovernanceEngine {
             rules: Vec::new(),
             risk_threshold: 1.0,
             human_approval_required: false,
+            #[cfg(feature = "ecc")]
             scorer: None,
         }
     }
@@ -371,6 +385,7 @@ impl GovernanceEngine {
     /// trained and falls back to the L2 magnitude otherwise. The
     /// fallback path is bit-for-bit identical to the pre-EML
     /// behaviour.
+    #[cfg(feature = "ecc")]
     pub fn with_scorer(mut self, scorer: crate::eml_kernel::GovernanceScorerModel) -> Self {
         self.scorer = Some(scorer);
         self
@@ -378,6 +393,7 @@ impl GovernanceEngine {
 
     /// Returns a reference to the installed governance scorer model,
     /// if any.
+    #[cfg(feature = "ecc")]
     pub fn scorer(&self) -> Option<&crate::eml_kernel::GovernanceScorerModel> {
         self.scorer.as_ref()
     }
@@ -417,7 +433,10 @@ impl GovernanceEngine {
     /// scorer and falls back to the L2 magnitude when no model is
     /// installed or the model is untrained.
     pub fn evaluate(&self, request: &GovernanceRequest) -> GovernanceResult {
+        #[cfg(feature = "ecc")]
         let magnitude = request.effect.score(self.scorer.as_ref());
+        #[cfg(not(feature = "ecc"))]
+        let magnitude = request.effect.score();
         let threshold_exceeded = magnitude > self.risk_threshold;
 
         let mut evaluated_rules = Vec::new();
@@ -521,7 +540,10 @@ impl GovernanceEngine {
         // Apply environment-scoped magnitude check on top.
         //
         // NOTE(eml-swap): wired — Finding #5 (GovernanceScorerModel).
+        #[cfg(feature = "ecc")]
         let magnitude = request.effect.score(self.scorer.as_ref());
+        #[cfg(not(feature = "ecc"))]
+        let magnitude = request.effect.score();
         if magnitude > adjusted_threshold {
             result.threshold_exceeded = true;
             result.decision = GovernanceDecision::Deny(format!(
@@ -814,6 +836,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ecc")]
     fn effect_score_untrained_matches_magnitude() {
         // Finding #5: untrained scorer must be bit-for-bit identical to
         // the L2 magnitude. Covers both None and Some(untrained) paths.
@@ -834,6 +857,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ecc")]
     fn effect_score_trained_uses_model() {
         // With a trained scorer, score() takes the EML path instead of
         // L2. We force the trained flag via a JSON patch because the
@@ -963,6 +987,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ecc")]
     fn engine_with_untrained_scorer_preserves_behavior() {
         // Finding #5: installing an untrained GovernanceScorerModel must
         // not change evaluation outcomes (drop-in safe).
@@ -1008,6 +1033,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ecc")]
     fn engine_with_trained_scorer_uses_model_scalar() {
         // Finding #5: once the scorer is trained, the engine's
         // threshold check receives the model-derived scalar. We force

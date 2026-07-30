@@ -726,11 +726,36 @@ cmd_wasm_panel() {
     pass "Panel wasm bundle ready at extensions/vscode-weft-panel/webview/wasm/"
 }
 
+# WEFT-114: clawft-kernel on wasm32-unknown-unknown with mesh (and every other
+# default feature) off. Catches non-browser code that creeps into the default
+# feature set and would break browser/WASM consumers. Equivalent CI hard gate:
+#   .github/workflows/pr-gates.yml → wasm-kernel-no-mesh
+check_kernel_wasm_no_mesh() {
+    cargo check -p clawft-kernel --target wasm32-unknown-unknown --no-default-features
+}
+
 cmd_check() {
     header "Running cargo check --workspace"
     timer_start
     run_cmd cargo check --workspace
     timer_end
+
+    # WEFT-114: hard local twin of the PR-gates wasm-kernel-no-mesh job.
+    # Skipped only when the target is not installed (contributors without the
+    # browser WASM toolchain); CI always has the target.
+    if check_target_installed wasm32-unknown-unknown; then
+        header "Running cargo check -p clawft-kernel --target wasm32-unknown-unknown --no-default-features (no mesh)"
+        timer_start
+        if [ "$DRY_RUN" = true ]; then
+            printf "  ${YELLOW}DRY${NC}   cargo check -p clawft-kernel --target wasm32-unknown-unknown --no-default-features\n"
+        else
+            check_kernel_wasm_no_mesh
+        fi
+        timer_end
+    else
+        skip "wasm32-unknown-unknown not installed — skip kernel no-mesh WASM check (WEFT-114)"
+        info "Install with: rustup target add wasm32-unknown-unknown"
+    fi
 }
 
 cmd_clippy() {
@@ -936,8 +961,8 @@ check_kernel_diskann_and_bench_matrix() {
 
 # ── Gate: full phase-gate checks ────────────────────────────────────
 cmd_gate() {
-    header "Phase Gate — 13 checks"
-    local total=13 passed=0 failed=0 skipped=0
+    header "Phase Gate — 14 checks"
+    local total=14 passed=0 failed=0 skipped=0
 
     run_gate_check() {
         local num="$1" label="$2"
@@ -1063,6 +1088,18 @@ cmd_gate() {
     run_gate_check 13 "diskann + bench feature compile (clawft-kernel)" \
         check_kernel_diskann_and_bench_matrix
 
+    # 14. WEFT-114: clawft-kernel wasm32-unknown-unknown with mesh OFF
+    # (--no-default-features). Hard fail when the target is installed; skip
+    # locally only if rustup target missing. CI always installs the target.
+    if check_target_installed wasm32-unknown-unknown; then
+        run_gate_check 14 "kernel WASM no-mesh (wasm32-unknown-unknown)" \
+            check_kernel_wasm_no_mesh
+    else
+        printf "\n${BOLD}[%2d/%d]${NC} %s\n" 14 "$total" "kernel WASM no-mesh (wasm32-unknown-unknown)"
+        skip "wasm32-unknown-unknown target not installed"
+        skipped=$((skipped + 1))
+    fi
+
     # Summary
     echo ""
     printf "${BOLD}═══════════════════════════════════════${NC}\n"
@@ -1122,13 +1159,19 @@ ${BOLD}Commands:${NC}
                   via wasm-pack / cargo + wasm-bindgen + wasm-opt -Oz, then
                   gate against the panel size budget. (WEFT-484 / M6-B)
                   Override budget: scripts/build.sh wasm-panel <max-raw-kb> <max-gz-kb>
-  check           Run cargo check --workspace (fast compile check)
+  check           Run cargo check --workspace (fast compile check), then
+                  cargo check -p clawft-kernel --target wasm32-unknown-unknown
+                  --no-default-features when the target is installed (WEFT-114:
+                  mesh/default features off — blocks non-browser code creeping
+                  into the kernel default feature set). CI hard gate twin:
+                  pr-gates.yml job wasm-kernel-no-mesh.
   clippy          Run clippy with warnings-as-errors
   audit           Run cargo audit with 0.7.0 ignore-list (deny warnings).
                   Requires: cargo install --locked cargo-audit
                   Followups: WEFT-551 (wasmtime), WEFT-552 (rustls-webpki),
                   WEFT-553 (unmaintained + unsound rand).
-  gate            Run full phase gate (12 checks, includes cargo audit)
+  gate            Run full phase gate (14 checks, includes cargo audit +
+                  kernel WASM no-mesh / WEFT-114)
   bench <crate> <name>
                   Run a `[[bench]] harness = false` target (e.g.
                   scripts/build.sh bench clawft-kernel vector_backend_bench
