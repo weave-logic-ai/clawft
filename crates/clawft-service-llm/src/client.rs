@@ -24,7 +24,7 @@ use crate::{DEFAULT_LLM_MODEL, DEFAULT_LLM_SERVICE_URL, LLM_SERVICE_URL_ENV};
 /// Configuration for [`LlmClient`].
 #[derive(Debug, Clone)]
 pub struct LlmConfig {
-    /// Base URL of the LLM service (e.g. `http://127.0.0.1:8111`).
+    /// Base URL of the LLM service (e.g. `http://127.0.0.1:8090`).
     /// No trailing slash.
     pub base_url: String,
     /// Model name to send in the request body. `llama-server` ignores
@@ -85,8 +85,13 @@ impl LlmConfig {
             .ok()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| DEFAULT_LLM_SERVICE_URL.to_string());
+        let model = std::env::var(crate::LLM_MODEL_ENV)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| DEFAULT_LLM_MODEL.to_string());
         Self {
             base_url,
+            model,
             ..Default::default()
         }
     }

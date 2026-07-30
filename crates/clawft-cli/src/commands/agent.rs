@@ -83,13 +83,32 @@ pub async fn run(args: AgentArgs) -> anyhow::Result<()> {
     let loaded = super::load_config_layered(&*platform, args.config.as_deref()).await?;
     let mut config = loaded.config;
 
-    // Apply model override if provided.
+    // WEFT-604: bridge [kernel.llm] + LLM_* env into the standalone agent
+    // path so daemon / weft agent / voice share ADR-060 defaults.
+    let mut agents_model_source = loaded.agents_model_source;
+    let resolution =
+        clawft_core::local_llm_bridge::apply_local_llm_bridge(&mut config, agents_model_source);
+    info!(
+        url = %resolution.service_url,
+        url_source = resolution.url_source,
+        model = %resolution.routed_model,
+        model_source = resolution.model_source,
+        agents_model_source = resolution.agents_model_source,
+        "local llm endpoint resolved for agent"
+    );
+
+    // Apply model override if provided (CLI flag wins over all layers).
     if let Some(ref model) = args.model {
         config.agents.defaults.model = model.clone();
+        agents_model_source = "cli:--model";
     }
 
     let effective_model = &config.agents.defaults.model;
-    info!(model = %effective_model, "initializing agent");
+    info!(
+        model = %effective_model,
+        model_source = agents_model_source,
+        "initializing agent"
+    );
 
     // Daemon-first routing (M1 / ADR-061, WEFT-606): if a kernel daemon is
     // reachable, route every turn through its long-lived AgentService via the

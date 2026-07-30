@@ -129,12 +129,15 @@ pub fn builtin_providers() -> Vec<LlmProviderConfig> {
             timeout_secs: None,
         },
         // ── Local / air-gapped providers ────────────────────────────
+        // WEFT-604 / ADR-060: `local/` defaults to the Hermes serve recipe
+        // on :8090 (not Ollama :11434) so zero-config matches the daemon.
+        // Ollama keeps :11434; override via [providers.ollama].api_base.
         LlmProviderConfig {
             name: "local".into(),
-            base_url: "http://localhost:11434/v1".into(),
+            base_url: clawft_types::config::DEFAULT_LOCAL_LLM_API_BASE.into(),
             api_key_env: "LOCAL_LLM_API_KEY".into(),
             model_prefix: Some("local/".into()),
-            default_model: Some("llama3.2".into()),
+            default_model: Some(clawft_types::config::DEFAULT_LOCAL_LLM_MODEL.into()),
             headers: HashMap::new(),
             timeout_secs: Some(300),
         },

@@ -48,10 +48,16 @@ pub const DEFAULT_LOCAL_MODEL: &str = "llama3.2";
 
 /// Default base URL for the ADR-060 Hermes serving recipe (`bin/serve-llamacpp`,
 /// OpenAI endpoint on port 8090).
-pub const HERMES_SERVING_BASE_URL: &str = "http://127.0.0.1:8090/v1";
+///
+/// WEFT-604: must stay equal to
+/// `clawft_types::config::DEFAULT_LOCAL_LLM_API_BASE`.
+pub const HERMES_SERVING_BASE_URL: &str = clawft_types::config::DEFAULT_LOCAL_LLM_API_BASE;
 
 /// Default model id for the ADR-060 Hermes serving recipe.
-pub const HERMES_DEFAULT_MODEL: &str = "hermes-4.3-36b";
+///
+/// WEFT-604: must stay equal to
+/// `clawft_types::config::DEFAULT_LOCAL_LLM_MODEL`.
+pub const HERMES_DEFAULT_MODEL: &str = clawft_types::config::DEFAULT_LOCAL_LLM_MODEL;
 
 /// Default explicit context window for the Hermes loop (ADR-060: cap to the live
 /// window, NOT the 512K native; never rely on a silent 4k default).

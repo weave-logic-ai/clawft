@@ -63,20 +63,25 @@ pub const LLM_MODEL_ENV: &str = "LLM_MODEL";
 /// `Authorization: Bearer <key>` to chat-completion requests.
 pub const OPENROUTER_API_KEY_ENV: &str = "OPENROUTER_API_KEY";
 
-/// Default LLM service URL if the env var is unset. Matches the
-/// `llama-server` instance the user already runs locally for Qwen3.
-pub const DEFAULT_LLM_SERVICE_URL: &str = "http://127.0.0.1:8111";
+/// Default LLM service URL if the env var is unset.
+///
+/// WEFT-604 / ADR-060: aligns with `clawft_types::config::DEFAULT_LOCAL_LLM_SERVICE_URL`
+/// and `LocalProvider::hermes_serving()` so a freshly-served Hermes on
+/// `:8090` is discovered with zero config by the daemon, `weft agent`,
+/// and the voice loop.
+pub const DEFAULT_LLM_SERVICE_URL: &str = "http://127.0.0.1:8090";
 
 /// Default OpenRouter API base. The client appends `/v1/chat/completions`
 /// (and tolerates a trailing `/v1`), so this points at the API root,
 /// not the v1 root.
 pub const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api";
 
-/// Default model name. `llama-server` accepts any string and routes to
-/// its single loaded model, so the default is purely cosmetic — it
-/// shows up in the request body for traceability and is echoed back in
-/// the response.
-pub const DEFAULT_LLM_MODEL: &str = "local";
+/// Default model name (ADR-060 Hermes alias).
+///
+/// `llama-server` routes to its single loaded model regardless of the
+/// string; the alias is used for traceability and must match
+/// `serve-llamacpp --alias` / `clawft_types::config::DEFAULT_LOCAL_LLM_MODEL`.
+pub const DEFAULT_LLM_MODEL: &str = "hermes-4.3-36b";
 
 /// Default OpenRouter model — Nvidia's free Nemotron 120b. Used when
 /// `OPENROUTER_API_KEY` is set and `LLM_MODEL` is unset.
