@@ -53,6 +53,11 @@ signing = ["dep:ed25519-dalek", "dep:rand"]
 # index (still O(n) over ~35 skills — measured under a microsecond).
 # Implies vector-memory because the Embedder trait lives there.
 embedding-router = ["vector-memory", "dep:ruvector-diskann"]
+# WEFT-46 / agent-core-v1 Phase E3+: sona-backed skill rerank step on
+# HybridRouter. Opt-in only — keeps default/`full` builds free of the
+# upstream `ruvector-sona` dep so a slow or broken release cannot block
+# the gate. Enable with `--features hybrid-rerank`.
+hybrid-rerank = ["dep:ruvector-sona"]
 
 [dependencies]
 # Always available
@@ -117,6 +122,9 @@ libc = { version = "0.2", optional = true }
 # E2 EmbeddingRouter: workspace-pinned at 2.1 (Cargo.toml:176). Vamana
 # graph + PQ + mmap; same crate the kernel uses in vector_diskann.rs.
 ruvector-diskann = { workspace = true, optional = true }
+# WEFT-46: SONA (Self-Optimizing Neural Architecture) for HybridRouter
+# skill rerank. Optional; only linked when `hybrid-rerank` is enabled.
+ruvector-sona = { workspace = true, optional = true }
 # sha2 is always-on so identity hashing (Phase D1 of agent-core-v1)
 # works without enabling rvf / signing. Existing rvf / signing
 # features still depend on it transitively (was previously optional).

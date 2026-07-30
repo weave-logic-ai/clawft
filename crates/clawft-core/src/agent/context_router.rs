@@ -220,17 +220,27 @@ pub use embedding::{
     FALLBACK_TRACING_TARGET,
 };
 
-// ── v2.5: HybridRouter (plumbing only) ───────────────────────────────────
+// ── v2.5: HybridRouter + skill rerank (WEFT-46) ──────────────────────────
 
-// Phase E3: chain a primary + fallback ContextRouter. Plumbing only —
-// the sona-backed rerank step is deferred until ruv-ecosystem
-// stability clears (see hybrid.rs module docs and
-// `docs/research/rvf-context-router.md`). v3 (`MicroLoraRouter`) is
-// also deferred until ruvllm-wasm lifts its 11-pattern HNSW cap; see
-// the TODO marker on `HybridRouter`.
+// Phase E3: chain a primary + fallback ContextRouter, with an optional
+// skill-list rerank after a non-empty primary. The rerank *trait* is
+// always available (`rerank`); the sona-backed adapter is feature-gated
+// (`hybrid-rerank` → `sona_rerank`) so default builds never pull
+// `ruvector-sona`. v3 (`MicroLoraRouter`) remains deferred until
+// ruvllm-wasm lifts its 11-pattern HNSW cap (see hybrid.rs TODO).
 pub mod hybrid;
+pub mod rerank;
+
+#[cfg(feature = "hybrid-rerank")]
+pub mod sona_rerank;
 
 pub use hybrid::HybridRouter;
+pub use rerank::{
+    IdentityReranker, RerankCandidate, SharedReranker, SkillReranker, apply_rerank, rank_priors,
+};
+
+#[cfg(feature = "hybrid-rerank")]
+pub use sona_rerank::{DEFAULT_SONA_DIM, RERANK_TRACING_TARGET, SonaSkillReranker};
 
 #[cfg(test)]
 mod tests {
