@@ -130,6 +130,15 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
 
+# WEFT-114: wasm32-unknown-unknown needs a browser RNG backend for uuid v4.
+# The kernel default feature set includes `mesh` (native-only transports). The
+# CI gate runs `cargo check -p clawft-kernel --target wasm32-unknown-unknown
+# --no-default-features` so mesh stays off; uuid still requires `js` (or an
+# equivalent RNG feature) on this target. Feature unification lifts `js` into
+# the shared uuid graph for this build without enabling mesh.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+uuid = { workspace = true, features = ["js"] }
+
 [dev-dependencies]
 tokio = { workspace = true }
 serde_json = { workspace = true }

@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::assessment::analyzer::Analyzer;
 use crate::assessment::{Finding, analyzer::AnalysisContext};
+#[cfg(feature = "ecc")]
 use crate::eml_kernel::ComplexityModel;
 
 /// Default complexity threshold (lines per file). Preserved as the
@@ -15,7 +16,7 @@ const DEFAULT_LINE_THRESHOLD: usize = 500;
 ///
 /// The line-count threshold defaults to 500 for backward compatibility
 /// (matching the original hardcoded limit). When constructed via
-/// [`Self::with_model`], a learned
+/// [`Self::with_model`] (requires `ecc`), a learned
 /// [`ComplexityModel`](crate::eml_kernel::ComplexityModel) is consulted
 /// per file; an untrained model falls back to the same 500-line
 /// threshold so the default remains drop-in safe.
@@ -23,7 +24,9 @@ const DEFAULT_LINE_THRESHOLD: usize = 500;
 /// NOTE(eml-swap): wired — Finding #5 (ComplexityModel).
 pub struct ComplexityAnalyzer {
     /// Optional learned threshold model. When None or untrained, the
-    /// analyzer behaves exactly as it did pre-EML.
+    /// analyzer behaves exactly as it did pre-EML. Only present under
+    /// the `ecc` feature (WEFT-114).
+    #[cfg(feature = "ecc")]
     model: Option<ComplexityModel>,
 }
 
@@ -37,23 +40,29 @@ impl ComplexityAnalyzer {
     /// Create a complexity analyzer using the hardcoded 500-line
     /// threshold (no learned model).
     pub fn new() -> Self {
-        Self { model: None }
+        Self {
+            #[cfg(feature = "ecc")]
+            model: None,
+        }
     }
 
     /// Create a complexity analyzer backed by a learned
     /// [`ComplexityModel`]. Untrained models fall back to the
     /// hardcoded 500-line threshold so this is drop-in safe.
+    #[cfg(feature = "ecc")]
     pub fn with_model(model: ComplexityModel) -> Self {
         Self { model: Some(model) }
     }
 
     /// Returns a reference to the learned model, if installed.
+    #[cfg(feature = "ecc")]
     pub fn model(&self) -> Option<&ComplexityModel> {
         self.model.as_ref()
     }
 
     /// Resolve the per-file line threshold. Consults the optional
     /// learned model when trained; otherwise returns 500.
+    #[cfg(feature = "ecc")]
     fn threshold_for(&self, lang_ordinal: u32, line_count: usize) -> usize {
         match self.model.as_ref() {
             Some(m) if m.is_trained() => {
@@ -64,6 +73,12 @@ impl ComplexityAnalyzer {
             }
             _ => DEFAULT_LINE_THRESHOLD,
         }
+    }
+
+    /// Resolve the per-file line threshold without EML (no `ecc`).
+    #[cfg(not(feature = "ecc"))]
+    fn threshold_for(&self, _lang_ordinal: u32, _line_count: usize) -> usize {
+        DEFAULT_LINE_THRESHOLD
     }
 }
 
@@ -159,6 +174,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ecc")]
     fn analyzer_untrained_model_matches_default() {
         // Finding #5: an untrained ComplexityModel must reproduce the
         // 500-line threshold exactly.
@@ -183,6 +199,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ecc")]
     fn analyzer_trained_model_can_change_threshold() {
         // Finding #5: a trained model dispatches to predict() and may
         // produce a different threshold than 500.
