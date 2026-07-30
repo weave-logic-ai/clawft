@@ -36,7 +36,7 @@ This directory contains Architecture Decision Records (ADRs) for the WeftOS + cl
 | [ADR-028](adr-028-post-quantum-dual-signing.md) | Mandatory dual signing (Ed25519 + ML-DSA-65) | Accepted | Security | K2 / K5 Symposium |
 | [ADR-029](adr-029-rvf-crypto-fork-strategy.md) | weftos-rvf-crypto fork strategy | Accepted | Release | K2 Symposium |
 | [ADR-030](adr-030-cbor-exochain-codec.md) | CBOR exochain codec | Accepted | Architecture | K6 |
-| [ADR-031](adr-031-rvf-wire-mesh-format.md) | RVF wire mesh format | Accepted | Architecture | K6 |
+| [ADR-031](adr-031-rvf-wire-mesh-format.md) | RVF wire mesh format (JSON shipped; RVF deferred WEFT-683) | Accepted | Architecture | K6 |
 | [ADR-032](adr-032-dashmap-concurrency.md) | DashMap for concurrent registry | Accepted | Performance | K2 |
 | [ADR-033](adr-033-three-branch-governance.md) | Three-branch governance model | Accepted | Architecture | Governance |
 | [ADR-034](adr-034-effect-algebra-scoring.md) | Effect-algebra scoring | Accepted | Architecture | Governance |

@@ -55,6 +55,12 @@ mesh = [
     "dep:futures-util",
     "dep:snow",
 ]
+# WEFT-683 / ADR-031: experimental RVF KernelMessage IPC encoding surface.
+# Default builds ship JSON only (`MeshIpcEncoding::Json`). Enabling this
+# exposes `MeshIpcEncoding::Rvf`; encode/decode currently return
+# `UnsupportedEncoding` until Option B (full RVF path) lands. Does **not**
+# change the production default.
+mesh-rvf = ["mesh"]
 ecc = ["clawft-core/vector-memory", "dep:blake3"]
 # EXPERIMENTAL (0.6.x): quantum backends — interface only, stubs return NotImplemented.
 quantum-pasqal = ["ecc", "dep:reqwest"]

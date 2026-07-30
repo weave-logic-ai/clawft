@@ -35,6 +35,9 @@
 //! # Feature Flags
 //!
 //! - `native` (default) -- enables tokio runtime, native file I/O.
+//! - `mesh` (default) -- mesh transport, framing, IPC (JSON KernelMessage).
+//! - `mesh-rvf` -- experimental RVF IPC encoding API surface (ADR-031 /
+//!   WEFT-683); encode/decode currently return `UnsupportedEncoding`.
 //! - `wasm-sandbox` -- enables WASM tool runner (Phase K3).
 //! - `containers` -- enables container manager (Phase K4).
 //! - `ecc` -- enables ECC cognitive substrate (Phase K3c).

@@ -1,8 +1,20 @@
 //! Cross-node IPC message serialization for mesh transport (K6.3).
 //!
-//! Handles serializing `KernelMessage` to wire format and deserializing
-//! incoming mesh messages. Uses JSON over the wire (RVF integration
-//! available via the `Rvf` payload variant).
+//! Handles serializing `KernelMessage` (via [`MeshIpcEnvelope`]) to wire
+//! format and deserializing incoming mesh messages.
+//!
+//! ## Encoding (ADR-031 / WEFT-683)
+//!
+//! **Shipped default:** JSON (`serde_json`) — [`MeshIpcEncoding::Json`] /
+//! [`DEFAULT_MESH_IPC_ENCODING`].
+//!
+//! **Deferred:** RVF wire-segment encoding for production performance is
+//! reserved behind the Cargo feature `mesh-rvf` as [`MeshIpcEncoding::Rvf`].
+//! That path currently returns [`MeshIpcError::UnsupportedEncoding`]; enable
+//! the feature only to exercise the API surface until Option B is built.
+//!
+//! Frame *kind* (`mesh_framing::FrameType`, e.g. `IpcMessage = 0x02`) is
+//! orthogonal to IPC *payload encoding*. See ADR-031.
 
 use serde::{Deserialize, Serialize};
 
@@ -13,6 +25,52 @@ const MAX_IPC_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 
 /// Maximum number of relay hops before a message is dropped.
 const MAX_HOPS: u8 = 8;
+
+/// Wire encoding for mesh IPC envelopes (ADR-031 / WEFT-683).
+///
+/// Orthogonal to [`crate::mesh_framing::FrameType`]: frame type selects the
+/// message kind (`IpcMessage`, `ChainSync`, …); this enum selects how the
+/// bytes *inside* an IPC frame are serialized.
+///
+/// Discriminant values match the conceptual encoding table in ADR-031
+/// (`0x01` JSON, `0x02` RVF). They are **not** written on the wire today —
+/// shipped traffic is bare JSON with no encoding prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum MeshIpcEncoding {
+    /// JSON (`serde_json`). Production and development default as of WEFT-683.
+    #[default]
+    Json = 0x01,
+    /// RVF wire segment (ADR-031 production target). Only compiled with
+    /// `--features mesh-rvf`; encode/decode return
+    /// [`MeshIpcError::UnsupportedEncoding`] until Option B lands.
+    #[cfg(feature = "mesh-rvf")]
+    Rvf = 0x02,
+}
+
+/// Production IPC encoding for all default builds (JSON).
+pub const DEFAULT_MESH_IPC_ENCODING: MeshIpcEncoding = MeshIpcEncoding::Json;
+
+impl MeshIpcEncoding {
+    /// Stable name for logs / errors.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            #[cfg(feature = "mesh-rvf")]
+            Self::Rvf => "rvf",
+        }
+    }
+
+    /// Parse a conceptual encoding byte (`0x01` JSON, `0x02` RVF when gated).
+    pub fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0x01 => Some(Self::Json),
+            #[cfg(feature = "mesh-rvf")]
+            0x02 => Some(Self::Rvf),
+            _ => None,
+        }
+    }
+}
 
 /// A mesh IPC envelope wrapping a KernelMessage with routing metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,31 +99,71 @@ impl MeshIpcEnvelope {
         }
     }
 
-    /// Serialize the envelope to JSON bytes for wire transport.
+    /// Serialize the envelope using [`DEFAULT_MESH_IPC_ENCODING`] (JSON).
     pub fn to_bytes(&self) -> Result<Vec<u8>, MeshIpcError> {
-        let bytes =
-            serde_json::to_vec(self).map_err(|e| MeshIpcError::Serialization(e.to_string()))?;
-        if bytes.len() > MAX_IPC_MESSAGE_SIZE {
-            return Err(MeshIpcError::MessageTooLarge {
-                size: bytes.len(),
-                max: MAX_IPC_MESSAGE_SIZE,
-            });
-        }
-        Ok(bytes)
+        self.to_bytes_with_encoding(DEFAULT_MESH_IPC_ENCODING)
     }
 
-    /// Deserialize an envelope from JSON bytes.
+    /// Serialize with an explicit encoding.
+    ///
+    /// JSON is always available. RVF requires `feature = "mesh-rvf"` and
+    /// currently returns [`MeshIpcError::UnsupportedEncoding`] (WEFT-683
+    /// Option A — deferred until revisit triggers in ADR-031 fire).
+    pub fn to_bytes_with_encoding(
+        &self,
+        encoding: MeshIpcEncoding,
+    ) -> Result<Vec<u8>, MeshIpcError> {
+        match encoding {
+            MeshIpcEncoding::Json => {
+                let bytes = serde_json::to_vec(self)
+                    .map_err(|e| MeshIpcError::Serialization(e.to_string()))?;
+                if bytes.len() > MAX_IPC_MESSAGE_SIZE {
+                    return Err(MeshIpcError::MessageTooLarge {
+                        size: bytes.len(),
+                        max: MAX_IPC_MESSAGE_SIZE,
+                    });
+                }
+                Ok(bytes)
+            }
+            #[cfg(feature = "mesh-rvf")]
+            MeshIpcEncoding::Rvf => Err(MeshIpcError::UnsupportedEncoding {
+                encoding: encoding.as_str(),
+            }),
+        }
+    }
+
+    /// Deserialize an envelope from JSON bytes (default encoding).
     pub fn from_bytes(data: &[u8]) -> Result<Self, MeshIpcError> {
+        Self::from_bytes_with_encoding(data, DEFAULT_MESH_IPC_ENCODING)
+    }
+
+    /// Deserialize with an explicit encoding.
+    pub fn from_bytes_with_encoding(
+        data: &[u8],
+        encoding: MeshIpcEncoding,
+    ) -> Result<Self, MeshIpcError> {
         if data.len() > MAX_IPC_MESSAGE_SIZE {
             return Err(MeshIpcError::MessageTooLarge {
                 size: data.len(),
                 max: MAX_IPC_MESSAGE_SIZE,
             });
         }
-        let envelope: Self = serde_json::from_slice(data)
-            .map_err(|e| MeshIpcError::Deserialization(e.to_string()))?;
+        match encoding {
+            MeshIpcEncoding::Json => {
+                let envelope: Self = serde_json::from_slice(data)
+                    .map_err(|e| MeshIpcError::Deserialization(e.to_string()))?;
+                Self::validate_boundary(&envelope)?;
+                Ok(envelope)
+            }
+            #[cfg(feature = "mesh-rvf")]
+            MeshIpcEncoding::Rvf => Err(MeshIpcError::UnsupportedEncoding {
+                encoding: encoding.as_str(),
+            }),
+        }
+    }
 
-        // Validate required fields at mesh boundary
+    /// Validate required fields at the mesh boundary.
+    fn validate_boundary(envelope: &Self) -> Result<(), MeshIpcError> {
         if envelope.envelope_id.is_empty() {
             return Err(MeshIpcError::Deserialization(
                 "envelope_id must not be empty".into(),
@@ -76,8 +174,7 @@ impl MeshIpcEnvelope {
                 "source_node must not be empty".into(),
             ));
         }
-
-        Ok(envelope)
+        Ok(())
     }
 
     /// Increment hop count and check if max hops exceeded.
@@ -114,6 +211,12 @@ pub enum MeshIpcError {
     MaxHopsExceeded { hops: u8 },
     #[error("duplicate message: {envelope_id}")]
     DuplicateMessage { envelope_id: String },
+    /// Encoding requested but not implemented (or not enabled).
+    ///
+    /// Used for [`MeshIpcEncoding::Rvf`] under `feature = "mesh-rvf"` until
+    /// ADR-031 Option B lands (WEFT-683).
+    #[error("unsupported mesh IPC encoding: {encoding} (ADR-031 / WEFT-683 — deferred)")]
+    UnsupportedEncoding { encoding: &'static str },
 }
 
 /// A correlated mesh request awaiting response.
@@ -459,5 +562,53 @@ mod tests {
         let bytes = env.to_bytes().unwrap();
         let restored = MeshIpcEnvelope::from_bytes(&bytes).unwrap();
         assert_eq!(restored.message.correlation_id, Some("corr-99".into()));
+    }
+
+    #[test]
+    fn default_encoding_is_json() {
+        assert_eq!(DEFAULT_MESH_IPC_ENCODING, MeshIpcEncoding::Json);
+        assert_eq!(MeshIpcEncoding::default(), MeshIpcEncoding::Json);
+        assert_eq!(MeshIpcEncoding::Json.as_str(), "json");
+        assert_eq!(
+            MeshIpcEncoding::from_byte(0x01),
+            Some(MeshIpcEncoding::Json)
+        );
+        // RVF byte is unknown unless mesh-rvf is enabled.
+        #[cfg(not(feature = "mesh-rvf"))]
+        assert_eq!(MeshIpcEncoding::from_byte(0x02), None);
+        #[cfg(feature = "mesh-rvf")]
+        assert_eq!(MeshIpcEncoding::from_byte(0x02), Some(MeshIpcEncoding::Rvf));
+    }
+
+    #[test]
+    fn to_bytes_with_encoding_json_matches_to_bytes() {
+        let msg = make_test_message();
+        let env = MeshIpcEnvelope::new("src".into(), "dst".into(), msg);
+        let a = env.to_bytes().unwrap();
+        let b = env.to_bytes_with_encoding(MeshIpcEncoding::Json).unwrap();
+        assert_eq!(a, b);
+        let restored =
+            MeshIpcEnvelope::from_bytes_with_encoding(&a, MeshIpcEncoding::Json).unwrap();
+        assert_eq!(restored.envelope_id, env.envelope_id);
+    }
+
+    #[cfg(feature = "mesh-rvf")]
+    #[test]
+    fn rvf_encoding_returns_unsupported() {
+        let msg = make_test_message();
+        let env = MeshIpcEnvelope::new("src".into(), "dst".into(), msg);
+        let err = env
+            .to_bytes_with_encoding(MeshIpcEncoding::Rvf)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MeshIpcError::UnsupportedEncoding { encoding: "rvf" }
+        ));
+        let err =
+            MeshIpcEnvelope::from_bytes_with_encoding(b"{}", MeshIpcEncoding::Rvf).unwrap_err();
+        assert!(matches!(
+            err,
+            MeshIpcError::UnsupportedEncoding { encoding: "rvf" }
+        ));
     }
 }
