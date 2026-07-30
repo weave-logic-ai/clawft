@@ -1232,14 +1232,19 @@ impl<P: Platform> AgentLoop<P> {
         //     failing the user-visible chat path. Phase D3's cutover
         //     replaces the spike's `build_concierge_system_prompt`
         //     with this exact path.
+        //
+        //     WEFT-328: also capture `identity_source` so the wire
+        //     `AgentChatResult` can surface it to the panel drift chip.
+        let mut identity_source: Option<String> = None;
         if let Some(ref builder) = self.system_prompt_builder {
-            match builder.build().await {
-                Ok(prompt) => {
+            match builder.build_with_meta().await {
+                Ok(built) => {
+                    identity_source = Some(built.identity_source);
                     messages.insert(
                         0,
                         LlmMessage {
                             role: "system".into(),
-                            content: prompt,
+                            content: built.body,
                             tool_call_id: None,
                             tool_calls: None,
                         },
@@ -1506,11 +1511,11 @@ impl<P: Platform> AgentLoop<P> {
 
         // 14. Build outbound reply (caller handles dispatch).
         //
-        // M4 D8: thread the enriched loop result (real tool calls,
-        // finish reason, iterations, spawned subagents) through the
-        // envelope's free-form metadata map under a well-known key so
-        // the agent service's `result_from_outbound` can populate the
-        // `AgentChatResult` fields that were previously hardcoded. This
+        // M4 D8 / WEFT-328: thread the enriched loop result (tool calls,
+        // finish reason, iterations, spawned subagents, token counts,
+        // model, identity_source) through the envelope's free-form
+        // metadata map under a well-known key so the agent service's
+        // `result_from_outbound` can populate `AgentChatResult`. This
         // mirrors the inbound `AgentChatParams.metadata` precedent and
         // avoids widening the generic `OutboundMessage` bus envelope.
         let mut metadata = std::collections::HashMap::new();
@@ -1523,6 +1528,7 @@ impl<P: Platform> AgentLoop<P> {
             prompt_tokens: tool_result.prompt_tokens,
             completion_tokens: tool_result.completion_tokens,
             reasoning: tool_result.reasoning,
+            identity_source,
         };
         match serde_json::to_value(&result_meta) {
             Ok(v) => {
@@ -3951,6 +3957,10 @@ mod tests {
                 .call_count
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+            // WEFT-328: model label in metadata so loop meta carries a real value.
+            let mut meta = HashMap::new();
+            meta.insert("model".into(), serde_json::json!("e2e-test-model"));
+
             if count == 0 {
                 // Call 1: LLM returns a tool_use request
                 Ok(LlmResponse {
@@ -3966,7 +3976,7 @@ mod tests {
                         output_tokens: 10,
                         total_tokens: 0,
                     },
-                    metadata: HashMap::new(),
+                    metadata: meta,
                 })
             } else {
                 // Call 2: LLM receives tool result, returns final text
@@ -3981,7 +3991,7 @@ mod tests {
                         output_tokens: 12,
                         total_tokens: 0,
                     },
-                    metadata: HashMap::new(),
+                    metadata: meta,
                 })
             }
         }
@@ -4882,6 +4892,8 @@ mod tests {
     /// D1: when a `SystemPromptBuilder` is attached, `handle_turn`
     /// must prepend the identity-aware system message to the message
     /// list passed to the transport.
+    ///
+    /// WEFT-328: also surfaces `identity_source` in the outbound loop meta.
     #[tokio::test]
     async fn handle_turn_prepends_identity_system_prompt() {
         use crate::agent::identity::{BINDING_THREAD_EXCERPT, IdentityProvider};
@@ -4912,7 +4924,7 @@ mod tests {
         };
         agent.bus.publish_inbound(inbound).unwrap();
         let msg = agent.bus.consume_inbound().await.unwrap();
-        let _ = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
+        let outbound = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
 
         let snapshots = transport.snapshots();
         assert!(!snapshots.is_empty(), "transport must record ≥1 call");
@@ -4928,6 +4940,21 @@ mod tests {
         assert!(prompt.contains("[binding-thread-status]\nok"));
         assert!(prompt.contains(&workspace.display().to_string()));
         assert!(prompt.contains("[hash]"));
+
+        // WEFT-328: identity_source from StubIdentityProvider ("stub")
+        // lands in the OutboundMessage loop meta.
+        let meta: AgentLoopResultMeta = serde_json::from_value(
+            outbound
+                .metadata
+                .get(AGENT_LOOP_RESULT_META_KEY)
+                .expect("loop meta present")
+                .clone(),
+        )
+        .unwrap();
+        assert_eq!(meta.identity_source.as_deref(), Some("stub"));
+        assert_eq!(meta.prompt_tokens, 40);
+        assert_eq!(meta.completion_tokens, 22);
+        assert_eq!(meta.model.as_deref(), Some("e2e-test-model"));
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
@@ -5488,7 +5515,8 @@ mod tests {
     #[tokio::test]
     async fn handle_turn_threads_real_tool_calls_and_iterations() {
         // A turn that runs one echo tool then answers must surface real
-        // tool_calls + iterations in the OutboundMessage metadata (D8).
+        // tool_calls + iterations + token/model fields in the
+        // OutboundMessage metadata (D8 / WEFT-328).
         let transport = Arc::new(E2eRecordingTransport::new());
         let (agent, dir) = make_agent_loop(transport, "d8_toolcalls").await;
 
@@ -5517,6 +5545,12 @@ mod tests {
         assert!(meta.tool_calls[0].arguments_preview.contains("e2e-ping"));
         // No spawns in this turn.
         assert!(meta.spawned_tasks.is_empty());
+        // WEFT-328: cumulative tokens from both LLM calls (15+25, 10+12).
+        assert_eq!(meta.prompt_tokens, 40);
+        assert_eq!(meta.completion_tokens, 22);
+        assert_eq!(meta.model.as_deref(), Some("e2e-test-model"));
+        // No SystemPromptBuilder attached → identity_source stays None.
+        assert!(meta.identity_source.is_none());
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

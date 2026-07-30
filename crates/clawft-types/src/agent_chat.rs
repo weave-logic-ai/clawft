@@ -142,14 +142,13 @@ pub struct SpawnedTaskSummary {
 
 /// Result of `agent.chat`.
 ///
-/// Several fields (`prompt_tokens`, `completion_tokens`, `model`,
-/// `identity_source`) cannot always be populated end-to-end from a
-/// generic `OutboundMessage` envelope; the agent service's `dispatch`
-/// returns best-effort defaults (0, None) when the underlying loop
-/// result type does not carry the data. Since M4 D8 the loop threads a
-/// real [`AgentLoopResultMeta`] through `OutboundMessage.metadata`, so
-/// `tool_calls` / `finish_reason` / `iterations` / `spawned_tasks`
-/// carry actual values.
+/// Since WEFT-328 the loop threads a real [`AgentLoopResultMeta`] through
+/// `OutboundMessage.metadata` under [`AGENT_LOOP_RESULT_META_KEY`], so
+/// `tool_calls`, `prompt_tokens`, `completion_tokens`, `model`, and
+/// `identity_source` carry actual values on the normal agent-loop path.
+/// When the meta key is absent (non-loop outbound, older producer) the
+/// agent service's `dispatch` falls back to C1-compatible defaults
+/// (empty tool_calls, 0 tokens, `None` model/identity_source).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentChatResult {
     /// Final assistant text after the tool loop terminates.
@@ -165,13 +164,12 @@ pub struct AgentChatResult {
     pub prompt_tokens: u32,
     /// Cumulative completion tokens across iterations.
     pub completion_tokens: u32,
-    /// Echoed model name (best-effort).
+    /// Echoed model name (best-effort; from the provider response).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// Identity descriptor surfaced to the panel — diagnostic for the
-    /// drift-warning path. Daemon injects the loaded source (e.g.
-    /// `"docs-fallback"`) at the wire boundary; service-side dispatch
-    /// leaves this `None`.
+    /// drift-warning path (e.g. `"clawft"`, `"docs-fallback"`). Sourced
+    /// from the turn's identity loader via the loop meta (WEFT-328).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_source: Option<String>,
     /// Model reasoning captured across the tool loop (Hermes `<think>` /
@@ -188,24 +186,24 @@ pub struct AgentChatResult {
 }
 
 /// Well-known `OutboundMessage.metadata` key under which the daemon
-/// agent loop stashes the enriched turn result (M4 D8).
+/// agent loop stashes the enriched turn result (M4 D8 / WEFT-328).
 ///
-/// `OutboundMessage` is a generic bus envelope with no slots for the
-/// tool-call summary, finish reason, iteration count, or spawned-task
-/// list. Rather than widen the envelope, the loop serializes an
-/// [`AgentLoopResultMeta`] into the envelope's free-form `metadata`
-/// map under this key; the agent service's `result_from_outbound`
-/// reads it back. Mirrors the `AgentChatParams.metadata` precedent
-/// used for the inbound direction.
+/// `OutboundMessage` is a generic bus envelope with no first-class slots
+/// for tool-call summaries, token counts, model, or identity source.
+/// Rather than widen the envelope, the loop serializes an
+/// [`AgentLoopResultMeta`] into the free-form `metadata` map under this
+/// key; the agent service's `result_from_outbound` reads it back.
+/// Mirrors the `AgentChatParams.metadata` precedent used inbound.
 pub const AGENT_LOOP_RESULT_META_KEY: &str = "agent_loop_result";
 
 /// Enriched loop-result summary threaded from the tool loop (in
 /// `clawft-core`) to the agent service's `result_from_outbound` via
-/// `OutboundMessage.metadata[AGENT_LOOP_RESULT_META_KEY]` (M4 D8).
+/// `OutboundMessage.metadata[AGENT_LOOP_RESULT_META_KEY]` (M4 D8 /
+/// WEFT-328).
 ///
 /// Every field is `#[serde(default)]` so a missing key or a partial
-/// object degrades to the pre-M4 defaults rather than failing to
-/// deserialize.
+/// object degrades to the pre-M4 / C1 defaults rather than failing to
+/// deserialize — keeping the panel wire shape backward-compatible.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentLoopResultMeta {
     /// Tool calls executed during the loop, in order.
@@ -234,6 +232,11 @@ pub struct AgentLoopResultMeta {
     /// [`AgentChatResult::reasoning`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// Identity loader source for this turn (e.g. `"clawft"`). Populated
+    /// when a `SystemPromptBuilder` successfully loads identity; absent
+    /// when no builder is attached or the load failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_source: Option<String>,
 }
 
 /// One externally-produced turn for the `agent.turn.record` RPC.
@@ -542,6 +545,7 @@ mod tests {
             prompt_tokens: 812,
             completion_tokens: 96,
             reasoning: Some("the user asked for a sum".into()),
+            identity_source: Some("clawft".into()),
         };
         let value = serde_json::to_value(&meta).unwrap();
         let back: AgentLoopResultMeta = serde_json::from_value(value).unwrap();
@@ -553,16 +557,43 @@ mod tests {
         assert_eq!(back.prompt_tokens, 812);
         assert_eq!(back.completion_tokens, 96);
         assert_eq!(back.reasoning.as_deref(), Some("the user asked for a sum"));
+        assert_eq!(back.identity_source.as_deref(), Some("clawft"));
     }
 
     #[test]
     fn agent_loop_result_meta_partial_object_uses_defaults() {
         // A partial/absent object degrades to defaults rather than
-        // failing to deserialize.
+        // failing to deserialize — C1 panel shape stays tolerant.
         let back: AgentLoopResultMeta = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(back.iterations, 0);
         assert!(back.finish_reason.is_empty());
         assert!(back.tool_calls.is_empty());
         assert!(back.spawned_tasks.is_empty());
+        assert_eq!(back.prompt_tokens, 0);
+        assert_eq!(back.completion_tokens, 0);
+        assert!(back.model.is_none());
+        assert!(back.identity_source.is_none());
+    }
+
+    #[test]
+    fn agent_chat_result_deserializes_nonzero_token_and_identity_fields() {
+        // WEFT-328: panel / clients must accept real (non-default) values
+        // for the five fields plumbed through the loop meta.
+        let json = r#"{
+            "assistant_text": "done",
+            "tool_calls": [{"name":"echo","arguments_preview":"{}","result_preview":"ok","success":true}],
+            "finish_reason": "stop",
+            "iterations": 2,
+            "prompt_tokens": 40,
+            "completion_tokens": 22,
+            "model": "hermes-4.3-36b",
+            "identity_source": "clawft"
+        }"#;
+        let r: AgentChatResult = serde_json::from_str(json).unwrap();
+        assert_eq!(r.tool_calls.len(), 1);
+        assert_eq!(r.prompt_tokens, 40);
+        assert_eq!(r.completion_tokens, 22);
+        assert_eq!(r.model.as_deref(), Some("hermes-4.3-36b"));
+        assert_eq!(r.identity_source.as_deref(), Some("clawft"));
     }
 }

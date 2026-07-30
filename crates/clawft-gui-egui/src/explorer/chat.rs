@@ -1102,9 +1102,9 @@ mod tests {
 
     #[test]
     fn identity_warning_silent_when_field_absent() {
-        // Daemon may not populate the field on every code path
-        // (service-side dispatch leaves it None). Absence is not a
-        // warning — only an explicit non-canonical value is.
+        // Non-loop / older producers may omit the field (C1 default).
+        // Absence is not a warning — only an explicit non-canonical
+        // value is. WEFT-328 populates it on the normal agent-loop path.
         let mut view = ChatView::default();
         view.on_response_ok(&json!({
             "assistant_text": "hi",
@@ -1116,21 +1116,29 @@ mod tests {
     fn ok_response_accepts_assistant_text_field() {
         // `agent.chat` returns `assistant_text`; the panel must accept it
         // alongside the legacy `completion` field for cross-rev safety.
+        // WEFT-328: full payload with real token/model/identity values.
         let mut view = ChatView::default();
         view.history.push(ChatMessage::user("hi"));
         let response = json!({
             "assistant_text": "hello from the concierge",
-            "tool_calls": [],
+            "tool_calls": [{
+                "name": "echo",
+                "arguments_preview": "{\"text\":\"hi\"}",
+                "result_preview": "hi",
+                "success": true
+            }],
             "finish_reason": "stop",
-            "iterations": 1,
-            "prompt_tokens": 12,
-            "completion_tokens": 5,
+            "iterations": 2,
+            "prompt_tokens": 40,
+            "completion_tokens": 22,
             "model": "local",
             "identity_source": "clawft",
         });
         view.on_response_ok(&response);
         assert_eq!(view.history.len(), 2);
         assert_eq!(view.history[1].content, "hello from the concierge");
+        // Identity source captured for the drift chip (canonical → no warn).
+        assert_eq!(view.identity_warning(), None);
     }
 
     #[test]
