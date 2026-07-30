@@ -256,6 +256,72 @@ impl CommandPolicy {
 
         Ok(())
     }
+
+    /// Compact, sorted summary of allowlisted executables for tool-error text.
+    ///
+    /// Used so agent-facing denials can list what *is* allowed instead of a
+    /// bare "command not allowed" that causes blind retry spirals (WEFT-605).
+    pub fn allowlist_summary(&self) -> String {
+        if self.allowlist.is_empty() {
+            return "(empty allowlist)".to_string();
+        }
+        let mut items: Vec<&str> = self.allowlist.iter().map(String::as_str).collect();
+        items.sort_unstable();
+        // Default allowlist is ~40 entries; cap very large custom lists.
+        const MAX_LIST: usize = 60;
+        if items.len() <= MAX_LIST {
+            items.join(", ")
+        } else {
+            format!(
+                "{}, ... ({} total; truncated in this message)",
+                items[..MAX_LIST].join(", "),
+                items.len()
+            )
+        }
+    }
+
+    /// Format a policy denial for tool-error surfaces that models read.
+    ///
+    /// Always states that the command was blocked by security policy, the
+    /// concrete reason (not on allowlist / denylist / dangerous pattern), and
+    /// — when relevant — the allowed executables so the model can adapt
+    /// instead of guessing unlisted commands until max tool iterations.
+    pub fn format_denial(&self, err: &CommandPolicyError) -> String {
+        match err {
+            CommandPolicyError::NotAllowed { command } => {
+                let exe = extract_first_token(command);
+                let allowed = self.allowlist_summary();
+                format!(
+                    "blocked by security policy: `{exe}` is not on the command allowlist \
+                     (command: {command}). Reason: not on allowlist. \
+                     Allowed executables: {allowed}. \
+                     Do not retry with other unlisted commands; use an allowed executable \
+                     or answer without shell."
+                )
+            }
+            CommandPolicyError::Blocked { command, pattern } => {
+                format!(
+                    "blocked by security policy: command matched denylist pattern `{pattern}` \
+                     (command: {command}). Reason: on denylist. \
+                     Do not retry equivalent variants of this blocked pattern."
+                )
+            }
+            CommandPolicyError::DangerousPattern { command, pattern } => {
+                let mut msg = format!(
+                    "blocked by security policy: dangerous command pattern `{pattern}` \
+                     (command: {command}). Reason: dangerous pattern. \
+                     Do not retry equivalent variants of this blocked pattern."
+                );
+                if self.mode == PolicyMode::Allowlist && !self.allowlist.is_empty() {
+                    msg.push_str(&format!(
+                        " Allowed executables: {}.",
+                        self.allowlist_summary()
+                    ));
+                }
+                msg
+            }
+        }
+    }
 }
 
 /// Split a command string on shell compound operators (`&&`, `||`, `;`, `|`).
@@ -515,6 +581,71 @@ mod tests {
             command: "curl".into(),
         };
         assert_eq!(err.to_string(), "command not allowed: curl");
+    }
+
+    #[test]
+    fn format_denial_not_allowed_includes_allowlist_and_reason() {
+        let policy = CommandPolicy::safe_defaults();
+        let err = policy.validate("curl http://evil.com").unwrap_err();
+        let msg = policy.format_denial(&err);
+        assert!(
+            msg.contains("blocked by security policy"),
+            "must state policy block: {msg}"
+        );
+        assert!(
+            msg.contains("not on allowlist"),
+            "must state reason: {msg}"
+        );
+        assert!(msg.contains("curl"), "must name denied exe: {msg}");
+        assert!(
+            msg.contains("Allowed executables:"),
+            "must list allowlist: {msg}"
+        );
+        assert!(msg.contains("echo"), "allowlist summary should include echo: {msg}");
+        assert!(msg.contains("python3"), "allowlist summary should include python3: {msg}");
+        // Must not be the old bare denial.
+        assert_ne!(msg, "command not allowed: curl http://evil.com");
+        assert!(msg.len() > 40, "message must be informative, not generic");
+    }
+
+    #[test]
+    fn format_denial_dangerous_pattern_is_informative() {
+        let policy = CommandPolicy::safe_defaults();
+        let err = policy.validate("rm -rf /").unwrap_err();
+        let msg = policy.format_denial(&err);
+        assert!(msg.contains("blocked by security policy"), "{msg}");
+        assert!(msg.contains("dangerous pattern"), "{msg}");
+        assert!(msg.contains("rm -rf /"), "{msg}");
+        assert!(!msg.trim().is_empty());
+        assert!(msg.len() > 30, "must not be empty/generic: {msg}");
+    }
+
+    #[test]
+    fn format_denial_denylist_blocked_is_informative() {
+        let mut policy = CommandPolicy::safe_defaults();
+        policy.mode = PolicyMode::Denylist;
+        // Pattern on denylist but not in dangerous_patterns defaults to Blocked.
+        // Use a custom denylist entry that is not also a dangerous pattern.
+        policy.dangerous_patterns.clear();
+        policy.denylist = vec!["nmap".into()];
+        let err = policy.validate("nmap -sS 10.0.0.0/24").unwrap_err();
+        let msg = policy.format_denial(&err);
+        assert!(msg.contains("blocked by security policy"), "{msg}");
+        assert!(msg.contains("on denylist"), "{msg}");
+        assert!(msg.contains("nmap"), "{msg}");
+        assert!(msg.len() > 30, "must not be empty/generic: {msg}");
+    }
+
+    #[test]
+    fn allowlist_summary_sorted_and_non_empty() {
+        let policy = CommandPolicy::safe_defaults();
+        let summary = policy.allowlist_summary();
+        assert!(!summary.is_empty());
+        assert!(summary.contains("echo"));
+        // Sorted: "awk" appears before "echo"
+        let awk = summary.find("awk").expect("awk in summary");
+        let echo = summary.find("echo").expect("echo in summary");
+        assert!(awk < echo, "summary should be sorted: {summary}");
     }
 
     // -- split_shell_commands --

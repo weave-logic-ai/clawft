@@ -111,12 +111,13 @@ impl<P: Platform + 'static> Tool for SpawnTool<P> {
             .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f as u64)))
             .unwrap_or(DEFAULT_TIMEOUT_SECS);
 
-        // Security policy check.
+        // Security policy check — same informative denial as exec_shell (WEFT-605).
         if let Err(e) = self.policy.validate(command) {
-            warn!(command, error = %e, "spawn command rejected by security policy");
+            let reason = self.policy.format_denial(&e);
+            warn!(command, error = %reason, "spawn command rejected by security policy");
             return Err(ToolError::PermissionDenied {
                 tool: "spawn".into(),
-                reason: e.to_string(),
+                reason,
             });
         }
 
