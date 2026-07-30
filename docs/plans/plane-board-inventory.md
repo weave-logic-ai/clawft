@@ -1,6 +1,6 @@
 # Plane Board Inventory — WeftOS
 
-> Generated: 2026-07-30 21:10 UTC
+> Generated: 2026-07-30 21:23 UTC
 > Source: Plane workspace `weftos`
 > Machine-readable DAG: [`plane-dag.json`](./plane-dag.json)
 > Wave plan: [`plane-wave-plan.md`](./plane-wave-plan.md)
@@ -10,9 +10,9 @@
 | Metric | Count |
 |--------|------:|
 | Total tickets | 677 |
-| Open | 272 |
+| Open | 264 |
 | In Progress | 1 |
-| Done | 386 |
+| Done | 394 |
 | Cancelled | 19 |
 | Dependency edges | 52 |
 | Inferred domain edges | 23 |
@@ -20,14 +20,14 @@
 
 ### Open by cycle
 
-- **0.8.x**: 181
+- **0.8.x**: 173
 - **0.9.x**: 70
 - **1.0.x**: 21
 
 ### Open by workstream
 
-- **ws10-voice**: 32
 - **ws17-research**: 31
+- **ws10-voice**: 30
 - **ws02-kernel**: 25
 - **ws12-knowledge-graph**: 25
 - **ws14-deployment**: 20
@@ -37,17 +37,17 @@
 - **ws03-pipeline**: 16
 - **ws08-weftos-gui**: 14
 - **ws07-multi-agent**: 12
-- **ws13-app-substrate**: 10
-- **ws15-mcp**: 9
-- **ws06-memory**: 9
-- **ws01-core**: 8
+- **ws06-memory**: 8
+- **ws13-app-substrate**: 8
+- **ws15-mcp**: 7
 - **ws05-channels**: 7
+- **ws01-core**: 7
 - **ws04-plugin-skills**: 3
 
 ### Open by priority
 
 - **high**: 29
-- **medium**: 56
+- **medium**: 48
 - **low**: 172
 - **none**: 15
 
@@ -265,14 +265,14 @@
 | WEFT-213 | Done | medium | 0.7.x | ws10-voice | E | strong | — | — | ws10: AudioConfig / CaptureConfig / PlaybackConfig — collapse into one canonical type |
 | WEFT-214 | Todo | medium | 0.8.x | ws10-voice | E | strong | WEFT-671 | — | ws10: voice_listen / voice_speak tools — wire to real STT/TTS with cloud fallback |
 | WEFT-215 | Todo | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: weft voice setup — real model download with SHA-256 verify and progress UI |
-| WEFT-216 | Todo | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: WakeWordDetector — wire rustpotter or document an alternative |
+| WEFT-216 | Done | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: WakeWordDetector — wire rustpotter or document an alternative |
 | WEFT-217 | Todo | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: EchoCanceller and NoiseSuppressor — replace deceptive passthroughs with real DSP |
 | WEFT-218 | Todo | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: WS voice:status — connect a real backend broadcaster |
 | WEFT-219 | Todo | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: /api/voice/* — replace MSW-only mocks with real handlers in clawft-services |
 | WEFT-220 | Todo | low | 0.8.x | ws10-voice | E | strong | — | — | ws10: Windows install-service — automate schtasks or document manual route as final |
 | WEFT-221 | Todo | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: Talk Mode interruption — abort TTS when VAD trips during playback |
 | WEFT-222 | Todo | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: VoicePersonality — wire per-agent lookup in TTS dispatch |
-| WEFT-223 | Todo | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: SC-2 audio buffer zeroization and voice.audio_retention config |
+| WEFT-223 | Done | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: SC-2 audio buffer zeroization and voice.audio_retention config |
 | WEFT-224 | Todo | low | 0.8.x | ws10-voice | E | strong | — | — | ws10: SC-3 cloud-fallback transparency log line |
 | WEFT-225 | Todo | low | 0.8.x | ws10-voice | E | strong | — | — | ws10: SC-6 anti-replay nonce and transcription-echo confirmation |
 | WEFT-226 | Todo | low | 0.8.x | ws10-voice | E | strong | — | — | ws10: SC-8 voice rate limiting (commands/min, wake/min, post-fail cooldown) |
@@ -307,7 +307,7 @@
 | WEFT-255 | Done | medium | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: chat panel — system-prompt UI affordance |
 | WEFT-256 | Todo | medium | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: chat panel — model / provider switcher in chip strip |
 | WEFT-257 | Done | low | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: chat panel — heartbeat label replaces spinner occlusion |
-| WEFT-258 | Todo | medium | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: chat panel — real interactive defer (resume on { deferred: true }) |
+| WEFT-258 | Done | medium | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: chat panel — real interactive defer (resume on { deferred: true }) |
 | WEFT-259 | Done | low | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: chat panel — identity-drift / binding-thread mismatch warning |
 | WEFT-260 | Done | medium | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: terminal panel — mouse selection + clipboard |
 | WEFT-261 | Done | low | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: terminal panel — bold/italic glyph variants |
@@ -467,7 +467,7 @@
 | WEFT-415 | Done | medium | 0.8.x | ws13-app-substrate | B | strong | — | — | ws13: clawft-substrate — emit substrate/meta/adapter/<id>/health from each adapter |
 | WEFT-416 | Done | medium | 0.8.x | ws13-app-substrate | B | strong | — | — | ws13: clawft-substrate — per-id Replace/Remove deltas on processes/services topics |
 | WEFT-417 | Done | medium | 0.8.x | ws13-app-substrate | B | strong | — | — | ws13: clawft-substrate — surface Subscription closed via adapter-health topic on teardown |
-| WEFT-418 | Todo | medium | 0.8.x | ws13-app-substrate | B | strong | — | — | ws13: clawft-substrate — migrate mic adapter to substrate/<node-id>/sensor/mic/{summary,pc |
+| WEFT-418 | Done | medium | 0.8.x | ws13-app-substrate | B | strong | — | — | ws13: clawft-substrate — migrate mic adapter to substrate/<node-id>/sensor/mic/{summary,pc |
 | WEFT-419 | Done | low | 0.8.x | ws13-app-substrate | B | strong | — | — | ws13: clawft-substrate — ship a second Characterization exemplar (Enumerated or Spectral) |
 | WEFT-420 | Done | medium | 0.8.x | ws13-app-substrate | B | strong | — | — | ws13: clawft-substrate — implement cross-platform network/bluetooth or document Linux-only |
 | WEFT-421 | Done | high | 0.8.x | ws13-app-substrate | B | strong | — | — | ws13: clawft-surface — wire 13 stub-leaf canon primitives in the composer |
@@ -476,7 +476,7 @@
 | WEFT-424 | Done | low | 0.8.x | ws13-app-substrate | B | strong | — | — | ws13: clawft-surface — accept scientific (1e5) and hex (0xff) number literals |
 | WEFT-425 | Done | medium | 0.8.x | ws13-app-substrate | B | strong | — | — | ws13: clawft-surface — parse [compositions.*] and expand in composer |
 | WEFT-426 | Done | low | 0.8.x | ws13-app-substrate | B | strong | — | — | ws13: clawft-surface — drop unused egui dep from Cargo.toml |
-| WEFT-427 | Todo | medium | 0.8.x | ws13-app-substrate | B | strong | — | — | ws13: clawft-surface — extract canon types and move composer back to clawft-surface |
+| WEFT-427 | Done | medium | 0.8.x | ws13-app-substrate | B | strong | — | — | ws13: clawft-surface — extract canon types and move composer back to clawft-surface |
 | WEFT-428 | Done | low | 0.8.x | ws13-app-substrate | B | strong | — | — | ws13: clawft-surface — replace 14-line src/substrate.rs shim with direct re-export |
 | WEFT-429 | Done | high | 0.8.x | ws13-app-substrate | B | strong | — | — | ws13: integration — wire real ADR-012 governance::Gate through Substrate::subscribe_adapte |
 | WEFT-430 | Done | high | 0.8.x | ws13-app-substrate | B | strong | — | — | ws13: integration — implement honest affordance ∩ permit intersection in compose::honest_a |
@@ -544,7 +544,7 @@
 | WEFT-492 | Done | medium | 0.7.x | ws15-mcp | J | strong | — | — | ws15: docs — `weft mcp add` install path for @claude-flow/cli + sample weave.toml |
 | WEFT-493 | Done | medium | 0.8.x | ws15-mcp | J | strong | — | — | ws15: McpServerManager hot-reload — wire file-watcher or remove affordances |
 | WEFT-494 | Done | medium | 0.8.x | ws15-mcp | J | strong | — | — | ws15: `mcp.add`/`mcp.list`/`mcp.remove` daemon verbs — clarify CLI vs RPC ownership |
-| WEFT-495 | Todo | medium | 0.8.x | ws15-mcp | G | strong | — | — | ws15: WASM panel auth — token/capability model for webview proxy |
+| WEFT-495 | Done | medium | 0.8.x | ws15-mcp | G | strong | — | — | ws15: WASM panel auth — token/capability model for webview proxy |
 | WEFT-496 | Done | medium | 0.8.x | ws15-mcp | J | strong | — | — | ws15: webview vs daemon allowlist — substrate.publish gating semantics |
 | WEFT-497 | Todo | low | 0.8.x | ws15-mcp | J | strong | — | — | ws15: agent-core-chat feature flag — schedule removal post-D3 soak |
 | WEFT-498 | Done | low | 0.8.x | ws15-mcp | J | strong | — | — | ws15: AgentChatParams/Result wire types — relocate to clawft-types |
@@ -653,7 +653,7 @@
 | WEFT-601 | Done | medium | 0.8.x | ws01-core | B | weak | — | — | ws01: adopt cargo-nextest + fix 6 test/latent-bug flakes (gate 12/12 green) |
 | WEFT-602 | Done | none | 0.8.x | ws14-deployment | A | weak | — | — | ws14: release v0.6.20 — 0.6 rollup (63 assets: binaries + WASM + KB) |
 | WEFT-603 | Done | high | 0.8.x | ws11-agent-core-v1 | D | strong | — | — | weft agent -m hangs forever after a failed turn (provider error / max-iterations) |
-| WEFT-604 | Backlog | medium | 0.8.x | ws01-core | E | strong | — | — | Unify local-LLM endpoint/model config — one source of truth for daemon + weft agent + voic |
+| WEFT-604 | Done | medium | 0.8.x | ws01-core | E | strong | — | — | Unify local-LLM endpoint/model config — one source of truth for daemon + weft agent + voic |
 | WEFT-605 | Done | medium | 0.8.x | ws11-agent-core-v1 | D | strong | — | — | exec_shell security allowlist is invisible to the model — denial spiral burns max tool ite |
 | WEFT-606 | Done | medium | 0.8.x | ws10-voice | E | ok | — | — | Voice Talk-Mode turns are not anchored to the witness chain (standalone weft voice talk) |
 | WEFT-607 | Done | high | 0.8.x | ws10-voice | E | weak | — | — | agent.turn.record RPC — voice Talk-Mode turns anchored via the existing sink+anchor path |
@@ -711,7 +711,7 @@
 | WEFT-659 | Done | high | 0.8.x | ws10-voice | E | weak | — | — | voice: unclear-input gate — consume STT confidence/SNR/paralinguistics before engaging the |
 | WEFT-660 | Done | high | 0.8.x | ws12-knowledge-graph | C | weak | — | — | vector: real DiskAnnBackend::search hardcodes SearchResult.id=0 for every hit |
 | WEFT-661 | Done | high | 0.8.x | ws12-knowledge-graph | C | weak | — | — | vector: HybridBackend merges cosine (hot) and sqeuclidean (cold) raw distances — recall 0. |
-| WEFT-662 | Todo | medium | 0.8.x | ws06-memory | C | ok | — | — | upstream rvf-runtime 0.2: report 3 bugs (macOS __errno_location link failure; open() reset |
+| WEFT-662 | Done | medium | 0.8.x | ws06-memory | C | ok | — | — | upstream rvf-runtime 0.2: report 3 bugs (macOS __errno_location link failure; open() reset |
 | WEFT-663 | Done | medium | 0.8.x | ws16-browser-wasm | G | ok | — | WEFT-672 | clawft-core browser target: 10 Send-future errors in agent/local_file_sink.rs (pre-existin |
 | WEFT-664 | Done | high | 0.8.x | ws10-voice | E | weak | — | — | voice: replace spoken ack/filler with light cue tones |
 | WEFT-665 | Done | high | 0.8.x | ws06-memory | C | weak | — | WEFT-651 | memory: graft debris poisoning MEMORY.md + contentless graft rendering |
@@ -739,7 +739,7 @@
 
 ## Open tickets by workstream
 
-### ws01-core (8 open)
+### ws01-core (7 open)
 
 #### WEFT-11 — ws01: rpc — implement Windows daemon transport (named pipes) for DaemonClient
 
@@ -757,15 +757,6 @@
 - **Blocked by**: none
 - **Blocks**: none
 - **Gap**: BrowserFileSystem is currently in-memory HashMap-backed. PWA users lose all state on reload. Comment says "acceptable for the current stub/MVP phase".
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-604 — Unify local-LLM endpoint/model config — one source of truth for daemon + weft agent + voice
-
-- **State**: Backlog · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: E · **AC**: strong
-- **Labels**: ws01-core, tech-debt
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: Problem There is no single source of truth for "which local LLM endpoint + model to use" — three consumers use three different selection mechanisms (full map in docs/handoff-local-llm-config.md): 1. Daemon → [kernel.llm] (service_url/model) → clawft-service-llm::LlmClient (env LL
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
 #### WEFT-14 — ws01: platform — land OPFS-or-equivalent BrowserEnvironment persistence
@@ -1280,7 +1271,7 @@
 - **Gap**: MEMORY.md mentions "failover chain improvements". The only failover machinery in tree is in clawft-llm/src/failover.rs (provider failover), not channel failover. The PluginHost treats each channel independently. Open product question: per-message? per-session? cross-channel quorum?
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
-### ws06-memory (9 open)
+### ws06-memory (8 open)
 
 #### WEFT-92 — ws06: identity — decide binding-thread-mismatch policy refuse vs annotate (MW-14)
 
@@ -1289,15 +1280,6 @@
 - **Blocked by**: none
 - **Blocks**: none
 - **Gap**: "Hard refusal is a v1.1 follow-up." Binding-thread mismatch currently downgrades to an annotation + warn log, never refuses. Reviewer-flagged as a security posture decision.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-662 — upstream rvf-runtime 0.2: report 3 bugs (macOS __errno_location link failure; open() resets metric to L2; permanent delete bitmap)
-
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: C · **AC**: ok
-- **Labels**: bug, ws06-memory
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: Found during WEFT-616 Phases 0/1 (adc5f9bc, 2026-07-14), all worked around locally: (1) locking.rs hardcodes glibc __errno_location — binaries don't link on macOS; both clawft-core and clawft-cow-memory carry cfg(macos) shims forwarding to libc::__error() — consolidate to one sha
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
 #### WEFT-85 — ws06: substrate — emit chain_event! for session.append on every appended turn (MW-7)
@@ -1495,12 +1477,12 @@
 
 #### WEFT-258 — ws08: chat panel — real interactive defer (resume on { deferred: true })
 
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: F · **AC**: strong
+- **State**: Done · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: F · **AC**: strong
 - **Labels**: ws08-weftos-gui, audit-finding, audit-0.7.0, gap
 - **Blocked by**: none
 - **Blocks**: none
 - **Gap**: When agent returns { deferred: true, reason } the panel should prompt the user and resume on response. Today it doesn't differentiate this control case.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
+- **Shipped**: Gate Defer halts the tool loop with `finish_reason=deferred` + `DeferredActionEvent`; chat panel detects deferred wire shapes, renders Approve/Deny/guide affordance, resumes via structured user turn. See `docs/plans/wave-0l-WEFT-258-result.md`.
 
 #### WEFT-277 — ws08: composer — honest_affordances real GEPA / governance intersection
 
@@ -1756,7 +1738,7 @@
 - **Gap**: WEFT-315 shipped the bundle-size budget gate (scripts/bench/check-ui-bundle-size.sh) and an eslint-plugin-jsx-a11y static lint pass. The original AC explicitly required "axe-core integrated into the Playwright suite or run as a standalone script across all 14 routes" — that runtime axe-core scan is not in the tree. The
 - **Plan**: Wait for WEFT-561
 
-### ws10-voice (32 open)
+### ws10-voice (30 open)
 
 #### WEFT-214 — ws10: voice_listen / voice_speak tools — wire to real STT/TTS with cloud fallback
 
@@ -1774,15 +1756,6 @@
 - **Blocked by**: none
 - **Blocks**: none
 - **Gap**: weft voice setup prints a stub message; no real model fetch happens.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-216 — ws10: WakeWordDetector — wire rustpotter or document an alternative
-
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: E · **AC**: strong
-- **Labels**: ws10-voice, audit-finding, audit-0.7.0, stub
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: WakeWordDetector::process_frame always returns false. No rustpotter dependency, no model file, no CPU enforcement, no "hey weft" model under models/voice/wake/hey-weft.rpw.
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
 #### WEFT-217 — ws10: EchoCanceller and NoiseSuppressor — replace deceptive passthroughs with real DSP
@@ -1828,15 +1801,6 @@
 - **Blocked by**: none
 - **Blocks**: none
 - **Gap**: VoiceConfig.personalities (HashMap<String, VoicePersonality>) is configured and validated but no TTS path consults it. VoicePersonality.greeting_prefix is never consumed.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-223 — ws10: SC-2 audio buffer zeroization and voice.audio_retention config
-
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: E · **AC**: strong
-- **Labels**: ws10-voice, audit-finding, audit-0.7.0, security
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: No zeroize of audio buffers after use; no voice.audio_retention config option (none/session/persist). Raw audio can persist in memory or on disk longer than necessary.
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
 #### WEFT-238 — ws10: VoiceConfig.tts.provider="browser" — implement Web Speech dispatch or change default
@@ -2428,7 +2392,7 @@
 - **Gap**: MASTER_PLAN.md named export/cypher.rs and export/svg.rs. Cypher is currently realized inside export/wiki.rs flow only; svg.rs is not in tree.
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
-### ws13-app-substrate (10 open)
+### ws13-app-substrate (8 open)
 
 #### WEFT-413 — ws13: clawft-app — wire ADR-015 rule 6 once clawft-adapter exists
 
@@ -2437,24 +2401,6 @@
 - **Blocked by**: none
 - **Blocks**: none
 - **Gap**: ADR-015 rule 6 (permission ↔ adapter consistency check) is TODO'd until ADR-017/clawft-adapter lands. The let _ = Permission::Camera; placeholder is kept in scope. Governance at install time is the backstop today.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-418 — ws13: clawft-substrate — migrate mic adapter to substrate/<node-id>/sensor/mic/{summary,pcm}
-
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: B · **AC**: strong
-- **Labels**: ws13-app-substrate, audit-finding, audit-0.7.0, stub, gap
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: The in-tree MicrophoneAdapter still emits the legacy flat substrate/sensor/mic summary only — no pcm topic, no node-scoped path. ESP32-signed publish path is only declared in planning.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-427 — ws13: clawft-surface — extract canon types and move composer back to clawft-surface
-
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: B · **AC**: strong
-- **Labels**: ws13-app-substrate, audit-finding, audit-0.7.0, tech-debt
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: The composer runtime lives in clawft-gui-egui::surface_host rather than in clawft-surface. The previously-cyclic dep is broken (f5e40c3) by composer relocation — but the proper fix (extract canon types to a shared crate, move composer back) is unscheduled.
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
 #### WEFT-410 — ws13: clawft-app — decide UnknownMode validation variant fate
@@ -2702,7 +2648,7 @@
 - **Gap**: Closure-sdk is currently 'defer / conceptual-only' due to AGPL-3.0. If weftos-closure-bridge work is ever proposed it would force a separate AGPL crate behind an IPC boundary — meaning a separate release-artifact lifecycle (separate crate, separate license bundle, possibly separate Docker image).
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
-### ws15-mcp (9 open)
+### ws15-mcp (7 open)
 
 #### WEFT-559 — ws15: Windows named-pipe transport — implement DaemonClient + daemon listener for x86_64-pc-windows-msvc
 
@@ -2712,24 +2658,6 @@
 - **Blocks**: WEFT-483
 - **Gap**: Re-enable Windows in cargo-dist target list once the named-pipe transport ships. See docs/guides/weftos-deferred-requirements.md (Windows transport section). Tracks the followup from WEFT-483 (deferred from 0.7.0). Implementation outline lives in the deferred-requirements doc; ve
 - **Plan**: Strengthen AC before coding
-
-#### WEFT-495 — ws15: WASM panel auth — token/capability model for webview proxy
-
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: G · **AC**: strong
-- **Labels**: ws15-mcp, audit-finding, audit-0.7.0, gap, security
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: The webview connects to the same UDS the local user owns; there is no token, capability, or per-panel identity on the proxy layer. Multi-user kernels (per ADR-042 modes) would need to add this. For single-user dev workstations this is acceptable; for the multi-user / multi-tenant operating modes contemplated in ADR-042
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-496 — ws15: webview vs daemon allowlist — substrate.publish gating semantics
-
-- **State**: Done · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: J · **AC**: strong
-- **Labels**: ws15-mcp, audit-finding, audit-0.7.0, governance, tech-debt
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: Closed WEFT-496 / ADR-071 — revise "viewer only" to mediated-mutators-yes / raw-`substrate.publish`-no; hard denylist survives WEFT-250 union; agent.chat tools audited (no tool calls `substrate.publish`; sinks grant-gated under `_derived/`).
-- **Plan**: Shipped; see `docs/plans/wave-0k-WEFT-496-result.md`
 
 #### WEFT-558 — ws15: VSCode panel E2E — chip-icon DOM assertion (followup to WEFT-486)
 

@@ -6,14 +6,16 @@
 //! The gate decides whether the tool runs:
 //!
 //! - [`GateDecision::Permit`] — proceed with the tool execute.
-//! - [`GateDecision::Defer`] — surface the reason as the tool result;
-//!   the loop continues so the model can re-plan. Real interactive
-//!   defer is a v1.1 follow-up needing panel UI (see `chat-agent-v1.md`
-//!   risk register).
-//! - [`GateDecision::Deny`]  — same handling as defer; the reason
-//!   becomes the tool result and the loop continues. After
-//!   [`GATE_DENIAL_ESCALATION_LIMIT`] consecutive Denys in one turn
-//!   the loop emits [`EscalateToHumanEvent`](clawft_types::agent_chat::EscalateToHumanEvent)
+//! - [`GateDecision::Defer`] — surface the reason as the tool result
+//!   and **halt** the turn with [`FINISH_REASON_DEFERRED`] /
+//!   [`DeferredActionEvent`] so the chat panel can prompt the user and
+//!   resume on response (WEFT-258 interactive defer). Prior to WEFT-258
+//!   the loop continued so the model could re-plan; the structured
+//!   tool-result shape is unchanged.
+//! - [`GateDecision::Deny`]  — the reason becomes the tool result and
+//!   the loop continues. After [`GATE_DENIAL_ESCALATION_LIMIT`]
+//!   consecutive Denys in one turn the loop emits
+//!   [`EscalateToHumanEvent`](clawft_types::agent_chat::EscalateToHumanEvent)
 //!   instead of silently burning the remaining tool-iteration budget
 //!   (WEFT-345).
 //!
@@ -59,6 +61,31 @@ pub fn gate_denial_reason(result_json: &str) -> Option<String> {
         .get("reason")
         .and_then(|v| v.as_str())
         .unwrap_or("policy")
+        .to_string();
+    Some(reason)
+}
+
+/// Extract the deferral reason from a tool-result body produced by
+/// [`AgentLoop::execute_tool_with_guards`](super::loop_core::AgentLoop)
+/// when the gate returned [`GateDecision::Defer`].
+///
+/// Returns `Some(reason)` only for the structured
+/// `{"deferred": true, "reason": ...}` shape — deny/sandbox/runtime
+/// envelopes do not match.
+pub fn gate_deferral_reason(result_json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(result_json).ok()?;
+    let obj = value.as_object()?;
+    if !obj
+        .get("deferred")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let reason = obj
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("policy review")
         .to_string();
     Some(reason)
 }
@@ -214,6 +241,23 @@ mod tests {
         assert!(gate_denial_reason(r#"{"deferred":true,"reason":"review"}"#).is_none());
         assert!(gate_denial_reason(r#"{"ok":true}"#).is_none());
         assert!(gate_denial_reason("not-json").is_none());
+    }
+
+    #[test]
+    fn gate_deferral_reason_parses_structured_deferred() {
+        let body = r#"{"deferred":true,"reason":"policy review pending"}"#;
+        assert_eq!(
+            gate_deferral_reason(body).as_deref(),
+            Some("policy review pending")
+        );
+    }
+
+    #[test]
+    fn gate_deferral_reason_ignores_denied_and_error() {
+        assert!(gate_deferral_reason(r#"{"denied":true,"reason":"no"}"#).is_none());
+        assert!(gate_deferral_reason(r#"{"error":"sandbox denied: x"}"#).is_none());
+        assert!(gate_deferral_reason(r#"{"ok":true}"#).is_none());
+        assert!(gate_deferral_reason("not-json").is_none());
     }
 
     #[test]

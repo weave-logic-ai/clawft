@@ -155,6 +155,15 @@ pub struct GateDenialRecord {
 /// Matches the wire string panels / RPC clients should switch on.
 pub const FINISH_REASON_ESCALATE_TO_HUMAN: &str = "escalate_to_human";
 
+/// Well-known `finish_reason` when the tool loop halts on a gate
+/// `Defer` decision so the panel can prompt the user (WEFT-258
+/// interactive defer).
+///
+/// Matches the wire string panels switch on, alongside the structured
+/// [`DeferredActionEvent`] / top-level `{ "deferred": true, "reason" }`
+/// shape.
+pub const FINISH_REASON_DEFERRED: &str = "deferred";
+
 /// Canonical governance decision name for the WEFT-345 path — same
 /// spelling as `clawft_kernel::governance::GovernanceDecision::EscalateToHuman`.
 pub const GOVERNANCE_DECISION_ESCALATE_TO_HUMAN: &str = "EscalateToHuman";
@@ -208,6 +217,62 @@ impl EscalateToHumanEvent {
     }
 }
 
+/// Interactive defer event when the effect gate returns `Defer` for a
+/// tool call (WEFT-258).
+///
+/// The agent loop **halts** the turn and surfaces this on
+/// [`AgentLoopResultMeta::deferred`] / [`AgentChatResult::deferred`] so
+/// the chat panel can render a reason + approve/deny/input affordance
+/// and resume the conversation with the user-supplied decision.
+///
+/// Wire shape mirrors the tool-result envelope
+/// `{ "deferred": true, "reason": ... }` so panels can switch on either
+/// the structured event or a top-level `deferred: true` flag.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeferredActionEvent {
+    /// Always `true` — wire-shape compatibility with
+    /// `{ "deferred": true, "reason" }`.
+    pub deferred: bool,
+    /// Human-readable reason from the effect gate.
+    pub reason: String,
+    /// Tool name that was deferred (e.g. `"write_file"`).
+    pub tool: String,
+    /// Conversation the loop was processing.
+    pub conv_id: String,
+    /// Truncated tool arguments for the panel preview.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub arguments_preview: String,
+    /// Human-readable summary for logs / assistant_text fallback.
+    pub summary: String,
+}
+
+impl DeferredActionEvent {
+    /// Build a WEFT-258 interactive-defer event.
+    pub fn new(
+        conv_id: impl Into<String>,
+        tool: impl Into<String>,
+        reason: impl Into<String>,
+        arguments_preview: impl Into<String>,
+    ) -> Self {
+        let conv_id = conv_id.into();
+        let tool = tool.into();
+        let reason = reason.into();
+        let arguments_preview = arguments_preview.into();
+        let summary = format!(
+            "agent: tool `{tool}` deferred for human review — {reason}. \
+             Approve, deny, or reply with guidance to resume."
+        );
+        Self {
+            deferred: true,
+            reason,
+            tool,
+            conv_id,
+            arguments_preview,
+            summary,
+        }
+    }
+}
+
 /// Result of `agent.chat`.
 ///
 /// Since WEFT-328 the loop threads a real [`AgentLoopResultMeta`] through
@@ -256,6 +321,12 @@ pub struct AgentChatResult {
     /// when `None` so older panels ignore the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub escalation: Option<EscalateToHumanEvent>,
+    /// WEFT-258: present when the tool loop halted on a gate `Defer`
+    /// so the panel can prompt-and-resume. Absent on the wire when
+    /// `None`. Also detectable via `finish_reason == "deferred"` and
+    /// the event's `deferred: true` field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred: Option<DeferredActionEvent>,
 }
 
 /// Well-known `OutboundMessage.metadata` key under which the daemon
@@ -314,6 +385,10 @@ pub struct AgentLoopResultMeta {
     /// Absent when the turn ended normally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub escalation: Option<EscalateToHumanEvent>,
+    /// WEFT-258: gate `Defer` → interactive human review event.
+    /// Absent when the turn ended without a deferral.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred: Option<DeferredActionEvent>,
 }
 
 /// One externally-produced turn for the `agent.turn.record` RPC.
@@ -520,6 +595,7 @@ mod tests {
             reasoning: None,
             spawned_tasks: Vec::new(),
             escalation: None,
+            deferred: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(!json.contains("\"model\""));
@@ -529,6 +605,7 @@ mod tests {
         // Empty spawned_tasks must not appear on the wire (backward-compat).
         assert!(!json.contains("\"spawned_tasks\""));
         assert!(!json.contains("\"escalation\""));
+        assert!(!json.contains("\"deferred\""));
     }
 
     #[test]
@@ -577,6 +654,7 @@ mod tests {
                 status: "completed".into(),
             }],
             escalation: None,
+            deferred: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("\"spawned_tasks\""));
@@ -627,6 +705,7 @@ mod tests {
             reasoning: Some("the user asked for a sum".into()),
             identity_source: Some("clawft".into()),
             escalation: None,
+            deferred: None,
         };
         let value = serde_json::to_value(&meta).unwrap();
         let back: AgentLoopResultMeta = serde_json::from_value(value).unwrap();
@@ -640,6 +719,7 @@ mod tests {
         assert_eq!(back.reasoning.as_deref(), Some("the user asked for a sum"));
         assert_eq!(back.identity_source.as_deref(), Some("clawft"));
         assert!(back.escalation.is_none());
+        assert!(back.deferred.is_none());
     }
 
     #[test]
@@ -656,6 +736,7 @@ mod tests {
         assert!(back.model.is_none());
         assert!(back.identity_source.is_none());
         assert!(back.escalation.is_none());
+        assert!(back.deferred.is_none());
     }
 
     #[test]
@@ -705,12 +786,57 @@ mod tests {
                     reason: "blocked".into(),
                 }],
             )),
+            deferred: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("EscalateToHuman"));
         let back: AgentChatResult = serde_json::from_str(&json).unwrap();
         assert_eq!(back.finish_reason, FINISH_REASON_ESCALATE_TO_HUMAN);
         assert_eq!(back.escalation.as_ref().unwrap().decision, "EscalateToHuman");
+    }
+
+    #[test]
+    fn deferred_action_event_wire_shape() {
+        let event = DeferredActionEvent::new(
+            "conv-1",
+            "write_file",
+            "policy review pending",
+            "{\"path\":\"x\"}",
+        );
+        assert!(event.deferred);
+        assert_eq!(event.tool, "write_file");
+        assert_eq!(event.reason, "policy review pending");
+        assert!(event.summary.contains("write_file"));
+        let v = serde_json::to_value(&event).unwrap();
+        assert_eq!(v["deferred"], true);
+        assert_eq!(v["reason"], "policy review pending");
+    }
+
+    #[test]
+    fn agent_chat_result_deferred_round_trips() {
+        let event = DeferredActionEvent::new("c", "echo", "needs review", "{}");
+        let r = AgentChatResult {
+            assistant_text: event.summary.clone(),
+            tool_calls: vec![],
+            finish_reason: FINISH_REASON_DEFERRED.into(),
+            iterations: 1,
+            prompt_tokens: 5,
+            completion_tokens: 2,
+            model: None,
+            identity_source: None,
+            reasoning: None,
+            spawned_tasks: vec![],
+            escalation: None,
+            deferred: Some(event),
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"deferred\":true") || json.contains("\"deferred\": true"));
+        let back: AgentChatResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.finish_reason, FINISH_REASON_DEFERRED);
+        let d = back.deferred.expect("deferred event");
+        assert!(d.deferred);
+        assert_eq!(d.tool, "echo");
+        assert_eq!(d.reason, "needs review");
     }
 
     #[test]
