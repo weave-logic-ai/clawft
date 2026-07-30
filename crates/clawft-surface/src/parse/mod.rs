@@ -9,4 +9,6 @@
 pub mod expr;
 pub mod toml;
 
-pub use self::toml::{ParseError, parse_all_surface_variants, parse_surface_toml};
+pub use self::toml::{
+    ParseError, parse_all_surface_variants, parse_compositions, parse_surface_toml,
+};

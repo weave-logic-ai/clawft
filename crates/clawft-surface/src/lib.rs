@@ -4,9 +4,9 @@
 //!
 //! This crate is the **M1.5 subset** of ADR-016 — sufficient for the
 //! WeftOS Admin reference panel (session-10 §6.1). Out of scope for
-//! M1.5: ternary, nested lambdas, user-defined compositions, real
-//! governance intersection, variant-id stamping, hot-path
-//! memoisation. Sibling milestones M1.6+ fill these in.
+//! M1.5: ternary, nested lambdas, real governance intersection,
+//! variant-id stamping, hot-path memoisation. Sibling milestones
+//! M1.6+ fill these in.
 //!
 //! # M1.5 scope reductions vs ADR-016 §5
 //!
@@ -22,16 +22,16 @@
 //!   rejected with `ParseError::NestedLambda`. Sibling lambdas
 //!   (e.g. the `s -> …` inside a `count(…, s -> …)` that sits
 //!   beside another `t -> …` at the same depth) are permitted.
-//! - User-defined compositions (`[compositions.*]`) — the TOML
-//!   parser does not read this table.
 //!
-//! Already shipped in 0.7.0 (history note for downstream readers):
+//! Already shipped (history note for downstream readers):
 //! - `sort(list, key)` ordering combinator (WEFT-423).
 //! - `.first` / `.last` field-access shorthand on list values
 //!   (WEFT-422); the function-call form `first($xs)` / `last($xs)`
 //!   continues to work.
 //! - Scientific (`1e5`, `1.5e-3`) and hex (`0xff`) number literals
 //!   (WEFT-424).
+//! - User-defined compositions (`[compositions.*]`) — parsed and
+//!   expanded at load time into canon IRIs (WEFT-425 / ADR-016 §7).
 //!
 //! See `.planning/symposiums/compositional-ui/adrs/adr-016-surface-description.md`
 //! §5 for the full authoritative grammar.
@@ -93,8 +93,8 @@ pub mod substrate {
 
 pub use substrate::OntologySnapshot;
 pub use tree::{
-    AffordanceDecl, AttrValue, Binding, IdentityIri, Input, Invocation, Mode, SurfaceNode,
-    SurfaceTree,
+    AffordanceDecl, AttrValue, Binding, CompositionDef, IdentityIri, Input, Invocation, Mode,
+    SurfaceNode, SurfaceTree,
 };
 
 // NOTE on composer location (M1.5-D): the composer runtime

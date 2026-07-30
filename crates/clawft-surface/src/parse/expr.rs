@@ -22,7 +22,10 @@
 //! typed error so future milestones can grow it safely):
 //! - Ternary `?:` operator.
 //! - Nested lambdas (a lambda body that itself contains `->`).
-//! - User-defined compositions (`[compositions.*]`).
+//!
+//! User-defined compositions (`[compositions.*]`) are handled by the
+//! TOML surface parser (WEFT-425 / ADR-016 §7), not the expression
+//! language — they expand at load time into canon IRIs.
 
 use std::iter::Peekable;
 use std::str::Chars;
