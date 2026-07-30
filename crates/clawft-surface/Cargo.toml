@@ -22,6 +22,13 @@ thiserror = { workspace = true }
 # the same types as the manifest + substrate layers.
 clawft-app = { workspace = true }
 clawft-substrate = { workspace = true }
+# WEFT-427: shared canon primitives so the composer can live here
+# without a cycle through clawft-gui-egui.
+clawft-canon = { workspace = true }
+# Composer drives egui::Ui + egui_extras strip cells (same versions as
+# clawft-canon / clawft-gui-egui).
+egui = "0.34"
+egui_extras = { version = "0.34", features = ["all_loaders", "datepicker"] }
 
 [dev-dependencies]
 # Headless eval tests use only serde_json fixtures; no UI deps required.

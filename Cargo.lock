@@ -1100,6 +1100,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "clawft-canon"
+version = "0.6.20"
+dependencies = [
+ "egui",
+ "egui_dock",
+ "egui_extras",
+ "egui_plot",
+ "image",
+ "jiff",
+]
+
+[[package]]
 name = "clawft-casestudy-gen-qsr"
 version = "0.6.20"
 dependencies = [
@@ -1308,6 +1320,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "clawft-app",
+ "clawft-canon",
  "clawft-kernel",
  "clawft-rpc",
  "clawft-substrate",
@@ -1651,7 +1664,10 @@ name = "clawft-surface"
 version = "0.6.20"
 dependencies = [
  "clawft-app",
+ "clawft-canon",
  "clawft-substrate",
+ "egui",
+ "egui_extras",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

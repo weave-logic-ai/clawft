@@ -5,7 +5,7 @@
 
 use std::borrow::Cow;
 
-use eframe::egui;
+use egui;
 use egui_plot::{Line, Plot as EguiPlot, PlotPoints};
 
 use super::CanonWidget;

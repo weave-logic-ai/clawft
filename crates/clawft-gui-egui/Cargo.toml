@@ -142,6 +142,8 @@ clawft-substrate = { workspace = true }
 clawft-app = { workspace = true }
 # M1.5-B + M1.5-D/E: surface-description IR + composer (ADR-016).
 clawft-surface = { workspace = true }
+# WEFT-427: shared canon primitives (re-exported as `crate::canon`).
+clawft-canon = { workspace = true }
 # ── Native-only dependencies ─────────────────────────────────────────
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

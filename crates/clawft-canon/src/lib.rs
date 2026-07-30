@@ -94,7 +94,7 @@ mod tests {
             "m",
             Modality::Modal,
             "Confirm",
-            |_ui: &mut eframe::egui::Ui| {},
+            |_ui: &mut egui::Ui| {},
         );
         assert!(m.mutation_axes().is_empty());
 
@@ -102,7 +102,7 @@ mod tests {
             "m",
             Modality::Floating,
             "Inspector",
-            |_ui: &mut eframe::egui::Ui| {},
+            |_ui: &mut egui::Ui| {},
         );
         assert!(!f.mutation_axes().is_empty());
     }
@@ -111,7 +111,7 @@ mod tests {
     fn canvas_transform_defaults_identity() {
         let t = CanvasTransform::default();
         assert_eq!(t.scale, 1.0);
-        assert_eq!(t.offset, eframe::egui::Vec2::ZERO);
+        assert_eq!(t.offset, egui::Vec2::ZERO);
     }
 
     #[test]
@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn grid_has_no_own_affordances() {
-        let g = Grid::new("g", 2, |_ui: &mut eframe::egui::Ui| {});
+        let g = Grid::new("g", 2, |_ui: &mut egui::Ui| {});
         assert!(g.affordances().is_empty());
     }
 
@@ -179,13 +179,13 @@ mod tests {
     fn tabs_exposes_switch_tab() {
         let labels = ["a", "b"];
         let mut sel = 0usize;
-        let t = Tabs::new("t", &labels, &mut sel, |_ui: &mut eframe::egui::Ui, _| {});
+        let t = Tabs::new("t", &labels, &mut sel, |_ui: &mut egui::Ui, _| {});
         assert_eq!(t.affordances().len(), 1);
         assert_eq!(t.affordances()[0].name.as_ref(), "switch-tab");
     }
 }
 
-use eframe::egui;
+use egui;
 
 /// Typed state payload. Primitives return whatever shape their
 /// ontology IRI demands (`ui://field.value`, `ui://gauge.value`, …).

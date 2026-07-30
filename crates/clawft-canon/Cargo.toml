@@ -1,0 +1,27 @@
+[package]
+name = "clawft-canon"
+version.workspace = true
+publish = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Primitive canon widgets + return-signal types (ADR-001 / ADR-006) shared by clawft-surface composer and clawft-gui-egui"
+
+[lib]
+name = "clawft_canon"
+path = "src/lib.rs"
+
+[dependencies]
+# Pure-egui widget stack — no eframe (app runner stays in gui-egui).
+egui = "0.34"
+# `datepicker` enables `egui_extras::DatePickerButton` (canon `Field::Date`).
+egui_extras = { version = "0.34", features = ["all_loaders", "datepicker"] }
+# Named direct dep so `FieldValue::Date(jiff::civil::Date)` is part of the
+# public surface without a re-export hop (egui_extras 0.34 datepicker uses jiff).
+jiff = { version = "0.2.23", default-features = false, features = ["std"] }
+egui_plot = "0.35"
+# ADR-001 row 10 — `ui://dock` via egui_dock.
+egui_dock = "0.19"
+# PNG-only image pin (matches clawft-gui-egui / WEFT-246 wasm budget).
+image = { version = "0.25", default-features = false, features = ["png"] }

@@ -41,11 +41,11 @@ use std::collections::BTreeSet;
 
 use clawft_app::manifest::{AppManifest, Permission};
 use clawft_app::permission_covered;
-use clawft_surface::eval::{Value, eval_binding};
-use clawft_surface::substrate::OntologySnapshot;
-use clawft_surface::tree::{AffordanceDecl, AttrValue, IdentityIri, SurfaceNode, SurfaceTree};
+use crate::eval::{Value, eval_binding};
+use crate::substrate::OntologySnapshot;
+use crate::tree::{AffordanceDecl, AttrValue, IdentityIri, SurfaceNode, SurfaceTree};
 
-use crate::canon::{
+use clawft_canon::{
     CanonResponse, CanonWidget, Canvas, CellSize, Chip, ChipTone, Field, FieldKind, FieldValue,
     Gauge, Grid, Media, MediaFit, Pressable, Sheet, Slider, Stack, StackAxis, StreamView, Strip,
     StripAxis, Table, TableColumn, Tabs, Toggle, pressable::PressableStyle,
@@ -747,14 +747,14 @@ fn render_heatmap(
     let raw: Option<serde_json::Value> = node
         .bindings
         .get("values")
-        .and_then(|b| clawft_surface::eval::eval_binding(b, snap).ok())
+        .and_then(|b| crate::eval::eval_binding(b, snap).ok())
         .and_then(|v| match v {
-            clawft_surface::eval::Value::Json(j) => Some(j),
-            clawft_surface::eval::Value::List(xs) => Some(serde_json::Value::Array(
+            crate::eval::Value::Json(j) => Some(j),
+            crate::eval::Value::List(xs) => Some(serde_json::Value::Array(
                 xs.into_iter()
                     .map(|x| match x {
-                        clawft_surface::eval::Value::Int(i) => serde_json::json!(i),
-                        clawft_surface::eval::Value::Num(n) => serde_json::json!(n),
+                        crate::eval::Value::Int(i) => serde_json::json!(i),
+                        crate::eval::Value::Num(n) => serde_json::json!(n),
                         _ => serde_json::Value::Null,
                     })
                     .collect(),
@@ -1451,7 +1451,7 @@ fn render_plot(
                 .collect()
         })
         .unwrap_or_default();
-    let p = crate::canon::Plot::new(&node.path)
+    let p = clawft_canon::Plot::new(&node.path)
         .points(&series)
         .variant(0);
     let resp = p.show(ui);
@@ -1698,7 +1698,7 @@ pub fn honest_affordances(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clawft_surface::tree::IdentityIri;
+    use crate::tree::IdentityIri;
 
     fn aff(name: &str, verb: &str) -> AffordanceDecl {
         AffordanceDecl {

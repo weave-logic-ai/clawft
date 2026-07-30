@@ -8,7 +8,7 @@
 //! for pushing these onto the observation stream — this module does
 //! not perform I/O.
 
-use eframe::egui;
+use egui;
 
 use super::types::{Affordance, IdentityUri, VariantId};
 

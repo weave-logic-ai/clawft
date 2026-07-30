@@ -38,6 +38,7 @@ members = [
     "crates/clawft-gui-egui",
     "crates/clawft-substrate",
     "crates/clawft-surface",
+    "crates/clawft-canon",
     "crates/clawft-treecalc",
     "crates/clawft-casestudy-gen-qsr",
     "crates/clawft-service-whisper",
@@ -303,6 +304,7 @@ weftos = { version = "0.6.20", path = "crates/weftos", default-features = false 
 clawft-substrate = { version = "0.6.20", path = "crates/clawft-substrate" }
 clawft-app = { version = "0.6.20", path = "crates/clawft-app" }
 clawft-surface = { version = "0.6.20", path = "crates/clawft-surface" }
+clawft-canon = { version = "0.6.20", path = "crates/clawft-canon" }
 clawft-service-whisper = { version = "0.6.20", path = "crates/clawft-service-whisper" }
 clawft-service-llm = { version = "0.6.20", path = "crates/clawft-service-llm" }
 clawft-service-terminal = { version = "0.6.20", path = "crates/clawft-service-terminal" }
