@@ -111,6 +111,19 @@ pub struct RoutingConfig {
     /// [`LlmClassifierRouter`]: ../../clawft_core/agent/context_router/llm_classifier/struct.LlmClassifierRouter.html
     #[serde(default = "default_context_router", alias = "contextRouter")]
     pub context_router: String,
+
+    /// Maximum permission level a workspace config may grant (WEFT-47).
+    ///
+    /// Used by workspace ceiling validation (`validate_workspace_ceiling`)
+    /// so operators can raise (or lower) the hard ceiling without patching
+    /// code. Default is `1` (user level) — matching the historical constant
+    /// that blocked workspaces from granting admin (`2`). Missing field in
+    /// JSON/TOML deserializes to this default for backward compatibility.
+    #[serde(
+        default = "default_max_grantable_level",
+        alias = "maxGrantableLevel"
+    )]
+    pub max_grantable_level: u8,
 }
 
 fn default_routing_mode() -> String {
@@ -122,6 +135,14 @@ fn default_routing_mode() -> String {
 /// flip to `"llm-classifier"` to enable the Phase E1 router.
 fn default_context_router() -> String {
     "null".into()
+}
+
+/// Default workspace permission ceiling: user level (`1`).
+///
+/// Matches the historical `DEFAULT_MAX_GRANTABLE_LEVEL` constant that
+/// lived in `routing_validation` before WEFT-47 promoted it to config.
+pub fn default_max_grantable_level() -> u8 {
+    1
 }
 
 impl Default for RoutingConfig {
@@ -136,6 +157,7 @@ impl Default for RoutingConfig {
             cost_budgets: CostBudgetConfig::default(),
             rate_limiting: RateLimitConfig::default(),
             context_router: default_context_router(),
+            max_grantable_level: default_max_grantable_level(),
         }
     }
 }
@@ -635,6 +657,7 @@ mod tests {
         assert!(cfg.selection_strategy.is_none());
         assert!(cfg.fallback_model.is_none());
         assert!(!cfg.escalation.enabled);
+        assert_eq!(cfg.max_grantable_level, 1);
     }
 
     #[test]
@@ -913,6 +936,25 @@ mod tests {
         assert!(cfg.selection_strategy.is_none());
         assert!(cfg.fallback_model.is_none());
         assert!(!cfg.escalation.enabled);
+        // WEFT-47: missing max_grantable_level deserializes to historical default.
+        assert_eq!(cfg.max_grantable_level, default_max_grantable_level());
+    }
+
+    #[test]
+    fn max_grantable_level_serde_and_alias() {
+        // Explicit snake_case.
+        let cfg: RoutingConfig =
+            serde_json::from_str(r#"{ "max_grantable_level": 2 }"#).unwrap();
+        assert_eq!(cfg.max_grantable_level, 2);
+
+        // camelCase alias.
+        let cfg: RoutingConfig =
+            serde_json::from_str(r#"{ "maxGrantableLevel": 0 }"#).unwrap();
+        assert_eq!(cfg.max_grantable_level, 0);
+
+        // Missing field → default 1 (backward-compat).
+        let cfg: RoutingConfig = serde_json::from_str(r#"{ "mode": "tiered" }"#).unwrap();
+        assert_eq!(cfg.max_grantable_level, 1);
     }
 
     #[test]

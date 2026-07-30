@@ -489,13 +489,14 @@ fn validate_fallback_model(config: &RoutingConfig, errors: &mut Vec<ValidationEr
     }
 }
 
-// ── Workspace ceiling enforcement (FIX-04) ──────────────────────────────
+// ── Workspace ceiling enforcement (FIX-04 / WEFT-47) ────────────────────
 
 /// Default maximum grantable permission level for workspace configs.
 ///
-/// Until `max_grantable_level` is added to [`RoutingConfig`], this constant
-/// provides the default ceiling. Workspaces cannot grant levels above this.
-const DEFAULT_MAX_GRANTABLE_LEVEL: u8 = 1;
+/// Kept for call sites / tests that need the historical default without
+/// loading a full [`RoutingConfig`]. Prefer reading
+/// [`RoutingConfig::max_grantable_level`] (WEFT-47) at validation time.
+pub const DEFAULT_MAX_GRANTABLE_LEVEL: u8 = 1;
 
 /// Validate that a workspace config does not exceed the global config ceiling.
 ///
@@ -503,7 +504,7 @@ const DEFAULT_MAX_GRANTABLE_LEVEL: u8 = 1;
 /// An empty [`Vec`] means the workspace is within bounds.
 ///
 /// Security-sensitive ceiling fields:
-/// - `level`: cannot exceed `DEFAULT_MAX_GRANTABLE_LEVEL` (1)
+/// - `level`: cannot exceed `global.max_grantable_level` (default 1)
 /// - `escalation_allowed`: cannot be true if global is false
 /// - `tool_access`: cannot add tools not in global allowlist
 /// - `rate_limit`: workspace cannot increase beyond global
@@ -515,7 +516,9 @@ pub fn validate_workspace_ceiling(
     workspace: &RoutingConfig,
 ) -> Vec<ValidationError> {
     let mut errors = Vec::new();
-    let max_grantable = DEFAULT_MAX_GRANTABLE_LEVEL;
+    // WEFT-47: ceiling is operator-configurable on global RoutingConfig.
+    // Missing field deserializes to default_max_grantable_level() = 1.
+    let max_grantable = global.max_grantable_level;
 
     // Check the three named permission levels.
     check_level_ceiling(
@@ -1664,6 +1667,91 @@ mod tests {
         assert!(
             !tool_errors,
             "workspace tools under global wildcard should pass"
+        );
+    }
+
+    // ── Test 46: WEFT-47 — elevated level accepted when global allows ─
+
+    /// Workspace may grant level 2 only when global.max_grantable_level ≥ 2.
+    /// Ties to WEFT-10 ceiling: validation rejects elevation under default
+    /// ceiling (1) but accepts it when the operator raises the config field.
+    #[test]
+    fn workspace_elevated_level_accepted_when_global_max_grantable_allows() {
+        // Default ceiling (1): level 2 is rejected.
+        let global_default = valid_tiered_config();
+        assert_eq!(
+            global_default.max_grantable_level, DEFAULT_MAX_GRANTABLE_LEVEL,
+            "valid_tiered_config should inherit default max_grantable_level=1"
+        );
+        let mut workspace = RoutingConfig::default();
+        workspace.permissions.user.level = Some(2);
+        let errors = validate_workspace_ceiling(&global_default, &workspace);
+        assert!(
+            has_error(
+                &errors,
+                "routing.permissions.user.level",
+                ValidationSeverity::Error
+            ),
+            "level 2 must be rejected under default max_grantable_level=1, got: {:?}",
+            errors
+        );
+
+        // Raised ceiling (2): same workspace grant is accepted.
+        let mut global_raised = valid_tiered_config();
+        global_raised.max_grantable_level = 2;
+        let errors = validate_workspace_ceiling(&global_raised, &workspace);
+        let level_errors = errors.iter().any(|e| {
+            e.field.ends_with(".level") && e.severity == ValidationSeverity::Error
+        });
+        assert!(
+            !level_errors,
+            "level 2 must be accepted when global.max_grantable_level=2, got: {:?}",
+            errors
+        );
+
+        // Ceiling still hard-bounds: level 3 rejected even when max is 2.
+        workspace.permissions.user.level = Some(3);
+        let errors = validate_workspace_ceiling(&global_raised, &workspace);
+        assert!(
+            has_error(
+                &errors,
+                "routing.permissions.user.level",
+                ValidationSeverity::Error
+            ),
+            "level 3 must still exceed max_grantable_level=2, got: {:?}",
+            errors
+        );
+    }
+
+    // ── Test 47: WEFT-47 — missing field uses default ceiling ────────
+
+    #[test]
+    fn max_grantable_level_missing_field_uses_default() {
+        // Simulate a pre-WEFT-47 config JSON without the field.
+        let global: RoutingConfig = serde_json::from_str(
+            r#"{
+                "mode": "tiered",
+                "tiers": [{
+                    "name": "free",
+                    "models": ["groq/llama-3.1-8b"],
+                    "complexity_range": [0.0, 1.0],
+                    "cost_per_1k_tokens": 0.0
+                }]
+            }"#,
+        )
+        .expect("pre-WEFT-47 config without max_grantable_level must deserialize");
+        assert_eq!(global.max_grantable_level, DEFAULT_MAX_GRANTABLE_LEVEL);
+
+        let mut workspace = RoutingConfig::default();
+        workspace.permissions.user.level = Some(2);
+        let errors = validate_workspace_ceiling(&global, &workspace);
+        assert!(
+            has_error(
+                &errors,
+                "routing.permissions.user.level",
+                ValidationSeverity::Error
+            ),
+            "missing max_grantable_level must keep historical ceiling of 1"
         );
     }
 }

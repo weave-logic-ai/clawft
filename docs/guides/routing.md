@@ -581,15 +581,34 @@ The `RateLimiter` enforces per-user request limits:
 ### Workspace Ceiling Enforcement
 
 When a workspace config overrides routing permissions, the
-`PermissionResolver` enforces ceilings:
+`PermissionResolver` and `validate_workspace_ceiling` enforce ceilings
+from the **global** routing config:
 
-- Workspace cannot grant a level above `max_grantable_level` (default: 1)
+- Workspace cannot grant a `permissions.*.level` above global
+  `routing.max_grantable_level` (default: `1` = user). Operators raise
+  this field (e.g. `"max_grantable_level": 2`) when workspaces need to
+  grant admin without a code change (WEFT-47).
 - Workspace cannot enable escalation if global disables it
 - Workspace cannot increase rate limits beyond global
 - Workspace cannot increase cost budgets beyond global
 - Workspace cannot grant wildcard tool access if global doesn't
 
 This prevents a malicious `.clawft/config.json` from escalating privileges.
+
+```json
+{
+  "routing": {
+    "max_grantable_level": 2,
+    "permissions": {
+      "user": { "level": 1 },
+      "admin": { "level": 2 }
+    }
+  }
+}
+```
+
+Missing `max_grantable_level` deserializes to `1` for backward
+compatibility with pre-0.8 configs.
 
 ### Configuration
 
