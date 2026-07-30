@@ -18,6 +18,7 @@ pub mod cron;
 pub mod daemon_guard;
 pub mod gateway;
 pub mod help_cmd;
+pub mod mcp_cmd;
 #[cfg(feature = "services")]
 pub mod mcp_server;
 pub mod memory_cmd;

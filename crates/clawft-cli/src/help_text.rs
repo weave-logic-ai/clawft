@@ -9,6 +9,7 @@ pub fn general_help() -> String {
     output.push_str("Subcommands:\n");
     output.push_str("  agent          Start an interactive agent session or send a message\n");
     output.push_str("  gateway        Start channel gateway (Telegram, Slack, etc.)\n");
+    output.push_str("  mcp            Manage MCP servers (add / list / remove)\n");
     output.push_str("  mcp-server     Run as an MCP tool server over stdio\n");
     output.push_str("  status         Show configuration status and diagnostics\n");
     output.push_str("  channels       Inspect channel configuration\n");
@@ -25,7 +26,7 @@ pub fn general_help() -> String {
     output.push_str("  kernel         WeftOS kernel management (status, ps, boot)\n");
     output.push_str("  help           Show help for a topic\n");
     output.push_str("  completions    Generate shell completions\n");
-    output.push_str("\nHelp topics: skills, agents, tools, commands, config, ui, kernel\n");
+    output.push_str("\nHelp topics: skills, agents, tools, commands, config, mcp, ui, kernel\n");
     output.push_str("  Run 'weft help <topic>' for more information on a topic.");
     output
 }
@@ -93,9 +94,37 @@ pub fn topic_help(topic: &str) -> String {
              weft tools deny <pattern>    Add a glob pattern to the tool denylist\n\
              weft tools allow <pattern>   Remove a pattern from the tool denylist\n\
              \n\
+             See also: weft help mcp\n\
+             \n\
              Interactive commands:\n\
              \n\
              /tools                       List all registered tools"
+            .into(),
+        "mcp" => "MCP (Model Context Protocol) servers expose tools to the agent.\n\
+             \n\
+             Configure outbound connections with `weft mcp` (edits config\n\
+             under tools.mcpServers / tools.mcp_servers). Run clawft itself\n\
+             as a server with `weft mcp-server`.\n\
+             \n\
+             CLI commands:\n\
+             \n\
+             weft mcp add <name> --command <cmd> [--arg ...] [--env KEY=VAL]\n\
+             weft mcp add <name> --url https://…\n\
+             weft mcp add <name> -- npx -y @example/mcp-server\n\
+             weft mcp list\n\
+             weft mcp remove <name>\n\
+             weft mcp-server              Serve clawft tools over stdio\n\
+             weft tools mcp               List servers with live tool counts\n\
+             \n\
+             Writes go to CLAWFT_CONFIG, clawft.toml / weave.toml (if present),\n\
+             or ~/.clawft/config.json. Updates are atomic (tmp+rename). When a\n\
+             daemon reload RPC is unavailable, a restart/hot-reload hint is printed.\n\
+             \n\
+             Examples:\n\
+               weft mcp add claude-flow -- npx --no-install @claude-flow/cli mcp start\n\
+               weft mcp add remote --url https://mcp.example.com/sse\n\
+               weft mcp list\n\
+               weft mcp remove claude-flow"
             .into(),
         "commands" => "Interactive slash commands (available inside `weft agent`):\n\
              \n\
