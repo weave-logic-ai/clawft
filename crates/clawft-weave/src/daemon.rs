@@ -79,6 +79,16 @@ fn daemon_agent() -> Option<Arc<DaemonAgentService>> {
     DAEMON_AGENT.get().cloned()
 }
 
+/// ADR-069 / WEFT-641: daemon-wide atom primary index (Panopticon).
+/// Set at boot when the agent anchor is wired (chain path present); `None`
+/// when anchors are off — absence is a supported mode (P3 removability).
+/// Serves `atom.locate` / `atom.audit` RPCs; never load-bearing for turns.
+static DAEMON_ATOM_REGISTRY: OnceLock<Arc<clawft_service_agent::AtomRegistry>> = OnceLock::new();
+
+fn daemon_atom_registry() -> Option<Arc<clawft_service_agent::AtomRegistry>> {
+    DAEMON_ATOM_REGISTRY.get().cloned()
+}
+
 /// WEFT-654: daemon-wide handle to the concrete [`AgentLoop`] behind
 /// `DAEMON_AGENT`, stashed separately because `AgentLoopHandle` (the trait
 /// `AgentService<H>` is generic over) doesn't expose the review-gate
@@ -1471,6 +1481,18 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
                 );
                 let mut anchor =
                     clawft_service_agent::KernelTurnAnchor::new(chain.clone(), anchor_causal);
+                // ADR-069 / WEFT-641: atom primary index (Panopticon). Wired
+                // whenever the chain is present (mint needs event.sequence).
+                // Fire-and-forget at the anchor; RPC surface reads the same Arc.
+                if chain.is_some() {
+                    let registry = clawft_service_agent::AtomRegistry::shared();
+                    anchor = anchor.with_atom_registry(registry.clone());
+                    if DAEMON_ATOM_REGISTRY.set(registry).is_err() {
+                        warn!("atom registry already set — reusing prior instance");
+                    } else {
+                        info!("ADR-069 atom registry wired (atom.locate / atom.audit)");
+                    }
+                }
                 // ADR-058 Phase 5.1: the L2 tier needs the witness chain (its
                 // sequence is the index key), so it lives only when chain
                 // anchoring is enabled. The embedder is the ADR-059 Qwen3
@@ -6547,6 +6569,52 @@ async fn dispatch(
                 .unwrap_or(serde_json::Value::Null);
             crate::voice_trace::voice_trace().record(&conv_id, &kind, detail);
             Response::success(serde_json::json!({ "recorded": true }))
+        }
+        // ADR-069 / WEFT-641: reverse-resolve an atom by chain_seq or uid.
+        // Read-only over projections (P3); returns null locator when unknown.
+        "atom.locate" => {
+            let Some(registry) = daemon_atom_registry() else {
+                return Response::error(
+                    "atom.locate unavailable — atom registry not wired \
+                     (enable [kernel.agent] anchor_chain)",
+                );
+            };
+            let key = if let Some(seq) = params.get("chain_seq").and_then(|v| v.as_u64()) {
+                clawft_service_agent::AtomKey::ByChainSeq(seq)
+            } else if let Some(uid) = params.get("uid").and_then(|v| v.as_str()) {
+                if uid.is_empty() {
+                    return Response::error("atom.locate uid must be non-empty");
+                }
+                clawft_service_agent::AtomKey::ByUid(uid.to_string())
+            } else {
+                return Response::error(
+                    "atom.locate requires chain_seq (u64) or uid (hex string)",
+                );
+            };
+            match registry.locate(key) {
+                Some(loc) => Response::success(serde_json::to_value(loc).unwrap_or_else(|_| {
+                    serde_json::json!({ "error": "locator serialize failed" })
+                })),
+                None => Response::success(serde_json::json!({ "locator": null })),
+            }
+        }
+        // ADR-069 audit — internal map agreement + optional projection samples
+        // (e.g. democritus chain_seq=0 rows). Read-only; never mutates lenses.
+        "atom.audit" => {
+            let Some(registry) = daemon_atom_registry() else {
+                return Response::error(
+                    "atom.audit unavailable — atom registry not wired \
+                     (enable [kernel.agent] anchor_chain)",
+                );
+            };
+            let rows: Vec<clawft_service_agent::ProjectionAuditRow> = params
+                .get("projections")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            let report = registry.audit_projections(&rows);
+            Response::success(serde_json::to_value(report).unwrap_or_else(|_| {
+                serde_json::json!({ "ok": false, "error": "report serialize failed" })
+            }))
         }
         "conversation.graph" => {
             let conv_id = match params.get("conv_id").and_then(|v| v.as_str()) {

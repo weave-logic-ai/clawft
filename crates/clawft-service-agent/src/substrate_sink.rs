@@ -221,6 +221,11 @@ pub struct KernelTurnAnchor {
     /// embedded and indexed into its conversation's `SessionView` keyed by the
     /// appended chain sequence.
     session_tier: Option<Arc<crate::session_tier::SessionTier>>,
+    /// Optional ADR-069 atom primary index (Panopticon). When set, each
+    /// chain-appended turn mints an [`AtomLocator`](crate::AtomLocator) into
+    /// the registry (fire-and-forget; P3 removability). Absence is a
+    /// supported mode — no producer depends on this handle.
+    atom_registry: Option<Arc<crate::AtomRegistry>>,
 }
 
 impl KernelTurnAnchor {
@@ -235,6 +240,7 @@ impl KernelTurnAnchor {
             causal,
             prev_causal: DashMap::new(),
             session_tier: None,
+            atom_registry: None,
         }
     }
 
@@ -244,6 +250,14 @@ impl KernelTurnAnchor {
     /// chain sequence is the index key).
     pub fn with_session_tier(mut self, tier: Arc<crate::session_tier::SessionTier>) -> Self {
         self.session_tier = Some(tier);
+        self
+    }
+
+    /// Attach the ADR-069 [`AtomRegistry`](crate::AtomRegistry) so each
+    /// chain-appended turn mints a reverse-resolvable locator (WEFT-641).
+    /// Fire-and-forget: a missing registry degrades observability only.
+    pub fn with_atom_registry(mut self, registry: Arc<crate::AtomRegistry>) -> Self {
+        self.atom_registry = Some(registry);
         self
     }
 
@@ -283,6 +297,23 @@ impl TurnAnchor for KernelTurnAnchor {
             // on poisoned lock, which is a programmer-error class
             // failure we don't want to swallow.
             let event = chain.append("agent", "agent.chat.turn", Some(payload));
+
+            // ADR-069 / WEFT-641: mint AtomLocator at the only seam where
+            // turn_id / chain_seq / uid / content_hash are co-present.
+            // Fire-and-forget (P3): never fails the turn; registry absence
+            // is a supported mode (like NoopTurnAnchor).
+            if let Some(ref registry) = self.atom_registry {
+                registry.mint_and_record(
+                    conv_id,
+                    turn_id,
+                    event.sequence,
+                    &turn.role,
+                    &turn.content,
+                    &content_hash,
+                    "agent.chat.turn",
+                    turn.ts_ms,
+                );
+            }
 
             // ADR-058 Phase 5.1: index the turn into the L2 session view,
             // keyed by the chain sequence just assigned (the universal key +
