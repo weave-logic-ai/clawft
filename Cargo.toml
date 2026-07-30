@@ -315,6 +315,11 @@ tempfile = "3"
 cargo-dist-version = "0.31.0"
 # CI backends to support
 ci = "github"
+# WEFT-593: release.yml is hand-patched (secret-scan-safe job outputs +
+# refuse binary-less announce). Without this, `dist plan` / CI host steps
+# refuse to run because the workflow differs from stock `dist generate`.
+# Re-apply the release.yml patch after any `dist generate` / version bump.
+allow-dirty = ["ci"]
 # Target platforms for binary builds
 targets = [
     # Linux glibc

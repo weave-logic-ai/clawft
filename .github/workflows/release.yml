@@ -12,6 +12,18 @@
 #
 # Note that the GitHub Release will be created with a generated
 # title/body based on your changelogs.
+#
+# WEFT-593 (hand-patch on top of cargo-dist 0.31.0 output):
+# GitHub Actions secret-scans job outputs. The stock plan step put the
+# full dist-manifest (including CHANGELOG-derived announcement bodies)
+# into `needs.plan.outputs.val`. When any substring matched a registered
+# repo/org secret, GHA dropped the output ("Skip output 'val' since it
+# may contain secret"), so `fromJson(...).ci.github.artifacts_matrix`
+# evaluated empty, `build-local-artifacts` was SKIPPED, and the release
+# published with no platform binaries (v0.6.21). We slim free-text fields
+# out of job outputs, expose a dedicated matrix output, and refuse to
+# host/announce a publishing run unless local+global builds succeeded.
+# Re-apply this patch if you regenerate release.yml via `dist generate`.
 
 name: Release
 permissions:
@@ -49,7 +61,13 @@ jobs:
   plan:
     runs-on: "ubuntu-22.04"
     outputs:
+      # Slim manifest (changelog bodies stripped) — safe for GHA secret-scan.
       val: ${{ steps.plan.outputs.manifest }}
+      # Dedicated matrix output so builds never depend on the full manifest.
+      matrix: ${{ steps.plan.outputs.matrix }}
+      pr-run-mode: ${{ steps.plan.outputs.pr_run_mode }}
+      is-prerelease: ${{ steps.plan.outputs.is_prerelease }}
+      publish-prereleases: ${{ steps.plan.outputs.publish_prereleases }}
       tag: ${{ !github.event.pull_request && github.ref_name || '' }}
       tag-flag: ${{ !github.event.pull_request && format('--tag={0}', github.ref_name) || '' }}
       publishing: ${{ !github.event.pull_request }}
@@ -76,11 +94,49 @@ jobs:
       # (PRs run on the *source* but secrets are usually on the *target* -- that's *good*
       # but also really annoying to build CI around when it needs secrets to work right.)
       - id: plan
+        shell: bash
         run: |
+          set -euo pipefail
           dist ${{ (!github.event.pull_request && format('host --steps=create --tag={0}', github.ref_name)) || 'plan' }} --output-format=json > plan-dist-manifest.json
           echo "dist ran successfully"
-          cat plan-dist-manifest.json
-          echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
+
+          # Summarize (do not dump full manifest — CHANGELOG bodies can match
+          # registered secrets and get redacted as "***" in the log).
+          jq '{
+            announcement_tag,
+            dist_version,
+            apps: [.releases[]?.app_name],
+            matrix_include: (.ci.github.artifacts_matrix.include // [] | length),
+            pr_run_mode: .ci.github.pr_run_mode
+          }' plan-dist-manifest.json
+
+          # WEFT-593: strip free-text announcement fields before job outputs.
+          # Full plan remains in the artifacts-plan-dist-manifest artifact.
+          jq -c 'del(.announcement_changelog, .announcement_github_body)' \
+            plan-dist-manifest.json > plan-slim.json
+
+          {
+            echo "manifest<<DIST_MANIFEST_EOF"
+            cat plan-slim.json
+            echo "DIST_MANIFEST_EOF"
+            echo "matrix<<DIST_MATRIX_EOF"
+            jq -c '.ci.github.artifacts_matrix // {"include": null}' plan-dist-manifest.json
+            echo "DIST_MATRIX_EOF"
+            echo "pr_run_mode=$(jq -r '.ci.github.pr_run_mode // "plan"' plan-dist-manifest.json)"
+            echo "is_prerelease=$(jq -r '.announcement_is_prerelease // false' plan-dist-manifest.json)"
+            echo "publish_prereleases=$(jq -r '.publish_prereleases // false' plan-dist-manifest.json)"
+          } >> "$GITHUB_OUTPUT"
+
+          # Fail loud on a tag if cargo-dist itself produced no local targets
+          # (distinct from the secret-scan job-output failure mode).
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            count=$(jq '.ci.github.artifacts_matrix.include // [] | length' plan-dist-manifest.json)
+            echo "artifacts_matrix.include count=${count}"
+            if [ "${count}" -eq 0 ]; then
+              echo "::error::cargo-dist produced empty artifacts_matrix.include — refusing binary-less release (WEFT-593)"
+              exit 1
+            fi
+          fi
       - name: "Upload dist-manifest.json"
         uses: actions/upload-artifact@v6
         with:
@@ -93,7 +149,9 @@ jobs:
     # Let the initial task tell us to not run (currently very blunt)
     needs:
       - plan
-    if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
+    # WEFT-593: read matrix from the dedicated plan output, not the full
+    # secret-scan-vulnerable manifest blob.
+    if: ${{ fromJson(needs.plan.outputs.matrix).include != null && (needs.plan.outputs.publishing == 'true' || needs.plan.outputs.pr-run-mode == 'upload') }}
     strategy:
       fail-fast: false
       # Target platforms/runners are computed by dist in create-release.
@@ -106,7 +164,7 @@ jobs:
       # Typically there will be:
       # - 1 "global" task that builds universal installers
       # - N "local" tasks that build each platform's binaries and platform-specific installers
-      matrix: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix }}
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container && matrix.container.image || null }}
     env:
@@ -225,8 +283,11 @@ jobs:
       - plan
       - build-local-artifacts
       - build-global-artifacts
-    # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
+    # WEFT-593: when publishing, require local+global builds to have *succeeded*
+    # (not merely skipped). The stock cargo-dist template treated skip as OK,
+    # which is how v0.6.21 announced an empty release after the plan output
+    # was secret-scrubbed and build-local-artifacts was skipped.
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && needs.build-global-artifacts.result == 'success' && needs.build-local-artifacts.result == 'success' }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"
@@ -253,10 +314,29 @@ jobs:
       - id: host
         shell: bash
         run: |
+          set -euo pipefail
           dist host ${{ needs.plan.outputs.tag-flag }} --steps=upload --steps=release --output-format=json > dist-manifest.json
           echo "artifacts uploaded and released successfully"
-          cat dist-manifest.json
-          echo "manifest=$(jq -c "." dist-manifest.json)" >> "$GITHUB_OUTPUT"
+
+          # Persist announcement text as files for the release-create step
+          # (avoids stuffing CHANGELOG bodies into step/job outputs — WEFT-593).
+          jq -r '.announcement_github_body // ""' dist-manifest.json > announcement-body.txt
+          jq -r '.announcement_title // ""' dist-manifest.json > announcement-title.txt
+          echo "is_prerelease=$(jq -r '.announcement_is_prerelease // false' dist-manifest.json)" >> "$GITHUB_OUTPUT"
+
+          # Slim job/step output (bodies stripped).
+          {
+            echo "manifest<<DIST_MANIFEST_EOF"
+            jq -c 'del(.announcement_changelog, .announcement_github_body)' dist-manifest.json
+            echo "DIST_MANIFEST_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          jq '{
+            announcement_tag,
+            dist_version,
+            apps: [.releases[]?.app_name],
+            upload_files: (.upload_files // [] | length)
+          }' dist-manifest.json
       - name: "Upload dist-manifest.json"
         uses: actions/upload-artifact@v6
         with:
@@ -276,15 +356,18 @@ jobs:
           rm -f artifacts/*-dist-manifest.json
       - name: Create GitHub Release
         env:
-          PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
-          ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
-          ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
+          PRERELEASE_FLAG: "${{ steps.host.outputs.is_prerelease == 'true' && '--prerelease' || '' }}"
           RELEASE_COMMIT: "${{ github.sha }}"
         run: |
-          # Write and read notes from a file to avoid quoting breaking things
-          echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
-
-          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+          # Title/body come from files written by the host step (WEFT-593) so
+          # CHANGELOG text never has to ride through GHA job outputs.
+          TITLE=$(cat announcement-title.txt)
+          gh release create "${{ needs.plan.outputs.tag }}" \
+            --target "$RELEASE_COMMIT" \
+            $PRERELEASE_FLAG \
+            --title "$TITLE" \
+            --notes-file announcement-body.txt \
+            artifacts/*
 
   publish-homebrew-formula:
     needs:
@@ -293,10 +376,12 @@ jobs:
     runs-on: "ubuntu-22.04"
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Slim plan (bodies stripped) still carries .releases[].artifacts for .rb selection.
       PLAN: ${{ needs.plan.outputs.val }}
       GITHUB_USER: "axo bot"
       GITHUB_EMAIL: "admin+bot@axo.dev"
-    if: ${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}
+    # WEFT-593: use discrete plan outputs instead of fromJson(full manifest).
+    if: ${{ needs.plan.outputs.is-prerelease != 'true' || needs.plan.outputs.publish-prereleases == 'true' }}
     steps:
       - uses: actions/checkout@v6
         with:
