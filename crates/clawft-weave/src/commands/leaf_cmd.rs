@@ -622,6 +622,7 @@ mod tests {
     fn build_ps_scene_emits_nodes_for_each_process() {
         let entries = vec![
             crate::protocol::ProcessInfo {
+                row_id: crate::protocol::process_row_id_for_pid(1),
                 pid: 1,
                 agent_id: "kernel".into(),
                 state: "running".into(),
@@ -630,6 +631,7 @@ mod tests {
                 parent_pid: None,
             },
             crate::protocol::ProcessInfo {
+                row_id: crate::protocol::process_row_id_for_pid(2),
                 pid: 2,
                 agent_id: "agent-foo".into(),
                 state: "degraded".into(),
@@ -647,6 +649,7 @@ mod tests {
     #[test]
     fn ps_scene_diffs_to_minimal_envelope() {
         let entries_v1 = vec![crate::protocol::ProcessInfo {
+            row_id: crate::protocol::process_row_id_for_pid(1),
             pid: 1,
             agent_id: "kernel".into(),
             state: "running".into(),
@@ -655,6 +658,7 @@ mod tests {
             parent_pid: None,
         }];
         let entries_v2 = vec![crate::protocol::ProcessInfo {
+            row_id: crate::protocol::process_row_id_for_pid(1),
             pid: 1,
             agent_id: "kernel".into(),
             state: "degraded".into(), // state changed

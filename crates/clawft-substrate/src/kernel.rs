@@ -10,8 +10,8 @@
 //! | Topic | Shape | Refresh | Buffer | Semantics |
 //! |-------|-------|---------|--------|-----------|
 //! | `substrate/kernel/status` | `ontology://kernel-status` | periodic 2s | refuse | singleton; one `Replace` per tick |
-//! | `substrate/kernel/processes` | `ontology://process-list` | periodic 1s | block-capped | list-by-pid; `Replace` of the whole list per tick (M1.6+ will emit per-pid deltas) |
-//! | `substrate/kernel/services` | `ontology://service-list` | periodic 2s | block-capped | list-by-name; `Replace` of the whole list per tick |
+//! | `substrate/kernel/processes` | `ontology://process-list` | periodic 1s | block-capped | list-by-id; per-row `Replace`/`Remove` at `…/by-id/{row_id}` + root list when membership/content changes (WEFT-416) |
+//! | `substrate/kernel/services` | `ontology://service-list` | periodic 2s | block-capped | list-by-name; per-row `Replace`/`Remove` at `…/by-name/{row_id}` + root list when membership/content changes (WEFT-416) |
 //! | `substrate/kernel/logs` | `ontology://log-ring` | event-driven (fallback periodic 1s) | drop-oldest | append-only ring; new lines only per tick |
 //!
 //! All topics are [`Sensitivity::Workspace`]; none require
@@ -193,8 +193,9 @@ impl OntologyAdapter for KernelAdapter {
 }
 
 /// Spawn the per-topic poller task. Each topic has its own shape —
-/// status is a singleton `Replace`, processes/services are whole-list
-/// `Replace`s, logs emit `Append` deltas for new entries only.
+/// status is a singleton `Replace`, processes/services emit per-row
+/// `Replace`/`Remove` deltas (WEFT-416), logs emit `Append` deltas
+/// for new entries only.
 fn spawn_poller(
     topic: String,
     args: Value,
@@ -210,6 +211,154 @@ fn spawn_poller(
             _ => { /* open() validated; unreachable */ }
         }
     });
+}
+
+// ── Per-id list deltas (WEFT-416) ───────────────────────────────────
+
+/// Path segment under which process rows are stored:
+/// `substrate/kernel/processes/by-id/{row_id}`.
+const PROCESSES_BY_ID: &str = "substrate/kernel/processes/by-id";
+/// Path segment under which service rows are stored:
+/// `substrate/kernel/services/by-name/{row_id}`.
+const SERVICES_BY_NAME: &str = "substrate/kernel/services/by-name";
+/// Topic root for the process list (array — backward-compat for table UIs).
+const PROCESSES_ROOT: &str = "substrate/kernel/processes";
+/// Topic root for the service list (array — backward-compat for table UIs).
+const SERVICES_ROOT: &str = "substrate/kernel/services";
+
+/// Sanitize a row_id so it is safe as a single path segment
+/// (no `/`, no empty). Empty ids become `"_"`; slashes become `_`.
+fn sanitize_row_id(id: &str) -> String {
+    if id.is_empty() {
+        return "_".into();
+    }
+    if id.contains('/') {
+        id.replace('/', "_")
+    } else {
+        id.to_string()
+    }
+}
+
+/// Extract a stable row id from a process row (daemon row-id contract).
+///
+/// Preference order:
+/// 1. explicit `row_id` string (WEFT-416 daemon contract)
+/// 2. composite `{pid}:{agent_id}` when both present (legacy daemons;
+///    services-as-process share the daemon pid so pid alone is not unique)
+/// 3. `pid` alone
+/// 4. `agent_id` alone
+fn process_row_id(row: &Value) -> Option<String> {
+    if let Some(id) = row.get("row_id").and_then(|v| v.as_str())
+        && !id.is_empty()
+    {
+        return Some(sanitize_row_id(id));
+    }
+    let pid = row.get("pid").and_then(|v| v.as_u64());
+    let agent = row.get("agent_id").and_then(|v| v.as_str());
+    match (pid, agent) {
+        (Some(p), Some(a)) if !a.is_empty() => Some(sanitize_row_id(&format!("{p}:{a}"))),
+        (Some(p), _) => Some(format!("pid:{p}")),
+        (None, Some(a)) if !a.is_empty() => Some(sanitize_row_id(a)),
+        _ => None,
+    }
+}
+
+/// Extract a stable row id from a service row.
+///
+/// Preference: explicit `row_id`, then `name`.
+fn service_row_id(row: &Value) -> Option<String> {
+    if let Some(id) = row.get("row_id").and_then(|v| v.as_str())
+        && !id.is_empty()
+    {
+        return Some(sanitize_row_id(id));
+    }
+    row.get("name")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(sanitize_row_id)
+}
+
+/// Diff a keyed list against the previous snapshot and produce
+/// per-row [`StateDelta`]s.
+///
+/// # Semantics
+///
+/// - New or changed row → `Replace` at `{row_prefix}/{row_id}`
+/// - Missing row (was present, now gone) → `Remove` at `{row_prefix}/{row_id}`
+/// - When any per-row delta is produced **or** the root array order /
+///   content changed, also emit a root-list `Replace` at `list_root`
+///   so table UIs that bind the whole array keep working.
+/// - Steady state (identical map of row_id → value) → empty vec.
+///
+/// `prev` is updated in place to match `next` so the caller can reuse
+/// it as the watermark for the next tick.
+///
+/// # Arguments
+///
+/// * `prev` — prior tick's `row_id → row` map (mutated to match next)
+/// * `next_rows` — projected array from the daemon this tick
+/// * `row_id_of` — extracts a stable key from one row (`None` skips it)
+/// * `row_prefix` — absolute path prefix for per-row cells
+/// * `list_root` — absolute path of the whole-list array (compat)
+fn diff_keyed_list(
+    prev: &mut std::collections::BTreeMap<String, Value>,
+    next_rows: &[Value],
+    row_id_of: impl Fn(&Value) -> Option<String>,
+    row_prefix: &str,
+    list_root: &str,
+) -> Vec<StateDelta> {
+    let mut next_map: std::collections::BTreeMap<String, Value> =
+        std::collections::BTreeMap::new();
+    let mut ordered: Vec<Value> = Vec::with_capacity(next_rows.len());
+    for row in next_rows {
+        let Some(id) = row_id_of(row) else {
+            // Unkeyed row: still include it in the root list so we
+            // don't silently drop data, but skip per-id tracking.
+            ordered.push(row.clone());
+            continue;
+        };
+        ordered.push(row.clone());
+        next_map.insert(id, row.clone());
+    }
+
+    let mut deltas = Vec::new();
+
+    // Removals first (ids present last tick, gone now).
+    for id in prev.keys() {
+        if !next_map.contains_key(id) {
+            deltas.push(StateDelta::Remove {
+                path: format!("{row_prefix}/{id}"),
+            });
+        }
+    }
+
+    // Inserts / updates.
+    for (id, value) in &next_map {
+        match prev.get(id) {
+            Some(old) if old == value => { /* unchanged */ }
+            _ => {
+                deltas.push(StateDelta::Replace {
+                    path: format!("{row_prefix}/{id}"),
+                    value: value.clone(),
+                });
+            }
+        }
+    }
+
+    // Root list for table consumers — only when anything changed.
+    // On the first tick `prev` is empty so any non-empty next yields
+    // per-row deltas and a root replace; steady-state emits nothing.
+    // An empty→empty transition (never had rows) also emits nothing;
+    // UIs treat a missing root path as "not yet polled / no data".
+    if !deltas.is_empty() {
+        deltas.push(StateDelta::Replace {
+            path: list_root.to_string(),
+            value: Value::Array(ordered),
+        });
+    }
+
+    *prev = next_map;
+    deltas
 }
 
 /// Loop helper — call `rpc` on each tick, emit one `Replace` per success.
@@ -280,28 +429,113 @@ async fn poll_status(tx: mpsc::Sender<StateDelta>, cancel_rx: oneshot::Receiver<
     .await;
 }
 
+/// Processes poller — WEFT-416 per-id deltas.
+///
+/// Diffs the projected `kernel.ps` array against the previous tick
+/// and emits:
+/// - `Replace` at `substrate/kernel/processes/by-id/{row_id}` for
+///   new/changed rows
+/// - `Remove` for rows that disappeared
+/// - a root-list `Replace` at `substrate/kernel/processes` when any
+///   per-row delta was produced (table-UI backward compat)
+///
+/// Steady-state ticks (identical row map) emit **zero** deltas.
 async fn poll_processes(tx: mpsc::Sender<StateDelta>, cancel_rx: oneshot::Receiver<()>) {
-    poll_replace_loop_with_projection(
-        "substrate/kernel/processes",
+    poll_keyed_list_loop(
         "kernel.ps",
         Duration::from_millis(1000),
         crate::projection::project_process_rows,
+        process_row_id,
+        PROCESSES_BY_ID,
+        PROCESSES_ROOT,
         tx,
         cancel_rx,
     )
     .await;
 }
 
+/// Services poller — WEFT-416 per-id deltas (see [`poll_processes`]).
 async fn poll_services(tx: mpsc::Sender<StateDelta>, cancel_rx: oneshot::Receiver<()>) {
-    poll_replace_loop_with_projection(
-        "substrate/kernel/services",
+    poll_keyed_list_loop(
         "kernel.services",
         Duration::from_millis(2000),
         crate::projection::project_service_rows,
+        service_row_id,
+        SERVICES_BY_NAME,
+        SERVICES_ROOT,
         tx,
         cancel_rx,
     )
     .await;
+}
+
+/// Shared poll loop for list-by-id topics (processes / services).
+#[allow(clippy::too_many_arguments)]
+async fn poll_keyed_list_loop<F, K>(
+    rpc_method: &'static str,
+    period: Duration,
+    project: F,
+    row_id_of: K,
+    row_prefix: &'static str,
+    list_root: &'static str,
+    tx: mpsc::Sender<StateDelta>,
+    mut cancel_rx: oneshot::Receiver<()>,
+) where
+    F: Fn(Value) -> Value + Send + 'static,
+    K: Fn(&Value) -> Option<String> + Send + 'static,
+{
+    let mut client: Option<DaemonClient> = None;
+    let mut ticker = tokio::time::interval(period);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut prev: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+
+    loop {
+        tokio::select! {
+            _ = &mut cancel_rx => return,
+            _ = ticker.tick() => {
+                if client.is_none() {
+                    client = DaemonClient::connect().await;
+                }
+                let Some(c) = client.as_mut() else { continue; };
+                match simple_call(c, rpc_method).await {
+                    Ok(value) => {
+                        let projected = project(value);
+                        let rows = match projected.as_array() {
+                            Some(arr) => arr.as_slice(),
+                            // Non-array response: fall back to whole-path Replace
+                            // so we never silently drop the payload.
+                            None => {
+                                let delta = StateDelta::Replace {
+                                    path: list_root.to_string(),
+                                    value: projected,
+                                };
+                                if tx.send(delta).await.is_err() {
+                                    return;
+                                }
+                                prev.clear();
+                                continue;
+                            }
+                        };
+                        let deltas = diff_keyed_list(
+                            &mut prev,
+                            rows,
+                            &row_id_of,
+                            row_prefix,
+                            list_root,
+                        );
+                        for delta in deltas {
+                            if tx.send(delta).await.is_err() {
+                                return; // subscriber dropped
+                            }
+                        }
+                    }
+                    Err(_e) => {
+                        client = None;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Logs poller — diffs tail responses and only emits `Append` deltas
@@ -609,5 +843,306 @@ mod tests {
             DiffTailOutcome::New(out) => assert!(out.is_empty()),
             other => panic!("expected New, got {other:?}"),
         }
+    }
+
+    // ── WEFT-416: per-id list deltas ───────────────────────────────
+
+    #[test]
+    fn process_row_id_prefers_explicit_row_id() {
+        let row = json!({
+            "row_id": "pid:42",
+            "pid": 42,
+            "agent_id": "kernel"
+        });
+        assert_eq!(process_row_id(&row).as_deref(), Some("pid:42"));
+    }
+
+    #[test]
+    fn process_row_id_falls_back_to_pid_agent_composite() {
+        // Legacy daemon without row_id: composite keeps service-virtual
+        // rows (shared daemon pid) unique.
+        let row = json!({"pid": 7, "agent_id": "mesh"});
+        assert_eq!(process_row_id(&row).as_deref(), Some("7:mesh"));
+    }
+
+    #[test]
+    fn service_row_id_uses_name() {
+        let row = json!({"name": "cron", "state": "running"});
+        assert_eq!(service_row_id(&row).as_deref(), Some("cron"));
+        let with_id = json!({"row_id": "cron", "name": "cron"});
+        assert_eq!(service_row_id(&with_id).as_deref(), Some("cron"));
+    }
+
+    #[test]
+    fn sanitize_row_id_strips_slashes() {
+        assert_eq!(sanitize_row_id("a/b"), "a_b");
+        assert_eq!(sanitize_row_id(""), "_");
+        assert_eq!(sanitize_row_id("pid:1"), "pid:1");
+    }
+
+    #[test]
+    fn diff_keyed_list_first_tick_emits_per_row_and_root() {
+        let mut prev = std::collections::BTreeMap::new();
+        let rows = vec![
+            json!({"row_id": "pid:1", "pid": 1, "state": "running"}),
+            json!({"row_id": "pid:2", "pid": 2, "state": "running"}),
+        ];
+        let deltas = diff_keyed_list(
+            &mut prev,
+            &rows,
+            process_row_id,
+            PROCESSES_BY_ID,
+            PROCESSES_ROOT,
+        );
+        // 2 per-row Replace + 1 root list Replace
+        assert_eq!(deltas.len(), 3);
+        assert!(
+            deltas.iter().any(|d| {
+                matches!(d, StateDelta::Replace { path, .. }
+                    if path == "substrate/kernel/processes/by-id/pid:1")
+            }),
+            "missing by-id Replace for pid:1: {deltas:?}"
+        );
+        assert!(
+            deltas.iter().any(|d| {
+                matches!(d, StateDelta::Replace { path, .. }
+                    if path == "substrate/kernel/processes/by-id/pid:2")
+            }),
+            "missing by-id Replace for pid:2: {deltas:?}"
+        );
+        let root = deltas.iter().find(|d| {
+            matches!(d, StateDelta::Replace { path, .. } if path == PROCESSES_ROOT)
+        });
+        match root {
+            Some(StateDelta::Replace { value, .. }) => {
+                assert_eq!(value.as_array().map(|a| a.len()), Some(2));
+            }
+            other => panic!("expected root Replace, got {other:?}"),
+        }
+        assert_eq!(prev.len(), 2);
+    }
+
+    #[test]
+    fn diff_keyed_list_steady_state_emits_zero_deltas() {
+        let mut prev = std::collections::BTreeMap::new();
+        let rows = vec![
+            json!({"row_id": "pid:1", "pid": 1, "cpu_time_ms": 100}),
+            json!({"row_id": "svc:mesh", "pid": 99, "agent_id": "mesh"}),
+        ];
+        let first = diff_keyed_list(
+            &mut prev,
+            &rows,
+            process_row_id,
+            PROCESSES_BY_ID,
+            PROCESSES_ROOT,
+        );
+        assert!(!first.is_empty(), "first tick must seed state");
+
+        // Identical payload on the next tick — zero deltas (the whole
+        // point of WEFT-416: reduced steady-state traffic).
+        let second = diff_keyed_list(
+            &mut prev,
+            &rows,
+            process_row_id,
+            PROCESSES_BY_ID,
+            PROCESSES_ROOT,
+        );
+        assert!(
+            second.is_empty(),
+            "steady-state must emit no deltas, got {second:?}"
+        );
+    }
+
+    #[test]
+    fn diff_keyed_list_one_row_change_emits_single_replace_plus_root() {
+        let mut prev = std::collections::BTreeMap::new();
+        let rows_v1 = vec![
+            json!({"row_id": "pid:1", "pid": 1, "cpu_time_ms": 100}),
+            json!({"row_id": "pid:2", "pid": 2, "cpu_time_ms": 50}),
+        ];
+        let _ = diff_keyed_list(
+            &mut prev,
+            &rows_v1,
+            process_row_id,
+            PROCESSES_BY_ID,
+            PROCESSES_ROOT,
+        );
+
+        let rows_v2 = vec![
+            json!({"row_id": "pid:1", "pid": 1, "cpu_time_ms": 100}), // unchanged
+            json!({"row_id": "pid:2", "pid": 2, "cpu_time_ms": 75}),  // changed
+        ];
+        let deltas = diff_keyed_list(
+            &mut prev,
+            &rows_v2,
+            process_row_id,
+            PROCESSES_BY_ID,
+            PROCESSES_ROOT,
+        );
+        // 1 per-row Replace + 1 root list
+        assert_eq!(deltas.len(), 2, "expected single-row update + root: {deltas:?}");
+        assert!(
+            deltas.iter().any(|d| {
+                matches!(d, StateDelta::Replace { path, value, .. }
+                    if path == "substrate/kernel/processes/by-id/pid:2"
+                        && value["cpu_time_ms"] == 75)
+            }),
+            "missing updated pid:2: {deltas:?}"
+        );
+        assert!(
+            !deltas.iter().any(|d| {
+                matches!(d, StateDelta::Replace { path, .. }
+                    if path == "substrate/kernel/processes/by-id/pid:1")
+            }),
+            "unchanged pid:1 must not re-emit"
+        );
+    }
+
+    #[test]
+    fn diff_keyed_list_removal_emits_remove_plus_root() {
+        let mut prev = std::collections::BTreeMap::new();
+        let rows_v1 = vec![
+            json!({"row_id": "cron", "name": "cron", "state": "running"}),
+            json!({"row_id": "mesh", "name": "mesh", "state": "running"}),
+        ];
+        let _ = diff_keyed_list(
+            &mut prev,
+            &rows_v1,
+            service_row_id,
+            SERVICES_BY_NAME,
+            SERVICES_ROOT,
+        );
+
+        let rows_v2 = vec![json!({"row_id": "cron", "name": "cron", "state": "running"})];
+        let deltas = diff_keyed_list(
+            &mut prev,
+            &rows_v2,
+            service_row_id,
+            SERVICES_BY_NAME,
+            SERVICES_ROOT,
+        );
+        assert!(
+            deltas.iter().any(|d| {
+                matches!(d, StateDelta::Remove { path }
+                    if path == "substrate/kernel/services/by-name/mesh")
+            }),
+            "expected Remove for mesh: {deltas:?}"
+        );
+        // Root list should now have only cron.
+        let root = deltas.iter().find(|d| {
+            matches!(d, StateDelta::Replace { path, .. } if path == SERVICES_ROOT)
+        });
+        match root {
+            Some(StateDelta::Replace { value, .. }) => {
+                assert_eq!(value.as_array().map(|a| a.len()), Some(1));
+                assert_eq!(value[0]["name"], "cron");
+            }
+            other => panic!("expected root Replace, got {other:?}"),
+        }
+        assert!(!prev.contains_key("mesh"));
+        assert!(prev.contains_key("cron"));
+    }
+
+    #[test]
+    fn diff_keyed_list_new_row_emits_replace_plus_root() {
+        let mut prev = std::collections::BTreeMap::new();
+        let rows_v1 = vec![json!({"row_id": "pid:1", "pid": 1})];
+        let _ = diff_keyed_list(
+            &mut prev,
+            &rows_v1,
+            process_row_id,
+            PROCESSES_BY_ID,
+            PROCESSES_ROOT,
+        );
+
+        let rows_v2 = vec![
+            json!({"row_id": "pid:1", "pid": 1}),
+            json!({"row_id": "svc:cron", "pid": 99, "agent_id": "cron"}),
+        ];
+        let deltas = diff_keyed_list(
+            &mut prev,
+            &rows_v2,
+            process_row_id,
+            PROCESSES_BY_ID,
+            PROCESSES_ROOT,
+        );
+        assert!(
+            deltas.iter().any(|d| {
+                matches!(d, StateDelta::Replace { path, .. }
+                    if path == "substrate/kernel/processes/by-id/svc:cron")
+            }),
+            "expected Replace for new svc:cron: {deltas:?}"
+        );
+        // Unchanged pid:1 must not re-emit.
+        assert!(
+            !deltas.iter().any(|d| {
+                matches!(d, StateDelta::Replace { path, .. }
+                    if path == "substrate/kernel/processes/by-id/pid:1")
+            }),
+            "unchanged pid:1 must not re-emit"
+        );
+    }
+
+    #[test]
+    fn diff_keyed_list_steady_state_delta_size_strictly_less_than_full_replace() {
+        // AC: "Tests confirm reduced delta size on steady-state ticks."
+        // Old behaviour: 1 whole-list Replace every tick (payload = full
+        // array). New behaviour: 0 deltas on steady state.
+        let mut prev = std::collections::BTreeMap::new();
+        let mut rows = Vec::new();
+        for i in 0..20 {
+            rows.push(json!({
+                "row_id": format!("pid:{i}"),
+                "pid": i,
+                "agent_id": format!("agent-{i}"),
+                "cpu_time_ms": i * 10,
+                "memory_bytes": i * 1024,
+                "state": "running",
+            }));
+        }
+        let seed = diff_keyed_list(
+            &mut prev,
+            &rows,
+            process_row_id,
+            PROCESSES_BY_ID,
+            PROCESSES_ROOT,
+        );
+        // First tick: 20 by-id + 1 root.
+        assert_eq!(seed.len(), 21);
+
+        let steady = diff_keyed_list(
+            &mut prev,
+            &rows,
+            process_row_id,
+            PROCESSES_BY_ID,
+            PROCESSES_ROOT,
+        );
+        assert_eq!(
+            steady.len(),
+            0,
+            "steady-state delta count must be 0 (was whole-list Replace of 20 rows)"
+        );
+
+        // Single-row mutation: only 1 by-id + root, not 20 by-id.
+        rows[5] = json!({
+            "row_id": "pid:5",
+            "pid": 5,
+            "agent_id": "agent-5",
+            "cpu_time_ms": 999,
+            "memory_bytes": 5 * 1024,
+            "state": "running",
+        });
+        let partial = diff_keyed_list(
+            &mut prev,
+            &rows,
+            process_row_id,
+            PROCESSES_BY_ID,
+            PROCESSES_ROOT,
+        );
+        assert_eq!(
+            partial.len(),
+            2,
+            "one-row change → 1 Replace + 1 root, got {partial:?}"
+        );
     }
 }

@@ -4794,6 +4794,8 @@ async fn dispatch(
                 .list()
                 .iter()
                 .map(|e| ProcessInfo {
+                    // WEFT-416: stable row key for substrate per-id deltas.
+                    row_id: crate::protocol::process_row_id_for_pid(e.pid),
                     pid: e.pid,
                     agent_id: e.agent_id.clone(),
                     state: e.state.to_string(),
@@ -4853,6 +4855,8 @@ async fn dispatch(
                     None => "unknown",
                 };
                 entries.push(ProcessInfo {
+                    // WEFT-416: svc: prefix — these share daemon_pid.
+                    row_id: crate::protocol::process_row_id_for_service(&name),
                     pid: daemon_pid,
                     agent_id: name,
                     state: state.to_string(),
@@ -4951,6 +4955,8 @@ async fn dispatch(
                     0
                 };
                 infos.push(ServiceInfo {
+                    // WEFT-416: row_id == name (unique in registry).
+                    row_id: name.clone(),
                     name,
                     service_type: stype.to_string(),
                     state,
@@ -6146,6 +6152,7 @@ async fn dispatch(
             let mut infos: Vec<ProcessInfo> = agents
                 .iter()
                 .map(|e| ProcessInfo {
+                    row_id: crate::protocol::process_row_id_for_pid(e.pid),
                     pid: e.pid,
                     agent_id: e.agent_id.clone(),
                     state: e.state.to_string(),

@@ -48,14 +48,55 @@ pub struct KernelStatusResult {
 }
 
 /// A single process entry for `kernel.ps`.
+///
+/// # Row-id contract (WEFT-416)
+///
+/// `row_id` is the stable unique key for substrate per-row
+/// Replace/Remove deltas. Prefer it over `pid` alone: `kernel.ps`
+/// merges registered services as virtual rows that share the daemon
+/// OS pid, so pid is not unique in the merged list.
+///
+/// Conventions:
+/// - process-table rows → `pid:{pid}`
+/// - service-as-process rows → `svc:{name}`
+/// - agent.list rows → `pid:{pid}`
+///
+/// Older daemons may omit `row_id` (serde default empty); clients
+/// should fall back via [`process_row_id_from_fields`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessInfo {
+    /// Stable unique row key for substrate list-by-id deltas (WEFT-416).
+    #[serde(default)]
+    pub row_id: String,
     pub pid: u64,
     pub agent_id: String,
     pub state: String,
     pub memory_bytes: u64,
     pub cpu_time_ms: u64,
     pub parent_pid: Option<u64>,
+}
+
+/// Build a process-table / agent `row_id` (`pid:{pid}`).
+pub fn process_row_id_for_pid(pid: u64) -> String {
+    format!("pid:{pid}")
+}
+
+/// Build a service-as-process `row_id` (`svc:{name}`) for virtual
+/// rows that `kernel.ps` merges in under the daemon OS pid.
+pub fn process_row_id_for_service(name: &str) -> String {
+    format!("svc:{name}")
+}
+
+/// Derive a process `row_id` when the daemon omitted it (legacy
+/// wire shape). Prefer `pid:{pid}` when `agent_id` does not look like
+/// a service-virtual row; callers that know the row is a service
+/// should use [`process_row_id_for_service`] instead.
+pub fn process_row_id_from_fields(pid: u64, agent_id: &str) -> String {
+    // Service-as-process rows historically set agent_id = service
+    // name and shared the daemon pid. Without an explicit row_id we
+    // cannot tell them apart from a real process at that pid, so we
+    // use a composite that stays unique either way.
+    format!("{pid}:{agent_id}")
 }
 
 /// A single service entry for `kernel.services`.
@@ -70,8 +111,17 @@ pub struct ProcessInfo {
 /// counts `service.restart` invocations since the daemon booted.
 /// `uptime_ms` is approximate — measured from kernel boot time for
 /// services that boot with the kernel.
+///
+/// # Row-id contract (WEFT-416)
+///
+/// `row_id` equals `name` (service names are unique in the registry).
+/// Substrate emits per-row deltas at
+/// `substrate/kernel/services/by-name/{row_id}`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceInfo {
+    /// Stable unique row key — equals [`Self::name`] (WEFT-416).
+    #[serde(default)]
+    pub row_id: String,
     pub name: String,
     pub service_type: String,
     pub state: String,
