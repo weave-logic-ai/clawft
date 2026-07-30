@@ -177,8 +177,8 @@ impl ColdVectorCache {
 ///
 /// - **Insert**: vector goes to DiskANN (always) and HNSW (if under hot
 ///   capacity).
-/// - **Search**: query both tiers, merge results by distance, deduplicate
-///   by ID.
+/// - **Search**: query both tiers, fuse ranks via Reciprocal Rank Fusion
+///   (RRF; WEFT-661), deduplicate by numeric ID.
 /// - **Promotion**: access counts are tracked per ID. When a cold-only
 ///   vector exceeds `promotion_threshold` accesses, it is copied into
 ///   the hot tier.
@@ -310,28 +310,71 @@ impl HybridBackend {
         }
     }
 
+    /// Cormack et al. RRF smoothing constant (standard IR default).
+    ///
+    /// Higher `k` reduces the weight gap between rank-1 and rank-N.
+    const RRF_K: f32 = 60.0;
+
     /// Merge and deduplicate search results from hot and cold tiers.
+    ///
+    /// # Ranking policy — Reciprocal Rank Fusion (WEFT-661)
+    ///
+    /// Hot HNSW returns **cosine** distances (~[0, 2]); real DiskANN cold
+    /// returns **squared Euclidean** (L2²) on a different scale. Sorting
+    /// raw distances lets cosine hits structurally dominate regardless of
+    /// true proximity (bench recall@10 ≈ 0.113). RRF ranks each list
+    /// independently and fuses with:
+    ///
+    /// ```text
+    /// score(id) = Σ_lists  1 / (RRF_K + rank_list(id))   // rank is 0-based
+    /// ```
+    ///
+    /// so metric scale is irrelevant. Higher score wins.
+    ///
+    /// # Dedup (WEFT-660)
+    ///
+    /// Dedup key is the numeric [`SearchResult::id`]. An id present in both
+    /// lists accumulates RRF mass from both ranks. The retained payload
+    /// prefers the **hot** entry (fresher key/metadata); cold fills only
+    /// when the id is cold-only. Original tier `distance` is kept for
+    /// diagnostics — callers must not assume a single metric after merge.
     fn merge_results(
         hot_results: Vec<SearchResult>,
         cold_results: Vec<SearchResult>,
         k: usize,
     ) -> Vec<SearchResult> {
-        let mut seen = std::collections::HashSet::new();
-        let mut merged: Vec<SearchResult> =
-            Vec::with_capacity(hot_results.len() + cold_results.len());
-
-        // Collect all results, dedup by id.
-        for r in hot_results.into_iter().chain(cold_results) {
-            if seen.insert(r.id) {
-                merged.push(r);
-            }
+        if k == 0 {
+            return Vec::new();
         }
 
-        // Sort by distance ascending.
+        // id → fused RRF score (higher = better)
+        let mut rrf: HashMap<u64, f32> = HashMap::new();
+        // id → retained SearchResult (hot wins on first insert)
+        let mut by_id: HashMap<u64, SearchResult> = HashMap::new();
+
+        for (rank, r) in hot_results.into_iter().enumerate() {
+            *rrf.entry(r.id).or_insert(0.0) += 1.0 / (Self::RRF_K + rank as f32);
+            by_id.entry(r.id).or_insert(r);
+        }
+        for (rank, r) in cold_results.into_iter().enumerate() {
+            *rrf.entry(r.id).or_insert(0.0) += 1.0 / (Self::RRF_K + rank as f32);
+            // Prefer hot payload when both tiers returned the same id.
+            by_id.entry(r.id).or_insert(r);
+        }
+
+        let mut merged: Vec<SearchResult> = by_id.into_values().collect();
+        // RRF desc, then native distance asc, then id for determinism.
         merged.sort_by(|a, b| {
-            a.distance
-                .partial_cmp(&b.distance)
+            let sa = rrf.get(&a.id).copied().unwrap_or(0.0);
+            let sb = rrf.get(&b.id).copied().unwrap_or(0.0);
+            sb.partial_cmp(&sa)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    a.distance
+                        .partial_cmp(&b.distance)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| a.id.cmp(&b.id))
         });
         merged.truncate(k);
         merged
@@ -609,9 +652,79 @@ mod tests {
 
         let merged = HybridBackend::merge_results(hot, cold, 3);
         assert_eq!(merged.len(), 3);
+        // id=1 is in both lists → highest RRF (1/60 + 1/60).
         assert_eq!(merged[0].id, 1);
+        // id=2 and id=3 both rank-1 in one list (score 1/61); distance
+        // tie-break: 0.2 < 0.3 → cold id=3 before hot id=2.
         assert_eq!(merged[1].id, 3);
         assert_eq!(merged[2].id, 2);
+    }
+
+    /// WEFT-661: cosine-scale hot distances must not drown L2² cold ranks.
+    #[test]
+    fn merge_results_rrf_not_raw_distance() {
+        // Hot: tiny cosine-like distances. Cold: large L2²-like distances.
+        // Raw-distance sort would return only hot ids for k=2.
+        let hot = vec![
+            SearchResult::new(10, "hot0".into(), 0.001, serde_json::Value::Null),
+            SearchResult::new(11, "hot1".into(), 0.002, serde_json::Value::Null),
+        ];
+        let cold = vec![
+            SearchResult::new(20, "cold0".into(), 100.0, serde_json::Value::Null),
+            SearchResult::new(21, "cold1".into(), 200.0, serde_json::Value::Null),
+        ];
+
+        let merged = HybridBackend::merge_results(hot, cold, 2);
+        assert_eq!(merged.len(), 2);
+        let ids: std::collections::HashSet<u64> = merged.iter().map(|r| r.id).collect();
+        // Rank-0 from each list share the top RRF band → both tiers in top-2.
+        assert!(ids.contains(&10), "hot rank-0 must survive RRF: {ids:?}");
+        assert!(ids.contains(&20), "cold rank-0 must survive RRF: {ids:?}");
+    }
+
+    /// WEFT-660/661: same numeric id from both tiers is one hit; hot payload wins.
+    #[test]
+    fn merge_results_dedup_prefers_hot_payload() {
+        let hot = vec![SearchResult::new(
+            42,
+            "hot-key".into(),
+            0.05,
+            serde_json::json!({"tier": "hot"}),
+        )];
+        let cold = vec![SearchResult::new(
+            42,
+            "cold-key".into(),
+            50.0,
+            serde_json::json!({"tier": "cold"}),
+        )];
+
+        let merged = HybridBackend::merge_results(hot, cold, 1);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].id, 42);
+        assert_eq!(merged[0].key, "hot-key");
+        assert_eq!(merged[0].metadata, serde_json::json!({"tier": "hot"}));
+        // Native hot distance retained (not rewritten to RRF).
+        assert!((merged[0].distance - 0.05).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn merge_results_empty_and_k_zero() {
+        assert!(HybridBackend::merge_results(vec![], vec![], 5).is_empty());
+        let hot = vec![SearchResult::new(1, "a".into(), 0.1, serde_json::Value::Null)];
+        assert!(HybridBackend::merge_results(hot, vec![], 0).is_empty());
+    }
+
+    #[test]
+    fn merge_results_cold_only_ids_survive() {
+        let hot = vec![SearchResult::new(1, "a".into(), 0.01, serde_json::Value::Null)];
+        let cold = vec![
+            SearchResult::new(2, "b".into(), 99.0, serde_json::Value::Null),
+            SearchResult::new(3, "c".into(), 100.0, serde_json::Value::Null),
+        ];
+        let merged = HybridBackend::merge_results(hot, cold, 3);
+        assert_eq!(merged.len(), 3);
+        let ids: std::collections::HashSet<u64> = merged.iter().map(|r| r.id).collect();
+        assert_eq!(ids, [1, 2, 3].into_iter().collect());
     }
 
     #[test]
