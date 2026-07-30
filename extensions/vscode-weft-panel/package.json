@@ -23,7 +23,17 @@
         "title": "WeftOS: Open Panel",
         "category": "WeftOS"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "WeftOS",
+      "properties": {
+        "weft.multiUser": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable multi-user panel auth (WEFT-495 / ADR-071). When true, each panel gets a scoped host-held token and methods outside those scopes are denied by identity. Also enabled by WEFTOS_MULTI_USER=1."
+        }
+      }
+    }
   },
   "scripts": {
     "compile": "tsc -p .",
@@ -31,7 +41,8 @@
     "watch": "tsc -w -p .",
     "package": "vsce package --allow-missing-repository",
     "pretest": "npm run compile && npm run compile-tests",
-    "test": "node ./out-test/runTest.js"
+    "test": "node ./out-test/runTest.js",
+    "test:panel-auth": "npm run compile && node scripts/test-panel-auth.mjs"
   },
   "devDependencies": {
     "@types/glob": "^8.1.0",

@@ -66,6 +66,7 @@ This directory contains Architecture Decision Records (ADRs) for the WeftOS + cl
 | [ADR-061](adr-061-conversational-voice-agent-loop.md) | Conversational voice agent loop — full-duplex, dual-layer TTS | Accepted | Architecture | Voice-pipeline thread 2026-06-26..28 (`~/llm` voicelab) |
 | [ADR-062](adr-062-ecc-graph-walk-conversation.md) | ECC graph-walk conversation — responses as nodes built by walking the causal graph | Proposed | Architecture | ECC graph-walk design swarm 2026-06-29 |
 | [ADR-070](adr-070-mcp-registry-ownership.md) | MCP server registry ownership — CLI durable config vs daemon runtime | Accepted | Architecture | WEFT-494 (ws15 MCP audit open question) |
+| [ADR-071](adr-071-wasm-panel-auth.md) | WASM panel auth — per-panel token / capability model for webview proxy | Accepted | Security | WEFT-495 (ws15 MCP audit open question) |
 
 ## Categories
 
@@ -74,7 +75,7 @@ This directory contains Architecture Decision Records (ADRs) for the WeftOS + cl
 | **Release** | 001, 002, 012, 029, 037, 044 | Versioning, distribution, and build decisions |
 | **GUI** | 003, 004, 005, 006, 007, 013, 016, 038, 055 | UI/UX technology and architecture decisions |
 | **Architecture** | 010, 017, 019, 020, 021, 022, 023, 026, 027, 030, 031, 033, 034, 035, 036, 039, 040, 041, 042, 045, 046, 047, 048, 049, 053, 056, 070 | Core system design decisions |
-| **Security** | 024, 025, 028, 043, 057 | Cryptography, identity, and chain-integrity decisions |
+| **Security** | 024, 025, 028, 043, 057, 071 | Cryptography, identity, and chain-integrity decisions |
 | **Performance** | 009, 011, 032 | Algorithmic and optimization decisions |
 | **Integration** | 008, 018, 054 | External system integration decisions |
 | **Documentation** | 014, 015 | Documentation and web presence decisions |

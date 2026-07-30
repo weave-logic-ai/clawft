@@ -17,6 +17,12 @@ import * as vscode from "vscode";
 import { randomUUID } from "node:crypto";
 import { watch as fsWatch, type FSWatcher } from "node:fs";
 import { resolveSocketPath, rpcCall, RpcError } from "./rpc";
+import {
+    authorizePanelRpc,
+    isMultiUserMode,
+    issuePanelSession,
+    type PanelSession,
+} from "./panelAuth";
 
 const VIEW_TYPE = "weft.panel";
 
@@ -241,6 +247,22 @@ function createOrShowPanel(context: vscode.ExtensionContext): void {
     wirePanel(context, panel);
 }
 
+/**
+ * Read multi-user mode for the panel proxy (WEFT-495 / ADR-071).
+ * VSCode setting `weft.multiUser` ORs with `WEFTOS_MULTI_USER` env.
+ */
+function readMultiUserMode(): boolean {
+    let setting = false;
+    try {
+        setting = vscode.workspace
+            .getConfiguration("weft")
+            .get<boolean>("multiUser", false);
+    } catch {
+        // Host without configuration API (tests) — fall through to env.
+    }
+    return isMultiUserMode(process.env, setting ? true : undefined);
+}
+
 function wirePanel(context: vscode.ExtensionContext, panel: vscode.WebviewPanel): void {
     currentPanel = panel;
     panel.webview.options = {
@@ -254,6 +276,20 @@ function wirePanel(context: vscode.ExtensionContext, panel: vscode.WebviewPanel)
 
     const cwd = getWorkspaceCwd();
     const socketPath = resolveSocketPath(cwd);
+
+    // WEFT-495 / ADR-071: per-panel identity only when multi-user mode
+    // is on. Single-user keeps the 0.7 allowlist-only posture. The
+    // session token stays host-side — never posted into the webview.
+    const multiUser = readMultiUserMode();
+    const panelSession: PanelSession | undefined = multiUser
+        ? issuePanelSession()
+        : undefined;
+    if (panelSession) {
+        console.log(
+            `weft: multi-user panel session ${panelSession.panelId} ` +
+                `scopes=[${panelSession.scopes.join(",")}]`,
+        );
+    }
 
     // WEFT-250: refresh the allowlist against the daemon on connect.
     // This call races the panel's "ready" handshake — that's fine,
@@ -269,11 +305,18 @@ function wirePanel(context: vscode.ExtensionContext, panel: vscode.WebviewPanel)
                 return;
             }
             if (msg.type === "ready") {
-                void panel.webview.postMessage({ type: "hello", socketPath });
+                // Do not leak panel token to the webview. panelId is
+                // diagnostic-only and optional for future UI chrome.
+                void panel.webview.postMessage({
+                    type: "hello",
+                    socketPath,
+                    multiUser,
+                    panelId: panelSession?.panelId,
+                });
                 return;
             }
             if (msg.type === "rpc-request") {
-                await handleRpc(panel, socketPath, msg);
+                await handleRpc(panel, socketPath, msg, panelSession, multiUser);
             }
         },
         undefined,
@@ -386,6 +429,8 @@ async function handleRpc(
     panel: vscode.WebviewPanel,
     socketPath: string,
     req: WasmRpcRequest,
+    panelSession?: PanelSession,
+    multiUser = false,
 ): Promise<void> {
     if (!ALLOWED_METHODS.has(req.method)) {
         void panel.webview.postMessage({
@@ -397,6 +442,23 @@ async function handleRpc(
         return;
     }
 
+    // WEFT-495 / ADR-071: multi-user → per-panel scope gate before UDS.
+    // Denied-by-identity returns here without opening a socket.
+    let auth: string | undefined;
+    if (multiUser) {
+        const decision = authorizePanelRpc(panelSession, req.method);
+        if (!decision.ok) {
+            void panel.webview.postMessage({
+                type: "rpc-response",
+                id: req.id,
+                ok: false,
+                error: decision.error,
+            });
+            return;
+        }
+        auth = decision.auth;
+    }
+
     try {
         const resp = await rpcCall(
             socketPath,
@@ -404,6 +466,7 @@ async function handleRpc(
                 method: req.method,
                 params: req.params ?? null,
                 id: randomUUID(),
+                auth,
             },
             timeoutForMethod(req.method),
         );
