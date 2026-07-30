@@ -1,0 +1,87 @@
+[package]
+name = "clawft-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+# Isolated from the workspace rust-version pin so cargo-fuzz can use
+# nightly (required by libfuzzer-sys) without fighting the main
+# toolchain file.
+rust-version = "1.85"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+# Pipeline / routing surfaces under test. Keep features minimal so
+# fuzz builds stay fast; `native` is only needed for modules gated
+# behind it (none of the 8 targets currently require it).
+clawft-core = { path = "..", default-features = false }
+clawft-types = { path = "../../clawft-types", default-features = false }
+# block_on for TieredRouter::route (async_trait, no real I/O).
+futures = { version = "0.3", default-features = false, features = ["executor", "std"] }
+
+# cargo-fuzz crates are their own workspace so the parent
+# `[workspace]` members list does not pull them into `cargo test` /
+# `scripts/build.sh` (and so nightly can resolve independently).
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "routing_config_parsing"
+path = "fuzz_targets/routing_config_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "permission_resolution"
+path = "fuzz_targets/permission_resolution.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cost_tracker_concurrent"
+path = "fuzz_targets/cost_tracker_concurrent.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rate_limiter_unique_ids"
+path = "fuzz_targets/rate_limiter_unique_ids.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "auth_context_threading"
+path = "fuzz_targets/auth_context_threading.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tool_permission_glob"
+path = "fuzz_targets/tool_permission_glob.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "escalation_chain"
+path = "fuzz_targets/escalation_chain.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "budget_persistence"
+path = "fuzz_targets/budget_persistence.rs"
+test = false
+doc = false
+bench = false

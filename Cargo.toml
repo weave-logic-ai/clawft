@@ -109,6 +109,8 @@ exclude = [
     "crates/clawft-edge-bench",
     "crates/lgfx-bus-rgb-rs",
     "crates/weftos-leaf-sim",
+    # WEFT-33: cargo-fuzz harness (own [workspace] + nightly/libfuzzer).
+    "crates/clawft-core/fuzz",
 ]
 
 [workspace.package]
