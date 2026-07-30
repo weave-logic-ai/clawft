@@ -330,7 +330,7 @@ them globally.
     "mcp_servers": {
       "claude-flow": {
         "command": "npx",
-        "args": ["-y", "@claude-flow/cli@latest", "mcp", "start"],
+        "args": ["--no-install", "@claude-flow/cli", "mcp", "start"],
         "internal_only": true
       },
       "my_server": {

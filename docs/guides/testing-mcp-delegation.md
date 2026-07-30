@@ -66,7 +66,7 @@ delegation enabled.
       },
       "claude-flow": {
         "command": "npx",
-        "args": ["-y", "@claude-flow/cli@latest", "mcp", "start"],
+        "args": ["--no-install", "@claude-flow/cli", "mcp", "start"],
         "env": {},
         "internalOnly": true
       }
@@ -233,13 +233,13 @@ orchestration via MCP.
 Some claude-flow tools require a running daemon for background coordination:
 
 ```bash
-npx @claude-flow/cli@latest daemon start
+npx --no-install @claude-flow/cli daemon start
 ```
 
 Verify it is running:
 
 ```bash
-npx @claude-flow/cli@latest doctor --fix
+npx --no-install @claude-flow/cli doctor --fix
 ```
 
 #### b. Configure as MCP server
@@ -249,7 +249,7 @@ The config from section 2 already includes the claude-flow entry. Verify:
 ```json
 "claude-flow": {
   "command": "npx",
-  "args": ["-y", "@claude-flow/cli@latest", "mcp", "start"],
+  "args": ["--no-install", "@claude-flow/cli", "mcp", "start"],
   "env": {},
   "internalOnly": true
 }
@@ -577,7 +577,7 @@ The `DelegationEngine::complexity_estimate()` function scores tasks on a
 CLAUDECODE= echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0.1.0"}}}' | CLAUDECODE= claude mcp serve
 
 # Test claude-flow server manually:
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0.1.0"}}}' | npx -y @claude-flow/cli@latest mcp start
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0.1.0"}}}' | npx --no-install @claude-flow/cli mcp start
 ```
 
 You should receive a JSON-RPC response with `result.protocolVersion` and
@@ -648,7 +648,7 @@ which npx
 
 # Verify it can be executed:
 CLAUDECODE= claude mcp serve --help
-npx -y @claude-flow/cli@latest mcp start --help
+npx --no-install @claude-flow/cli mcp start --help
 ```
 
 If using `npx`, ensure the package can be resolved. On first run, `npx -y`

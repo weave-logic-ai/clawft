@@ -178,7 +178,8 @@ cd .claude/skills/plane-workflow && ./scripts/plane.sh list-cycle 0.8.x
   trust tiers, `coverage-map.md` §3 → what it deliberately does NOT know)
 - `scripts/brain-embedded-rust-ingest.sh` — `validate` / `plan` / `stores` /
   `ingest`; `stores` is the memory-store diagnostic
-- `.mcp.json` — **tracked**; pins `@claude-flow/cli@3.32.38`
+- `.mcp.json` — **tracked**; `npx --no-install @claude-flow/cli mcp start` (version from package.json / lockfile)
+- `package.json` — **tracked**; `"@claude-flow/cli": "3.32.38"`, `"ruflo": "3.32.38"`, `overrides` + `weftos.rufloPin`
 - `~/.claude.json` → `projects['/Users/mathewbeane/weftos'].mcpServers['claude-flow']`
   — machine-local override pointing at the grok build
 - `~/.claude/backups/` — pre-migration store backups +

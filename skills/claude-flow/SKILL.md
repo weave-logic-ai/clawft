@@ -53,7 +53,7 @@ Claude-flow must be registered as an MCP server in `~/.clawft/config.json`:
     "mcp_servers": {
       "claude-flow": {
         "command": "npx",
-        "args": ["-y", "@claude-flow/cli@latest"],
+        "args": ["--no-install", "@claude-flow/cli", "mcp", "start"],
         "internal_only": false
       }
     }

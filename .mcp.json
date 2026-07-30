@@ -3,7 +3,8 @@
     "claude-flow": {
       "command": "npx",
       "args": [
-        "@claude-flow/cli@3.32.38",
+        "--no-install",
+        "@claude-flow/cli",
         "mcp",
         "start"
       ],
