@@ -105,7 +105,8 @@ grep -n 'Updated\|Implementation status\|mesh-rvf\|DEFAULT_MESH_IPC' \
 
 ## Commit
 
-- **SHA:** `abc83dd00fddee457bde490bc49860614593d0c0` (`abc83dd0`) — implementation commit; this result-doc tip may be +1 docs fix
+- **Implementation SHA:** `f31d505c02f6413405a65ddc60ceb81c1dac7177` (`f31d505c`)
+- **Branch tip:** `git rev-parse wave0j/weft-683-rvf-encoding` (may include docs SHA note)
 - **Branch:** `wave0j/weft-683-rvf-encoding`
 - **Message:** `WEFT-683: ADR-031 match reality — JSON default, mesh-rvf gate`
 - **No push** (per wave instructions)
