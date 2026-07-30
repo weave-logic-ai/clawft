@@ -464,6 +464,132 @@ pub fn chat_stream_path(conv_id: &str) -> String {
     format!("substrate/_derived/chat/{conv_id}/stream")
 }
 
+// ── Interactive Defer UX (WEFT-331) ──────────────────────────────
+//
+// When the effect gate returns `GateDecision::Defer`, the agent loop
+// can suspend until a human decides allow / deny / cancel via
+// `agent.chat.defer_decide`. The pending prompt is published on the
+// progressive stream frame (`phase = "awaiting_defer"`) and on the
+// dedicated substrate path [`chat_defer_path`].
+
+/// Default human-decision timeout for an interactive defer (ms).
+///
+/// On expiry the loop applies the **default-deny** path: the tool
+/// does not run and the LLM receives a structured
+/// `{"denied":true,"reason":"defer timed out"}` result so the turn
+/// continues without hanging forever. Documented here and in
+/// `docs/plans/wave-0l-WEFT-331-result.md`.
+pub const DEFER_DEFAULT_TIMEOUT_MS: u64 = 120_000;
+
+/// Stream / heartbeat phase while the loop is suspended on a defer.
+pub const STREAM_PHASE_AWAITING_DEFER: &str = "awaiting_defer";
+
+/// Wire string for a human **allow** decision on a deferred tool.
+pub const DEFER_DECISION_ALLOW: &str = "allow";
+/// Wire string for a human **deny** decision on a deferred tool.
+pub const DEFER_DECISION_DENY: &str = "deny";
+/// Wire string for a human **cancel** decision on a deferred tool.
+pub const DEFER_DECISION_CANCEL: &str = "cancel";
+
+/// Human decision returned via `agent.chat.defer_decide` (WEFT-331).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DeferUserDecision {
+    /// Proceed with the deferred tool (sandbox + dispatch still apply).
+    Allow,
+    /// Refuse the tool; loop continues with a structured deny result.
+    Deny,
+    /// Abort this defer without approving; treated as deny for the tool
+    /// result so the model can re-plan (does not cancel the whole turn
+    /// unless the panel also fires `agent.chat.cancel`).
+    Cancel,
+}
+
+impl DeferUserDecision {
+    /// Parse a wire decision string (`allow` / `deny` / `cancel`).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            DEFER_DECISION_ALLOW => Some(Self::Allow),
+            DEFER_DECISION_DENY => Some(Self::Deny),
+            DEFER_DECISION_CANCEL => Some(Self::Cancel),
+            _ => None,
+        }
+    }
+
+    /// Wire spelling for this decision.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => DEFER_DECISION_ALLOW,
+            Self::Deny => DEFER_DECISION_DENY,
+            Self::Cancel => DEFER_DECISION_CANCEL,
+        }
+    }
+}
+
+/// Pending interactive-defer prompt shown in the panel (WEFT-331).
+///
+/// Published on [`AgentChatStreamFrame::defer`] / [`chat_defer_path`]
+/// while the tool loop is suspended awaiting `agent.chat.defer_decide`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeferPromptEvent {
+    /// Stable id for this defer (keyed by the decision RPC).
+    pub defer_id: String,
+    /// Conversation the loop is processing.
+    pub conv_id: String,
+    /// Tool name the gate deferred (e.g. `"write_file"`).
+    pub tool: String,
+    /// Human-readable defer reason from the effect gate.
+    pub reason: String,
+    /// Truncated JSON arguments for the panel preview.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub arguments_preview: String,
+    /// How long the loop will wait (ms) before default-deny.
+    #[serde(default = "default_defer_timeout_ms")]
+    pub timeout_ms: u64,
+    /// Wall-clock ms when the prompt was opened (panel age label).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts_ms: Option<u64>,
+}
+
+fn default_defer_timeout_ms() -> u64 {
+    DEFER_DEFAULT_TIMEOUT_MS
+}
+
+/// Parameters for the `agent.chat.defer_decide` RPC (WEFT-331).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentChatDeferDecideParams {
+    /// Conversation that owns the pending defer.
+    pub conv_id: String,
+    /// Id from the published [`DeferPromptEvent`].
+    pub defer_id: String,
+    /// One of [`DEFER_DECISION_ALLOW`] / [`DEFER_DECISION_DENY`] /
+    /// [`DEFER_DECISION_CANCEL`].
+    pub decision: String,
+}
+
+/// Result of `agent.chat.defer_decide`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentChatDeferDecideResult {
+    /// True when a pending waiter accepted this decision.
+    pub accepted: bool,
+    /// Echo of the defer id.
+    pub defer_id: String,
+    /// Echo of the decision (or `"none"` when nothing was pending).
+    pub decision: String,
+    /// Optional diagnostic when `accepted == false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Substrate path for the pending interactive-defer prompt.
+///
+/// Sibling of `status` / `stream` under `_derived/chat/<conv>/` so the
+/// existing chat `DerivedWriteGrant` covers it. The panel may poll this
+/// path (or read `defer` off the stream frame) while a turn is in flight.
+pub fn chat_defer_path(conv_id: &str) -> String {
+    format!("substrate/_derived/chat/{conv_id}/defer")
+}
+
 /// One progressive frame written to [`chat_stream_path`].
 ///
 /// The panel treats `text` as the **accumulated** assistant draft
@@ -477,7 +603,8 @@ pub struct AgentChatStreamFrame {
     #[serde(default)]
     pub text: String,
     /// Coarse phase for the heartbeat-style status label:
-    /// `"thinking"` / `"generating"` / `"done"` / `"error"`.
+    /// `"thinking"` / `"generating"` / `"done"` / `"error"` /
+    /// [`STREAM_PHASE_AWAITING_DEFER`].
     pub phase: String,
     /// Monotonic frame counter within this turn.
     pub seq: u64,
@@ -495,6 +622,11 @@ pub struct AgentChatStreamFrame {
     /// Wall-clock ms the frame was published (panel age label).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ts_ms: Option<u64>,
+    /// WEFT-331: present when `phase == awaiting_defer` so the panel
+    /// can render the allow / deny / cancel prompt without a second
+    /// substrate read. Absent on the wire when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defer: Option<DeferPromptEvent>,
 }
 
 impl AgentChatStreamFrame {
@@ -508,6 +640,7 @@ impl AgentChatStreamFrame {
             tool_name: None,
             error: None,
             ts_ms: None,
+            defer: None,
         }
     }
 
@@ -521,6 +654,7 @@ impl AgentChatStreamFrame {
             tool_name: None,
             error: None,
             ts_ms: None,
+            defer: None,
         }
     }
 
@@ -534,6 +668,7 @@ impl AgentChatStreamFrame {
             tool_name: None,
             error: None,
             ts_ms: None,
+            defer: None,
         }
     }
 
@@ -547,6 +682,25 @@ impl AgentChatStreamFrame {
             tool_name: None,
             error: Some(error.into()),
             ts_ms: None,
+            defer: None,
+        }
+    }
+
+    /// Build an interactive-defer wait frame (WEFT-331).
+    ///
+    /// `done` stays `false` — the turn is still in flight; the panel
+    /// shows the prompt and must call `agent.chat.defer_decide`.
+    pub fn awaiting_defer(seq: u64, prompt: DeferPromptEvent) -> Self {
+        let tool_name = Some(prompt.tool.clone());
+        Self {
+            text: String::new(),
+            phase: STREAM_PHASE_AWAITING_DEFER.into(),
+            seq,
+            done: false,
+            tool_name,
+            error: None,
+            ts_ms: prompt.ts_ms,
+            defer: Some(prompt),
         }
     }
 }
@@ -859,5 +1013,52 @@ mod tests {
         assert_eq!(r.completion_tokens, 22);
         assert_eq!(r.model.as_deref(), Some("hermes-4.3-36b"));
         assert_eq!(r.identity_source.as_deref(), Some("clawft"));
+    }
+
+    #[test]
+    fn defer_user_decision_parses_wire_strings() {
+        assert_eq!(
+            DeferUserDecision::parse("allow"),
+            Some(DeferUserDecision::Allow)
+        );
+        assert_eq!(
+            DeferUserDecision::parse("DENY"),
+            Some(DeferUserDecision::Deny)
+        );
+        assert_eq!(
+            DeferUserDecision::parse("cancel"),
+            Some(DeferUserDecision::Cancel)
+        );
+        assert!(DeferUserDecision::parse("maybe").is_none());
+    }
+
+    #[test]
+    fn defer_prompt_and_decide_params_round_trip() {
+        let prompt = DeferPromptEvent {
+            defer_id: "d-1".into(),
+            conv_id: "c-1".into(),
+            tool: "write_file".into(),
+            reason: "needs review".into(),
+            arguments_preview: r#"{"path":"x"}"#.into(),
+            timeout_ms: DEFER_DEFAULT_TIMEOUT_MS,
+            ts_ms: Some(1),
+        };
+        let frame = AgentChatStreamFrame::awaiting_defer(7, prompt.clone());
+        assert_eq!(frame.phase, STREAM_PHASE_AWAITING_DEFER);
+        assert!(!frame.done);
+        assert_eq!(frame.defer.as_ref().unwrap().defer_id, "d-1");
+        let v = serde_json::to_value(&frame).unwrap();
+        let back: AgentChatStreamFrame = serde_json::from_value(v).unwrap();
+        assert_eq!(back, frame);
+
+        let params = AgentChatDeferDecideParams {
+            conv_id: "c-1".into(),
+            defer_id: "d-1".into(),
+            decision: DEFER_DECISION_ALLOW.into(),
+        };
+        let json = serde_json::to_string(&params).unwrap();
+        let p2: AgentChatDeferDecideParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(p2.decision, "allow");
+        assert_eq!(chat_defer_path("c-1"), "substrate/_derived/chat/c-1/defer");
     }
 }

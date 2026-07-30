@@ -2090,10 +2090,27 @@ pub async fn run(
             }
         }
 
+        // WEFT-331: interactive Defer broker. Publishes panel prompts on the
+        // chat stream + dedicated defer substrate path; decisions arrive via
+        // `agent.chat.defer_decide`. Attach the interactor to the loop before
+        // the service wraps it so GateDecision::Defer suspends the turn.
+        let defer_publisher: Arc<dyn clawft_service_agent::DeferPromptPublisher> =
+            Arc::new(DaemonDeferPublisher {
+                kernel: Arc::clone(&kernel),
+            });
+        let defer_broker = Arc::new(clawft_service_agent::InteractiveDeferBroker::new(
+            defer_publisher,
+            std::time::Duration::from_millis(
+                clawft_types::agent_chat::DEFER_DEFAULT_TIMEOUT_MS,
+            ),
+        ));
+        agent_loop.set_defer_interactor(defer_broker.clone());
+
         // ADR-058 Phase 5 deferred step 4: also hand the SAME tier to the
         // service so the `agent.chat.end` signal can drive conversation-end
         // promotion (the loop grafts from it; the service promotes from it).
-        let mut service = clawft_service_agent::AgentService::new(agent_loop);
+        let mut service = clawft_service_agent::AgentService::new(agent_loop)
+            .with_defer_broker(defer_broker);
         if let Some(tier) = session_tier {
             service = service.with_session_tier(tier);
         }
@@ -4245,6 +4262,82 @@ async fn handle_node_identity(
     )
 }
 
+/// WEFT-331: substrate publisher for interactive defer prompts.
+///
+/// Writes an `awaiting_defer` stream frame (so the progressive chat
+/// panel lights up) and the dedicated `chat_defer_path` value the
+/// panel can poll independently of stream phase.
+struct DaemonDeferPublisher {
+    kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
+}
+
+#[async_trait::async_trait]
+impl clawft_service_agent::DeferPromptPublisher for DaemonDeferPublisher {
+    async fn publish_prompt(&self, prompt: &clawft_types::agent_chat::DeferPromptEvent) {
+        // Stream frame — panel already polls this path during chat_stream.
+        let frame = crate::protocol::AgentChatStreamFrame::awaiting_defer(
+            // High seq so we don't rewind an earlier generating frame;
+            // panel treats equal seq as idempotent refresh.
+            1_000_000,
+            prompt.clone(),
+        );
+        publish_chat_stream_frame(&self.kernel, &prompt.conv_id, frame).await;
+
+        // Dedicated defer path for non-stream consumers / late joiners.
+        let path = crate::protocol::chat_defer_path(&prompt.conv_id);
+        let value = match serde_json::to_value(prompt) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(error = %e, "agent.chat defer: prompt serialize failed");
+                return;
+            }
+        };
+        let Some(ctrl) = daemon_control() else {
+            warn!("agent.chat defer: daemon control not wired; skip prompt publish");
+            return;
+        };
+        let k = self.kernel.read().await;
+        if let Err(e) = k.substrate_service().publish_gated_with_grants(
+            Some(&ctrl.daemon_node_id),
+            &path,
+            value,
+            k.node_registry(),
+        ) {
+            warn!(
+                error = %e,
+                path = %path,
+                conv_id = %prompt.conv_id,
+                "agent.chat defer: prompt publish failed"
+            );
+        }
+    }
+
+    async fn clear_prompt(&self, conv_id: &str, defer_id: &str) {
+        let path = crate::protocol::chat_defer_path(conv_id);
+        let value = serde_json::json!({
+            "cleared": true,
+            "defer_id": defer_id,
+        });
+        let Some(ctrl) = daemon_control() else {
+            return;
+        };
+        let k = self.kernel.read().await;
+        if let Err(e) = k.substrate_service().publish_gated_with_grants(
+            Some(&ctrl.daemon_node_id),
+            &path,
+            value,
+            k.node_registry(),
+        ) {
+            warn!(
+                error = %e,
+                path = %path,
+                conv_id,
+                "agent.chat defer: clear publish failed"
+            );
+        }
+    }
+}
+
 /// Publish an [`AgentChatStreamFrame`] to
 /// `substrate/_derived/chat/<conv>/stream` under the daemon's chat
 /// DerivedWriteGrant (WEFT-253). Best-effort: publish failures are
@@ -5996,6 +6089,41 @@ async fn dispatch(
                 Response::success(serde_json::json!({"cancelled": conv_id}))
             } else {
                 Response::error("agent service not wired")
+            }
+        }
+        // WEFT-331: human decision for an interactive gate Defer. The
+        // tool loop is suspended on a oneshot; this resolves it so
+        // allow resumes the tool (sandbox still applies) and deny /
+        // cancel returns a structured envelope without dispatch.
+        "agent.chat.defer_decide" => {
+            let parsed: crate::protocol::AgentChatDeferDecideParams =
+                match serde_json::from_value(params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return Response::error(format!(
+                            "agent.chat.defer_decide: invalid params: {e}"
+                        ));
+                    }
+                };
+            if parsed.conv_id.is_empty() || parsed.defer_id.is_empty() {
+                return Response::error(
+                    "agent.chat.defer_decide requires conv_id and defer_id",
+                );
+            }
+            let Some(decision) =
+                crate::protocol::DeferUserDecision::parse(&parsed.decision)
+            else {
+                return Response::error(
+                    "agent.chat.defer_decide: decision must be allow|deny|cancel",
+                );
+            };
+            let Some(agent) = daemon_agent() else {
+                return Response::error("agent service not wired");
+            };
+            let result = agent.defer_decide(&parsed.conv_id, &parsed.defer_id, decision);
+            match serde_json::to_value(&result) {
+                Ok(v) => Response::success(v),
+                Err(e) => Response::error(format!("agent.chat.defer_decide: serialize: {e}")),
             }
         }
         "agent.chat.end" => {

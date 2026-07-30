@@ -42,6 +42,7 @@
 #![warn(missing_docs)]
 
 pub mod atom_registry;
+pub mod defer_broker;
 pub mod enrich_queue;
 pub mod dialogue_act;
 pub mod enrichment_classifier;
@@ -73,6 +74,9 @@ pub use enrichment_classifier::{
 };
 pub use interrupt_router::{
     InterruptAction, InterruptCtx, InterruptOutcome, InterruptRouter, InterruptSignals,
+};
+pub use defer_broker::{
+    DeferPromptPublisher, InteractiveDeferBroker, NoopDeferPublisher,
 };
 pub use kernel_gate::KernelEffectGate;
 pub use text_structure::{Argument, EntityKind, EntitySpan, Structure, UtteranceShape};

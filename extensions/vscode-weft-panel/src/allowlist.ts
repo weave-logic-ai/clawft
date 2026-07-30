@@ -59,6 +59,8 @@ export const STATIC_ALLOWED_METHODS: ReadonlySet<string> = new Set([
     "llm.models",
     "agent.chat",
     "agent.chat_stream",
+    // WEFT-331: human decision for interactive gate Defer.
+    "agent.chat.defer_decide",
     "terminal.spawn",
     "terminal.write",
     "terminal.resize",

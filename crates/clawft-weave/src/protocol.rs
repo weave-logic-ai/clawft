@@ -772,9 +772,11 @@ pub struct LlmModelsResult {
 // paths (`clawft_weave::protocol::AgentChatParams`, etc.).
 
 pub use clawft_types::agent_chat::{
-    AgentChatMessage, AgentChatParams, AgentChatResult, AgentChatStreamFrame, AgentChatToolCall,
-    AgentTurnRecordParams, AgentTurnRecordResult, RecordedTurn, SpawnedTaskSummary,
-    chat_stream_path,
+    AgentChatDeferDecideParams, AgentChatDeferDecideResult, AgentChatMessage, AgentChatParams,
+    AgentChatResult, AgentChatStreamFrame, AgentChatToolCall, AgentTurnRecordParams,
+    AgentTurnRecordResult, DEFER_DECISION_ALLOW, DEFER_DECISION_CANCEL, DEFER_DECISION_DENY,
+    DEFER_DEFAULT_TIMEOUT_MS, DeferPromptEvent, DeferUserDecision, RecordedTurn,
+    STREAM_PHASE_AWAITING_DEFER, SpawnedTaskSummary, chat_defer_path, chat_stream_path,
 };
 
 // ── Agent proposal (WEFT-654 review gate, D9-D11) ──────────

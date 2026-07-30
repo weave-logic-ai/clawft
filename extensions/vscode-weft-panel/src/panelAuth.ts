@@ -116,6 +116,7 @@ export function requiredScope(method: string): CapScope {
         case "agent.chat_stream":
         case "agent.chat.cancel":
         case "agent.chat.end":
+        case "agent.chat.defer_decide":
         case "agent.turn.record":
         case "llm.prompt":
             return "chat";

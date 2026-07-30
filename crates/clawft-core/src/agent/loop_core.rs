@@ -604,6 +604,15 @@ pub struct AgentLoop<P: Platform> {
     /// (default for CLI / legacy callers) no decision records are
     /// written.
     routing_log: Option<Arc<dyn super::routing_log::RouterDecisionLog>>,
+    /// Optional interactive-defer hook (WEFT-331).
+    ///
+    /// When set, [`GateDecision::Defer`](super::gate::GateDecision::Defer)
+    /// suspends the tool loop until the interactor returns a human
+    /// decision (allow / deny / cancel / timeout). When `None` (default)
+    /// Defer keeps the v1 structured-tool-result behaviour so the model
+    /// can re-plan without a panel. Daemon path wires
+    /// `clawft-service-agent`'s broker via [`Self::set_defer_interactor`].
+    defer_interactor: std::sync::OnceLock<Arc<dyn super::defer::DeferInteractor>>,
 }
 
 impl<P: Platform> AgentLoop<P> {
@@ -663,6 +672,7 @@ impl<P: Platform> AgentLoop<P> {
             #[cfg(feature = "rvf")]
             pending_hold: std::sync::Mutex::new(None),
             turn_ledger: std::sync::OnceLock::new(),
+            defer_interactor: std::sync::OnceLock::new(),
         }
     }
 
@@ -719,6 +729,29 @@ impl<P: Platform> AgentLoop<P> {
     pub fn with_context_router(mut self, router: Arc<dyn ContextRouter>) -> Self {
         self.context_router = router;
         self
+    }
+
+    /// Attach an interactive-defer interactor (WEFT-331).
+    ///
+    /// Builder form for tests / early wiring. Prefer
+    /// [`Self::set_defer_interactor`] when the loop is already behind
+    /// an `Arc` (daemon boot).
+    pub fn with_defer_interactor(
+        self,
+        interactor: Arc<dyn super::defer::DeferInteractor>,
+    ) -> Self {
+        let _ = self.defer_interactor.set(interactor);
+        self
+    }
+
+    /// Late-wire an interactive-defer interactor (WEFT-331).
+    ///
+    /// Idempotent: first set wins (matches `set_cow_memory` /
+    /// `set_turn_ledger`).
+    pub fn set_defer_interactor(&self, interactor: Arc<dyn super::defer::DeferInteractor>) {
+        if self.defer_interactor.set(interactor).is_err() {
+            tracing::debug!("defer interactor already set; ignoring second attach");
+        }
     }
 
     /// Attach an [`EffectGate`] so the loop checks every tool dispatch
@@ -2117,22 +2150,29 @@ impl<P: Platform> AgentLoop<P> {
     /// * `EffectGate::Deny`   → no tool dispatch; returns
     ///   `{"denied": true, "reason": ...}` so the LLM sees a
     ///   policy decision distinct from a runtime fault.
-    /// * `EffectGate::Defer`  → no tool dispatch; returns
-    ///   `{"deferred": true, "reason": ...}`. The tool loop then
-    ///   **halts** with [`FINISH_REASON_DEFERRED`] +
-    ///   [`DeferredActionEvent`] so the chat panel can
-    ///   prompt-and-resume (WEFT-258).
+    /// * `EffectGate::Defer`  → with no interactor: returns
+    ///   `{"deferred": true, "reason": ...}` and **halts** with
+    ///   [`FINISH_REASON_DEFERRED`] + [`DeferredActionEvent`] (WEFT-258).
+    ///   With a [`super::defer::DeferInteractor`] (WEFT-331): suspends
+    ///   until allow / deny / cancel / timeout; allow falls through
+    ///   to sandbox + dispatch.
     /// * Sandbox denial       → returns `{"error": "sandbox denied: ..."}`.
     ///
     /// The helper applies the [`MAX_TOOL_RESULT_BYTES`] truncation
     /// uniformly so callers cannot accidentally ship un-truncated
     /// tool output back to the LLM (the audit's CRIT-02 finding).
+    ///
+    /// `conv_id` + `cancel` are required for the interactive-defer path
+    /// (panel prompt + WEFT-323 cancel). Callers without a live turn
+    /// (unit tests of the deny envelope) may pass `""` and a fresh token.
     pub async fn execute_tool_with_guards(
         &self,
         agent_id: &str,
         tool_name: &str,
         input: &serde_json::Value,
         permissions: Option<&clawft_types::routing::UserPermissions>,
+        conv_id: &str,
+        cancel: &CancellationToken,
     ) -> String {
         // 1. EffectGate (policy) check.
         let ev = effect_for_tool(tool_name, input);
@@ -2150,12 +2190,50 @@ impl<P: Platform> AgentLoop<P> {
                 .to_string();
             }
             GateDecision::Defer { reason } => {
-                warn!(tool = %tool_name, reason = %reason, "gate: tool dispatch deferred");
-                return serde_json::json!({
-                    "deferred": true,
-                    "reason": reason,
-                })
-                .to_string();
+                // WEFT-331: interactive defer when an interactor is
+                // attached; otherwise keep the v1 structured deferred
+                // tool-result so the model re-plans without a panel.
+                if let Some(interactor) = self.defer_interactor.get() {
+                    warn!(
+                        tool = %tool_name,
+                        reason = %reason,
+                        conv_id,
+                        "gate: tool dispatch deferred — awaiting human decision"
+                    );
+                    let args_preview = preview_truncate(
+                        &serde_json::to_string(input).unwrap_or_else(|_| "{}".into()),
+                    );
+                    let request = super::defer::DeferRequest {
+                        conv_id: conv_id.to_string(),
+                        tool: tool_name.to_string(),
+                        reason: reason.clone(),
+                        arguments_preview: args_preview,
+                        timeout_ms: clawft_types::agent_chat::DEFER_DEFAULT_TIMEOUT_MS,
+                    };
+                    let outcome = interactor.await_decision(request, cancel).await;
+                    if let Some(body) = outcome.tool_result_json(&reason) {
+                        info!(
+                            tool = %tool_name,
+                            conv_id,
+                            outcome = ?outcome,
+                            "defer decision — tool not executed"
+                        );
+                        return body;
+                    }
+                    // Allow → fall through to sandbox + dispatch
+                    info!(
+                        tool = %tool_name,
+                        conv_id,
+                        "defer allowed by human — proceeding with tool"
+                    );
+                } else {
+                    warn!(tool = %tool_name, reason = %reason, "gate: tool dispatch deferred");
+                    return serde_json::json!({
+                        "deferred": true,
+                        "reason": reason,
+                    })
+                    .to_string();
+                }
             }
         }
 
@@ -2508,7 +2586,14 @@ impl<P: Platform> AgentLoop<P> {
                 .iter()
                 .map(|(id, name, input)| async move {
                     let body = self
-                        .execute_tool_with_guards(agent_id, name, input, permissions)
+                        .execute_tool_with_guards(
+                            agent_id,
+                            name,
+                            input,
+                            permissions,
+                            conv_id,
+                            cancel,
+                        )
                         .await;
                     (id.clone(), name.clone(), body)
                 })
@@ -3731,6 +3816,8 @@ mod tests {
                 "canvas_stub",
                 &serde_json::json!({"command": "render"}),
                 None,
+                "schema_echo",
+                &CancellationToken::new(),
             )
             .await;
 
@@ -5845,6 +5932,100 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
+    /// WEFT-331: with AlwaysAllowDefer interactor, a gate Defer still
+    /// executes the tool (human allow path) and the model sees the
+    /// real tool result rather than a deferred envelope.
+    #[tokio::test]
+    async fn gate_defer_allow_resumes_tool_execution() {
+        let transport = Arc::new(GateProbeTransport::new());
+        let (mut agent, dir) = make_agent_loop(transport, "gate_defer_allow").await;
+        let gate = Arc::new(StubGate::defer("needs human"));
+        agent = agent
+            .with_gate(gate)
+            .with_defer_interactor(Arc::new(super::super::defer::AlwaysAllowDefer));
+
+        let inbound = InboundMessage {
+            channel: "test".into(),
+            sender_id: "u".into(),
+            chat_id: "conv-defer-allow".into(),
+            content: "trigger tool".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        agent.bus.publish_inbound(inbound).unwrap();
+        let msg = agent.bus.consume_inbound().await.unwrap();
+        let outbound = agent
+            .handle_turn(msg, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        // GateProbeTransport echoes the tool-result body on the second
+        // LLM call as the assistant text. After human allow the gate no
+        // longer short-circuits — the body must not be the deferred
+        // envelope (tool may still fail sandbox/permissions downstream).
+        let parsed: serde_json::Value =
+            serde_json::from_str(&outbound.content).expect("tool result is JSON");
+        assert!(
+            parsed.get("deferred").is_none(),
+            "allow path must not leave a deferred envelope: {parsed}"
+        );
+        // Gate-level deny envelope is also absent — interactive allow
+        // does not synthesize denied:true from the gate reason.
+        assert!(
+            parsed.get("denied").is_none()
+                || parsed
+                    .get("reason")
+                    .and_then(|r| r.as_str())
+                    .is_some_and(|r| r.contains("permission") || r.contains("sandbox")),
+            "allow path must not gate-deny: {parsed}"
+        );
+        // Prove the interactor ran: without it, content would be
+        // {"deferred":true,"reason":"needs human"}.
+        assert_ne!(
+            parsed.get("reason").and_then(|r| r.as_str()),
+            Some("needs human"),
+            "interactive allow must not return the raw gate defer reason: {parsed}"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// WEFT-331: interactive deny maps to a structured denied envelope.
+    #[tokio::test]
+    async fn gate_defer_interactive_deny_blocks_tool() {
+        let transport = Arc::new(GateProbeTransport::new());
+        let (mut agent, dir) = make_agent_loop(transport, "gate_defer_deny").await;
+        agent = agent
+            .with_gate(Arc::new(StubGate::defer("needs human")))
+            .with_defer_interactor(Arc::new(super::super::defer::AlwaysDenyDefer {
+                reason: "human said no".into(),
+            }));
+
+        let inbound = InboundMessage {
+            channel: "test".into(),
+            sender_id: "u".into(),
+            chat_id: "conv-defer-deny".into(),
+            content: "trigger tool".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        agent.bus.publish_inbound(inbound).unwrap();
+        let msg = agent.bus.consume_inbound().await.unwrap();
+        let outbound = agent
+            .handle_turn(msg, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&outbound.content).expect("deny result is JSON");
+        assert_eq!(parsed["denied"], true);
+        assert_eq!(parsed["reason"], "human said no");
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
     #[tokio::test]
     async fn gate_defer_halts_without_second_llm_round_trip() {
         // GateProbeTransport only returns tool-use on call 0; if the
@@ -6397,7 +6578,14 @@ mod tests {
         agent = agent.with_gate(Arc::new(StubGate::deny("policy")) as Arc<dyn EffectGate>);
 
         let body = agent
-            .execute_tool_with_guards("agent-x", "echo", &serde_json::json!({"text": "hi"}), None)
+            .execute_tool_with_guards(
+                "agent-x",
+                "echo",
+                &serde_json::json!({"text": "hi"}),
+                None,
+                "etwg_deny",
+                &CancellationToken::new(),
+            )
             .await;
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["denied"], true);
@@ -6415,7 +6603,14 @@ mod tests {
         let (agent, dir) = make_agent_loop(transport, "etwg_trunc").await;
 
         let body = agent
-            .execute_tool_with_guards("agent-x", "huge_output", &serde_json::json!({}), None)
+            .execute_tool_with_guards(
+                "agent-x",
+                "huge_output",
+                &serde_json::json!({}),
+                None,
+                "etwg_trunc",
+                &CancellationToken::new(),
+            )
             .await;
         // The mock-loop registry has no `huge_output` tool, so this
         // path returns an `{"error": ...}` envelope. That alone

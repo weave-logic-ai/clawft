@@ -6,12 +6,12 @@
 //! The gate decides whether the tool runs:
 //!
 //! - [`GateDecision::Permit`] — proceed with the tool execute.
-//! - [`GateDecision::Defer`] — surface the reason as the tool result
-//!   and **halt** the turn with [`FINISH_REASON_DEFERRED`] /
-//!   [`DeferredActionEvent`] so the chat panel can prompt the user and
-//!   resume on response (WEFT-258 interactive defer). Prior to WEFT-258
-//!   the loop continued so the model could re-plan; the structured
-//!   tool-result shape is unchanged.
+//! - [`GateDecision::Defer`] — without a
+//!   [`DeferInteractor`](super::defer::DeferInteractor): surface the
+//!   reason as the tool result and **halt** with [`FINISH_REASON_DEFERRED`]
+//!   / [`DeferredActionEvent`] so the panel can prompt-and-resume
+//!   (WEFT-258). With an interactor (WEFT-331): suspend until allow /
+//!   deny / cancel / timeout; allow falls through to sandbox + dispatch.
 //! - [`GateDecision::Deny`]  — the reason becomes the tool result and
 //!   the loop continues. After [`GATE_DENIAL_ESCALATION_LIMIT`]
 //!   consecutive Denys in one turn the loop emits

@@ -111,6 +111,8 @@ pub fn required_capability(method: &str) -> Capability {
         "agent.chat_stream" => Capability::Chat,
         "agent.chat.cancel" => Capability::Chat,
         "agent.chat.end" => Capability::Chat,
+        // WEFT-331: human decision for interactive gate Defer.
+        "agent.chat.defer_decide" => Capability::Chat,
         "agent.turn.record" => Capability::Chat,
         "llm.prompt" => Capability::Chat,
 
@@ -271,6 +273,12 @@ mod tests {
         // WEFT-256: model enumeration is Read (anonymous-safe).
         assert!(caps.allows_method("llm.models"));
         assert_eq!(required_capability("llm.models"), Capability::Read);
+        // WEFT-331: interactive defer decision (panel allow/deny/cancel).
+        assert!(caps.allows_method("agent.chat.defer_decide"));
+        assert_eq!(
+            required_capability("agent.chat.defer_decide"),
+            Capability::Chat
+        );
         // gated:
         assert!(!caps.allows_method("agent.spawn"));
         assert!(!caps.allows_method("memory.delete"));
