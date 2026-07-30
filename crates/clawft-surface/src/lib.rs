@@ -3,10 +3,12 @@
 //! drives the shared canon primitives in [`clawft_canon`].
 //!
 //! This crate is the **M1.5 subset** of ADR-016 — sufficient for the
-//! WeftOS Admin reference panel (session-10 §6.1). Out of scope for
-//! M1.5: ternary, nested lambdas, real governance intersection,
-//! variant-id stamping, hot-path memoisation. Sibling milestones
-//! M1.6+ fill these in.
+//! WeftOS Admin reference panel (session-10 §6.1). Governance /
+//! GEPA affordance intersection (WEFT-277 / ADR-006 rule 2 + ADR-008)
+//! ships as a compose-time policy snapshot ([`ComposeGovernance`]);
+//! full Goal aggregate + chain events remain kernel-side. Still out
+//! of scope here: ternary, nested lambdas, variant-id stamping,
+//! hot-path memoisation. Sibling milestones M1.6+ fill these in.
 //!
 //! # M1.5 scope reductions vs ADR-016 §5
 //!
@@ -93,9 +95,9 @@ pub mod substrate {
 }
 
 pub use compose::{
-    ComposeOutcome, ComposePermits, PendingDispatch, compose, compose_with_permits,
-    honest_affordances, normalize_verb, render_headless, render_headless_full,
-    render_headless_with_permits,
+    ComposeGovernance, ComposeOutcome, ComposePermits, EffectCeiling, PendingDispatch, compose,
+    compose_with_permits, estimate_verb_effect, honest_affordances, is_gepa_mutate_verb,
+    normalize_verb, render_headless, render_headless_full, render_headless_with_permits,
 };
 pub use substrate::OntologySnapshot;
 pub use tree::{

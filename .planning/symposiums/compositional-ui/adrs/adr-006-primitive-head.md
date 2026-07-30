@@ -74,6 +74,26 @@ governance.permit(caller, primitive, resource)` (Session 9 §Layer-2
 missing gap). Empty list means "read-only right now"; absent
 `affordances` field means malformed.
 
+> **Alignment note (WEFT-277 / WEFT-430, 2026-07-30):** Compose-time
+> honesty is implemented in `clawft_surface::compose::honest_affordances`
+> as the layered intersection
+> `raw ∩ influences ∩ capture_grants ∩ ComposeGovernance`.
+>
+> - **WEFT-430** — session permit half: manifest `influences` +
+>   ADR-012 capture grants (`ComposePermits`).
+> - **WEFT-277** — goal-aggregate / GEPA half: `ComposeGovernance`
+>   snapshot with `granted_affordances` / `denied_affordances`
+>   (deny wins), optional `effect_ceiling` (5-D), `surface_scope`
+>   path prefix, and `gepa_mutate_allowed` for ADR-005 `mutate`
+>   verbs (ADR-008). Default policy is the chain-recorded
+>   `adhoc-scratch` open snapshot so hosts without a wired Goal
+>   keep WEFT-430 behaviour.
+>
+> Kernel double-gate at dispatch (ADR-033 / ADR-008) remains
+> authoritative; the composer only evaluates a frozen snapshot so
+> frame time stays pure and sync. Full Goal aggregate substrate +
+> `governance.goal.*` chain events are still kernel-owned.
+
 **3. `confidence`** — `{source, value?, interval?, as-of?}` where
 `source ∈ {deterministic, inference, cache, input}`. A value
 produced by inference without confidence is malformed (Cedar-OS

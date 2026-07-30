@@ -30,12 +30,16 @@
 //! `kernel.kill-process` (matching the extension's ALLOWED_METHODS
 //! allowlist + the daemon handlers added in M1.5.1a).
 //!
-//! **WEFT-430 / ADR-006 rule 2**: affordances are intersected with
-//! session permits at compose time via [`honest_affordances`]. The
-//! permit set is the app's manifest `influences` (write-side verbs)
-//! plus session capability grants (ADR-012 / WEFT-429). Surfaces hide
+//! **WEFT-430 / ADR-006 rule 2 (permit half)**: affordances are
+//! intersected with session permits at compose time via
+//! [`honest_affordances`]. The permit set is the app's manifest
+//! `influences` (write-side verbs) plus session capability grants
+//! (ADR-012 / WEFT-429).
+//!
+//! **WEFT-277 / ADR-008 (governance half)**: the same intersection also
+//! applies [`ComposeGovernance`] — goal-aggregate grants/denies,
+//! effect ceiling, surface scope, and GEPA mutate gate. Surfaces hide
 //! affordances the caller cannot perform — no "attempt and hope".
-//! Full GEPA / goal-aggregate gating (ADR-008) remains M2 (WEFT-277).
 
 use std::collections::BTreeSet;
 
@@ -44,6 +48,8 @@ use clawft_app::permission_covered;
 use crate::eval::{Value, eval_binding};
 use crate::substrate::OntologySnapshot;
 use crate::tree::{AffordanceDecl, AttrValue, IdentityIri, SurfaceNode, SurfaceTree};
+
+use super::governance::{ComposeGovernance, normalize_verb};
 
 use clawft_canon::{
     CanonResponse, CanonWidget, Canvas, CellSize, Chip, ChipTone, Field, FieldKind, FieldValue,
@@ -85,20 +91,27 @@ pub struct ComposeOutcome {
     pub dispatches: Vec<PendingDispatch>,
 }
 
-/// Session permits for ADR-006 rule 2 (`affordance ∩ permit`).
+/// Session permits + goal-aggregate governance for ADR-006 rule 2
+/// (`affordance ∩ permit ∩ governance`).
 ///
-/// Built from the app manifest write-side verb list (`influences`) and
-/// the session's ADR-012 capability grants. When `influences` is
-/// [`None`], the composer is in **open** mode (legacy tests / chip
-/// surfaces without a manifest) and only grant-gated capture verbs
-/// are filtered. When `influences` is [`Some`], every affordance verb
-/// must appear in that set (normalized, `rpc.` prefix stripped).
+/// Built from the app manifest write-side verb list (`influences`),
+/// the session's ADR-012 capability grants, and an optional
+/// [`ComposeGovernance`] snapshot (WEFT-277 / ADR-008). When
+/// `influences` is [`None`], the composer is in **open** mode (legacy
+/// tests / chip surfaces without a manifest) and only grant-gated
+/// capture verbs are filtered at the permit layer. When `influences`
+/// is [`Some`], every affordance verb must appear in that set
+/// (normalized, `rpc.` prefix stripped). Governance defaults to
+/// [`ComposeGovernance::open`] (`adhoc-scratch`) so hosts that have
+/// not yet wired a goal keep WEFT-430 behaviour.
 #[derive(Debug, Clone)]
 pub struct ComposePermits {
     /// Allowed write verbs (manifest `influences`). `None` = open.
     pub influences: Option<BTreeSet<String>>,
     /// Session capability grants (ADR-012 capture / fs / net).
     pub grants: Vec<Permission>,
+    /// Goal-aggregate / GEPA policy (WEFT-277). Default = open.
+    pub governance: ComposeGovernance,
 }
 
 impl Default for ComposePermits {
@@ -111,18 +124,24 @@ impl ComposePermits {
     /// Unrestricted verb set — identity-like for non-capture verbs.
     /// Used by headless tests and tray-chip surfaces without a
     /// manifest. Capture-mapped verbs still require a matching grant.
+    /// Governance is open (`adhoc-scratch`).
     pub fn open() -> Self {
         Self {
             influences: None,
             grants: Vec::new(),
+            governance: ComposeGovernance::open(),
         }
     }
 
     /// Deny every write verb (empty influences, no grants).
+    /// Governance left open so tests can isolate the permit layer;
+    /// use [`Self::with_governance`]`(ComposeGovernance::closed())`
+    /// for a full dual-closed fixture.
     pub fn closed() -> Self {
         Self {
             influences: Some(BTreeSet::new()),
             grants: Vec::new(),
+            governance: ComposeGovernance::open(),
         }
     }
 
@@ -135,6 +154,7 @@ impl ComposePermits {
         Self {
             influences: Some(influences),
             grants: Vec::new(),
+            governance: ComposeGovernance::open(),
         }
     }
 
@@ -154,7 +174,16 @@ impl ComposePermits {
         self
     }
 
-    /// Whether an affordance verb is permitted under this set.
+    /// Attach goal-aggregate / GEPA governance (WEFT-277).
+    pub fn with_governance(mut self, governance: ComposeGovernance) -> Self {
+        self.governance = governance;
+        self
+    }
+
+    /// Whether an affordance verb is permitted under the **session
+    /// permit** half (influences + capture grants). Does not consult
+    /// governance — use [`Self::allows_affordance`] for the full
+    /// ADR-006 rule 2 intersection.
     pub fn allows_verb(&self, verb: &str) -> bool {
         let bare = normalize_verb(verb);
 
@@ -174,18 +203,11 @@ impl ComposePermits {
         true
     }
 
-    /// Whether a full affordance declaration is permitted.
-    pub fn allows_affordance(&self, aff: &AffordanceDecl) -> bool {
-        self.allows_verb(&aff.verb)
+    /// Full ADR-006 rule 2 check: session permits **and** goal-aggregate
+    /// / GEPA governance for this node + affordance.
+    pub fn allows_affordance(&self, node: &SurfaceNode, aff: &AffordanceDecl) -> bool {
+        self.allows_verb(&aff.verb) && self.governance.allows(node, aff)
     }
-}
-
-/// Normalize a WSP / fixture verb for permit matching: strip the
-/// optional `rpc.` dispatch prefix used by surface fixtures.
-pub fn normalize_verb(verb: &str) -> String {
-    verb.strip_prefix("rpc.")
-        .unwrap_or(verb)
-        .to_string()
 }
 
 /// Capture / channel permissions implied by a write verb.
@@ -1679,18 +1701,20 @@ fn attr_number(node: &SurfaceNode, key: &str) -> Option<f64> {
 }
 
 /// ADR-006 rule 2 — intersect declared affordances with session
-/// permits. Surfaces only expose affordances the caller may perform.
+/// permits **and** goal-aggregate / GEPA governance.
 ///
-/// `node` is reserved for future resource-scoped / goal-aggregate
-/// gates (WEFT-277 / ADR-008); the current intersection is
-/// verb-level (`influences`) plus capture-channel grants.
+/// Layers (all must pass):
+/// 1. **Influences** — manifest write-side verbs (WEFT-430)
+/// 2. **Capture grants** — ADR-012 / WEFT-429 channel permissions
+/// 3. **Governance** — ADR-008 grants/denies, effect ceiling, surface
+///    scope, GEPA mutate gate (WEFT-277); uses `node.path` for scope
 pub fn honest_affordances(
-    _node: &SurfaceNode,
+    node: &SurfaceNode,
     raw: &[AffordanceDecl],
     permits: &ComposePermits,
 ) -> Vec<AffordanceDecl> {
     raw.iter()
-        .filter(|aff| permits.allows_affordance(aff))
+        .filter(|aff| permits.allows_affordance(node, aff))
         .cloned()
         .collect()
 }
@@ -1811,5 +1835,101 @@ mod tests {
         let names: Vec<_> = out.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(names, vec!["kill", "restart"]);
         assert!(!out.iter().any(|a| a.name == "spy"));
+    }
+
+    // ── WEFT-277: governance ∩ permits ─────────────────────────────
+
+    use super::super::governance::{ComposeGovernance, EffectCeiling};
+
+    #[test]
+    fn governance_deny_hides_despite_open_permits() {
+        let n = node_with(vec![
+            aff("kill", "rpc.kernel.kill-process"),
+            aff("restart", "kernel.restart-service"),
+        ]);
+        let permits = ComposePermits::open().with_governance(
+            ComposeGovernance::open().with_denies(["kernel.kill-process", "kill"]),
+        );
+        let out = honest_affordances(&n, &n.affordances, &permits);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "restart");
+    }
+
+    #[test]
+    fn governance_grant_allow_fixture() {
+        let n = node_with(vec![
+            aff("kill", "rpc.kernel.kill-process"),
+            aff("restart", "kernel.restart-service"),
+            aff("spy", "kernel.dump-core"),
+        ]);
+        let permits = ComposePermits::open().with_governance(
+            ComposeGovernance::open()
+                .with_goal_id("goal-admin-ops")
+                .with_grants(["kernel.restart-service", "restart"]),
+        );
+        let out = honest_affordances(&n, &n.affordances, &permits);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "restart");
+    }
+
+    #[test]
+    fn governance_and_influences_both_required() {
+        // Influences allow kill+restart; governance grants only kill.
+        let n = node_with(vec![
+            aff("kill", "rpc.kernel.kill-process"),
+            aff("restart", "kernel.restart-service"),
+        ]);
+        let permits = ComposePermits::from_influences([
+            "kernel.kill-process",
+            "kernel.restart-service",
+        ])
+        .with_governance(
+            ComposeGovernance::open().with_grants(["kernel.kill-process", "kill"]),
+        );
+        let out = honest_affordances(&n, &n.affordances, &permits);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "kill");
+    }
+
+    #[test]
+    fn governance_surface_scope_and_gepa() {
+        let mut n = node_with(vec![
+            aff("kill", "kernel.kill-process"),
+            aff("evolve", "surface.mutate"),
+        ]);
+        n.path = "/root/other".into();
+        let permits = ComposePermits::open().with_governance(
+            ComposeGovernance::open()
+                .with_surface_scope("/root/admin")
+                .with_gepa_mutate_allowed(false),
+        );
+        let out = honest_affordances(&n, &n.affordances, &permits);
+        assert!(out.is_empty(), "out-of-scope node must hide all");
+
+        n.path = "/root/admin/procs".into();
+        let out = honest_affordances(&n, &n.affordances, &permits);
+        // In scope, but mutate still gated.
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "kill");
+    }
+
+    #[test]
+    fn governance_effect_ceiling_deny_fixture() {
+        let n = node_with(vec![
+            aff("kill", "kernel.kill-process"),
+            aff("refresh", "ui.refresh"),
+        ]);
+        let permits = ComposePermits::open().with_governance(
+            ComposeGovernance::open().with_effect_ceiling(EffectCeiling {
+                risk: 0.4,
+                fairness: 1.0,
+                privacy: 1.0,
+                novelty: 1.0,
+                security: 1.0,
+            }),
+        );
+        let out = honest_affordances(&n, &n.affordances, &permits);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "refresh");
     }
 }

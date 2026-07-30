@@ -275,9 +275,10 @@ pub enum Binding {
 /// ADR-006 §2 + ADR-019 extension. Affordances on a node declare
 /// which WSP verb the caller may invoke and on which input channels.
 ///
-/// The composer intersects these with session permits
-/// (`honest_affordances` / WEFT-430, ADR-006 rule 2). Goal-aggregate
-/// / GEPA gates remain M2 (WEFT-277).
+/// The composer intersects these with session permits **and**
+/// goal-aggregate / GEPA governance (`honest_affordances` /
+/// WEFT-430 + WEFT-277, ADR-006 rule 2 / ADR-008):
+/// `raw ∩ influences ∩ grants ∩ ComposeGovernance`.
 #[derive(Clone, Debug)]
 pub struct AffordanceDecl {
     pub name: String,
