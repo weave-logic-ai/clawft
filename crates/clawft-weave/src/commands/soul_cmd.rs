@@ -9,19 +9,20 @@
 //! write the merged result back to disk plus a witness chain entry.
 //!
 //! The agent's *write* side of the journal (self-observation during
-//! chat turns) is deferred to a future phase. F2 lands the operator
-//! side only — with an empty journal the command exits cleanly with
-//! "No journal entries to promote." so the rollout doesn't require
-//! the agent to start writing first.
+//! chat turns) is WEFT-330: `loop_core` detects drift and publishes
+//! under the mesh-canonical `soul_journal` topic (grant-gated). F2
+//! remains the operator side — with an empty journal the command
+//! exits cleanly with "No journal entries to promote."
 //!
 //! # Wire shape (current node)
 //!
-//! Substrate paths:
-//! - prefix: `substrate/<daemon-node-id>/derived/soul_journal/`
-//! - entry: `substrate/<daemon-node-id>/derived/soul_journal/<entry-ulid>`
+//! Substrate paths (mesh-canonical; F1 `DerivedWriteGrant` topic
+//! `soul_journal`):
+//! - prefix: `substrate/_derived/soul_journal/`
+//! - entry: `substrate/_derived/soul_journal/<entry-ulid>`
 //! - entry value: `{ "summary": "...", "content": "...", "ts": "..." }`
 //!   (only `content` is required; the rest are best-effort metadata
-//!   the agent's future write path will populate)
+//!   the agent write path populates)
 //!
 //! # Witness chain (WEFT-324)
 //!
@@ -95,9 +96,10 @@ pub struct StatusArgs {
 
 /// One pending journal entry, decoded from substrate.
 ///
-/// Built from the value side of `substrate/<node>/derived/soul_journal/<ulid>`.
-/// The agent's future write path will populate `summary` and `ts`;
-/// today both are best-effort and the diff body is `content`.
+/// Built from the value side of
+/// `substrate/_derived/soul_journal/<ulid>`. The agent write path
+/// (WEFT-330) populates `summary` and `ts`; both remain best-effort
+/// and the diff body is `content`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JournalEntry {
     /// ULID portion of the substrate path — the entry's stable id.
@@ -120,8 +122,10 @@ pub struct JournalEntry {
 /// the merge + diff + witness paths without spinning a daemon.
 #[async_trait::async_trait]
 pub trait SoulRpc: Send + Sync {
-    /// Resolve the daemon's own node-id (used to scope the
-    /// `derived/soul_journal/` prefix).
+    /// Resolve the daemon's own node-id (retained for diagnostics /
+    /// future per-node journal scopes). Promote lists the mesh-
+    /// canonical `_derived/soul_journal/` prefix and does not require
+    /// this for path construction today.
     async fn node_id(&mut self) -> anyhow::Result<String>;
 
     /// Enumerate journal entries under the given prefix. Returns
@@ -398,11 +402,18 @@ fn sha256_hex(data: &[u8]) -> String {
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Mesh-canonical journal prefix (matches F1 grant + WEFT-330 writer).
+const SOUL_JOURNAL_PREFIX: &str = "substrate/_derived/soul_journal";
+
 /// Build the prefix, list, then read each child as a [`JournalEntry`].
 async fn fetch_journal<R: SoulRpc>(rpc: &mut R) -> anyhow::Result<Vec<JournalEntry>> {
-    let node_id = rpc.node_id().await?;
-    let prefix = format!("substrate/{node_id}/derived/soul_journal");
-    let children = rpc.list_journal(&prefix).await?;
+    // Touch node_id so a down daemon still fails fast with a clear
+    // identity error (status/promote are operator tools that require
+    // a live daemon). Path construction itself is mesh-canonical and
+    // does not embed the node id.
+    let _node_id = rpc.node_id().await?;
+    let prefix = SOUL_JOURNAL_PREFIX;
+    let children = rpc.list_journal(prefix).await?;
 
     let mut entries = Vec::with_capacity(children.len());
     for child in children {
@@ -589,6 +600,48 @@ mod tests {
         }
     }
 
+    /// WEFT-330: an entry published in the agent wire shape
+    /// (`summary`/`content`/`ts`/`signal`/`conv_id`) is picked up by
+    /// promote and lands under `## Drift Observations`.
+    #[tokio::test]
+    async fn promote_picks_up_agent_side_journal_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_seed_soul(tmp.path(), "# SOUL\nseed\n");
+
+        // Shape matches `DriftObservation::to_substrate_value`.
+        let path = format!("{SOUL_JOURNAL_PREFIX}/01HZXWEFT330");
+        let mut values = HashMap::new();
+        values.insert(
+            path.clone(),
+            serde_json::json!({
+                "summary": "noticed bias toward verbose answers",
+                "content": "prefer narrative paragraphs over bullet lists",
+                "ts": "2026-04-27T14:32:18Z",
+                "conv_id": "chat-soul-explicit",
+                "signal": "explicit"
+            }),
+        );
+        let mut rpc = MockRpc {
+            node_id: "n-daemon".into(),
+            children: vec![child(&path)],
+            values,
+            ..Default::default()
+        };
+        let mut prompt = FakePrompt(true);
+        let args = PromoteArgs {
+            yes: true,
+            workspace: Some(tmp.path().to_path_buf()),
+        };
+        run_promote_with(args, &mut rpc, &mut prompt).await.unwrap();
+
+        let soul = std::fs::read_to_string(tmp.path().join(".clawft").join("SOUL.md")).unwrap();
+        assert!(soul.contains("## Drift Observations"));
+        assert!(soul.contains("01HZXWEFT330"));
+        assert!(soul.contains("prefer narrative paragraphs over bullet lists"));
+        assert_eq!(rpc.appended.len(), 1);
+        assert_eq!(rpc.appended[0].entries, vec!["01HZXWEFT330".to_string()]);
+    }
+
     #[tokio::test]
     async fn promote_with_empty_journal_returns_no_op() {
         let tmp = tempfile::tempdir().unwrap();
@@ -618,8 +671,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_seed_soul(tmp.path(), "# SOUL\nseed body\n");
 
-        let path1 = "substrate/n-abc/derived/soul_journal/01HZX1AAAA";
-        let path2 = "substrate/n-abc/derived/soul_journal/01HZX1BBBB";
+        let path1 = "substrate/_derived/soul_journal/01HZX1AAAA";
+        let path2 = "substrate/_derived/soul_journal/01HZX1BBBB";
         let mut values = HashMap::new();
         values.insert(
             path1.to_string(),
@@ -683,7 +736,7 @@ mod tests {
         let seed = "# SOUL\nseed body\n";
         write_seed_soul(tmp.path(), seed);
 
-        let path1 = "substrate/n-x/derived/soul_journal/01HZX1AAAA";
+        let path1 = "substrate/_derived/soul_journal/01HZX1AAAA";
         let mut values = HashMap::new();
         values.insert(
             path1.to_string(),
@@ -732,8 +785,8 @@ mod tests {
         // ones the RPC returned. (Status is fundamentally a print
         // wrapper around `fetch_journal`; testing the fetch covers
         // the moving parts.)
-        let path1 = "substrate/n/derived/soul_journal/01HZA";
-        let path2 = "substrate/n/derived/soul_journal/01HZB";
+        let path1 = "substrate/_derived/soul_journal/01HZA";
+        let path2 = "substrate/_derived/soul_journal/01HZB";
         let mut values = HashMap::new();
         values.insert(
             path1.to_string(),
@@ -773,7 +826,7 @@ mod tests {
         let seed = "# SOUL\nseed\n";
         write_seed_soul(tmp.path(), seed);
 
-        let path1 = "substrate/n/derived/soul_journal/01HZX";
+        let path1 = "substrate/_derived/soul_journal/01HZX";
         let mut values = HashMap::new();
         values.insert(
             path1.to_string(),

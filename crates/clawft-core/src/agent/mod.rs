@@ -20,6 +20,7 @@ pub mod sink;
 pub mod skill_autogen;
 #[cfg(feature = "native")]
 pub mod skill_watcher;
+pub mod soul_journal;
 pub mod skills;
 pub mod skills_v2;
 pub mod spawn;

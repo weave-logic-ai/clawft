@@ -1901,6 +1901,35 @@ pub async fn run(
                 }
             };
 
+        // WEFT-330: agent-side SOUL.journal writer. Substrate publish is
+        // grant-gated under `_derived/soul_journal/` (F1 stamped the
+        // `soul_journal` DerivedWriteGrant at boot). File mirror keeps
+        // `.clawft/SOUL.journal.md` in sync for offline inspection.
+        let soul_journal: Option<Arc<dyn clawft_core::agent::soul_journal::SoulJournal>> = {
+            use clawft_core::agent::soul_journal::{
+                CompositeSoulJournal, FileSoulJournal, SoulJournal,
+            };
+            let k = kernel.read().await;
+            let client = Arc::new(clawft_service_agent::KernelSubstrateClient::new(
+                k.substrate_service().clone(),
+                k.node_registry().clone(),
+            ));
+            let substrate_writer: Arc<dyn SoulJournal> =
+                Arc::new(clawft_service_agent::SubstrateSoulJournal::new(
+                    client,
+                    daemon_identity.node_id.clone(),
+                ));
+            let file_mirror: Arc<dyn SoulJournal> =
+                Arc::new(FileSoulJournal::for_workspace(&workspace));
+            let composite: Arc<dyn SoulJournal> =
+                Arc::new(CompositeSoulJournal::with_mirror(substrate_writer, file_mirror));
+            info!(
+                node_id = %daemon_identity.node_id,
+                "agent-core: soul journal writer attached (substrate + file mirror)"
+            );
+            Some(composite)
+        };
+
         let agent_loop = clawft_core::bootstrap::build_daemon_agent_loop(
             llm_for_agent,
             tool_registry,
@@ -1925,6 +1954,7 @@ pub async fn run(
                 let p: Arc<dyn clawft_core::agent::graft::ContextGraftProvider> = t;
                 p
             }),
+            soul_journal,
         )
         .await;
 
