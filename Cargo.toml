@@ -252,7 +252,10 @@ dashmap = "6"
 # JSONL keys in clawft-service-agent's substrate sink).
 ulid = "1"
 
-# Distributed coordination (crates.io — upstream ruvnet)
+# Distributed coordination (crates.io — upstream ruvnet).
+# WEFT-552: Cargo.lock pins ruvector-core ≥2.3.0 so the graph uses
+# reqwest 0.12 + rustls 0.23 + rustls-webpki ≥0.103.13. Do not re-lock
+# ruvector-core to 2.1.x (it pulled reqwest 0.11 → rustls-webpki 0.101).
 ruvector-cluster = "2.0"
 ruvector-raft = "2.0"
 ruvector-replication = "2.0"
