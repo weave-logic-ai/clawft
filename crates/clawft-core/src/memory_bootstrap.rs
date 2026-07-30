@@ -1,13 +1,21 @@
 //! Memory bootstrap: index existing MEMORY.md into a vector store.
 //!
-//! On first startup (or when the index file is missing), this module reads
-//! the workspace's `MEMORY.md`, splits it into sections, embeds each
+//! On first startup (or when the index file is missing / stale), this module
+//! reads the workspace's `MEMORY.md`, splits it into sections, embeds each
 //! section, and stores the results in an [`RvfStore`] for later semantic
 //! search.
 //!
+//! # Staleness (WEFT-84 / MW-6)
+//!
+//! The index is rebuilt when:
+//! - the index file does not exist, or
+//! - `MEMORY.md` has a newer mtime than the index file, or
+//! - the caller requests a forced reindex via [`reindex_memory_index`].
+//!
 //! This module is gated behind the `rvf` feature flag.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use tracing::{debug, info, warn};
 
@@ -60,7 +68,8 @@ impl From<RvfError> for BootstrapError {
 ///
 /// # Algorithm
 ///
-/// 1. Check if the index file at `index_path` already exists -- if so, skip.
+/// 1. If the index exists and is **not** older than `MEMORY.md`, skip
+///    (return `0`). Otherwise rebuild.
 /// 2. Read the MEMORY.md file at `memory_path`.
 /// 3. Split the content into sections by `## ` headers or double-newline
 ///    paragraphs.
@@ -71,7 +80,7 @@ impl From<RvfError> for BootstrapError {
 /// # Arguments
 ///
 /// * `memory_path` - Path to the MEMORY.md file.
-/// * `index_path` - Path where the index file will be stored (e.g. `memory.rvf.json`).
+/// * `index_path` - Path where the index file will be stored (e.g. `memory.rvf`).
 /// * `embedder` - The embedder to use for generating vectors.
 ///
 /// # Errors
@@ -83,13 +92,106 @@ pub async fn bootstrap_memory_index(
     index_path: &Path,
     embedder: &dyn Embedder,
 ) -> Result<usize, BootstrapError> {
-    // 1. Check if index already exists
+    bootstrap_memory_index_inner(memory_path, index_path, embedder, false).await
+}
+
+/// Force a full rebuild of the memory vector index from MEMORY.md.
+///
+/// Always reindexes when `MEMORY.md` exists and is non-empty, even if the
+/// index file is present and newer. Use from `weft memory reindex` or any
+/// operator path that needs an explicit refresh (WEFT-84).
+///
+/// Returns the number of sections indexed (same contract as
+/// [`bootstrap_memory_index`]).
+pub async fn reindex_memory_index(
+    memory_path: &Path,
+    index_path: &Path,
+    embedder: &dyn Embedder,
+) -> Result<usize, BootstrapError> {
+    bootstrap_memory_index_inner(memory_path, index_path, embedder, true).await
+}
+
+/// Return `true` when `MEMORY.md` is newer than the index (or the index is
+/// missing / unreadable), so a rebuild is warranted.
+///
+/// Exposed for tests and for CLI status messaging.
+pub fn memory_is_newer_than_index(memory_path: &Path, index_path: &Path) -> bool {
+    if !index_path.exists() {
+        return memory_path.exists();
+    }
+    if !memory_path.exists() {
+        return false;
+    }
+    match (file_mtime(memory_path), file_mtime(index_path)) {
+        (Some(mem), Some(idx)) => mem > idx,
+        // If we cannot read either mtime, prefer reindexing when memory
+        // exists so we never leave a silently stale index.
+        _ => true,
+    }
+}
+
+/// Sidecar path used by the real RVF backend (`path` + `.sidecar.json`).
+pub fn memory_index_sidecar_path(index_path: &Path) -> PathBuf {
+    let mut s = index_path.as_os_str().to_owned();
+    s.push(".sidecar.json");
+    PathBuf::from(s)
+}
+
+/// Remove the index file and any companion sidecar so a rebuild starts clean.
+pub fn remove_memory_index(index_path: &Path) {
     if index_path.exists() {
+        if let Err(e) = std::fs::remove_file(index_path) {
+            warn!(
+                path = %index_path.display(),
+                error = %e,
+                "failed to remove stale memory index"
+            );
+        }
+    }
+    let sidecar = memory_index_sidecar_path(index_path);
+    if sidecar.exists() {
+        if let Err(e) = std::fs::remove_file(&sidecar) {
+            warn!(
+                path = %sidecar.display(),
+                error = %e,
+                "failed to remove stale memory index sidecar"
+            );
+        }
+    }
+}
+
+async fn bootstrap_memory_index_inner(
+    memory_path: &Path,
+    index_path: &Path,
+    embedder: &dyn Embedder,
+    force: bool,
+) -> Result<usize, BootstrapError> {
+    // 1. Skip when index is present, not forced, and MEMORY.md is not newer.
+    if index_path.exists() && !force {
+        if !memory_is_newer_than_index(memory_path, index_path) {
+            info!(
+                path = %index_path.display(),
+                "memory index already exists and is up to date, skipping bootstrap"
+            );
+            return Ok(0);
+        }
+        info!(
+            memory = %memory_path.display(),
+            index = %index_path.display(),
+            "MEMORY.md is newer than index, re-indexing"
+        );
+    } else if force && index_path.exists() {
         info!(
             path = %index_path.display(),
-            "memory index already exists, skipping bootstrap"
+            "forced reindex requested, rebuilding memory index"
         );
-        return Ok(0);
+    }
+
+    // Clear any prior index (and sidecar) so create/compact starts fresh.
+    // Real RVF also clears inside ensure_ready; this keeps the stub and
+    // force-reindex paths consistent and avoids leftover entries.
+    if index_path.exists() || memory_index_sidecar_path(index_path).exists() {
+        remove_memory_index(index_path);
     }
 
     // 2. Read MEMORY.md
@@ -169,10 +271,15 @@ pub async fn bootstrap_memory_index(
         indexed,
         total_sections = sections.len(),
         path = %index_path.display(),
+        force,
         "memory bootstrap complete"
     );
 
     Ok(indexed)
+}
+
+fn file_mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).ok()?.modified().ok()
 }
 
 /// Split markdown content into sections.
@@ -228,6 +335,8 @@ mod tests {
     use super::*;
     use crate::embeddings::api_embedder::ApiEmbedder;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::thread;
+    use std::time::Duration;
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -327,15 +436,18 @@ mod tests {
         let memory_path = dir.join("MEMORY.md");
         let index_path = dir.join("memory.rvf.json");
 
+        // Write memory first, then a newer index, so mtime check keeps skip.
         std::fs::write(&memory_path, "## Stuff\n\nContent.").unwrap();
-        std::fs::write(&index_path, "{}").unwrap(); // pre-existing index
+        // Ensure index mtime is >= memory mtime on coarse filesystems.
+        thread::sleep(Duration::from_millis(20));
+        std::fs::write(&index_path, "{}").unwrap();
 
         let embedder = ApiEmbedder::hash_only(64);
         let count = bootstrap_memory_index(&memory_path, &index_path, &embedder)
             .await
             .unwrap();
 
-        assert_eq!(count, 0, "should skip when index already exists");
+        assert_eq!(count, 0, "should skip when index already exists and is current");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -431,6 +543,131 @@ mod tests {
         let first = &results[0];
         assert!(first.metadata.get("text").is_some());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// WEFT-84: when MEMORY.md is edited after the index was built, bootstrap
+    /// must rebuild so semantic search finds the new content.
+    #[tokio::test]
+    async fn bootstrap_reindexes_when_memory_newer() {
+        let dir = temp_dir("mtime_reindex");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let memory_path = dir.join("MEMORY.md");
+        let index_path = dir.join("memory.rvf.json");
+        let embedder = ApiEmbedder::hash_only(64);
+
+        // Two ## headers so section split is stable (not paragraph fallback).
+        std::fs::write(
+            &memory_path,
+            "## Alpha\n\nALPHA_ONLY unique token about widgets.\n\n## Misc\n\nOther old note.",
+        )
+        .unwrap();
+
+        let count1 = bootstrap_memory_index(&memory_path, &index_path, &embedder)
+            .await
+            .unwrap();
+        assert_eq!(count1, 2);
+        assert!(index_path.exists());
+
+        // Coarse FS mtime resolution (HFS+/FAT) can be 1s; sleep so rewrite is newer.
+        thread::sleep(Duration::from_millis(1100));
+
+        std::fs::write(
+            &memory_path,
+            "## Beta\n\nBETA_ONLY unique token about gadgets.\n\n## Misc\n\nOther new note.",
+        )
+        .unwrap();
+
+        assert!(
+            memory_is_newer_than_index(&memory_path, &index_path),
+            "MEMORY.md mtime should exceed index mtime after rewrite"
+        );
+
+        let count2 = bootstrap_memory_index(&memory_path, &index_path, &embedder)
+            .await
+            .unwrap();
+        assert_eq!(count2, 2, "should reindex when MEMORY.md is newer");
+
+        let store = RvfStore::open(&index_path).unwrap();
+        assert_eq!(store.len(), 2);
+
+        let query_emb = embedder.hash_fallback("BETA_ONLY unique token gadgets");
+        let results = store.query(&query_emb, 2);
+        assert!(!results.is_empty());
+        let texts: Vec<&str> = results
+            .iter()
+            .filter_map(|r| r.metadata.get("text").and_then(|v| v.as_str()))
+            .collect();
+        let joined = texts.join("\n");
+        assert!(
+            joined.contains("BETA_ONLY"),
+            "search should surface reindexed content, got: {joined}"
+        );
+        assert!(
+            !joined.contains("ALPHA_ONLY"),
+            "stale sections should not remain after reindex, got: {joined}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// WEFT-84: `reindex_memory_index` always rebuilds even when the index is
+    /// current relative to MEMORY.md mtime.
+    #[tokio::test]
+    async fn force_reindex_rebuilds_current_index() {
+        let dir = temp_dir("force_reindex");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let memory_path = dir.join("MEMORY.md");
+        let index_path = dir.join("memory.rvf.json");
+        let embedder = ApiEmbedder::hash_only(64);
+
+        std::fs::write(
+            &memory_path,
+            "## Facts\n\nFORCE_REINDEX_TOKEN for zebra quilts.\n\n## More\n\nSecondary section.",
+        )
+        .unwrap();
+
+        let count1 = bootstrap_memory_index(&memory_path, &index_path, &embedder)
+            .await
+            .unwrap();
+        assert_eq!(count1, 2);
+
+        // Index is up to date — plain bootstrap should skip.
+        let skipped = bootstrap_memory_index(&memory_path, &index_path, &embedder)
+            .await
+            .unwrap();
+        assert_eq!(skipped, 0, "up-to-date index should skip without force");
+
+        // Forced reindex still rebuilds.
+        let count2 = reindex_memory_index(&memory_path, &index_path, &embedder)
+            .await
+            .unwrap();
+        assert_eq!(count2, 2, "force reindex should rebuild");
+
+        let store = RvfStore::open(&index_path).unwrap();
+        let query_emb = embedder.hash_fallback("FORCE_REINDEX_TOKEN zebra quilts");
+        let results = store.query(&query_emb, 2);
+        assert!(!results.is_empty());
+        let joined: String = results
+            .iter()
+            .filter_map(|r| r.metadata.get("text").and_then(|v| v.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("FORCE_REINDEX_TOKEN"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn memory_is_newer_when_index_missing() {
+        let dir = temp_dir("mtime_missing_index");
+        std::fs::create_dir_all(&dir).unwrap();
+        let memory_path = dir.join("MEMORY.md");
+        let index_path = dir.join("memory.rvf.json");
+        std::fs::write(&memory_path, "x").unwrap();
+        assert!(memory_is_newer_than_index(&memory_path, &index_path));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -198,6 +198,17 @@ enum MemoryCmd {
         config: Option<String>,
     },
 
+    /// Rebuild the vector memory index from MEMORY.md (WEFT-84).
+    ///
+    /// Always reindexes, even when the existing `memory.rvf` is newer than
+    /// MEMORY.md. Bootstrap also rebuilds automatically when MEMORY.md is
+    /// newer (mtime check).
+    Reindex {
+        /// Config file path (overrides auto-discovery).
+        #[arg(short, long)]
+        config: Option<String>,
+    },
+
     /// Export memory to a file.
     Export {
         /// Agent ID to export memory for.
@@ -438,6 +449,10 @@ async fn main() -> anyhow::Result<()> {
                 } => {
                     let cfg = commands::load_config(&platform, config.as_deref()).await?;
                     commands::memory_cmd::memory_search(&query, limit, &cfg).await?;
+                }
+                MemoryCmd::Reindex { config } => {
+                    let cfg = commands::load_config(&platform, config.as_deref()).await?;
+                    commands::memory_cmd::memory_reindex(&cfg).await?;
                 }
                 MemoryCmd::Export {
                     agent,

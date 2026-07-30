@@ -306,7 +306,12 @@ All crates are designed for minimal binary size and optional WASM compilation.
 - Memory is stored in `MEMORY.md` (Markdown format, human-readable).
 - Sessions are stored as JSONL files.
 - The `weft memory show` command displays stored memory.
-- The `weft memory search` command searches with brute-force cosine similarity.
+- The `weft memory search` command searches with substring matching on
+  MEMORY.md / HISTORY.md paragraphs.
+- A parallel vector index (`memory.rvf`) is built from MEMORY.md by
+  `bootstrap_memory_index` (feature `rvf`). **WEFT-84:** the index is
+  rebuilt when MEMORY.md is newer than the index (mtime check), and can
+  always be force-rebuilt with `weft memory reindex`.
 
 ### After RVF
 
@@ -314,6 +319,8 @@ All crates are designed for minimal binary size and optional WASM compilation.
 - Sessions are stored in `index.rvf`.
 - The same `weft memory show` and `weft memory search` commands work, but
   search uses HNSW instead of brute-force.
+- Stale indexes after MEMORY.md edits are handled by mtime-aware bootstrap
+  or `weft memory reindex` (no manual delete required).
 
 ### Backup
 
