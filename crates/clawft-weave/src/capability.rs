@@ -94,6 +94,8 @@ pub fn required_capability(method: &str) -> Capability {
 
         // ── Chat: LLM-conversational verbs ──────────────────────────
         "agent.chat" => Capability::Chat,
+        // WEFT-253: progressive companion to agent.chat (same Chat cap).
+        "agent.chat_stream" => Capability::Chat,
         "agent.chat.cancel" => Capability::Chat,
         "agent.chat.end" => Capability::Chat,
         "agent.turn.record" => Capability::Chat,
@@ -240,6 +242,12 @@ mod tests {
         assert!(caps.allows_method("kernel.status"));
         assert!(caps.allows_method("agent.list"));
         assert!(caps.allows_method("agent.chat"));
+        // WEFT-253: progressive chat shares Chat capability.
+        assert!(caps.allows_method("agent.chat_stream"));
+        assert_eq!(
+            required_capability("agent.chat_stream"),
+            Capability::Chat
+        );
         // gated:
         assert!(!caps.allows_method("agent.spawn"));
         assert!(!caps.allows_method("memory.delete"));

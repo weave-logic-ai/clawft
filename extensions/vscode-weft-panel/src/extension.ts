@@ -102,6 +102,11 @@ const STATIC_ALLOWED_METHODS = new Set<string>([
     // `llm.prompt` as the chat panel's wire for user turns; same llama.cpp
     // server underneath. Plan: docs/plans/chat-agent-v1.md §5.
     "agent.chat",
+    // WEFT-253: progressive companion to agent.chat. Same timeout as
+    // agent.chat (LLM_TIMEOUT_MS). Daemon publishes intermediate frames
+    // to substrate/_derived/chat/<conv>/stream; the RPC response is the
+    // final AgentChatResult. Panel polls stream path via substrate.read.
+    "agent.chat_stream",
     // Terminal service: PTY-backed shell sessions hosted in the
     // daemon, surfaced as an Explorer panel. Output is published
     // to substrate (via the existing `substrate.read` proxy);
@@ -364,7 +369,16 @@ function installWasmHotReload(
 // a stopped daemon surfaces immediately on the chips.
 const LLM_TIMEOUT_MS = 300_000;
 function timeoutForMethod(method: string): number | undefined {
-    if (method === "llm.prompt" || method === "agent.chat") return LLM_TIMEOUT_MS;
+    // WEFT-253: agent.chat_stream shares the long bucket — the RPC
+    // holds the connection for the full turn (plus a short typewriter
+    // cascade) while progressive frames ride substrate.
+    if (
+        method === "llm.prompt" ||
+        method === "agent.chat" ||
+        method === "agent.chat_stream"
+    ) {
+        return LLM_TIMEOUT_MS;
+    }
     return undefined; // fall through to rpcCall's default
 }
 

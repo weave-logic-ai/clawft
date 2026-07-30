@@ -3,11 +3,12 @@
 //! DESIGN.md §9 sidebar 10.
 //!
 //! All the real work — markdown rendering, system-prompt editor,
-//! heartbeat label, identity-drift warning, `agent.chat` RPC plumbing
-//! — lives in `explorer::chat`. This module is a thin host: it owns
-//! nothing, paints the canonical heading, and delegates the body to
-//! the standalone [`ChatView`](crate::explorer::chat::ChatView)
-//! instance on [`Desktop`].
+//! heartbeat label, identity-drift warning, `agent.chat_stream` RPC
+//! plumbing (WEFT-253 progressive frames) — lives in `explorer::chat`.
+//! This module is a thin host: it owns nothing, paints the canonical
+//! heading, and delegates the body to the standalone
+//! [`ChatView`](crate::explorer::chat::ChatView) instance on
+//! [`Desktop`].
 //!
 //! State-lifting note: `desk.chat` is independent from
 //! `desk.explorer.chat_view` (which backs the substrate-sentinel
