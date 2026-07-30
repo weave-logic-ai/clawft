@@ -7,6 +7,13 @@ Wave 2 and the entire fork-adoption/COW track)
 `(sha ts) [features]` — WEFT-656). **Pending:** WEFT-615 round-2 mic
 confirmation (windowed playback pacing / self-echo fix / clarity retune).
 
+> **Infra state moved (2026-07-30).** Tracker/CI/memory-store/brain state now
+> lives in `docs/handoff-tracker-ci-memory.md`. Read that first if you are
+> resuming infrastructure work — notably: CI gates now run on push and are RED
+> (9 jobs), the AgentDB store was split and repaired, and `.mcp.json` is pinned.
+> **This doc remains current for the voice/COW track.** WEFT-615 round-2 mic
+> confirmation is still pending and still needs a human with a microphone.
+
 **Standing directives:** `~/llm` voicelab is still the tuned reference — diff
 against it first when the native voice stack misbehaves. Subagent model
 policy: sonnet default, fable escalation-only (memory: agent-model-routing).

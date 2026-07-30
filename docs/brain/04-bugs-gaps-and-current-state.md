@@ -24,6 +24,55 @@ reconciled against code:
 **Lesson encoded in memory**: audit-era bug lists go stale; verify against
 current code before fixing (we nearly "re-fixed" already-correct auth gates).
 
+## 0b. Reconciliation update — 2026-07-30 (infrastructure)
+
+A session that touched no product code and instead fixed the machinery that
+reports whether product code is correct. It was lying in three ways.
+
+- **The AgentDB memory store was SPLIT.** `.swarm/memory.db` (188 rows,
+  2026-07-03, no `provenance_type`) vs `.swarm/agentdb-memory.db` (live, has it
+  per ADR-323). The store had been recreated under a new filename for the
+  provenance migration and the old rows were never carried over — so
+  `clawft-knowledge`, `ruv/brain` and every `weftos/*` namespace were
+  **unretrievable by any agent**. REPAIRED: 182 active rows migrated via the MCP
+  `memory_import` tool, namespaces preserved, content byte-verified 182/182
+  sha256. Store now 232 entries, 100% embedding coverage. WEFT-669 (Done).
+- **ROOT CAUSE of that split** (WEFT-684): `.mcp.json` is **tracked in git** and
+  said `@claude-flow/cli@latest`, so the process owning the store resolved a
+  different version per machine, per day. Nobody chose the schema migration;
+  npx took it. Now pinned to `3.32.38`, with a machine-local override in
+  `~/.claude.json` for the local grok build.
+- **The CI hard gates had NEVER RUN** (WEFT-674). `pr-gates.yml` was
+  pull_request-only; work lands on feature branches with no PR, and master is a
+  month stale — `gh run list` showed zero runs across 211 commits. Fixed with
+  push triggers + `workflow_dispatch`, and a concurrency-group bug that the new
+  trigger would itself have introduced (`github.head_ref` is empty on push).
+  Two further workflows had never run on ANY event (`benchmarks.yml`,
+  `wasm-build.yml` targeted a `main` branch that does not exist), and
+  `release-gate.yml` was malformed YAML that GitHub could not load.
+- **First gate run exposed 9 failing jobs**, only 3 of them known. Newly
+  visible: VSCode panel build, UI lint/type-check, Docs site build,
+  weftos-design audit, Binary size check, Cargo audit. None have tickets yet.
+- **Two tickets were false Dones.** WEFT-154 (Email) and WEFT-159 (Matrix) —
+  both adapters still carry `// ! # WARNING: Planning stub -- does NOT transmit
+  messages.`, with no imap/lettre and no matrix-sdk dependency. Reopened. A
+  recurrence of the 0.7.0 audit's "channels 9/9 ≠ reality". Now bounded: all 12
+  adapters audited, exactly these 2 are stubs.
+- **Browser WASM: exactly 15 errors** — 10 non-Send futures (WEFT-663, original
+  count *unchanged*), 4 cascading E0282, 1 E0433 `hermes` unresolved (WEFT-672,
+  a separate newer break). An earlier "rotted 10→16" claim was a miscount of
+  cargo's summary line.
+- **ADR-031 drift** (WEFT-683): Accepted, declares RVF the production default
+  for `KernelMessage`; `mesh_ipc.rs:47` unconditionally does `serde_json::to_vec`
+  and no RVF path exists. The living-ADR rule says amend or build; leaving it
+  Accepted-and-unimplemented is the forbidden outcome.
+- **Plane reconciled**: 659 → 676+ items, label violations 69 → 0,
+  `ws18-firmware` created, cycle `0.8.x` is the live gate (0.7.x is completed
+  and hard-locked; it holds 129 Done + 8 Cancelled + **0 open** — nothing was
+  ever stranded there, contrary to older notes).
+
+Full resume context: `docs/handoff-tracker-ci-memory.md`.
+
 ## 1. Known bugs / defects
 
 | ID | Severity | Summary | Status |
