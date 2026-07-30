@@ -254,6 +254,8 @@ pub mod mesh_service;
 #[cfg(feature = "mesh")]
 pub mod mesh_service_adv;
 #[cfg(feature = "mesh")]
+pub mod mesh_system_service;
+#[cfg(feature = "mesh")]
 pub mod mesh_tcp;
 #[cfg(feature = "mesh")]
 pub mod mesh_tree;
@@ -457,6 +459,8 @@ pub use mesh_runtime::{DiscoveryState, MeshRuntime, PeerConnection};
 pub use mesh_service::{
     RemoteServiceEndpoint, ServiceResolutionCache, ServiceResolveRequest, ServiceResolveResponse,
 };
+#[cfg(feature = "mesh")]
+pub use mesh_system_service::MeshService;
 #[cfg(feature = "mesh")]
 pub use mesh_service_adv::{ClusterServiceRegistry, ServiceAdvertisement};
 #[cfg(feature = "mesh")]
