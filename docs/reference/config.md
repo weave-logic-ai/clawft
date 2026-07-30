@@ -840,6 +840,17 @@ When `mode` is `"static"`, the `StaticRouter` is used (always routes to
 `agents.defaults.model`). When `"tiered"`, the `TieredRouter` selects models
 based on task complexity, user permissions, and cost budgets.
 
+### routing.max_grantable_level
+
+| Field                 | Type    | Default | Description |
+|-----------------------|---------|---------|-------------|
+| `max_grantable_level` | integer | `1`     | Maximum permission level a workspace overlay may grant (`0` = zero-trust, `1` = user, `2` = admin). Alias: `maxGrantableLevel`. |
+
+Used by workspace ceiling validation (`validate_workspace_ceiling` /
+WEFT-47). Missing field keeps the historical default of `1` so existing
+configs remain safe-by-default. Raise to `2` only when operators intend
+workspace configs to assign admin-level grants.
+
 ### routing.tiers
 
 Model tiers define named groups of models with associated complexity ranges and
