@@ -1220,6 +1220,7 @@ dependencies = [
  "rand 0.8.5",
  "reqwest",
  "ruvector-diskann",
+ "ruvector-sona",
  "rvf-runtime",
  "rvf-types",
  "serde",
@@ -7003,6 +7004,20 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "ruvector-sona"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c197a2e9a76d425faa60c860e73ce8ad0531083bbbd4f991d022fe9898359bf1"
+dependencies = [
+ "crossbeam",
+ "getrandom 0.2.17",
+ "parking_lot",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
