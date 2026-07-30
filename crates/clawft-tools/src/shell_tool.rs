@@ -57,7 +57,9 @@ impl Tool for ShellExecTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command and return its output. Enforces timeout and rejects dangerous commands."
+        "Execute a shell command and return its output. Enforces timeout and a security \
+         policy (default: allowlist of common read-only and dev tools). Denied calls \
+         return the reason and allowed executables — do not retry unlisted commands."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -90,11 +92,14 @@ impl Tool for ShellExecTool {
             .min(self.max_timeout);
 
         // Security policy check (allowlist/denylist + dangerous patterns).
+        // On denial, return an informative reason + allowlist so the model can
+        // adapt instead of blind-retrying until max tool iterations (WEFT-605).
         if let Err(e) = self.policy.validate(command) {
-            warn!(command, error = %e, "command rejected by security policy");
+            let reason = self.policy.format_denial(&e);
+            warn!(command, error = %reason, "command rejected by security policy");
             return Err(ToolError::PermissionDenied {
                 tool: "exec_shell".into(),
-                reason: e.to_string(),
+                reason,
             });
         }
 
@@ -400,6 +405,78 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::PermissionDenied { .. }));
+
+        cleanup(&ws).await;
+    }
+
+    /// WEFT-605: denial must expose policy reason + allowlist so the model
+    /// stops blind-retrying (bc, perl, ruby, …) until max tool iterations.
+    #[tokio::test]
+    async fn test_denial_message_lists_allowlist_and_reason() {
+        let (tool, ws) = setup().await;
+
+        let err = tool
+            .execute(json!({"command": "bc -e '17*23'"}))
+            .await
+            .unwrap_err();
+
+        match err {
+            ToolError::PermissionDenied { tool, reason } => {
+                assert_eq!(tool, "exec_shell");
+                assert!(
+                    !reason.trim().is_empty(),
+                    "denial reason must not be empty"
+                );
+                assert!(
+                    reason.contains("blocked by security policy"),
+                    "must state policy block: {reason}"
+                );
+                assert!(
+                    reason.contains("not on allowlist"),
+                    "must state reason class: {reason}"
+                );
+                assert!(
+                    reason.contains("Allowed executables:"),
+                    "must include allowlist for model adaptation: {reason}"
+                );
+                assert!(
+                    reason.contains("echo") && reason.contains("python3"),
+                    "allowlist summary should name known defaults: {reason}"
+                );
+                // Old bare form that caused the retry spiral.
+                assert!(
+                    !reason.eq("command not allowed: bc -e '17*23'"),
+                    "must not be bare generic denial: {reason}"
+                );
+                assert!(
+                    reason.len() > 80,
+                    "message must be informative, not generic short text: {reason}"
+                );
+            }
+            other => panic!("expected PermissionDenied, got: {other:?}"),
+        }
+
+        cleanup(&ws).await;
+    }
+
+    #[tokio::test]
+    async fn test_dangerous_denial_message_is_informative() {
+        let (tool, ws) = setup().await;
+
+        let err = tool
+            .execute(json!({"command": "sudo apt-get install evil"}))
+            .await
+            .unwrap_err();
+
+        match err {
+            ToolError::PermissionDenied { reason, .. } => {
+                assert!(!reason.trim().is_empty());
+                assert!(reason.contains("blocked by security policy"), "{reason}");
+                assert!(reason.contains("dangerous pattern"), "{reason}");
+                assert!(reason.len() > 40, "must not be empty/generic: {reason}");
+            }
+            other => panic!("expected PermissionDenied, got: {other:?}"),
+        }
 
         cleanup(&ws).await;
     }
