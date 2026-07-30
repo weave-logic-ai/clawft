@@ -2,7 +2,7 @@
 
 **Ticket:** WEFT-494  
 **Branch:** `wave0j/weft-494-mcp-rpc`  
-**SHA:** `ff07bcbe23f99e6b74c5475fae9ea73f2a2c1d7c`  
+**SHA:** `bb3383d66a038ae4bae94ebb5bae00286fbe3575`  
 **Worktree:** `/Users/mathewbeane/.grok/worktrees/mathewbeane-weftos/subagent-019fb4cf-e145-7911-8cfa-12052b8f2aa1`  
 **Base:** `release/0.8-staging`  
 **Date:** 2026-07-30  
