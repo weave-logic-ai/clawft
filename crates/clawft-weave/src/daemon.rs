@@ -7260,10 +7260,16 @@ async fn dispatch(
                 Some(n) => n,
                 None => return Response::error("missing required param: name"),
             };
+            // FR-W06 / WEFT-86: default removes .clawft/ + CLAWFT.md;
+            // keep_data=true is registry-only (pre-0.8 behavior).
+            let keep_data = params["keep_data"].as_bool().unwrap_or(false);
 
             match WorkspaceManager::new() {
-                Ok(mut mgr) => match mgr.delete(name) {
-                    Ok(()) => Response::success(serde_json::json!({ "deleted": name })),
+                Ok(mut mgr) => match mgr.delete(name, keep_data) {
+                    Ok(()) => Response::success(serde_json::json!({
+                        "deleted": name,
+                        "keep_data": keep_data,
+                    })),
                     Err(e) => Response::error(format!("workspace delete failed: {e}")),
                 },
                 Err(e) => Response::error(format!("workspace manager init failed: {e}")),

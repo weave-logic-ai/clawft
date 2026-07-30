@@ -91,12 +91,20 @@ and `CLAWFT.md` exist, and scoped resource directories.
 ### Delete a workspace
 
 ```sh
-weft workspace delete my-project       # prompts for confirmation
-weft workspace delete my-project -y    # skip confirmation
+weft workspace delete my-project              # prompts; removes .clawft/ + CLAWFT.md
+weft workspace delete my-project -y           # skip confirmation
+weft workspace delete my-project --keep-data  # registry-only (keep files on disk)
 ```
 
-Deletion removes the entry from the global registry only. Files on disk are
-not touched.
+By default (FR-W06), deletion removes the global registry entry **and** the
+workspace markers on disk: `.clawft/` and `CLAWFT.md`. The project root and
+other user source files are left alone.
+
+Pass `--keep-data` for a registry-only delete (the pre-0.8 default).
+
+> **Migration (WEFT-86):** older clawft versions only unregistered the
+> workspace and never deleted files. Scripts that assumed a no-op file
+> delete should add `--keep-data` if they still need that behavior.
 
 ### Workspace configuration
 
