@@ -69,8 +69,11 @@ The extension allowlists four methods for the panel:
 - `kernel.logs`
 
 Any other method request from the webview is rejected with
-`method not allowed: <method>`. Extending the allowlist happens in
-`extensions/vscode-weft-panel/src/extension.ts` (`ALLOWED_METHODS`).
+`method not allowed: <method>` (or `method denied for webview: …` for
+entries on `WEBVIEW_DENIED_METHODS`, e.g. `substrate.publish` — WEFT-496 /
+ADR-071). Extending the allowlist happens in
+`extensions/vscode-weft-panel/src/allowlist.ts` (`STATIC_ALLOWED_METHODS`);
+raw substrate writes go on `WEBVIEW_DENIED_METHODS`, never the allowlist.
 
 ## Known gaps (deferred to M2 / M3)
 
