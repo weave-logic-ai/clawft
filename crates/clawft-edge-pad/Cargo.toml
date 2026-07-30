@@ -105,11 +105,15 @@ weftos-leaf-touch-gt911 = { path = "../weftos-leaf-touch-gt911" }
 # (CrowPanel DIS08070H) on 2026-05-15. Replaces the hand-rolled
 # `drivers::dpi_surface` register-bang from configs #1-#11.
 #
-# `default-features = false` disables the `double-buffer` feature for
-# the single-buffer disambiguation per docs/handoff.md punch-list
-# item 1: if the gutter now lands visibly (with tearing during
-# writes), the bus swap was the residual visual bug. Re-enable by
-# dropping `default-features = false` once the swap is fixed.
+# WEFT-595 / BUG-1 disposition (2026-07-30):
+# `default-features = false` keeps the bus on the hardware-proven
+# single-buffer path (v0.1.0 behaviour from 2026-05-15). That is the
+# accepted production default for clawft-edge-pad until a CrowPanel
+# reflash confirms the v0.2.2 double-buffer fixes:
+#   (1) page-flip index/restart-desc invariants (see page_flip unit tests)
+#   (2) copy_scanning_to_offscreen before partial damage (DpiSurface)
+# Re-enable double-buffer by dropping `default-features = false` after
+# the manual flash checklist in docs/plans/wave-0a-WEFT-595-result.md.
 lgfx-bus-rgb-rs = { path = "../lgfx-bus-rgb-rs", default-features = false }
 
 # ── Crypto for Actor identity ────────────────────────────────────────

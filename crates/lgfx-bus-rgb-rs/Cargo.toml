@@ -18,9 +18,9 @@
 
 [package]
 name = "lgfx-bus-rgb-rs"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
-description = "Faithful Rust port of LovyanGFX Bus_RGB for ESP32-S3 RGB-DPI panels (PSRAM framebuffer, GDMA circular chain, VSYNC re-arm). v0.2 adds synchronous double-buffering with VSYNC sync."
+description = "Faithful Rust port of LovyanGFX Bus_RGB for ESP32-S3 RGB-DPI panels (PSRAM framebuffer, GDMA circular chain, VSYNC re-arm). v0.2.2: page-flip unit tests + copy_scanning_to_offscreen for dirty-rect coherence (WEFT-595)."
 license = "MIT OR Apache-2.0 OR BSD-3-Clause"
 repository = "https://github.com/weave-logic/lgfx-bus-rgb-rs"
 keywords = ["esp32s3", "lcd", "rgb", "dpi", "no_std"]

@@ -259,10 +259,13 @@ async fn main(spawner: Spawner) {
     // bus.
     let mut surface = match drivers::dpi_surface::DpiSurface::new(dpi) {
         Ok(s) => {
+            // WEFT-595: log buffer mode so a flash can confirm single-
+            // vs double-buffer without decoding the ELF features.
             println!(
-                "[edge-pad] DpiSurface up — framebuffer @ 0x{:08x} (align%64 = {})",
+                "[edge-pad] DpiSurface up — framebuffer @ 0x{:08x} (align%64 = {}) double_buffer={}",
                 s.framebuffer_addr(),
-                s.framebuffer_addr() % 64
+                s.framebuffer_addr() % 64,
+                s.is_double_buffered()
             );
             s
         }
