@@ -11,7 +11,7 @@
 //! # Shape of the service
 //!
 //! ```text
-//!   substrate/sensor/mic/pcm_chunk          substrate/_derived/transcript/<src>/mic
+//!   substrate/<node>/sensor/mic/pcm_chunk   substrate/_derived/transcript/<src>/mic
 //!           (i16 PCM, b64 in JSON)                    (text + timing)
 //!                   │                                      ▲
 //!                   ▼                                      │
@@ -25,6 +25,9 @@
 //!                                      (separate process,
 //!                                       localhost:8080)
 //! ```
+//!
+//! Path naming follows WEFT-438 (node-scoped canonical). Prefer
+//! [`pcm_chunk_input_path`] over the legacy flat constant.
 //!
 //! Unlike the earlier FFI-linked design (which this crate deliberately
 //! does NOT take — see journal §"HTTP-as-stage"), whisper runs as its
@@ -61,13 +64,31 @@ pub use manifest::{
 pub use service::{WhisperService, WhisperServiceConfig};
 pub use windower::{PcmChunk, PcmWindow, Windower};
 
-/// Substrate path the service subscribes to for inbound PCM chunks.
+/// Legacy flat PCM input path (pre-node-identity).
+///
+/// **Deprecated (WEFT-438):** use [`pcm_chunk_input_path`] with the
+/// source node id. Dual-emit may still populate this path during the
+/// 0.8.x migration window; it is removed at 0.9.0
+/// (`LEGACY_FLAT_REMOVAL_VERSION` in `clawft_substrate::sensor_paths`).
 ///
 /// Payload shape (JSON):
 /// ```json
 /// { "pcm_b64": "...", "sample_rate": 16000, "channels": 1, "seq": 0, "chunk_ms": 500 }
 /// ```
+#[deprecated(
+    since = "0.8.0",
+    note = "use pcm_chunk_input_path(node_id) — WEFT-438 node-scoped layout"
+)]
 pub const SUBSTRATE_PCM_INPUT_PATH: &str = "substrate/sensor/mic/pcm_chunk";
+
+/// Canonical node-scoped PCM input path for `source_node_id`.
+///
+/// Builds `substrate/<source_node_id>/sensor/mic/pcm_chunk` per WEFT-438.
+/// Mirrors `clawft_substrate::sensor_paths::mic_pcm_chunk_path` without
+/// taking a substrate crate dependency.
+pub fn pcm_chunk_input_path(source_node_id: &str) -> String {
+    format!("substrate/{source_node_id}/sensor/mic/pcm_chunk")
+}
 
 /// Mesh-canonical transcript path *prefix* for the whisper pipeline.
 ///
