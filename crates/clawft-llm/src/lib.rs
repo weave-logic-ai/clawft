@@ -52,7 +52,10 @@ pub mod types;
 
 #[cfg(feature = "native")]
 pub mod failover;
-#[cfg(feature = "native")]
+// Pure Hermes dialect helpers (`strip_think`, tool-call recovery, request
+// knobs). No I/O — available under browser/WASM as well as native so shared
+// pipeline code (e.g. clawft-core transport) can strip `<think>` without a
+// native-only cfg (WEFT-672).
 pub mod hermes;
 #[cfg(feature = "native")]
 pub mod local_provider;
@@ -86,7 +89,6 @@ pub use types::{ChatMessage, ChatRequest, ChatResponse, StreamChunk, ToolCall, U
 
 #[cfg(feature = "native")]
 pub use failover::FailoverChain;
-#[cfg(feature = "native")]
 pub use hermes::ReasoningMode;
 #[cfg(feature = "native")]
 pub use local_provider::LocalProvider;
