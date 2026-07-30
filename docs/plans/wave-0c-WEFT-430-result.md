@@ -3,7 +3,7 @@
 **Ticket:** WEFT-430  
 **Branch:** `wave0c/weft-430-affordance-permit`  
 **Base:** `release/0.8-staging`  
-**Commit:** `81306e0b`  
+**Commit:** `db172564`  
 **Date:** 2026-07-30  
 **Agent:** coder-430 (wave-0c)
 
