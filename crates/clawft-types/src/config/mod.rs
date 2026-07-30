@@ -1177,6 +1177,11 @@ mod tests {
         assert_eq!(cfg.audio.channels, 1);
         assert!(cfg.audio.input_device.is_none());
         assert!(cfg.audio.output_device.is_none());
+        // SC-2 / WEFT-223: default audio_retention is none (no raw audio retained).
+        assert_eq!(cfg.audio_retention, AudioRetention::None);
+        assert!(cfg.audio_retention.is_none());
+        assert!(!cfg.audio_retention.allows_disk_write());
+        assert!(!cfg.audio_retention.allows_session_hold());
         assert!(cfg.stt.enabled);
         assert_eq!(cfg.stt.model, "sherpa-onnx-streaming-zipformer-en-20M");
         assert!(cfg.stt.language.is_empty());
@@ -1194,6 +1199,30 @@ mod tests {
         assert!(!cfg.cloud_fallback.enabled);
         assert!(cfg.cloud_fallback.stt_provider.is_empty());
         assert!(cfg.cloud_fallback.tts_provider.is_empty());
+    }
+
+    #[test]
+    fn voice_audio_retention_serde() {
+        // Default omitted key → None
+        let cfg: VoiceConfig = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
+        assert_eq!(cfg.audio_retention, AudioRetention::None);
+
+        let session: VoiceConfig =
+            serde_json::from_str(r#"{"audio_retention":"session"}"#).unwrap();
+        assert_eq!(session.audio_retention, AudioRetention::Session);
+        assert!(session.audio_retention.allows_session_hold());
+        assert!(!session.audio_retention.allows_disk_write());
+
+        let persist: VoiceConfig =
+            serde_json::from_str(r#"{"audioRetention":"persist"}"#).unwrap();
+        assert_eq!(persist.audio_retention, AudioRetention::Persist);
+        assert!(persist.audio_retention.allows_disk_write());
+
+        // Round-trip lowercase wire form
+        let json = serde_json::to_string(&AudioRetention::Session).unwrap();
+        assert_eq!(json, "\"session\"");
+        let back: AudioRetention = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, AudioRetention::Session);
     }
 
     #[test]

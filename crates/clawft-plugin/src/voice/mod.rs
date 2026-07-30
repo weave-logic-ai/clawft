@@ -86,6 +86,10 @@ pub mod transcript_log;
 // All other re-exports are legacy scaffold — prefer clawft-channels /
 // clawft-voice-* for new work (WEFT-671).
 
+// SC-2 / WEFT-223: re-export retention + secure buffer types for callers.
+pub use clawft_types::config::AudioRetention;
+pub use clawft_types::{SecureAudioBuffer, SecureAudioRing};
+
 pub use channel::{VoiceChannel, VoiceStatus};
 pub use config::{VoiceAudioConfig, VoiceCaptureSpec, VoicePipelineConfig, VoicePlaybackSpec};
 pub use echo::{EchoCanceller, EchoCancellerConfig};

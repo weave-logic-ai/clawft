@@ -20,6 +20,13 @@ pub struct VoiceConfig {
     #[serde(default)]
     pub audio: AudioConfig,
 
+    /// Raw-audio retention policy (SC-2 / WEFT-223).
+    ///
+    /// Default [`AudioRetention::None`]: process PCM in memory and
+    /// discard (zeroize) after STT — never write `.wav`/`.pcm` to disk.
+    #[serde(default, alias = "audioRetention")]
+    pub audio_retention: AudioRetention,
+
     /// Speech-to-text settings.
     #[serde(default)]
     pub stt: SttConfig,
@@ -60,6 +67,49 @@ pub struct VoiceConfig {
     /// Disabled by default; voice features must be opted into.
     #[serde(default)]
     pub consumer: VoiceConsumerConfig,
+}
+
+/// How long raw PCM may be retained after capture (SC-2 / WEFT-223).
+///
+/// | Variant | Memory | Disk |
+/// |---------|--------|------|
+/// | [`None`](Self::None) | zeroize after STT / drop | never |
+/// | [`Session`](Self::Session) | hold until session end, then zeroize | never |
+/// | [`Persist`](Self::Persist) | as session | may write under `~/.clawft/audio/` |
+///
+/// Default is **`none`** — privacy-preserving; operators must opt into
+/// retention explicitly.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AudioRetention {
+    /// Do not retain raw audio (default). Zeroize buffers on drop; never
+    /// write PCM/WAV to disk.
+    #[default]
+    None,
+    /// Keep raw audio in memory for the current voice session only.
+    /// Deleted / zeroized on session exit. Still no disk write.
+    Session,
+    /// Persist raw audio under the workspace / home audio directory.
+    /// Operator is responsible for cleanup and access control.
+    Persist,
+}
+
+impl AudioRetention {
+    /// True when raw samples may be written to disk (`.wav` / `.pcm`).
+    pub fn allows_disk_write(self) -> bool {
+        matches!(self, Self::Persist)
+    }
+
+    /// True when raw samples may be held past the immediate STT handoff
+    /// (session buffer or disk-backed archive).
+    pub fn allows_session_hold(self) -> bool {
+        matches!(self, Self::Session | Self::Persist)
+    }
+
+    /// True when the policy is the default privacy-preserving mode.
+    pub fn is_none(self) -> bool {
+        matches!(self, Self::None)
+    }
 }
 
 /// Voice transcript consumer configuration.

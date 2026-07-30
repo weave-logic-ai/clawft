@@ -42,12 +42,31 @@ impl SttModel {
 }
 
 /// One finalized utterance ready to transcribe: 16 kHz mono `s16le` PCM.
-#[derive(Debug, Clone)]
+///
+/// SC-2 / WEFT-223: [`Drop`] zeroizes `samples` so raw audio does not linger
+/// on the heap after STT returns (or the utterance is abandoned).
+#[derive(Clone)]
 pub struct Utterance {
     /// Interleaved 16 kHz mono `s16le` samples.
     pub samples: Vec<i16>,
     /// Sample rate of `samples`.
     pub sample_rate: u32,
+}
+
+impl Drop for Utterance {
+    fn drop(&mut self) {
+        clawft_types::zeroize_vec(&mut self.samples);
+    }
+}
+
+impl std::fmt::Debug for Utterance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Utterance")
+            .field("len", &self.samples.len())
+            .field("sample_rate", &self.sample_rate)
+            .field("samples", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// One decoded token with acoustic timing, already converted to milliseconds

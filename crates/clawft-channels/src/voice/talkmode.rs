@@ -29,6 +29,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use clawft_types::{zeroize_vec, SecureAudioRing};
 use tokio::sync::{mpsc, Notify};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -386,6 +387,10 @@ mod name_tests {
 /// A finalized utterance handed from the capture loop to decode. It carries the
 /// endpoint + noise-floor readings sampled *at finalize* so decode can run off
 /// the capture loop without touching the (still-advancing) endpointer / floor.
+/// One utterance ready for STT decode.
+///
+/// SC-2 / WEFT-223: `samples` are zeroized on drop so raw PCM does not
+/// linger in the heap after the turn is consumed (or abandoned).
 struct FinalizedTurn {
     samples: Vec<i16>,
     voiced_samples: usize,
@@ -399,6 +404,13 @@ struct FinalizedTurn {
     /// while idle is an ordinary word (mirrors interrupt_router.rs's timing
     /// axis — see [`WINDOW_STOP_PHRASES`]).
     from_window_interrupt: bool,
+}
+
+impl Drop for FinalizedTurn {
+    fn drop(&mut self) {
+        // SC-2: wipe raw PCM after STT consume / queue drop / abandon.
+        zeroize_vec(&mut self.samples);
+    }
 }
 
 /// The STT → speaker → record → emit pipeline for one finalized utterance,
@@ -630,10 +642,18 @@ impl Decoder {
     /// talk-mode reply slot can gate on it per WEFT-659 without re-deriving
     /// what this method already computed), or `None` when the turn is
     /// dropped (empty transcript / error).
-    async fn decode_and_emit(&self, turn: FinalizedTurn) -> Option<DecodedTurn> {
+    async fn decode_and_emit(&self, mut turn: FinalizedTurn) -> Option<DecodedTurn> {
         let sr = self.config.sample_rate;
+        // Take samples out so FinalizedTurn::Drop zeroizes an empty vec; the
+        // Utterance owns PCM for the STT/attribute window and zeroizes on drop
+        // (SC-2 / WEFT-223).
+        let samples = std::mem::take(&mut turn.samples);
+        let voiced_samples = turn.voiced_samples;
+        let endpoint = turn.endpoint.take();
+        let noise_floor_dbfs = turn.noise_floor_dbfs;
+        let noise_floor_converged = turn.noise_floor_converged;
         let utt = Utterance {
-            samples: turn.samples,
+            samples,
             sample_rate: sr,
         };
         info!(
@@ -647,7 +667,7 @@ impl Decoder {
             Ok(d) if !d.text.trim().is_empty() => d,
             Ok(_) => {
                 info!("talk-mode STT returned an empty transcript; turn dropped");
-                return None;
+                return None; // utt Drop zeroizes samples
             }
             Err(e) => {
                 warn!(error = %e, "talk-mode STT failed");
@@ -669,10 +689,10 @@ impl Decoder {
             &detail,
             speaker,
             stt_latency_ms,
-            turn.voiced_samples,
-            turn.endpoint,
-            turn.noise_floor_dbfs,
-            turn.noise_floor_converged,
+            voiced_samples,
+            endpoint,
+            noise_floor_dbfs,
+            noise_floor_converged,
         );
 
         self.observer.observe(ConversationEvent::UserTurn {
@@ -681,6 +701,7 @@ impl Decoder {
             speaker_name,
             voice_analysis: Some(Box::new(voice_analysis.clone())),
         });
+        // utt drops here → samples zeroized (SC-2).
         Some(DecodedTurn {
             text,
             speaker_ctx,
@@ -1040,8 +1061,9 @@ impl<M: EndpointModel> TalkModeController<M> {
         let mut last_level: Option<Instant> = None;
         // Pre-onset ring: the last PREROLL_MS of raw frames, prepended to a new
         // utterance at onset so the below-gate word attack isn't clipped.
+        // SC-2 / WEFT-223: SecureAudioRing zeroizes on eviction and on drop.
         let preroll_cap = (self.config.sample_rate as usize) * PREROLL_MS / 1_000;
-        let mut preroll: VecDeque<i16> = VecDeque::with_capacity(preroll_cap + 1);
+        let mut preroll = SecureAudioRing::with_capacity(preroll_cap);
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,
@@ -1065,10 +1087,7 @@ impl<M: EndpointModel> TalkModeController<M> {
                     // Maintain the ring with this frame AFTER the onset check, so
                     // the prepended audio is strictly pre-onset (the current voiced
                     // frame is added to `utt` below, not duplicated from the ring).
-                    preroll.extend(frame.iter().copied());
-                    while preroll.len() > preroll_cap {
-                        preroll.pop_front();
-                    }
+                    preroll.push_frame(&frame);
                     if voiced {
                         utt.extend_from_slice(&frame);
                         voiced_samples += frame.len();
@@ -1076,7 +1095,7 @@ impl<M: EndpointModel> TalkModeController<M> {
                     match self.endpointer.observe(&frame, voiced, "").await {
                         TurnDecision::Continue => {}
                         TurnDecision::Finalize => {
-                            let captured = std::mem::take(&mut utt);
+                            let mut captured = std::mem::take(&mut utt);
                             let captured_voiced = std::mem::take(&mut voiced_samples);
                             let captured_from_window = std::mem::take(&mut from_window_interrupt);
                             // Guard against ghost turns: noise blips and the
@@ -1153,12 +1172,17 @@ impl<M: EndpointModel> TalkModeController<M> {
                                         / self.config.sample_rate.max(1) as usize,
                                     "talk-mode dropping sub-minimum utterance blip"
                                 );
+                                // SC-2: wipe abandoned blip PCM immediately.
+                                zeroize_vec(&mut captured);
                             }
                         }
                     }
                 }
             }
         }
+        // SC-2: wipe any in-progress utterance + pre-roll on loop exit.
+        zeroize_vec(&mut utt);
+        preroll.clear();
         // Stop the decode worker (cancel usually already did; abort covers the
         // capture-channel-closed path where `cancel` never fired).
         if let Some(handle) = decode_worker {

@@ -51,6 +51,9 @@ chrono = { workspace = true }
 tracing = { workspace = true }
 semver = "1"
 reqwest = { workspace = true, default-features = false, features = ["json", "multipart"] }
+# SC-2 / WEFT-223: AudioRetention + SecureAudioBuffer for voice capture/transcript.
+clawft-types = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
