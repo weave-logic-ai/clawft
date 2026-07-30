@@ -2,6 +2,7 @@
 
 **Ticket:** WEFT-496  
 **Branch:** `wave0k/weft-496-publish-gate`  
+**SHA:** `b933f1140591ce7339e5d16ded5e8edfb2f0dae9`  
 **Worktree:** `/Users/mathewbeane/.grok/worktrees/mathewbeane-weftos/subagent-019fb4dd-9e94-7350-bce2-782ff5a15f53`  
 **Base:** `release/0.8-staging`  
 **Date:** 2026-07-30  
