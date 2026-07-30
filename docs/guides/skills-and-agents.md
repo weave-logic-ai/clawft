@@ -391,7 +391,13 @@ Agents can exchange messages through the `AgentBus`:
 - **Per-agent inboxes** -- Each agent has a bounded channel (configurable
   capacity) for incoming inter-agent messages.
 - **SwarmCoordinator** -- Provides `dispatch_subtask` (send to one agent)
-  and `broadcast_task` (send to all agents) methods.
+  and `broadcast_task` (send to all agents) methods, plus `spawn_workers`
+  / `collect_replies` / `dispatch_and_collect` for live worker loops.
+- **Worker loops** -- `worker_message_loop` + `spawn_worker_loop` drain a
+  worker's inbox, invoke a `WorkerHandler`, and reply to the coordinator.
+  Production hosts attach the bus via `AppContext::enable_agent_bus`.
+- **Demo** -- `weft swarm demo` (or `cargo run -p clawft-core --example
+  swarm_demo`) runs a coordinator map/collect workflow end-to-end (WEFT-185).
 - **TTL enforcement** -- Messages carry a time-to-live; expired messages are
   dropped on delivery attempt.
 

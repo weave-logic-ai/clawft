@@ -113,6 +113,10 @@ pub async fn run(args: AgentArgs) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("bootstrap failed: {e}"))?
         .with_routing_layers(loaded.global_routing, loaded.workspace_routing);
 
+    // WEFT-185: construct AgentBus on the production agent path so A2A
+    // messaging and SwarmCoordinator demos share the same wiring surface.
+    let _agent_bus = ctx.enable_agent_bus(None);
+
     // Register core tools (built-in + MCP proxied + delegation).
     super::register_core_tools(ctx.tools_mut(), &config, platform.clone()).await;
 

@@ -452,6 +452,29 @@ impl<P: Platform> AppContext<P> {
         self.agent_bus = Some(bus);
     }
 
+    /// Construct and attach an [`AgentBus`](crate::agent_bus::AgentBus)
+    /// if one is not already set (WEFT-185 production wiring).
+    ///
+    /// Uses `capacity` when provided; otherwise the bus default (256).
+    /// Returns a clone of the live bus handle so callers can spawn
+    /// worker loops or build a [`SwarmCoordinator`](crate::agent_bus::SwarmCoordinator).
+    #[cfg(feature = "native")]
+    pub fn enable_agent_bus(&mut self, capacity: Option<usize>) -> Arc<crate::agent_bus::AgentBus> {
+        if let Some(bus) = self.agent_bus.as_ref() {
+            return bus.clone();
+        }
+        let bus = Arc::new(match capacity {
+            Some(c) => crate::agent_bus::AgentBus::with_capacity(c),
+            None => crate::agent_bus::AgentBus::new(),
+        });
+        self.agent_bus = Some(bus.clone());
+        info!(
+            capacity = bus.inbox_capacity(),
+            "agent bus enabled (WEFT-185)"
+        );
+        bus
+    }
+
     /// Borrow the optional agent bus. `None` means A2A messaging is
     /// disabled (single-agent process).
     #[cfg(feature = "native")]
@@ -985,6 +1008,22 @@ mod tests {
         let bus = ctx.bus();
         // Should be able to get an inbound sender
         let _tx = bus.inbound_sender();
+    }
+
+    /// WEFT-185: production path constructs an AgentBus via enable_agent_bus.
+    #[cfg(feature = "native")]
+    #[tokio::test]
+    async fn enable_agent_bus_constructs_once() {
+        let platform = Arc::new(NativePlatform::new());
+        let mut ctx = AppContext::new(test_config(), platform).await.unwrap();
+        assert!(ctx.agent_bus().is_none());
+        let bus1 = ctx.enable_agent_bus(Some(32));
+        assert_eq!(bus1.inbox_capacity(), 32);
+        assert!(ctx.agent_bus().is_some());
+        let bus2 = ctx.enable_agent_bus(Some(99));
+        // Second call returns the existing bus (capacity unchanged).
+        assert_eq!(bus2.inbox_capacity(), 32);
+        assert!(Arc::ptr_eq(&bus1, &bus2));
     }
 
     #[tokio::test]

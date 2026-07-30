@@ -12,7 +12,6 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, warn};
@@ -20,7 +19,7 @@ use tracing::{debug, warn};
 use clawft_types::agent_bus::{AgentBusError, InterAgentMessage};
 
 /// Default inbox capacity per agent.
-const DEFAULT_INBOX_CAPACITY: usize = 256;
+pub(crate) const DEFAULT_INBOX_CAPACITY: usize = 256;
 
 /// Handle for an agent's inbox receiver.
 ///
@@ -119,6 +118,11 @@ impl AgentBus {
         }
     }
 
+    /// Inbox capacity used for new agent registrations.
+    pub fn inbox_capacity(&self) -> usize {
+        self.inbox_capacity
+    }
+
     /// Register an agent on the bus and return its inbox handle.
     ///
     /// If the agent is already registered, the old inbox is replaced
@@ -201,92 +205,11 @@ impl Default for AgentBus {
     }
 }
 
-/// Coordinator for dispatching subtasks to worker agents and collecting
-/// results via the [`AgentBus`].
-///
-/// Implements the coordinator pattern: a lead agent dispatches work to
-/// worker agents and waits for their replies.
-pub struct SwarmCoordinator {
-    /// Shared agent bus for message delivery.
-    bus: Arc<AgentBus>,
-    /// Agent ID of the coordinator.
-    coordinator_id: String,
-    /// Registered worker agent IDs.
-    worker_agents: Vec<String>,
-}
-
-impl SwarmCoordinator {
-    /// Create a new coordinator.
-    pub fn new(
-        bus: Arc<AgentBus>,
-        coordinator_id: impl Into<String>,
-        worker_agents: Vec<String>,
-    ) -> Self {
-        Self {
-            bus,
-            coordinator_id: coordinator_id.into(),
-            worker_agents,
-        }
-    }
-
-    /// Dispatch a subtask to a specific worker agent.
-    ///
-    /// Sends an [`InterAgentMessage`] to the worker and returns the
-    /// message ID for later correlation.
-    pub async fn dispatch_subtask(
-        &self,
-        task: &str,
-        worker: &str,
-        payload: serde_json::Value,
-        ttl: Duration,
-    ) -> Result<uuid::Uuid, AgentBusError> {
-        let msg = InterAgentMessage::new(&self.coordinator_id, worker, task, payload, ttl);
-        let msg_id = msg.id;
-        self.bus.send(msg).await?;
-        debug!(
-            coordinator = %self.coordinator_id,
-            worker = %worker,
-            task = %task,
-            msg_id = %msg_id,
-            "dispatched subtask"
-        );
-        Ok(msg_id)
-    }
-
-    /// Dispatch the same task to all registered workers.
-    ///
-    /// Returns a list of (worker_id, message_id) pairs.
-    pub async fn broadcast_task(
-        &self,
-        task: &str,
-        payload: serde_json::Value,
-        ttl: Duration,
-    ) -> Vec<(String, Result<uuid::Uuid, AgentBusError>)> {
-        let mut results = Vec::new();
-        for worker in &self.worker_agents {
-            let result = self
-                .dispatch_subtask(task, worker, payload.clone(), ttl)
-                .await;
-            results.push((worker.clone(), result));
-        }
-        results
-    }
-
-    /// Coordinator agent ID.
-    pub fn coordinator_id(&self) -> &str {
-        &self.coordinator_id
-    }
-
-    /// List of registered worker agent IDs.
-    pub fn workers(&self) -> &[String] {
-        &self.worker_agents
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn register_and_send() {
@@ -332,7 +255,6 @@ mod tests {
         let mut inbox_a = bus.register_agent("agent-a").await;
         let mut inbox_b = bus.register_agent("agent-b").await;
 
-        // Send to agent-a only.
         let msg = InterAgentMessage::new(
             "sender",
             "agent-a",
@@ -342,12 +264,10 @@ mod tests {
         );
         bus.send(msg).await.unwrap();
 
-        // agent-a should receive it.
         let received = inbox_a.try_recv();
         assert!(received.is_some());
         assert_eq!(received.unwrap().task, "for a only");
 
-        // agent-b should not.
         let received_b = inbox_b.try_recv();
         assert!(received_b.is_none());
     }
@@ -367,7 +287,6 @@ mod tests {
         let bus = AgentBus::with_capacity(2);
         let _inbox = bus.register_agent("agent-a").await;
 
-        // Fill inbox.
         for i in 0..2 {
             let msg = InterAgentMessage::new(
                 "sender",
@@ -379,7 +298,6 @@ mod tests {
             bus.send(msg).await.unwrap();
         }
 
-        // Third should fail.
         let msg = InterAgentMessage::new(
             "sender",
             "agent-a",
@@ -404,48 +322,15 @@ mod tests {
         assert!(agents.contains(&"b".to_string()));
     }
 
-    #[tokio::test]
-    async fn coordinator_dispatch() {
-        let bus = Arc::new(AgentBus::new());
-        let _inbox = bus.register_agent("worker-1").await;
-
-        let coord = SwarmCoordinator::new(bus.clone(), "coordinator", vec!["worker-1".into()]);
-
-        let msg_id = coord
-            .dispatch_subtask(
-                "subtask-1",
-                "worker-1",
-                json!({"data": 42}),
-                Duration::from_secs(60),
-            )
-            .await
-            .unwrap();
-
-        // Message ID should be valid.
-        assert!(!msg_id.is_nil());
-    }
-
-    #[tokio::test]
-    async fn coordinator_broadcast() {
-        let bus = Arc::new(AgentBus::new());
-        let _inbox1 = bus.register_agent("w1").await;
-        let _inbox2 = bus.register_agent("w2").await;
-
-        let coord = SwarmCoordinator::new(bus.clone(), "coord", vec!["w1".into(), "w2".into()]);
-
-        let results = coord
-            .broadcast_task("broadcast-task", json!({}), Duration::from_secs(60))
-            .await;
-
-        assert_eq!(results.len(), 2);
-        for (_, result) in &results {
-            assert!(result.is_ok());
-        }
-    }
-
     #[test]
     fn agent_bus_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<AgentBus>();
+    }
+
+    #[test]
+    fn with_capacity_exposes_capacity() {
+        let bus = AgentBus::with_capacity(32);
+        assert_eq!(bus.inbox_capacity(), 32);
     }
 }
