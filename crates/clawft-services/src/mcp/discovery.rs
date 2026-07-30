@@ -22,12 +22,14 @@
 //! 5. Changed servers: remove + add.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
+use tokio::sync::{Mutex, mpsc};
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
@@ -35,10 +37,13 @@ use super::transport::{
     DefaultTransportFactory, McpTransport, McpTransportFactory, TransportFactoryConfig,
     TransportSpec,
 };
-use crate::error::Result;
+use crate::error::{Result, ServiceError};
 
-/// Default debounce for config file changes.
-const DEBOUNCE_MS: u64 = 500;
+/// Default debounce for config file changes (WEFT-187).
+pub const DEBOUNCE_MS: u64 = 500;
+
+/// Shared manager handle used by the config watcher and runtime callers.
+pub type SharedMcpServerManager = Arc<Mutex<McpServerManager>>;
 
 /// Default drain timeout for removing servers.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -114,7 +119,10 @@ pub enum ServerStatus {
 }
 
 /// Configuration for a managed MCP server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Full equality (command, args, env, url) is used by
+/// [`McpServerManager::apply_config_diff`] for change detection (WEFT-187).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpServerConfig {
     /// Server name (unique identifier).
     pub name: String,
@@ -133,6 +141,19 @@ pub struct McpServerConfig {
     /// Optional URL for HTTP-based servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+}
+
+/// Outcome of a validated config reload (WEFT-187).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfigReloadResult {
+    /// Servers newly present in the config.
+    pub added: usize,
+    /// Servers removed from the config.
+    pub removed: usize,
+    /// Servers whose config changed (command/args/env/url).
+    pub changed: usize,
+    /// Per-server validation failures that were skipped.
+    pub validation_errors: Vec<String>,
 }
 
 /// A managed MCP server with its connection state.
@@ -390,9 +411,8 @@ impl McpServerManager {
         for config in new_configs {
             let name = config.name.clone();
             if let Some(existing) = self.servers.get(&name) {
-                // Check if config changed.
-                if existing.config.command != config.command || existing.config.args != config.args
-                {
+                // Full config equality (command, args, env, url) — WEFT-187.
+                if existing.config != config {
                     self.add_server(config);
                     changed += 1;
                 }
@@ -407,6 +427,42 @@ impl McpServerManager {
         (added, removed, changed)
     }
 
+    /// Validate each config via the transport factory, skip invalid entries,
+    /// then apply the diff. Returns counts plus validation error messages.
+    pub fn apply_config_diff_validated(
+        &mut self,
+        new_configs: Vec<McpServerConfig>,
+    ) -> ConfigReloadResult {
+        let mut validation_errors = Vec::new();
+        let mut valid = Vec::with_capacity(new_configs.len());
+
+        for config in new_configs {
+            let spec = transport_spec_for(&config);
+            match self.factory.validate(&spec) {
+                Ok(()) => valid.push(config),
+                Err(e) => {
+                    let msg = format!("{}: {e}", config.name);
+                    warn!(name = %config.name, error = %e, "skipping invalid MCP server config");
+                    validation_errors.push(msg);
+                }
+            }
+        }
+
+        let (added, removed, changed) = self.apply_config_diff(valid);
+        ConfigReloadResult {
+            added,
+            removed,
+            changed,
+            validation_errors,
+        }
+    }
+
+    /// Reload server list from a config file path: parse → validate → apply.
+    pub fn reload_from_path(&mut self, path: &Path) -> Result<ConfigReloadResult> {
+        let configs = load_mcp_servers_from_path(path)?;
+        Ok(self.apply_config_diff_validated(configs))
+    }
+
     /// Debounce duration for config changes.
     pub fn debounce(&self) -> Duration {
         self.debounce
@@ -416,6 +472,264 @@ impl McpServerManager {
     pub fn drain_timeout(&self) -> Duration {
         self.drain_timeout
     }
+}
+
+// ── Config file parsing (WEFT-187) ──────────────────────────────────────────
+
+/// Wire shape for a single MCP server entry (name comes from the map key).
+#[derive(Debug, Clone, Default, Deserialize)]
+struct McpServerConfigWire {
+    #[serde(default)]
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: HashMap<String, String>,
+    #[serde(default)]
+    url: Option<String>,
+}
+
+/// Nested tools section used in clawft.toml / config.json.
+#[derive(Debug, Default, Deserialize)]
+struct ToolsSection {
+    #[serde(default, alias = "mcpServers")]
+    mcp_servers: HashMap<String, McpServerConfigWire>,
+}
+
+/// Top-level config document supporting several layouts.
+#[derive(Debug, Default, Deserialize)]
+struct ConfigDocument {
+    #[serde(default)]
+    tools: Option<ToolsSection>,
+    /// Top-level `mcp_servers` / `mcpServers` (Claude-style `.mcp.json`).
+    #[serde(default, alias = "mcpServers")]
+    mcp_servers: HashMap<String, McpServerConfigWire>,
+}
+
+fn wire_map_to_configs(map: HashMap<String, McpServerConfigWire>) -> Vec<McpServerConfig> {
+    let mut out: Vec<McpServerConfig> = map
+        .into_iter()
+        .map(|(name, w)| McpServerConfig {
+            name,
+            command: w.command,
+            args: w.args,
+            env: w.env,
+            url: w.url.filter(|s| !s.is_empty()),
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+fn extract_mcp_servers(doc: ConfigDocument) -> Vec<McpServerConfig> {
+    if let Some(tools) = doc.tools {
+        if !tools.mcp_servers.is_empty() {
+            return wire_map_to_configs(tools.mcp_servers);
+        }
+    }
+    wire_map_to_configs(doc.mcp_servers)
+}
+
+/// Parse MCP server configs from a TOML or JSON string.
+///
+/// Accepts:
+/// - `[tools.mcp_servers.<name>]` / `tools.mcpServers` (TOML/JSON)
+/// - top-level `mcp_servers` / `mcpServers` (e.g. `.mcp.json`)
+///
+/// Format is chosen from `hint` (`"toml"` / `"json"`) or auto-detected
+/// from content (leading `{` → JSON, else TOML).
+pub fn load_mcp_servers_from_str(content: &str, hint: Option<&str>) -> Result<Vec<McpServerConfig>> {
+    let trimmed = content.trim_start();
+    let is_json = match hint.map(|h| h.to_ascii_lowercase()) {
+        Some(h) if h == "json" || h == ".json" || h.ends_with(".json") => true,
+        Some(h) if h == "toml" || h == ".toml" || h.ends_with(".toml") => false,
+        _ => trimmed.starts_with('{'),
+    };
+
+    let doc: ConfigDocument = if is_json {
+        serde_json::from_str(content).map_err(ServiceError::Json)?
+    } else {
+        toml::from_str(content).map_err(|e| {
+            ServiceError::McpProtocol(format!("toml parse error for mcp_servers: {e}"))
+        })?
+    };
+
+    Ok(extract_mcp_servers(doc))
+}
+
+/// Load MCP server configs from a file path (`.toml` or `.json` by extension).
+pub fn load_mcp_servers_from_path(path: &Path) -> Result<Vec<McpServerConfig>> {
+    let content = std::fs::read_to_string(path)?;
+    let hint = path.extension().and_then(|e| e.to_str());
+    load_mcp_servers_from_str(&content, hint)
+}
+
+// ── Config file watcher (WEFT-187) ──────────────────────────────────────────
+
+/// Handle to a running MCP config watcher. Drop or [`stop`](Self::stop) to shut down.
+pub struct McpConfigWatcherHandle {
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl McpConfigWatcherHandle {
+    /// Stop the watcher gracefully.
+    pub fn stop(mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+impl Drop for McpConfigWatcherHandle {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+fn event_affects_target(event: &Event, target: &Path) -> bool {
+    let target_name = target.file_name();
+    event.paths.iter().any(|p| {
+        p == target
+            || (target_name.is_some() && p.file_name() == target_name)
+            // Atomic writers often use `.tmp` / `~` siblings in the same dir.
+            || p.parent() == target.parent()
+    })
+}
+
+/// Start watching `path` for changes with the default **500ms** debounce.
+///
+/// Watches the parent directory so atomic renames are observed. Emits a
+/// [`ConfigReloadResult`] on each successful (or validated-with-errors) reload.
+pub fn start_config_watcher(
+    path: impl Into<PathBuf>,
+    manager: SharedMcpServerManager,
+) -> std::result::Result<(McpConfigWatcherHandle, mpsc::Receiver<ConfigReloadResult>), notify::Error>
+{
+    start_config_watcher_with_debounce(path, manager, Duration::from_millis(DEBOUNCE_MS))
+}
+
+/// Start watching `path` with a custom debounce duration.
+pub fn start_config_watcher_with_debounce(
+    path: impl Into<PathBuf>,
+    manager: SharedMcpServerManager,
+    debounce: Duration,
+) -> std::result::Result<(McpConfigWatcherHandle, mpsc::Receiver<ConfigReloadResult>), notify::Error>
+{
+    let path = path.into();
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    let (event_tx, mut event_rx) = mpsc::channel::<Event>(64);
+    let (result_tx, result_rx) = mpsc::channel::<ConfigReloadResult>(16);
+
+    let mut watcher = RecommendedWatcher::new(
+        move |res: notify::Result<Event>| {
+            if let Ok(event) = res {
+                let _ = event_tx.blocking_send(event);
+            }
+        },
+        notify::Config::default(),
+    )?;
+
+    // Watch parent dir so atomic write+rename of the config file is seen.
+    let watch_dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    if watch_dir.exists() {
+        watcher.watch(&watch_dir, RecursiveMode::NonRecursive)?;
+        debug!(path = %watch_dir.display(), "watching MCP config parent directory");
+    } else {
+        warn!(
+            path = %watch_dir.display(),
+            "MCP config parent directory does not exist; watcher may miss events"
+        );
+    }
+
+    let watched_path = path.clone();
+
+    tokio::spawn(async move {
+        let _watcher = watcher;
+        let mut pending = false;
+        let mut debounce_deadline: Option<tokio::time::Instant> = None;
+
+        loop {
+            tokio::select! {
+                event = event_rx.recv() => {
+                    match event {
+                        Some(ev) => {
+                            match ev.kind {
+                                EventKind::Create(_)
+                                | EventKind::Modify(_)
+                                | EventKind::Remove(_) => {
+                                    if event_affects_target(&ev, &watched_path) {
+                                        pending = true;
+                                        debounce_deadline = Some(
+                                            tokio::time::Instant::now() + debounce,
+                                        );
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                _ = async {
+                    match debounce_deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                }, if pending => {
+                    pending = false;
+                    debounce_deadline = None;
+
+                    let result = {
+                        let mut mgr = manager.lock().await;
+                        match mgr.reload_from_path(&watched_path) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                warn!(
+                                    path = %watched_path.display(),
+                                    error = %e,
+                                    "MCP config reload failed"
+                                );
+                                ConfigReloadResult {
+                                    validation_errors: vec![e.to_string()],
+                                    ..Default::default()
+                                }
+                            }
+                        }
+                    };
+
+                    info!(
+                        added = result.added,
+                        removed = result.removed,
+                        changed = result.changed,
+                        validation_errors = result.validation_errors.len(),
+                        "MCP config hot-reload applied"
+                    );
+
+                    if result_tx.send(result).await.is_err() {
+                        // No listeners; keep watching until shutdown.
+                    }
+                }
+                _ = &mut shutdown_rx => {
+                    info!("MCP config watcher shutting down");
+                    break;
+                }
+            }
+        }
+    });
+
+    Ok((
+        McpConfigWatcherHandle {
+            shutdown_tx: Some(shutdown_tx),
+        },
+        result_rx,
+    ))
 }
 
 impl Default for McpServerManager {
@@ -742,5 +1056,264 @@ mod tests {
         );
         // And it should have observed in_flight=0 by the end.
         assert_eq!(counter.load(), 0);
+    }
+
+    // ── hot-reload parse / validate / watcher (WEFT-187) ────────────────
+
+    #[test]
+    fn debounce_default_is_500ms() {
+        assert_eq!(DEBOUNCE_MS, 500);
+        let mgr = McpServerManager::new();
+        assert_eq!(mgr.debounce(), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn load_mcp_servers_from_toml_tools_section() {
+        let toml = r#"
+[tools.mcp_servers.github]
+command = "npx"
+args = ["-y", "github-mcp"]
+
+[tools.mcp_servers.slack]
+command = "npx"
+args = ["-y", "slack-mcp"]
+env = { SLACK_TOKEN = "x" }
+"#;
+        let configs = load_mcp_servers_from_str(toml, Some("toml")).unwrap();
+        assert_eq!(configs.len(), 2);
+        assert_eq!(configs[0].name, "github");
+        assert_eq!(configs[0].command, "npx");
+        assert_eq!(configs[0].args, vec!["-y", "github-mcp"]);
+        assert_eq!(configs[1].name, "slack");
+        assert_eq!(
+            configs[1].env.get("SLACK_TOKEN").map(String::as_str),
+            Some("x")
+        );
+    }
+
+    #[test]
+    fn load_mcp_servers_from_json_camel_case_alias() {
+        let json = r#"{
+            "tools": {
+                "mcpServers": {
+                    "claude-flow": {
+                        "command": "npx",
+                        "args": ["--no-install", "@claude-flow/cli", "mcp", "start"]
+                    }
+                }
+            }
+        }"#;
+        let configs = load_mcp_servers_from_str(json, Some("json")).unwrap();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "claude-flow");
+        assert_eq!(configs[0].command, "npx");
+        assert!(configs[0].args.contains(&"mcp".to_string()));
+    }
+
+    #[test]
+    fn load_mcp_servers_from_top_level_mcp_servers_json() {
+        let json = r#"{
+            "mcpServers": {
+                "remote": { "url": "https://example.com/rpc" }
+            }
+        }"#;
+        let configs = load_mcp_servers_from_str(json, None).unwrap();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "remote");
+        assert_eq!(configs[0].url.as_deref(), Some("https://example.com/rpc"));
+        assert!(configs[0].command.is_empty());
+    }
+
+    #[test]
+    fn apply_config_diff_reports_changed_on_command_update() {
+        let mut mgr = McpServerManager::new();
+        mgr.add_server(test_config("github"));
+
+        let mut updated = test_config("github");
+        updated.command = "node".into();
+        let (added, removed, changed) = mgr.apply_config_diff(vec![updated]);
+        assert_eq!(added, 0);
+        assert_eq!(removed, 0);
+        assert_eq!(changed, 1);
+        assert_eq!(mgr.get_server("github").unwrap().config.command, "node");
+    }
+
+    #[test]
+    fn apply_config_diff_reports_changed_on_env_only_update() {
+        let mut mgr = McpServerManager::new();
+        mgr.add_server(test_config("github"));
+
+        let mut updated = test_config("github");
+        updated.env.insert("TOKEN".into(), "abc".into());
+        let (_, _, changed) = mgr.apply_config_diff(vec![updated]);
+        assert_eq!(changed, 1, "env-only change must count as changed");
+    }
+
+    #[test]
+    fn apply_config_diff_validated_skips_bad_http_url() {
+        let factory = Arc::new(DefaultTransportFactory::new(
+            TransportFactoryConfig::strict(),
+        ));
+        let mut mgr = McpServerManager::with_factory(factory);
+        mgr.add_server(test_config("github"));
+
+        let result = mgr.apply_config_diff_validated(vec![
+            test_config("github"),
+            McpServerConfig {
+                name: "evil".into(),
+                command: String::new(),
+                args: Vec::new(),
+                env: HashMap::new(),
+                url: Some("http://evil.example.com".into()),
+            },
+        ]);
+
+        assert_eq!(result.added, 0);
+        assert_eq!(result.removed, 0);
+        assert_eq!(result.changed, 0);
+        assert_eq!(result.validation_errors.len(), 1);
+        assert!(
+            result.validation_errors[0].contains("evil"),
+            "got: {:?}",
+            result.validation_errors
+        );
+        assert!(mgr.get_server("evil").is_none());
+        assert!(mgr.get_server("github").is_some());
+    }
+
+    #[test]
+    fn reload_from_path_applies_add_remove_change() {
+        let dir = std::env::temp_dir().join(format!(
+            "clawft_mcp_reload_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clawft.toml");
+
+        std::fs::write(
+            &path,
+            r#"
+[tools.mcp_servers.github]
+command = "npx"
+args = ["-y", "github-mcp"]
+
+[tools.mcp_servers.slack]
+command = "npx"
+args = ["-y", "slack-mcp"]
+"#,
+        )
+        .unwrap();
+
+        let mut mgr = McpServerManager::new();
+        let r1 = mgr.reload_from_path(&path).unwrap();
+        assert_eq!(r1.added, 2);
+        assert_eq!(mgr.server_count(), 2);
+
+        // Remove slack, change github command, add jira.
+        std::fs::write(
+            &path,
+            r#"
+[tools.mcp_servers.github]
+command = "node"
+args = ["-y", "github-mcp"]
+
+[tools.mcp_servers.jira]
+command = "npx"
+args = ["-y", "jira-mcp"]
+"#,
+        )
+        .unwrap();
+
+        let r2 = mgr.reload_from_path(&path).unwrap();
+        assert_eq!(r2.added, 1, "jira added");
+        assert_eq!(r2.removed, 1, "slack removed");
+        assert_eq!(r2.changed, 1, "github command changed");
+        assert!(mgr.get_server("jira").is_some());
+        assert!(mgr.get_server("slack").is_none());
+        assert_eq!(mgr.get_server("github").unwrap().config.command, "node");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn watcher_edit_config_emits_added_removed_changed() {
+        let dir = std::env::temp_dir().join(format!(
+            "clawft_mcp_watch_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clawft.toml");
+
+        std::fs::write(
+            &path,
+            r#"
+[tools.mcp_servers.github]
+command = "npx"
+args = ["-y", "github-mcp"]
+
+[tools.mcp_servers.slack]
+command = "npx"
+args = ["-y", "slack-mcp"]
+"#,
+        )
+        .unwrap();
+
+        let manager = Arc::new(Mutex::new(McpServerManager::new()));
+        {
+            let mut mgr = manager.lock().await;
+            let r = mgr.reload_from_path(&path).unwrap();
+            assert_eq!(r.added, 2);
+        }
+
+        let (handle, mut rx) = start_config_watcher_with_debounce(
+            path.clone(),
+            manager.clone(),
+            Duration::from_millis(80),
+        )
+        .expect("start watcher");
+
+        // Give the OS watcher a moment to attach.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        std::fs::write(
+            &path,
+            r#"
+[tools.mcp_servers.github]
+command = "node"
+args = ["-y", "github-mcp"]
+
+[tools.mcp_servers.jira]
+command = "npx"
+args = ["-y", "jira-mcp"]
+"#,
+        )
+        .unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("timeout waiting for reload event")
+            .expect("channel closed without result");
+
+        assert_eq!(result.added, 1, "jira added: {result:?}");
+        assert_eq!(result.removed, 1, "slack removed: {result:?}");
+        assert_eq!(result.changed, 1, "github changed: {result:?}");
+
+        {
+            let mgr = manager.lock().await;
+            assert!(mgr.get_server("jira").is_some());
+            assert!(mgr.get_server("slack").is_none());
+            assert_eq!(mgr.get_server("github").unwrap().config.command, "node");
+        }
+
+        handle.stop();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

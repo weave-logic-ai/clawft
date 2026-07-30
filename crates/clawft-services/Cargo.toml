@@ -40,6 +40,9 @@ tower-http = { version = "0.6", features = ["cors", "fs", "trace"], optional = t
 futures-util = { workspace = true, optional = true }
 clawft-core = { workspace = true, features = ["native"], optional = true }
 clawft-platform = { workspace = true, optional = true }
+# WEFT-187: clawft.toml / config.json hot-reload for tools.mcp_servers.
+notify = { workspace = true }
+toml = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
