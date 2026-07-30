@@ -3255,6 +3255,15 @@ async fn dispatch_json_line(
                     }
                     Err(msg) => (Response::error(msg).with_id(id), None),
                 }
+            } else if req.method == "kernel.logs_stream" {
+                // WEFT-434: live kernel log tail; write-half owned by
+                // the stream forwarder after the ack.
+                match handle_kernel_logs_stream(req.params, Arc::clone(kernel)).await {
+                    Ok((ack, topic, rx, on_disconnect)) => {
+                        (ack.with_id(id), Some((topic, rx, on_disconnect)))
+                    }
+                    Err(msg) => (Response::error(msg).with_id(id), None),
+                }
             } else {
                 (
                     dispatch(
@@ -3686,6 +3695,137 @@ fn hex_encode(bytes: &[u8]) -> String {
         s.push_str(&format!("{b:02x}"));
     }
     s
+}
+
+/// Handle `kernel.logs_stream` (WEFT-434): subscribe to the kernel
+/// event log and stream new entries as line-delimited JSON after an
+/// initial ack. Optionally replays a recent tail first (`count`).
+///
+/// Stream frames are raw [`LogEntry`] JSON objects (not `Response`
+/// envelopes), matching `ipc.subscribe_stream` / `substrate.subscribe`.
+async fn handle_kernel_logs_stream(
+    params: serde_json::Value,
+    kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
+) -> Result<
+    (
+        Response,
+        String,
+        tokio::sync::mpsc::Receiver<Vec<u8>>,
+        Box<dyn FnOnce() + Send>,
+    ),
+    String,
+> {
+    let log_params: LogsParams = serde_json::from_value(params).unwrap_or_default();
+
+    let level_filter = log_params.level.as_deref().map(|level_str| {
+        match level_str {
+            "debug" => clawft_kernel::LogLevel::Debug,
+            "warn" | "warning" => clawft_kernel::LogLevel::Warn,
+            "error" => clawft_kernel::LogLevel::Error,
+            _ => clawft_kernel::LogLevel::Info,
+        }
+    });
+
+    let level_rank = |l: &clawft_kernel::LogLevel| -> u8 {
+        match l {
+            clawft_kernel::LogLevel::Debug => 0,
+            clawft_kernel::LogLevel::Info => 1,
+            clawft_kernel::LogLevel::Warn => 2,
+            clawft_kernel::LogLevel::Error => 3,
+            // LogLevel is #[non_exhaustive]; treat unknown as Info-rank.
+            _ => 1,
+        }
+    };
+    let min_rank = level_filter.as_ref().map(level_rank);
+
+    let k = kernel.read().await;
+    let event_log = Arc::clone(k.event_log());
+
+    // Subscribe *before* reading the tail so we never miss live
+    // entries that arrive during the initial dump. The bridge task
+    // de-dupes by seq so overlapping tail + live events are safe.
+    //
+    // KernelEventLog uses std::sync::mpsc (wasm-safe); we bridge to
+    // an async channel for the socket forwarder.
+    let (sub_id, entry_rx) = event_log.subscribe();
+
+    let initial: Vec<clawft_kernel::BootEvent> = if let Some(ref min) = level_filter {
+        event_log.filter_level(min, log_params.count)
+    } else if log_params.count == 0 {
+        Vec::new()
+    } else {
+        event_log.tail(log_params.count)
+    };
+    let initial_count = initial.len();
+
+    let (bytes_tx, bytes_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+
+    tokio::spawn(async move {
+        let mut max_sent: u64 = 0;
+        for event in initial {
+            if event.seq > max_sent {
+                max_sent = event.seq;
+            }
+            let entry = LogEntry::from_boot_event(&event);
+            let Ok(mut line) = serde_json::to_string(&entry) else {
+                continue;
+            };
+            line.push('\n');
+            if bytes_tx.send(line.into_bytes()).await.is_err() {
+                return;
+            }
+        }
+        // Poll the std mpsc receiver so we stay on the async runtime
+        // without blocking a worker thread on a quiet log stream.
+        loop {
+            match entry_rx.try_recv() {
+                Ok(event) => {
+                    if event.seq != 0 && event.seq <= max_sent {
+                        continue;
+                    }
+                    if let Some(min) = min_rank
+                        && level_rank(&event.level) < min
+                    {
+                        continue;
+                    }
+                    if event.seq > max_sent {
+                        max_sent = event.seq;
+                    }
+                    let entry = LogEntry::from_boot_event(&event);
+                    let Ok(mut line) = serde_json::to_string(&entry) else {
+                        continue;
+                    };
+                    line.push('\n');
+                    if bytes_tx.send(line.into_bytes()).await.is_err() {
+                        return;
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+            }
+        }
+    });
+
+    let log_for_cleanup = Arc::clone(&event_log);
+    let on_disconnect: Box<dyn FnOnce() + Send> = Box::new(move || {
+        log_for_cleanup.unsubscribe(sub_id);
+    });
+
+    // Use tracing rather than event_log so the subscribe ack itself
+    // does not inject a frame into the stream the client just opened.
+    debug!(
+        sub_id,
+        initial_count, "kernel.logs_stream: subscriber attached"
+    );
+
+    let ack = Response::success(serde_json::json!({
+        "streaming": true,
+        "subscriber_id": sub_id,
+        "initial_count": initial_count,
+    }));
+    Ok((ack, "kernel.logs".into(), bytes_rx, on_disconnect))
 }
 
 /// Handle `ipc.subscribe_stream`: register an external sink with the
@@ -5043,15 +5183,7 @@ async fn dispatch(
                 event_log.tail(log_params.count)
             };
 
-            let entries: Vec<LogEntry> = events
-                .iter()
-                .map(|e| LogEntry {
-                    timestamp: e.timestamp.to_rfc3339(),
-                    phase: e.phase.tag().to_owned(),
-                    level: format!("{:?}", e.level).to_lowercase(),
-                    message: e.message.clone(),
-                })
-                .collect();
+            let entries: Vec<LogEntry> = events.iter().map(LogEntry::from_boot_event).collect();
 
             Response::success(serde_json::to_value(entries).unwrap())
         }

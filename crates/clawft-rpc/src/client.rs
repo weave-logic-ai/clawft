@@ -11,12 +11,39 @@ mod imp {
 
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
+    use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
     use crate::protocol::{self, Request, Response};
 
     /// A client connected to the kernel daemon.
     pub struct DaemonClient {
         stream: UnixStream,
+    }
+
+    /// Streaming subscription returned by [`DaemonClient::open_stream`].
+    ///
+    /// After the initial ack `Response`, the daemon owns the write half
+    /// of the connection and pushes line-delimited JSON frames. This
+    /// reader yields those frames until the stream ends (daemon
+    /// disconnect or client drop). The write half is retained so the
+    /// socket stays open for the forwarder (WEFT-434).
+    pub struct StreamSession {
+        reader: BufReader<OwnedReadHalf>,
+        _writer: OwnedWriteHalf,
+    }
+
+    impl StreamSession {
+        /// Read the next newline-terminated frame.
+        ///
+        /// Returns `Ok(None)` on clean EOF (daemon closed the stream).
+        pub async fn next_line(&mut self) -> anyhow::Result<Option<String>> {
+            let mut line = String::new();
+            let n = self.reader.read_line(&mut line).await?;
+            if n == 0 {
+                return Ok(None);
+            }
+            Ok(Some(line))
+        }
     }
 
     impl DaemonClient {
@@ -74,6 +101,43 @@ mod imp {
         pub async fn simple_call(&mut self, method: &str) -> anyhow::Result<Response> {
             self.call(Request::new(method)).await
         }
+
+        /// Open a streaming RPC (WEFT-434).
+        ///
+        /// Sends `request`, reads a single ack [`Response`], then
+        /// returns a [`StreamSession`] for subsequent line-delimited
+        /// frames. Consumes the client — the connection is owned by
+        /// the stream until dropped.
+        ///
+        /// Used by `kernel.logs_stream`, `ipc.subscribe_stream`, and
+        /// `substrate.subscribe`.
+        pub async fn open_stream(
+            mut self,
+            mut request: Request,
+        ) -> anyhow::Result<(Response, StreamSession)> {
+            if request.auth.is_none() {
+                request.auth = Some("admin".to_string());
+            }
+            let mut json = serde_json::to_string(&request)?;
+            json.push('\n');
+            self.stream.write_all(json.as_bytes()).await?;
+
+            let (reader, writer) = self.stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            reader.read_line(&mut line).await?;
+            if line.trim().is_empty() {
+                anyhow::bail!("daemon closed connection without stream ack");
+            }
+            let response: Response = serde_json::from_str(line.trim())?;
+            Ok((
+                response,
+                StreamSession {
+                    reader,
+                    _writer: writer,
+                },
+            ))
+        }
     }
 }
 
@@ -96,6 +160,16 @@ mod imp {
     /// that mirrors the unix `DaemonClient` API and re-add the target.
     pub struct DaemonClient;
 
+    /// Stub stream session (never constructible on non-Unix).
+    pub struct StreamSession;
+
+    impl StreamSession {
+        /// Always errors on non-Unix platforms.
+        pub async fn next_line(&mut self) -> anyhow::Result<Option<String>> {
+            anyhow::bail!("daemon not available on this platform")
+        }
+    }
+
     impl DaemonClient {
         /// Always returns `None` on non-Unix platforms.
         pub async fn connect() -> Option<Self> {
@@ -114,10 +188,17 @@ mod imp {
         pub async fn simple_call(&mut self, _method: &str) -> anyhow::Result<Response> {
             anyhow::bail!("daemon not available on this platform")
         }
+
+        pub async fn open_stream(
+            self,
+            _request: Request,
+        ) -> anyhow::Result<(Response, StreamSession)> {
+            anyhow::bail!("daemon not available on this platform")
+        }
     }
 }
 
-pub use imp::DaemonClient;
+pub use imp::{DaemonClient, StreamSession};
 
 /// Check if a daemon is running at the default socket path
 /// (socket exists and accepts connections).
