@@ -737,7 +737,19 @@ fn open_or_create_cow_memory(
     }
 }
 
-pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<()> {
+/// Run the kernel daemon.
+///
+/// `global_routing` / `workspace_routing` (WEFT-10) are the split layers
+/// from the config loader. Global is the PermissionResolver ceiling;
+/// workspace is the optional overlay that will be clamped.
+pub async fn run(
+    config: Config,
+    kernel_config: KernelConfig,
+    // WEFT-10: unmerged global routing (ceiling for PermissionResolver).
+    global_routing: clawft_types::routing::RoutingConfig,
+    // WEFT-10: workspace overlay routing, when present.
+    workspace_routing: Option<clawft_types::routing::RoutingConfig>,
+) -> anyhow::Result<()> {
     let socket_path = protocol::socket_path();
 
     // Clean up stale socket file
@@ -766,12 +778,11 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
     // in `clawft-types::routing`.
     let context_router_choice = config.routing.context_router.clone();
 
-    // Snapshot the loaded `RoutingConfig` before `config` moves into
-    // `Kernel::boot`. The agent service later threads this into
-    // `build_daemon_agent_loop` so the resolver's `channel_overrides`
-    // reflect the operator's loaded permissions instead of
-    // `Config::default()`'s empty defaults.
-    let agent_routing = config.routing.clone();
+    // Snapshot split routing layers before `config` moves into
+    // `Kernel::boot`. Global is the PermissionResolver ceiling;
+    // workspace is the overlay that will be clamped (WEFT-10).
+    let agent_routing = global_routing;
+    let agent_workspace_routing = workspace_routing;
 
     // WEFT-555 (M5-W): snapshot the voice-consumer section so it
     // survives `Kernel::boot` taking ownership of `config`. The voice
@@ -1896,11 +1907,12 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
             Some(chat_gate),
             Some(agent_sink),
             Some(identity_provider),
-            // The loaded RoutingConfig — without this, the resolver's
-            // `channel_overrides` is empty and every chat principal
-            // hits the zero_trust fallback regardless of what the
-            // workspace/home `.clawft/config.json` says.
+            // WEFT-10: global routing is the PermissionResolver ceiling.
+            // Without this, channel_overrides is empty and every chat
+            // principal hits zero_trust regardless of config.
             Some(&agent_routing),
+            // WEFT-10: workspace overlay (clamped against global ceiling).
+            agent_workspace_routing.as_ref(),
             // ADR-058 Phase 5.1: the L2 session tier as the loop's graft
             // provider (the same instance the turn anchor indexes into), so
             // each turn's prompt is augmented with recalled context. `None`

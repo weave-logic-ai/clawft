@@ -112,9 +112,16 @@ pub async fn run(args: KernelArgs) -> anyhow::Result<()> {
             if foreground {
                 // Run in foreground (blocking)
                 let platform = NativePlatform::new();
-                let config = super::load_config(&platform, args.config.as_deref()).await?;
-                let kernel_config = config.kernel.clone();
-                crate::daemon::run(config, kernel_config).await?;
+                let loaded =
+                    super::load_config_layered(&platform, args.config.as_deref()).await?;
+                let kernel_config = loaded.config.kernel.clone();
+                crate::daemon::run(
+                    loaded.config,
+                    kernel_config,
+                    loaded.global_routing,
+                    loaded.workspace_routing,
+                )
+                .await?;
             } else {
                 // Background (default) — fork and exit
                 crate::daemon::daemonize(args.config.as_deref())?;
