@@ -3,6 +3,30 @@ name: PR Gates
 on:
   pull_request:
     branches: [main, master]
+  # WEFT-674: these gates used to be pull_request-ONLY. Because work lands on
+  # long-lived feature branches that often have no open PR, the gates never ran
+  # against current code. Measured 2026-07-29: the browser-WASM target fails with
+  # 15 errors — 10 `future cannot be sent between threads safely` (WEFT-663),
+  # 4 cascading E0282, and 1 E0433 `could not find hermes in clawft_llm`
+  # (WEFT-672, a newer independent break) — all while a declared "hard gate"
+  # existed and was green, because it was never invoked. A gate that only fires
+  # at merge protects only the merge moment, which this workflow rarely reaches.
+  push:
+    branches:
+      - master
+      - main
+      - 'feat/**'
+      - 'fix/**'
+      - 'chore/**'
+      - 'docs/**'
+    paths-ignore:
+      # Planning notes are not code and cannot break a build. Everything else —
+      # including docs/ and *.md — still triggers, because pr-gates.yml has a
+      # docs-build job that must run precisely when docs change.
+      - '.planning/**'
+  # Lets anyone run the full gate on demand from the Actions tab, which is the
+  # escape hatch when a branch pattern above doesn't match.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -10,7 +34,11 @@ env:
   WASM_TARGET: wasm32-wasip2
 
 concurrency:
-  group: pr-${{ github.head_ref }}
+  # `github.head_ref` is ONLY set for pull_request events — it is empty on push.
+  # Left as-is, every push run would collapse into the single group "pr-" and
+  # cancel every other branch's run. Key on the PR number when there is one and
+  # the full ref otherwise, so PR runs and per-branch push runs stay isolated.
+  group: pr-gates-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:

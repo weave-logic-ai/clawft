@@ -1,10 +1,12 @@
 name: WASM Build & Size Gate
 
 on:
+  # WEFT-674: this targeted `main` only, and this repo's default branch is
+  # `master` — there is no `main` branch, so this size gate had NEVER run.
   pull_request:
-    branches: [main]
+    branches: [main, master]
   push:
-    branches: [main]
+    branches: [main, master]
 
 env:
   CARGO_TERM_COLOR: always

@@ -41,6 +41,6 @@ jobs:
             --prerelease \
             --notes "$(gh release view "$TAG" --repo "${{ github.repository }}" --json body --jq .body)
 
----
-> **Release incomplete**: \`${WORKFLOW}\` failed. [View run](${RUN_URL})
-> Re-run the failed workflow or create a new release to fix."
+          ---
+          > **Release incomplete**: \`${WORKFLOW}\` failed. [View run](${RUN_URL})
+          > Re-run the failed workflow or create a new release to fix."
