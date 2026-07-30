@@ -68,7 +68,7 @@ pub enum DelegationError {
     #[error("delegation cancelled")]
     Cancelled,
 
-    /// All fallback targets exhausted (Flow -> Claude -> Local).
+    /// All fallback targets exhausted (Claude -> Local).
     #[error("all delegation targets exhausted")]
     FallbackExhausted {
         attempts: Vec<(DelegationTarget, String)>,

@@ -629,7 +629,7 @@ mod tests {
                 rules: vec![
                     DelegationRule {
                         pattern: r"(?i)deploy|orchestrate|swarm".into(),
-                        target: DelegationTarget::Flow,
+                        target: DelegationTarget::Claude,
                     },
                     DelegationRule {
                         pattern: r"(?i)research|analyze".into(),

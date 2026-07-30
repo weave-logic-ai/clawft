@@ -817,96 +817,52 @@ The server name (the JSON key) is used for tool namespacing. A server named
 
 ## Delegation & Multi-Agent
 
-The `delegation` section controls task delegation to sub-agents, including
-Claude Code and Claude Flow integration. When enabled, the primary agent can
-delegate subtasks to specialized delegate agents that run in isolated
-environments.
+The `delegation` section controls task routing between local execution and
+Claude AI (`DelegationEngine` + `ClaudeDelegator`). Multi-agent orchestration
+(claude-flow, external tools) uses **MCP servers + skills**, not a subprocess
+Flow target.
+
+Source of truth: `crates/clawft-types/src/delegation.rs` and
+`docs/reference/config.md` § delegation.
 
 ### delegation
 
-Top-level delegation settings that apply to all delegate agents unless
-overridden per-agent.
-
 ```json
 {
   "delegation": {
-    "enabled": true,
-    "model": "anthropic/claude-sonnet-4-5",
-    "max_turns": 10,
-    "max_tokens": 4096,
-    "excluded_tools": ["exec_shell"],
     "claude_enabled": true,
-    "flow_enabled": true
-  }
-}
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `enabled` | boolean | `true` | Master switch for task delegation. When `false`, all delegation requests are rejected. |
-| `model` | string | `"anthropic/claude-sonnet-4-5"` | LLM model used by delegate agents, using `provider/model` syntax. |
-| `max_turns` | integer | `10` | Maximum conversation turns per delegation. Prevents runaway delegate sessions. |
-| `max_tokens` | integer | `4096` | Token limit per delegation response. Controls cost and output length. |
-| `excluded_tools` | string[] | `[]` | Tools that are not available to delegate agents. Use this to restrict dangerous operations like shell execution. |
-| `claude_enabled` | boolean | `true` | Enable Claude Code as a delegation backend. If the `claude` binary is not found on `PATH`, delegation gracefully falls back without error. |
-| `flow_enabled` | boolean | `true` | Enable Claude Flow as a delegation backend. Detection uses `which claude-flow` at startup. |
-
-### delegation.flow
-
-Configuration for the Flow delegator, which spawns Claude Flow as a
-subprocess. The delegator constructs a minimal environment to prevent
-credential leakage between the primary agent and delegates.
-
-```json
-{
-  "delegation": {
-    "flow": {
-      "binary": "claude-flow",
-      "timeout_seconds": 300,
-      "max_depth": 3,
-      "env_passthrough": ["PATH", "HOME", "ANTHROPIC_API_KEY"]
-    }
-  }
-}
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `binary` | string | auto-detect | Path or name of the `claude-flow` binary. When omitted, the runtime uses `which claude-flow` to locate it (result is cached with `OnceLock`). |
-| `timeout_seconds` | integer | `300` | Wall-clock timeout in seconds per delegation. The subprocess is killed if it exceeds this limit. |
-| `max_depth` | integer | `3` | Maximum recursive delegation depth. Prevents infinite delegation loops where a delegate spawns another delegate. Exceeding this limit returns `DelegationError::MaxDepthExceeded`. |
-| `env_passthrough` | string[] | `["PATH", "HOME", "ANTHROPIC_API_KEY"]` | Environment variables passed to the subprocess. Only these variables are inherited; all others are stripped for security. |
-
-**Fallback chain:** When a delegation is requested, the runtime attempts
-backends in order: Flow -> Claude -> error. If Flow is unavailable (binary not
-found or `flow_enabled` is `false`), the request falls through to Claude Code.
-If Claude Code is also unavailable, a `DelegationError::FallbackExhausted`
-error is returned.
-
-### delegation.per_agent
-
-Per-agent overrides let you customize delegation behavior for specific agents.
-Each key is an agent name, and the value is a partial delegation config that
-merges on top of the top-level defaults.
-
-```json
-{
-  "delegation": {
-    "per_agent": {
-      "research-agent": {
-        "model": "anthropic/claude-opus-4-5",
-        "max_turns": 20,
-        "excluded_tools": []
+    "claudeModel": "claude-sonnet-4-20250514",
+    "maxTurns": 10,
+    "maxTokens": 4096,
+    "rules": [
+      {
+        "pattern": "(?i)deploy|orchestrate|swarm",
+        "target": "claude"
+      },
+      {
+        "pattern": "(?i)^list\\b",
+        "target": "local"
       }
-    }
+    ],
+    "excludedTools": ["exec_shell"]
   }
 }
 ```
 
-Any field from the top-level `delegation` section can be overridden per-agent.
-Fields not specified in the per-agent block inherit from the top-level
-defaults. In this example, `research-agent` uses a more capable model with
-more turns and no tool restrictions, while all other agents use the defaults.
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `claude_enabled` | boolean | see note | Enable Claude as a delegation backend. (`Default` is `true`; bare `{}` via serde is `false`.) |
+| `claudeModel` / `claude_model` | string | `"claude-sonnet-4-20250514"` | Claude model for delegated tasks. |
+| `maxTurns` / `max_turns` | integer | `10` | Maximum conversation turns per delegated task. |
+| `maxTokens` / `max_tokens` | integer | `4096` | Token limit per Claude response. |
+| `rules` | array | `[]` | Ordered regex rules; first match wins. Targets: `local`, `claude`, `auto`. |
+| `excludedTools` / `excluded_tools` | string[] | `[]` | Tool names that should never be delegated. |
+
+**Retired (WEFT-179):** `flow_enabled`, `claudeFlowEnabled`,
+`claude_flow_enabled`, and nested `delegation.flow` subprocess settings are
+not supported. Legacy rule `"target": "flow"` still deserializes as `claude`.
+For multi-agent coordination, configure an MCP server (e.g. claude-flow) and
+expose tools via skills — see `docs/guides/mcp-integration.md`.
 
 ### routing.planning
 

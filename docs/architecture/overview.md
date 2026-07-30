@@ -236,7 +236,7 @@ Background services that generate inbound events.
 - `CronService` -- JSONL-backed scheduled job execution using cron expressions. Jobs fire as `InboundMessage` events on the bus.
 - `HeartbeatService` -- periodic health check messages at configurable intervals.
 - `mcp` -- Dual-mode MCP (Model Context Protocol) subsystem. In server mode (`weft mcp-server`), `McpServerShell` exposes built-in tools to an LLM host via JSON-RPC over stdio. In client mode (`tools.mcp_servers` config), `McpClient` connects to external MCP servers. MCP servers support an `internal_only` flag (default true): when set, the session is created but tools are not registered in the `ToolRegistry`, allowing skills to selectively surface them per turn. Both modes use the pluggable `ToolProvider` trait. See [Pluggable MCP Architecture](#pluggable-mcp-architecture-phase-3h) below.
-- `delegation` -- MCP-first task delegation engine. `DelegationEngine` routes tasks to Local or Claude targets based on regex rules and complexity heuristics. Flow targets (previously subprocess-based) fall back to Claude. Delegation uses the Claude API directly, not subprocess spawning.
+- `delegation` -- MCP-first task delegation engine. `DelegationEngine` routes tasks to Local or Claude targets based on regex rules and complexity heuristics. The subprocess `Flow` target was retired (WEFT-179); multi-agent orchestration uses MCP servers + skills. Delegation uses the Claude API directly, not subprocess spawning.
 
 **Key types:** `ToolProvider` trait, `McpServerShell`, `CompositeToolProvider`, `McpClient`, `McpTransport` trait, `StdioTransport`, `HttpTransport`, `ToolDefinition`, `DelegationEngine`
 
