@@ -684,6 +684,8 @@ fn result_from_outbound(outbound: OutboundMessage, _params: &AgentChatParams) ->
         identity_source: meta.identity_source,
         reasoning: meta.reasoning,
         spawned_tasks: meta.spawned_tasks,
+        // WEFT-345: consecutive gate-denial → EscalateToHuman event.
+        escalation: meta.escalation,
     }
 }
 
@@ -847,6 +849,7 @@ mod tests {
             completion_tokens: 96,
             reasoning: None,
             identity_source: Some("clawft".into()),
+            escalation: None,
         };
         let mut metadata = HashMap::new();
         metadata.insert(
@@ -873,6 +876,66 @@ mod tests {
         assert_eq!(r.completion_tokens, 96);
         assert_eq!(r.model.as_deref(), Some("hermes-4.3-36b"));
         assert_eq!(r.identity_source.as_deref(), Some("clawft"));
+        assert!(r.escalation.is_none());
+    }
+
+    #[test]
+    fn result_from_outbound_reads_weft345_escalation() {
+        // WEFT-345: EscalateToHuman event on the loop meta must surface
+        // on AgentChatResult for panels / future allow-abort-refine RPC.
+        use clawft_types::agent_chat::{
+            EscalateToHumanEvent, FINISH_REASON_ESCALATE_TO_HUMAN, GateDenialRecord,
+            GOVERNANCE_DECISION_ESCALATE_TO_HUMAN,
+        };
+        let event = EscalateToHumanEvent::from_denials(
+            "c",
+            vec![
+                GateDenialRecord {
+                    tool: "echo".into(),
+                    reason: "blocked".into(),
+                },
+                GateDenialRecord {
+                    tool: "echo".into(),
+                    reason: "blocked".into(),
+                },
+                GateDenialRecord {
+                    tool: "echo".into(),
+                    reason: "blocked".into(),
+                },
+            ],
+        );
+        let meta = AgentLoopResultMeta {
+            tool_calls: vec![],
+            finish_reason: FINISH_REASON_ESCALATE_TO_HUMAN.into(),
+            iterations: 3,
+            spawned_tasks: vec![],
+            model: None,
+            prompt_tokens: 30,
+            completion_tokens: 9,
+            reasoning: None,
+            identity_source: None,
+            escalation: Some(event.clone()),
+        };
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            AGENT_LOOP_RESULT_META_KEY.to_string(),
+            serde_json::to_value(&meta).unwrap(),
+        );
+        let out = OutboundMessage {
+            channel: "agent.chat".into(),
+            chat_id: "c".into(),
+            content: event.summary.clone(),
+            reply_to: None,
+            media: Vec::new(),
+            metadata,
+        };
+        let r = result_from_outbound(out, &params_for("c", ""));
+        assert_eq!(r.finish_reason, FINISH_REASON_ESCALATE_TO_HUMAN);
+        let esc = r.escalation.expect("escalation present");
+        assert_eq!(esc.decision, GOVERNANCE_DECISION_ESCALATE_TO_HUMAN);
+        assert_eq!(esc.denial_count, 3);
+        assert_eq!(esc.denials.len(), 3);
+        assert!(r.assistant_text.contains("EscalateToHuman"));
     }
 
     #[test]
