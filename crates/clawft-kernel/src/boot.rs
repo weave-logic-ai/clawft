@@ -19,6 +19,7 @@ use clawft_types::config::Config;
 
 #[cfg(feature = "native")]
 use crate::a2a::A2ARouter;
+use crate::app::{AppManager, DEFAULT_APPS_PERSIST_PATH};
 use crate::capability::AgentCapabilities;
 #[cfg(feature = "native")]
 use crate::capability::CapabilityChecker;
@@ -150,6 +151,8 @@ pub struct Kernel<P: Platform> {
     event_log: Arc<KernelEventLog>,
     boot_time: Instant,
     cluster_membership: Arc<ClusterMembership>,
+    /// Installed application catalog; rehydrated from disk at boot.
+    app_manager: Arc<AppManager>,
     revocation_list: Arc<crate::revocation::RevocationList>,
     #[cfg(feature = "native")]
     agent_registry: crate::agent_registry::AgentRegistry,
@@ -594,6 +597,19 @@ impl<P: Platform> Kernel<P> {
                 "Cluster membership ready (node {}, {} peer(s) rehydrated)",
                 cluster_membership.local_node_id(),
                 cluster_membership.len(),
+            ),
+        ));
+
+        // 6a. AppManager with on-disk manifest store (WEFT-136).
+        // Installs survive kernel restarts via atomic apps.json (mirrors cluster_peers).
+        let apps_persist_path = std::path::PathBuf::from(DEFAULT_APPS_PERSIST_PATH);
+        let app_manager = Arc::new(AppManager::new().with_persist_path(&apps_persist_path));
+        boot_log.push(BootEvent::info(
+            BootPhase::Services,
+            format!(
+                "AppManager ready ({} app(s) rehydrated from {})",
+                app_manager.len(),
+                apps_persist_path.display(),
             ),
         ));
 
@@ -1808,6 +1824,7 @@ impl<P: Platform> Kernel<P> {
             event_log,
             boot_time,
             cluster_membership,
+            app_manager,
             revocation_list,
             #[cfg(feature = "native")]
             agent_registry: crate::agent_registry::AgentRegistry::new(),
@@ -2063,6 +2080,11 @@ impl<P: Platform> Kernel<P> {
     /// Get the cluster membership tracker.
     pub fn cluster_membership(&self) -> &Arc<ClusterMembership> {
         &self.cluster_membership
+    }
+
+    /// Get the application manager (installed apps rehydrated from disk).
+    pub fn app_manager(&self) -> &Arc<AppManager> {
+        &self.app_manager
     }
 
     /// Get the host revocation list.
