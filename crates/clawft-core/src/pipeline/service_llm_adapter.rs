@@ -48,7 +48,8 @@ use async_trait::async_trait;
 use tracing::debug;
 
 use clawft_service_llm::{
-    ChatMessage, ChatResponse, LlmClient, Tool, ToolCall, ToolCallFunction, ToolChoice,
+    ChatMessage, ChatResponse, ContentBlock, LlmClient, MessageContent, Tool, ToolCall,
+    ToolCallFunction, ToolChoice,
 };
 
 use super::transport::LlmProvider;
@@ -162,19 +163,17 @@ impl LlmProvider for ServiceLlmAdapter {
 /// Convert a `serde_json::Value` message into a typed [`ChatMessage`].
 ///
 /// Tolerant of partial input — missing `role` defaults to `"user"` and
-/// missing `content` defaults to empty string (the OpenAI-compat
-/// schema accepts both).
+/// missing / null / unrecognized `content` defaults to empty text (the
+/// OpenAI-compat schema accepts both). Array content is preserved as
+/// [`MessageContent::Blocks`] (vision / structured); strings stay
+/// [`MessageContent::Text`].
 fn value_to_message(value: &serde_json::Value) -> ChatMessage {
     let role = value
         .get("role")
         .and_then(|v| v.as_str())
         .unwrap_or("user")
         .to_string();
-    let content = value
-        .get("content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let content = value_to_content(value.get("content"));
     let tool_call_id = value
         .get("tool_call_id")
         .and_then(|v| v.as_str())
@@ -196,6 +195,33 @@ fn value_to_message(value: &serde_json::Value) -> ChatMessage {
         content,
         tool_calls,
         tool_call_id,
+    }
+}
+
+/// Map a JSON `content` value into [`MessageContent`].
+///
+/// - missing / null → empty text
+/// - string → [`MessageContent::Text`]
+/// - array → [`MessageContent::Blocks`] (best-effort; malformed arrays
+///   fall back to empty text so the adapter never panics)
+/// - other → empty text (tolerant; log at debug)
+fn value_to_content(value: Option<&serde_json::Value>) -> MessageContent {
+    match value {
+        None | Some(serde_json::Value::Null) => MessageContent::Text(String::new()),
+        Some(serde_json::Value::String(s)) => MessageContent::Text(s.clone()),
+        Some(serde_json::Value::Array(_)) => match serde_json::from_value::<Vec<ContentBlock>>(
+            value.cloned().unwrap_or(serde_json::Value::Null),
+        ) {
+            Ok(blocks) => MessageContent::Blocks(blocks),
+            Err(e) => {
+                debug!(error = %e, "service-llm adapter: content blocks unparseable; empty text");
+                MessageContent::Text(String::new())
+            }
+        },
+        Some(other) => {
+            debug!(value = %other, "service-llm adapter: unexpected content shape; empty text");
+            MessageContent::Text(String::new())
+        }
     }
 }
 
@@ -331,6 +357,29 @@ mod tests {
     }
 
     #[test]
+    fn value_to_message_preserves_vision_content_blocks() {
+        let v = serde_json::json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "what is this?"},
+                {"type": "image_url", "image_url": {"url": "https://ex/a.png"}}
+            ]
+        });
+        let m = value_to_message(&v);
+        let blocks = m.content.blocks().expect("blocks preserved");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(m.content.as_text(), "what is this?");
+    }
+
+    #[test]
+    fn value_to_message_null_content_is_empty_text() {
+        let v = serde_json::json!({"role": "assistant", "content": null});
+        let m = value_to_message(&v);
+        assert!(m.content.is_empty());
+        assert_eq!(m.content, MessageContent::Text(String::new()));
+    }
+
+    #[test]
     fn value_to_message_extracts_tool_call_id() {
         let v = serde_json::json!({
             "role": "tool",
@@ -416,7 +465,7 @@ mod tests {
             choices: vec![ChatChoice {
                 message: ChatMessage {
                     role: "assistant".into(),
-                    content: String::new(),
+                    content: MessageContent::Text(String::new()),
                     tool_calls: Some(vec![ToolCall {
                         id: "call_abc".into(),
                         kind: "function".into(),

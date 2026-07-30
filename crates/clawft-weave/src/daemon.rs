@@ -4040,7 +4040,10 @@ async fn handle_llm_prompt(
             .into_iter()
             .map(|m| clawft_service_llm::ChatMessage {
                 role: m.role,
-                content: m.content,
+                // RPC schema is still plain string content; wrap into
+                // MessageContent::Text. Vision/block content can land
+                // via a future RPC schema bump.
+                content: clawft_service_llm::MessageContent::Text(m.content),
                 // The daemon's `llm.prompt` RPC predates tool-call
                 // support and accepts only role+content from clients;
                 // tool fields stay None until a future RPC schema bump
@@ -4074,7 +4077,9 @@ async fn handle_llm_prompt(
         Ok(resp) => {
             let first = &resp.choices[0]; // complete() rejects empty choices upstream
             let result = crate::protocol::LlmPromptResult {
-                completion: first.message.content.clone(),
+                // Flatten block content → string for the RPC result
+                // shape (completion is still a plain String).
+                completion: first.message.content.as_text().into_owned(),
                 finish_reason: first.finish_reason.clone(),
                 prompt_tokens: resp.usage.prompt_tokens,
                 completion_tokens: resp.usage.completion_tokens,
