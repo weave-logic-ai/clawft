@@ -28,7 +28,17 @@ voice = ["voice-vad", "voice-wake", "voice-stt", "voice-tts", "dep:tokio"]
 voice-stt = []
 voice-tts = []
 voice-vad = []
+# Transitional wake API (stub backend). Included in the `voice` umbrella.
 voice-wake = []
+# Experimental: reserve rustpotter fail-closed API (WEFT-216).
+# Does NOT pull `dep:rustpotter` — crates.io rustpotter 3.0.2 depends on
+# candle-core 0.2.2 which fails to compile on this workspace toolchain.
+# Enabling this feature only compiles the try_with_rustpotter() path that
+# returns NotImplemented with RUSTPOTTER_BLOCKED_REASON. Pulls the `voice`
+# umbrella so the module is compiled (lib.rs gates `mod voice` on `voice`).
+# Concrete alternative: OpenWakeWord-style ONNX KWS via clawft-voice-onnx.
+# See docs/plans/wave-0k-WEFT-216-result.md.
+voice-wake-rustpotter = ["voice"]
 
 [dependencies]
 async-trait = { workspace = true }

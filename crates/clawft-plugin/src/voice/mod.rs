@@ -22,9 +22,11 @@
 //!
 //! - **`wake` / `wake_daemon`** (`WakeWordConfig`, `WakeDaemon`,
 //!   `WakeWordDetector`) — sole **live external caller**: CLI
-//!   `weft voice wake` (`clawft-cli::commands::voice`). Still a stub
-//!   detector (always silent) but the API is the transitional home for
-//!   wake until a follow-up migrates it into a `clawft-voice-*` crate.
+//!   `weft voice wake` (`clawft-cli::commands::voice`). **Stub backend**
+//!   (WEFT-216): rustpotter blocked on candle-core; concrete alternative
+//!   is OpenWakeWord-style ONNX KWS via `clawft-voice-onnx` (not wired).
+//!   Feature `voice-wake-rustpotter` reserves a fail-closed API. See
+//!   `docs/plans/wave-0k-WEFT-216-result.md`.
 //!
 //! ### What is deprecated scaffold
 //!
@@ -94,6 +96,9 @@ pub use quality::{AudioMetrics, analyze_frame};
 pub use talk_mode::TalkModeController;
 
 #[cfg(feature = "voice-wake")]
-pub use wake::{WakeWordConfig, WakeWordDetector, WakeWordEvent};
+pub use wake::{
+    RUSTPOTTER_BLOCKED_REASON, WakeWordBackend, WakeWordConfig, WakeWordDetector, WakeWordEvent,
+    rustpotter_feature_enabled,
+};
 #[cfg(feature = "voice-wake")]
 pub use wake_daemon::WakeDaemon;

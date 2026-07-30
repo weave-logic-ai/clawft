@@ -4,27 +4,33 @@
 //! audio input for the "Hey Weft" trigger phrase. When detected,
 //! activates Talk Mode.
 //!
-//! ## Disposition (WEFT-671)
+//! ## Disposition (WEFT-671 / WEFT-216)
 //!
 //! Transitional home for wake: CLI `weft voice wake` is the sole live
 //! external consumer. Not part of the canonical Talk Mode stack
 //! (`clawft-voice-talk` / `clawft-channels::voice`). See
 //! `docs/plans/wave-0a-WEFT-671-decision.md`.
 //!
-//! Currently a **stub implementation** — logs and waits for cancel; no
-//! real capture. Real audio + detector wiring tracks WEFT-216.
+//! **Stub capture + stub detector** (WEFT-216): logs and waits for cancel;
+//! no mic capture, no rustpotter (blocked), no ONNX KWS yet. See
+//! `docs/plans/wave-0k-WEFT-216-result.md` for the engine decision and
+//! revisit triggers. CPU-budget auto-throttle (<2%) is deferred until a
+//! live engine + capture loop exists.
 
 use tracing::info;
 
 use crate::error::PluginError;
 use crate::traits::CancellationToken;
 
-use super::wake::{WakeWordConfig, WakeWordDetector};
+use super::wake::{WakeWordBackend, WakeWordConfig, WakeWordDetector};
 
 /// Daemon that runs wake word detection in the background.
 ///
 /// When the wake word is detected, the daemon can activate Talk Mode.
 /// The daemon runs until cancelled via its [`CancellationToken`].
+///
+/// Today both capture and detection are stubs — `run` does not open a
+/// microphone and never activates Talk Mode from a wake hit.
 pub struct WakeDaemon {
     detector: WakeWordDetector,
     active: bool,
@@ -32,6 +38,8 @@ pub struct WakeDaemon {
 
 impl WakeDaemon {
     /// Create a new wake daemon with the given configuration.
+    ///
+    /// Uses the stub detector backend (see [`WakeWordDetector::new`]).
     pub fn new(config: WakeWordConfig) -> Result<Self, PluginError> {
         let detector = WakeWordDetector::new(config)?;
         Ok(Self {
@@ -42,12 +50,17 @@ impl WakeDaemon {
 
     /// Run the daemon until cancelled.
     ///
-    /// STUB: Logs that the daemon is running and waits for cancellation.
-    /// Real implementation will continuously capture audio and feed it
-    /// to the wake word detector.
+    /// **Stub:** logs backend identity, marks active, waits for cancellation.
+    /// No audio capture. Real loop will feed PCM into
+    /// [`WakeWordDetector::process_frame`] once an engine and cpal (or
+    /// equivalent) capture path land.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn run(&mut self, cancel: CancellationToken) -> Result<(), PluginError> {
-        info!("wake daemon started (stub)");
+        info!(
+            backend = %self.detector.backend(),
+            stub = self.detector.is_stub(),
+            "wake daemon started (no capture; engine deferred WEFT-216)"
+        );
         self.active = true;
         self.detector.start();
 
@@ -69,6 +82,11 @@ impl WakeDaemon {
     pub fn detector(&self) -> &WakeWordDetector {
         &self.detector
     }
+
+    /// Backend in use (always [`WakeWordBackend::Stub`] today).
+    pub fn backend(&self) -> WakeWordBackend {
+        self.detector.backend()
+    }
 }
 
 #[cfg(test)]
@@ -80,6 +98,8 @@ mod tests {
         let config = WakeWordConfig::default();
         let daemon = WakeDaemon::new(config).unwrap();
         assert!(!daemon.is_active());
+        assert_eq!(daemon.backend(), WakeWordBackend::Stub);
+        assert!(daemon.detector().is_stub());
     }
 
     #[test]
