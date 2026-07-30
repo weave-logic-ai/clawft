@@ -477,6 +477,10 @@ mod tests {
         assert_eq!(result, None);
     }
 
+    /// Existence checks for home candidates are `#[cfg(feature = "native")]`
+    /// only; browser/WASM returns the preferred path without probing the
+    /// host FS (see `discover_config_path`).
+    #[cfg(feature = "native")]
     #[test]
     fn test_discover_home_but_no_files() {
         // When home dir is given but no config files exist on disk,
@@ -524,7 +528,9 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    // Match FileSystem's Send bound: browser uses ?Send (WEFT-391 test path).
+    #[cfg_attr(not(feature = "browser"), async_trait)]
+    #[cfg_attr(feature = "browser", async_trait(?Send))]
     impl super::super::fs::FileSystem for MockFs {
         async fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
             self.files

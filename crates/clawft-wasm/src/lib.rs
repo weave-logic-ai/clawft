@@ -139,6 +139,8 @@ mod browser_entry {
     use clawft_core::tools::registry::ToolRegistry;
     use clawft_llm::browser_transport::BrowserLlmClient;
     use clawft_llm::config::LlmProviderConfig;
+    use clawft_platform::browser::BrowserEnvironment;
+    use clawft_platform::env::Environment;
     use clawft_platform::BrowserPlatform;
     use clawft_types::config::Config;
     use clawft_types::event::InboundMessage;
@@ -159,6 +161,10 @@ mod browser_entry {
         /// entry points (`tool_schema`, `tool_list`). Captured before
         /// `ctx.into_agent_loop()` consumes the AppContext (WEFT-307).
         tools: Arc<ToolRegistry>,
+        /// Live environment shared with the platform inside `agent`
+        /// (WEFT-391). `set_env` mutates through this `Arc` so tools
+        /// and config loaders see updates after init.
+        env: Arc<BrowserEnvironment>,
     }
 
     // SAFETY: wasm32-unknown-unknown is single-threaded; nothing here
@@ -276,6 +282,29 @@ mod browser_entry {
         ))
     }
 
+    /// Parse an optional JSON object of string→string env vars.
+    ///
+    /// Empty / missing input yields an empty map. Rejects non-object JSON
+    /// and non-string values so callers get a clear init error.
+    fn parse_env_seed(env_json: Option<&str>) -> Result<std::collections::HashMap<String, String>, String> {
+        let Some(raw) = env_json.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Ok(std::collections::HashMap::new());
+        };
+        let value: serde_json::Value = serde_json::from_str(raw)
+            .map_err(|e| format!("env map parse error: {e}"))?;
+        let obj = value
+            .as_object()
+            .ok_or_else(|| "env map must be a JSON object of string keys to string values".to_string())?;
+        let mut map = std::collections::HashMap::with_capacity(obj.len());
+        for (k, v) in obj {
+            let s = v.as_str().ok_or_else(|| {
+                format!("env map value for key '{k}' must be a string")
+            })?;
+            map.insert(k.clone(), s.to_string());
+        }
+        Ok(map)
+    }
+
     /// Initialize the clawft-wasm browser runtime.
     ///
     /// Parses the provided JSON config, builds an
@@ -283,14 +312,34 @@ mod browser_entry {
     /// transport to the appropriate provider via [`BrowserLlmClient`],
     /// and produces a fully assembled [`AgentLoop<BrowserPlatform>`].
     /// Must be called once before `send_message`.
+    ///
+    /// # Parameters
+    ///
+    /// * `config_json` — clawft [`Config`] as a JSON string.
+    /// * `env_json` — optional JSON object of string→string pairs used to
+    ///   pre-seed [`BrowserEnvironment`] before the platform is moved
+    ///   into the agent loop (WEFT-391). Pass `undefined` / `null` from
+    ///   JS to skip seeding; call [`set_env`] after init for live
+    ///   updates.
     #[wasm_bindgen]
-    pub async fn init(config_json: &str) -> Result<(), JsValue> {
+    pub async fn init(config_json: &str, env_json: Option<String>) -> Result<(), JsValue> {
         console_error_panic_hook::set_once();
 
         let mut config: Config = serde_json::from_str(config_json)
             .map_err(|e| JsValue::from_str(&format!("config parse error: {e}")))?;
 
-        let platform = Arc::new(BrowserPlatform::new());
+        // WEFT-391: build a shared BrowserEnvironment, optionally
+        // pre-seeded from the JS-side env map, then clone the Arc into
+        // BrowserRuntime so set_env can mutate after AgentLoop takes
+        // ownership of BrowserPlatform.
+        let seed = parse_env_seed(env_json.as_deref())
+            .map_err(|e| JsValue::from_str(&e))?;
+        let env = Arc::new(if seed.is_empty() {
+            BrowserEnvironment::new()
+        } else {
+            BrowserEnvironment::with_vars(seed)
+        });
+        let platform = Arc::new(BrowserPlatform::with_env_arc(Arc::clone(&env)));
 
         let model = config.agents.defaults.model.clone();
         let (llm_cfg, stripped_model, user_cfg) =
@@ -367,7 +416,11 @@ mod browser_entry {
         let agent = Arc::new(ctx.into_agent_loop());
 
         RUNTIME
-            .set(BrowserRuntime { agent, tools })
+            .set(BrowserRuntime {
+                agent,
+                tools,
+                env,
+            })
             .map_err(|_| JsValue::from_str("already initialized"))?;
 
         web_sys::console::log_1(
@@ -415,10 +468,30 @@ mod browser_entry {
         Ok(outbound.content)
     }
 
-    /// Set an environment variable on the BrowserPlatform.
+    /// Set an environment variable on the live [`BrowserEnvironment`].
+    ///
+    /// After [`init`], mutates the shared [`Arc`] stored in
+    /// [`BrowserRuntime`] so the agent loop's platform and any tools
+    /// that call `Platform::env()` observe the new value (WEFT-391).
+    ///
+    /// Before `init`, this is a no-op (does not panic) so out-of-order
+    /// JS callers stay safe; use the optional `env_json` argument to
+    /// [`init`] to pre-seed variables.
     #[wasm_bindgen]
-    pub fn set_env(_key: &str, _value: &str) {
-        // Browser env vars are managed by BrowserPlatform.env()
+    pub fn set_env(key: &str, value: &str) {
+        if let Some(rt) = RUNTIME.get() {
+            rt.env.set_var(key, value);
+        }
+    }
+
+    /// Read an environment variable from the live [`BrowserEnvironment`].
+    ///
+    /// Returns `undefined` in JS when the runtime is not initialized or
+    /// the key is unset. Used by the browser regression suite and
+    /// useful for dashboard debugging (WEFT-391).
+    #[wasm_bindgen]
+    pub fn get_env(key: &str) -> Option<String> {
+        RUNTIME.get().and_then(|rt| rt.env.get_var(key))
     }
 
     // -------------------------------------------------------------------

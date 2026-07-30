@@ -93,7 +93,7 @@ impl ProcessSpawner for NativeProcessSpawner {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
 

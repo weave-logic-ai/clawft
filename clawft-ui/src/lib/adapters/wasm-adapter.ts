@@ -24,9 +24,12 @@ import type {
 // ---------------------------------------------------------------------------
 
 interface ClawftWasm {
-  init(config_json: string): Promise<void>;
+  /** WEFT-391: optional env_json pre-seeds BrowserEnvironment. */
+  init(config_json: string, env_json?: string | null): Promise<void>;
   send_message(text: string): Promise<string>;
   set_env(key: string, value: string): void;
+  /** WEFT-391: read live BrowserEnvironment value (undefined if unset). */
+  get_env?(key: string): string | undefined;
   /** WEFT-307: JSON-Schema introspection for a registered tool. */
   tool_schema?(slug: string): string;
   /** WEFT-307: list of registered tool names. */

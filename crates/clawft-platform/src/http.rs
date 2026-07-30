@@ -140,7 +140,7 @@ impl HttpClient for NativeHttpClient {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
 
