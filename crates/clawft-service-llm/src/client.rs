@@ -92,16 +92,197 @@ impl LlmConfig {
     }
 }
 
-/// Maps an absent or `null` JSON `content` to an empty string. Some
-/// OpenAI-compatible providers (notably OpenRouter routing to certain
-/// upstreams like Nvidia Nemotron) emit `"content": null` alongside
-/// `tool_calls` instead of `"content": ""`. Plain `#[serde(default)]`
-/// only covers the missing-field case, not the explicit-null case.
-fn null_or_missing_to_empty<'de, D>(d: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(Option::<String>::deserialize(d)?.unwrap_or_default())
+/// One content block inside a multimodal / structured message.
+///
+/// OpenAI vision uses `type: "text"` / `type: "image_url"`; Anthropic-
+/// style payloads use `type: "text"` / `type: "image"` (with a `source`
+/// object). Unknown block kinds are preserved so providers that add
+/// new block types do not fail deserialization — consumers that only
+/// care about text should call [`MessageContent::as_text`], which
+/// joins the `text` fields of every block that carries one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ContentBlock {
+    /// Block kind: `"text"`, `"image_url"`, `"image"`, etc.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Present on `type: "text"` blocks (and occasionally on others).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Present on OpenAI `type: "image_url"` blocks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<ImageUrl>,
+    /// Present on Anthropic-style `type: "image"` blocks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<serde_json::Value>,
+}
+
+/// OpenAI vision `image_url` payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ImageUrl {
+    /// HTTPS URL or `data:` URI for the image.
+    pub url: String,
+    /// Optional detail hint (`"auto"`, `"low"`, `"high"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Message content as it appears on the wire: a plain string, an array
+/// of content blocks (vision / multimodal), or JSON `null`.
+///
+/// Most daemon paths only need the flattened text view — use
+/// [`MessageContent::as_text`] / [`MessageContent::into_text`]. The
+/// block form is retained so callers that care about images (or that
+/// re-serialize the original shape) can still reach it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MessageContent {
+    /// Plain text content (the historical / default shape).
+    Text(String),
+    /// Multimodal or structured content blocks.
+    Blocks(Vec<ContentBlock>),
+}
+
+impl Default for MessageContent {
+    fn default() -> Self {
+        Self::Text(String::new())
+    }
+}
+
+impl MessageContent {
+    /// Flatten to plain text.
+    ///
+    /// - [`MessageContent::Text`] → the string as-is (including empty).
+    /// - [`MessageContent::Blocks`] → join non-empty `text` fields of
+    ///   every block, separated by newlines. Image-only blocks
+    ///   contribute nothing, so a pure-image array yields `""`.
+    pub fn as_text(&self) -> std::borrow::Cow<'_, str> {
+        match self {
+            MessageContent::Text(s) => std::borrow::Cow::Borrowed(s.as_str()),
+            MessageContent::Blocks(blocks) => {
+                let mut parts: Vec<&str> = Vec::new();
+                for b in blocks {
+                    if let Some(t) = b.text.as_deref()
+                        && !t.is_empty()
+                    {
+                        parts.push(t);
+                    }
+                }
+                std::borrow::Cow::Owned(parts.join("\n"))
+            }
+        }
+    }
+
+    /// Consume and return the flattened text (see [`Self::as_text`]).
+    pub fn into_text(self) -> String {
+        match self {
+            MessageContent::Text(s) => s,
+            MessageContent::Blocks(blocks) => {
+                let mut parts: Vec<&str> = Vec::new();
+                for b in &blocks {
+                    if let Some(t) = b.text.as_deref()
+                        && !t.is_empty()
+                    {
+                        parts.push(t);
+                    }
+                }
+                parts.join("\n")
+            }
+        }
+    }
+
+    /// `true` when there is no textual content (empty string, empty
+    /// blocks, or image-only blocks).
+    pub fn is_empty(&self) -> bool {
+        match self {
+            MessageContent::Text(s) => s.is_empty(),
+            MessageContent::Blocks(blocks) => blocks.iter().all(|b| {
+                b.text
+                    .as_deref()
+                    .map(|t| t.is_empty())
+                    .unwrap_or(true)
+            }),
+        }
+    }
+
+    /// Borrow the block list when content arrived as an array.
+    pub fn blocks(&self) -> Option<&[ContentBlock]> {
+        match self {
+            MessageContent::Blocks(b) => Some(b.as_slice()),
+            MessageContent::Text(_) => None,
+        }
+    }
+}
+
+impl From<String> for MessageContent {
+    fn from(s: String) -> Self {
+        MessageContent::Text(s)
+    }
+}
+
+impl From<&str> for MessageContent {
+    fn from(s: &str) -> Self {
+        MessageContent::Text(s.to_string())
+    }
+}
+
+impl From<Vec<ContentBlock>> for MessageContent {
+    fn from(blocks: Vec<ContentBlock>) -> Self {
+        MessageContent::Blocks(blocks)
+    }
+}
+
+impl std::fmt::Display for MessageContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.as_text())
+    }
+}
+
+impl PartialEq<str> for MessageContent {
+    fn eq(&self, other: &str) -> bool {
+        self.as_text() == other
+    }
+}
+
+impl PartialEq<&str> for MessageContent {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_text() == *other
+    }
+}
+
+impl PartialEq<String> for MessageContent {
+    fn eq(&self, other: &String) -> bool {
+        self.as_text() == other.as_str()
+    }
+}
+
+impl Serialize for MessageContent {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        match self {
+            MessageContent::Text(s) => ser.serialize_str(s),
+            MessageContent::Blocks(blocks) => blocks.serialize(ser),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MessageContent {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // Accept string | array | null | missing (via Option).
+        // Nemotron/OpenRouter emit null on tool-call turns; OpenAI
+        // vision and Anthropic-style APIs emit content-block arrays.
+        let value = Option::<serde_json::Value>::deserialize(d)?;
+        match value {
+            None | Some(serde_json::Value::Null) => Ok(MessageContent::Text(String::new())),
+            Some(serde_json::Value::String(s)) => Ok(MessageContent::Text(s)),
+            Some(serde_json::Value::Array(arr)) => {
+                let blocks: Vec<ContentBlock> =
+                    serde_json::from_value(serde_json::Value::Array(arr))
+                        .map_err(serde::de::Error::custom)?;
+                Ok(MessageContent::Blocks(blocks))
+            }
+            Some(other) => Err(serde::de::Error::custom(format!(
+                "content must be string, array of content blocks, or null; got {other}"
+            ))),
+        }
+    }
 }
 
 /// One message in a chat completion conversation.
@@ -115,16 +296,22 @@ where
 /// - When relaying a tool result back to the model, `role` is `"tool"`,
 ///   `content` is the tool's stringified result, and `tool_call_id`
 ///   matches the originating call's id.
+///
+/// Content shape: providers emit string, array-of-blocks (vision), or
+/// `null` (Nemotron tool-calls). All three deserialize into
+/// [`MessageContent`]; use [`MessageContent::as_text`] when only the
+/// flattened string is needed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     /// Role: `system` / `user` / `assistant` / `tool`.
     pub role: String,
-    /// Message content. Empty string for tool-call-only assistant
+    /// Message content. Empty text for tool-call-only assistant
     /// turns. Some providers emit JSON `null` here instead of `""`
-    /// when the assistant turn is purely a tool call; both are
-    /// coerced to an empty string on the way in.
-    #[serde(default, deserialize_with = "null_or_missing_to_empty")]
-    pub content: String,
+    /// when the assistant turn is purely a tool call; both become
+    /// [`MessageContent::Text`]`("")`. Vision / multimodal providers
+    /// emit an array of content blocks → [`MessageContent::Blocks`].
+    #[serde(default)]
+    pub content: MessageContent,
     /// Tool calls produced by the assistant. Present on assistant
     /// messages whose `finish_reason` is `"tool_calls"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -141,7 +328,7 @@ impl ChatMessage {
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: "system".into(),
-            content: content.into(),
+            content: MessageContent::Text(content.into()),
             tool_calls: None,
             tool_call_id: None,
         }
@@ -150,7 +337,7 @@ impl ChatMessage {
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: "user".into(),
-            content: content.into(),
+            content: MessageContent::Text(content.into()),
             tool_calls: None,
             tool_call_id: None,
         }
@@ -159,7 +346,7 @@ impl ChatMessage {
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
             role: "assistant".into(),
-            content: content.into(),
+            content: MessageContent::Text(content.into()),
             tool_calls: None,
             tool_call_id: None,
         }
@@ -169,9 +356,19 @@ impl ChatMessage {
     pub fn tool(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             role: "tool".into(),
-            content: content.into(),
+            content: MessageContent::Text(content.into()),
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
+        }
+    }
+
+    /// Multimodal user (or other) message with structured content blocks.
+    pub fn with_blocks(role: impl Into<String>, blocks: Vec<ContentBlock>) -> Self {
+        Self {
+            role: role.into(),
+            content: MessageContent::Blocks(blocks),
+            tool_calls: None,
+            tool_call_id: None,
         }
     }
 }
@@ -1200,5 +1397,243 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.choices[0].message.content, "done");
+    }
+
+    // ── MessageContent: string | blocks | null ─────────────────────────
+
+    #[test]
+    fn message_content_deserializes_plain_string() {
+        let m: ChatMessage = serde_json::from_value(serde_json::json!({
+            "role": "assistant",
+            "content": "hello back"
+        }))
+        .unwrap();
+        assert!(matches!(m.content, MessageContent::Text(_)));
+        assert_eq!(m.content.as_text(), "hello back");
+        assert_eq!(m.content, "hello back");
+    }
+
+    #[test]
+    fn message_content_deserializes_null_as_empty_text() {
+        // Nemotron / OpenRouter tool-call turns.
+        let m: ChatMessage = serde_json::from_value(serde_json::json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": []
+        }))
+        .unwrap();
+        assert_eq!(m.content, MessageContent::Text(String::new()));
+        assert!(m.content.is_empty());
+        assert_eq!(m.content.as_text(), "");
+    }
+
+    #[test]
+    fn message_content_deserializes_missing_as_empty_text() {
+        let m: ChatMessage = serde_json::from_value(serde_json::json!({
+            "role": "assistant"
+        }))
+        .unwrap();
+        assert!(m.content.is_empty());
+    }
+
+    #[test]
+    fn message_content_deserializes_openai_vision_blocks() {
+        // OpenAI vision API: array of text + image_url blocks.
+        let m: ChatMessage = serde_json::from_value(serde_json::json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What is in this image?"},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://example.com/cat.png",
+                        "detail": "auto"
+                    }
+                }
+            ]
+        }))
+        .unwrap();
+        let blocks = m.content.blocks().expect("blocks present");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].kind, "text");
+        assert_eq!(blocks[0].text.as_deref(), Some("What is in this image?"));
+        assert_eq!(blocks[1].kind, "image_url");
+        assert_eq!(
+            blocks[1].image_url.as_ref().map(|u| u.url.as_str()),
+            Some("https://example.com/cat.png")
+        );
+        assert_eq!(
+            blocks[1].image_url.as_ref().and_then(|u| u.detail.as_deref()),
+            Some("auto")
+        );
+        // Flatten joins text parts only.
+        assert_eq!(m.content.as_text(), "What is in this image?");
+    }
+
+    #[test]
+    fn message_content_deserializes_anthropic_style_blocks() {
+        // Anthropic-style: type "image" with a source object + text.
+        let m: ChatMessage = serde_json::from_value(serde_json::json!({
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": "/9j/4AAQSkZJRg=="
+                    }
+                },
+                {"type": "text", "text": "Describe this photo."}
+            ]
+        }))
+        .unwrap();
+        let blocks = m.content.blocks().expect("blocks present");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].kind, "image");
+        assert!(blocks[0].source.is_some());
+        assert_eq!(blocks[0].source.as_ref().unwrap()["type"], "base64");
+        assert_eq!(blocks[1].kind, "text");
+        assert_eq!(m.content.as_text(), "Describe this photo.");
+    }
+
+    #[test]
+    fn message_content_flattens_multiple_text_blocks() {
+        let m: ChatMessage = serde_json::from_value(serde_json::json!({
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "line one"},
+                {"type": "text", "text": "line two"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(m.content.as_text(), "line one\nline two");
+        assert_eq!(m.content.into_text(), "line one\nline two");
+    }
+
+    #[test]
+    fn message_content_image_only_blocks_flatten_to_empty() {
+        let m: ChatMessage = serde_json::from_value(serde_json::json!({
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,abc"}
+                }
+            ]
+        }))
+        .unwrap();
+        assert!(m.content.is_empty());
+        assert_eq!(m.content.as_text(), "");
+    }
+
+    #[test]
+    fn message_content_serializes_text_as_string() {
+        let m = ChatMessage::user("hi");
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["content"], "hi");
+        assert!(v["content"].is_string());
+    }
+
+    #[test]
+    fn message_content_serializes_blocks_as_array() {
+        let m = ChatMessage::with_blocks(
+            "user",
+            vec![
+                ContentBlock {
+                    kind: "text".into(),
+                    text: Some("see this".into()),
+                    image_url: None,
+                    source: None,
+                },
+                ContentBlock {
+                    kind: "image_url".into(),
+                    text: None,
+                    image_url: Some(ImageUrl {
+                        url: "https://example.com/x.png".into(),
+                        detail: None,
+                    }),
+                    source: None,
+                },
+            ],
+        );
+        let v = serde_json::to_value(&m).unwrap();
+        assert!(v["content"].is_array());
+        assert_eq!(v["content"][0]["type"], "text");
+        assert_eq!(v["content"][0]["text"], "see this");
+        assert_eq!(v["content"][1]["type"], "image_url");
+        assert_eq!(v["content"][1]["image_url"]["url"], "https://example.com/x.png");
+    }
+
+    #[tokio::test]
+    async fn complete_accepts_openai_vision_response_content_blocks() {
+        // Some OpenAI-compat vision endpoints return assistant content
+        // as a single text block array rather than a bare string.
+        let server = MockServer::start().await;
+        let body = r#"{
+            "id": "chatcmpl-vision-1",
+            "model": "gpt-4o",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "A calico cat on a windowsill."}
+                    ]
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 12, "total_tokens": 112}
+        }"#;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+        let client = LlmClient::new(test_config(server.uri())).unwrap();
+        let r = client
+            .complete(vec![ChatMessage::user("describe")], None, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            r.choices[0].message.content,
+            MessageContent::Blocks(_)
+        ));
+        assert_eq!(
+            r.choices[0].message.content.as_text(),
+            "A calico cat on a windowsill."
+        );
+        // PartialEq<&str> flattens for consumers that compare text.
+        assert_eq!(
+            r.choices[0].message.content,
+            "A calico cat on a windowsill."
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_accepts_anthropic_style_content_blocks_in_response() {
+        let server = MockServer::start().await;
+        let body = r#"{
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "I see a red bicycle."}
+                    ]
+                },
+                "finish_reason": "stop"
+            }]
+        }"#;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+        let client = LlmClient::new(test_config(server.uri())).unwrap();
+        let r = client
+            .complete(vec![ChatMessage::user("what do you see?")], None, None)
+            .await
+            .unwrap();
+        assert_eq!(r.choices[0].message.content.as_text(), "I see a red bicycle.");
     }
 }

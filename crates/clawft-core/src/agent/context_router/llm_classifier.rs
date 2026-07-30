@@ -302,7 +302,7 @@ impl Classifier for clawft_service_llm::LlmClient {
         let body = resp
             .choices
             .first()
-            .map(|c| c.message.content.clone())
+            .map(|c| c.message.content.as_text().into_owned())
             .unwrap_or_default();
         Ok(body)
     }

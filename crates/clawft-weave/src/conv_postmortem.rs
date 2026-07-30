@@ -58,7 +58,7 @@ pub async fn summarize_durable_facts(llm: &LlmClient, digest: &str) -> Option<St
     let fact = resp
         .choices
         .first()
-        .map(|c| c.message.content.trim().to_string())
+        .map(|c| c.message.content.as_text().trim().to_string())
         .unwrap_or_default();
 
     if fact.is_empty() || fact.eq_ignore_ascii_case(NO_DURABLE_FACT) {
