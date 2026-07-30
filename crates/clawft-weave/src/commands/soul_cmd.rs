@@ -23,24 +23,19 @@
 //!   (only `content` is required; the rest are best-effort metadata
 //!   the agent's future write path will populate)
 //!
-//! # Witness chain
+//! # Witness chain (WEFT-324)
 //!
-//! The daemon does not expose a public `chain.append` RPC today (see
-//! `crates/clawft-weave/src/daemon.rs::handle_request` — only
-//! `chain.{status,local,checkpoint,verify,export}`). For F2 we record
-//! the promotion event two ways:
+//! Promotion records a [`WitnessRecord`] two ways:
 //!
-//! 1. `tracing::info!(target = "chain_event", source = "soul",
-//!    kind = "soul.promote", ...)` — this is the bridge that
-//!    [`clawft_core::chain_event::push_chain_event`] uses; the
-//!    daemon's chain-event bridge drains the buffer every 2s and
-//!    forwards to `ChainManager::append`. Because `weaver` is a
-//!    short-lived CLI that talks to the daemon over a Unix socket
-//!    (not embedded), the bridge never sees this event. So we also:
-//! 2. Append the same payload as one JSONL line to
-//!    `<workspace>/.weftos/audit/soul-promote.log`. Local audit log
-//!    is the durable record until a public `chain.append` RPC ships;
-//!    follow-up TODO is filed below.
+//! 1. **Primary** — public `chain.append` RPC on the daemon (Write
+//!    capability; local UDS clients get implicit `admin` from
+//!    [`DaemonClient`](crate::client::DaemonClient)). The daemon
+//!    proxies to `ChainManager::append` with `source = "soul"` and
+//!    `kind = record.kind`.
+//! 2. **Redundant / offline** — the same payload as one JSONL line
+//!    to `<workspace>/.weftos/audit/soul-promote.log`. Always written
+//!    so promote stays durable when the chain is disabled or the RPC
+//!    fails (offline mode).
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -51,9 +46,13 @@ use sha2::{Digest, Sha256};
 
 use crate::client::DaemonClient;
 use crate::protocol::{
-    NodeIdentityResult, Request, SubstrateListChild, SubstrateListParams, SubstrateListResult,
-    SubstrateReadParams, SubstrateReadResult,
+    ChainAppendParams, NodeIdentityResult, Request, SubstrateListChild, SubstrateListParams,
+    SubstrateListResult, SubstrateReadParams, SubstrateReadResult,
 };
+
+/// Witness audit record for soul promote (re-export of the canonical
+/// WEFT-324 wire type).
+pub use crate::protocol::WitnessRecord;
 
 /// `weaver soul` subcommand group.
 #[derive(Args)]
@@ -114,26 +113,6 @@ pub struct JournalEntry {
     pub ts: String,
 }
 
-/// Witness audit-log record written for every applied promotion.
-///
-/// Mirrors what a future public `chain.append` RPC payload would
-/// carry; persisted to `.weftos/audit/soul-promote.log` as one JSONL
-/// line per promote and (when running embedded inside the daemon)
-/// pushed onto the chain-event bridge.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WitnessRecord {
-    /// `"soul.promote"`.
-    pub kind: String,
-    /// ULID of every journal entry that contributed to the merge.
-    pub entries: Vec<String>,
-    /// SHA-256 hex of the SOUL.md contents *before* the merge.
-    pub hash_before: String,
-    /// SHA-256 hex of the SOUL.md contents *after* the merge.
-    pub hash_after: String,
-    /// ISO-8601 (UTC) wall-clock at promotion time.
-    pub ts: String,
-}
-
 /// Abstraction over the daemon RPC surface this command uses.
 ///
 /// Production wires through [`DaemonRpc`]; tests hand a mock impl
@@ -153,9 +132,9 @@ pub trait SoulRpc: Send + Sync {
     /// Read one journal entry's payload by full substrate path.
     async fn read_entry(&mut self, path: &str) -> anyhow::Result<Option<serde_json::Value>>;
 
-    /// Append a witness record. Today this is a local audit-log
-    /// write (no public `chain.append` RPC exists); the trait shape
-    /// is forward-compatible with switching to RPC when one ships.
+    /// Append a witness record via `chain.append` RPC when available,
+    /// always retaining the local audit-log line as a redundant /
+    /// offline durable record (WEFT-324).
     async fn append_chain(
         &mut self,
         workspace: &Path,
@@ -235,16 +214,49 @@ impl SoulRpc for DaemonRpc {
         workspace: &Path,
         record: &WitnessRecord,
     ) -> anyhow::Result<()> {
-        // No `chain.append` RPC is exposed by the daemon today; until
-        // one ships, write the same payload to a local audit log.
-        // TODO(agent-core-v1.1): replace with `chain.append` RPC once
-        // the daemon's public chain surface gains an append handler;
-        // the trait shape is already forward-compatible.
+        // Always retain the local audit log first — offline mode and
+        // redundant durable record (WEFT-324 acceptance).
         write_audit_log(workspace, record)?;
-        // Best-effort: also emit a tracing event so any in-process
-        // chain-event bridge (i.e. when this code is later embedded)
-        // forwards through `clawft_core::chain_event`. For the CLI
-        // process this is a no-op past the subscriber.
+
+        // Primary path: public chain.append RPC (daemon → ChainManager).
+        // UDS clients get implicit admin auth from DaemonClient::call.
+        let params = ChainAppendParams {
+            source: "soul".into(),
+            record: record.clone(),
+        };
+        match self
+            .client
+            .call(Request::with_params(
+                "chain.append",
+                serde_json::to_value(&params)?,
+            ))
+            .await
+        {
+            Ok(resp) if resp.ok => {
+                tracing::info!(
+                    target: "chain_event",
+                    source = "soul",
+                    kind = %record.kind,
+                    sequence = ?resp.result.as_ref().and_then(|v| v.get("sequence")),
+                    "chain.append ok"
+                );
+            }
+            Ok(resp) => {
+                // Chain disabled / gated / bad params — local log stands.
+                tracing::warn!(
+                    error = %resp.error.unwrap_or_default(),
+                    "chain.append rejected; local audit log retained (offline mode)"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "chain.append transport error; local audit log retained (offline mode)"
+                );
+            }
+        }
+
+        // Best-effort embedded bridge (no-op for short-lived CLI).
         tracing::info!(
             target: "chain_event",
             source = "soul",

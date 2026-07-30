@@ -91,6 +91,10 @@ pub fn required_capability(method: &str) -> Capability {
         // state-mutating agent verbs above.
         "agent.proposal.accept" => Capability::Write,
         "agent.proposal.discard" => Capability::Write,
+        // WEFT-324: public witness append (soul promote + agent journal).
+        // Write — not Admin — so a write-scoped token can promote without
+        // holding full daemon admin. Checkpoint remains Admin.
+        "chain.append" => Capability::Write,
 
         // ── Chat: LLM-conversational verbs ──────────────────────────
         "agent.chat" => Capability::Chat,
@@ -323,10 +327,25 @@ mod tests {
     }
 
     #[test]
+    fn chain_append_requires_write() {
+        assert_eq!(required_capability("chain.append"), Capability::Write);
+        let anon = CallerCapabilities::anonymous();
+        assert!(
+            !anon.allows_method("chain.append"),
+            "anonymous must not append to the witness chain"
+        );
+        let write = CallerCapabilities::from_scopes(["write"]);
+        assert!(write.allows_method("chain.append"));
+        let admin = CallerCapabilities::from_scopes(["admin"]);
+        assert!(admin.allows_method("chain.append"));
+    }
+
+    #[test]
     fn write_methods_classified_correctly() {
         for m in [
             "agent.register",
             "agent.spawn",
+            "chain.append",
             "agent.stop",
             "agent.send",
             "memory.delete",

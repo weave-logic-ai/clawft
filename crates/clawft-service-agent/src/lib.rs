@@ -74,7 +74,10 @@ pub use interrupt_router::{
 };
 pub use kernel_gate::KernelEffectGate;
 pub use text_structure::{Argument, EntityKind, EntitySpan, Structure, UtteranceShape};
-pub use protocol::{AgentChatMessage, AgentChatParams, AgentChatResult, AgentChatToolCall};
+pub use protocol::{
+    AgentChatMessage, AgentChatParams, AgentChatResult, AgentChatToolCall, ChainAppendParams,
+    ChainAppendResult, WitnessRecord,
+};
 pub use service::{AgentLoopHandle, AgentService, AgentServiceError, ReplySubmitter};
 pub use session_tier::SessionTier;
 pub use spawn_registry::{SharedSpawnRegistry, SpawnRegistry, TaskRecord};
