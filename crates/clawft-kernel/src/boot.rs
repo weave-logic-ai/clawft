@@ -1133,6 +1133,7 @@ impl<P: Platform> Kernel<P> {
                         active: true,
                         reference_url: None,
                         sop_category: None,
+                        rule_type: Default::default(),
                     },
                     GovernanceRule {
                         id: "GOV-002".into(),
@@ -1142,6 +1143,7 @@ impl<P: Platform> Kernel<P> {
                         active: true,
                         reference_url: None,
                         sop_category: None,
+                        rule_type: Default::default(),
                     },
                     GovernanceRule {
                         id: "GOV-003".into(),
@@ -1151,6 +1153,7 @@ impl<P: Platform> Kernel<P> {
                         active: true,
                         reference_url: None,
                         sop_category: None,
+                        rule_type: Default::default(),
                     },
                     GovernanceRule {
                         id: "GOV-004".into(),
@@ -1160,6 +1163,7 @@ impl<P: Platform> Kernel<P> {
                         active: true,
                         reference_url: None,
                         sop_category: None,
+                        rule_type: Default::default(),
                     },
                     GovernanceRule {
                         id: "GOV-005".into(),
@@ -1169,6 +1173,7 @@ impl<P: Platform> Kernel<P> {
                         active: true,
                         reference_url: None,
                         sop_category: None,
+                        rule_type: Default::default(),
                     },
                     GovernanceRule {
                         id: "GOV-006".into(),
@@ -1178,6 +1183,7 @@ impl<P: Platform> Kernel<P> {
                         active: true,
                         reference_url: None,
                         sop_category: None,
+                        rule_type: Default::default(),
                     },
                     GovernanceRule {
                         id: "GOV-007".into(),
@@ -1187,6 +1193,7 @@ impl<P: Platform> Kernel<P> {
                         active: true,
                         reference_url: None,
                         sop_category: None,
+                        rule_type: Default::default(),
                     },
                     // ── AI-SDLC SOP rules: Legislative (6) ──────────────────
                     GovernanceRule {
@@ -1197,6 +1204,7 @@ impl<P: Platform> Kernel<P> {
                         active: true,
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1300-01-AI_IRB_Approval.md".into()),
                         sop_category: Some("governance".into()),
+                        rule_type: Default::default(),
                     },
                     GovernanceRule {
                         id: "SOP-L002".into(),
@@ -1206,6 +1214,7 @@ impl<P: Platform> Kernel<P> {
                         active: true,
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1003-01-AI_Version_Control.md".into()),
                         sop_category: Some("governance".into()),
+                        rule_type: Default::default(),
                     },
                     GovernanceRule {
                         id: "SOP-L003".into(),
@@ -1215,6 +1224,7 @@ impl<P: Platform> Kernel<P> {
                         active: true,
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1040-01-AI_Requirements.md".into()),
                         sop_category: Some("engineering".into()),
+                        rule_type: Default::default(),
                     },
                     GovernanceRule {
                         id: "SOP-L004".into(),
@@ -1224,6 +1234,7 @@ impl<P: Platform> Kernel<P> {
                         active: true,
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1005-01-AI_Release_Planning.md".into()),
                         sop_category: Some("lifecycle".into()),
+                        rule_type: Default::default(),
                     },
                     GovernanceRule {
                         id: "SOP-L005".into(),
@@ -1233,6 +1244,7 @@ impl<P: Platform> Kernel<P> {
                         active: true,
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1303-01-AI_Data_Protection.md".into()),
                         sop_category: Some("ethics".into()),
+                        rule_type: Default::default(),
                     },
                     GovernanceRule {
                         id: "SOP-L006".into(),
@@ -1242,6 +1254,7 @@ impl<P: Platform> Kernel<P> {
                         active: true,
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1062-01-AI_Risk_Register.md".into()),
                         sop_category: Some("governance".into()),
+                        rule_type: Default::default(),
                     },
                     // ── AI-SDLC SOP rules: Executive (5) ────────────────────
                     GovernanceRule {
@@ -1252,6 +1265,7 @@ impl<P: Platform> Kernel<P> {
                         active: true,
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1200-01-AI_Secure_Coding.md".into()),
                         sop_category: Some("engineering".into()),
+                        rule_type: Default::default(),
                     },
                     GovernanceRule {
                         id: "SOP-E002".into(),
@@ -1261,6 +1275,7 @@ impl<P: Platform> Kernel<P> {
                         active: true,
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1220-01-AI_Deployment_Clearance.md".into()),
                         sop_category: Some("lifecycle".into()),
+                        rule_type: Default::default(),
                     },
                     GovernanceRule {
                         id: "SOP-E003".into(),
@@ -1270,6 +1285,7 @@ impl<P: Platform> Kernel<P> {
                         active: true,
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1008-01-AI_Incident_Response.md".into()),
                         sop_category: Some("security".into()),
+                        rule_type: Default::default(),
                     },
                     GovernanceRule {
                         id: "SOP-E004".into(),
@@ -1279,6 +1295,7 @@ impl<P: Platform> Kernel<P> {
                         active: true,
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1011-01-AI_Decommissioning.md".into()),
                         sop_category: Some("lifecycle".into()),
+                        rule_type: Default::default(),
                     },
                     GovernanceRule {
                         id: "SOP-E005".into(),
@@ -1288,6 +1305,7 @@ impl<P: Platform> Kernel<P> {
                         active: true,
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1004-01-AI_Procurement_Screening.md".into()),
                         sop_category: Some("governance".into()),
+                        rule_type: Default::default(),
                     },
                     // ── AI-SDLC SOP rules: Judicial (4) ─────────────────────
                     GovernanceRule {
@@ -1298,6 +1316,7 @@ impl<P: Platform> Kernel<P> {
                         active: true,
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1301-01-AI_Bias_Fairness.md".into()),
                         sop_category: Some("ethics".into()),
+                        rule_type: Default::default(),
                     },
                     GovernanceRule {
                         id: "SOP-J002".into(),
@@ -1307,6 +1326,7 @@ impl<P: Platform> Kernel<P> {
                         active: true,
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1302-01-AI_Explainability.md".into()),
                         sop_category: Some("ethics".into()),
+                        rule_type: Default::default(),
                     },
                     GovernanceRule {
                         id: "SOP-J003".into(),
@@ -1316,6 +1336,7 @@ impl<P: Platform> Kernel<P> {
                         active: true,
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-1009-01-AI_Drift_Detection.md".into()),
                         sop_category: Some("lifecycle".into()),
+                        rule_type: Default::default(),
                     },
                     GovernanceRule {
                         id: "SOP-J004".into(),
@@ -1325,8 +1346,16 @@ impl<P: Platform> Kernel<P> {
                         active: true,
                         reference_url: Some("https://github.com/AISDLC/AI-SDLC-SOPs/blob/main/sops/SOP-2002-01-AI_Quality_Records.md".into()),
                         sop_category: Some("quality".into()),
+                        rule_type: Default::default(),
                     },
-                ];
+                    // ── Browser policy rules (S7 / WEFT-108) ────────────────
+                    // Browser nodes are untrusted; these rules constrain IPC
+                    // topics, spawn, and network without relying on effect
+                    // magnitude. Operators may supersede via governance.root.
+                ]
+                .into_iter()
+                .chain(crate::governance::browser_policy_default_rules())
+                .collect::<Vec<_>>();
 
                 // Anchor genesis rules to chain
                 let genesis_seq = cm.sequence();
@@ -1340,6 +1369,7 @@ impl<P: Platform> Kernel<P> {
                             "severity": format!("{}", r.severity),
                             "reference_url": r.reference_url,
                             "sop_category": r.sop_category,
+                            "rule_type": format!("{}", r.rule_type),
                         })
                     })
                     .collect();
@@ -2594,8 +2624,8 @@ mod tests {
             .expect("should find v2.0.0 governance genesis on chain");
         assert_eq!(
             genesis_payload["rule_count"].as_u64().unwrap(),
-            22,
-            "genesis should contain 22 rules"
+            25,
+            "genesis should contain 25 rules (22 constitutional/SOP + 3 browser_policy)"
         );
         assert_eq!(
             genesis_payload["version"].as_str().unwrap(),
@@ -2603,18 +2633,18 @@ mod tests {
             "genesis version should be 2.0.0"
         );
 
-        // Each rule should be individually anchored (at least 22)
+        // Each rule should be individually anchored (at least 25)
         let rule_events: Vec<_> = all_events
             .iter()
             .filter(|e| e.kind == "governance.rule")
             .collect();
         assert!(
-            rule_events.len() >= 22,
-            "at least 22 genesis rules should be individually anchored, got {}",
+            rule_events.len() >= 25,
+            "at least 25 genesis rules should be individually anchored, got {}",
             rule_events.len(),
         );
 
-        // Verify all rule IDs are present (GOV-001..007 + SOP-L/E/J)
+        // Verify all rule IDs are present (GOV + SOP + BP browser_policy)
         let rule_ids: Vec<&str> = rule_events
             .iter()
             .filter_map(|e| e.payload.as_ref()?.get("rule_id")?.as_str())
@@ -2623,7 +2653,7 @@ mod tests {
             "GOV-001", "GOV-002", "GOV-003", "GOV-004", "GOV-005", "GOV-006", "GOV-007",
             "SOP-L001", "SOP-L002", "SOP-L003", "SOP-L004", "SOP-L005", "SOP-L006", "SOP-E001",
             "SOP-E002", "SOP-E003", "SOP-E004", "SOP-E005", "SOP-J001", "SOP-J002", "SOP-J003",
-            "SOP-J004",
+            "SOP-J004", "BP-001", "BP-002", "BP-003",
         ] {
             assert!(
                 rule_ids.contains(expected_id),

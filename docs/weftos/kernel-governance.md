@@ -669,9 +669,16 @@ The `IpcScope` enum controls which message targets an agent can communicate with
 |---------|---------------------|---------------|-------------|
 | `All` | Yes (any PID) | Yes (any topic) | Unrestricted IPC |
 | `ParentOnly` | No (caller checks parent) | Yes | Only talk to parent process |
-| `Restricted(Vec<u64>)` | Yes (listed PIDs only) | Yes | Explicit PID allowlist |
+| `Restricted(Vec<u64>)` | Yes (listed PIDs only) | Public topics only (`public` / `public.*`) | Explicit PID allowlist; browser default (S7 / WEFT-108) |
 | `Topic(Vec<String>)` | No | Yes (listed topics only) | Topic-based IPC only |
 | `None` | No | No | All IPC disabled |
+
+Browser-platform agents start with `AgentCapabilities::browser_default()`
+(`IpcScope::Restricted([])`). Governance also installs `browser_policy`
+rules (`GovernanceRuleType::BrowserPolicy`, genesis BP-001..003) that
+deny non-public topic subscribe/publish, spawn, and network for
+`platform=browser` independently of effect magnitude. See
+[`docs/guides/browser.md`](../guides/browser.md).
 
 ### Resource Limits
 
@@ -932,7 +939,8 @@ let outcome = result.to_rvf_task_outcome(); // TaskOutcome::Solved / Failed / Sk
 
 | Type | Description |
 |---|---|
-| `GovernanceRule` | A single governance rule with id, description, branch, severity, active flag, SOP fields |
+| `GovernanceRule` | A single governance rule with id, description, branch, severity, active flag, SOP fields, `rule_type` |
+| `GovernanceRuleType` | `General` (default), `BrowserPolicy` (S7 / WEFT-108) |
 | `GovernanceBranch` | `Legislative`, `Executive`, `Judicial` |
 | `RuleSeverity` | `Advisory`, `Warning`, `Blocking`, `Critical` (ordered) |
 | `EffectVector` | 5D vector: risk, fairness, privacy, novelty, security (all `f64`) |

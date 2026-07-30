@@ -1767,6 +1767,7 @@ pub async fn run(
                 active: true,
                 reference_url: None,
                 sop_category: None,
+                rule_type: Default::default(),
             });
             // D6: opt-in per-action grant so agent_spawn (~0.93 effect) clears
             // the 0.8 chat gate without globally loosening the threshold. Off
@@ -5904,6 +5905,7 @@ async fn dispatch(
                             active: true,
                             reference_url: None,
                             sop_category: None,
+                            rule_type: Default::default(),
                         })
                         .add_rule(GovernanceRule {
                             id: "cron-warn".into(),
@@ -5913,6 +5915,7 @@ async fn dispatch(
                             active: true,
                             reference_url: None,
                             sop_category: None,
+                            rule_type: Default::default(),
                         });
                     Some(std::sync::Arc::new(g))
                 };

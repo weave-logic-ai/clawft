@@ -22,6 +22,31 @@ use tracing::debug;
 
 use crate::environment::{Environment, EnvironmentClass};
 
+/// Discriminator for governance rule evaluation paths.
+///
+/// Most rules use the default effect-magnitude path ([`General`](Self::General)).
+/// [`BrowserPolicy`](Self::BrowserPolicy) rules apply platform-aware checks for
+/// untrusted browser nodes (S7 / WEFT-108) independent of effect magnitude.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GovernanceRuleType {
+    /// Standard rule evaluated via effect-magnitude threshold.
+    #[default]
+    General,
+    /// Browser-platform sandbox policy (topic scope, elevation, spawn/network).
+    BrowserPolicy,
+}
+
+impl std::fmt::Display for GovernanceRuleType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GovernanceRuleType::General => write!(f, "general"),
+            GovernanceRuleType::BrowserPolicy => write!(f, "browser_policy"),
+        }
+    }
+}
+
 /// A governance rule that restricts agent behavior.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GovernanceRule {
@@ -48,6 +73,12 @@ pub struct GovernanceRule {
     /// SOP category tag for filtering rules by domain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sop_category: Option<String>,
+
+    /// Rule type discriminator. Defaults to [`GovernanceRuleType::General`].
+    ///
+    /// Serde defaults missing fields so older chain-anchored rules remain valid.
+    #[serde(default)]
+    pub rule_type: GovernanceRuleType,
 }
 
 impl GovernanceRule {
@@ -61,6 +92,53 @@ impl GovernanceRule {
             .filter(|r| r.sop_category.as_deref() == Some(category))
             .collect()
     }
+
+    /// Get rules of a given type from a slice of rules.
+    pub fn filter_by_type<'a>(
+        rules: &'a [GovernanceRule],
+        rule_type: &GovernanceRuleType,
+    ) -> Vec<&'a GovernanceRule> {
+        rules
+            .iter()
+            .filter(|r| &r.rule_type == rule_type)
+            .collect()
+    }
+
+    /// Build a blocking browser_policy rule (S7 / WEFT-108).
+    pub fn browser_policy(id: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            description: description.into(),
+            branch: GovernanceBranch::Legislative,
+            severity: RuleSeverity::Blocking,
+            active: true,
+            reference_url: None,
+            sop_category: Some("browser_policy".into()),
+            rule_type: GovernanceRuleType::BrowserPolicy,
+        }
+    }
+}
+
+/// Default browser_policy rules anchored at governance genesis (S7).
+///
+/// - **BP-001**: browser nodes may only subscribe/publish public topics
+/// - **BP-002**: browser nodes cannot spawn children without elevation
+/// - **BP-003**: browser nodes cannot enable network without elevation
+pub fn browser_policy_default_rules() -> Vec<GovernanceRule> {
+    vec![
+        GovernanceRule::browser_policy(
+            "BP-001",
+            "Browser nodes may only publish/subscribe to public topics (public.*)",
+        ),
+        GovernanceRule::browser_policy(
+            "BP-002",
+            "Browser nodes cannot spawn child agents without capability elevation",
+        ),
+        GovernanceRule::browser_policy(
+            "BP-003",
+            "Browser nodes cannot enable network access without capability elevation",
+        ),
+    ]
 }
 
 fn default_true() -> bool {
@@ -320,6 +398,93 @@ impl GovernanceRequest {
     }
 }
 
+/// Evaluate a single browser_policy rule against a request.
+///
+/// Returns `Some(reason)` when the rule fires a denial, `None` when the rule
+/// does not apply (wrong platform / action) or permits the action.
+fn apply_browser_policy_rule(
+    rule: &GovernanceRule,
+    request: &GovernanceRequest,
+) -> Option<String> {
+    let platform = request
+        .context
+        .get("platform")
+        .map(|s| s.as_str())
+        .unwrap_or("");
+
+    // Browser policy only constrains browser-platform principals.
+    if platform != "browser" {
+        return None;
+    }
+
+    let action = request.action.as_str();
+
+    // Topic subscribe/publish restricted to public topics (BP-001).
+    if action.starts_with("ipc.topic")
+        || action == "ipc.subscribe"
+        || action == "ipc.publish"
+        || action == "topic.subscribe"
+        || action == "topic.publish"
+    {
+        let topic = request
+            .context
+            .get("topic")
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        if !crate::capability::is_public_topic(topic) {
+            return Some(format!(
+                "browser_policy '{}': browser nodes may only access public topics (got '{topic}')",
+                rule.id
+            ));
+        }
+        return None;
+    }
+
+    // Spawn blocked for browser without elevation (BP-002).
+    if (action == "agent.spawn"
+        || action == "tool.agent_spawn"
+        || action.starts_with("agent.spawn"))
+        && (rule.id == "BP-002" || rule.description.to_lowercase().contains("spawn"))
+    {
+        return Some(format!(
+            "browser_policy '{}': browser nodes cannot spawn without elevation",
+            rule.id
+        ));
+    }
+
+    // Network blocked for browser without elevation (BP-003).
+    if (action == "network.enable" || action == "capability.network")
+        && (rule.id == "BP-003" || rule.description.to_lowercase().contains("network"))
+    {
+        return Some(format!(
+            "browser_policy '{}': browser nodes cannot enable network without elevation",
+            rule.id
+        ));
+    }
+
+    // Context-driven checks when elevating caps (spawn/network flags).
+    if action == "capability.elevate" {
+        if request.context.get("can_spawn").map(|s| s.as_str()) == Some("true")
+            && (rule.id == "BP-002" || rule.description.to_lowercase().contains("spawn"))
+        {
+            return Some(format!(
+                "browser_policy '{}': browser nodes cannot spawn without elevation",
+                rule.id
+            ));
+        }
+        if request.context.get("can_network").map(|s| s.as_str()) == Some("true")
+            && (rule.id == "BP-003" || rule.description.to_lowercase().contains("network"))
+        {
+            return Some(format!(
+                "browser_policy '{}': browser nodes cannot enable network without elevation",
+                rule.id
+            ));
+        }
+    }
+
+    None
+}
+
 /// Governance evaluation result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GovernanceResult {
@@ -420,11 +585,12 @@ impl GovernanceEngine {
     /// Evaluate a governance request.
     ///
     /// Decision logic:
-    /// 1. If any blocking/critical rule applies, deny.
-    /// 2. If effect magnitude exceeds threshold:
-    ///    - If human_approval_required, escalate.
-    ///    - Otherwise deny.
-    /// 3. If any warning rule applies, permit with warning.
+    /// 1. If any active [`GovernanceRuleType::BrowserPolicy`] rule denies the
+    ///    action (platform-aware; independent of effect magnitude), deny.
+    /// 2. If any blocking/critical rule applies and magnitude exceeds threshold,
+    ///    deny (or escalate when human approval is required).
+    /// 3. If any warning rule applies and magnitude exceeds threshold, permit
+    ///    with warning.
     /// 4. Otherwise permit.
     ///
     /// NOTE(eml-swap): wired — Finding #5 (GovernanceScorerModel).
@@ -446,6 +612,26 @@ impl GovernanceEngine {
 
         for rule in self.active_rules() {
             evaluated_rules.push(rule.id.clone());
+
+            // Browser policy rules fire on platform/context match, independent
+            // of effect magnitude (S7 / WEFT-108).
+            if rule.rule_type == GovernanceRuleType::BrowserPolicy {
+                if let Some(reason) = apply_browser_policy_rule(rule, request) {
+                    has_blocking = true;
+                    blocking_reason = reason;
+                    // Keep scanning so evaluated_rules is complete, but the
+                    // first denial reason is retained for the decision text.
+                    if !matches!(
+                        rule.severity,
+                        RuleSeverity::Blocking | RuleSeverity::Critical
+                    ) {
+                        // Non-blocking browser_policy still records the hit as warning.
+                        has_warning = true;
+                        has_blocking = false;
+                    }
+                }
+                continue;
+            }
 
             match rule.severity {
                 RuleSeverity::Blocking | RuleSeverity::Critical => {
@@ -487,6 +673,14 @@ impl GovernanceEngine {
             effect: request.effect.clone(),
             threshold_exceeded,
         }
+    }
+
+    /// Active browser_policy rules only.
+    pub fn browser_policy_rules(&self) -> Vec<&GovernanceRule> {
+        self.rules
+            .iter()
+            .filter(|r| r.active && r.rule_type == GovernanceRuleType::BrowserPolicy)
+            .collect()
     }
 
     /// Get the configured risk threshold.
@@ -814,6 +1008,7 @@ mod tests {
             active: true,
             reference_url: None,
             sop_category: None,
+            rule_type: Default::default(),
         }
     }
 
@@ -1198,6 +1393,7 @@ mod tests {
             active: false,
             reference_url: None,
             sop_category: None,
+            rule_type: Default::default(),
         });
         assert_eq!(engine.active_rules().len(), 0);
     }
@@ -1292,6 +1488,7 @@ mod tests {
                 active: true,
                 reference_url: Some("https://example.com".into()),
                 sop_category: Some("governance".into()),
+                rule_type: Default::default(),
             },
             GovernanceRule {
                 id: "SOP-J001".into(),
@@ -1301,6 +1498,7 @@ mod tests {
                 active: true,
                 reference_url: Some("https://example.com".into()),
                 sop_category: Some("ethics".into()),
+                rule_type: Default::default(),
             },
             GovernanceRule {
                 id: "GOV-001".into(),
@@ -1310,6 +1508,7 @@ mod tests {
                 active: true,
                 reference_url: None,
                 sop_category: None,
+                rule_type: Default::default(),
             },
         ];
         let ethics = GovernanceRule::filter_by_category(&rules, "ethics");
@@ -1333,6 +1532,7 @@ mod tests {
             active: true,
             reference_url: Some("https://example.com/sop".into()),
             sop_category: Some("governance".into()),
+            rule_type: Default::default(),
         };
         let json = serde_json::to_string(&rule).unwrap();
         assert!(json.contains("reference_url"));
@@ -1351,6 +1551,106 @@ mod tests {
         let rule: GovernanceRule = serde_json::from_str(json).unwrap();
         assert!(rule.reference_url.is_none());
         assert!(rule.sop_category.is_none());
+        assert_eq!(rule.rule_type, GovernanceRuleType::General);
+    }
+
+    // ── Browser policy (S7 / WEFT-108) ────────────────────────────────
+
+    #[test]
+    fn browser_policy_default_rules_shape() {
+        let rules = browser_policy_default_rules();
+        assert_eq!(rules.len(), 3);
+        for rule in &rules {
+            assert_eq!(rule.rule_type, GovernanceRuleType::BrowserPolicy);
+            assert_eq!(rule.sop_category.as_deref(), Some("browser_policy"));
+            assert_eq!(rule.severity, RuleSeverity::Blocking);
+            assert!(rule.active);
+        }
+        let ids: Vec<_> = rules.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["BP-001", "BP-002", "BP-003"]);
+    }
+
+    #[test]
+    fn browser_policy_denies_non_public_topic_for_browser() {
+        let mut engine = GovernanceEngine::new(0.7, false);
+        for rule in browser_policy_default_rules() {
+            engine.add_rule(rule);
+        }
+
+        let request = GovernanceRequest::new("browser-agent", "ipc.topic.subscribe")
+            .with_context_entry("platform", "browser")
+            .with_context_entry("topic", "admin.secrets");
+
+        let result = engine.evaluate(&request);
+        assert!(
+            matches!(result.decision, GovernanceDecision::Deny(ref r) if r.contains("public")),
+            "browser non-public topic must be denied, got {:?}",
+            result.decision
+        );
+    }
+
+    #[test]
+    fn browser_policy_allows_public_topic_for_browser() {
+        let mut engine = GovernanceEngine::new(0.7, false);
+        for rule in browser_policy_default_rules() {
+            engine.add_rule(rule);
+        }
+
+        let request = GovernanceRequest::new("browser-agent", "ipc.topic.subscribe")
+            .with_context_entry("platform", "browser")
+            .with_context_entry("topic", "public.events");
+
+        let result = engine.evaluate(&request);
+        assert_eq!(
+            result.decision,
+            GovernanceDecision::Permit,
+            "browser public topic must be permitted, got {:?}",
+            result.decision
+        );
+    }
+
+    #[test]
+    fn browser_policy_does_not_apply_to_native_platform() {
+        let mut engine = GovernanceEngine::new(0.7, false);
+        for rule in browser_policy_default_rules() {
+            engine.add_rule(rule);
+        }
+
+        // Native platform may access non-public topics (browser_policy no-op).
+        let request = GovernanceRequest::new("native-agent", "ipc.topic.subscribe")
+            .with_context_entry("platform", "native")
+            .with_context_entry("topic", "admin.secrets");
+
+        let result = engine.evaluate(&request);
+        assert_eq!(result.decision, GovernanceDecision::Permit);
+    }
+
+    #[test]
+    fn browser_policy_denies_spawn_for_browser() {
+        let mut engine = GovernanceEngine::new(0.7, false);
+        for rule in browser_policy_default_rules() {
+            engine.add_rule(rule);
+        }
+
+        let request = GovernanceRequest::new("browser-agent", "agent.spawn")
+            .with_context_entry("platform", "browser");
+
+        let result = engine.evaluate(&request);
+        assert!(
+            matches!(result.decision, GovernanceDecision::Deny(ref r) if r.contains("spawn")),
+            "browser spawn must be denied, got {:?}",
+            result.decision
+        );
+    }
+
+    #[test]
+    fn filter_by_browser_policy_type() {
+        let rules = browser_policy_default_rules();
+        let filtered =
+            GovernanceRule::filter_by_type(&rules, &GovernanceRuleType::BrowserPolicy);
+        assert_eq!(filtered.len(), 3);
+        let general = GovernanceRule::filter_by_type(&rules, &GovernanceRuleType::General);
+        assert!(general.is_empty());
     }
 
     // ── Genesis rule enforcement tests ──────────────────────────────
@@ -1371,10 +1671,12 @@ mod tests {
             active: true,
             reference_url: None,
             sop_category: category.map(|c| c.into()),
+            rule_type: Default::default(),
         }
     }
 
-    /// Build a GovernanceEngine with all 22 genesis rules matching boot.rs.
+    /// Build a GovernanceEngine with all genesis rules matching boot.rs
+    /// (22 constitutional/SOP + 3 browser_policy = 25).
     fn genesis_engine() -> GovernanceEngine {
         let mut engine = GovernanceEngine::new(0.7, false);
 
@@ -1524,13 +1826,19 @@ mod tests {
             Some("quality"),
         ));
 
+        // ── Browser policy rules (S7 / WEFT-108) ────────────────
+        for rule in browser_policy_default_rules() {
+            engine.add_rule(rule);
+        }
+
         engine
     }
 
     #[test]
-    fn genesis_has_22_rules() {
+    fn genesis_has_25_rules() {
         let engine = genesis_engine();
-        assert_eq!(engine.rule_count(), 22);
+        // 22 constitutional/SOP + 3 browser_policy (BP-001..003)
+        assert_eq!(engine.rule_count(), 25);
     }
 
     #[test]
@@ -1735,11 +2043,11 @@ mod tests {
         let executive = engine.rules_by_branch(&GovernanceBranch::Executive);
         let judicial = engine.rules_by_branch(&GovernanceBranch::Judicial);
 
-        // Legislative: GOV-003, GOV-005, SOP-L001..L006 = 8
+        // Legislative: GOV-003, GOV-005, SOP-L001..L006, BP-001..003 = 11
         assert_eq!(
             legislative.len(),
-            8,
-            "legislative should have 8 rules, got {}",
+            11,
+            "legislative should have 11 rules, got {}",
             legislative.len()
         );
         // Executive: GOV-004, GOV-006, SOP-E001..E005 = 7
@@ -1766,8 +2074,9 @@ mod tests {
             .iter()
             .filter(|r| matches!(r.severity, RuleSeverity::Blocking | RuleSeverity::Critical))
             .count();
-        // GOV-001, GOV-002, GOV-006, SOP-L001, SOP-L005, SOP-E002, SOP-J001 = 7
-        assert_eq!(blocking_count, 7, "should have exactly 7 blocking rules");
+        // GOV-001, GOV-002, GOV-006, SOP-L001, SOP-L005, SOP-E002, SOP-J001,
+        // BP-001, BP-002, BP-003 = 10
+        assert_eq!(blocking_count, 10, "should have exactly 10 blocking rules");
     }
 
     #[test]
@@ -1870,7 +2179,7 @@ mod tests {
     }
 
     #[test]
-    fn genesis_evaluates_all_22_rules() {
+    fn genesis_evaluates_all_25_rules() {
         let engine = genesis_engine();
         let request = GovernanceRequest {
             agent_id: "agent-1".into(),
@@ -1885,8 +2194,8 @@ mod tests {
         let result = engine.evaluate(&request);
         assert_eq!(
             result.evaluated_rules.len(),
-            22,
-            "all 22 rules should be evaluated, got {}",
+            25,
+            "all 25 rules should be evaluated, got {}",
             result.evaluated_rules.len(),
         );
     }
@@ -1899,8 +2208,12 @@ mod tests {
             .iter()
             .filter(|r| r.sop_category.is_some())
             .collect();
-        // 15 SOP rules have categories, 7 GOV rules do not
-        assert_eq!(categorized.len(), 15, "15 SOP rules should have categories");
+        // 15 SOP + 3 browser_policy have categories; 7 GOV rules do not
+        assert_eq!(
+            categorized.len(),
+            18,
+            "15 SOP + 3 browser_policy rules should have categories"
+        );
 
         let categories: std::collections::HashSet<_> = categorized
             .iter()
@@ -1912,6 +2225,7 @@ mod tests {
         assert!(categories.contains("lifecycle"));
         assert!(categories.contains("security"));
         assert!(categories.contains("quality"));
+        assert!(categories.contains("browser_policy"));
     }
 
     #[test]
@@ -2300,6 +2614,7 @@ mod tests {
             active: true,
             reference_url: Some("https://sops.example.com/001".into()),
             sop_category: Some("data-access".into()),
+            rule_type: Default::default(),
         };
         let json = serde_json::to_string(&rule).unwrap();
         let restored: GovernanceRule = serde_json::from_str(&json).unwrap();
@@ -2456,6 +2771,7 @@ mod tests {
                 active: true,
                 reference_url: None,
                 sop_category: None,
+                rule_type: Default::default(),
             });
 
             let request = GovernanceRequest {
@@ -2491,6 +2807,7 @@ mod tests {
                 active: true,
                 reference_url: None,
                 sop_category: None,
+                rule_type: Default::default(),
             });
 
             let request = GovernanceRequest {
@@ -2544,6 +2861,7 @@ mod tests {
                 active: true,
                 reference_url: None,
                 sop_category: None,
+                rule_type: Default::default(),
             });
 
             let request = GovernanceRequest {
