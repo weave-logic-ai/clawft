@@ -489,8 +489,8 @@ pub use service::{
 pub use stream_anchor::{StreamWindowAnchor, TopicAnchor, topic_matches};
 #[cfg(feature = "native")]
 pub use substrate_service::{
-    EgressDenied, GateDenied, Sensitivity as SubstrateSensitivity, SubstrateListEntry,
-    SubstrateListSnapshot, SubstrateReadSnapshot, SubstrateService,
+    AclDenialEvent, EgressDenied, GateDenied, Sensitivity as SubstrateSensitivity,
+    SubstrateListEntry, SubstrateListSnapshot, SubstrateReadSnapshot, SubstrateService,
 };
 pub use supervisor::{AgentSupervisor, EnclaveConfig, SpawnBackend, SpawnRequest, SpawnResult};
 #[cfg(feature = "os-patterns")]

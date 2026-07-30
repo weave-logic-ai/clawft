@@ -3716,9 +3716,13 @@ async fn handle_substrate_subscribe(
     }
 
     let substrate = k.substrate_service().clone();
-    let (id, rx) = substrate
-        .subscribe(p.actor_id.as_deref(), &p.path)
-        .map_err(|e| e.to_string())?;
+    let (id, rx) = match substrate.subscribe(p.actor_id.as_deref(), &p.path) {
+        Ok(pair) => pair,
+        Err(e) => {
+            flush_acl_denials_to_chain(&k);
+            return Err(e.wire_message());
+        }
+    };
     k.event_log().info(
         "substrate",
         format!(
@@ -3761,7 +3765,12 @@ async fn handle_substrate_read(
             })
             .unwrap(),
         ),
-        Err(e) => Response::error(format!("unauthorized: {e}")),
+        Err(e) => {
+            // Flush authenticated ACL denials onto the ExoChain
+            // (ADR-057 / ADR-022: substrate.read.denied).
+            flush_acl_denials_to_chain(&k);
+            Response::error(e.wire_message())
+        }
     }
 }
 
@@ -3814,8 +3823,29 @@ async fn handle_substrate_list(
             };
             Response::success(serde_json::to_value(result).unwrap())
         }
-        Err(e) => Response::error(format!("unauthorized: {e}")),
+        Err(e) => {
+            flush_acl_denials_to_chain(&k);
+            Response::error(e.wire_message())
+        }
     }
+}
+
+/// Append any buffered ADR-057 ACL denial events to the local ExoChain.
+fn flush_acl_denials_to_chain(k: &Kernel<NativePlatform>) {
+    let events = k.substrate_service().take_acl_denials();
+    if events.is_empty() {
+        return;
+    }
+    #[cfg(feature = "exochain")]
+    if let Some(cm) = k.chain_manager() {
+        for ev in events {
+            cm.append("substrate-acl", &ev.kind, Some(ev.payload));
+        }
+        return;
+    }
+    // Without exochain, denials were already recorded in the service
+    // buffer and drained here as a no-op (best-effort).
+    let _ = events;
 }
 
 /// Handle `substrate.publish`: verify node signature, enforce the
