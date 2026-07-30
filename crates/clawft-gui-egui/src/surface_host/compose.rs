@@ -30,13 +30,17 @@
 //! `kernel.kill-process` (matching the extension's ALLOWED_METHODS
 //! allowlist + the daemon handlers added in M1.5.1a).
 //!
-//! Governance intersection (ADR-006 rule 2) is still stubbed: every
-//! node receives `variant_id = 0` and affordances are passed through
-//! unfiltered. The honest GEPA-gated intersection lands with M2's
-//! active-radar loop — at that point [`honest_affordances`] grows a
-//! real implementation and the composer stops dispatching verbs the
-//! gate would have denied.
+//! **WEFT-430 / ADR-006 rule 2**: affordances are intersected with
+//! session permits at compose time via [`honest_affordances`]. The
+//! permit set is the app's manifest `influences` (write-side verbs)
+//! plus session capability grants (ADR-012 / WEFT-429). Surfaces hide
+//! affordances the caller cannot perform — no "attempt and hope".
+//! Full GEPA / goal-aggregate gating (ADR-008) remains M2 (WEFT-277).
 
+use std::collections::BTreeSet;
+
+use clawft_app::manifest::{AppManifest, Permission};
+use clawft_app::permission_covered;
 use clawft_surface::eval::{Value, eval_binding};
 use clawft_surface::substrate::OntologySnapshot;
 use clawft_surface::tree::{AffordanceDecl, AttrValue, IdentityIri, SurfaceNode, SurfaceTree};
@@ -81,6 +85,129 @@ pub struct ComposeOutcome {
     pub dispatches: Vec<PendingDispatch>,
 }
 
+/// Session permits for ADR-006 rule 2 (`affordance ∩ permit`).
+///
+/// Built from the app manifest write-side verb list (`influences`) and
+/// the session's ADR-012 capability grants. When `influences` is
+/// [`None`], the composer is in **open** mode (legacy tests / chip
+/// surfaces without a manifest) and only grant-gated capture verbs
+/// are filtered. When `influences` is [`Some`], every affordance verb
+/// must appear in that set (normalized, `rpc.` prefix stripped).
+#[derive(Debug, Clone)]
+pub struct ComposePermits {
+    /// Allowed write verbs (manifest `influences`). `None` = open.
+    pub influences: Option<BTreeSet<String>>,
+    /// Session capability grants (ADR-012 capture / fs / net).
+    pub grants: Vec<Permission>,
+}
+
+impl Default for ComposePermits {
+    fn default() -> Self {
+        Self::open()
+    }
+}
+
+impl ComposePermits {
+    /// Unrestricted verb set — identity-like for non-capture verbs.
+    /// Used by headless tests and tray-chip surfaces without a
+    /// manifest. Capture-mapped verbs still require a matching grant.
+    pub fn open() -> Self {
+        Self {
+            influences: None,
+            grants: Vec::new(),
+        }
+    }
+
+    /// Deny every write verb (empty influences, no grants).
+    pub fn closed() -> Self {
+        Self {
+            influences: Some(BTreeSet::new()),
+            grants: Vec::new(),
+        }
+    }
+
+    /// Build from an explicit influence list (verbs may carry `rpc.`).
+    pub fn from_influences(verbs: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
+        let influences = verbs
+            .into_iter()
+            .map(|v| normalize_verb(v.as_ref()))
+            .collect();
+        Self {
+            influences: Some(influences),
+            grants: Vec::new(),
+        }
+    }
+
+    /// Manifest `influences` + session grants (WEFT-430 production path).
+    pub fn from_manifest(
+        manifest: &AppManifest,
+        grants: impl IntoIterator<Item = Permission>,
+    ) -> Self {
+        let mut p = Self::from_influences(manifest.influences.iter());
+        p.grants = grants.into_iter().collect();
+        p
+    }
+
+    /// Attach session grants (builder style).
+    pub fn with_grants(mut self, grants: impl IntoIterator<Item = Permission>) -> Self {
+        self.grants = grants.into_iter().collect();
+        self
+    }
+
+    /// Whether an affordance verb is permitted under this set.
+    pub fn allows_verb(&self, verb: &str) -> bool {
+        let bare = normalize_verb(verb);
+
+        // Write-side influences (ADR-015 §influences).
+        if let Some(allowed) = &self.influences
+            && !allowed.contains(&bare)
+        {
+            return false;
+        }
+
+        // Capture / channel grants (ADR-012 / WEFT-429).
+        for req in required_permissions_for_verb(&bare) {
+            if !permission_covered(&req, &self.grants) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Whether a full affordance declaration is permitted.
+    pub fn allows_affordance(&self, aff: &AffordanceDecl) -> bool {
+        self.allows_verb(&aff.verb)
+    }
+}
+
+/// Normalize a WSP / fixture verb for permit matching: strip the
+/// optional `rpc.` dispatch prefix used by surface fixtures.
+pub fn normalize_verb(verb: &str) -> String {
+    verb.strip_prefix("rpc.")
+        .unwrap_or(verb)
+        .to_string()
+}
+
+/// Capture / channel permissions implied by a write verb.
+///
+/// Kernel admin verbs (`kernel.kill-process`, …) need only influences.
+/// Verbs that clearly name a capture channel also require the matching
+/// ADR-012 grant so a surface cannot offer "start mic" without consent.
+fn required_permissions_for_verb(bare_verb: &str) -> Vec<Permission> {
+    let v = bare_verb.to_ascii_lowercase();
+    let mut out = Vec::new();
+    if v.contains("mic") || v.contains("audio.capture") || v.contains("sensor.mic") {
+        out.push(Permission::Mic);
+    }
+    if v.contains("camera") || v.contains("video.capture") {
+        out.push(Permission::Camera);
+    }
+    if v.contains("screen.capture") || v.contains("display.capture") {
+        out.push(Permission::Screen);
+    }
+    out
+}
+
 /// Internal call frame — every recursive `render_*` takes this
 /// together so affordance-emitting primitives can push dispatches
 /// alongside their CanonResponse without plumbing a second argument
@@ -106,6 +233,7 @@ pub struct ComposeOutcome {
 struct Frame<'a> {
     responses: &'a mut Vec<CanonResponse>,
     dispatches: &'a mut Vec<PendingDispatch>,
+    permits: &'a ComposePermits,
 }
 
 impl<'a> Frame<'a> {
@@ -122,21 +250,42 @@ impl<'a> Frame<'a> {
         self.responses.append(&mut child.responses);
         self.dispatches.append(&mut child.dispatches);
     }
+
+    /// Affordance set after ADR-006 rule 2 intersection for this node.
+    fn affordances(&self, node: &SurfaceNode) -> Vec<AffordanceDecl> {
+        honest_affordances(node, &node.affordances, self.permits)
+    }
 }
 
 /// Main entry point. Walks `tree.root` and drives primitives. Returns
 /// a [`ComposeOutcome`] with the flat response list + any pending
 /// RPC dispatches produced by affordance activations this frame.
+///
+/// Uses [`ComposePermits::open`] — unrestricted non-capture verbs.
+/// Production hosts that know the app manifest should call
+/// [`compose_with_permits`] instead.
 pub fn compose(
     tree: &SurfaceTree,
     snapshot: &OntologySnapshot,
     ui: &mut egui::Ui,
+) -> ComposeOutcome {
+    compose_with_permits(tree, snapshot, ui, &ComposePermits::open())
+}
+
+/// Like [`compose`], but filters affordances against `permits`
+/// (ADR-006 rule 2 / WEFT-430).
+pub fn compose_with_permits(
+    tree: &SurfaceTree,
+    snapshot: &OntologySnapshot,
+    ui: &mut egui::Ui,
+    permits: &ComposePermits,
 ) -> ComposeOutcome {
     let mut responses: Vec<CanonResponse> = Vec::new();
     let mut dispatches: Vec<PendingDispatch> = Vec::new();
     let mut frame = Frame {
         responses: &mut responses,
         dispatches: &mut dispatches,
+        permits,
     };
     // Debug-only re-entrancy guard. The `&mut Vec` shape already
     // makes re-entrant `compose` calls a compile error, but we still
@@ -270,6 +419,7 @@ fn render_stack(
             let mut child_frame = Frame {
                 responses: &mut child.responses,
                 dispatches: &mut child.dispatches,
+                permits: frame.permits,
             };
             for c in children {
                 render_node(c, snap, ui, &mut child_frame);
@@ -306,6 +456,7 @@ fn render_strip(
             let mut child_frame = Frame {
                 responses: &mut child.responses,
                 dispatches: &mut child.dispatches,
+                permits: frame.permits,
             };
             for c in children {
                 strip.cell(|ui| {
@@ -337,6 +488,7 @@ fn render_grid(
         let mut child_frame = Frame {
             responses: &mut child.responses,
             dispatches: &mut child.dispatches,
+            permits: frame.permits,
         };
         for (i, c) in children.iter().enumerate() {
             egui::Frame::group(ui.style())
@@ -367,13 +519,15 @@ fn render_chip(
         .and_then(|s| tone_from_str(&s))
         .unwrap_or(ChipTone::Neutral);
 
+    let affs = frame.affordances(node);
     let mut chip = Chip::new(&node.path, label).tone(tone).variant(0);
-    if !node.affordances.is_empty() {
+    if !affs.is_empty() {
         chip = chip.activatable(true);
     }
     let resp = chip.show(ui);
     if resp.inner.clicked()
-        && let Some(dispatch) = build_dispatch(node, None)
+        && let Some(aff) = affs.first()
+        && let Some(dispatch) = build_dispatch(node, aff)
     {
         frame.push_dispatch(dispatch);
     }
@@ -398,13 +552,15 @@ fn render_pressable(
         .unwrap_or(PressableStyle::Primary);
     let enabled = attr_bool(node, "enabled").unwrap_or(true);
 
+    let affs = frame.affordances(node);
     let p = Pressable::new(&node.path, label)
         .style(style)
         .enabled(enabled)
         .variant(0);
     let resp = p.show(ui);
     if resp.inner.clicked()
-        && let Some(dispatch) = build_dispatch(node, None)
+        && let Some(aff) = affs.first()
+        && let Some(dispatch) = build_dispatch(node, aff)
     {
         frame.push_dispatch(dispatch);
     }
@@ -431,21 +587,22 @@ fn render_gauge(
     let resp = g.show(ui);
     frame.push_response(resp);
 
-    // If the node declares affordances, render a small action strip
-    // underneath the gauge. Per-affordance click → dispatch is
+    // If the node has permitted affordances, render a small action
+    // strip underneath the gauge. Per-affordance click → dispatch is
     // collected in a local Vec inside the closure (egui's
     // `ui.horizontal` body cannot borrow `&mut frame`) and merged
-    // afterward. WEFT-249.
-    if !node.affordances.is_empty() {
+    // afterward. WEFT-249. WEFT-430: filtered via honest_affordances.
+    let affs = frame.affordances(node);
+    if !affs.is_empty() {
         let mut local: Vec<PendingDispatch> = Vec::new();
         ui.horizontal(|ui| {
-            for aff in &node.affordances {
+            for aff in &affs {
                 let label = prettify(&aff.name);
                 if ui
                     .small_button(format!("↻ {label}"))
                     .on_hover_text(format!("{} — {}", aff.name, aff.verb))
                     .clicked()
-                    && let Some(dispatch) = build_dispatch(node, Some(aff))
+                    && let Some(dispatch) = build_dispatch(node, aff)
                 {
                     local.push(dispatch);
                 }
@@ -509,6 +666,11 @@ fn render_table(
     // outlives an inner write. Keeps the re-entrancy story trivial.
     // WEFT-249.
     let clicked_row: std::cell::Cell<Option<usize>> = std::cell::Cell::new(None);
+    // WEFT-430: only permit-allowed row affordances make the table
+    // clickable / dispatchable.
+    let affs = frame.affordances(node);
+    let row_affordance = affs.first().cloned();
+    let has_row_affordance = row_affordance.is_some();
 
     let t = Table::new(&node.path, &columns)
         .rows(row_count)
@@ -519,9 +681,9 @@ fn render_table(
                     row.col(|ui| {
                         let cell = val.field(key);
                         let text = cell.to_display_string();
-                        if i == 0 && !node.affordances.is_empty() {
+                        if i == 0 && has_row_affordance {
                             // First column is the click target when
-                            // the table declares row-level affordances.
+                            // the table has a permitted row-level affordance.
                             if ui.selectable_label(false, text).clicked() {
                                 clicked_row.set(Some(idx));
                             }
@@ -535,12 +697,13 @@ fn render_table(
     let (resp, _outcome) = t.show_with_outcome(ui);
     frame.push_response(resp);
 
-    // If a row was clicked and the node has a row-level affordance,
-    // extract the row's `pid` (or the first column's value if there's
-    // no `pid` field) and dispatch. The params shape is per-verb — for
-    // `kernel.kill-process` the daemon expects `{"pid": u64}`.
+    // If a row was clicked and the node has a permitted row-level
+    // affordance, extract the row's `pid` (or the first column's value
+    // if there's no `pid` field) and dispatch. The params shape is
+    // per-verb — for `kernel.kill-process` the daemon expects
+    // `{"pid": u64}`.
     if let Some(idx) = clicked_row.get()
-        && let Some(aff) = node.affordances.first()
+        && let Some(aff) = row_affordance.as_ref()
         && let Some(row_val) = rows.get(idx)
     {
         let params = row_params_for(&aff.verb, row_val);
@@ -902,7 +1065,10 @@ fn render_field(
     ui.ctx().memory_mut(|m| {
         m.data.insert_temp(key, value);
     });
-    if changed && let Some(dispatch) = build_dispatch(node, None) {
+    if changed
+        && let Some(aff) = frame.affordances(node).first().cloned()
+        && let Some(dispatch) = build_dispatch(node, &aff)
+    {
         frame.push_dispatch(dispatch);
     }
     frame.push_response(resp);
@@ -932,7 +1098,8 @@ fn render_toggle(
     let resp = t.show(ui);
     ui.ctx().memory_mut(|m| m.data.insert_temp(key, value));
     if resp.inner.changed()
-        && let Some(dispatch) = build_dispatch(node, None)
+        && let Some(aff) = frame.affordances(node).first().cloned()
+        && let Some(dispatch) = build_dispatch(node, &aff)
     {
         frame.push_dispatch(dispatch);
     }
@@ -987,7 +1154,10 @@ fn render_select(
     let changed = current != prev;
     ui.ctx().memory_mut(|m| m.data.insert_temp(key, current));
     let synth = CanonResponse::from_egui(resp, std::borrow::Cow::Borrowed("ui://select"), 0, None);
-    if changed && let Some(dispatch) = build_dispatch(node, None) {
+    if changed
+        && let Some(aff) = frame.affordances(node).first().cloned()
+        && let Some(dispatch) = build_dispatch(node, &aff)
+    {
         frame.push_dispatch(dispatch);
     }
     frame.push_response(synth);
@@ -1020,7 +1190,8 @@ fn render_slider(
     let resp = s.show(ui);
     ui.ctx().memory_mut(|m| m.data.insert_temp(key, value));
     if resp.inner.changed()
-        && let Some(dispatch) = build_dispatch(node, None)
+        && let Some(aff) = frame.affordances(node).first().cloned()
+        && let Some(dispatch) = build_dispatch(node, &aff)
     {
         frame.push_dispatch(dispatch);
     }
@@ -1042,6 +1213,7 @@ fn render_sheet(
         let mut child_frame = Frame {
             responses: &mut child.responses,
             dispatches: &mut child.dispatches,
+            permits: frame.permits,
         };
         for c in children {
             render_node(c, snap, ui, &mut child_frame);
@@ -1091,26 +1263,26 @@ fn render_modal(
             let mut child_frame = Frame {
                 responses: &mut child.responses,
                 dispatches: &mut child.dispatches,
+                permits: frame.permits,
             };
             for c in &node.children {
                 render_node(c, snap, ui, &mut child_frame);
             }
-            // Action strip: render any modal-level affordances as
-            // small buttons. WEFT-439 specifically wants a
-            // confirm-restart pattern — declaring one or more
-            // affordances on the Modal node yields one button per
-            // affordance with the standard dispatch shape.
-            if !node.affordances.is_empty() {
+            // Action strip: render permitted modal-level affordances
+            // as small buttons. WEFT-439 confirm-restart + WEFT-430
+            // honesty filter — only verbs allowed by permits appear.
+            let affs = honest_affordances(node, &node.affordances, frame.permits);
+            if !affs.is_empty() {
                 ui.separator();
                 let mut local: Vec<PendingDispatch> = Vec::new();
                 ui.horizontal(|ui| {
-                    for aff in &node.affordances {
+                    for aff in &affs {
                         let label = prettify(&aff.name);
                         if ui
                             .small_button(label)
                             .on_hover_text(format!("{} — {}", aff.name, aff.verb))
                             .clicked()
-                            && let Some(dispatch) = build_dispatch(node, Some(aff))
+                            && let Some(dispatch) = build_dispatch(node, aff)
                         {
                             local.push(dispatch);
                         }
@@ -1206,6 +1378,7 @@ fn render_tabs(
                 let mut child_frame = Frame {
                     responses: &mut child.responses,
                     dispatches: &mut child.dispatches,
+                    permits: frame.permits,
                 };
                 if let Some(c) = children.get(idx) {
                     render_node(c, snap, ui, &mut child_frame);
@@ -1247,6 +1420,7 @@ fn render_tree(
             let mut child_frame = Frame {
                 responses: &mut child.responses,
                 dispatches: &mut child.dispatches,
+                permits: frame.permits,
             };
             for c in &node.children {
                 render_node(c, snap, ui, &mut child_frame);
@@ -1307,7 +1481,8 @@ fn render_media(
             _ => None,
         })
         .unwrap_or(MediaFit::Contain);
-    let clickable = !node.affordances.is_empty();
+    let affs = frame.affordances(node);
+    let clickable = !affs.is_empty();
 
     match uri {
         Some(u) if !u.is_empty() => {
@@ -1320,7 +1495,8 @@ fn render_media(
             let resp = media.show(ui);
             if clickable
                 && resp.inner.clicked()
-                && let Some(dispatch) = build_dispatch(node, None)
+                && let Some(aff) = affs.first()
+                && let Some(dispatch) = build_dispatch(node, aff)
             {
                 frame.push_dispatch(dispatch);
             }
@@ -1420,12 +1596,10 @@ fn row_params_for(verb: &str, row: &Value) -> serde_json::Value {
     }
 }
 
-/// Build a dispatch for a node whose primary affordance fires at the
-/// node level (gauge button, chip activate, pressable click). Returns
-/// `None` if the node has no affordances. For a specific affordance,
-/// pass `Some(&aff)`; otherwise the first declared affordance is used.
-fn build_dispatch(node: &SurfaceNode, aff: Option<&AffordanceDecl>) -> Option<PendingDispatch> {
-    let aff = aff.or_else(|| node.affordances.first())?;
+/// Build a dispatch for a permitted affordance that fired at the node
+/// level (gauge button, chip activate, pressable click). Callers must
+/// pass an affordance already filtered by [`honest_affordances`].
+fn build_dispatch(node: &SurfaceNode, aff: &AffordanceDecl) -> Option<PendingDispatch> {
     let verb = strip_rpc_prefix(&aff.verb);
     let params = node_params_for(&aff.verb, node);
     Some(PendingDispatch {
@@ -1504,8 +1678,138 @@ fn attr_number(node: &SurfaceNode, key: &str) -> Option<f64> {
     node.attrs.get(key).and_then(AttrValue::as_number)
 }
 
-/// Exposed so a future governance pass can intersect affordances
-/// against a policy. Currently identity — ADR-006 rule 2 TODO.
-pub fn honest_affordances(_node: &SurfaceNode, raw: &[AffordanceDecl]) -> Vec<AffordanceDecl> {
-    raw.to_vec()
+/// ADR-006 rule 2 — intersect declared affordances with session
+/// permits. Surfaces only expose affordances the caller may perform.
+///
+/// `node` is reserved for future resource-scoped / goal-aggregate
+/// gates (WEFT-277 / ADR-008); the current intersection is
+/// verb-level (`influences`) plus capture-channel grants.
+pub fn honest_affordances(
+    _node: &SurfaceNode,
+    raw: &[AffordanceDecl],
+    permits: &ComposePermits,
+) -> Vec<AffordanceDecl> {
+    raw.iter()
+        .filter(|aff| permits.allows_affordance(aff))
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clawft_surface::tree::IdentityIri;
+
+    fn aff(name: &str, verb: &str) -> AffordanceDecl {
+        AffordanceDecl {
+            name: name.to_string(),
+            verb: verb.to_string(),
+            invocations: vec![],
+            args_schema: None,
+        }
+    }
+
+    fn node_with(affs: Vec<AffordanceDecl>) -> SurfaceNode {
+        let mut n = SurfaceNode::new(IdentityIri::Pressable, "/test");
+        n.affordances = affs;
+        n
+    }
+
+    #[test]
+    fn open_permits_pass_non_capture_verbs() {
+        let n = node_with(vec![
+            aff("kill", "rpc.kernel.kill-process"),
+            aff("restart", "kernel.restart-service"),
+        ]);
+        let out = honest_affordances(&n, &n.affordances, &ComposePermits::open());
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn closed_permits_hide_all_verbs() {
+        let n = node_with(vec![aff("kill", "rpc.kernel.kill-process")]);
+        let out = honest_affordances(&n, &n.affordances, &ComposePermits::closed());
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn influences_allow_only_listed_verbs() {
+        let n = node_with(vec![
+            aff("kill", "rpc.kernel.kill-process"),
+            aff("restart", "rpc.kernel.restart-service"),
+            aff("spy", "rpc.kernel.dump-core"),
+        ]);
+        let permits = ComposePermits::from_influences([
+            "kernel.kill-process",
+            "kernel.restart-service",
+        ]);
+        let out = honest_affordances(&n, &n.affordances, &permits);
+        let names: Vec<_> = out.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, vec!["kill", "restart"]);
+    }
+
+    #[test]
+    fn rpc_prefix_normalized_against_influences() {
+        let n = node_with(vec![aff("kill", "rpc.kernel.kill-process")]);
+        let permits = ComposePermits::from_influences(["kernel.kill-process"]);
+        let out = honest_affordances(&n, &n.affordances, &permits);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "kill");
+    }
+
+    #[test]
+    fn capture_verb_denied_without_grant() {
+        let n = node_with(vec![aff("listen", "sensor.mic.start")]);
+        // Open influences, but no Mic grant → deny.
+        let permits = ComposePermits::open();
+        let out = honest_affordances(&n, &n.affordances, &permits);
+        assert!(out.is_empty(), "mic verb must require Mic grant");
+    }
+
+    #[test]
+    fn capture_verb_allowed_with_grant() {
+        let n = node_with(vec![aff("listen", "sensor.mic.start")]);
+        let permits = ComposePermits::open().with_grants([Permission::Mic]);
+        let out = honest_affordances(&n, &n.affordances, &permits);
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn influences_and_grant_both_required() {
+        let n = node_with(vec![
+            aff("listen", "sensor.mic.start"),
+            aff("kill", "kernel.kill-process"),
+        ]);
+        // Influences allow both, but Mic grant missing → only kill.
+        let permits = ComposePermits::from_influences([
+            "sensor.mic.start",
+            "kernel.kill-process",
+        ]);
+        let out = honest_affordances(&n, &n.affordances, &permits);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "kill");
+
+        let permits = permits.with_grants([Permission::Mic]);
+        let out = honest_affordances(&n, &n.affordances, &permits);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn from_manifest_uses_influences() {
+        // Parse the bundled admin fixture rather than constructing
+        // AppManifest by hand (avoids a direct `semver` dep here).
+        const ADMIN: &str =
+            include_str!("../../../clawft-app/fixtures/weftos-admin.toml");
+        let m = AppManifest::from_toml_str(ADMIN).expect("admin fixture parses");
+        let permits = ComposePermits::from_manifest(&m, []);
+        let n = node_with(vec![
+            aff("kill", "rpc.kernel.kill-process"),
+            aff("restart", "kernel.restart-service"),
+            aff("spy", "kernel.dump-core"),
+        ]);
+        let out = honest_affordances(&n, &n.affordances, &permits);
+        let names: Vec<_> = out.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, vec!["kill", "restart"]);
+        assert!(!out.iter().any(|a| a.name == "spy"));
+    }
 }

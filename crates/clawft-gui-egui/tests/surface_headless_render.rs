@@ -74,10 +74,12 @@ fn admin_panel_emits_expected_primitive_counts() {
 
 #[test]
 fn affordance_kill_is_declared_on_process_table() {
-    // Governance intersection is stubbed in M1.5, so every declared
-    // affordance survives through the tree to the composer boundary.
+    // Surface fixture declares the kill affordance with the daemon
+    // verb (`rpc.kernel.kill-process`). WEFT-430 honest ∩ then filters
+    // against session permits at compose time — declaration lives on
+    // the tree; visibility is a compose concern.
     let tree = parse_surface_toml(FIXTURE).expect("parse");
-    assert!(tree.any_affordance_with_verb("rpc.kernel.kill"));
+    assert!(tree.any_affordance_with_verb("rpc.kernel.kill-process"));
 }
 
 /// Finding 5: a child with `when` evaluating to false must be skipped

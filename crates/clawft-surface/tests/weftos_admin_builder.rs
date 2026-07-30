@@ -61,7 +61,7 @@ fn build_admin_surface_via_rust() -> SurfaceTree {
                         .bind("rows", "$substrate/kernel/processes")
                         .affordance_with_schema(
                             "kill",
-                            "rpc.kernel.kill",
+                            "rpc.kernel.kill-process",
                             &[Invocation::Pointer, Invocation::Voice],
                             "ontology://kernel/kill-process",
                         ),
@@ -185,7 +185,7 @@ fn rust_builder_produces_admin_surface() {
     assert_eq!(tree.count_of("ui://gauge"), 1);
     assert_eq!(tree.count_of("ui://table"), 1);
     assert_eq!(tree.count_of("ui://stream-view"), 1);
-    assert!(tree.any_affordance_with_verb("rpc.kernel.kill"));
+    assert!(tree.any_affordance_with_verb("rpc.kernel.kill-process"));
     assert!(tree.any_affordance_with_verb("rpc.kernel.restart-service"));
 }
 

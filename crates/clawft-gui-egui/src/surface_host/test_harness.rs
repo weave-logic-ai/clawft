@@ -7,7 +7,7 @@
 use clawft_surface::substrate::OntologySnapshot;
 use clawft_surface::tree::SurfaceTree;
 
-use super::compose::compose;
+use super::compose::{ComposePermits, compose_with_permits};
 use crate::canon::CanonResponse;
 
 /// Execute the composer in a headless egui frame. Returns the full
@@ -21,6 +21,8 @@ use crate::canon::CanonResponse;
 /// both responses and pending RPC dispatches. This helper keeps the
 /// historical `Vec<CanonResponse>` return shape for existing tests;
 /// callers who want dispatches should use `render_headless_full`.
+///
+/// Uses [`ComposePermits::open`] (unrestricted non-capture verbs).
 pub fn render_headless(tree: &SurfaceTree, snapshot: OntologySnapshot) -> Vec<CanonResponse> {
     render_headless_full(tree, snapshot).responses
 }
@@ -41,13 +43,23 @@ pub fn render_headless_full(
     tree: &SurfaceTree,
     snapshot: OntologySnapshot,
 ) -> super::compose::ComposeOutcome {
+    render_headless_with_permits(tree, snapshot, &ComposePermits::open())
+}
+
+/// Headless compose with explicit ADR-006 rule 2 permits (WEFT-430).
+#[allow(deprecated)]
+pub fn render_headless_with_permits(
+    tree: &SurfaceTree,
+    snapshot: OntologySnapshot,
+    permits: &ComposePermits,
+) -> super::compose::ComposeOutcome {
     let ctx = egui::Context::default();
     let raw_input = egui::RawInput::default();
     let mut captured: super::compose::ComposeOutcome = super::compose::ComposeOutcome::default();
 
     let _output = ctx.run(raw_input, |ctx| {
         egui::CentralPanel::default().show(ctx, |ui| {
-            captured = compose(tree, &snapshot, ui);
+            captured = compose_with_permits(tree, &snapshot, ui, permits);
         });
     });
 

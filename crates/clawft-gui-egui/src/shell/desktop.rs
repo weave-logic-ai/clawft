@@ -383,6 +383,7 @@ pub(crate) fn render_chip_detail(
     // retired when the composer primitive shipped.
     if let Some(tree) = desk.chip_surfaces.get(&chip) {
         let ontology = live.substrate_snapshot();
+        // Chip surfaces are host chrome (no app manifest) — open permits.
         let outcome = surface_host::compose(tree, &ontology, ui);
         for d in outcome.dispatches {
             log::info!(
@@ -695,8 +696,20 @@ pub(crate) fn render_selected_app(
 
     // Compose against the current substrate snapshot, then dispatch
     // any affordance activations through the RPC bridge.
+    //
+    // WEFT-430: intersect surface affordances with the selected app's
+    // manifest `influences` (write-side permit). Surfaces hide verbs
+    // the app is not allowed to invoke.
     let snapshot = live.substrate_snapshot();
-    let outcome = surface_host::compose(tree, &snapshot, ui);
+    let permits = desk
+        .selected_app
+        .as_ref()
+        .and_then(|id| desk.app_registry.get(id))
+        .map(|installed| {
+            surface_host::ComposePermits::from_manifest(&installed.manifest, std::iter::empty())
+        })
+        .unwrap_or_else(surface_host::ComposePermits::open);
+    let outcome = surface_host::compose_with_permits(tree, &snapshot, ui, &permits);
     for d in outcome.dispatches {
         log::info!(
             "admin app affordance: {} -> {} ({:?}) from {}",

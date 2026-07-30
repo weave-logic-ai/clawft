@@ -37,6 +37,9 @@ influences = [
     "wsp.activate",
     "kernel.restart-service",
     "kernel.kill-process",
+    # Confirm-restart modal affordance (WEFT-439) — must be listed so
+    # WEFT-430 honest ∩ keeps the button visible under manifest permits.
+    "kernel.restart",
 ]
 
 permissions = [
