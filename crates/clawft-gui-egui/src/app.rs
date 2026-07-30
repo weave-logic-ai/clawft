@@ -24,14 +24,54 @@ pub struct ClawftApp {
 /// are ~3 KB instead of the full 700 KB.
 const SYMBOLS_FONT: &[u8] = include_bytes!("../assets/fonts/DejaVuSans-WeftSymbols.ttf");
 
-/// Append the symbol-font subset to every family's fallback list so
-/// painting an icon glyph that the primary font lacks falls through
-/// to a font that has it.
-fn install_symbol_font(ctx: &egui::Context) {
+/// Latin + common UI glyph subset of Ubuntu Light (proportional).
+/// Built with `pyftsubset` from epaint's Ubuntu-Light.ttf; see
+/// `assets/fonts/README.md`. ~38 KB vs ~362 KB full face (WEFT-577).
+#[cfg(target_arch = "wasm32")]
+const FONT_PROPORTIONAL: &[u8] =
+    include_bytes!("../assets/fonts/UbuntuLight-WeftLatin.ttf");
+
+/// Latin + common UI glyph subset of Hack Regular (monospace).
+/// ~84 KB vs ~309 KB full face (WEFT-577).
+#[cfg(target_arch = "wasm32")]
+const FONT_MONO: &[u8] = include_bytes!("../assets/fonts/Hack-WeftLatin.ttf");
+
+/// Install UI fonts for the current target.
+///
+/// - **Native**: start from egui's `default_fonts` pack, then append the
+///   Weft symbol subset as a fallback on every family.
+/// - **Wasm (WEFT-577)**: eframe is built without `default_fonts` so the
+///   ~740 KB NotoEmoji + emoji-icon TTFs never enter the panel bundle.
+///   We install Latin-subset Ubuntu-Light + Hack-Regular plus the
+///   symbol subset (~125 KB total vs ~1.4 MB stock pack).
+fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        fonts.font_data.insert(
+            "ubuntu-weft".to_owned(),
+            Arc::new(egui::FontData::from_static(FONT_PROPORTIONAL)),
+        );
+        fonts.font_data.insert(
+            "hack-weft".to_owned(),
+            Arc::new(egui::FontData::from_static(FONT_MONO)),
+        );
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .insert(0, "ubuntu-weft".to_owned());
+        fonts
+            .families
+            .entry(egui::FontFamily::Monospace)
+            .or_default()
+            .insert(0, "hack-weft".to_owned());
+    }
+
     fonts.font_data.insert(
         "weft-symbols".to_string(),
-        std::sync::Arc::new(egui::FontData::from_static(SYMBOLS_FONT)),
+        Arc::new(egui::FontData::from_static(SYMBOLS_FONT)),
     );
     for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
         fonts
@@ -46,7 +86,7 @@ fn install_symbol_font(ctx: &egui::Context) {
 impl ClawftApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         crate::theming::apply(&cc.egui_ctx);
-        install_symbol_font(&cc.egui_ctx);
+        install_fonts(&cc.egui_ctx);
         egui_extras::install_image_loaders(&cc.egui_ctx);
 
         // Preload the boot logo so the splash appears on frame 1 instead

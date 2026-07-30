@@ -14,9 +14,13 @@ path = "src/lib.rs"
 
 [dependencies]
 # Pure-egui widget stack — no eframe (app runner stays in gui-egui).
-egui = "0.34"
+# WEFT-577: default-features off so panel wasm does not inherit
+# `epaint/default_fonts` via feature unification.
+egui = { version = "0.34", default-features = false }
 # `datepicker` enables `egui_extras::DatePickerButton` (canon `Field::Date`).
-egui_extras = { version = "0.34", features = ["all_loaders", "datepicker"] }
+# WEFT-577: `image` only (not `all_loaders`) — SVG/HTTP/GIF/WebP loaders
+# are unused by canon primitives and inflate the panel wasm bundle.
+egui_extras = { version = "0.34", features = ["image", "datepicker"] }
 # Named direct dep so `FieldValue::Date(jiff::civil::Date)` is part of the
 # public surface without a re-export hop (egui_extras 0.34 datepicker uses jiff).
 jiff = { version = "0.2.23", default-features = false, features = ["std"] }
