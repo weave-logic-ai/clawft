@@ -71,7 +71,8 @@ tracing = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
 dirs = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
-wasmtime = { version = "33", optional = true, default-features = false, features = ["cranelift", "runtime"] }
+# WEFT-551: keep in lockstep with workspace wasmtime pin (45+ / MSRV 1.93).
+wasmtime = { version = "45", optional = true, default-features = false, features = ["cranelift", "runtime"] }
 
 [dev-dependencies]
 wat = "1"

@@ -896,39 +896,16 @@ cmd_serve() {
 #
 # When a followup lands, drop the matching IDs from this array.
 #
-# WEFT-551 — wasmtime 33 → 46+ (19 advisories as of 2026-07-30; was 15 at
-#   gate cut). Real fix is the major bump; no in-range patch on 33.0.2.
-#   Tracking / risk acceptance for the 2026-06 deferral: WEFT-681.
-#   Review date: 2026-10-30 (or when WEFT-551 is claimed — whichever first).
-# WEFT-552 — rustls-webpki: cleared 2026-07-30 (rustls-webpki 0.103.13 only;
-#   ruvector-core 2.3.0 dropped the reqwest 0.11 / webpki 0.101 path).
+# WEFT-551 — DONE (wave0c): wasmtime/wasmtime-wasi 33.0.2 → 45.0.3.
+#   All 19 wasmtime/wasi RUSTSEC IDs cleared from cargo audit; ignores removed.
+# WEFT-552 — rustls-webpki bump (3 advisories)
 # WEFT-553 — unmaintained + unsound (6 advisories)
 CARGO_AUDIT_IGNORES=(
-    # WEFT-551 wasmtime / wasmtime-wasi 33.0.2 (must stay in sync with
+    # WEFT-552 rustls-webpki (must stay in sync with
     # .github/workflows/pr-gates.yml cargo-audit job)
-    --ignore RUSTSEC-2025-0118
-    --ignore RUSTSEC-2026-0006
-    --ignore RUSTSEC-2026-0020
-    --ignore RUSTSEC-2026-0021
-    --ignore RUSTSEC-2026-0085
-    --ignore RUSTSEC-2026-0086
-    --ignore RUSTSEC-2026-0087
-    --ignore RUSTSEC-2026-0088
-    --ignore RUSTSEC-2026-0089
-    --ignore RUSTSEC-2026-0091
-    --ignore RUSTSEC-2026-0092
-    --ignore RUSTSEC-2026-0093
-    --ignore RUSTSEC-2026-0094
-    --ignore RUSTSEC-2026-0095
-    --ignore RUSTSEC-2026-0096
-    # WEFT-551 (cont.) post-2026-04 disclosures; no in-range fix on 33.x.
-    # 0149 HIGH (path_open TRUNCATE bypasses FilePerms::WRITE) — prioritize
-    # in the bump. 0188 (2026-06-24) hardlink/rename FilePerms bypass added
-    # 2026-07-30 under WEFT-681 audit. Target floor for full clear: 46.0.1.
-    --ignore RUSTSEC-2026-0114
-    --ignore RUSTSEC-2026-0149
-    --ignore RUSTSEC-2026-0182
-    --ignore RUSTSEC-2026-0188
+    --ignore RUSTSEC-2026-0098
+    --ignore RUSTSEC-2026-0099
+    --ignore RUSTSEC-2026-0104
     # WEFT-553 unmaintained + unsound
     --ignore RUSTSEC-2017-0008
     --ignore RUSTSEC-2024-0384
@@ -1155,8 +1132,8 @@ ${BOLD}Commands:${NC}
   clippy          Run clippy with warnings-as-errors
   audit           Run cargo audit with 0.7.0 ignore-list (deny warnings).
                   Requires: cargo install --locked cargo-audit
-                  Followups: WEFT-551 (wasmtime), WEFT-553 (unmaintained +
-                  unsound rand). WEFT-552 (rustls-webpki) cleared.
+                  Followups: WEFT-551 (wasmtime), WEFT-552 (rustls-webpki),
+                  WEFT-553 (unmaintained + unsound rand).
   gate            Run full phase gate (12 checks, includes cargo audit)
   bench <crate> <name>
                   Run a `[[bench]] harness = false` target (e.g.
