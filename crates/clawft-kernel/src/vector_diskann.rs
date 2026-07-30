@@ -206,6 +206,10 @@ pub struct DiskAnnBackend {
     /// ID map: u64 -> string key (needed for real index too).
     #[cfg(feature = "diskann")]
     id_map: Mutex<HashMap<u64, String>>,
+    /// Reverse map: string key -> u64 (O(1) resolve of DiskANN hits → numeric id).
+    /// Kept in sync with `id_map` on insert/remove (WEFT-660).
+    #[cfg(feature = "diskann")]
+    key_to_id: Mutex<HashMap<String, u64>>,
     /// Monotonic epoch counter.
     epoch: AtomicU64,
     /// Soft-deleted entries.
@@ -238,6 +242,7 @@ impl DiskAnnBackend {
                 config,
                 index: Mutex::new(index),
                 id_map: Mutex::new(HashMap::new()),
+                key_to_id: Mutex::new(HashMap::new()),
                 epoch: AtomicU64::new(0),
                 tombstones: Mutex::new(HashMap::new()),
                 max_vectors_override: Mutex::new(None),
@@ -315,36 +320,81 @@ impl VectorBackend for DiskAnnBackend {
         vector: &[f32],
         _metadata: serde_json::Value,
     ) -> VectorResult<()> {
+        // Lock order: id_map → key_to_id → tombstones → index.
+        let mut id_map = self.id_map.lock().expect("DiskAnn id_map lock poisoned");
+        let mut key_to_id = self
+            .key_to_id
+            .lock()
+            .expect("DiskAnn key_to_id lock poisoned");
         let mut ts = self.tombstones.lock().expect("tombstones lock poisoned");
         ts.remove(&id);
+
+        // Capacity: live = mapped - tombstoned; allow upsert of existing id.
+        let live = id_map.len().saturating_sub(ts.len());
+        if let Some(max) = self.effective_max()
+            && live >= max
+            && !id_map.contains_key(&id)
+        {
+            return Err(VectorError::StoreFull { max, current: live });
+        }
         drop(ts);
 
         let mut index = self.index.lock().expect("DiskAnn lock poisoned");
-        let mut id_map = self.id_map.lock().expect("DiskAnn id_map lock poisoned");
         index
             .insert(key.to_owned(), vector.to_vec())
             .map_err(|e| VectorError::Other(format!("diskann insert: {e}")))?;
-        id_map.insert(id, key.to_owned());
+        // Keep bidirectional maps in sync (HNSW-style reverse lookup for search).
+        if let Some(old_key) = id_map.insert(id, key.to_owned()) {
+            key_to_id.remove(&old_key);
+        }
+        // If this key was previously bound to another numeric id, drop that binding.
+        if let Some(old_id) = key_to_id.insert(key.to_owned(), id)
+            && old_id != id
+        {
+            id_map.remove(&old_id);
+        }
         self.bump_epoch();
         Ok(())
     }
 
     fn search(&self, query: &[f32], k: usize) -> Vec<SearchResult> {
-        let _ts = self.tombstones.lock().expect("tombstones lock poisoned");
+        // Lock order: key_to_id → tombstones → index (no id_map needed).
+        let key_to_id = self
+            .key_to_id
+            .lock()
+            .expect("DiskAnn key_to_id lock poisoned");
+        let ts = self.tombstones.lock().expect("tombstones lock poisoned");
         let index = self.index.lock().expect("DiskAnn lock poisoned");
+        // Real DiskANN returns string keys + L2² distances (metric vs hybrid
+        // cosine is WEFT-661). Resolve numeric ids via reverse map; skip
+        // unknown/tombstoned keys. Metadata is Null on this path (DiskANN
+        // index does not store caller metadata).
         match index.search(query, k) {
             Ok(results) => results
                 .into_iter()
-                .map(|r| SearchResult::new(0, r.id, r.distance, serde_json::Value::Null))
+                .filter_map(|r| {
+                    let numeric_id = *key_to_id.get(&r.id)?;
+                    if ts.contains_key(&numeric_id) {
+                        return None;
+                    }
+                    Some(SearchResult::new(
+                        numeric_id,
+                        r.id,
+                        r.distance,
+                        serde_json::Value::Null,
+                    ))
+                })
                 .collect(),
             Err(_) => Vec::new(),
         }
     }
 
     fn len(&self) -> usize {
-        let index = self.index.lock().expect("DiskAnn lock poisoned");
+        // Prefer id_map over index.count so soft-deleted rows (still in the
+        // index) are counted correctly against live capacity.
+        let id_map = self.id_map.lock().expect("DiskAnn id_map lock poisoned");
         let ts = self.tombstones.lock().expect("tombstones lock poisoned");
-        index.count().saturating_sub(ts.len())
+        id_map.len().saturating_sub(ts.len())
     }
 
     fn contains(&self, id: u64) -> bool {
@@ -354,18 +404,22 @@ impl VectorBackend for DiskAnnBackend {
     }
 
     fn remove(&self, id: u64) -> bool {
+        // Lock order: id_map → key_to_id → tombstones → index.
+        let mut id_map = self.id_map.lock().expect("DiskAnn id_map lock poisoned");
+        let mut key_to_id = self
+            .key_to_id
+            .lock()
+            .expect("DiskAnn key_to_id lock poisoned");
         let mut ts = self.tombstones.lock().expect("tombstones lock poisoned");
         ts.remove(&id);
         drop(ts);
 
-        let id_map = self.id_map.lock().expect("DiskAnn id_map lock poisoned");
-        if let Some(key) = id_map.get(&id) {
+        if let Some(key) = id_map.remove(&id) {
+            key_to_id.remove(&key);
             let mut index = self.index.lock().expect("DiskAnn lock poisoned");
-            let removed = index.delete(key).unwrap_or(false);
-            if removed {
-                self.bump_epoch();
-            }
-            removed
+            let _ = index.delete(&key);
+            self.bump_epoch();
+            true
         } else {
             false
         }
@@ -391,6 +445,52 @@ impl VectorBackend for DiskAnnBackend {
 
     fn current_epoch(&self) -> u64 {
         self.epoch.load(Ordering::SeqCst)
+    }
+
+    fn soft_delete(&self, id: u64) -> bool {
+        let id_map = self.id_map.lock().expect("DiskAnn id_map lock poisoned");
+        let mut ts = self.tombstones.lock().expect("tombstones lock poisoned");
+        if !id_map.contains_key(&id) || ts.contains_key(&id) {
+            return false;
+        }
+        let epoch = self.bump_epoch();
+        ts.insert(
+            id,
+            Tombstone {
+                deleted_at_epoch: epoch,
+            },
+        );
+        true
+    }
+
+    fn compact(&self, older_than_epoch: u64) -> usize {
+        let mut id_map = self.id_map.lock().expect("DiskAnn id_map lock poisoned");
+        let mut key_to_id = self
+            .key_to_id
+            .lock()
+            .expect("DiskAnn key_to_id lock poisoned");
+        let mut ts = self.tombstones.lock().expect("tombstones lock poisoned");
+        let mut index = self.index.lock().expect("DiskAnn lock poisoned");
+
+        let to_purge: Vec<u64> = ts
+            .iter()
+            .filter(|(_, t)| t.deleted_at_epoch < older_than_epoch)
+            .map(|(&id, _)| id)
+            .collect();
+
+        let count = to_purge.len();
+        for id in to_purge {
+            ts.remove(&id);
+            if let Some(key) = id_map.remove(&id) {
+                key_to_id.remove(&key);
+                let _ = index.delete(&key);
+            }
+        }
+
+        if count > 0 {
+            self.bump_epoch();
+        }
+        count
     }
 
     fn tombstone_count(&self) -> usize {
@@ -610,10 +710,33 @@ mod tests {
     use super::*;
 
     fn make_backend() -> DiskAnnBackend {
-        DiskAnnBackend::new(DiskAnnConfig {
-            max_points: 100,
-            ..DiskAnnConfig::default()
-        })
+        #[cfg(feature = "diskann")]
+        {
+            // Isolated data_path + small dim so unit tests don't share the
+            // default `.weftos/diskann` tree or require 384-d vectors.
+            let dir = std::env::temp_dir().join(format!(
+                "weft-diskann-test-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ));
+            DiskAnnBackend::new(DiskAnnConfig {
+                max_points: 100,
+                dimensions: 3,
+                data_path: dir.to_string_lossy().into_owned(),
+                use_pq: false,
+                ..DiskAnnConfig::default()
+            })
+        }
+        #[cfg(not(feature = "diskann"))]
+        {
+            DiskAnnBackend::new(DiskAnnConfig {
+                max_points: 100,
+                ..DiskAnnConfig::default()
+            })
+        }
     }
 
     // ── Feature/config mismatch (WEFT-656) ─────────────────────────────
@@ -676,16 +799,95 @@ mod tests {
         b.insert(3, "c", &[0.0, 0.0, 1.0], serde_json::json!({}))
             .unwrap();
 
+        // Real DiskANN requires build/flush before search returns hits.
+        #[cfg(feature = "diskann")]
+        b.flush().unwrap();
+
         let results = b.search(&[1.0, 0.0, 0.0], 2);
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].id, 1);
         assert!(results[0].distance < 0.01);
     }
 
+    /// WEFT-660: real DiskANN must resolve distinct numeric ids (not hardcode 0).
+    #[cfg(feature = "diskann")]
+    #[test]
+    fn search_returns_distinct_numeric_ids() {
+        let dir = std::env::temp_dir().join(format!(
+            "weft-660-diskann-ids-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let b = DiskAnnBackend::new(DiskAnnConfig {
+            max_points: 100,
+            dimensions: 3,
+            data_path: dir.to_string_lossy().into_owned(),
+            use_pq: false,
+            ..DiskAnnConfig::default()
+        });
+        b.insert(1, "key-a", &[1.0, 0.0, 0.0], serde_json::json!({}))
+            .unwrap();
+        b.insert(2, "key-b", &[0.0, 1.0, 0.0], serde_json::json!({}))
+            .unwrap();
+        b.insert(3, "key-c", &[0.0, 0.0, 1.0], serde_json::json!({}))
+            .unwrap();
+        b.flush().unwrap();
+
+        let results = b.search(&[1.0, 0.0, 0.0], 3);
+        assert!(
+            results.len() >= 3,
+            "expected ≥3 hits, got {}",
+            results.len()
+        );
+
+        let allowed: std::collections::HashSet<u64> = [1u64, 2, 3].into_iter().collect();
+        let mut seen = std::collections::HashSet::new();
+        for r in &results {
+            assert_ne!(r.id, 0, "hit key={} must not hardcode id=0", r.key);
+            assert!(
+                allowed.contains(&r.id),
+                "unexpected id {} for key {}",
+                r.id,
+                r.key
+            );
+            assert!(
+                seen.insert(r.id),
+                "duplicate numeric id {} (key={})",
+                r.id,
+                r.key
+            );
+        }
+        // Nearest to [1,0,0] should be id 1.
+        assert_eq!(results[0].id, 1);
+        assert_eq!(results[0].key, "key-a");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Stub path: numeric ids stay distinct and non-zero (WEFT-660 regression guard).
+    #[cfg(not(feature = "diskann"))]
+    #[test]
+    fn stub_search_returns_distinct_numeric_ids() {
+        let b = make_backend();
+        b.insert(1, "key-a", &[1.0, 0.0, 0.0], serde_json::json!({}))
+            .unwrap();
+        b.insert(2, "key-b", &[0.0, 1.0, 0.0], serde_json::json!({}))
+            .unwrap();
+        b.insert(3, "key-c", &[0.0, 0.0, 1.0], serde_json::json!({}))
+            .unwrap();
+
+        let results = b.search(&[1.0, 0.0, 0.0], 3);
+        assert_eq!(results.len(), 3);
+        let mut ids: Vec<u64> = results.iter().map(|r| r.id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 2, 3]);
+        assert!(results.iter().all(|r| r.id != 0));
+    }
+
     #[test]
     fn remove_entry() {
         let b = make_backend();
-        b.insert(1, "a", &[1.0, 0.0], serde_json::json!({}))
+        b.insert(1, "a", &[1.0, 0.0, 0.0], serde_json::json!({}))
             .unwrap();
         assert!(b.contains(1));
         assert!(b.remove(1));
@@ -693,12 +895,37 @@ mod tests {
         assert_eq!(b.len(), 0);
     }
 
+    fn small_capacity_backend(max_points: usize) -> DiskAnnBackend {
+        #[cfg(feature = "diskann")]
+        {
+            let dir = std::env::temp_dir().join(format!(
+                "weft-diskann-cap-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ));
+            DiskAnnBackend::new(DiskAnnConfig {
+                max_points,
+                dimensions: 1,
+                data_path: dir.to_string_lossy().into_owned(),
+                use_pq: false,
+                ..DiskAnnConfig::default()
+            })
+        }
+        #[cfg(not(feature = "diskann"))]
+        {
+            DiskAnnBackend::new(DiskAnnConfig {
+                max_points,
+                ..DiskAnnConfig::default()
+            })
+        }
+    }
+
     #[test]
     fn capacity_exceeded() {
-        let b = DiskAnnBackend::new(DiskAnnConfig {
-            max_points: 2,
-            ..DiskAnnConfig::default()
-        });
+        let b = small_capacity_backend(2);
         b.insert(1, "a", &[1.0], serde_json::json!({})).unwrap();
         b.insert(2, "b", &[0.0], serde_json::json!({})).unwrap();
         let result = b.insert(3, "c", &[0.5], serde_json::json!({}));
@@ -707,10 +934,7 @@ mod tests {
 
     #[test]
     fn upsert_does_not_exceed_capacity() {
-        let b = DiskAnnBackend::new(DiskAnnConfig {
-            max_points: 2,
-            ..DiskAnnConfig::default()
-        });
+        let b = small_capacity_backend(2);
         b.insert(1, "a", &[1.0], serde_json::json!({})).unwrap();
         b.insert(2, "b", &[0.0], serde_json::json!({})).unwrap();
         // Updating existing id=1 should succeed.
@@ -743,12 +967,18 @@ mod tests {
         #[cfg(not(feature = "diskann"))]
         assert_eq!(b.backend_name(), "diskann (stub)");
         #[cfg(feature = "diskann")]
-        assert_eq!(b.backend_name(), "diskann");
+        assert_eq!(b.backend_name(), "diskann (ruvector)");
     }
 
     #[test]
     fn flush_noop() {
         let b = make_backend();
+        // Real DiskANN build requires at least one vector; stub flush is pure no-op.
+        #[cfg(feature = "diskann")]
+        {
+            b.insert(1, "a", &[1.0, 0.0, 0.0], serde_json::json!({}))
+                .unwrap();
+        }
         b.flush().unwrap();
     }
 
@@ -758,15 +988,18 @@ mod tests {
     fn epoch_increments_on_insert() {
         let b = make_backend();
         assert_eq!(b.current_epoch(), 0);
-        b.insert(1, "a", &[1.0], serde_json::json!({})).unwrap();
+        b.insert(1, "a", &[1.0, 0.0, 0.0], serde_json::json!({}))
+            .unwrap();
         assert_eq!(b.current_epoch(), 1);
     }
 
     #[test]
     fn insert_with_epoch_rejects_stale() {
         let b = make_backend();
-        b.insert(1, "a", &[1.0], serde_json::json!({})).unwrap();
-        let result = b.insert_with_epoch(2, "b", &[0.0], serde_json::json!({}), 0);
+        b.insert(1, "a", &[1.0, 0.0, 0.0], serde_json::json!({}))
+            .unwrap();
+        let result =
+            b.insert_with_epoch(2, "b", &[0.0, 1.0, 0.0], serde_json::json!({}), 0);
         assert!(matches!(result, Err(VectorError::EpochConflict { .. })));
     }
 
@@ -775,16 +1008,19 @@ mod tests {
     #[test]
     fn soft_delete_hides_from_search() {
         let b = make_backend();
-        b.insert(1, "a", &[1.0, 0.0], serde_json::json!({}))
+        b.insert(1, "a", &[1.0, 0.0, 0.0], serde_json::json!({}))
             .unwrap();
-        b.insert(2, "b", &[0.0, 1.0], serde_json::json!({}))
+        b.insert(2, "b", &[0.0, 1.0, 0.0], serde_json::json!({}))
             .unwrap();
+
+        #[cfg(feature = "diskann")]
+        b.flush().unwrap();
 
         assert!(b.soft_delete(1));
         assert_eq!(b.tombstone_count(), 1);
         assert_eq!(b.len(), 1);
 
-        let results = b.search(&[1.0, 0.0], 5);
+        let results = b.search(&[1.0, 0.0, 0.0], 5);
         for r in &results {
             assert_ne!(r.id, 1);
         }
@@ -793,7 +1029,8 @@ mod tests {
     #[test]
     fn compact_purges_old_tombstones() {
         let b = make_backend();
-        b.insert(1, "a", &[1.0], serde_json::json!({})).unwrap();
+        b.insert(1, "a", &[1.0, 0.0, 0.0], serde_json::json!({}))
+            .unwrap();
         b.soft_delete(1);
         let epoch = b.current_epoch();
         let purged = b.compact(epoch + 1);
@@ -817,10 +1054,7 @@ mod tests {
 
     #[test]
     fn soft_delete_frees_capacity_slot() {
-        let b = DiskAnnBackend::new(DiskAnnConfig {
-            max_points: 2,
-            ..DiskAnnConfig::default()
-        });
+        let b = small_capacity_backend(2);
         b.insert(1, "a", &[1.0], serde_json::json!({})).unwrap();
         b.insert(2, "b", &[0.0], serde_json::json!({})).unwrap();
 
