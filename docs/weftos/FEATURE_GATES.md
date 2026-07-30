@@ -83,3 +83,32 @@ feature combination compiles cleanly.
 2. Guard code with `#[cfg(feature = "your-feature")]`.
 3. Add a row to the table above.
 4. Run `scripts/build.sh gate` to verify all combinations still compile.
+
+## Platform constraints (host OS, not Cargo features)
+
+Some host-local substrate adapters are gated by **target OS**, not by
+Cargo features — Cargo features cannot express "only on Linux."
+
+### Linux-only sysfs adapters (WEFT-420)
+
+| Adapter | Crate path | Probe source |
+|---------|------------|--------------|
+| `network` | `clawft-substrate::network` | `/sys/class/net`, `/sys/class/power_supply` |
+| `bluetooth` | `clawft-substrate::bluetooth` | `/sys/class/bluetooth`, `/sys/class/rfkill` |
+| `rfkill` | `clawft-substrate::rfkill` | `/sys/class/rfkill` (same ABI; related) |
+
+**Compile gate:** modules are native-only (`cfg(not(target_arch = "wasm32"))`).
+**Runtime gate:** `clawft_substrate::sysfs::linux_sysfs_native()`
+(`cfg!(target_os = "linux")`).
+
+| Host | Behaviour |
+|------|-----------|
+| Linux | Real sysfs sampling. Missing hardware → plain `absent` / `present: false` (no platform `cause`). |
+| macOS / Windows / other | Adapter still **opens** so tray/Explorer keep a uniform surface. Emits placeholders with `platform: "unsupported"` and `cause: "sysfs-unavailable"`, and writes `substrate/meta/adapter/<id>/health` with `event: "error"` and that cause in `reason`. |
+| wasm32 | Modules not compiled; GUI uses Snapshot fallback. |
+
+macOS (CoreWLAN / IOBluetooth) and Windows (WinRT) ports are
+**unscheduled**. Do not treat non-Linux `absent` as "no radio" without
+checking `cause == "sysfs-unavailable"` or the adapter-health reason.
+
+Shared helpers live in `crates/clawft-substrate/src/sysfs.rs`.

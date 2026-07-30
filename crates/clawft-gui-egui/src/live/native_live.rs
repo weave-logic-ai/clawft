@@ -79,7 +79,9 @@ fn run_driver(live: Arc<Live>, mut cmd_rx: tokio::sync::mpsc::Receiver<Command>)
         }
 
         // M1.5.1b — host-local network adapter (wifi / ethernet /
-        // battery). Independent of the daemon; reads /sys directly.
+        // battery). Independent of the daemon; reads /sys on Linux.
+        // Non-Linux: opens with absent + adapter-health sysfs-unavailable
+        // (WEFT-420). See clawft_substrate::sysfs.
         let network_adapter: Arc<dyn OntologyAdapter> = Arc::new(NetworkAdapter::new());
         for topic in NETWORK_TOPICS {
             match substrate
@@ -96,8 +98,7 @@ fn run_driver(live: Arc<Live>, mut cmd_rx: tokio::sync::mpsc::Receiver<Command>)
         }
 
         // M1.5.1c — host-local bluetooth adapter. Same pattern as
-        // the network adapter; reads /sys/class/bluetooth and
-        // /sys/class/rfkill.
+        // the network adapter; Linux sysfs only (WEFT-420).
         let bluetooth_adapter: Arc<dyn OntologyAdapter> = Arc::new(BluetoothAdapter::new());
         for topic in BLUETOOTH_TOPICS {
             match substrate
