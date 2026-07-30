@@ -83,5 +83,5 @@ scripts/build.sh check --dry-run
 
 ## Commit
 
-**SHA:** `PLACEHOLDER`  
+**SHA:** `3d7c2c3f6104816538b956dcfdfab1d9aff94871`  
 Branch: `wave0d/weft-114-wasm-ci`
