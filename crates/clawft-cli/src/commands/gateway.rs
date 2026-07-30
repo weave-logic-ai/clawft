@@ -440,7 +440,25 @@ pub async fn run_with_config(
     };
 
     // ── Agent loop (inbound processing) ─────────────────────────────
-    let agent = ctx.into_agent_loop().with_cancel(cancel.clone());
+    // WEFT-67: attach skill-autogen when opted in via skills.autogen.enabled.
+    let mut agent = ctx.into_agent_loop().with_cancel(cancel.clone());
+    if config.skills.autogen.enabled {
+        use clawft_core::agent::skill_autogen::{AutogenConfig, PatternDetector};
+        use std::sync::Mutex;
+        let autogen_cfg = AutogenConfig {
+            enabled: true,
+            threshold: config.skills.autogen.threshold,
+            max_pending: config.skills.autogen.max_pending,
+            install_dir: None,
+        };
+        let detector = Arc::new(Mutex::new(PatternDetector::new(autogen_cfg)));
+        agent = agent.with_autogen(detector);
+        info!(
+            threshold = config.skills.autogen.threshold,
+            max_pending = config.skills.autogen.max_pending,
+            "skill autogen enabled (gateway pattern detection active)"
+        );
+    }
 
     let agent_handle = tokio::spawn(async move {
         if let Err(e) = agent.run().await {

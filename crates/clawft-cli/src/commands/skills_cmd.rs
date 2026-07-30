@@ -17,6 +17,9 @@
 //!   the canonical user skills directory (WEFT-59).
 //! - `weft skills reject <name>` -- discard a `.pending` staged skill
 //!   directory (WEFT-59).
+//! - `weft skills autogen enable|disable|status` -- toggle autonomous skill
+//!   creation and show threshold / max_pending (WEFT-67). Persists to
+//!   user-level `~/.clawft/config.json` (`skills.autogen`).
 //! - `weft skills search <query>` -- search ClawHub for skills.
 //! - `weft skills publish <path>` -- publish a skill to ClawHub.
 //! - `weft skills remote-install <name>` -- install a skill from ClawHub.
@@ -86,6 +89,17 @@ pub enum SkillsAction {
         name: String,
     },
 
+    /// Manage autonomous skill creation (pattern detection → pending skills).
+    ///
+    /// Examples:
+    ///   weft skills autogen enable
+    ///   weft skills autogen disable
+    ///   weft skills autogen status
+    Autogen {
+        #[command(subcommand)]
+        action: AutogenAction,
+    },
+
     /// Search ClawHub for skills.
     Search {
         /// Search query.
@@ -115,6 +129,22 @@ pub enum SkillsAction {
 
     /// Generate a signing key pair for skill publishing.
     Keygen,
+}
+
+/// Subcommands for `weft skills autogen` (WEFT-67).
+#[derive(Subcommand)]
+pub enum AutogenAction {
+    /// Enable autonomous skill creation (`skills.autogen.enabled = true`).
+    ///
+    /// Pattern detection runs during agent turns and stages candidates under
+    /// `~/.clawft/skills/` with a `.pending` marker for human approval.
+    Enable,
+
+    /// Disable autonomous skill creation (`skills.autogen.enabled = false`).
+    Disable,
+
+    /// Show enabled state, threshold, and max_pending from user config.
+    Status,
 }
 
 /// Warning printed when falling back to local execution without daemon.
@@ -153,6 +183,15 @@ pub async fn run(args: SkillsArgs) -> anyhow::Result<()> {
     // Keygen is pure local crypto — no daemon routing needed.
     if matches!(args.action, SkillsAction::Keygen) {
         return skills_keygen();
+    }
+
+    // Autogen config is user-level local config — no daemon routing.
+    if let SkillsAction::Autogen { action } = &args.action {
+        return match action {
+            AutogenAction::Enable => skills_autogen_set_enabled(true),
+            AutogenAction::Disable => skills_autogen_set_enabled(false),
+            AutogenAction::Status => skills_autogen_status(),
+        };
     }
 
     let (ws_dir, user_dir) = discover_skill_dirs();
@@ -285,9 +324,193 @@ pub async fn run(args: SkillsArgs) -> anyhow::Result<()> {
             eprintln!("{DAEMON_FALLBACK_WARNING}");
             skills_remote_install(&name, allow_unsigned, user_dir.as_deref()).await
         }
+        SkillsAction::Autogen { .. } => unreachable!("handled before skill discovery"),
         SkillsAction::Keygen => unreachable!(),
     }
 }
+
+// ── Autogen (WEFT-67) ────────────────────────────────────────────────
+
+/// Resolve the user-level config path used for `skills.autogen` writes.
+///
+/// Order:
+/// 1. `CLAWFT_CONFIG` environment variable (always, even if missing).
+/// 2. `~/.clawft/config.json` (created on write if absent).
+fn user_config_path() -> anyhow::Result<PathBuf> {
+    if let Ok(env_path) = std::env::var("CLAWFT_CONFIG") {
+        let path = PathBuf::from(env_path);
+        if !path.as_os_str().is_empty() {
+            return Ok(path);
+        }
+    }
+    let home = dirs::home_dir().ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot determine home directory. Set $HOME or CLAWFT_CONFIG \
+             to the config.json path."
+        )
+    })?;
+    Ok(home.join(".clawft").join("config.json"))
+}
+
+/// Load raw user config JSON, or `{}` when the file is missing.
+fn load_user_config_raw(path: &Path) -> anyhow::Result<serde_json::Value> {
+    if !path.exists() {
+        return Ok(serde_json::json!({}));
+    }
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
+    if contents.trim().is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    serde_json::from_str(&contents)
+        .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", path.display()))
+}
+
+/// Ensure `skills.autogen` object exists with defaults, return mutable access path.
+fn ensure_autogen_object(
+    root: &mut serde_json::Value,
+) -> anyhow::Result<&mut serde_json::Map<String, serde_json::Value>> {
+    let obj = root
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("config root is not a JSON object"))?;
+
+    let skills = obj
+        .entry("skills")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("skills is not a JSON object"))?;
+
+    let autogen = skills
+        .entry("autogen")
+        .or_insert_with(|| {
+            serde_json::json!({
+                "enabled": false,
+                "threshold": 3,
+                "max_pending": 10
+            })
+        })
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("skills.autogen is not a JSON object"))?;
+
+    // Fill missing fields with AutogenConfig defaults without clobbering
+    // operator-set threshold / max_pending.
+    if !autogen.contains_key("enabled") {
+        autogen.insert("enabled".into(), serde_json::json!(false));
+    }
+    if !autogen.contains_key("threshold") {
+        autogen.insert("threshold".into(), serde_json::json!(3));
+    }
+    if !autogen.contains_key("max_pending") && !autogen.contains_key("maxPending") {
+        autogen.insert("max_pending".into(), serde_json::json!(10));
+    }
+
+    Ok(autogen)
+}
+
+/// Write config with tmp+rename, falling back to direct write on rename failure.
+fn persist_user_config(path: &Path, value: &serde_json::Value) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            anyhow::anyhow!("failed to create config directory {}: {e}", parent.display())
+        })?;
+    }
+    let output = format!("{}\n", serde_json::to_string_pretty(value)?);
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, &output)
+        .map_err(|e| anyhow::anyhow!("failed to write temp config {}: {e}", tmp.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        std::fs::write(path, &output).map_err(|e2| {
+            anyhow::anyhow!(
+                "failed to write {}: rename error {e}; write error {e2}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// Read current autogen settings (defaults when unset).
+fn read_autogen_settings(root: &serde_json::Value) -> (bool, usize, usize) {
+    let autogen = root
+        .get("skills")
+        .and_then(|s| s.get("autogen"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let enabled = autogen
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let threshold = autogen
+        .get("threshold")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(3);
+    let max_pending = autogen
+        .get("max_pending")
+        .or_else(|| autogen.get("maxPending"))
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(10);
+
+    (enabled, threshold, max_pending)
+}
+
+/// Enable or disable skill autogen in user-level config.
+fn skills_autogen_set_enabled(enabled: bool) -> anyhow::Result<()> {
+    let path = user_config_path()?;
+    let mut root = load_user_config_raw(&path)?;
+    {
+        let autogen = ensure_autogen_object(&mut root)?;
+        autogen.insert("enabled".into(), serde_json::json!(enabled));
+    }
+    persist_user_config(&path, &root)?;
+
+    let (enabled_now, threshold, max_pending) = read_autogen_settings(&root);
+    let state = if enabled_now { "enabled" } else { "disabled" };
+    println!("Skill autogen {state}.");
+    println!("  Config:      {}", path.display());
+    println!("  enabled:     {enabled_now}");
+    println!("  threshold:   {threshold}");
+    println!("  max_pending: {max_pending}");
+    if enabled_now {
+        println!();
+        println!(
+            "Pattern detection will stage candidates under ~/.clawft/skills/ \
+             with a .pending marker. Review with 'weft skills pending'."
+        );
+    }
+    Ok(())
+}
+
+/// Print current skill autogen status from user-level config.
+fn skills_autogen_status() -> anyhow::Result<()> {
+    let path = user_config_path()?;
+    let root = load_user_config_raw(&path)?;
+    let (enabled, threshold, max_pending) = read_autogen_settings(&root);
+    let state = if enabled { "enabled" } else { "disabled" };
+
+    println!("Skill autogen status");
+    println!("  state:       {state}");
+    println!("  enabled:     {enabled}");
+    println!("  threshold:   {threshold}");
+    println!("  max_pending: {max_pending}");
+    println!(
+        "  config:      {}{}",
+        path.display(),
+        if path.exists() { "" } else { " (not created yet)" }
+    );
+    println!();
+    println!("Examples:");
+    println!("  weft skills autogen enable");
+    println!("  weft skills autogen disable");
+    println!("  weft skills autogen status");
+
+    Ok(())
+}
+
+
 
 /// Discover workspace and user skill directories.
 fn discover_skill_dirs() -> (Option<PathBuf>, Option<PathBuf>) {
@@ -2034,6 +2257,97 @@ mod tests {
         let h1 = compute_simple_hash(&dir).unwrap();
         let h2 = compute_simple_hash(&dir).unwrap();
         assert_eq!(h1, h2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Autogen (WEFT-67) ────────────────────────────────────────────
+
+    #[test]
+    fn read_autogen_settings_defaults() {
+        let (enabled, threshold, max_pending) = read_autogen_settings(&serde_json::json!({}));
+        assert!(!enabled);
+        assert_eq!(threshold, 3);
+        assert_eq!(max_pending, 10);
+    }
+
+    #[test]
+    fn read_autogen_settings_custom() {
+        let root = serde_json::json!({
+            "skills": {
+                "autogen": {
+                    "enabled": true,
+                    "threshold": 5,
+                    "max_pending": 20
+                }
+            }
+        });
+        let (enabled, threshold, max_pending) = read_autogen_settings(&root);
+        assert!(enabled);
+        assert_eq!(threshold, 5);
+        assert_eq!(max_pending, 20);
+    }
+
+    #[test]
+    fn ensure_autogen_object_preserves_threshold() {
+        let mut root = serde_json::json!({
+            "skills": {
+                "autogen": {
+                    "enabled": false,
+                    "threshold": 9
+                }
+            },
+            "gateway": { "port": 1 }
+        });
+        {
+            let autogen = ensure_autogen_object(&mut root).unwrap();
+            autogen.insert("enabled".into(), serde_json::json!(true));
+        }
+        assert_eq!(root["skills"]["autogen"]["enabled"], true);
+        assert_eq!(root["skills"]["autogen"]["threshold"], 9);
+        assert_eq!(root["skills"]["autogen"]["max_pending"], 10);
+        assert_eq!(root["gateway"]["port"], 1);
+    }
+
+    #[test]
+    fn persist_and_toggle_autogen_roundtrip() {
+        let dir = temp_dir("autogen_cfg");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+
+        // Seed a partial config that must be preserved.
+        std::fs::write(
+            &path,
+            r#"{ "agents": { "defaults": { "model": "test-model" } } }"#,
+        )
+        .unwrap();
+
+        let mut root = load_user_config_raw(&path).unwrap();
+        {
+            let autogen = ensure_autogen_object(&mut root).unwrap();
+            autogen.insert("enabled".into(), serde_json::json!(true));
+            autogen.insert("threshold".into(), serde_json::json!(4));
+        }
+        persist_user_config(&path, &root).unwrap();
+
+        let reloaded = load_user_config_raw(&path).unwrap();
+        let (enabled, threshold, max_pending) = read_autogen_settings(&reloaded);
+        assert!(enabled);
+        assert_eq!(threshold, 4);
+        assert_eq!(max_pending, 10);
+        assert_eq!(reloaded["agents"]["defaults"]["model"], "test-model");
+
+        // Disable
+        {
+            let mut root2 = reloaded;
+            let autogen = ensure_autogen_object(&mut root2).unwrap();
+            autogen.insert("enabled".into(), serde_json::json!(false));
+            persist_user_config(&path, &root2).unwrap();
+        }
+        let disabled = load_user_config_raw(&path).unwrap();
+        let (enabled, _, _) = read_autogen_settings(&disabled);
+        assert!(!enabled);
+        assert_eq!(disabled["agents"]["defaults"]["model"], "test-model");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

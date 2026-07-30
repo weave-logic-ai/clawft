@@ -44,6 +44,18 @@ pub fn topic_help(topic: &str) -> String {
              weft skills list             List all skills (workspace, user, builtin)\n\
              weft skills show <name>      Show skill details\n\
              weft skills install <path>   Install a skill from a local path\n\
+             weft skills autogen enable   Enable autonomous skill creation\n\
+             weft skills autogen disable  Disable autonomous skill creation\n\
+             weft skills autogen status   Show enabled / threshold / max_pending\n\
+             \n\
+             Autogen (opt-in) watches tool-call patterns and stages pending\n\
+             SKILL.md candidates under ~/.clawft/skills/ for human approval.\n\
+             Settings persist to ~/.clawft/config.json under skills.autogen.\n\
+             \n\
+             Examples:\n\
+               weft skills autogen enable\n\
+               weft skills autogen status\n\
+               weft skills pending\n\
              \n\
              Interactive commands:\n\
              \n\
@@ -182,6 +194,8 @@ mod tests {
         let text = topic_help("skills");
         assert!(text.contains("instruction bundles"));
         assert!(text.contains("weft skills list"));
+        assert!(text.contains("weft skills autogen enable"));
+        assert!(text.contains("skills.autogen"));
     }
 
     #[test]

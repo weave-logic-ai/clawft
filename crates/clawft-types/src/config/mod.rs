@@ -14,6 +14,7 @@ pub mod kernel;
 pub mod personality;
 pub mod plugins;
 pub mod policies;
+pub mod skills;
 pub mod voice;
 
 // Re-export channel types at the config level for backward compatibility.
@@ -22,6 +23,7 @@ pub use kernel::*;
 pub use personality::*;
 pub use plugins::*;
 pub use policies::*;
+pub use skills::*;
 pub use voice::*;
 
 use std::collections::HashMap;
@@ -89,6 +91,10 @@ pub struct Config {
     /// grants (WEFT-556 / SC-10).
     #[serde(default)]
     pub plugins: PluginsConfig,
+
+    /// Skill discovery and autonomous skill-generation settings (WEFT-67).
+    #[serde(default)]
+    pub skills: SkillsConfig,
 }
 
 // ── Pipeline ────────────────────────────────────────────────────────────
@@ -873,6 +879,27 @@ mod tests {
         let path = cfg.workspace_path();
         // Should not start with "~" after expansion
         assert!(!path.to_string_lossy().starts_with('~'));
+    }
+
+    #[test]
+    fn skills_autogen_defaults_disabled() {
+        let cfg = Config::default();
+        assert!(!cfg.skills.autogen.enabled);
+        assert_eq!(cfg.skills.autogen.threshold, 3);
+        assert_eq!(cfg.skills.autogen.max_pending, 10);
+    }
+
+    #[test]
+    fn skills_autogen_deserializes_from_json() {
+        let json = r#"{
+            "skills": {
+                "autogen": { "enabled": true, "threshold": 5, "max_pending": 8 }
+            }
+        }"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert!(cfg.skills.autogen.enabled);
+        assert_eq!(cfg.skills.autogen.threshold, 5);
+        assert_eq!(cfg.skills.autogen.max_pending, 8);
     }
 
     #[test]
