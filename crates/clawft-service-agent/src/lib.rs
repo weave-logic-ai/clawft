@@ -53,6 +53,7 @@ mod session_forest;
 pub mod session_tier;
 pub mod spawn_registry;
 pub mod subagent;
+pub mod soul_journal;
 pub mod substrate_budget;
 pub mod substrate_sink;
 pub mod text_structure;
@@ -77,6 +78,7 @@ pub use text_structure::{Argument, EntityKind, EntitySpan, Structure, UtteranceS
 pub use protocol::{AgentChatMessage, AgentChatParams, AgentChatResult, AgentChatToolCall};
 pub use service::{AgentLoopHandle, AgentService, AgentServiceError, ReplySubmitter};
 pub use session_tier::SessionTier;
+pub use soul_journal::SubstrateSoulJournal;
 pub use spawn_registry::{SharedSpawnRegistry, SpawnRegistry, TaskRecord};
 pub use subagent::{DaemonSubagentSpawner, SubagentConfig, SubagentForest};
 pub use substrate_budget::SubstrateBudgetStore;

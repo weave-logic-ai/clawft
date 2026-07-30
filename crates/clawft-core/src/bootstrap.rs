@@ -690,6 +690,11 @@ pub async fn build_daemon_agent_loop(
     // applies workspace level overrides then clamps to the global ceiling.
     workspace_routing: Option<&clawft_types::routing::RoutingConfig>,
     graft_provider: Option<Arc<dyn crate::agent::graft::ContextGraftProvider>>,
+    // WEFT-330: optional soul-journal writer (grant-gated substrate
+    // impl from service-agent, dual-writing `.clawft/SOUL.journal.md`
+    // when the daemon supplies a composite). `None` skips journal
+    // writes (CLI / test path).
+    soul_journal: Option<Arc<dyn crate::agent::soul_journal::SoulJournal>>,
 ) -> Arc<crate::agent::loop_core::AgentLoop<clawft_platform::NativePlatform>> {
     use clawft_platform::NativePlatform;
 
@@ -856,6 +861,14 @@ pub async fn build_daemon_agent_loop(
     // default — no grafting, byte-identical wire.
     if let Some(gp) = graft_provider {
         agent = agent.with_graft_provider(gp);
+    }
+    // WEFT-330: agent-side SOUL.journal write path. When attached, the
+    // loop appends drift observations after successful turns that
+    // fire the documented drift signal. Daemon supplies a
+    // grant-gated substrate writer (+ optional file mirror); CLI /
+    // tests leave this `None`.
+    if let Some(j) = soul_journal {
+        agent = agent.with_soul_journal(j);
     }
     Arc::new(agent)
 }

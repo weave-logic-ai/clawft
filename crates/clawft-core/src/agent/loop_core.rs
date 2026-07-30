@@ -570,6 +570,16 @@ pub struct AgentLoop<P: Platform> {
     /// Late-wired by the daemon over ChainManager; absent = no chain coupling
     /// (memory semantics unchanged). Not feature-gated — the trait is pure.
     turn_ledger: std::sync::OnceLock<Arc<dyn super::turn_ledger::TurnLedger>>,
+    /// Optional soul-journal writer (WEFT-330 / agent-core-v1.1).
+    ///
+    /// When set, [`Self::handle_turn_inner`] consults
+    /// [`super::soul_journal::detect_drift_signal`] after a successful
+    /// tool loop and, on a hit, appends a
+    /// [`super::soul_journal::DriftObservation`] via this writer.
+    /// Failures are logged and swallowed (degrade, don't crash the
+    /// user-visible turn). When `None` (default for CLI / legacy
+    /// callers) the loop never writes journal entries.
+    soul_journal: Option<Arc<dyn super::soul_journal::SoulJournal>>,
 }
 
 impl<P: Platform> AgentLoop<P> {
@@ -617,6 +627,7 @@ impl<P: Platform> AgentLoop<P> {
             sink: Arc::new(InMemorySink::new()),
             daemon_agent_id: None,
             system_prompt_builder: None,
+            soul_journal: None,
             agent_router: None,
             max_delegation_depth: resolve_max_delegation_depth(),
             cost_budget: None,
@@ -730,6 +741,22 @@ impl<P: Platform> AgentLoop<P> {
     /// [`ContextBuilder`] produces, exactly as before.
     pub fn with_system_prompt_builder(mut self, builder: Arc<SystemPromptBuilder>) -> Self {
         self.system_prompt_builder = Some(builder);
+        self
+    }
+
+    /// Attach a [`SoulJournal`](super::soul_journal::SoulJournal) so
+    /// [`Self::handle_turn_inner`] can append identity-drift
+    /// observations after a successful turn (WEFT-330).
+    ///
+    /// When unset (default), the loop never writes journal entries.
+    /// The daemon attaches a grant-gated substrate writer (optionally
+    /// dual-writing `.clawft/SOUL.journal.md`); tests use
+    /// [`InMemorySoulJournal`](super::soul_journal::InMemorySoulJournal).
+    pub fn with_soul_journal(
+        mut self,
+        journal: Arc<dyn super::soul_journal::SoulJournal>,
+    ) -> Self {
+        self.soul_journal = Some(journal);
         self
     }
 
@@ -1491,6 +1518,23 @@ impl<P: Platform> AgentLoop<P> {
         self.sink_append_plain(&conv_id, "assistant", &tool_result.text)
             .await;
 
+        // 12c. Soul-journal drift observation (WEFT-330).
+        //      When a SoulJournal is attached, consult the documented
+        //      drift signal (heuristic user-correction cues and/or
+        //      explicit `soul_journal_observe` metadata). On a hit,
+        //      append one observation. Failures are logged and
+        //      swallowed — a journal write must never abort chat
+        //      (same degrade-don't-crash contract as sink appends).
+        if let Some(ref journal) = self.soul_journal {
+            self.maybe_append_soul_journal(
+                journal.as_ref(),
+                &msg,
+                &tool_result.text,
+                &conv_id,
+            )
+            .await;
+        }
+
         // 13. Persist session metadata to the sink's meta sidecar (§D3).
         //     `SessionManager::save_session` is retired on this path (§D1):
         //     the sink already durably recorded every turn as it happened,
@@ -1784,6 +1828,38 @@ impl<P: Platform> AgentLoop<P> {
             .await
         {
             warn!(error = %e, role, "sink: failed to append turn");
+        }
+    }
+
+    /// WEFT-330: detect a drift signal on this turn and, if present,
+    /// append one [`super::soul_journal::DriftObservation`]. See
+    /// `soul_journal` module docs for the signal table.
+    async fn maybe_append_soul_journal(
+        &self,
+        journal: &dyn super::soul_journal::SoulJournal,
+        msg: &InboundMessage,
+        assistant_text: &str,
+        conv_id: &str,
+    ) {
+        use super::soul_journal::{detect_drift_signal, observation_from_signal};
+
+        let Some((signal, content)) =
+            detect_drift_signal(&msg.content, assistant_text, &msg.metadata)
+        else {
+            return;
+        };
+        let obs = observation_from_signal(signal, content, conv_id);
+        match journal.append(obs).await {
+            Ok(()) => {
+                debug!(conv_id = %conv_id, "soul journal: drift observation appended");
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    conv_id = %conv_id,
+                    "soul journal: append failed (non-fatal)"
+                );
+            }
         }
     }
 
@@ -4944,6 +5020,130 @@ mod tests {
         assert!(!snapshots.is_empty());
         let leading = &snapshots[0][0];
         assert!(!leading.content.contains("[binding-thread-status]"));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    // ── WEFT-330 soul journal ───────────────────────────────────────
+
+    /// Synthetic drift turn (explicit metadata) produces one journal
+    /// entry via the attached `SoulJournal`.
+    #[tokio::test]
+    async fn handle_turn_appends_soul_journal_on_explicit_drift() {
+        use crate::agent::soul_journal::{InMemorySoulJournal, SOUL_JOURNAL_OBSERVE_META_KEY};
+
+        let transport = Arc::new(MockTransport::new("ack — noted."));
+        let (mut agent, dir) =
+            make_agent_loop(transport as Arc<dyn LlmTransport>, "soul_j_explicit").await;
+        let journal = Arc::new(InMemorySoulJournal::new());
+        agent = agent.with_soul_journal(journal.clone());
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            SOUL_JOURNAL_OBSERVE_META_KEY.to_string(),
+            serde_json::json!("noticed bias toward verbose answers"),
+        );
+        let inbound = InboundMessage {
+            channel: "test".into(),
+            sender_id: "user1".into(),
+            chat_id: "chat-soul-explicit".into(),
+            content: "hello".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata,
+        };
+        agent.bus.publish_inbound(inbound).unwrap();
+        let msg = agent.bus.consume_inbound().await.unwrap();
+        let _ = agent
+            .handle_turn(msg, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        let entries = journal.entries();
+        assert_eq!(entries.len(), 1, "explicit drift must produce one entry");
+        assert!(
+            entries[0]
+                .content
+                .contains("noticed bias toward verbose answers"),
+            "entry body must carry the explicit observation"
+        );
+        assert!(!entries[0].entry_id.is_empty());
+        assert!(!entries[0].ts.is_empty());
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// Heuristic correction cue on the user message produces a journal
+    /// entry after the assistant replies.
+    #[tokio::test]
+    async fn handle_turn_appends_soul_journal_on_user_correction_cue() {
+        use crate::agent::soul_journal::{DriftSignal, InMemorySoulJournal};
+
+        let transport = Arc::new(MockTransport::new("Understood — I'll keep answers short."));
+        let (mut agent, dir) =
+            make_agent_loop(transport as Arc<dyn LlmTransport>, "soul_j_heuristic").await;
+        let journal = Arc::new(InMemorySoulJournal::new());
+        agent = agent.with_soul_journal(journal.clone());
+
+        let inbound = InboundMessage {
+            channel: "test".into(),
+            sender_id: "user1".into(),
+            chat_id: "chat-soul-heur".into(),
+            content: "Please don't use bullet lists; I prefer narrative paragraphs."
+                .into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        agent.bus.publish_inbound(inbound).unwrap();
+        let msg = agent.bus.consume_inbound().await.unwrap();
+        let _ = agent
+            .handle_turn(msg, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        let entries = journal.entries();
+        assert_eq!(entries.len(), 1, "heuristic cue must produce one entry");
+        assert!(
+            matches!(entries[0].signal, DriftSignal::UserCorrection { .. }),
+            "signal must be UserCorrection, got {:?}",
+            entries[0].signal
+        );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// Neutral user message does not write a journal entry.
+    #[tokio::test]
+    async fn handle_turn_skips_soul_journal_without_drift_signal() {
+        use crate::agent::soul_journal::InMemorySoulJournal;
+
+        let transport = Arc::new(MockTransport::new("Sunny and 72°F."));
+        let (mut agent, dir) =
+            make_agent_loop(transport as Arc<dyn LlmTransport>, "soul_j_skip").await;
+        let journal = Arc::new(InMemorySoulJournal::new());
+        agent = agent.with_soul_journal(journal.clone());
+
+        let inbound = InboundMessage {
+            channel: "test".into(),
+            sender_id: "user1".into(),
+            chat_id: "chat-soul-skip".into(),
+            content: "What is the weather?".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        agent.bus.publish_inbound(inbound).unwrap();
+        let msg = agent.bus.consume_inbound().await.unwrap();
+        let _ = agent
+            .handle_turn(msg, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert!(
+            journal.entries().is_empty(),
+            "neutral turn must not write journal entries"
+        );
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

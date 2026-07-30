@@ -29,13 +29,20 @@
 //!
 //! ## What this is NOT (yet)
 //!
-//! - **No SOUL.journal write path** — F1 seeds the empty journal
-//!   file and stamps the `soul_journal` derived-write grant; F2's
-//!   `weaver soul promote` reads it, diffs, and applies on
-//!   confirmation. The journal is not consulted on every-turn loads.
 //! - **No hot-reload watcher** — the cached `FileIdentityProvider`
 //!   re-reads on every call (small files; cheap). A `notify`-driven
 //!   watcher arrives when measurement says it earns its keep.
+//!
+//! ## SOUL.journal write path (WEFT-330)
+//!
+//! Agent-side drift observations during chat turns are handled by
+//! [`super::soul_journal`] — hooked from `loop_core` after a
+//! successful turn when the documented drift signal fires. F1 seeds
+//! the empty journal file and stamps the `soul_journal` derived-write
+//! grant; F2's `weaver soul promote` reads substrate entries, diffs,
+//! and applies on confirmation. The journal is still not consulted on
+//! every-turn identity loads (identity = `SOUL.md` + `IDENTITY.md`
+//! only).
 //!
 //! Plan reference: `docs/plans/agent-core-v1.md` Phase D1, F1.
 
