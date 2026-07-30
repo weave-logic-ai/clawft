@@ -285,14 +285,56 @@ impl SessionTier {
         if text.trim().is_empty() {
             return;
         }
+
+        // ADR-062 §1.1 forest dual-write needs classification first so the
+        // WEFT-640 verbalizer can fold act/topic/emotion/voice into the
+        // *embedding* string (passage lane). Raw `text` still lands in the
+        // chunk payload / forest node; only the embedder input is verbalized.
+        let classification = self.classifier.as_ref().map(|c| {
+            let prev_topic = self
+                .forest
+                .as_ref()
+                .and_then(|_| self.conv_forest(conv_id).last_topic());
+            c.classify(role, text, prev_topic.as_deref())
+        });
+        let mut blob = classification.as_ref().map(|cv| cv.to_metadata_value());
+        let mut emotion_label = classification.as_ref().map(|cv| cv.emotion.label.clone());
+        let goal = classification.as_ref().and_then(|cv| cv.goal.clone());
+
+        // Wave 1 §W1.2: voice emotion overwrites the classification emotion axis
+        // (authoritative for VAD) before verbalization + dual-write.
+        if let Some(va) = voice_analysis
+            && let Some(vemo) = va.get("emotion")
+            && let Some(blob_val) = blob.as_mut()
+            && let Some(obj) = blob_val.as_object_mut()
+        {
+            if let Some(cemo) = obj.get_mut("emotion").and_then(|e| e.as_object_mut()) {
+                for k in ["valence", "arousal", "dominance", "label"] {
+                    if let Some(v) = vemo.get(k) {
+                        cemo.insert(k.to_string(), v.clone());
+                    }
+                }
+            }
+            obj.insert("tier".into(), serde_json::Value::String("voice".into()));
+            if let Some(label) = vemo.get("label").and_then(|v| v.as_str()) {
+                emotion_label = Some(label.to_string());
+            }
+        }
+
+        // WEFT-640: embed verbalized atom (text + classification + voice cues)
+        // while storing raw `text` for graft payload / content-hash stability.
+        // Without classifier / voice the verbalizer is identity on `text`.
+        let embed_input = crate::verbalize::verbalize_turn(text, blob.as_ref(), voice_analysis);
+
         let view = self.view(conv_id);
         if let Err(e) = view
-            .index_chunk(
+            .index_chunk_with_embed(
                 &*self.embedder,
                 self.store.as_deref(),
                 chain_seq,
                 kind,
                 text,
+                &embed_input,
                 self.inline_max,
             )
             .await
@@ -306,50 +348,6 @@ impl SessionTier {
         // and in the cosine index regardless.
         if let Some(forest) = &self.forest {
             let conv_forest = self.conv_forest(conv_id);
-
-            // ADR-067 P2: when a classifier is attached (mode != off), derive
-            // the 4-axis `classification` blob synchronously here (design §D1 —
-            // µs of CPU, safe on the witness path). `prev_topic` threads the
-            // conversation's last topic for the continuity carry (design §D2);
-            // the derived `emotion.label` / `goal` feed the dual-write's
-            // EmotionCause / GoalMotivation cross-ref params. With no classifier
-            // the blob is `None`, so no `classification`/`text` keys are written
-            // (legacy behaviour, and text-at-rest stays off — design §6).
-            let classification = self.classifier.as_ref().map(|c| {
-                let prev_topic = conv_forest.last_topic();
-                c.classify(role, text, prev_topic.as_deref())
-            });
-            let mut blob = classification.as_ref().map(|cv| cv.to_metadata_value());
-            let mut emotion_label = classification.as_ref().map(|cv| cv.emotion.label.clone());
-            let goal = classification.as_ref().and_then(|cv| cv.goal.clone());
-
-            // Wave 1 §W1.2: when the caller supplied a per-utterance voice
-            // decomposition, its `emotion` sub-blob is the authoritative emotion
-            // axis (the voice > llm > keyword confidence hierarchy, design §5).
-            // Overwrite ONLY the four canonical VAD fields of the classification
-            // emotion axis (keeping the compact 4-axis contract's shape — the
-            // rich confidence flags / source live in the sibling record) and
-            // bump the blob's `tier` to "voice". Intent/topic stay keyword. The
-            // full record is stored verbatim as a sibling key by
-            // `dual_write_turn`; `emotion_label` (the EmotionCause cross-ref key)
-            // follows the voice label so per-emotion recall groups by it.
-            if let Some(va) = voice_analysis
-                && let Some(vemo) = va.get("emotion")
-                && let Some(blob_val) = blob.as_mut()
-                && let Some(obj) = blob_val.as_object_mut()
-            {
-                if let Some(cemo) = obj.get_mut("emotion").and_then(|e| e.as_object_mut()) {
-                    for k in ["valence", "arousal", "dominance", "label"] {
-                        if let Some(v) = vemo.get(k) {
-                            cemo.insert(k.to_string(), v.clone());
-                        }
-                    }
-                }
-                obj.insert("tier".into(), serde_json::Value::String("voice".into()));
-                if let Some(label) = vemo.get("label").and_then(|v| v.as_str()) {
-                    emotion_label = Some(label.to_string());
-                }
-            }
 
             let node = session_forest::dual_write_turn(
                 &forest.causal,

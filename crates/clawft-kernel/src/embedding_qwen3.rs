@@ -400,6 +400,20 @@ impl EmbeddingProvider for Qwen3EmbeddingProvider {
         Ok(results)
     }
 
+    /// Asymmetric query lane — delegates to the inherent
+    /// [`Self::embed_query`] so trait-object call sites
+    /// (`SessionView::graft_text`) get the instruction prefix.
+    async fn embed_query(&self, query: &str) -> Result<Vec<f32>, EmbeddingError> {
+        // Call the inherent method body directly (avoid infinite recursion on
+        // the trait method of the same name).
+        #[cfg(feature = "onnx-embeddings")]
+        if self.runtime_available {
+            let prompted = format!("{QUERY_INSTRUCTION}{query}");
+            return self.qwen3_embed(&prompted);
+        }
+        self.fallback.embed(query).await
+    }
+
     fn dimensions(&self) -> usize {
         self.dimensions
     }

@@ -56,6 +56,7 @@ pub mod substrate_budget;
 pub mod substrate_sink;
 pub mod text_structure;
 pub mod turn_classifier;
+pub mod verbalize;
 
 pub use enrich_queue::{EnrichJob, EnrichQueue};
 pub use dialogue_act::{Act, Intent, RefinedAct, SpeechActClass};
@@ -76,6 +77,10 @@ pub use subagent::{DaemonSubagentSpawner, SubagentConfig, SubagentForest};
 pub use substrate_budget::SubstrateBudgetStore;
 pub use turn_classifier::{
     arousal_of, ClassificationVector, KeywordTurnClassifier, Tier, TurnClassifier, Vad,
+};
+pub use verbalize::{
+    verbalize_classification, verbalize_classification_value, verbalize_turn,
+    verbalize_voice_analysis,
 };
 pub use substrate_sink::{
     AudioRef, HEARTBEAT_PERIOD, KernelSubstrateClient, KernelTurnAnchor, NoopTurnAnchor,

@@ -82,6 +82,8 @@ pub mod duplex;
 #[cfg(feature = "ecc")]
 pub mod embedding;
 #[cfg(feature = "ecc")]
+pub mod embedding_e5;
+#[cfg(feature = "ecc")]
 pub mod embedding_onnx;
 #[cfg(feature = "ecc")]
 pub mod embedding_qwen3;
@@ -337,6 +339,10 @@ pub use democritus::{DemocritusConfig, DemocritusLoop, DemocritusTickResult};
 pub use embedding::{
     EmbeddingError, EmbeddingProvider, LlmEmbeddingConfig, LlmEmbeddingProvider,
     MockEmbeddingProvider, select_embedding_provider,
+};
+#[cfg(feature = "ecc")]
+pub use embedding_e5::{
+    E5EmbeddingProvider, E5_DIMS, E5_MAX_TOKENS, E5_MODEL_NAME, PASSAGE_PREFIX, QUERY_PREFIX,
 };
 #[cfg(feature = "ecc")]
 pub use embedding_onnx::{
