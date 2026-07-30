@@ -732,6 +732,8 @@ impl<P: Platform> Kernel<P> {
         }
 
         // 7. Register cluster service (when feature-gated ruvector integration is enabled)
+        //    WEFT-120: when mesh is live, subscribe ClusterService to the mesh
+        //    peer-event stream so membership tracks joins/leaves/partitions.
         #[cfg(feature = "cluster")]
         {
             use crate::cluster::ClusterService;
@@ -758,6 +760,20 @@ impl<P: Platform> Kernel<P> {
             ) {
                 Ok(cluster_svc) => {
                     let svc = Arc::new(cluster_svc);
+
+                    // WEFT-120: ClusterService ← mesh peer-event bus.
+                    #[cfg(all(feature = "native", feature = "mesh"))]
+                    {
+                        if let Some(ref mr) = mesh_runtime {
+                            let rx = mr.subscribe_peer_events();
+                            svc.spawn_mesh_peer_listener(rx);
+                            boot_log.push(BootEvent::info(
+                                BootPhase::Network,
+                                "ClusterService subscribed to mesh peer-event stream",
+                            ));
+                        }
+                    }
+
                     if let Err(e) = service_registry.register(svc) {
                         error!(error = %e, "failed to register cluster service");
                     } else {
@@ -774,6 +790,20 @@ impl<P: Platform> Kernel<P> {
                         format!("Cluster service failed: {e}"),
                     ));
                 }
+            }
+        }
+
+        // WEFT-120 fallback: mesh without cluster feature — membership still
+        // tracks live peers via the peer-event bus.
+        #[cfg(all(feature = "native", feature = "mesh", not(feature = "cluster")))]
+        {
+            if let Some(ref mr) = mesh_runtime {
+                let rx = mr.subscribe_peer_events();
+                cluster_membership.spawn_mesh_peer_listener(rx);
+                boot_log.push(BootEvent::info(
+                    BootPhase::Network,
+                    "ClusterMembership subscribed to mesh peer-event stream",
+                ));
             }
         }
 

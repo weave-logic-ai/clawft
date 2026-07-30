@@ -5,9 +5,18 @@
 //! - Static seed peers (always available, no extra deps)
 //! - mDNS for LAN discovery (behind mesh-discovery feature)
 //! - Kademlia DHT for WAN discovery (behind mesh-discovery feature)
+//!
+//! # Peer event stream (WEFT-120)
+//!
+//! Live mesh membership changes are published as [`MeshPeerEvent`] on a
+//! [`MeshPeerEventBus`]. [`crate::mesh_runtime::MeshRuntime`] emits events
+//! on connect / disconnect / health transitions; [`crate::cluster::ClusterMembership`]
+//! (and `ClusterService` when the `cluster` feature is on) subscribe so
+//! cluster membership reflects live mesh state without manual pull-sync.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast;
 
 /// A discovered peer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +45,119 @@ pub enum DiscoverySource {
     PeerExchange,
     /// Manually added by operator.
     Manual,
+}
+
+/// Live mesh peer membership / health change (WEFT-120).
+///
+/// Published by the mesh runtime whenever a peer joins, leaves, or
+/// transitions health state. Consumers (notably `ClusterService` /
+/// `ClusterMembership`) apply these atomically so cluster membership
+/// mirrors mesh state without a pull-based `sync_to_membership` loop.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MeshPeerEvent {
+    /// Peer established a mesh connection (or reconnected after drop).
+    Joined {
+        /// Remote node id.
+        node_id: String,
+        /// Network address if known (seed / discovery map).
+        address: Option<String>,
+        /// Platform label when known.
+        platform: Option<String>,
+    },
+    /// Peer disconnected (graceful leave or connection drop).
+    Left {
+        /// Remote node id.
+        node_id: String,
+    },
+    /// Heartbeat / successful probe — peer is alive.
+    Alive {
+        /// Remote node id.
+        node_id: String,
+    },
+    /// SWIM / heartbeat marked the peer suspect.
+    Suspect {
+        /// Remote node id.
+        node_id: String,
+    },
+    /// Peer confirmed unreachable (partition or dead).
+    Unreachable {
+        /// Remote node id.
+        node_id: String,
+    },
+    /// Peer recovered after Unreachable / Suspect (partition recovery).
+    Recovered {
+        /// Remote node id.
+        node_id: String,
+        /// Address if known on recovery path.
+        address: Option<String>,
+    },
+}
+
+impl MeshPeerEvent {
+    /// Node id referenced by this event.
+    pub fn node_id(&self) -> &str {
+        match self {
+            MeshPeerEvent::Joined { node_id, .. }
+            | MeshPeerEvent::Left { node_id }
+            | MeshPeerEvent::Alive { node_id }
+            | MeshPeerEvent::Suspect { node_id }
+            | MeshPeerEvent::Unreachable { node_id }
+            | MeshPeerEvent::Recovered { node_id, .. } => node_id.as_str(),
+        }
+    }
+}
+
+/// Default capacity for the peer-event broadcast bus.
+const DEFAULT_PEER_EVENT_CAPACITY: usize = 256;
+
+/// Fan-out bus for [`MeshPeerEvent`] (tokio broadcast).
+///
+/// Multiple subscribers (cluster membership, observability, tests) can
+/// each hold a receiver. Slow consumers lag and skip old events rather
+/// than blocking mesh I/O.
+#[derive(Clone, Debug)]
+pub struct MeshPeerEventBus {
+    tx: broadcast::Sender<MeshPeerEvent>,
+}
+
+impl MeshPeerEventBus {
+    /// Create a bus with the default capacity.
+    pub fn new() -> Self {
+        Self::with_capacity(DEFAULT_PEER_EVENT_CAPACITY)
+    }
+
+    /// Create a bus with an explicit ring capacity.
+    pub fn with_capacity(capacity: usize) -> Self {
+        let (tx, _) = broadcast::channel(capacity.max(1));
+        Self { tx }
+    }
+
+    /// Publish a peer event (best-effort; no-op when no receivers).
+    pub fn emit(&self, event: MeshPeerEvent) {
+        let _ = self.tx.send(event);
+    }
+
+    /// Subscribe to the peer-event stream.
+    pub fn subscribe(&self) -> broadcast::Receiver<MeshPeerEvent> {
+        self.tx.subscribe()
+    }
+
+    /// Number of active receivers.
+    pub fn receiver_count(&self) -> usize {
+        self.tx.receiver_count()
+    }
+
+    /// Shared sender for advanced wiring (e.g. external discovery).
+    pub fn sender(&self) -> broadcast::Sender<MeshPeerEvent> {
+        self.tx.clone()
+    }
+}
+
+impl Default for MeshPeerEventBus {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Discovery backend trait.
@@ -248,6 +370,50 @@ mod tests {
         let back: DiscoveredPeer = serde_json::from_str(&json).unwrap();
         assert_eq!(back.node_id, "serde-test");
         assert_eq!(back.source, DiscoverySource::Kademlia);
+    }
+
+    #[test]
+    fn mesh_peer_event_node_id() {
+        let e = MeshPeerEvent::Joined {
+            node_id: "n1".into(),
+            address: Some("127.0.0.1:9".into()),
+            platform: None,
+        };
+        assert_eq!(e.node_id(), "n1");
+        assert_eq!(
+            MeshPeerEvent::Left {
+                node_id: "n2".into()
+            }
+            .node_id(),
+            "n2"
+        );
+    }
+
+    #[tokio::test]
+    async fn peer_event_bus_delivers_to_subscriber() {
+        let bus = MeshPeerEventBus::new();
+        let mut rx = bus.subscribe();
+        bus.emit(MeshPeerEvent::Alive {
+            node_id: "p".into(),
+        });
+        let got = rx.recv().await.unwrap();
+        assert_eq!(
+            got,
+            MeshPeerEvent::Alive {
+                node_id: "p".into()
+            }
+        );
+    }
+
+    #[test]
+    fn mesh_peer_event_serde_roundtrip() {
+        let e = MeshPeerEvent::Recovered {
+            node_id: "r1".into(),
+            address: Some("10.0.0.2:9470".into()),
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        let back: MeshPeerEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, e);
     }
 
     #[test]
