@@ -13,10 +13,10 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use clawft_services::api::{
     AgentAccess, AgentInfo, ApiState, BusAccess, ChannelAccess, ChannelStatusInfo, ConfigAccess,
-    MemoryAccess, MemoryEntryInfo, SessionAccess, SessionDetail, SessionInfo, SkillAccess,
-    SkillInfo, ToolInfo, ToolRegistryAccess, TtsProviderInfo, VoiceAccess, VoiceSettingsInfo,
-    VoiceSettingsUpdate, VoiceStatusInfo, auth::TokenStore, broadcaster::TopicBroadcaster,
-    build_router,
+    InMemoryKernelFacade, MemoryAccess, MemoryEntryInfo, SessionAccess, SessionDetail, SessionInfo,
+    SkillAccess, SkillInfo, ToolInfo, ToolRegistryAccess, TtsProviderInfo, VoiceAccess,
+    VoiceSettingsInfo, VoiceSettingsUpdate, VoiceStatusInfo, auth::TokenStore,
+    broadcaster::TopicBroadcaster, build_router,
 };
 use tower::ServiceExt;
 
@@ -154,6 +154,7 @@ fn make_state() -> (ApiState, Arc<TokenStore>) {
         channels: Arc::new(StubChannels),
         voice: Arc::new(StubVoice),
         broadcaster: Arc::new(TopicBroadcaster::new()),
+        kernel_facade: Arc::new(InMemoryKernelFacade::new()),
     };
     (state, auth)
 }

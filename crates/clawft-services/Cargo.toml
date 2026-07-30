@@ -17,7 +17,17 @@ delegate = ["regex"]
 rvf = []
 test-utils = []
 clawhub = []
-api = ["dep:axum", "dep:axum-extra", "dep:tower-http", "dep:futures-util", "dep:clawft-core", "dep:clawft-platform"]
+# WEFT-122: `http-api` on clawft-kernel exposes `http_facade` types for the axum binding.
+api = [
+    "dep:axum",
+    "dep:axum-extra",
+    "dep:tower-http",
+    "dep:futures-util",
+    "dep:clawft-core",
+    "dep:clawft-platform",
+    "dep:clawft-kernel",
+    "clawft-kernel/http-api",
+]
 
 [dependencies]
 clawft-types = { workspace = true }
@@ -40,6 +50,8 @@ tower-http = { version = "0.6", features = ["cors", "fs", "trace"], optional = t
 futures-util = { workspace = true, optional = true }
 clawft-core = { workspace = true, features = ["native"], optional = true }
 clawft-platform = { workspace = true, optional = true }
+# WEFT-122: http_facade types + KernelEventLog for SSE poll_events loop.
+clawft-kernel = { workspace = true, optional = true, default-features = false, features = ["http-api"] }
 # WEFT-187: clawft.toml / config.json hot-reload for tools.mcp_servers.
 notify = { workspace = true }
 toml = { workspace = true }

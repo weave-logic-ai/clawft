@@ -12,6 +12,7 @@ pub mod config_api;
 pub mod cron_api;
 pub mod delegation;
 pub mod handlers;
+pub mod http_facade_api;
 pub mod memory_api;
 pub mod middleware;
 pub mod monitoring;
@@ -23,6 +24,8 @@ use std::sync::Arc;
 
 use axum::Router;
 use tower_http::trace::TraceLayer;
+
+pub use http_facade_api::{InMemoryKernelFacade, KernelFacadeBackend};
 
 /// Shared state accessible by all API handlers.
 #[derive(Clone)]
@@ -49,6 +52,11 @@ pub struct ApiState {
     pub voice: Arc<dyn VoiceAccess>,
     /// Topic-based broadcaster for real-time WebSocket events.
     pub broadcaster: Arc<broadcaster::TopicBroadcaster>,
+    /// WeftOS kernel HTTP facade backend (WEFT-122).
+    ///
+    /// Drives `/api/status`, chain/vectors/ecc RPC routes, `/events` SSE
+    /// (`poll_events`), and `/custody/witness`.
+    pub kernel_facade: Arc<dyn KernelFacadeBackend>,
 }
 
 /// Trait for tool registry access (decouples API from Platform generics).
@@ -326,7 +334,16 @@ pub fn build_router(state: ApiState, cors_origins: &[String], static_dir: Option
             auth::ws_auth_middleware,
         ));
 
-    let mut router = Router::new().nest("/api", api_router).merge(ws_router);
+    // WEFT-122: top-level kernel facade routes (SSE `/events`, witness).
+    // Auth-gated with the same Bearer middleware as `/api/*`.
+    let facade_top = http_facade_api::kernel_facade_top_routes().route_layer(
+        axum::middleware::from_fn_with_state(state.clone(), auth::auth_middleware),
+    );
+
+    let mut router = Router::new()
+        .nest("/api", api_router)
+        .merge(ws_router)
+        .merge(facade_top);
 
     // Serve built UI as SPA fallback when a static directory is provided.
     if let Some(dir) = static_dir {
