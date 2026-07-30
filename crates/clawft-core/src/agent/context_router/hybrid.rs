@@ -85,7 +85,11 @@ impl ContextRouter for HybridRouter {
                 target: "context_router.hybrid_fallback",
                 "HybridRouter: primary returned empty; falling through to fallback"
             );
-            self.fallback.route(request).await
+            let mut fallback_decision = self.fallback.route(request).await;
+            // WEFT-335: mark the decision so the router-decision log
+            // can seed the v2→v2.5 fallback-rate promotion gate.
+            fallback_decision.fallback_used = true;
+            fallback_decision
         } else {
             primary_decision
         }
@@ -302,7 +306,30 @@ mod tests {
             tool_subset: Some(Vec::new()),
             complexity_hint: 0.0,
             archetype: None,
+            fallback_used: false,
         };
         assert!(!is_empty_decision(&d));
+    }
+
+    #[tokio::test]
+    async fn hybrid_marks_fallback_used_on_fall_through() {
+        let primary = Arc::new(StubRouter {
+            decision: ContextDecision::default(),
+            calls: Mutex::new(0),
+        });
+        let fallback = Arc::new(StubRouter {
+            decision: ContextDecision::new(vec!["rescued".into()], None, 0.0),
+            calls: Mutex::new(0),
+        });
+        let hybrid = HybridRouter::new(primary, fallback);
+        let req = ContextRequest {
+            content: "x".into(),
+            channel: "panel".into(),
+            chat_id: "c".into(),
+            metadata: Default::default(),
+        };
+        let d = hybrid.route(&req).await;
+        assert!(d.fallback_used, "fall-through must set fallback_used");
+        assert_eq!(d.skills, vec!["rescued".to_string()]);
     }
 }

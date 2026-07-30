@@ -716,6 +716,10 @@ pub async fn build_daemon_agent_loop(
     // when the daemon supplies a composite). `None` skips journal
     // writes (CLI / test path).
     soul_journal: Option<Arc<dyn crate::agent::soul_journal::SoulJournal>>,
+    // WEFT-335: optional router-decision observability log (grant-gated
+    // substrate writer under `_derived/agent/routing/recent/`). `None`
+    // skips decision logging (CLI / test path).
+    routing_log: Option<Arc<dyn crate::agent::routing_log::RouterDecisionLog>>,
 ) -> Arc<crate::agent::loop_core::AgentLoop<clawft_platform::NativePlatform>> {
     use clawft_platform::NativePlatform;
 
@@ -893,6 +897,12 @@ pub async fn build_daemon_agent_loop(
     // tests leave this `None`.
     if let Some(j) = soul_journal {
         agent = agent.with_soul_journal(j);
+    }
+    // WEFT-335: log every ContextRouter::route decision for the v1→v2
+    // promotion gate. Daemon supplies a grant-gated substrate writer;
+    // CLI / tests leave this `None`.
+    if let Some(rlog) = routing_log {
+        agent = agent.with_routing_log(rlog);
     }
     Arc::new(agent)
 }

@@ -53,6 +53,7 @@ mod session_forest;
 pub mod session_tier;
 pub mod spawn_registry;
 pub mod subagent;
+pub mod routing_log;
 pub mod soul_journal;
 pub mod substrate_budget;
 pub mod substrate_sink;
@@ -81,6 +82,7 @@ pub use protocol::{
 };
 pub use service::{AgentLoopHandle, AgentService, AgentServiceError, ReplySubmitter};
 pub use session_tier::SessionTier;
+pub use routing_log::SubstrateRouterDecisionLog;
 pub use soul_journal::SubstrateSoulJournal;
 pub use spawn_registry::{SharedSpawnRegistry, SpawnRegistry, TaskRecord};
 pub use subagent::{DaemonSubagentSpawner, SubagentConfig, SubagentForest};
