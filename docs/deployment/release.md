@@ -399,7 +399,7 @@ item that tracks the eventual fix:
 
 | Followup | Cluster | Why deferred |
 |----------|---------|--------------|
-| WEFT-551 | wasmtime 33 → 43 (15 advisory IDs: 14× RUSTSEC-2026 + RUSTSEC-2025-0118) | Major-version bump; component-model API churn affects `clawft-wasm` + `clawft-kernel/runtime/wasm.rs`. |
+| WEFT-551 | wasmtime / wasmtime-wasi 33.0.2 → **46+** (19 advisory IDs as of 2026-07-30: 16× wasmtime + 3× wasmtime-wasi) | Major-version bump; component-model / WASI API churn affects `clawft-wasm` + `clawft-kernel` wasm_runner. No in-range patch on 33.x. **Risk acceptance + exposure analysis: WEFT-681** (review by 2026-10-30). Prioritize RUSTSEC-2026-0149 (HIGH) and residual aarch64 Cranelift RUSTSEC-2026-0096 (CRITICAL) in the bump. |
 | WEFT-552 | rustls-webpki via rustls / reqwest / quinn alignment (3 IDs) | Coordinated TLS-stack upgrade across the workspace. |
 | WEFT-553 | unmaintained crates + unsound `rand` (6 IDs) | Multiple transitive replacements (`bincode`, `instant`, `paste`, `rustls-pemfile` 1, `serial`). |
 
