@@ -35,6 +35,12 @@ pub const EVENT_KIND_WORKSPACE_CONFIG: &str = "workspace.config";
 /// Tool registered in the ToolRegistry.
 pub const EVENT_KIND_TOOL_REGISTER: &str = "tool.register";
 
+/// WASM plugin invocation (fuel/memory observability — WEFT-68).
+///
+/// Mirrors `clawft_plugin::EVENT_KIND_PLUGIN_WASM_INVOKE` so the daemon
+/// chain bridge and plugin host share a vocabulary.
+pub const EVENT_KIND_PLUGIN_WASM_INVOKE: &str = "plugin.wasm.invoke";
+
 /// A pending chain event record for the tracing-to-ChainManager bridge.
 ///
 /// Non-kernel crates cannot call `ChainManager::append()` directly.
@@ -131,6 +137,7 @@ mod tests {
         assert_eq!(EVENT_KIND_WORKSPACE_CREATE, "workspace.create");
         assert_eq!(EVENT_KIND_WORKSPACE_CONFIG, "workspace.config");
         assert_eq!(EVENT_KIND_TOOL_REGISTER, "tool.register");
+        assert_eq!(EVENT_KIND_PLUGIN_WASM_INVOKE, "plugin.wasm.invoke");
     }
 
     #[test]

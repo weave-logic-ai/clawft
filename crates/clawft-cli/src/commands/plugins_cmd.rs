@@ -5,6 +5,8 @@
 //! - `weft plugins create <name>` -- scaffold a new WeftOS plugin crate.
 //! - `weft plugins templates` -- list available plugin templates.
 //! - `weft plugins validate <path>` -- validate a plugin crate structure.
+//! - `weft plugins inspect <name>` -- show aggregate fuel / memory /
+//!   invocation counters for a WASM plugin (WEFT-68).
 
 use std::path::{Path, PathBuf};
 
@@ -39,6 +41,19 @@ pub enum PluginsAction {
         /// Path to plugin crate root.
         path: String,
     },
+    /// Show aggregate fuel, memory, and invocation metrics for a plugin.
+    ///
+    /// Reads the per-plugin snapshot under `~/.clawft/plugins/metrics/`
+    /// (written by the WASM host after each invocation) and prints the
+    /// pinned WEFT-68 metric shape. When no snapshot exists, prints a
+    /// zeroed shape so consumers can still depend on the field set.
+    Inspect {
+        /// Plugin name or id (e.g. `my-analyzer` or `weftos.plugin.my-analyzer`).
+        name: String,
+        /// Emit raw JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Run the `weft plugins` subcommand.
@@ -51,6 +66,7 @@ pub async fn run(args: PluginsArgs) -> anyhow::Result<()> {
         } => create_plugin(&name, &plugin_type, dir.as_deref())?,
         PluginsAction::Templates => list_templates(),
         PluginsAction::Validate { path } => validate_plugin(&path)?,
+        PluginsAction::Inspect { name, json } => inspect_plugin(&name, json)?,
     }
     Ok(())
 }
@@ -403,6 +419,63 @@ fn list_templates() {
     println!("{table}");
 }
 
+// ── Inspect (WEFT-68) ───────────────────────────────────────────────
+
+/// Show aggregate fuel / memory / invocation metrics for a plugin.
+///
+/// Resolution order:
+/// 1. On-disk snapshot under `~/.clawft/plugins/metrics/<name>.json`
+/// 2. In-process global registry (same process as a live host)
+/// 3. Zeroed metrics for `name` (shape still pinned)
+fn inspect_plugin(name: &str, as_json: bool) -> anyhow::Result<()> {
+    use clawft_plugin::{
+        PluginMetrics, default_metrics_dir, global_plugin_metrics, load_metrics,
+    };
+
+    let metrics = if let Some(dir) = default_metrics_dir() {
+        match load_metrics(&dir, name)? {
+            Some(m) => m,
+            None => {
+                // Fall back to in-process registry, then zeroed.
+                global_plugin_metrics().get(name).unwrap_or_else(|| {
+                    // Try common id form `weftos.plugin.<name>` as well.
+                    let alt = format!("weftos.plugin.{name}");
+                    load_metrics(&dir, &alt)
+                        .ok()
+                        .flatten()
+                        .or_else(|| global_plugin_metrics().get(&alt))
+                        .unwrap_or_else(|| PluginMetrics::new(name))
+                })
+            }
+        }
+    } else {
+        global_plugin_metrics()
+            .get(name)
+            .unwrap_or_else(|| PluginMetrics::new(name))
+    };
+
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&metrics)?);
+        return Ok(());
+    }
+
+    println!("Plugin: {}", metrics.plugin_name);
+    if metrics.invocation_count == 0 {
+        println!("  (no invocations recorded yet)");
+    }
+    println!("  invocation_count:       {}", metrics.invocation_count);
+    println!("  fuel_consumed_total:    {}", metrics.fuel_consumed_total);
+    println!("  memory_peak_bytes:      {}", metrics.memory_peak_bytes);
+    println!("  last_fuel_consumed:     {}", metrics.last_fuel_consumed);
+    println!(
+        "  last_memory_peak_bytes: {}",
+        metrics.last_memory_peak_bytes
+    );
+    println!("  last_duration_ms:       {}", metrics.last_duration_ms);
+    println!("  total_duration_ms:      {}", metrics.total_duration_ms);
+    Ok(())
+}
+
 // ── Validate ────────────────────────────────────────────────────────
 
 fn validate_plugin(path: &str) -> anyhow::Result<()> {
@@ -570,5 +643,51 @@ mod tests {
     fn lib_rs_generic_compiles_syntax() {
         let code = lib_rs_template("misc", "generic");
         assert!(code.contains("pub fn init()"));
+    }
+
+    #[test]
+    fn inspect_renders_pinned_metric_shape() {
+        // Simulate a persisted metrics snapshot and ensure inspect's JSON
+        // path exposes every WEFT-68 key (shape pin at the CLI boundary).
+        use clawft_plugin::{PluginMetrics, save_metrics};
+        use std::collections::BTreeSet;
+
+        let dir = tempfile::tempdir().unwrap();
+        let m = PluginMetrics {
+            plugin_name: "inspect-demo".into(),
+            fuel_consumed_total: 1_500,
+            memory_peak_bytes: 32_768,
+            invocation_count: 4,
+            last_fuel_consumed: 300,
+            last_memory_peak_bytes: 16_384,
+            last_duration_ms: 8,
+            total_duration_ms: 40,
+        };
+        save_metrics(dir.path(), &m).unwrap();
+
+        let loaded = clawft_plugin::load_metrics(dir.path(), "inspect-demo")
+            .unwrap()
+            .unwrap();
+        let value = serde_json::to_value(&loaded).unwrap();
+        let obj = value.as_object().unwrap();
+        let keys: BTreeSet<&str> = obj.keys().map(|s| s.as_str()).collect();
+        for required in [
+            "plugin_name",
+            "fuel_consumed_total",
+            "memory_peak_bytes",
+            "invocation_count",
+            "last_fuel_consumed",
+            "last_memory_peak_bytes",
+            "last_duration_ms",
+            "total_duration_ms",
+        ] {
+            assert!(
+                keys.contains(required),
+                "inspect metric shape missing key {required}"
+            );
+        }
+        assert_eq!(loaded.fuel_consumed_total, 1_500);
+        assert_eq!(loaded.invocation_count, 4);
+        assert_eq!(loaded.memory_peak_bytes, 32_768);
     }
 }

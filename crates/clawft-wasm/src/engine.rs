@@ -28,7 +28,7 @@ use crate::sandbox::{
     MAX_WRITE_SIZE, PluginSandbox, validate_env_access, validate_file_access,
     validate_http_request, validate_log_message, validate_wasm_size,
 };
-use clawft_plugin::{PluginError, PluginManifest, PluginResourceConfig};
+use clawft_plugin::{PluginError, PluginManifest, PluginResourceConfig, record_plugin_invocation};
 
 /// Hard maximum fuel budget (10 billion units, ~10s CPU).
 pub const MAX_FUEL_HARD: u64 = 10_000_000_000;
@@ -88,6 +88,11 @@ pub struct PluginExecutionResult {
     pub result: Result<String, PluginError>,
     /// Fuel consumed during execution.
     pub fuel_consumed: u64,
+    /// Peak linear-memory size observed during execution, in bytes.
+    ///
+    /// Zero when the module has no exported `memory` or measurement is
+    /// unavailable (e.g. early failure before instantiate).
+    pub memory_peak: usize,
     /// Wall-clock duration in milliseconds.
     pub duration_ms: u64,
 }
@@ -374,22 +379,26 @@ impl WasmPluginEngine {
         let mut store = match self.create_store(config, sandbox, audit) {
             Ok(s) => s,
             Err(e) => {
-                return PluginExecutionResult {
-                    result: Err(e),
-                    fuel_consumed: 0,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                };
+                return finish_execution(
+                    &config.plugin_id,
+                    Err(e),
+                    0,
+                    0,
+                    start.elapsed().as_millis() as u64,
+                );
             }
         };
 
         let linker = match self.create_linker() {
             Ok(l) => l,
             Err(e) => {
-                return PluginExecutionResult {
-                    result: Err(e),
-                    fuel_consumed: 0,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                };
+                return finish_execution(
+                    &config.plugin_id,
+                    Err(e),
+                    0,
+                    0,
+                    start.elapsed().as_millis() as u64,
+                );
             }
         };
 
@@ -399,11 +408,13 @@ impl WasmPluginEngine {
                 let fuel_consumed = config
                     .fuel_budget
                     .saturating_sub(store.get_fuel().unwrap_or(0));
-                return PluginExecutionResult {
-                    result: Err(PluginError::LoadFailed(format!("instantiate: {e}"))),
+                return finish_execution(
+                    &config.plugin_id,
+                    Err(PluginError::LoadFailed(format!("instantiate: {e}"))),
                     fuel_consumed,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                };
+                    0,
+                    start.elapsed().as_millis() as u64,
+                );
             }
         };
 
@@ -450,13 +461,21 @@ impl WasmPluginEngine {
         let fuel_consumed = config
             .fuel_budget
             .saturating_sub(store.get_fuel().unwrap_or(0));
+        // Best-effort peak memory: size of the exported linear memory after
+        // the call (0 if the module does not export `memory`).
+        let memory_peak = instance
+            .get_memory(&mut store, "memory")
+            .map(|m| m.data_size(&store))
+            .unwrap_or(0);
         let duration_ms = start.elapsed().as_millis() as u64;
 
-        PluginExecutionResult {
+        finish_execution(
+            &config.plugin_id,
             result,
             fuel_consumed,
+            memory_peak,
             duration_ms,
-        }
+        )
     }
 
     /// Execute a raw WASM function with wall-clock timeout enforcement.
@@ -502,6 +521,32 @@ impl WasmPluginEngine {
         store
             .get_fuel()
             .map_err(|e| PluginError::ExecutionFailed(format!("get fuel: {e}")))
+    }
+}
+
+/// Package an execution result, update per-plugin aggregate metrics, and
+/// emit a `plugin.wasm.invoke` chain-event (WEFT-68).
+fn finish_execution(
+    plugin_id: &str,
+    result: Result<String, PluginError>,
+    fuel_consumed: u64,
+    memory_peak: usize,
+    duration_ms: u64,
+) -> PluginExecutionResult {
+    // Observability: per-plugin fuel/memory counters + chain_event surface.
+    // Uses plugin_id as the registry key (manifest id).
+    let _snapshot = record_plugin_invocation(
+        plugin_id,
+        fuel_consumed,
+        memory_peak as u64,
+        duration_ms,
+    );
+
+    PluginExecutionResult {
+        result,
+        fuel_consumed,
+        memory_peak,
+        duration_ms,
     }
 }
 
@@ -1206,6 +1251,83 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// WEFT-68: execute_tool records per-plugin fuel/memory aggregates and
+    /// pins the PluginMetrics shape through the global registry.
+    #[test]
+    fn weft68_execute_tool_records_plugin_metrics() {
+        use clawft_plugin::global_plugin_metrics;
+
+        let engine = WasmPluginEngine::new().unwrap();
+        // Minimal valid module (no execute-tool export — still finishes and
+        // records metrics for the failed-export path).
+        let wasm = wat::parse_str(
+            r#"(module
+                (memory (export "memory") 1)
+                (func (export "run") (nop))
+            )"#,
+        )
+        .unwrap();
+        let module = engine.compile_module(&wasm).unwrap();
+
+        let plugin_id = "weft68-metrics-plugin";
+        let config = PluginConfig::default_for(plugin_id);
+        let sandbox = test_sandbox(vec![], vec![], vec![]);
+        let audit = Arc::new(AuditLog::new(plugin_id.into()));
+
+        // Clear any prior state for this id (shared process-wide registry).
+        if let Some(existing) = global_plugin_metrics().get(plugin_id) {
+            // Re-upsert zeroed by recording from a clean registry isn't
+            // possible for a single key; assert deltas instead.
+            let before = existing.invocation_count;
+            let result = engine.execute_tool(
+                &module,
+                &config,
+                sandbox.clone(),
+                audit.clone(),
+                "noop",
+                "{}",
+            );
+            // Module lacks execute-tool — result is Err, but metrics still
+            // recorded via finish_execution.
+            assert!(result.result.is_err());
+            let after = global_plugin_metrics().get(plugin_id).unwrap();
+            assert_eq!(after.invocation_count, before + 1);
+            assert!(
+                after.memory_peak_bytes >= 65_536 || after.memory_peak_bytes == 0,
+                "memory peak should be page-sized or unmeasured; got {}",
+                after.memory_peak_bytes
+            );
+            // Shape pin
+            let keys: std::collections::BTreeSet<_> = after
+                .to_json_value()
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect();
+            for k in [
+                "plugin_name",
+                "fuel_consumed_total",
+                "memory_peak_bytes",
+                "invocation_count",
+            ] {
+                assert!(keys.contains(k), "missing metric key {k}");
+            }
+            return;
+        }
+
+        let result = engine.execute_tool(&module, &config, sandbox, audit, "noop", "{}");
+        assert!(result.result.is_err());
+        let m = global_plugin_metrics().get(plugin_id).expect("metrics recorded");
+        assert_eq!(m.plugin_name, plugin_id);
+        assert_eq!(m.invocation_count, 1);
+        assert_eq!(result.fuel_consumed, m.last_fuel_consumed);
+        assert_eq!(result.memory_peak as u64, m.last_memory_peak_bytes);
+        // 1 page of linear memory when exported
+        assert_eq!(m.memory_peak_bytes, 65_536);
+    }
+
 
     // -- T43: Memory isolation (conceptual test) --
 
