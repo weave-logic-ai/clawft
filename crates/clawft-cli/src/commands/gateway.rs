@@ -159,6 +159,10 @@ pub async fn run_with_config(
         ctx = ctx.with_routing_layers(global, workspace_routing);
     }
 
+    // WEFT-185: construct a shared AgentBus so multi-agent / A2A hosts
+    // can register workers and run SwarmCoordinator workflows.
+    let _agent_bus = ctx.enable_agent_bus(None);
+
     // Register core tools (built-in + MCP proxied + delegation).
     super::register_core_tools(ctx.tools_mut(), &config, platform.clone()).await;
 

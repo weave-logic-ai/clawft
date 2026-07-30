@@ -20,13 +20,16 @@ pub fn general_help() -> String {
     output.push_str("  skills         Manage skills (list, show, install)\n");
     output.push_str("  tools          Manage tools (list, show, search, deny/allow)\n");
     output.push_str("  agents         Manage agents (list, show, use)\n");
+    output.push_str("  swarm          Multi-agent swarm demo (AgentBus + workers)\n");
     output.push_str("  workspace      Manage workspaces\n");
     output.push_str("  onboard        Initialize clawft config and workspace\n");
     output.push_str("  ui             Start the web dashboard\n");
     output.push_str("  kernel         WeftOS kernel management (status, ps, boot)\n");
     output.push_str("  help           Show help for a topic\n");
     output.push_str("  completions    Generate shell completions\n");
-    output.push_str("\nHelp topics: skills, agents, tools, commands, config, mcp, ui, kernel\n");
+    output.push_str(
+        "\nHelp topics: skills, agents, tools, commands, config, mcp, swarm, ui, kernel\n",
+    );
     output.push_str("  Run 'weft help <topic>' for more information on a topic.");
     output
 }
@@ -78,6 +81,25 @@ pub fn topic_help(topic: &str) -> String {
              \n\
              /agent <name>                Switch to a different agent\n\
              /status                      Show the current agent"
+            .into(),
+        "swarm" => "Multi-agent swarm orchestration over the AgentBus (WEFT-185).\n\
+             \n\
+             A SwarmCoordinator dispatches subtasks to worker agents that run\n\
+             worker_message_loop on per-agent inboxes. Workers may be backed by\n\
+             AgentRuntime (isolated sessions under workspace/sessions/<id>/).\n\
+             \n\
+             CLI commands:\n\
+             \n\
+             weft swarm demo [--workers N] [--workspace PATH]\n\
+             \n\
+             Demo constructs a capacity-bounded AgentBus, spawns N echo workers,\n\
+             runs SwarmCoordinator::dispatch_subtask for each, collects replies,\n\
+             and shuts down cleanly. No LLM required.\n\
+             \n\
+             Examples:\n\
+               weft swarm demo\n\
+               weft swarm demo --workers 4\n\
+               cargo run -p clawft-core --example swarm_demo --features native -- 3"
             .into(),
         "tools" => "Tools are functions the agent can call during conversation.\n\
              \n\

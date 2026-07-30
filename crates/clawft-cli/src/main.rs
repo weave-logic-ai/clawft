@@ -101,6 +101,9 @@ enum Commands {
     /// Manage agents (list, show, use).
     Agents(commands::agents_cmd::AgentsArgs),
 
+    /// Multi-agent swarm demo (AgentBus + SwarmCoordinator).
+    Swarm(commands::swarm_cmd::SwarmArgs),
+
     /// Manage workspaces.
     Workspace(commands::workspace_cmd::WorkspaceArgs),
 
@@ -495,6 +498,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Skills(args) => commands::skills_cmd::run(args).await?,
         Commands::Tools(args) => commands::tools_cmd::run(args).await?,
         Commands::Agents(args) => commands::agents_cmd::run(args).await?,
+        Commands::Swarm(args) => commands::swarm_cmd::run(args).await?,
         Commands::Workspace(args) => commands::workspace_cmd::run(args).await?,
         Commands::Onboard(args) => commands::onboard::run(args).await?,
         Commands::Analyze(args) => commands::analyze_cmd::run(args).await?,
@@ -865,6 +869,12 @@ mod tests {
     #[cfg(feature = "services")]
     #[test]
     // ── MCP manage subcommand parsing (WEFT-188) ───────────────────
+
+    #[test]
+    fn cli_swarm_demo_parses() {
+        let result = Cli::try_parse_from(["weft", "swarm", "demo", "--workers", "4"]);
+        assert!(result.is_ok(), "parse error: {}", result.err().unwrap());
+    }
 
     #[test]
     fn cli_mcp_list_parses() {
