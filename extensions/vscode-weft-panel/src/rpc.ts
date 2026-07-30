@@ -22,6 +22,14 @@ export interface RpcRequest {
     method: string;
     params?: unknown;
     id?: string;
+    /**
+     * Optional WEFT-479 bearer / scope token. When set, forwarded on the
+     * UDS JSON-RPC envelope as `auth` so the daemon's capability gate
+     * can re-check. Multi-user panel sessions (WEFT-495 / ADR-071) set
+     * this from host-held `PanelSession` scopes; the webview never
+     * supplies it.
+     */
+    auth?: string;
 }
 
 export interface RpcResponse {
@@ -91,6 +99,12 @@ export function rpcCall(
             method: req.method,
             params: req.params ?? null,
             id: req.id,
+            // WEFT-495: only include `auth` when the host attached one
+            // (multi-user panel session). Omitting keeps single-user
+            // wire-compatible with anonymous daemon posture.
+            ...(req.auth != null && req.auth.length > 0
+                ? { auth: req.auth }
+                : {}),
         };
 
         let buffer = "";

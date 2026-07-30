@@ -209,9 +209,13 @@ inline markers.
   durable config; daemon RPCs `mcp.add` / `mcp.list` / `mcp.remove` /
   `mcp.reload` (+ `tools.mcp` alias) own the live shared registry. Preferred
   path: CLI writes config → `mcp.reload`.
-- **WASM panel auth.** The webview connects to the same UDS the local user
-  owns; there is no token, capability, or per-panel identity on the proxy
-  layer. Multi-user kernels (per ADR-042 modes) would need to add this.
+- **WASM panel auth.** **Closed by WEFT-495 / ADR-071 (2026-07-30).**
+  Per-panel host-held token + CapScope model on the webview proxy,
+  gated behind multi-user mode (`WEFTOS_MULTI_USER` / `weft.multiUser`).
+  Default viewer scopes `{read, chat}`; write/admin denied-by-identity.
+  Reuses WEFT-479 wire `auth` literal scopes. (Audit originally cited
+  ADR-042 for multi-user; ADR-042 is cognitive Act/Analyze/Generate —
+  tenancy is a separate deployment mode documented in ADR-071.)
 - **`IdeToolProvider` backend.** The provider declares 5 tools with detailed
   schemas, but the audit did not locate a backend that actually opens files
   / applies edits / fetches diagnostics from a connected IDE. The dispatcher

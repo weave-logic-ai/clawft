@@ -72,6 +72,28 @@ Any other method request from the webview is rejected with
 `method not allowed: <method>`. Extending the allowlist happens in
 `extensions/vscode-weft-panel/src/extension.ts` (`ALLOWED_METHODS`).
 
+## 8. Multi-user panel auth (WEFT-495 / ADR-071)
+
+Default is **single-user** (0.7 posture): allowlist only, no panel token.
+
+Enable multi-user with either:
+
+```bash
+export WEFTOS_MULTI_USER=1
+# or VSCode setting: weft.multiUser = true
+```
+
+When multi-user is on, each panel gets a host-held session with default
+scopes `{read, chat}`. Methods requiring `write` or `admin` are rejected
+by identity before the UDS call (`permission denied: panel scopes …`).
+The token is never sent into the webview.
+
+Unit tests (no VSCode host):
+
+```bash
+cd extensions/vscode-weft-panel && npm run test:panel-auth
+```
+
 ## Known gaps (deferred to M2 / M3)
 
 - No voice input — VSCode webviews can't expose `allow="microphone"`
