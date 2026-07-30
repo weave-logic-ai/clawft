@@ -81,6 +81,16 @@ pub trait AutoDelegation: Send + Sync {
 /// Maximum size in bytes for a single tool result.
 const MAX_TOOL_RESULT_BYTES: usize = 65_536;
 
+/// After this many consecutive identical failing tool calls (same tool
+/// name + same args JSON + same error text) within one
+/// [`AgentLoop::run_tool_loop`] turn, abort the loop (WEFT-651).
+///
+/// Live incident (conv w21-smoke2): Hermes retried canvas with missing
+/// `content` for the full 20-iteration budget. Three strikes is enough
+/// for the model to see schema-echo + escalated errors before we
+/// fail-fast — matching the planning circuit-breaker default of 3.
+const IDENTICAL_TOOL_FAILURE_LIMIT: u32 = 3;
+
 /// Default maximum delegation depth (WEFT-180).
 ///
 /// When a message arrives with no `delegation_depth` metadata, the
@@ -244,6 +254,108 @@ fn tool_result_succeeded(result_json: &str) -> bool {
         }
         _ => true,
     }
+}
+
+/// Fingerprint of a failing tool call used by the WEFT-651 identical-
+/// failure circuit breaker. Two failures match when tool name, args
+/// JSON (compact serialization), and error text are equal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IdenticalFailureKey {
+    tool: String,
+    args: String,
+    error: String,
+}
+
+/// Extract a stable error fingerprint from a failed tool-result body.
+fn tool_result_error_text(result_json: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(result_json) {
+        Ok(serde_json::Value::Object(map)) => {
+            if let Some(e) = map.get("error") {
+                return e
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| e.to_string());
+            }
+            if map.contains_key("denied") {
+                let reason = map
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("policy");
+                return format!("denied: {reason}");
+            }
+            "failure".into()
+        }
+        _ => "failure".into(),
+    }
+}
+
+/// Build an [`IdenticalFailureKey`] when `result_json` is a failure;
+/// `None` on success (so the breaker counter resets).
+fn identical_failure_key(
+    tool_name: &str,
+    input: &serde_json::Value,
+    result_json: &str,
+) -> Option<IdenticalFailureKey> {
+    if tool_result_succeeded(result_json) {
+        return None;
+    }
+    Some(IdenticalFailureKey {
+        tool: tool_name.to_string(),
+        args: serde_json::to_string(input).unwrap_or_default(),
+        error: tool_result_error_text(result_json),
+    })
+}
+
+/// Record one tool-result outcome against the consecutive-identical-
+/// failure counter. Returns `Some(key)` when the breaker should trip
+/// (`count >= limit`); updates `last` / `count` in place.
+///
+/// Success or a different (tool, args, error) fingerprint resets the
+/// streak. Same key increments.
+fn record_identical_failure(
+    last: &mut Option<IdenticalFailureKey>,
+    count: &mut u32,
+    key: Option<IdenticalFailureKey>,
+    limit: u32,
+) -> Option<IdenticalFailureKey> {
+    match key {
+        None => {
+            *last = None;
+            *count = 0;
+            None
+        }
+        Some(k) => {
+            if last.as_ref() == Some(&k) {
+                *count = count.saturating_add(1);
+            } else {
+                *last = Some(k.clone());
+                *count = 1;
+            }
+            if *count >= limit {
+                Some(k)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Escalated tool-result body when the WEFT-651 breaker trips — clear
+/// instruction to the model (and any history inspector) to stop the
+/// identical retry.
+fn identical_failure_breaker_message(key: &IdenticalFailureKey, count: u32) -> String {
+    serde_json::json!({
+        "error": format!(
+            "IDENTICAL TOOL FAILURE BREAKER: tool `{tool}` failed {count} times \
+             with the same arguments. Last error: {err}. Stop calling this tool \
+             with the same arguments — fix the args (see any schema hint above) \
+             or answer without this tool.",
+            tool = key.tool,
+            count = count,
+            err = key.error,
+        )
+    })
+    .to_string()
 }
 
 /// Detect an `agent_spawn` tool result and extract its
@@ -1712,6 +1824,9 @@ impl<P: Platform> AgentLoop<P> {
 
         // 3. Dispatch through the registry, with truncation applied
         //    to success results. Errors stay short by definition.
+        //    WEFT-651: InvalidArgs echoes the tool parameter schema so
+        //    the model can correct the call instead of blind-retrying
+        //    (the canvas missing-content ×20 incident).
         match self
             .tools
             .execute(tool_name, input.clone(), permissions)
@@ -1723,7 +1838,23 @@ impl<P: Platform> AgentLoop<P> {
             }
             Err(e) => {
                 error!(tool = %tool_name, error = %e, "tool execution failed");
-                serde_json::json!({"error": e.to_string()}).to_string()
+                let mut msg = e.to_string();
+                if matches!(
+                    e,
+                    crate::tools::registry::ToolError::InvalidArgs(_)
+                ) {
+                    if let Some(tool) = self.tools.get(tool_name) {
+                        let schema = tool.parameters();
+                        let schema_str =
+                            serde_json::to_string(&schema).unwrap_or_else(|_| "{}".into());
+                        let schema_preview = preview_truncate(&schema_str);
+                        msg = format!(
+                            "{msg}. Expected parameters schema: {schema_preview}. \
+                             Do not retry with the same invalid arguments."
+                        );
+                    }
+                }
+                serde_json::json!({"error": msg}).to_string()
             }
         }
     }
@@ -1757,6 +1888,9 @@ impl<P: Platform> AgentLoop<P> {
         let mut completion_tokens: u32 = 0;
         let mut reasoning_parts: Vec<String> = Vec::new();
         let workspace = self.workspace_path();
+        // WEFT-651: consecutive identical (tool, args, error) failures.
+        let mut last_identical_failure: Option<IdenticalFailureKey> = None;
+        let mut identical_failure_count: u32 = 0;
 
         for iteration in 0..max_iterations {
             // WEFT-652 (cubecow event-level snapshots): under tool cadence,
@@ -2088,7 +2222,7 @@ impl<P: Platform> AgentLoop<P> {
             }
 
             for (id, name, result_json) in &results {
-                let content = if hallucinated_ids.contains(id) {
+                let mut content = if hallucinated_ids.contains(id) {
                     // Replace the success result with a verification failure error.
                     serde_json::json!({
                         "error": "VERIFICATION FAILED: the file you claimed to write does not exist on disk. The write was hallucinated. Please retry the write operation."
@@ -2097,17 +2231,85 @@ impl<P: Platform> AgentLoop<P> {
                     result_json.clone()
                 };
 
+                // Match args from the request-side tool call (by id).
+                let input = tool_calls
+                    .iter()
+                    .find(|(cid, _, _)| cid == id)
+                    .map(|(_, _, input)| input.clone())
+                    .unwrap_or(serde_json::Value::Null);
+
+                // WEFT-651: consecutive identical-failure circuit breaker.
+                let failure_key = identical_failure_key(name, &input, &content);
+                if let Some(tripped) = record_identical_failure(
+                    &mut last_identical_failure,
+                    &mut identical_failure_count,
+                    failure_key,
+                    IDENTICAL_TOOL_FAILURE_LIMIT,
+                ) {
+                    content = identical_failure_breaker_message(
+                        &tripped,
+                        identical_failure_count,
+                    );
+                    warn!(
+                        conv_id,
+                        tool = %tripped.tool,
+                        count = identical_failure_count,
+                        error = %tripped.error,
+                        "WEFT-651 identical tool failure breaker tripped"
+                    );
+
+                    // Still surface the escalated result in history /
+                    // summaries before fail-fast so observers see why.
+                    let arguments_preview =
+                        preview_truncate(&serde_json::to_string(&input).unwrap_or_default());
+                    tool_call_summaries.push(AgentChatToolCall {
+                        name: name.clone(),
+                        arguments_preview,
+                        result_preview: preview_truncate(&content),
+                        success: false,
+                    });
+                    request.messages.push(LlmMessage {
+                        role: "tool".into(),
+                        content: content.clone(),
+                        tool_call_id: Some(id.clone()),
+                        tool_calls: None,
+                    });
+                    if let Err(e) = self
+                        .sink
+                        .append_turn(
+                            conv_id,
+                            Turn {
+                                turn_id: Self::next_turn_id(),
+                                role: "tool".into(),
+                                content,
+                                tool_calls: None,
+                                tool_call_id: Some(id.clone()),
+                                ts_ms: Self::now_ms(),
+                                voice_analysis: None,
+                            },
+                        )
+                        .await
+                    {
+                        warn!(error = %e, "sink: failed to append tool turn");
+                    }
+
+                    return Err(ClawftError::Provider {
+                        message: format!(
+                            "identical tool failure breaker: tool `{}` failed {} times \
+                             with the same arguments ({}). Stop retrying the identical call.",
+                            tripped.tool,
+                            identical_failure_count,
+                            tripped.error,
+                        ),
+                    });
+                }
+
                 // M4 D8: record a per-tool-call summary for the wire
                 // result. `arguments_preview` comes from the request-side
                 // tool input (matched by call id); `result_preview` and
                 // `success` reflect the post-verification `content`.
-                let arguments_preview = tool_calls
-                    .iter()
-                    .find(|(cid, _, _)| cid == id)
-                    .map(|(_, _, input)| {
-                        preview_truncate(&serde_json::to_string(input).unwrap_or_default())
-                    })
-                    .unwrap_or_default();
+                let arguments_preview =
+                    preview_truncate(&serde_json::to_string(&input).unwrap_or_default());
                 tool_call_summaries.push(AgentChatToolCall {
                     name: name.clone(),
                     arguments_preview,
@@ -2707,6 +2909,185 @@ mod tests {
             err_msg.contains("max tool iterations"),
             "error should mention max iterations: {}",
             err_msg
+        );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    // -- WEFT-651: identical tool+args failure breaker in run_tool_loop -----
+
+    /// Tool that always rejects with InvalidArgs (canvas missing-content
+    /// pattern). Parameters schema is non-empty so schema-echo can be
+    /// asserted on the error body.
+    struct AlwaysInvalidTool;
+
+    #[async_trait]
+    impl Tool for AlwaysInvalidTool {
+        fn name(&self) -> &str {
+            "canvas_stub"
+        }
+        fn description(&self) -> &str {
+            "Stub canvas tool that always rejects args"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string" },
+                    "content": { "type": "string" }
+                },
+                "required": ["command", "content"]
+            })
+        }
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+        ) -> Result<serde_json::Value, crate::tools::registry::ToolError> {
+            Err(crate::tools::registry::ToolError::InvalidArgs(
+                "invalid canvas command: missing field content".into(),
+            ))
+        }
+    }
+
+    /// Transport that always requests the same failing canvas_stub call
+    /// (identical tool + args every iteration).
+    struct InfiniteIdenticalFailTransport;
+
+    #[async_trait]
+    impl LlmTransport for InfiniteIdenticalFailTransport {
+        async fn complete(&self, _request: &TransportRequest) -> clawft_types::Result<LlmResponse> {
+            Ok(LlmResponse {
+                id: "identical-fail".into(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "call-fail".into(),
+                    name: "canvas_stub".into(),
+                    input: serde_json::json!({"command": "render"}),
+                }],
+                stop_reason: StopReason::ToolUse,
+                usage: Usage {
+                    input_tokens: 5,
+                    output_tokens: 3,
+                    total_tokens: 0,
+                },
+                metadata: HashMap::new(),
+            })
+        }
+    }
+
+    /// Agent loop with AlwaysInvalidTool registered (and echo for other
+    /// tests' default registry shape).
+    async fn make_agent_loop_with_failing_tool(
+        transport: Arc<dyn LlmTransport>,
+        prefix: &str,
+    ) -> (AgentLoop<NativePlatform>, PathBuf) {
+        let dir = temp_dir(prefix);
+        let platform = Arc::new(NativePlatform::new());
+        let bus = Arc::new(MessageBus::new());
+
+        let memory = Arc::new(MemoryStore::with_paths(
+            dir.join("memory").join("MEMORY.md"),
+            dir.join("memory").join("HISTORY.md"),
+            platform.clone(),
+        ));
+        let skills = Arc::new(SkillsLoader::with_dir(dir.join("skills"), platform.clone()));
+        let context = ContextBuilder::new(test_config(), memory, skills, platform.clone());
+
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(EchoTool));
+        tools.register(Arc::new(AlwaysInvalidTool));
+
+        let pipeline = make_pipeline(transport);
+
+        let agent = AgentLoop::new(
+            test_config(),
+            platform,
+            bus,
+            pipeline,
+            Arc::new(tools),
+            context,
+            PermissionResolver::default_resolver(),
+        );
+        (agent, dir)
+    }
+
+    #[tokio::test]
+    async fn run_tool_loop_trips_identical_failure_breaker() {
+        // max_tool_iterations is 10 in test_config; without the breaker
+        // this would burn all 10. With N=3 it must fail-fast earlier.
+        let transport = Arc::new(InfiniteIdenticalFailTransport);
+        let (agent, dir) = make_agent_loop_with_failing_tool(transport, "ident_fail").await;
+
+        let request = ChatRequest {
+            messages: vec![LlmMessage {
+                role: "user".into(),
+                content: "write a haiku on the canvas".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            tools: vec![],
+            model: Some("test-model".into()),
+            max_tokens: Some(4096),
+            temperature: Some(0.5),
+            auth_context: None,
+            complexity_boost: 0.0,
+            tool_choice: None,
+        };
+
+        let result = agent
+            .run_tool_loop(request, "w21-smoke2", "test:agent")
+            .await;
+        assert!(result.is_err(), "breaker must fail-fast: {result:?}");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("identical tool failure breaker"),
+            "error should name the breaker: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("canvas_stub"),
+            "error should name the tool: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("3 times") || err_msg.contains("failed 3"),
+            "error should report N=3: {err_msg}"
+        );
+        // Must NOT burn the full max-iteration budget message.
+        assert!(
+            !err_msg.contains("max tool iterations"),
+            "should trip breaker before max iterations: {err_msg}"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn invalid_args_error_echoes_parameter_schema() {
+        let transport = Arc::new(MockTransport::new("unused"));
+        let (agent, dir) = make_agent_loop_with_failing_tool(transport, "schema_echo").await;
+
+        let body = agent
+            .execute_tool_with_guards(
+                "test:agent",
+                "canvas_stub",
+                &serde_json::json!({"command": "render"}),
+                None,
+            )
+            .await;
+
+        assert!(
+            body.contains("invalid arguments") || body.contains("missing field content"),
+            "should surface InvalidArgs: {body}"
+        );
+        assert!(
+            body.contains("Expected parameters schema"),
+            "WEFT-651 schema-echo missing: {body}"
+        );
+        assert!(
+            body.contains("content"),
+            "schema should mention required content field: {body}"
+        );
+        assert!(
+            body.contains("Do not retry with the same invalid arguments"),
+            "should advise against identical retry: {body}"
         );
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
@@ -4795,6 +5176,99 @@ mod tests {
         assert!(!tool_result_succeeded(r#"{"denied":true,"reason":"policy"}"#));
         // Non-object results are treated as success.
         assert!(tool_result_succeeded(r#""just a string""#));
+    }
+
+    // -- WEFT-651: identical tool-failure breaker helpers --------------------
+
+    #[test]
+    fn identical_failure_key_none_on_success() {
+        let key = identical_failure_key(
+            "echo",
+            &serde_json::json!({"text": "hi"}),
+            r#"{"output":"hi"}"#,
+        );
+        assert!(key.is_none());
+    }
+
+    #[test]
+    fn identical_failure_key_matches_same_tool_args_error() {
+        let args = serde_json::json!({"command": "render"});
+        let err = r#"{"error":"invalid arguments: missing field content"}"#;
+        let a = identical_failure_key("canvas", &args, err).expect("fail");
+        let b = identical_failure_key("canvas", &args, err).expect("fail");
+        assert_eq!(a, b);
+        assert_eq!(a.tool, "canvas");
+        assert!(a.error.contains("missing field content"));
+    }
+
+    #[test]
+    fn identical_failure_key_differs_when_args_change() {
+        let err = r#"{"error":"boom"}"#;
+        let a = identical_failure_key("t", &serde_json::json!({"x": 1}), err).unwrap();
+        let b = identical_failure_key("t", &serde_json::json!({"x": 2}), err).unwrap();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn record_identical_failure_trips_at_limit() {
+        let limit = 3;
+        let mut last = None;
+        let mut count = 0u32;
+        let mk = || {
+            identical_failure_key(
+                "canvas",
+                &serde_json::json!({"command": "render"}),
+                r#"{"error":"missing field content"}"#,
+            )
+        };
+
+        assert!(record_identical_failure(&mut last, &mut count, mk(), limit).is_none());
+        assert_eq!(count, 1);
+        assert!(record_identical_failure(&mut last, &mut count, mk(), limit).is_none());
+        assert_eq!(count, 2);
+        let tripped = record_identical_failure(&mut last, &mut count, mk(), limit);
+        assert!(tripped.is_some());
+        assert_eq!(count, 3);
+        assert_eq!(tripped.unwrap().tool, "canvas");
+    }
+
+    #[test]
+    fn record_identical_failure_resets_on_success_or_different_key() {
+        let limit = 3;
+        let mut last = None;
+        let mut count = 0u32;
+        let fail_a = || {
+            identical_failure_key("t", &serde_json::json!({"a": 1}), r#"{"error":"e1"}"#)
+        };
+        let fail_b = || {
+            identical_failure_key("t", &serde_json::json!({"a": 2}), r#"{"error":"e1"}"#)
+        };
+
+        assert!(record_identical_failure(&mut last, &mut count, fail_a(), limit).is_none());
+        assert!(record_identical_failure(&mut last, &mut count, fail_a(), limit).is_none());
+        assert_eq!(count, 2);
+        // Different args → streak resets to 1.
+        assert!(record_identical_failure(&mut last, &mut count, fail_b(), limit).is_none());
+        assert_eq!(count, 1);
+        // Success → streak clears.
+        assert!(record_identical_failure(&mut last, &mut count, None, limit).is_none());
+        assert_eq!(count, 0);
+        assert!(last.is_none());
+    }
+
+    #[test]
+    fn identical_failure_breaker_message_is_clear() {
+        let key = IdenticalFailureKey {
+            tool: "canvas".into(),
+            args: r#"{"command":"render"}"#.into(),
+            error: "missing field content".into(),
+        };
+        let msg = identical_failure_breaker_message(&key, 3);
+        assert!(msg.contains("IDENTICAL TOOL FAILURE BREAKER"));
+        assert!(msg.contains("canvas"));
+        assert!(msg.contains("3 times"));
+        assert!(msg.contains("missing field content"));
+        assert!(msg.contains("Stop calling this tool"));
     }
 
     #[test]
