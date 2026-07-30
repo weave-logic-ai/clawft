@@ -88,6 +88,11 @@ pub fn drain_pending_chain_events() -> Vec<PendingChainEvent> {
 /// The daemon's chain event bridge drains the pending buffer and
 /// forwards matching events to `ChainManager::append`.
 ///
+/// Sets `chain_buffered = true` on the tracing record so the weaver
+/// [`ChainEventLayer`] (WEFT-597) does not double-push events that the
+/// macro has already buffered. Call sites that only emit tracing
+/// (without this flag) are captured by the Layer instead.
+///
 /// # Usage
 ///
 /// ```rust,ignore
@@ -97,17 +102,18 @@ pub fn drain_pending_chain_events() -> Vec<PendingChainEvent> {
 macro_rules! chain_event {
     ($source:expr, $kind:expr, { $($key:tt : $val:expr),* $(,)? }) => {
         {
-            tracing::info!(
-                target: "chain_event",
-                source = $source,
-                kind = $kind,
-                $( $key = %$val, )*
-                "chain"
-            );
             $crate::chain_event::push_chain_event(
                 $source,
                 $kind,
                 Some(serde_json::json!({ $( stringify!($key): format!("{}", $val) ),* })),
+            );
+            tracing::info!(
+                target: "chain_event",
+                source = $source,
+                kind = $kind,
+                chain_buffered = true,
+                $( $key = %$val, )*
+                "chain"
             );
         }
     };

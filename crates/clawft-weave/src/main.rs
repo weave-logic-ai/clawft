@@ -120,12 +120,21 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
+    // WEFT-597 / BUG-3: install the chain_event → pending-buffer Layer
+    // before any subcommand runs. The daemon drain loop (exochain feature)
+    // periodically appends drained records to ChainManager. Without this
+    // Layer, tracing-only emitters (graphify, soul, project.init, …) hit
+    // stdout and never reach ExoChain.
     let default_filter = if cli.verbose { "debug" } else { "warn" };
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    tracing_subscriber::registry()
+        .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| default_filter.into()),
         )
+        .with(clawft_weave::chain_bridge::ChainEventLayer::new())
+        .with(tracing_subscriber::fmt::layer())
         .init();
 
     // Check for updates (non-blocking, cached 24h)
