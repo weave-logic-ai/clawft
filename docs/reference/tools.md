@@ -653,7 +653,7 @@ should be scoped through skills rather than presented to the LLM all at once.
     "mcp_servers": {
       "claude-flow": {
         "command": "npx",
-        "args": ["-y", "@claude-flow/cli@latest", "mcp", "start"],
+        "args": ["--no-install", "@claude-flow/cli", "mcp", "start"],
         "internal_only": true
       },
       "claude-code": {

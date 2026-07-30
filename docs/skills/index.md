@@ -281,7 +281,7 @@ From CLAUDE.md:
 ### Dependencies
 
 - Claude-flow MCP server registered in `tools.mcp_servers`.
-- `npx -y @claude-flow/cli@latest` (auto-installs).
+- `npx --no-install @claude-flow/cli` (version from package.json / lockfile; WEFT-684).
 
 ### Error Codes
 

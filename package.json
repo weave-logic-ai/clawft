@@ -1,6 +1,15 @@
 {
   "devDependencies": {
+    "@claude-flow/cli": "3.32.38",
     "agentic-flow": "^2.1.0",
+    "ruflo": "3.32.38",
     "typescript": "^6.0.3"
+  },
+  "overrides": {
+    "@claude-flow/cli": "3.32.38"
+  },
+  "weftos": {
+    "rufloPin": "3.32.38",
+    "rufloPinNote": "Schema-bearing MCP owner of .swarm/agentdb-memory.db. Bump only deliberately: back up .swarm/, read changelog, then scripts/brain-embedded-rust-ingest.sh stores. See WEFT-684 / WEFT-669."
   }
 }

@@ -117,7 +117,7 @@ scripts/build.sh --help
 - NEVER commit .env files or any file containing secrets
 - Always validate user input at system boundaries
 - Always sanitize file paths to prevent directory traversal
-- Run `npx @claude-flow/cli@latest security scan` after security-related changes
+- Run `npx --no-install @claude-flow/cli security scan` after security-related changes
 
 ## Concurrency: 1 MESSAGE = ALL RELATED OPERATIONS
 
@@ -156,7 +156,7 @@ scripts/build.sh --help
 - Keep shared memory namespace for all agents
 
 ```bash
-npx @claude-flow/cli@latest swarm init --topology hierarchical --max-agents 8 --strategy specialized
+npx --no-install @claude-flow/cli swarm init --topology hierarchical --max-agents 8 --strategy specialized
 ```
 
 ## Swarm Execution Rules
@@ -185,11 +185,11 @@ npx @claude-flow/cli@latest swarm init --topology hierarchical --max-agents 8 --
 ### Quick CLI Examples
 
 ```bash
-npx @claude-flow/cli@latest init --wizard
-npx @claude-flow/cli@latest agent spawn -t coder --name my-coder
-npx @claude-flow/cli@latest swarm init --v3-mode
-npx @claude-flow/cli@latest memory search --query "authentication patterns"
-npx @claude-flow/cli@latest doctor --fix
+npx --no-install @claude-flow/cli init --wizard
+npx --no-install @claude-flow/cli agent spawn -t coder --name my-coder
+npx --no-install @claude-flow/cli swarm init --v3-mode
+npx --no-install @claude-flow/cli memory search --query "authentication patterns"
+npx --no-install @claude-flow/cli doctor --fix
 ```
 
 ## Available Agents (60+ Types)
@@ -213,24 +213,26 @@ npx @claude-flow/cli@latest doctor --fix
 
 ```bash
 # Store (REQUIRED: --key, --value; OPTIONAL: --namespace, --ttl, --tags)
-npx @claude-flow/cli@latest memory store --key "pattern-auth" --value "JWT with refresh" --namespace patterns
+npx --no-install @claude-flow/cli memory store --key "pattern-auth" --value "JWT with refresh" --namespace patterns
 
 # Search (REQUIRED: --query; OPTIONAL: --namespace, --limit, --threshold)
-npx @claude-flow/cli@latest memory search --query "authentication patterns"
+npx --no-install @claude-flow/cli memory search --query "authentication patterns"
 
 # List (OPTIONAL: --namespace, --limit)
-npx @claude-flow/cli@latest memory list --namespace patterns --limit 10
+npx --no-install @claude-flow/cli memory list --namespace patterns --limit 10
 
 # Retrieve (REQUIRED: --key; OPTIONAL: --namespace)
-npx @claude-flow/cli@latest memory retrieve --key "pattern-auth" --namespace patterns
+npx --no-install @claude-flow/cli memory retrieve --key "pattern-auth" --namespace patterns
 ```
 
 ## Quick Setup
 
 ```bash
-claude mcp add claude-flow -- npx -y @claude-flow/cli@latest
-npx @claude-flow/cli@latest daemon start
-npx @claude-flow/cli@latest doctor --fix
+# Prefer project .mcp.json (pinned via package.json weftos.rufloPin = 3.32.38).
+# Manual add: never @latest — schema owns .swarm/agentdb-memory.db (WEFT-684).
+claude mcp add claude-flow -- npx --no-install @claude-flow/cli mcp start
+npx --no-install @claude-flow/cli daemon start
+npx --no-install @claude-flow/cli doctor --fix
 ```
 
 ## Claude Code vs CLI Tools

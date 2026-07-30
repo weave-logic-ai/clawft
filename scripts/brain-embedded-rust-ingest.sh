@@ -62,8 +62,9 @@ Options:
 
 Notes:
   * Requires python3 for JSON handling; `ingest` additionally requires the
-    GLOBAL `ruflo` binary (never `npx ruflo@latest`, which uses its own
-    private copy and hides drift).
+    GLOBAL `ruflo` binary pinned at package.json weftos.rufloPin (currently
+    3.32.38). Never `npx ruflo@latest` — it uses its own private copy, hides
+    drift, and can silently migrate AgentDB (WEFT-669 / WEFT-684).
   * `memory store` is upsert-by-default, so re-ingest is idempotent per key.
   * On refresh, regenerate chunks.jsonl from notes/ first, then `validate`,
     then diff against `plan` output to see what actually changed.

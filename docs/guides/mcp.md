@@ -15,10 +15,11 @@ sessions are created, how skills scope tool visibility, how
 ## TL;DR
 
 ```bash
-# Install claude-flow as an MCP server in this project's weave.toml
+# Install claude-flow as an MCP server in this project's weave.toml.
+# Pin matches package.json / .mcp.json (WEFT-684). Never @latest — schema-bearing.
 weft mcp add claude-flow \
   --command "npx" \
-  --args "-y,@claude-flow/cli@latest" \
+  --args "--no-install,@claude-flow/cli,mcp,start" \
   --internal-only
 ```
 
@@ -42,7 +43,7 @@ After running the example above you will see:
 ```toml
 [tools.mcp_servers.claude-flow]
 command = "npx"
-args = ["-y", "@claude-flow/cli@latest"]
+args = ["--no-install", "@claude-flow/cli", "mcp", "start"]
 internalOnly = true
 
 [tools.mcp_servers.claude-flow.env]
@@ -66,9 +67,9 @@ args    = ["mcp-serve"]
 internalOnly = true
 
 [tools.mcp_servers.claude-flow]
-# claude-flow user-install. See CLAUDE.md and ADR-054.
+# claude-flow user-install. Pin = package.json weftos.rufloPin (WEFT-684).
 command = "npx"
-args    = ["-y", "@claude-flow/cli@latest"]
+args    = ["--no-install", "@claude-flow/cli", "mcp", "start"]
 internalOnly = true
 
 [tools.mcp_servers.claude-flow.env]

@@ -141,7 +141,7 @@ accepted.
       },
       "claude-flow": {
         "command": "npx",
-        "args": ["-y", "@claude-flow/cli@latest", "mcp", "start"],
+        "args": ["--no-install", "@claude-flow/cli", "mcp", "start"],
         "internalOnly": true
       },
       "my-custom-server": {
@@ -481,7 +481,7 @@ tools), it should always be configured as `internal_only`.
     "mcpServers": {
       "claude-flow": {
         "command": "npx",
-        "args": ["-y", "@claude-flow/cli@latest", "mcp", "start"],
+        "args": ["--no-install", "@claude-flow/cli", "mcp", "start"],
         "internalOnly": true
       }
     }
