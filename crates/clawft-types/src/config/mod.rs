@@ -11,6 +11,7 @@
 
 pub mod channels;
 pub mod kernel;
+pub mod local_llm;
 pub mod personality;
 pub mod plugins;
 pub mod policies;
@@ -20,6 +21,7 @@ pub mod voice;
 // Re-export channel types at the config level for backward compatibility.
 pub use channels::*;
 pub use kernel::*;
+pub use local_llm::*;
 pub use personality::*;
 pub use plugins::*;
 pub use policies::*;
@@ -453,7 +455,11 @@ fn default_workspace() -> String {
     "~/.nanobot/workspace".into()
 }
 fn default_model() -> String {
-    "deepseek/deepseek-chat".into()
+    // WEFT-604 / ADR-060: local Hermes is the zero-config default so
+    // `weft agent` reaches a freshly-served :8090 endpoint without a
+    // cloud API key. Operators who want cloud set agents.defaults.model
+    // (or OPENROUTER_API_KEY for the daemon OpenRouter takeover).
+    DEFAULT_LOCAL_LLM_MODEL_ROUTED.into()
 }
 fn default_max_tokens() -> i32 {
     8192
@@ -573,6 +579,19 @@ pub struct ProvidersConfig {
     /// ElevenLabs (TTS).
     #[serde(default)]
     pub elevenlabs: ProviderConfig,
+
+    /// Keyless local OpenAI-compat endpoint (`local/` model prefix).
+    ///
+    /// WEFT-604: honoured by `apply_config_overrides` so
+    /// `[providers.local] api_base = "…"` is no longer silently dropped.
+    #[serde(default)]
+    pub local: ProviderConfig,
+
+    /// Ollama OpenAI-compat endpoint (`ollama/` model prefix).
+    ///
+    /// WEFT-604: same as [`Self::local`] — overrides must apply or fail loud.
+    #[serde(default)]
+    pub ollama: ProviderConfig,
 }
 
 // ── Gateway ──────────────────────────────────────────────────────────────
@@ -793,7 +812,10 @@ mod tests {
         let cfg = load_fixture();
 
         // Agents
-        assert_eq!(cfg.agents.defaults.model, "deepseek/deepseek-chat");
+        assert_eq!(
+            cfg.agents.defaults.model,
+            DEFAULT_LOCAL_LLM_MODEL_ROUTED
+        );
         assert_eq!(cfg.agents.defaults.max_tokens, 8192);
         assert_eq!(cfg.agents.defaults.temperature, 0.7);
         assert_eq!(cfg.agents.defaults.max_tool_iterations, 20);
@@ -848,7 +870,10 @@ mod tests {
 
         // Agent defaults
         assert_eq!(cfg.agents.defaults.workspace, "~/.nanobot/workspace");
-        assert_eq!(cfg.agents.defaults.model, "deepseek/deepseek-chat");
+        assert_eq!(
+            cfg.agents.defaults.model,
+            DEFAULT_LOCAL_LLM_MODEL_ROUTED
+        );
         assert_eq!(cfg.agents.defaults.max_tokens, 8192);
         assert!((cfg.agents.defaults.temperature - 0.7).abs() < f64::EPSILON);
         assert_eq!(cfg.agents.defaults.max_tool_iterations, 20);

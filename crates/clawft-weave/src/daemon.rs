@@ -1116,7 +1116,7 @@ pub async fn run(
         //      choice.
         //   3. OPENROUTER_API_KEY set AND no URL above — opt-in
         //      OpenRouter takeover (bearer auth + OpenRouter defaults).
-        //   4. Local llama-server defaults (127.0.0.1:8111, "local").
+        //   4. ADR-060 local Hermes defaults (127.0.0.1:8090, hermes-4.3-36b).
         //
         // The earlier logic flipped `using_openrouter` purely on
         // OPENROUTER_API_KEY presence, which meant a user pointing

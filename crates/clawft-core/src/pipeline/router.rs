@@ -182,10 +182,14 @@ mod tests {
 
     #[test]
     fn from_config_default_agents_config() {
+        // WEFT-604 / ADR-060: default model is local Hermes.
         let config = AgentsConfig::default();
         let router = StaticRouter::from_config(&config);
-        assert_eq!(router.provider(), "deepseek");
-        assert_eq!(router.model(), "deepseek-chat");
+        assert_eq!(router.provider(), "local");
+        assert_eq!(
+            router.model(),
+            clawft_types::config::DEFAULT_LOCAL_LLM_MODEL
+        );
     }
 
     #[test]

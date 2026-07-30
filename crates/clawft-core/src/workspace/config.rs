@@ -157,7 +157,7 @@ mod tests {
     #[test]
     fn load_merged_config_defaults_only() {
         let config = load_merged_config_from(None, None).unwrap();
-        assert_eq!(config.agents.defaults.model, "deepseek/deepseek-chat");
+        assert_eq!(config.agents.defaults.model, clawft_types::config::DEFAULT_LOCAL_LLM_MODEL_ROUTED);
         assert_eq!(config.agents.defaults.max_tokens, 8192);
     }
 
@@ -174,7 +174,7 @@ mod tests {
 
         let config = load_merged_config_from(None, Some(&dir)).unwrap();
         assert_eq!(config.agents.defaults.max_tokens, 4096);
-        assert_eq!(config.agents.defaults.model, "deepseek/deepseek-chat");
+        assert_eq!(config.agents.defaults.model, clawft_types::config::DEFAULT_LOCAL_LLM_MODEL_ROUTED);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -22,12 +22,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use clawft_llm::{
     ChatMessage, ChatRequest as LlmChatRequest, ChatResponse, LlmProviderConfig,
     OpenAiCompatProvider, ProviderRouter,
 };
+#[cfg(feature = "native")]
+use clawft_llm::LocalProvider;
 use clawft_types::config::Config;
 
 use super::assembler::TokenBudgetAssembler;
@@ -304,24 +306,40 @@ fn convert_response_to_value(response: &ChatResponse) -> serde_json::Value {
 /// 4. Create an [`OpenAiCompatProvider`] and wrap it in a [`ClawftLlmAdapter`].
 ///
 /// Falls back to the first built-in provider (OpenAI) when no prefix matches.
+///
+/// WEFT-604: `local/` and `ollama/` prefixes (and bare models that match the
+/// ADR-060 Hermes alias) use keyless [`LocalProvider`] so zero-config Hermes
+/// works without inventing dummy API keys.
 pub fn create_adapter_from_config(config: &Config) -> Arc<dyn LlmProvider> {
     let model = &config.agents.defaults.model;
-    let (prefix, _bare_model) = ProviderRouter::strip_prefix(model);
+    let (prefix, bare_model) = ProviderRouter::strip_prefix(model);
 
     let builtins = clawft_llm::config::builtin_providers();
 
+    // Prefer local provider for ADR-060 bare Hermes aliases even without a
+    // `local/` prefix (legacy machine-local configs used bare model names).
+    let resolved_prefix = match &prefix {
+        Some(name) => Some(name.as_str()),
+        None if bare_model == clawft_types::config::DEFAULT_LOCAL_LLM_MODEL
+            || clawft_types::config::is_default_local_model(model) =>
+        {
+            Some("local")
+        }
+        None => None,
+    };
+
     // Find the matching built-in config by provider name prefix.
-    let mut provider_config = match &prefix {
+    let mut provider_config = match resolved_prefix {
         Some(name) => builtins
             .iter()
-            .find(|c| c.name == *name)
+            .find(|c| c.name == name)
             .cloned()
             .unwrap_or_else(|| builtins[0].clone()),
         None => builtins[0].clone(),
     };
 
     // Apply overrides from the application config's providers section.
-    apply_config_overrides(&mut provider_config, config, prefix.as_deref());
+    apply_config_overrides(&mut provider_config, config, resolved_prefix);
 
     debug!(
         provider = %provider_config.name,
@@ -330,11 +348,31 @@ pub fn create_adapter_from_config(config: &Config) -> Arc<dyn LlmProvider> {
         "creating LLM adapter from config"
     );
 
+    let provider_name = provider_config.name.clone();
+    let is_local = matches!(provider_name.as_str(), "local" | "ollama" | "hermes");
+
+    #[cfg(feature = "native")]
+    if is_local {
+        let app_api_key = resolve_app_api_key(&provider_name, config);
+        let mut local = LocalProvider::from_config(provider_config, app_api_key);
+        if provider_name == "local"
+            || provider_name == "hermes"
+            || bare_model == clawft_types::config::DEFAULT_LOCAL_LLM_MODEL
+        {
+            // Match LocalProvider::hermes_serving() window for ADR-060.
+            local = local.with_num_ctx(clawft_llm::local_provider::HERMES_DEFAULT_NUM_CTX);
+        }
+        let retrying = clawft_llm::retry::RetryPolicy::new(
+            local,
+            clawft_llm::retry::RetryConfig::default(),
+        );
+        return Arc::new(ClawftLlmAdapter::new(Arc::new(retrying)));
+    }
+
     // Honor an explicit api_key from config.providers.<name>, matching
     // create_adapter_for_provider. Keyless local endpoints (llama.cpp
     // behind a builtin's api_base override) can set a placeholder key in
     // config instead of requiring the provider's env var.
-    let provider_name = provider_config.name.clone();
     let app_api_key = resolve_app_api_key(&provider_name, config);
     let provider = if let Some(key) = app_api_key {
         OpenAiCompatProvider::with_api_key(provider_config, key)
@@ -354,6 +392,9 @@ pub fn create_adapter_from_config(config: &Config) -> Arc<dyn LlmProvider> {
 /// The application config stores provider credentials in
 /// `config.providers.<name>`, where each entry has `api_key` and optionally
 /// `api_base`. If present, these override the built-in defaults.
+///
+/// WEFT-604: `local` and `ollama` are first-class; unknown provider names
+/// that the adapter cannot override log a warning so silent drops stop.
 fn apply_config_overrides(
     llm_config: &mut LlmProviderConfig,
     app_config: &Config,
@@ -370,8 +411,23 @@ fn apply_config_overrides(
         "openrouter" => &app_config.providers.openrouter,
         "gemini" => &app_config.providers.gemini,
         "xai" => &app_config.providers.xai,
-        "mistral" | "together" => return, // supported builtins with no config override
-        _ => return,
+        "local" => &app_config.providers.local,
+        "ollama" => &app_config.providers.ollama,
+        "vllm" => &app_config.providers.vllm,
+        "mistral" | "together" => return, // supported builtins with no config override slot
+        other => {
+            // Loud rejection: operator set a providers.* block we don't
+            // wire (or a typo). Previously local/ollama fell into this
+            // silent-return path and overrides were ignored.
+            if other != "hermes" {
+                warn!(
+                    provider = other,
+                    "providers.{other} has no override arm in apply_config_overrides \
+                     — api_base/api_key from config are ignored"
+                );
+            }
+            return;
+        }
     };
 
     // Override base URL if provided.
@@ -415,8 +471,17 @@ fn create_adapter_for_provider(provider_name: &str, config: &Config) -> Arc<dyn 
         "creating LLM adapter for provider"
     );
 
-    // Check for an explicit API key in the app config.
     let app_api_key = resolve_app_api_key(provider_name, config);
+    let is_local = matches!(provider_name, "local" | "ollama" | "hermes");
+
+    #[cfg(feature = "native")]
+    if is_local {
+        let mut local = LocalProvider::from_config(provider_config, app_api_key);
+        if matches!(provider_name, "local" | "hermes") {
+            local = local.with_num_ctx(clawft_llm::local_provider::HERMES_DEFAULT_NUM_CTX);
+        }
+        return Arc::new(ClawftLlmAdapter::new(Arc::new(local)));
+    }
 
     let provider = if let Some(key) = app_api_key {
         OpenAiCompatProvider::with_api_key(provider_config, key)
@@ -440,6 +505,9 @@ fn resolve_app_api_key(provider_name: &str, config: &Config) -> Option<String> {
         "openrouter" => &config.providers.openrouter.api_key,
         "gemini" => &config.providers.gemini.api_key,
         "xai" => &config.providers.xai.api_key,
+        "local" => &config.providers.local.api_key,
+        "ollama" => &config.providers.ollama.api_key,
+        "vllm" => &config.providers.vllm.api_key,
         _ => return None,
     };
     if key.is_empty() {
@@ -939,6 +1007,47 @@ mod tests {
         // Should have both the original anthropic-version header and the custom one.
         assert_eq!(llm_config.headers.get("X-Custom").unwrap(), "value");
         assert!(llm_config.headers.contains_key("anthropic-version"));
+    }
+
+    #[test]
+    fn overrides_apply_local_api_base() {
+        // WEFT-604: [providers.local] must not be silently ignored.
+        let mut config = test_config();
+        config.providers.local.api_base = Some("http://127.0.0.1:8090/v1".into());
+
+        let builtins = clawft_llm::config::builtin_providers();
+        let mut llm_config = builtins
+            .iter()
+            .find(|c| c.name == "local")
+            .cloned()
+            .unwrap();
+
+        apply_config_overrides(&mut llm_config, &config, Some("local"));
+        assert_eq!(llm_config.base_url, "http://127.0.0.1:8090/v1");
+    }
+
+    #[test]
+    fn overrides_apply_ollama_api_base() {
+        let mut config = test_config();
+        config.providers.ollama.api_base = Some("http://10.0.0.2:11434/v1".into());
+
+        let builtins = clawft_llm::config::builtin_providers();
+        let mut llm_config = builtins
+            .iter()
+            .find(|c| c.name == "ollama")
+            .cloned()
+            .unwrap();
+
+        apply_config_overrides(&mut llm_config, &config, Some("ollama"));
+        assert_eq!(llm_config.base_url, "http://10.0.0.2:11434/v1");
+    }
+
+    #[test]
+    fn create_adapter_local_prefix_uses_local_provider() {
+        let mut config = test_config();
+        config.agents.defaults.model = clawft_types::config::DEFAULT_LOCAL_LLM_MODEL_ROUTED.into();
+        let adapter = create_adapter_from_config(&config);
+        let _ = Arc::strong_count(&adapter);
     }
 
     // -- end-to-end: MockProvider -> ClawftLlmAdapter -> OpenAiCompatTransport -

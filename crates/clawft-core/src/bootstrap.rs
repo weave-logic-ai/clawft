@@ -764,7 +764,7 @@ pub async fn build_daemon_agent_loop(
     // the agent loop's request body matches the upstream the operator
     // configured (`[kernel.llm].model` / `LLM_MODEL` env). Without
     // this, `Config::default()` injects a hardcoded
-    // `deepseek/deepseek-chat`; combined with the panel principal's
+    // ADR-060 local Hermes default; combined with the panel principal's
     // `model_override: true` permission the tiered router takes that
     // verbatim and the request goes out asking for a model the local
     // llama-server (or any non-deepseek upstream) doesn't host.
@@ -967,7 +967,7 @@ mod tests {
             agents: AgentsConfig {
                 defaults: AgentDefaults {
                     workspace: "~/.clawft/workspace".into(),
-                    model: "deepseek/deepseek-chat".into(),
+                    model: clawft_types::config::DEFAULT_LOCAL_LLM_MODEL_ROUTED.into(),
                     max_tokens: 4096,
                     temperature: 0.7,
                     max_tool_iterations: 10,
@@ -990,7 +990,7 @@ mod tests {
     async fn config_accessor() {
         let platform = Arc::new(NativePlatform::new());
         let ctx = AppContext::new(test_config(), platform).await.unwrap();
-        assert_eq!(ctx.config().agents.defaults.model, "deepseek/deepseek-chat");
+        assert_eq!(ctx.config().agents.defaults.model, clawft_types::config::DEFAULT_LOCAL_LLM_MODEL_ROUTED);
         assert_eq!(ctx.config().agents.defaults.max_tokens, 4096);
     }
 
@@ -1143,7 +1143,7 @@ mod tests {
         let platform = Arc::new(NativePlatform::new());
         let ctx = AppContext::new(test_config(), platform).await.unwrap();
         let agent = ctx.into_agent_loop();
-        assert_eq!(agent.config().defaults.model, "deepseek/deepseek-chat");
+        assert_eq!(agent.config().defaults.model, clawft_types::config::DEFAULT_LOCAL_LLM_MODEL_ROUTED);
         assert_eq!(agent.config().defaults.max_tokens, 4096);
     }
 
@@ -1158,7 +1158,7 @@ mod tests {
 
         // Should still produce a valid agent loop
         let agent = ctx.into_agent_loop();
-        assert_eq!(agent.config().defaults.model, "deepseek/deepseek-chat");
+        assert_eq!(agent.config().defaults.model, clawft_types::config::DEFAULT_LOCAL_LLM_MODEL_ROUTED);
     }
 
     #[tokio::test]
@@ -1278,7 +1278,7 @@ mod tests {
 
         // Convert to agent loop and verify it's still valid.
         let agent = ctx.into_agent_loop();
-        assert_eq!(agent.config().defaults.model, "deepseek/deepseek-chat");
+        assert_eq!(agent.config().defaults.model, clawft_types::config::DEFAULT_LOCAL_LLM_MODEL_ROUTED);
     }
 
     // ── Integration: default pipeline uses stub (negative test) ─────

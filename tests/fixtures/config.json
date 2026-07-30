@@ -2,7 +2,7 @@
   "agents": {
     "defaults": {
       "workspace": "~/.nanobot/workspace",
-      "model": "deepseek/deepseek-chat",
+      "model": "local/hermes-4.3-36b",
       "maxTokens": 8192,
       "temperature": 0.7,
       "maxToolIterations": 20,

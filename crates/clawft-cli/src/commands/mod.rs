@@ -63,6 +63,9 @@ pub struct LoadedConfig {
     pub global_routing: clawft_types::routing::RoutingConfig,
     /// Workspace overlay routing, when cwd `.clawft/config.json` existed.
     pub workspace_routing: Option<clawft_types::routing::RoutingConfig>,
+    /// WEFT-604: which config layer last set `agents.defaults.model`
+    /// (`default`, `global:…`, `workspace:…`, or `cli:--config`).
+    pub agents_model_source: &'static str,
 }
 
 /// If `config_override` is provided, loads from that path. Otherwise,
@@ -103,6 +106,7 @@ pub async fn load_config_layered<P: Platform>(
             config,
             global_routing,
             workspace_routing: None,
+            agents_model_source: "cli:--config",
         });
     }
 
@@ -121,13 +125,48 @@ pub async fn load_config_layered<P: Platform>(
         }
         None => None,
     };
+    let agents_model_source = agents_model_layer_source(&layers);
     let config: Config = serde_json::from_value(layers.merged())?;
 
     Ok(LoadedConfig {
         config,
         global_routing: global.routing,
         workspace_routing,
+        agents_model_source,
     })
+}
+
+/// WEFT-604: name the config layer that last set `agents.defaults.model`.
+///
+/// Workspace overlay wins over the merged global layer (weave.toml + home
+/// JSON). When neither sets the key, serde defaults apply → `"default"`.
+fn agents_model_layer_source(
+    layers: &clawft_platform::config_loader::ConfigLayers,
+) -> &'static str {
+    if let Some(ref ws) = layers.workspace
+        && json_path_is_set(ws, &["agents", "defaults", "model"])
+    {
+        return "workspace:.clawft/config.json";
+    }
+    if json_path_is_set(&layers.global, &["agents", "defaults", "model"]) {
+        return "global:weave.toml|home-config";
+    }
+    "default"
+}
+
+fn json_path_is_set(value: &serde_json::Value, path: &[&str]) -> bool {
+    let mut cur = value;
+    for key in path {
+        match cur.get(*key) {
+            Some(next) => cur = next,
+            None => return false,
+        }
+    }
+    match cur {
+        serde_json::Value::String(s) => !s.is_empty(),
+        serde_json::Value::Null => false,
+        _ => true,
+    }
 }
 
 /// Expand `~/` prefixes in workspace paths to the user's home directory.

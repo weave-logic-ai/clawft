@@ -75,7 +75,7 @@ async fn test_fixture_config_loads() {
     );
     let content = tokio::fs::read_to_string(fixture_path).await.unwrap();
     let config: Config = serde_json::from_str(&content).unwrap();
-    assert_eq!(config.agents.defaults.model, "deepseek/deepseek-chat");
+    assert_eq!(config.agents.defaults.model, clawft_types::config::DEFAULT_LOCAL_LLM_MODEL_ROUTED);
     assert!(config.channels.telegram.enabled);
 }
 
@@ -156,5 +156,5 @@ async fn test_app_context_into_agent_loop() {
     let _tx = ctx.bus().inbound_sender();
 
     let agent = ctx.into_agent_loop();
-    assert_eq!(agent.config().defaults.model, "deepseek/deepseek-chat");
+    assert_eq!(agent.config().defaults.model, clawft_types::config::DEFAULT_LOCAL_LLM_MODEL_ROUTED);
 }

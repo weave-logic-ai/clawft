@@ -560,15 +560,16 @@ impl ClassificationConfig {
 /// - `OPENROUTER_API_KEY` set: OpenRouter takeover (defaults to the
 ///   OpenRouter base URL + a free-tier reasoning model, attaches
 ///   bearer auth).
-/// - Otherwise: local llama-server at `http://127.0.0.1:8111` with
-///   model name `"local"`.
+/// - Otherwise: ADR-060 local Hermes at
+///   [`crate::config::DEFAULT_LOCAL_LLM_SERVICE_URL`] (`:8090`) with
+///   model [`crate::config::DEFAULT_LOCAL_LLM_MODEL`].
 ///
 /// Example:
 ///
 /// ```toml
 /// [kernel.llm]
-/// service_url = "http://127.0.0.1:8080"
-/// model = "gemma-iq2m"
+/// service_url = "http://127.0.0.1:8090"
+/// model = "hermes-4.3-36b"
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LlmEndpointConfig {

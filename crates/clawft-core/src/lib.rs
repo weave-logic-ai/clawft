@@ -36,6 +36,8 @@ pub mod chain_event;
 pub mod clawft_md;
 pub mod config_merge;
 pub mod json_repair;
+/// WEFT-604: unify local-LLM endpoint/model for daemon + agent + voice.
+pub mod local_llm_bridge;
 pub mod pipeline;
 // `planning` uses `tokio::time::{Instant, timeout}` directly. Until those
 // callsites get a runtime abstraction, the module only compiles for native
