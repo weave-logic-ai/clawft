@@ -935,15 +935,12 @@ cmd_serve() {
 #
 # WEFT-551 — DONE (wave0c): wasmtime/wasmtime-wasi 33 → 45.0.3; ignores removed.
 # WEFT-552 — DONE (wave0c): rustls-webpki via ruvector-core 2.3 + pin 0.103.13; ignores removed.
-# WEFT-553 — unmaintained + unsound (6 advisories)
+# WEFT-553 — partial (wave0i): cleared serial / instant / rustls-pemfile / rand;
+#            residual bincode + paste need upstream (ruvector/hnsw_rs, tokenizers/egui_dock).
 CARGO_AUDIT_IGNORES=(
-    # WEFT-553 unmaintained + unsound
-    --ignore RUSTSEC-2017-0008
-    --ignore RUSTSEC-2024-0384
-    --ignore RUSTSEC-2024-0436
-    --ignore RUSTSEC-2025-0134
-    --ignore RUSTSEC-2025-0141
-    --ignore RUSTSEC-2026-0097
+    # WEFT-553 residual — unmaintained, blocked on upstream
+    --ignore RUSTSEC-2024-0436   # paste via tokenizers / egui_dock / macro_rules_attribute
+    --ignore RUSTSEC-2025-0141   # bincode via ruvector-* / hnsw_rs
 )
 
 cmd_audit() {
@@ -1178,10 +1175,10 @@ ${BOLD}Commands:${NC}
                   into the kernel default feature set). CI hard gate twin:
                   pr-gates.yml job wasm-kernel-no-mesh.
   clippy          Run clippy with warnings-as-errors
-  audit           Run cargo audit with 0.7.0 ignore-list (deny warnings).
+  audit           Run cargo audit with residual ignore-list (deny warnings).
                   Requires: cargo install --locked cargo-audit
-                  Followups: WEFT-551 (wasmtime), WEFT-552 (rustls-webpki),
-                  WEFT-553 (unmaintained + unsound rand).
+                  Followups: WEFT-551/552 DONE; WEFT-553 residual paste+bincode
+                  (see docs/plans/wave-0i-WEFT-553-result.md).
   gate            Run full phase gate (14 checks, includes cargo audit +
                   kernel WASM no-mesh / WEFT-114)
   bench <crate> <name>

@@ -24,7 +24,8 @@ serde_json = { workspace = true }
 # unix-pty on Linux/macOS (works on WSL2 — it just uses /dev/ptmx), and
 # winpty/conpty on Windows. We deliberately don't pin a specific backend
 # feature here — `portable-pty` auto-selects.
-portable-pty = "0.8"
+# WEFT-553: 0.9 replaces unmaintained `serial` (RUSTSEC-2017-0008) with serial2.
+portable-pty = "0.9"
 
 # Concurrent map keyed by session id. Same crate the daemon control plane
 # uses, so no new transitive deps.

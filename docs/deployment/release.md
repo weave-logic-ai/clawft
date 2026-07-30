@@ -412,8 +412,8 @@ item that tracks the eventual fix:
 | Followup | Cluster | Why deferred |
 |----------|---------|--------------|
 | WEFT-551 | wasmtime / wasmtime-wasi 33.0.2 → **45.0.3** (19 advisory IDs) | **DONE** (wave0c / `wave0c/weft-551-wasmtime-bump`). 45.0.3 is the highest on MSRV 1.93; 46+ needs rustc 1.94. All 19 RUSTSEC IDs cleared from cargo audit; gate ignores removed. See `docs/plans/wave-0c-WEFT-551-result.md`. |
-| WEFT-552 | rustls-webpki via rustls / reqwest / quinn alignment (3 IDs) | Coordinated TLS-stack upgrade across the workspace. |
-| WEFT-553 | unmaintained crates + unsound `rand` (6 IDs) | Multiple transitive replacements (`bincode`, `instant`, `paste`, `rustls-pemfile` 1, `serial`). |
+| WEFT-552 | rustls-webpki via rustls / reqwest / quinn alignment (3 IDs) | **DONE** (wave0c) — ruvector-core 2.3 + pin rustls-webpki ≥0.103.13. |
+| WEFT-553 | unmaintained crates + unsound `rand` (6 IDs) | **PARTIAL** (wave0i / `wave0i/weft-553-audit-deps`). Cleared: `serial` (portable-pty 0.9), `instant` (notify 8), `rustls-pemfile` 1 (gone with WEFT-552), `rand` ≥0.8.7/0.9.5. Residual ignores: `bincode` (RUSTSEC-2025-0141 via ruvector/hnsw_rs), `paste` (RUSTSEC-2024-0436 via tokenizers/egui_dock). See `docs/plans/wave-0i-WEFT-553-result.md`. |
 
 The cold-run report from the gate's introduction is at
 `.planning/reviews/0.7.0-release-gate/audit-findings/cargo-audit-cold-run-2026-04-28.md`.

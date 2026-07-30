@@ -194,7 +194,10 @@ regex = "1"
 which = "7"
 
 # Random (testing)
-rand = "0.8"
+# WEFT-553: RUSTSEC-2026-0097 — unsound ThreadRng reseed with custom logger.
+# Patched lines: >=0.8.6 / >=0.9.3 / >=0.10.1. Stay on 0.8.x for workspace
+# API compatibility (thread_rng); lockfile also carries 0.9.x via hnsw_rs.
+rand = "0.8.7"
 
 # WASM-compatible random
 getrandom = { version = "0.2", features = ["js"] }
@@ -209,7 +212,10 @@ wasmtime = { version = "45", default-features = false, features = ["cranelift", 
 wasmtime-wasi = { version = "45", default-features = false, features = ["p1"] }
 
 # File-system watching
-notify = "7"
+# WEFT-553: notify 8+ drops unmaintained `instant` (RUSTSEC-2024-0384) in
+# favour of web-time / std Instant. Public API (RecommendedWatcher, EventKind,
+# RecursiveMode, Config) is compatible with our call sites.
+notify = "8"
 
 # RVF (RuVector Format) -- vector storage
 # rvf-types, rvf-runtime, rvf-wire: upstream crates.io (ruvnet)
