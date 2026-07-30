@@ -7,6 +7,18 @@
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 
+/// Metadata about a filesystem entry (file or directory).
+///
+/// Used by tools such as `list_directory` so browser/OPFS backends can report
+/// real `is_dir` / size instead of native-only `tokio::fs::metadata` (WEFT-392).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FsMetadata {
+    /// `true` when the path is a directory.
+    pub is_dir: bool,
+    /// Byte length for files; `0` for directories.
+    pub len: u64,
+}
+
 /// Platform-agnostic filesystem operations.
 ///
 /// All path arguments use [`Path`] for proper cross-platform path handling.
@@ -41,6 +53,11 @@ pub trait FileSystem: Send + Sync {
 
     /// Get the user's home directory.
     fn home_dir(&self) -> Option<PathBuf>;
+
+    /// Metadata for a path (file or directory).
+    ///
+    /// Returns [`std::io::ErrorKind::NotFound`] when the path does not exist.
+    async fn metadata(&self, path: &Path) -> std::io::Result<FsMetadata>;
 }
 
 /// Native filesystem implementation using [`tokio::fs`].
@@ -100,6 +117,14 @@ impl FileSystem for NativeFileSystem {
 
     fn home_dir(&self) -> Option<PathBuf> {
         dirs::home_dir()
+    }
+
+    async fn metadata(&self, path: &Path) -> std::io::Result<FsMetadata> {
+        let meta = tokio::fs::metadata(path).await?;
+        Ok(FsMetadata {
+            is_dir: meta.is_dir(),
+            len: meta.len(),
+        })
     }
 }
 

@@ -4,7 +4,8 @@
 //! implementations of all platform sub-traits:
 //!
 //! - [`BrowserHttpClient`] -- HTTP via the fetch API ([`web_sys`]).
-//! - [`BrowserFileSystem`] -- In-memory filesystem (OPFS planned for future).
+//! - [`BrowserFileSystem`] -- In-memory filesystem, or OPFS when built with
+//!   the `browser-opfs` feature (WEFT-392).
 //! - [`BrowserEnvironment`] -- In-memory key-value environment variables.
 //!
 //! Process spawning is not available in WASM, so
@@ -15,7 +16,9 @@ pub mod fs;
 pub mod http;
 
 pub use env::BrowserEnvironment;
-pub use fs::BrowserFileSystem;
+pub use fs::{
+    BrowserFileSystem, BrowserFsBackend, BROWSER_HOME_DIR, BROWSER_WORKSPACE_DIR,
+};
 pub use http::BrowserHttpClient;
 
 use std::sync::Arc;
@@ -30,7 +33,10 @@ use crate::Platform;
 /// environments compiled to `wasm32-unknown-unknown`. It provides:
 ///
 /// - HTTP via the browser fetch API.
-/// - An in-memory filesystem (no persistence across page reloads).
+/// - A filesystem: in-memory by default, or OPFS when constructed via
+///   [`BrowserPlatform::open`] / [`BrowserPlatform::with_env_arc_and_fs`]
+///   under the `browser-opfs` feature (falls back to memory if OPFS is
+///   unavailable).
 /// - An in-memory environment variable store.
 /// - No process spawning capability.
 ///
@@ -44,11 +50,23 @@ pub struct BrowserPlatform {
 }
 
 impl BrowserPlatform {
-    /// Create a new browser platform with default (empty) state.
+    /// Create a new browser platform with default (empty) in-memory state.
     pub fn new() -> Self {
         Self {
             http: BrowserHttpClient::new(),
             fs: BrowserFileSystem::new(),
+            env: Arc::new(BrowserEnvironment::new()),
+        }
+    }
+
+    /// Open a platform preferring OPFS when `browser-opfs` is enabled.
+    ///
+    /// Falls back to the in-memory filesystem if OPFS is unavailable.
+    /// Without the feature this is equivalent to [`new`].
+    pub async fn open() -> Self {
+        Self {
+            http: BrowserHttpClient::new(),
+            fs: BrowserFileSystem::open().await,
             env: Arc::new(BrowserEnvironment::new()),
         }
     }
@@ -67,10 +85,31 @@ impl BrowserPlatform {
     /// Used when the WASM runtime needs the same [`Arc`] both inside the
     /// platform (for agent tools / config loaders) and outside it (for
     /// `set_env` after `BrowserPlatform` is moved into `AgentLoop`).
+    /// Uses the in-memory filesystem; prefer
+    /// [`with_env_arc_open`] when OPFS is desired.
     pub fn with_env_arc(env: Arc<BrowserEnvironment>) -> Self {
         Self {
             http: BrowserHttpClient::new(),
             fs: BrowserFileSystem::new(),
+            env,
+        }
+    }
+
+    /// Like [`with_env_arc`], but opens the best available filesystem
+    /// backend (OPFS when `browser-opfs` is enabled).
+    pub async fn with_env_arc_open(env: Arc<BrowserEnvironment>) -> Self {
+        Self {
+            http: BrowserHttpClient::new(),
+            fs: BrowserFileSystem::open().await,
+            env,
+        }
+    }
+
+    /// Construct with an explicit filesystem (tests / custom wiring).
+    pub fn with_env_arc_and_fs(env: Arc<BrowserEnvironment>, fs: BrowserFileSystem) -> Self {
+        Self {
+            http: BrowserHttpClient::new(),
+            fs,
             env,
         }
     }
@@ -81,6 +120,11 @@ impl BrowserPlatform {
     /// via `set_env` after this platform is owned by `AgentLoop`.
     pub fn env_arc(&self) -> Arc<BrowserEnvironment> {
         Arc::clone(&self.env)
+    }
+
+    /// Which filesystem backend is active (WEFT-392).
+    pub fn fs_backend(&self) -> BrowserFsBackend {
+        self.fs.backend()
     }
 }
 
