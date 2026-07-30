@@ -155,9 +155,11 @@ Search recent tweets matching a query.
 
 ```bash
 weft tool rest_request --provider twitter --method GET \
-  --url "https://api.x.com/2/tweets/search/recent?query=<encoded_query>&tweet.fields=created_at,author_id,text,public_metrics&max_results=10"
+  --url "https://api.x.com/2/tweets/search/recent?query=<encoded_query>&tweet.fields=created_at,author_id,text,public_metrics&expansions=author_id&user.fields=name,username&max_results=10"
 ```
 
+Resolve each tweet's `author_id` against the matching user in
+`includes.users`. Use that user's name and username when presenting results.
 Present results in a readable format: author, text preview, metrics
 (likes, retweets, replies).
 
