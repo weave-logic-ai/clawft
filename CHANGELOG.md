@@ -13,14 +13,29 @@ time, then add a matching `[X.Y.Z]: ...compare/...` link to the
 footnote block at the bottom of the file. The release runbook documents
 the cut-over (`docs/deployment/release.md`).
 
+### Fixed
+
+- **Release CI (WEFT-593)**: cargo-dist plan job no longer loses its
+  `artifacts_matrix` to GitHub Actions secret-scanning. Stock
+  `release.yml` stuffed the full dist-manifest (including CHANGELOG
+  announcement bodies) into a job output; when any substring matched a
+  registered secret, GHA dropped the output (`Skip output 'val' since it
+  may contain secret`), `build-local-artifacts` was SKIPPED, and the
+  tag announced a binary-less release (v0.6.21). Job outputs are now
+  slimmed (bodies stripped) with a dedicated matrix output, and the
+  host/announce path refuses to run unless local+global builds
+  succeeded. `allow-dirty = ["ci"]` records that `release.yml` is
+  hand-patched — re-apply after any `dist generate`.
+
 ### Fixed (parked — verified locally, not yet released)
 
 Docker-image fixes that are **not** in a published release. A v0.6.21 cut
-was attempted and rolled back: cargo-dist stopped publishing the platform
-binaries (its plan produced an empty target matrix — root cause TBD), and
-the download-based image depends on them. The published binaries remain
-at **v0.6.20**. Re-cut once the binary-publish issue is resolved (and the
-download-vs-self-contained Docker choice is settled).
+was attempted and rolled back: cargo-dist's plan *did* compute the 6
+target matrix, but GHA secret-scrubbed the plan job output so builds
+were skipped (WEFT-593, fixed above). The download-based image depends
+on those binaries. The published binaries remain at **v0.6.20**. Re-cut
+once this fix is on master (and the download-vs-self-contained Docker
+choice is settled).
 
 - **Docker (`Dockerfile`)**: pre-create `~/.clawft` owned by the `weft`
   user *before* the `VOLUME` (Docker created the unmounted mountpoint
