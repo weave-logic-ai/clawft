@@ -65,6 +65,4 @@ scripts/build.sh test clawft-types clawft-tools
 
 ## Commit
 
-See branch tip: `git rev-parse wave0a/weft-605-shell-deny-visible`
-
-Recorded at ship time by the implementer in the return summary (SHA below is filled on commit via trailer in git log).
+`be8c2ddd31d40a2755754a991c8222c98a3a85cc`
