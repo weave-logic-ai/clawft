@@ -11,7 +11,7 @@ pub mod analyzers;
 pub mod mesh;
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
@@ -223,8 +223,9 @@ pub struct AssessmentService {
     /// Path to the previous report JSON for diff computation.
     previous_report_path: Mutex<Option<PathBuf>>,
     /// Mesh coordinator for cross-project assessment exchange.
-    /// Present only when `[mesh] enabled = true` in weave.toml.
-    mesh_coordinator: Option<mesh::MeshCoordinator>,
+    /// Present when constructed via [`with_mesh`] / [`with_mesh_coordinator`]
+    /// (kernel boot enables this when `[mesh] enabled = true`).
+    mesh_coordinator: Option<Arc<mesh::MeshCoordinator>>,
 }
 
 impl AssessmentService {
@@ -245,13 +246,60 @@ impl AssessmentService {
             latest: Mutex::new(None),
             peers: Mutex::new(Vec::new()),
             previous_report_path: Mutex::new(None),
-            mesh_coordinator: Some(mesh::MeshCoordinator::new(node_id, project_name)),
+            mesh_coordinator: Some(Arc::new(mesh::MeshCoordinator::new(
+                node_id,
+                project_name,
+            ))),
+        }
+    }
+
+    /// Create a service that shares an existing mesh coordinator (WEFT-117).
+    ///
+    /// Used by kernel boot so [`AssessmentTransport`] and the service
+    /// hold the same [`mesh::MeshCoordinator`].
+    pub fn with_mesh_coordinator(coordinator: Arc<mesh::MeshCoordinator>) -> Self {
+        Self {
+            started: AtomicBool::new(false),
+            latest: Mutex::new(None),
+            peers: Mutex::new(Vec::new()),
+            previous_report_path: Mutex::new(None),
+            mesh_coordinator: Some(coordinator),
         }
     }
 
     /// Returns a reference to the mesh coordinator, if enabled.
     pub fn mesh_coordinator(&self) -> Option<&mesh::MeshCoordinator> {
-        self.mesh_coordinator.as_ref()
+        self.mesh_coordinator.as_deref()
+    }
+
+    /// Shared `Arc` to the mesh coordinator (for wiring AssessmentTransport).
+    pub fn mesh_coordinator_arc(&self) -> Option<Arc<mesh::MeshCoordinator>> {
+        self.mesh_coordinator.clone()
+    }
+
+    /// Queue mesh propagation for a completed report.
+    ///
+    /// Prefer **FindingDiff** (changed findings only) when a previous
+    /// report is available; otherwise queue a lightweight gossip message.
+    pub fn queue_mesh_propagation(&self, report: &AssessmentReport) {
+        let Some(ref mc) = self.mesh_coordinator else {
+            return;
+        };
+        if let Some(previous) = self.load_previous_report() {
+            let diff = analyzer::diff_reports(report, &previous);
+            // Only push a diff when something actually changed.
+            if !diff.findings_new.is_empty()
+                || !diff.findings_resolved.is_empty()
+                || diff.complexity_delta != 0
+                || (diff.coherence_delta.abs() > f64::EPSILON)
+            {
+                let msg = mc.build_finding_diff(report, &diff);
+                mc.set_pending_broadcast(msg);
+                return;
+            }
+        }
+        let gossip = mc.build_gossip(report);
+        mc.set_pending_broadcast(gossip);
     }
 
     /// Set the path to a previous assessment report JSON file.
@@ -440,11 +488,9 @@ impl AssessmentService {
 
         *self.latest.lock().unwrap() = Some(report.clone());
 
-        // If mesh is enabled, prepare a gossip broadcast for the daemon.
-        if let Some(ref mc) = self.mesh_coordinator {
-            let gossip = mc.build_gossip(&report);
-            mc.set_pending_broadcast(gossip);
-        }
+        // If mesh is enabled, queue diff (preferred) or gossip for the
+        // daemon mesh event loop / AssessmentTransport (WEFT-117).
+        self.queue_mesh_propagation(&report);
 
         debug!(
             scope = scope,
@@ -696,11 +742,8 @@ impl AssessmentService {
 
         *self.latest.lock().unwrap() = Some(report.clone());
 
-        // If mesh is enabled, prepare a gossip broadcast for the daemon.
-        if let Some(ref mc) = self.mesh_coordinator {
-            let gossip = mc.build_gossip(&report);
-            mc.set_pending_broadcast(gossip);
-        }
+        // Mesh propagation (FindingDiff when prior report exists).
+        self.queue_mesh_propagation(&report);
 
         debug!(
             scope = scope,
