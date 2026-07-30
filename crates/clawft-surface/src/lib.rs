@@ -1,6 +1,6 @@
 //! `clawft-surface` — surface-description IR, TOML + Rust builder
 //! parsers, binding expression evaluator, and composer runtime that
-//! drives the canon primitives in `clawft-gui-egui`.
+//! drives the shared canon primitives in [`clawft_canon`].
 //!
 //! This crate is the **M1.5 subset** of ADR-016 — sufficient for the
 //! WeftOS Admin reference panel (session-10 §6.1). Out of scope for
@@ -67,6 +67,7 @@
 //! and a full admin-panel fixture.
 
 pub mod builder;
+pub mod compose;
 pub mod eval;
 pub mod parse;
 pub mod tree;
@@ -91,16 +92,17 @@ pub mod substrate {
     pub use clawft_substrate::OntologySnapshot;
 }
 
+pub use compose::{
+    ComposeOutcome, ComposePermits, PendingDispatch, compose, compose_with_permits,
+    honest_affordances, normalize_verb, render_headless, render_headless_full,
+    render_headless_with_permits,
+};
 pub use substrate::OntologySnapshot;
 pub use tree::{
     AffordanceDecl, AttrValue, Binding, CompositionDef, IdentityIri, Input, Invocation, Mode,
     SurfaceNode, SurfaceTree,
 };
 
-// NOTE on composer location (M1.5-D): the composer runtime
-// (`compose(tree, snapshot, ui) -> Vec<CanonResponse>`) lives in
-// `clawft-gui-egui::surface_host` because it talks directly to canon
-// primitive types defined in that crate. Moving it here would
-// introduce a cyclic crate dependency (surface → gui-egui → surface).
-// A future milestone may extract the canon types into their own
-// crate, at which point the composer can migrate back.
+// WEFT-427: canon primitives live in `clawft-canon`; the composer
+// runtime lives here again (was temporarily in
+// `clawft-gui-egui::surface_host` during M1.5-D to break the cycle).

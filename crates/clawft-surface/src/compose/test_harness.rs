@@ -4,11 +4,11 @@
 //! window and no eframe glue. Suitable for asserting primitive
 //! counts, affordance presence, and rendered text regexes.
 
-use clawft_surface::substrate::OntologySnapshot;
-use clawft_surface::tree::SurfaceTree;
+use crate::substrate::OntologySnapshot;
+use crate::tree::SurfaceTree;
 
-use super::compose::{ComposePermits, compose_with_permits};
-use crate::canon::CanonResponse;
+use super::runtime::{ComposePermits, compose_with_permits};
+use clawft_canon::CanonResponse;
 
 /// Execute the composer in a headless egui frame. Returns the full
 /// `Vec<CanonResponse>` for assertion.
@@ -42,7 +42,7 @@ pub fn render_headless(tree: &SurfaceTree, snapshot: OntologySnapshot) -> Vec<Ca
 pub fn render_headless_full(
     tree: &SurfaceTree,
     snapshot: OntologySnapshot,
-) -> super::compose::ComposeOutcome {
+) -> super::runtime::ComposeOutcome {
     render_headless_with_permits(tree, snapshot, &ComposePermits::open())
 }
 
@@ -52,10 +52,10 @@ pub fn render_headless_with_permits(
     tree: &SurfaceTree,
     snapshot: OntologySnapshot,
     permits: &ComposePermits,
-) -> super::compose::ComposeOutcome {
+) -> super::runtime::ComposeOutcome {
     let ctx = egui::Context::default();
     let raw_input = egui::RawInput::default();
-    let mut captured: super::compose::ComposeOutcome = super::compose::ComposeOutcome::default();
+    let mut captured: super::runtime::ComposeOutcome = super::runtime::ComposeOutcome::default();
 
     let _output = ctx.run(raw_input, |ctx| {
         egui::CentralPanel::default().show(ctx, |ui| {

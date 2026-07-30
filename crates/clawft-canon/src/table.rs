@@ -6,7 +6,7 @@
 
 use std::borrow::Cow;
 
-use eframe::egui;
+use egui;
 use egui_extras::{Column, TableBuilder};
 
 use super::CanonWidget;

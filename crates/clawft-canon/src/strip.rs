@@ -8,7 +8,7 @@
 
 use std::borrow::Cow;
 
-use eframe::egui;
+use egui;
 use egui_extras::{Size, StripBuilder};
 
 use super::CanonWidget;

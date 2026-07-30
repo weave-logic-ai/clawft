@@ -6,7 +6,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-use eframe::egui;
+use egui;
 
 use super::CanonWidget;
 use super::response::CanonResponse;

@@ -5,7 +5,7 @@
 //! [`SurfaceTree`]. The composer runtime ([`crate::compose`]) walks
 //! this tree every frame, resolves bindings against an
 //! [`crate::substrate::OntologySnapshot`], and drives the canon
-//! primitives from `clawft-gui-egui`.
+//! primitives from `clawft-canon`.
 
 use std::collections::BTreeMap;
 
