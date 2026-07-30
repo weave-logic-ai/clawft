@@ -145,6 +145,8 @@ impl ResourceTree {
     /// Recompute the Merkle hash for a single node.
     ///
     /// Hash = SHAKE-256(sorted child hashes || scoring bytes || sorted metadata kv).
+    /// Does **not** clear the dirty flag — use [`Self::recompute_dirty`] or
+    /// [`Self::recompute_path`] for incremental updates.
     pub fn recompute_merkle(&mut self, id: &ResourceId) {
         // Gather child hashes (sorted for determinism) + scoring bytes
         let (child_hashes, scoring_bytes): (Vec<[u8; 32]>, [u8; 24]) = {
@@ -194,12 +196,174 @@ impl ResourceTree {
         }
     }
 
+    /// Mark `id` and every ancestor dirty (O(depth)).
+    ///
+    /// Walks the full ancestor chain. Early-stops only when a node is already
+    /// dirty **and** its parent is also dirty (or it is root), so the
+    /// invariant "dirty ⇒ ancestors dirty" holds. Newly constructed nodes
+    /// start dirty without parents marked — this path still propagates.
+    pub fn mark_dirty(&mut self, id: &ResourceId) {
+        let mut current = Some(id.clone());
+        while let Some(cid) = current {
+            let (parent, was_dirty) = match self.nodes.get_mut(&cid) {
+                Some(node) => {
+                    let was = node.dirty;
+                    node.dirty = true;
+                    (node.parent.clone(), was)
+                }
+                None => break,
+            };
+            if was_dirty {
+                // Already dirty: stop only if the parent is dirty too
+                // (or there is no parent). Otherwise keep climbing to
+                // restore the dirty⇒ancestors-dirty invariant.
+                let parent_ok = match &parent {
+                    None => true,
+                    Some(pid) => self.nodes.get(pid).map(|n| n.dirty).unwrap_or(false),
+                };
+                if parent_ok {
+                    break;
+                }
+            }
+            current = parent;
+        }
+    }
+
+    /// Whether any node currently carries a dirty flag.
+    pub fn has_dirty(&self) -> bool {
+        self.nodes.values().any(|n| n.dirty)
+    }
+
+    /// Count of nodes with the dirty flag set.
+    pub fn dirty_count(&self) -> usize {
+        self.nodes.values().filter(|n| n.dirty).count()
+    }
+
+    /// Aggregate children's scoring into `id` when it is a non-leaf.
+    ///
+    /// Mirrors the scoring step used by [`Self::recompute_all`] so
+    /// incremental and full recompute paths stay equivalent.
+    fn aggregate_scoring_for(&mut self, id: &ResourceId) {
+        let child_scorings: Vec<NodeScoring> = {
+            let node = match self.nodes.get(id) {
+                Some(n) => n,
+                None => return,
+            };
+            if node.children.is_empty() {
+                return;
+            }
+            node.children
+                .iter()
+                .filter_map(|cid| self.nodes.get(cid).map(|c| c.scoring))
+                .collect()
+        };
+        if child_scorings.is_empty() {
+            return;
+        }
+        let refs: Vec<&NodeScoring> = child_scorings.iter().collect();
+        let aggregated = NodeScoring::aggregate(&refs);
+        if let Some(node) = self.nodes.get_mut(id) {
+            node.scoring = aggregated;
+        }
+    }
+
+    /// Recompute Merkle hashes for dirty nodes only (bottom-up).
+    ///
+    /// Collects dirty IDs, sorts deepest-first so children hash before
+    /// parents, aggregates scoring for non-leaves, hashes, and clears
+    /// dirty. Returns the number of nodes recomputed.
+    ///
+    /// For a single mutation path this is O(depth). Multiple independent
+    /// dirty subtrees recompute only those subtrees, not the whole tree.
+    pub fn recompute_dirty(&mut self) -> usize {
+        let mut id_depth: Vec<(ResourceId, usize)> = self
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.dirty)
+            .map(|(id, _)| {
+                let depth = self.ancestors(id).len();
+                (id.clone(), depth)
+            })
+            .collect();
+
+        if id_depth.is_empty() {
+            return 0;
+        }
+
+        // Deepest first (leaves before parents)
+        id_depth.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let count = id_depth.len();
+        for (id, _) in &id_depth {
+            self.aggregate_scoring_for(id);
+            self.recompute_merkle(id);
+            if let Some(node) = self.nodes.get_mut(id) {
+                node.dirty = false;
+            }
+        }
+        count
+    }
+
+    /// Mark the path from `id` to root dirty and recompute only that path.
+    ///
+    /// Primary mutation entry point for structural changes (insert / remove /
+    /// meta) — O(depth) rather than O(tree). Non-leaf nodes on the path
+    /// (including `id`) re-aggregate child scoring before hashing, matching
+    /// [`Self::recompute_all`].
+    ///
+    /// Returns the number of nodes recomputed.
+    pub fn recompute_path(&mut self, id: &ResourceId) -> usize {
+        self.recompute_path_inner(id, /*aggregate_origin=*/ true)
+    }
+
+    /// Like [`Self::recompute_path`], but keeps `id`'s scoring vector as-is.
+    ///
+    /// Used by [`Self::update_scoring`] / [`Self::blend_scoring`] so an
+    /// explicit observation on a non-leaf is not immediately overwritten by
+    /// child aggregation. Ancestors still re-aggregate (O(depth)).
+    pub fn recompute_path_preserve_scoring(&mut self, id: &ResourceId) -> usize {
+        self.recompute_path_inner(id, /*aggregate_origin=*/ false)
+    }
+
+    fn recompute_path_inner(&mut self, id: &ResourceId, aggregate_origin: bool) -> usize {
+        if self.nodes.get(id).is_none() {
+            return 0;
+        }
+        self.mark_dirty(id);
+
+        // Origin first (deepest).
+        if aggregate_origin {
+            self.aggregate_scoring_for(id);
+        }
+        self.recompute_merkle(id);
+        if let Some(node) = self.nodes.get_mut(id) {
+            node.dirty = false;
+        }
+
+        // Ancestors: parent → … → root (already deepest-first for a path).
+        let ancestors = self.ancestors(id);
+        let mut count = 1usize;
+        for anc in &ancestors {
+            self.aggregate_scoring_for(anc);
+            self.recompute_merkle(anc);
+            if let Some(node) = self.nodes.get_mut(anc) {
+                node.dirty = false;
+            }
+            count += 1;
+        }
+        count
+    }
+
     /// Bottom-up Merkle recomputation for the entire tree.
     ///
     /// Uses a topological sort (leaves first) to ensure children are
     /// hashed before their parents. For non-leaf nodes, the parent's
     /// scoring is aggregated from its children via reward-weighted mean
-    /// before hashing.
+    /// before hashing. Clears all dirty flags.
+    ///
+    /// Prefer [`Self::recompute_path`] for per-mutation updates (WEFT-145).
+    /// Keep `recompute_all` for bootstrap, checkpoint restore, and tests
+    /// that need a full consistency pass.
     pub fn recompute_all(&mut self) {
         // Collect all IDs with their depth (distance from root)
         let mut id_depth: Vec<(ResourceId, usize)> = self
@@ -216,36 +380,19 @@ impl ResourceTree {
 
         // Recompute in order: aggregate children's scoring, then hash
         for (id, _) in &id_depth {
-            // Aggregate children's scoring into parent for non-leaf nodes
-            let child_scorings: Vec<NodeScoring> = {
-                let node = match self.nodes.get(id) {
-                    Some(n) => n,
-                    None => continue,
-                };
-                if node.children.is_empty() {
-                    Vec::new()
-                } else {
-                    node.children
-                        .iter()
-                        .filter_map(|cid| self.nodes.get(cid).map(|c| c.scoring))
-                        .collect()
-                }
-            };
-            if !child_scorings.is_empty() {
-                let refs: Vec<&NodeScoring> = child_scorings.iter().collect();
-                let aggregated = NodeScoring::aggregate(&refs);
-                if let Some(node) = self.nodes.get_mut(id) {
-                    node.scoring = aggregated;
-                }
-            }
-
+            self.aggregate_scoring_for(id);
             self.recompute_merkle(id);
+            if let Some(node) = self.nodes.get_mut(id) {
+                node.dirty = false;
+            }
         }
     }
 
-    /// Set the scoring vector for a node and recompute its Merkle hash.
+    /// Set the scoring vector for a node and recompute its Merkle path.
     ///
     /// Returns the old scoring, or `None` if the node was not found.
+    /// Bubbles the hash update to the root (O(depth)). Preserves the
+    /// explicit scoring on `id` (see [`Self::recompute_path_preserve_scoring`]).
     pub fn update_scoring(&mut self, id: &ResourceId, scoring: NodeScoring) -> Option<NodeScoring> {
         let old = {
             let node = self.nodes.get_mut(id)?;
@@ -254,13 +401,15 @@ impl ResourceTree {
             node.updated_at = chrono::Utc::now();
             old
         };
-        self.recompute_merkle(id);
+        self.recompute_path_preserve_scoring(id);
         Some(old)
     }
 
-    /// EMA-blend an observation into a node's scoring and recompute its hash.
+    /// EMA-blend an observation into a node's scoring and recompute its path.
     ///
     /// Returns `true` if the node was found and updated.
+    /// Bubbles the hash update to the root (O(depth)). Preserves the
+    /// blended scoring on `id` (see [`Self::recompute_path_preserve_scoring`]).
     pub fn blend_scoring(
         &mut self,
         id: &ResourceId,
@@ -275,7 +424,7 @@ impl ResourceTree {
             false
         };
         if found {
-            self.recompute_merkle(id);
+            self.recompute_path_preserve_scoring(id);
         }
         found
     }
@@ -700,5 +849,263 @@ mod tests {
         let mut tree = ResourceTree::new();
         let obs = NodeScoring::default();
         assert!(!tree.blend_scoring(&ResourceId::new("/nope"), &obs, 0.5));
+    }
+
+    // --- WEFT-145: incremental Merkle updates ---
+
+    /// Build a balanced-ish tree with `width` children under root and
+    /// `depth` levels of single-child chains under each branch.
+    fn build_wide_tree(width: usize, depth: usize) -> ResourceTree {
+        let mut tree = ResourceTree::new();
+        for w in 0..width {
+            let mut parent = ResourceId::root();
+            for d in 0..depth {
+                let id = if d == 0 {
+                    ResourceId::new(format!("/b{w}"))
+                } else {
+                    ResourceId::new(format!("/b{w}/d{d}"))
+                };
+                tree.insert(id.clone(), ResourceKind::Namespace, parent)
+                    .unwrap();
+                parent = id;
+            }
+        }
+        tree.recompute_all();
+        tree
+    }
+
+    #[test]
+    fn mark_dirty_propagates_to_root() {
+        let mut tree = ResourceTree::new();
+        tree.insert(
+            ResourceId::new("/a"),
+            ResourceKind::Namespace,
+            ResourceId::root(),
+        )
+        .unwrap();
+        tree.insert(
+            ResourceId::new("/a/b"),
+            ResourceKind::Namespace,
+            ResourceId::new("/a"),
+        )
+        .unwrap();
+        tree.recompute_all();
+        assert!(!tree.has_dirty());
+
+        tree.mark_dirty(&ResourceId::new("/a/b"));
+        assert!(tree.get(&ResourceId::new("/a/b")).unwrap().dirty);
+        assert!(tree.get(&ResourceId::new("/a")).unwrap().dirty);
+        assert!(tree.get(&ResourceId::root()).unwrap().dirty);
+        assert_eq!(tree.dirty_count(), 3);
+    }
+
+    #[test]
+    fn mark_dirty_early_exit_when_ancestor_already_dirty() {
+        let mut tree = ResourceTree::new();
+        tree.insert(
+            ResourceId::new("/a"),
+            ResourceKind::Namespace,
+            ResourceId::root(),
+        )
+        .unwrap();
+        tree.insert(
+            ResourceId::new("/a/b"),
+            ResourceKind::Service,
+            ResourceId::new("/a"),
+        )
+        .unwrap();
+        tree.recompute_all();
+
+        tree.mark_dirty(&ResourceId::new("/a"));
+        assert_eq!(tree.dirty_count(), 2); // /a + root
+        // Marking child expands only the child; parent already dirty
+        tree.mark_dirty(&ResourceId::new("/a/b"));
+        assert!(tree.get(&ResourceId::new("/a/b")).unwrap().dirty);
+        assert_eq!(tree.dirty_count(), 3); // + /a/b only
+    }
+
+    #[test]
+    fn mark_dirty_propagates_from_new_node_already_dirty() {
+        // ResourceNode::new starts dirty without ancestors marked.
+        let mut tree = ResourceTree::new();
+        tree.recompute_all(); // clear root dirty
+        tree.insert(
+            ResourceId::new("/a"),
+            ResourceKind::Namespace,
+            ResourceId::root(),
+        )
+        .unwrap();
+        assert!(tree.get(&ResourceId::new("/a")).unwrap().dirty);
+        assert!(!tree.get(&ResourceId::root()).unwrap().dirty);
+
+        tree.mark_dirty(&ResourceId::new("/a"));
+        assert!(tree.get(&ResourceId::root()).unwrap().dirty);
+        assert_eq!(tree.dirty_count(), 2);
+    }
+
+    #[test]
+    fn recompute_path_matches_recompute_all_root_hash() {
+        let mut incr = ResourceTree::new();
+        let mut full = ResourceTree::new();
+        for path in ["/a", "/a/b", "/a/b/c", "/x", "/x/y"] {
+            let id = ResourceId::new(path);
+            let parent = id.parent().unwrap();
+            incr.insert(id.clone(), ResourceKind::Namespace, parent.clone())
+                .unwrap();
+            full.insert(id, ResourceKind::Namespace, parent).unwrap();
+        }
+
+        // Seed both with full recompute
+        incr.recompute_all();
+        full.recompute_all();
+        assert_eq!(incr.root_hash(), full.root_hash());
+
+        // Mutate a deep leaf on both trees the same way
+        for tree in [&mut incr, &mut full] {
+            tree.get_mut(&ResourceId::new("/a/b/c"))
+                .unwrap()
+                .metadata
+                .insert("k".into(), serde_json::json!("v"));
+        }
+
+        let recomputed = incr.recompute_path(&ResourceId::new("/a/b/c"));
+        assert_eq!(recomputed, 4); // /a/b/c, /a/b, /a, /
+        assert!(!incr.has_dirty());
+
+        full.recompute_all();
+        assert_eq!(incr.root_hash(), full.root_hash());
+
+        // Per-node hashes must match too
+        for (id, node) in incr.iter() {
+            let other = full.get(id).unwrap();
+            assert_eq!(
+                node.merkle_hash, other.merkle_hash,
+                "hash mismatch at {id}"
+            );
+            assert_eq!(
+                node.scoring.as_array(),
+                other.scoring.as_array(),
+                "scoring mismatch at {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn recompute_path_after_insert_matches_full() {
+        let mut incr = build_wide_tree(4, 3);
+        let mut full = build_wide_tree(4, 3);
+        assert_eq!(incr.root_hash(), full.root_hash());
+
+        let leaf = ResourceId::new("/b0/d1/leaf");
+        let parent = ResourceId::new("/b0/d1");
+        incr.insert(leaf.clone(), ResourceKind::Service, parent.clone())
+            .unwrap();
+        full.insert(leaf.clone(), ResourceKind::Service, parent)
+            .unwrap();
+
+        let n = incr.recompute_path(&leaf);
+        // leaf + /b0/d1 + /b0 + root = 4 (depth chain)
+        assert_eq!(n, 4);
+        full.recompute_all();
+        assert_eq!(incr.root_hash(), full.root_hash());
+    }
+
+    #[test]
+    fn recompute_path_after_remove_matches_full() {
+        let mut incr = build_wide_tree(3, 3);
+        let mut full = build_wide_tree(3, 3);
+
+        // remove the deepest leaf under b1
+        let deepest = ResourceId::new("/b1/d2");
+        let parent = ResourceId::new("/b1/d1");
+        incr.remove(deepest.clone()).unwrap();
+        full.remove(deepest).unwrap();
+
+        let n = incr.recompute_path(&parent);
+        // parent /b1/d1 + /b1 + root
+        assert_eq!(n, 3);
+        // sibling branches stay clean
+        assert!(!incr.get(&ResourceId::new("/b0")).unwrap().dirty);
+        full.recompute_all();
+        assert_eq!(incr.root_hash(), full.root_hash());
+    }
+
+    #[test]
+    fn recompute_path_scoring_update_matches_full() {
+        let mut incr = build_wide_tree(2, 4);
+        let mut full = build_wide_tree(2, 4);
+        // depth=4 ⇒ chain /b0 → /b0/d1 → /b0/d2 → /b0/d3
+        let target = ResourceId::new("/b0/d3");
+        let scoring = NodeScoring::new(0.9, 0.1, 0.5, 0.8, 0.5, 0.5);
+
+        incr.update_scoring(&target, scoring);
+        full.get_mut(&target).unwrap().scoring = scoring;
+        full.recompute_all();
+
+        assert_eq!(incr.root_hash(), full.root_hash());
+        // Parent scoring must have been re-aggregated
+        let parent = ResourceId::new("/b0/d2");
+        assert_eq!(
+            incr.get(&parent).unwrap().scoring.as_array(),
+            full.get(&parent).unwrap().scoring.as_array()
+        );
+    }
+
+    #[test]
+    fn recompute_path_is_o_depth_not_o_size() {
+        // Large tree: 50 branches × 20 depth ≈ 1000+ nodes
+        let width = 50;
+        let depth = 20;
+        let mut tree = build_wide_tree(width, depth);
+        let n_nodes = tree.len();
+        assert!(n_nodes > 900, "expected large tree, got {n_nodes}");
+
+        // Touch one deep leaf
+        let leaf = ResourceId::new(format!("/b0/d{}", depth - 1));
+        tree.get_mut(&leaf)
+            .unwrap()
+            .metadata
+            .insert("touch".into(), serde_json::json!(1));
+
+        let recomputed = tree.recompute_path(&leaf);
+        // Path length = depth levels under branch + root = depth + 1
+        // (b0, d1..d{depth-1}, root) = depth + 1? 
+        // structure: /b0 (d=0), /b0/d1, ..., /b0/d{depth-1}
+        // ancestors of leaf: d{depth-2}..d1, b0, root → depth nodes on path total
+        // path nodes = depth (under branch) + 0? Wait:
+        // depth=20 → nodes: /b0 + /b0/d1..d19 = 20 nodes under root, + root = 21
+        assert_eq!(
+            recomputed,
+            depth + 1,
+            "expected O(depth)={}+1, got {recomputed} (tree size {n_nodes})",
+            depth
+        );
+        assert!(
+            recomputed * 10 < n_nodes,
+            "recomputed {recomputed} is not << tree size {n_nodes}"
+        );
+        assert!(!tree.has_dirty());
+    }
+
+    #[test]
+    fn recompute_dirty_noop_when_clean() {
+        let mut tree = build_wide_tree(2, 2);
+        assert_eq!(tree.recompute_dirty(), 0);
+    }
+
+    #[test]
+    fn multi_branch_dirty_only_touches_dirty_paths() {
+        let mut tree = build_wide_tree(5, 5);
+        tree.mark_dirty(&ResourceId::new("/b0/d4"));
+        tree.mark_dirty(&ResourceId::new("/b2/d4"));
+        // Each path: leaf + 4 ancestors under branch + root, but root shared
+        // b0/d4, b0/d3, b0/d2, b0/d1, b0, root = 6
+        // b2/d4, b2/d3, b2/d2, b2/d1, b2 = 5 (root already dirty)
+        assert_eq!(tree.dirty_count(), 11);
+
+        let n = tree.recompute_dirty();
+        assert_eq!(n, 11);
+        assert!(!tree.get(&ResourceId::new("/b1")).unwrap().dirty);
+        assert!(!tree.get(&ResourceId::new("/b3/d2")).unwrap().dirty);
     }
 }

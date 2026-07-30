@@ -210,8 +210,8 @@ impl TreeManager {
             );
         }
 
-        // Recompute Merkle hashes
-        tree.recompute_all();
+        // Incremental Merkle update: O(depth) path recompute (WEFT-145)
+        tree.recompute_path(&id);
 
         // Mutation log
         let now = Utc::now();
@@ -240,8 +240,11 @@ impl TreeManager {
     /// `tree.remove` chain event.
     pub fn remove(&self, id: ResourceId) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut tree = self.tree.lock().map_err(|e| format!("tree lock: {e}"))?;
-        tree.remove(id.clone())?;
-        tree.recompute_all();
+        let removed = tree.remove(id.clone())?;
+        // Recompute from former parent upward (node is gone) — O(depth)
+        if let Some(parent) = removed.parent {
+            tree.recompute_path(&parent);
+        }
 
         self.chain.append(
             "tree",
@@ -285,7 +288,8 @@ impl TreeManager {
             .ok_or_else(|| format!("node not found: {id}"))?;
         node.metadata.insert(key.to_string(), value.clone());
         node.updated_at = Utc::now();
-        tree.recompute_all();
+        // Incremental Merkle update: O(depth) path recompute (WEFT-145)
+        tree.recompute_path(id);
 
         self.chain.append(
             "tree",
@@ -392,7 +396,8 @@ impl TreeManager {
                     serde_json::json!(caps.can_exec_tools),
                 );
             }
-            tree.recompute_all();
+            // Incremental Merkle update: O(depth) path recompute (WEFT-145)
+            tree.recompute_path(&agent_rid);
         }
 
         // Chain event
@@ -468,7 +473,8 @@ impl TreeManager {
                 );
                 node.updated_at = Utc::now();
             }
-            tree.recompute_all();
+            // Incremental Merkle update: O(depth) path recompute (WEFT-145)
+            tree.recompute_path(&agent_rid);
         }
 
         self.chain.append(
@@ -1165,13 +1171,15 @@ impl TreeManager {
                 // Only insert if not already present (idempotent)
                 if tree.get(id).is_none() {
                     tree.insert(id.clone(), kind.clone(), parent.clone())?;
-                    tree.recompute_all();
+                    tree.recompute_path(id);
                 }
             }
             MutationEvent::Remove { id, .. } => {
                 if tree.get(id).is_some() {
-                    tree.remove(id.clone())?;
-                    tree.recompute_all();
+                    let removed = tree.remove(id.clone())?;
+                    if let Some(parent) = removed.parent {
+                        tree.recompute_path(&parent);
+                    }
                 }
             }
             MutationEvent::UpdateMeta { id, key, value, .. } => {
@@ -1183,7 +1191,7 @@ impl TreeManager {
                     }
                     node.updated_at = Utc::now();
                 }
-                tree.recompute_all();
+                tree.recompute_path(id);
             }
             MutationEvent::Move { .. } | MutationEvent::UpdateScoring { .. } => {
                 // Move and scoring updates are recorded but not yet applied
