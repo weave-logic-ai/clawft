@@ -10,6 +10,11 @@
 .hive-mind
 .swarm/
 target/
+# WEFT-33: cargo-fuzz local state (corpus grows; artifacts hold crashes).
+crates/clawft-core/fuzz/target/
+crates/clawft-core/fuzz/corpus/
+crates/clawft-core/fuzz/artifacts/
+crates/clawft-core/fuzz/coverage/
 .env
 .env-keys.json
 # Documented Vite build-time template files (no secrets) — keep tracked.

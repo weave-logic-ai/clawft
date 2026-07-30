@@ -1,0 +1,98 @@
+# WEFT-33: bounded nightly fuzz of clawft-core pipeline/routing attack surfaces.
+#
+# Requires nightly + cargo-fuzz + clang (libFuzzer). Each target runs for a
+# fixed wall-clock budget so the job stays CI-friendly. Crashes fail the job
+# and upload libFuzzer artifacts for triage.
+#
+# Manual: Actions → "Fuzz (nightly bounded)" → Run workflow.
+# Local:  see crates/clawft-core/fuzz/README.md
+
+name: Fuzz (nightly bounded)
+
+on:
+  schedule:
+    # 06:17 UTC daily — offset from other nightlies
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      max_total_time:
+        description: "libFuzzer -max_total_time seconds per target"
+        required: false
+        default: "60"
+  # Optional: exercise on PRs that touch the harness or the surfaces under test.
+  pull_request:
+    paths:
+      - "crates/clawft-core/fuzz/**"
+      - "crates/clawft-core/src/pipeline/**"
+      - "crates/clawft-core/src/routing_validation.rs"
+      - "crates/clawft-core/src/tools/registry.rs"
+      - "crates/clawft-types/src/routing.rs"
+      - ".github/workflows/fuzz-nightly.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+  # Default bound; workflow_dispatch may override via inputs.
+  FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.max_total_time || '60' }}
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - routing_config_parsing
+          - permission_resolution
+          - cost_tracker_concurrent
+          - rate_limiter_unique_ids
+          - auth_context_threading
+          - tool_permission_glob
+          - escalation_chain
+          - budget_persistence
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly + rust-src (libfuzzer-sys)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Install clang (libFuzzer)
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: Cache cargo fuzz
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/clawft-core/fuzz/target
+          key: ${{ runner.os }}-fuzz-${{ matrix.target }}-${{ hashFiles('crates/clawft-core/fuzz/Cargo.toml', 'Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-fuzz-${{ matrix.target }}-
+            ${{ runner.os }}-fuzz-
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Run ${{ matrix.target }} (bounded)
+        working-directory: crates/clawft-core
+        run: |
+          set -euo pipefail
+          echo "Running ${{ matrix.target }} for ${FUZZ_MAX_TOTAL_TIME}s"
+          cargo +nightly fuzz run "${{ matrix.target }}" -- \
+            -max_total_time="${FUZZ_MAX_TOTAL_TIME}" \
+            -max_len=8192 \
+            -timeout=10
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: |
+            crates/clawft-core/fuzz/artifacts/${{ matrix.target }}/
+            crates/clawft-core/fuzz/corpus/${{ matrix.target }}/
+          if-no-files-found: ignore
+          retention-days: 14
