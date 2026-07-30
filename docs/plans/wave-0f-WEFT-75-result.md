@@ -90,4 +90,5 @@ still returns only `.`.
 
 ## Commit
 
-`51d5aad45f3236a99c68894fe13c9e4a07e07266`
+- Feature: `d666f56954aa6d24fc959f717b5b7a14d0047f59`
+- Branch tip: `git rev-parse wave0f/weft-75-autogen-allowlist` (includes this result doc pointer)
