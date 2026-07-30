@@ -28,6 +28,8 @@ browser = [
     "clawft-platform/browser",
     "clawft-core/browser",
 ]
+# WEFT-392: OPFS-backed platform filesystem for browser tools.
+browser-opfs = ["browser", "clawft-platform/browser-opfs"]
 canvas = []
 vector-memory = ["clawft-core/vector-memory"]
 delegate = ["clawft-services/delegate"]

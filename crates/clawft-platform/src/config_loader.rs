@@ -561,6 +561,28 @@ mod tests {
         fn home_dir(&self) -> Option<PathBuf> {
             self.home.clone()
         }
+        async fn metadata(
+            &self,
+            path: &Path,
+        ) -> std::io::Result<super::super::fs::FsMetadata> {
+            if self.exists(path).await {
+                Ok(super::super::fs::FsMetadata {
+                    is_dir: false,
+                    len: self
+                        .files
+                        .lock()
+                        .unwrap()
+                        .get(path)
+                        .map(|s| s.len() as u64)
+                        .unwrap_or(0),
+                })
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "not found",
+                ))
+            }
+        }
     }
 
     fn workspace_config_path() -> PathBuf {

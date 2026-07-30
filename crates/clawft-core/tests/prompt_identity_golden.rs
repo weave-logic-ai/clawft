@@ -424,6 +424,28 @@ impl clawft_platform::fs::FileSystem for GoldenFs {
         // A path with no bootstrap files on any real disk → default system prompt.
         Some(PathBuf::from("/golden-nonexistent-home"))
     }
+
+    async fn metadata(
+        &self,
+        path: &Path,
+    ) -> std::io::Result<clawft_platform::fs::FsMetadata> {
+        if let Some(content) = self.files.lock().unwrap().get(path) {
+            return Ok(clawft_platform::fs::FsMetadata {
+                is_dir: false,
+                len: content.len() as u64,
+            });
+        }
+        if self.dirs.lock().unwrap().contains(&path.to_path_buf()) {
+            return Ok(clawft_platform::fs::FsMetadata {
+                is_dir: true,
+                len: 0,
+            });
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "not found",
+        ))
+    }
 }
 
 struct GoldenEnv;

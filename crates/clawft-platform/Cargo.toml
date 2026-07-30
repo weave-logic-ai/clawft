@@ -19,6 +19,12 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = ["native"]
 native = ["dep:tokio", "dep:reqwest", "dep:dirs", "clawft-types/native"]
 browser = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:web-sys", "dep:js-sys", "dep:getrandom", "clawft-types/browser"]
+# WEFT-392: Origin Private File System backend for BrowserFileSystem.
+# Requires `browser`. web-sys ≥ 0.3.70 exposes stable FileSystem*Handle /
+# StorageManager bindings (no `web_sys_unstable_apis` cfg needed as of 0.3.85).
+# When OPFS is unavailable at runtime (non-secure context, missing API),
+# BrowserFileSystem falls back to the in-memory store.
+browser-opfs = ["browser"]
 
 [dependencies]
 # Always available (trait definitions)
@@ -38,7 +44,33 @@ dirs = { workspace = true, optional = true }
 # Browser only
 wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
-web-sys = { version = "0.3", optional = true, features = ["Request", "RequestInit", "RequestMode", "Response", "Headers", "Window", "WorkerGlobalScope"] }
+# OPFS-related features are listed here so `browser-opfs` compiles against
+# them; they are inert unless the OPFS code path is cfg'd in.
+web-sys = { version = "0.3", optional = true, features = [
+    "Request",
+    "RequestInit",
+    "RequestMode",
+    "Response",
+    "Headers",
+    "Window",
+    "WorkerGlobalScope",
+    # WEFT-392 OPFS (stable in web-sys 0.3.70+)
+    "Navigator",
+    "WorkerNavigator",
+    "StorageManager",
+    "FileSystemHandle",
+    "FileSystemHandleKind",
+    "FileSystemDirectoryHandle",
+    "FileSystemFileHandle",
+    "FileSystemGetDirectoryOptions",
+    "FileSystemGetFileOptions",
+    "FileSystemWritableFileStream",
+    "FileSystemCreateWritableOptions",
+    "FileSystemRemoveOptions",
+    "File",
+    "Blob",
+    "WritableStream",
+] }
 js-sys = { version = "0.3", optional = true }
 getrandom = { workspace = true, optional = true }
 

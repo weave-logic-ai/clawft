@@ -613,17 +613,33 @@ cmd_test_browser() {
     fi
     if ! check_target_installed wasm32-unknown-unknown; then return 1; fi
     timer_start
+    # Default suite is browser (entry-point contracts). Pass FEATURES=browser-opfs
+    # to also exercise OPFS persistence (WEFT-392 / browser_opfs.rs).
+    local feat="browser"
+    if [ -n "$FEATURES" ]; then
+        feat="browser,$FEATURES"
+    fi
     local args=(wasm-pack test --headless --chrome crates/clawft-wasm
-                --no-default-features --features browser
+                --no-default-features --features "$feat"
                 --test browser_pipeline)
     if [ "$DRY_RUN" = true ]; then
         printf "  ${YELLOW}DRY${NC}   %s\n" "${args[*]}"
+        if echo "$feat" | grep -q 'browser-opfs'; then
+            printf "  ${YELLOW}DRY${NC}   … --test browser_opfs\n"
+        fi
         timer_end
         return 0
     fi
     # Always show full output — tail -5 hides per-test results from the runner.
     "${args[@]}" 2>&1
     local rc=$?
+    if [ "$rc" -eq 0 ] && echo "$feat" | grep -q 'browser-opfs'; then
+        info "Running WEFT-392 OPFS persistence suite"
+        wasm-pack test --headless --chrome crates/clawft-wasm \
+            --no-default-features --features "$feat" \
+            --test browser_opfs 2>&1
+        rc=$?
+    fi
     timer_end
     return "$rc"
 }

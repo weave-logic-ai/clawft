@@ -16,8 +16,9 @@ use tracing::debug;
 /// Resolve a path to its canonical form.
 ///
 /// On native targets this follows symlinks via `std::fs::canonicalize`.
-/// On browser/WASM targets (no real filesystem symlinks in OPFS) we
-/// normalize the path components without filesystem access.
+/// On browser/WASM/OPFS targets there are no symlinks (OPFS stores plain
+/// named entries only) — we normalize `..` / `.` components without
+/// touching the filesystem (WEFT-392 audit: OPFS-no-symlink assumption).
 #[cfg(feature = "native")]
 fn resolve_sandbox_path(path: &Path) -> std::io::Result<PathBuf> {
     std::fs::canonicalize(path)
@@ -25,7 +26,7 @@ fn resolve_sandbox_path(path: &Path) -> std::io::Result<PathBuf> {
 
 #[cfg(not(feature = "native"))]
 fn resolve_sandbox_path(path: &Path) -> std::io::Result<PathBuf> {
-    // Normalize path without filesystem access (OPFS has no symlinks).
+    // OPFS / in-memory browser FS has no symlinks; lexical normalize only.
     let mut components = Vec::new();
     for component in path.components() {
         match component {
@@ -46,8 +47,10 @@ fn resolve_sandbox_path(path: &Path) -> std::io::Result<PathBuf> {
 /// Check whether a path exists on the filesystem.
 ///
 /// On native targets this uses `std::path::Path::exists()`.
-/// On browser/WASM targets this always returns `true` (the caller
-/// relies on platform filesystem errors for non-existent paths).
+/// On browser/WASM/OPFS targets there is no synchronous stat API
+/// (`FileSystemHandle` lookups are async), so this returns `true` and
+/// callers fall through to workspace containment + async platform FS
+/// errors for missing paths (WEFT-392).
 #[cfg(feature = "native")]
 fn path_exists(path: &Path) -> bool {
     path.exists()
@@ -55,9 +58,8 @@ fn path_exists(path: &Path) -> bool {
 
 #[cfg(not(feature = "native"))]
 fn path_exists(_path: &Path) -> bool {
-    // In OPFS/browser we cannot synchronously stat paths.
-    // Return true so validate_parent_path falls through to the
-    // workspace containment check using the normalized path.
+    // OPFS cannot synchronously stat; validate_parent_path uses the
+    // normalized path for workspace containment instead.
     true
 }
 
@@ -419,16 +421,13 @@ impl<P: Platform + 'static> Tool for ListDirectoryTool<P> {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
 
-            #[cfg(feature = "native")]
-            let (is_dir, size) = {
-                let metadata = tokio::fs::metadata(&entry_path).await;
-                match metadata {
-                    Ok(m) => (m.is_dir(), m.len()),
-                    Err(_) => (false, 0),
-                }
+            // WEFT-392: use platform `FileSystem::metadata` so browser/OPFS
+            // backends report real is_dir / size (native still uses tokio
+            // under NativeFileSystem::metadata).
+            let (is_dir, size) = match self.platform.fs().metadata(entry_path).await {
+                Ok(m) => (m.is_dir, m.len),
+                Err(_) => (false, 0u64),
             };
-            #[cfg(not(feature = "native"))]
-            let (is_dir, size) = (false, 0u64);
 
             result.push(json!({
                 "name": name,

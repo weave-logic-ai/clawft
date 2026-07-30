@@ -339,7 +339,10 @@ mod browser_entry {
         } else {
             BrowserEnvironment::with_vars(seed)
         });
-        let platform = Arc::new(BrowserPlatform::with_env_arc(Arc::clone(&env)));
+        // WEFT-392: when built with `browser-opfs`, prefer OPFS-backed FS
+        // (falls back to in-memory if OPFS is unavailable). Workspace is
+        // always the absolute virtual path `/clawft/workspace`.
+        let platform = Arc::new(BrowserPlatform::with_env_arc_open(Arc::clone(&env)).await);
 
         let model = config.agents.defaults.model.clone();
         let (llm_cfg, stripped_model, user_cfg) =
@@ -387,10 +390,11 @@ mod browser_entry {
         // (shell, spawn) are gated out at compile time via
         // clawft-tools' feature flags so what lands here is the
         // file/memory/web-search/web-fetch subset. The browser
-        // workspace is the in-memory `BrowserFileSystem`'s virtual
-        // home (`/clawft`) — file tools sandbox to that root and the
-        // web tools defer to UrlPolicy for SSRF protection.
-        let workspace_dir = std::path::PathBuf::from("/clawft/workspace");
+        // workspace is always the absolute virtual root under
+        // `BROWSER_WORKSPACE_DIR` (`/clawft/workspace`) — never a
+        // relative `.clawft/` path (WEFT-392 home_dir collision).
+        let workspace_dir =
+            std::path::PathBuf::from(clawft_platform::browser::BROWSER_WORKSPACE_DIR);
         clawft_tools::register_all(
             ctx.tools_mut(),
             platform.clone(),
