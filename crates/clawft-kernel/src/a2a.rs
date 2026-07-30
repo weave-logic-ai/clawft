@@ -287,6 +287,13 @@ impl A2ARouter {
                 self.deliver_to_inbox(*target_pid, msg).await
             }
             MessageTarget::Topic(topic) => {
+                // WEFT-150: enforce IpcScope topic grants on publish
+                // (mirrors check_ipc_target for Process). Kernel PID 0
+                // defaults to IpcScope::All; Restricted / Topic scopes
+                // and browser Restricted are blocked from non-public
+                // topics (mesh.leaf.* is not public).
+                self.capability_checker.check_ipc_topic(from, topic)?;
+
                 let sinks = self.topic_router.live_sinks(topic);
                 let mut delivered = 0u32;
 
@@ -1028,6 +1035,66 @@ mod tests {
             received.payload,
             MessagePayload::Text(ref t) if t == "no-chain"
         ));
+    }
+
+    /// WEFT-150: Restricted IpcScope cannot publish to leaf-push topics.
+    #[tokio::test]
+    async fn restricted_scope_cannot_publish_leaf_push_topic() {
+        use crate::capability::IpcScope;
+        use crate::process::ProcessTable;
+
+        let table = Arc::new(ProcessTable::new(16));
+        let entry = ProcessEntry {
+            pid: 0,
+            agent_id: "browser-like".into(),
+            state: ProcessState::Running,
+            capabilities: AgentCapabilities {
+                ipc_scope: IpcScope::Restricted(vec![]),
+                ..AgentCapabilities::default()
+            },
+            resource_usage: ResourceUsage::default(),
+            cancel_token: CancellationToken::new(),
+            parent_pid: None,
+        };
+        let pid = table.insert(entry).unwrap();
+        let checker = Arc::new(CapabilityChecker::new(table.clone()));
+        let topic_router = Arc::new(TopicRouter::new(table.clone()));
+        let router = A2ARouter::new(table, checker, topic_router);
+        router.create_inbox(pid);
+
+        let leaf_topic = "mesh.leaf.deadbeef.push";
+        let msg = KernelMessage::text(pid, MessageTarget::Topic(leaf_topic.into()), "leaf");
+        let err = router
+            .send(msg)
+            .await
+            .expect_err("Restricted must not publish mesh.leaf.*.push");
+        assert!(
+            matches!(err, KernelError::CapabilityDenied { .. }),
+            "expected CapabilityDenied, got {err:?}"
+        );
+
+        // Public topics remain allowed under Restricted.
+        let ok_msg =
+            KernelMessage::text(pid, MessageTarget::Topic("public.events".into()), "ok");
+        router
+            .send(ok_msg)
+            .await
+            .expect("Restricted may publish public.*");
+    }
+
+    /// WEFT-150: default (IpcScope::All) agents can publish leaf-push topics.
+    #[tokio::test]
+    async fn all_scope_can_publish_leaf_push_topic() {
+        let (router, pids, _receivers) = setup_router(1);
+        let msg = KernelMessage::text(
+            pids[0],
+            MessageTarget::Topic("mesh.leaf.abc123.push".into()),
+            "scene",
+        );
+        router
+            .send(msg)
+            .await
+            .expect("IpcScope::All may publish leaf-push topics");
     }
 
     #[tokio::test]
