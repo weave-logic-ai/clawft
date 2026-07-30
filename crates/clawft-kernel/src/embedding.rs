@@ -85,6 +85,16 @@ pub trait EmbeddingProvider: Send + Sync {
     /// Name of the embedding model (for metadata tracking).
     fn model_name(&self) -> &str;
 
+    /// Embed a **query** (asymmetric retrieval lane).
+    ///
+    /// Default = [`embed`](Self::embed) (symmetric backends: Mock, MiniLM, LLM).
+    /// Providers with asymmetric training (e5 `query:` / `passage:`, Qwen3
+    /// instruction prefix) **must** override so graft/search queries land in the
+    /// correct half of the space (WEFT-640 / ADR-059).
+    async fn embed_query(&self, query: &str) -> Result<Vec<f32>, EmbeddingError> {
+        self.embed(query).await
+    }
+
     /// Pre-warm the backend: run one throwaway [`embed`](Self::embed) so the
     /// model graph, runtime thread pool, and allocator are hot before the first
     /// real call. Best-effort — errors are swallowed (a backend with nothing to
@@ -321,21 +331,25 @@ impl EmbeddingProvider for LlmEmbeddingProvider {
 
 /// Select the best available embedding provider based on configuration.
 ///
-/// Priority order (ADR-059):
+/// Priority order (ADR-059 + WEFT-640):
 /// 1. **Qwen3-Embedding-0.6B** — if `model_fp16.onnx` + `tokenizer.json` are
-///    present and the `onnx-embeddings` runtime loads them (the preferred
-///    semantic embedder: 32K ctx, MRL-512).
-/// 2. **all-MiniLM-L6-v2** ONNX — the legacy BERT encoder fallback.
-/// 3. **LLM API** — if an `llm_embedding` config is present.
-/// 4. **Mock** — graceful fallback for tests / when no model is available.
+///    present and the `onnx-embeddings` runtime loads them (project-canonical
+///    long-context semantic embedder: 32K ctx, MRL-512).
+/// 2. **e5-small-v2** ONNX — 384-d MIT BERT-family encoder (matches RVF/HNSW
+///    dim; lightweights CI/dev when staged under `.weftos/models/e5-small-v2/`).
+/// 3. **all-MiniLM-L6-v2** ONNX — the legacy BERT encoder fallback.
+/// 4. **LLM API** — if an `llm_embedding` config is present.
+/// 5. **Mock** — graceful fallback for tests / when no model is available.
 ///
 /// Selection only promotes a model-backed provider when its runtime is actually
 /// live, so without the `onnx-embeddings` feature (or the artifacts) this always
-/// degrades cleanly to LLM or Mock.
+/// degrades cleanly to LLM or Mock. Model downloads are **not** required for
+/// CI — real inference is gated on staged artifacts + the `onnx-embeddings`
+/// feature.
 pub fn select_embedding_provider(
     llm_config: Option<LlmEmbeddingConfig>,
 ) -> Box<dyn EmbeddingProvider> {
-    // 1. Qwen3 (preferred): needs both model_fp16.onnx and tokenizer.json.
+    // 1. Qwen3 (preferred / project-canonical): needs model_fp16.onnx + tokenizer.json.
     for dir in qwen3_model_search_dirs() {
         let model = dir.join("model_fp16.onnx");
         let tokenizer = dir.join("tokenizer.json");
@@ -348,7 +362,18 @@ pub fn select_embedding_provider(
         }
     }
 
-    // 2. all-MiniLM-L6-v2 ONNX (legacy BERT fallback).
+    // 2. e5-small-v2 (WEFT-640): 384-d, query:/passage: asymmetric prefixes.
+    for path in &e5_model_search_paths() {
+        if path.exists() {
+            let provider = crate::embedding_e5::E5EmbeddingProvider::new(path);
+            if provider.is_runtime_available() {
+                tracing::info!("Using e5-small-v2 embedding provider from {}", path.display());
+                return Box::new(provider);
+            }
+        }
+    }
+
+    // 3. all-MiniLM-L6-v2 ONNX (legacy BERT fallback).
     for path in &onnx_model_search_paths() {
         if path.exists() {
             let provider = crate::embedding_onnx::OnnxEmbeddingProvider::new(path);
@@ -359,12 +384,12 @@ pub fn select_embedding_provider(
         }
     }
 
-    // 3. LLM API.
+    // 4. LLM API.
     if let Some(config) = llm_config {
         return Box::new(LlmEmbeddingProvider::new(config));
     }
 
-    // 4. Mock.
+    // 5. Mock.
     Box::new(MockEmbeddingProvider::new(64))
 }
 
@@ -415,6 +440,42 @@ fn onnx_model_search_paths() -> Vec<std::path::PathBuf> {
     // Env override.
     if let Ok(env_path) = std::env::var("WEFTOS_MODEL_PATH") {
         paths.push(std::path::PathBuf::from(env_path));
+    }
+
+    paths
+}
+
+/// Search paths for the e5-small-v2 ONNX bundle (WEFT-640).
+///
+/// Each entry is a candidate **model file** path. Staging layout:
+/// - `.weftos/models/e5-small-v2/model.onnx` (or `model_int8.onnx`)
+/// - sibling `vocab.txt` for WordPiece (reuses MiniLM/BERT uncased vocab)
+///
+/// Order: project-local → user-global → `$WEFTOS_MODEL_PATH` (as models root
+/// and as a direct file path).
+fn e5_model_search_paths() -> Vec<std::path::PathBuf> {
+    let subdir = "e5-small-v2";
+    let files = ["model.onnx", "model_int8.onnx", "model_fp16.onnx"];
+    let mut paths = Vec::new();
+
+    let mut push_dir = |dir: std::path::PathBuf| {
+        for f in files {
+            paths.push(dir.join(f));
+        }
+    };
+
+    push_dir(std::path::PathBuf::from(format!(".weftos/models/{subdir}")));
+    if let Some(home) = dirs_home() {
+        push_dir(home.join(format!(".weftos/models/{subdir}")));
+    }
+    if let Ok(env_path) = std::env::var("WEFTOS_MODEL_PATH") {
+        let p = std::path::PathBuf::from(env_path);
+        push_dir(p.join(subdir));
+        // Direct file path override.
+        paths.push(p.clone());
+        for f in files {
+            paths.push(p.join(f));
+        }
     }
 
     paths
@@ -615,11 +676,30 @@ mod tests {
     }
 
     #[test]
+    fn e5_search_paths_include_project_local_model() {
+        let paths = e5_model_search_paths();
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.ends_with(".weftos/models/e5-small-v2/model.onnx")),
+            "expected project-local e5 model path, got: {paths:?}"
+        );
+    }
+
+    #[test]
     fn select_provider_priorities_skip_unavailable_qwen3() {
-        // No model artifacts present in the test cwd → Qwen3/MiniLM runtimes are
-        // not live, so selection must fall through to Mock when no LLM config.
+        // No model artifacts present in the test cwd → Qwen3/e5/MiniLM runtimes
+        // are not live, so selection must fall through to Mock when no LLM config.
         let provider = select_embedding_provider(None);
         assert_eq!(provider.model_name(), "mock-sha256");
+    }
+
+    #[tokio::test]
+    async fn mock_embed_query_defaults_to_embed() {
+        let provider = MockEmbeddingProvider::new(16);
+        let a = provider.embed("hello").await.unwrap();
+        let b = provider.embed_query("hello").await.unwrap();
+        assert_eq!(a, b);
     }
 
     #[test]

@@ -316,7 +316,29 @@ impl SessionView {
         text: &str,
         inline_max: usize,
     ) -> Result<bool, EmbeddingError> {
-        let vector = embedder.embed(text).await?;
+        // Default: embed the same string that is stored.
+        self.index_chunk_with_embed(embedder, store, chain_seq, kind, text, text, inline_max)
+            .await
+    }
+
+    /// Like [`index_chunk`](Self::index_chunk), but embeds `embed_input` while
+    /// storing / hashing `text` (WEFT-640).
+    ///
+    /// Used when the passage lane is a **verbalized** atom (text +
+    /// classification + voice cues) but the grafted payload must remain the
+    /// original turn text for the prompt. Content hash is over `text` so
+    /// dedup stays content-stable across verbalizer format bumps.
+    pub async fn index_chunk_with_embed(
+        &self,
+        embedder: &dyn EmbeddingProvider,
+        store: Option<&ArtifactStore>,
+        chain_seq: u64,
+        kind: impl Into<String>,
+        text: &str,
+        embed_input: &str,
+        inline_max: usize,
+    ) -> Result<bool, EmbeddingError> {
+        let vector = embedder.embed(embed_input).await?;
         let hash = content_hash(text);
 
         // Externalize large payloads to a content-addressed blob; fall back to
@@ -353,13 +375,18 @@ impl SessionView {
 
     /// Convenience: embed a free-text query with `embedder` and graft the
     /// `top_k` nearest chunks (ADR-058 Phase 3.2 + 3.3, query side).
+    ///
+    /// Uses [`EmbeddingProvider::embed_query`] (not plain `embed`) so asymmetric
+    /// providers (e5 `query:` prefix, Qwen3 instruction) land queries in the
+    /// correct half of the space (WEFT-640). Symmetric backends default
+    /// `embed_query` → `embed`.
     pub async fn graft_text(
         &self,
         embedder: &dyn EmbeddingProvider,
         query_text: &str,
         top_k: usize,
     ) -> Result<Vec<GraftedItem>, EmbeddingError> {
-        let query = embedder.embed(query_text).await?;
+        let query = embedder.embed_query(query_text).await?;
         Ok(self.graft(&query, top_k))
     }
 
