@@ -110,10 +110,18 @@ async fn send_request(
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
+    // WEFT-150: ipc.publish is Write-gated; local UDS operator path
+    // uses admin. Subscribe_stream remains Read (anonymous ok).
+    let auth = if method == "ipc.publish" {
+        Some("admin")
+    } else {
+        None
+    };
     let req = serde_json::json!({
         "id": "test-1",
         "method": method,
         "params": params,
+        "auth": auth,
     });
     let mut line = serde_json::to_string(&req).unwrap();
     line.push('\n');

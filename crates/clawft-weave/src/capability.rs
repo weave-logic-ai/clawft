@@ -95,6 +95,11 @@ pub fn required_capability(method: &str) -> Capability {
         // Write — not Admin — so a write-scoped token can promote without
         // holding full daemon admin. Checkpoint remains Admin.
         "chain.append" => Capability::Write,
+        // WEFT-150: topic publish mutates the live IPC / mesh fan-out
+        // (including `weaver leaf push` → `mesh.leaf.<pk>.push`). Anonymous
+        // must not publish; DaemonClient on the local UDS path auto-attaches
+        // `admin` so operator CLI continues to work.
+        "ipc.publish" => Capability::Write,
 
         // ── Chat: LLM-conversational verbs ──────────────────────────
         "agent.chat" => Capability::Chat,
@@ -346,6 +351,7 @@ mod tests {
             "agent.register",
             "agent.spawn",
             "chain.append",
+            "ipc.publish",
             "agent.stop",
             "agent.send",
             "memory.delete",
@@ -358,5 +364,20 @@ mod tests {
                 "method {m} should be Write",
             );
         }
+    }
+
+    #[test]
+    fn ipc_publish_requires_write() {
+        // WEFT-150: leaf-push and generic topic publish are Write-gated.
+        assert_eq!(required_capability("ipc.publish"), Capability::Write);
+        let anon = CallerCapabilities::anonymous();
+        assert!(
+            !anon.allows_method("ipc.publish"),
+            "anonymous must not publish to IPC topics (incl. mesh.leaf.*.push)"
+        );
+        let write = CallerCapabilities::from_scopes(["write"]);
+        assert!(write.allows_method("ipc.publish"));
+        let admin = CallerCapabilities::from_scopes(["admin"]);
+        assert!(admin.allows_method("ipc.publish"));
     }
 }

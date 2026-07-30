@@ -6375,6 +6375,35 @@ async fn dispatch(
 
             match send_result {
                 Ok(()) => {
+                    // WEFT-150: explicit ipc.publish chain event (in addition
+                    // to the generic ipc.send recorded by send_checked).
+                    // Leaf-push topics are tagged so audits can filter
+                    // `weaver leaf push` / scene publishes without parsing
+                    // the Debug target string on ipc.send.
+                    #[cfg(feature = "exochain")]
+                    if let Some(cm) = k.chain_manager() {
+                        let is_leaf_push = weftos_leaf_types::is_push_topic(&pub_params.topic);
+                        let wire_type = serde_json::from_str::<serde_json::Value>(&pub_params.message)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("type")
+                                    .and_then(|t| t.as_str())
+                                    .map(|s| s.to_string())
+                            });
+                        cm.append(
+                            "ipc",
+                            "ipc.publish",
+                            Some(serde_json::json!({
+                                "topic": pub_params.topic,
+                                "subscribers": subscriber_count,
+                                "actor_id": pub_params.actor_id,
+                                "leaf_push": is_leaf_push,
+                                "wire_type": wire_type,
+                                "message_len": pub_params.message.len(),
+                            })),
+                        );
+                    }
+
                     k.event_log().info(
                         "ipc",
                         format!(
@@ -8319,6 +8348,138 @@ mod tests {
             cm.len()
         };
         assert_eq!(after, before + 1, "exactly one event appended");
+    }
+
+    /// WEFT-150: `ipc.publish` to a leaf-push topic lands on ExoChain
+    /// as both `ipc.send` (send_checked) and structured `ipc.publish`
+    /// with `leaf_push: true`.
+    #[cfg(feature = "exochain")]
+    #[tokio::test]
+    async fn ipc_publish_leaf_push_lands_on_chain() {
+        use clawft_types::config::ChainConfig;
+
+        let platform = Arc::new(NativePlatform::new());
+        let mut kcfg = KernelConfig::default();
+        kcfg.chain = Some(ChainConfig {
+            enabled: true,
+            checkpoint_interval: 1000,
+            chain_id: 0,
+            checkpoint_path: None,
+        });
+        let kernel = Kernel::boot(Config::default(), kcfg, platform)
+            .await
+            .expect("kernel boots");
+        let kernel = Arc::new(tokio::sync::RwLock::new(kernel));
+        let (shutdown_tx, _rx) = watch::channel(false);
+
+        let before = {
+            let k = kernel.read().await;
+            k.chain_manager()
+                .expect("chain_manager present")
+                .len()
+        };
+
+        let topic = weftos_leaf_types::push_topic("deadbeefcafe");
+        let wire = serde_json::json!({
+            "type": "leaf_push",
+            "cbor_b64": "oQ==",
+            "target_pubkey": "deadbeefcafe",
+        })
+        .to_string();
+
+        let resp = dispatch(
+            "ipc.publish".into(),
+            serde_json::json!({
+                "topic": topic,
+                "message": wire,
+            }),
+            kernel.clone(),
+            shutdown_tx.clone(),
+        )
+        .await;
+        assert!(
+            resp.ok,
+            "leaf ipc.publish should succeed: {:?}",
+            resp.error
+        );
+        let result = resp.result.expect("result present");
+        assert_eq!(result["topic"], topic);
+
+        let k = kernel.read().await;
+        let cm = k.chain_manager().expect("chain_manager present");
+        let events = cm.tail(0);
+
+        let send_hit = events
+            .iter()
+            .find(|e| e.kind == "ipc.send" && e.source == "ipc")
+            .expect("ipc.send event from send_checked");
+        let send_payload = send_hit.payload.as_ref().expect("ipc.send payload");
+        let target = send_payload["target"].as_str().unwrap_or("");
+        assert!(
+            target.contains("mesh.leaf.deadbeefcafe.push") || target.contains("Topic"),
+            "ipc.send target should reference leaf topic, got {target}"
+        );
+
+        let pub_hit = events
+            .iter()
+            .find(|e| e.kind == "ipc.publish" && e.source == "ipc")
+            .expect("ipc.publish chain event");
+        let pub_payload = pub_hit.payload.as_ref().expect("ipc.publish payload");
+        assert_eq!(pub_payload["topic"], topic);
+        assert_eq!(pub_payload["leaf_push"], true);
+        assert_eq!(pub_payload["wire_type"], "leaf_push");
+        assert_eq!(pub_payload["subscribers"], 0);
+
+        assert!(
+            cm.len() >= before + 2,
+            "expected at least ipc.send + ipc.publish (+ any boot noise); before={before} after={}",
+            cm.len()
+        );
+    }
+
+    /// WEFT-150: non-leaf topic publish still witnesses ipc.publish with
+    /// `leaf_push: false`.
+    #[cfg(feature = "exochain")]
+    #[tokio::test]
+    async fn ipc_publish_non_leaf_not_tagged_leaf_push() {
+        use clawft_types::config::ChainConfig;
+
+        let platform = Arc::new(NativePlatform::new());
+        let mut kcfg = KernelConfig::default();
+        kcfg.chain = Some(ChainConfig {
+            enabled: true,
+            checkpoint_interval: 1000,
+            chain_id: 0,
+            checkpoint_path: None,
+        });
+        let kernel = Kernel::boot(Config::default(), kcfg, platform)
+            .await
+            .expect("kernel boots");
+        let kernel = Arc::new(tokio::sync::RwLock::new(kernel));
+        let (shutdown_tx, _rx) = watch::channel(false);
+
+        let resp = dispatch(
+            "ipc.publish".into(),
+            serde_json::json!({
+                "topic": "hello",
+                "message": "world",
+            }),
+            kernel.clone(),
+            shutdown_tx,
+        )
+        .await;
+        assert!(resp.ok, "publish should succeed: {:?}", resp.error);
+
+        let k = kernel.read().await;
+        let cm = k.chain_manager().expect("chain_manager present");
+        let hit = cm
+            .tail(0)
+            .into_iter()
+            .find(|e| e.kind == "ipc.publish")
+            .expect("ipc.publish event");
+        let p = hit.payload.as_ref().unwrap();
+        assert_eq!(p["topic"], "hello");
+        assert_eq!(p["leaf_push"], false);
     }
 
     #[cfg(feature = "exochain")]

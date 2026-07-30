@@ -54,6 +54,35 @@ Helpers: `push_topic(pubkey_hex)` / `announce_topic(pubkey_hex)` in
   and publishes via `ipc.publish` to the push topic; the topic router
   bridges that to the leaf's mesh-transport subscription.
 
+### Governance / ExoChain (WEFT-150)
+
+Leaf push is **not** a side door. The host path is:
+
+1. `weaver leaf push|scene` encodes CBOR (`weftos-leaf-types` /
+   `weftos-leaf-scene`) and calls daemon RPC `ipc.publish`.
+2. **RPC capability** — `ipc.publish` requires `Capability::Write`
+   (anonymous clients cannot publish). The local UDS `DaemonClient`
+   auto-attaches an `admin` token, so operator CLI keeps working.
+3. **Optional actor signature** — when `actor_id` is set, Ed25519
+   signature over `publish_payload(...)` is verified; wrong signatures
+   are rejected. Missing `actor_id` is still accepted for bring-up
+   (warn-logged).
+4. **A2A routing gate** — delivery goes through `A2ARouter::send_checked`
+   (PID 0 / kernel as sender). Topic publishes call
+   `CapabilityChecker::check_ipc_topic`; `IpcScope::Restricted` (browser
+   default) cannot publish `mesh.leaf.*` (not a public topic).
+5. **ExoChain** — with the `exochain` feature (default for `weaver`):
+   - `send_checked` appends `source=ipc` / `kind=ipc.send` (generic
+     IPC audit).
+   - On success the daemon also appends `kind=ipc.publish` with
+     structured payload: `topic`, `subscribers`, `actor_id`,
+     `leaf_push` (true when `is_push_topic`), `wire_type`
+     (`leaf_push` / `scene_push` when present), `message_len`.
+
+`weftos-leaf-types` itself is schema-only (`no_std` CBOR types + topic
+helpers). Governance and chain witnessing live on the kernel / weave
+side of `ipc.publish`, not in the leaf firmware crate.
+
 ## 4. Payloads — `LeafPush`
 
 `#[non_exhaustive]` enum — new variants are additive, old leaves ignore
@@ -303,6 +332,7 @@ loop, `_dmadesc_restart`, VSYNC_END ISR); esp-hal
 | `LeafPush` / `LeafServices` wire schema (`weftos-leaf-types`) | ✅ exists |
 | `weaver leaf push` CLI (manual push: text/clear/brightness/effect/audio) | ✅ exists |
 | Topic routing (`ipc.publish` → `mesh.leaf.*.push` → mesh subscriber) | ✅ exists |
+| Governance + ExoChain on leaf-push path (WEFT-150) | ✅ Write gate + topic scope + `ipc.publish` chain event |
 | `scripts/leaf-push-ps.sh` — `kernel.ps` → leaf-push host script | ✅ exists |
 | `LeafSurface` primitive + compositor + host simulator (`weftos-leaf-display`) | ⛔ not built — next step |
 | esp-hal `LeafSurface` impl — circular PSRAM chain + cache (§8) | ⛔ not built |

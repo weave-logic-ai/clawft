@@ -45,6 +45,19 @@ pub fn announce_topic(pubkey_hex: &str) -> String {
     s
 }
 
+/// True when `topic` is a leaf push topic: `mesh.leaf.<pubkey>.push`.
+///
+/// Used by the daemon / ExoChain audit path (WEFT-150) to tag
+/// `ipc.publish` events that drive leaf devices.
+pub fn is_push_topic(topic: &str) -> bool {
+    topic.starts_with(PUSH_TOPIC_PREFIX) && topic.ends_with(PUSH_TOPIC_SUFFIX)
+}
+
+/// True when `topic` is a leaf announce topic: `mesh.leaf.<pubkey>.announce`.
+pub fn is_announce_topic(topic: &str) -> bool {
+    topic.starts_with(PUSH_TOPIC_PREFIX) && topic.ends_with(ANNOUNCE_TOPIC_SUFFIX)
+}
+
 // ── Subscribe ─────────────────────────────────────────────────────
 
 /// Sent by a leaf to the kernel right after the Noise handshake completes.
@@ -248,6 +261,19 @@ mod tests {
     fn topic_construction() {
         assert_eq!(push_topic("abc123"), "mesh.leaf.abc123.push");
         assert_eq!(announce_topic("abc123"), "mesh.leaf.abc123.announce");
+    }
+
+    #[test]
+    fn is_push_and_announce_topic_predicates() {
+        assert!(is_push_topic("mesh.leaf.deadbeef.push"));
+        assert!(!is_push_topic("mesh.leaf.deadbeef.announce"));
+        assert!(!is_push_topic("public.events"));
+        assert!(!is_push_topic("mesh.other.push"));
+        // prefix+suffix shape only; empty pubkey still matches (caller validates hex)
+        assert!(is_push_topic(&push_topic("")));
+        assert!(is_push_topic("mesh.leaf.push")); // edge: empty middle segment
+        assert!(is_announce_topic("mesh.leaf.aa.announce"));
+        assert!(!is_announce_topic("mesh.leaf.aa.push"));
     }
 
     #[test]
