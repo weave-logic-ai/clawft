@@ -2,7 +2,7 @@
 
 **Ticket:** WEFT-137  
 **Branch:** `wave0h/weft-137-chain-anchor`  
-**SHA:** `48e34b5f54c75d43cdc3a90f52dae185b722218d`  
+**SHA:** `df2483f06af7ea0a171d97b4ff3084818f0d4dce` (impl `48e34b5f`)  
 **Worktree:** `/Users/mathewbeane/.grok/worktrees/mathewbeane-weftos/subagent-019fb4b6-6bee-7ac0-92b1-c4e34a19e4e7`  
 **Base:** `release/0.8-staging`  
 **Date:** 2026-07-30  
