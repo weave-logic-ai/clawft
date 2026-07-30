@@ -2,7 +2,7 @@
 
 **Ticket:** WEFT-258 — chat panel real interactive defer (resume on `{ deferred: true }`)  
 **Branch:** `wave0l/weft-258-interactive-defer`  
-**SHA:** `f14c6a1fe73bacb8a429b66ad15192a2102783e5`  
+**SHA:** branch tip of `wave0l/weft-258-interactive-defer` (impl `6e970acd`)  
 **Worktree:** `/Users/mathewbeane/.grok/worktrees/mathewbeane-weftos/subagent-019fb4ea-5b24-73d2-a8c3-9e52631e5ad2`  
 **Base:** `release/0.8-staging`  
 **Date:** 2026-07-30  
