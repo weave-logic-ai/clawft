@@ -281,14 +281,25 @@ impl DemocritusLoop {
         let mut edges_added = 0usize;
         let mut crossrefs_added = 0usize;
 
-        // Add a causal node for this impulse.
+        // Atom-spine sequence for this event (WEFT-642). Prefer the explicit
+        // `payload.chain_seq` minted by session_tier / talk-mode after the
+        // ExoChain append; without it the projection cannot reverse-resolve
+        // to the witness spine (the panopticon "looks alive but does not
+        // join back" class). Zero is retained only when the emitter never
+        // supplied a sequence — ADR-069 audit will flag those rows.
+        let chain_seq = resolve_chain_seq(impulse);
+
+        // Add a causal node for this impulse. Payload already carries
+        // `chain_seq` when present (session_tier); re-assert it on the
+        // metadata object so non-object payloads still become joinable.
         let label = format!("impulse:{}:{}", impulse.impulse_type, impulse.id);
-        let node_id = self
-            .causal_graph
-            .add_node(label.clone(), impulse.payload.clone());
+        let node_metadata = node_metadata_with_chain_seq(impulse, chain_seq);
+        let node_id = self.causal_graph.add_node(label.clone(), node_metadata);
         self.total_nodes_added.fetch_add(1, Ordering::Relaxed);
 
-        // Insert embedding into HNSW (keyed by causal node ID).
+        // Insert embedding into HNSW (keyed by causal node ID so neighbor
+        // hits can re-link by NodeId). `chain_seq` in metadata is the
+        // join key back to the atom spine — never hardcode 0 here.
         if !embedding.is_empty() {
             self.hnsw.insert(
                 node_id.to_string(),
@@ -297,6 +308,8 @@ impl DemocritusLoop {
                     "impulse_id": impulse.id,
                     "impulse_type": impulse.impulse_type.to_string(),
                     "hlc": impulse.hlc_timestamp,
+                    "chain_seq": chain_seq,
+                    "causal_node_id": node_id,
                 }),
             );
         }
@@ -312,7 +325,7 @@ impl DemocritusLoop {
                     edge_type,
                     *score,
                     impulse.hlc_timestamp,
-                    0, // chain_seq; set during exochain commit if enabled
+                    chain_seq,
                 );
                 if linked {
                     edges_added += 1;
@@ -326,7 +339,13 @@ impl DemocritusLoop {
         let uni_id = UniversalNodeId::new(
             &StructureTag::CausalGraph,
             label.as_bytes(),
-            impulse.hlc_timestamp,
+            // Prefer chain_seq for UID material when available so the
+            // identity aligns with turn-style spine UIDs (session_forest).
+            if chain_seq > 0 {
+                chain_seq
+            } else {
+                impulse.hlc_timestamp
+            },
             &impulse.source_node,
             &[0u8; 32],
         );
@@ -338,7 +357,7 @@ impl DemocritusLoop {
             target_structure: source_tag,
             ref_type: CrossRefType::TriggeredBy,
             created_at: impulse.hlc_timestamp,
-            chain_seq: 0,
+            chain_seq,
         });
         crossrefs_added += 1;
 
@@ -418,6 +437,45 @@ fn structure_tag_from_u8(tag: u8) -> StructureTag {
         0x03 => StructureTag::CausalGraph,
         0x04 => StructureTag::HnswIndex,
         other => StructureTag::Custom(other),
+    }
+}
+
+/// Resolve the atom-spine `chain_seq` for an impulse (WEFT-642).
+///
+/// Session-tier / talk-mode emitters put the ExoChain sequence into
+/// `payload.chain_seq` at emit time (see `session_tier::index_turn`).
+/// That is the only durable join key back to the witness spine; hardcoding
+/// `0` made the ECC brain HNSW look populated while remaining unjoinable.
+///
+/// Returns `0` when the emitter did not supply a sequence (legacy / synthetic
+/// impulses). Callers must still record that zero rather than inventing one.
+fn resolve_chain_seq(impulse: &Impulse) -> u64 {
+    impulse
+        .payload
+        .get("chain_seq")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+}
+
+/// Build causal-node metadata that always surfaces `chain_seq` when known.
+///
+/// Clones the impulse payload and ensures a top-level `chain_seq` field so
+/// reverse scans (`nodes_for_conv`, panopticon audit) can join without
+/// reading HNSW metadata.
+fn node_metadata_with_chain_seq(impulse: &Impulse, chain_seq: u64) -> serde_json::Value {
+    let mut meta = impulse.payload.clone();
+    if chain_seq == 0 {
+        return meta;
+    }
+    match meta.as_object_mut() {
+        Some(obj) => {
+            obj.insert("chain_seq".into(), serde_json::json!(chain_seq));
+            meta
+        }
+        None => serde_json::json!({
+            "chain_seq": chain_seq,
+            "payload": impulse.payload,
+        }),
     }
 }
 
@@ -1103,5 +1161,168 @@ mod tests {
             demo.classify_edge(&impulse, 0.9),
             CausalEdgeType::Correlates
         );
+    }
+
+    // ── WEFT-642: chain_seq joinability ──────────────────────────────
+
+    fn emit_impulse_with_chain_seq(
+        iq: &ImpulseQueue,
+        impulse_type: ImpulseType,
+        chain_seq: u64,
+        conv_id: &str,
+    ) -> u64 {
+        // Mirror session_tier::index_turn: payload carries chain_seq and
+        // HLC is stamped with the same sequence.
+        iq.emit(
+            StructureTag::ExoChain.as_u8(),
+            [7u8; 32],
+            StructureTag::HnswIndex.as_u8(),
+            impulse_type,
+            serde_json::json!({ "chain_seq": chain_seq, "conv_id": conv_id }),
+            chain_seq,
+        )
+    }
+
+    #[test]
+    fn resolve_chain_seq_reads_payload() {
+        let with_seq = Impulse {
+            id: 1,
+            source_structure: 0,
+            source_node: [0u8; 32],
+            target_structure: 2,
+            impulse_type: ImpulseType::BeliefUpdate,
+            payload: serde_json::json!({ "chain_seq": 8633u64, "conv_id": "c1" }),
+            hlc_timestamp: 8633,
+            acknowledged: std::sync::atomic::AtomicBool::new(false),
+        };
+        assert_eq!(resolve_chain_seq(&with_seq), 8633);
+
+        let missing = Impulse {
+            payload: serde_json::json!({ "test": true }),
+            ..with_seq.clone()
+        };
+        assert_eq!(resolve_chain_seq(&missing), 0);
+
+        let non_object = Impulse {
+            payload: serde_json::json!("plain"),
+            ..with_seq
+        };
+        assert_eq!(resolve_chain_seq(&non_object), 0);
+    }
+
+    /// Joinability assertion (WEFT-642): when the emitter supplies
+    /// `payload.chain_seq`, every DEMOCRITUS projection must carry that
+    /// sequence — causal node metadata, HNSW metadata, and CrossRef.
+    /// A zero chain_seq on any of those would re-open the panopticon
+    /// "looks alive but does not join back" class.
+    #[tokio::test]
+    async fn chain_seq_joinable_on_hnsw_node_and_crossref() {
+        let (cg, hnsw, iq, crs, demo) = make_loop();
+        const SEQ: u64 = 42_001;
+
+        emit_impulse_with_chain_seq(&iq, ImpulseType::BeliefUpdate, SEQ, "conv-weft-642");
+        let result = demo.tick().await;
+
+        assert_eq!(result.impulses_sensed, 1);
+        assert_eq!(result.crossrefs_added, 1);
+        assert_eq!(cg.node_count(), 1);
+        assert_eq!(hnsw.len(), 1);
+
+        // Causal node metadata carries chain_seq.
+        let node_ids = cg.node_ids();
+        assert_eq!(node_ids.len(), 1);
+        let node = cg.get_node(node_ids[0]).expect("node present");
+        assert_eq!(
+            node.metadata.get("chain_seq").and_then(|v| v.as_u64()),
+            Some(SEQ),
+            "causal node must join to atom spine via chain_seq"
+        );
+
+        // HNSW entry metadata carries the same chain_seq (join key).
+        // Search with a zero vector still returns the sole entry under mock
+        // embeddings when we query after insert; use a real embed of the
+        // same shape as the loop (type:payload).
+        let emb: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbeddingProvider::new(8));
+        let query = emb
+            .embed(&format!(
+                "{}:{}",
+                ImpulseType::BeliefUpdate,
+                serde_json::json!({ "chain_seq": SEQ, "conv_id": "conv-weft-642" })
+            ))
+            .await
+            .expect("mock embed");
+        let hits = hnsw.search(&query, 5);
+        assert!(
+            !hits.is_empty(),
+            "HNSW must return the inserted brain entry"
+        );
+        let meta = &hits[0].metadata;
+        assert_eq!(
+            meta.get("chain_seq").and_then(|v| v.as_u64()),
+            Some(SEQ),
+            "HNSW metadata must carry real chain_seq (not hardcoded 0)"
+        );
+        assert_eq!(
+            meta.get("causal_node_id").and_then(|v| v.as_u64()),
+            Some(node_ids[0]),
+            "HNSW metadata should point back at the causal node id"
+        );
+
+        // CrossRef chain_seq must match.
+        let refs = crs.all();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(
+            refs[0].chain_seq, SEQ,
+            "CrossRef must carry real chain_seq (not hardcoded 0)"
+        );
+    }
+
+    /// Edge path (democritus.rs link site): neighbor edges must inherit the
+    /// impulse's chain_seq so causal edges also join the atom spine.
+    #[tokio::test]
+    async fn chain_seq_joinable_on_causal_edges() {
+        let config = DemocritusConfig {
+            correlation_threshold: 0.0, // force edges on any neighbor hit
+            ..DemocritusConfig::default()
+        };
+        let (cg, hnsw, iq, _, demo) = make_loop_with_config(config);
+
+        // Seed a neighbor with a known sequence.
+        emit_impulse_with_chain_seq(&iq, ImpulseType::BeliefUpdate, 100, "conv-edge");
+        demo.tick().await;
+        assert_eq!(hnsw.len(), 1);
+
+        // Second tick: same impulse type → same mock embedding → neighbor hit.
+        const SEQ2: u64 = 101;
+        emit_impulse_with_chain_seq(&iq, ImpulseType::BeliefUpdate, SEQ2, "conv-edge");
+        let r2 = demo.tick().await;
+        assert_eq!(r2.searches_performed, 1);
+
+        // Find the newer node and assert its outgoing edges carry SEQ2.
+        let mut nodes: Vec<_> = cg
+            .node_ids()
+            .into_iter()
+            .filter_map(|id| cg.get_node(id))
+            .collect();
+        nodes.sort_by_key(|n| n.id);
+        assert!(nodes.len() >= 2, "expected at least two causal nodes");
+        let newer = nodes.last().expect("newer node");
+        assert_eq!(
+            newer.metadata.get("chain_seq").and_then(|v| v.as_u64()),
+            Some(SEQ2)
+        );
+
+        let edges = cg.get_forward_edges(newer.id);
+        // With correlation_threshold=0 and a prior neighbor, at least one edge.
+        assert!(
+            !edges.is_empty(),
+            "expected similarity edge(s) from second impulse to first"
+        );
+        for edge in &edges {
+            assert_eq!(
+                edge.chain_seq, SEQ2,
+                "causal edge must carry the impulse chain_seq (not hardcoded 0)"
+            );
+        }
     }
 }
