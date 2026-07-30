@@ -26,6 +26,9 @@ tokio = { workspace = true, features = ["sync", "rt", "time", "macros"] }
 # links tokio `net` which doesn't build for wasm32-unknown-unknown, so the
 # dep — along with the kernel adapter module that uses it — is native-only.
 clawft-rpc = { workspace = true }
+# Mic adapter (WEFT-418) base64-encodes s16le PCM windows for the
+# windowed-Append `pcm_chunk` topic consumed by whisper / classify.
+base64 = "0.22"
 
 # WASM build: tokio only needs sync + macros; the kernel poller task is
 # spawned via caller-provided runtime. We don't target wasm for M1.5 but

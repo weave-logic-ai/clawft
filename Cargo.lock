@@ -1636,6 +1636,7 @@ name = "clawft-substrate"
 version = "0.6.20"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "clawft-app",
  "clawft-rpc",
  "parking_lot",

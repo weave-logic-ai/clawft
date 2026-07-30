@@ -6,20 +6,24 @@
 //! harness or a future host-audio bridge can feed) and emits RMS +
 //! peak levels every 500 ms.
 //!
-//! ## Path layout (WEFT-438)
+//! ## Path layout (WEFT-418 / WEFT-438)
 //!
 //! Canonical emissions (always):
 //! - `substrate/<node-id>/sensor/mic/summary` — full level object
 //! - `substrate/<node-id>/sensor/mic/rms` — scalar `rms_db` for gauge
 //!   discovery (`mic_discovery` matches `/sensor/mic/rms`)
+//! - `substrate/<node-id>/sensor/mic/pcm_chunk` — windowed-Append PCM
+//!   stream (whisper / classify input; shape matches
+//!   `JOURNALED-SENSOR-MIC.md` §2.2 + whisper `PcmChunk`)
 //!
 //! Legacy dual-emit (default on until
 //! [`crate::sensor_paths::LEGACY_FLAT_REMOVAL_VERSION`]):
-//! - `substrate/sensor/mic` — pre-node-identity flat path
+//! - `substrate/sensor/mic` — pre-node-identity flat level path
+//! - `substrate/sensor/mic/pcm_chunk` — pre-node-identity flat PCM path
 //!
 //! Default `node_id` is [`crate::sensor_paths::HOST_LOCAL_NODE_ID`].
 //! Pass a provisioned node id via [`MicrophoneAdapter::with_node_id`]
-//! for multi-node meshes. Full pcm topic cutover is WEFT-418.
+//! for multi-node meshes.
 //!
 //! ## Characterization level (spectrometer principle)
 //!
@@ -53,6 +57,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as B64;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
@@ -69,8 +75,9 @@ use crate::physical::{
     Characterization, PhysicalSensorAdapter, SensorCalibration, SensorInterface,
 };
 use crate::sensor_paths::{
-    DEFAULT_DUAL_EMIT_LEGACY, HOST_LOCAL_MIC_RMS, HOST_LOCAL_MIC_SUMMARY, HOST_LOCAL_NODE_ID,
-    LEGACY_MIC_PATH, is_mic_level_open_topic, mic_level_emit_plan,
+    DEFAULT_DUAL_EMIT_LEGACY, HOST_LOCAL_MIC_PCM_CHUNK, HOST_LOCAL_MIC_RMS, HOST_LOCAL_MIC_SUMMARY,
+    HOST_LOCAL_NODE_ID, LEGACY_MIC_PATH, LEGACY_MIC_PCM_PATH, MIC_PCM_WINDOW_MAX_LEN,
+    is_mic_open_topic, mic_level_emit_plan, mic_pcm_emit_plan,
 };
 // Used only by `tests::host_audio_direction_variant_compiles` via
 // `use super::*` — keep the import so `cargo test` builds.
@@ -84,25 +91,28 @@ const WINDOW_SAMPLES: usize = 8000;
 /// Default sample rate assumed when none is configured.
 const DEFAULT_SAMPLE_RATE: u32 = 16_000;
 /// Channel depth for the shared producer. Sized for dual-emit
-/// (summary + rms + optional legacy) + health + one tick of slack.
-const CHAN: usize = 8;
+/// (summary + rms + pcm + optional legacy level/pcm) + health + slack.
+const CHAN: usize = 16;
 /// Emission cadence — matches WINDOW_SAMPLES at DEFAULT_SAMPLE_RATE.
 const TICK_MS: u64 = 500;
 
 /// Declared topics.
 ///
-/// The mic adapter declares level + healthcheck topics. Level topics
-/// cover the WEFT-438 dual-emit set so `subscribe_adapter` against any
-/// of the open targets shares the same producer loop:
+/// The mic adapter declares level + PCM + healthcheck topics. Level and
+/// PCM topics cover the WEFT-418/438 dual-emit set so `subscribe_adapter`
+/// against any of the open targets shares the same producer loop:
 ///
 /// - [`HOST_LOCAL_MIC_SUMMARY`] — canonical level object (host-local)
 /// - [`HOST_LOCAL_MIC_RMS`] — canonical RMS scalar (host-local)
-/// - [`LEGACY_MIC_PATH`] — flat legacy shim (removal: 0.9.0)
+/// - [`HOST_LOCAL_MIC_PCM_CHUNK`] — windowed-Append PCM (host-local)
+/// - [`LEGACY_MIC_PATH`] — flat legacy level shim (removal: 0.9.0)
+/// - [`LEGACY_MIC_PCM_PATH`] — flat legacy PCM shim (removal: 0.9.0)
 /// - `substrate/meta/adapter/mic/healthcheck` — per-sensor health
 ///   (HEALTHCHECK-CONTRACT.md §3; Public — no audio content)
 ///
-/// `open()` also accepts any node-scoped `…/sensor/mic/{summary,rms}`
-/// so multi-node callers do not need a TopicDecl per node id.
+/// `open()` also accepts any node-scoped
+/// `…/sensor/mic/{summary,rms,pcm_chunk}` so multi-node callers do not
+/// need a TopicDecl per node id.
 pub const TOPICS: &[TopicDecl] = &[
     TopicDecl {
         path: HOST_LOCAL_MIC_SUMMARY,
@@ -125,6 +135,17 @@ pub const TOPICS: &[TopicDecl] = &[
         max_len: None,
     },
     TopicDecl {
+        // WEFT-418: windowed-Append PCM stream. Substrate trims the
+        // front of the array to `MIC_PCM_WINDOW_MAX_LEN` on each Append
+        // (drop-oldest ring — ~4 s at 2 Hz).
+        path: HOST_LOCAL_MIC_PCM_CHUNK,
+        shape: "ontology://audio-pcm-chunk",
+        refresh_hint: RefreshHint::Periodic { ms: TICK_MS },
+        sensitivity: Sensitivity::Capture,
+        buffer_policy: BufferPolicy::DropOldest,
+        max_len: Some(MIC_PCM_WINDOW_MAX_LEN),
+    },
+    TopicDecl {
         // Legacy flat open target — dual-emitted until 0.9.0 (WEFT-438).
         path: LEGACY_MIC_PATH,
         shape: "ontology://audio-level",
@@ -132,6 +153,15 @@ pub const TOPICS: &[TopicDecl] = &[
         sensitivity: Sensitivity::Capture,
         buffer_policy: BufferPolicy::Refuse,
         max_len: None,
+    },
+    TopicDecl {
+        // Legacy flat PCM open target — dual-emitted until 0.9.0 (WEFT-418).
+        path: LEGACY_MIC_PCM_PATH,
+        shape: "ontology://audio-pcm-chunk",
+        refresh_hint: RefreshHint::Periodic { ms: TICK_MS },
+        sensitivity: Sensitivity::Capture,
+        buffer_policy: BufferPolicy::DropOldest,
+        max_len: Some(MIC_PCM_WINDOW_MAX_LEN),
     },
     TopicDecl {
         path: "substrate/meta/adapter/mic/healthcheck",
@@ -249,12 +279,12 @@ impl OntologyAdapter for MicrophoneAdapter {
     }
 
     async fn open(&self, topic: &str, _args: Value) -> Result<Subscription, AdapterError> {
-        // Level topics (legacy + node-scoped summary/rms) and the
-        // healthcheck share the same producer loop. Subscribing to
-        // any of them yields the full dual-emit delta stream; the
-        // substrate routes by path.
+        // Level + PCM topics (legacy + node-scoped) and the healthcheck
+        // share the same producer loop. Subscribing to any of them
+        // yields the full dual-emit delta stream; the substrate routes
+        // by path.
         let is_health = topic == "substrate/meta/adapter/mic/healthcheck";
-        if !is_health && !is_mic_level_open_topic(topic, &self.node_id) {
+        if !is_health && !is_mic_open_topic(topic, &self.node_id) {
             return Err(AdapterError::UnknownTopic(topic.into()));
         }
         let id = {
@@ -335,7 +365,8 @@ async fn poll_level(
 ) {
     let mut ticker = tokio::time::interval(Duration::from_millis(TICK_MS));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let plan = mic_level_emit_plan(&node_id, dual_emit_legacy);
+    let level_plan = mic_level_emit_plan(&node_id, dual_emit_legacy);
+    let pcm_plan = mic_pcm_emit_plan(&node_id, dual_emit_legacy);
 
     // File-read cursor that advances each tick. The file is expected
     // to be a rolling buffer (test, synthetic stream, or mmapped
@@ -348,6 +379,9 @@ async fn poll_level(
     let mut error_count: u64 = 0;
     let mut last_emit_ts: u64 = 0;
     let mut last_error: Option<String> = None;
+    // Monotonic PCM chunk sequence (WEFT-418) — independent of wall clock
+    // so whisper/classify joiners can order windows without timing assumptions.
+    let mut pcm_seq: u64 = 0;
     // Emit an initial `unknown`-status report so subscribers see the
     // healthcheck path populated immediately (contract §9 open question
     // 1: ship `unknown` for the pre-first-emit window).
@@ -366,8 +400,9 @@ async fn poll_level(
             _ = &mut cancel_rx => return,
             _ = ticker.tick() => {
                 tick_count += 1;
-                let value = read_and_measure(&source_path, sample_rate, &mut cursor);
-                let reason = value
+                let measure = read_and_measure(&source_path, sample_rate, &mut cursor);
+                let reason = measure
+                    .level
                     .get("reason")
                     .and_then(Value::as_str)
                     .map(str::to_string);
@@ -386,27 +421,61 @@ async fn poll_level(
                 } else {
                     // WEFT-438 dual-emit: summary object + rms scalar
                     // always; legacy flat when the migration flag is on.
-                    let rms_scalar = value
+                    let rms_scalar = measure
+                        .level
                         .get("rms_db")
                         .cloned()
                         .unwrap_or(Value::Null);
-                    let deltas = [
+                    let level_deltas = [
                         Some(StateDelta::Replace {
-                            path: plan.summary.clone(),
-                            value: value.clone(),
+                            path: level_plan.summary.clone(),
+                            value: measure.level.clone(),
                         }),
                         Some(StateDelta::Replace {
-                            path: plan.rms.clone(),
+                            path: level_plan.rms.clone(),
                             value: rms_scalar,
                         }),
-                        plan.legacy.as_ref().map(|legacy| StateDelta::Replace {
+                        level_plan.legacy.as_ref().map(|legacy| StateDelta::Replace {
                             path: legacy.clone(),
-                            value,
+                            value: measure.level.clone(),
                         }),
                     ];
-                    for delta in deltas.into_iter().flatten() {
+                    for delta in level_deltas.into_iter().flatten() {
                         if tx.send(delta).await.is_err() {
                             return;
+                        }
+                    }
+
+                    // WEFT-418: windowed-Append PCM chunk on the
+                    // node-scoped path (+ optional legacy dual-emit).
+                    // Only emit when we actually read samples — empty
+                    // windows (EOF of a finite fixture) still publish
+                    // level but skip PCM so whisper doesn't ingest silence
+                    // spam from a drained file.
+                    if let Some(pcm_bytes) = measure.pcm_bytes.as_ref()
+                        && !pcm_bytes.is_empty()
+                    {
+                        pcm_seq = pcm_seq.saturating_add(1);
+                        let chunk = build_pcm_chunk(
+                            pcm_bytes,
+                            sample_rate,
+                            pcm_seq,
+                            tick_count,
+                        );
+                        let pcm_deltas = [
+                            Some(StateDelta::Append {
+                                path: pcm_plan.pcm.clone(),
+                                value: chunk.clone(),
+                            }),
+                            pcm_plan.legacy.as_ref().map(|legacy| StateDelta::Append {
+                                path: legacy.clone(),
+                                value: chunk,
+                            }),
+                        ];
+                        for delta in pcm_deltas.into_iter().flatten() {
+                            if tx.send(delta).await.is_err() {
+                                return;
+                            }
                         }
                     }
                     last_emit_ts = now_ms();
@@ -452,6 +521,40 @@ async fn poll_level(
     }
 }
 
+/// Build the whisper/classify-compatible PCM chunk object.
+///
+/// Wire shape accepts both journal fields (`pcm_b64`, `encoding: s16le`)
+/// and the ESP32/whisper wire fields (`data`, `encoding: base64`,
+/// `format: i16le`). See `JOURNALED-SENSOR-MIC.md` §2.2 and
+/// `clawft_service_whisper::windower::PcmChunk`.
+fn build_pcm_chunk(pcm_bytes: &[u8], sample_rate: u32, seq: u64, tick: u64) -> Value {
+    let samples = (pcm_bytes.len() / 2) as u64;
+    let b64 = B64.encode(pcm_bytes);
+    json!({
+        // Whisper / ESP32 wire fields
+        "data": b64.clone(),
+        "encoding": "base64",
+        "format": "i16le",
+        "sample_rate": sample_rate,
+        "channels": 1,
+        "samples": samples,
+        "start_ts_ms": seq.saturating_mul(TICK_MS),
+        // Journal / publish_wav aliases (pcm_b64 ≡ data; seq ≡ start_ts_ms)
+        "pcm_b64": b64,
+        "seq": seq,
+        "chunk_ms": TICK_MS,
+        "tick": tick,
+    })
+}
+
+/// Result of one window read: level summary object + optional raw PCM.
+struct MeasureResult {
+    level: Value,
+    /// Raw s16le bytes for this window when the source delivered audio.
+    /// `None` when the source is missing / reset / empty.
+    pcm_bytes: Option<Vec<u8>>,
+}
+
 /// Wall-clock millis since UNIX epoch — small helper kept private so
 /// the system-time read isn't sprinkled through the poller body.
 fn now_ms() -> u64 {
@@ -463,50 +566,64 @@ fn now_ms() -> u64 {
 }
 
 /// Read up to `WINDOW_SAMPLES` from the file at `cursor`, compute
-/// RMS + peak in dBFS, return the emission shape. Advances `cursor`
-/// to the new end-of-read position.
-fn read_and_measure(source_path: &Path, sample_rate: u32, cursor: &mut u64) -> Value {
+/// RMS + peak in dBFS, and capture the raw PCM bytes for the
+/// windowed-Append topic. Advances `cursor` to the new end-of-read
+/// position.
+fn read_and_measure(source_path: &Path, sample_rate: u32, cursor: &mut u64) -> MeasureResult {
     let Ok(mut file) = std::fs::File::open(source_path) else {
-        return json!({
-            "available": false,
-            "reason": "source-missing",
-            "characterization": Characterization::Rate.as_str(),
-        });
+        return MeasureResult {
+            level: json!({
+                "available": false,
+                "reason": "source-missing",
+                "characterization": Characterization::Rate.as_str(),
+            }),
+            pcm_bytes: None,
+        };
     };
     if file.seek(SeekFrom::Start(*cursor)).is_err() {
         // File truncated / replaced — reset and return a 'stream
         // reset' marker.
         *cursor = 0;
-        return json!({
-            "available": false,
-            "reason": "stream-reset",
-            "characterization": Characterization::Rate.as_str(),
-        });
+        return MeasureResult {
+            level: json!({
+                "available": false,
+                "reason": "stream-reset",
+                "characterization": Characterization::Rate.as_str(),
+            }),
+            pcm_bytes: None,
+        };
     }
     let mut buf = vec![0u8; WINDOW_SAMPLES * 2];
     let n = file.read(&mut buf).unwrap_or(0);
     let samples_read = n / 2;
     *cursor += n as u64;
     if samples_read == 0 {
-        return json!({
-            "available": true,
-            "rms_db": -120.0,
-            "peak_db": -120.0,
-            "sample_rate": sample_rate,
-            "samples_in_window": 0,
-            "characterization": Characterization::Rate.as_str(),
-        });
+        return MeasureResult {
+            level: json!({
+                "available": true,
+                "rms_db": -120.0,
+                "peak_db": -120.0,
+                "sample_rate": sample_rate,
+                "samples_in_window": 0,
+                "characterization": Characterization::Rate.as_str(),
+            }),
+            pcm_bytes: None,
+        };
     }
 
     let (rms_db, peak_db) = rms_and_peak_dbfs(&buf[..n]);
-    json!({
-        "available": true,
-        "rms_db": rms_db,
-        "peak_db": peak_db,
-        "sample_rate": sample_rate,
-        "samples_in_window": samples_read,
-        "characterization": Characterization::Rate.as_str(),
-    })
+    buf.truncate(n);
+    MeasureResult {
+        level: json!({
+            "available": true,
+            "rms_db": rms_db,
+            "peak_db": peak_db,
+            "sample_rate": sample_rate,
+            "samples_in_window": samples_read,
+            "characterization": Characterization::Rate.as_str(),
+        }),
+        pcm_bytes: Some(buf),
+    }
 }
 
 /// Compute RMS + peak level of a signed-16-bit little-endian PCM
@@ -562,10 +679,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = write_pcm(&dir, "silence.raw", &[0i16; 1024]);
         let mut cursor = 0u64;
-        let v = read_and_measure(&path, 16000, &mut cursor);
-        assert_eq!(v["available"], true);
-        assert_eq!(v["rms_db"], -120.0);
-        assert_eq!(v["peak_db"], -120.0);
+        let m = read_and_measure(&path, 16000, &mut cursor);
+        assert_eq!(m.level["available"], true);
+        assert_eq!(m.level["rms_db"], -120.0);
+        assert_eq!(m.level["peak_db"], -120.0);
+        assert!(m.pcm_bytes.as_ref().is_some_and(|b| !b.is_empty()));
     }
 
     #[test]
@@ -577,9 +695,9 @@ mod tests {
             .collect();
         let path = write_pcm(&dir, "fullscale.raw", &samples);
         let mut cursor = 0u64;
-        let v = read_and_measure(&path, 16000, &mut cursor);
-        let peak = v["peak_db"].as_f64().unwrap();
-        let rms = v["rms_db"].as_f64().unwrap();
+        let m = read_and_measure(&path, 16000, &mut cursor);
+        let peak = m.level["peak_db"].as_f64().unwrap();
+        let rms = m.level["rms_db"].as_f64().unwrap();
         // Square at full scale: peak ~ 0 dBFS, RMS ~ 0 dBFS.
         assert!(peak > -0.1, "peak_db = {peak}");
         assert!(rms > -0.1, "rms_db = {rms}");
@@ -594,17 +712,18 @@ mod tests {
             .collect();
         let path = write_pcm(&dir, "halfscale.raw", &samples);
         let mut cursor = 0u64;
-        let v = read_and_measure(&path, 16000, &mut cursor);
-        let rms = v["rms_db"].as_f64().unwrap();
+        let m = read_and_measure(&path, 16000, &mut cursor);
+        let rms = m.level["rms_db"].as_f64().unwrap();
         assert!((rms + 6.02).abs() < 0.1, "expected ~-6.02 dBFS, got {rms}");
     }
 
     #[test]
     fn missing_source_emits_unavailable() {
-        let v = read_and_measure(Path::new("/nonexistent/weftos/mic.raw"), 16000, &mut 0u64);
-        assert_eq!(v["available"], false);
-        assert_eq!(v["reason"], "source-missing");
-        assert_eq!(v["characterization"], Characterization::Rate.as_str());
+        let m = read_and_measure(Path::new("/nonexistent/weftos/mic.raw"), 16000, &mut 0u64);
+        assert_eq!(m.level["available"], false);
+        assert_eq!(m.level["reason"], "source-missing");
+        assert_eq!(m.level["characterization"], Characterization::Rate.as_str());
+        assert!(m.pcm_bytes.is_none());
     }
 
     #[test]
@@ -622,10 +741,28 @@ mod tests {
         let v1 = read_and_measure(&path, 16000, &mut cursor);
         let v2 = read_and_measure(&path, 16000, &mut cursor);
         // First window is silent (-120).
-        assert_eq!(v1["rms_db"], -120.0);
+        assert_eq!(v1.level["rms_db"], -120.0);
         // Second window jumps to ~0 dBFS.
-        let second_rms = v2["rms_db"].as_f64().unwrap();
+        let second_rms = v2.level["rms_db"].as_f64().unwrap();
         assert!(second_rms > -0.1, "second rms_db = {second_rms}");
+    }
+
+    #[test]
+    fn build_pcm_chunk_shape_is_whisper_compatible() {
+        // Round-trip: samples → build_pcm_chunk → fields whisper expects.
+        let samples: Vec<u8> = (0i16..4).flat_map(|s| s.to_le_bytes()).collect();
+        let chunk = build_pcm_chunk(&samples, 16_000, 3, 7);
+        assert_eq!(chunk["sample_rate"], 16_000);
+        assert_eq!(chunk["channels"], 1);
+        assert_eq!(chunk["samples"], 4);
+        assert_eq!(chunk["seq"], 3);
+        assert_eq!(chunk["chunk_ms"], TICK_MS);
+        assert_eq!(chunk["tick"], 7);
+        assert_eq!(chunk["encoding"], "base64");
+        assert_eq!(chunk["format"], "i16le");
+        assert_eq!(chunk["data"], chunk["pcm_b64"]);
+        let decoded = B64.decode(chunk["data"].as_str().unwrap()).unwrap();
+        assert_eq!(decoded, samples);
     }
 
     #[tokio::test]
@@ -636,13 +773,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn adapter_open_accepts_legacy_and_canonical_level_topics() {
+    async fn adapter_open_accepts_legacy_and_canonical_level_and_pcm_topics() {
         let a = MicrophoneAdapter::new();
         for topic in [
             LEGACY_MIC_PATH,
+            LEGACY_MIC_PCM_PATH,
             HOST_LOCAL_MIC_SUMMARY,
             HOST_LOCAL_MIC_RMS,
+            HOST_LOCAL_MIC_PCM_CHUNK,
             "substrate/n-other/sensor/mic/summary",
+            "substrate/n-other/sensor/mic/pcm_chunk",
         ] {
             let r = a.open(topic, Value::Null).await;
             assert!(r.is_ok(), "open({topic}) should succeed: {r:?}");
@@ -679,13 +819,22 @@ mod tests {
     }
 
     #[test]
-    fn declares_payload_and_healthcheck_topics() {
-        // WEFT-438: host-local summary + rms + legacy flat + healthcheck.
+    fn declares_payload_pcm_and_healthcheck_topics() {
+        // WEFT-418: host-local summary + rms + pcm_chunk + legacy flats + healthcheck.
         let paths: Vec<&str> = TOPICS.iter().map(|t| t.path).collect();
         assert!(paths.contains(&HOST_LOCAL_MIC_SUMMARY));
         assert!(paths.contains(&HOST_LOCAL_MIC_RMS));
+        assert!(paths.contains(&HOST_LOCAL_MIC_PCM_CHUNK));
         assert!(paths.contains(&LEGACY_MIC_PATH));
+        assert!(paths.contains(&LEGACY_MIC_PCM_PATH));
         assert!(paths.contains(&"substrate/meta/adapter/mic/healthcheck"));
+
+        let pcm = TOPICS
+            .iter()
+            .find(|t| t.path == HOST_LOCAL_MIC_PCM_CHUNK)
+            .expect("pcm topic");
+        assert_eq!(pcm.buffer_policy, BufferPolicy::DropOldest);
+        assert_eq!(pcm.max_len, Some(MIC_PCM_WINDOW_MAX_LEN));
     }
 
     #[tokio::test]
@@ -774,6 +923,102 @@ mod tests {
             saw_summary && saw_rms && saw_legacy,
             "expected dual-emit summary+rms+legacy (got summary={saw_summary} rms={saw_rms} legacy={saw_legacy})"
         );
+    }
+
+    #[tokio::test]
+    async fn poller_appends_pcm_chunk_on_node_scoped_path() {
+        // WEFT-418: one tick Appends a PCM window to
+        // substrate/<node>/sensor/mic/pcm_chunk (+ legacy when dual-emit on).
+        let dir = TempDir::new().unwrap();
+        let path = write_pcm(&dir, "silence.raw", &[0i16; WINDOW_SAMPLES]);
+        let a = MicrophoneAdapter::with_source(path, 16000);
+        let mut sub = a
+            .open(HOST_LOCAL_MIC_PCM_CHUNK, Value::Null)
+            .await
+            .expect("open");
+
+        // Drain the initial health report.
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), sub.rx.recv())
+            .await
+            .expect("recv timed out")
+            .expect("channel closed");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut saw_canonical_pcm = false;
+        let mut saw_legacy_pcm = false;
+        while std::time::Instant::now() < deadline {
+            let delta =
+                tokio::time::timeout(std::time::Duration::from_millis(700), sub.rx.recv()).await;
+            let Ok(Some(delta)) = delta else { continue };
+            if let StateDelta::Append { path, value } = delta {
+                if path == HOST_LOCAL_MIC_PCM_CHUNK {
+                    assert!(value.get("pcm_b64").is_some() || value.get("data").is_some());
+                    assert_eq!(value["sample_rate"], 16_000);
+                    assert_eq!(value["channels"], 1);
+                    assert_eq!(value["chunk_ms"], TICK_MS);
+                    assert!(value["seq"].as_u64().unwrap_or(0) >= 1);
+                    assert_eq!(value["samples"], WINDOW_SAMPLES as u64);
+                    saw_canonical_pcm = true;
+                } else if path == LEGACY_MIC_PCM_PATH {
+                    saw_legacy_pcm = true;
+                }
+            }
+            if saw_canonical_pcm && saw_legacy_pcm {
+                break;
+            }
+        }
+        assert!(
+            saw_canonical_pcm && saw_legacy_pcm,
+            "expected Append on canonical+legacy pcm (canonical={saw_canonical_pcm} legacy={saw_legacy_pcm})"
+        );
+    }
+
+    #[tokio::test]
+    async fn poller_skips_legacy_pcm_when_dual_emit_disabled() {
+        let dir = TempDir::new().unwrap();
+        let path = write_pcm(&dir, "silence.raw", &[0i16; WINDOW_SAMPLES]);
+        let a = MicrophoneAdapter::with_source(path, 16000).with_dual_emit_legacy(false);
+        let mut sub = a
+            .open(HOST_LOCAL_MIC_PCM_CHUNK, Value::Null)
+            .await
+            .expect("open");
+
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), sub.rx.recv())
+            .await
+            .expect("recv")
+            .expect("channel");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut saw_canonical = false;
+        let mut saw_legacy = false;
+        while std::time::Instant::now() < deadline {
+            let delta =
+                tokio::time::timeout(std::time::Duration::from_millis(700), sub.rx.recv()).await;
+            let Ok(Some(delta)) = delta else { continue };
+            if let StateDelta::Append { path, .. } = delta {
+                if path == HOST_LOCAL_MIC_PCM_CHUNK {
+                    saw_canonical = true;
+                }
+                if path == LEGACY_MIC_PCM_PATH {
+                    saw_legacy = true;
+                }
+            }
+            if saw_canonical {
+                let extra = tokio::time::timeout(
+                    std::time::Duration::from_millis(600),
+                    sub.rx.recv(),
+                )
+                .await;
+                if let Ok(Some(StateDelta::Append { path, .. })) = extra
+                    && path == LEGACY_MIC_PCM_PATH
+                {
+                    saw_legacy = true;
+                }
+                break;
+            }
+        }
+        assert!(saw_canonical, "expected canonical pcm Append");
+        assert!(!saw_legacy, "legacy pcm must stay silent when dual-emit off");
     }
 
     #[tokio::test]
