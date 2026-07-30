@@ -24,6 +24,7 @@ use tracing::{debug, info};
 
 use clawft_platform::Platform;
 use clawft_types::config::Config;
+use clawft_types::routing::RoutingConfig;
 
 use crate::agent::context::ContextBuilder;
 use crate::agent::loop_core::{AgentLoop, AutoDelegation};
@@ -96,6 +97,21 @@ pub struct AppContext<P: Platform> {
     /// register each spawned agent and route IPC through the bus.
     #[cfg(feature = "native")]
     agent_bus: Option<Arc<crate::agent_bus::AgentBus>>,
+
+    /// Global (system-wide) routing used as the PermissionResolver ceiling.
+    ///
+    /// When set via [`AppContext::with_routing_layers`], this is the
+    /// unmerged global layer from the config loader. When `None`,
+    /// `config.routing` is used as the sole routing source (legacy /
+    /// single-tenant path with no workspace ceiling).
+    global_routing: Option<RoutingConfig>,
+
+    /// Workspace overlay routing for PermissionResolver (WEFT-10).
+    ///
+    /// When `Some`, `PermissionResolver::new(global, Some(workspace))`
+    /// runs `enforce_workspace_ceiling` so elevated workspace grants
+    /// are clamped to system-wide bounds.
+    workspace_routing: Option<RoutingConfig>,
 }
 
 impl<P: Platform> AppContext<P> {
@@ -209,7 +225,37 @@ impl<P: Platform> AppContext<P> {
             agent_router: None,
             #[cfg(feature = "native")]
             agent_bus: None,
+            global_routing: None,
+            workspace_routing: None,
         })
+    }
+
+    /// Attach split routing layers for PermissionResolver ceiling (WEFT-10).
+    ///
+    /// Call after [`AppContext::new`] when the config loader returned
+    /// separate global / workspace layers. `global` is the system-wide
+    /// ceiling; `workspace` is the optional overlay that will be clamped.
+    pub fn with_routing_layers(
+        mut self,
+        global: RoutingConfig,
+        workspace: Option<RoutingConfig>,
+    ) -> Self {
+        if let Some(ref ws) = workspace {
+            let violations =
+                crate::pipeline::permissions::PermissionResolver::validate_workspace_ceiling(
+                    &global, ws,
+                );
+            if !violations.is_empty() {
+                tracing::warn!(
+                    violations = ?violations,
+                    "workspace routing exceeds global permission ceiling; \
+                     elevated grants will be silently clamped at resolve time"
+                );
+            }
+        }
+        self.global_routing = Some(global);
+        self.workspace_routing = workspace;
+        self
     }
 
     /// Consume the context and produce a running [`AgentLoop`].
@@ -220,9 +266,16 @@ impl<P: Platform> AppContext<P> {
     where
         P: 'static,
     {
+        // WEFT-10: prefer split layers so enforce_workspace_ceiling runs.
+        // Fall back to config.routing alone (no ceiling) when the caller
+        // did not attach layers — preserves single-tenant / test behaviour.
+        let global = self
+            .global_routing
+            .as_ref()
+            .unwrap_or(&self.config.routing);
         let resolver = crate::pipeline::permissions::PermissionResolver::new(
-            &self.config.routing,
-            None, // workspace config not yet supported
+            global,
+            self.workspace_routing.as_ref(),
         );
         // M3 store collapse (design §D4): the in-process / no-daemon path
         // gets a real durable sink instead of the no-op `InMemorySink`
@@ -629,7 +682,13 @@ pub async fn build_daemon_agent_loop(
     gate: Option<Arc<dyn crate::agent::gate::EffectGate>>,
     sink: Option<Arc<dyn crate::agent::sink::ConversationSink>>,
     identity_provider: Option<Arc<dyn crate::agent::identity::IdentityProvider>>,
+    // Global (system-wide) routing — the PermissionResolver ceiling.
+    // When a workspace overlay is also passed, this must be the
+    // unmerged global layer so `enforce_workspace_ceiling` can run.
     routing: Option<&clawft_types::routing::RoutingConfig>,
+    // Workspace overlay routing (WEFT-10). When `Some`, the resolver
+    // applies workspace level overrides then clamps to the global ceiling.
+    workspace_routing: Option<&clawft_types::routing::RoutingConfig>,
     graft_provider: Option<Arc<dyn crate::agent::graft::ContextGraftProvider>>,
 ) -> Arc<crate::agent::loop_core::AgentLoop<clawft_platform::NativePlatform>> {
     use clawft_platform::NativePlatform;
@@ -716,15 +775,27 @@ pub async fn build_daemon_agent_loop(
         learner,
     });
 
-    // TODO(v1.1): split workspace from global at the loader layer so
-    // we can pass them to `PermissionResolver::new(global, Some(workspace))`
-    // and let `enforce_workspace_ceiling` clamp workspace permissions
-    // against system-wide bounds. Today the workspace overlay is
-    // deep-merged into `config.routing` upstream in
-    // `config_loader::load_config_raw`, so workspace policy reaches
-    // the resolver but the security ceiling pattern is bypassed. Fine
-    // for single-user kernels; needed for multi-tenant.
-    let resolver = crate::pipeline::permissions::PermissionResolver::new(&config.routing, None);
+    // WEFT-10: pass split routing layers so enforce_workspace_ceiling
+    // clamps elevated workspace grants against the global ceiling.
+    // `routing` is the global (or merged-legacy) layer; `workspace_routing`
+    // is the optional overlay kept separate by the loader.
+    if let (Some(global), Some(ws)) = (routing, workspace_routing) {
+        let violations =
+            crate::pipeline::permissions::PermissionResolver::validate_workspace_ceiling(
+                global, ws,
+            );
+        if !violations.is_empty() {
+            tracing::warn!(
+                violations = ?violations,
+                "workspace routing exceeds global permission ceiling; \
+                 elevated grants will be silently clamped at resolve time"
+            );
+        }
+    }
+    let resolver = crate::pipeline::permissions::PermissionResolver::new(
+        &config.routing,
+        workspace_routing,
+    );
     let mut agent = crate::agent::loop_core::AgentLoop::new(
         config.agents,
         platform,
@@ -918,6 +989,61 @@ mod tests {
         let ctx = AppContext::new(test_config(), platform).await.unwrap();
         let skills = ctx.skills();
         assert!(skills.skills_dir().is_absolute());
+    }
+
+    #[tokio::test]
+    async fn with_routing_layers_wires_permission_ceiling() {
+        // WEFT-10: AppContext must accept split layers and build a
+        // PermissionResolver that clamps elevated workspace grants.
+        use clawft_types::routing::{PermissionLevelConfig, PermissionsConfig, RoutingConfig};
+
+        let platform = Arc::new(NativePlatform::new());
+        let global = RoutingConfig {
+            permissions: PermissionsConfig {
+                user: PermissionLevelConfig {
+                    level: Some(1),
+                    tool_access: Some(vec!["read_file".into()]),
+                    cost_budget_daily_usd: Some(5.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let workspace = RoutingConfig {
+            permissions: PermissionsConfig {
+                user: PermissionLevelConfig {
+                    level: Some(2),
+                    tool_access: Some(vec!["read_file".into(), "shell".into()]),
+                    cost_budget_daily_usd: Some(999.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let ctx = AppContext::new(test_config(), platform)
+            .await
+            .unwrap()
+            .with_routing_layers(global.clone(), Some(workspace.clone()));
+
+        // Mirror what into_agent_loop does for the resolver.
+        let resolver = crate::pipeline::permissions::PermissionResolver::new(
+            ctx.global_routing.as_ref().unwrap(),
+            ctx.workspace_routing.as_ref(),
+        );
+        let perms = resolver.resolve("someone", "telegram", true);
+        assert!(
+            perms.level <= 1,
+            "workspace level elevation must clamp, got {}",
+            perms.level
+        );
+        assert!(
+            !perms.tool_access.contains(&"shell".to_string()),
+            "workspace-only tool must be filtered"
+        );
+        assert!(perms.cost_budget_daily_usd <= 5.0);
     }
 
     #[tokio::test]

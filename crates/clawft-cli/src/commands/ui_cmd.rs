@@ -48,7 +48,8 @@ pub async fn run(args: UiArgs) -> anyhow::Result<()> {
     #[cfg(feature = "channels")]
     {
         let platform = std::sync::Arc::new(clawft_platform::NativePlatform::new());
-        let mut config = super::load_config(&*platform, args.config.as_deref()).await?;
+        let loaded = super::load_config_layered(&*platform, args.config.as_deref()).await?;
+        let mut config = loaded.config;
 
         // Force the API on -- that's the whole point of `weft ui`.
         config.gateway.api_enabled = true;
@@ -75,8 +76,16 @@ pub async fn run(args: UiArgs) -> anyhow::Result<()> {
         }
 
         // Delegate to the gateway with the pre-loaded (mutated) config.
+        // WEFT-10: pass split routing layers for PermissionResolver ceiling.
         let intelligent_routing = false;
-        super::gateway::run_with_config(config, intelligent_routing, args.ui_dir).await
+        super::gateway::run_with_config(
+            config,
+            intelligent_routing,
+            args.ui_dir,
+            Some(loaded.global_routing),
+            loaded.workspace_routing,
+        )
+        .await
     }
 }
 

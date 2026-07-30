@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use tracing::debug;
+use tracing::{debug, warn};
 
 use clawft_types::routing::{
     AuthContext, PermissionLevelConfig, PermissionsConfig, RoutingConfig, UserPermissions,
@@ -250,21 +250,62 @@ fn tier_rank(tier: &str) -> u8 {
 pub struct PermissionResolver {
     global_level_overrides: HashMap<String, PermissionLevelConfig>,
     workspace_level_overrides: HashMap<String, PermissionLevelConfig>,
+    /// Effective user overrides (global, overlaid by workspace when present).
     user_overrides: HashMap<String, PermissionLevelConfig>,
+    /// Effective channel overrides (global, overlaid by workspace when present).
     channel_overrides: HashMap<String, PermissionLevelConfig>,
+    /// Global-only user overrides (ceiling baseline; no workspace overlay).
+    global_user_overrides: HashMap<String, PermissionLevelConfig>,
+    /// Global-only channel overrides (ceiling baseline; no workspace overlay).
+    global_channel_overrides: HashMap<String, PermissionLevelConfig>,
+    /// True when any workspace overlay was provided (level/user/channel).
+    has_workspace: bool,
     cli_default_level: u8,
 }
 
 impl PermissionResolver {
     /// Create from a global `RoutingConfig` and optional workspace config.
+    ///
+    /// WEFT-10: pass the unmerged global layer and the workspace overlay
+    /// separately so `enforce_workspace_ceiling` can clamp elevated grants.
+    /// Workspace user/channel overrides are applied at resolve time but
+    /// the ceiling is computed from global-only overrides.
     pub fn new(global: &RoutingConfig, workspace: Option<&RoutingConfig>) -> Self {
+        let mut user_overrides = global.permissions.users.clone();
+        let mut channel_overrides = global.permissions.channels.clone();
+        let mut workspace_level_overrides = HashMap::new();
+        let mut has_workspace = false;
+
+        if let Some(ws) = workspace {
+            has_workspace = true;
+            workspace_level_overrides = extract_level_overrides(&ws.permissions);
+            // Workspace user/channel overlays win on key collision so
+            // single-tenant workspace channel grants (e.g. agent.chat)
+            // still apply; the ceiling pass clamps security fields.
+            for (k, v) in &ws.permissions.users {
+                user_overrides.insert(k.clone(), v.clone());
+            }
+            for (k, v) in &ws.permissions.channels {
+                channel_overrides.insert(k.clone(), v.clone());
+            }
+            // Workspace-only named levels also count as workspace present
+            // even if users/channels were empty.
+            if !workspace_level_overrides.is_empty()
+                || !ws.permissions.users.is_empty()
+                || !ws.permissions.channels.is_empty()
+            {
+                has_workspace = true;
+            }
+        }
+
         Self {
             global_level_overrides: extract_level_overrides(&global.permissions),
-            workspace_level_overrides: workspace
-                .map(|ws| extract_level_overrides(&ws.permissions))
-                .unwrap_or_default(),
-            user_overrides: global.permissions.users.clone(),
-            channel_overrides: global.permissions.channels.clone(),
+            workspace_level_overrides,
+            user_overrides,
+            channel_overrides,
+            global_user_overrides: global.permissions.users.clone(),
+            global_channel_overrides: global.permissions.channels.clone(),
+            has_workspace,
             cli_default_level: 2,
         }
     }
@@ -276,6 +317,9 @@ impl PermissionResolver {
             workspace_level_overrides: HashMap::new(),
             user_overrides: HashMap::new(),
             channel_overrides: HashMap::new(),
+            global_user_overrides: HashMap::new(),
+            global_channel_overrides: HashMap::new(),
+            has_workspace: false,
             cli_default_level: 2,
         }
     }
@@ -291,7 +335,7 @@ impl PermissionResolver {
         channel: &str,
         allow_from_match: bool,
     ) -> UserPermissions {
-        let level = self.determine_level(sender_id, channel, allow_from_match);
+        let level = self.determine_level(sender_id, channel, allow_from_match, false);
         let mut perms = defaults_for_level(level);
         let lname = level_name(level);
 
@@ -308,9 +352,21 @@ impl PermissionResolver {
             merge_permissions(&mut perms, c);
         }
 
-        if !self.workspace_level_overrides.is_empty() {
+        if self.has_workspace {
             let ceiling = self.resolve_global_only(sender_id, channel, allow_from_match);
-            Self::enforce_workspace_ceiling(&mut perms, &ceiling);
+            let clamps = Self::enforce_workspace_ceiling(&mut perms, &ceiling);
+            if !clamps.is_empty() {
+                // Audit-log warning: elevated workspace grants were
+                // silently clamped to the system-wide ceiling (WEFT-10 /
+                // FIX-04). Operators monitoring logs can detect
+                // misconfigured multi-tenant workspaces.
+                warn!(
+                    sender_id = %sender_id,
+                    channel = %channel,
+                    clamps = ?clamps,
+                    "workspace permission ceiling enforced; elevated grants silently clamped"
+                );
+            }
         }
 
         debug!(
@@ -341,14 +397,34 @@ impl PermissionResolver {
     }
 
     /// Determine level: user override > channel override > allow_from > cli > zero_trust.
-    fn determine_level(&self, sender_id: &str, channel: &str, allow_from_match: bool) -> u8 {
-        if let Some(u) = self.user_overrides.get(sender_id)
+    ///
+    /// When `global_only` is true, only system-wide user/channel overrides
+    /// are consulted (ceiling baseline). Otherwise workspace overlays win.
+    fn determine_level(
+        &self,
+        sender_id: &str,
+        channel: &str,
+        allow_from_match: bool,
+        global_only: bool,
+    ) -> u8 {
+        let users = if global_only {
+            &self.global_user_overrides
+        } else {
+            &self.user_overrides
+        };
+        let channels = if global_only {
+            &self.global_channel_overrides
+        } else {
+            &self.channel_overrides
+        };
+
+        if let Some(u) = users.get(sender_id)
             && let Some(level) = u.level
         {
             debug!(sender_id = %sender_id, level, source = "user_override", "permission level determined");
             return level;
         }
-        if let Some(c) = self.channel_overrides.get(channel)
+        if let Some(c) = channels.get(channel)
             && let Some(level) = c.level
         {
             debug!(sender_id = %sender_id, channel = %channel, level, source = "channel_override", "permission level determined");
@@ -368,55 +444,106 @@ impl PermissionResolver {
 
     /// Resolve using only global config (no workspace). For ceiling comparison.
     fn resolve_global_only(&self, sender_id: &str, channel: &str, afm: bool) -> UserPermissions {
-        let level = self.determine_level(sender_id, channel, afm);
+        let level = self.determine_level(sender_id, channel, afm, true);
         let mut perms = defaults_for_level(level);
         let lname = level_name(level);
         if let Some(g) = self.global_level_overrides.get(lname) {
             merge_permissions(&mut perms, g);
         }
-        if let Some(u) = self.user_overrides.get(sender_id) {
+        if let Some(u) = self.global_user_overrides.get(sender_id) {
             merge_permissions(&mut perms, u);
         }
-        if let Some(c) = self.channel_overrides.get(channel) {
+        if let Some(c) = self.global_channel_overrides.get(channel) {
             merge_permissions(&mut perms, c);
         }
         perms
     }
 
     /// Clamp workspace permissions to global ceiling for security fields.
-    fn enforce_workspace_ceiling(perms: &mut UserPermissions, ceil: &UserPermissions) {
+    ///
+    /// Returns a list of human-readable clamp descriptions for audit logging
+    /// (empty when no field was reduced). FIX-04 / WEFT-10 rules:
+    /// - `level` cannot exceed the global ceiling
+    /// - `escalation_allowed` cannot become true if global forbids it
+    /// - `tool_access` is intersected with the global allowlist
+    /// - `rate_limit` / cost budgets cannot increase beyond global
+    /// - `max_tier` cannot upgrade past the global tier
+    fn enforce_workspace_ceiling(
+        perms: &mut UserPermissions,
+        ceil: &UserPermissions,
+    ) -> Vec<String> {
+        let mut clamps = Vec::new();
         if perms.level > ceil.level {
+            clamps.push(format!("level {} → {}", perms.level, ceil.level));
             perms.level = ceil.level;
         }
-        if !ceil.escalation_allowed {
+        if perms.escalation_allowed && !ceil.escalation_allowed {
+            clamps.push("escalation_allowed true → false".into());
+            perms.escalation_allowed = false;
+        } else if !ceil.escalation_allowed {
             perms.escalation_allowed = false;
         }
         if !ceil.tool_access.contains(&"*".to_string()) {
+            let before = perms.tool_access.clone();
             perms
                 .tool_access
                 .retain(|t| t == "*" || ceil.tool_access.contains(t));
             if perms.tool_access.contains(&"*".to_string()) {
                 perms.tool_access = ceil.tool_access.clone();
             }
+            if perms.tool_access != before {
+                clamps.push(format!(
+                    "tool_access {:?} → {:?}",
+                    before, perms.tool_access
+                ));
+            }
         }
         if ceil.rate_limit > 0 && (perms.rate_limit == 0 || perms.rate_limit > ceil.rate_limit) {
+            clamps.push(format!(
+                "rate_limit {} → {}",
+                perms.rate_limit, ceil.rate_limit
+            ));
             perms.rate_limit = ceil.rate_limit;
         }
         if ceil.cost_budget_daily_usd > 0.0
             && (perms.cost_budget_daily_usd == 0.0
                 || perms.cost_budget_daily_usd > ceil.cost_budget_daily_usd)
         {
+            clamps.push(format!(
+                "cost_budget_daily_usd {} → {}",
+                perms.cost_budget_daily_usd, ceil.cost_budget_daily_usd
+            ));
             perms.cost_budget_daily_usd = ceil.cost_budget_daily_usd;
         }
         if ceil.cost_budget_monthly_usd > 0.0
             && (perms.cost_budget_monthly_usd == 0.0
                 || perms.cost_budget_monthly_usd > ceil.cost_budget_monthly_usd)
         {
+            clamps.push(format!(
+                "cost_budget_monthly_usd {} → {}",
+                perms.cost_budget_monthly_usd, ceil.cost_budget_monthly_usd
+            ));
             perms.cost_budget_monthly_usd = ceil.cost_budget_monthly_usd;
         }
         if tier_rank(&perms.max_tier) > tier_rank(&ceil.max_tier) {
+            clamps.push(format!(
+                "max_tier {} → {}",
+                perms.max_tier, ceil.max_tier
+            ));
             perms.max_tier = ceil.max_tier.clone();
         }
+        clamps
+    }
+
+    /// Public test/audit helper: apply the ceiling clamp and return reasons.
+    ///
+    /// Used by integration tests to assert both the clamped values and that
+    /// clamp reasons are produced (the same strings logged via `warn!`).
+    pub fn clamp_to_ceiling(
+        perms: &mut UserPermissions,
+        ceiling: &UserPermissions,
+    ) -> Vec<String> {
+        Self::enforce_workspace_ceiling(perms, ceiling)
     }
 
     /// Static validation: check if workspace expands beyond global ceiling.
@@ -551,7 +678,7 @@ mod tests {
             }),
             None,
         );
-        assert_eq!(r.determine_level("alice", "telegram", false), 2);
+        assert_eq!(r.determine_level("alice", "telegram", false, false), 2);
     }
 
     #[test]
@@ -571,26 +698,26 @@ mod tests {
             }),
             None,
         );
-        assert_eq!(r.determine_level("unknown", "discord", false), 0);
+        assert_eq!(r.determine_level("unknown", "discord", false, false), 0);
     }
 
     #[test]
     fn test_determine_level_allow_from_match() {
         let r = PermissionResolver::default_resolver();
-        assert_eq!(r.determine_level("someone", "telegram", true), 1);
-        assert_eq!(r.determine_level("someone", "telegram", false), 0);
+        assert_eq!(r.determine_level("someone", "telegram", true, false), 1);
+        assert_eq!(r.determine_level("someone", "telegram", false, false), 0);
     }
 
     #[test]
     fn test_determine_level_cli_default() {
         let r = PermissionResolver::default_resolver();
-        assert_eq!(r.determine_level("local", "cli", false), 2);
+        assert_eq!(r.determine_level("local", "cli", false, false), 2);
     }
 
     #[test]
     fn test_determine_level_unknown_sender() {
         let r = PermissionResolver::default_resolver();
-        assert_eq!(r.determine_level("nobody", "telegram", false), 0);
+        assert_eq!(r.determine_level("nobody", "telegram", false, false), 0);
     }
 
     // -- Merge (4) --
@@ -1012,5 +1139,101 @@ mod tests {
         });
         let v = PermissionResolver::validate_workspace_ceiling(&g, &w);
         assert!(v.is_empty(), "expected no violations, got: {v:?}");
+    }
+
+    // -- WEFT-10: clamp produces audit reasons --
+
+    #[test]
+    fn test_clamp_to_ceiling_emits_audit_reasons() {
+        let mut perms = admin_defaults(); // level 2, wildcard tools, unlimited budget
+        let ceil = user_defaults(); // level 1, restricted tools, budgets set
+        let reasons = PermissionResolver::clamp_to_ceiling(&mut perms, &ceil);
+        assert!(
+            !reasons.is_empty(),
+            "elevated admin → user ceiling must produce clamp reasons"
+        );
+        assert!(
+            reasons.iter().any(|r| r.contains("level")),
+            "expected level clamp reason, got: {reasons:?}"
+        );
+        assert!(perms.level <= 1);
+        assert!(!perms.tool_access.contains(&"*".to_string()));
+    }
+
+    #[test]
+    fn test_workspace_ceiling_rate_limit_clamped() {
+        let g = rcfg(PermissionsConfig {
+            user: PermissionLevelConfig {
+                rate_limit: Some(30),
+                ..plc()
+            },
+            ..Default::default()
+        });
+        let w = rcfg(PermissionsConfig {
+            user: PermissionLevelConfig {
+                rate_limit: Some(999),
+                ..plc()
+            },
+            ..Default::default()
+        });
+        let perms = PermissionResolver::new(&g, Some(&w)).resolve("someone", "telegram", true);
+        assert!(
+            perms.rate_limit <= 30,
+            "workspace rate_limit increase must clamp, got {}",
+            perms.rate_limit
+        );
+    }
+
+    /// Multi-tenant scenario: two workspaces, one elevates beyond global.
+    /// Only the elevating workspace is clamped; the other is unaffected.
+    #[test]
+    fn test_multi_tenant_workspace_ceiling_isolation() {
+        let global = rcfg(PermissionsConfig {
+            user: PermissionLevelConfig {
+                level: Some(1),
+                tool_access: Some(vec!["read_file".into(), "web_search".into()]),
+                cost_budget_daily_usd: Some(5.0),
+                ..plc()
+            },
+            ..Default::default()
+        });
+
+        // Tenant A: tries to escalate to admin + add shell.
+        let tenant_a = rcfg(PermissionsConfig {
+            user: PermissionLevelConfig {
+                level: Some(2),
+                tool_access: Some(vec![
+                    "read_file".into(),
+                    "web_search".into(),
+                    "shell".into(),
+                ]),
+                cost_budget_daily_usd: Some(100.0),
+                ..plc()
+            },
+            ..Default::default()
+        });
+        let a = PermissionResolver::new(&global, Some(&tenant_a)).resolve("u", "telegram", true);
+        assert!(a.level <= 1, "tenant A level clamped");
+        assert!(!a.tool_access.contains(&"shell".to_string()));
+        assert!(a.cost_budget_daily_usd <= 5.0);
+
+        // Tenant B: stays within bounds (restricts further).
+        let tenant_b = rcfg(PermissionsConfig {
+            user: PermissionLevelConfig {
+                level: Some(0),
+                tool_access: Some(vec!["read_file".into()]),
+                cost_budget_daily_usd: Some(1.0),
+                ..plc()
+            },
+            ..Default::default()
+        });
+        let b = PermissionResolver::new(&global, Some(&tenant_b)).resolve("u", "telegram", true);
+        // allow_from promotes to level 1, then workspace level-0 override
+        // merges — but ceiling is global level 1. The workspace sets level 0
+        // via named level override for "user" (lname of determined level).
+        // determined level is 1 (allow_from), so workspace user override applies.
+        assert_eq!(b.level, 0, "tenant B may further restrict");
+        assert!(b.tool_access.contains(&"read_file".to_string()));
+        assert!(!b.tool_access.contains(&"web_search".to_string()));
     }
 }

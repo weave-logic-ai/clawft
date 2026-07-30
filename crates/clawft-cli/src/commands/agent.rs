@@ -40,7 +40,7 @@ use clawft_core::bus::MessageBus;
 use clawft_platform::NativePlatform;
 use clawft_types::event::InboundMessage;
 
-use super::load_config;
+
 use crate::interactive::builtins::{QUIT_SENTINEL, register_builtins, register_skill_commands};
 use crate::interactive::registry::{InteractiveContext, SlashCommandRegistry};
 
@@ -80,7 +80,8 @@ pub struct AgentArgs {
 /// tool execution.
 pub async fn run(args: AgentArgs) -> anyhow::Result<()> {
     let platform = Arc::new(NativePlatform::new());
-    let mut config = load_config(&*platform, args.config.as_deref()).await?;
+    let loaded = super::load_config_layered(&*platform, args.config.as_deref()).await?;
+    let mut config = loaded.config;
 
     // Apply model override if provided.
     if let Some(ref model) = args.model {
@@ -106,9 +107,11 @@ pub async fn run(args: AgentArgs) -> anyhow::Result<()> {
     info!("no kernel daemon reachable — using in-process agent loop");
 
     // Bootstrap the application context (bus, sessions, memory, skills, pipeline).
+    // WEFT-10: attach split routing layers so PermissionResolver ceiling runs.
     let mut ctx = AppContext::new(config.clone(), platform.clone())
         .await
-        .map_err(|e| anyhow::anyhow!("bootstrap failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("bootstrap failed: {e}"))?
+        .with_routing_layers(loaded.global_routing, loaded.workspace_routing);
 
     // Register core tools (built-in + MCP proxied + delegation).
     super::register_core_tools(ctx.tools_mut(), &config, platform.clone()).await;

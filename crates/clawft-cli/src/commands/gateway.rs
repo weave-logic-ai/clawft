@@ -50,7 +50,6 @@ use clawft_services::heartbeat::HeartbeatService;
 #[cfg(feature = "channels")]
 use crate::markdown::dispatch::MarkdownDispatcher;
 
-use super::load_config;
 #[cfg(feature = "channels")]
 use super::make_channel_host;
 
@@ -121,8 +120,15 @@ pub async fn run(args: GatewayArgs) -> anyhow::Result<()> {
 #[cfg(feature = "channels")]
 async fn run_with_channels(args: GatewayArgs) -> anyhow::Result<()> {
     let platform = Arc::new(NativePlatform::new());
-    let config = load_config(&*platform, args.config.as_deref()).await?;
-    run_with_config(config, args.intelligent_routing, None).await
+    let loaded = super::load_config_layered(&*platform, args.config.as_deref()).await?;
+    run_with_config(
+        loaded.config,
+        args.intelligent_routing,
+        None,
+        Some(loaded.global_routing),
+        loaded.workspace_routing,
+    )
+    .await
 }
 
 /// Run the gateway with a pre-loaded [`Config`].
@@ -130,11 +136,16 @@ async fn run_with_channels(args: GatewayArgs) -> anyhow::Result<()> {
 /// This is the shared inner function used by both `weft gateway` and
 /// `weft ui`. The `static_dir` parameter, when `Some`, enables SPA-style
 /// static file serving for the built frontend.
+///
+/// `global_routing` / `workspace_routing` (WEFT-10) feed the
+/// PermissionResolver ceiling when provided.
 #[cfg(feature = "channels")]
 pub async fn run_with_config(
     config: clawft_types::config::Config,
     intelligent_routing: bool,
     static_dir: Option<String>,
+    global_routing: Option<clawft_types::routing::RoutingConfig>,
+    workspace_routing: Option<clawft_types::routing::RoutingConfig>,
 ) -> anyhow::Result<()> {
     info!("starting weft gateway");
 
@@ -144,6 +155,9 @@ pub async fn run_with_config(
     let mut ctx = AppContext::new(config.clone(), platform.clone())
         .await
         .map_err(|e| anyhow::anyhow!("failed to bootstrap app context: {e}"))?;
+    if let Some(global) = global_routing {
+        ctx = ctx.with_routing_layers(global, workspace_routing);
+    }
 
     // Register core tools (built-in + MCP proxied + delegation).
     super::register_core_tools(ctx.tools_mut(), &config, platform.clone()).await;

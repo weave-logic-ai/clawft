@@ -9,7 +9,10 @@
 pub mod agent;
 mod config;
 
-pub use config::{load_merged_config, load_merged_config_from};
+pub use config::{
+    load_merged_config, load_merged_config_from, load_split_config, load_split_config_from,
+    SplitConfig,
+};
 
 use std::path::{Path, PathBuf};
 

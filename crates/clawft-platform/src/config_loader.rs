@@ -64,27 +64,59 @@ pub fn discover_config_path(
     None
 }
 
-/// Load raw JSON configuration using the discovery algorithm.
+/// Split configuration layers produced by the discovery algorithm.
 ///
-/// Merges configuration from two sources (project `weave.toml` first,
-/// then user JSON config on top):
+/// WEFT-10 / FIX-04: the workspace overlay is kept separate from the
+/// global (weave.toml + home JSON) layer so callers can construct
+/// `PermissionResolver::new(global, Some(workspace))` and let
+/// `enforce_workspace_ceiling` clamp elevated workspace grants against
+/// system-wide bounds. Deep-merging first bypasses the ceiling.
+#[derive(Debug, Clone)]
+pub struct ConfigLayers {
+    /// Layers 1+2 only: `weave.toml` + home/env JSON. No workspace overlay.
+    pub global: Value,
+    /// Layer 3 alone: cwd `.clawft/config.json`, when present and parseable.
+    pub workspace: Option<Value>,
+}
+
+impl ConfigLayers {
+    /// Deep-merge workspace onto global (legacy single-config behaviour).
+    ///
+    /// Use this for non-security fields (agents, providers, tools) where
+    /// most-specific-wins overlay is correct. For `routing.permissions`,
+    /// prefer keeping the layers split and handing them to
+    /// `PermissionResolver`.
+    pub fn merged(&self) -> Value {
+        let mut out = self.global.clone();
+        if let Some(ref ws) = self.workspace {
+            deep_merge(&mut out, ws);
+        }
+        out
+    }
+
+    /// True when a workspace overlay was loaded.
+    pub fn has_workspace(&self) -> bool {
+        self.workspace.is_some()
+    }
+}
+
+/// Load configuration as split global / workspace layers (WEFT-10).
 ///
+/// Layer order:
 /// 1. `weave.toml` in the current directory (project-level settings)
-/// 2. JSON config from the discovery chain:
-///    - `CLAWFT_CONFIG` env var
-///    - `~/.clawft/config.json`
-///    - `~/.nanobot/config.json` (legacy)
+/// 2. JSON config from the discovery chain (`CLAWFT_CONFIG` /
+///    `~/.clawft/config.json` / `~/.nanobot/config.json`)
+/// 3. Workspace overlay at cwd `.clawft/config.json` (returned separately)
 ///
-/// JSON config values override `weave.toml` values where keys collide.
-///
-/// Returns the merged and key-normalized JSON value. The caller (typically
-/// `clawft-types`) deserializes this into a typed `Config` struct.
-pub async fn load_config_raw(
+/// Layers 1+2 are deep-merged into [`ConfigLayers::global`]. Layer 3 is
+/// returned as [`ConfigLayers::workspace`] without being merged, so
+/// multi-tenant permission ceilings can be enforced.
+pub async fn load_config_layers(
     fs: &dyn super::fs::FileSystem,
     env: &dyn super::env::Environment,
-) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<ConfigLayers, Box<dyn std::error::Error + Send + Sync>> {
     // Layer 1: weave.toml from project root (current directory).
-    let mut merged = load_weave_toml(fs)
+    let mut global = load_weave_toml(fs)
         .await
         .unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
 
@@ -100,7 +132,7 @@ pub async fn load_config_raw(
             Ok(contents) => match serde_json::from_str::<Value>(&contents) {
                 Ok(json_value) => {
                     let normalized = normalize_keys(json_value);
-                    deep_merge(&mut merged, &normalized);
+                    deep_merge(&mut global, &normalized);
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -121,25 +153,20 @@ pub async fn load_config_raw(
     }
 
     // Layer 3: workspace JSON overlay from cwd `.clawft/config.json`.
-    // Most-specific wins — when a kernel runs inside a workspace, the
-    // workspace's config dictates policy (channel permissions, routing
-    // tiers, identity binding, etc.) while the home-dir config remains
-    // the fallback for fields the workspace does not redeclare.
-    //
-    // This restores per-workspace policy that was lost when the loader
-    // stopped reading cwd JSON; matches the convention used by `git`,
-    // `npm`, etc. (most-specific config wins).
+    // Kept separate (WEFT-10) so PermissionResolver can apply the
+    // security ceiling. Most-specific wins for non-security merge via
+    // `ConfigLayers::merged()`.
     let workspace_path = PathBuf::from(".clawft").join("config.json");
+    let mut workspace = None;
     if fs.exists(&workspace_path).await {
         tracing::debug!(
             path = %workspace_path.display(),
-            "loading workspace config overlay"
+            "loading workspace config overlay (kept split for permission ceiling)"
         );
         match fs.read_to_string(&workspace_path).await {
             Ok(contents) => match serde_json::from_str::<Value>(&contents) {
                 Ok(json_value) => {
-                    let normalized = normalize_keys(json_value);
-                    deep_merge(&mut merged, &normalized);
+                    workspace = Some(normalize_keys(json_value));
                 }
                 Err(e) => tracing::warn!(
                     path = %workspace_path.display(),
@@ -155,11 +182,27 @@ pub async fn load_config_raw(
         }
     }
 
-    if merged.as_object().is_none_or(|m| m.is_empty()) {
+    if global.as_object().is_none_or(|m| m.is_empty()) && workspace.is_none() {
         tracing::info!("no config found (checked weave.toml + JSON), using defaults");
     }
 
-    Ok(merged)
+    Ok(ConfigLayers { global, workspace })
+}
+
+/// Load raw JSON configuration using the discovery algorithm.
+///
+/// Convenience wrapper around [`load_config_layers`] that deep-merges
+/// the workspace overlay onto the global layer (legacy single-`Value`
+/// behaviour). Prefer [`load_config_layers`] when constructing a
+/// `PermissionResolver` so the workspace ceiling can run.
+///
+/// Returns the merged and key-normalized JSON value. The caller (typically
+/// `clawft-types`) deserializes this into a typed `Config` struct.
+pub async fn load_config_raw(
+    fs: &dyn super::fs::FileSystem,
+    env: &dyn super::env::Environment,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(load_config_layers(fs, env).await?.merged())
 }
 
 /// Load `weave.toml` from the current directory if it exists.
@@ -593,5 +636,59 @@ mod tests {
                 .and_then(Value::as_u64),
             Some(8192)
         );
+    }
+
+    // ── WEFT-10: split global / workspace layers ─────────────────────
+
+    #[tokio::test]
+    async fn load_config_layers_keeps_workspace_separate() {
+        // Workspace elevates agent.chat to level 2; global has no
+        // routing. After split, global must NOT contain the elevation
+        // while workspace does — so PermissionResolver can clamp.
+        let workspace = r#"{
+            "routing": {
+                "permissions": {
+                    "channels": { "agent.chat": { "level": 2 } },
+                    "user": { "level": 2 }
+                }
+            }
+        }"#;
+        let fs = MockFs::new(Some(PathBuf::from("/tmp/clawft_test_no_home_xyz")))
+            .with_file(workspace_config_path(), workspace);
+        let env = MockEnv::new();
+        let layers = load_config_layers(&fs, &env).await.unwrap();
+
+        assert!(layers.has_workspace(), "workspace overlay present");
+        assert!(
+            layers
+                .global
+                .pointer("/routing/permissions/user/level")
+                .is_none(),
+            "global must not contain workspace elevation"
+        );
+        let ws_lvl = layers
+            .workspace
+            .as_ref()
+            .and_then(|w| w.pointer("/routing/permissions/user/level"))
+            .and_then(Value::as_u64);
+        assert_eq!(ws_lvl, Some(2));
+
+        // merged() still deep-merges for non-security consumers.
+        let merged = layers.merged();
+        assert_eq!(
+            merged
+                .pointer("/routing/permissions/user/level")
+                .and_then(Value::as_u64),
+            Some(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn load_config_layers_no_workspace_when_absent() {
+        let fs = MockFs::new(Some(PathBuf::from("/tmp/clawft_test_no_home_xyz")));
+        let env = MockEnv::new();
+        let layers = load_config_layers(&fs, &env).await.unwrap();
+        assert!(!layers.has_workspace());
+        assert!(layers.workspace.is_none());
     }
 }
