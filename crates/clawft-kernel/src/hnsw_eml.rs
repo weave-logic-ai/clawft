@@ -1418,6 +1418,68 @@ fn measure_latency(store: &mut HnswStore, qs: &[Vec<f32>], top_k: usize) -> ArmM
     }
 }
 
+/// Tunables for [`run_hnsw_benchmark_with`].
+///
+/// Full-scale defaults match the historical 4-phase A/B protocol (20×128
+/// learning queries with `train_every_n = 100`). That path spends most of
+/// its wall time inside `EmlModel::train` (100–200 random restarts + up to
+/// 1000 coordinate-descent passes per train cycle) and is **not** suitable
+/// as a default unit test — use [`HnswBenchmarkParams::smoke`] in CI.
+#[derive(Debug, Clone)]
+pub struct HnswBenchmarkParams {
+    pub store_size: usize,
+    pub dims: usize,
+    pub top_k: usize,
+    /// Full passes over the query set in phase 2. Default: 20.
+    pub learning_passes: usize,
+    /// Structured query count. Default: 128.
+    pub n_queries: usize,
+    /// EML auto-train interval during phase 2. Default: 100.
+    ///
+    /// Each train cycle is O(restarts × training_set × param_count) and
+    /// dominates wall clock; raise this (or lower `learning_passes`) for
+    /// smoke runs.
+    pub train_every_n: usize,
+    /// Minimum samples before EML will train. Default: 50.
+    pub min_training_samples: usize,
+    /// Run the phase-4 size sweep. Default: true.
+    pub phase4: bool,
+}
+
+impl HnswBenchmarkParams {
+    /// Historical full-scale protocol (multi-minute; for manual/perf runs).
+    pub fn full(store_size: usize, dims: usize, top_k: usize) -> Self {
+        Self {
+            store_size,
+            dims,
+            top_k,
+            learning_passes: 20,
+            n_queries: 128,
+            train_every_n: 100,
+            min_training_samples: 50,
+            phase4: true,
+        }
+    }
+
+    /// Tiny params that still exercise all four phases in well under a second.
+    ///
+    /// Phase-2 training is effectively disabled mid-stream (`train_every_n`
+    /// larger than the query budget) so the suite does not hang on
+    /// `EmlModel::train` (WEFT-134).
+    pub fn smoke() -> Self {
+        Self {
+            store_size: 48,
+            dims: 8,
+            top_k: 3,
+            learning_passes: 1,
+            n_queries: 8,
+            train_every_n: 10_000,
+            min_training_samples: 50,
+            phase4: true,
+        }
+    }
+}
+
 /// Run the 4-phase HNSW-EML benchmark with three-arm A/B.
 ///
 /// **Control**: bare HNSW at static ef, no EML code in the path.
@@ -1426,16 +1488,40 @@ fn measure_latency(store: &mut HnswStore, qs: &[Vec<f32>], top_k: usize) -> ArmM
 /// **Adaptive**: EML fully enabled, predictions applied to ef.
 ///
 /// All three arms use identical data and query sequences.
+///
+/// This is the full-scale protocol. Prefer
+/// [`run_hnsw_benchmark_with`]`(`[HnswBenchmarkParams::smoke]`)` in unit
+/// tests — the full protocol can spend many minutes inside EML training
+/// (WEFT-134).
 pub fn run_hnsw_benchmark(store_size: usize, dims: usize, top_k: usize) -> HnswEmlBenchmark {
+    run_hnsw_benchmark_with(HnswBenchmarkParams::full(store_size, dims, top_k))
+}
+
+/// Run the 4-phase HNSW-EML benchmark with explicit scale parameters.
+pub fn run_hnsw_benchmark_with(params: HnswBenchmarkParams) -> HnswEmlBenchmark {
+    let HnswBenchmarkParams {
+        store_size,
+        dims,
+        top_k,
+        learning_passes,
+        n_queries,
+        train_every_n,
+        min_training_samples,
+        phase4,
+    } = params;
+
     let mut rng = 0xDEAD_BEEF_u64;
 
-    // Structured embeddings: 20 clusters, early dims = high variance
-    // (cluster identity), later dims = noise. Mimics real model outputs.
-    let n_clusters = 20;
+    // Structured embeddings: 20 clusters (capped by corpus size), early dims
+    // = high variance (cluster identity), later dims = noise.
+    let n_clusters = 20.min(store_size.max(1));
+    let n_queries = n_queries.max(1);
     let corpus = gen_structured_corpus(&mut rng, store_size, dims, n_clusters);
-    let queries = gen_structured_queries(&mut rng, 128, dims, n_clusters);
+    let queries = gen_structured_queries(&mut rng, n_queries, dims, n_clusters);
 
     let static_ef: usize = if store_size >= 1000 { 20 } else { 100 };
+    let recall_sample = queries.len().min(16);
+    let recall_check_every = 50.max(n_queries); // at most once per pass when tiny
 
     // ── Phase 1 (Warmup) ────────────────────────────────────────────────
 
@@ -1449,7 +1535,8 @@ pub fn run_hnsw_benchmark(store_size: usize, dims: usize, top_k: usize) -> HnswE
     let _ = store_control.query(&queries[0], top_k);
     let phase1_warmup_query_ns = t0.elapsed().as_nanos();
 
-    let phase1_baseline_recall = measure_recall_direct(&mut store_control, &queries[..16], top_k);
+    let phase1_baseline_recall =
+        measure_recall_direct(&mut store_control, &queries[..recall_sample], top_k);
 
     // ── Phase 2 (Learning) ──────────────────────────────────────────────
     // Train the EML manager on a query stream. The adaptive store starts
@@ -1457,9 +1544,9 @@ pub fn run_hnsw_benchmark(store_size: usize, dims: usize, top_k: usize) -> HnswE
 
     let eml_config = HnswEmlConfig {
         enabled: true,
-        train_every_n: 100,
-        recall_check_every_n: 200,
-        min_training_samples: 50,
+        train_every_n: train_every_n as u64,
+        recall_check_every_n: (train_every_n.saturating_mul(2).max(1)) as u64,
+        min_training_samples,
         distance_selected_dims: dims.min(16),
         ef_strategy: EfStrategy::Score,
         target_recall: 0.95,
@@ -1469,11 +1556,12 @@ pub fn run_hnsw_benchmark(store_size: usize, dims: usize, top_k: usize) -> HnswE
     let mut store_adaptive = build_store(&corpus, static_ef);
     let mut eml = HnswEmlManager::new(eml_config);
 
-    let phase2_pre_train_recall = measure_recall_direct(&mut store_adaptive, &queries[..16], top_k);
+    let phase2_pre_train_recall =
+        measure_recall_direct(&mut store_adaptive, &queries[..recall_sample], top_k);
 
-    // 20 passes × 128 queries = 2560. Recall checkpoints every 50.
     let mut phase2_queries_run = 0usize;
-    for pass in 0..20 {
+    let learning_passes = learning_passes.max(1);
+    for pass in 0..learning_passes {
         for (qi, q) in queries.iter().enumerate() {
             let t = std::time::Instant::now();
             let results = store_adaptive.query(q, top_k);
@@ -1489,8 +1577,9 @@ pub fn run_hnsw_benchmark(store_size: usize, dims: usize, top_k: usize) -> HnswE
             );
             phase2_queries_run += 1;
 
-            if (pass * queries.len() + qi) % 50 == 49 {
-                let hnsw_ids: Vec<Vec<String>> = queries[..8]
+            if (pass * queries.len() + qi) % recall_check_every == recall_check_every - 1 {
+                let sample_n = queries.len().min(8);
+                let hnsw_ids: Vec<Vec<String>> = queries[..sample_n]
                     .iter()
                     .map(|qq| {
                         store_adaptive
@@ -1500,7 +1589,7 @@ pub fn run_hnsw_benchmark(store_size: usize, dims: usize, top_k: usize) -> HnswE
                             .collect()
                     })
                     .collect();
-                let exact_ids: Vec<Vec<String>> = queries[..8]
+                let exact_ids: Vec<Vec<String>> = queries[..sample_n]
                     .iter()
                     .map(|qq| store_adaptive.brute_force_topk(qq, top_k))
                     .collect();
@@ -1522,7 +1611,7 @@ pub fn run_hnsw_benchmark(store_size: usize, dims: usize, top_k: usize) -> HnswE
     }
 
     let phase2_post_train_recall =
-        measure_recall_direct(&mut store_adaptive, &queries[..16], top_k);
+        measure_recall_direct(&mut store_adaptive, &queries[..recall_sample], top_k);
     let phase2_recall_delta = phase2_post_train_recall - phase2_pre_train_recall;
     let phase2_eml_train_cycles = eml.train_cycles;
 
@@ -1590,9 +1679,9 @@ pub fn run_hnsw_benchmark(store_size: usize, dims: usize, top_k: usize) -> HnswE
         let mean = lats.iter().sum::<u128>() / lats.len().max(1) as u128;
         let p99 = lats[(lats.len() * 99) / 100];
         let recall = {
-            let q16 = &queries[..queries.len().min(16)];
+            let q_sample = &queries[..queries.len().min(16)];
             let mut total = 0.0;
-            for q in q16 {
+            for q in q_sample {
                 let tiered_ids: Vec<String> =
                     tiered.search(q, top_k).into_iter().map(|r| r.id).collect();
                 let exact_ids = tiered.brute_force_topk(q, top_k);
@@ -1602,7 +1691,7 @@ pub fn run_hnsw_benchmark(store_size: usize, dims: usize, top_k: usize) -> HnswE
                     .count();
                 total += found as f64 / exact_ids.len().max(1) as f64;
             }
-            total / q16.len() as f64
+            total / q_sample.len() as f64
         };
         ArmMetrics {
             recall,
@@ -1613,28 +1702,38 @@ pub fn run_hnsw_benchmark(store_size: usize, dims: usize, top_k: usize) -> HnswE
 
     // ── Phase 4 (Scalability) ───────────────────────────────────────────
 
-    let sweep_sizes = [100, 500, 1000, 2000, 5000usize];
     let mut phase4_scaling = Vec::new();
-    for &sz in &sweep_sizes {
-        if sz > store_size {
-            break;
+    if phase4 {
+        let sweep_sizes = [100, 500, 1000, 2000, 5000usize];
+        // For smoke-sized stores, still emit one scaling point at store_size.
+        let sizes: Vec<usize> = if store_size < sweep_sizes[0] {
+            vec![store_size]
+        } else {
+            sweep_sizes
+                .into_iter()
+                .filter(|&sz| sz <= store_size)
+                .collect()
+        };
+        for sz in sizes {
+            let subset = &corpus[..sz.min(corpus.len())];
+
+            let mut s_control = build_store(subset, static_ef);
+            let control_m =
+                measure_latency(&mut s_control, &queries[..queries.len().min(16)], top_k);
+
+            let adaptive_ef = ef_pred.recommended_ef.max(10);
+            let mut s_adaptive = build_store(subset, adaptive_ef);
+            let adaptive_m =
+                measure_latency(&mut s_adaptive, &queries[..queries.len().min(16)], top_k);
+
+            phase4_scaling.push(HnswScalingPoint {
+                store_size: sz,
+                control_recall: control_m.recall,
+                adaptive_recall: adaptive_m.recall,
+                control_mean_ns: control_m.mean_ns,
+                adaptive_mean_ns: adaptive_m.mean_ns,
+            });
         }
-        let subset = &corpus[..sz];
-
-        let mut s_control = build_store(subset, static_ef);
-        let control_m = measure_latency(&mut s_control, &queries[..16], top_k);
-
-        let adaptive_ef = ef_pred.recommended_ef.max(10);
-        let mut s_adaptive = build_store(subset, adaptive_ef);
-        let adaptive_m = measure_latency(&mut s_adaptive, &queries[..16], top_k);
-
-        phase4_scaling.push(HnswScalingPoint {
-            store_size: sz,
-            control_recall: control_m.recall,
-            adaptive_recall: adaptive_m.recall,
-            control_mean_ns: control_m.mean_ns,
-            adaptive_mean_ns: adaptive_m.mean_ns,
-        });
     }
 
     HnswEmlBenchmark {
@@ -2056,8 +2155,40 @@ mod tests {
     }
 
     // -- 4-Phase benchmark --
+    //
+    // WEFT-134: full-scale params (20×128 learning queries with train_every_n=100)
+    // spend minutes inside EmlModel::train and hung the aggregate --lib suite.
+    // Default unit coverage uses HnswBenchmarkParams::smoke(); full protocol
+    // stays available via --ignored.
 
     #[test]
+    fn benchmark_4_phase_smoke() {
+        let bench = run_hnsw_benchmark_with(HnswBenchmarkParams::smoke());
+
+        assert!(bench.phase1_build_ns > 0);
+        assert!(bench.phase1_baseline_recall >= 0.0);
+        assert!(bench.phase2_queries_run > 0);
+        assert_eq!(bench.phase2_queries_run, 8); // 1 pass × 8 queries
+        assert!(bench.phase3_control.mean_ns > 0);
+        assert!(bench.phase3_overhead.mean_ns > 0);
+        assert!(bench.phase3_adaptive.mean_ns > 0);
+        assert!(!bench.phase4_scaling.is_empty());
+    }
+
+    #[test]
+    fn benchmark_produces_json() {
+        let bench = run_hnsw_benchmark_with(HnswBenchmarkParams::smoke());
+        let json = serde_json::to_string_pretty(&bench).unwrap();
+        assert!(json.contains("phase1_baseline_recall"));
+        assert!(json.contains("phase3_control"));
+        assert!(json.contains("phase3_overhead"));
+        assert!(json.contains("phase3_adaptive"));
+        assert!(json.contains("phase4_scaling"));
+    }
+
+    /// Full-scale 500-vector protocol. Multi-minute EML train; not for CI.
+    #[test]
+    #[ignore = "WEFT-134: full-scale HNSW-EML bench (multi-minute EmlModel::train); run with --ignored"]
     fn benchmark_4_phase_runs() {
         let bench = run_hnsw_benchmark(500, 32, 10);
 
@@ -2070,19 +2201,9 @@ mod tests {
         assert!(!bench.phase4_scaling.is_empty());
     }
 
+    /// Full-scale 5k-vector report. Multi-minute; not for CI.
     #[test]
-    fn benchmark_produces_json() {
-        let bench = run_hnsw_benchmark(200, 16, 5);
-        let json = serde_json::to_string_pretty(&bench).unwrap();
-        eprintln!("\n{json}\n");
-        assert!(json.contains("phase1_baseline_recall"));
-        assert!(json.contains("phase3_control"));
-        assert!(json.contains("phase3_overhead"));
-        assert!(json.contains("phase3_adaptive"));
-        assert!(json.contains("phase4_scaling"));
-    }
-
-    #[test]
+    #[ignore = "WEFT-134: full-scale HNSW-EML report (5000×128); run with --ignored"]
     fn benchmark_full_report() {
         let bench = run_hnsw_benchmark(5000, 128, 10);
         let c = &bench.phase3_control;

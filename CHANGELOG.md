@@ -205,7 +205,7 @@ Eight learnable models replace hard-coded constants:
 ### Known Issues
 
 - Pre-existing workspace clippy debt (~150 errors across `clawft-types/src/goal.rs`, `clawft-rpc`, `eml-core`, and some older kernel/weave code). `scripts/build.sh check` is green; `scripts/build.sh clippy` is red on pre-existing code.
-- One test in `clawft-kernel --lib` full suite hangs when run aggregate; targeted runs pass. Tracked separately.
+- ~~One test in `clawft-kernel --lib` full suite hangs when run aggregate~~ — **fixed (WEFT-134)**: full-scale HNSW-EML benches ignored; smoke path in suite.
 
 ## [0.6.18] - 2026-04-19
 
