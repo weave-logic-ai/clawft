@@ -4,7 +4,7 @@
 **Branch:** `wave0d/weft-71-plugin-schema-tests`  
 **Base:** `release/0.8-staging`  
 **Worktree:** `/Users/mathewbeane/.grok/worktrees/mathewbeane-weftos/subagent-019fb45e-9f20-75c3-aedd-b59604048c75`  
-**Commit:** `6ae7200b`  
+**Commit:** `4f069984`  
 **Date:** 2026-07-30  
 **Agent:** coder-71 (wave-0d)
 
