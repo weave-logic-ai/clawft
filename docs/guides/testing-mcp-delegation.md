@@ -80,7 +80,7 @@ delegation enabled.
     "rules": [
       {
         "pattern": "(?i)deploy|orchestrate|swarm",
-        "target": "flow"
+        "target": "claude"
       },
       {
         "pattern": "(?i)research|analyze|architect|refactor",
@@ -479,11 +479,10 @@ Even without a matching rule, the auto-decision routes to Claude:
 DEBUG clawft_services::delegation: auto delegation decision task="Architect a comprehensive..." complexity=0.85 target=Claude
 ```
 
-### 6.3 Flow targets fall back to Claude
+### 6.3 Claude rule matching (retired Flow target)
 
-The config rule `"(?i)deploy|orchestrate|swarm"` targets `Flow`. Since Flow
-delegation was removed in the MCP-first architecture, Flow targets resolve
-to Claude when Claude is available:
+The config rule `"(?i)deploy|orchestrate|swarm"` targets `claude`. (Legacy
+configs that still say `"flow"` deserialize as `claude` — WEFT-179.)
 
 ```
 Deploy the application to staging.
@@ -492,10 +491,11 @@ Deploy the application to staging.
 Expected:
 
 ```
-DEBUG clawft_services::delegation: delegation rule matched task="Deploy the application..." matched_target=Flow resolved_target=Claude
+DEBUG clawft_services::delegation: delegation rule matched task="Deploy the application..." matched_target=Claude resolved_target=Claude
 ```
 
-If Claude is also unavailable (no API key), it falls back further to Local:
+If Claude is unavailable (no API key / `claude_enabled: false`), it falls
+back to Local:
 
 ```
 resolved_target=Local
@@ -728,8 +728,8 @@ DelegationEngine::decide(task, claude_available=true)
   |     |
   |     +-- Rule matched? -> resolve_availability(target)
   |           +-- Claude target + Claude unavailable -> Local
-  |           +-- Flow target -> Claude (if available) else Local
   |           +-- Local target -> Local
+  |           (legacy "flow" configs deserialize as Claude)
   |
   +-- No rule matched? -> auto_decide(task)
         |

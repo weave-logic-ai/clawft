@@ -1,7 +1,11 @@
 //! Task delegation engine.
 //!
-//! Routes tasks to the appropriate execution target (Local, Claude, Flow)
+//! Routes tasks to the appropriate execution target (Local or Claude)
 //! based on regex rule matching and complexity heuristics.
+//!
+//! The subprocess-based `Flow` target was retired (WEFT-179); multi-agent
+//! orchestration uses MCP servers + skills. Legacy config `"target": "flow"`
+//! deserializes as [`DelegationTarget::Claude`].
 //!
 //! Gated behind the `delegate` feature.
 
@@ -83,11 +87,11 @@ impl DelegationEngine {
     ///
     /// Evaluation order:
     /// 1. Walk compiled rules in order; first regex match wins.
-    /// 2. If the matched target is `Claude` but `claude_available` is false,
-    ///    fall back to `Local`.
-    /// 3. If the matched target is `Flow`, treat as Claude (Flow delegation
-    ///    removed in MCP-first architecture).
-    /// 4. If no rule matches, use `Auto` mode (complexity heuristic).
+    /// 2. If the matched target is `Claude` but `claude_available` is false
+    ///    (or Claude is disabled in config), fall back to `Local`.
+    /// 3. If no rule matches, use `Auto` mode (complexity heuristic).
+    ///
+    /// Note: retired `Flow` rules deserialize as `Claude` (WEFT-179).
     pub fn decide(&self, task: &str, claude_available: bool) -> DelegationTarget {
         // Try explicit rules first.
         for rule in &self.compiled_rules {
@@ -172,14 +176,6 @@ impl DelegationEngine {
         match target {
             DelegationTarget::Claude if !claude_available || !self.config.claude_enabled => {
                 DelegationTarget::Local
-            }
-            // Flow delegation removed — treat as Claude fallback.
-            DelegationTarget::Flow => {
-                if claude_available && self.config.claude_enabled {
-                    DelegationTarget::Claude
-                } else {
-                    DelegationTarget::Local
-                }
             }
             DelegationTarget::Auto => {
                 // Should not normally appear in rules, but handle gracefully.
@@ -271,7 +267,7 @@ mod tests {
         let engine = make_engine(vec![
             DelegationRule {
                 pattern: r"(?i)deploy".into(),
-                target: DelegationTarget::Flow,
+                target: DelegationTarget::Claude,
             },
             DelegationRule {
                 pattern: r"(?i)^list\b".into(),
@@ -283,7 +279,6 @@ mod tests {
             },
         ]);
 
-        // Flow rules now resolve to Claude (Flow delegation removed).
         assert_eq!(
             engine.decide("deploy to production", true),
             DelegationTarget::Claude
@@ -317,19 +312,39 @@ mod tests {
     }
 
     #[test]
-    fn flow_target_falls_back_to_claude() {
+    fn claude_target_falls_back_to_local_when_unavailable() {
         let engine = make_engine(vec![DelegationRule {
             pattern: r"(?i)deploy".into(),
-            target: DelegationTarget::Flow,
+            target: DelegationTarget::Claude,
         }]);
 
-        // Flow delegation removed; Claude available: fall back to Claude.
         assert_eq!(
             engine.decide("deploy to staging", true),
             DelegationTarget::Claude
         );
 
-        // Claude also unavailable: fall back to Local.
+        // Claude unavailable: fall back to Local.
+        assert_eq!(
+            engine.decide("deploy to staging", false),
+            DelegationTarget::Local
+        );
+    }
+
+    #[test]
+    fn retired_flow_config_target_routes_as_claude() {
+        // WEFT-179: configs that still say "flow" deserialize as Claude.
+        let cfg: DelegationConfig = serde_json::from_str(
+            r#"{
+                "claude_enabled": true,
+                "rules": [{ "pattern": "(?i)deploy", "target": "flow" }]
+            }"#,
+        )
+        .unwrap();
+        let engine = DelegationEngine::new(cfg);
+        assert_eq!(
+            engine.decide("deploy to staging", true),
+            DelegationTarget::Claude
+        );
         assert_eq!(
             engine.decide("deploy to staging", false),
             DelegationTarget::Local
@@ -354,7 +369,6 @@ mod tests {
                     coordinate the orchestration???";
         let score = DelegationEngine::complexity_estimate(task);
         assert!(score >= 0.7, "expected >= 0.7, got {score}");
-        // Flow removed — high complexity now routes to Claude.
         assert_eq!(engine.decide(task, true), DelegationTarget::Claude);
     }
 
@@ -475,14 +489,13 @@ mod tests {
         let engine = make_engine(vec![
             DelegationRule {
                 pattern: r"(?i)deploy".into(),
-                target: DelegationTarget::Flow,
+                target: DelegationTarget::Claude,
             },
             DelegationRule {
                 pattern: r"(?i)deploy".into(),
                 target: DelegationTarget::Local,
             },
         ]);
-        // Flow rules resolve to Claude now.
         assert_eq!(engine.decide("deploy now", true), DelegationTarget::Claude);
     }
 }

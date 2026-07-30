@@ -75,3 +75,58 @@ despite the tracker's prior "Done" framing.
 - WEFT-180 — recursive-delegation guard.
 - WEFT-181 — McpBridge real Claude Code connection.
 - Audit: 07-multi-agent-routing.md Deferred item #3.
+
+## D-MF-003 — Retire FlowDelegator / Flow target (WEFT-179) — 2026-07-30
+
+**Status**: Accepted.
+
+**Context**. WEFT-179 required a keep-or-retire decision for `FlowDelegator`.
+Evidence at decision time:
+
+1. `crates/clawft-services/src/delegation/flow.rs` never existed.
+2. `DelegationEngine::resolve_availability` already collapsed `Flow` → `Claude`
+   (or `Local`); `flow_available` was gone.
+3. `claude_flow_enabled` was an inert config field (serde default only; no
+   runtime consumer).
+4. Product architecture moved to MCP-first multi-agent integration
+   (`docs/guides/mcp-integration.md`): persistent MCP sessions + skill-scoped
+   tools replace subprocess `claude --print` / `claude-flow` spawn.
+5. The M-Foundation phase doc's subprocess design (env_clear, depth env,
+   which::which cache) contradicts the MCP posture and would reintroduce
+   context bloat and tight CLI coupling.
+
+**Decision**. **Formally retire** FlowDelegator. Do not implement
+`delegation/flow.rs`.
+
+Code changes (this decision):
+
+- Remove `DelegationTarget::Flow` variant.
+- Remove `DelegationConfig::claude_flow_enabled` / `claudeFlowEnabled`.
+- Migration: serde aliases map `"flow"` / `"Flow"` → `Claude`; unknown
+  `claudeFlowEnabled` keys are ignored.
+- Docs/config references updated; migration path documented for users.
+
+**Migration path for users**.
+
+| Old config | Action |
+|------------|--------|
+| `"target": "flow"` or `"Flow"` | Still works (→ Claude). Prefer `"claude"`. |
+| `"claudeFlowEnabled": true/false` | Ignored; remove the key. |
+| Expectation of subprocess `claude-flow` | Use MCP: `weft mcp add claude-flow …` + skills with `allowed-tools` patterns. |
+
+**Consequences**.
+
+- **Positive**: No silent no-op flag; type surface matches runtime; tracker can
+  stop claiming FlowDelegator shipped.
+- **Negative**: Breaking for Rust matchers that named `Flow` (enum is
+  `#[non_exhaustive]`). Config JSON remains loadable via aliases.
+- **Follow-ups**: WEFT-304 (dashboard delegation API) should wire live
+  `DelegationEngine` / events, not a FlowDelegator; WEFT-180 depth guard
+  remains independent.
+
+**Cross-references**.
+- WEFT-179 — this decision.
+- D-MF-001 — prior deferral (WEFT-202).
+- Spec retained for history only:
+  `.planning/sparc/phase4/09-multi-agent-routing/01-phase-MFoundation-flow-delegator.md`.
+- MCP posture: `docs/guides/mcp-integration.md`.

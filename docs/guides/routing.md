@@ -1230,15 +1230,22 @@ multi-turn tool-use loop. It provides:
 | `Cancelled` | User abort or agent shutdown |
 | `FallbackExhausted` | All delegation targets exhausted |
 
-### Flow Target Compatibility
+### Flow Target Retired (WEFT-179)
 
-`DelegationTarget::Flow` remains a valid value in `DelegationConfig` rules
-for backward compatibility. At runtime, the engine resolves `Flow` to
-`Claude` (if available and enabled) or `Local`. The `FlowDelegator` and
-its subprocess-based execution model have been removed. For complex
-multi-agent coordination that previously used Flow delegation, the
-recommended approach is now **skill-based orchestration** via MCP servers
-(see Section 14).
+`DelegationTarget::Flow` and `claude_flow_enabled` / `claudeFlowEnabled` were
+**removed**. Subprocess `FlowDelegator` was never shipped; the product path is
+MCP-first multi-agent integration.
+
+**Migration:**
+
+| Old | New |
+|-----|-----|
+| `"target": "flow"` / `"Flow"` | Still loads as `claude` (serde alias). Prefer `"claude"`. |
+| `claudeFlowEnabled` | Remove the key (ignored if present). |
+| Subprocess `claude-flow` spawn | MCP session + skills (`allowed-tools`). |
+
+For complex multi-agent coordination, use **skill-based orchestration** via
+MCP servers (see Section 14 and `docs/guides/mcp-integration.md`).
 
 ### Feature Gate
 

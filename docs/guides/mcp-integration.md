@@ -752,4 +752,4 @@ inconsistent state.
 | `clawft-services/src/mcp/composite.rs` | `CompositeToolProvider` with namespace-based routing |
 | `clawft-services/src/mcp/server.rs` | `McpServerShell` (JSON-RPC over stdio) |
 | `clawft-services/src/mcp/discovery.rs` | `McpServerManager` with hot-reload |
-| `clawft-services/src/delegation/mod.rs` | `DelegationEngine` (MCP-first, Flow target falls back to Claude) |
+| `clawft-services/src/delegation/mod.rs` | `DelegationEngine` (MCP-first; Flow target retired WEFT-179) |

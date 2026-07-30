@@ -731,7 +731,8 @@ details.
 ## delegation
 
 Task delegation routing configuration. Controls how tasks are dispatched between
-local execution, Claude AI, and Claude Flow orchestration.
+local execution and Claude AI. Multi-agent orchestration uses MCP servers +
+skills (the subprocess `Flow` target was retired in WEFT-179).
 
 Source: `crates/clawft-types/src/delegation.rs`
 
@@ -742,15 +743,14 @@ Source: `crates/clawft-types/src/delegation.rs`
     "claudeModel": "claude-sonnet-4-20250514",
     "maxTurns": 10,
     "maxTokens": 4096,
-    "claudeFlowEnabled": false,
     "rules": [
       {
         "pattern": "(?i)deploy",
-        "target": "Flow"
+        "target": "claude"
       },
       {
         "pattern": "(?i)simple.*query",
-        "target": "Local"
+        "target": "local"
       }
     ],
     "excludedTools": ["shell_exec"]
@@ -764,9 +764,12 @@ Source: `crates/clawft-types/src/delegation.rs`
 | `claudeModel`       | string       | `"claude-sonnet-4-20250514"`   | Claude model identifier for delegated tasks.       |
 | `maxTurns`          | integer      | `10`                           | Maximum conversation turns per delegated task.     |
 | `maxTokens`         | integer      | `4096`                         | Maximum tokens per Claude response.                |
-| `claudeFlowEnabled` | boolean      | `false`                        | Whether Claude Flow orchestration is enabled.      |
 | `rules`             | array        | `[]`                           | Ordered routing rules. First match wins.           |
 | `excludedTools`     | string array | `[]`                           | Tool names that should never be delegated.         |
+
+> **Retired (WEFT-179):** `claudeFlowEnabled` / `claude_flow_enabled` is ignored
+> if present — remove it. Rule `"target": "flow"` still deserializes as
+> `"claude"`; prefer writing `"claude"`.
 
 ### Delegation Rules
 
@@ -775,7 +778,7 @@ Each rule maps a regex pattern to a target:
 | Field     | Type   | Description                                      |
 |-----------|--------|--------------------------------------------------|
 | `pattern` | string | Regex pattern matched against the task description. |
-| `target`  | string | Where to route: `"Local"`, `"Claude"`, `"Flow"`, or `"Auto"`. |
+| `target`  | string | Where to route: `"local"`, `"claude"`, or `"auto"` (PascalCase aliases accepted). Retired `"flow"` maps to `"claude"`. |
 
 ### Delegation Targets
 
