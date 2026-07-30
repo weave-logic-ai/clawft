@@ -302,13 +302,14 @@ pub struct Explorer {
     /// selection clears it via [`Explorer::on_select`] so the new
     /// Workshop (if any) starts from a clean slate.
     workshop_view: workshop::WorkshopView,
-    /// Live chat-window state. Holds conversation history + draft
-    /// input + in-flight reply channel across frames so a paint
-    /// doesn't lose a pending `llm.prompt` reply. Cleared on selection
-    /// change for the same reason as `workshop_view` — a fresh chat
-    /// sentinel selection should start with an empty history rather
-    /// than inherit the previous panel's turns.
-    chat_view: chat::ChatView,
+    /// Live chat-window state (WEFT-254 multi-conversation panel).
+    /// Holds one or more in-memory sessions (history + draft + in-flight
+    /// reply) across frames so a paint doesn't lose a pending
+    /// `agent.chat_stream` reply. Cleared on selection change for the
+    /// same reason as `workshop_view` — a fresh chat sentinel selection
+    /// should start with an empty session list rather than inherit the
+    /// previous panel's turns.
+    chat_view: chat::ChatPanel,
     /// Live terminal panel state. Reset (and the daemon-side session
     /// closed) when selection moves off the terminal sentinel — see
     /// [`Explorer::on_select`] and [`Explorer::close`]. Held inside
@@ -352,7 +353,7 @@ impl Default for Explorer {
             // later instead of immediately.
             last_slow_tick: epoch_minus(SLOW_TICK * 2),
             workshop_view: workshop::WorkshopView::default(),
-            chat_view: chat::ChatView::default(),
+            chat_view: chat::ChatPanel::default(),
             terminal_view: terminal::Terminal::default(),
             last_copy_msg: None,
             tree_filters: tree::TreeFilters::default(),
@@ -418,7 +419,7 @@ impl Explorer {
         // the previous selection is dropped (the ReplyRx falls out of
         // scope, the daemon's response is ignored). In-memory only —
         // there is no on-disk conversation to restore.
-        self.chat_view = chat::ChatView::default();
+        self.chat_view = chat::ChatPanel::default();
         // Tear down the terminal session if we were on the terminal
         // sentinel and are navigating away. If we're navigating to a
         // (different) terminal sentinel the next paint re-spawns; if
@@ -440,7 +441,7 @@ impl Explorer {
         self.workshop_view = workshop::WorkshopView::default();
         // Drop chat state on close — same reason as Workshop: hidden
         // panels shouldn't keep an in-flight RPC against the daemon.
-        self.chat_view = chat::ChatView::default();
+        self.chat_view = chat::ChatPanel::default();
         // Same teardown as `on_select`: kill the daemon-side shell
         // when the Explorer is hidden so a forgotten terminal panel
         // doesn't leak a session.

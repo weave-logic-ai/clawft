@@ -26,8 +26,10 @@
 //!   LLM token callbacks are a daemon-side follow-up; today the daemon
 //!   cascades the final assistant text as typewriter frames before
 //!   returning, and the panel renders the draft bubble live.
-//! - No on-disk persistence. Conversation lives only as long as the
-//!   panel does (close → cleared on next selection).
+//! - Conversation history is **in-memory only** for the panel lifetime
+//!   (close / Explorer re-select resets). On-disk rehydrate via
+//!   `substrate.list` is a follow-up; WEFT-254 ships the multi-session
+//!   sidebar with in-memory slots.
 //! - No model picker. The daemon decides which `llama-server` it talks
 //!   to; the model name in the sentinel is informational. WEFT-256
 //!   tracks the chip-strip selector and is blocked on a daemon-side
@@ -35,6 +37,9 @@
 //!
 //! ## Shipped UX (this file)
 //!
+//! - **Multi-conversation sidebar** (WEFT-254): list sessions by id +
+//!   last-active age + first user-message snippet; **New** creates a
+//!   fresh slot; click switches active history + stream.
 //! - **Markdown rendering** in assistant bubbles via `egui_commonmark`
 //!   so code blocks / lists / headers don't render as raw markdown.
 //!   WEFT-252.
@@ -78,6 +83,12 @@ const DEFAULT_MAX_TOKENS: u32 = 512;
 /// typewriter, higher = fewer RPCs. 120 ms is well under the daemon's
 /// 4 ms cascade step × chunk size without flooding the socket.
 const STREAM_POLL_INTERVAL_MS: f64 = 120.0;
+
+/// Fixed width (px) of the WEFT-254 multi-conversation sidebar strip.
+const CONV_SIDEBAR_WIDTH: f32 = 196.0;
+
+/// Max characters shown for the first-message snippet in the sidebar.
+const SNIPPET_MAX_CHARS: usize = 48;
 
 /// Shape predicate. Returns [`PRIORITY`] when `value` looks like a
 /// chat sentinel:
@@ -517,18 +528,410 @@ impl ChatView {
     }
 }
 
+// ── WEFT-254 multi-conversation panel ───────────────────────────────
+
+/// One in-memory conversation slot for the multi-conversation sidebar.
+///
+/// Holds a full [`ChatView`] (history, stream state, pending RPC) plus
+/// sidebar metadata. Persistence is panel-lifetime only; substrate
+/// rehydrate is a follow-up.
+#[derive(Default)]
+pub struct ChatSession {
+    /// Always-present local key for egui widget ids and the sidebar
+    /// row before the daemon `conv_id` is minted on first submit.
+    local_id: String,
+    /// `live::now_ms()` when the slot was created.
+    created_ms: f64,
+    /// `live::now_ms()` of the last user submit or completed turn.
+    last_active_ms: f64,
+    /// Per-conversation UI + wire state machine.
+    view: ChatView,
+}
+
+impl ChatSession {
+    fn fresh() -> Self {
+        let now = live::now_ms();
+        Self {
+            local_id: mint_local_session_id(),
+            created_ms: now,
+            last_active_ms: now,
+            view: ChatView::default(),
+        }
+    }
+
+    /// Id shown in the sidebar: daemon `conv_id` once minted, else the
+    /// local draft key.
+    pub fn display_id(&self) -> &str {
+        self.view
+            .conv_id
+            .as_deref()
+            .unwrap_or(self.local_id.as_str())
+    }
+
+    /// First user-message snippet for the sidebar row, or a placeholder
+    /// when the conversation has no user turns yet.
+    pub fn first_snippet(&self) -> String {
+        self.view
+            .history
+            .iter()
+            .find(|m| m.role == "user")
+            .map(|m| truncate_snippet(&m.content, SNIPPET_MAX_CHARS))
+            .unwrap_or_else(|| "New conversation".into())
+    }
+
+    /// Last-active wall clock from panel epoch (`live::now_ms`).
+    pub fn last_active_ms(&self) -> f64 {
+        self.last_active_ms
+    }
+
+    /// Created-at wall clock from panel epoch.
+    pub fn created_ms(&self) -> f64 {
+        self.created_ms
+    }
+
+    /// Borrow the underlying single-conversation view.
+    pub fn view(&self) -> &ChatView {
+        &self.view
+    }
+
+    fn touch(&mut self) {
+        self.last_active_ms = live::now_ms();
+    }
+}
+
+/// Multi-conversation chat panel (WEFT-254).
+///
+/// Owns one or more [`ChatSession`] slots in memory. The active session
+/// drives the main transcript; the left strip lists every slot so the
+/// user can switch concurrent threads or revisit earlier history without
+/// losing in-flight stream state on other slots.
+pub struct ChatPanel {
+    sessions: Vec<ChatSession>,
+    active: usize,
+}
+
+impl Default for ChatPanel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ChatPanel {
+    /// Panel with a single empty conversation selected.
+    pub fn new() -> Self {
+        Self {
+            sessions: vec![ChatSession::fresh()],
+            active: 0,
+        }
+    }
+
+    /// Number of in-memory conversation slots.
+    pub fn len(&self) -> usize {
+        self.sessions.len()
+    }
+
+    /// True when no sessions exist (should not happen after [`Self::new`]).
+    pub fn is_empty(&self) -> bool {
+        self.sessions.is_empty()
+    }
+
+    /// Index of the active conversation.
+    pub fn active_index(&self) -> usize {
+        self.active
+    }
+
+    /// All sessions in creation order (sidebar lists newest-active
+    /// first at paint time without mutating this order).
+    pub fn sessions(&self) -> &[ChatSession] {
+        &self.sessions
+    }
+
+    /// Active session view (read-only).
+    pub fn active_view(&self) -> &ChatView {
+        &self.sessions[self.active].view
+    }
+
+    /// Active session view (mutable) — for tests and host plumbing.
+    pub fn active_view_mut(&mut self) -> &mut ChatView {
+        &mut self.sessions[self.active].view
+    }
+
+    /// Create a fresh conversation and select it. Returns the new index.
+    pub fn new_conversation(&mut self) -> usize {
+        self.sessions.push(ChatSession::fresh());
+        self.active = self.sessions.len() - 1;
+        self.active
+    }
+
+    /// Select conversation `idx` if in range. No-op on OOB.
+    pub fn select(&mut self, idx: usize) {
+        if idx < self.sessions.len() {
+            self.active = idx;
+        }
+    }
+
+    /// Drain pending RPC replies + stream polls for **every** session
+    /// so a background turn that finishes while another is selected
+    /// still lands in that session's history.
+    fn drain_all(&mut self, live: &Arc<Live>) {
+        for session in &mut self.sessions {
+            let hist_before = session.view.history.len();
+            let inflight_before = session.view.is_in_flight();
+            session.view.drain_reply();
+            if session.view.is_in_flight() {
+                session.view.poll_stream_if_needed(live);
+            }
+            // Touch last-active when a turn completes or history grows.
+            if session.view.history.len() != hist_before
+                || (inflight_before && !session.view.is_in_flight())
+            {
+                session.touch();
+            }
+        }
+        // Defensive: never leave active out of range.
+        if self.active >= self.sessions.len() {
+            self.active = self.sessions.len().saturating_sub(1);
+        }
+    }
+}
+
+/// Mint a local session key (distinct from daemon `panel-…` conv ids).
+fn mint_local_session_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let ts = live::now_ms() as u64;
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("local-{ts:013}-{n:04}")
+}
+
+/// Truncate a user message for the sidebar snippet line.
+fn truncate_snippet(s: &str, max_chars: usize) -> String {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return "New conversation".into();
+    }
+    let mut out = String::new();
+    for (i, ch) in trimmed.chars().enumerate() {
+        if i >= max_chars {
+            out.push('…');
+            break;
+        }
+        // Collapse internal newlines so the sidebar row stays one line.
+        if ch == '\n' || ch == '\r' {
+            out.push(' ');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Human-readable age from a panel-epoch timestamp (`live::now_ms`).
+fn format_age_label(last_active_ms: f64) -> String {
+    let age_ms = (live::now_ms() - last_active_ms).max(0.0);
+    let secs = (age_ms / 1000.0) as u64;
+    if secs < 5 {
+        "just now".into()
+    } else if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
+}
+
 /// Render the chat panel. `path` is the substrate sentinel path (used
 /// only for the muted footer hint). `value` is the sentinel value
 /// (used only to surface the model name).
-pub fn paint(ui: &mut egui::Ui, path: &str, value: &Value, view: &mut ChatView, live: &Arc<Live>) {
-    view.drain_reply();
-    view.poll_stream_if_needed(live);
+///
+/// Layout (WEFT-254): left conversation list + right active transcript.
+pub fn paint(ui: &mut egui::Ui, path: &str, value: &Value, panel: &mut ChatPanel, live: &Arc<Live>) {
+    panel.drain_all(live);
 
+    ui.horizontal_top(|ui| {
+        // ── conversation sidebar ──────────────────────────────────
+        ui.allocate_ui_with_layout(
+            egui::vec2(CONV_SIDEBAR_WIDTH, ui.available_height()),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                paint_conversation_sidebar(ui, panel);
+            },
+        );
+
+        ui.separator();
+
+        // ── active conversation body ──────────────────────────────
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), ui.available_height()),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                paint_active_conversation(ui, path, value, panel, live);
+            },
+        );
+    });
+}
+
+/// Left strip: New + scrollable session rows (id, age, snippet).
+fn paint_conversation_sidebar(ui: &mut egui::Ui, panel: &mut ChatPanel) {
+    ui.set_min_width(CONV_SIDEBAR_WIDTH - 8.0);
+    ui.label(
+        egui::RichText::new("Conversations")
+            .small()
+            .strong()
+            .color(egui::Color32::from_rgb(180, 180, 190)),
+    );
+    ui.add_space(4.0);
+
+    if ui
+        .add_sized(
+            [ui.available_width(), 28.0],
+            egui::Button::new(
+                egui::RichText::new("+ New conversation")
+                    .small()
+                    .color(egui::Color32::from_rgb(200, 220, 240)),
+            ),
+        )
+        .clicked()
+    {
+        panel.new_conversation();
+    }
+
+    ui.add_space(4.0);
+    ui.separator();
+    ui.add_space(2.0);
+
+    // Paint order: most-recently-active first, without reordering the
+    // underlying vec (select still uses stable indices).
+    let mut order: Vec<usize> = (0..panel.sessions.len()).collect();
+    order.sort_by(|&a, &b| {
+        panel.sessions[b]
+            .last_active_ms
+            .partial_cmp(&panel.sessions[a].last_active_ms)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let active = panel.active;
+    let mut clicked: Option<usize> = None;
+
+    egui::ScrollArea::vertical()
+        .id_salt("chat-conv-sidebar-scroll")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for idx in order {
+                let session = &panel.sessions[idx];
+                let selected = idx == active;
+                let id_label = session.display_id();
+                // Shorten long panel-/local- ids for the row title.
+                let id_short = if id_label.len() > 22 {
+                    format!("{}…", &id_label[..20])
+                } else {
+                    id_label.to_owned()
+                };
+                let age = format_age_label(session.last_active_ms);
+                let snippet = session.first_snippet();
+                let inflight = session.view.is_in_flight();
+
+                let fill = if selected {
+                    egui::Color32::from_rgb(40, 55, 75)
+                } else {
+                    egui::Color32::from_rgb(28, 28, 34)
+                };
+                let stroke = if selected {
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(90, 140, 200))
+                } else {
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 50, 58))
+                };
+
+                let frame = egui::Frame::new()
+                    .fill(fill)
+                    .stroke(stroke)
+                    .inner_margin(egui::Margin::symmetric(8, 6))
+                    .corner_radius(4.0);
+
+                let resp = frame
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            if inflight {
+                                ui.label(
+                                    egui::RichText::new("●")
+                                        .small()
+                                        .color(egui::Color32::from_rgb(100, 190, 230)),
+                                );
+                            } else if selected {
+                                ui.label(
+                                    egui::RichText::new("▸")
+                                        .small()
+                                        .color(egui::Color32::from_rgb(160, 190, 230)),
+                                );
+                            } else {
+                                ui.label(
+                                    egui::RichText::new(" ")
+                                        .small()
+                                        .color(egui::Color32::TRANSPARENT),
+                                );
+                            }
+                            ui.label(
+                                egui::RichText::new(id_short)
+                                    .small()
+                                    .monospace()
+                                    .strong()
+                                    .color(if selected {
+                                        egui::Color32::from_rgb(220, 230, 245)
+                                    } else {
+                                        egui::Color32::from_rgb(170, 175, 185)
+                                    }),
+                            );
+                        });
+                        ui.label(
+                            egui::RichText::new(&age)
+                                .small()
+                                .italics()
+                                .color(egui::Color32::from_rgb(130, 140, 150)),
+                        );
+                        ui.label(
+                            egui::RichText::new(&snippet)
+                                .small()
+                                .color(egui::Color32::from_rgb(150, 155, 165)),
+                        );
+                    })
+                    .response
+                    .interact(egui::Sense::click())
+                    .on_hover_text(format!("{id_label}\n{age}"));
+
+                if resp.clicked() {
+                    clicked = Some(idx);
+                }
+                ui.add_space(3.0);
+            }
+        });
+
+    if let Some(idx) = clicked {
+        panel.select(idx);
+    }
+}
+
+/// Right pane: model chip, history, input for the active session.
+fn paint_active_conversation(
+    ui: &mut egui::Ui,
+    path: &str,
+    value: &Value,
+    panel: &mut ChatPanel,
+    live: &Arc<Live>,
+) {
     let model = value
         .as_object()
         .and_then(|o| o.get("model"))
         .and_then(Value::as_str)
         .unwrap_or("local");
+
+    // Pull session-local bits we need for labels before mutably
+    // borrowing the view for the rest of the body.
+    let session_id_label = panel.sessions[panel.active].display_id().to_owned();
+    let system_salt = panel.sessions[panel.active].local_id.clone();
 
     ui.label(
         egui::RichText::new(format!("chat · {model}"))
@@ -536,8 +939,20 @@ pub fn paint(ui: &mut egui::Ui, path: &str, value: &Value, view: &mut ChatView, 
             .small(),
     );
     ui.add_space(2.0);
-    ui.heading("Local LLM");
+    ui.horizontal(|ui| {
+        ui.heading("Local LLM");
+        ui.label(
+            egui::RichText::new(format!("· {session_id_label}"))
+                .small()
+                .monospace()
+                .color(egui::Color32::from_rgb(130, 140, 155)),
+        );
+    });
     ui.add_space(6.0);
+
+    // Scoped mut borrow of the active ChatView for the remainder.
+    let session = &mut panel.sessions[panel.active];
+    let view = &mut session.view;
 
     // WEFT-259: identity-drift / binding-thread mismatch warning. Lives
     // above the input so the user always sees it before composing the
@@ -547,7 +962,7 @@ pub fn paint(ui: &mut egui::Ui, path: &str, value: &Value, view: &mut ChatView, 
     // WEFT-255: system-prompt affordance. Collapsible header above the
     // history so the persona/instructions can be tweaked without
     // crowding the message field. Initial state is collapsed.
-    paint_system_editor(ui, view);
+    paint_system_editor(ui, view, &system_salt);
 
     // Reserve room for the input area at the bottom so the scroll area
     // doesn't fight it for vertical space.
@@ -561,6 +976,7 @@ pub fn paint(ui: &mut egui::Ui, path: &str, value: &Value, view: &mut ChatView, 
         .inner_margin(egui::Margin::same(6))
         .show(ui, |ui| {
             egui::ScrollArea::vertical()
+                .id_salt(format!("chat-history-{system_salt}"))
                 .auto_shrink([false, false])
                 .stick_to_bottom(true)
                 .max_height(history_h)
@@ -582,9 +998,11 @@ pub fn paint(ui: &mut egui::Ui, path: &str, value: &Value, view: &mut ChatView, 
     // Input row. Disabled while a request is in flight; Enter submits,
     // Shift+Enter inserts a newline (egui's default for multiline +
     // explicit `desired_rows`).
+    let mut did_submit = false;
     ui.add_enabled_ui(!view.is_in_flight(), |ui| {
         let response = ui.add(
             egui::TextEdit::multiline(&mut view.draft)
+                .id_salt(format!("chat-draft-{system_salt}"))
                 .desired_rows(3)
                 .desired_width(f32::INFINITY)
                 .hint_text("Type a message — Enter to send, Shift+Enter for newline"),
@@ -597,12 +1015,16 @@ pub fn paint(ui: &mut egui::Ui, path: &str, value: &Value, view: &mut ChatView, 
             let send_clicked = ui.button("Send").clicked();
             if (send_clicked || enter_pressed) && !view.draft.trim().is_empty() {
                 view.submit_draft(live);
+                did_submit = true;
             }
             if !view.history.is_empty() && ui.button("Clear").clicked() && !view.is_in_flight() {
                 view.history.clear();
             }
         });
     });
+    if did_submit {
+        session.touch();
+    }
 
     ui.add_space(4.0);
     ui.separator();
@@ -662,19 +1084,23 @@ fn paint_history(ui: &mut egui::Ui, view: &mut ChatView) {
 /// crowd the panel when the user just wants to chat. Edits flow into
 /// `view.system`; an empty/whitespace string is treated as `None` on
 /// the wire (see [`ChatView::build_request_params`]).
-fn paint_system_editor(ui: &mut egui::Ui, view: &mut ChatView) {
+///
+/// `id_salt` is the session `local_id` so multi-conversation panels
+/// don't share collapsible open-state across sessions (WEFT-254).
+fn paint_system_editor(ui: &mut egui::Ui, view: &mut ChatView, id_salt: &str) {
     egui::CollapsingHeader::new(
         egui::RichText::new("system prompt (optional)")
             .small()
             .color(egui::Color32::from_rgb(170, 170, 180)),
     )
-    .id_salt("chat-system-prompt")
+    .id_salt(format!("chat-system-prompt-{id_salt}"))
     .default_open(view.system_expanded)
     .show(ui, |ui| {
         view.system_expanded = true;
         let mut text = view.system.clone().unwrap_or_default();
         let resp = ui.add(
             egui::TextEdit::multiline(&mut text)
+                .id_salt(format!("chat-system-text-{id_salt}"))
                 .desired_rows(2)
                 .desired_width(f32::INFINITY)
                 .hint_text("Extra context layered on top of the workspace identity prompt."),
@@ -1273,5 +1699,136 @@ mod tests {
         view.on_response_err("agent.chat_stream: cancelled");
         assert_eq!(view.streaming_draft(), None);
         assert!(!view.is_in_flight());
+    }
+
+    // ── WEFT-254 multi-conversation sidebar ──────────────────────
+
+    #[test]
+    fn panel_starts_with_one_empty_session() {
+        let panel = ChatPanel::new();
+        assert_eq!(panel.len(), 1);
+        assert_eq!(panel.active_index(), 0);
+        assert!(panel.active_view().history.is_empty());
+        assert_eq!(panel.sessions()[0].first_snippet(), "New conversation");
+        assert!(panel.sessions()[0].display_id().starts_with("local-"));
+    }
+
+    #[test]
+    fn new_conversation_appends_and_selects() {
+        let mut panel = ChatPanel::new();
+        let a = panel.active_index();
+        panel.active_view_mut().history.push(ChatMessage::user("first thread"));
+        let b = panel.new_conversation();
+        assert_eq!(panel.len(), 2);
+        assert_eq!(b, 1);
+        assert_eq!(panel.active_index(), b);
+        assert_ne!(a, b);
+        // New session is empty; previous keeps its history.
+        assert!(panel.active_view().history.is_empty());
+        assert_eq!(panel.sessions()[0].view().history.len(), 1);
+        assert_eq!(
+            panel.sessions()[0].first_snippet(),
+            "first thread"
+        );
+    }
+
+    #[test]
+    fn select_switches_active_history() {
+        let mut panel = ChatPanel::new();
+        panel
+            .active_view_mut()
+            .history
+            .push(ChatMessage::user("alpha"));
+        panel.new_conversation();
+        panel
+            .active_view_mut()
+            .history
+            .push(ChatMessage::user("beta"));
+        assert_eq!(panel.active_view().history[0].content, "beta");
+
+        panel.select(0);
+        assert_eq!(panel.active_index(), 0);
+        assert_eq!(panel.active_view().history[0].content, "alpha");
+
+        panel.select(1);
+        assert_eq!(panel.active_view().history[0].content, "beta");
+
+        // OOB is a no-op.
+        panel.select(99);
+        assert_eq!(panel.active_index(), 1);
+    }
+
+    #[test]
+    fn select_preserves_per_session_stream_state() {
+        // Switching away mid-stream must not clear the background
+        // session's draft; the active stream path follows the selected
+        // session only.
+        let mut panel = ChatPanel::new();
+        panel.active_view_mut().ensure_conv_id();
+        panel.active_view_mut().on_stream_frame(&json!({
+            "phase": "generating",
+            "text": "partial A",
+            "seq": 2,
+            "done": false,
+        }));
+        assert_eq!(panel.active_view().streaming_draft(), Some("partial A"));
+
+        panel.new_conversation();
+        assert_eq!(panel.active_view().streaming_draft(), None);
+        // Session 0 still holds its draft.
+        assert_eq!(
+            panel.sessions()[0].view().streaming_draft(),
+            Some("partial A")
+        );
+        assert!(panel.sessions()[0].view().stream_path().is_some());
+        assert!(panel.active_view().stream_path().is_none());
+
+        panel.select(0);
+        assert_eq!(panel.active_view().streaming_draft(), Some("partial A"));
+    }
+
+    #[test]
+    fn snippet_truncates_and_collapses_newlines() {
+        let mut panel = ChatPanel::new();
+        let long = "hello\nworld ".repeat(10);
+        panel
+            .active_view_mut()
+            .history
+            .push(ChatMessage::user(long));
+        let snip = panel.sessions()[0].first_snippet();
+        assert!(!snip.contains('\n'));
+        assert!(snip.ends_with('…'), "got {snip:?}");
+        assert!(snip.chars().count() <= SNIPPET_MAX_CHARS + 1);
+    }
+
+    #[test]
+    fn display_id_prefers_minted_conv_id() {
+        let mut panel = ChatPanel::new();
+        let local = panel.sessions()[0].display_id().to_owned();
+        assert!(local.starts_with("local-"));
+        panel.active_view_mut().ensure_conv_id();
+        let display = panel.sessions()[0].display_id().to_owned();
+        assert!(display.starts_with("panel-"), "got {display:?}");
+        assert_ne!(display, local);
+    }
+
+    #[test]
+    fn truncate_snippet_helpers() {
+        assert_eq!(truncate_snippet("  hi  ", 48), "hi");
+        assert_eq!(truncate_snippet("", 48), "New conversation");
+        assert_eq!(truncate_snippet("a\nb", 48), "a b");
+        let s = truncate_snippet("abcdefghij", 5);
+        assert_eq!(s, "abcde…");
+    }
+
+    #[test]
+    fn touch_updates_last_active_ordering_input() {
+        let mut panel = ChatPanel::new();
+        let t0 = panel.sessions()[0].last_active_ms();
+        panel.new_conversation();
+        // Force-touch session 0 so it would sort first if we re-sort.
+        panel.sessions[0].touch();
+        assert!(panel.sessions()[0].last_active_ms() >= t0);
+        assert_eq!(panel.active_index(), 1);
     }
 }
