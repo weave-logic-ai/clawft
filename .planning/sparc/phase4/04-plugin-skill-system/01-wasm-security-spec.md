@@ -1127,7 +1127,8 @@ satisfied:
 - [ ] First-run permission approval prompt implemented for shell, unrestricted network, and env var access
 - [ ] All 45 security tests (T01-T45) pass
 - [ ] Auto-generated skills require user approval before activation (C4a)
-- [ ] Shell-execution skills require explicit user approval on install (C3)
+- [x] T39 plugin-lifecycle tests (WEFT-73) — contracts under `crates/clawft-plugin/tests/lifecycle/`
+- [ ] Shell-execution skills require explicit user approval on install (C3 product CLI — WEFT-63; T39 contracts covered)
 
 ---
 

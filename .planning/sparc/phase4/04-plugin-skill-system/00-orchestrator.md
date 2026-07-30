@@ -195,7 +195,8 @@ Every WIT host function MUST validate against the plugin's `PluginPermissions` b
 - [x] `http-request` host function applies SSRF check + network allowlist (2026-02-19)
 - [x] `get-env` host function only returns values for explicitly permitted env vars (2026-02-19)
 - [x] Auto-generated skills (C4a) require user approval before activation (2026-02-20)
-- [ ] Shell-execution skills require explicit user approval on install (deferred -- part of T39 lifecycle tests)
+- [x] T39 plugin-lifecycle tests landed (WEFT-73, 2026-07-30) — install / hot-reload / approve-reject / signed-install scaffold / rejected-skill-cleanup / shell-skill confirmation under `crates/clawft-plugin/tests/lifecycle/`
+- [ ] Shell-execution skills require explicit user approval on install (product CLI/runtime wiring — WEFT-63; pure T39 contracts covered by WEFT-73)
 
 ---
 
