@@ -11,12 +11,18 @@
 //!   privacy (ADR-012 invariant 2) for both app launch and ontology
 //!   adapter open (wired through
 //!   `clawft_substrate::Substrate::subscribe_adapter`).
+//! * [`LifecycleTeardownTombstone`] / [`TeardownTombstoneBus`] (WEFT-412)
+//!   — emitted when an enabled app is uninstalled so the compositor
+//!   can run ADR-015 §Lifecycle teardown once M1.6+ hooks land.
 //!
 //! None of this actually *launches* anything — that's the
 //! `clawft-gui-egui::shell` compositor's job. The types here are what
 //! gets handed to it.
 
+use std::sync::{Arc, Mutex, mpsc};
+
 use serde::{Deserialize, Serialize};
+use web_time::{SystemTime, UNIX_EPOCH};
 
 use crate::manifest::{AppManifest, Input, Mode};
 
@@ -358,6 +364,164 @@ pub fn check_launch_shape(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Lifecycle teardown tombstone (WEFT-412 / ADR-015 §Lifecycle)
+// ---------------------------------------------------------------------------
+
+/// Why a [`LifecycleTeardownTombstone`] was recorded.
+///
+/// Today only uninstall-while-enabled is emitted from
+/// [`crate::registry::AppRegistry::uninstall`]. Further reasons
+/// (consent revoked, host terminate) land with M1.6+ compositor hooks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TeardownReason {
+    /// App was `enabled == true` when removed from the registry.
+    /// Compositor must tear down surfaces, topic subscriptions, and
+    /// affordance registrations (ADR-015 §Lifecycle terminate).
+    UninstallWhileEnabled,
+}
+
+/// Deferred ADR-015 §Lifecycle teardown payload.
+///
+/// Compositor-level hooks for surfaces / subscriptions / affordances
+/// do not exist yet (M1.6+). When an **enabled** app is uninstalled,
+/// the registry records this tombstone so consumers can:
+///
+/// 1. Observe it via [`TeardownTombstoneBus::subscribe`], and/or
+/// 2. Read it from [`UninstallResult::teardown_tombstone`] /
+///    [`TeardownTombstoneBus::recorded`].
+///
+/// When M1.6+ hooks land, the compositor matches on
+/// [`TeardownReason`] and runs the real teardown described in the
+/// ADR (tear down surfaces, unsubscribe topics, revoke influences,
+/// interrupt in-flight streaming primitives).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifecycleTeardownTombstone {
+    /// `app://...` IRI of the removed app.
+    pub app_id: String,
+    /// Display name (diagnostics / UI).
+    pub app_name: String,
+    /// Surface ids the compositor should drop (manifest `surfaces`).
+    pub surface_ids: Vec<String>,
+    /// Ontology topic paths that were subscribed (manifest
+    /// `subscriptions`) — unsubscribe targets.
+    pub subscription_topics: Vec<String>,
+    /// WSP verb / affordance names to revoke (manifest `influences`).
+    pub influences: Vec<String>,
+    /// Why this tombstone was emitted.
+    pub reason: TeardownReason,
+    /// Unix epoch seconds when the tombstone was recorded.
+    pub recorded_at: u64,
+}
+
+impl LifecycleTeardownTombstone {
+    /// Build a tombstone for an enabled app that is about to be
+    /// uninstalled (ADR-015 §Lifecycle terminate payload).
+    pub fn uninstall_while_enabled(manifest: &AppManifest) -> Self {
+        let recorded_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        Self {
+            app_id: manifest.id.clone(),
+            app_name: manifest.name.clone(),
+            surface_ids: manifest
+                .surfaces
+                .iter()
+                .map(|s| s.as_str().to_string())
+                .collect(),
+            subscription_topics: manifest.subscriptions.clone(),
+            influences: manifest.influences.clone(),
+            reason: TeardownReason::UninstallWhileEnabled,
+            recorded_at,
+        }
+    }
+}
+
+/// In-process bus for lifecycle teardown tombstones (WEFT-412).
+///
+/// * **Record** — every emitted tombstone is appended to an internal
+///   log ([`Self::recorded`] / [`Self::drain`]).
+/// * **Subscribe** — callers obtain an [`mpsc::Receiver`] that gets a
+///   clone of each subsequent tombstone (sync, lossy only if the
+///   subscriber drops).
+///
+/// Clone shares the same log + subscriber set (Arc-backed), so the
+/// desktop shell can hand a clone of the registry's bus to the
+/// compositor without a second source of truth.
+#[derive(Debug, Clone, Default)]
+pub struct TeardownTombstoneBus {
+    inner: Arc<Mutex<TeardownBusInner>>,
+}
+
+#[derive(Debug, Default)]
+struct TeardownBusInner {
+    log: Vec<LifecycleTeardownTombstone>,
+    /// Live subscribers; dead senders are pruned on emit.
+    subscribers: Vec<mpsc::Sender<LifecycleTeardownTombstone>>,
+}
+
+impl TeardownTombstoneBus {
+    /// Create an empty bus.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Subscribe to future tombstones. Returns a receiver that yields
+    /// each tombstone emitted after this call. Drop the receiver (or
+    /// let it go out of scope) to unsubscribe; emit prunes broken
+    /// senders.
+    pub fn subscribe(&self) -> mpsc::Receiver<LifecycleTeardownTombstone> {
+        let (tx, rx) = mpsc::channel();
+        self.inner
+            .lock()
+            .expect("teardown bus mutex poisoned")
+            .subscribers
+            .push(tx);
+        rx
+    }
+
+    /// Append `tombstone` to the log and fan-out to all live
+    /// subscribers.
+    pub fn emit(&self, tombstone: LifecycleTeardownTombstone) {
+        let mut inner = self.inner.lock().expect("teardown bus mutex poisoned");
+        inner.log.push(tombstone.clone());
+        inner
+            .subscribers
+            .retain(|tx| tx.send(tombstone.clone()).is_ok());
+    }
+
+    /// Snapshot of all recorded tombstones (oldest first).
+    pub fn recorded(&self) -> Vec<LifecycleTeardownTombstone> {
+        self.inner
+            .lock()
+            .expect("teardown bus mutex poisoned")
+            .log
+            .clone()
+    }
+
+    /// Take and clear the recorded log (subscribers are unaffected).
+    pub fn drain(&self) -> Vec<LifecycleTeardownTombstone> {
+        let mut inner = self.inner.lock().expect("teardown bus mutex poisoned");
+        std::mem::take(&mut inner.log)
+    }
+
+    /// Number of tombstones currently in the log.
+    pub fn len(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("teardown bus mutex poisoned")
+            .log
+            .len()
+    }
+
+    /// `true` when the log is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use semver::Version;
@@ -524,5 +688,35 @@ mod tests {
             infer_capture_permission("kernel", "substrate/kernel/processes"),
             None
         );
+    }
+
+    #[test]
+    fn teardown_tombstone_from_manifest_captures_lifecycle_fields() {
+        let mut m = mk_manifest();
+        m.subscriptions = vec!["substrate/kernel/status".to_string()];
+        m.influences = vec!["kernel.restart-service".to_string()];
+        let t = LifecycleTeardownTombstone::uninstall_while_enabled(&m);
+        assert_eq!(t.app_id, "app://example.lifecycle");
+        assert_eq!(t.surface_ids, vec!["s.toml".to_string()]);
+        assert_eq!(t.subscription_topics, m.subscriptions);
+        assert_eq!(t.influences, m.influences);
+        assert_eq!(t.reason, TeardownReason::UninstallWhileEnabled);
+    }
+
+    #[test]
+    fn teardown_bus_subscribe_and_drain() {
+        let bus = TeardownTombstoneBus::new();
+        let rx = bus.subscribe();
+        let m = mk_manifest();
+        let t = LifecycleTeardownTombstone::uninstall_while_enabled(&m);
+        bus.emit(t.clone());
+
+        assert_eq!(bus.len(), 1);
+        let got = rx.try_recv().expect("subscriber receives");
+        assert_eq!(got.app_id, t.app_id);
+
+        let drained = bus.drain();
+        assert_eq!(drained.len(), 1);
+        assert!(bus.is_empty());
     }
 }
