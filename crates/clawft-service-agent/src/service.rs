@@ -640,19 +640,18 @@ fn last_user_content(messages: &[crate::protocol::AgentChatMessage]) -> Option<S
 /// Convert an [`OutboundMessage`] into the wire-shape
 /// [`AgentChatResult`].
 ///
-/// Token counts, `model`, and `identity_source` still cannot be
-/// populated from `OutboundMessage` alone (it is a generic bus
-/// envelope) and stay defaulted here — the daemon injects
-/// `identity_source` at the wire boundary. Since M4 D8 the loop threads
-/// an [`AgentLoopResultMeta`] through `OutboundMessage.metadata` under
-/// [`AGENT_LOOP_RESULT_META_KEY`], so `tool_calls`, `finish_reason`,
-/// `iterations`, and `spawned_tasks` now carry real values. When the
-/// key is absent (a non-loop outbound, or an older producer) the fields
-/// fall back to the pre-M4 defaults.
+/// Since WEFT-328 / M4 D8 the loop threads an [`AgentLoopResultMeta`]
+/// through `OutboundMessage.metadata` under
+/// [`AGENT_LOOP_RESULT_META_KEY`], carrying `tool_calls`, token counts,
+/// `model`, `identity_source`, `finish_reason`, `iterations`, and
+/// `spawned_tasks`. When the key is absent (a non-loop outbound, or an
+/// older producer) the fields fall back to the pre-M4 / C1 defaults so
+/// the panel keeps tolerating partial payloads.
 fn result_from_outbound(outbound: OutboundMessage, _params: &AgentChatParams) -> AgentChatResult {
-    // M4 D8: read the enriched loop result the daemon agent loop stashed
-    // in the envelope metadata. A missing/partial object degrades to
-    // `AgentLoopResultMeta::default()` rather than failing the turn.
+    // M4 D8 / WEFT-328: read the enriched loop result the daemon agent
+    // loop stashed in the envelope metadata. A missing/partial object
+    // degrades to `AgentLoopResultMeta::default()` rather than failing
+    // the turn.
     let meta = outbound
         .metadata
         .get(AGENT_LOOP_RESULT_META_KEY)
@@ -669,7 +668,10 @@ fn result_from_outbound(outbound: OutboundMessage, _params: &AgentChatParams) ->
         tool_calls = meta.tool_calls.len(),
         spawned_tasks = meta.spawned_tasks.len(),
         model = ?meta.model,
-        "agent.chat result populated from OutboundMessage; identity_source defaults"
+        identity_source = ?meta.identity_source,
+        prompt_tokens = meta.prompt_tokens,
+        completion_tokens = meta.completion_tokens,
+        "agent.chat result populated from OutboundMessage loop meta"
     );
     AgentChatResult {
         assistant_text: outbound.content,
@@ -679,7 +681,7 @@ fn result_from_outbound(outbound: OutboundMessage, _params: &AgentChatParams) ->
         prompt_tokens: meta.prompt_tokens,
         completion_tokens: meta.completion_tokens,
         model: meta.model,
-        identity_source: None,
+        identity_source: meta.identity_source,
         reasoning: meta.reasoning,
         spawned_tasks: meta.spawned_tasks,
     }
@@ -797,7 +799,8 @@ mod tests {
     #[test]
     fn result_from_outbound_marks_known_shortfalls() {
         // No loop metadata on the envelope (e.g. a non-loop outbound):
-        // enriched fields fall back to their pre-M4 defaults.
+        // enriched fields fall back to their pre-M4 / C1 defaults so the
+        // panel keeps tolerating partial payloads across the cutover.
         let out = OutboundMessage {
             channel: "agent.chat".into(),
             chat_id: "c".into(),
@@ -812,7 +815,7 @@ mod tests {
         assert_eq!(r.finish_reason, "stop");
         assert_eq!(r.iterations, 0);
         assert!(r.spawned_tasks.is_empty());
-        // Still defaulted: tokens 0, model/identity_source None.
+        // C1 defaults when meta is absent.
         assert_eq!(r.prompt_tokens, 0);
         assert_eq!(r.completion_tokens, 0);
         assert!(r.model.is_none());
@@ -821,8 +824,9 @@ mod tests {
 
     #[test]
     fn result_from_outbound_reads_enriched_loop_meta() {
-        // M4 D8: the daemon loop stashes AgentLoopResultMeta under the
-        // well-known key; result_from_outbound must surface it.
+        // M4 D8 / WEFT-328: the daemon loop stashes AgentLoopResultMeta
+        // under the well-known key; result_from_outbound must surface
+        // all five plumbed fields (tool_calls, tokens, model, identity).
         use clawft_types::agent_chat::{AgentChatToolCall, SpawnedTaskSummary};
         let meta = AgentLoopResultMeta {
             tool_calls: vec![AgentChatToolCall {
@@ -842,6 +846,7 @@ mod tests {
             prompt_tokens: 812,
             completion_tokens: 96,
             reasoning: None,
+            identity_source: Some("clawft".into()),
         };
         let mut metadata = HashMap::new();
         metadata.insert(
@@ -863,6 +868,11 @@ mod tests {
         assert_eq!(r.spawned_tasks.len(), 1);
         assert_eq!(r.spawned_tasks[0].task_id, "task-1");
         assert_eq!(r.spawned_tasks[0].status, "completed");
+        // WEFT-328: real token / model / identity values surface on the wire.
+        assert_eq!(r.prompt_tokens, 812);
+        assert_eq!(r.completion_tokens, 96);
+        assert_eq!(r.model.as_deref(), Some("hermes-4.3-36b"));
+        assert_eq!(r.identity_source.as_deref(), Some("clawft"));
     }
 
     #[test]

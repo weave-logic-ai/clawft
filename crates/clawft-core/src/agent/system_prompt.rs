@@ -72,6 +72,17 @@ impl BindingThreadStatus {
     }
 }
 
+/// Result of [`SystemPromptBuilder::build_with_meta`]: the rendered
+/// system-prompt body plus the identity-loader source label (WEFT-328).
+#[derive(Debug, Clone)]
+pub struct BuiltSystemPrompt {
+    /// Rendered system message body (same text as [`SystemPromptBuilder::build`]).
+    pub body: String,
+    /// Identity loader source (e.g. `"clawft"`) for
+    /// [`AgentChatResult::identity_source`](clawft_types::agent_chat::AgentChatResult).
+    pub identity_source: String,
+}
+
 /// Builds an identity-aware system message body for a turn.
 ///
 /// Construction is cheap; reuse one builder per [`AgentLoop`]. The
@@ -100,6 +111,20 @@ impl SystemPromptBuilder {
         &self.workspace
     }
 
+    /// Build the system message body plus the identity-source label
+    /// (WEFT-328). Callers that only need the text can use [`Self::build`].
+    ///
+    /// Returns an [`IdentityError::NotFound`] when the underlying
+    /// provider cannot resolve identity content (callers should
+    /// surface this as `agent: identity load failed: ...`).
+    pub async fn build_with_meta(&self) -> Result<BuiltSystemPrompt, IdentityError> {
+        let identity = self.identity_provider.current().await?;
+        Ok(BuiltSystemPrompt {
+            body: self.render(&identity),
+            identity_source: identity.source.to_string(),
+        })
+    }
+
     /// Build the system message body.
     ///
     /// Returns the rendered prompt on success; an
@@ -107,8 +132,7 @@ impl SystemPromptBuilder {
     /// cannot resolve identity content (callers should surface this
     /// to the chat client as `agent: identity load failed: ...`).
     pub async fn build(&self) -> Result<String, IdentityError> {
-        let identity = self.identity_provider.current().await?;
-        Ok(self.render(&identity))
+        Ok(self.build_with_meta().await?.body)
     }
 
     /// Render an in-memory [`Identity`] into the prompt body. Split
@@ -225,6 +249,18 @@ mod tests {
         assert!(prompt.contains("[workspace]\n/tmp/ws"));
         assert!(prompt.contains("[hash]\n"));
         assert!(prompt.contains(&expected_hash));
+    }
+
+    #[tokio::test]
+    async fn build_with_meta_exposes_identity_source() {
+        // WEFT-328: loop needs the source label for AgentChatResult.
+        let id = ok_identity();
+        assert_eq!(id.source, "test");
+        let provider = Arc::new(StubProvider(id));
+        let builder = SystemPromptBuilder::new(provider, PathBuf::from("/tmp/ws"));
+        let built = builder.build_with_meta().await.expect("build ok");
+        assert_eq!(built.identity_source, "test");
+        assert!(built.body.contains("[identity]"));
     }
 
     #[tokio::test]
