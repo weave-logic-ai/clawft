@@ -1432,4 +1432,219 @@ mod tests {
         let response = registry.complete(&request).await.unwrap();
         assert_eq!(response.id, "test-resp");
     }
+
+    // ── WEFT-38: evolution_ready → GA → system prompt reaches transport ──
+
+    /// Transport that records the system message content seen at complete().
+    struct CaptureTransport {
+        system_prompts: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl LlmTransport for CaptureTransport {
+        async fn complete(&self, request: &TransportRequest) -> clawft_types::Result<LlmResponse> {
+            if let Some(sys) = request.messages.iter().find(|m| m.role == "system") {
+                self.system_prompts
+                    .lock()
+                    .unwrap()
+                    .push(sys.content.clone());
+            }
+            Ok(LlmResponse {
+                id: "capture-resp".into(),
+                content: vec![ContentBlock::Text {
+                    text: "ok".into(),
+                }],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage {
+                    input_tokens: 10,
+                    output_tokens: 2,
+                    total_tokens: 0,
+                },
+                metadata: HashMap::new(),
+            })
+        }
+    }
+
+    /// End-to-end WEFT-38: synthetic poor trajectories set `evolution_ready`;
+    /// the next `PipelineRegistry::complete` runs the GA via stage 3.5 and
+    /// the (possibly) evolved system prompt is what transport sees.
+    #[tokio::test]
+    async fn e2e_evolution_ready_ga_prompt_reaches_transport() {
+        use crate::pipeline::learner::{TrajectoryLearner, TrajectoryLearnerConfig};
+        use crate::pipeline::mutation::GaConfig;
+
+        let learner = Arc::new(TrajectoryLearner::new(TrajectoryLearnerConfig {
+            max_trajectories: 32,
+            poor_threshold: 0.6,
+            evolution_trigger_count: 2,
+            check_interval: 1,
+            ga: GaConfig {
+                population_size: 6,
+                elite_count: 2,
+                generations: 2,
+                crossover_rate: 0.4,
+                min_improvement: 0.0,
+            },
+            population_path: None,
+        }));
+
+        // Seed the ring buffer with poor trajectories so evolution_ready trips
+        // *before* the pipeline complete call (stage 6 records more later).
+        let poor = Trajectory {
+            request: ChatRequest {
+                messages: vec![LlmMessage {
+                    role: "user".into(),
+                    content: "hello".into(),
+                    tool_call_id: None,
+                    tool_calls: None,
+                }],
+                tools: vec![],
+                model: None,
+                max_tokens: None,
+                temperature: None,
+                auth_context: None,
+                complexity_boost: 0.0,
+                tool_choice: None,
+            },
+            routing: RoutingDecision {
+                provider: "test".into(),
+                model: "test".into(),
+                reason: "test".into(),
+                ..Default::default()
+            },
+            response: LlmResponse {
+                id: "pre".into(),
+                content: vec![ContentBlock::Text {
+                    text: "bad".into(),
+                }],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    total_tokens: 0,
+                },
+                metadata: HashMap::new(),
+            },
+            quality: QualityScore {
+                overall: 0.2,
+                relevance: 0.1,
+                coherence: 0.2,
+            },
+        };
+        learner.record(&poor);
+        learner.record(&poor);
+        assert!(
+            learner.is_evolution_ready(),
+            "precondition: evolution_ready must be set before complete()"
+        );
+
+        let transport = Arc::new(CaptureTransport {
+            system_prompts: std::sync::Mutex::new(Vec::new()),
+        });
+        let seed_system =
+            "Use the search tool to find docs\nAlways verify output\nEnsure accuracy".to_string();
+
+        // Assembler that injects a fixed system prompt (production assemblers
+        // pull SOUL.md / skills; here we pin the seed for the GA).
+        struct SysAssembler {
+            system: String,
+        }
+        #[async_trait]
+        impl ContextAssembler for SysAssembler {
+            async fn assemble(
+                &self,
+                request: &ChatRequest,
+                _profile: &TaskProfile,
+            ) -> AssembledContext {
+                let mut messages = vec![LlmMessage {
+                    role: "system".into(),
+                    content: self.system.clone(),
+                    tool_call_id: None,
+                    tool_calls: None,
+                }];
+                messages.extend(request.messages.clone());
+                AssembledContext {
+                    messages,
+                    token_estimate: 100,
+                    truncated: false,
+                }
+            }
+        }
+
+        let pipeline = Pipeline {
+            classifier: Arc::new(TestClassifier {
+                task_type: TaskType::Chat,
+            }),
+            router: Arc::new(TestRouter {
+                provider: "test".into(),
+                model: "test".into(),
+            }),
+            assembler: Arc::new(SysAssembler {
+                system: seed_system.clone(),
+            }),
+            transport: transport.clone(),
+            scorer: Arc::new(TestScorer),
+            learner: learner.clone() as Arc<dyn LearningBackend>,
+        };
+        let registry =
+            PipelineRegistry::new(pipeline).with_trajectory_learner(Arc::clone(&learner));
+
+        let request = ChatRequest {
+            messages: vec![LlmMessage {
+                role: "user".into(),
+                content: "write a function".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            tools: vec![],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            auth_context: None,
+            complexity_boost: 0.0,
+            tool_choice: None,
+        };
+
+        let response = registry.complete(&request).await.unwrap();
+        assert_eq!(response.id, "capture-resp");
+
+        // Flag consumed by stage 3.5 evolve_prompt.
+        assert!(
+            !learner.is_evolution_ready(),
+            "complete() must clear evolution_ready after the GA run"
+        );
+        assert!(
+            learner.population_snapshot().is_some(),
+            "GA population must be retained after evolution"
+        );
+
+        let seen = transport.system_prompts.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "transport must receive exactly one complete()");
+        let delivered = &seen[0];
+        assert!(
+            !delivered.trim().is_empty(),
+            "evolved system prompt must not be empty"
+        );
+        // Last evolved bookkeeping matches what transport saw.
+        if let Some(last) = learner.last_evolved_prompt() {
+            assert_eq!(
+                &last, delivered,
+                "transport system prompt must equal last_evolved_prompt"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_prompt_evolution_noop_without_system_message() {
+        let learner = TestLearner;
+        let msgs = vec![LlmMessage {
+            role: "user".into(),
+            content: "hi".into(),
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+        let out = apply_prompt_evolution(msgs.clone(), &learner);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].content, "hi");
+    }
 }
