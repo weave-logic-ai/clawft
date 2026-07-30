@@ -530,7 +530,7 @@ pub fn build_live_pipeline(config: &Config) -> PipelineRegistry {
     };
 
     let scorer = super::build_scorer(&config.pipeline);
-    let learner = super::build_learner(&config.pipeline);
+    let (learner, trajectory) = super::build_learner_parts(&config.pipeline);
 
     let pipeline = Pipeline {
         classifier,
@@ -541,7 +541,12 @@ pub fn build_live_pipeline(config: &Config) -> PipelineRegistry {
         learner,
     };
 
-    PipelineRegistry::new(pipeline)
+    // WEFT-66: share TrajectoryLearner with skill autogen when active.
+    let mut registry = PipelineRegistry::new(pipeline);
+    if let Some(t) = trajectory {
+        registry = registry.with_trajectory_learner(t);
+    }
+    registry
 }
 
 /// Build the appropriate router based on `config.routing.mode`.

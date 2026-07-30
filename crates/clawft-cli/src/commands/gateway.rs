@@ -441,21 +441,28 @@ pub async fn run_with_config(
 
     // ── Agent loop (inbound processing) ─────────────────────────────
     // WEFT-67: attach skill-autogen when opted in via skills.autogen.enabled.
+    // WEFT-66: wire active TrajectoryLearner into AutogenConfig.
+    let trajectory_learner = ctx.trajectory_learner();
     let mut agent = ctx.into_agent_loop().with_cancel(cancel.clone());
     if config.skills.autogen.enabled {
         use clawft_core::agent::skill_autogen::{AutogenConfig, PatternDetector};
         use std::sync::Mutex;
-        let autogen_cfg = AutogenConfig {
+        let mut autogen_cfg = AutogenConfig {
             enabled: true,
             threshold: config.skills.autogen.threshold,
             max_pending: config.skills.autogen.max_pending,
             install_dir: None,
+            learner: None,
         };
+        if let Some(learner) = trajectory_learner {
+            autogen_cfg = autogen_cfg.with_learner(learner);
+        }
         let detector = Arc::new(Mutex::new(PatternDetector::new(autogen_cfg)));
         agent = agent.with_autogen(detector);
         info!(
             threshold = config.skills.autogen.threshold,
             max_pending = config.skills.autogen.max_pending,
+            learning = config.pipeline.learner == "trajectory",
             "skill autogen enabled (gateway pattern detection active)"
         );
     }

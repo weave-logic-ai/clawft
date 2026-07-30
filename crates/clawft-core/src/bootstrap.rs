@@ -467,6 +467,17 @@ impl<P: Platform> AppContext<P> {
         self.pipeline = pipeline;
     }
 
+    /// Active pipeline [`TrajectoryLearner`](crate::pipeline::learner::TrajectoryLearner)
+    /// when stage 6 is trajectory mode (WEFT-66).
+    ///
+    /// Call before [`Self::into_agent_loop`] so skill autogen can share the
+    /// same ring buffer the pipeline records into.
+    pub fn trajectory_learner(
+        &self,
+    ) -> Option<Arc<crate::pipeline::learner::TrajectoryLearner>> {
+        self.pipeline.trajectory_learner().cloned()
+    }
+
     /// Replace the pipeline with a live LLM-backed pipeline.
     ///
     /// Convenience method that calls [`build_live_pipeline`] and sets it
@@ -524,7 +535,7 @@ fn build_default_pipeline(config: &Config) -> PipelineRegistry {
     ));
     let transport = build_default_transport();
     let scorer = crate::pipeline::build_scorer(&config.pipeline);
-    let learner = crate::pipeline::build_learner(&config.pipeline);
+    let (learner, trajectory) = crate::pipeline::build_learner_parts(&config.pipeline);
 
     let pipeline = Pipeline {
         classifier,
@@ -535,7 +546,13 @@ fn build_default_pipeline(config: &Config) -> PipelineRegistry {
         learner,
     };
 
-    PipelineRegistry::new(pipeline)
+    // WEFT-66: keep the concrete TrajectoryLearner handle so skill
+    // autogen can share the same trajectory ring buffer.
+    let mut registry = PipelineRegistry::new(pipeline);
+    if let Some(t) = trajectory {
+        registry = registry.with_trajectory_learner(t);
+    }
+    registry
 }
 
 /// Native: wrap a [`ServiceLlmAdapter`] over a freshly-constructed
@@ -597,15 +614,19 @@ pub fn build_browser_pipeline(
         config.agents.defaults.max_tokens.max(1) as usize,
     ));
     let scorer = crate::pipeline::build_scorer(&config.pipeline);
-    let learner = crate::pipeline::build_learner(&config.pipeline);
-    PipelineRegistry::new(Pipeline {
+    let (learner, trajectory) = crate::pipeline::build_learner_parts(&config.pipeline);
+    let mut registry = PipelineRegistry::new(Pipeline {
         classifier,
         router,
         assembler,
         transport,
         scorer,
         learner,
-    })
+    });
+    if let Some(t) = trajectory {
+        registry = registry.with_trajectory_learner(t);
+    }
+    registry
 }
 
 /// Construct an [`AgentLoop`] suitable for daemon-side hosting via
@@ -765,8 +786,8 @@ pub async fn build_daemon_agent_loop(
         config.agents.defaults.max_tokens.max(1) as usize,
     ));
     let scorer = crate::pipeline::build_scorer(&config.pipeline);
-    let learner = crate::pipeline::build_learner(&config.pipeline);
-    let pipeline = PipelineRegistry::new(Pipeline {
+    let (learner, trajectory) = crate::pipeline::build_learner_parts(&config.pipeline);
+    let mut pipeline = PipelineRegistry::new(Pipeline {
         classifier,
         router,
         assembler,
@@ -774,6 +795,9 @@ pub async fn build_daemon_agent_loop(
         scorer,
         learner,
     });
+    if let Some(t) = trajectory {
+        pipeline = pipeline.with_trajectory_learner(t);
+    }
 
     // WEFT-10: pass split routing layers so enforce_workspace_ceiling
     // clamps elevated workspace grants against the global ceiling.

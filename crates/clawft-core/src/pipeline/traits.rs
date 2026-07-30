@@ -557,6 +557,13 @@ fn apply_prompt_evolution(
 pub struct PipelineRegistry {
     pipelines: HashMap<TaskType, Pipeline>,
     default: Pipeline,
+    /// Concrete trajectory learner when stage 6 is
+    /// [`crate::pipeline::learner::TrajectoryLearner`] (WEFT-66).
+    ///
+    /// Shared with skill autogen so generated `SKILL.md` can be improved
+    /// from the same trajectories the pipeline records. `None` when the
+    /// active learner is `NoopLearner` or a test double.
+    trajectory_learner: Option<Arc<crate::pipeline::learner::TrajectoryLearner>>,
 }
 
 impl PipelineRegistry {
@@ -565,7 +572,25 @@ impl PipelineRegistry {
         Self {
             pipelines: HashMap::new(),
             default,
+            trajectory_learner: None,
         }
+    }
+
+    /// Attach the concrete [`TrajectoryLearner`] used by the default
+    /// pipeline so skill autogen can share the same ring buffer (WEFT-66).
+    pub fn with_trajectory_learner(
+        mut self,
+        learner: Arc<crate::pipeline::learner::TrajectoryLearner>,
+    ) -> Self {
+        self.trajectory_learner = Some(learner);
+        self
+    }
+
+    /// Active concrete trajectory learner, if stage 6 is trajectory mode.
+    pub fn trajectory_learner(
+        &self,
+    ) -> Option<&Arc<crate::pipeline::learner::TrajectoryLearner>> {
+        self.trajectory_learner.as_ref()
     }
 
     /// Register a specialized pipeline for a specific task type.

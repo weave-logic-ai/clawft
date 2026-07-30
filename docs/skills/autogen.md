@@ -132,6 +132,45 @@ host allowlist unchanged.
 
 ---
 
+## Trajectory learning (WEFT-66)
+
+When skill autogen is enabled **and** the pipeline learner is
+`trajectory`, generated candidates are improved before install:
+
+```text
+pattern detect → generate_skill_md_with_learning(pattern, learner)
+               → install_pending_skill (still .pending until approve)
+```
+
+| Piece | Role |
+|-------|------|
+| `AutogenConfig.learner` | Optional `Arc<TrajectoryLearner>` — the active stage-6 learner |
+| `improve_skill_instructions` | Mutates instruction body from best/poor trajectories |
+| `generate_skill_md_with_learning` | `generate_skill_md` + optional improve |
+| `PipelineRegistry::trajectory_learner` | Shared handle built by `build_learner_parts` |
+| Agent loop (`loop_core`) | Uses learning generation when autogen is attached |
+
+CLI / gateway build `AutogenConfig` with `ctx.trajectory_learner()` so
+the ring buffer that pipeline stage 6 records into is the same instance
+autogen mutates against. If the detector has no learner, the loop falls
+back to the pipeline handle and latches it onto the detector.
+
+Learning is a **soft** improvement: with an empty learner (no
+trajectories ≥ 0.8 / no poor set) the candidate matches plain
+`generate_skill_md`. Promotion to live skills remains manual (`.pending`
+marker).
+
+Enable both surfaces in config:
+
+```json
+{
+  "skills": { "autogen": { "enabled": true, "threshold": 3 } },
+  "pipeline": { "learner": "trajectory", "scorer": "fitness" }
+}
+```
+
+---
+
 ## Runtime wiring
 
 Sandbox enforcement continues to use
@@ -155,6 +194,11 @@ canonical prefix checks (sandbox requires real on-disk roots).
 
 - WEFT-65 — per-skill `allowed-tools` intersection validator
   (`clawft_plugin::skill_grants::validate_allowed_tools`)
+- WEFT-66 — wire `improve_skill_instructions` /
+  `generate_skill_md_with_learning` into agent-loop via
+  `AutogenConfig.learner`
+- WEFT-67 — CLI `weft skills autogen enable|disable|status`
+- WEFT-75 — filesystem allowlist semantics (this doc)
 - SEC-SKILL-03 / 03b — `intersect_allowed_tools` /
   `intersect_path_allowlists` in `clawft_core::security`
 - Review source: `.planning/reviews/0.7.0-release-gate/04-plugin-skills.md` Q5

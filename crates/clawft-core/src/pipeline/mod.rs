@@ -44,10 +44,30 @@ pub fn build_scorer(config: &PipelineConfig) -> Arc<dyn QualityScorer> {
 ///
 /// - `"trajectory"` -> [`TrajectoryLearner`] (Level 1 GEPA-inspired)
 /// - `"noop"` or anything else -> [`NoopLearner`] (Level 0 baseline)
+///
+/// Prefer [`build_learner_parts`] when the concrete [`TrajectoryLearner`]
+/// must also be shared with skill autogen (WEFT-66).
 pub fn build_learner(config: &PipelineConfig) -> Arc<dyn LearningBackend> {
+    build_learner_parts(config).0
+}
+
+/// Build the stage-6 learner and, when configured as `"trajectory"`, the
+/// shared concrete [`TrajectoryLearner`] handle (WEFT-66).
+///
+/// Returns `(backend, Some(trajectory))` for trajectory mode so callers can
+/// wire the same `Arc` into both the pipeline and skill autogen
+/// (`AutogenConfig.learner`). For noop / unknown backends the second
+/// value is `None`.
+pub fn build_learner_parts(
+    config: &PipelineConfig,
+) -> (Arc<dyn LearningBackend>, Option<Arc<TrajectoryLearner>>) {
     match config.learner.as_str() {
-        "trajectory" => Arc::new(TrajectoryLearner::new(TrajectoryLearnerConfig::default())),
-        _ => Arc::new(NoopLearner::new()),
+        "trajectory" => {
+            let trajectory = Arc::new(TrajectoryLearner::new(TrajectoryLearnerConfig::default()));
+            let backend: Arc<dyn LearningBackend> = trajectory.clone();
+            (backend, Some(trajectory))
+        }
+        _ => (Arc::new(NoopLearner::new()), None),
     }
 }
 
@@ -135,6 +155,29 @@ mod factory_tests {
         };
         let _learner = build_learner(&config);
         // TrajectoryLearner constructed without panicking
+    }
+
+    #[test]
+    fn build_learner_parts_shares_trajectory_arc() {
+        let config = PipelineConfig {
+            scorer: "noop".into(),
+            learner: "trajectory".into(),
+        };
+        let (backend, trajectory) = build_learner_parts(&config);
+        let t = trajectory.expect("trajectory mode must yield concrete learner");
+        // Same allocation: Arc ptr equality after coerce to dyn.
+        assert_eq!(
+            Arc::as_ptr(&backend) as *const (),
+            Arc::as_ptr(&t) as *const ()
+        );
+        assert_eq!(t.trajectory_count(), 0);
+    }
+
+    #[test]
+    fn build_learner_parts_noop_has_no_trajectory() {
+        let config = PipelineConfig::default();
+        let (_backend, trajectory) = build_learner_parts(&config);
+        assert!(trajectory.is_none());
     }
 
     #[test]
