@@ -1,10 +1,12 @@
-//! Echo cancellation for voice pipeline.
+//! Echo cancellation for voice pipeline (legacy scaffold — WEFT-671).
 //!
-//! Prevents the system from hearing its own TTS output during Talk Mode.
-//! Uses a reference signal (the TTS audio) to cancel echoes from the mic input.
+//! **Deprecated surface.** Product AEC lives in [`clawft-voice-aec`]
+//! (WebRTC AEC3 + NS). This module remains a **passthrough stub** under
+//! the plugin `voice` feature for compile coverage only. Do not implement
+//! real DSP here (WEFT-217 is superseded by `clawft-voice-aec`).
 //!
-//! Current implementation: stub (passthrough). Real AEC will use webrtc-audio-processing
-//! or a custom delay-line canceller in a future phase.
+//! Prevents the system from hearing its own TTS output during Talk Mode
+//! *when* a real canceller is wired — this file does not.
 
 use serde::{Deserialize, Serialize};
 

@@ -503,6 +503,11 @@ async fn spawn_turn_recorder(
 /// Creates a WakeDaemon and runs until Ctrl+C. When the wake word
 /// is detected (after real rustpotter integration), Talk Mode will
 /// be activated automatically.
+///
+/// **WEFT-671:** this is the sole live external caller of
+/// `clawft_plugin::voice` (wake only). Talk Mode itself is
+/// `clawft_voice_talk` — see `handle_talk`. Wake remains transitional
+/// under the plugin until a follow-up migrates it to a voice crate.
 async fn handle_wake() -> anyhow::Result<()> {
     use clawft_plugin::traits::CancellationToken;
     use clawft_plugin::voice::{WakeDaemon, WakeWordConfig};

@@ -1,7 +1,8 @@
-//! Talk Mode controller for continuous voice conversation.
+//! Talk Mode controller (legacy scaffold — WEFT-671).
 //!
-//! Manages the lifecycle of a voice conversation session,
-//! coordinating the VoiceChannel with the agent pipeline.
+//! **Deprecated surface.** Product Talk Mode is `clawft-voice-talk` +
+//! `clawft-channels::voice::talkmode` (ADR-061 / ADR-068). This controller
+//! is a thin stub retained under the plugin `voice` feature only.
 
 use std::sync::Arc;
 

@@ -4,9 +4,15 @@
 //! audio input for the "Hey Weft" trigger phrase. When detected,
 //! activates Talk Mode.
 //!
-//! Currently a **stub implementation** -- real audio capture and
-//! rustpotter integration are deferred to the 0.8.x in-process voice
-//! backend (see ADR-053).
+//! ## Disposition (WEFT-671)
+//!
+//! Transitional home for wake: CLI `weft voice wake` is the sole live
+//! external consumer. Not part of the canonical Talk Mode stack
+//! (`clawft-voice-talk` / `clawft-channels::voice`). See
+//! `docs/plans/wave-0a-WEFT-671-decision.md`.
+//!
+//! Currently a **stub implementation** — logs and waits for cancel; no
+//! real capture. Real audio + detector wiring tracks WEFT-216.
 
 use tracing::info;
 

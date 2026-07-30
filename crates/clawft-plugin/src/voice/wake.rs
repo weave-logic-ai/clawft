@@ -3,8 +3,17 @@
 //! Provides the `WakeWordDetector` that processes audio frames and
 //! fires a detection event when the wake word is recognized.
 //!
-//! Currently a **stub implementation** -- real rustpotter integration
-//! is deferred to the 0.8.x in-process voice backend (see ADR-053).
+//! ## Disposition (WEFT-671)
+//!
+//! This module is the **only supported transitional surface** under
+//! `clawft_plugin::voice`. Live caller: CLI `weft voice wake`
+//! (`WakeDaemon` / `WakeWordConfig`). Product Talk Mode does **not**
+//! use this path — see `clawft-voice-talk` and `clawft-channels::voice`.
+//!
+//! Currently a **stub implementation** — `process_frame` always returns
+//! false. Real rustpotter (or alternative) wiring is WEFT-216. A later
+//! follow-up should migrate this API into a `clawft-voice-*` crate and
+//! retire the rest of `clawft-plugin/src/voice/`.
 
 use std::path::PathBuf;
 
