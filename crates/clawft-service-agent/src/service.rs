@@ -686,6 +686,8 @@ fn result_from_outbound(outbound: OutboundMessage, _params: &AgentChatParams) ->
         spawned_tasks: meta.spawned_tasks,
         // WEFT-345: consecutive gate-denial → EscalateToHuman event.
         escalation: meta.escalation,
+        // WEFT-258: gate Defer → interactive panel prompt-and-resume.
+        deferred: meta.deferred,
     }
 }
 
@@ -850,6 +852,7 @@ mod tests {
             reasoning: None,
             identity_source: Some("clawft".into()),
             escalation: None,
+            deferred: None,
         };
         let mut metadata = HashMap::new();
         metadata.insert(
@@ -877,6 +880,7 @@ mod tests {
         assert_eq!(r.model.as_deref(), Some("hermes-4.3-36b"));
         assert_eq!(r.identity_source.as_deref(), Some("clawft"));
         assert!(r.escalation.is_none());
+        assert!(r.deferred.is_none());
     }
 
     #[test]
@@ -915,6 +919,7 @@ mod tests {
             reasoning: None,
             identity_source: None,
             escalation: Some(event.clone()),
+            deferred: None,
         };
         let mut metadata = HashMap::new();
         metadata.insert(
@@ -936,6 +941,49 @@ mod tests {
         assert_eq!(esc.denial_count, 3);
         assert_eq!(esc.denials.len(), 3);
         assert!(r.assistant_text.contains("EscalateToHuman"));
+        assert!(r.deferred.is_none());
+    }
+
+    #[test]
+    fn result_from_outbound_reads_weft258_deferred() {
+        // WEFT-258: DeferredActionEvent on the loop meta must surface
+        // on AgentChatResult so the chat panel can prompt-and-resume.
+        use clawft_types::agent_chat::{DeferredActionEvent, FINISH_REASON_DEFERRED};
+        let event =
+            DeferredActionEvent::new("c", "write_file", "policy review pending", "{\"path\":\"x\"}");
+        let meta = AgentLoopResultMeta {
+            tool_calls: vec![],
+            finish_reason: FINISH_REASON_DEFERRED.into(),
+            iterations: 1,
+            spawned_tasks: vec![],
+            model: None,
+            prompt_tokens: 12,
+            completion_tokens: 4,
+            reasoning: None,
+            identity_source: None,
+            escalation: None,
+            deferred: Some(event.clone()),
+        };
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            AGENT_LOOP_RESULT_META_KEY.to_string(),
+            serde_json::to_value(&meta).unwrap(),
+        );
+        let out = OutboundMessage {
+            channel: "agent.chat".into(),
+            chat_id: "c".into(),
+            content: event.summary.clone(),
+            reply_to: None,
+            media: Vec::new(),
+            metadata,
+        };
+        let r = result_from_outbound(out, &params_for("c", ""));
+        assert_eq!(r.finish_reason, FINISH_REASON_DEFERRED);
+        let d = r.deferred.expect("deferred present");
+        assert!(d.deferred);
+        assert_eq!(d.tool, "write_file");
+        assert_eq!(d.reason, "policy review pending");
+        assert!(r.assistant_text.contains("deferred"));
     }
 
     #[test]

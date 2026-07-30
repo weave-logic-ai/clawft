@@ -33,8 +33,9 @@ use tracing::{debug, error, info, warn};
 
 use clawft_platform::Platform;
 use clawft_types::agent_chat::{
-    AGENT_LOOP_RESULT_META_KEY, AgentChatToolCall, AgentLoopResultMeta, EscalateToHumanEvent,
-    FINISH_REASON_ESCALATE_TO_HUMAN, GateDenialRecord, SpawnedTaskSummary,
+    AGENT_LOOP_RESULT_META_KEY, AgentChatToolCall, AgentLoopResultMeta, DeferredActionEvent,
+    EscalateToHumanEvent, FINISH_REASON_DEFERRED, FINISH_REASON_ESCALATE_TO_HUMAN, GateDenialRecord,
+    SpawnedTaskSummary,
 };
 use clawft_types::config::AgentsConfig;
 use clawft_types::error::ClawftError;
@@ -52,7 +53,8 @@ use super::context_router::{ContextDecision, ContextRequest, ContextRouter, Null
 use super::cost_budget::ConversationBudget;
 use super::effects::effect_for_tool;
 use super::gate::{
-    EffectGate, GATE_DENIAL_ESCALATION_LIMIT, GateDecision, NoopGate, record_gate_denial_streak,
+    EffectGate, GATE_DENIAL_ESCALATION_LIMIT, GateDecision, NoopGate, gate_deferral_reason,
+    record_gate_denial_streak,
 };
 use super::graft::{ContextGraftProvider, splice_graft_block};
 use super::sink::{ConversationSink, InMemorySink, Turn};
@@ -236,6 +238,9 @@ struct ToolLoopResult {
     /// WEFT-345: set when the loop halted after consecutive gate denials
     /// and emitted `EscalateToHuman`.
     escalation: Option<EscalateToHumanEvent>,
+    /// WEFT-258: set when the loop halted on a gate `Defer` so the
+    /// panel can prompt-and-resume.
+    deferred: Option<DeferredActionEvent>,
 }
 
 /// Truncate a string to at most `TOOL_PREVIEW_MAX_BYTES` bytes on a
@@ -1706,6 +1711,7 @@ impl<P: Platform> AgentLoop<P> {
             reasoning: tool_result.reasoning,
             identity_source,
             escalation: tool_result.escalation,
+            deferred: tool_result.deferred,
         };
         match serde_json::to_value(&result_meta) {
             Ok(v) => {
@@ -2090,8 +2096,10 @@ impl<P: Platform> AgentLoop<P> {
     ///   `{"denied": true, "reason": ...}` so the LLM sees a
     ///   policy decision distinct from a runtime fault.
     /// * `EffectGate::Defer`  → no tool dispatch; returns
-    ///   `{"deferred": true, "reason": ...}` (interactive defer
-    ///   prompt is a future increment).
+    ///   `{"deferred": true, "reason": ...}`. The tool loop then
+    ///   **halts** with [`FINISH_REASON_DEFERRED`] +
+    ///   [`DeferredActionEvent`] so the chat panel can
+    ///   prompt-and-resume (WEFT-258).
     /// * Sandbox denial       → returns `{"error": "sandbox denied: ..."}`.
     ///
     /// The helper applies the [`MAX_TOOL_RESULT_BYTES`] truncation
@@ -2394,6 +2402,7 @@ impl<P: Platform> AgentLoop<P> {
                         Some(reasoning_parts.join("\n\n"))
                     },
                     escalation: None,
+                    deferred: None,
                 });
             }
 
@@ -2594,6 +2603,79 @@ impl<P: Platform> AgentLoop<P> {
                     .map(|(_, _, input)| input.clone())
                     .unwrap_or(serde_json::Value::Null);
 
+                // WEFT-258: gate Defer → halt for interactive panel prompt.
+                // Structured tool-result shape is unchanged
+                // (`{"deferred":true,"reason":...}`); the loop no longer
+                // continues so the model can re-plan — the panel owns the
+                // human decision and resumes via a follow-up user turn.
+                if let Some(reason) = gate_deferral_reason(&content) {
+                    let arguments_preview =
+                        preview_truncate(&serde_json::to_string(&input).unwrap_or_default());
+                    let event = DeferredActionEvent::new(
+                        conv_id,
+                        name.clone(),
+                        reason,
+                        arguments_preview.clone(),
+                    );
+                    warn!(
+                        conv_id,
+                        tool = %name,
+                        reason = %event.reason,
+                        "WEFT-258 gate defer — interactive human review"
+                    );
+
+                    tool_call_summaries.push(AgentChatToolCall {
+                        name: name.clone(),
+                        arguments_preview,
+                        result_preview: preview_truncate(&content),
+                        success: false,
+                    });
+                    request.messages.push(LlmMessage {
+                        role: "tool".into(),
+                        content: content.clone(),
+                        tool_call_id: Some(id.clone()),
+                        tool_calls: None,
+                    });
+                    if let Err(e) = self
+                        .sink
+                        .append_turn(
+                            conv_id,
+                            Turn {
+                                turn_id: Self::next_turn_id(),
+                                role: "tool".into(),
+                                content: content.clone(),
+                                tool_calls: None,
+                                tool_call_id: Some(id.clone()),
+                                ts_ms: Self::now_ms(),
+                                voice_analysis: None,
+                            },
+                        )
+                        .await
+                    {
+                        warn!(error = %e, "sink: failed to append tool turn");
+                    }
+
+                    return Ok(ToolLoopResult {
+                        text: event.summary.clone(),
+                        hallucinations: total_hallucinations,
+                        verified_successes: total_verified,
+                        tool_calls: tool_call_summaries,
+                        finish_reason: FINISH_REASON_DEFERRED.into(),
+                        iterations: (iteration as u32).saturating_add(1),
+                        spawned_tasks,
+                        model,
+                        prompt_tokens,
+                        completion_tokens,
+                        reasoning: if reasoning_parts.is_empty() {
+                            None
+                        } else {
+                            Some(reasoning_parts.join("\n\n"))
+                        },
+                        escalation: None,
+                        deferred: Some(event),
+                    });
+                }
+
                 // WEFT-345: consecutive gate Deny → EscalateToHuman.
                 // Count only structured gate denials (`{"denied":true}`);
                 // sandbox / runtime errors and Defer do not contribute.
@@ -2670,6 +2752,7 @@ impl<P: Platform> AgentLoop<P> {
                             Some(reasoning_parts.join("\n\n"))
                         },
                         escalation: Some(event),
+                        deferred: None,
                     });
                 }
 
@@ -5687,6 +5770,9 @@ mod tests {
 
     #[tokio::test]
     async fn gate_defer_emits_structured_tool_result() {
+        // WEFT-258: Defer halts the turn with finish_reason=deferred and
+        // a DeferredActionEvent on loop meta (panel prompt-and-resume).
+        // Tool-result body remains `{"deferred":true,"reason":...}`.
         let transport = Arc::new(GateProbeTransport::new());
         let (mut agent, dir) = make_agent_loop(transport, "gate_defer").await;
         let gate = Arc::new(StubGate::defer("policy review pending"));
@@ -5705,15 +5791,78 @@ mod tests {
         let msg = agent.bus.consume_inbound().await.unwrap();
         let outbound = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
 
-        let parsed: serde_json::Value =
-            serde_json::from_str(&outbound.content).expect("gate result is JSON");
-        assert_eq!(parsed["deferred"], serde_json::json!(true));
-        assert_eq!(parsed["reason"], serde_json::json!("policy review pending"));
         assert!(
-            parsed.get("error").is_none(),
-            "Defer must use the structured `deferred` shape, not the legacy error envelope"
+            outbound.content.contains("deferred") || outbound.content.contains("policy review"),
+            "assistant text should mention deferral: {}",
+            outbound.content
+        );
+        let meta: AgentLoopResultMeta = serde_json::from_value(
+            outbound
+                .metadata
+                .get(AGENT_LOOP_RESULT_META_KEY)
+                .expect("loop meta")
+                .clone(),
+        )
+        .unwrap();
+        assert_eq!(meta.finish_reason, FINISH_REASON_DEFERRED);
+        let deferred = meta.deferred.expect("deferred event present");
+        assert!(deferred.deferred);
+        assert_eq!(deferred.reason, "policy review pending");
+        assert_eq!(deferred.tool, "echo");
+        assert_eq!(meta.tool_calls.len(), 1);
+        assert!(
+            meta.tool_calls[0]
+                .result_preview
+                .contains("\"deferred\":true")
+                || meta.tool_calls[0].result_preview.contains("deferred"),
+            "tool result preview must keep structured deferred shape: {}",
+            meta.tool_calls[0].result_preview
         );
         assert_eq!(gate.agent_ids().len(), 1);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn gate_defer_halts_without_second_llm_round_trip() {
+        // GateProbeTransport only returns tool-use on call 0; if the
+        // loop continued after Defer it would hit call 1. WEFT-258 must
+        // stop after the deferred tool result (one LLM call).
+        let transport = Arc::new(GateProbeTransport::new());
+        let (mut agent, dir) = make_agent_loop(transport.clone(), "gate_defer_halt").await;
+        let gate = Arc::new(StubGate::defer("stop here"));
+        agent = agent.with_gate(gate);
+
+        let inbound = InboundMessage {
+            channel: "test".into(),
+            sender_id: "u".into(),
+            chat_id: "conv-defer-halt".into(),
+            content: "trigger".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        agent.bus.publish_inbound(inbound).unwrap();
+        let msg = agent.bus.consume_inbound().await.unwrap();
+        let outbound = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
+
+        let calls = transport
+            .call_count
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            calls, 1,
+            "defer must halt before the second LLM round-trip; got {calls}"
+        );
+        let meta: AgentLoopResultMeta = serde_json::from_value(
+            outbound
+                .metadata
+                .get(AGENT_LOOP_RESULT_META_KEY)
+                .expect("meta")
+                .clone(),
+        )
+        .unwrap();
+        assert_eq!(meta.finish_reason, FINISH_REASON_DEFERRED);
+        assert_eq!(meta.iterations, 1);
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
