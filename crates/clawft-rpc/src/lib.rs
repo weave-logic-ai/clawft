@@ -24,7 +24,7 @@ mod client;
 mod protocol;
 pub mod version_check;
 
-pub use client::{DaemonClient, is_daemon_running};
+pub use client::{DaemonClient, is_daemon_running, is_daemon_running_at};
 pub use protocol::{
     LOG_FILE_NAME, PID_FILE_NAME, Request, Response, SOCKET_NAME, log_path, pid_path, runtime_dir,
     socket_path,

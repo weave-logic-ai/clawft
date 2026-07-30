@@ -24,3 +24,4 @@ reqwest = { workspace = true, features = ["blocking"] }
 
 [dev-dependencies]
 mockito = "1"
+tempfile = { workspace = true }
