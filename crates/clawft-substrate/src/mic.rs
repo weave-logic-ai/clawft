@@ -4,7 +4,22 @@
 //! Reads signed-16-bit little-endian mono PCM samples from a
 //! configurable byte source (default: a file backing that a test
 //! harness or a future host-audio bridge can feed) and emits RMS +
-//! peak levels into `substrate/sensor/mic` every 500 ms.
+//! peak levels every 500 ms.
+//!
+//! ## Path layout (WEFT-438)
+//!
+//! Canonical emissions (always):
+//! - `substrate/<node-id>/sensor/mic/summary` — full level object
+//! - `substrate/<node-id>/sensor/mic/rms` — scalar `rms_db` for gauge
+//!   discovery (`mic_discovery` matches `/sensor/mic/rms`)
+//!
+//! Legacy dual-emit (default on until
+//! [`crate::sensor_paths::LEGACY_FLAT_REMOVAL_VERSION`]):
+//! - `substrate/sensor/mic` — pre-node-identity flat path
+//!
+//! Default `node_id` is [`crate::sensor_paths::HOST_LOCAL_NODE_ID`].
+//! Pass a provisioned node id via [`MicrophoneAdapter::with_node_id`]
+//! for multi-node meshes. Full pcm topic cutover is WEFT-418.
 //!
 //! ## Characterization level (spectrometer principle)
 //!
@@ -53,6 +68,10 @@ use crate::healthcheck::{
 use crate::physical::{
     Characterization, PhysicalSensorAdapter, SensorCalibration, SensorInterface,
 };
+use crate::sensor_paths::{
+    DEFAULT_DUAL_EMIT_LEGACY, HOST_LOCAL_MIC_RMS, HOST_LOCAL_MIC_SUMMARY, HOST_LOCAL_NODE_ID,
+    LEGACY_MIC_PATH, is_mic_level_open_topic, mic_level_emit_plan,
+};
 // Used only by `tests::host_audio_direction_variant_compiles` via
 // `use super::*` — keep the import so `cargo test` builds.
 #[cfg(test)]
@@ -64,31 +83,52 @@ use crate::physical::AudioDirection;
 const WINDOW_SAMPLES: usize = 8000;
 /// Default sample rate assumed when none is configured.
 const DEFAULT_SAMPLE_RATE: u32 = 16_000;
-/// Channel depth for the singleton topic. Sized to comfortably hold
-/// the per-tick payload-plus-health pair (2 deltas) plus one tick of
-/// slack for slow consumers.
-const CHAN: usize = 4;
+/// Channel depth for the shared producer. Sized for dual-emit
+/// (summary + rms + optional legacy) + health + one tick of slack.
+const CHAN: usize = 8;
 /// Emission cadence — matches WINDOW_SAMPLES at DEFAULT_SAMPLE_RATE.
 const TICK_MS: u64 = 500;
 
 /// Declared topics.
 ///
-/// The mic adapter declares two topics:
-/// - `substrate/sensor/mic` — the level-meter payload (RMS / peak dBFS).
-/// - `substrate/meta/adapter/mic/healthcheck` — the per-sensor health
-///   report (HEALTHCHECK-CONTRACT.md §3). Both are emitted from the
-///   same poller; opening either subscribes to the shared producer
-///   loop. The healthcheck path uses [`Sensitivity::Public`] because
-///   it carries no audio content — only liveness counters.
+/// The mic adapter declares level + healthcheck topics. Level topics
+/// cover the WEFT-438 dual-emit set so `subscribe_adapter` against any
+/// of the open targets shares the same producer loop:
+///
+/// - [`HOST_LOCAL_MIC_SUMMARY`] — canonical level object (host-local)
+/// - [`HOST_LOCAL_MIC_RMS`] — canonical RMS scalar (host-local)
+/// - [`LEGACY_MIC_PATH`] — flat legacy shim (removal: 0.9.0)
+/// - `substrate/meta/adapter/mic/healthcheck` — per-sensor health
+///   (HEALTHCHECK-CONTRACT.md §3; Public — no audio content)
+///
+/// `open()` also accepts any node-scoped `…/sensor/mic/{summary,rms}`
+/// so multi-node callers do not need a TopicDecl per node id.
 pub const TOPICS: &[TopicDecl] = &[
     TopicDecl {
-        path: "substrate/sensor/mic",
+        path: HOST_LOCAL_MIC_SUMMARY,
         shape: "ontology://audio-level",
         refresh_hint: RefreshHint::Periodic { ms: TICK_MS },
         // Audio-capture data CAN leak user content even at RMS level
         // (speech envelope is recoverable). `Capture` sensitivity per
         // ADR-012 forces a per-goal `CapabilityGrant` rather than a
         // one-off install-time prompt.
+        sensitivity: Sensitivity::Capture,
+        buffer_policy: BufferPolicy::Refuse,
+        max_len: None,
+    },
+    TopicDecl {
+        path: HOST_LOCAL_MIC_RMS,
+        shape: "ontology://audio-level-rms",
+        refresh_hint: RefreshHint::Periodic { ms: TICK_MS },
+        sensitivity: Sensitivity::Capture,
+        buffer_policy: BufferPolicy::Refuse,
+        max_len: None,
+    },
+    TopicDecl {
+        // Legacy flat open target — dual-emitted until 0.9.0 (WEFT-438).
+        path: LEGACY_MIC_PATH,
+        shape: "ontology://audio-level",
+        refresh_hint: RefreshHint::Periodic { ms: TICK_MS },
         sensitivity: Sensitivity::Capture,
         buffer_policy: BufferPolicy::Refuse,
         max_len: None,
@@ -135,6 +175,11 @@ pub struct MicrophoneAdapter {
     reg: Mutex<Registry>,
     source_path: PathBuf,
     sample_rate: u32,
+    /// Publishing node id — prefixes the canonical emission paths.
+    node_id: String,
+    /// When true, also emit the legacy flat `substrate/sensor/mic`
+    /// path (WEFT-438 migration window).
+    dual_emit_legacy: bool,
 }
 
 impl Default for MicrophoneAdapter {
@@ -145,7 +190,8 @@ impl Default for MicrophoneAdapter {
 
 impl MicrophoneAdapter {
     /// Build an adapter reading from the default file-backed source
-    /// at `/tmp/weftos/mic/stream.raw`, 16 kHz mono s16le.
+    /// at `/tmp/weftos/mic/stream.raw`, 16 kHz mono s16le, under the
+    /// host-local node id with legacy dual-emit enabled.
     pub fn new() -> Self {
         Self::with_source(
             PathBuf::from("/tmp/weftos/mic/stream.raw"),
@@ -161,7 +207,30 @@ impl MicrophoneAdapter {
             reg: Mutex::new(Registry::new()),
             source_path,
             sample_rate,
+            node_id: HOST_LOCAL_NODE_ID.to_string(),
+            dual_emit_legacy: DEFAULT_DUAL_EMIT_LEGACY,
         }
+    }
+
+    /// Override the publishing node id (default
+    /// [`HOST_LOCAL_NODE_ID`]). Use the daemon's provisioned identity
+    /// for multi-node meshes.
+    pub fn with_node_id(mut self, node_id: impl Into<String>) -> Self {
+        self.node_id = node_id.into();
+        self
+    }
+
+    /// Control legacy flat dual-emit (default
+    /// [`DEFAULT_DUAL_EMIT_LEGACY`]). Pass `false` after the 0.9.0 cut
+    /// or in tests that assert a pure node-scoped tree.
+    pub fn with_dual_emit_legacy(mut self, dual: bool) -> Self {
+        self.dual_emit_legacy = dual;
+        self
+    }
+
+    /// Publishing node id this adapter emits under.
+    pub fn node_id(&self) -> &str {
+        &self.node_id
     }
 }
 
@@ -180,11 +249,12 @@ impl OntologyAdapter for MicrophoneAdapter {
     }
 
     async fn open(&self, topic: &str, _args: Value) -> Result<Subscription, AdapterError> {
-        // Both declared topics share the same producer loop — the
-        // poller emits the level payload AND the per-sensor health
-        // report on every tick. Subscribing to either gives the caller
-        // the full delta stream; the substrate routes by path.
-        if topic != "substrate/sensor/mic" && topic != "substrate/meta/adapter/mic/healthcheck" {
+        // Level topics (legacy + node-scoped summary/rms) and the
+        // healthcheck share the same producer loop. Subscribing to
+        // any of them yields the full dual-emit delta stream; the
+        // substrate routes by path.
+        let is_health = topic == "substrate/meta/adapter/mic/healthcheck";
+        if !is_health && !is_mic_level_open_topic(topic, &self.node_id) {
             return Err(AdapterError::UnknownTopic(topic.into()));
         }
         let id = {
@@ -197,8 +267,10 @@ impl OntologyAdapter for MicrophoneAdapter {
 
         let source_path = self.source_path.clone();
         let sample_rate = self.sample_rate;
+        let node_id = self.node_id.clone();
+        let dual_emit_legacy = self.dual_emit_legacy;
         tokio::spawn(async move {
-            poll_level(source_path, sample_rate, tx, cancel_rx).await;
+            poll_level(source_path, sample_rate, node_id, dual_emit_legacy, tx, cancel_rx).await;
         });
         Ok(Subscription { id, rx })
     }
@@ -256,11 +328,14 @@ impl PhysicalSensorAdapter for MicrophoneAdapter {
 async fn poll_level(
     source_path: PathBuf,
     sample_rate: u32,
+    node_id: String,
+    dual_emit_legacy: bool,
     tx: mpsc::Sender<StateDelta>,
     mut cancel_rx: oneshot::Receiver<()>,
 ) {
     let mut ticker = tokio::time::interval(Duration::from_millis(TICK_MS));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let plan = mic_level_emit_plan(&node_id, dual_emit_legacy);
 
     // File-read cursor that advances each tick. The file is expected
     // to be a rolling buffer (test, synthetic stream, or mmapped
@@ -297,7 +372,7 @@ async fn poll_level(
                     .and_then(Value::as_str)
                     .map(str::to_string);
                 // If the backing file is missing we emit nothing on the
-                // primary topic. Otherwise we'd overwrite
+                // primary topics. Otherwise we'd overwrite
                 // externally-published values (e.g. from the ESP32 bridge
                 // calling `substrate.publish`) on every tick with
                 // `{available: false, reason: "source-missing"}`, which
@@ -309,12 +384,30 @@ async fn poll_level(
                     last_error = Some("source-missing".into());
                     false
                 } else {
-                    let delta = StateDelta::Replace {
-                        path: "substrate/sensor/mic".to_string(),
-                        value,
-                    };
-                    if tx.send(delta).await.is_err() {
-                        return;
+                    // WEFT-438 dual-emit: summary object + rms scalar
+                    // always; legacy flat when the migration flag is on.
+                    let rms_scalar = value
+                        .get("rms_db")
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    let deltas = [
+                        Some(StateDelta::Replace {
+                            path: plan.summary.clone(),
+                            value: value.clone(),
+                        }),
+                        Some(StateDelta::Replace {
+                            path: plan.rms.clone(),
+                            value: rms_scalar,
+                        }),
+                        plan.legacy.as_ref().map(|legacy| StateDelta::Replace {
+                            path: legacy.clone(),
+                            value,
+                        }),
+                    ];
+                    for delta in deltas.into_iter().flatten() {
+                        if tx.send(delta).await.is_err() {
+                            return;
+                        }
                     }
                     last_emit_ts = now_ms();
                     true
@@ -542,6 +635,20 @@ mod tests {
         assert!(matches!(r, Err(AdapterError::UnknownTopic(_))));
     }
 
+    #[tokio::test]
+    async fn adapter_open_accepts_legacy_and_canonical_level_topics() {
+        let a = MicrophoneAdapter::new();
+        for topic in [
+            LEGACY_MIC_PATH,
+            HOST_LOCAL_MIC_SUMMARY,
+            HOST_LOCAL_MIC_RMS,
+            "substrate/n-other/sensor/mic/summary",
+        ] {
+            let r = a.open(topic, Value::Null).await;
+            assert!(r.is_ok(), "open({topic}) should succeed: {r:?}");
+        }
+    }
+
     #[test]
     fn physical_trait_declares_rate_characterization() {
         let a = MicrophoneAdapter::new();
@@ -572,11 +679,12 @@ mod tests {
     }
 
     #[test]
-    fn declares_both_payload_and_healthcheck_topics() {
-        // WEFT-432: the mic adapter declares the per-sensor
-        // healthcheck topic alongside its level-meter payload.
+    fn declares_payload_and_healthcheck_topics() {
+        // WEFT-438: host-local summary + rms + legacy flat + healthcheck.
         let paths: Vec<&str> = TOPICS.iter().map(|t| t.path).collect();
-        assert!(paths.contains(&"substrate/sensor/mic"));
+        assert!(paths.contains(&HOST_LOCAL_MIC_SUMMARY));
+        assert!(paths.contains(&HOST_LOCAL_MIC_RMS));
+        assert!(paths.contains(&LEGACY_MIC_PATH));
         assert!(paths.contains(&"substrate/meta/adapter/mic/healthcheck"));
     }
 
@@ -599,7 +707,7 @@ mod tests {
         let path = write_pcm(&dir, "silence.raw", &[0i16; 1024]);
         let a = MicrophoneAdapter::with_source(path, 16000);
         let mut sub = a
-            .open("substrate/sensor/mic", Value::Null)
+            .open(HOST_LOCAL_MIC_SUMMARY, Value::Null)
             .await
             .expect("open");
 
@@ -621,6 +729,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn poller_dual_emits_summary_rms_and_legacy() {
+        // WEFT-438: one level tick writes summary + rms (+ legacy).
+        let dir = TempDir::new().unwrap();
+        let path = write_pcm(&dir, "silence.raw", &[0i16; WINDOW_SAMPLES]);
+        let a = MicrophoneAdapter::with_source(path, 16000);
+        let mut sub = a
+            .open(HOST_LOCAL_MIC_SUMMARY, Value::Null)
+            .await
+            .expect("open");
+
+        // Drain the initial health report.
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), sub.rx.recv())
+            .await
+            .expect("recv timed out")
+            .expect("channel closed");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut saw_summary = false;
+        let mut saw_rms = false;
+        let mut saw_legacy = false;
+        while std::time::Instant::now() < deadline {
+            let delta =
+                tokio::time::timeout(std::time::Duration::from_millis(700), sub.rx.recv()).await;
+            let Ok(Some(delta)) = delta else { continue };
+            if let StateDelta::Replace { path, value } = delta {
+                if path == HOST_LOCAL_MIC_SUMMARY {
+                    assert_eq!(value["available"], true);
+                    assert!(value.get("rms_db").is_some());
+                    saw_summary = true;
+                } else if path == HOST_LOCAL_MIC_RMS {
+                    assert!(value.as_f64().is_some() || value.as_i64().is_some());
+                    saw_rms = true;
+                } else if path == LEGACY_MIC_PATH {
+                    assert_eq!(value["available"], true);
+                    saw_legacy = true;
+                }
+            }
+            if saw_summary && saw_rms && saw_legacy {
+                break;
+            }
+        }
+        assert!(
+            saw_summary && saw_rms && saw_legacy,
+            "expected dual-emit summary+rms+legacy (got summary={saw_summary} rms={saw_rms} legacy={saw_legacy})"
+        );
+    }
+
+    #[tokio::test]
+    async fn poller_skips_legacy_when_dual_emit_disabled() {
+        let dir = TempDir::new().unwrap();
+        let path = write_pcm(&dir, "silence.raw", &[0i16; WINDOW_SAMPLES]);
+        let a = MicrophoneAdapter::with_source(path, 16000).with_dual_emit_legacy(false);
+        let mut sub = a
+            .open(HOST_LOCAL_MIC_SUMMARY, Value::Null)
+            .await
+            .expect("open");
+
+        // Drain initial health.
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), sub.rx.recv())
+            .await
+            .expect("recv")
+            .expect("channel");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut saw_summary = false;
+        let mut saw_legacy = false;
+        while std::time::Instant::now() < deadline {
+            let delta =
+                tokio::time::timeout(std::time::Duration::from_millis(700), sub.rx.recv()).await;
+            let Ok(Some(delta)) = delta else { continue };
+            if let StateDelta::Replace { path, .. } = delta {
+                if path == HOST_LOCAL_MIC_SUMMARY {
+                    saw_summary = true;
+                }
+                if path == LEGACY_MIC_PATH {
+                    saw_legacy = true;
+                }
+            }
+            if saw_summary {
+                // Give one more tick window to catch a stray legacy emit.
+                let extra = tokio::time::timeout(
+                    std::time::Duration::from_millis(600),
+                    sub.rx.recv(),
+                )
+                .await;
+                if let Ok(Some(StateDelta::Replace { path, .. })) = extra
+                    && path == LEGACY_MIC_PATH
+                {
+                    saw_legacy = true;
+                }
+                break;
+            }
+        }
+        assert!(saw_summary, "expected canonical summary emit");
+        assert!(!saw_legacy, "legacy path must stay silent when dual-emit off");
+    }
+
+    #[tokio::test]
     async fn poller_emits_degraded_health_report_when_source_missing() {
         // WEFT-432: when the backing audio source is missing, the
         // poller must surface that on the healthcheck path (status:
@@ -628,7 +834,7 @@ mod tests {
         // drops to zero). This is honest reporting per the contract:
         // the sensor *can* tell you it tried to read and failed, even
         // before the §4.2 "down for 10s" threshold trips.
-        // The legacy `substrate/sensor/mic` payload is NOT overwritten
+        // Level paths are NOT overwritten when the source is missing
         // (covered by `missing_source_emits_unavailable`).
         let nonexistent = PathBuf::from("/nonexistent/weftos/mic-test.raw");
         let a = MicrophoneAdapter::with_source(nonexistent, 16000);

@@ -2,11 +2,12 @@
 //!
 //! Every physical device WeftOS integrates (microphone, camera, radar,
 //! speaker, geiger tube, load cell, GPS, IMU, …) wraps its raw sample
-//! stream in an [`OntologyAdapter`] emitting `substrate/sensor/<kind>/*`
-//! topics. The extension trait [`PhysicalSensorAdapter`] adds the
-//! hardware-specific metadata those adapters share: bus / interface,
-//! units, range, calibration, and — critically — a declared
-//! [`Characterization`] level.
+//! stream in an [`OntologyAdapter`] emitting
+//! `substrate/<node-id>/sensor/<kind>/<leaf>` topics (WEFT-438
+//! canonical layout; see [`crate::sensor_paths`]). The extension trait
+//! [`PhysicalSensorAdapter`] adds the hardware-specific metadata those
+//! adapters share: bus / interface, units, range, calibration, and —
+//! critically — a declared [`Characterization`] level.
 //!
 //! ## The spectrometer principle (see
 //! [feedback memory][gcm])

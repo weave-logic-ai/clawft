@@ -93,9 +93,15 @@ pub mod chain;
 /// source needs.
 pub mod physical;
 
+/// Sensor path naming — canonical node-scoped layout + legacy flat
+/// migration helpers (WEFT-438). See [`sensor_paths`].
+pub mod sensor_paths;
+
 /// Microphone reference sensor adapter. File-backed preview stub —
-/// reads signed-16-bit LE PCM from a configurable path and emits
-/// RMS + peak dBFS levels on `substrate/sensor/mic`. Host-audio
+/// reads signed-16-bit LE PCM from a configurable path and dual-emits
+/// RMS + peak levels on the WEFT-438 node-scoped paths
+/// (`substrate/<node>/sensor/mic/{summary,rms}`) plus the legacy flat
+/// `substrate/sensor/mic` during the migration window. Host-audio
 /// (CPAL / ALSA / CoreAudio / WASAPI) backing lands in a follow-up.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mic;
@@ -145,5 +151,15 @@ pub use healthcheck::{
     HealthGranularity, NodeHealth, RebootReason, SensorHealth, Status as HealthStatus,
     classify_value as classify_health_value, node_health_derived_path, node_health_path,
     node_health_raw_path, sensor_health_derived_path, sensor_health_path, sensor_health_raw_path,
+};
+pub use sensor_paths::{
+    DEFAULT_DUAL_EMIT_LEGACY, HOST_LOCAL_MIC_PCM_CHUNK, HOST_LOCAL_MIC_RMS, HOST_LOCAL_MIC_SUMMARY,
+    HOST_LOCAL_NODE_ID, LEAF_PCM_CHUNK, LEAF_RMS, LEAF_STATE, LEAF_SUMMARY, LEGACY_FLAT_REMOVAL_DATE,
+    LEGACY_FLAT_REMOVAL_VERSION, LEGACY_MIC_PATH, LEGACY_MIC_PCM_PATH, LEGACY_PRESENCE_PATH,
+    LEGACY_RFKILL_PATH, MESH_OWNED_SEGMENTS, SENSOR_MIC, SENSOR_PRESENCE, SENSOR_RFKILL,
+    SensorPathKind, classify_sensor_path, is_legacy_flat_sensor_path, is_mic_level_open_topic,
+    is_node_scoped_sensor_path, legacy_sensor_leaf_path, legacy_sensor_path, legacy_to_canonical,
+    mic_level_emit_plan, mic_pcm_chunk_path, mic_rms_path, mic_summary_path, sensor_leaf_path,
+    sensor_pcm_chunk_path, sensor_rms_path, sensor_state_path, sensor_summary_path, MicLevelEmitPlan,
 };
 pub use snapshot::{OntologySnapshot, Substrate};

@@ -19,7 +19,8 @@ layout = "rows"
 
 [[panels]]
 title = "Microphone stream"
-substrate_path = "substrate/sensor/mic"
+# WEFT-438 canonical host-local summary (legacy flat dual-emitted until 0.9.0)
+substrate_path = "substrate/host-local/sensor/mic/summary"
 viewer_hint = "auto"
 min_height = 140
 

@@ -24,11 +24,11 @@
 //! ```
 //!
 //! The example spins up an in-process [`SubstrateService`] + the
-//! [`WhisperService`], then publishes the WAV's PCM to
-//! [`clawft_service_whisper::SUBSTRATE_PCM_INPUT_PATH`] in chunks. It
-//! prints every transcript the service emits on
-//! the configured `output_path_derived` until the WAV is exhausted +
-//! a short grace window elapses.
+//! [`WhisperService`], then publishes the WAV's PCM to the node-scoped
+//! PCM path (`pcm_chunk_input_path("n-test00")`) in chunks. It prints
+//! every transcript the service emits on the configured
+//! `output_path_derived` until the WAV is exhausted + a short grace
+//! window elapses.
 //!
 //! This is deliberately a stand-alone example rather than wired into
 //! the daemon. Wiring to the live daemon is a single additional step
@@ -43,7 +43,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use clawft_kernel::SubstrateService;
 use clawft_service_whisper::{
-    SUBSTRATE_PCM_INPUT_PATH, WhisperClient, WhisperConfig, WhisperService, WhisperServiceConfig,
+    WhisperClient, WhisperConfig, WhisperService, WhisperServiceConfig, pcm_chunk_input_path,
     wav::parse_wav,
 };
 use serde_json::{Value, json};
@@ -131,7 +131,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "seq": seq,
             "chunk_ms": chunk_ms,
         });
-        substrate.publish(Some("publish_wav"), SUBSTRATE_PCM_INPUT_PATH, payload);
+        // WEFT-438: publish under the same node-scoped path the default
+        // WhisperServiceConfig subscribes to (n-test00).
+        let pcm_path = pcm_chunk_input_path("n-test00");
+        substrate.publish(Some("publish_wav"), &pcm_path, payload);
 
         // Pace ourselves to wall-clock so we don't flood: sleep until
         // the (seq * chunk_ms) mark.

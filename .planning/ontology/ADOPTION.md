@@ -280,3 +280,76 @@ This direction produces several ADR-sized decisions, each deferred to its own do
 - `~/dev/vector-synth/docs/modules/bus/` — ~200 ⊃μBus module specs (first concrete Object Types)
 - `~/dev/vector-synth/crates/vector-synth-core/src/patch_graph/` — patch-graph data model (consumer of `ui://graph`)
 - `docs/handoff.md` — session state including the INMP441 MEMS swap and mic race fix context
+
+## 16. Sensor path layout — node-scoped is canonical (WEFT-438)
+
+**Decision (2026-07-30):** physical-sensor emissions use the **node-scoped**
+path layout. The pre-node-identity **legacy flat** layout is dual-emitted
+during a single migration window and removed at **0.9.0** (target date
+2026-10-01).
+
+### Canonical form
+
+```text
+substrate/<node-id>/sensor/<sensor-name>/<leaf>
+```
+
+| Emission | Canonical path |
+|---|---|
+| Mic level object | `substrate/<node-id>/sensor/mic/summary` |
+| Mic RMS scalar (gauge / tray discovery) | `substrate/<node-id>/sensor/mic/rms` |
+| Mic PCM window | `substrate/<node-id>/sensor/mic/pcm_chunk` |
+| Presence / rfkill state | `substrate/<node-id>/sensor/<name>/state` |
+| Sensor health (HEALTHCHECK-CONTRACT) | `substrate/<node-id>/health/sensor/<name>` |
+
+Host-local adapters that have no provisioned identity yet publish under
+the reserved node id `host-local` (see
+`clawft_substrate::sensor_paths::HOST_LOCAL_NODE_ID`).
+
+### Mesh-owned namespaces (not node-scoped)
+
+These stay at the mesh root and are **not** sensors:
+
+```text
+substrate/{kernel,cluster,chain,meta,_derived,actor,ui}/…
+```
+
+### Legacy flat form (deprecated)
+
+```text
+substrate/sensor/<sensor-name>
+substrate/sensor/<sensor-name>/<leaf>
+```
+
+Examples: `substrate/sensor/mic`, `substrate/sensor/mic/pcm_chunk`.
+
+### Compatibility shim
+
+| Mechanism | Behaviour | Removal |
+|---|---|---|
+| Dual-emit from `MicrophoneAdapter` | Writes summary + rms always; also writes legacy flat when `DEFAULT_DUAL_EMIT_LEGACY` is true | Flip default / ship 0.9.0 |
+| Legacy open topic | `open("substrate/sensor/mic")` still accepted | Reject after 0.9.0 |
+| `legacy_to_canonical` helper | Maps flat → node-scoped under a chosen node id | Kept as utility |
+| Whisper `SUBSTRATE_PCM_INPUT_PATH` | Marked `#[deprecated]`; prefer `pcm_chunk_input_path(node)` | Remove constant at 0.9.0 |
+
+**Why not a hard cut with zero shim?** JOURNALED-NODE-ESP32 §7 preferred a
+hard cut on the ESP32 write path. Host-local adapters and fixtures still
+bind the flat path; a one-minor dual-emit window lets WEFT-418 (mic pcm
+topic) and task 24 (per-node write gate) land without breaking in-tree
+surfaces mid-0.8.x. ESP32 firmware continues to publish node-scoped only
+(no flat dual-emit on-device).
+
+### Code owners
+
+- Path builders / classify / dual-emit plan:
+  `crates/clawft-substrate/src/sensor_paths.rs`
+- First migrated emitter: `crates/clawft-substrate/src/mic.rs`
+- Whisper consumer helper: `clawft_service_whisper::pcm_chunk_input_path`
+- Planning sources: `.planning/sensors/JOURNALED-SENSOR-MIC.md`,
+  `JOURNALED-NODE-ESP32.md` §7
+
+### Unblocks
+
+- WEFT-418 — mic adapter pcm topic under node-scoped paths
+- Task 24 / per-node write gate on `substrate.publish`
+- Consistent ACL (ADR-057) + signed-envelope (ADR-063) assumptions

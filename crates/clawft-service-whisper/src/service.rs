@@ -1,8 +1,9 @@
 //! Substrate-connected whisper pipeline.
 //!
 //! Binds a [`WhisperClient`](crate::WhisperClient) to an in-process
-//! [`SubstrateService`]: subscribes to
-//! [`crate::SUBSTRATE_PCM_INPUT_PATH`], windows incoming PCM, posts to
+//! [`SubstrateService`]: subscribes to the node-scoped PCM path
+//! (`substrate/<source>/sensor/mic/pcm_chunk` via
+//! [`crate::pcm_chunk_input_path`]), windows incoming PCM, posts to
 //! `/inference`, and publishes transcripts to the mesh-canonical
 //! `substrate/_derived/transcript/<source>/mic` (configured via
 //! [`WhisperServiceConfig::output_path_derived`]).
@@ -36,7 +37,7 @@ use serde_json::{Value, json};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
 
-use crate::SUBSTRATE_PCM_INPUT_PATH;
+use crate::pcm_chunk_input_path;
 use crate::audit::TranscriptAuditEvent;
 use crate::client::{TranscribeError, WhisperClient};
 use crate::wav::write_wav;
@@ -159,7 +160,8 @@ impl Default for WhisperServiceConfig {
             window_ms: 2_000,
             retry_backoff: Duration::from_millis(500),
             node_id: "n-test00".to_string(),
-            input_path: SUBSTRATE_PCM_INPUT_PATH.to_string(),
+            // WEFT-438: node-scoped PCM path (not the legacy flat constant).
+            input_path: pcm_chunk_input_path("n-test00"),
             output_path_derived: "substrate/_derived/transcript/n-test00/mic".to_string(),
             output_path_legacy: Some("substrate/n-test00/derived/transcript/mic".to_string()),
             service_enabled: Arc::new(AtomicBool::new(true)),
