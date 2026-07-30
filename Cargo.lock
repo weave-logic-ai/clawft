@@ -1322,6 +1322,7 @@ dependencies = [
  "clawft-platform",
  "clawft-plugin",
  "clawft-plugin-treesitter",
+ "clawft-substrate",
  "clawft-treecalc",
  "clawft-types",
  "cognitum-gate-tilezero",

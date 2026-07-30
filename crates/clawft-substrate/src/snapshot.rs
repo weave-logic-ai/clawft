@@ -22,6 +22,7 @@ use serde_json::Value;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::task::JoinHandle;
 
+use crate::acl::{AclDenied, AclTable, CallerIdentity, plan_publish_public};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::adapter::{AdapterError, OntologyAdapter, SubId};
 use crate::delta::StateDelta;
@@ -138,12 +139,24 @@ struct TrackedSub {
 
 /// Substrate state tree — aggregates deltas from all subscribed
 /// adapters.
+///
+/// # ADR-057 read ACLs
+///
+/// The optional [`AclTable`] gates identity-aware reads via
+/// [`Substrate::get_for`] / [`Substrate::snapshot_for`]. Internal
+/// adapter drain paths use the ungated [`Substrate::get`] /
+/// [`Substrate::apply`] so producers are not subject to their own
+/// read ACLs. Callers that surface values to remote subscribers MUST
+/// use the `*_for` variants.
 pub struct Substrate {
     state: RwLock<BTreeMap<String, Value>>,
     /// `path → max_len` overrides applied on every `Append`. Seeded
     /// from each adapter's [`crate::TopicDecl::max_len`] at subscribe
     /// time. `None`/missing means unbounded.
     max_lens: RwLock<BTreeMap<String, usize>>,
+    /// Per-path read ACL table (ADR-057). `None` until
+    /// [`Substrate::set_acl`] / [`Substrate::with_acl`] installs one.
+    acl: RwLock<Option<AclTable>>,
     #[cfg(not(target_arch = "wasm32"))]
     subscriptions: Mutex<Vec<TrackedSub>>,
 }
@@ -155,14 +168,120 @@ impl Default for Substrate {
 }
 
 impl Substrate {
-    /// Construct an empty substrate.
+    /// Construct an empty substrate (no ACL table — open reads until
+    /// [`Substrate::set_acl`] is called).
     pub fn new() -> Self {
         Self {
             state: RwLock::new(BTreeMap::new()),
             max_lens: RwLock::new(BTreeMap::new()),
+            acl: RwLock::new(None),
             #[cfg(not(target_arch = "wasm32"))]
             subscriptions: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Construct a substrate with boot-time ACL defaults for `mesh_id`
+    /// (ADR-057 §Default ACL).
+    pub fn with_acl_defaults(mesh_id: impl Into<String>) -> Self {
+        let s = Self::new();
+        s.set_acl(AclTable::with_boot_defaults(mesh_id));
+        s
+    }
+
+    /// Install (or replace) the read ACL table.
+    pub fn set_acl(&self, table: AclTable) {
+        *self.acl.write() = Some(table);
+    }
+
+    /// Install an ACL table; builder-style.
+    pub fn with_acl(self, table: AclTable) -> Self {
+        *self.acl.write() = Some(table);
+        self
+    }
+
+    /// Whether an ACL table is installed.
+    pub fn has_acl(&self) -> bool {
+        self.acl.read().is_some()
+    }
+
+    /// Number of explicit ACL rules (0 if no table).
+    pub fn acl_rule_count(&self) -> usize {
+        self.acl.read().as_ref().map(AclTable::len).unwrap_or(0)
+    }
+
+    /// Check read access for `caller` on `path` under the installed ACL.
+    ///
+    /// When no ACL table is installed, this is a no-op allow (legacy
+    /// open mode). Daemon / mesh hosts MUST install boot defaults.
+    pub fn check_read(
+        &self,
+        path: &str,
+        caller: &CallerIdentity,
+        op: &str,
+    ) -> Result<(), AclDenied> {
+        let guard = self.acl.read();
+        match guard.as_ref() {
+            Some(table) => table.check(path, caller, op),
+            None => Ok(()),
+        }
+    }
+
+    /// Identity-aware single-path read (ADR-057).
+    ///
+    /// Returns [`AclDenied`] when the caller fails the path ACL. A
+    /// successful check with a missing path returns `Ok(None)` —
+    /// distinct from denial so clients cannot probe existence via
+    /// error-shape alone only when the path is readable; denied paths
+    /// always return `acl_denied` regardless of presence.
+    pub fn get_for(
+        &self,
+        path: &str,
+        caller: &CallerIdentity,
+    ) -> Result<Option<Value>, AclDenied> {
+        self.check_read(path, caller, "read")?;
+        Ok(self.get(path))
+    }
+
+    /// Identity-aware full snapshot. Filters out paths the caller may
+    /// not read. Does not error on individual denials — omitted paths
+    /// are simply absent (list-style redaction).
+    pub fn snapshot_for(&self, caller: &CallerIdentity) -> OntologySnapshot {
+        let full = self.snapshot();
+        let guard = self.acl.read();
+        let Some(table) = guard.as_ref() else {
+            return full;
+        };
+        let mut filtered = OntologySnapshot::empty();
+        for (path, value) in full.iter() {
+            if table.check(path, caller, "read").is_ok() {
+                filtered.put(path.clone(), value.clone());
+            }
+        }
+        filtered
+    }
+
+    /// Opt a path into public readability (ADR-057 `publish_public`).
+    ///
+    /// Writes `value` at `path` and seals an `allow: ["public"]` rule
+    /// on the exact path. Requires an ACL table to be installed; if
+    /// none exists, the value is still written and a fresh table is
+    /// created to hold the public rule.
+    pub fn publish_public(&self, path: impl Into<String>, value: Value) {
+        let path = path.into();
+        let plan = plan_publish_public(&path, None);
+        {
+            let mut guard = self.acl.write();
+            if guard.is_none() {
+                *guard = Some(AclTable::new());
+            }
+            if let Some(table) = guard.as_mut() {
+                table.publish_public(&plan.path);
+            }
+        }
+        self.apply(StateDelta::Replace {
+            path: plan.path,
+            value,
+        });
     }
 
     /// Apply a single delta.

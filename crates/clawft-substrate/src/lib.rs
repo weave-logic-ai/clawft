@@ -35,6 +35,7 @@
 #![deny(rust_2018_idioms)]
 #![warn(missing_docs)]
 
+pub mod acl;
 pub mod adapter;
 pub mod delta;
 pub mod health;
@@ -112,6 +113,10 @@ pub mod rfkill;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod presence;
 
+pub use acl::{
+    AclDenied, AclRule, AclTable, CallerIdentity, PublishPublicPlan, READ_DENIED_EVENT,
+    plan_publish_public,
+};
 pub use adapter::{
     AdapterError, BufferPolicy, OntologyAdapter, PermissionReq, RefreshHint, Sensitivity, SubId,
     Subscription, TopicDecl,

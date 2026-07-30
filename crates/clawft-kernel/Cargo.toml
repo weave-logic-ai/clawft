@@ -76,6 +76,8 @@ clawft-types = { workspace = true, default-features = false }
 clawft-platform = { workspace = true, default-features = false }
 clawft-plugin = { workspace = true, default-features = false }
 clawft-plugin-treesitter = { workspace = true, features = ["rust", "typescript"], optional = true }
+# ADR-057 per-path read ACLs — shared table/types with the ontology substrate.
+clawft-substrate = { workspace = true }
 dashmap = { workspace = true }
 tokio = { workspace = true, optional = true }
 tokio-util = { workspace = true, optional = true }

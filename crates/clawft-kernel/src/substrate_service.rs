@@ -18,14 +18,26 @@
 //! # Egress gating
 //!
 //! All reads/subscribes pass through [`SubstrateService::egress_check`]
-//! — the single seam where a future governance policy will gate
-//! `Capture`-tier topics on per-caller capability grants. For M1.5
-//! bring-up this is a log-but-allow stub so adapters can land before
-//! the policy layer is live.
+//! which enforces:
+//!
+//! 1. **ADR-057 per-path ACLs** — deny-by-default for `sensor/**` and
+//!    actor private subtrees; public for cluster/health/meta/chain.
+//! 2. **Sensitivity tier** — `Capture` still requires an authenticated
+//!    caller (bring-up residual until grants land).
+//!
+//! ACL rejections surface as [`EgressDenied::acl_denied`] with a wire
+//! message starting with `acl_denied:` so clients can distinguish them
+//! from path-not-found. Authenticated denials are recorded for ExoChain
+//! emission (`substrate.read.denied`).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use std::sync::Mutex;
+
+use clawft_substrate::{
+    AclDenied, AclTable, CallerIdentity, READ_DENIED_EVENT, plan_publish_public,
+};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -134,12 +146,65 @@ pub struct SubstrateListSnapshot {
 pub struct EgressDenied {
     /// Short failure reason.
     pub reason: String,
+    /// When set, this is an ADR-057 ACL denial (wire code `acl_denied`).
+    pub acl: Option<AclDenied>,
+}
+
+impl EgressDenied {
+    /// Construct a sensitivity / legacy egress denial.
+    pub fn sensitivity(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            acl: None,
+        }
+    }
+
+    /// Construct an ADR-057 ACL denial.
+    pub fn acl_denied(denied: AclDenied) -> Self {
+        let reason = denied.wire_message();
+        Self {
+            reason,
+            acl: Some(denied),
+        }
+    }
+
+    /// Whether this denial is a path-ACL rejection (vs sensitivity).
+    pub fn is_acl_denied(&self) -> bool {
+        self.acl.is_some() || self.reason.starts_with(AclDenied::CODE)
+    }
+
+    /// Wire error string for the IPC envelope. ACL denials keep the
+    /// `acl_denied:` prefix so clients can branch without parsing prose.
+    pub fn wire_message(&self) -> String {
+        if let Some(ref a) = self.acl {
+            a.wire_message()
+        } else if self.reason.starts_with(AclDenied::CODE) {
+            self.reason.clone()
+        } else {
+            format!("unauthorized: {}", self.reason)
+        }
+    }
 }
 
 impl std::fmt::Display for EgressDenied {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "egress denied: {}", self.reason)
+        f.write_str(&self.wire_message())
     }
+}
+
+impl From<AclDenied> for EgressDenied {
+    fn from(d: AclDenied) -> Self {
+        Self::acl_denied(d)
+    }
+}
+
+/// Buffered `substrate.read.denied` event awaiting ExoChain append.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AclDenialEvent {
+    /// Event kind (always [`READ_DENIED_EVENT`]).
+    pub kind: String,
+    /// Chain payload.
+    pub payload: Value,
 }
 
 /// Reason the node-identity write gate rejected a publish.
@@ -205,6 +270,10 @@ pub struct SubstrateService {
 struct SubstrateInner {
     entries: DashMap<String, Entry>,
     global_tick: AtomicU64,
+    /// ADR-057 per-path read ACL table.
+    acl: Mutex<AclTable>,
+    /// Authenticated ACL denials buffered for ExoChain emission.
+    denial_log: Mutex<Vec<AclDenialEvent>>,
 }
 
 impl Default for SubstrateService {
@@ -214,14 +283,75 @@ impl Default for SubstrateService {
 }
 
 impl SubstrateService {
-    /// Create a new, empty service.
+    /// Create a new service with ADR-057 boot-default ACLs for the
+    /// local mesh id `"local"`. Prefer [`Self::with_mesh_id`] when the
+    /// real mesh id is known at construction.
     pub fn new() -> Self {
+        Self::with_mesh_id("local")
+    }
+
+    /// Create a service seeded with ADR-057 defaults for `mesh_id`.
+    pub fn with_mesh_id(mesh_id: impl Into<String>) -> Self {
         Self {
             inner: Arc::new(SubstrateInner {
                 entries: DashMap::new(),
                 global_tick: AtomicU64::new(0),
+                acl: Mutex::new(AclTable::with_boot_defaults(mesh_id)),
+                denial_log: Mutex::new(Vec::new()),
             }),
         }
+    }
+
+    /// Replace the ACL table (tests / mesh re-bootstrap).
+    pub fn set_acl_table(&self, table: AclTable) {
+        *self.inner.acl.lock().expect("acl mutex") = table;
+    }
+
+    /// Opt a path into public readability (ADR-057 `publish_public`).
+    ///
+    /// Seals `allow: ["public"]` on the exact path and publishes
+    /// `value` under the legacy ungated publish path. Prefer the
+    /// signed [`Self::publish_gated`] flow for production node writes;
+    /// this helper is the ergonomic opt-out of default-private sensor
+    /// posture after a successful gated publish.
+    pub fn publish_public(&self, path: &str, value: Value) -> u64 {
+        let mesh_id = self
+            .inner
+            .acl
+            .lock()
+            .expect("acl mutex")
+            .mesh_id()
+            .map(str::to_string);
+        let plan = plan_publish_public(path, mesh_id.as_deref());
+        self.inner
+            .acl
+            .lock()
+            .expect("acl mutex")
+            .publish_public(&plan.path);
+        self.publish(None, &plan.path, value)
+    }
+
+    /// Drain buffered ACL denial events (for ExoChain append by the
+    /// daemon dispatch loop). Authenticated denials only.
+    pub fn take_acl_denials(&self) -> Vec<AclDenialEvent> {
+        std::mem::take(&mut *self.inner.denial_log.lock().expect("denial_log mutex"))
+    }
+
+    /// Record an authenticated ACL denial for later chain emission.
+    fn record_acl_denial(&self, denied: &AclDenied) {
+        // ADR-057: chain-log authenticated denials; rate-limit-summarize
+        // anonymous (we simply skip anonymous here).
+        if denied.caller == "anonymous" {
+            return;
+        }
+        self.inner
+            .denial_log
+            .lock()
+            .expect("denial_log mutex")
+            .push(AclDenialEvent {
+                kind: READ_DENIED_EVENT.to_string(),
+                payload: denied.chain_payload(),
+            });
     }
 
     /// Declare (or re-declare) the sensitivity level for a path.
@@ -238,18 +368,33 @@ impl SubstrateService {
         entry.sensitivity = sensitivity;
     }
 
-    /// Egress gate stub.
+    /// Egress gate: ADR-057 path ACL then sensitivity tier.
     ///
-    /// For bring-up: log every `Capture` read/subscribe but allow
-    /// it. A future governance commit wires this to the
-    /// capability-grant layer. This is intentionally the *one* seam
-    /// the policy will gate, so callers need not change.
+    /// This is intentionally the *one* seam the policy will gate, so
+    /// callers need not change when grants land for Capture.
     pub fn egress_check(
         &self,
         caller: Option<&str>,
         path: &str,
         op: &str,
     ) -> Result<(), EgressDenied> {
+        let identity = CallerIdentity::parse(caller);
+
+        // 1. Per-path ACL (ADR-057).
+        if let Err(denied) = self.inner.acl.lock().expect("acl mutex").check(path, &identity, op)
+        {
+            self.record_acl_denial(&denied);
+            warn!(
+                path,
+                caller = %denied.caller,
+                op,
+                reason = %denied.reason,
+                "substrate acl denied"
+            );
+            return Err(EgressDenied::acl_denied(denied));
+        }
+
+        // 2. Sensitivity tier (Capture still requires identity).
         let sensitivity = self
             .inner
             .entries
@@ -258,12 +403,10 @@ impl SubstrateService {
             .unwrap_or(Sensitivity::Workspace);
 
         if sensitivity.requires_caller_identity() && caller.is_none() {
-            return Err(EgressDenied {
-                reason: format!(
-                    "{op} on {path} (sensitivity={}) requires authenticated caller",
-                    sensitivity.as_str()
-                ),
-            });
+            return Err(EgressDenied::sensitivity(format!(
+                "{op} on {path} (sensitivity={}) requires authenticated caller",
+                sensitivity.as_str()
+            )));
         }
 
         if sensitivity == Sensitivity::Capture {
@@ -271,10 +414,16 @@ impl SubstrateService {
                 path,
                 caller = ?caller,
                 op,
-                "substrate egress: capture-tier path accessed (allow-all stub)"
+                "substrate egress: capture-tier path accessed"
             );
         } else {
-            debug!(path, caller = ?caller, op, sensitivity = sensitivity.as_str(), "substrate egress ok");
+            debug!(
+                path,
+                caller = ?caller,
+                op,
+                sensitivity = sensitivity.as_str(),
+                "substrate egress ok"
+            );
         }
         Ok(())
     }
@@ -358,9 +507,10 @@ impl SubstrateService {
         // Depth 0 — just the exact-match node.
         if depth == 0 {
             if let Some((_, sens)) = value_paths.iter().find(|(p, _)| *p == norm_prefix) {
-                // Respect capture-tier gate on the entry itself.
-                if egress_permits(caller, *sens) {
-                    let child_count = count_descendants(&value_paths, &norm_prefix, caller);
+                // Respect capture-tier + ACL on the entry itself.
+                if egress_permits(caller, *sens) && list_path_visible(self, caller, &norm_prefix) {
+                    let child_count =
+                        count_descendants(self, &value_paths, &norm_prefix, caller);
                     return Ok(SubstrateListSnapshot {
                         children: vec![SubstrateListEntry {
                             path: norm_prefix,
@@ -386,6 +536,7 @@ impl SubstrateService {
         } else if let Some((_, sens)) = value_paths.iter().find(|(p, _)| *p == norm_prefix)
             && is_leaf(&value_paths, &norm_prefix)
             && egress_permits(caller, *sens)
+            && list_path_visible(self, caller, &norm_prefix)
         {
             return Ok(SubstrateListSnapshot {
                 children: vec![SubstrateListEntry {
@@ -407,6 +558,9 @@ impl SubstrateService {
             if !egress_permits(caller, *sens) {
                 continue;
             }
+            if !list_path_visible(self, caller, path) {
+                continue;
+            }
             // Only consider strict descendants of the prefix (or, for
             // empty prefix, all paths).
             let Some(rest) = strict_descendant_rest(path, &norm_prefix) else {
@@ -423,6 +577,10 @@ impl SubstrateService {
             let max_level = (depth as usize).min(tail_segs.len());
             for level in 1..=max_level {
                 let ancestor = join_with_prefix(&norm_prefix, &tail_segs[..level]);
+                // Hide intermediate ancestors the caller cannot list.
+                if !list_path_visible(self, caller, &ancestor) {
+                    continue;
+                }
                 let is_exact_value_leaf = level == tail_segs.len();
                 let entry = buckets.entry(ancestor).or_insert(false);
                 if is_exact_value_leaf {
@@ -434,7 +592,7 @@ impl SubstrateService {
         let children: Vec<SubstrateListEntry> = buckets
             .into_iter()
             .map(|(path, has_value)| SubstrateListEntry {
-                child_count: count_descendants(&value_paths, &path, caller),
+                child_count: count_descendants(self, &value_paths, &path, caller),
                 path,
                 has_value,
             })
@@ -714,8 +872,9 @@ fn is_leaf(value_paths: &[(String, Sensitivity)], path: &str) -> bool {
 }
 
 /// Count all descendants of `path` that carry a value and are visible
-/// to `caller` under the egress rules.
+/// to `caller` under the egress + ACL rules.
 fn count_descendants(
+    svc: &SubstrateService,
     value_paths: &[(String, Sensitivity)],
     path: &str,
     caller: Option<&str>,
@@ -725,6 +884,9 @@ fn count_descendants(
         if !egress_permits(caller, *sens) {
             continue;
         }
+        if !list_path_visible(svc, caller, p) {
+            continue;
+        }
         if strict_descendant_rest(p, path).is_some() {
             n = n.saturating_add(1);
         }
@@ -732,12 +894,23 @@ fn count_descendants(
     n
 }
 
-/// Mirror of [`SubstrateService::egress_check`]'s accept/deny logic for
+/// Mirror of sensitivity half of [`SubstrateService::egress_check`] for
 /// a path whose sensitivity we already know. Used by `list` so we can
 /// skip capture-tier children for anonymous callers without taking a
-/// second DashMap lookup per entry.
+/// second DashMap lookup per entry. ACL checks are applied separately
+/// via [`list_path_visible`].
 fn egress_permits(caller: Option<&str>, sensitivity: Sensitivity) -> bool {
     !(sensitivity.requires_caller_identity() && caller.is_none())
+}
+
+/// Whether `path` is visible to `caller` under the service ACL table.
+fn list_path_visible(svc: &SubstrateService, caller: Option<&str>, path: &str) -> bool {
+    svc.inner
+        .acl
+        .lock()
+        .expect("acl mutex")
+        .check_raw(path, caller, "list")
+        .is_ok()
 }
 
 fn build_update_line(
@@ -808,7 +981,7 @@ mod tests {
         let svc = SubstrateService::new();
         svc.declare("substrate/mic/frames", Sensitivity::Capture);
         let err = svc.read(None, "substrate/mic/frames").unwrap_err();
-        assert!(err.reason.contains("requires authenticated"));
+        assert!(err.reason.contains("requires authenticated") || err.wire_message().contains("requires authenticated"));
     }
 
     #[test]
@@ -816,6 +989,103 @@ mod tests {
         let svc = SubstrateService::new();
         svc.declare("substrate/mic/frames", Sensitivity::Capture);
         assert!(svc.read(Some("aid-1"), "substrate/mic/frames").is_ok());
+    }
+
+    // ── ADR-057 path ACLs ───────────────────────────────────────────
+
+    #[test]
+    fn acl_sensor_denies_anonymous_and_foreign_actor() {
+        let svc = SubstrateService::with_mesh_id("mesh-test");
+        let path = "substrate/n-esp32/sensor/mic/pcm_chunk";
+        svc.publish(Some("n-esp32"), path, serde_json::json!({"pcm": true}));
+
+        let err = svc.read(None, path).unwrap_err();
+        assert!(err.is_acl_denied(), "expected acl_denied, got: {}", err);
+        assert!(err.wire_message().starts_with("acl_denied:"));
+
+        let err2 = svc
+            .read(Some("actor:a-watch1"), path)
+            .unwrap_err();
+        assert!(err2.is_acl_denied());
+        // Authenticated denial is buffered for ExoChain.
+        let events = svc.take_acl_denials();
+        assert!(
+            events.iter().any(|e| e.kind == clawft_substrate::READ_DENIED_EVENT),
+            "expected substrate.read.denied event"
+        );
+    }
+
+    #[test]
+    fn acl_sensor_allows_owning_node_and_admin() {
+        let svc = SubstrateService::with_mesh_id("mesh-test");
+        let path = "substrate/n-esp32/sensor/mic/pcm_chunk";
+        svc.publish(Some("n-esp32"), path, serde_json::json!(1));
+
+        let snap = svc.read(Some("node:n-esp32"), path).unwrap();
+        assert_eq!(snap.value, Some(serde_json::json!(1)));
+
+        let snap = svc.read(Some("scope:admin"), path).unwrap();
+        assert_eq!(snap.value, Some(serde_json::json!(1)));
+    }
+
+    #[test]
+    fn acl_meta_public_sensor_private_integration() {
+        // ADR-057 MUST-HAVE integration: subscriber sees meta, not mic.
+        let svc = SubstrateService::with_mesh_id("mesh-test");
+        svc.publish(
+            Some("n-esp32"),
+            "substrate/n-esp32/meta",
+            serde_json::json!({"fw": "1.0"}),
+        );
+        svc.publish(
+            Some("n-esp32"),
+            "substrate/n-esp32/sensor/mic/pcm_chunk",
+            serde_json::json!({"chunk": 0}),
+        );
+
+        let watch = Some("actor:a-watch1");
+        let meta = svc.read(watch, "substrate/n-esp32/meta").unwrap();
+        assert!(meta.value.is_some());
+        assert!(svc
+            .subscribe(watch, "substrate/n-esp32/sensor/mic/pcm_chunk")
+            .is_err());
+    }
+
+    #[test]
+    fn acl_publish_public_opts_sensor_out() {
+        let svc = SubstrateService::with_mesh_id("mesh-test");
+        let path = "substrate/n-esp32/sensor/mic/rms";
+        svc.publish_public(path, serde_json::json!({"rms_db": -20}));
+        let snap = svc.read(None, path).unwrap();
+        assert_eq!(snap.value, Some(serde_json::json!({"rms_db": -20})));
+    }
+
+    #[test]
+    fn acl_list_hides_private_sensor_children() {
+        let svc = SubstrateService::with_mesh_id("mesh-test");
+        svc.publish(
+            Some("n-1"),
+            "substrate/n-1/meta",
+            serde_json::json!({"ok": true}),
+        );
+        svc.publish(
+            Some("n-1"),
+            "substrate/n-1/sensor/mic",
+            serde_json::json!({"rms": 1}),
+        );
+
+        let list = svc
+            .list(None, "substrate/n-1", 2)
+            .unwrap();
+        let paths: Vec<&str> = list.children.iter().map(|c| c.path.as_str()).collect();
+        assert!(
+            paths.iter().any(|p| p.ends_with("/meta")),
+            "meta should be listed: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|p| p.contains("/sensor")),
+            "sensor must not leak to anonymous list: {paths:?}"
+        );
     }
 
     #[test]
@@ -1057,8 +1327,10 @@ mod tests {
             .publish_gated(Some("n1"), "substrate/n1/sensor/mic", serde_json::json!(42))
             .expect("valid prefix accepted");
         assert_eq!(tick, 1);
-        // And the value is readable back.
-        let snap = svc.read(None, "substrate/n1/sensor/mic").unwrap();
+        // Sensor path is private (ADR-057) — owning node may read it back.
+        let snap = svc
+            .read(Some("node:n1"), "substrate/n1/sensor/mic")
+            .unwrap();
         assert_eq!(snap.value, Some(serde_json::json!(42)));
     }
 
@@ -1127,8 +1399,9 @@ mod tests {
     #[test]
     fn publish_gated_fans_out_to_subscribers() {
         let svc = SubstrateService::new();
+        // ADR-057: sensor/** requires owning node (or scope:admin).
         let (_id, mut rx) = svc
-            .subscribe(Some("aid"), "substrate/n1/sensor/mic")
+            .subscribe(Some("node:n1"), "substrate/n1/sensor/mic")
             .unwrap();
         svc.publish_gated(
             Some("n1"),
