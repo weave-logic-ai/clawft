@@ -174,13 +174,32 @@ pub struct IdentityLoader {
 }
 
 impl IdentityLoader {
-    /// Build a loader rooted at the given workspace directory. The
-    /// workspace is the daemon CWD by default (plan §15.4 — soon
-    /// `agent.workspace_root` config key).
+    /// Build a loader rooted at the given workspace directory.
+    ///
+    /// The workspace is typically the resolved
+    /// [`clawft_types::config::AgentsConfig::workspace_root`]
+    /// (WEFT-83 / plan §15.4). When that config key is unset, callers
+    /// pass the daemon process CWD.
     pub fn new(workspace: impl Into<PathBuf>) -> Self {
         Self {
             workspace: workspace.into(),
         }
+    }
+
+    /// Build a loader from [`clawft_types::config::AgentsConfig`].
+    ///
+    /// Uses `agents.workspace_root` when present; otherwise falls back
+    /// to `std::env::current_dir()` (back-compat with pre-WEFT-83
+    /// daemons).
+    pub fn from_agents_config(
+        agents: &clawft_types::config::AgentsConfig,
+    ) -> std::io::Result<Self> {
+        Ok(Self::new(agents.resolve_workspace_root()?))
+    }
+
+    /// Return the workspace root this loader reads from.
+    pub fn workspace(&self) -> &Path {
+        &self.workspace
     }
 
     /// Load the current identity from `<workspace>/.clawft/`.
@@ -324,6 +343,49 @@ mod tests {
 
         let loader = IdentityLoader::new(tmp.path());
         assert!(loader.current().is_none());
+    }
+
+    #[test]
+    fn two_workspaces_load_distinct_identities() {
+        // WEFT-83: configure two workspace roots with different identity
+        // files; IdentityLoader (driven by agents.workspace_root) must
+        // resolve each independently — not the process CWD.
+        let alpha = tempfile::tempdir().unwrap();
+        let beta = tempfile::tempdir().unwrap();
+        for (root, soul, id) in [
+            (alpha.path(), "soul-alpha", "id-alpha"),
+            (beta.path(), "soul-beta", "id-beta"),
+        ] {
+            let clawft = root.join(".clawft");
+            std::fs::create_dir_all(&clawft).unwrap();
+            std::fs::write(clawft.join("SOUL.md"), soul).unwrap();
+            std::fs::write(clawft.join("IDENTITY.md"), id).unwrap();
+        }
+
+        let mut cfg_alpha = clawft_types::config::AgentsConfig::default();
+        cfg_alpha.workspace_root = Some(alpha.path().to_path_buf());
+        let mut cfg_beta = clawft_types::config::AgentsConfig::default();
+        cfg_beta.workspace_root = Some(beta.path().to_path_buf());
+
+        let loader_a = IdentityLoader::from_agents_config(&cfg_alpha).unwrap();
+        let loader_b = IdentityLoader::from_agents_config(&cfg_beta).unwrap();
+
+        let id_a = loader_a.current().expect("alpha identity");
+        let id_b = loader_b.current().expect("beta identity");
+        assert_eq!(id_a.soul, "soul-alpha");
+        assert_eq!(id_b.soul, "soul-beta");
+        assert_ne!(id_a.hash, id_b.hash);
+        assert_eq!(loader_a.workspace(), alpha.path());
+        assert_eq!(loader_b.workspace(), beta.path());
+    }
+
+    #[test]
+    fn from_agents_config_falls_back_to_cwd_when_unset() {
+        let cwd = std::env::current_dir().unwrap();
+        let cfg = clawft_types::config::AgentsConfig::default();
+        assert!(cfg.workspace_root.is_none());
+        let loader = IdentityLoader::from_agents_config(&cfg).unwrap();
+        assert_eq!(loader.workspace(), cwd.as_path());
     }
 
     // ── FileIdentityProvider tests ────────────────────────────────
