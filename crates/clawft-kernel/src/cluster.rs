@@ -157,6 +157,18 @@ pub struct ClusterConfig {
     /// Path to Ed25519 identity key file.
     #[serde(default)]
     pub identity_key_path: Option<std::path::PathBuf>,
+
+    /// Max `add_peer` calls allowed per source within
+    /// [`Self::peer_add_window_ms`] (WEFT-148).
+    ///
+    /// `0` disables peer-add rate limiting. Default: 1.
+    #[serde(default = "default_peer_add_max_per_source")]
+    pub peer_add_max_per_source: u32,
+
+    /// Sliding window for peer-add rate limiting, in milliseconds.
+    /// Default: 100.
+    #[serde(default = "default_peer_add_window_ms")]
+    pub peer_add_window_ms: u64,
 }
 
 fn default_node_name() -> String {
@@ -179,6 +191,14 @@ fn default_unreachable_threshold() -> u32 {
     10
 }
 
+fn default_peer_add_max_per_source() -> u32 {
+    crate::rate_limit::DEFAULT_PEER_ADD_RATE.max_per_window
+}
+
+fn default_peer_add_window_ms() -> u64 {
+    crate::rate_limit::DEFAULT_PEER_ADD_RATE.window.as_millis() as u64
+}
+
 impl Default for ClusterConfig {
     fn default() -> Self {
         Self {
@@ -192,11 +212,22 @@ impl Default for ClusterConfig {
             bind_address: None,
             seed_peers: Vec::new(),
             identity_key_path: None,
+            peer_add_max_per_source: default_peer_add_max_per_source(),
+            peer_add_window_ms: default_peer_add_window_ms(),
         }
     }
 }
 
 impl ClusterConfig {
+    /// Build a [`crate::rate_limit::RateLimitConfig`] from the peer-add
+    /// rate-limit fields (WEFT-148).
+    pub fn peer_add_rate_config(&self) -> crate::rate_limit::RateLimitConfig {
+        crate::rate_limit::RateLimitConfig {
+            max_per_window: self.peer_add_max_per_source,
+            window: Duration::from_millis(self.peer_add_window_ms),
+        }
+    }
+
     /// Recommend the heartbeat / gossip interval (seconds), consulting
     /// an optional learned
     /// [`GossipTimingModel`](crate::eml_kernel::GossipTimingModel).
@@ -413,10 +444,8 @@ fn default_peers_file_version() -> u32 {
 pub struct ClusterMembership {
     config: ClusterConfig,
     peers: DashMap<NodeId, PeerNode>,
-    /// Timestamp of last peer addition (rate limiting).
-    last_peer_add: std::sync::Mutex<Option<Instant>>,
-    /// Minimum interval between peer additions.
-    min_peer_add_interval: std::time::Duration,
+    /// Per-source rate limiter for `add_peer` (WEFT-148).
+    peer_add_limiter: crate::rate_limit::KeyedRateLimiter,
     /// Optional path for peer membership persistence.
     ///
     /// When set, mutations (add/remove/state-change) are reflected to disk
@@ -433,12 +462,17 @@ pub struct ClusterMembership {
 
 impl ClusterMembership {
     /// Create a new cluster membership tracker.
+    ///
+    /// Peer-add rate limiting is initialised from
+    /// [`ClusterConfig::peer_add_rate_config`] (defaults: 1 per source
+    /// per 100 ms).
     pub fn new(config: ClusterConfig) -> Self {
+        let peer_add_limiter =
+            crate::rate_limit::KeyedRateLimiter::new(config.peer_add_rate_config());
         Self {
             config,
             peers: DashMap::new(),
-            last_peer_add: std::sync::Mutex::new(None),
-            min_peer_add_interval: std::time::Duration::from_millis(100),
+            peer_add_limiter,
             persist_path: std::sync::Mutex::new(None),
             #[cfg(feature = "exochain")]
             chain: None,
@@ -461,10 +495,47 @@ impl ClusterMembership {
         self
     }
 
-    /// Set the minimum interval between peer additions (builder style).
-    pub fn with_min_peer_interval(mut self, interval: std::time::Duration) -> Self {
-        self.min_peer_add_interval = interval;
+    /// Set the minimum interval between peer additions from the *same*
+    /// source (builder style).
+    ///
+    /// `Duration::ZERO` disables rate limiting (used by unit tests).
+    /// Non-zero intervals configure a per-source limit of 1 addition
+    /// per `interval`. Prefer [`Self::with_peer_add_rate_limit`] for
+    /// multi-count windows.
+    pub fn with_min_peer_interval(self, interval: std::time::Duration) -> Self {
+        if interval.is_zero() {
+            self.with_peer_add_rate_limit(crate::rate_limit::RateLimitConfig::unlimited())
+        } else {
+            self.with_peer_add_rate_limit(crate::rate_limit::RateLimitConfig {
+                max_per_window: 1,
+                window: interval,
+            })
+        }
+    }
+
+    /// Configure the per-source `add_peer` rate limit (WEFT-148).
+    pub fn with_peer_add_rate_limit(
+        self,
+        config: crate::rate_limit::RateLimitConfig,
+    ) -> Self {
+        self.peer_add_limiter.set_config(config);
         self
+    }
+
+    /// Current peer-add rate-limit configuration.
+    pub fn peer_add_rate_limit(&self) -> crate::rate_limit::RateLimitConfig {
+        self.peer_add_limiter.config()
+    }
+
+    /// Resolve the rate-limit source key for a peer.
+    ///
+    /// Prefers network `address` when present (so one host flooding many
+    /// node IDs still hits the same bucket); falls back to peer `id`.
+    pub fn peer_add_source_key(peer: &PeerNode) -> &str {
+        match &peer.address {
+            Some(addr) if !addr.is_empty() => addr.as_str(),
+            _ => peer.id.as_str(),
+        }
     }
 
     /// Enable peer persistence at the given path (builder style).
@@ -571,8 +642,11 @@ impl ClusterMembership {
 
     /// Register a peer node.
     ///
-    /// Rate-limited to at most one addition per `min_peer_add_interval`
-    /// (default 100 ms) to prevent join-flood attacks.
+    /// Rate-limited **per source** (WEFT-148): by default at most one
+    /// addition per source per 100 ms. Source key is the peer's network
+    /// address when set, otherwise its node id. Thresholds are
+    /// configurable via [`ClusterConfig`] /
+    /// [`Self::with_peer_add_rate_limit`].
     pub fn add_peer(&self, peer: PeerNode) -> Result<(), ClusterError> {
         // Governance gate: check policy before allowing peer addition.
         #[cfg(feature = "exochain")]
@@ -595,15 +669,10 @@ impl ClusterMembership {
             }
         }
 
-        // Rate-limit peer additions.
-        {
-            let mut last = self.last_peer_add.lock().unwrap();
-            if let Some(ts) = *last
-                && ts.elapsed() < self.min_peer_add_interval
-            {
-                return Err(ClusterError::RateLimited);
-            }
-            *last = Some(Instant::now());
+        // Rate-limit peer additions per source (WEFT-148).
+        let source = Self::peer_add_source_key(&peer);
+        if !self.peer_add_limiter.check(source) {
+            return Err(ClusterError::RateLimited);
         }
 
         if self.peers.contains_key(&peer.id) {
@@ -1515,20 +1584,71 @@ mod tests {
         assert!(config.bind_address.is_none());
         assert!(config.seed_peers.is_empty());
         assert!(config.identity_key_path.is_none());
+        // WEFT-148 defaults
+        assert_eq!(config.peer_add_max_per_source, 1);
+        assert_eq!(config.peer_add_window_ms, 100);
+        assert!(config.peer_add_rate_config().is_enabled());
     }
 
     #[test]
     fn rate_limited_peer_additions() {
-        // Use the default 100ms rate limit (do NOT use make_cluster here).
+        // Use the default per-source rate limit (do NOT use make_cluster here).
+        // make_peer assigns the same address → same source key.
         let cluster = ClusterMembership::new(ClusterConfig::default());
         cluster.add_peer(make_peer("node-1", "alpha")).unwrap();
 
-        // Second add immediately should be rate limited.
+        // Second add from the same source immediately should be rate limited.
         let result = cluster.add_peer(make_peer("node-2", "beta"));
         assert!(
             matches!(result, Err(ClusterError::RateLimited)),
             "expected RateLimited, got {result:?}"
         );
+    }
+
+    #[test]
+    fn rate_limit_is_per_source_not_global() {
+        // Different addresses are independent sources (WEFT-148).
+        let cluster = ClusterMembership::new(ClusterConfig::default());
+        let mut a = make_peer("node-1", "alpha");
+        a.address = Some("10.0.0.1:8080".into());
+        let mut b = make_peer("node-2", "beta");
+        b.address = Some("10.0.0.2:8080".into());
+
+        cluster.add_peer(a).unwrap();
+        // Different source must still succeed under default 1/100ms limit.
+        cluster.add_peer(b).unwrap();
+        assert_eq!(cluster.len(), 2);
+    }
+
+    #[test]
+    fn rate_limit_configurable_threshold() {
+        // Allow 2 adds per source per long window.
+        let cluster = ClusterMembership::new(ClusterConfig::default())
+            .with_peer_add_rate_limit(crate::rate_limit::RateLimitConfig {
+                max_per_window: 2,
+                window: Duration::from_secs(60),
+            });
+        cluster.add_peer(make_peer("node-1", "alpha")).unwrap();
+        cluster.add_peer(make_peer("node-2", "beta")).unwrap();
+        let third = cluster.add_peer(make_peer("node-3", "gamma"));
+        assert!(
+            matches!(third, Err(ClusterError::RateLimited)),
+            "expected RateLimited on third same-source add, got {third:?}"
+        );
+    }
+
+    #[test]
+    fn rate_limit_source_key_prefers_address() {
+        let mut peer = make_peer("node-1", "alpha");
+        peer.address = Some("192.168.1.5:9470".into());
+        assert_eq!(
+            ClusterMembership::peer_add_source_key(&peer),
+            "192.168.1.5:9470"
+        );
+        peer.address = None;
+        assert_eq!(ClusterMembership::peer_add_source_key(&peer), "node-1");
+        peer.address = Some(String::new());
+        assert_eq!(ClusterMembership::peer_add_source_key(&peer), "node-1");
     }
 
     #[test]

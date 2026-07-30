@@ -341,10 +341,17 @@ pub struct GovernanceResult {
 /// Evaluates actions against governance rules and the environment's
 /// risk threshold. Without the `governance` feature gate, all
 /// evaluations return `Permit`.
+///
+/// Evaluation requests are rate-limited **per principal** (WEFT-148)
+/// to stop flood/DoS against the governance path. Defaults are
+/// generous enough for normal agent tool loops; configure via
+/// [`GovernanceEngine::with_eval_rate_limit`].
 pub struct GovernanceEngine {
     rules: Vec<GovernanceRule>,
     risk_threshold: f64,
     human_approval_required: bool,
+    /// Per-principal evaluation rate limiter (WEFT-148).
+    eval_limiter: crate::rate_limit::KeyedRateLimiter,
     /// Optional learned scorer (Finding #5). When `None` the engine
     /// scores effect vectors with the hardcoded L2 norm; when set and
     /// trained the scorer's learned composite is used instead.
@@ -362,19 +369,63 @@ impl GovernanceEngine {
             rules: Vec::new(),
             risk_threshold,
             human_approval_required,
+            eval_limiter: crate::rate_limit::KeyedRateLimiter::new(
+                crate::rate_limit::DEFAULT_GOVERNANCE_EVAL_RATE,
+            ),
             #[cfg(feature = "ecc")]
             scorer: None,
         }
     }
 
     /// Create an open governance engine that permits everything.
+    ///
+    /// Still rate-limits evaluations per principal by default so an
+    /// open policy cannot be used as a free DoS amplifier.
     pub fn open() -> Self {
         Self {
             rules: Vec::new(),
             risk_threshold: 1.0,
             human_approval_required: false,
+            eval_limiter: crate::rate_limit::KeyedRateLimiter::new(
+                crate::rate_limit::DEFAULT_GOVERNANCE_EVAL_RATE,
+            ),
             #[cfg(feature = "ecc")]
             scorer: None,
+        }
+    }
+
+    /// Configure the per-principal evaluation rate limit (WEFT-148).
+    ///
+    /// `RateLimitConfig::unlimited()` disables enforcement (tests).
+    pub fn with_eval_rate_limit(
+        self,
+        config: crate::rate_limit::RateLimitConfig,
+    ) -> Self {
+        self.set_eval_rate_limit(config);
+        self
+    }
+
+    /// Replace the evaluation rate-limit configuration in place.
+    pub fn set_eval_rate_limit(&self, config: crate::rate_limit::RateLimitConfig) {
+        self.eval_limiter.set_config(config);
+    }
+
+    /// Current evaluation rate-limit configuration.
+    pub fn eval_rate_limit(&self) -> crate::rate_limit::RateLimitConfig {
+        self.eval_limiter.config()
+    }
+
+    /// Resolve the principal key used for evaluation rate limiting.
+    ///
+    /// Prefers non-empty `agent_id`; falls back to `node_id`.
+    pub fn eval_principal_key(request: &GovernanceRequest) -> &str {
+        if !request.agent_id.is_empty() {
+            request.agent_id.as_str()
+        } else {
+            request
+                .node_id
+                .as_deref()
+                .unwrap_or("")
         }
     }
 
@@ -420,6 +471,9 @@ impl GovernanceEngine {
     /// Evaluate a governance request.
     ///
     /// Decision logic:
+    /// 0. **Rate limit** (WEFT-148): if the principal has exceeded the
+    ///    configured evaluation quota, return `Deny("rate limited: …")`
+    ///    without scoring rules.
     /// 1. If any blocking/critical rule applies, deny.
     /// 2. If effect magnitude exceeds threshold:
     ///    - If human_approval_required, escalate.
@@ -433,6 +487,24 @@ impl GovernanceEngine {
     /// scorer and falls back to the L2 magnitude when no model is
     /// installed or the model is untrained.
     pub fn evaluate(&self, request: &GovernanceRequest) -> GovernanceResult {
+        // WEFT-148: per-principal evaluation rate limit.
+        let principal = Self::eval_principal_key(request);
+        if !self.eval_limiter.check(principal) {
+            debug!(
+                principal = %principal,
+                action = %request.action,
+                "governance evaluation rate limited"
+            );
+            return GovernanceResult {
+                decision: GovernanceDecision::Deny(format!(
+                    "rate limited: evaluation quota exceeded for principal '{principal}'"
+                )),
+                evaluated_rules: Vec::new(),
+                effect: request.effect.clone(),
+                threshold_exceeded: false,
+            };
+        }
+
         #[cfg(feature = "ecc")]
         let magnitude = request.effect.score(self.scorer.as_ref());
         #[cfg(not(feature = "ecc"))]
@@ -960,6 +1032,76 @@ mod tests {
         };
         let result = engine.evaluate(&request);
         assert_eq!(result.decision, GovernanceDecision::Permit);
+    }
+
+    #[test]
+    fn eval_rate_limit_blocks_per_principal() {
+        // WEFT-148: 2 evaluations per principal, then deny.
+        let engine = GovernanceEngine::open().with_eval_rate_limit(
+            crate::rate_limit::RateLimitConfig {
+                max_per_window: 2,
+                window: std::time::Duration::from_secs(60),
+            },
+        );
+        let req = GovernanceRequest::new("agent-flood", "noop");
+        assert_eq!(engine.evaluate(&req).decision, GovernanceDecision::Permit);
+        assert_eq!(engine.evaluate(&req).decision, GovernanceDecision::Permit);
+        let limited = engine.evaluate(&req);
+        match limited.decision {
+            GovernanceDecision::Deny(ref msg) => {
+                assert!(
+                    msg.contains("rate limited"),
+                    "expected rate-limited deny, got {msg}"
+                );
+            }
+            other => panic!("expected Deny(rate limited), got {other:?}"),
+        }
+        assert!(limited.evaluated_rules.is_empty());
+    }
+
+    #[test]
+    fn eval_rate_limit_is_per_principal() {
+        let engine = GovernanceEngine::open().with_eval_rate_limit(
+            crate::rate_limit::RateLimitConfig {
+                max_per_window: 1,
+                window: std::time::Duration::from_secs(60),
+            },
+        );
+        let a = GovernanceRequest::new("agent-a", "noop");
+        let b = GovernanceRequest::new("agent-b", "noop");
+        assert_eq!(engine.evaluate(&a).decision, GovernanceDecision::Permit);
+        // Same principal blocked.
+        assert!(matches!(
+            engine.evaluate(&a).decision,
+            GovernanceDecision::Deny(_)
+        ));
+        // Different principal still allowed.
+        assert_eq!(engine.evaluate(&b).decision, GovernanceDecision::Permit);
+    }
+
+    #[test]
+    fn eval_rate_limit_configurable_and_disableable() {
+        let engine = GovernanceEngine::new(0.5, false).with_eval_rate_limit(
+            crate::rate_limit::RateLimitConfig::unlimited(),
+        );
+        assert!(!engine.eval_rate_limit().is_enabled());
+        let req = GovernanceRequest::new("agent-1", "noop");
+        for _ in 0..20 {
+            assert_eq!(engine.evaluate(&req).decision, GovernanceDecision::Permit);
+        }
+    }
+
+    #[test]
+    fn eval_principal_key_prefers_agent_id() {
+        let mut req = GovernanceRequest::new("agent-x", "act");
+        req = req.with_node_id("node-y");
+        assert_eq!(GovernanceEngine::eval_principal_key(&req), "agent-x");
+        let mut empty_agent = GovernanceRequest::new("", "act");
+        empty_agent.node_id = Some("node-y".into());
+        assert_eq!(
+            GovernanceEngine::eval_principal_key(&empty_agent),
+            "node-y"
+        );
     }
 
     #[test]
