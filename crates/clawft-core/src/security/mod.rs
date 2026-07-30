@@ -241,6 +241,48 @@ pub fn intersect_allowed_tools(skill_tools: &[String], agent_tools: &[String]) -
         .collect()
 }
 
+// ── SEC-SKILL-03b: Filesystem path allowlist intersection ───────────
+
+/// Compute the effective path allowlist as the intersection of a skill's
+/// declared paths and a host agent's paths.
+///
+/// Semantics match [`intersect_allowed_tools`]:
+/// - Empty skill list → host list applies (skill does not further restrict).
+/// - Empty host list → skill list applies (host unrestricted / no FS policy).
+/// - Both non-empty → only paths present in **both** lists (order preserved
+///   from the skill list).
+///
+/// The effective set never exceeds the host set when the host is non-empty:
+/// every returned path is a member of `host_paths`.
+///
+/// Comparison is exact string match after trimming trailing `/` (except
+/// root `/`). Callers that need prefix/canonical containment should
+/// pre-normalize paths before calling.
+pub fn intersect_path_allowlists(skill_paths: &[String], host_paths: &[String]) -> Vec<String> {
+    if skill_paths.is_empty() {
+        return host_paths.to_vec();
+    }
+    if host_paths.is_empty() {
+        return skill_paths.to_vec();
+    }
+    let host_norm: Vec<String> = host_paths.iter().map(|p| normalize_allowlist_path(p)).collect();
+    skill_paths
+        .iter()
+        .filter(|p| host_norm.contains(&normalize_allowlist_path(p)))
+        .cloned()
+        .collect()
+}
+
+/// Normalize a path string for allowlist comparison.
+///
+/// Trims trailing slashes except for the root path `"/"`.
+fn normalize_allowlist_path(path: &str) -> String {
+    if path == "/" {
+        return path.to_string();
+    }
+    path.trim_end_matches('/').to_string()
+}
+
 // ── SEC-SKILL-04: Model string validation ───────────────────────────
 
 /// Validate a model string against security rules.
@@ -850,6 +892,54 @@ mod tests {
         let agent = vec!["Bash".into()];
         let result = intersect_allowed_tools(&skill, &agent);
         assert!(result.is_empty());
+    }
+
+    // ── SEC-SKILL-03b: Path allowlist intersection ───────────────
+
+    #[test]
+    fn path_intersection_both_non_empty() {
+        let skill = vec![".".into(), "/tmp".into()];
+        let host = vec![".".into(), "/home".into(), "/tmp".into()];
+        let result = intersect_path_allowlists(&skill, &host);
+        assert_eq!(result, vec![".", "/tmp"]);
+    }
+
+    #[test]
+    fn path_intersection_broader_host_keeps_skill_minimum() {
+        let skill = vec![".".into()];
+        let host = vec![".".into(), "/home".into(), "/var".into()];
+        let result = intersect_path_allowlists(&skill, &host);
+        assert_eq!(result, vec!["."]);
+    }
+
+    #[test]
+    fn path_intersection_narrower_host_restricts_skill() {
+        let skill = vec![".".into(), "/tmp".into()];
+        let host = vec!["/tmp".into()];
+        let result = intersect_path_allowlists(&skill, &host);
+        assert_eq!(result, vec!["/tmp"]);
+    }
+
+    #[test]
+    fn path_intersection_skill_empty_uses_host() {
+        let host = vec!["/workspace".into()];
+        let result = intersect_path_allowlists(&[], &host);
+        assert_eq!(result, vec!["/workspace"]);
+    }
+
+    #[test]
+    fn path_intersection_host_empty_uses_skill() {
+        let skill = vec![".".into()];
+        let result = intersect_path_allowlists(&skill, &[]);
+        assert_eq!(result, vec!["."]);
+    }
+
+    #[test]
+    fn path_intersection_trailing_slash_normalized() {
+        let skill = vec!["/tmp/".into()];
+        let host = vec!["/tmp".into()];
+        let result = intersect_path_allowlists(&skill, &host);
+        assert_eq!(result, vec!["/tmp/"]);
     }
 
     // ── SEC-SKILL-04: Model string validation ────────────────────
