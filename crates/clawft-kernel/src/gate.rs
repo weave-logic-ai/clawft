@@ -300,6 +300,15 @@ impl GovernanceGate {
         }
     }
 
+    /// Configure per-principal governance-evaluation rate limiting (WEFT-148).
+    pub fn with_eval_rate_limit(
+        self,
+        config: crate::rate_limit::RateLimitConfig,
+    ) -> Self {
+        self.engine.set_eval_rate_limit(config);
+        self
+    }
+
     /// Attach a chain manager for audit logging.
     pub fn with_chain(mut self, cm: std::sync::Arc<crate::chain::ChainManager>) -> Self {
         self.chain = Some(cm);

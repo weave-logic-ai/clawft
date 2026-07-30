@@ -164,6 +164,7 @@ pub mod ipc;
 #[cfg(feature = "native")]
 pub mod node_registry;
 pub mod process;
+pub mod rate_limit;
 pub mod revocation;
 pub mod service;
 #[cfg(all(feature = "native", feature = "exochain"))]
