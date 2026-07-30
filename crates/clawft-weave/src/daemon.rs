@@ -853,10 +853,22 @@ pub async fn run(
         //                     promote` reads back, diffs, and applies
         //                     to SOUL.md on confirmation. Plan
         //                     `agent-core-v1.md` Phase F1/F2.
+        // - `agent`         — agent-core observability under
+        //                     `derived/agent/...` (WEFT-335 router
+        //                     decisions at `agent/routing/recent/<ulid>`;
+        //                     future identity projection may share this
+        //                     topic). TopicPrefix covers the subtree.
         //
-        // Stamping all five here means the parallel branches don't
+        // Stamping all six here means the parallel branches don't
         // each need to touch this grant-issue path.
-        for topic in ["transcript", "classify", "terminal", "chat", "soul_journal"] {
+        for topic in [
+            "transcript",
+            "classify",
+            "terminal",
+            "chat",
+            "soul_journal",
+            "agent",
+        ] {
             match k.node_registry().issue_derived_grant(
                 daemon_identity.node_id.clone(),
                 topic,
@@ -1930,6 +1942,29 @@ pub async fn run(
             Some(composite)
         };
 
+        // WEFT-335: log every ContextRouter::route decision under
+        // `substrate/_derived/agent/routing/recent/<ulid>` (grant topic
+        // `agent`, stamped at boot above). Seeds v1→v2 promotion gate.
+        let routing_log: Option<
+            Arc<dyn clawft_core::agent::routing_log::RouterDecisionLog>,
+        > = {
+            let k = kernel.read().await;
+            let client = Arc::new(clawft_service_agent::KernelSubstrateClient::new(
+                k.substrate_service().clone(),
+                k.node_registry().clone(),
+            ));
+            let writer: Arc<dyn clawft_core::agent::routing_log::RouterDecisionLog> =
+                Arc::new(clawft_service_agent::SubstrateRouterDecisionLog::new(
+                    client,
+                    daemon_identity.node_id.clone(),
+                ));
+            info!(
+                node_id = %daemon_identity.node_id,
+                "agent-core: router decision log attached (substrate/_derived/agent/routing/recent)"
+            );
+            Some(writer)
+        };
+
         let agent_loop = clawft_core::bootstrap::build_daemon_agent_loop(
             llm_for_agent,
             tool_registry,
@@ -1955,6 +1990,7 @@ pub async fn run(
                 p
             }),
             soul_journal,
+            routing_log,
         )
         .await;
 

@@ -47,7 +47,7 @@ use crate::pipeline::traits::{ChatRequest, LlmMessage, PipelineRegistry};
 use crate::tools::registry::ToolRegistry;
 
 use super::context::ContextBuilder;
-use super::context_router::{ContextRequest, ContextRouter, NullRouter};
+use super::context_router::{ContextDecision, ContextRequest, ContextRouter, NullRouter};
 use super::cost_budget::ConversationBudget;
 use super::effects::effect_for_tool;
 use super::gate::{EffectGate, GateDecision, NoopGate};
@@ -580,6 +580,16 @@ pub struct AgentLoop<P: Platform> {
     /// user-visible turn). When `None` (default for CLI / legacy
     /// callers) the loop never writes journal entries.
     soul_journal: Option<Arc<dyn super::soul_journal::SoulJournal>>,
+    /// Optional router-decision observability log (WEFT-335).
+    ///
+    /// When set, every [`ContextRouter::route`] call appends a
+    /// [`super::routing_log::RouterDecisionRecord`] (query, selected
+    /// route, alternatives, confidence, latency) for the v1→v2
+    /// promotion gate. Failures are logged and swallowed — logging
+    /// must never abort the user-visible chat path. When `None`
+    /// (default for CLI / legacy callers) no decision records are
+    /// written.
+    routing_log: Option<Arc<dyn super::routing_log::RouterDecisionLog>>,
 }
 
 impl<P: Platform> AgentLoop<P> {
@@ -628,6 +638,7 @@ impl<P: Platform> AgentLoop<P> {
             daemon_agent_id: None,
             system_prompt_builder: None,
             soul_journal: None,
+            routing_log: None,
             agent_router: None,
             max_delegation_depth: resolve_max_delegation_depth(),
             cost_budget: None,
@@ -757,6 +768,22 @@ impl<P: Platform> AgentLoop<P> {
         journal: Arc<dyn super::soul_journal::SoulJournal>,
     ) -> Self {
         self.soul_journal = Some(journal);
+        self
+    }
+
+    /// Attach a [`RouterDecisionLog`](super::routing_log::RouterDecisionLog)
+    /// so every [`ContextRouter::route`] call is recorded for the
+    /// v1→v2 promotion gate (WEFT-335).
+    ///
+    /// When unset (default), the loop never writes decision records.
+    /// The daemon attaches a grant-gated substrate writer under
+    /// `substrate/_derived/agent/routing/recent/`; tests use
+    /// [`InMemoryRouterDecisionLog`](super::routing_log::InMemoryRouterDecisionLog).
+    pub fn with_routing_log(
+        mut self,
+        log: Arc<dyn super::routing_log::RouterDecisionLog>,
+    ) -> Self {
+        self.routing_log = Some(log);
         self
     }
 
@@ -1195,13 +1222,18 @@ impl<P: Platform> AgentLoop<P> {
         //     Default is NullRouter (no-op); Phase E1 replaces it with
         //     LlmClassifierRouter. By contract, the router NEVER picks
         //     a model — TieredRouter still owns that decision.
+        //     WEFT-335: time the route call and append a decision
+        //     record when a RouterDecisionLog is attached. Log failures
+        //     are non-fatal (degrade, don't crash the chat path).
         let ctx_request = ContextRequest {
             content: msg.content.clone(),
             channel: msg.channel.clone(),
             chat_id: msg.chat_id.clone(),
             metadata: msg.metadata.clone(),
         };
+        let route_started = std::time::Instant::now();
         let ctx_decision = self.context_router.route(&ctx_request).await;
+        let route_latency_ms = route_started.elapsed().as_millis() as u64;
         if !ctx_decision.skills.is_empty()
             || ctx_decision.tool_subset.is_some()
             || ctx_decision.complexity_hint != 0.0
@@ -1210,8 +1242,18 @@ impl<P: Platform> AgentLoop<P> {
                 skills = ?ctx_decision.skills,
                 tool_subset = ?ctx_decision.tool_subset,
                 complexity_hint = ctx_decision.complexity_hint,
+                latency_ms = route_latency_ms,
                 "context router emitted decision"
             );
+        }
+        if let Some(ref rlog) = self.routing_log {
+            self.maybe_append_routing_decision(
+                rlog.as_ref(),
+                &ctx_request,
+                &ctx_decision,
+                route_latency_ms,
+            )
+            .await;
         }
 
         // 1. Hydrate the assembly session from the conversation sink
@@ -1864,6 +1906,66 @@ impl<P: Platform> AgentLoop<P> {
                     error = %e,
                     conv_id = %conv_id,
                     "soul journal: append failed (non-fatal)"
+                );
+            }
+        }
+    }
+
+    /// WEFT-335: append one router decision record. Always fires when
+    /// a log is attached (every `ContextRouter::route` call). Failures
+    /// are logged and swallowed so observability never aborts chat.
+    async fn maybe_append_routing_decision(
+        &self,
+        log: &dyn super::routing_log::RouterDecisionLog,
+        request: &ContextRequest,
+        decision: &ContextDecision,
+        latency_ms: u64,
+    ) {
+        use super::routing_log::RouterDecisionRecord;
+
+        // Routers today don't always surface confidence / alternatives
+        // on `ContextDecision`. Populate what we can; leave the rest
+        // empty so the record still seeds promotion-gate counts +
+        // latency baselines. `fallback_used` comes from the decision
+        // (HybridRouter sets it on fall-through). Optional metadata
+        // keys let tests / future routers enrich confidence + alts.
+        let confidence = request
+            .metadata
+            .get("routing_confidence")
+            .and_then(|v| v.as_f64())
+            .map(|f| f as f32);
+        let alternatives = request
+            .metadata
+            .get("routing_alternatives")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let rec = RouterDecisionRecord::from_route(
+            request,
+            decision,
+            latency_ms,
+            alternatives,
+            confidence,
+            decision.fallback_used,
+        );
+        match log.append(rec).await {
+            Ok(()) => {
+                debug!(
+                    chat_id = %request.chat_id,
+                    latency_ms,
+                    "routing log: decision appended"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    chat_id = %request.chat_id,
+                    "routing log: append failed (non-fatal)"
                 );
             }
         }
@@ -5184,6 +5286,129 @@ mod tests {
             journal.entries().is_empty(),
             "neutral turn must not write journal entries"
         );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    // ── WEFT-335 router decision log ────────────────────────────────
+
+    /// Every handle_turn that hits ContextRouter::route appends one
+    /// decision record when a RouterDecisionLog is attached.
+    #[tokio::test]
+    async fn handle_turn_appends_routing_decision_log() {
+        use crate::agent::routing_log::InMemoryRouterDecisionLog;
+
+        let transport = Arc::new(MockTransport::new("ok"));
+        let (mut agent, dir) =
+            make_agent_loop(transport as Arc<dyn LlmTransport>, "route_log_one").await;
+        let rlog = Arc::new(InMemoryRouterDecisionLog::new());
+        agent = agent.with_routing_log(rlog.clone());
+
+        let inbound = InboundMessage {
+            channel: "panel".into(),
+            sender_id: "user1".into(),
+            chat_id: "chat-route-1".into(),
+            content: "what is this project about?".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        agent.bus.publish_inbound(inbound).unwrap();
+        let msg = agent.bus.consume_inbound().await.unwrap();
+        let _ = agent
+            .handle_turn(msg, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        let entries = rlog.entries();
+        assert_eq!(entries.len(), 1, "one route must produce one log entry");
+        assert_eq!(entries[0].query, "what is this project about?");
+        assert_eq!(entries[0].channel, "panel");
+        assert_eq!(entries[0].chat_id, "chat-route-1");
+        assert!(!entries[0].decision_id.is_empty());
+        // latency is measured; just ensure the field is present (0 is fine
+        // for a NullRouter that returns instantly).
+        let _ = entries[0].latency_ms;
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// 100 routes produce 100 substrate/log entries (AC).
+    #[tokio::test]
+    async fn handle_turn_one_hundred_routes_produce_one_hundred_log_entries() {
+        use crate::agent::routing_log::InMemoryRouterDecisionLog;
+
+        let transport = Arc::new(MockTransport::new("ok"));
+        let (mut agent, dir) =
+            make_agent_loop(transport as Arc<dyn LlmTransport>, "route_log_100").await;
+        let rlog = Arc::new(InMemoryRouterDecisionLog::with_retention(1_000));
+        agent = agent.with_routing_log(rlog.clone());
+
+        for i in 0..100 {
+            let inbound = InboundMessage {
+                channel: "panel".into(),
+                sender_id: "user1".into(),
+                chat_id: format!("chat-route-{i}"),
+                content: format!("query number {i}"),
+                timestamp: chrono::Utc::now(),
+                media: vec![],
+                metadata: HashMap::new(),
+            };
+            agent.bus.publish_inbound(inbound).unwrap();
+            let msg = agent.bus.consume_inbound().await.unwrap();
+            let _ = agent
+                .handle_turn(msg, &CancellationToken::new())
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            rlog.len(),
+            100,
+            "100 routes must produce 100 decision log entries"
+        );
+        let entries = rlog.entries();
+        assert_eq!(entries[0].query, "query number 0");
+        assert_eq!(entries[99].query, "query number 99");
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// Routing-log failure must not abort the chat path.
+    #[tokio::test]
+    async fn handle_turn_survives_routing_log_failure() {
+        use crate::agent::routing_log::{RouterDecisionLog, RouterDecisionRecord};
+        use async_trait::async_trait;
+
+        struct FailingLog;
+        #[async_trait]
+        impl RouterDecisionLog for FailingLog {
+            async fn append(&self, _record: RouterDecisionRecord) -> Result<(), String> {
+                Err("substrate down".into())
+            }
+        }
+
+        let transport = Arc::new(MockTransport::new("still works"));
+        let (mut agent, dir) =
+            make_agent_loop(transport as Arc<dyn LlmTransport>, "route_log_fail").await;
+        agent = agent.with_routing_log(Arc::new(FailingLog));
+
+        let inbound = InboundMessage {
+            channel: "test".into(),
+            sender_id: "user1".into(),
+            chat_id: "chat-route-fail".into(),
+            content: "hello".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        agent.bus.publish_inbound(inbound).unwrap();
+        let msg = agent.bus.consume_inbound().await.unwrap();
+        let outbound = agent
+            .handle_turn(msg, &CancellationToken::new())
+            .await
+            .expect("chat path must succeed even when routing log fails");
+        assert!(outbound.content.contains("still works") || !outbound.content.is_empty());
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

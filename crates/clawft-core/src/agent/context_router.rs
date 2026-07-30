@@ -122,6 +122,13 @@ pub struct ContextDecision {
     /// shelf. Surfaced here so the downstream wiring can land in a
     /// later commit without reshaping the trait.
     pub archetype: Option<String>,
+
+    /// True when a hybrid/fallback arm produced this decision
+    /// (WEFT-335). Seeded by [`HybridRouter`](hybrid::HybridRouter)
+    /// when the primary returns empty and the fallback runs. Surfaced
+    /// on the router-decision log so the v2→v2.5 promotion gate can
+    /// compute fallback rate without re-deriving it from traces.
+    pub fallback_used: bool,
 }
 
 impl ContextDecision {
@@ -130,6 +137,7 @@ impl ContextDecision {
     ///
     /// The `archetype` field is left `None`; classifier routers that
     /// produce an archetype label set it after construction.
+    /// `fallback_used` defaults to `false`.
     pub fn new(
         skills: Vec<String>,
         tool_subset: Option<Vec<String>>,
@@ -140,6 +148,7 @@ impl ContextDecision {
             tool_subset,
             complexity_hint: clamp_complexity(complexity_hint),
             archetype: None,
+            fallback_used: false,
         }
     }
 }
@@ -151,6 +160,7 @@ impl Default for ContextDecision {
             tool_subset: None,
             complexity_hint: 0.0,
             archetype: None,
+            fallback_used: false,
         }
     }
 }
