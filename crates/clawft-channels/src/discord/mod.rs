@@ -13,10 +13,15 @@
 
 pub mod api;
 pub mod channel;
+pub mod chunker;
 pub mod events;
 pub mod factory;
 
 pub use channel::DiscordChannel;
+pub use chunker::{
+    ChunkPlan, ChunkerOptions, EmbedField, EmbedPayload, OutboundChunk, chunk_message, plan_chunks,
+    resolve_max_message_len,
+};
 pub use factory::DiscordChannelFactory;
 
 #[cfg(test)]

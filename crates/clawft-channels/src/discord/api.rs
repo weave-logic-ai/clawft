@@ -9,6 +9,7 @@ use tracing::{debug, warn};
 
 use clawft_types::error::ChannelError;
 
+use super::chunker::EmbedPayload;
 use super::events::RateLimitInfo;
 
 /// Base URL for the Discord REST API v10.
@@ -101,6 +102,132 @@ impl DiscordApiClient {
             );
             tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
         }
+
+        let status = resp.status();
+        if !status.is_success() {
+            let err_body = resp.text().await.unwrap_or_else(|_| "unknown error".into());
+            return Err(ChannelError::SendFailed(format!(
+                "Discord API returned {status}: {err_body}"
+            )));
+        }
+
+        let msg: DiscordMessage = resp
+            .json()
+            .await
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
+
+        Ok(msg.id)
+    }
+
+    /// Send a message with one or more embeds (content may be empty when embeds
+    /// carry the body). Used by the WEFT-169 chunker embed packing path.
+    pub async fn create_message_with_embeds(
+        &self,
+        channel_id: &str,
+        content: &str,
+        embeds: &[EmbedPayload],
+    ) -> Result<String, ChannelError> {
+        let url = format!("{}/channels/{channel_id}/messages", self.base_url);
+        let embed_json: Vec<serde_json::Value> = embeds.iter().map(|e| e.to_json()).collect();
+        let body = serde_json::json!({
+            "content": content,
+            "embeds": embed_json,
+        });
+
+        debug!(
+            channel_id = %channel_id,
+            embed_count = embeds.len(),
+            "creating message with embeds"
+        );
+
+        let resp = self
+            .http
+            .post(&url)
+            .header("Authorization", format!("Bot {}", self.token))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
+
+        let rate_limit = RateLimitInfo::from_headers(resp.headers());
+        if rate_limit.is_limited() {
+            let wait_ms = rate_limit.retry_after_ms().unwrap_or(1000);
+            warn!(
+                wait_ms = wait_ms,
+                "Discord rate limit reached, waiting before retry"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+        }
+
+        let status = resp.status();
+        if !status.is_success() {
+            let err_body = resp.text().await.unwrap_or_else(|_| "unknown error".into());
+            return Err(ChannelError::SendFailed(format!(
+                "Discord API returned {status}: {err_body}"
+            )));
+        }
+
+        let msg: DiscordMessage = resp
+            .json()
+            .await
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
+
+        Ok(msg.id)
+    }
+
+    /// Upload a file attachment with an optional notice as message content.
+    ///
+    /// Multipart form path for Discord `channels/{id}/messages`. When the
+    /// runtime lacks a working multipart client path, this still attempts the
+    /// request; callers should treat failure as non-fatal and fall back to
+    /// text (see [`DiscordChannel::send`](super::channel::DiscordChannel::send)).
+    ///
+    /// Unit tests exercise the *decision* to use file fallback via
+    /// [`plan_chunks`](super::chunker::plan_chunks); this method is the wired
+    /// upload stub.
+    pub async fn create_message_with_file(
+        &self,
+        channel_id: &str,
+        notice: &str,
+        filename: &str,
+        file_bytes: &[u8],
+    ) -> Result<String, ChannelError> {
+        let url = format!("{}/channels/{channel_id}/messages", self.base_url);
+
+        debug!(
+            channel_id = %channel_id,
+            filename = %filename,
+            bytes = file_bytes.len(),
+            "creating message with file attachment"
+        );
+
+        // payload_json part + files[0] part — Discord multipart convention.
+        let payload = serde_json::json!({
+            "content": notice,
+            "attachments": [{
+                "id": 0,
+                "filename": filename,
+            }],
+        });
+
+        let file_part = reqwest::multipart::Part::bytes(file_bytes.to_vec())
+            .file_name(filename.to_owned())
+            .mime_str("text/plain")
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
+
+        let form = reqwest::multipart::Form::new()
+            .text("payload_json", payload.to_string())
+            .part("files[0]", file_part);
+
+        let resp = self
+            .http
+            .post(&url)
+            .header("Authorization", format!("Bot {}", self.token))
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| ChannelError::SendFailed(e.to_string()))?;
 
         let status = resp.status();
         if !status.is_success() {

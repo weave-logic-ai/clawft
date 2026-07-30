@@ -215,6 +215,33 @@ pub struct DiscordConfig {
     /// Gateway intents bitmask.
     #[serde(default = "default_discord_intents")]
     pub intents: u32,
+
+    /// When true, use the Nitro / boosted 4000-character message limit
+    /// instead of the standard 2000. Overridden by [`Self::max_message_length`]
+    /// when that field is set. (WEFT-169)
+    #[serde(default)]
+    pub nitro: bool,
+
+    /// Explicit max message length in characters. When set, takes precedence
+    /// over the standard (2000) / nitro (4000) defaults. Values above 4000 are
+    /// clamped to Discord's hard ceiling. (WEFT-169)
+    #[serde(default, alias = "maxMessageLength")]
+    pub max_message_length: Option<usize>,
+
+    /// After this many text/embed chunks, remaining content is delivered via
+    /// file-upload fallback instead of more sequential messages. Default 10.
+    /// (WEFT-169)
+    #[serde(
+        default = "default_discord_max_chunks_before_file",
+        alias = "maxChunksBeforeFile"
+    )]
+    pub max_chunks_before_file: usize,
+
+    /// Prefer packing long content into embeds (description / fields) when
+    /// beneficial for length. Default false — plain text chunking only.
+    /// (WEFT-169)
+    #[serde(default, alias = "preferEmbeds")]
+    pub prefer_embeds: bool,
 }
 
 fn default_discord_gateway_url() -> String {
@@ -222,6 +249,9 @@ fn default_discord_gateway_url() -> String {
 }
 fn default_discord_intents() -> u32 {
     37377 // GUILDS + GUILD_MESSAGES + DIRECT_MESSAGES + MESSAGE_CONTENT
+}
+fn default_discord_max_chunks_before_file() -> usize {
+    10
 }
 
 impl Default for DiscordConfig {
@@ -233,6 +263,10 @@ impl Default for DiscordConfig {
             allow_from: Vec::new(),
             gateway_url: default_discord_gateway_url(),
             intents: default_discord_intents(),
+            nitro: false,
+            max_message_length: None,
+            max_chunks_before_file: default_discord_max_chunks_before_file(),
+            prefer_embeds: false,
         }
     }
 }
