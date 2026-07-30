@@ -49,7 +49,10 @@ double-buffer = []
 # Pinned to the same esp-hal 1.0 the reference firmware (clawft-edge-pad
 # / Elecrow CrowPanel bringup) uses. `unstable` is required because the
 # LCD_CAM DPI module + raw `regs()` peripheral access are gated on it.
-esp-hal = { version = "1.0.0", default-features = true, features = [
+# WEFT-667: tilde-pin (not caret). esp-hal allows breaking changes to
+# unstable APIs in MINOR releases; ~ locks the minor while unstable is on.
+# Do not revert to caret while the `unstable` feature is enabled.
+esp-hal = { version = "~1.0", default-features = true, features = [
     "esp32s3",
     "unstable",
     "psram",

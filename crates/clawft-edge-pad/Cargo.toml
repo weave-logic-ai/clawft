@@ -20,7 +20,11 @@ publish = false
 [dependencies]
 # ── ESP HAL + runtime ────────────────────────────────────────────────
 # Mirrors infinition/waveshare-watch-rs (the LX7 reference firmware).
-esp-hal = { version = "1.0.0", default-features = true, features = [
+# WEFT-667: tilde-pin (not caret). esp-hal's stability policy allows
+# breaking changes to `unstable` APIs in MINOR releases; caret ^1.0.0
+# would permit those minors. Upstream recommends ~ for unstable users.
+# Do not revert to caret while the `unstable` feature is enabled.
+esp-hal = { version = "~1.0", default-features = true, features = [
     "esp32s3",
     "unstable",
     "psram",
@@ -50,7 +54,9 @@ embedded-hal-bus = "0.3"
 
 # ── WiFi / networking ────────────────────────────────────────────────
 # Needed for substrate.publish over JSON-RPC.
-esp-radio = { version = "0.17.0", features = [
+# WEFT-667: same tilde pin as esp-hal — `unstable` feature enabled;
+# minor bumps may break unstable radio APIs. Keep ~ while unstable.
+esp-radio = { version = "~0.17", features = [
     "esp32s3",
     "wifi",
     "ble",
