@@ -9,13 +9,14 @@ land on the WeftOS side. **Primary source wins; the brain corroborates.**
 
 | Artifact | Path in clone | What it gives you |
 |----------|---------------|-------------------|
-| Capability cards | `kb/capability-cards.md` | One capability-phrased routing card per building block — "reach for X when you need Y". Best entry point. |
-| Per-repo primers | `kb/<repo>-primer.md` | What / capabilities / concepts / maturity / docs / usage, grounded with file-path citations. 18 primers. |
+| Capability cards | `kb/capability-cards.md` | One capability-phrased routing card per building block — "reach for X when you need Y". Best entry point. **33 cards** (was 19; grew 2026-07-13). |
+| Per-repo primers | `kb/<repo>-primer.md` | What / capabilities / concepts / maturity / docs / usage, grounded with file-path citations. **19 primers** (new 07-13: `agentic-qe`). |
+| L2 topic notes | `kb/l2/*.md` | Mid-depth distilled notes between card and primer (agentdb memory end-to-end, RuLake freshness, ruvector HNSW ADRs, guidance mechanism). New layer, 2026-07-13. |
 | Registry | `data/ruvnet-registry.json` | All ~197 ruvnet repos: name, ★, pushed date, lang, one-line desc. |
-| Tier list | `data/registry.tiers.json` | T0–T3 ingest-depth tiers + selection rule (`stars≥1000 OR pushed≤3mo OR core-allowlist`). |
+| Tier list | `data/registry.tiers.json` | T0–T3 ingest-depth tiers + selection rule (`stars≥1000 OR pushed≤3mo OR core-allowlist`). Fully rebuilt 07-13. |
 | Capability JSON | `kb/capability.<repo>.json` | Machine-readable capability facets (ruflo, ruvector, rulake, ruview, agentdb). |
-| Q/A + held-out | `kb/questions.*.json`, `kb/heldout.*.json` | Eval sets used to grade primer groundedness. |
-| Source pins | `kb/SOURCE.json` | Pinned source commits for ingested stores (currently `rvm`). |
+| Q/A + held-out | `kb/questions.*.json`, `kb/heldout.*.json`, `data/grade-*.json` | Eval sets + grades used to gate primer groundedness (120-question Wilson-bound release gate). |
+| Source pins | `kb/SOURCE.json` | **No longer reliable from a bare clone** — records only the author's last local build; real per-store pins ship inside the ~512 MB release bundle. |
 
 ## Active-integration coverage (our focus areas)
 
@@ -23,7 +24,7 @@ land on the WeftOS side. **Primary source wins; the brain corroborates.**
 |--------------------|-------------------|-----------------------|---------------|----------------|
 | **agenticow** | `agenticow-primer.md`, card | `packages/agenticow/overview.md` | **Ours** (142×, ADR-202 bridge, full API) | Actor/hermes-loop memory checkpoint + rollback; exochain lineage |
 | **AgentBBS** | *none* (registry only) | `packages/agentbbs/overview.md` | **Ours** (brain has no primer) | `clawft-substrate` A2A + `clawft-channels`; ed25519 actor identity |
-| **midstream** | *none* (registry only) | `packages/new-libraries-2026-07.md` | **Ours** + primary README | Voice/ECC 50 ms CognitiveTick — mid-stream gate/steer |
+| **midstream** | card (since 07-13; no primer) | `packages/new-libraries-2026-07.md` | **Ours** + primary README | Voice/ECC 50 ms CognitiveTick — mid-stream gate/steer |
 | **metaharness** (agent-harness-generator) | `agent-harness-generator-primer.md`, card | `packages/new-libraries-2026-07.md` | Comparable | Governance/gate patterns, MCP `mcp-scan`, Darwin-mode self-evolution |
 | **RuLake** | `rulake-primer.md`, card | `packages/new-libraries-2026-07.md` | Brain primer is **deeper** (ADR-by-ADR maturity) | Receipt-pinned LLM cache; witness-anchored retrieval |
 | **rvm** | card (rich); `SOURCE.json` pinned @`af97d18` | `packages/new-libraries-2026-07.md` | Brain card is **deeper** (rights, proof tiers, depth) | K3 WASM sandbox / capability tokens / proof-gated mutation (exochain) |
@@ -35,12 +36,16 @@ starting point — but still re-verify against the primary repo before a decisio
 lands. Distilled, verified extracts for the deeper-brain cases are in
 `distilled-notes.md`.
 
-## Broader ecosystem coverage (18 primers)
+## Broader ecosystem coverage (19 primers, 33 cards)
 
 Primers exist for: `ruflo`, `ruvector`, `agentdb`, `rulake`, `ruview`,
 `agentic-flow`, `sparc`, `qudag`, `safla`, `ruv-fann`, `synthlang`, `rupixel`,
-`agenticow`, `cve-bench`, `daa`, `dspy.ts`, `fact`, `agent-harness-generator`.
-Each has a matching capability card in `kb/capability-cards.md`.
+`agenticow`, `cve-bench`, `daa`, `dspy.ts`, `fact`, `agent-harness-generator`,
+and (since 07-13) `agentic-qe`. Each has a matching capability card in
+`kb/capability-cards.md`. Card-only (no primer, since 07-13):
+`agentic-security`, `flow-nexus`, `marketing`, `midstream`, `rudevolution`,
+`ruv-dev`, `sublinear-time-solver`, `symbolic-scribe`, `synaptic-mesh`,
+`cognitum-cogs`, `cognitum-support`, `open-claude-code`.
 
 These overlap our existing `packages/` for `ruvector`, `ruflo`, `qudag`, `daa`
 (via the ruv-researcher charter's own repo set). For those four, our charter
@@ -74,10 +79,11 @@ unnamed. Condensed:
 
 ## Coverage gaps (brain does NOT cover our active integrations well)
 
-- **AgentBBS** — no primer; registry one-liner only. Our
-  `packages/agentbbs/overview.md` is the authority.
-- **midstream** — no primer; registry one-liner only. Our
-  `packages/new-libraries-2026-07.md` + primary README are the authority.
+- **AgentBBS** — STILL no primer or card (checked 07-13); registry one-liner
+  only. Our `packages/agentbbs/overview.md` is the authority.
+- **midstream** — gained a capability card (07-13) but no primer. Our
+  `packages/new-libraries-2026-07.md` + primary README remain the authority for
+  depth; the card is routing-level only.
 - **WeftOS/clawft itself** — the brain is RuvNet-only; it has no knowledge of our
   kernel, ADRs, or phases. It never will — that is what `docs/brain/` and the
   ruvector `weftos/*` namespaces are for.

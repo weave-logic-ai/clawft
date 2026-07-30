@@ -84,3 +84,7 @@ ui/
 # multi-GB, not source. Kept on-disk for reference, never committed.
 .planning/devices/crowpanel-display/CrowPanel-7.0-HMI-ESP32-Display-800x480/
 .planning/devices/crowpanel-display/CrowPanel-ESP32-Display-Course-File/
+# ruvnet-brain plugin local telemetry — per-session hook token ledger
+# (timestamps + byte counts). Machine-local, regenerated on every session,
+# no project value. The brain's DURABLE content lives in .planning/ruv/brain/.
+.ruvnet-brain/
