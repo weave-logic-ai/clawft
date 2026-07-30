@@ -432,6 +432,7 @@ pub use mesh_dedup::DedupFilter;
 #[cfg(feature = "mesh")]
 pub use mesh_discovery::{
     DiscoveredPeer, DiscoveryBackend, DiscoveryCoordinator, DiscoveryError, DiscoverySource,
+    MeshPeerEvent, MeshPeerEventBus,
 };
 #[cfg(feature = "mesh")]
 pub use mesh_framing::{FrameType, MeshFrame};

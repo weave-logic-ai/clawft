@@ -14,6 +14,7 @@ use crate::error::{KernelError, KernelResult};
 use crate::ipc::{KernelMessage, MessagePayload, MessageTarget};
 use crate::mesh_assess::AssessmentTransport;
 use crate::mesh_chain::{ChainSyncRequest, ChainSyncResponse};
+use crate::mesh_discovery::{MeshPeerEvent, MeshPeerEventBus};
 use crate::mesh_heartbeat::{ClockSource, HeartbeatConfig, HeartbeatTracker, MeshClockSync};
 use crate::mesh_ipc::MeshIpcEnvelope;
 use crate::mesh_kad::KademliaTable;
@@ -73,6 +74,11 @@ pub struct MeshRuntime {
     /// `FrameType::AssessmentSync` frames are demuxed into the transport
     /// instead of being treated as MeshIpcEnvelope JSON.
     assessment_transport: std::sync::OnceLock<Arc<AssessmentTransport>>,
+    /// Peer join/leave/health event bus (WEFT-120).
+    ///
+    /// `ClusterService` / `ClusterMembership` subscribe so cluster
+    /// membership tracks live mesh state.
+    peer_events: MeshPeerEventBus,
 }
 
 impl MeshRuntime {
@@ -88,6 +94,7 @@ impl MeshRuntime {
             chain_manager: std::sync::OnceLock::new(),
             mesh_subscriptions: DashMap::new(),
             assessment_transport: std::sync::OnceLock::new(),
+            peer_events: MeshPeerEventBus::new(),
         }
     }
 
@@ -110,7 +117,23 @@ impl MeshRuntime {
             chain_manager: std::sync::OnceLock::new(),
             mesh_subscriptions: DashMap::new(),
             assessment_transport: std::sync::OnceLock::new(),
+            peer_events: MeshPeerEventBus::new(),
         }
+    }
+
+    /// Subscribe to live mesh peer membership / health events (WEFT-120).
+    pub fn subscribe_peer_events(&self) -> tokio::sync::broadcast::Receiver<MeshPeerEvent> {
+        self.peer_events.subscribe()
+    }
+
+    /// Shared peer-event bus (for boot wiring and tests).
+    pub fn peer_event_bus(&self) -> &MeshPeerEventBus {
+        &self.peer_events
+    }
+
+    /// Publish a peer event (used by external discovery / tests).
+    pub fn emit_peer_event(&self, event: MeshPeerEvent) {
+        self.peer_events.emit(event);
     }
 
     /// Attach the assessment transport used for AssessmentSync demux (WEFT-117).
@@ -248,14 +271,32 @@ impl MeshRuntime {
     /// on top of this.
     pub fn add_peer(&self, node_id: String, sender: tokio::sync::mpsc::Sender<Vec<u8>>) {
         debug!(peer = %node_id, "adding peer connection");
+        let was_known = self.peers.contains_key(&node_id);
+        let address = self
+            .discovery
+            .as_ref()
+            .and_then(|d| d.peer_addresses.get(&node_id).map(|a| a.value().clone()));
         self.peers.insert(
             node_id.clone(),
             PeerConnection {
-                node_id,
+                node_id: node_id.clone(),
                 connected_at: chrono::Utc::now(),
                 sender,
             },
         );
+        // WEFT-120: reconnected peers emit Recovered; first connect → Joined.
+        if was_known {
+            self.peer_events.emit(MeshPeerEvent::Recovered {
+                node_id,
+                address,
+            });
+        } else {
+            self.peer_events.emit(MeshPeerEvent::Joined {
+                node_id,
+                address,
+                platform: None,
+            });
+        }
     }
 
     /// Send a [`MeshIpcEnvelope`] to a connected peer.
@@ -491,6 +532,9 @@ impl MeshRuntime {
         if self.peers.remove(node_id).is_some() {
             self.unregister_all_peer_topics(node_id);
             debug!(peer = %node_id, "disconnected peer");
+            self.peer_events.emit(MeshPeerEvent::Left {
+                node_id: node_id.to_owned(),
+            });
         } else {
             warn!(peer = %node_id, "disconnect_peer: peer not found");
         }
@@ -543,10 +587,31 @@ impl MeshRuntime {
     pub fn record_heartbeat(&self, node_id: &str) {
         if let Some(ref disc) = self.discovery {
             let mut hb = disc.heartbeat.lock().unwrap();
-            if hb.peer_state(node_id).is_none() {
+            let prior = hb.peer_state(node_id);
+            if prior.is_none() {
                 hb.add_peer(node_id.to_string());
             }
             hb.record_alive(node_id);
+            // Emit health transitions for cluster membership (WEFT-120).
+            use crate::mesh_heartbeat::HeartbeatState;
+            match prior {
+                Some(HeartbeatState::Suspect) | Some(HeartbeatState::Dead) => {
+                    drop(hb);
+                    self.peer_events.emit(MeshPeerEvent::Recovered {
+                        node_id: node_id.to_owned(),
+                        address: disc
+                            .peer_addresses
+                            .get(node_id)
+                            .map(|a| a.value().clone()),
+                    });
+                }
+                _ => {
+                    drop(hb);
+                    self.peer_events.emit(MeshPeerEvent::Alive {
+                        node_id: node_id.to_owned(),
+                    });
+                }
+            }
         }
     }
 
@@ -607,6 +672,10 @@ impl MeshRuntime {
     }
 
     /// Disconnect peers that the heartbeat tracker considers dead.
+    ///
+    /// Emits [`MeshPeerEvent::Unreachable`] before the connection is
+    /// dropped so cluster membership can mark partition/failure
+    /// separately from a graceful [`MeshPeerEvent::Left`].
     pub fn remove_dead_peers(&self) {
         if let Some(ref disc) = self.discovery {
             let dead: Vec<String> = {
@@ -614,7 +683,15 @@ impl MeshRuntime {
                 hb.dead_peers().into_iter().map(|s| s.to_string()).collect()
             };
             for node_id in &dead {
-                self.disconnect_peer(node_id);
+                self.peer_events.emit(MeshPeerEvent::Unreachable {
+                    node_id: node_id.clone(),
+                });
+                // Disconnect without a second Left event: remove peer map
+                // entry and topics, but treat Unreachable as the bus signal.
+                if self.peers.remove(node_id.as_str()).is_some() {
+                    self.unregister_all_peer_topics(node_id);
+                    debug!(peer = %node_id, "removed dead peer (unreachable)");
+                }
                 disc.peer_addresses.remove(node_id.as_str());
             }
         }
@@ -716,6 +793,143 @@ mod tests {
         rt.add_peer("peer-1".into(), tx);
         assert_eq!(rt.peer_count(), 1);
         assert_eq!(rt.peer_ids(), vec!["peer-1".to_string()]);
+    }
+
+    // ── WEFT-120: peer-event emission ─────────────────────────────
+
+    #[tokio::test]
+    async fn add_peer_emits_joined_event() {
+        use crate::mesh_discovery::MeshPeerEvent;
+        let rt = MeshRuntime::new("local".into());
+        let mut rx = rt.subscribe_peer_events();
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        rt.add_peer("peer-j".into(), tx);
+        let ev = rx.recv().await.unwrap();
+        match ev {
+            MeshPeerEvent::Joined { node_id, .. } => assert_eq!(node_id, "peer-j"),
+            other => panic!("expected Joined, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnect_peer_emits_left_event() {
+        use crate::mesh_discovery::MeshPeerEvent;
+        let rt = MeshRuntime::new("local".into());
+        let mut rx = rt.subscribe_peer_events();
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        rt.add_peer("peer-l".into(), tx);
+        let _ = rx.recv().await.unwrap(); // Joined
+        rt.disconnect_peer("peer-l");
+        let ev = rx.recv().await.unwrap();
+        assert_eq!(
+            ev,
+            MeshPeerEvent::Left {
+                node_id: "peer-l".into()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn re_add_peer_emits_recovered() {
+        use crate::mesh_discovery::MeshPeerEvent;
+        let rt = MeshRuntime::new("local".into());
+        let mut rx = rt.subscribe_peer_events();
+        let (tx1, _rx1) = tokio::sync::mpsc::channel(16);
+        rt.add_peer("peer-r".into(), tx1);
+        let _ = rx.recv().await.unwrap();
+        // Re-register same node_id (reconnect) without disconnecting first
+        // keeps was_known=true → Recovered.
+        let (tx2, _rx2) = tokio::sync::mpsc::channel(16);
+        rt.add_peer("peer-r".into(), tx2);
+        let ev = rx.recv().await.unwrap();
+        match ev {
+            MeshPeerEvent::Recovered { node_id, .. } => assert_eq!(node_id, "peer-r"),
+            other => panic!("expected Recovered, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn remove_dead_peers_emits_unreachable() {
+        use crate::mesh_discovery::MeshPeerEvent;
+        use crate::mesh_heartbeat::{HeartbeatConfig, HeartbeatState};
+        use std::time::Duration;
+
+        let kad = [0u8; 32];
+        let mut rt = MeshRuntime::with_discovery("local".into(), kad);
+        let mut rx = rt.subscribe_peer_events();
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        rt.add_peer("dying".into(), tx);
+        let _ = rx.recv().await.unwrap(); // Joined
+
+        // Force peer to Dead via zero suspect timeout + two misses.
+        {
+            let disc = rt.discovery_mut().unwrap();
+            *disc.heartbeat.lock().unwrap() =
+                crate::mesh_heartbeat::HeartbeatTracker::new(HeartbeatConfig {
+                    suspect_timeout: Duration::ZERO,
+                    ..Default::default()
+                });
+            let mut hb = disc.heartbeat.lock().unwrap();
+            hb.add_peer("dying".into());
+            hb.record_miss("dying"); // Alive → Suspect
+            hb.record_miss("dying"); // Suspect + zero timeout → Dead
+            assert_eq!(hb.peer_state("dying"), Some(HeartbeatState::Dead));
+        }
+
+        rt.remove_dead_peers();
+        let ev = rx.recv().await.unwrap();
+        assert_eq!(
+            ev,
+            MeshPeerEvent::Unreachable {
+                node_id: "dying".into()
+            }
+        );
+        assert_eq!(rt.peer_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn mesh_runtime_events_drive_cluster_membership() {
+        use crate::cluster::{ClusterConfig, ClusterMembership, NodeState};
+        use crate::mesh_discovery::MeshPeerEvent;
+        use std::sync::Arc;
+
+        let membership = Arc::new(
+            ClusterMembership::new(ClusterConfig::default())
+                .with_min_peer_interval(std::time::Duration::ZERO),
+        );
+        let rt = MeshRuntime::new("local".into());
+        membership.spawn_mesh_peer_listener(rt.subscribe_peer_events());
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        rt.add_peer("mesh-peer".into(), tx);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            membership.get_peer("mesh-peer").unwrap().state,
+            NodeState::Active
+        );
+
+        rt.emit_peer_event(MeshPeerEvent::Unreachable {
+            node_id: "mesh-peer".into(),
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            membership.get_peer("mesh-peer").unwrap().state,
+            NodeState::Unreachable
+        );
+
+        // Reconnect after partition.
+        let (tx2, _rx2) = tokio::sync::mpsc::channel(16);
+        // Still in peers map from first add — re-add emits Recovered.
+        rt.add_peer("mesh-peer".into(), tx2);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            membership.get_peer("mesh-peer").unwrap().state,
+            NodeState::Active
+        );
+
+        rt.disconnect_peer("mesh-peer");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(membership.get_peer("mesh-peer").is_none());
     }
 
     // ── Test 3: send envelope to peer (mock channel) ────────────

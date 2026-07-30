@@ -883,6 +883,178 @@ impl ClusterMembership {
             .map(|e| e.key().clone())
             .collect()
     }
+
+    /// Apply a live mesh peer event to membership **atomically** (WEFT-120).
+    ///
+    /// Mesh is the authority for connect/health; this path upserts peers
+    /// without the operator-facing `add_peer` rate limit (mesh already
+    /// authenticated the session). A single event produces one consistent
+    /// membership mutation + one persist.
+    ///
+    /// Returns `true` when membership changed.
+    #[cfg(feature = "mesh")]
+    pub fn apply_mesh_peer_event(
+        &self,
+        event: &crate::mesh_discovery::MeshPeerEvent,
+    ) -> Result<bool, ClusterError> {
+        use crate::mesh_discovery::MeshPeerEvent;
+        match event {
+            MeshPeerEvent::Joined {
+                node_id,
+                address,
+                platform,
+            } => self.mesh_upsert_active(node_id, address.as_deref(), platform.as_deref()),
+            MeshPeerEvent::Recovered { node_id, address } => {
+                self.mesh_upsert_active(node_id, address.as_deref(), None)
+            }
+            MeshPeerEvent::Alive { node_id } => {
+                if self.peers.contains_key(node_id) {
+                    let _ = self.heartbeat(node_id);
+                    if self
+                        .get_peer(node_id)
+                        .map(|p| p.state != NodeState::Active)
+                        .unwrap_or(false)
+                    {
+                        let _ = self.update_state(node_id, NodeState::Active);
+                        return Ok(true);
+                    }
+                    // heartbeat already updated last_heartbeat in-place
+                    Ok(true)
+                } else {
+                    // Alive without prior join — treat as soft join.
+                    self.mesh_upsert_active(node_id, None, None)
+                }
+            }
+            MeshPeerEvent::Suspect { node_id } => {
+                if self.peers.contains_key(node_id) {
+                    self.update_state(node_id, NodeState::Suspect)?;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            MeshPeerEvent::Unreachable { node_id } => {
+                if self.peers.contains_key(node_id) {
+                    self.update_state(node_id, NodeState::Unreachable)?;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            MeshPeerEvent::Left { node_id } => {
+                if self.peers.contains_key(node_id) {
+                    // Mark Left then drop so membership no longer lists the peer.
+                    let _ = self.update_state(node_id, NodeState::Left);
+                    let _ = self.remove_peer(node_id);
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+        }
+    }
+
+    /// Insert-or-activate a peer from mesh (bypasses rate limit).
+    #[cfg(feature = "mesh")]
+    fn mesh_upsert_active(
+        &self,
+        node_id: &str,
+        address: Option<&str>,
+        platform: Option<&str>,
+    ) -> Result<bool, ClusterError> {
+        if let Some(mut entry) = self.peers.get_mut(node_id) {
+            let mut changed = false;
+            if entry.state != NodeState::Active {
+                entry.state = NodeState::Active;
+                changed = true;
+            }
+            entry.last_heartbeat = Utc::now();
+            if let Some(addr) = address
+                && entry.address.as_deref() != Some(addr)
+            {
+                entry.address = Some(addr.to_owned());
+                changed = true;
+            }
+            drop(entry);
+            if changed {
+                self.persist();
+            }
+            return Ok(true);
+        }
+
+        if self.config.max_nodes > 0 && self.peers.len() as u32 >= self.config.max_nodes {
+            return Err(ClusterError::ClusterFull {
+                max: self.config.max_nodes,
+            });
+        }
+
+        let platform = match platform {
+            Some("edge") => NodePlatform::Edge,
+            Some("browser") => NodePlatform::Browser,
+            Some("wasi") => NodePlatform::Wasi,
+            Some(other) if other.starts_with("custom:") => {
+                NodePlatform::Custom(other.trim_start_matches("custom:").to_owned())
+            }
+            Some(other) if other != "cloud-native" && other != "linux" => {
+                NodePlatform::Custom(other.to_owned())
+            }
+            _ => NodePlatform::CloudNative,
+        };
+
+        let now = Utc::now();
+        let peer = PeerNode {
+            id: node_id.to_owned(),
+            name: node_id.to_owned(),
+            platform,
+            state: NodeState::Active,
+            address: address.map(|s| s.to_owned()),
+            first_seen: now,
+            last_heartbeat: now,
+            capabilities: vec!["mesh".into()],
+            labels: HashMap::from([("source".into(), "mesh".into())]),
+        };
+
+        debug!(node_id = %node_id, "mesh peer join → cluster membership");
+        self.peers.insert(node_id.to_owned(), peer);
+        self.persist();
+        Ok(true)
+    }
+
+    /// Drain a mesh peer-event receiver and apply each event (WEFT-120).
+    ///
+    /// Spawns a background task. Intended for boot when `ClusterService`
+    /// is not available (mesh-only builds) or as a shared membership
+    /// path. Prefer [`ClusterService::spawn_mesh_peer_listener`] when
+    /// the cluster feature is on so ruvector nodes stay in sync too.
+    #[cfg(all(feature = "mesh", feature = "native"))]
+    pub fn spawn_mesh_peer_listener(
+        self: &Arc<Self>,
+        mut rx: tokio::sync::broadcast::Receiver<crate::mesh_discovery::MeshPeerEvent>,
+    ) {
+        let membership = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        if let Err(e) = membership.apply_mesh_peer_event(&event) {
+                            debug!(
+                                error = %e,
+                                node = %event.node_id(),
+                                "cluster membership: mesh peer event apply failed"
+                            );
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(skipped = n, "cluster membership: mesh peer event bus lagged");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        info!("cluster membership: mesh peer event bus closed");
+                        break;
+                    }
+                }
+            }
+        });
+    }
 }
 
 // ── Time-windowed pairing (Cognitum Seed Gap #2) ────────────────────
@@ -1149,6 +1321,8 @@ mod cluster_service {
         manager: ClusterManager,
         membership: Arc<ClusterMembership>,
         config: ClusterNetworkConfig,
+        /// True once a mesh peer-event listener has been spawned (WEFT-120).
+        mesh_listener_started: std::sync::atomic::AtomicBool,
     }
 
     impl ClusterService {
@@ -1178,6 +1352,7 @@ mod cluster_service {
                 manager,
                 membership,
                 config,
+                mesh_listener_started: std::sync::atomic::AtomicBool::new(false),
             })
         }
 
@@ -1197,6 +1372,10 @@ mod cluster_service {
         /// Converts ruvector [`ClusterNode`] entries into kernel
         /// [`PeerNode`] entries, mapping `SocketAddr` → `String`
         /// and `NodeStatus` → `NodeState`.
+        ///
+        /// Prefer the mesh peer-event path ([`Self::apply_mesh_peer_event`] /
+        /// [`Self::spawn_mesh_peer_listener`]) for live membership; this
+        /// pull-based method remains for bootstrap and fallback.
         pub fn sync_to_membership(&self) {
             let nodes = self.manager.list_nodes();
             for node in &nodes {
@@ -1213,6 +1392,114 @@ mod cluster_service {
                     }
                 }
             }
+        }
+
+        /// Apply one mesh peer event: membership (atomic) + ruvector manager.
+        ///
+        /// Membership is updated synchronously; manager `add_node` /
+        /// `remove_node` are best-effort fire-and-forget via the runtime
+        /// (call from async context via [`Self::apply_mesh_peer_event_async`]
+        /// when manager updates must complete).
+        #[cfg(feature = "mesh")]
+        pub fn apply_mesh_peer_event(
+            &self,
+            event: &crate::mesh_discovery::MeshPeerEvent,
+        ) -> Result<bool, crate::cluster::ClusterError> {
+            self.membership.apply_mesh_peer_event(event)
+        }
+
+        /// Apply mesh peer event and await ruvector manager join/leave.
+        #[cfg(feature = "mesh")]
+        pub async fn apply_mesh_peer_event_async(
+            &self,
+            event: &crate::mesh_discovery::MeshPeerEvent,
+        ) -> Result<bool, crate::cluster::ClusterError> {
+            use crate::mesh_discovery::MeshPeerEvent;
+            let changed = self.membership.apply_mesh_peer_event(event)?;
+            match event {
+                MeshPeerEvent::Joined {
+                    node_id, address, ..
+                }
+                | MeshPeerEvent::Recovered { node_id, address } => {
+                    let addr: std::net::SocketAddr = address
+                        .as_deref()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
+                    let node = ClusterNode::new(node_id.clone(), addr);
+                    if let Err(e) = self.manager.add_node(node).await {
+                        debug!(error = %e, node = %node_id, "cluster manager: add_node from mesh");
+                    }
+                }
+                MeshPeerEvent::Left { node_id } | MeshPeerEvent::Unreachable { node_id } => {
+                    if let Err(e) = self.manager.remove_node(node_id).await {
+                        debug!(
+                            error = %e,
+                            node = %node_id,
+                            "cluster manager: remove_node from mesh"
+                        );
+                    }
+                }
+                MeshPeerEvent::Alive { .. } | MeshPeerEvent::Suspect { .. } => {}
+            }
+            Ok(changed)
+        }
+
+        /// Subscribe to the mesh peer-event stream and keep membership +
+        /// ruvector manager aligned with live mesh state (WEFT-120).
+        ///
+        /// Idempotent: only one listener task is spawned per service.
+        #[cfg(feature = "mesh")]
+        pub fn spawn_mesh_peer_listener(
+            self: &Arc<Self>,
+            mut rx: tokio::sync::broadcast::Receiver<crate::mesh_discovery::MeshPeerEvent>,
+        ) {
+            use std::sync::atomic::Ordering;
+            if self
+                .mesh_listener_started
+                .swap(true, Ordering::SeqCst)
+            {
+                debug!("cluster service mesh peer listener already started");
+                return;
+            }
+            let svc = Arc::clone(self);
+            tokio::spawn(async move {
+                info!("cluster service subscribed to mesh peer-event stream");
+                loop {
+                    match rx.recv().await {
+                        Ok(event) => {
+                            if let Err(e) = svc.apply_mesh_peer_event_async(&event).await {
+                                debug!(
+                                    error = %e,
+                                    node = %event.node_id(),
+                                    "cluster service: mesh peer event apply failed"
+                                );
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!(
+                                skipped = n,
+                                "cluster service: mesh peer event bus lagged"
+                            );
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            info!("cluster service: mesh peer event bus closed");
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+
+        /// Whether a mesh peer-event listener is attached.
+        #[cfg(feature = "mesh")]
+        pub fn mesh_listener_started(&self) -> bool {
+            self.mesh_listener_started
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// Shared membership handle (tests / boot introspection).
+        pub fn membership(&self) -> &Arc<ClusterMembership> {
+            &self.membership
         }
 
         /// Get the cluster network configuration.
@@ -1905,6 +2192,255 @@ mod tests {
         assert_eq!(cluster.len(), 0);
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    // ── WEFT-120: mesh peer-event → membership ────────────────────
+
+    #[cfg(feature = "mesh")]
+    mod mesh_peer_events {
+        use super::*;
+        use crate::mesh_discovery::MeshPeerEvent;
+
+        #[test]
+        fn mesh_join_adds_active_peer() {
+            let cluster = make_cluster(ClusterConfig::default());
+            let changed = cluster
+                .apply_mesh_peer_event(&MeshPeerEvent::Joined {
+                    node_id: "peer-a".into(),
+                    address: Some("10.0.0.5:9470".into()),
+                    platform: Some("edge".into()),
+                })
+                .unwrap();
+            assert!(changed);
+            let peer = cluster.get_peer("peer-a").expect("joined peer");
+            assert_eq!(peer.state, NodeState::Active);
+            assert_eq!(peer.address.as_deref(), Some("10.0.0.5:9470"));
+            assert_eq!(peer.platform, NodePlatform::Edge);
+            assert!(peer.capabilities.contains(&"mesh".into()));
+        }
+
+        #[test]
+        fn mesh_leave_removes_peer() {
+            let cluster = make_cluster(ClusterConfig::default());
+            cluster
+                .apply_mesh_peer_event(&MeshPeerEvent::Joined {
+                    node_id: "peer-b".into(),
+                    address: None,
+                    platform: None,
+                })
+                .unwrap();
+            assert_eq!(cluster.len(), 1);
+
+            let changed = cluster
+                .apply_mesh_peer_event(&MeshPeerEvent::Left {
+                    node_id: "peer-b".into(),
+                })
+                .unwrap();
+            assert!(changed);
+            assert!(cluster.get_peer("peer-b").is_none());
+            assert_eq!(cluster.len(), 0);
+        }
+
+        #[test]
+        fn mesh_partition_marks_unreachable_then_recovery() {
+            let cluster = make_cluster(ClusterConfig::default());
+            cluster
+                .apply_mesh_peer_event(&MeshPeerEvent::Joined {
+                    node_id: "peer-p".into(),
+                    address: Some("10.1.0.1:9470".into()),
+                    platform: None,
+                })
+                .unwrap();
+
+            cluster
+                .apply_mesh_peer_event(&MeshPeerEvent::Unreachable {
+                    node_id: "peer-p".into(),
+                })
+                .unwrap();
+            assert_eq!(
+                cluster.get_peer("peer-p").unwrap().state,
+                NodeState::Unreachable
+            );
+
+            // Partition recovery: peer comes back.
+            cluster
+                .apply_mesh_peer_event(&MeshPeerEvent::Recovered {
+                    node_id: "peer-p".into(),
+                    address: Some("10.1.0.1:9470".into()),
+                })
+                .unwrap();
+            let peer = cluster.get_peer("peer-p").unwrap();
+            assert_eq!(peer.state, NodeState::Active);
+            assert_eq!(cluster.len(), 1);
+        }
+
+        #[test]
+        fn mesh_suspect_then_alive() {
+            let cluster = make_cluster(ClusterConfig::default());
+            cluster
+                .apply_mesh_peer_event(&MeshPeerEvent::Joined {
+                    node_id: "peer-s".into(),
+                    address: None,
+                    platform: None,
+                })
+                .unwrap();
+            cluster
+                .apply_mesh_peer_event(&MeshPeerEvent::Suspect {
+                    node_id: "peer-s".into(),
+                })
+                .unwrap();
+            assert_eq!(
+                cluster.get_peer("peer-s").unwrap().state,
+                NodeState::Suspect
+            );
+            cluster
+                .apply_mesh_peer_event(&MeshPeerEvent::Alive {
+                    node_id: "peer-s".into(),
+                })
+                .unwrap();
+            assert_eq!(cluster.get_peer("peer-s").unwrap().state, NodeState::Active);
+        }
+
+        #[test]
+        fn mesh_join_is_idempotent_upsert() {
+            let cluster = make_cluster(ClusterConfig::default());
+            for _ in 0..3 {
+                cluster
+                    .apply_mesh_peer_event(&MeshPeerEvent::Joined {
+                        node_id: "peer-i".into(),
+                        address: Some("1.2.3.4:9".into()),
+                        platform: None,
+                    })
+                    .unwrap();
+            }
+            assert_eq!(cluster.len(), 1);
+            assert_eq!(
+                cluster.get_peer("peer-i").unwrap().state,
+                NodeState::Active
+            );
+        }
+
+        #[tokio::test]
+        async fn mesh_event_bus_drives_membership_listener() {
+            use crate::mesh_discovery::MeshPeerEventBus;
+
+            let cluster = Arc::new(make_cluster(ClusterConfig::default()));
+            let bus = MeshPeerEventBus::new();
+            let rx = bus.subscribe();
+            cluster.spawn_mesh_peer_listener(rx);
+
+            bus.emit(MeshPeerEvent::Joined {
+                node_id: "async-peer".into(),
+                address: Some("127.0.0.1:1".into()),
+                platform: None,
+            });
+            // Allow the spawned task to apply the event.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert!(cluster.get_peer("async-peer").is_some());
+
+            bus.emit(MeshPeerEvent::Left {
+                node_id: "async-peer".into(),
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert!(cluster.get_peer("async-peer").is_none());
+        }
+
+        #[cfg(feature = "cluster")]
+        #[tokio::test]
+        async fn cluster_service_applies_mesh_join_leave_async() {
+            use crate::cluster::ClusterService;
+            use clawft_types::config::ClusterNetworkConfig;
+            use ruvector_cluster::StaticDiscovery;
+
+            let membership = Arc::new(make_cluster(ClusterConfig {
+                node_id: "local".into(),
+                ..Default::default()
+            }));
+            let svc = Arc::new(
+                ClusterService::new(
+                    ClusterNetworkConfig::default(),
+                    "local".into(),
+                    Box::new(StaticDiscovery::new(vec![])),
+                    Arc::clone(&membership),
+                )
+                .expect("cluster service"),
+            );
+
+            svc.apply_mesh_peer_event_async(&MeshPeerEvent::Joined {
+                node_id: "remote-1".into(),
+                address: Some("127.0.0.1:9471".into()),
+                platform: None,
+            })
+            .await
+            .unwrap();
+            assert!(membership.get_peer("remote-1").is_some());
+            assert!(svc.list_nodes().iter().any(|n| n.node_id == "remote-1"));
+
+            svc.apply_mesh_peer_event_async(&MeshPeerEvent::Left {
+                node_id: "remote-1".into(),
+            })
+            .await
+            .unwrap();
+            assert!(membership.get_peer("remote-1").is_none());
+        }
+
+        #[cfg(feature = "cluster")]
+        #[tokio::test]
+        async fn cluster_service_subscribes_to_mesh_stream() {
+            use crate::cluster::ClusterService;
+            use crate::mesh_discovery::MeshPeerEventBus;
+            use clawft_types::config::ClusterNetworkConfig;
+            use ruvector_cluster::StaticDiscovery;
+
+            let membership = Arc::new(make_cluster(ClusterConfig {
+                node_id: "coord".into(),
+                ..Default::default()
+            }));
+            let svc = Arc::new(
+                ClusterService::new(
+                    ClusterNetworkConfig::default(),
+                    "coord".into(),
+                    Box::new(StaticDiscovery::new(vec![])),
+                    Arc::clone(&membership),
+                )
+                .expect("cluster service"),
+            );
+
+            let bus = MeshPeerEventBus::new();
+            svc.spawn_mesh_peer_listener(bus.subscribe());
+            assert!(svc.mesh_listener_started());
+
+            bus.emit(MeshPeerEvent::Joined {
+                node_id: "stream-peer".into(),
+                address: Some("10.0.0.9:9470".into()),
+                platform: None,
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            assert_eq!(
+                membership.get_peer("stream-peer").unwrap().state,
+                NodeState::Active
+            );
+
+            // Partition then recovery via bus.
+            bus.emit(MeshPeerEvent::Unreachable {
+                node_id: "stream-peer".into(),
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert_eq!(
+                membership.get_peer("stream-peer").unwrap().state,
+                NodeState::Unreachable
+            );
+
+            bus.emit(MeshPeerEvent::Recovered {
+                node_id: "stream-peer".into(),
+                address: Some("10.0.0.9:9470".into()),
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert_eq!(
+                membership.get_peer("stream-peer").unwrap().state,
+                NodeState::Active
+            );
+        }
     }
 }
 
