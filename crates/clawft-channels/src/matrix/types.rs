@@ -1,5 +1,7 @@
 //! Matrix channel configuration types.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 use clawft_types::secret::SecretString;
@@ -8,9 +10,11 @@ use clawft_types::secret::SecretString;
 ///
 /// Connects to a Matrix homeserver via the client-server API.
 /// Credential fields use [`SecretString`] to prevent exposure.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatrixAdapterConfig {
     /// Homeserver URL (e.g. `"https://matrix.org"`).
+    ///
+    /// Tests point this at a local `wiremock` server URI.
     #[serde(default, alias = "homeserverUrl")]
     pub homeserver_url: String,
 
@@ -33,6 +37,47 @@ pub struct MatrixAdapterConfig {
     /// Allowed user IDs. Empty = allow all.
     #[serde(default, alias = "allowedUsers")]
     pub allowed_users: Vec<String>,
+
+    /// Directory for durable state (since-token file). When unset, uses
+    /// `$XDG_DATA_HOME/clawft/matrix` (or platform equivalent via `dirs`).
+    #[serde(default, alias = "stateDir")]
+    pub state_dir: Option<PathBuf>,
+
+    /// Long-poll timeout for `GET /_matrix/client/v3/sync` in milliseconds.
+    /// Defaults to 30_000. Tests use a short value so the mock returns quickly.
+    #[serde(default = "default_sync_timeout_ms", alias = "syncTimeoutMs")]
+    pub sync_timeout_ms: u64,
+}
+
+fn default_sync_timeout_ms() -> u64 {
+    30_000
+}
+
+impl Default for MatrixAdapterConfig {
+    fn default() -> Self {
+        Self {
+            homeserver_url: String::new(),
+            access_token: SecretString::default(),
+            user_id: String::new(),
+            auto_join_rooms: Vec::new(),
+            auto_accept_invites: false,
+            allowed_users: Vec::new(),
+            state_dir: None,
+            sync_timeout_ms: default_sync_timeout_ms(),
+        }
+    }
+}
+
+impl MatrixAdapterConfig {
+    /// Resolved state directory for the since-token file.
+    pub fn resolved_state_dir(&self) -> PathBuf {
+        self.state_dir.clone().unwrap_or_else(|| {
+            dirs::data_local_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("clawft")
+                .join("matrix")
+        })
+    }
 }
 
 #[cfg(test)]
@@ -47,6 +92,8 @@ mod tests {
         assert!(!cfg.auto_accept_invites);
         assert!(cfg.auto_join_rooms.is_empty());
         assert!(cfg.allowed_users.is_empty());
+        assert!(cfg.state_dir.is_none());
+        assert_eq!(cfg.sync_timeout_ms, 30_000);
     }
 
     #[test]
@@ -68,7 +115,9 @@ mod tests {
             "userId": "@bot:matrix.org",
             "autoJoinRooms": ["!room1:matrix.org"],
             "autoAcceptInvites": true,
-            "allowedUsers": ["@admin:matrix.org"]
+            "allowedUsers": ["@admin:matrix.org"],
+            "stateDir": "/tmp/matrix-state",
+            "syncTimeoutMs": 5000
         }"#;
         let cfg: MatrixAdapterConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.homeserver_url, "https://matrix.org");
@@ -76,5 +125,19 @@ mod tests {
         assert!(cfg.auto_accept_invites);
         assert_eq!(cfg.auto_join_rooms, vec!["!room1:matrix.org"]);
         assert_eq!(cfg.allowed_users, vec!["@admin:matrix.org"]);
+        assert_eq!(
+            cfg.state_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/matrix-state"))
+        );
+        assert_eq!(cfg.sync_timeout_ms, 5000);
+    }
+
+    #[test]
+    fn resolved_state_dir_prefers_explicit() {
+        let cfg = MatrixAdapterConfig {
+            state_dir: Some(PathBuf::from("/custom/state")),
+            ..Default::default()
+        };
+        assert_eq!(cfg.resolved_state_dir(), PathBuf::from("/custom/state"));
     }
 }

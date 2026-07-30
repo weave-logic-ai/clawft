@@ -209,8 +209,7 @@ the actual transport is a `debug!` log. Each marks itself as a "stub" or
 | whatsapp | `whatsapp/channel.rs:96-105` | `send` fabricates `wamid.{ts}` without POST to `/v18.0/{phone_number_id}/messages` |
 | signal | `signal/channel.rs:90-105` | `signal-cli daemon` subprocess + JSON-RPC reader missing; no PID tracking, no auto-restart |
 | signal | `signal/channel.rs:132-148` | `send` does not actually `tokio::process::Command` `signal-cli` -- argument sanitization runs but no process is spawned |
-| matrix | `matrix/channel.rs:82-95` | `/sync` long-poll, room auto-join, m.room.message parsing not implemented |
-| matrix | `matrix/channel.rs:115-128` | `send` returns `${ts}` -- no `PUT /_matrix/client/v3/rooms/{room}/send/m.room.message/{txn}` |
+| matrix | `matrix/channel.rs` + `client.rs` | **Landed (WEFT-159):** `/sync` long-poll with since-token persistence, room auto-join + invite accept, `m.room.message` → `MessagePayload`, `PUT .../send/m.room.message/{txn}` returns real `event_id` (wiremock coverage) |
 | irc | `irc/channel.rs:82-101` | TCP/TLS dial, NICK/USER/CAP, JOIN, PRIVMSG reader -- all missing; pending `irc` crate selection |
 | irc | `irc/channel.rs:128-149` | PRIVMSG send missing; returns synthetic id |
 
@@ -345,7 +344,7 @@ deployment of any of these flips a foot-gun.
 | 2 | Wire WhatsApp Cloud API: webhook receiver with `X-Hub-Signature-256` verify, POST `/v{api}/{phone_number_id}/messages`, 429 backoff | High | M | unassigned | E3 risk in tracker |
 | 3 | Wire Signal `signal-cli daemon` subprocess: spawn with sanitized args, JSON-RPC stdout reader, PID tracking, auto-restart on crash with timeout-kill | High | L | unassigned | E4 risk in tracker; sanitization already lands |
 | 4 | Wire Email IMAP poll + SMTP send via `imap` + `lettre` crates behind `email` feature | High | M | unassigned | E2 stubs at email/channel.rs:166 and :200 |
-| 5 | Wire Matrix `/sync` long-poll, room auto-join, `m.room.message` parse, `PUT /rooms/{room}/send/...` outbound | High | M | unassigned | E5 stubs at matrix/channel.rs:82 |
+| 5 | Wire Matrix `/sync` long-poll, room auto-join, `m.room.message` parse, `PUT /rooms/{room}/send/...` outbound | High | M | done (WEFT-159) | Real CS API via reqwest; since-token on disk; wiremock tests |
 | 6 | Wire Google Chat now that F6 OAuth2 is available: service-account creds, Pub/Sub subscription, `chat.spaces.messages.create` | High | M | unassigned | E5a was blocked on F6; F6 now landed |
 | 7 | Wire Teams Bot Framework: Azure AD client-credentials token, register webhook, parse `Activity` JSON, POST via Graph | High | L | unassigned | E5b stubs at teams/channel.rs:88 |
 | 8 | Fix `DiscordApiClient::edit_message` to actually sleep when rate-limited (parity with `create_message`) | Med | XS | unassigned | discord/api.rs:153-161 |

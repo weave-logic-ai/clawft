@@ -552,6 +552,8 @@ cmd_all() {
 workspace_test() {
     local extra=()
     [ "$NO_FAIL_FAST" = true ] && extra+=(--no-fail-fast)
+    # Honor `--features <f>` so feature-gated adapters (matrix, email, …)
+    # are compiled and tested (WEFT-159).
     [ -n "$FEATURES" ] && extra+=(--features "$FEATURES")
     # `scripts/build.sh test <pkg>…` scopes to the named packages; no
     # packages means the whole workspace (the historical behavior).
