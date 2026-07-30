@@ -2,7 +2,7 @@
 
 **Ticket:** WEFT-185  
 **Branch:** `wave0i/weft-185-swarm-demo`  
-**SHA:** (see `git rev-parse wave0i/weft-185-swarm-demo`)  
+**SHA:** `6f435aef`  
 **Worktree:** `/Users/mathewbeane/.grok/worktrees/mathewbeane-weftos/subagent-019fb4c3-9a5a-7d11-afcd-7ea5ca084de6`  
 **Base:** `release/0.8-staging`  
 **Date:** 2026-07-30  
