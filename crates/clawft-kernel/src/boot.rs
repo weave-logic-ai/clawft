@@ -653,6 +653,24 @@ impl<P: Platform> Kernel<P> {
                     });
                 }
 
+                // WEFT-119: register Mesh as a SystemService so start/stop/
+                // health_check are available via the kernel service surface.
+                // start_all() (phase 8) flips the service to started; stop_all()
+                // on shutdown disconnects peers.
+                let mesh_svc = Arc::new(crate::mesh_system_service::MeshService::with_endpoints(
+                    Arc::clone(&runtime),
+                    listen_display.clone(),
+                    transport_display.clone(),
+                ));
+                if let Err(e) = service_registry.register(mesh_svc) {
+                    error!(error = %e, "failed to register mesh service");
+                } else {
+                    boot_log.push(BootEvent::info(
+                        BootPhase::Network,
+                        "Mesh service registered (SystemService lifecycle)",
+                    ));
+                }
+
                 boot_log.push(BootEvent::info(
                     BootPhase::Network,
                     format!(
@@ -2440,6 +2458,52 @@ mod tests {
             llm: None,
             agent: None,
         }
+    }
+
+    /// WEFT-119: mesh.enabled registers `mesh` SystemService and starts it.
+    #[cfg(all(feature = "native", feature = "mesh"))]
+    #[tokio::test]
+    async fn boot_registers_mesh_system_service() {
+        use clawft_types::config::MeshConfig;
+        use crate::health::HealthStatus;
+
+        let platform = Arc::new(NativePlatform::new());
+        let mut kconfig = test_kernel_config();
+        kconfig.mesh = Some(MeshConfig {
+            enabled: true,
+            transport: "tcp".into(),
+            // Ephemeral port so parallel tests do not clash.
+            listen_addr: "127.0.0.1:0".into(),
+            discovery: false,
+            seed_peers: vec![],
+            noise: false,
+            noise_key_path: None,
+        });
+
+        let mut kernel = Kernel::boot(test_config(), kconfig, platform)
+            .await
+            .expect("boot with mesh");
+
+        let mesh_svc = kernel
+            .services()
+            .get("mesh")
+            .expect("mesh SystemService should be registered when mesh.enabled");
+        assert_eq!(mesh_svc.name(), "mesh");
+        assert_eq!(
+            mesh_svc.health_check().await,
+            HealthStatus::Healthy,
+            "start_all should have started mesh"
+        );
+
+        kernel.shutdown().await.unwrap();
+        // After stop_all, mesh reports not started.
+        assert!(
+            matches!(
+                mesh_svc.health_check().await,
+                HealthStatus::Unhealthy(_)
+            ),
+            "mesh should be unhealthy after shutdown stop"
+        );
     }
 
     #[tokio::test]

@@ -496,6 +496,18 @@ impl MeshRuntime {
         }
     }
 
+    /// Disconnect every connected peer (used by mesh service stop / shutdown).
+    ///
+    /// Returns the number of peers that were disconnected.
+    pub fn disconnect_all_peers(&self) -> usize {
+        let ids: Vec<String> = self.peer_ids();
+        let n = ids.len();
+        for id in &ids {
+            self.disconnect_peer(id);
+        }
+        n
+    }
+
     // ── Discovery integration ─────────────────────────────────────
 
     /// Register a peer's network address for future connection.
