@@ -209,6 +209,48 @@ pub struct AgentsConfig {
     /// behavior is unchanged from before this option existed.
     #[serde(default, alias = "cowMemory")]
     pub cow_memory: CowMemoryConfig,
+
+    /// Binding-thread integrity policy (WEFT-342 / agent-core-v1.1).
+    ///
+    /// Controls whether a missing compile-time `BINDING_THREAD_EXCERPT`
+    /// in loaded `SOUL.md` hard-refuses the turn (`deny`, default) or
+    /// only annotates the system prompt (`warn_only`, legacy v1).
+    /// Evaluated every turn via `gate.check("soul.binding_thread_intact", …)`.
+    ///
+    /// TOML/JSON: `agents.binding_thread_mode` / `agents.bindingThreadMode`.
+    #[serde(default, alias = "bindingThreadMode")]
+    pub binding_thread_mode: BindingThreadMode,
+}
+
+/// Policy for binding-thread integrity checks (WEFT-342).
+///
+/// - [`Deny`](Self::Deny) — default; mismatch → hard refuse the turn
+///   (`GateDecision::Deny { reason: "binding-thread mismatch" }`).
+/// - [`WarnOnly`](Self::WarnOnly) — legacy v1; annotate prompt + `warn!`
+///   log, agent continues in degraded mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BindingThreadMode {
+    /// Hard refuse on mismatch (v1.1 default).
+    #[default]
+    Deny,
+    /// Annotate prompt + warn log only (legacy).
+    WarnOnly,
+}
+
+impl BindingThreadMode {
+    /// Stable string label for logs and gate context.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Deny => "deny",
+            Self::WarnOnly => "warn_only",
+        }
+    }
+
+    /// `true` when mismatch must abort the turn.
+    pub const fn is_deny(self) -> bool {
+        matches!(self, Self::Deny)
+    }
 }
 
 impl AgentsConfig {
@@ -913,6 +955,22 @@ mod tests {
             .resolve_workspace_root_or(Some(fallback.clone()))
             .unwrap();
         assert_eq!(resolved, fallback);
+    }
+
+    #[test]
+    fn binding_thread_mode_defaults_to_deny() {
+        // WEFT-342: v1.1 default is hard-refuse, not legacy warn-only.
+        let cfg = Config::default();
+        assert_eq!(cfg.agents.binding_thread_mode, BindingThreadMode::Deny);
+        assert!(cfg.agents.binding_thread_mode.is_deny());
+
+        let snake = r#"{ "agents": { "binding_thread_mode": "warn_only" } }"#;
+        let cfg: Config = serde_json::from_str(snake).unwrap();
+        assert_eq!(cfg.agents.binding_thread_mode, BindingThreadMode::WarnOnly);
+
+        let camel = r#"{ "agents": { "bindingThreadMode": "deny" } }"#;
+        let cfg: Config = serde_json::from_str(camel).unwrap();
+        assert_eq!(cfg.agents.binding_thread_mode, BindingThreadMode::Deny);
     }
 
     #[test]

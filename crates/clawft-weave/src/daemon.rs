@@ -1760,16 +1760,21 @@ pub async fn run(
             use clawft_kernel::{
                 GateBackend, GovernanceBranch, GovernanceGate, GovernanceRule, RuleSeverity,
             };
-            let mut g = GovernanceGate::new(0.8, false).add_rule(GovernanceRule {
-                id: "chat-tool-guard".into(),
-                description: "Block high-risk tool dispatches in agent.chat".into(),
-                branch: GovernanceBranch::Judicial,
-                severity: RuleSeverity::Blocking,
-                active: true,
-                reference_url: None,
-                sop_category: None,
-                rule_type: Default::default(),
-            });
+            let mut g = GovernanceGate::new(0.8, false)
+                .add_rule(GovernanceRule {
+                    id: "chat-tool-guard".into(),
+                    description: "Block high-risk tool dispatches in agent.chat".into(),
+                    branch: GovernanceBranch::Judicial,
+                    severity: RuleSeverity::Blocking,
+                    active: true,
+                    reference_url: None,
+                    sop_category: None,
+                    rule_type: Default::default(),
+                })
+                // WEFT-342: hard-refuse on binding-thread mismatch each turn.
+                .add_rule(clawft_kernel::governance::GovernanceRule::binding_thread(
+                    "SOUL.md must contain the compile-time binding-thread excerpt",
+                ));
             // D6: opt-in per-action grant so agent_spawn (~0.93 effect) clears
             // the 0.8 chat gate without globally loosening the threshold. Off
             // by default ([kernel.agent.subagents].governance_grant); the grant
