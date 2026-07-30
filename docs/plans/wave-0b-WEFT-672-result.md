@@ -75,5 +75,5 @@ cargo test -p clawft-llm --lib hermes::   # 19 passed
 
 ## Commit
 
-**SHA:** `c4d921491c9fa40a75b99dc246b9520a9e44b4be`  
+**SHA:** `df62d89b8c4168f9e79377d7876e690393594e44`  
 Branch: `wave0b/weft-672-strip-think-wasm`
