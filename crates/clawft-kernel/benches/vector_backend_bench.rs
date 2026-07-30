@@ -46,11 +46,10 @@
 //! ground truth matching its actual metric. Do not compare `recall_at_10`
 //! across backends with different `metric` values.
 //!
-//! [`HybridBackend`] compounds this: its `merge_results` sorts hot
-//! (cosine, range ~[0, 2]) and cold (real DiskANN: squared L2, range
-//! 10s-100s at these vector magnitudes) results by raw distance with no
-//! normalization, structurally favoring hot-tier hits when `diskann` is
-//! on — see the `notes` field on the `hybrid` JSON line.
+//! [`HybridBackend`] fuses hot (cosine) and cold (real DiskANN: L2²)
+//! via Reciprocal Rank Fusion (RRF; WEFT-661) so raw-distance scale
+//! cannot drown cold hits. Hybrid `recall_at_10` is still scored against
+//! cosine ground truth — see the `notes` field on the `hybrid` JSON line.
 //!
 //! ## Timing method
 //!
@@ -553,12 +552,10 @@ fn main() {
         let notes = if diskann_compiled {
             Some(
                 "hot tier=cosine (HNSW), cold tier=sqeuclidean (real DiskANN); \
-                 merge_results sorts by raw distance with no scale normalization, \
-                 so cosine hits are structurally favored over sqL2 hits regardless \
-                 of true proximity. recall_at_10 here is measured against cosine \
-                 ground truth (what the merge degenerates toward), which likely \
-                 overstates true hybrid retrieval quality -- see vector_hybrid.rs \
-                 merge_results."
+                 merge_results uses Reciprocal Rank Fusion (RRF, k=60; WEFT-661) \
+                 so incomparable raw distances are not sorted. recall_at_10 is \
+                 still measured against cosine ground truth — interpret hybrid \
+                 recall accordingly."
                     .to_string(),
             )
         } else {
