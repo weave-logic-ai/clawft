@@ -1,7 +1,7 @@
 # WEFT-596 result — ADR-057 substrate per-path read ACLs
 
 **Branch**: `wave0a/weft-596-substrate-read-acl`  
-**Commit**: `453f48d0c3aef3a030763a185ddd5ae4dbf1bd16`  
+**Commit**: `9a121457d8ebeb9d1433d3fcb3f4511ea17bc3a6`  
 **Status**: first vertical slice landed  
 **Date**: 2026-07-30  
 **Agent**: coder-596 (wave-0a)
