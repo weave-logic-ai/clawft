@@ -1,10 +1,18 @@
 //! `weft mcp` — manage configured MCP servers (add / list / remove).
 //!
 //! Thin CLI over the user config file (`tools.mcp_servers` /
-//! `tools.mcpServers`). Writes are atomic (tmp + rename). Hot-reload
-//! of a running gateway is via the WEFT-493 config watcher (WEFT-187
-//! API). When no reload RPC is available the CLI surfaces a
-//! restart/reload hint.
+//! `tools.mcpServers`). Writes are atomic (tmp + rename).
+//!
+//! # Ownership (ADR-070 / WEFT-494)
+//!
+//! - **This CLI** owns *durable* config mutation (works offline).
+//! - **Daemon RPCs** `mcp.add` / `mcp.list` / `mcp.remove` / `mcp.reload`
+//!   own the *live* shared registry inside the kernel process.
+//! - After add/remove, the CLI best-effort calls `mcp.reload` so a
+//!   running daemon picks up the file change (fallback: `config.reload`,
+//!   then a restart hint).
+//! - Gateway/UI also run the WEFT-493 file watcher (WEFT-187 API) so
+//!   durable edits apply without an explicit RPC when the host is up.
 //!
 //! # Examples
 //!
@@ -293,13 +301,16 @@ fn print_server_summary(
 // ── List ─────────────────────────────────────────────────────────────────
 
 async fn mcp_list(config_override: Option<&str>) -> anyhow::Result<()> {
-    // Prefer live daemon view when available.
-    if let Some(result) = try_daemon_rpc("tools.mcp", serde_json::json!({})).await {
-        if let Some(output) = result.get("output").and_then(|v| v.as_str()) {
-            print!("{output}");
-            return Ok(());
+    // Prefer live daemon registry when available (WEFT-494: mcp.list;
+    // tools.mcp is the CLI-compat alias).
+    for method in ["mcp.list", "tools.mcp"] {
+        if let Some(result) = try_daemon_rpc(method, serde_json::json!({})).await {
+            if let Some(output) = result.get("output").and_then(|v| v.as_str()) {
+                print!("{output}");
+                return Ok(());
+            }
+            // Fall through if the daemon shape is unexpected.
         }
-        // Fall through to local list if the daemon shape is unexpected.
     }
 
     let path = resolve_writable_config_path(config_override).ok();

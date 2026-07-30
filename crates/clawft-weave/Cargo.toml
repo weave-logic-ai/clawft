@@ -88,6 +88,8 @@ clawft-service-llm = { workspace = true }
 clawft-service-terminal = { workspace = true }
 clawft-service-classify = { workspace = true }
 clawft-service-agent = { workspace = true }
+# WEFT-494: live McpServerManager registry behind mcp.add/list/remove/reload.
+clawft-services = { workspace = true }
 # M4 Phase C.1: `subagent` enables the four spawn tools (agent_spawn /
 # task_status / task_result / agent_message) in register_all — the daemon is
 # the only caller that injects a live SubagentSpawner. Workspace pins

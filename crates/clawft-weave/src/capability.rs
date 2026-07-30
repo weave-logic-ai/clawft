@@ -100,6 +100,10 @@ pub fn required_capability(method: &str) -> Capability {
         // must not publish; DaemonClient on the local UDS path auto-attaches
         // `admin` so operator CLI continues to work.
         "ipc.publish" => Capability::Write,
+        // WEFT-494 / ADR-070: live MCP registry mutations.
+        "mcp.add" => Capability::Write,
+        "mcp.remove" => Capability::Write,
+        "mcp.reload" => Capability::Write,
 
         // ── Chat: LLM-conversational verbs ──────────────────────────
         "agent.chat" => Capability::Chat,
@@ -132,7 +136,10 @@ pub fn required_capability(method: &str) -> Capability {
         | "substrate.read"
         | "substrate.list"
         | "substrate.subscribe"
-        | "ipc.subscribe_stream" => Capability::Read,
+        | "ipc.subscribe_stream"
+        // WEFT-494: live MCP registry inspection (alias tools.mcp = mcp.list).
+        | "mcp.list"
+        | "tools.mcp" => Capability::Read,
 
         // Default for anything we haven't explicitly classified.
         // Read is the safest baseline — the verb still goes through
@@ -381,5 +388,24 @@ mod tests {
         assert!(write.allows_method("ipc.publish"));
         let admin = CallerCapabilities::from_scopes(["admin"]);
         assert!(admin.allows_method("ipc.publish"));
+    }
+
+    #[test]
+    fn mcp_registry_verbs_classified() {
+        // WEFT-494 / ADR-070.
+        assert_eq!(required_capability("mcp.list"), Capability::Read);
+        assert_eq!(required_capability("tools.mcp"), Capability::Read);
+        for m in ["mcp.add", "mcp.remove", "mcp.reload"] {
+            assert_eq!(
+                required_capability(m),
+                Capability::Write,
+                "method {m} should be Write"
+            );
+        }
+        let anon = CallerCapabilities::anonymous();
+        assert!(anon.allows_method("mcp.list"));
+        assert!(!anon.allows_method("mcp.add"));
+        assert!(!anon.allows_method("mcp.remove"));
+        assert!(!anon.allows_method("mcp.reload"));
     }
 }
