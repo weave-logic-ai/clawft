@@ -15,8 +15,10 @@
 use serde::{Deserialize, Serialize};
 
 pub use clawft_types::agent_chat::{
-    AgentChatMessage, AgentChatParams, AgentChatResult, AgentChatToolCall, SpawnedTaskSummary,
-    default_conv_id,
+    AgentChatDeferDecideParams, AgentChatDeferDecideResult, AgentChatMessage, AgentChatParams,
+    AgentChatResult, AgentChatToolCall, DEFER_DECISION_ALLOW, DEFER_DECISION_CANCEL,
+    DEFER_DECISION_DENY, DEFER_DEFAULT_TIMEOUT_MS, DeferPromptEvent, DeferUserDecision,
+    STREAM_PHASE_AWAITING_DEFER, SpawnedTaskSummary, chat_defer_path, default_conv_id,
 };
 
 // ── chain.append (WEFT-324) ───────────────────────────────────────

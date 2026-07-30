@@ -28,6 +28,8 @@ describe("STATIC_ALLOWED_METHODS", () => {
     it("includes agent.chat and agent.chat_stream", () => {
         assert.equal(STATIC_ALLOWED_METHODS.has("agent.chat"), true);
         assert.equal(STATIC_ALLOWED_METHODS.has("agent.chat_stream"), true);
+        // WEFT-331: interactive defer human decision.
+        assert.equal(STATIC_ALLOWED_METHODS.has("agent.chat.defer_decide"), true);
     });
 
     it("never seeds substrate.publish", () => {

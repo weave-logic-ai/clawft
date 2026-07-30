@@ -6,10 +6,11 @@
 //! The gate decides whether the tool runs:
 //!
 //! - [`GateDecision::Permit`] — proceed with the tool execute.
-//! - [`GateDecision::Defer`] — surface the reason as the tool result;
-//!   the loop continues so the model can re-plan. Real interactive
-//!   defer is a v1.1 follow-up needing panel UI (see `chat-agent-v1.md`
-//!   risk register).
+//! - [`GateDecision::Defer`] — without a
+//!   [`DeferInteractor`](super::defer::DeferInteractor): surface the
+//!   reason as the tool result and continue so the model can re-plan.
+//!   With an interactor (WEFT-331): suspend until allow / deny / cancel
+//!   / timeout; allow falls through to sandbox + dispatch.
 //! - [`GateDecision::Deny`]  — same handling as defer; the reason
 //!   becomes the tool result and the loop continues. After
 //!   [`GATE_DENIAL_ESCALATION_LIMIT`] consecutive Denys in one turn

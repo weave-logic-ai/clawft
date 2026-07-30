@@ -5,6 +5,7 @@ pub mod context;
 pub mod context_compress;
 pub mod context_router;
 pub mod cost_budget;
+pub mod defer;
 pub mod effects;
 pub mod gate;
 pub mod graft;

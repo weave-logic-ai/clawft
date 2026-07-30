@@ -198,6 +198,63 @@ pub struct ChatView {
     /// `live::now_ms()` of the last stream-poll submit. Throttles the
     /// poll cadence to [`STREAM_POLL_INTERVAL_MS`].
     last_stream_poll_ms: f64,
+    /// WEFT-331: pending interactive-defer prompt while a turn is
+    /// suspended on `GateDecision::Defer`. When set, the panel paints
+    /// an inline allow / deny / cancel prompt and fires
+    /// `agent.chat.defer_decide` on the user's choice.
+    pending_defer: Option<PendingDeferPrompt>,
+    /// True while a defer-decide RPC is in flight (debounce double-clicks).
+    defer_decide_pending: Option<ReplyRx>,
+}
+
+/// Snapshot of a [`DeferPromptEvent`] the panel can render without
+/// depending on `clawft-types` (wasm-clean).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingDeferPrompt {
+    /// Broker id for `agent.chat.defer_decide`.
+    pub defer_id: String,
+    /// Conversation id (must match the in-flight turn).
+    pub conv_id: String,
+    /// Deferred tool name.
+    pub tool: String,
+    /// Gate reason shown to the user.
+    pub reason: String,
+    /// Truncated tool arguments for preview.
+    pub arguments_preview: String,
+    /// Timeout budget (ms) — informational in the UI.
+    pub timeout_ms: u64,
+}
+
+impl PendingDeferPrompt {
+    /// Parse a wire-shaped defer prompt object.
+    pub fn from_value(v: &Value) -> Option<Self> {
+        let defer_id = v.get("defer_id").and_then(Value::as_str)?.to_owned();
+        let conv_id = v.get("conv_id").and_then(Value::as_str)?.to_owned();
+        let tool = v.get("tool").and_then(Value::as_str)?.to_owned();
+        let reason = v
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("policy review required")
+            .to_owned();
+        if defer_id.is_empty() || conv_id.is_empty() || tool.is_empty() {
+            return None;
+        }
+        Some(Self {
+            defer_id,
+            conv_id,
+            tool,
+            reason,
+            arguments_preview: v
+                .get("arguments_preview")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+            timeout_ms: v
+                .get("timeout_ms")
+                .and_then(Value::as_u64)
+                .unwrap_or(120_000),
+        })
+    }
 }
 
 impl ChatView {
@@ -305,6 +362,20 @@ impl ChatView {
             // rewind a growing draft on a late re-read).
             self.streaming_draft = Some(text.to_owned());
         }
+        // WEFT-331: interactive defer prompt rides on the stream frame.
+        if let Some(defer) = frame.get("defer").filter(|v| v.is_object()) {
+            if let Some(prompt) = PendingDeferPrompt::from_value(defer) {
+                self.pending_defer = Some(prompt);
+            }
+        } else if frame
+            .get("phase")
+            .and_then(Value::as_str)
+            .is_some_and(|p| p != "awaiting_defer")
+            && frame.get("done").and_then(Value::as_bool).unwrap_or(false)
+        {
+            // Terminal frames clear any stale defer prompt.
+            self.pending_defer = None;
+        }
         if frame.get("done").and_then(Value::as_bool).unwrap_or(false)
             && let Some(err) = frame.get("error").and_then(Value::as_str)
         {
@@ -313,6 +384,63 @@ impl ChatView {
             // oneshot lands.
             self.stream_phase = Some(format!("error: {err}"));
         }
+    }
+
+    /// Apply a dedicated `chat_defer_path` payload (WEFT-331).
+    ///
+    /// Accepts either a full defer prompt object or a `{ cleared: true }`
+    /// clear marker after the human decides / timeout.
+    pub fn on_defer_payload(&mut self, value: &Value) {
+        if value.get("cleared").and_then(Value::as_bool).unwrap_or(false) {
+            if let Some(id) = value.get("defer_id").and_then(Value::as_str)
+                && self
+                    .pending_defer
+                    .as_ref()
+                    .is_some_and(|p| p.defer_id == id)
+            {
+                self.pending_defer = None;
+            } else if value.get("defer_id").is_none() {
+                self.pending_defer = None;
+            }
+            return;
+        }
+        if let Some(prompt) = PendingDeferPrompt::from_value(value) {
+            self.pending_defer = Some(prompt);
+        }
+    }
+
+    /// Current pending defer prompt, if any (WEFT-331).
+    pub fn pending_defer(&self) -> Option<&PendingDeferPrompt> {
+        self.pending_defer.as_ref()
+    }
+
+    /// Submit a human decision for the pending defer (WEFT-331).
+    ///
+    /// No-op when there is no pending prompt or a decide RPC is already
+    /// in flight. Clears the local prompt optimistically so the UI
+    /// collapses immediately; a failed decide re-surfaces via the next
+    /// stream/defer poll if the broker still holds the waiter.
+    pub fn submit_defer_decision(&mut self, live: &Arc<Live>, decision: &str) {
+        if self.defer_decide_pending.is_some() {
+            return;
+        }
+        let Some(prompt) = self.pending_defer.clone() else {
+            return;
+        };
+        let (tx, rx) = live::reply_channel();
+        self.defer_decide_pending = Some(rx);
+        // Optimistic clear — if the decide is rejected the loop is still
+        // waiting and will re-publish / the user can cancel the turn.
+        self.pending_defer = None;
+        live.submit(Command::Raw {
+            method: "agent.chat.defer_decide".into(),
+            params: serde_json::json!({
+                "conv_id": prompt.conv_id,
+                "defer_id": prompt.defer_id,
+                "decision": decision,
+            }),
+            reply: Some(tx),
+        });
     }
 
     /// Clear every WEFT-253 streaming field. Called when the final RPC
@@ -324,6 +452,8 @@ impl ChatView {
         self.stream_seq = 0;
         self.stream_poll = None;
         self.last_stream_poll_ms = 0.0;
+        self.pending_defer = None;
+        self.defer_decide_pending = None;
     }
 
     /// Substrate path for the progressive stream frame, or `None` if
@@ -401,6 +531,17 @@ impl ChatView {
                 self.stream_poll = None;
             }
             Some(live::TryReply::Empty) | None => {}
+        }
+        // WEFT-331: drain defer_decide oneshot (fire-and-forget for UI).
+        if let Some(rx) = self.defer_decide_pending.as_mut() {
+            match live::try_recv_reply(rx) {
+                live::TryReply::Done(Ok(_))
+                | live::TryReply::Done(Err(_))
+                | live::TryReply::Closed => {
+                    self.defer_decide_pending = None;
+                }
+                live::TryReply::Empty => {}
+            }
         }
     }
 
@@ -579,6 +720,12 @@ pub fn paint(ui: &mut egui::Ui, path: &str, value: &Value, view: &mut ChatView, 
         paint_heartbeat(ui, view, live);
     }
 
+    // WEFT-331: interactive defer prompt (allow / deny / cancel).
+    // Shown while the agent loop is suspended on GateDecision::Defer.
+    if view.pending_defer().is_some() {
+        paint_defer_prompt(ui, view, live);
+    }
+
     // Input row. Disabled while a request is in flight; Enter submits,
     // Shift+Enter inserts a newline (egui's default for multiline +
     // explicit `desired_rows`).
@@ -687,6 +834,86 @@ fn paint_system_editor(ui: &mut egui::Ui, view: &mut ChatView) {
             };
         }
     });
+    ui.add_space(4.0);
+}
+
+/// Paint the WEFT-331 interactive-defer prompt. Inline (not a blocking
+/// OS modal) so the history remains visible while the user decides.
+fn paint_defer_prompt(ui: &mut egui::Ui, view: &mut ChatView, live: &Arc<Live>) {
+    let Some(prompt) = view.pending_defer.clone() else {
+        return;
+    };
+    let deciding = view.defer_decide_pending.is_some();
+    egui::Frame::new()
+        .fill(egui::Color32::from_rgb(45, 40, 20))
+        .stroke(egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgb(200, 160, 60),
+        ))
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .corner_radius(4.0)
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new("tool deferred — human decision required")
+                    .strong()
+                    .color(egui::Color32::from_rgb(240, 210, 120)),
+            );
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new(format!("tool: `{}`", prompt.tool))
+                    .monospace()
+                    .small()
+                    .color(egui::Color32::from_rgb(220, 210, 180)),
+            );
+            ui.label(
+                egui::RichText::new(format!("reason: {}", prompt.reason))
+                    .small()
+                    .color(egui::Color32::from_rgb(220, 210, 180)),
+            );
+            if !prompt.arguments_preview.is_empty() {
+                ui.label(
+                    egui::RichText::new(format!("args: {}", prompt.arguments_preview))
+                        .monospace()
+                        .small()
+                        .color(egui::Color32::from_rgb(180, 175, 160)),
+                );
+            }
+            ui.label(
+                egui::RichText::new(format!(
+                    "timeout: {}s (default-deny on expiry)",
+                    prompt.timeout_ms / 1000
+                ))
+                .small()
+                .italics()
+                .color(egui::Color32::from_rgb(160, 150, 130)),
+            );
+            ui.add_space(4.0);
+            ui.add_enabled_ui(!deciding, |ui| {
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(egui::RichText::new("Allow").strong())
+                        .on_hover_text("Run the deferred tool (sandbox still applies)")
+                        .clicked()
+                    {
+                        view.submit_defer_decision(live, "allow");
+                    }
+                    if ui
+                        .button("Deny")
+                        .on_hover_text("Refuse the tool; the model can re-plan")
+                        .clicked()
+                    {
+                        view.submit_defer_decision(live, "deny");
+                    }
+                    if ui
+                        .button("Cancel")
+                        .on_hover_text("Abort this defer without approving")
+                        .clicked()
+                    {
+                        view.submit_defer_decision(live, "cancel");
+                    }
+                });
+            });
+        });
     ui.add_space(4.0);
 }
 
@@ -1273,5 +1500,80 @@ mod tests {
         view.on_response_err("agent.chat_stream: cancelled");
         assert_eq!(view.streaming_draft(), None);
         assert!(!view.is_in_flight());
+    }
+
+    // ── WEFT-331 interactive defer prompt ────────────────────────
+
+    #[test]
+    fn stream_frame_captures_defer_prompt() {
+        let mut view = ChatView::default();
+        view.on_stream_frame(&json!({
+            "phase": "awaiting_defer",
+            "text": "",
+            "seq": 1_000_000,
+            "done": false,
+            "tool_name": "write_file",
+            "defer": {
+                "defer_id": "defer-1",
+                "conv_id": "panel-1",
+                "tool": "write_file",
+                "reason": "needs review",
+                "arguments_preview": "{\"path\":\"x\"}",
+                "timeout_ms": 120000
+            }
+        }));
+        let p = view.pending_defer().expect("prompt");
+        assert_eq!(p.defer_id, "defer-1");
+        assert_eq!(p.tool, "write_file");
+        assert_eq!(p.reason, "needs review");
+        assert_eq!(view.stream_phase(), Some("awaiting_defer"));
+    }
+
+    #[test]
+    fn defer_payload_clear_removes_prompt() {
+        let mut view = ChatView::default();
+        view.on_defer_payload(&json!({
+            "defer_id": "d1",
+            "conv_id": "c1",
+            "tool": "echo",
+            "reason": "r",
+            "timeout_ms": 1000
+        }));
+        assert!(view.pending_defer().is_some());
+        view.on_defer_payload(&json!({ "cleared": true, "defer_id": "d1" }));
+        assert!(view.pending_defer().is_none());
+    }
+
+    #[test]
+    fn final_response_clears_pending_defer() {
+        let mut view = ChatView::default();
+        view.on_stream_frame(&json!({
+            "phase": "awaiting_defer",
+            "seq": 9,
+            "done": false,
+            "defer": {
+                "defer_id": "d",
+                "conv_id": "c",
+                "tool": "echo",
+                "reason": "r"
+            }
+        }));
+        assert!(view.pending_defer().is_some());
+        view.on_response_ok(&json!({ "assistant_text": "done" }));
+        assert!(view.pending_defer().is_none());
+    }
+
+    #[test]
+    fn pending_defer_prompt_from_value_requires_ids() {
+        assert!(PendingDeferPrompt::from_value(&json!({ "tool": "x" })).is_none());
+        assert!(
+            PendingDeferPrompt::from_value(&json!({
+                "defer_id": "d",
+                "conv_id": "c",
+                "tool": "t",
+                "reason": "why"
+            }))
+            .is_some()
+        );
     }
 }

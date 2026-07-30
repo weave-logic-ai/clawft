@@ -173,11 +173,30 @@ pub struct AgentService<H: AgentLoopHandle> {
     /// Wave 2 §W2.3: the §W2.1 reply submitter, injected after wiring. Absent ⇒
     /// the interrupt executor's Refine arm degrades to cancel-only (no resubmit).
     reply_submitter: OnceLock<Arc<dyn ReplySubmitter>>,
+    /// WEFT-331: interactive defer broker. Present when the daemon wired
+    /// human-in-the-loop defer; drives `agent.chat.defer_decide`.
+    defer_broker: Option<Arc<crate::defer_broker::InteractiveDeferBroker>>,
 }
 
 impl<H: AgentLoopHandle> AgentService<H> {
     /// Construct a new service around the given loop handle.
     pub fn new(agent_loop: Arc<H>) -> Self {
+        Self::new_inner(agent_loop, None)
+    }
+
+    /// Construct with an interactive-defer broker (WEFT-331).
+    pub fn with_defer_broker(
+        mut self,
+        broker: Arc<crate::defer_broker::InteractiveDeferBroker>,
+    ) -> Self {
+        self.defer_broker = Some(broker);
+        self
+    }
+
+    fn new_inner(
+        agent_loop: Arc<H>,
+        defer_broker: Option<Arc<crate::defer_broker::InteractiveDeferBroker>>,
+    ) -> Self {
         Self {
             agent_loop,
             conv_locks: DashMap::new(),
@@ -188,7 +207,31 @@ impl<H: AgentLoopHandle> AgentService<H> {
             cost_budget: None,
             session_tier: None,
             reply_submitter: OnceLock::new(),
+            defer_broker,
         }
+    }
+
+    /// Deliver a human defer decision (WEFT-331 / `agent.chat.defer_decide`).
+    pub fn defer_decide(
+        &self,
+        conv_id: &str,
+        defer_id: &str,
+        decision: clawft_types::agent_chat::DeferUserDecision,
+    ) -> clawft_types::agent_chat::AgentChatDeferDecideResult {
+        match self.defer_broker.as_ref() {
+            Some(broker) => broker.decide(conv_id, defer_id, decision),
+            None => clawft_types::agent_chat::AgentChatDeferDecideResult {
+                accepted: false,
+                defer_id: defer_id.into(),
+                decision: decision.as_str().into(),
+                error: Some("defer broker not wired".into()),
+            },
+        }
+    }
+
+    /// Shared defer broker handle (for attaching to `AgentLoop`), if any.
+    pub fn defer_broker(&self) -> Option<Arc<crate::defer_broker::InteractiveDeferBroker>> {
+        self.defer_broker.clone()
     }
 
     /// Inject the §W2.1 [`ReplySubmitter`] (register-early/commit-late reply
