@@ -77,13 +77,20 @@ pub async fn run(args: UiArgs) -> anyhow::Result<()> {
 
         // Delegate to the gateway with the pre-loaded (mutated) config.
         // WEFT-10: pass split routing layers for PermissionResolver ceiling.
+        // WEFT-493: pass config path so MCP hot-reload watcher can attach.
         let intelligent_routing = false;
+        let config_watch_path = args
+            .config
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .or_else(|| super::discover_config_path(&*platform));
         super::gateway::run_with_config(
             config,
             intelligent_routing,
             args.ui_dir,
             Some(loaded.global_routing),
             loaded.workspace_routing,
+            config_watch_path,
         )
         .await
     }

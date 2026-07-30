@@ -12,9 +12,10 @@
 //! 2. Register + init enabled channel factories
 //! 3. Start all channels (each in its own tokio task)
 //! 4. Start background services (CronService, HeartbeatService)
-//! 5. Spawn the agent loop (consumes inbound, produces outbound)
-//! 6. Spawn the outbound dispatch loop (routes outbound to channels)
-//! 7. Wait for Ctrl+C, then gracefully shut everything down
+//! 5. Start MCP config file watcher (WEFT-493; drain-and-swap on edit)
+//! 6. Spawn the agent loop (consumes inbound, produces outbound)
+//! 7. Spawn the outbound dispatch loop (routes outbound to channels)
+//! 8. Wait for Ctrl+C, then gracefully shut everything down
 //! ```
 //!
 //! # Example
@@ -24,6 +25,7 @@
 //! weft gateway --config /path/to/config.json
 //! ```
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Args;
@@ -121,12 +123,19 @@ pub async fn run(args: GatewayArgs) -> anyhow::Result<()> {
 async fn run_with_channels(args: GatewayArgs) -> anyhow::Result<()> {
     let platform = Arc::new(NativePlatform::new());
     let loaded = super::load_config_layered(&*platform, args.config.as_deref()).await?;
+    // Prefer explicit `--config` / CLAWFT_CONFIG, else discovery chain.
+    let config_watch_path = args
+        .config
+        .as_ref()
+        .map(PathBuf::from)
+        .or_else(|| super::discover_config_path(&*platform));
     run_with_config(
         loaded.config,
         args.intelligent_routing,
         None,
         Some(loaded.global_routing),
         loaded.workspace_routing,
+        config_watch_path,
     )
     .await
 }
@@ -139,6 +148,10 @@ async fn run_with_channels(args: GatewayArgs) -> anyhow::Result<()> {
 ///
 /// `global_routing` / `workspace_routing` (WEFT-10) feed the
 /// PermissionResolver ceiling when provided.
+///
+/// `config_watch_path` (WEFT-493) is the file the MCP config watcher
+/// observes for hot-reload. When `None`, discovery falls back to the
+/// platform config path, then `~/.clawft/config.json`.
 #[cfg(feature = "channels")]
 pub async fn run_with_config(
     config: clawft_types::config::Config,
@@ -146,6 +159,7 @@ pub async fn run_with_config(
     static_dir: Option<String>,
     global_routing: Option<clawft_types::routing::RoutingConfig>,
     workspace_routing: Option<clawft_types::routing::RoutingConfig>,
+    config_watch_path: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     info!("starting weft gateway");
 
@@ -174,6 +188,46 @@ pub async fn run_with_config(
         )));
 
     info!(tools = ctx.tools().len(), "tool registry initialized");
+
+    // ── MCP config hot-reload watcher (WEFT-493 / WEFT-187) ───────────
+    //
+    // Long-lived gateway is the production host for tools.mcp_servers.
+    // Seed McpServerManager from the user config file and keep the
+    // notify watcher alive until shutdown so `weft mcp add/remove`
+    // (atomic write) is observed without a process restart.
+    #[cfg(feature = "services")]
+    let _mcp_config_watcher = {
+        let watch_path = config_watch_path
+            .or_else(|| super::discover_config_path(&*platform))
+            .or_else(|| dirs::home_dir().map(|h| h.join(".clawft").join("config.json")));
+        match watch_path {
+            Some(path) => {
+                match clawft_services::mcp::boot_mcp_manager_with_watcher(path).await {
+                    Ok(boot) => {
+                        info!(
+                            path = %boot.path.display(),
+                            seeded = boot.initial.added,
+                            "MCP config watcher armed for gateway lifetime"
+                        );
+                        Some(boot)
+                    }
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            "failed to start MCP config watcher; hot-reload disabled this run"
+                        );
+                        None
+                    }
+                }
+            }
+            None => {
+                warn!("no config path for MCP watcher; hot-reload disabled this run");
+                None
+            }
+        }
+    };
+    #[cfg(not(feature = "services"))]
+    let _ = config_watch_path;
 
     // Wire the live LLM-backed pipeline so real provider calls work.
     ctx.enable_live_llm();
