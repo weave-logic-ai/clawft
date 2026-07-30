@@ -16,11 +16,13 @@
 //! between apps and with built-in agents.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 use crate::capability::{AgentCapabilities, IpcScope};
 use crate::container::PortMapping;
@@ -406,6 +408,31 @@ pub fn validate_manifest(manifest: &AppManifest) -> Result<(), AppError> {
     Ok(())
 }
 
+// ── On-disk manifest store ──────────────────────────────────────────
+
+/// Default relative path for the installed-apps manifest store
+/// (mirrors `.weftos/runtime/cluster_peers.json`).
+pub const DEFAULT_APPS_PERSIST_PATH: &str = ".weftos/runtime/apps.json";
+
+fn default_apps_file_version() -> u32 {
+    1
+}
+
+/// On-disk format for persisted AppManager state.
+///
+/// Written atomically (tmp + rename) on every install/remove/state
+/// mutation when persistence is enabled. Rehydrated at boot via
+/// [`AppManager::with_persist_path`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AppsFile {
+    /// Schema version for forward compatibility.
+    #[serde(default = "default_apps_file_version")]
+    pub version: u32,
+    /// Persisted installed applications.
+    #[serde(default)]
+    pub apps: Vec<InstalledApp>,
+}
+
 // ── AppManager ──────────────────────────────────────────────────────
 
 /// Application lifecycle manager.
@@ -414,8 +441,19 @@ pub fn validate_manifest(manifest: &AppManifest) -> Result<(), AppError> {
 /// spawning and service starting are delegated to the supervisor and
 /// container manager respectively -- those integrations are wired in
 /// the kernel boot sequence.
+///
+/// When a persist path is configured (see [`Self::with_persist_path`]),
+/// installed apps survive kernel restarts via an atomic on-disk
+/// manifest store (same pattern as cluster peer membership).
 pub struct AppManager {
     apps: DashMap<String, InstalledApp>,
+    /// Optional path for installed-app persistence.
+    ///
+    /// When set, mutations (install/remove/state-change) are reflected
+    /// to disk so the catalog survives kernel restarts. A `Mutex`
+    /// serialises writers; the lock is held only for the JSON encode +
+    /// atomic rename.
+    persist_path: Mutex<Option<PathBuf>>,
     #[cfg(feature = "exochain")]
     chain_manager: Option<std::sync::Arc<crate::chain::ChainManager>>,
     #[cfg(feature = "exochain")]
@@ -427,10 +465,118 @@ impl AppManager {
     pub fn new() -> Self {
         Self {
             apps: DashMap::new(),
+            persist_path: Mutex::new(None),
             #[cfg(feature = "exochain")]
             chain_manager: None,
             #[cfg(feature = "exochain")]
             governance_gate: None,
+        }
+    }
+
+    /// Enable installed-app persistence at the given path (builder style).
+    ///
+    /// If the file exists and is readable, apps are rehydrated into the
+    /// in-memory map so installs survive kernel restarts. Parse errors
+    /// log a warning and leave the map empty. Subsequent mutations write
+    /// back to the same path via [`Self::persist`].
+    ///
+    /// Runtime handles (agent PIDs, service names) are cleared on
+    /// rehydrate, and transient lifecycle states (`Starting` /
+    /// `Running` / `Stopping`) are normalized to `Stopped` because
+    /// those processes do not survive a kernel restart.
+    pub fn with_persist_path(self, path: impl AsRef<Path>) -> Self {
+        let path = path.as_ref().to_path_buf();
+        if path.exists() {
+            match std::fs::read_to_string(&path) {
+                Ok(data) => match serde_json::from_str::<AppsFile>(&data) {
+                    Ok(file) => {
+                        for mut app in file.apps {
+                            // Processes die with the kernel; drop runtime handles.
+                            app.agent_pids.clear();
+                            app.service_names.clear();
+                            // Normalize transient states so apps can be restarted.
+                            app.state = match app.state {
+                                AppState::Starting
+                                | AppState::Running
+                                | AppState::Stopping => AppState::Stopped,
+                                other => other,
+                            };
+                            let name = app.manifest.name.clone();
+                            self.apps.insert(name, app);
+                        }
+                        info!(
+                            count = self.apps.len(),
+                            path = %path.display(),
+                            "rehydrated installed apps from disk"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            path = %path.display(),
+                            "failed to parse apps file; starting empty"
+                        );
+                    }
+                },
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        path = %path.display(),
+                        "failed to read apps file; starting empty"
+                    );
+                }
+            }
+        }
+        *self
+            .persist_path
+            .lock()
+            .expect("persist_path lock poisoned") = Some(path);
+        self
+    }
+
+    /// Snapshot installed apps to disk (no-op when persistence is disabled).
+    ///
+    /// Writes to a sibling `.tmp` file then renames for atomic replacement.
+    /// Errors are logged but not propagated — the in-memory catalog stays
+    /// correct, and the next successful mutation will re-sync the file.
+    fn persist(&self) {
+        let path_opt = self
+            .persist_path
+            .lock()
+            .expect("persist_path lock poisoned")
+            .clone();
+        let Some(path) = path_opt else {
+            return;
+        };
+
+        let apps: Vec<InstalledApp> = self.apps.iter().map(|e| e.value().clone()).collect();
+        let file = AppsFile {
+            version: default_apps_file_version(),
+            apps,
+        };
+        let json = match serde_json::to_string_pretty(&file) {
+            Ok(j) => j,
+            Err(e) => {
+                warn!(error = %e, "failed to serialise installed apps");
+                return;
+            }
+        };
+
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            warn!(error = %e, path = %parent.display(), "failed to create apps persist parent");
+            return;
+        }
+
+        let tmp = path.with_extension("json.tmp");
+        if let Err(e) = std::fs::write(&tmp, &json) {
+            warn!(error = %e, path = %tmp.display(), "failed to write apps tmp");
+            return;
+        }
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            warn!(error = %e, path = %path.display(), "failed to rename apps file");
+            let _ = std::fs::remove_file(&tmp);
         }
     }
 
@@ -516,6 +662,7 @@ impl AppManager {
             );
         }
 
+        self.persist();
         Ok(name)
     }
 
@@ -559,6 +706,7 @@ impl AppManager {
         let to_state = new_state.to_string();
         debug!(app = name, from = %from_state, to = %to_state, "state transition");
         entry.state = new_state;
+        drop(entry); // release lock before persist (which snapshots the map)
 
         // Chain logging — record state transition.
         #[cfg(feature = "exochain")]
@@ -574,6 +722,7 @@ impl AppManager {
             );
         }
 
+        self.persist();
         Ok(())
     }
 
@@ -653,6 +802,7 @@ impl AppManager {
             );
         }
 
+        self.persist();
         Ok(app.manifest)
     }
 
@@ -1988,5 +2138,116 @@ mod tests {
         let app = mgr.inspect("pid-test").unwrap();
         assert!(app.agent_pids.is_empty());
         assert!(app.service_names.is_empty());
+    }
+
+    // ── Persistence (WEFT-136) ──────────────────────────────────────
+
+    fn apps_persist_tmp_path(suffix: &str) -> PathBuf {
+        let pid = std::process::id();
+        let ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("weftos-apps-{pid}-{ns}-{suffix}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("apps.json")
+    }
+
+    #[test]
+    fn persisted_apps_rehydrate_on_restart() {
+        let path = apps_persist_tmp_path("rehydrate");
+
+        {
+            let manager = AppManager::new().with_persist_path(&path);
+            manager.install(sample_manifest()).unwrap();
+            let mut other = sample_manifest();
+            other.name = "second-app".into();
+            other.version = "2.0.0".into();
+            manager.install(other).unwrap();
+            assert_eq!(manager.len(), 2);
+        }
+
+        assert!(path.exists(), "persist path should exist after install");
+
+        // Simulate restart: new AppManager rehydrates from disk.
+        let restored = AppManager::new().with_persist_path(&path);
+        assert_eq!(restored.len(), 2, "apps should rehydrate from disk");
+        let app = restored.inspect("code-reviewer").unwrap();
+        assert_eq!(app.manifest.version, "1.0.0");
+        assert_eq!(app.state, AppState::Installed);
+        assert!(restored.inspect("second-app").is_ok());
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn persist_uses_atomic_tmp_rename() {
+        let path = apps_persist_tmp_path("atomic");
+        let manager = AppManager::new().with_persist_path(&path);
+        manager.install(sample_manifest()).unwrap();
+
+        assert!(path.exists());
+        // Sibling .tmp must not remain after a successful atomic rename.
+        let tmp = path.with_extension("json.tmp");
+        assert!(
+            !tmp.exists(),
+            "tmp file should be renamed away after atomic write"
+        );
+
+        let data = std::fs::read_to_string(&path).unwrap();
+        let file: AppsFile = serde_json::from_str(&data).unwrap();
+        assert_eq!(file.version, 1);
+        assert_eq!(file.apps.len(), 1);
+        assert_eq!(file.apps[0].manifest.name, "code-reviewer");
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn persist_reflects_remove_and_state_change() {
+        let path = apps_persist_tmp_path("mutations");
+
+        let manager = AppManager::new().with_persist_path(&path);
+        manager.install(sample_manifest()).unwrap();
+        let mut other = sample_manifest();
+        other.name = "to-remove".into();
+        manager.install(other).unwrap();
+        manager
+            .transition_to("code-reviewer", AppState::Starting)
+            .unwrap();
+        manager
+            .transition_to("code-reviewer", AppState::Running)
+            .unwrap();
+        manager.remove("to-remove").unwrap();
+
+        let data = std::fs::read_to_string(&path).unwrap();
+        let file: AppsFile = serde_json::from_str(&data).unwrap();
+        assert_eq!(file.apps.len(), 1);
+        assert_eq!(file.apps[0].manifest.name, "code-reviewer");
+        assert_eq!(file.apps[0].state, AppState::Running);
+
+        // Rehydrate: Running -> Stopped; runtime handles discarded.
+        let restored = AppManager::new().with_persist_path(&path);
+        let app = restored.inspect("code-reviewer").unwrap();
+        assert_eq!(
+            app.state,
+            AppState::Stopped,
+            "transient Running state normalizes to Stopped on rehydrate"
+        );
+        assert!(app.agent_pids.is_empty());
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn with_persist_path_missing_file_is_ok() {
+        let path = apps_persist_tmp_path("missing")
+            .parent()
+            .unwrap()
+            .join("nope.json");
+        let manager = AppManager::new().with_persist_path(&path);
+        assert_eq!(manager.len(), 0);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

@@ -262,8 +262,8 @@ pub use agent_registry::{
     AgentRegistry, RegisteredAgent, publish_payload, register_payload, subscribe_payload,
 };
 pub use app::{
-    AgentSpec, AppCapabilities, AppError, AppHooks, AppManager, AppManifest, AppState,
-    InstalledApp, ServiceSpec, ToolSource, ToolSpec,
+    AgentSpec, AppCapabilities, AppError, AppHooks, AppManager, AppManifest, AppState, AppsFile,
+    DEFAULT_APPS_PERSIST_PATH, InstalledApp, ServiceSpec, ToolSource, ToolSpec,
 };
 #[cfg(feature = "ecc")]
 pub use artifact_store::{ArtifactBackend, ArtifactStore, ArtifactType, StoredArtifact};
