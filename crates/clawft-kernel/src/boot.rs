@@ -272,16 +272,74 @@ impl<P: Platform> Kernel<P> {
             ));
         }
 
+        // 5b½ / 5d prep — mesh-aware assessment service (WEFT-117).
+        //
+        // When mesh is enabled we allocate a stable node_id up front and
+        // share one MeshCoordinator between AssessmentService and
+        // AssessmentTransport. Assessment is registered after that
+        // decision so `assess.mesh.status` sees a live coordinator.
+        #[cfg(all(feature = "native", feature = "mesh"))]
+        let mesh_config_early = kernel_config.mesh.clone().unwrap_or_default();
+        #[cfg(all(feature = "native", feature = "mesh"))]
+        let mesh_node_id: Option<String> = if mesh_config_early.enabled {
+            Some(uuid::Uuid::new_v4().to_string())
+        } else {
+            None
+        };
+        #[cfg(all(feature = "native", feature = "mesh"))]
+        let mesh_project_name = kernel_config
+            .cluster
+            .as_ref()
+            .and_then(|c| c.node_name.clone())
+            .unwrap_or_else(|| "local".into());
+        #[cfg(all(feature = "native", feature = "mesh"))]
+        let assess_mesh_coord: Option<Arc<crate::assessment::mesh::MeshCoordinator>> =
+            mesh_node_id.as_ref().map(|id| {
+                Arc::new(crate::assessment::mesh::MeshCoordinator::new(
+                    id.clone(),
+                    mesh_project_name.clone(),
+                ))
+            });
+
         // 5b½. Register assessment service
         #[cfg(feature = "native")]
-        let assessment_svc = Arc::new(crate::assessment::AssessmentService::new());
+        let assessment_svc = {
+            #[cfg(feature = "mesh")]
+            {
+                if let Some(ref coord) = assess_mesh_coord {
+                    Arc::new(crate::assessment::AssessmentService::with_mesh_coordinator(
+                        Arc::clone(coord),
+                    ))
+                } else {
+                    Arc::new(crate::assessment::AssessmentService::new())
+                }
+            }
+            #[cfg(not(feature = "mesh"))]
+            {
+                Arc::new(crate::assessment::AssessmentService::new())
+            }
+        };
         #[cfg(feature = "native")]
         if let Err(e) = service_registry.register(assessment_svc.clone()) {
             error!(error = %e, "failed to register assessment service");
         } else {
+            let mesh_note = {
+                #[cfg(feature = "mesh")]
+                {
+                    if assess_mesh_coord.is_some() {
+                        " (mesh coordination enabled)"
+                    } else {
+                        ""
+                    }
+                }
+                #[cfg(not(feature = "mesh"))]
+                {
+                    ""
+                }
+            };
             boot_log.push(BootEvent::info(
                 BootPhase::Services,
-                "Assessment service registered",
+                format!("Assessment service registered{mesh_note}"),
             ));
         }
 
@@ -306,9 +364,11 @@ impl<P: Platform> Kernel<P> {
         //     to reach peer nodes.
         #[cfg(all(feature = "native", feature = "mesh"))]
         let mesh_runtime = {
-            let mesh_config = kernel_config.mesh.clone().unwrap_or_default();
+            let mesh_config = mesh_config_early;
             if mesh_config.enabled {
-                let node_id = uuid::Uuid::new_v4().to_string();
+                let node_id = mesh_node_id
+                    .clone()
+                    .expect("mesh enabled implies mesh_node_id");
                 let mut runtime = if mesh_config.discovery {
                     let kad_id = blake3::hash(node_id.as_bytes());
                     crate::mesh_runtime::MeshRuntime::with_discovery(
@@ -323,6 +383,45 @@ impl<P: Platform> Kernel<P> {
                 runtime.set_local_router(Arc::clone(&a2a_router));
 
                 let runtime = Arc::new(runtime);
+
+                // WEFT-117: register AssessmentTransport so the mesh
+                // accept/event loop demuxes FrameType::AssessmentSync
+                // and can drain FindingDiff / gossip pushes to peers.
+                if let Some(ref coord) = assess_mesh_coord {
+                    let assess_transport =
+                        Arc::new(crate::mesh_assess::AssessmentTransport::new(Arc::clone(
+                            coord,
+                        )));
+                    runtime.set_assessment_transport(Arc::clone(&assess_transport));
+
+                    // Periodic drain of pending assessment broadcasts
+                    // (diff-only when available) + lightweight gossip.
+                    let rt_tick = Arc::clone(&runtime);
+                    let assess_for_tick = Arc::clone(&assessment_svc);
+                    let transport_for_tick = Arc::clone(&assess_transport);
+                    tokio::spawn(async move {
+                        let mut interval =
+                            tokio::time::interval(std::time::Duration::from_secs(15));
+                        loop {
+                            interval.tick().await;
+                            // Keep transport's published report in sync so
+                            // RequestReport and gossip_tick have data.
+                            if let Some(report) = assess_for_tick.get_latest() {
+                                transport_for_tick.publish_report(report);
+                            }
+                            // Prefer pending (FindingDiff / gossip from run).
+                            let pushed = rt_tick.push_pending_assessment().await;
+                            if pushed == 0 {
+                                let _ = rt_tick.assessment_gossip_tick().await;
+                            }
+                        }
+                    });
+
+                    boot_log.push(BootEvent::info(
+                        BootPhase::Network,
+                        "AssessmentTransport wired into mesh event loop",
+                    ));
+                }
 
                 // Wire the A2A router BACK to the mesh runtime — the
                 // counterpart of `set_local_router` above. Without

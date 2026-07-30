@@ -29,12 +29,12 @@
 //! - **`gossip_tick`** -- periodic gossip loop driver (called by the
 //!   mesh heartbeat tick or a dedicated timer).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use crate::assessment::AssessmentReport;
+use crate::assessment::{AssessmentDiff, AssessmentReport};
 use crate::assessment::mesh::{AssessmentMessage, MeshCoordinator, PeerAssessmentState};
 use crate::error::{KernelError, KernelResult};
 use crate::mesh_framing::{FrameType, MeshFrame};
@@ -108,6 +108,8 @@ pub struct AssessmentTransport {
     coordinator: Arc<MeshCoordinator>,
     /// Next outbound sequence number (monotonic).
     next_seq: std::sync::atomic::AtomicU64,
+    /// Latest local report (for answering `RequestReport` and gossip ticks).
+    latest_report: Mutex<Option<AssessmentReport>>,
 }
 
 impl AssessmentTransport {
@@ -116,12 +118,28 @@ impl AssessmentTransport {
         Self {
             coordinator,
             next_seq: std::sync::atomic::AtomicU64::new(1),
+            latest_report: Mutex::new(None),
         }
     }
 
     /// Return a reference to the inner coordinator.
     pub fn coordinator(&self) -> &MeshCoordinator {
         &self.coordinator
+    }
+
+    /// Shared coordinator handle (for status RPC / service wiring).
+    pub fn coordinator_arc(&self) -> Arc<MeshCoordinator> {
+        Arc::clone(&self.coordinator)
+    }
+
+    /// Cache the latest local report (enables RequestReport responses + ticks).
+    pub fn publish_report(&self, report: AssessmentReport) {
+        *self.latest_report.lock().unwrap() = Some(report);
+    }
+
+    /// Snapshot of the cached latest report.
+    pub fn latest_report(&self) -> Option<AssessmentReport> {
+        self.latest_report.lock().unwrap().clone()
     }
 
     // ── Outbound ─────────────────────────────────────────────────
@@ -137,6 +155,16 @@ impl AssessmentTransport {
     /// Build a `ReportAvailable` broadcast frame.
     pub fn build_broadcast_frame(&self, report: &AssessmentReport) -> KernelResult<Vec<u8>> {
         let msg = self.coordinator.build_broadcast(report);
+        self.wrap_and_encode(msg)
+    }
+
+    /// Build a `FindingDiff` frame that carries only changed findings.
+    pub fn build_diff_frame(
+        &self,
+        report: &AssessmentReport,
+        diff: &AssessmentDiff,
+    ) -> KernelResult<Vec<u8>> {
+        let msg = self.coordinator.build_finding_diff(report, diff);
         self.wrap_and_encode(msg)
     }
 
@@ -171,11 +199,62 @@ impl AssessmentTransport {
 
     // ── Inbound ──────────────────────────────────────────────────
 
+    /// Try to decode an `AssessmentSync` payload from raw peer bytes.
+    ///
+    /// Accepts either a full [`MeshFrame::encode`] buffer
+    /// (`[4-byte len][type][payload]`) or a type-prefixed buffer
+    /// (`[type][payload]` as produced after transport length stripping).
+    /// Returns `Ok(None)` when the bytes are not an AssessmentSync frame
+    /// (caller should fall through to IPC envelope handling).
+    pub fn try_extract_payload(data: &[u8]) -> KernelResult<Option<Vec<u8>>> {
+        if data.is_empty() {
+            return Ok(None);
+        }
+        // JSON MeshIpcEnvelope starts with '{' — not a framed message.
+        if data[0] == b'{' {
+            return Ok(None);
+        }
+        // Full encode: [4-len][type][payload]
+        if data.len() >= 5 {
+            let len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+            if len + 4 == data.len() && data[4] == FrameType::AssessmentSync as u8 {
+                let frame = MeshFrame::decode(&data[4..])
+                    .map_err(|e| KernelError::Mesh(format!("assessment frame decode: {e}")))?;
+                return Ok(Some(frame.payload));
+            }
+        }
+        // Type-prefixed only: [type][payload]
+        if data[0] == FrameType::AssessmentSync as u8 {
+            let frame = MeshFrame::decode(data)
+                .map_err(|e| KernelError::Mesh(format!("assessment frame decode: {e}")))?;
+            return Ok(Some(frame.payload));
+        }
+        Ok(None)
+    }
+
+    /// Handle raw peer bytes if they carry AssessmentSync; otherwise
+    /// return `Ok(None)` so the mesh runtime can treat them as IPC.
+    ///
+    /// On AssessmentSync, returns `Ok(Some(response_bytes))` when a
+    /// reply should be sent, or `Ok(Some(empty))` is not used — `Ok(Some(None))`
+    /// isn't valid. Convention: `Ok(Some(opt_reply))` where outer Some
+    /// means "this was assessment traffic".
+    pub fn try_handle_raw(&self, data: &[u8]) -> KernelResult<Option<Option<Vec<u8>>>> {
+        match Self::try_extract_payload(data)? {
+            Some(payload) => {
+                let reply = self.handle_incoming(&payload)?;
+                Ok(Some(reply))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Handle an incoming `AssessmentSync` frame payload.
     ///
     /// Decodes the envelope, feeds the inner message to the coordinator,
     /// and returns an optional response message (encoded as frame bytes)
-    /// that should be sent back to the source peer.
+    /// that should be sent back to the source peer. `RequestReport` is
+    /// answered with a `FullReport` when a local report has been published.
     pub fn handle_incoming(&self, frame_payload: &[u8]) -> KernelResult<Option<Vec<u8>>> {
         let envelope = AssessmentEnvelope::from_bytes(frame_payload)?;
         debug!(
@@ -183,6 +262,18 @@ impl AssessmentTransport {
             seq = envelope.sequence,
             "received assessment sync message"
         );
+
+        // Answer RequestReport from the published local report before
+        // coordinator handling (which returns None for this variant).
+        if matches!(
+            &envelope.message,
+            AssessmentMessage::RequestReport { .. }
+        ) {
+            if let Some(report) = self.latest_report() {
+                return Ok(Some(self.build_full_report_frame(&report)?));
+            }
+            return Ok(None);
+        }
 
         let response = self.coordinator.handle_message(envelope.message);
         match response {
@@ -567,6 +658,118 @@ mod tests {
         let frame = MeshFrame::decode(&full[4..4 + len]).unwrap();
         let resp = transport_b.handle_incoming(&frame.payload).unwrap();
         assert!(resp.is_none()); // FullReport is handled by caller
+    }
+
+    fn make_finding(file: &str, msg: &str) -> crate::assessment::Finding {
+        crate::assessment::Finding {
+            severity: "warning".into(),
+            category: "size".into(),
+            file: file.into(),
+            line: Some(1),
+            message: msg.into(),
+        }
+    }
+
+    #[test]
+    fn build_diff_frame_only_changed_findings() {
+        use crate::assessment::analyzer::diff_reports;
+
+        let coord = make_coordinator("node-a", "proj-a");
+        let transport = AssessmentTransport::new(coord);
+        let mut prev = make_report();
+        prev.findings = vec![make_finding("a.rs", "old")];
+        let mut curr = make_report();
+        curr.findings = vec![
+            make_finding("a.rs", "old"),
+            make_finding("b.rs", "new issue"),
+        ];
+        let diff = diff_reports(&curr, &prev);
+        assert_eq!(diff.findings_new.len(), 1);
+        assert!(diff.findings_resolved.is_empty());
+
+        let bytes = transport.build_diff_frame(&curr, &diff).unwrap();
+        let len = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        let frame = MeshFrame::decode(&bytes[4..4 + len]).unwrap();
+        let envelope = AssessmentEnvelope::from_bytes(&frame.payload).unwrap();
+        match envelope.message {
+            AssessmentMessage::FindingDiff {
+                findings_new,
+                findings_resolved,
+                finding_count,
+                ..
+            } => {
+                assert_eq!(findings_new.len(), 1);
+                assert_eq!(findings_new[0].file, "b.rs");
+                assert!(findings_resolved.is_empty());
+                assert_eq!(finding_count, 2);
+            }
+            other => panic!("expected FindingDiff, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_extract_payload_from_full_encode_and_type_prefix() {
+        let coord = make_coordinator("n", "p");
+        let transport = AssessmentTransport::new(coord);
+        let report = make_report();
+        let full = transport.build_gossip_frame(&report).unwrap();
+        let payload = AssessmentTransport::try_extract_payload(&full)
+            .unwrap()
+            .expect("full encode should extract");
+        assert!(!payload.is_empty());
+
+        // type-prefix only form
+        let len = u32::from_be_bytes([full[0], full[1], full[2], full[3]]) as usize;
+        let type_prefixed = &full[4..4 + len];
+        let payload2 = AssessmentTransport::try_extract_payload(type_prefixed)
+            .unwrap()
+            .expect("type-prefix should extract");
+        assert_eq!(payload, payload2);
+
+        // JSON IPC must not be mistaken for assessment frames
+        assert!(
+            AssessmentTransport::try_extract_payload(br#"{"source_node":"x"}"#)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn queue_mesh_propagation_prefers_finding_diff() {
+        use crate::assessment::AssessmentService;
+        use std::io::Write;
+
+        let coord = make_coordinator("node-a", "proj-a");
+        let svc = AssessmentService::with_mesh_coordinator(coord.clone());
+
+        let mut prev = make_report();
+        prev.findings = vec![make_finding("a.rs", "old")];
+        let dir = tempfile::tempdir().unwrap();
+        let prev_path = dir.path().join("prev.json");
+        let mut f = std::fs::File::create(&prev_path).unwrap();
+        f.write_all(serde_json::to_string(&prev).unwrap().as_bytes())
+            .unwrap();
+        svc.set_previous_report_path(prev_path);
+
+        let mut curr = make_report();
+        curr.findings = vec![
+            make_finding("a.rs", "old"),
+            make_finding("b.rs", "new"),
+        ];
+        svc.queue_mesh_propagation(&curr);
+
+        let pending = coord.take_pending_broadcast().expect("pending set");
+        match pending {
+            AssessmentMessage::FindingDiff {
+                findings_new,
+                findings_resolved,
+                ..
+            } => {
+                assert_eq!(findings_new.len(), 1);
+                assert!(findings_resolved.is_empty());
+            }
+            other => panic!("expected FindingDiff, got {other:?}"),
+        }
     }
 
     // ── TCP integration test ─────────────────────────────────────

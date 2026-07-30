@@ -12,6 +12,7 @@ use tracing::{debug, warn};
 use crate::a2a::A2ARouter;
 use crate::error::{KernelError, KernelResult};
 use crate::ipc::{KernelMessage, MessagePayload, MessageTarget};
+use crate::mesh_assess::AssessmentTransport;
 use crate::mesh_chain::{ChainSyncRequest, ChainSyncResponse};
 use crate::mesh_heartbeat::{ClockSource, HeartbeatConfig, HeartbeatTracker, MeshClockSync};
 use crate::mesh_ipc::MeshIpcEnvelope;
@@ -68,6 +69,10 @@ pub struct MeshRuntime {
     /// Consulted by the A2A router's Topic handler to forward published
     /// messages to remote nodes that subscribed to the same topic.
     mesh_subscriptions: DashMap<String, Vec<String>>,
+    /// Assessment mesh transport (WEFT-117 / K6.6). When set, inbound
+    /// `FrameType::AssessmentSync` frames are demuxed into the transport
+    /// instead of being treated as MeshIpcEnvelope JSON.
+    assessment_transport: std::sync::OnceLock<Arc<AssessmentTransport>>,
 }
 
 impl MeshRuntime {
@@ -82,6 +87,7 @@ impl MeshRuntime {
             #[cfg(feature = "exochain")]
             chain_manager: std::sync::OnceLock::new(),
             mesh_subscriptions: DashMap::new(),
+            assessment_transport: std::sync::OnceLock::new(),
         }
     }
 
@@ -103,7 +109,66 @@ impl MeshRuntime {
             #[cfg(feature = "exochain")]
             chain_manager: std::sync::OnceLock::new(),
             mesh_subscriptions: DashMap::new(),
+            assessment_transport: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Attach the assessment transport used for AssessmentSync demux (WEFT-117).
+    ///
+    /// Idempotent (first call wins). Safe after the runtime is wrapped in
+    /// [`Arc`] so boot can wire the transport after mesh listener spawn.
+    pub fn set_assessment_transport(&self, transport: Arc<AssessmentTransport>) {
+        let _ = self.assessment_transport.set(transport);
+    }
+
+    /// Shared assessment transport, if registered.
+    pub fn assessment_transport(&self) -> Option<Arc<AssessmentTransport>> {
+        self.assessment_transport.get().cloned()
+    }
+
+    /// Broadcast raw encoded frame bytes to every connected peer.
+    ///
+    /// Used by the assessment gossip/diff push loop. Failures on individual
+    /// peers are logged and skipped (best-effort fan-out).
+    pub async fn broadcast_raw(&self, data: &[u8]) -> usize {
+        let mut sent = 0usize;
+        for entry in self.peers.iter() {
+            let peer_id = entry.key().clone();
+            let sender = entry.sender.clone();
+            match sender.send(data.to_vec()).await {
+                Ok(()) => sent += 1,
+                Err(_) => {
+                    warn!(peer = %peer_id, "assessment broadcast: peer send channel closed");
+                }
+            }
+        }
+        sent
+    }
+
+    /// Drain pending assessment broadcast (diff/gossip) and push to all peers.
+    ///
+    /// Returns the number of peers that received the frame, or 0 if nothing
+    /// was pending / transport not wired.
+    pub async fn push_pending_assessment(&self) -> usize {
+        let Some(transport) = self.assessment_transport.get() else {
+            return 0;
+        };
+        let Some(bytes) = transport.drain_pending() else {
+            return 0;
+        };
+        self.broadcast_raw(&bytes).await
+    }
+
+    /// Drive one assessment gossip tick using the published local report.
+    pub async fn assessment_gossip_tick(&self) -> usize {
+        let Some(transport) = self.assessment_transport.get() else {
+            return 0;
+        };
+        let report = transport.latest_report();
+        let Some(bytes) = transport.gossip_tick(report.as_ref()) else {
+            return 0;
+        };
+        self.broadcast_raw(&bytes).await
     }
 
     /// Return this node's identifier.
@@ -228,11 +293,16 @@ impl MeshRuntime {
 
     /// Handle incoming raw bytes from a peer.
     ///
-    /// Deserializes the data into a [`MeshIpcEnvelope`], then injects
-    /// the inner [`KernelMessage`] into the local A2A router. The
-    /// message target is unwrapped from `RemoteNode` if present so
-    /// that the local router delivers to the correct local process.
+    /// First attempts AssessmentSync demux via the registered
+    /// [`AssessmentTransport`] (WEFT-117). Non-assessment traffic is
+    /// deserialized as a [`MeshIpcEnvelope`] and injected into the
+    /// local A2A router. The message target is unwrapped from
+    /// `RemoteNode` if present so that the local router delivers to
+    /// the correct local process.
     pub async fn handle_incoming(&self, data: &[u8]) -> KernelResult<()> {
+        if self.try_handle_assessment(data, None).await? {
+            return Ok(());
+        }
         let envelope = MeshIpcEnvelope::from_bytes(data)
             .map_err(|e| KernelError::Mesh(format!("deserialization error: {e}")))?;
         self.handle_envelope(envelope).await
@@ -255,6 +325,18 @@ impl MeshRuntime {
         data: &[u8],
         outbound: tokio::sync::mpsc::Sender<Vec<u8>>,
     ) -> KernelResult<()> {
+        // AssessmentSync frames do not carry MeshIpcEnvelope source_node
+        // for auto-registration. Demux first; reply (if any) goes on the
+        // same outbound channel. Peer registration for assessment-only
+        // peers happens when the first IPC envelope arrives, or via
+        // explicit add_peer (seed / test harness).
+        if self
+            .try_handle_assessment(data, Some(outbound.clone()))
+            .await?
+        {
+            return Ok(());
+        }
+
         let envelope = MeshIpcEnvelope::from_bytes(data)
             .map_err(|e| KernelError::Mesh(format!("deserialization error: {e}")))?;
 
@@ -272,6 +354,44 @@ impl MeshRuntime {
         self.add_peer(envelope.source_node.clone(), outbound);
 
         self.handle_envelope(envelope).await
+    }
+
+    /// Demux AssessmentSync frames into the registered transport.
+    ///
+    /// Returns `Ok(true)` when the bytes were assessment traffic (handled),
+    /// `Ok(false)` when the caller should continue with IPC envelope path.
+    async fn try_handle_assessment(
+        &self,
+        data: &[u8],
+        reply_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    ) -> KernelResult<bool> {
+        let Some(transport) = self.assessment_transport.get() else {
+            return Ok(false);
+        };
+        match transport.try_handle_raw(data)? {
+            Some(maybe_reply) => {
+                if let Some(reply) = maybe_reply {
+                    if let Some(tx) = reply_tx {
+                        let _ = tx.send(reply).await;
+                    } else if let Some(source) = AssessmentTransport::try_extract_payload(data)
+                        .ok()
+                        .flatten()
+                        .and_then(|p| {
+                            crate::mesh_assess::AssessmentEnvelope::from_bytes(&p)
+                                .ok()
+                                .map(|e| e.source_node)
+                        })
+                    {
+                        // Prefer routing the reply to the known peer by source_node.
+                        if let Some(peer) = self.peers.get(&source) {
+                            let _ = peer.sender.send(reply).await;
+                        }
+                    }
+                }
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 
     async fn handle_envelope(&self, envelope: MeshIpcEnvelope) -> KernelResult<()> {
@@ -1121,5 +1241,117 @@ mod tests {
             old_rx.try_recv().is_err(),
             "stale channel from the dropped connection must not receive"
         );
+    }
+
+    // ── WEFT-117: AssessmentTransport demux + two-node diff push ─
+
+    /// Two mock peers: node A pushes a FindingDiff through MeshRuntime
+    /// demux; node B's AssessmentTransport updates peer state without
+    /// requiring a full report exchange.
+    #[tokio::test]
+    async fn assessment_transport_demux_and_diff_push_two_nodes() {
+        use crate::assessment::analyzer::diff_reports;
+        use crate::assessment::mesh::MeshCoordinator;
+        use crate::assessment::{AssessmentReport, AssessmentSummary, Finding};
+        use crate::mesh_assess::AssessmentTransport;
+        use chrono::Utc;
+
+        fn report_with(findings: Vec<Finding>) -> AssessmentReport {
+            AssessmentReport {
+                timestamp: Utc::now(),
+                scope: "full".into(),
+                project: "/tmp/a".into(),
+                files_scanned: 10,
+                summary: AssessmentSummary {
+                    total_files: 10,
+                    coherence_score: 0.9,
+                    ..Default::default()
+                },
+                findings,
+                analyzers_run: vec!["complexity".into()],
+            }
+        }
+
+        let coord_a = Arc::new(MeshCoordinator::new("node-a".into(), "proj-a".into()));
+        let coord_b = Arc::new(MeshCoordinator::new("node-b".into(), "proj-b".into()));
+        let transport_a = Arc::new(AssessmentTransport::new(coord_a.clone()));
+        let transport_b = Arc::new(AssessmentTransport::new(coord_b.clone()));
+
+        // Routers not required for assessment demux path.
+        let rt_a = Arc::new(MeshRuntime::new("node-a".into()));
+        let rt_b = Arc::new(MeshRuntime::new("node-b".into()));
+        rt_a.set_assessment_transport(transport_a.clone());
+        rt_b.set_assessment_transport(transport_b.clone());
+
+        // Mock peer channels: A → B and B → A
+        let (a_to_b_tx, mut a_to_b_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        let (b_to_a_tx, mut b_to_a_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        rt_a.add_peer("node-b".into(), a_to_b_tx);
+        rt_b.add_peer("node-a".into(), b_to_a_tx.clone());
+
+        let prev = report_with(vec![Finding {
+            severity: "warning".into(),
+            category: "size".into(),
+            file: "a.rs".into(),
+            line: Some(1),
+            message: "old".into(),
+        }]);
+        let curr = report_with(vec![
+            Finding {
+                severity: "warning".into(),
+                category: "size".into(),
+                file: "a.rs".into(),
+                line: Some(1),
+                message: "old".into(),
+            },
+            Finding {
+                severity: "warning".into(),
+                category: "size".into(),
+                file: "b.rs".into(),
+                line: Some(2),
+                message: "new finding".into(),
+            },
+        ]);
+        let diff = diff_reports(&curr, &prev);
+        assert_eq!(diff.findings_new.len(), 1);
+
+        // A queues FindingDiff and drains via push_pending_assessment.
+        coord_a.set_pending_broadcast(coord_a.build_finding_diff(&curr, &diff));
+        transport_a.publish_report(curr.clone());
+        let sent = rt_a.push_pending_assessment().await;
+        assert_eq!(sent, 1, "diff should reach mock peer B channel");
+
+        let frame_bytes = a_to_b_rx.try_recv().expect("B should receive encoded frame");
+
+        // B demuxes AssessmentSync in the mesh event loop.
+        rt_b.handle_incoming_from(&frame_bytes, b_to_a_tx.clone())
+            .await
+            .expect("assessment demux must succeed");
+
+        let peers = transport_b.peer_states();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].node_id, "node-a");
+        assert_eq!(peers[0].project_name, "proj-a");
+        assert_eq!(peers[0].finding_count, 2);
+
+        // JSON IPC still works when assessment transport is wired
+        // (non-assessment traffic falls through).
+        let ipc = MeshIpcEnvelope::new(
+            "node-a".into(),
+            "node-b".into(),
+            KernelMessage::new(
+                0,
+                MessageTarget::Topic("mesh.subscribe".into()),
+                MessagePayload::Json(serde_json::json!({"topic": "t1"})),
+            ),
+        );
+        let ipc_bytes = ipc.to_bytes().unwrap();
+        rt_b.handle_incoming_from(&ipc_bytes, b_to_a_tx)
+            .await
+            .unwrap();
+        assert!(rt_b.peers_for_topic("t1").contains(&"node-a".to_string()));
+
+        // Silence unused warning for b_to_a_rx if nothing was replied.
+        let _ = b_to_a_rx.try_recv();
     }
 }

@@ -134,6 +134,18 @@ pub enum AssessAction {
         #[arg(short, long)]
         dir: Option<String>,
     },
+
+    /// Show assessment mesh peer state (WEFT-117).
+    ///
+    /// Reports whether mesh assessment coordination is enabled and the
+    /// last-known gossip state of each peer. Requires a running daemon
+    /// with mesh enabled; falls back to a local "disabled" summary.
+    #[command(name = "mesh-status")]
+    MeshStatus {
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Assessment scope — what to scan.
@@ -212,6 +224,7 @@ pub async fn run(args: AssessArgs) -> anyhow::Result<()> {
         Some(AssessAction::Review { history, dir }) => {
             run_review_with_daemon(history, dir.as_deref()).await
         }
+        Some(AssessAction::MeshStatus { json }) => run_mesh_status(json).await,
         // No subcommand — run assessment with top-level args.
         None => {
             run_assessment_with_daemon(&args.scope, &args.format, args.dir.as_deref(), None).await
@@ -355,6 +368,112 @@ async fn run_review_with_daemon(history: usize, dir: Option<&str>) -> anyhow::Re
     }
 
     run_review(history, dir)
+}
+
+/// Query `assess.mesh.status` from the daemon (WEFT-117).
+async fn run_mesh_status(as_json: bool) -> anyhow::Result<()> {
+    if let Some(mut client) = DaemonClient::connect().await {
+        let resp = client
+            .call(Request::new("assess.mesh.status"))
+            .await?;
+        if resp.ok {
+            if let Some(data) = resp.result {
+                if as_json {
+                    println!("{}", serde_json::to_string_pretty(&data)?);
+                } else {
+                    print_mesh_status_table(&data);
+                }
+                return Ok(());
+            }
+        }
+        if let Some(ref err) = resp.error
+            && !err.contains("unknown method")
+        {
+            anyhow::bail!("{err}");
+        }
+        eprintln!("Warning: daemon returned no mesh status payload.");
+    } else {
+        eprintln!("{NO_DAEMON_WARNING}");
+    }
+
+    // Offline fallback — mesh coordination requires a running daemon.
+    let offline = serde_json::json!({
+        "mesh_enabled": false,
+        "node_id": null,
+        "project_name": null,
+        "peer_count": 0,
+        "peers": [],
+        "message": "No daemon connection; assessment mesh status unavailable."
+    });
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&offline)?);
+    } else {
+        println!("Assessment mesh: disabled (no daemon)");
+        println!("Start daemon with mesh enabled to view peer assessment state.");
+    }
+    Ok(())
+}
+
+fn print_mesh_status_table(data: &serde_json::Value) {
+    let enabled = data
+        .get("mesh_enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let node_id = data
+        .get("node_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("-");
+    let project = data
+        .get("project_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("-");
+    let peer_count = data
+        .get("peer_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    println!("Assessment mesh status");
+    println!("======================");
+    println!("  mesh_enabled : {enabled}");
+    println!("  node_id      : {node_id}");
+    println!("  project      : {project}");
+    println!("  peer_count   : {peer_count}");
+    println!();
+
+    let peers = data
+        .get("peers")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if peers.is_empty() {
+        println!("No assessment peers known yet (await gossip / FindingDiff push).");
+        return;
+    }
+
+    println!(
+        "{:<20} {:<20} {:>8} {:>9}  {}",
+        "NODE", "PROJECT", "FINDINGS", "ANALYZERS", "LAST_GOSSIP"
+    );
+    for p in &peers {
+        let nid = p.get("node_id").and_then(|v| v.as_str()).unwrap_or("?");
+        let proj = p
+            .get("project_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let fc = p
+            .get("finding_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let ac = p
+            .get("analyzer_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let lg = p
+            .get("last_gossip")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-");
+        println!("{nid:<20} {proj:<20} {fc:>8} {ac:>9}  {lg}");
+    }
 }
 
 /// Analyze assessment history and generate SOP improvement recommendations.

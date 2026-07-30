@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use super::AssessmentReport;
+use super::{AssessmentDiff, AssessmentReport, Finding};
 
 // ── Protocol messages ─────────────────────────────────────────────
 
@@ -35,6 +35,21 @@ pub enum AssessmentMessage {
         node_id: String,
         project_name: String,
         last_assessment: Option<String>,
+        finding_count: usize,
+        analyzer_count: usize,
+    },
+    /// Diff push: only findings that changed since the previous assessment
+    /// (WEFT-117). Prefer this over full-report flood when a prior report
+    /// exists so peers receive deltas only.
+    FindingDiff {
+        node_id: String,
+        project_name: String,
+        timestamp: String,
+        findings_new: Vec<Finding>,
+        findings_resolved: Vec<Finding>,
+        complexity_delta: i64,
+        coherence_delta: f64,
+        /// Total finding count after applying the diff (for peer state).
         finding_count: usize,
         analyzer_count: usize,
     },
@@ -138,6 +153,23 @@ impl MeshCoordinator {
                 // Caller handles storing the received report.
                 None
             }
+            AssessmentMessage::FindingDiff {
+                ref node_id,
+                ref project_name,
+                finding_count,
+                analyzer_count,
+                ..
+            } => {
+                self.update_peer(PeerAssessmentState {
+                    node_id: node_id.clone(),
+                    project_name: project_name.clone(),
+                    last_assessment: Some(Utc::now().to_rfc3339()),
+                    finding_count,
+                    analyzer_count,
+                    last_gossip: Utc::now().to_rfc3339(),
+                });
+                None
+            }
         }
     }
 
@@ -161,6 +193,25 @@ impl MeshCoordinator {
             files_scanned: report.files_scanned,
             finding_count: report.findings.len(),
             coherence_score: report.summary.coherence_score,
+        }
+    }
+
+    /// Build a `FindingDiff` push from an [`AssessmentDiff`] (changed findings only).
+    pub fn build_finding_diff(
+        &self,
+        report: &AssessmentReport,
+        diff: &AssessmentDiff,
+    ) -> AssessmentMessage {
+        AssessmentMessage::FindingDiff {
+            node_id: self.node_id.clone(),
+            project_name: self.project_name.clone(),
+            timestamp: report.timestamp.to_rfc3339(),
+            findings_new: diff.findings_new.clone(),
+            findings_resolved: diff.findings_resolved.clone(),
+            complexity_delta: diff.complexity_delta,
+            coherence_delta: diff.coherence_delta,
+            finding_count: report.findings.len(),
+            analyzer_count: report.analyzers_run.len(),
         }
     }
 
