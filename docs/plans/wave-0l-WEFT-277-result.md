@@ -3,6 +3,7 @@
 **Ticket:** WEFT-277  
 **Branch:** `wave0l/weft-277-honest-affordances`  
 **Base:** `release/0.8-staging`  
+**Commit:** `496db589`  
 **Date:** 2026-07-30  
 **Agent:** coder-277 (wave-0l)
 
