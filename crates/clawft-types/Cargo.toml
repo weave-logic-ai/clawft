@@ -28,6 +28,8 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 dirs = { workspace = true, optional = true }
 getrandom = { workspace = true, optional = true }
+# SC-2 / WEFT-223: SecureAudioBuffer / SecureAudioRing zeroize-on-drop.
+zeroize = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

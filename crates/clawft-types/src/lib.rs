@@ -32,6 +32,8 @@
 pub mod agent_bus;
 pub mod agent_chat;
 pub mod agent_routing;
+/// SC-2 secure PCM buffers (WEFT-223) — zeroize-on-drop raw audio holders.
+pub mod audio_buffer;
 pub mod canvas;
 pub mod company;
 pub mod config;
@@ -49,5 +51,8 @@ pub mod session;
 pub mod skill;
 pub mod workspace;
 
+pub use audio_buffer::{
+    zeroize_samples, zeroize_vec, SecureAudioBuffer, SecureAudioRing,
+};
 pub use error::{ChannelError, ClawftError, Result};
 pub use registry::Registry;

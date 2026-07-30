@@ -3,7 +3,17 @@
 //! [`TranscriptLogger`] writes voice session transcripts to JSONL files
 //! in the workspace directory. Each line is a JSON-serialized
 //! [`TranscriptEntry`].
+//!
+//! # SC-2 / WEFT-223
+//!
+//! Transcript logs are **text-only by default**. Raw PCM is never
+//! embedded in the JSONL. An optional `audio_path` field is only
+//! written when the logger's [`AudioRetention`] is
+//! [`AudioRetention::Persist`] **and** the caller supplies a path
+//! produced by capture-side persistence. Session/None policies strip
+//! any audio path before write.
 
+use clawft_types::config::AudioRetention;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
@@ -28,6 +38,13 @@ pub struct TranscriptEntry {
     /// Duration of the audio segment in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    /// Optional path to persisted raw audio (SC-2).
+    ///
+    /// Only serialized when the logger's retention is
+    /// [`AudioRetention::Persist`]. Never contains sample bytes —
+    /// only a filesystem path under `.clawft/audio/`.
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "audioPath")]
+    pub audio_path: Option<String>,
 }
 
 /// Appends voice transcript entries to a JSONL file.
@@ -56,8 +73,15 @@ pub struct TranscriptEntry {
 /// Per ADR-053, substrate-side `clawft-service-whisper` is the
 /// canonical 0.7.0 STT path; this logger is the agent-side companion
 /// that records consumed transcripts in the workspace.
+///
+/// # SC-2 (WEFT-223)
+///
+/// Construct with [`TranscriptLogger::with_retention`] (or the default
+/// [`AudioRetention::None`] via [`new`](Self::new)) so raw-audio path
+/// fields are gated. Text transcriptions are always allowed.
 pub struct TranscriptLogger {
     path: PathBuf,
+    retention: AudioRetention,
 }
 
 impl TranscriptLogger {
@@ -68,16 +92,40 @@ impl TranscriptLogger {
     /// `session_id` should be the substrate `<source-node-id>` that
     /// produced the transcripts being recorded — see the type-level
     /// docs (WEFT-241) for the join-key contract.
+    ///
+    /// Retention defaults to [`AudioRetention::None`] (no raw-audio
+    /// path fields written).
     pub fn new(workspace: &Path, session_id: &str) -> std::io::Result<Self> {
+        Self::with_retention(workspace, session_id, AudioRetention::None)
+    }
+
+    /// Create a logger with an explicit SC-2 retention policy.
+    pub fn with_retention(
+        workspace: &Path,
+        session_id: &str,
+        retention: AudioRetention,
+    ) -> std::io::Result<Self> {
         let dir = workspace.join(".clawft").join("transcripts");
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{session_id}.jsonl"));
-        Ok(Self { path })
+        Ok(Self { path, retention })
+    }
+
+    /// Current retention policy.
+    pub fn retention(&self) -> AudioRetention {
+        self.retention
     }
 
     /// Append a transcript entry to the log file.
+    ///
+    /// SC-2: strips `audio_path` unless retention is
+    /// [`AudioRetention::Persist`]. Never writes sample bytes.
     pub async fn log(&self, entry: &TranscriptEntry) -> std::io::Result<()> {
-        let mut line = serde_json::to_string(entry)
+        let mut entry = entry.clone();
+        if !self.retention.allows_disk_write() {
+            entry.audio_path = None;
+        }
+        let mut line = serde_json::to_string(&entry)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         line.push('\n');
 
@@ -113,22 +161,32 @@ impl TranscriptLogger {
 mod tests {
     use super::*;
 
-    #[test]
-    fn transcript_entry_serde_roundtrip() {
-        let entry = TranscriptEntry {
+    fn entry(
+        speaker: &str,
+        text: &str,
+        audio_path: Option<&str>,
+    ) -> TranscriptEntry {
+        TranscriptEntry {
             timestamp: "2026-02-24T12:00:00Z".into(),
-            speaker: "user".into(),
-            text: "hello world".into(),
+            speaker: speaker.into(),
+            text: text.into(),
             source: "local".into(),
             confidence: Some(0.95),
             language: Some("en".into()),
             duration_ms: Some(1500),
-        };
+            audio_path: audio_path.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn transcript_entry_serde_roundtrip() {
+        let entry = entry("user", "hello world", None);
         let json = serde_json::to_string(&entry).unwrap();
         let restored: TranscriptEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.text, "hello world");
         assert_eq!(restored.speaker, "user");
         assert!((restored.confidence.unwrap() - 0.95).abs() < f32::EPSILON);
+        assert!(restored.audio_path.is_none());
     }
 
     #[test]
@@ -141,11 +199,13 @@ mod tests {
             confidence: None,
             language: None,
             duration_ms: None,
+            audio_path: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(!json.contains("confidence"));
         assert!(!json.contains("language"));
         assert!(!json.contains("duration_ms"));
+        assert!(!json.contains("audio_path"));
     }
 
     #[tokio::test]
@@ -160,17 +220,10 @@ mod tests {
                 .to_string_lossy()
                 .contains("test-session-001.jsonl")
         );
+        assert_eq!(logger.retention(), AudioRetention::None);
 
         // Write two entries
-        let entry1 = TranscriptEntry {
-            timestamp: "2026-02-24T12:00:00Z".into(),
-            speaker: "user".into(),
-            text: "what time is it".into(),
-            source: "local".into(),
-            confidence: Some(0.85),
-            language: Some("en".into()),
-            duration_ms: Some(2000),
-        };
+        let entry1 = entry("user", "what time is it", None);
         let entry2 = TranscriptEntry {
             timestamp: "2026-02-24T12:00:01Z".into(),
             speaker: "agent".into(),
@@ -179,6 +232,7 @@ mod tests {
             confidence: None,
             language: None,
             duration_ms: None,
+            audio_path: None,
         };
 
         logger.log(&entry1).await.unwrap();
@@ -203,6 +257,71 @@ mod tests {
 
         let logger = TranscriptLogger::new(&tmp_dir, "dir-test").unwrap();
         assert!(logger.path().parent().unwrap().exists());
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[tokio::test]
+    async fn retention_none_strips_audio_path() {
+        let tmp_dir = std::env::temp_dir().join("clawft_test_transcript_sc2_none");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+
+        let logger = TranscriptLogger::new(&tmp_dir, "sess-none").unwrap();
+        let e = entry(
+            "user",
+            "secret utterance",
+            Some("/tmp/.clawft/audio/should-not-appear.pcm"),
+        );
+        logger.log(&e).await.unwrap();
+
+        let raw = tokio::fs::read_to_string(logger.path()).await.unwrap();
+        assert!(!raw.contains("audio_path"));
+        assert!(!raw.contains("should-not-appear"));
+        assert!(raw.contains("secret utterance"));
+
+        let entries = logger.read_all().await.unwrap();
+        assert!(entries[0].audio_path.is_none());
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[tokio::test]
+    async fn retention_persist_keeps_audio_path() {
+        let tmp_dir = std::env::temp_dir().join("clawft_test_transcript_sc2_persist");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+
+        let logger =
+            TranscriptLogger::with_retention(&tmp_dir, "sess-persist", AudioRetention::Persist)
+                .unwrap();
+        let e = entry(
+            "user",
+            "kept",
+            Some("/workspace/.clawft/audio/utt-1.pcm"),
+        );
+        logger.log(&e).await.unwrap();
+
+        let entries = logger.read_all().await.unwrap();
+        assert_eq!(
+            entries[0].audio_path.as_deref(),
+            Some("/workspace/.clawft/audio/utt-1.pcm")
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[tokio::test]
+    async fn retention_session_strips_audio_path() {
+        // Session = memory only; transcript writer must not reference disk audio.
+        let tmp_dir = std::env::temp_dir().join("clawft_test_transcript_sc2_session");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+
+        let logger =
+            TranscriptLogger::with_retention(&tmp_dir, "sess-session", AudioRetention::Session)
+                .unwrap();
+        let e = entry("user", "session hold", Some("/x/y.pcm"));
+        logger.log(&e).await.unwrap();
+        let entries = logger.read_all().await.unwrap();
+        assert!(entries[0].audio_path.is_none());
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }

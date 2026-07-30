@@ -60,6 +60,10 @@ pub use analysis::{
     ParalinguisticClass, ParalinguisticsAnalysis, ProsodyAnalysis, SpeakerAction, SpeakerAnalysis,
     SttAnalysis, SttPath, TokenAnalysis, VoiceAnalysis, VOICE_ANALYSIS_VERSION, VOICE_TIER,
 };
+// SC-2 / WEFT-223: re-export secure PCM helpers used by talk-mode preroll.
+pub use clawft_types::config::AudioRetention;
+pub use clawft_types::{SecureAudioBuffer, SecureAudioRing, zeroize_samples, zeroize_vec};
+
 pub use capture::{CaptureMetrics, CaptureProcessor, ImpulseSink, VoiceImpulse};
 pub use edge_reflex::{EdgeCommand, EdgeReflex, ReflexState};
 pub use paralinguistics::{classify_paralinguistics, ParalinguisticInput};

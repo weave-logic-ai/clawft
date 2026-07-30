@@ -171,6 +171,8 @@ futures-util = "0.3"
 hmac = "0.12"
 sha2 = "0.10"
 sha3 = { version = "0.10", default-features = false, features = ["std"] }
+# SC-2 / WEFT-223: zeroize raw PCM buffers on drop (voice audio retention).
+zeroize = { version = "1.8", features = ["derive"] }
 
 # Scheduling
 cron = "0.15"
