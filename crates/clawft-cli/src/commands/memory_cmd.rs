@@ -1,11 +1,12 @@
-//! `weft memory` -- read, search, export, and import agent memory files.
+//! `weft memory` -- read, search, export, import, and reindex agent memory.
 //!
 //! Provides commands to inspect the long-term memory (`MEMORY.md`) and
 //! session history (`HISTORY.md`) files managed by the agent, as well
 //! as a substring search across both.
 //!
 //! Export and import support JSON format with optional WITNESS chain
-//! validation for tamper detection.
+//! validation for tamper detection. `reindex` rebuilds the vector index
+//! (`memory.rvf`) from `MEMORY.md` (WEFT-84 / MW-6).
 //!
 //! # Examples
 //!
@@ -13,16 +14,24 @@
 //! weft memory show
 //! weft memory history
 //! weft memory search "authentication" --limit 5
+//! weft memory reindex
 //! weft memory export --agent my-agent --output /tmp/memory.json
 //! weft memory import --agent my-agent --input /tmp/memory.json
 //! ```
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clawft_core::agent::memory::MemoryStore;
+use clawft_core::embeddings::api_embedder::ApiEmbedder;
+use clawft_core::memory_bootstrap::{
+    memory_is_newer_than_index, reindex_memory_index,
+};
 use clawft_platform::NativePlatform;
 use clawft_types::config::Config;
+
+/// Default vector index filename next to `MEMORY.md` (WEFT-84).
+const MEMORY_INDEX_NAME: &str = "memory.rvf";
 
 /// Read and display the contents of `MEMORY.md`.
 ///
@@ -101,6 +110,67 @@ pub async fn memory_search(query: &str, limit: usize, _config: &Config) -> anyho
         }
     }
     Ok(())
+}
+
+/// Force-rebuild the vector memory index from `MEMORY.md` (WEFT-84).
+///
+/// Resolves the workspace memory path via [`MemoryStore`], embeds sections
+/// with the local hash embedder (same zero-dependency default bootstrap
+/// uses when no API key is set), and writes `memory.rvf` beside
+/// `MEMORY.md`. Always rebuilds; use this after manual edits to MEMORY.md
+/// or when automatic mtime-based bootstrap is not running.
+pub async fn memory_reindex(_config: &Config) -> anyhow::Result<()> {
+    let platform = Arc::new(NativePlatform::new());
+    let store = MemoryStore::new(platform)
+        .map_err(|e| anyhow::anyhow!("failed to initialize memory store: {e}"))?;
+
+    let memory_path = store.memory_path().to_path_buf();
+    let index_path = default_memory_index_path(&memory_path);
+
+    if !memory_path.exists() {
+        anyhow::bail!(
+            "MEMORY.md not found at {} — nothing to index",
+            memory_path.display()
+        );
+    }
+
+    let stale = memory_is_newer_than_index(&memory_path, &index_path);
+    println!("Memory file: {}", memory_path.display());
+    println!("Index file:  {}", index_path.display());
+    if index_path.exists() {
+        println!(
+            "Status:      {} (forced reindex)",
+            if stale {
+                "MEMORY.md newer than index"
+            } else {
+                "index present"
+            }
+        );
+    } else {
+        println!("Status:      no index yet (building)");
+    }
+
+    // Hash-only embedder: deterministic, offline, matches bootstrap tests.
+    // Dimension 384 aligns with ApiEmbedder defaults used elsewhere.
+    let embedder = ApiEmbedder::hash_only(384);
+    let indexed = reindex_memory_index(&memory_path, &index_path, &embedder)
+        .await
+        .map_err(|e| anyhow::anyhow!("memory reindex failed: {e}"))?;
+
+    if indexed == 0 {
+        println!("Indexed 0 sections (MEMORY.md empty or no split sections).");
+    } else {
+        println!("Indexed {indexed} section(s) into {}", index_path.display());
+    }
+    Ok(())
+}
+
+/// Resolve `memory.rvf` beside the given `MEMORY.md` path.
+fn default_memory_index_path(memory_path: &Path) -> PathBuf {
+    memory_path
+        .parent()
+        .map(|p| p.join(MEMORY_INDEX_NAME))
+        .unwrap_or_else(|| PathBuf::from(MEMORY_INDEX_NAME))
 }
 
 /// Export agent memory to a file.
@@ -354,5 +424,12 @@ mod tests {
             history_content: String::new(),
         };
         assert_eq!(export.version, 1);
+    }
+
+    #[test]
+    fn default_memory_index_path_beside_memory_md() {
+        let mem = Path::new("/tmp/ws/memory/MEMORY.md");
+        let idx = default_memory_index_path(mem);
+        assert_eq!(idx, PathBuf::from("/tmp/ws/memory/memory.rvf"));
     }
 }
