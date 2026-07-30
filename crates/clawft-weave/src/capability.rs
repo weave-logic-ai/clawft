@@ -115,6 +115,8 @@ pub fn required_capability(method: &str) -> Capability {
         | "kernel.ps"
         | "kernel.services"
         | "kernel.logs"
+        // WEFT-434: live log tail (same Read capability as kernel.logs).
+        | "kernel.logs_stream"
         | "cluster.status"
         | "cluster.nodes"
         | "cluster.health"

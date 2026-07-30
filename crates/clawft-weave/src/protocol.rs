@@ -131,24 +131,56 @@ pub struct ServiceInfo {
     pub uptime_ms: u64,
 }
 
-/// A single log entry for `kernel.logs`.
+/// A single log entry for `kernel.logs` / `kernel.logs_stream`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
     pub timestamp: String,
     pub phase: String,
     pub level: String,
     pub message: String,
+    /// Monotonic sequence from the daemon event log (WEFT-434).
+    /// Absent / zero on legacy payloads that predate the field.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub seq: u64,
 }
 
-/// Parameters for `kernel.logs`.
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
+impl LogEntry {
+    /// Build a wire log entry from a kernel boot event.
+    pub fn from_boot_event(e: &clawft_kernel::BootEvent) -> Self {
+        Self {
+            timestamp: e.timestamp.to_rfc3339(),
+            phase: e.phase.tag().to_owned(),
+            level: format!("{:?}", e.level).to_lowercase(),
+            message: e.message.clone(),
+            seq: e.seq,
+        }
+    }
+}
+
+/// Parameters for `kernel.logs` and `kernel.logs_stream`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogsParams {
-    /// Number of recent entries to return (0 = all).
+    /// Number of recent entries to return (0 = all for `kernel.logs`;
+    /// for `kernel.logs_stream`, 0 means stream-only with no initial
+    /// tail replay).
     #[serde(default)]
     pub count: usize,
     /// Minimum level filter: "debug", "info", "warn", "error".
     #[serde(default)]
     pub level: Option<String>,
+}
+
+impl Default for LogsParams {
+    fn default() -> Self {
+        Self {
+            count: 50,
+            level: None,
+        }
+    }
 }
 
 // ── Cluster result types ──────────────────────────────────

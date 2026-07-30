@@ -5,6 +5,10 @@
 //! loop is stubbed (requires complex stdin handling); only the event
 //! types and output formatting are implemented.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender};
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -77,6 +81,11 @@ pub struct BootEvent {
     pub message: String,
     /// Severity level.
     pub level: LogLevel,
+    /// Monotonic sequence assigned by [`KernelEventLog`] on ingest
+    /// (WEFT-434). Zero for events that never passed through the
+    /// event log (or legacy payloads that predate the field).
+    #[serde(default)]
+    pub seq: u64,
 }
 
 impl BootEvent {
@@ -87,6 +96,7 @@ impl BootEvent {
             phase,
             message: message.into(),
             level: LogLevel::Info,
+            seq: 0,
         }
     }
 
@@ -97,6 +107,7 @@ impl BootEvent {
             phase,
             message: message.into(),
             level: LogLevel::Warn,
+            seq: 0,
         }
     }
 
@@ -107,6 +118,7 @@ impl BootEvent {
             phase,
             message: message.into(),
             level: LogLevel::Error,
+            seq: 0,
         }
     }
 
@@ -172,16 +184,30 @@ impl BootLog {
 /// Default capacity of the kernel event ring buffer.
 const DEFAULT_EVENT_LOG_CAPACITY: usize = 1024;
 
+/// Default capacity of a live-log subscriber channel (WEFT-434).
+const EVENT_LOG_SUBSCRIBER_CAPACITY: usize = 1024;
+
 /// Thread-safe ring buffer for kernel runtime events.
 ///
 /// Captures boot events and any post-boot events (service starts/stops,
 /// agent spawns, health checks, errors). Holds at most `capacity` events
 /// — when full, the oldest event is evicted.
 ///
-/// Used by the daemon to serve `kernel.logs` RPC requests.
+/// Used by the daemon to serve `kernel.logs` / `kernel.logs_stream` RPC
+/// requests. Live subscribers receive entries as they are ingested
+/// (WEFT-434); each entry carries a monotonic [`BootEvent::seq`].
 pub struct KernelEventLog {
     events: std::sync::Mutex<std::collections::VecDeque<BootEvent>>,
     capacity: usize,
+    /// Next sequence number to assign (starts at 1 so 0 stays "unset").
+    next_seq: AtomicU64,
+    /// Live stream subscribers keyed by subscription id.
+    ///
+    /// Uses `std::sync::mpsc` (not tokio) so the event log compiles for
+    /// wasm32 `--no-default-features` where tokio is not linked. The
+    /// daemon stream bridge polls with `try_recv` on the async runtime.
+    subscribers: std::sync::Mutex<HashMap<u64, SyncSender<BootEvent>>>,
+    next_sub_id: AtomicU64,
 }
 
 impl KernelEventLog {
@@ -195,16 +221,45 @@ impl KernelEventLog {
         Self {
             events: std::sync::Mutex::new(std::collections::VecDeque::with_capacity(capacity)),
             capacity,
+            next_seq: AtomicU64::new(1),
+            subscribers: std::sync::Mutex::new(HashMap::new()),
+            next_sub_id: AtomicU64::new(1),
         }
     }
 
-    /// Push an event into the ring buffer.
-    pub fn push(&self, event: BootEvent) {
-        let mut events = self.events.lock().unwrap();
-        if events.len() >= self.capacity {
-            events.pop_front();
+    /// Push an event into the ring buffer and fan out to live subscribers.
+    ///
+    /// Assigns a monotonic [`BootEvent::seq`] (starting at 1). The write
+    /// lock is released before subscriber notification so a slow
+    /// consumer cannot block ingest.
+    pub fn push(&self, mut event: BootEvent) {
+        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+        event.seq = seq;
+        {
+            let mut events = self.events.lock().unwrap();
+            if events.len() >= self.capacity {
+                events.pop_front();
+            }
+            events.push_back(event.clone());
         }
-        events.push_back(event);
+
+        // Fan out (non-blocking). Drop dead subscribers so a closed
+        // stream RPC cannot accumulate senders forever.
+        let mut dead = Vec::new();
+        {
+            let subs = self.subscribers.lock().unwrap();
+            for (id, tx) in subs.iter() {
+                if tx.try_send(event.clone()).is_err() {
+                    dead.push(*id);
+                }
+            }
+        }
+        if !dead.is_empty() {
+            let mut subs = self.subscribers.lock().unwrap();
+            for id in dead {
+                subs.remove(&id);
+            }
+        }
     }
 
     /// Push a simple info event with a source tag and message.
@@ -214,6 +269,7 @@ impl KernelEventLog {
             phase: BootPhase::Ready, // post-boot events use Ready phase
             message: format!("[{source}] {}", message.into()),
             level: LogLevel::Info,
+            seq: 0,
         });
     }
 
@@ -224,6 +280,7 @@ impl KernelEventLog {
             phase: BootPhase::Ready,
             message: format!("[{source}] {}", message.into()),
             level: LogLevel::Warn,
+            seq: 0,
         });
     }
 
@@ -234,7 +291,36 @@ impl KernelEventLog {
             phase: BootPhase::Ready,
             message: format!("[{source}] {}", message.into()),
             level: LogLevel::Error,
+            seq: 0,
         });
+    }
+
+    /// Subscribe to real-time log entries (WEFT-434).
+    ///
+    /// Returns a subscription id (for [`Self::unsubscribe`]) and a
+    /// receiver that yields every event ingested after the subscribe
+    /// call. The channel is bounded; a slow consumer is dropped from
+    /// the fan-out set on the next failed `try_send`.
+    pub fn subscribe(&self) -> (u64, Receiver<BootEvent>) {
+        let id = self.next_sub_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = mpsc::sync_channel(EVENT_LOG_SUBSCRIBER_CAPACITY);
+        self.subscribers.lock().unwrap().insert(id, tx);
+        (id, rx)
+    }
+
+    /// Drop a live subscriber. Idempotent.
+    pub fn unsubscribe(&self, id: u64) {
+        self.subscribers.lock().unwrap().remove(&id);
+    }
+
+    /// Number of active live subscribers.
+    pub fn subscriber_count(&self) -> usize {
+        self.subscribers.lock().unwrap().len()
+    }
+
+    /// Highest sequence number assigned so far (0 if none pushed).
+    pub fn last_seq(&self) -> u64 {
+        self.next_seq.load(Ordering::Relaxed).saturating_sub(1)
     }
 
     /// Push an info event and optionally append to the local chain.
@@ -390,6 +476,7 @@ mod tests {
             phase: BootPhase::Init,
             message: "debug msg".into(),
             level: LogLevel::Debug,
+            seq: 0,
         });
         log.push(BootEvent::info(BootPhase::Init, "info msg"));
 
@@ -500,5 +587,32 @@ mod tests {
         assert!(log.is_empty());
         assert_eq!(log.len(), 0);
         assert!(log.tail(10).is_empty());
+    }
+
+    #[test]
+    fn event_log_assigns_monotonic_seq() {
+        let log = KernelEventLog::new();
+        log.info("test", "a");
+        log.info("test", "b");
+        log.warn("test", "c");
+        let all = log.tail(0);
+        assert_eq!(all[0].seq, 1);
+        assert_eq!(all[1].seq, 2);
+        assert_eq!(all[2].seq, 3);
+        assert_eq!(log.last_seq(), 3);
+    }
+
+    #[test]
+    fn event_log_subscribe_receives_new_entries() {
+        let log = KernelEventLog::new();
+        log.info("test", "before-sub");
+        let (id, rx) = log.subscribe();
+        assert_eq!(log.subscriber_count(), 1);
+        log.info("test", "after-sub");
+        let got = rx.recv_timeout(std::time::Duration::from_secs(1)).expect("entry");
+        assert!(got.message.contains("after-sub"));
+        assert!(got.seq >= 2);
+        log.unsubscribe(id);
+        assert_eq!(log.subscriber_count(), 0);
     }
 }

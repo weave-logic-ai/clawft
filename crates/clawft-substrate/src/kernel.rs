@@ -12,7 +12,7 @@
 //! | `substrate/kernel/status` | `ontology://kernel-status` | periodic 2s | refuse | singleton; one `Replace` per tick |
 //! | `substrate/kernel/processes` | `ontology://process-list` | periodic 1s | block-capped | list-by-id; per-row `Replace`/`Remove` at `…/by-id/{row_id}` + root list when membership/content changes (WEFT-416) |
 //! | `substrate/kernel/services` | `ontology://service-list` | periodic 2s | block-capped | list-by-name; per-row `Replace`/`Remove` at `…/by-name/{row_id}` + root list when membership/content changes (WEFT-416) |
-//! | `substrate/kernel/logs` | `ontology://log-ring` | event-driven (fallback periodic 1s) | drop-oldest | append-only ring; new lines only per tick |
+//! | `substrate/kernel/logs` | `ontology://log-ring` | event-driven (`kernel.logs_stream`) | drop-oldest | append-only ring; live Append per entry |
 //!
 //! All topics are [`Sensitivity::Workspace`]; none require
 //! [`PermissionReq`].
@@ -88,8 +88,7 @@ pub const TOPICS: &[TopicDecl] = &[
     TopicDecl {
         path: "substrate/kernel/logs",
         shape: "ontology://log-ring",
-        // Event-driven when the daemon supports a tail stream; falls
-        // back to periodic poll (1s) in the current implementation.
+        // WEFT-434: genuine event-driven stream via `kernel.logs_stream`.
         refresh_hint: RefreshHint::EventDriven,
         sensitivity: Sensitivity::Workspace,
         buffer_policy: BufferPolicy::DropOldest,
@@ -207,7 +206,7 @@ fn spawn_poller(
             "substrate/kernel/status" => poll_status(tx, cancel_rx).await,
             "substrate/kernel/processes" => poll_processes(tx, cancel_rx).await,
             "substrate/kernel/services" => poll_services(tx, cancel_rx).await,
-            "substrate/kernel/logs" => poll_logs(args, tx, cancel_rx).await,
+            "substrate/kernel/logs" => stream_logs(args, tx, cancel_rx).await,
             _ => { /* open() validated; unreachable */ }
         }
     });
@@ -538,12 +537,15 @@ async fn poll_keyed_list_loop<F, K>(
     }
 }
 
-/// Logs poller — diffs tail responses and only emits `Append` deltas
-/// for entries we haven't seen. Falls back to periodic poll because the
-/// daemon does not yet expose a tail-stream RPC; M1.6+ can replace this
-/// with a genuine event-driven subscription without changing the topic
-/// contract.
-async fn poll_logs(
+/// Logs streamer (WEFT-434) — opens `kernel.logs_stream` and emits one
+/// `Append` delta per entry. Event-driven: no periodic poll of
+/// `kernel.logs`. On disconnect, reconnects with exponential backoff
+/// (connection resilience, not a poll fallback).
+///
+/// Entries carry a monotonic `seq` from the daemon. Across reconnects
+/// we skip frames with `seq <= last_seq` so the initial tail replay
+/// does not re-emit already-seen lines.
+async fn stream_logs(
     args: Value,
     tx: mpsc::Sender<StateDelta>,
     mut cancel_rx: oneshot::Receiver<()>,
@@ -554,67 +556,108 @@ async fn poll_logs(
         .map(|n| n as usize)
         .unwrap_or(LOG_TAIL);
 
-    let mut client: Option<DaemonClient> = None;
-    let mut ticker = tokio::time::interval(Duration::from_millis(1000));
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // Track the last seen log entry to diff against. For M1.5 the
-    // kernel log entries have `{ ts, ... }` and we compare the top of
-    // the tail window as a water-mark. Good enough until the daemon
-    // exposes a monotonic log offset.
-    let mut watermark: Option<Value> = None;
+    let mut last_seq: u64 = 0;
+    let mut backoff = Duration::from_millis(200);
 
     loop {
+        // Wait for a daemon connection (or cancel).
+        let client = loop {
+            tokio::select! {
+                _ = &mut cancel_rx => return,
+                c = DaemonClient::connect() => {
+                    if let Some(c) = c {
+                        break c;
+                    }
+                }
+            }
+            tokio::select! {
+                _ = &mut cancel_rx => return,
+                _ = tokio::time::sleep(backoff) => {}
+            }
+            backoff = (backoff.saturating_mul(2)).min(Duration::from_secs(5));
+        };
+
+        let params = json!({ "count": tail });
+        let req = Request::with_params("kernel.logs_stream", params);
+        let open = client.open_stream(req).await;
+        let (ack, mut session) = match open {
+            Ok(pair) if pair.0.ok => {
+                backoff = Duration::from_millis(200);
+                pair
+            }
+            _ => {
+                // Stream open failed — back off and retry.
+                tokio::select! {
+                    _ = &mut cancel_rx => return,
+                    _ = tokio::time::sleep(backoff) => {}
+                }
+                backoff = (backoff.saturating_mul(2)).min(Duration::from_secs(5));
+                continue;
+            }
+        };
+        let _ = ack; // streaming:true ack; frames follow on the session
+
+        // Pump frames until cancel or stream EOF/error.
+        let pump_result = pump_log_stream(&mut session, &tx, &mut last_seq, &mut cancel_rx).await;
+        if pump_result == PumpOutcome::Cancelled || pump_result == PumpOutcome::SubscriberGone {
+            return;
+        }
+        // Disconnected — reconnect after backoff.
         tokio::select! {
             _ = &mut cancel_rx => return,
-            _ = ticker.tick() => {
-                if client.is_none() {
-                    client = DaemonClient::connect().await;
-                }
-                let Some(c) = client.as_mut() else { continue; };
-                let params = json!({ "count": tail });
-                match call(c, "kernel.logs", params).await {
-                    Ok(value) => {
-                        let Some(entries) = value.as_array() else { continue; };
-                        match diff_tail(entries, watermark.as_ref(), tail) {
-                            DiffTailOutcome::New(new_entries) => {
-                                for entry in &new_entries {
-                                    let delta = StateDelta::Append {
-                                        path: "substrate/kernel/logs".into(),
-                                        value: (*entry).clone(),
-                                    };
-                                    if tx.send(delta).await.is_err() {
-                                        return;
-                                    }
-                                }
+            _ = tokio::time::sleep(backoff) => {}
+        }
+        backoff = (backoff.saturating_mul(2)).min(Duration::from_secs(5));
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PumpOutcome {
+    /// Subscription cancel fired.
+    Cancelled,
+    /// Downstream substrate consumer dropped.
+    SubscriberGone,
+    /// Stream ended or errored; caller should reconnect.
+    Disconnected,
+}
+
+/// Read log frames from an open stream session and Append them.
+async fn pump_log_stream(
+    session: &mut clawft_rpc::StreamSession,
+    tx: &mpsc::Sender<StateDelta>,
+    last_seq: &mut u64,
+    cancel_rx: &mut oneshot::Receiver<()>,
+) -> PumpOutcome {
+    loop {
+        tokio::select! {
+            _ = &mut *cancel_rx => return PumpOutcome::Cancelled,
+            line = session.next_line() => {
+                match line {
+                    Ok(Some(raw)) => {
+                        let trimmed = raw.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        let Ok(entry) = serde_json::from_str::<Value>(trimmed) else {
+                            continue;
+                        };
+                        if let Some(seq) = entry.get("seq").and_then(|v| v.as_u64()) {
+                            if seq > 0 && seq <= *last_seq {
+                                continue;
                             }
-                            DiffTailOutcome::Overflow { lost_estimate } => {
-                                // Previous watermark fell off the
-                                // tail window — the daemon either
-                                // rotated the log or emitted more
-                                // entries than our window size in a
-                                // single tick. Emit one synthetic
-                                // warning rather than re-emitting
-                                // every entry as new.
-                                let delta = StateDelta::Append {
-                                    path: "substrate/kernel/logs".into(),
-                                    value: json!({
-                                        "level": "warn",
-                                        "message": "log window overflow — some entries lost",
-                                        "lost_entries": lost_estimate,
-                                    }),
-                                };
-                                if tx.send(delta).await.is_err() {
-                                    return;
-                                }
+                            if seq > *last_seq {
+                                *last_seq = seq;
                             }
                         }
-                        if let Some(last) = entries.last() {
-                            watermark = Some(last.clone());
+                        let delta = StateDelta::Append {
+                            path: "substrate/kernel/logs".into(),
+                            value: entry,
+                        };
+                        if tx.send(delta).await.is_err() {
+                            return PumpOutcome::SubscriberGone;
                         }
                     }
-                    Err(_) => {
-                        client = None;
-                    }
+                    Ok(None) | Err(_) => return PumpOutcome::Disconnected,
                 }
             }
         }
@@ -622,17 +665,17 @@ async fn poll_logs(
 }
 
 /// Result of a `diff_tail` — either a batch of new entries or a
-/// synthetic overflow notice. See [`diff_tail`].
+/// synthetic overflow notice. Kept for unit tests of the historical
+/// option-2 poll-window logic; production path uses streaming + seq
+/// (WEFT-434 option-1).
+#[cfg(test)]
 #[derive(Debug, PartialEq)]
 enum DiffTailOutcome<'a> {
     /// Zero-or-more new entries strictly newer than the watermark.
     New(Vec<&'a Value>),
     /// The previous watermark was not found in the current window and
     /// the window is at the poll-buffer limit — entries were lost
-    /// between ticks. `lost_estimate` is a best-effort count
-    /// (window-size when full; we cannot reconstruct the exact gap
-    /// without a daemon-side sequence counter — that's a future M1.6+
-    /// RPC change).
+    /// between ticks.
     Overflow {
         /// Best-effort count of entries that fell off the window.
         lost_estimate: usize,
@@ -641,23 +684,10 @@ enum DiffTailOutcome<'a> {
 
 /// Diff a tail window against the previous watermark.
 ///
-/// Semantics:
-/// - If `watermark` is `None` (first call), all entries are returned.
-/// - If the watermark is found in the window, entries strictly after
-///   it are returned.
-/// - If the watermark is missing AND the window is at the poll buffer
-///   limit (`window_cap`), this is treated as an overflow: return a
-///   synthetic overflow outcome rather than re-emitting the whole
-///   window (which would duplicate already-seen entries). Callers are
-///   expected to emit a single synthetic warn entry and advance the
-///   watermark to the newest entry.
-/// - If the watermark is missing AND the window is below the cap, the
-///   simplest explanation is daemon restart / log reset — return all
-///   entries (same semantics as first call).
-///
-/// Finding 1 fix (option 2 — capped-tail + capped-returns). A proper
-/// monotonic `seq: u64` per entry (option 1) is deferred to M1.6+
-/// pending a daemon-side RPC change.
+/// Historical option-2 (capped-tail) helper. Production log path now
+/// uses `kernel.logs_stream` + monotonic `seq` (WEFT-434); this remains
+/// for unit coverage of the prior algorithm.
+#[cfg(test)]
 fn diff_tail<'a>(
     entries: &'a [Value],
     watermark: Option<&Value>,
@@ -670,14 +700,10 @@ fn diff_tail<'a>(
         Some(idx) => DiffTailOutcome::New(entries.iter().skip(idx + 1).collect()),
         None => {
             if entries.len() >= window_cap {
-                // Overflow: the watermark rolled off. Report the whole
-                // window as lost rather than re-emit it.
                 DiffTailOutcome::Overflow {
                     lost_estimate: entries.len(),
                 }
             } else {
-                // Window is not full — daemon likely reset or rotated.
-                // Safe to treat the whole window as fresh.
                 DiffTailOutcome::New(entries.iter().collect())
             }
         }
@@ -689,20 +715,6 @@ fn diff_tail<'a>(
 async fn simple_call(client: &mut DaemonClient, method: &str) -> Result<Value, String> {
     let resp = client
         .simple_call(method)
-        .await
-        .map_err(|e| format!("{method}: {e}"))?;
-    if !resp.ok {
-        return Err(format!(
-            "{method}: {}",
-            resp.error.unwrap_or_else(|| "unknown error".into())
-        ));
-    }
-    Ok(resp.result.unwrap_or(Value::Null))
-}
-
-async fn call(client: &mut DaemonClient, method: &str, params: Value) -> Result<Value, String> {
-    let resp = client
-        .call(Request::with_params(method, params))
         .await
         .map_err(|e| format!("{method}: {e}"))?;
     if !resp.ok {
@@ -843,6 +855,42 @@ mod tests {
             DiffTailOutcome::New(out) => assert!(out.is_empty()),
             other => panic!("expected New, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn logs_topic_is_event_driven() {
+        let logs = TOPICS
+            .iter()
+            .find(|t| t.path == "substrate/kernel/logs")
+            .unwrap();
+        assert_eq!(logs.refresh_hint, RefreshHint::EventDriven);
+    }
+
+    #[test]
+    fn seq_skip_logic_drops_stale_reconnect_replay() {
+        // Mirrors pump_log_stream reconnect de-dupe: frames with
+        // seq <= last_seq are ignored; higher seq advances watermark.
+        let mut last_seq = 5u64;
+        let frames = [
+            json!({"seq": 3, "message": "stale"}),
+            json!({"seq": 5, "message": "boundary"}),
+            json!({"seq": 6, "message": "fresh"}),
+            json!({"seq": 0, "message": "legacy-no-seq"}),
+        ];
+        let mut kept = Vec::new();
+        for entry in &frames {
+            if let Some(seq) = entry.get("seq").and_then(|v| v.as_u64()) {
+                if seq > 0 && seq <= last_seq {
+                    continue;
+                }
+                if seq > last_seq {
+                    last_seq = seq;
+                }
+            }
+            kept.push(entry.get("message").and_then(|v| v.as_str()).unwrap());
+        }
+        assert_eq!(kept, vec!["fresh", "legacy-no-seq"]);
+        assert_eq!(last_seq, 6);
     }
 
     // ── WEFT-416: per-id list deltas ───────────────────────────────
