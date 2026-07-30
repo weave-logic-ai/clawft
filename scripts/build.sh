@@ -896,16 +896,10 @@ cmd_serve() {
 #
 # When a followup lands, drop the matching IDs from this array.
 #
-# WEFT-551 — DONE (wave0c): wasmtime/wasmtime-wasi 33.0.2 → 45.0.3.
-#   All 19 wasmtime/wasi RUSTSEC IDs cleared from cargo audit; ignores removed.
-# WEFT-552 — rustls-webpki bump (3 advisories)
+# WEFT-551 — DONE (wave0c): wasmtime/wasmtime-wasi 33 → 45.0.3; ignores removed.
+# WEFT-552 — DONE (wave0c): rustls-webpki via ruvector-core 2.3 + pin 0.103.13; ignores removed.
 # WEFT-553 — unmaintained + unsound (6 advisories)
 CARGO_AUDIT_IGNORES=(
-    # WEFT-552 rustls-webpki (must stay in sync with
-    # .github/workflows/pr-gates.yml cargo-audit job)
-    --ignore RUSTSEC-2026-0098
-    --ignore RUSTSEC-2026-0099
-    --ignore RUSTSEC-2026-0104
     # WEFT-553 unmaintained + unsound
     --ignore RUSTSEC-2017-0008
     --ignore RUSTSEC-2024-0384
