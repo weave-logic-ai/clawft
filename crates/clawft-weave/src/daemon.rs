@@ -2344,7 +2344,10 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
         }
     });
 
-    // Chain event bridge — drains non-kernel chain events and forwards to ChainManager
+    // Chain event bridge — drains non-kernel chain events and forwards to
+    // ChainManager (WEFT-597). Producers reach the pending buffer either via
+    // `chain_event!` / `push_chain_event` or via `ChainEventLayer` (installed
+    // in weaver `main.rs`) for tracing-only call sites.
     #[cfg(feature = "exochain")]
     {
         let bridge_kernel = Arc::clone(&kernel);
@@ -2354,27 +2357,22 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        let pending = clawft_core::chain_event::drain_pending_chain_events();
-                        if pending.is_empty() {
-                            continue;
-                        }
                         let k = bridge_kernel.read().await;
                         if let Some(cm) = k.chain_manager() {
-                            for evt in pending {
-                                cm.append(&evt.source, &evt.kind, evt.payload);
+                            let n = crate::chain_bridge::forward_pending_to_chain(cm);
+                            if n > 0 {
+                                debug!(count = n, "chain event bridge forwarded pending events");
                             }
                         }
                     }
                     _ = bridge_shutdown_rx.changed() => {
                         if *bridge_shutdown_rx.borrow() {
                             // Final drain before shutdown
-                            let pending = clawft_core::chain_event::drain_pending_chain_events();
-                            if !pending.is_empty() {
-                                let k = bridge_kernel.read().await;
-                                if let Some(cm) = k.chain_manager() {
-                                    for evt in pending {
-                                        cm.append(&evt.source, &evt.kind, evt.payload);
-                                    }
+                            let k = bridge_kernel.read().await;
+                            if let Some(cm) = k.chain_manager() {
+                                let n = crate::chain_bridge::forward_pending_to_chain(cm);
+                                if n > 0 {
+                                    debug!(count = n, "chain event bridge final drain");
                                 }
                             }
                             debug!("chain event bridge shutting down");

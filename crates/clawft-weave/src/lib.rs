@@ -8,6 +8,8 @@
 //! tests link against them.
 
 pub mod capability;
+/// Tracing → pending-buffer bridge for ExoChain (WEFT-597).
+pub mod chain_bridge;
 pub mod client;
 pub mod commands;
 pub mod control;
