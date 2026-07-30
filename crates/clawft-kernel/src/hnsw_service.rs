@@ -147,6 +147,47 @@ impl HnswService {
         }
     }
 
+    /// Wrap an existing [`HnswStore`] (e.g. after loading a snapshot).
+    ///
+    /// Counters and epoch start at zero; callers that restore backend-level
+    /// epoch (e.g. [`crate::vector_hnsw::HnswBackend`]) set it separately.
+    pub fn from_store(config: HnswServiceConfig, store: HnswStore) -> Self {
+        Self {
+            store: Mutex::new(store),
+            config,
+            insert_count: AtomicU64::new(0),
+            search_count: AtomicU64::new(0),
+            epoch: AtomicU64::new(0),
+            eml: Mutex::new(HnswEmlManager::with_defaults()),
+            #[cfg(feature = "exochain")]
+            chain_manager: None,
+            #[cfg(feature = "exochain")]
+            governance_engine: None,
+        }
+    }
+
+    /// Snapshot all stored entries for composite backend persistence.
+    pub fn snapshot_entries(&self) -> Vec<clawft_core::embeddings::hnsw_store::HnswEntry> {
+        let store = self.store.lock().expect("HnswStore lock poisoned");
+        store.entries().to_vec()
+    }
+
+    /// Current `(ef_search, ef_construction)` used by the inner store.
+    pub fn ef_params(&self) -> (usize, usize) {
+        let store = self.store.lock().expect("HnswStore lock poisoned");
+        (store.ef_search(), store.ef_construction())
+    }
+
+    /// Hard-delete an entry by string id. Returns `true` if it was present.
+    pub fn delete(&self, id: &str) -> bool {
+        let mut store = self.store.lock().expect("HnswStore lock poisoned");
+        let removed = store.delete(id);
+        if removed {
+            self.epoch.fetch_add(1, Ordering::SeqCst);
+        }
+        removed
+    }
+
     /// Create a new service with custom EML configuration.
     pub fn with_eml(config: HnswServiceConfig, eml_config: HnswEmlConfig) -> Self {
         let store = HnswStore::with_params(config.ef_search, config.ef_construction);
@@ -532,23 +573,13 @@ impl HnswService {
     /// [`load_from_file_logged`] when a chain manager is available.
     pub fn load_from_file(path: &std::path::Path) -> Result<Self, std::io::Error> {
         let store = HnswStore::load(path)?;
+        let (ef_search, ef_construction) = (store.ef_search(), store.ef_construction());
         let config = HnswServiceConfig {
-            ef_search: 100, // store doesn't expose params after load; use defaults
-            ef_construction: 200,
+            ef_search,
+            ef_construction,
             default_dimensions: 384,
         };
-        Ok(Self {
-            store: Mutex::new(store),
-            config,
-            insert_count: AtomicU64::new(0),
-            search_count: AtomicU64::new(0),
-            epoch: AtomicU64::new(0),
-            eml: Mutex::new(HnswEmlManager::with_defaults()),
-            #[cfg(feature = "exochain")]
-            chain_manager: None,
-            #[cfg(feature = "exochain")]
-            governance_engine: None,
-        })
+        Ok(Self::from_store(config, store))
     }
 
     /// Load an HNSW store from a JSON file with chain logging.
@@ -561,9 +592,10 @@ impl HnswService {
     ) -> Result<Self, std::io::Error> {
         let store = HnswStore::load(path)?;
         let entry_count = store.len();
+        let (ef_search, ef_construction) = (store.ef_search(), store.ef_construction());
         let config = HnswServiceConfig {
-            ef_search: 100,
-            ef_construction: 200,
+            ef_search,
+            ef_construction,
             default_dimensions: 384,
         };
 
@@ -576,16 +608,9 @@ impl HnswService {
             })),
         );
 
-        Ok(Self {
-            store: Mutex::new(store),
-            config,
-            insert_count: AtomicU64::new(0),
-            search_count: AtomicU64::new(0),
-            epoch: AtomicU64::new(0),
-            eml: Mutex::new(HnswEmlManager::with_defaults()),
-            chain_manager: Some(cm),
-            governance_engine: None,
-        })
+        let mut svc = Self::from_store(config, store);
+        svc.chain_manager = Some(cm);
+        Ok(svc)
     }
 }
 
