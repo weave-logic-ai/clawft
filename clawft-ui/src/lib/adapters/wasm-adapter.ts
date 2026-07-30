@@ -27,6 +27,14 @@ interface ClawftWasm {
   /** WEFT-391: optional env_json pre-seeds BrowserEnvironment. */
   init(config_json: string, env_json?: string | null): Promise<void>;
   send_message(text: string): Promise<string>;
+  /**
+   * WEFT-390: pipeline streaming chat. `on_chunk(delta)` receives each
+   * text fragment; return `false` to abort. Resolves to full text.
+   */
+  stream_chat?(
+    text: string,
+    on_chunk: (chunk: string) => boolean | void,
+  ): Promise<string>;
   set_env(key: string, value: string): void;
   /** WEFT-391: read live BrowserEnvironment value (undefined if unset). */
   get_env?(key: string): string | undefined;
@@ -178,6 +186,48 @@ export class WasmAdapter implements BackendAdapter {
     messages.push(assistantMsg);
     this.messageCallbacks.forEach((cb) => cb(assistantMsg));
 
+    return assistantMsg;
+  }
+
+  /**
+   * WEFT-390: stream a pipeline chat turn, invoking `onChunk` for each
+   * text delta. Falls back to non-streaming `send_message` when the
+   * WASM build lacks `stream_chat`.
+   */
+  async sendMessageStream(
+    sessionKey: string,
+    content: string,
+    onChunk?: (delta: string) => void,
+  ): Promise<ChatMessage> {
+    if (!this.wasm) throw new Error("WASM module not initialized");
+
+    const userMsg: ChatMessage = {
+      role: "user",
+      content,
+      timestamp: new Date().toISOString(),
+    };
+    const messages = this.sessions.get(sessionKey) ?? [];
+    messages.push(userMsg);
+    this.sessions.set(sessionKey, messages);
+
+    let responseText: string;
+    if (typeof this.wasm.stream_chat === "function") {
+      responseText = await this.wasm.stream_chat(content, (delta) => {
+        onChunk?.(delta);
+        return true;
+      });
+    } else {
+      responseText = await this.wasm.send_message(content);
+      onChunk?.(responseText);
+    }
+
+    const assistantMsg: ChatMessage = {
+      role: "assistant",
+      content: responseText,
+      timestamp: new Date().toISOString(),
+    };
+    messages.push(assistantMsg);
+    this.messageCallbacks.forEach((cb) => cb(assistantMsg));
     return assistantMsg;
   }
 

@@ -149,6 +149,13 @@ rand = { workspace = true }
 # verify the JSON conversion round-trip.
 wiremock = "0.6"
 
+# WEFT-390: browser stream path (non-Send callback). Isolated so native
+# default test binaries don't need the browser feature.
+[[test]]
+name = "browser_stream"
+path = "tests/browser_stream.rs"
+required-features = ["browser"]
+
 [[bench]]
 name = "pipeline_bench"
 harness = false

@@ -8,25 +8,29 @@
 
 /// Get current time as milliseconds since epoch.
 ///
-/// Safe on both native and browser WASM.
-#[cfg(feature = "native")]
-pub fn now_millis() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-/// Get current time as milliseconds since epoch (browser).
-#[cfg(feature = "browser")]
+/// * **wasm32 + browser** — `js_sys::Date::now()`
+/// * **host** (native feature, or browser feature under host unit tests) —
+///   `std::time::SystemTime`
+/// * **neither feature** — returns 0
+#[cfg(all(feature = "browser", target_arch = "wasm32"))]
 pub fn now_millis() -> u64 {
     js_sys::Date::now() as u64
 }
 
-/// Fallback when neither native nor browser is selected.
-#[cfg(not(any(feature = "native", feature = "browser")))]
+/// Host-side clock (native builds and browser-feature host tests).
+#[cfg(not(all(feature = "browser", target_arch = "wasm32")))]
 pub fn now_millis() -> u64 {
-    0
+    #[cfg(any(feature = "native", feature = "browser"))]
+    {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+    #[cfg(not(any(feature = "native", feature = "browser")))]
+    {
+        0
+    }
 }
 
 // ── Async Mutex re-export ─────────────────────────────────────────────

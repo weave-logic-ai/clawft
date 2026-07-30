@@ -402,21 +402,28 @@ impl std::fmt::Debug for BrowserLlmClient {
 
 /// Asynchronous delay that works in both native and browser environments.
 ///
-/// On native targets (behind `#[cfg(feature = "native")]`), this delegates
-/// to `tokio::time::sleep`. On browser/WASM, a true delay would require
-/// `wasm-bindgen-futures` + `js_sys::Promise`; for now this yields once
-/// to the executor, allowing other tasks to run.
-///
-/// For production browser usage, consider adding `gloo-timers` or
-/// `wasm-bindgen-futures` as a dependency for accurate timing.
-pub async fn browser_delay(_duration: std::time::Duration) {
-    // Yield to the browser event loop. A real implementation would use:
-    //   gloo_timers::future::sleep(duration).await
-    // or:
-    //   wasm_bindgen_futures::JsFuture::from(js_sys::Promise::new(...)).await
-    //
-    // For now, a single yield is sufficient to prevent busy-waiting.
-    futures_util::future::ready(()).await;
+/// * **wasm32 + browser** (WEFT-390): real wall-clock wait via
+///   [`gloo_timers::future::TimeoutFuture`] so retry/backoff paths
+///   actually pause the event loop instead of spinning.
+/// * **Native** (when the `browser` feature is exercised under host
+///   tests alongside `native`): `tokio::time::sleep`.
+/// * **Other**: single yield to the executor (no busy-wait).
+pub async fn browser_delay(duration: std::time::Duration) {
+    #[cfg(all(target_arch = "wasm32", feature = "browser"))]
+    {
+        // Cap at u32::MAX ms (~49 days) — fine for backoff budgets.
+        let ms = duration.as_millis().min(u128::from(u32::MAX)) as u32;
+        gloo_timers::future::TimeoutFuture::new(ms).await;
+    }
+    #[cfg(all(not(target_arch = "wasm32"), feature = "native"))]
+    {
+        tokio::time::sleep(duration).await;
+    }
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "native")))]
+    {
+        let _ = duration;
+        futures_util::future::ready(()).await;
+    }
 }
 
 #[cfg(test)]

@@ -18,7 +18,9 @@ rustdoc-args = ["--cfg", "docsrs"]
 [features]
 default = ["native"]
 native = ["reqwest/rustls-tls", "dep:tokio", "clawft-types/native"]
-browser = ["clawft-types/browser"]
+# gloo-timers provides a real wall-clock sleep on wasm32 for browser_delay
+# (WEFT-390). Host-side tests under the browser feature keep using tokio.
+browser = ["clawft-types/browser", "dep:gloo-timers"]
 
 [dependencies]
 # Always available
@@ -34,11 +36,15 @@ uuid = { workspace = true }
 
 # HTTP client -- always included, TLS backend selected by feature.
 # On native: the `native` feature activates reqwest/rustls-tls.
-# On browser/WASM: reqwest auto-detects wasm32 target and uses Fetch API.
+# On browser/WASM: reqwest auto-detects wasm32 target and uses Fetch API
+# (bytes_stream → wasm-streams / ReadableStream for SSE — WEFT-390).
 reqwest = { workspace = true, default-features = false, features = ["json", "stream"] }
 
 # Native only
 tokio = { workspace = true, optional = true }
+
+# Browser only — real timers for retry/backoff (WEFT-390)
+gloo-timers = { version = "0.3", optional = true, features = ["futures"] }
 
 [dev-dependencies]
 tokio = { workspace = true }

@@ -993,6 +993,15 @@ impl<P: Platform> AgentLoop<P> {
         &self.bus
     }
 
+    /// Access the pipeline registry (e.g. browser streaming chat — WEFT-390).
+    ///
+    /// Prefer [`Self::handle_turn`] for the full agent path (tools, sessions).
+    /// [`PipelineRegistry::complete_stream`] is the single-call streaming
+    /// entry used by the WASM `stream_chat` export.
+    pub fn pipeline(&self) -> &PipelineRegistry {
+        &self.pipeline
+    }
+
     /// Run the agent loop, consuming messages until the bus is closed or
     /// the optional [`CancellationToken`] is triggered.
     ///
