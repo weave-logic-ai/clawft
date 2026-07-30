@@ -127,6 +127,11 @@ pub struct HnswQueryResult {
 
 /// Serializable snapshot of the store (entries only; the HNSW graph is
 /// rebuilt on load).
+///
+/// Extra fields may appear in on-disk files written by higher layers
+/// (e.g. `HnswBackend` tombstones / id maps). Serde ignores unknown
+/// keys by default, so those remain forward-compatible with this
+/// struct. A missing optional section is treated as empty by callers.
 #[derive(Debug, Serialize, Deserialize)]
 struct StoreSnapshot {
     entries: Vec<HnswEntry>,
@@ -378,6 +383,10 @@ impl HnswStore {
     /// Load a store from a JSON file.
     ///
     /// If the file does not exist, returns a new empty store.
+    ///
+    /// Extra keys (for example backend tombstone sections written by
+    /// `HnswBackend`) are ignored — missing optional sections are treated
+    /// as empty. This keeps load backward-compatible with older snapshots.
     pub fn load(path: &Path) -> std::io::Result<Self> {
         if !path.exists() {
             return Ok(Self::new());
@@ -393,29 +402,11 @@ impl HnswStore {
             "loaded HnswStore from disk"
         );
 
-        let mut id_index: HashMap<String, usize> = HashMap::with_capacity(snapshot.entries.len());
-        for (i, e) in snapshot.entries.iter().enumerate() {
-            id_index.insert(e.id.clone(), i);
-        }
-
-        let mut store = Self {
-            entries: snapshot.entries,
-            id_index,
-            index: None,
-            ef_search: snapshot.ef_search,
-            ef_construction: snapshot.ef_construction,
-            dirty: true,
-            index_built_len: 0,
-            inserts_since_rebuild: 0,
-            rebuild_threshold: DEFAULT_REBUILD_THRESHOLD,
-        };
-
-        // Pre-build the index if above threshold.
-        if store.entries.len() >= HNSW_THRESHOLD {
-            store.rebuild_index();
-        }
-
-        Ok(store)
+        Ok(Self::from_entries(
+            snapshot.entries,
+            snapshot.ef_search,
+            snapshot.ef_construction,
+        ))
     }
 
     /// Force a full rebuild of the HNSW index.
@@ -478,6 +469,50 @@ impl HnswStore {
     /// Current ef_search parameter.
     pub fn ef_search(&self) -> usize {
         self.ef_search
+    }
+
+    /// Current ef_construction parameter.
+    pub fn ef_construction(&self) -> usize {
+        self.ef_construction
+    }
+
+    /// Borrow all stored entries (source of truth for persistence).
+    pub fn entries(&self) -> &[HnswEntry] {
+        &self.entries
+    }
+
+    /// Rebuild a store from a previously snapshotted entry list.
+    ///
+    /// The HNSW graph is rebuilt when the entry count is at or above
+    /// [`HNSW_THRESHOLD`]. Used by higher-level backends that embed
+    /// store state inside a larger on-disk format.
+    pub fn from_entries(
+        entries: Vec<HnswEntry>,
+        ef_search: usize,
+        ef_construction: usize,
+    ) -> Self {
+        let mut id_index: HashMap<String, usize> = HashMap::with_capacity(entries.len());
+        for (i, e) in entries.iter().enumerate() {
+            id_index.insert(e.id.clone(), i);
+        }
+
+        let mut store = Self {
+            entries,
+            id_index,
+            index: None,
+            ef_search,
+            ef_construction,
+            dirty: true,
+            index_built_len: 0,
+            inserts_since_rebuild: 0,
+            rebuild_threshold: DEFAULT_REBUILD_THRESHOLD,
+        };
+
+        if store.entries.len() >= HNSW_THRESHOLD {
+            store.rebuild_index();
+        }
+
+        store
     }
 
     /// Number of mutations since the last HNSW rebuild.

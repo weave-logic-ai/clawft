@@ -65,7 +65,13 @@
 ## Design Decisions
 
 - **SeqCst ordering for epochs**: Ensures all threads see epoch mutations in a consistent order, critical for optimistic concurrency correctness.
-- **Tombstones are in-memory only**: For the HNSW backend, tombstones live in a `HashMap<u64, Tombstone>` protected by `Mutex`. Persistence of tombstones would require extending the save/load format (deferred to vector sync work in WS4/Gap #11).
+- **Tombstone persistence (WEFT-127)**: `HnswBackend::save_to_file` /
+  `load_from_file` write a JSON superset of the core `HnswStore` snapshot
+  that includes `id_map`, `tombstones` (`id` + `deleted_at_epoch`), `epoch`,
+  and `max_vectors`. Missing sections default to empty (backward compatible
+  with plain store snapshots). Soft-deleted entries stay excluded after
+  restart; `compact(older_than_epoch)` physically drops aged tombstones
+  from the id map and the inner `HnswService`.
 - **Capacity checks use live count**: `live = total - tombstones`, so soft-deleted vectors free slots without requiring compaction first.
 - **Default trait impls**: All new methods have sensible defaults so existing `VectorBackend` implementations continue to compile without changes.
 - **DiskAnnBackend uses `StoreFull` instead of `CapacityExceeded`**: The old `CapacityExceeded` variant is preserved for backward compatibility but new capacity enforcement uses `StoreFull` which includes both `max` and `current` counts.

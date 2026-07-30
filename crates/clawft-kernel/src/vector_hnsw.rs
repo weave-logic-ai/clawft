@@ -10,12 +10,38 @@
 //! - **Optimistic concurrency**: `insert_with_epoch` rejects stale writes.
 //! - **Soft-delete + compaction**: tombstone records excluded from search.
 //! - **Capacity limits**: configurable `max_vectors` with `StoreFull` error.
+//! - **Tombstone persistence** (WEFT-127): [`HnswBackend::save_to_file`] /
+//!   [`HnswBackend::load_from_file`] round-trip id map, epoch, capacity,
+//!   and soft-delete tombstones so deleted entries stay gone after restart.
+//!
+//! ## Soft-delete and compaction
+//!
+//! Soft-delete ([`VectorBackend::soft_delete`]) marks a numeric id as
+//! tombstoned at the current epoch. Tombstoned ids are excluded from
+//! `search`, `contains`, and `len`, but the underlying HNSW entry remains
+//! until compaction.
+//!
+//! [`VectorBackend::compact`] with `older_than_epoch` **physically** removes
+//! tombstones whose `deleted_at_epoch` is strictly less than that threshold:
+//! the id-map entry is dropped and the string-keyed vector is deleted from
+//! the inner [`HnswService`]. Callers that want durable soft-delete across
+//! process restarts must call [`HnswBackend::save_to_file`] after deletes
+//! (and after compact, if they want the purged state on disk).
+//!
+//! On-disk format is a JSON superset of the core `HnswStore` snapshot:
+//! legacy files with only `entries` / `ef_search` / `ef_construction`
+//! load with an empty tombstone section (backward compatible).
 //!
 //! Compiled only when the `ecc` feature is enabled.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use serde::{Deserialize, Serialize};
+
+use clawft_core::embeddings::hnsw_store::{HnswEntry, HnswStore};
 
 use crate::hnsw_service::{HnswService, HnswServiceConfig};
 use crate::vector_backend::{SearchResult, VectorBackend, VectorError, VectorResult};
@@ -51,7 +77,6 @@ impl IdMap {
         self.id_to_key.contains_key(&id)
     }
 
-    #[allow(dead_code)]
     fn key_for_id(&self, id: u64) -> Option<&str> {
         self.id_to_key.get(&id).map(|s| s.as_str())
     }
@@ -73,11 +98,38 @@ impl IdMap {
 // ── Tombstone record ───────────────────────────────────────────────────
 
 /// A soft-deleted vector. Keeps the ID and the epoch at which it was
-/// deleted so that [`compact`] can purge old tombstones.
-#[derive(Debug, Clone)]
+/// deleted so that [`VectorBackend::compact`] can purge old tombstones.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Tombstone {
     /// Epoch at which the vector was soft-deleted.
     deleted_at_epoch: u64,
+}
+
+// ── On-disk snapshot (WEFT-127) ─────────────────────────────────────────
+
+/// JSON format written by [`HnswBackend::save_to_file`].
+///
+/// Super-set of the core `HnswStore` snapshot so:
+/// - new files remain loadable by `HnswStore::load` (extra keys ignored);
+/// - old files (no `tombstones` / `id_map` / `epoch`) load with empty
+///   tombstone state via `#[serde(default)]`.
+#[derive(Debug, Serialize, Deserialize)]
+struct HnswBackendSnapshot {
+    entries: Vec<HnswEntry>,
+    ef_search: usize,
+    ef_construction: usize,
+    /// Numeric id → string key map. Missing on legacy snapshots → empty.
+    #[serde(default)]
+    id_map: Vec<(u64, String)>,
+    /// Soft-deleted ids with deletion epoch. Missing → empty (compat).
+    #[serde(default)]
+    tombstones: Vec<(u64, Tombstone)>,
+    /// Monotonic backend epoch. Missing → 0.
+    #[serde(default)]
+    epoch: u64,
+    /// Optional capacity limit. Missing → `None` (unbounded).
+    #[serde(default)]
+    max_vectors: Option<usize>,
 }
 
 // ── Backend ─────────────────────────────────────────────────────────────
@@ -125,6 +177,94 @@ impl HnswBackend {
     /// Access the underlying [`HnswService`] for legacy code paths.
     pub fn inner(&self) -> &HnswService {
         &self.inner
+    }
+
+    /// Persist backend state (vectors, id map, tombstones, epoch, capacity).
+    ///
+    /// Soft-deleted entries remain in the vector list but are recorded in
+    /// the `tombstones` section so they stay excluded after
+    /// [`load_from_file`]. See module docs for the compaction story.
+    pub fn save_to_file(&self, path: &Path) -> VectorResult<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let entries = self.inner.snapshot_entries();
+        let (ef_search, ef_construction) = self.inner.ef_params();
+
+        let map = self.id_map.lock().expect("IdMap lock poisoned");
+        let id_map: Vec<(u64, String)> = map
+            .id_to_key
+            .iter()
+            .map(|(&id, key)| (id, key.clone()))
+            .collect();
+
+        let ts = self.tombstones.lock().expect("tombstones lock poisoned");
+        let tombstones: Vec<(u64, Tombstone)> = ts
+            .iter()
+            .map(|(&id, t)| (id, t.clone()))
+            .collect();
+
+        let snapshot = HnswBackendSnapshot {
+            entries,
+            ef_search,
+            ef_construction,
+            id_map,
+            tombstones,
+            epoch: self.epoch.load(Ordering::SeqCst),
+            max_vectors: *self.max_vectors.lock().expect("max_vectors lock poisoned"),
+        };
+
+        let json = serde_json::to_string_pretty(&snapshot)
+            .map_err(|e| VectorError::Other(format!("serialize hnsw backend: {e}")))?;
+        std::fs::write(path, json)?;
+        Ok(())
+    }
+
+    /// Load a backend from a snapshot written by [`save_to_file`].
+    ///
+    /// **Backward compatible**: files produced by plain `HnswStore` /
+    /// `HnswService` save (entries + ef params only) load successfully
+    /// with empty `id_map`, empty tombstones, epoch 0, and no capacity
+    /// limit.
+    pub fn load_from_file(path: &Path) -> VectorResult<Self> {
+        if !path.exists() {
+            return Ok(Self::with_defaults());
+        }
+
+        let data = std::fs::read_to_string(path)?;
+        let snapshot: HnswBackendSnapshot = serde_json::from_str(&data)
+            .map_err(|e| VectorError::Other(format!("deserialize hnsw backend: {e}")))?;
+
+        let store = HnswStore::from_entries(
+            snapshot.entries,
+            snapshot.ef_search,
+            snapshot.ef_construction,
+        );
+        let config = HnswServiceConfig {
+            ef_search: snapshot.ef_search,
+            ef_construction: snapshot.ef_construction,
+            default_dimensions: 384,
+        };
+        let inner = HnswService::from_store(config, store);
+
+        let mut id_map = IdMap::new();
+        for (id, key) in snapshot.id_map {
+            id_map.insert(id, key);
+        }
+
+        let mut tombstones = HashMap::new();
+        for (id, t) in snapshot.tombstones {
+            tombstones.insert(id, t);
+        }
+
+        Ok(Self {
+            inner,
+            id_map: Mutex::new(id_map),
+            epoch: AtomicU64::new(snapshot.epoch),
+            tombstones: Mutex::new(tombstones),
+            max_vectors: Mutex::new(snapshot.max_vectors),
+        })
     }
 
     /// Bump the epoch and return the new value.
@@ -220,18 +360,22 @@ impl VectorBackend for HnswBackend {
         let mut map = self.id_map.lock().expect("IdMap lock poisoned");
         let mut ts = self.tombstones.lock().expect("tombstones lock poisoned");
         ts.remove(&id);
-        let removed = map.remove(id).is_some();
+        let key = map.remove(id);
+        let removed = key.is_some();
         if removed {
             drop(ts);
             drop(map);
+            if let Some(key) = key {
+                self.inner.delete(&key);
+            }
             self.bump_epoch();
         }
         removed
     }
 
     fn flush(&self) -> VectorResult<()> {
-        // HNSW is in-memory only; flush is a no-op.
-        // Epoch is persisted by callers via save_to_file when needed.
+        // Pure in-memory HNSW has no automatic durable path. Callers that
+        // need durability (including tombstones) use [`Self::save_to_file`].
         Ok(())
     }
 
@@ -287,21 +431,37 @@ impl VectorBackend for HnswBackend {
         let mut map = self.id_map.lock().expect("IdMap lock poisoned");
         let mut ts = self.tombstones.lock().expect("tombstones lock poisoned");
 
-        let to_purge: Vec<u64> = ts
+        let to_purge: Vec<(u64, String)> = ts
+            .iter()
+            .filter(|(_, t)| t.deleted_at_epoch < older_than_epoch)
+            .filter_map(|(&id, _)| map.key_for_id(id).map(|k| (id, k.to_owned())))
+            .collect();
+
+        // Also drop orphan tombstones with no id_map entry.
+        let orphan_ids: Vec<u64> = ts
             .iter()
             .filter(|(_, t)| t.deleted_at_epoch < older_than_epoch)
             .map(|(&id, _)| id)
+            .filter(|id| !to_purge.iter().any(|(p, _)| p == id))
             .collect();
 
-        let count = to_purge.len();
-        for id in to_purge {
+        let count = to_purge.len() + orphan_ids.len();
+        let mut keys_to_delete = Vec::with_capacity(to_purge.len());
+        for (id, key) in to_purge {
             ts.remove(&id);
             map.remove(id);
+            keys_to_delete.push(key);
+        }
+        for id in orphan_ids {
+            ts.remove(&id);
         }
 
         if count > 0 {
             drop(ts);
             drop(map);
+            for key in keys_to_delete {
+                self.inner.delete(&key);
+            }
             self.bump_epoch();
         }
 
@@ -602,5 +762,116 @@ mod tests {
         // Should now accept a new insert.
         b.insert(3, "c", &[0.5], serde_json::json!({})).unwrap();
         assert_eq!(b.len(), 2);
+    }
+
+    // ── Persistence / tombstone round-trip (WEFT-127) ───────────────────
+
+    fn temp_backend_path(label: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, AtomicOrdering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "weft127_hnsw_backend_{label}_{}_{n}.json",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn soft_delete_save_load_keeps_tombstones() {
+        let path = temp_backend_path("tombstone_roundtrip");
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let b = make_backend();
+            b.insert(1, "a", &[1.0, 0.0, 0.0], serde_json::json!({"k": "a"}))
+                .unwrap();
+            b.insert(2, "b", &[0.0, 1.0, 0.0], serde_json::json!({"k": "b"}))
+                .unwrap();
+            b.insert(3, "c", &[0.0, 0.0, 1.0], serde_json::json!({"k": "c"}))
+                .unwrap();
+
+            assert!(b.soft_delete(1));
+            assert_eq!(b.tombstone_count(), 1);
+            assert!(!b.contains(1));
+            assert_eq!(b.len(), 2);
+
+            let epoch_before = b.current_epoch();
+            b.save_to_file(&path).unwrap();
+
+            // Sanity: epoch captured in snapshot should match.
+            assert!(epoch_before > 0);
+        }
+
+        let loaded = HnswBackend::load_from_file(&path).unwrap();
+        assert_eq!(loaded.tombstone_count(), 1, "tombstone must survive load");
+        assert!(!loaded.contains(1), "soft-deleted id must stay gone");
+        assert!(loaded.contains(2));
+        assert!(loaded.contains(3));
+        assert_eq!(loaded.len(), 2);
+
+        // Search must not resurface the soft-deleted vector.
+        let results = loaded.search(&[1.0, 0.0, 0.0], 5);
+        for r in &results {
+            assert_ne!(r.id, 1, "tombstoned vector must not appear after load");
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_legacy_store_snapshot_has_empty_tombstones() {
+        // Write a plain HnswStore snapshot (no id_map / tombstones section).
+        let path = temp_backend_path("legacy_compat");
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let mut store = HnswStore::new();
+            store.insert("legacy-a".into(), vec![1.0, 0.0], serde_json::json!({}));
+            store.insert("legacy-b".into(), vec![0.0, 1.0], serde_json::json!({}));
+            store.save(&path).unwrap();
+        }
+
+        let loaded = HnswBackend::load_from_file(&path).unwrap();
+        assert_eq!(
+            loaded.tombstone_count(),
+            0,
+            "missing tombstone section must default to empty"
+        );
+        assert_eq!(loaded.current_epoch(), 0);
+        assert_eq!(loaded.max_vectors(), None);
+        // id_map is empty on legacy files — vectors live only in the store
+        // until re-inserted through the backend API.
+        assert_eq!(loaded.len(), 0);
+        assert_eq!(loaded.inner().len(), 2);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn compact_physically_removes_and_survives_save() {
+        let path = temp_backend_path("compact_save");
+        let _ = std::fs::remove_file(&path);
+
+        let b = make_backend();
+        b.insert(1, "a", &[1.0], serde_json::json!({})).unwrap();
+        b.insert(2, "b", &[0.0], serde_json::json!({})).unwrap();
+        b.soft_delete(1);
+        let delete_epoch = b.current_epoch();
+
+        let purged = b.compact(delete_epoch + 1);
+        assert_eq!(purged, 1);
+        assert_eq!(b.tombstone_count(), 0);
+        assert!(!b.contains(1));
+        // Physical delete from inner store.
+        assert_eq!(b.inner().len(), 1);
+
+        b.save_to_file(&path).unwrap();
+        let loaded = HnswBackend::load_from_file(&path).unwrap();
+        assert_eq!(loaded.tombstone_count(), 0);
+        assert!(!loaded.contains(1));
+        assert!(loaded.contains(2));
+        assert_eq!(loaded.inner().len(), 1);
+
+        let _ = std::fs::remove_file(&path);
     }
 }
