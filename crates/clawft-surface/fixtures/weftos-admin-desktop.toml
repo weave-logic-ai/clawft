@@ -44,7 +44,9 @@ bindings = { rows = "$substrate/kernel/processes" }
 
   [[surfaces.root.children.affordances]]
   name        = "kill"
-  verb        = "rpc.kernel.kill"
+  # Must match admin manifest `influences` + daemon handler
+  # (`kernel.kill-process`). WEFT-430 honest ∩ filters by this verb.
+  verb        = "rpc.kernel.kill-process"
   invocations = ["pointer", "voice"]
   args_schema = "ontology://kernel/kill-process"
 

@@ -18,5 +18,8 @@
 mod compose;
 mod test_harness;
 
-pub use compose::{ComposeOutcome, PendingDispatch, compose, honest_affordances};
-pub use test_harness::render_headless;
+pub use compose::{
+    ComposeOutcome, ComposePermits, PendingDispatch, compose, compose_with_permits,
+    honest_affordances, normalize_verb,
+};
+pub use test_harness::{render_headless, render_headless_full, render_headless_with_permits};

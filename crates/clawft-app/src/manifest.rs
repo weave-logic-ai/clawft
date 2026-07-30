@@ -298,7 +298,8 @@ mod tests {
         assert_eq!(m.surfaces.len(), 2);
         assert_eq!(m.surfaces[0].as_str(), "surfaces/admin-main.toml");
         assert_eq!(m.subscriptions.len(), 4);
-        assert_eq!(m.influences.len(), 3);
+        // kill-process, restart-service, wsp.activate, kernel.restart (WEFT-430)
+        assert_eq!(m.influences.len(), 4);
         assert_eq!(m.permissions.len(), 1);
         assert_eq!(
             m.permissions[0],

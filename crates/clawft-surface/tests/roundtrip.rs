@@ -43,7 +43,7 @@ fn toml_primitive_counts_match_expectations() {
 #[test]
 fn fixture_declares_kill_affordance() {
     let tree = parse_surface_toml(FIXTURE).expect("parse");
-    assert!(tree.any_affordance_with_verb("rpc.kernel.kill"));
+    assert!(tree.any_affordance_with_verb("rpc.kernel.kill-process"));
     assert!(tree.any_affordance_with_verb("rpc.kernel.restart-service"));
 }
 
