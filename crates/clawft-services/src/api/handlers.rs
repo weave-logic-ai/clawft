@@ -13,7 +13,13 @@ pub fn api_routes() -> Router<ApiState> {
     Router::new()
         // Agent endpoints
         .route("/agents", get(list_agents))
-        .route("/agents/{name}", get(get_agent))
+        // GET = dashboard agent detail; DELETE = WEFT-122 facade agent.stop
+        // (numeric pid). Same path-param pattern — axum cannot register
+        // `/agents/{name}` and `/agents/{pid}` separately.
+        .route(
+            "/agents/{name}",
+            get(get_agent).delete(super::http_facade_api::delete_agent_by_pid),
+        )
         .route("/agents/{name}/start", post(start_agent))
         .route("/agents/{name}/stop", post(stop_agent))
         // Session endpoints
@@ -46,6 +52,8 @@ pub fn api_routes() -> Router<ApiState> {
         .merge(super::chat::chat_routes())
         // Voice
         .merge(super::voice_api::voice_routes())
+        // WEFT-122: kernel http_facade REST surface (status/chain/vectors/ecc/agents)
+        .merge(super::http_facade_api::kernel_facade_api_routes())
 }
 
 async fn list_agents(State(state): State<ApiState>) -> Json<Vec<super::AgentInfo>> {

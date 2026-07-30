@@ -505,6 +505,7 @@ mod tests {
             channels: stub.clone(),
             voice: stub.clone(),
             broadcaster: Arc::new(TopicBroadcaster::new()),
+            kernel_facade: Arc::new(crate::api::InMemoryKernelFacade::new()),
         }
     }
 

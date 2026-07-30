@@ -743,6 +743,9 @@ fn build_api_state(
         channels: Arc::new(channel_bridge),
         voice: Arc::new(voice_bridge),
         broadcaster,
+        // WEFT-122: stub kernel facade until daemon RPC is wired through.
+        // SSE + route table work; call_rpc returns stub envelopes.
+        kernel_facade: Arc::new(clawft_services::api::InMemoryKernelFacade::new()),
     }
 }
 

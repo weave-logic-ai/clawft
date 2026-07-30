@@ -1600,6 +1600,7 @@ dependencies = [
  "axum-extra",
  "chrono",
  "clawft-core",
+ "clawft-kernel",
  "clawft-platform",
  "clawft-types",
  "cron",

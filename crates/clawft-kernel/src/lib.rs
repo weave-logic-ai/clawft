@@ -203,6 +203,11 @@ pub mod auth_service;
 pub mod config_service;
 #[cfg(feature = "http-api")]
 pub mod http_api;
+/// Transport-agnostic REST + SSE facade types (WEFT-122 / Cognitum gaps #6–#8).
+///
+/// Bound by `clawft-services` axum handlers; not a standalone server.
+#[cfg(feature = "http-api")]
+pub mod http_facade;
 pub mod tree_view;
 
 // ── Mesh networking modules (K6) ──────────────────────────────
