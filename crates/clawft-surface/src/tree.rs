@@ -317,9 +317,31 @@ impl SurfaceNode {
     }
 }
 
+/// Author-local composition macro (ADR-016 §7 / WEFT-425).
+///
+/// Declared in TOML as `[compositions.Name]` and expanded at load
+/// time into a canon [`IdentityIri`] node. Compositions are **not**
+/// new IRIs — the wire and composer only ever see expanded canon
+/// primitives. Names must not collide with the 21-IRI short names
+/// or full `ui://…` forms.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompositionDef {
+    /// Local name (`Card`, `Form`, …) as declared under
+    /// `[compositions.<name>]`.
+    pub name: String,
+    /// Canon primitive this composition expands to.
+    pub expands_to: IdentityIri,
+    /// Default attrs merged under instance attrs (instance wins).
+    pub attrs: BTreeMap<String, AttrValue>,
+}
+
 /// One complete surface description variant — an id, its mode/input
 /// targeting, optional title, subscription paths, and the root node
 /// (ADR-016 §9).
+///
+/// `compositions` holds document-level macro definitions that were
+/// applied while building `root`. The tree itself is always fully
+/// expanded to canon IRIs (WEFT-425).
 #[derive(Clone, Debug)]
 pub struct SurfaceTree {
     pub id: String,
@@ -328,6 +350,9 @@ pub struct SurfaceTree {
     pub title: Option<String>,
     pub subscriptions: Vec<String>,
     pub root: SurfaceNode,
+    /// Document-level `[compositions.*]` defs used during load-time
+    /// expansion. Empty when the document declares none.
+    pub compositions: BTreeMap<String, CompositionDef>,
 }
 
 impl SurfaceTree {
@@ -339,6 +364,7 @@ impl SurfaceTree {
             title: None,
             subscriptions: Vec::new(),
             root,
+            compositions: BTreeMap::new(),
         }
     }
 

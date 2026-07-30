@@ -1,0 +1,48 @@
+# WEFT-425 multi-composition surface (ADR-016 §7).
+# Card + Form macros expand at load time into canon IRIs.
+
+[compositions.Card]
+expands_to = "ui://stack"
+attrs      = { axis = "vertical", padding = 12, frame = "rounded" }
+
+[compositions.Form]
+expands_to = "ui://stack"
+attrs      = { axis = "vertical", gap = 8 }
+
+[[surfaces]]
+id     = "demo/multi-comp"
+modes  = ["desktop"]
+inputs = ["pointer"]
+title  = "Multi-composition"
+
+[surfaces.root]
+type  = "ui://stack"
+id    = "/root"
+attrs = { axis = "vertical" }
+
+[[surfaces.root.children]]
+type  = "Card"
+id    = "/root/card"
+# Instance attrs override composition defaults (padding 8 > 12).
+attrs = { padding = 8 }
+
+  [[surfaces.root.children.children]]
+  type  = "ui://chip"
+  id    = "/root/card/title"
+  attrs = { label = "Hello" }
+
+[[surfaces.root.children]]
+type  = "Form"
+id    = "/root/form"
+# Form sugar: last child wraps in ui://pressable with this verb.
+attrs = { submit_verb = "rpc.form.submit" }
+
+  [[surfaces.root.children.children]]
+  type  = "ui://field"
+  id    = "/root/form/name"
+  attrs = { label = "Name" }
+
+  [[surfaces.root.children.children]]
+  type  = "ui://chip"
+  id    = "/root/form/go"
+  attrs = { label = "Send" }

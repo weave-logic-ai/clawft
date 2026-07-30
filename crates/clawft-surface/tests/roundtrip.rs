@@ -5,11 +5,15 @@
 //! is not in scope for M1.5 (the wire form is TOML *input* only;
 //! output is via the canon-response path). The "round trip" here is
 //! parse → structural introspection → assertions.
+//!
+//! WEFT-425 also covers a multi-composition fixture: load-time
+//! expansion of `[compositions.*]` into canon IRIs.
 
 use clawft_surface::parse::parse_surface_toml;
-use clawft_surface::tree::{IdentityIri, Input, Mode};
+use clawft_surface::tree::{AttrValue, IdentityIri, Input, Mode};
 
 const FIXTURE: &str = include_str!("../fixtures/weftos-admin-desktop.toml");
+const MULTI_COMP: &str = include_str!("../fixtures/multi-composition.toml");
 
 #[test]
 fn parses_admin_fixture() {
@@ -67,4 +71,57 @@ fn fixture_parses_binding_expression() {
         }
         _ => panic!("expected Expr binding"),
     }
+}
+
+/// WEFT-425: multi-composition surface expands at load time.
+///
+/// Round-trip here means: TOML with `[compositions.Card]` +
+/// `[compositions.Form]` + instance references → fully expanded
+/// canon-only tree, with defs retained on `SurfaceTree.compositions`
+/// for introspection.
+#[test]
+fn multi_composition_surface_expands() {
+    let tree = parse_surface_toml(MULTI_COMP).expect("parse multi-comp");
+    assert_eq!(tree.id, "demo/multi-comp");
+    assert_eq!(tree.title.as_deref(), Some("Multi-composition"));
+    assert_eq!(tree.compositions.len(), 2);
+    assert_eq!(
+        tree.compositions["Card"].expands_to,
+        IdentityIri::Stack
+    );
+    assert_eq!(
+        tree.compositions["Form"].expands_to,
+        IdentityIri::Stack
+    );
+
+    assert_eq!(tree.root.kind, IdentityIri::Stack);
+    assert_eq!(tree.root.children.len(), 2);
+
+    // Card expanded: stack + merged attrs (instance padding wins).
+    let card = &tree.root.children[0];
+    assert_eq!(card.kind, IdentityIri::Stack);
+    assert_eq!(
+        card.attrs.get("padding"),
+        Some(&AttrValue::Int(8))
+    );
+    assert_eq!(
+        card.attrs.get("frame"),
+        Some(&AttrValue::Str("rounded".into()))
+    );
+    assert_eq!(card.children[0].kind, IdentityIri::Chip);
+
+    // Form expanded: last child wrapped in pressable.
+    let form = &tree.root.children[1];
+    assert_eq!(form.kind, IdentityIri::Stack);
+    assert!(form.attrs.get("submit_verb").is_none());
+    assert_eq!(form.children.len(), 2);
+    assert_eq!(form.children[0].kind, IdentityIri::Field);
+    assert_eq!(form.children[1].kind, IdentityIri::Pressable);
+    assert_eq!(form.children[1].affordances[0].verb, "rpc.form.submit");
+    assert_eq!(form.children[1].children[0].kind, IdentityIri::Chip);
+
+    // Wire-level tree is flat canon — no composition names remain as kinds.
+    assert_eq!(tree.count_of("ui://stack"), 3);
+    assert_eq!(tree.count_of("ui://pressable"), 1);
+    assert!(tree.any_affordance_with_verb("rpc.form.submit"));
 }
