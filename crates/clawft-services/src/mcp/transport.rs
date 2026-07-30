@@ -13,6 +13,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -31,6 +33,58 @@ pub trait McpTransport: Send + Sync {
 
     /// Send a JSON-RPC notification (no `id`, no response expected).
     async fn send_notification(&self, method: &str, params: serde_json::Value) -> Result<()>;
+
+    /// Whether the underlying connection is still alive (WEFT-191).
+    ///
+    /// Default returns `true` for transports that cannot detect liveness
+    /// (e.g. plain HTTP). [`StdioTransport`] checks the child process.
+    async fn is_alive(&self) -> bool {
+        true
+    }
+
+    /// Force-close the transport (kill child, drop pipes) (WEFT-191).
+    ///
+    /// Default is a no-op. Callers use this during graceful session shutdown
+    /// after emitting `notifications/cancelled`.
+    async fn close(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Recreate a transport after the underlying connection dies (WEFT-191).
+///
+/// Used by [`super::McpSession::reconnect_with_backoff`]. Production code
+/// typically wraps a [`TransportSpec`] + [`McpTransportFactory`]; tests can
+/// supply canned replacements.
+#[async_trait]
+pub trait TransportReconnect: Send + Sync {
+    /// Build a fresh transport for the same logical server.
+    async fn recreate(&self) -> Result<Box<dyn McpTransport>>;
+}
+
+/// [`TransportReconnect`] backed by a factory + [`TransportSpec`].
+pub struct SpecReconnect {
+    factory: Arc<dyn McpTransportFactory>,
+    spec: TransportSpec,
+}
+
+impl SpecReconnect {
+    /// Create a reconnect handle from a factory and transport spec.
+    pub fn new(factory: Arc<dyn McpTransportFactory>, spec: TransportSpec) -> Self {
+        Self { factory, spec }
+    }
+
+    /// Access the transport spec used for recreation.
+    pub fn spec(&self) -> &TransportSpec {
+        &self.spec
+    }
+}
+
+#[async_trait]
+impl TransportReconnect for SpecReconnect {
+    async fn recreate(&self) -> Result<Box<dyn McpTransport>> {
+        self.factory.create(self.spec.clone()).await
+    }
 }
 
 /// Pending response registry: maps request IDs to oneshot senders.
@@ -42,13 +96,26 @@ type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>;
 /// concurrent requests. Each `send_request` call registers a oneshot
 /// channel keyed by the request ID, writes to stdin, and waits for the
 /// background reader to deliver the matching response.
+///
+/// # Durability (WEFT-191)
+///
+/// - [`Self::is_alive`] polls `child.try_wait()` so callers can detect crashes.
+/// - Spawn parameters are retained for session-level reconnect helpers.
+/// - [`Self::close`] kills the child and clears pending request waiters.
 pub struct StdioTransport {
-    #[allow(dead_code)]
     child: Arc<Mutex<Child>>,
     stdin: Arc<Mutex<tokio::process::ChildStdin>>,
     pending: PendingMap,
     #[allow(dead_code)]
     reader_handle: Arc<tokio::task::JoinHandle<()>>,
+    /// Command used to spawn the child (for reconnect diagnostics / re-spawn).
+    command: String,
+    /// Args used to spawn the child.
+    args: Vec<String>,
+    /// Env used to spawn the child.
+    env: HashMap<String, String>,
+    /// Set when [`Self::close`] has been invoked.
+    closed: AtomicBool,
 }
 
 impl StdioTransport {
@@ -65,6 +132,8 @@ impl StdioTransport {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
+        // WEFT-191: ensure we can reap / detect exit without waiting for Drop.
+        cmd.kill_on_drop(true);
 
         let mut child = cmd.spawn()?;
 
@@ -133,7 +202,30 @@ impl StdioTransport {
             stdin: Arc::new(Mutex::new(stdin)),
             pending,
             reader_handle: Arc::new(reader_handle),
+            command: command.to_string(),
+            args: args.to_vec(),
+            env: env.clone(),
+            closed: AtomicBool::new(false),
         })
+    }
+
+    /// Command / args / env used to spawn this transport (WEFT-191).
+    pub fn spawn_config(&self) -> (&str, &[String], &HashMap<String, String>) {
+        (&self.command, &self.args, &self.env)
+    }
+
+    /// Build a [`TransportSpec`] that re-spawns the same child (WEFT-191).
+    pub fn to_transport_spec(&self) -> TransportSpec {
+        TransportSpec::Stdio {
+            command: self.command.clone(),
+            args: self.args.clone(),
+            env: self.env.clone(),
+        }
+    }
+
+    /// True if the child is still running (sync helper used by tests).
+    pub async fn child_running(&self) -> bool {
+        self.is_alive().await
     }
 }
 
@@ -143,6 +235,12 @@ const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 #[async_trait]
 impl McpTransport for StdioTransport {
     async fn send_request(&self, request: JsonRpcRequest) -> Result<JsonRpcResponse> {
+        if self.closed.load(Ordering::SeqCst) || !self.is_alive().await {
+            return Err(ServiceError::McpTransport(
+                "stdio child process is not alive".into(),
+            ));
+        }
+
         let mut line = serde_json::to_string(&request)?;
         line.push('\n');
 
@@ -190,6 +288,12 @@ impl McpTransport for StdioTransport {
     }
 
     async fn send_notification(&self, method: &str, params: serde_json::Value) -> Result<()> {
+        if self.closed.load(Ordering::SeqCst) || !self.is_alive().await {
+            return Err(ServiceError::McpTransport(
+                "stdio child process is not alive".into(),
+            ));
+        }
+
         let notif = JsonRpcNotification::new(method, params);
         let mut line = serde_json::to_string(&notif)?;
         line.push('\n');
@@ -205,6 +309,50 @@ impl McpTransport for StdioTransport {
         })?;
 
         // Notifications do not expect a response -- do NOT read from stdout.
+        Ok(())
+    }
+
+    async fn is_alive(&self) -> bool {
+        if self.closed.load(Ordering::SeqCst) {
+            return false;
+        }
+        let mut child = self.child.lock().await;
+        match child.try_wait() {
+            Ok(None) => true,
+            Ok(Some(status)) => {
+                debug!(?status, "stdio child has exited");
+                false
+            }
+            Err(e) => {
+                warn!(error = %e, "stdio try_wait failed; treating as dead");
+                false
+            }
+        }
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.closed.store(true, Ordering::SeqCst);
+        // Drop all pending waiters so in-flight send_request unblocks.
+        {
+            let mut map = self.pending.lock().await;
+            map.clear();
+        }
+        let mut child = self.child.lock().await;
+        // Best-effort kill + reap.
+        if let Err(e) = child.start_kill() {
+            debug!(error = %e, "stdio close: start_kill");
+        }
+        match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
+            Ok(Ok(status)) => {
+                debug!(?status, "stdio child reaped on close");
+            }
+            Ok(Err(e)) => {
+                warn!(error = %e, "stdio close: wait failed");
+            }
+            Err(_) => {
+                warn!("stdio close: wait timed out after kill");
+            }
+        }
         Ok(())
     }
 }
@@ -303,6 +451,10 @@ pub struct MockTransport {
     responses: Arc<Mutex<Vec<JsonRpcResponse>>>,
     requests: Arc<Mutex<Vec<JsonRpcRequest>>>,
     notifications: Arc<Mutex<Vec<JsonRpcNotification>>>,
+    /// Liveness flag (WEFT-191). When false, `send_*` fails and `is_alive` is false.
+    alive: AtomicBool,
+    /// Whether [`McpTransport::close`] has been called.
+    closed: AtomicBool,
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -313,6 +465,8 @@ impl MockTransport {
             responses: Arc::new(Mutex::new(responses)),
             requests: Arc::new(Mutex::new(Vec::new())),
             notifications: Arc::new(Mutex::new(Vec::new())),
+            alive: AtomicBool::new(true),
+            closed: AtomicBool::new(false),
         }
     }
 
@@ -325,12 +479,45 @@ impl MockTransport {
     pub async fn notifications(&self) -> Vec<JsonRpcNotification> {
         self.notifications.lock().await.clone()
     }
+
+    /// Simulate a crashed / disconnected peer (WEFT-191).
+    pub fn set_alive(&self, alive: bool) {
+        self.alive.store(alive, Ordering::SeqCst);
+    }
+
+    /// Whether `close()` has been called.
+    pub fn was_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+
+    /// Push additional mock responses (e.g. after reconnect handshake setup).
+    pub async fn push_responses(&self, extra: Vec<JsonRpcResponse>) {
+        self.responses.lock().await.extend(extra);
+    }
+
+    /// Wrap in a [`SharedMockTransport`] so callers can retain an `Arc`
+    /// while still passing `Box<dyn McpTransport>` into sessions.
+    pub fn shared(self) -> (SharedMockTransport, Arc<MockTransport>) {
+        let arc = Arc::new(self);
+        (SharedMockTransport(Arc::clone(&arc)), arc)
+    }
 }
+
+/// `Box<dyn McpTransport>`-compatible handle that keeps a shared
+/// [`MockTransport`] alive for post-session assertions (WEFT-191 tests).
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone)]
+pub struct SharedMockTransport(pub Arc<MockTransport>);
 
 #[cfg(any(test, feature = "test-utils"))]
 #[async_trait]
 impl McpTransport for MockTransport {
     async fn send_request(&self, request: JsonRpcRequest) -> Result<JsonRpcResponse> {
+        if !self.alive.load(Ordering::SeqCst) || self.closed.load(Ordering::SeqCst) {
+            return Err(ServiceError::McpTransport(
+                "mock transport is not alive".into(),
+            ));
+        }
         self.requests.lock().await.push(request);
         let mut responses = self.responses.lock().await;
         if responses.is_empty() {
@@ -341,9 +528,44 @@ impl McpTransport for MockTransport {
     }
 
     async fn send_notification(&self, method: &str, params: serde_json::Value) -> Result<()> {
+        if !self.alive.load(Ordering::SeqCst) || self.closed.load(Ordering::SeqCst) {
+            return Err(ServiceError::McpTransport(
+                "mock transport is not alive".into(),
+            ));
+        }
         let notif = JsonRpcNotification::new(method, params);
         self.notifications.lock().await.push(notif);
         Ok(())
+    }
+
+    async fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::SeqCst) && !self.closed.load(Ordering::SeqCst)
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.closed.store(true, Ordering::SeqCst);
+        self.alive.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+#[async_trait]
+impl McpTransport for SharedMockTransport {
+    async fn send_request(&self, request: JsonRpcRequest) -> Result<JsonRpcResponse> {
+        self.0.send_request(request).await
+    }
+
+    async fn send_notification(&self, method: &str, params: serde_json::Value) -> Result<()> {
+        self.0.send_notification(method, params).await
+    }
+
+    async fn is_alive(&self) -> bool {
+        self.0.is_alive().await
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.0.close().await
     }
 }
 
@@ -873,5 +1095,82 @@ mod tests {
         assert!(!json.contains("\"id\""));
         assert!(json.contains("\"jsonrpc\":\"2.0\""));
         assert!(json.contains("\"method\":\"test/notify\""));
+    }
+
+    // ── WEFT-191: StdioTransport is_alive / close ────────────────────────
+
+    #[tokio::test]
+    async fn stdio_is_alive_while_child_running() {
+        let env = HashMap::new();
+        let transport = StdioTransport::new("sleep", &["30".into()], &env)
+            .await
+            .expect("spawn sleep");
+        assert!(
+            transport.is_alive().await,
+            "sleep child should still be running"
+        );
+        transport.close().await.unwrap();
+        assert!(!transport.is_alive().await);
+    }
+
+    #[tokio::test]
+    async fn stdio_is_alive_false_after_child_exits() {
+        let env = HashMap::new();
+        // `true` exits immediately with success.
+        let transport = StdioTransport::new("true", &[], &env)
+            .await
+            .expect("spawn true");
+        // Give the kernel a moment to reap / report exit.
+        for _ in 0..50 {
+            if !transport.is_alive().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !transport.is_alive().await,
+            "child that already exited must report not alive"
+        );
+        // Writes should fail fast rather than hang on a dead pipe.
+        let req = JsonRpcRequest::new(1, "tools/list", serde_json::json!({}));
+        let err = transport.send_request(req).await.unwrap_err();
+        assert!(
+            err.to_string().contains("not alive"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stdio_to_transport_spec_round_trip_fields() {
+        let mut env = HashMap::new();
+        env.insert("FOO".into(), "bar".into());
+        let transport = StdioTransport::new("sleep", &["5".into()], &env)
+            .await
+            .expect("spawn");
+        match transport.to_transport_spec() {
+            TransportSpec::Stdio {
+                command,
+                args,
+                env: e,
+            } => {
+                assert_eq!(command, "sleep");
+                assert_eq!(args, vec!["5".to_string()]);
+                assert_eq!(e.get("FOO").map(String::as_str), Some("bar"));
+            }
+            other => panic!("expected Stdio spec, got {other:?}"),
+        }
+        transport.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mock_transport_is_alive_and_close() {
+        let t = MockTransport::new(vec![]);
+        assert!(t.is_alive().await);
+        t.set_alive(false);
+        assert!(!t.is_alive().await);
+        t.set_alive(true);
+        t.close().await.unwrap();
+        assert!(t.was_closed());
+        assert!(!t.is_alive().await);
     }
 }
