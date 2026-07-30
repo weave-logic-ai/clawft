@@ -553,9 +553,10 @@ use crate::protocol::{
 };
 #[cfg(feature = "exochain")]
 use crate::protocol::{
-    ChainEventInfo, ChainExportParams, ChainLocalParams, ChainStatusResult, ChainVerifyResult,
-    ResourceInspectParams, ResourceNodeInfo, ResourceRankEntry, ResourceRankParams,
-    ResourceScoreParams, ResourceScoreResult, ResourceStatsResult,
+    ChainAppendParams, ChainAppendResult, ChainEventInfo, ChainExportParams, ChainLocalParams,
+    ChainStatusResult, ChainVerifyResult, ResourceInspectParams, ResourceNodeInfo,
+    ResourceRankEntry, ResourceRankParams, ResourceScoreParams, ResourceScoreResult,
+    ResourceStatsResult,
 };
 
 /// Fork the daemon into the background.
@@ -5396,6 +5397,53 @@ async fn dispatch(
             #[cfg(not(feature = "exochain"))]
             Response::error("exochain feature not enabled")
         }
+        // WEFT-324: public chain.append for WitnessRecord (soul promote +
+        // future agent journal). Gated Write capability at the dispatch
+        // envelope; handler proxies to ChainManager::append.
+        "chain.append" => {
+            #[cfg(feature = "exochain")]
+            {
+                let append_params: ChainAppendParams = match serde_json::from_value(params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return Response::error(format!("invalid chain.append params: {e}"));
+                    }
+                };
+                if append_params.record.kind.trim().is_empty() {
+                    return Response::error("chain.append: record.kind must be non-empty");
+                }
+                let k = kernel.read().await;
+                if let Some(cm) = k.chain_manager() {
+                    let payload = match serde_json::to_value(&append_params.record) {
+                        Ok(v) => Some(v),
+                        Err(e) => {
+                            return Response::error(format!(
+                                "chain.append: failed to serialize record: {e}"
+                            ));
+                        }
+                    };
+                    let event = cm.append(
+                        &append_params.source,
+                        &append_params.record.kind,
+                        payload,
+                    );
+                    let hash_hex: String =
+                        event.hash.iter().map(|b| format!("{b:02x}")).collect();
+                    let result = ChainAppendResult {
+                        sequence: event.sequence,
+                        chain_id: event.chain_id,
+                        hash: hash_hex,
+                        source: event.source,
+                        kind: event.kind,
+                    };
+                    Response::success(serde_json::to_value(result).unwrap())
+                } else {
+                    Response::error("chain not enabled")
+                }
+            }
+            #[cfg(not(feature = "exochain"))]
+            Response::error("exochain feature not enabled")
+        }
         "resource.tree" => {
             #[cfg(feature = "exochain")]
             {
@@ -8163,5 +8211,126 @@ mod tests {
                 "{method}: unexpected error message: {err}"
             );
         }
+    }
+
+    /// WEFT-324: public `chain.append` accepts a WitnessRecord, lands it
+    /// on the live ChainManager, and returns sequence + hash.
+    #[cfg(feature = "exochain")]
+    #[tokio::test]
+    async fn chain_append_rpc_witnesses_soul_promote() {
+        use clawft_service_agent::protocol::{ChainAppendParams, ChainAppendResult, WitnessRecord};
+        use clawft_types::config::ChainConfig;
+
+        let platform = Arc::new(NativePlatform::new());
+        // Force chain on (default ChainConfig is enabled, but pin it
+        // so the test doesn't depend on KernelConfig::default drift).
+        let mut kcfg = KernelConfig::default();
+        kcfg.chain = Some(ChainConfig {
+            enabled: true,
+            checkpoint_interval: 1000,
+            chain_id: 0,
+            checkpoint_path: None,
+        });
+        let kernel = Kernel::boot(Config::default(), kcfg, platform)
+            .await
+            .expect("kernel boots");
+        let kernel = Arc::new(tokio::sync::RwLock::new(kernel));
+        let (shutdown_tx, _rx) = watch::channel(false);
+
+        let before = {
+            let k = kernel.read().await;
+            k.chain_manager()
+                .expect("chain_manager present")
+                .len()
+        };
+
+        let params = ChainAppendParams {
+            source: "soul".into(),
+            record: WitnessRecord {
+                kind: "soul.promote".into(),
+                entries: vec!["01HZXTEST".into()],
+                hash_before: "aa".repeat(32),
+                hash_after: "bb".repeat(32),
+                ts: "2026-07-30T12:00:00Z".into(),
+            },
+        };
+        let resp = dispatch(
+            "chain.append".into(),
+            serde_json::to_value(&params).unwrap(),
+            kernel.clone(),
+            shutdown_tx.clone(),
+        )
+        .await;
+        assert!(resp.ok, "chain.append should succeed: {:?}", resp.error);
+        let result: ChainAppendResult =
+            serde_json::from_value(resp.result.expect("result present")).expect("typed result");
+        assert_eq!(result.source, "soul");
+        assert_eq!(result.kind, "soul.promote");
+        assert_eq!(result.hash.len(), 64, "hash is 32-byte hex");
+        assert!(result.sequence >= 1, "non-genesis sequence");
+
+        let after = {
+            let k = kernel.read().await;
+            let cm = k.chain_manager().expect("chain_manager present");
+            let events = cm.tail(0);
+            let hit = events
+                .iter()
+                .find(|e| e.kind == "soul.promote" && e.source == "soul")
+                .expect("soul.promote event on chain");
+            assert_eq!(
+                hit.payload
+                    .as_ref()
+                    .and_then(|p| p.get("entries"))
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len()),
+                Some(1),
+                "payload carries WitnessRecord.entries"
+            );
+            cm.len()
+        };
+        assert_eq!(after, before + 1, "exactly one event appended");
+    }
+
+    #[cfg(feature = "exochain")]
+    #[tokio::test]
+    async fn chain_append_rpc_rejects_empty_kind() {
+        use clawft_types::config::ChainConfig;
+
+        let platform = Arc::new(NativePlatform::new());
+        let mut kcfg = KernelConfig::default();
+        kcfg.chain = Some(ChainConfig {
+            enabled: true,
+            checkpoint_interval: 1000,
+            chain_id: 0,
+            checkpoint_path: None,
+        });
+        let kernel = Kernel::boot(Config::default(), kcfg, platform)
+            .await
+            .expect("kernel boots");
+        let kernel = Arc::new(tokio::sync::RwLock::new(kernel));
+        let (shutdown_tx, _rx) = watch::channel(false);
+
+        let resp = dispatch(
+            "chain.append".into(),
+            serde_json::json!({
+                "source": "soul",
+                "record": {
+                    "kind": "  ",
+                    "entries": [],
+                    "hash_before": "0".repeat(64),
+                    "hash_after": "1".repeat(64),
+                    "ts": "t"
+                }
+            }),
+            kernel,
+            shutdown_tx,
+        )
+        .await;
+        assert!(!resp.ok, "empty kind must be rejected");
+        let err = resp.error.unwrap_or_default();
+        assert!(
+            err.contains("kind"),
+            "error should mention kind, got: {err}"
+        );
     }
 }

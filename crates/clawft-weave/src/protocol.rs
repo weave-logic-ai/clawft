@@ -323,6 +323,19 @@ fn default_export_format() -> String {
     "json".into()
 }
 
+// ── chain.append (WEFT-324) ────────────────────────────────
+//
+// Canonical definitions live in `clawft_service_agent::protocol` so the
+// agent service and the weave daemon share one wire shape. Re-export
+// here for callers that already import chain types from this module.
+
+/// Witness record payload for `chain.append` (WEFT-324).
+pub use clawft_service_agent::protocol::WitnessRecord;
+/// Parameters for `chain.append` (WEFT-324).
+pub use clawft_service_agent::protocol::ChainAppendParams;
+/// Result of `chain.append` (WEFT-324).
+pub use clawft_service_agent::protocol::ChainAppendResult;
+
 // ── Cron result types ────────────────────────────────────
 
 /// Parameters for `cron.add`.
