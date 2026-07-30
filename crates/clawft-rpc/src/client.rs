@@ -7,6 +7,8 @@
 
 #[cfg(unix)]
 mod imp {
+    use std::path::Path;
+
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
 
@@ -18,10 +20,19 @@ mod imp {
     }
 
     impl DaemonClient {
-        /// Try to connect to the daemon. Returns `None` if no daemon is running.
+        /// Try to connect to the daemon at the default socket path.
+        /// Returns `None` if no daemon is running.
         pub async fn connect() -> Option<Self> {
-            let path = protocol::socket_path();
-            let stream = UnixStream::connect(&path).await.ok()?;
+            Self::connect_path(protocol::socket_path()).await
+        }
+
+        /// Try to connect to a daemon at an explicit socket path.
+        ///
+        /// Used by hermetic tests (and callers that already know the
+        /// runtime dir) so they do not probe the shared default path
+        /// that a live developer daemon may own (WEFT-645).
+        pub async fn connect_path(path: impl AsRef<Path>) -> Option<Self> {
+            let stream = UnixStream::connect(path.as_ref()).await.ok()?;
             Some(Self { stream })
         }
 
@@ -70,6 +81,8 @@ mod imp {
 
 #[cfg(not(unix))]
 mod imp {
+    use std::path::Path;
+
     use crate::protocol::{Request, Response};
 
     /// Stub daemon client for non-Unix platforms.
@@ -89,6 +102,11 @@ mod imp {
             None
         }
 
+        /// Always returns `None` on non-Unix platforms.
+        pub async fn connect_path(_path: impl AsRef<Path>) -> Option<Self> {
+            None
+        }
+
         pub async fn call(&mut self, _request: Request) -> anyhow::Result<Response> {
             anyhow::bail!("daemon not available on this platform")
         }
@@ -101,23 +119,48 @@ mod imp {
 
 pub use imp::DaemonClient;
 
-/// Check if a daemon is running (socket exists and accepts connections).
+/// Check if a daemon is running at the default socket path
+/// (socket exists and accepts connections).
 pub async fn is_daemon_running() -> bool {
     DaemonClient::connect().await.is_some()
+}
+
+/// Check if a daemon is accepting connections at `path`.
+///
+/// Prefer this over [`is_daemon_running`] in tests so a live developer
+/// daemon on the shared default path cannot flip the result (WEFT-645).
+pub async fn is_daemon_running_at(path: impl AsRef<std::path::Path>) -> bool {
+    DaemonClient::connect_path(path).await.is_some()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Isolated socket path under a unique temp dir. Nothing listens
+    /// there, and a live weaver on the default path cannot affect it.
+    fn isolated_socket() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("temp runtime dir");
+        let sock = dir.path().join(crate::SOCKET_NAME);
+        (dir, sock)
+    }
+
     #[tokio::test]
     async fn connect_returns_none_when_no_daemon() {
-        let client = DaemonClient::connect().await;
-        assert!(client.is_none());
+        let (_dir, sock) = isolated_socket();
+        let client = DaemonClient::connect_path(&sock).await;
+        assert!(
+            client.is_none(),
+            "connect_path should return None for an isolated empty runtime dir"
+        );
     }
 
     #[tokio::test]
     async fn is_daemon_running_false_when_no_daemon() {
-        assert!(!is_daemon_running().await);
+        let (_dir, sock) = isolated_socket();
+        assert!(
+            !is_daemon_running_at(&sock).await,
+            "is_daemon_running_at should be false for an isolated empty runtime dir"
+        );
     }
 }
