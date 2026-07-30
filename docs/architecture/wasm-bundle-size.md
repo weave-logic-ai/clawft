@@ -162,3 +162,58 @@ ship a bundle-growing feature:
 - **`cargo bloat --crates`** — per-crate aggregation (only works against bin/dylib targets, not cdylib).
 - **`scripts/bench/wasm-twiggy.sh`** — wrapper for the WASI-target wasm twiggy run.
 - **`scripts/build/wasm-opt.sh`** — wasm-opt -Oz post-pass (used by VSCode panel build).
+
+---
+
+# VSCode panel WASM bundle — Budget & Audit (WEFT-484 / WEFT-577)
+
+Separate artifact from the browser `clawft-wasm` bundle above. Built
+from `clawft-gui-egui` (`--no-default-features`) and emitted to
+`extensions/vscode-weft-panel/webview/wasm/clawft_gui_egui_bg.wasm`.
+
+## tl;dr (post-WEFT-577)
+
+| Metric           | Measured (2026-07-30) | Gate    | Long-term goal |
+|------------------|-----------------------|---------|----------------|
+| Raw `_bg.wasm`   | 4487 KB               | 4500 KB | 4500 KB        |
+| Gzipped (-9)     | 1576 KB               | 1600 KB | 1500 KB        |
+
+Gate entry point: `scripts/build.sh wasm-panel` (defaults 4500 / 1600).
+
+## What WEFT-577 changed
+
+| Lever | Effect |
+|-------|--------|
+| Drop `egui_extras/all_loaders` → `image` + `datepicker` only (gui-egui, canon, surface) | Removes **resvg** (SVG), **ehttp** HTTP loader, gif/webp decoders |
+| `egui_demo_lib` native-only | Stops wasm feature-unification of `egui_extras/svg` |
+| `egui` `default-features = false` on panel graph; eframe wasm without `default_fonts` | Drops NotoEmoji + emoji-icon (~740 KB raw) |
+| Latin-subset Ubuntu/Hack TTFs in `assets/fonts/` | ~125 KB fonts vs ~670 KB full faces |
+| Splash logo resized + pngquant | 636 KB → ~60 KB PNG |
+| Panel build uses `release-wasm` (`opt-level = "z"`) + `wasm-opt -Oz` | Size-first code gen |
+
+## Audits (acceptance)
+
+| Item | Result |
+|------|--------|
+| `egui_commonmark` features | Already `default-features = false` + `pulldown_cmark` only. No further trim without dropping markdown. |
+| `jiff` features | Direct dep: `std` only. egui_extras datepicker adds `tz-system` + `js` (required). No tzdb bundle. |
+| `egui_extras` / `egui_plot` | extras trimmed to `image`+`datepicker`. `egui_plot` still required for showroom oscilloscope + canon Plot. |
+| Lazy-load viewers | Deferred — single-module wasm has no cheap dynamic import path; would need multi-module / deferred fetch design. |
+
+## Residual to 1500 KB gz
+
+Gzipped is **~76 KB over** the original 1500 KB WEFT-484 goal. Next
+candidates (not in this pass):
+
+1. Multi-module split: core shell vs viewers (Health/Sensor/sparkline).
+2. Drop or slim `egui_plot` on wasm if showroom oscilloscope is gated.
+3. Further glyph-subset of Hack (still ~84 KB).
+4. Review glow/eframe default_fonts-adjacent code paths and dead showroom blocks.
+
+## How to run
+
+```bash
+scripts/build.sh wasm-panel           # build + gate at 4500/1600
+scripts/build.sh wasm-panel 4500 1500 # dry-run the long-term ceiling
+twiggy top extensions/vscode-weft-panel/webview/wasm/clawft_gui_egui_bg.wasm
+```

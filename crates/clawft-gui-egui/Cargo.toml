@@ -67,19 +67,30 @@ crate-type = ["cdylib", "rlib"]
 # ── Cross-target dependencies ────────────────────────────────────────
 
 [dependencies]
-egui = "0.34"
+# WEFT-577: default-features off so wasm builds do not pull
+# `epaint/default_fonts` (NotoEmoji + emoji-icon ~740 KB). Native
+# re-enables fonts via eframe's `default_fonts` feature below.
+egui = { version = "0.34", default-features = false }
 # `datepicker` enables `egui_extras::DatePickerButton` (canon `Field::Date`).
 # Note: egui_extras 0.34's datepicker is built on `jiff::civil::Date`, not
 # `chrono::NaiveDate` — the original Plane spec referenced chrono but the
 # library moved to jiff. We expose `jiff::civil::Date` through `FieldValue::Date`
 # so the surface stays in sync with the underlying widget.
-egui_extras = { version = "0.34", features = ["all_loaders", "datepicker"] }
+# WEFT-577: do **not** enable `all_loaders`. That feature union pulls
+# `http` (ehttp), `svg` (resvg — multi-MB), `gif`, and `webp` into the
+# VSCode panel wasm bundle even though production only renders PNG
+# boot/chip assets via `bytes://` + the PNG-only `image` pin below.
+# Keep `image` (crate loader) + `datepicker` (Field::Date / jiff).
+egui_extras = { version = "0.34", features = ["image", "datepicker"] }
 # Brought in transitively by `egui_extras/datepicker`; named here as a
 # direct dep so canon `FieldValue::Date(jiff::civil::Date)` can be
 # spelled in this crate's public surface without a re-export hop.
+# Feature surface is intentionally minimal (`std` only here). egui_extras'
+# datepicker dep also enables `tz-system` + `js` for the picker widget;
+# we do **not** enable jiff default features (tzdb bundle / zoneinfo),
+# which would re-inflate the wasm bundle (WEFT-577 audit).
 jiff = { version = "0.2.23", default-features = false, features = ["std"] }
 egui_plot = "0.35"
-egui_demo_lib = "0.34"
 # NB: egui_dock 0.19 tracks egui 0.34. (0.14 tracked egui 0.29.)
 # ADR-001 row 10 — `ui://dock` is implemented via this crate.
 egui_dock = "0.19"
@@ -90,7 +101,8 @@ egui_dock = "0.19"
 # only `pulldown_cmark` is re-enabled — that's the parser the renderer
 # needs at runtime. No `fetch` (no network egress from chat bubbles),
 # no `svg`, no `embedded_image`, no `macros` (compile-time markdown is
-# wrong for runtime LLM output).
+# wrong for runtime LLM output). WEFT-577 re-confirmed: no further
+# feature trim available without dropping markdown rendering.
 egui_commonmark = { version = "0.23", default-features = false, features = ["pulldown_cmark"] }
 log = "0.4"
 serde_json = { workspace = true }
@@ -102,7 +114,7 @@ web-time = "1"
 # NOTE (WEFT-251): the `image` crate is feature-pinned to PNG only.
 #
 # Why "png" and nothing else:
-#   1. egui_extras's `all_loaders` brings `image` in as a transitive
+#   1. egui_extras's `image` feature brings `image` in as a transitive
 #      dep but leaves all format features OFF (default-features=false,
 #      no overrides). Feature unification across the workspace
 #      doesn't reliably enable PNG on `wasm32-unknown-unknown`, so
@@ -159,11 +171,19 @@ tokio = { workspace = true }
 clawft-rpc = { workspace = true }
 ehttp = { version = "0.5", features = ["native-async"] }
 poll-promise = "0.3"
+# Native-only: `weft-demo-lab` A/B theming proof. Kept off the wasm
+# dependency graph because egui_demo_lib enables `egui_extras/svg`
+# (resvg) which alone dominates VSCode panel cold-load size (WEFT-577).
+egui_demo_lib = "0.34"
 
 # ── Wasm-only dependencies (compiled for `wasm32-unknown-unknown`) ──
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-eframe = { version = "0.34", default-features = false, features = ["default_fonts", "glow"] }
+# WEFT-577: drop `default_fonts` on the panel path. epaint's default pack
+# embeds Ubuntu + Hack + NotoEmoji + emoji-icon (~1.4 MB). The webview
+# installs Latin-subset TTFs from `assets/fonts/` (~125 KB) in `app.rs`.
+# Native keeps full default_fonts for desktop UX.
+eframe = { version = "0.34", default-features = false, features = ["glow"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"

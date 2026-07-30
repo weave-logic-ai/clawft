@@ -686,21 +686,21 @@ cmd_bundle_size() {
 # distinct from the clawft-wasm bundle and rides a separate budget;
 # defaults are wider here because the panel ships eframe + egui_extras.
 #
-#   raw budget:  7600 KB  (current ~7300 KB after wasm-opt -Oz)
-#   gz budget:   3500 KB  (current ~3400 KB after gzip -9)
+#   raw budget:  4500 KB  (WEFT-577 — restored WEFT-484 raw ceiling)
+#   gz budget:   1600 KB  (step toward 1500; measured ~1576 KB gzip-9)
 #
-# The budget was raised from the original WEFT-484 ceiling (4500/1500
-# KB) after the M7+M7b feature wave landed: chat-panel markdown
-# (egui_commonmark), terminal scrollback + glyph styling, canon
-# Field::Date (jiff) + Field::Code, Workshop Grid/Tabs layouts, three
-# new viewers (HealthViewer / SensorViewer / sparkline), tree filters,
-# breadcrumb navigation, and Object Type registrations for Mesh /
-# Sensor / Node. Trimming back toward 4500 / 1500 is tracked as a
-# separate optimisation pass (twiggy + cargo bloat investigation,
-# optional-dep audits, possible bundle splitting). Until that lands,
-# the Cursor webview ships at ~7.3 MB raw / ~3.4 MB gz.
+# History:
+#   - WEFT-484 set 4500/1500.
+#   - M7+M7b feature wave grew the bundle to ~7.3 MB raw / ~3.4 MB gz;
+#     the gate was raised to 7600/3500 so ship wasn't blocked.
+#   - WEFT-577 (this pass) reclaimed raw under 4500 and gz to ~1576 via
+#     loader feature cuts (drop resvg/http/gif/webp), native-only
+#     egui_demo_lib, release-wasm opt-level=z + wasm-opt -Oz, Latin
+#     font subsets (no emoji pack), and splash-logo quantisation.
+#     Residual to full 1500 KB gz is documented in
+#     docs/architecture/wasm-bundle-size.md and the wave-0l result.
 #
-# Override by passing positional args: scripts/build.sh wasm-panel 7600 3500
+# Override by passing positional args: scripts/build.sh wasm-panel 4500 1600
 cmd_wasm_panel() {
     header "Building VSCode dev-panel wasm bundle"
     local inner="$ROOT/extensions/vscode-weft-panel/scripts/build-wasm.sh"
@@ -734,8 +734,8 @@ cmd_wasm_panel() {
     #   scripts/build.sh wasm-panel <max-raw-kb> <max-gz-kb>
     local max_raw_kb="${1:-}"
     local max_gz_kb="${2:-}"
-    [ -z "$max_raw_kb" ] && max_raw_kb=7600
-    [ -z "$max_gz_kb" ] && max_gz_kb=3500
+    [ -z "$max_raw_kb" ] && max_raw_kb=4500
+    [ -z "$max_gz_kb" ] && max_gz_kb=1600
     info "Panel size gate: raw≤${max_raw_kb}KB, gz≤${max_gz_kb}KB"
     if ! bash "$ROOT/scripts/bench/check-bundle-size.sh" \
             "$bundle" "$max_raw_kb" "$max_gz_kb"; then

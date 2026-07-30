@@ -26,9 +26,11 @@ clawft-substrate = { workspace = true }
 # without a cycle through clawft-gui-egui.
 clawft-canon = { workspace = true }
 # Composer drives egui::Ui + egui_extras strip cells (same versions as
-# clawft-canon / clawft-gui-egui).
-egui = "0.34"
-egui_extras = { version = "0.34", features = ["all_loaders", "datepicker"] }
+# clawft-canon / clawft-gui-egui). WEFT-577: keep feature set aligned
+# with gui-egui (`image` + `datepicker`; no `all_loaders`;
+# egui default-features off for panel font budget).
+egui = { version = "0.34", default-features = false }
+egui_extras = { version = "0.34", features = ["image", "datepicker"] }
 
 [dev-dependencies]
 # Headless eval tests use only serde_json fixtures; no UI deps required.
