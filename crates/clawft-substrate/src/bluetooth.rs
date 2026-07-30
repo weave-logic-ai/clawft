@@ -6,11 +6,21 @@
 //! [`crate::network`] — minimum honest replacement for the hardcoded
 //! tray placeholder.
 //!
+//! # Platform support (WEFT-420)
+//!
+//! | Host | Behaviour |
+//! |------|-----------|
+//! | **Linux** | Real sysfs sampling. No controller → `present: false` (no platform cause). |
+//! | **macOS / Windows / other** | Adapter still **opens**. Emits `present: false, enabled: false` with `platform: "unsupported"` and `cause: "sysfs-unavailable"`, and surfaces [`crate::health::AdapterHealthEvent::Error`] on `substrate/meta/adapter/bluetooth/health`. |
+//! | **wasm32** | Module is not compiled. |
+//!
+//! IOBluetooth / WinRT ports are **unscheduled**. See [`crate::sysfs`].
+//!
 //! ## Topic
 //!
 //! | Topic | Shape | Refresh | Emits |
 //! |-------|-------|---------|-------|
-//! | `substrate/bluetooth` | `{present, enabled, controller?}` | 5s | `present` = any `/sys/class/bluetooth/hci*` exists; `enabled` = controller present AND no rfkill soft-block for type `bluetooth` |
+//! | `substrate/bluetooth` | `{present, enabled, controller?, platform?, cause?}` | 5s | `present` = any `/sys/class/bluetooth/hci*` exists; `enabled` = controller present AND no rfkill soft-block for type `bluetooth` |
 //!
 //! [`Sensitivity::Public`]; no [`PermissionReq`]. Scanning / paired
 //! device enumeration carries user content and is deferred to an
@@ -30,6 +40,9 @@ use crate::adapter::{
     Subscription, TopicDecl,
 };
 use crate::delta::StateDelta;
+use crate::sysfs::{
+    linux_sysfs_native, sysfs_unavailable_health_delta, unsupported_payload_fields,
+};
 
 const CHAN_SINGLETON: usize = 1;
 
@@ -70,10 +83,18 @@ impl Registry {
 }
 
 /// Host-local bluetooth adapter.
+///
+/// On non-Linux hosts (or when constructed with
+/// [`Self::with_roots_and_platform`] `platform_supported = false`),
+/// pollers emit disabled placeholders + adapter-health error with
+/// `sysfs-unavailable` (WEFT-420).
 pub struct BluetoothAdapter {
     reg: Mutex<Registry>,
     bt_root: PathBuf,
     rfkill_root: PathBuf,
+    /// When `false`, skip sysfs sampling and emit the unsupported
+    /// platform fallback. See [`NetworkAdapter`](crate::network::NetworkAdapter).
+    platform_supported: bool,
 }
 
 impl Default for BluetoothAdapter {
@@ -83,22 +104,39 @@ impl Default for BluetoothAdapter {
 }
 
 impl BluetoothAdapter {
-    /// Build with real `/sys` roots.
+    /// Build with real `/sys` roots and the compile-time platform gate.
     pub fn new() -> Self {
-        Self::with_roots(
+        Self::with_roots_and_platform(
             PathBuf::from("/sys/class/bluetooth"),
             PathBuf::from("/sys/class/rfkill"),
+            linux_sysfs_native(),
         )
     }
 
     /// Construct with arbitrary filesystem roots — used by unit tests
-    /// to feed canned sysfs directories.
+    /// to feed canned sysfs directories. Marks platform **supported**.
     pub fn with_roots(bt_root: PathBuf, rfkill_root: PathBuf) -> Self {
+        Self::with_roots_and_platform(bt_root, rfkill_root, true)
+    }
+
+    /// Like [`Self::with_roots`], but control the platform gate
+    /// (`false` → non-Linux fallback for WEFT-420 tests).
+    pub fn with_roots_and_platform(
+        bt_root: PathBuf,
+        rfkill_root: PathBuf,
+        platform_supported: bool,
+    ) -> Self {
         Self {
             reg: Mutex::new(Registry::new()),
             bt_root,
             rfkill_root,
+            platform_supported,
         }
+    }
+
+    /// Whether this instance will sample sysfs (vs unsupported fallback).
+    pub fn platform_supported(&self) -> bool {
+        self.platform_supported
     }
 }
 
@@ -130,8 +168,9 @@ impl OntologyAdapter for BluetoothAdapter {
 
         let bt_root = self.bt_root.clone();
         let rfkill_root = self.rfkill_root.clone();
+        let platform_supported = self.platform_supported;
         tokio::spawn(async move {
-            poll_bluetooth(bt_root, rfkill_root, tx, cancel_rx).await;
+            poll_bluetooth(bt_root, rfkill_root, platform_supported, id, tx, cancel_rx).await;
         });
         Ok(Subscription { id, rx })
     }
@@ -145,17 +184,32 @@ impl OntologyAdapter for BluetoothAdapter {
 async fn poll_bluetooth(
     bt_root: PathBuf,
     rfkill_root: PathBuf,
+    platform_supported: bool,
+    sub_id: SubId,
     tx: mpsc::Sender<StateDelta>,
     mut cancel_rx: oneshot::Receiver<()>,
 ) {
     let mut ticker = tokio::time::interval(Duration::from_secs(5));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    // Surface non-Linux once up front on adapter-health (WEFT-420 AC).
+    if !platform_supported {
+        let health =
+            sysfs_unavailable_health_delta("bluetooth", "substrate/bluetooth", Some(sub_id));
+        if tx.send(health).await.is_err() {
+            return;
+        }
+    }
+
     loop {
         tokio::select! {
             _ = &mut cancel_rx => return,
             _ = ticker.tick() => {
-                let value = sample_bluetooth(&bt_root, &rfkill_root);
+                let value = if !platform_supported {
+                    sample_unsupported()
+                } else {
+                    sample_bluetooth(&bt_root, &rfkill_root)
+                };
                 let delta = StateDelta::Replace {
                     path: "substrate/bluetooth".to_string(),
                     value,
@@ -166,6 +220,14 @@ async fn poll_bluetooth(
             }
         }
     }
+}
+
+/// Disabled placeholders with platform cause fields (non-Linux).
+fn sample_unsupported() -> Value {
+    let mut obj = unsupported_payload_fields();
+    obj.insert("present".into(), json!(false));
+    obj.insert("enabled".into(), json!(false));
+    Value::Object(obj)
 }
 
 /// Build the bluetooth state object. Returns:
@@ -227,6 +289,7 @@ fn bluetooth_rfkill_blocked(rfkill_root: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sysfs::CAUSE_SYSFS_UNAVAILABLE;
     use std::fs;
     use tempfile::TempDir;
 
@@ -266,6 +329,7 @@ mod tests {
         assert_eq!(v["present"], false);
         assert_eq!(v["enabled"], false);
         assert!(v.get("controller").is_none());
+        assert!(v.get("cause").is_none());
     }
 
     #[test]
@@ -298,10 +362,73 @@ mod tests {
         assert_eq!(v["enabled"], true);
     }
 
+    #[test]
+    fn sample_unsupported_carries_sysfs_cause() {
+        let v = sample_unsupported();
+        assert_eq!(v["present"], false);
+        assert_eq!(v["enabled"], false);
+        assert_eq!(v["cause"], CAUSE_SYSFS_UNAVAILABLE);
+        assert_eq!(v["platform"], "unsupported");
+        assert!(v.get("controller").is_none());
+    }
+
+    #[test]
+    fn new_respects_compile_time_platform_gate() {
+        let a = BluetoothAdapter::new();
+        assert_eq!(a.platform_supported(), linux_sysfs_native());
+    }
+
     #[tokio::test]
     async fn adapter_open_unknown_topic_errors() {
         let a = BluetoothAdapter::new();
         let r = a.open("substrate/bogus", Value::Null).await;
         assert!(matches!(r, Err(AdapterError::UnknownTopic(_))));
+    }
+
+    #[tokio::test]
+    async fn unsupported_platform_emits_health_error_then_disabled_payload() {
+        // WEFT-420: force non-Linux path even with hci0 present in tree.
+        let dir = TempDir::new().unwrap();
+        let a = BluetoothAdapter::with_roots_and_platform(
+            fake_bt_root_with_hci(&dir, "hci0"),
+            fake_rfkill_root_empty(&dir),
+            false,
+        );
+        let mut sub = a
+            .open("substrate/bluetooth", Value::Null)
+            .await
+            .expect("open");
+
+        let health = tokio::time::timeout(Duration::from_secs(2), sub.rx.recv())
+            .await
+            .expect("timeout waiting health")
+            .expect("channel closed");
+        match health {
+            StateDelta::Replace { path, value } => {
+                assert_eq!(path, "substrate/meta/adapter/bluetooth/health");
+                assert_eq!(value["event"], "error");
+                let reason = value["reason"].as_str().unwrap_or("");
+                assert!(
+                    reason.contains(CAUSE_SYSFS_UNAVAILABLE),
+                    "reason={reason}"
+                );
+            }
+            other => panic!("expected health Replace, got {other:?}"),
+        }
+
+        let payload = tokio::time::timeout(Duration::from_secs(6), sub.rx.recv())
+            .await
+            .expect("timeout waiting payload")
+            .expect("channel closed");
+        match payload {
+            StateDelta::Replace { path, value } => {
+                assert_eq!(path, "substrate/bluetooth");
+                assert_eq!(value["present"], false);
+                assert_eq!(value["enabled"], false);
+                assert_eq!(value["cause"], CAUSE_SYSFS_UNAVAILABLE);
+                assert!(value.get("controller").is_none());
+            }
+            other => panic!("expected bluetooth Replace, got {other:?}"),
+        }
     }
 }

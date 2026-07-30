@@ -1,17 +1,27 @@
 //! `network` reference adapter — system-local WiFi / ethernet / battery.
 //!
 //! Reads `/sys/class/net/*` and `/sys/class/power_supply/*` directly so
-//! it works on any Linux host without requiring NetworkManager,
-//! bluetoothd, or any userspace service layer. Cross-platform stubs
-//! emit an `absent` state; the tray renders a grey chip.
+//! it works on any **Linux** host without requiring NetworkManager,
+//! bluetoothd, or any userspace service layer.
+//!
+//! # Platform support (WEFT-420)
+//!
+//! | Host | Behaviour |
+//! |------|-----------|
+//! | **Linux** | Real sysfs sampling. Missing hardware → plain `absent` / `present: false` (no platform cause). |
+//! | **macOS / Windows / other** | Adapter still **opens** (tray/Explorer keep a uniform surface). Emits `absent` / `present: false` with `platform: "unsupported"` and `cause: "sysfs-unavailable"`, and surfaces [`crate::health::AdapterHealthEvent::Error`] on `substrate/meta/adapter/network/health` with that cause. |
+//! | **wasm32** | Module is not compiled; GUI uses the legacy Snapshot fallback. |
+//!
+//! macOS CoreWLAN / Windows WinRT ports are **unscheduled**. See
+//! [`crate::sysfs`] for the shared cause codes and health helpers.
 //!
 //! ## Topics
 //!
 //! | Topic | Shape | Refresh | Emits |
 //! |-------|-------|---------|-------|
-//! | `substrate/network/wifi` | `{state, iface?}` | 3s | Aggregate wifi state — `"connected"` if any wlan-class iface has operstate `up`, `"disconnected"` if present but down, `"absent"` if no wlan iface exists |
-//! | `substrate/network/ethernet` | `{state, iface?}` | 3s | Same shape for physical ethernet (en*/eth* interfaces, excluding virtual bridge/docker/tap) |
-//! | `substrate/network/battery` | `{present, percent?, charging?}` | 5s | From `/sys/class/power_supply/BAT*/capacity` + `status` |
+//! | `substrate/network/wifi` | `{state, iface?, platform?, cause?}` | 3s | Aggregate wifi state — `"connected"` if any wlan-class iface has operstate `up`, `"disconnected"` if present but down, `"absent"` if no wlan iface exists (or non-Linux) |
+//! | `substrate/network/ethernet` | `{state, iface?, platform?, cause?}` | 3s | Same shape for physical ethernet (en*/eth* interfaces, excluding virtual bridge/docker/tap) |
+//! | `substrate/network/battery` | `{present, percent?, charging?, platform?, cause?}` | 5s | From `/sys/class/power_supply/BAT*/capacity` + `status` |
 //!
 //! All topics are [`Sensitivity::Public`] and require no
 //! [`PermissionReq`] — interface names, aggregate state, and battery
@@ -23,8 +33,8 @@
 //! This adapter is a minimal honest replacement for the hardcoded
 //! tray placeholders. It doesn't attempt SSID enumeration, signal
 //! strength, or connection management — those belong to a
-//! nmcli/iwd-specific variant (native-only) and land in M1.6+ once
-//! the editor-in work exposes a cross-platform permissions UX.
+//! nmcli/iwd-specific variant (native Linux) and land in M1.6+ once
+//! the editor-in work exposes a permissions UX.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -40,6 +50,9 @@ use crate::adapter::{
     Subscription, TopicDecl,
 };
 use crate::delta::StateDelta;
+use crate::sysfs::{
+    linux_sysfs_native, sysfs_unavailable_health_delta, unsupported_payload_fields,
+};
 
 /// Channel depth for singleton topics.
 const CHAN_SINGLETON: usize = 1;
@@ -97,13 +110,24 @@ impl Registry {
     }
 }
 
-/// Host-local network adapter. Pollers read `/sys/class/*`; no RPC.
+/// Host-local network adapter. Pollers read `/sys/class/*` on Linux; no RPC.
+///
+/// On non-Linux hosts (or when constructed with
+/// [`Self::with_roots_and_platform`] `platform_supported = false`),
+/// pollers emit absent placeholders + adapter-health error with
+/// `sysfs-unavailable` (WEFT-420).
 pub struct NetworkAdapter {
     reg: Mutex<Registry>,
     /// Root for `/sys/class/net` — overridable for tests via [`Self::with_roots`].
     net_root: PathBuf,
     /// Root for `/sys/class/power_supply` — overridable for tests.
     power_root: PathBuf,
+    /// When `false`, skip sysfs sampling and emit the unsupported
+    /// platform fallback (payload cause + adapter-health error).
+    ///
+    /// `new()` sets this from [`linux_sysfs_native`]. `with_roots`
+    /// sets `true` so unit tests can feed canned trees on any host.
+    platform_supported: bool,
 }
 
 impl Default for NetworkAdapter {
@@ -113,22 +137,43 @@ impl Default for NetworkAdapter {
 }
 
 impl NetworkAdapter {
-    /// Build with real `/sys` roots.
+    /// Build with real `/sys` roots and the compile-time platform gate.
     pub fn new() -> Self {
-        Self::with_roots(
+        Self::with_roots_and_platform(
             PathBuf::from("/sys/class/net"),
             PathBuf::from("/sys/class/power_supply"),
+            linux_sysfs_native(),
         )
     }
 
     /// Construct with arbitrary filesystem roots — used by unit tests
-    /// to feed canned sysfs directories.
+    /// to feed canned sysfs directories. Marks the platform as
+    /// **supported** so sampling runs against the injected trees even
+    /// on macOS CI.
     pub fn with_roots(net_root: PathBuf, power_root: PathBuf) -> Self {
+        Self::with_roots_and_platform(net_root, power_root, true)
+    }
+
+    /// Like [`Self::with_roots`], but control the platform gate.
+    ///
+    /// `platform_supported = false` exercises the non-Linux fallback
+    /// path on any host (tests for WEFT-420).
+    pub fn with_roots_and_platform(
+        net_root: PathBuf,
+        power_root: PathBuf,
+        platform_supported: bool,
+    ) -> Self {
         Self {
             reg: Mutex::new(Registry::new()),
             net_root,
             power_root,
+            platform_supported,
         }
+    }
+
+    /// Whether this instance will sample sysfs (vs unsupported fallback).
+    pub fn platform_supported(&self) -> bool {
+        self.platform_supported
     }
 }
 
@@ -165,8 +210,18 @@ impl OntologyAdapter for NetworkAdapter {
         let topic_path = topic.to_string();
         let net_root = self.net_root.clone();
         let power_root = self.power_root.clone();
+        let platform_supported = self.platform_supported;
         tokio::spawn(async move {
-            spawn_poller(topic_path, net_root, power_root, tx, cancel_rx).await;
+            spawn_poller(
+                topic_path,
+                net_root,
+                power_root,
+                platform_supported,
+                id,
+                tx,
+                cancel_rx,
+            )
+            .await;
         });
         Ok(Subscription { id, rx })
     }
@@ -181,6 +236,8 @@ async fn spawn_poller(
     topic: String,
     net_root: PathBuf,
     power_root: PathBuf,
+    platform_supported: bool,
+    sub_id: SubId,
     tx: mpsc::Sender<StateDelta>,
     mut cancel_rx: oneshot::Receiver<()>,
 ) {
@@ -191,15 +248,28 @@ async fn spawn_poller(
     let mut ticker = tokio::time::interval(period);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    // Surface non-Linux once up front so adapter-health shows the
+    // sysfs cause before the first payload tick lands (WEFT-420 AC).
+    if !platform_supported {
+        let health = sysfs_unavailable_health_delta("network", &topic, Some(sub_id));
+        if tx.send(health).await.is_err() {
+            return;
+        }
+    }
+
     loop {
         tokio::select! {
             _ = &mut cancel_rx => return,
             _ = ticker.tick() => {
-                let value = match topic.as_str() {
-                    "substrate/network/wifi" => sample_link_state(&net_root, LinkKind::Wifi),
-                    "substrate/network/ethernet" => sample_link_state(&net_root, LinkKind::Ethernet),
-                    "substrate/network/battery" => sample_battery(&power_root),
-                    _ => continue,
+                let value = if !platform_supported {
+                    sample_unsupported(&topic)
+                } else {
+                    match topic.as_str() {
+                        "substrate/network/wifi" => sample_link_state(&net_root, LinkKind::Wifi),
+                        "substrate/network/ethernet" => sample_link_state(&net_root, LinkKind::Ethernet),
+                        "substrate/network/battery" => sample_battery(&power_root),
+                        _ => continue,
+                    }
                 };
                 let delta = StateDelta::Replace {
                     path: topic.clone(),
@@ -209,6 +279,23 @@ async fn spawn_poller(
                     return; // subscriber dropped
                 }
             }
+        }
+    }
+}
+
+/// Absent / present:false placeholders with platform cause fields.
+fn sample_unsupported(topic: &str) -> Value {
+    let fields = unsupported_payload_fields();
+    match topic {
+        "substrate/network/battery" => {
+            let mut obj = fields;
+            obj.insert("present".into(), json!(false));
+            Value::Object(obj)
+        }
+        _ => {
+            let mut obj = fields;
+            obj.insert("state".into(), json!("absent"));
+            Value::Object(obj)
         }
     }
 }
@@ -332,6 +419,7 @@ fn sample_battery(power_root: &Path) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sysfs::CAUSE_SYSFS_UNAVAILABLE;
     use std::fs;
     use tempfile::TempDir;
 
@@ -380,6 +468,9 @@ mod tests {
         let net = fake_net_root(&dir, &[("eth0", false, "up"), ("lo", false, "unknown")]);
         let v = sample_link_state(&net, LinkKind::Wifi);
         assert_eq!(v["state"], "absent");
+        // Linux-path absent must NOT carry a platform cause — that is
+        // reserved for non-Linux (WEFT-420).
+        assert!(v.get("cause").is_none());
     }
 
     #[test]
@@ -450,10 +541,91 @@ mod tests {
         assert_eq!(v["charging"], false);
     }
 
+    #[test]
+    fn sample_unsupported_wifi_carries_sysfs_cause() {
+        let v = sample_unsupported("substrate/network/wifi");
+        assert_eq!(v["state"], "absent");
+        assert_eq!(v["cause"], CAUSE_SYSFS_UNAVAILABLE);
+        assert_eq!(v["platform"], "unsupported");
+    }
+
+    #[test]
+    fn sample_unsupported_battery_carries_sysfs_cause() {
+        let v = sample_unsupported("substrate/network/battery");
+        assert_eq!(v["present"], false);
+        assert_eq!(v["cause"], CAUSE_SYSFS_UNAVAILABLE);
+    }
+
+    #[test]
+    fn new_respects_compile_time_platform_gate() {
+        let a = NetworkAdapter::new();
+        assert_eq!(a.platform_supported(), linux_sysfs_native());
+    }
+
+    #[test]
+    fn with_roots_marks_platform_supported_for_tests() {
+        let dir = TempDir::new().unwrap();
+        let a = NetworkAdapter::with_roots(
+            fake_net_root(&dir, &[]),
+            fake_power_root_empty(&dir),
+        );
+        assert!(a.platform_supported());
+    }
+
     #[tokio::test]
     async fn adapter_open_unknown_topic_errors() {
         let a = NetworkAdapter::new();
         let r = a.open("substrate/network/bogus", Value::Null).await;
         assert!(matches!(r, Err(AdapterError::UnknownTopic(_))));
+    }
+
+    #[tokio::test]
+    async fn unsupported_platform_emits_health_error_then_absent_payload() {
+        // WEFT-420: force non-Linux path on any host.
+        let dir = TempDir::new().unwrap();
+        let a = NetworkAdapter::with_roots_and_platform(
+            fake_net_root(&dir, &[("wlan0", true, "up")]),
+            fake_power_root_empty(&dir),
+            false,
+        );
+        let mut sub = a
+            .open("substrate/network/wifi", Value::Null)
+            .await
+            .expect("open");
+
+        // First delta: adapter-health error with sysfs cause.
+        let health = tokio::time::timeout(Duration::from_secs(2), sub.rx.recv())
+            .await
+            .expect("timeout waiting health")
+            .expect("channel closed");
+        match health {
+            StateDelta::Replace { path, value } => {
+                assert_eq!(path, "substrate/meta/adapter/network/health");
+                assert_eq!(value["event"], "error");
+                let reason = value["reason"].as_str().unwrap_or("");
+                assert!(
+                    reason.contains(CAUSE_SYSFS_UNAVAILABLE),
+                    "reason={reason}"
+                );
+            }
+            other => panic!("expected health Replace, got {other:?}"),
+        }
+
+        // Second delta: absent wifi payload with cause (interval fires).
+        let payload = tokio::time::timeout(Duration::from_secs(5), sub.rx.recv())
+            .await
+            .expect("timeout waiting payload")
+            .expect("channel closed");
+        match payload {
+            StateDelta::Replace { path, value } => {
+                assert_eq!(path, "substrate/network/wifi");
+                assert_eq!(value["state"], "absent");
+                assert_eq!(value["cause"], CAUSE_SYSFS_UNAVAILABLE);
+                // Even though fake tree has wlan0 up, unsupported path
+                // must not sample it.
+                assert!(value.get("iface").is_none());
+            }
+            other => panic!("expected wifi Replace, got {other:?}"),
+        }
     }
 }

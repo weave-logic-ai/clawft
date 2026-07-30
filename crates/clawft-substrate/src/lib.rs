@@ -56,17 +56,30 @@ pub mod snapshot;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod kernel;
 
+/// Shared Linux-sysfs platform probe (WEFT-420). Network / bluetooth
+/// adapters use this to document and surface the Linux-only constraint.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod sysfs;
+
 /// Host-local WiFi / ethernet / battery adapter. Reads `/sys/class/*`
 /// directly — no daemon round-trip, no NetworkManager dependency.
-/// Native-only; the wasm path is covered by the legacy-Snapshot
-/// fallback in `clawft_gui_egui::live` (M1.6+ migrates this to a real
-/// substrate-over-postMessage bridge).
+///
+/// **Linux-only probe** (WEFT-420): real sampling requires Linux sysfs.
+/// On macOS / Windows / other hosts the adapter still opens and emits
+/// `absent` placeholders with `cause: "sysfs-unavailable"`, and writes
+/// an adapter-health `error` event. See [`sysfs`].
+///
+/// Native-only compile gate (`not(wasm32)`); the wasm path is covered
+/// by the legacy-Snapshot fallback in `clawft_gui_egui::live`
+/// (M1.6+ migrates this to a real substrate-over-postMessage bridge).
 #[cfg(not(target_arch = "wasm32"))]
 pub mod network;
 
 /// Host-local bluetooth adapter. Reads `/sys/class/bluetooth` +
 /// `/sys/class/rfkill` directly — no bluez / bluetoothctl dependency.
-/// Native-only for the same reason as [`network`].
+///
+/// **Linux-only probe** (WEFT-420): same constraint and non-Linux
+/// fallback as [`network`]. See [`sysfs`].
 #[cfg(not(target_arch = "wasm32"))]
 pub mod bluetooth;
 
