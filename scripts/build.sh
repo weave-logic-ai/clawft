@@ -900,7 +900,8 @@ cmd_serve() {
 #   gate cut). Real fix is the major bump; no in-range patch on 33.0.2.
 #   Tracking / risk acceptance for the 2026-06 deferral: WEFT-681.
 #   Review date: 2026-10-30 (or when WEFT-551 is claimed — whichever first).
-# WEFT-552 — rustls-webpki bump (3 advisories)
+# WEFT-552 — rustls-webpki: cleared 2026-07-30 (rustls-webpki 0.103.13 only;
+#   ruvector-core 2.3.0 dropped the reqwest 0.11 / webpki 0.101 path).
 # WEFT-553 — unmaintained + unsound (6 advisories)
 CARGO_AUDIT_IGNORES=(
     # WEFT-551 wasmtime / wasmtime-wasi 33.0.2 (must stay in sync with
@@ -928,10 +929,6 @@ CARGO_AUDIT_IGNORES=(
     --ignore RUSTSEC-2026-0149
     --ignore RUSTSEC-2026-0182
     --ignore RUSTSEC-2026-0188
-    # WEFT-552 rustls-webpki
-    --ignore RUSTSEC-2026-0098
-    --ignore RUSTSEC-2026-0099
-    --ignore RUSTSEC-2026-0104
     # WEFT-553 unmaintained + unsound
     --ignore RUSTSEC-2017-0008
     --ignore RUSTSEC-2024-0384
@@ -1158,8 +1155,8 @@ ${BOLD}Commands:${NC}
   clippy          Run clippy with warnings-as-errors
   audit           Run cargo audit with 0.7.0 ignore-list (deny warnings).
                   Requires: cargo install --locked cargo-audit
-                  Followups: WEFT-551 (wasmtime), WEFT-552 (rustls-webpki),
-                  WEFT-553 (unmaintained + unsound rand).
+                  Followups: WEFT-551 (wasmtime), WEFT-553 (unmaintained +
+                  unsound rand). WEFT-552 (rustls-webpki) cleared.
   gate            Run full phase gate (12 checks, includes cargo audit)
   bench <crate> <name>
                   Run a `[[bench]] harness = false` target (e.g.
