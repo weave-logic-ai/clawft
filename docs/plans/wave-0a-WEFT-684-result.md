@@ -2,7 +2,7 @@
 
 **Ticket:** WEFT-684  
 **Branch:** `wave0a/weft-684-pin-ruflo`  
-**Commit:** `99e6d5724e3ab484a1a53063959a6b29a7a813de`  
+**Commit:** `6953de758dd904616afb96eaa8b26c0b5d75d243`  
 **Worktree:** `/Users/mathewbeane/.grok/worktrees/mathewbeane-weftos/subagent-019fb418-df94-7233-a1e3-57844d9ad65b`
 
 ## Pinned version
