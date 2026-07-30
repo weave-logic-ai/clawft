@@ -22,7 +22,6 @@ use clawft_types::error::ClawftError;
 use clawft_types::provider::{ContentBlock, LlmResponse, StopReason, Usage};
 
 use super::traits::LlmTransport;
-#[cfg(feature = "native")]
 use super::traits::StreamCallback;
 use super::traits::TransportRequest;
 
@@ -76,7 +75,10 @@ pub trait LlmProvider: Send + Sync {
     /// not supported. Providers that support streaming should override this.
     ///
     /// Only available with the `native` feature (requires tokio channels).
-    #[cfg(feature = "native")]
+    ///
+    /// When both `native` and `browser` are enabled the browser callback
+    /// signature wins (WEFT-390 / single-threaded `!Send` callbacks).
+    #[cfg(all(feature = "native", not(feature = "browser")))]
     #[allow(clippy::too_many_arguments)] // OpenAI-compat call shape: the model
     // plus messages/tools/max_tokens/temperature/tool_choice knobs and the
     // stream sink. Bundling into a struct would obscure the wire mapping.
@@ -89,6 +91,27 @@ pub trait LlmProvider: Send + Sync {
         _temperature: Option<f64>,
         _tool_choice: Option<&serde_json::Value>,
         _tx: tokio::sync::mpsc::Sender<String>,
+    ) -> Result<serde_json::Value, String> {
+        Err("streaming not supported by this provider".into())
+    }
+
+    /// Browser streaming path (WEFT-390): invoke `on_delta` for each text
+    /// fragment. No tokio mpsc — the WASM runtime is single-threaded and
+    /// callbacks may close over `!Send` JS handles.
+    ///
+    /// Return the final aggregated JSON response (same format as
+    /// `complete()`) after the stream ends. Default: not supported.
+    #[cfg(feature = "browser")]
+    #[allow(clippy::too_many_arguments)]
+    async fn complete_stream(
+        &self,
+        _model: &str,
+        _messages: &[serde_json::Value],
+        _tools: &[serde_json::Value],
+        _max_tokens: Option<i32>,
+        _temperature: Option<f64>,
+        _tool_choice: Option<&serde_json::Value>,
+        _on_delta: Box<dyn for<'a> FnMut(&'a str) -> bool>,
     ) -> Result<serde_json::Value, String> {
         Err("streaming not supported by this provider".into())
     }
@@ -218,7 +241,7 @@ impl LlmTransport for OpenAiCompatTransport {
         convert_response(raw_response)
     }
 
-    #[cfg(feature = "native")]
+    #[cfg(all(feature = "native", not(feature = "browser")))]
     async fn complete_stream(
         &self,
         request: &TransportRequest,
@@ -308,6 +331,105 @@ impl LlmTransport for OpenAiCompatTransport {
                     Ok(LlmResponse {
                         id: "stream-partial".into(),
                         content: vec![ContentBlock::Text { text: full_text }],
+                        stop_reason: StopReason::EndTurn,
+                        usage: Usage {
+                            input_tokens: 0,
+                            output_tokens: 0,
+                            total_tokens: 0,
+                        },
+                        metadata: HashMap::new(),
+                    })
+                } else {
+                    Err(ClawftError::Provider { message: e })
+                }
+            }
+        }
+    }
+
+    /// Browser streaming (WEFT-390): no tokio spawn / mpsc. The provider
+    /// invokes a non-`Send` delta callback on the single-threaded WASM
+    /// event loop as SSE chunks arrive (reqwest → wasm-streams /
+    /// Fetch `ReadableStream`).
+    #[cfg(feature = "browser")]
+    async fn complete_stream(
+        &self,
+        request: &TransportRequest,
+        callback: StreamCallback,
+    ) -> clawft_types::Result<LlmResponse> {
+        let provider = self
+            .providers
+            .get(&request.provider)
+            .or(self.provider.as_ref())
+            .ok_or_else(|| ClawftError::Provider {
+                message: "transport not configured -- call with_provider()".into(),
+            })?;
+
+        let messages: Vec<serde_json::Value> = request
+            .messages
+            .iter()
+            .map(|m| {
+                let content_value = if m.content.is_empty() && m.tool_calls.is_some() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!(m.content)
+                };
+                let mut msg = serde_json::json!({
+                    "role": m.role,
+                    "content": content_value,
+                });
+                if let Some(ref id) = m.tool_call_id {
+                    msg["tool_call_id"] = serde_json::json!(id);
+                }
+                if let Some(ref tcs) = m.tool_calls {
+                    msg["tool_calls"] = serde_json::json!(tcs);
+                }
+                msg
+            })
+            .collect();
+
+        debug!(
+            provider = %request.provider,
+            model = %request.model,
+            messages = messages.len(),
+            browser = true,
+            "sending browser streaming request via transport"
+        );
+
+        // Accumulate text while forwarding deltas to the pipeline callback.
+        // `Rc<RefCell<_>>` keeps the sink `!Send`-friendly (single-threaded
+        // WASM) and satisfies the `'static` dyn-FnMut box.
+        let full_text = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        let callback_cell = std::rc::Rc::new(std::cell::RefCell::new(callback));
+        let full_text_cb = std::rc::Rc::clone(&full_text);
+        let callback_cb = std::rc::Rc::clone(&callback_cell);
+
+        let stream_result = provider
+            .complete_stream(
+                &request.model,
+                &messages,
+                &request.tools,
+                request.max_tokens,
+                request.temperature,
+                request.tool_choice.as_ref(),
+                Box::new(move |delta: &str| {
+                    full_text_cb.borrow_mut().push_str(delta);
+                    callback_cb.borrow_mut()(delta)
+                }),
+            )
+            .await;
+
+        match stream_result {
+            Ok(raw_response) => convert_response(raw_response),
+            Err(e) => {
+                let text = full_text.borrow().clone();
+                if !text.is_empty() {
+                    debug!(
+                        "browser stream ended with error but collected {} chars, returning partial response",
+                        text.len()
+                    );
+                    Ok(LlmResponse {
+                        id: "stream-partial".into(),
+                        content: vec![ContentBlock::Text { text }],
                         stop_reason: StopReason::EndTurn,
                         usage: Usage {
                             input_tokens: 0,

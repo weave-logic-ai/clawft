@@ -16,9 +16,10 @@
 //! 5. `send_message()`     — "not initialized" guard before `init()`.
 //! 6. `VERSION`            — non-empty crate version metadata.
 //!
-//! The full network round-trip lives in the `www/` HTML harness (BW6)
-//! and the upcoming `crates/clawft-llm/tests/browser_transport_*` suite
-//! (out of scope for this card — see WEFT-390 follow-up).
+//! The full network round-trip lives in the `www/` HTML harness (BW6).
+//! Streaming entry (`stream_chat`) is covered by WEFT-390 tests below
+//! (pre-init guard) plus host-side pipeline stream tests in
+//! `clawft-core::pipeline::browser_llm_adapter`.
 //!
 //! Run via `scripts/build.sh test-browser` (which shells out to
 //! `wasm-pack test --headless --chrome -p clawft-wasm --features browser`).
@@ -30,8 +31,9 @@ use wasm_bindgen_test::*;
 wasm_bindgen_test_configure!(run_in_browser);
 
 // `clawft_wasm::*` reexports the `browser_entry` symbols (init, send_message,
-// boot_info, analyze_files, set_env, get_env) when the `browser` feature is on.
-use clawft_wasm::{VERSION, analyze_files, boot_info, get_env, send_message, set_env};
+// stream_chat, boot_info, analyze_files, set_env, get_env) when the
+// `browser` feature is on.
+use clawft_wasm::{VERSION, analyze_files, boot_info, get_env, send_message, set_env, stream_chat};
 
 // ---------------------------------------------------------------------------
 // Test 1 — boot_info() returns the expected 5-phase trace.
@@ -197,6 +199,27 @@ async fn send_message_before_init_errors_cleanly() {
         assert!(
             !msg.is_empty(),
             "send_message error JsValue must carry a message"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 5b — stream_chat() before init() returns a structured error
+// (WEFT-390). Same guard as send_message; must not panic.
+// ---------------------------------------------------------------------------
+#[wasm_bindgen_test]
+async fn stream_chat_before_init_errors_cleanly() {
+    let on_chunk = js_sys::Function::new_with_args("chunk", "return true;");
+    let result = stream_chat("hello", &on_chunk).await;
+    if let Err(err) = result {
+        let msg = err.as_string().unwrap_or_default();
+        assert!(
+            !msg.is_empty(),
+            "stream_chat error JsValue must carry a message"
+        );
+        assert!(
+            msg.contains("not initialized") || msg.contains("init"),
+            "expected not-initialized guard, got `{msg}`"
         );
     }
 }

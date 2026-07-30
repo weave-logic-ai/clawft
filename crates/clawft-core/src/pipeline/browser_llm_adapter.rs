@@ -34,7 +34,7 @@ use async_trait::async_trait;
 use tracing::debug;
 
 use clawft_llm::browser_transport::BrowserLlmClient;
-use clawft_llm::types::{ChatMessage, ChatRequest as LlmChatRequest};
+use clawft_llm::types::{ChatMessage, ChatRequest as LlmChatRequest, StreamChunk};
 
 use super::transport::LlmProvider;
 
@@ -95,6 +95,89 @@ impl LlmProvider for BrowserLlmAdapter {
             Ok(response) => Ok(convert_response_to_value(&response)),
             Err(e) => Err(e.to_string()),
         }
+    }
+
+    /// Stream text deltas via [`BrowserLlmClient::complete_stream_callback`].
+    ///
+    /// Under the hood reqwest's wasm client consumes the Fetch
+    /// `ReadableStream` (wasm-streams). CORS proxy routing from
+    /// `BrowserLlmClient` applies unchanged. WEFT-390.
+    #[allow(clippy::too_many_arguments)]
+    async fn complete_stream(
+        &self,
+        model: &str,
+        messages: &[serde_json::Value],
+        tools: &[serde_json::Value],
+        max_tokens: Option<i32>,
+        temperature: Option<f64>,
+        tool_choice: Option<&serde_json::Value>,
+        mut on_delta: Box<dyn for<'a> FnMut(&'a str) -> bool>,
+    ) -> Result<serde_json::Value, String> {
+        let chat_messages: Vec<ChatMessage> =
+            messages.iter().map(convert_value_to_message).collect();
+
+        let request = LlmChatRequest {
+            model: model.to_string(),
+            messages: chat_messages,
+            max_tokens,
+            temperature,
+            tools: tools.to_vec(),
+            stream: Some(true),
+            tool_choice: tool_choice.cloned(),
+        };
+
+        debug!(
+            provider = %self.client.name(),
+            model = %model,
+            messages = request.messages.len(),
+            tools = request.tools.len(),
+            "browser adapter streaming request to BrowserLlmClient"
+        );
+
+        let mut full_text = String::new();
+        let mut finish_reason: Option<String> = None;
+        let mut usage: Option<clawft_llm::Usage> = None;
+
+        self.client
+            .complete_stream_callback(&request, |chunk| match chunk {
+                StreamChunk::TextDelta { text } => {
+                    full_text.push_str(&text);
+                    on_delta(&text)
+                }
+                StreamChunk::Done {
+                    finish_reason: fr,
+                    usage: u,
+                } => {
+                    if fr.is_some() {
+                        finish_reason = fr;
+                    }
+                    if u.is_some() {
+                        usage = u;
+                    }
+                    true
+                }
+                StreamChunk::ToolCallDelta { .. } => {
+                    // Tool-call deltas are not forwarded as text; a future
+                    // path can accumulate them the way the native adapter does.
+                    true
+                }
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let fr = finish_reason.unwrap_or_else(|| "stop".into());
+        let response = clawft_llm::types::ChatResponse {
+            id: "stream-response".into(),
+            model: model.to_string(),
+            choices: vec![clawft_llm::types::Choice {
+                index: 0,
+                message: ChatMessage::assistant(full_text),
+                finish_reason: Some(fr),
+            }],
+            usage,
+        };
+
+        Ok(convert_response_to_value(&response))
     }
 }
 

@@ -472,6 +472,98 @@ mod browser_entry {
         Ok(outbound.content)
     }
 
+    /// Stream a single-turn chat completion through the pipeline
+    /// (WEFT-390).
+    ///
+    /// Stages 1–3 (classify / route / assemble) run as usual, then
+    /// stage 4 streams text deltas into `on_chunk` as SSE arrives via
+    /// Fetch `ReadableStream` / wasm-streams. Stages 5–6 score and
+    /// learn after the stream completes.
+    ///
+    /// Unlike [`send_message`], this path does **not** run the full
+    /// agent tool loop or session append — it is the pipeline
+    /// streaming entry. Prefer [`send_message`] when tools / history
+    /// matter; use `stream_chat` for token-by-token UI updates.
+    ///
+    /// # Parameters
+    ///
+    /// * `text` — user message content.
+    /// * `on_chunk` — JS `function(chunk: string): void | boolean`.
+    ///   Return `false` to abort the stream early; any other value
+    ///   (including `undefined`) continues.
+    ///
+    /// # Returns
+    ///
+    /// The full accumulated assistant text (even if the stream was
+    /// aborted early).
+    #[wasm_bindgen]
+    pub async fn stream_chat(text: &str, on_chunk: &js_sys::Function) -> Result<String, JsValue> {
+        use clawft_core::pipeline::traits::{ChatRequest, LlmMessage, StreamCallback};
+        use clawft_types::provider::ContentBlock;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let rt = RUNTIME
+            .get()
+            .ok_or_else(|| JsValue::from_str("not initialized — call init() first"))?;
+
+        let request = ChatRequest {
+            messages: vec![LlmMessage {
+                role: "user".into(),
+                content: text.to_string(),
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            tools: vec![],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            auth_context: None,
+            complexity_boost: 0.0,
+            tool_choice: None,
+        };
+
+        let accumulated = Rc::new(RefCell::new(String::new()));
+        let acc = Rc::clone(&accumulated);
+        // Clone the Function into an owned handle the closure can call.
+        let on_chunk = on_chunk.clone();
+
+        let callback: StreamCallback = Box::new(move |delta: &str| {
+            acc.borrow_mut().push_str(delta);
+            match on_chunk.call1(&JsValue::NULL, &JsValue::from_str(delta)) {
+                Ok(v) => {
+                    // Explicit `false` aborts; everything else continues.
+                    !matches!(v.as_bool(), Some(false))
+                }
+                Err(err) => {
+                    web_sys::console::warn_1(
+                        &format!("stream_chat on_chunk threw: {err:?}").into(),
+                    );
+                    true
+                }
+            }
+        });
+
+        let response = rt
+            .agent
+            .pipeline()
+            .complete_stream(&request, callback)
+            .await
+            .map_err(|e| JsValue::from_str(&format!("stream error: {e}")))?;
+
+        // Prefer accumulated deltas; fall back to response content if the
+        // provider only returned a terminal non-streaming payload.
+        let mut out = accumulated.borrow().clone();
+        if out.is_empty() {
+            for block in &response.content {
+                if let ContentBlock::Text { text } = block {
+                    out.push_str(text);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Set an environment variable on the live [`BrowserEnvironment`].
     ///
     /// After [`init`], mutates the shared [`Arc`] stored in
