@@ -1,0 +1,338 @@
+{
+  "$comment": "Pinned source manifest for the embedded-rust brain. Every note in notes/ must trace to an entry here. Bump `fetched` and `crate_versions_at_fetch` on refresh; never edit a note without touching this file.",
+  "corpus": "embedded-rust",
+  "namespace": "embedded-rust",
+  "built": "2026-07-29",
+  "builder": "claude-code session (Opus 5), weftos repo, branch feat/hermes-loop-base",
+  "refresh_signal": "https://docs.espressif.com/projects/rust/ — lists every esp-* crate with the version its docs are built from. Diff against crate_versions_at_fetch below.",
+
+  "crate_versions_at_fetch": {
+    "$comment": "Read from the docs.espressif.com/projects/rust/ crate-doc index on 2026-07-29. These are UPSTREAM CURRENT, not our pins. Our pins are in notes/12-weftos-anchors.md §2.",
+    "esp-hal": "1.1.0",
+    "esp-rtos": "0.3.0",
+    "esp-radio": "1.0.0-beta.0",
+    "esp-radio-rtos-driver": "0.3.0",
+    "esp-alloc": "0.10.0",
+    "esp-println": "0.17.0",
+    "esp-backtrace": "0.19.0",
+    "esp-config": "0.7.0",
+    "esp-storage": "0.9.0",
+    "esp-sync": "0.2.1",
+    "esp-phy": "0.2.0",
+    "esp-bootloader-esp-idf": "0.5.0",
+    "esp-hal-procmacros": "0.22.0",
+    "esp-lp-hal": "0.3.0",
+    "esp-metadata": "0.10.1",
+    "esp-metadata-generated": "0.4.0",
+    "esp-rom-sys": "0.1.4",
+    "esp-riscv-rt": "0.14.0",
+    "xtensa-lx": "0.13.0",
+    "xtensa-lx-rt": "0.22.0",
+    "xtensa-lx-rt-proc-macros": "0.5.0",
+    "embedded-test": "0.7.1",
+    "embedded-hal": "1.0.0",
+    "esp-generate-msrv": "1.86"
+  },
+
+  "sources": [
+    {
+      "id": "rust-on-esp-book",
+      "title": "The Rust on ESP Book",
+      "url": "https://docs.espressif.com/projects/rust/book/",
+      "single_page_url": "https://docs.espressif.com/projects/rust/book/print.html",
+      "publisher": "Espressif (esp-rs project)",
+      "trust": "upstream-official",
+      "fetched": "2026-07-29",
+      "primary": true,
+      "extracted": [
+        "Full 5-chapter outline: Preface, Introduction, Getting Started, Application Development, FAQ",
+        "Introduction: Xtensa vs RISC-V chip split, DevKit anatomy, full ancillary-crate inventory with per-crate stable/unstable status, embedded-hal/embedded-io/rand_core integration",
+        "Getting Started: rustup + espup install, RISC-V target triples, what espup installs, esp-generate / espflash / probe-rs / esp-config install + use",
+        "Application Development: two-stage boot + partition tables + custom bootloader build, esp-config configuration system, defmt vs log, heap/reclaimed-RAM/PSRAM + allocator constraints, Embassy/ArielOS/RTIC, host + HIL testing, OTA",
+        "FAQ: editor setup, binary-size and memory optimization, crates from git, mem::forget on drivers, download-mode / boot-mode strapping"
+      ],
+      "notes": ["01", "02", "03", "04", "05", "06", "07", "08", "10", "11"],
+      "caveat": "print.html is the whole book on one page — the cheapest complete re-read on refresh."
+    },
+    {
+      "id": "esp-rust-docs-index",
+      "title": "esp-rs Documentation and Resources (crate-doc index)",
+      "url": "https://docs.espressif.com/projects/rust/",
+      "publisher": "Espressif",
+      "trust": "upstream-official",
+      "fetched": "2026-07-29",
+      "primary": true,
+      "extracted": [
+        "The canonical version index: 21 esp-* crate doc links, each carrying the version its docs are built from (captured in crate_versions_at_fetch)",
+        "Confirms only 2 official books/training resources are published from this index: the Rust on ESP Book and the no_std training"
+      ],
+      "notes": ["01", "12"],
+      "caveat": "THIS IS THE REFRESH SIGNAL. Chip/version selector site, self-hosted rather than docs.rs because esp-hal docs are per-chip."
+    },
+    {
+      "id": "esp-hal-1.0-release",
+      "title": "esp-hal 1.0.0 release announcement",
+      "url": "https://developer.espressif.com/blog/2025/10/esp-hal-1/",
+      "publisher": "Espressif Developer Portal",
+      "trust": "upstream-official",
+      "fetched": "2026-07-29",
+      "extracted": [
+        "Exact stable-API scope: esp_hal::init + config, GPIO/UART/SPI/I2C in both Async and Blocking, time module (Instant/Duration/Rate), SoC reset + misc, #[main] macro, esp-config",
+        "Everything else feature-gated behind `unstable`",
+        "'Unstable refers to API stability' — not functional immaturity"
+      ],
+      "notes": ["01", "11"],
+      "caveat": "Did NOT state MSRV, chip-support matrix, or migration guidance. Do not infer those from this page."
+    },
+    {
+      "id": "esp-hal-repo",
+      "title": "esp-rs/esp-hal repository README",
+      "url": "https://github.com/esp-rs/esp-hal",
+      "raw_url": "https://raw.githubusercontent.com/esp-rs/esp-hal/main/README.md",
+      "publisher": "esp-rs",
+      "trust": "upstream-official",
+      "fetched": "2026-07-29",
+      "extracted": [
+        "Supported chips: ESP32; ESP32-C2/C3/C5/C6/C61; ESP32-H2; ESP32-P4; ESP32-S2/S3",
+        "esp-lp-hal covers the low-power RISC-V cores on ESP32-C6, ESP32-S2, ESP32-S3",
+        "Stability policy: unstable changes ship in MINOR releases; if you depend on `unstable`, pin with the tilde operator (e.g. `esp-hal = { version = \"~1.1\" }`)"
+      ],
+      "notes": ["01", "11", "12"],
+      "caveat": "README as fetched carried NO MSRV table and NO per-chip architecture/status matrix. Flagged known-uncertain in README.md."
+    },
+    {
+      "id": "esp-hal-beta-announcement",
+      "title": "esp-hal 1.0.0-beta announcement (the std→no_std support shift)",
+      "url": "https://developer.espressif.com/blog/2025/02/rust-esp-hal-beta/",
+      "publisher": "Espressif Developer Portal",
+      "trust": "upstream-official",
+      "fetched": "2026-07-29",
+      "via": "web search result summary",
+      "extracted": [
+        "Feb 2025: esp-idf-sys, esp-idf-hal, esp-idf-svc became COMMUNITY projects; esp-hal + the no_std crates are the officially supported path",
+        "Espressif continues to maintain the upstream compiler targets so the std path keeps working"
+      ],
+      "notes": ["01"],
+      "caveat": "Read via search-result summary, not a direct page fetch. The claim is corroborated by the esp-idf-hal repo and the std-training book's own framing, so it is treated as verified; re-fetch directly if it ever becomes load-bearing for a decision."
+    },
+    {
+      "id": "no-std-training",
+      "title": "Embedded Rust (no_std) on Espressif — training",
+      "url": "https://docs.espressif.com/projects/rust/no_std-training/",
+      "publisher": "Espressif",
+      "trust": "upstream-official",
+      "fetched": "2026-07-29",
+      "extracted": [
+        "Targets ESP32-C3 (ESP32-C3-DevKit-RUST-1)",
+        "Exercise ladder: Panic! → Blinky → button poll → button interrupt → DMA over SPI → HTTP client → defmt"
+      ],
+      "notes": ["02"],
+      "caveat": "SELF-DECLARED OUT OF DATE, rewrite in progress on branch `feat/overhaul`. Ingested as a resource pointer, NOT as an API authority."
+    },
+    {
+      "id": "std-training",
+      "title": "Embedded Rust on Espressif (std training)",
+      "url": "https://esp-rs.github.io/std-training/",
+      "publisher": "Ferrous Systems / esp-rs",
+      "trust": "ecosystem-canon",
+      "fetched": "2026-07-29",
+      "via": "web search result summary + awesome-esp-rust listing",
+      "extracted": [
+        "The std-path training course, built on the now community-maintained esp-idf-hal / esp-idf-svc / esp-idf-sys"
+      ],
+      "notes": ["01"],
+      "caveat": "Teaches the community-maintained std stack. Relevant to us ONLY because crates/clawft-edge-pad-idf/ is on that stack."
+    },
+    {
+      "id": "awesome-esp-rust",
+      "title": "esp-rs/awesome-esp-rust",
+      "url": "https://github.com/esp-rs/awesome-esp-rust",
+      "publisher": "esp-rs",
+      "license": "CC0-1.0",
+      "trust": "ecosystem-canon",
+      "fetched": "2026-07-29",
+      "extracted": [
+        "Full resource inventory: books/training, blogs, video courses, tools (espup, espflash, esp-web-flash-server, wokwi-server, Wokwi), templates (esp-idf-template for std, esp-generate for no_std), esp-hal-community, esp-rust-board hardware",
+        "~30 std example projects and ~30 no_std example projects with URLs",
+        "Community: Matrix #esp-rs:matrix.org"
+      ],
+      "notes": ["02", "12"],
+      "caveat": "CC0, so freely quotable. Curated list — inclusion is not endorsement or a maintenance guarantee."
+    },
+    {
+      "id": "embedded-rust-book",
+      "title": "The Embedded Rust Book",
+      "url": "https://docs.rust-embedded.org/book/",
+      "single_page_url": "https://docs.rust-embedded.org/book/print.html",
+      "publisher": "Rust Embedded Working Group",
+      "trust": "ecosystem-canon",
+      "fetched": "2026-07-29",
+      "extracted": [
+        "Full chapter outline (no_std environment, tooling, memory-mapped registers, semihosting, panicking, exceptions, interrupts, peripherals)",
+        "Peripherals as State Machines: PAC read()/write()/modify() closures, Peripherals::take() singleton enforcement, constrain()/split()",
+        "Static Guarantees: typestate programming, into_af_push_pull-style compile-time transitions, zero-cost monomorphization",
+        "Portability: the micro-arch → PAC → HAL → board-crate layering, embedded-hal as the driver-portability seam",
+        "Concurrency: hardware non-reentrancy of exception handlers, `static mut` in handlers, multicore caveat, interrupt priority/nesting"
+      ],
+      "notes": ["09"],
+      "caveat": "Cortex-M / STM32F3DISCOVERY examples throughout. The IDIOMS transfer to Espressif; the register names and `cortex-m` specifics do NOT."
+    },
+    {
+      "id": "embassy-book",
+      "title": "The Embassy Book",
+      "url": "https://embassy.dev/book/",
+      "publisher": "Embassy project",
+      "trust": "ecosystem-canon",
+      "fetched": "2026-07-29",
+      "extracted": [
+        "Executor model: cooperative polling, Poll::Pending yield, statically-allocated tasks via #[embassy_executor::task], no heap, fairness guarantee",
+        "embassy-time: Timer::at / Timer::after, default 32768 Hz tick (1000 Hz / 32768 Hz / 1 MHz selectable), per-platform Timer Driver required",
+        "embassy-sync: Mutex<RawMutexType, T>, Channel with Sender/Receiver, Signal, PubSubChannel",
+        "embassy-net: Ethernet/IP/TCP/UDP/ICMP/DHCP",
+        "InterruptExecutor for priority preemption across multiple executor instances",
+        "FAQ: cargo-call-stack for worst-case stack, cargo size for .data/.bss, opt-level=\"s\" + lto=\"fat\" + build-std=[\"core\"] + panic_immediate_abort"
+      ],
+      "notes": ["05", "10"],
+      "caveat": "First-party HALs are stm32/nrf/rp/mspm0; ESP32 is listed as EXTERNALLY supported (via esp-rtos). Embassy-book HAL specifics do not apply to us — the executor/time/sync semantics do."
+    },
+    {
+      "id": "embedded-hal-docs",
+      "title": "embedded-hal crate documentation",
+      "url": "https://docs.rs/embedded-hal/latest/embedded_hal/",
+      "publisher": "Rust Embedded Working Group",
+      "license": "MIT OR Apache-2.0",
+      "trust": "ecosystem-canon",
+      "fetched": "2026-07-29",
+      "extracted": [
+        "Version 1.0.0, MSRV 1.60",
+        "Five modules: delay, digital, i2c, pwm, spi",
+        "Design rules: erase device-specific detail; generic within and across devices; minimal, zero-cost, composable; all trait methods fallible",
+        "Companion crates: embedded-hal-async, embedded-hal-nb, embedded-hal-bus, embedded-io, embedded-can"
+      ],
+      "notes": ["09"],
+      "caveat": "The docs.rs render reported a 1.0.0 release DATE that looks like a page-build artifact. Version + MSRV recorded; date deliberately NOT recorded."
+    },
+    {
+      "id": "embedded-test-docs",
+      "title": "embedded-test crate documentation",
+      "url": "https://docs.rs/embedded-test/latest/embedded_test/",
+      "publisher": "probe-rs project",
+      "trust": "ecosystem-canon",
+      "fetched": "2026-07-29",
+      "extracted": [
+        "Version 0.7.1",
+        "Cargo.toml: harness = false on [lib] and each [[test]]; test = false on [[bin]]",
+        "build.rs: println!(\"cargo::rustc-link-arg=-Tembedded-test.x\")",
+        ".cargo/config.toml runner = \"probe-rs run --chip <CHIP>\"",
+        "#[embedded_test::tests] macro; #[init], #[test], #[should_panic], #[timeout(secs)] (default 60s), #[ignore], #[cfg(...)]",
+        "async tests behind the embassy-09 / embassy-010 features",
+        "requires `cargo install probe-rs-tools`"
+      ],
+      "notes": ["07"],
+      "caveat": "The GitHub raw README 404'd at fetch time; docs.rs was used instead. Use docs.rs on refresh."
+    },
+    {
+      "id": "espflash-repo",
+      "title": "esp-rs/espflash",
+      "url": "https://github.com/esp-rs/espflash",
+      "raw_url": "https://raw.githubusercontent.com/esp-rs/espflash/main/espflash/README.md",
+      "publisher": "esp-rs",
+      "trust": "upstream-official",
+      "fetched": "2026-07-29",
+      "extracted": [
+        "Full subcommand list: board-info, checksum-md5, completions, erase-flash, erase-parts, erase-region, flash, hold-in-reset, list-ports, monitor, partition-table, read-flash, reset, save-image, write-bin",
+        "espflash.toml config: local (cwd or parent) + global per-OS paths; [idf] bootloader/partition_table; [flash] mode/size/frequency; baudrate",
+        "Precedence: env vars > local config > global config",
+        "Env vars: ESPFLASH_PORT, ESPFLASH_BAUD, MONITOR_BAUD",
+        "-L/--log-format with `serial` or `defmt`",
+        "cargo-espflash is the cargo-extension sibling; .cargo/config.toml runner = \"espflash flash --baud=921600 --monitor <port>\"",
+        "Supports ESP32, ESP32-C2/C3/C5/C6/C61, ESP32-H2, ESP32-P4, ESP32-S2/S3"
+      ],
+      "notes": ["02"],
+      "caveat": "Per-subcommand flag tables (--chip/--port/--bootloader/--partition-table etc) were NOT fully enumerated by the fetched README. Confirm exact spellings with `espflash <subcmd> --help` before scripting them."
+    },
+    {
+      "id": "esp-generate-repo",
+      "title": "esp-rs/esp-generate",
+      "url": "https://github.com/esp-rs/esp-generate",
+      "raw_url": "https://raw.githubusercontent.com/esp-rs/esp-generate/main/README.md",
+      "publisher": "esp-rs",
+      "license": "MIT OR Apache-2.0",
+      "trust": "upstream-official",
+      "fetched": "2026-07-29",
+      "extracted": [
+        "cargo install esp-generate --locked",
+        "Interactive TUI (`esp-generate`) or headless (`esp-generate --headless -o esp32 -o embassy -o unstable-hal -o alloc -o wifi <name>`)",
+        "Chip options: esp32, esp32c2, esp32c3, esp32c5, esp32c6, esp32c61, esp32h2, esp32s2, esp32s3",
+        "Feature options seen: alloc, wifi, embassy, unstable-hal, defmt, log, probe-rs, embedded-test, stack-protector",
+        "Discovery commands: `esp-generate list-options`, `esp-generate explain <option>`",
+        "MSRV 1.86"
+      ],
+      "notes": ["02"],
+      "caveat": "Option list is what the README enumerated — it is NOT guaranteed exhaustive. `esp-generate list-options` is the authority."
+    },
+    {
+      "id": "esp-idf-hal-repo",
+      "title": "esp-rs/esp-idf-hal (the std path)",
+      "url": "https://github.com/esp-rs/esp-idf-hal",
+      "publisher": "esp-rs (community-maintained)",
+      "trust": "ecosystem-canon",
+      "fetched": "2026-07-29",
+      "via": "web search result summary",
+      "extracted": [
+        "Naming convention: repos prefixed `esp-idf-` are the std path; repos prefixed `esp-` are the no_std path",
+        "std path supports whatever ESP-IDF supports; no_std was written from scratch and is less complete but now covers most common peripherals",
+        "Practical tradeoff: the std path eventually requires reading ESP-IDF C; esp-hal is a plain cargo build, all Rust"
+      ],
+      "notes": ["01"],
+      "caveat": "Read via search-result summary. Load-bearing for our clawft-edge-pad-idf crate, so re-fetch directly before any std-path migration decision."
+    },
+    {
+      "id": "in-repo-edge-pad",
+      "title": "crates/clawft-edge-pad/Cargo.toml (no_std esp-hal firmware)",
+      "url": "repo://crates/clawft-edge-pad/Cargo.toml",
+      "publisher": "WeftOS (this repo)",
+      "trust": "in-repo-verified",
+      "fetched": "2026-07-29",
+      "extracted": [
+        "Exact pins: esp-hal 1.0.0 (features esp32s3, unstable, psram), esp-rtos 0.2.0, esp-alloc 0.9.0, esp-println 0.16.1, esp-backtrace 0.18.1, esp-bootloader-esp-idf 0.4, esp-radio 0.17.0, embassy-executor 0.9.0, embassy-time 0.5.1, embassy-sync 0.8, embassy-net 0.9.0, embedded-hal 1.0, embedded-hal-async 1.0, embedded-hal-bus 0.3, embedded-graphics 0.8, heapless 0.8, ed25519-dalek 2, blake3 1",
+        "Out-of-workspace pattern: empty [workspace] table stops cargo walking up to the host workspace, isolating the Xtensa toolchain",
+        "profile.dev opt-level=\"s\"; profile.release opt-level=\"s\" + lto=true"
+      ],
+      "notes": ["12"],
+      "caveat": "Header comment references a stale absolute path (/home/aepod/dev/clawft/Cargo.toml) from a different machine. Harmless, but do not treat repo paths in comments as current."
+    },
+    {
+      "id": "in-repo-edge-pad-idf",
+      "title": "crates/clawft-edge-pad-idf/Cargo.toml (std esp-idf firmware)",
+      "url": "repo://crates/clawft-edge-pad-idf/Cargo.toml",
+      "publisher": "WeftOS (this repo)",
+      "trust": "in-repo-verified",
+      "fetched": "2026-07-29",
+      "extracted": [
+        "Exact pins: esp-idf-svc 0.52, esp-idf-hal 0.46, esp-idf-sys 0.37 (binstart), embedded-svc 0.29, embuild 0.33 (build-dep)",
+        "The documented coherent version matrix: esp-idf-svc 0.52 ⇒ esp-idf-hal ^0.46 ⇒ esp-idf-sys ^0.37; embedded-svc 0.29 is what svc 0.52 re-exports",
+        "Both firmware crates deliberately share ed25519-dalek/blake3/embedded-hal/embedded-graphics versions so drivers port 1:1 between the std and no_std ports",
+        "Uses Espressif's official esp_lcd_panel_rgb (bounce buffers + frame sync) — the thing esp-hal 1.0 lacks"
+      ],
+      "notes": ["01", "12"],
+      "caveat": "This crate exists specifically as the escape hatch from an esp-hal gap. That is the single best in-repo illustration of the std-vs-no_std tradeoff."
+    },
+    {
+      "id": "in-repo-display-agent",
+      "title": "esp32-s3-rgb-touch-display agent — 2026-05-15 session learnings",
+      "url": "file://~/.claude/agents/esp32-s3-rgb-touch-display/esp32-s3-rgb-touch-display.md",
+      "publisher": "WeftOS (this repo's agent ecosystem)",
+      "trust": "in-repo-verified",
+      "fetched": "2026-07-29",
+      "extracted": [
+        "The measured fix-B heap split: heap_allocator! in internal SRAM FIRST, then HEAP.add_region(psram_raw_parts) with MemoryCapability::External; only the framebuffer requests External",
+        "esp_alloc::psram_allocator! PANICS on ESP32-S3 N4R8 / AP_3v3 in linked_list_allocator hole.rs:331",
+        "esp-hal 1.0 has NO RGB-DPI bounce buffer (upstream issue #5262 open) — the reason the esp-idf port exists",
+        "#[esp_hal::ram] placement is required for a VSYNC ISR or you eat a 20-30 µs flash-fetch stall per fire"
+      ],
+      "notes": ["04", "10", "12"],
+      "caveat": "Hardware-specific to the CrowPanel DIS08070H. The ALLOCATOR and ISR-placement lessons generalize; the panel timings do not."
+    }
+  ]
+}

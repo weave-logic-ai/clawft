@@ -5,8 +5,12 @@ description: >-
   you create, claim, finish, or defer a meaningful unit of work, or when
   triaging audits / TODOs / FIXMEs / orphans into Plane work items. Codifies
   the lifecycle (Backlog → Todo → In Progress → Done | Cancelled), the cycle
-  taxonomy (0.7.x must-ship, 0.8.x / 0.9.x / 1.0.x deferred), and the HTTP
-  API workaround for the partially-broken MCP server.
+  taxonomy, and the HTTP API workaround for the partially-broken MCP server.
+  IMPORTANT as of 2026-07-29 - cycle 0.7.x is COMPLETED and LOCKED by Plane
+  (rejects new issues with HTTP 400 CYCLE_COMPLETED, and cannot be edited);
+  0.8.x is now the live gate, 2026-07-01 to 2026-09-30. File all new work
+  into 0.8.x. State changes and comments on the 137 items already inside
+  0.7.x still work normally - only cycle membership is frozen.
 ---
 
 <!-- TOC: Why | The Rule | IDs | Lifecycle | HTTP API | Triage | Templates | References -->
@@ -70,11 +74,11 @@ project_id     : e5d6dd76-c47e-43f0-b228-efbea039c6e7   # "WeftOS"
 api_base       : https://api.plane.so/api
 auth_header    : X-API-Key: $PLANE_API_KEY               # NEVER commit the key
 
-cycles:
-  0.7.x : e3df6167-3b59-46e4-bee8-7f37146b9a9f   # must-ship-before-0.7
-  0.8.x : 76a2e899-a3fd-4fdd-ab88-5310d458bb22   # H1 2027 horizon
-  0.9.x : e5abd13f-9634-485a-a0c5-0d075ff3dc19   # H2 2027 horizon
-  1.0.x : 852ebfd6-ba10-4d82-b63c-676201d7e985   # H1 2028 horizon
+cycles:                                          # dates as of 2026-07-29
+  0.7.x : e3df6167-3b59-46e4-bee8-7f37146b9a9f   # ⛔ COMPLETED + LOCKED — see below
+  0.8.x : 76a2e899-a3fd-4fdd-ab88-5310d458bb22   # ✅ THE LIVE GATE, 2026-07-01 → 2026-09-30
+  0.9.x : e5abd13f-9634-485a-a0c5-0d075ff3dc19   # 2027-07-01 → 2027-12-31
+  1.0.x : 852ebfd6-ba10-4d82-b63c-676201d7e985   # 2028-01-01 → 2028-06-30
 
 states:
   Backlog     : 129bc069-e372-41f7-a563-becf429154f8   # group=backlog
@@ -83,6 +87,39 @@ states:
   Done        : 7d0ebbba-5ad6-4b05-9c93-f2e871eaf6b3   # group=completed
   Cancelled   : 0e18be3e-9bbc-46d1-b1fc-875718dce5e3   # group=cancelled
 ```
+
+### ⛔ 0.7.x is completed and locked — file into 0.8.x (2026-07-29)
+
+**Do not try to file work into `0.7.x`.** It will fail with HTTP 400
+`CYCLE_COMPLETED`. Plane auto-completed it because its `end_date` was
+2026-04-30, three months in the past. It cannot be revived either —
+`PATCH` on a completed cycle returns *"already been completed so it
+cannot be edited"*.
+
+What still works, verified empirically:
+
+| Operation on / inside 0.7.x | Works? |
+|---|---|
+| Add an issue to the cycle | ❌ HTTP 400 `CYCLE_COMPLETED` |
+| Edit the cycle (dates, name) | ❌ HTTP 400 |
+| **Change an issue's state** (close/transition) | ✅ yes |
+| **Comment on an issue** | ✅ yes |
+
+So the 137 items sitting in 0.7.x can still be closed and commented
+normally — only cycle *membership* is frozen.
+
+**Current convention**: `0.8.x` is the live gate (2026-07-01 →
+2026-09-30). File all new work there regardless of which release it
+notionally targets; 0.7.x is now a frozen historical record. Version
+numbers are not load-bearing here — work from where we are.
+
+⚠ **The trap that caused this**: the "cycles are gates" model below
+fights Plane's semantics, which enforce dates and auto-complete on
+expiry. **Any cycle you intend to keep live needs a far-future
+`end_date`**, and it needs pushing out before it lapses. Note there is
+currently a coverage gap between 0.8.x ending 2026-09-30 and 0.9.x
+starting 2027-07-01 — extend 0.8.x rather than letting it lapse into the
+same locked state.
 
 **Cycles are gates, not time-boxed sprints.** Targeting a cycle is a
 scope decision, not a commitment to ship by a date.
