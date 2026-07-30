@@ -64,8 +64,8 @@ grep -rn "clawft_plugin::voice" crates --include='*.rs' | grep -v clawft-plugin
 
 ## Commit
 
+- **Primary SHA**: `7113b6d924ab5b0e3c26ee96386976dabae3a500` (`7113b6d9`)
 - **Branch**: `wave0a/weft-671-voice-disposition`
-- **Tip**: run `git log -1 --oneline -- docs/plans/wave-0a-WEFT-671-decision.md` for the SHA on your checkout
 - **Message**: `WEFT-671: disposition of clawft-plugin/src/voice`
 
 
