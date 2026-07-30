@@ -2,6 +2,7 @@
 
 **Ticket:** WEFT-188  
 **Branch:** `wave0f/weft-188-mcp-cli`  
+**SHA:** `6bf9d83f`  
 **Worktree:** `/Users/mathewbeane/.grok/worktrees/mathewbeane-weftos/subagent-019fb478-7733-7932-bf2f-90062494c4b0`  
 **Base:** `release/0.8-staging`  
 **Date:** 2026-07-30  
