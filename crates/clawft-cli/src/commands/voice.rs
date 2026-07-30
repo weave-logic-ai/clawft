@@ -500,20 +500,24 @@ async fn spawn_turn_recorder(
 
 /// Run the wake word daemon -- continuously listen for "Hey Weft".
 ///
-/// Creates a WakeDaemon and runs until Ctrl+C. When the wake word
-/// is detected (after real rustpotter integration), Talk Mode will
-/// be activated automatically.
+/// Creates a [`WakeDaemon`] and runs until Ctrl+C.
 ///
-/// **WEFT-671:** this is the sole live external caller of
-/// `clawft_plugin::voice` (wake only). Talk Mode itself is
-/// `clawft_voice_talk` — see `handle_talk`. Wake remains transitional
-/// under the plugin until a follow-up migrates it to a voice crate.
+/// **WEFT-671:** sole live external caller of `clawft_plugin::voice`
+/// (wake only). Talk Mode itself is `clawft_voice_talk` — see
+/// `handle_talk`.
+///
+/// **WEFT-216:** detector backend is **stub**. rustpotter is blocked
+/// (candle-core); no model is shipped; no mic capture in the daemon.
+/// Detection will not fire. Concrete alternative (future): OpenWakeWord
+/// ONNX via `clawft-voice-onnx`. See
+/// `docs/plans/wave-0k-WEFT-216-result.md`.
 async fn handle_wake() -> anyhow::Result<()> {
     use clawft_plugin::traits::CancellationToken;
     use clawft_plugin::voice::{WakeDaemon, WakeWordConfig};
 
     println!("=== ClawFT Wake Word Daemon ===");
-    println!("Wake word daemon started (stub - listening for 'Hey Weft')");
+    println!("Backend: stub (WEFT-216 — rustpotter blocked; no model shipped)");
+    println!("No microphone capture; process_frame never reports detection.");
     println!("Press Ctrl+C to exit.\n");
 
     let config = WakeWordConfig::default();

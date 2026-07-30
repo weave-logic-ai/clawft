@@ -43,7 +43,13 @@
 //! - `voice-vad` -- Voice Activity Detection (legacy Silero stub).
 //! - `voice-stt` -- Speech-to-Text (legacy sherpa-rs stub).
 //! - `voice-tts` -- Text-to-Speech (legacy sherpa-rs stub).
-//! - `voice-wake` -- Wake-word detection (transitional CLI home; still stub).
+//! - `voice-wake` -- Wake-word detection (transitional CLI home; **stub
+//!   backend**, WEFT-216). `process_frame` always returns false.
+//! - `voice-wake-rustpotter` -- Experimental fail-closed reserve for a
+//!   rustpotter path. Does **not** link rustpotter (3.0.2 / candle-core
+//!   0.2.2 does not compile here). `try_with_rustpotter` returns
+//!   `NotImplemented`. Concrete alternative: OpenWakeWord ONNX via
+//!   `clawft-voice-onnx`. See `docs/plans/wave-0k-WEFT-216-result.md`.
 //!
 //! ## Crate Ecosystem
 //!

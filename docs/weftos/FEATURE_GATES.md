@@ -112,3 +112,17 @@ macOS (CoreWLAN / IOBluetooth) and Windows (WinRT) ports are
 checking `cause == "sysfs-unavailable"` or the adapter-health reason.
 
 Shared helpers live in `crates/clawft-substrate/src/sysfs.rs`.
+
+## Related crate features (not kernel)
+
+### `clawft-plugin` voice / wake (WEFT-212, WEFT-671, WEFT-216)
+
+| Feature | Crate | What it enables | Notes |
+|---------|-------|-----------------|-------|
+| `voice` | `clawft-plugin` | Umbrella: `voice-vad` + `voice-wake` + `voice-stt` + `voice-tts` + tokio | Legacy scaffold + transitional wake (WEFT-671). Product Talk Mode is **not** this path. |
+| `voice-wake` | `clawft-plugin` | `WakeWordDetector` / `WakeDaemon` API | **Stub backend** only. `process_frame` always returns `false`. |
+| `voice-wake-rustpotter` | `clawft-plugin` | Fail-closed `try_with_rustpotter` reserve | **Does not link rustpotter.** crates.io `rustpotter` 3.0.2 → `candle-core` 0.2.2 fails to compile on this workspace (rand dual + half/bf16). Returns `PluginError::NotImplemented` with `RUSTPOTTER_BLOCKED_REASON`. |
+
+**Concrete alternative (documented, not wired):** OpenWakeWord-style keyword spotting via ONNX through `clawft-voice-onnx` (`ort`), once a trained model and capture loop exist. Do **not** add `dep:rustpotter` until upstream builds on current deps or a compatible pin is proven.
+
+Full decision + revisit triggers: `docs/plans/wave-0k-WEFT-216-result.md`.

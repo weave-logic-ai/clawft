@@ -1,19 +1,31 @@
 //! Wake word detection for "Hey Weft" trigger phrase.
 //!
-//! Provides the `WakeWordDetector` that processes audio frames and
+//! Provides the [`WakeWordDetector`] that processes audio frames and
 //! fires a detection event when the wake word is recognized.
 //!
-//! ## Disposition (WEFT-671)
+//! ## Disposition (WEFT-671 / WEFT-216)
 //!
 //! This module is the **only supported transitional surface** under
 //! `clawft_plugin::voice`. Live caller: CLI `weft voice wake`
-//! (`WakeDaemon` / `WakeWordConfig`). Product Talk Mode does **not**
+//! (`WakeDaemon` / [`WakeWordConfig`]). Product Talk Mode does **not**
 //! use this path — see `clawft-voice-talk` and `clawft-channels::voice`.
 //!
-//! Currently a **stub implementation** — `process_frame` always returns
-//! false. Real rustpotter (or alternative) wiring is WEFT-216. A later
-//! follow-up should migrate this API into a `clawft-voice-*` crate and
-//! retire the rest of `clawft-plugin/src/voice/`.
+//! ### Engine status (WEFT-216)
+//!
+//! | Backend | Status | Feature |
+//! |---------|--------|---------|
+//! | **Stub** (default) | Shipped. [`WakeWordDetector::process_frame`] always returns `false`. | `voice-wake` (via `voice` umbrella) |
+//! | **rustpotter** | **Blocked** — crates.io `rustpotter` 3.0.2 depends on `candle-core` 0.2.2, which fails to compile on the workspace toolchain (rand 0.8/0.9 dual + `half`/`bf16` trait bounds). No dep is pulled. | `voice-wake-rustpotter` (API reserve; fails closed) |
+//! | **OpenWakeWord / ONNX KWS** | **Chosen concrete alternative** when a live engine ships. Reuse `clawft-voice-onnx` (`ort`) + a trained ONNX wake model. Not wired yet; tracked as follow-up after model + capture land. | future `voice-wake-onnx` (not declared yet) |
+//!
+//! There is **no** shipped `models/voice/wake/hey-weft.rpw` (or ONNX
+//! equivalent). Training / model integrity is blocked by SC-7 and by the
+//! lack of multi-speaker sample set. CPU-budget auto-throttle and
+//! recorded-utterance integration tests require a live engine + capture
+//! loop and are deferred with the engine.
+//!
+//! See `docs/plans/wave-0k-WEFT-216-result.md` for the full decision,
+//! blockers, and revisit triggers.
 
 use std::path::PathBuf;
 
@@ -22,14 +34,58 @@ use tracing::{debug, info};
 
 use crate::error::PluginError;
 
+/// Which wake-word engine is active for a detector instance.
+///
+/// Default (and currently only live) backend is [`WakeWordBackend::Stub`].
+/// Additional variants are reserved for when an engine feature compiles
+/// and a model is available.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WakeWordBackend {
+    /// No neural / DTW engine. [`WakeWordDetector::process_frame`] never
+    /// reports detection. Safe default for CI and for hosts without models.
+    Stub,
+}
+
+impl WakeWordBackend {
+    /// Human-readable name for logs and CLI.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WakeWordBackend::Stub => "stub",
+        }
+    }
+
+    /// Whether this backend can ever return `true` from `process_frame`.
+    pub fn can_detect(self) -> bool {
+        match self {
+            WakeWordBackend::Stub => false,
+        }
+    }
+}
+
+impl std::fmt::Display for WakeWordBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Configuration for the wake word detector.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WakeWordConfig {
-    /// Path to the wake word model file (.rpw).
+    /// Path to the wake word model file (`.rpw` for rustpotter, or
+    /// future `.onnx` for OpenWakeWord-style KWS).
+    ///
+    /// Default path is historical (`models/voice/wake/hey-weft.rpw`).
+    /// **That file is not shipped** (WEFT-216). Loading a real engine
+    /// will fail closed until a model is trained and integrity-checked.
     #[serde(default = "default_model_path")]
     pub model_path: PathBuf,
 
     /// Detection threshold (0.0-1.0). Lower = more sensitive.
+    ///
+    /// Mapping to `WakeConfig.sensitivity` (types crate) is deferred to
+    /// WEFT-240; until then both knobs exist independently.
     #[serde(default = "default_threshold")]
     pub threshold: f32,
 
@@ -95,48 +151,133 @@ pub enum WakeWordEvent {
     },
 }
 
-/// Wake word detector (STUB implementation).
+/// Why a non-stub engine is unavailable at compile or runtime time.
 ///
-/// Real implementation will use rustpotter for "Hey Weft" detection.
-/// This stub provides the API surface for integration testing.
+/// Stable string for docs, tests, and CLI. Do not rephrase casually —
+/// tests match substrings.
+pub const RUSTPOTTER_BLOCKED_REASON: &str = "rustpotter blocked (WEFT-216): crates.io rustpotter \
+3.0.2 depends on candle-core 0.2.2 which fails to compile on this workspace toolchain \
+(rand 0.8/0.9 dual + half/bf16 SampleUniform). No rustpotter dep is linked. \
+Concrete alternative: OpenWakeWord-style ONNX KWS via clawft-voice-onnx (follow-up). \
+See docs/plans/wave-0k-WEFT-216-result.md";
+
+/// Compile-time: is the experimental `voice-wake-rustpotter` feature enabled?
+///
+/// Even when `true`, the engine is **not live** — see
+/// [`RUSTPOTTER_BLOCKED_REASON`]. This only means the reserved fail-closed
+/// API is compiled in.
+pub const fn rustpotter_feature_enabled() -> bool {
+    cfg!(feature = "voice-wake-rustpotter")
+}
+
+/// Wake word detector.
+///
+/// Default construction yields a **stub** backend ([`WakeWordBackend::Stub`]):
+/// `process_frame` always returns `false`. That is intentional and honest —
+/// not a silent half-integration.
+///
+/// Real detection requires an unblocked engine feature **and** a trained
+/// model under `model_path` (neither is available in-tree today).
 pub struct WakeWordDetector {
     config: WakeWordConfig,
+    backend: WakeWordBackend,
     running: bool,
+    /// Frames processed since the last reported detection (or start).
+    /// Reserved for min-gap enforcement once a live engine exists.
+    frames_since_detection: usize,
 }
 
 impl WakeWordDetector {
     /// Create a new wake word detector with the given configuration.
+    ///
+    /// Always constructs the **stub** backend. Does not attempt to load
+    /// rustpotter or any model file (model is not shipped; engine blocked).
     pub fn new(config: WakeWordConfig) -> Result<Self, PluginError> {
         info!(
             model = %config.model_path.display(),
             threshold = config.threshold,
-            "wake word detector created (stub)"
+            backend = %WakeWordBackend::Stub,
+            "wake word detector created (stub; WEFT-216 engine deferred)"
         );
         Ok(Self {
             config,
+            backend: WakeWordBackend::Stub,
             running: false,
+            frames_since_detection: 0,
         })
+    }
+
+    /// Attempt to construct a detector with the rustpotter engine.
+    ///
+    /// **Always fails closed** today (WEFT-216): rustpotter does not compile
+    /// on this workspace. The `voice-wake-rustpotter` feature only reserves
+    /// this API surface so callers can feature-gate against a future unlock.
+    ///
+    /// Without the feature, returns [`PluginError::NotImplemented`] naming
+    /// the missing feature. With the feature, returns the same error class
+    /// with [`RUSTPOTTER_BLOCKED_REASON`].
+    pub fn try_with_rustpotter(_config: WakeWordConfig) -> Result<Self, PluginError> {
+        #[cfg(feature = "voice-wake-rustpotter")]
+        {
+            tracing::warn!(reason = RUSTPOTTER_BLOCKED_REASON, "try_with_rustpotter");
+            Err(PluginError::NotImplemented(RUSTPOTTER_BLOCKED_REASON.into()))
+        }
+        #[cfg(not(feature = "voice-wake-rustpotter"))]
+        {
+            Err(PluginError::NotImplemented(
+                "voice-wake-rustpotter feature not enabled; engine still blocked (WEFT-216). \
+                 Enable the feature only to exercise the fail-closed path; see \
+                 docs/plans/wave-0k-WEFT-216-result.md"
+                    .into(),
+            ))
+        }
+    }
+
+    /// Active backend for this instance.
+    pub fn backend(&self) -> WakeWordBackend {
+        self.backend
+    }
+
+    /// `true` when this detector cannot detect (current production path).
+    pub fn is_stub(&self) -> bool {
+        !self.backend.can_detect()
     }
 
     /// Process a single audio frame. Returns `true` if wake word detected.
     ///
-    /// STUB: Always returns `false`.
-    pub fn process_frame(&mut self, _samples: &[i16]) -> bool {
-        debug!("wake word: processing frame (stub, no detection)");
-        false
+    /// **Stub:** always returns `false`. Counts frames while running so a
+    /// future engine can enforce `min_gap_frames` without API changes.
+    /// Samples are ignored.
+    pub fn process_frame(&mut self, samples: &[i16]) -> bool {
+        if !self.running {
+            debug!("wake word: process_frame while stopped (ignored)");
+            return false;
+        }
+        self.frames_since_detection = self.frames_since_detection.saturating_add(1);
+        match self.backend {
+            WakeWordBackend::Stub => {
+                debug!(
+                    samples = samples.len(),
+                    frames_since = self.frames_since_detection,
+                    "wake word: processing frame (stub backend, no detection)"
+                );
+                false
+            }
+        }
     }
 
     /// Start listening for the wake word.
     pub fn start(&mut self) -> WakeWordEvent {
         self.running = true;
-        info!("wake word detector started (stub)");
+        self.frames_since_detection = 0;
+        info!(backend = %self.backend, "wake word detector started");
         WakeWordEvent::Started
     }
 
     /// Stop listening for the wake word.
     pub fn stop(&mut self) -> WakeWordEvent {
         self.running = false;
-        info!("wake word detector stopped (stub)");
+        info!(backend = %self.backend, "wake word detector stopped");
         WakeWordEvent::Stopped
     }
 
@@ -148,6 +289,11 @@ impl WakeWordDetector {
     /// Get the current configuration.
     pub fn config(&self) -> &WakeWordConfig {
         &self.config
+    }
+
+    /// Frames observed since last detection / start (stub accounting).
+    pub fn frames_since_detection(&self) -> usize {
+        self.frames_since_detection
     }
 }
 
@@ -198,10 +344,14 @@ mod tests {
     }
 
     #[test]
-    fn wake_word_detector_create() {
+    fn wake_word_detector_create_is_stub() {
         let config = WakeWordConfig::default();
         let detector = WakeWordDetector::new(config).unwrap();
         assert!(!detector.is_running());
+        assert!(detector.is_stub());
+        assert_eq!(detector.backend(), WakeWordBackend::Stub);
+        assert!(!detector.backend().can_detect());
+        assert_eq!(detector.backend().as_str(), "stub");
     }
 
     #[test]
@@ -231,6 +381,18 @@ mod tests {
 
         let samples = vec![0i16; 512];
         assert!(!detector.process_frame(&samples));
+        assert_eq!(detector.frames_since_detection(), 1);
+        assert!(!detector.process_frame(&samples));
+        assert_eq!(detector.frames_since_detection(), 2);
+    }
+
+    #[test]
+    fn wake_word_detector_process_frame_while_stopped_is_noop() {
+        let config = WakeWordConfig::default();
+        let mut detector = WakeWordDetector::new(config).unwrap();
+        let samples = vec![0i16; 64];
+        assert!(!detector.process_frame(&samples));
+        assert_eq!(detector.frames_since_detection(), 0);
     }
 
     #[test]
@@ -303,5 +465,46 @@ mod tests {
             let json = serde_json::to_string(event).unwrap();
             let _: WakeWordEvent = serde_json::from_str(&json).unwrap();
         }
+    }
+
+    #[test]
+    fn try_with_rustpotter_fails_closed() {
+        match WakeWordDetector::try_with_rustpotter(WakeWordConfig::default()) {
+            Ok(_) => panic!("expected NotImplemented, got Ok"),
+            Err(err) => {
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("not implemented")
+                        || msg.contains("WEFT-216")
+                        || msg.contains("voice-wake-rustpotter")
+                        || msg.contains("rustpotter"),
+                    "unexpected error: {msg}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rustpotter_blocked_reason_is_stable() {
+        assert!(RUSTPOTTER_BLOCKED_REASON.contains("WEFT-216"));
+        assert!(RUSTPOTTER_BLOCKED_REASON.contains("candle-core"));
+        assert!(RUSTPOTTER_BLOCKED_REASON.contains("OpenWakeWord"));
+    }
+
+    #[test]
+    fn backend_display_and_serde() {
+        let b = WakeWordBackend::Stub;
+        assert_eq!(b.to_string(), "stub");
+        let json = serde_json::to_string(&b).unwrap();
+        assert!(json.contains("stub"));
+        let restored: WakeWordBackend = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, WakeWordBackend::Stub);
+    }
+
+    #[test]
+    fn rustpotter_feature_flag_matches_cfg() {
+        // Document compile-time gate; both branches are valid.
+        let enabled = rustpotter_feature_enabled();
+        assert_eq!(enabled, cfg!(feature = "voice-wake-rustpotter"));
     }
 }
