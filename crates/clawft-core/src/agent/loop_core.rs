@@ -2209,11 +2209,18 @@ impl<P: Platform> AgentLoop<P> {
             // Skill autogen pattern detection: feed each dispatched
             // tool name to the detector, then surface any newly
             // recurring patterns as pending SKILL.md candidates in
-            // `~/.clawft/skills/pending/`. Promotion to live skills
-            // stays a manual approval step per the autogen module's
-            // design — we never auto-arm a generated skill.
+            // `~/.clawft/skills/`. Promotion to live skills stays a
+            // manual approval step per the autogen module's design —
+            // we never auto-arm a generated skill.
+            //
+            // WEFT-66: when AutogenConfig carries the active
+            // TrajectoryLearner (or the pipeline exposes one),
+            // generation goes through generate_skill_md_with_learning
+            // so successful trajectories mutate the candidate body.
             if let Some(detector) = self.autogen.as_ref() {
-                use crate::agent::skill_autogen::{generate_skill_md, install_pending_skill};
+                use crate::agent::skill_autogen::{
+                    generate_skill_md_with_learning, install_pending_skill,
+                };
                 let candidates = {
                     let mut det = match detector.lock() {
                         Ok(g) => g,
@@ -2228,27 +2235,33 @@ impl<P: Platform> AgentLoop<P> {
                     det.detect_candidates()
                 };
                 if !candidates.is_empty() {
-                    let install_dir = {
-                        // Reload the config-derived install dir each
-                        // time so user overrides take effect without
-                        // restarting the loop.
-                        let det = match detector.lock() {
+                    // Prefer the learner wired into AutogenConfig; fall
+                    // back to the pipeline's shared TrajectoryLearner so
+                    // learning-driven generation still runs when CLI
+                    // only set enabled/threshold.
+                    let (install_dir, learner_arc) = {
+                        let mut det = match detector.lock() {
                             Ok(g) => g,
                             Err(p) => p.into_inner(),
                         };
-                        crate::agent::skill_autogen::AutogenConfig {
-                            enabled: det.is_enabled(),
-                            ..Default::default()
+                        if det.learner().is_none() {
+                            if let Some(pipeline_learner) = self.pipeline.trajectory_learner() {
+                                det.set_learner(Some(Arc::clone(pipeline_learner)));
+                            }
                         }
-                        .install_dir()
+                        (det.install_dir(), det.learner_arc())
                     };
                     for pattern in candidates {
-                        let candidate = generate_skill_md(&pattern);
+                        let candidate = generate_skill_md_with_learning(
+                            &pattern,
+                            learner_arc.as_deref(),
+                        );
                         match install_pending_skill(&candidate, &install_dir) {
                             Ok(path) => {
                                 info!(
                                     skill_dir = %path.display(),
                                     name = %candidate.name,
+                                    learning = learner_arc.is_some(),
                                     "autogen: installed pending skill candidate"
                                 );
                             }

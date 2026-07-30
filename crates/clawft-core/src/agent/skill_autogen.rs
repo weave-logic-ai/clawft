@@ -27,6 +27,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tracing::{debug, info};
 
@@ -273,7 +274,12 @@ pub fn effective_filesystem_on_load(
 // ---------------------------------------------------------------------------
 
 /// Configuration for autonomous skill creation.
-#[derive(Debug, Clone)]
+///
+/// When [`Self::learner`] is set (the active pipeline
+/// [`TrajectoryLearner`]), skill generation uses
+/// [`generate_skill_md_with_learning`] so successful trajectory patterns
+/// mutate the candidate `SKILL.md` (WEFT-66).
+#[derive(Clone)]
 pub struct AutogenConfig {
     /// Whether autonomous skill creation is enabled.
     /// Default: `false` (disabled).
@@ -287,6 +293,30 @@ pub struct AutogenConfig {
     /// Directory where generated skills are installed.
     /// Default: `~/.clawft/skills/`
     pub install_dir: Option<PathBuf>,
+    /// Active GEPA trajectory learner shared with pipeline stage 6.
+    ///
+    /// When `Some` and autogen is enabled, candidate skills are improved
+    /// via [`improve_skill_instructions`] / [`generate_skill_md_with_learning`].
+    /// Default: `None` (pattern-only generation, no learning mutation).
+    pub learner: Option<Arc<TrajectoryLearner>>,
+}
+
+impl std::fmt::Debug for AutogenConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AutogenConfig")
+            .field("enabled", &self.enabled)
+            .field("threshold", &self.threshold)
+            .field("max_pending", &self.max_pending)
+            .field("install_dir", &self.install_dir)
+            .field(
+                "learner",
+                &self
+                    .learner
+                    .as_ref()
+                    .map(|l| format!("TrajectoryLearner(n={})", l.trajectory_count())),
+            )
+            .finish()
+    }
 }
 
 impl Default for AutogenConfig {
@@ -296,6 +326,7 @@ impl Default for AutogenConfig {
             threshold: 3,
             max_pending: 10,
             install_dir: None,
+            learner: None,
         }
     }
 }
@@ -316,6 +347,13 @@ impl AutogenConfig {
                 PathBuf::from(".clawft").join("skills")
             }
         })
+    }
+
+    /// Attach the active pipeline [`TrajectoryLearner`] for learning-driven
+    /// skill generation (WEFT-66).
+    pub fn with_learner(mut self, learner: Arc<TrajectoryLearner>) -> Self {
+        self.learner = Some(learner);
+        self
     }
 }
 
@@ -450,6 +488,31 @@ impl PatternDetector {
     /// Whether the detector is enabled.
     pub fn is_enabled(&self) -> bool {
         self.config.enabled
+    }
+
+    /// Borrow the detector's configuration (includes install dir + learner).
+    pub fn config(&self) -> &AutogenConfig {
+        &self.config
+    }
+
+    /// Effective skill install directory from the embedded config.
+    pub fn install_dir(&self) -> PathBuf {
+        self.config.install_dir()
+    }
+
+    /// Active trajectory learner, if wired into [`AutogenConfig`].
+    pub fn learner(&self) -> Option<&TrajectoryLearner> {
+        self.config.learner.as_deref()
+    }
+
+    /// Clone the [`Arc`] to the trajectory learner, if wired.
+    pub fn learner_arc(&self) -> Option<Arc<TrajectoryLearner>> {
+        self.config.learner.clone()
+    }
+
+    /// Attach (or replace) the trajectory learner used for skill mutation.
+    pub fn set_learner(&mut self, learner: Option<Arc<TrajectoryLearner>>) {
+        self.config.learner = learner;
     }
 }
 
@@ -618,7 +681,17 @@ pub fn is_pending(skill_dir: &Path) -> bool {
 /// Returns the (possibly improved) instructions. If there are no
 /// successful patterns, the original instructions are returned unchanged.
 pub fn improve_skill_instructions(instructions: &str, learner: &TrajectoryLearner) -> String {
-    let best = learner.get_best_trajectories(10);
+    // `get_best_trajectories` returns the top-N by score among *all*
+    // trajectories (including poor ones). Filter to high-quality only
+    // before chaining with `get_poor_trajectories` so poor items are not
+    // double-counted — that previously biased `auto_select_strategy`
+    // toward RemoveIneffective, which is a no-op on fresh SKILL.md bodies
+    // that share no phrases with trajectory feedback (WEFT-66).
+    let best: Vec<_> = learner
+        .get_best_trajectories(10)
+        .into_iter()
+        .filter(|t| t.trajectory.quality.overall >= 0.8)
+        .collect();
     let poor = learner.get_poor_trajectories(10);
 
     if best.is_empty() && poor.is_empty() {
@@ -653,7 +726,9 @@ pub fn improve_skill_instructions(instructions: &str, learner: &TrajectoryLearne
 /// Generate a skill candidate and optionally improve it using trajectory data.
 ///
 /// Combines [`generate_skill_md`] with [`improve_skill_instructions`] when
-/// a [`TrajectoryLearner`] is available.
+/// a [`TrajectoryLearner`] is available. Mutation is applied to the
+/// instruction body (after the YAML frontmatter) so the frontmatter
+/// allowlist / name / tools stay stable (WEFT-66).
 pub fn generate_skill_md_with_learning(
     pattern: &ToolCallPattern,
     learner: Option<&TrajectoryLearner>,
@@ -667,7 +742,18 @@ pub fn generate_skill_md_with_learning(
                 pattern_count = patterns.len(),
                 "improving skill via trajectory learning"
             );
-            candidate.skill_md = improve_skill_instructions(&candidate.skill_md, learner);
+            // Split on the closing frontmatter fence so YAML is preserved.
+            if let Some(idx) = candidate.skill_md.find("\n---\n") {
+                let (front, rest) = candidate.skill_md.split_at(idx + "\n---\n".len());
+                let body = rest.trim_start_matches('\n');
+                let improved = improve_skill_instructions(body, learner);
+                candidate.skill_md = format!("{front}\n{improved}");
+                if !candidate.skill_md.ends_with('\n') {
+                    candidate.skill_md.push('\n');
+                }
+            } else {
+                candidate.skill_md = improve_skill_instructions(&candidate.skill_md, learner);
+            }
         }
     }
 
@@ -688,6 +774,7 @@ mod tests {
             threshold: 3,
             max_pending: 10,
             install_dir: None,
+            learner: None,
         }
     }
 
@@ -703,6 +790,20 @@ mod tests {
         assert!(!config.enabled);
         assert_eq!(config.threshold, 3);
         assert_eq!(config.max_pending, 10);
+        assert!(config.learner.is_none());
+    }
+
+    #[test]
+    fn config_with_learner_attaches_arc() {
+        let learner = Arc::new(TrajectoryLearner::new(
+            crate::pipeline::learner::TrajectoryLearnerConfig::default(),
+        ));
+        let config = AutogenConfig::default().with_learner(Arc::clone(&learner));
+        assert!(config.learner.is_some());
+        assert_eq!(
+            Arc::as_ptr(config.learner.as_ref().unwrap()),
+            Arc::as_ptr(&learner)
+        );
     }
 
     #[test]
@@ -1166,16 +1267,78 @@ mod tests {
         let pattern = ToolCallPattern::new(vec!["a".into(), "b".into()]);
         let candidate = generate_skill_md_with_learning(&pattern, None);
         assert!(candidate.skill_md.contains("autogenerated: true"));
+        let baseline = generate_skill_md(&pattern);
+        assert_eq!(candidate.skill_md, baseline.skill_md);
     }
 
     #[test]
     fn generate_skill_md_with_learning_uses_learner() {
         let learner = make_test_learner();
         let pattern = ToolCallPattern::new(vec!["read_file".into(), "edit_file".into()]);
+        let baseline = generate_skill_md(&pattern);
         let candidate = generate_skill_md_with_learning(&pattern, Some(&learner));
 
-        // Should still be a valid skill
+        // Frontmatter + tools remain valid.
         assert!(candidate.skill_md.contains("read_file"));
+        assert!(candidate.skill_md.contains("autogenerated: true"));
+        assert!(candidate.skill_md.contains("filesystem:"));
         assert!(!candidate.skill_md.is_empty());
+
+        // Learning mutates the body using successful trajectories
+        // (make_test_learner seeds quality ≥ 0.8 → AddExamples strategy).
+        assert_ne!(
+            candidate.skill_md, baseline.skill_md,
+            "trajectory learning must change SKILL.md body"
+        );
+        assert!(
+            candidate.skill_md.contains("Successful Examples")
+                || candidate.skill_md.contains("Write a function")
+                || candidate.skill_md.contains("Explain recursion")
+                || candidate.skill_md.contains("Step "),
+            "expected example injection or rephrase markers in improved SKILL.md: {}",
+            candidate.skill_md
+        );
+    }
+
+    /// End-to-end WEFT-66: AutogenConfig with an active TrajectoryLearner
+    /// drives learning-based generation the same way the agent loop does.
+    #[test]
+    fn e2e_autogen_config_learner_improves_skill_md() {
+        let learner = Arc::new(make_test_learner());
+        let config = AutogenConfig {
+            enabled: true,
+            threshold: 2,
+            max_pending: 10,
+            install_dir: None,
+            learner: Some(Arc::clone(&learner)),
+        };
+        assert!(config.learner.is_some());
+
+        let mut detector = PatternDetector::new(config);
+        // Threshold=2: record the same 2-tool sequence twice.
+        for _ in 0..2 {
+            detector.record_tool_call("read_file");
+            detector.record_tool_call("edit_file");
+        }
+        let candidates = detector.detect_candidates();
+        assert!(
+            !candidates.is_empty(),
+            "pattern detector should emit at least one candidate"
+        );
+
+        let pattern = &candidates[0];
+        let baseline = generate_skill_md(pattern);
+        let improved = generate_skill_md_with_learning(pattern, detector.learner());
+
+        assert_ne!(improved.skill_md, baseline.skill_md);
+        assert!(improved.skill_md.contains("read_file"));
+        assert!(improved.skill_md.contains("autogenerated: true"));
+        assert!(
+            improved.skill_md.contains("Successful Examples")
+                || improved.skill_md.contains("Write a function")
+                || improved.skill_md.contains("Explain recursion"),
+            "improved body should reflect synthetic high-quality trajectories: {}",
+            improved.skill_md
+        );
     }
 }
