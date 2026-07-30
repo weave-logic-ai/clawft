@@ -166,7 +166,26 @@ pub async fn run(args: AgentArgs) -> anyhow::Result<()> {
     let bus = ctx.bus().clone();
 
     // Convert context into the agent loop (consumes ctx).
-    let agent = ctx.into_agent_loop();
+    // WEFT-67: attach skill-autogen pattern detector when opted in via
+    // `skills.autogen.enabled` in ~/.clawft/config.json.
+    let mut agent = ctx.into_agent_loop();
+    if config.skills.autogen.enabled {
+        use clawft_core::agent::skill_autogen::{AutogenConfig, PatternDetector};
+        use std::sync::{Arc, Mutex};
+        let autogen_cfg = AutogenConfig {
+            enabled: true,
+            threshold: config.skills.autogen.threshold,
+            max_pending: config.skills.autogen.max_pending,
+            install_dir: None,
+        };
+        let detector = Arc::new(Mutex::new(PatternDetector::new(autogen_cfg)));
+        agent = agent.with_autogen(detector);
+        info!(
+            threshold = config.skills.autogen.threshold,
+            max_pending = config.skills.autogen.max_pending,
+            "skill autogen enabled (pattern detection active)"
+        );
+    }
 
     if let Some(ref message) = args.message {
         return run_single_message(message, &bus, agent, effective_model).await;

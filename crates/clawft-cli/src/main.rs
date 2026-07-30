@@ -658,6 +658,24 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[test]
+    fn cli_skills_autogen_enable_parses() {
+        let result = Cli::try_parse_from(["weft", "skills", "autogen", "enable"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_skills_autogen_disable_parses() {
+        let result = Cli::try_parse_from(["weft", "skills", "autogen", "disable"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cli_skills_autogen_status_parses() {
+        let result = Cli::try_parse_from(["weft", "skills", "autogen", "status"]);
+        assert!(result.is_ok());
+    }
+
     // ── Tools subcommand parsing ───────────────────────────────────
 
     #[test]
