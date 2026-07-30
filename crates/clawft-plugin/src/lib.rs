@@ -65,6 +65,7 @@
 pub mod error;
 pub mod manifest;
 pub mod message;
+pub mod metrics;
 pub mod sandbox;
 pub mod skill_grants;
 pub mod traits;
@@ -79,6 +80,11 @@ pub use manifest::{
     VoiceCapability, VoiceGrants, validate_voice_capability,
 };
 pub use message::MessagePayload;
+pub use metrics::{
+    EVENT_KIND_PLUGIN_WASM_INVOKE, PluginMetrics, PluginMetricsRegistry, default_metrics_dir,
+    global_plugin_metrics, load_metrics, metrics_file_path, record_plugin_invocation,
+    save_metrics,
+};
 pub use sandbox::{
     EnvPolicy, FilesystemPolicy, NetworkPolicy, ProcessPolicy, SandboxAuditEntry, SandboxPolicy,
     SandboxType,
