@@ -192,12 +192,15 @@ inline markers.
   currently implement a per-method capability check (`grep -n allow.*method`
   on `daemon.rs` returns nothing useful). Either the comment is aspirational
   or the gating happens at a deeper layer the audit did not reach.
-- **`substrate.publish` deliberately omitted from `ALLOWED_METHODS`.** Comment
-  in `extension.ts:55` says "the webview is a viewer, not a writer." But the
-  `agent.chat` handler can call tools that mutate substrate via the daemon
-  process. The audit cannot tell from this workstream whether the spike's
-  tool surface (`read_file`, `list_directory`) is exhaustive of the
-  spike-time gap, or whether D3 introduced more.
+- **`substrate.publish` deliberately omitted from `ALLOWED_METHODS`.**
+  **Closed by WEFT-496 / ADR-072 (2026-07-30).** Revised invariant:
+  mediated mutators yes (`agent.chat`, `terminal.*`, `control.*`, …),
+  raw substrate pen no. `WEBVIEW_DENIED_METHODS` always blocks
+  `substrate.publish` even after WEFT-250 daemon-method union.
+  Post-D3 agent tools = full `clawft_tools::register_all` (FS / shell /
+  memory / web / subagent); tools do not call `substrate.publish`.
+  Daemon sinks write `_derived/` under grants. See
+  `docs/plans/wave-0k-WEFT-496-result.md`.
 - **Claude-flow MCP wiring at the project level.** Repo-name and CLAUDE.md
   call this "Claude Flow V3," but no Rust crate spawns a claude-flow MCP
   session by default. Is it expected that users add it via

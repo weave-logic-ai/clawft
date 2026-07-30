@@ -16,6 +16,12 @@
 import * as vscode from "vscode";
 import { randomUUID } from "node:crypto";
 import { watch as fsWatch, type FSWatcher } from "node:fs";
+import {
+    STATIC_ALLOWED_METHODS as STATIC_SEED,
+    WEBVIEW_DENIED_METHODS,
+    isMethodAllowed,
+    mergeAllowlist,
+} from "./allowlist";
 import { resolveSocketPath, rpcCall, RpcError } from "./rpc";
 import {
     authorizePanelRpc,
@@ -31,14 +37,29 @@ const VIEW_TYPE = "weft.panel";
 // **WEFT-250**: This list used to drift every time the daemon added
 // an RPC. The proxy now auto-fetches the daemon's method list on
 // connect (`daemon.list_methods` / `kernel.list_methods` — the first
-// one the daemon answers wins) and merges the response into this
+// one the daemon answers wins) and *unions* the response into this
 // static seed. The static set is kept as a *fallback* for the
 // daemon-doesn't-yet-support-introspection case AND as the documented
-// minimum surface that the panel relies on. Methods returned by the
-// daemon are intersected with the runtime allowlist before being
-// proxied; so the daemon's authority gate is still the real
-// enforcement, the proxy just refuses to forward anything it has
-// never been told about.
+// minimum surface that the panel relies on.
+//
+// **WEFT-496 / ADR-072 — webview vs daemon write boundary:**
+// The panel is *not* literally "viewer only." It already proxies
+// intentional high-level mutators (`agent.chat`, `terminal.*`,
+// `control.set_enabled`, `cron.add`, `service.start`, …). The hard
+// rule is narrower:
+//
+//   • The webview must never call raw `substrate.publish` (and any
+//     future entry in `WEBVIEW_DENIED_METHODS`). WEFT-250's union
+//     refresh cannot re-open denied methods.
+//   • Daemon-side substrate writes triggered *by* allowed RPCs
+//     (conversation sink, chat stream frames, soul journal, routing
+//     log, terminal output) are grant-gated under
+//     `substrate/_derived/…` inside the daemon process. They are
+//     not a webview write pen.
+//   • The agent.chat tool surface (post-D3 `clawft_tools::register_all`)
+//     mutates workspace FS / subagent registry / memory file under the
+//     governance gate — not substrate via tools. See the audit table
+//     in docs/plans/wave-0k-WEFT-496-result.md.
 //
 // History:
 //   - M1: four read methods the wasm `Live` polls.
@@ -47,88 +68,24 @@ const VIEW_TYPE = "weft.panel";
 //   - M1.5.2 reserved `sensor.mic.status` for the audio bridge.
 //   - M1.5.3: substrate.read / substrate.subscribe / substrate.list
 //     so the WASM Live loop drives Snapshot through these verbs.
+//     Raw `substrate.publish` stays on the denylist (WEFT-496).
 //   - control.set_enabled / control.list (Phase 3 control plane).
 //   - llm.prompt + agent.chat for the chat panel.
 //   - terminal.* for PTY-backed shell sessions.
-const STATIC_ALLOWED_METHODS = new Set<string>([
-    "kernel.status",
-    "kernel.ps",
-    "kernel.services",
-    "kernel.logs",
-    "kernel.kill-process",
-    "kernel.restart-service",
-    // Service lifecycle (WEFT-579..591 follow-up): the desktop
-    // Services panel's contextual buttons submit these directly.
-    // Daemon dispatches them to SystemService::{start,stop} on the
-    // matching kernel ServiceRegistry entry.
-    "service.start",
-    "service.stop",
-    "service.restart",
-    "cluster.status",
-    "cluster.nodes",
-    "chain.status",
-    "chain.tail",
-    "sensor.mic.status",
-    // Scheduler app: list / add / remove cron jobs through the
-    // daemon. The Scheduler panel polls `cron.list` once a second and
-    // submits `cron.add` from its add-job dialog.
-    "cron.list",
-    "cron.add",
-    "cron.remove",
-    // Explorer header: ECC (RNN + vector backend) status summary.
-    "ecc.status",
-    // Ontology Explorer Phase 0 (2026-04-23): the WASM `Live` loop inside
-    // the webview drives `Snapshot` through these two verbs — same code
-    // the native GUI runs. Without them the tray chip icons never go
-    // green and the mic gauge bound to $substrate/sensor/mic.rms_db
-    // never sees bridge-published values. `substrate.publish` stays
-    // blocked; the webview is a viewer, not a writer.
-    "substrate.read",
-    "substrate.subscribe",
-    // Ontology Explorer Phase 1: tree enumeration. Request is
-    // { prefix, depth }, response is { children: [...], tick }. The
-    // webview-hosted Explorer panel calls this on each tree-node
-    // expand to fetch immediate children from the daemon.
-    "substrate.list",
-    // Phase 3 control plane (commit a8bdc631): the Explorer's
-    // control-intent toggle viewer fires `control.set_enabled` to
-    // flip a sensor or service on/off; `control.list` is the read
-    // counterpart for the upcoming control-overview panel. The
-    // daemon's gate enforces authority — this allowlist just opens
-    // the proxy.
-    "control.set_enabled",
-    "control.list",
-    // LLM service: synchronous chat completion against the local
-    // llama.cpp endpoint. Wired in the daemon at boot via DAEMON_LLM;
-    // the chat window panel calls this for each user turn.
-    "llm.prompt",
-    // WeftOS Concierge: identity-aware tool-using chat. Wraps `llm.prompt`
-    // with a built-in tool surface (read_file, list_directory) that lets
-    // the assistant inspect the workspace before answering. Replaces
-    // `llm.prompt` as the chat panel's wire for user turns; same llama.cpp
-    // server underneath. Plan: docs/plans/chat-agent-v1.md §5.
-    "agent.chat",
-    // WEFT-253: progressive companion to agent.chat. Same timeout as
-    // agent.chat (LLM_TIMEOUT_MS). Daemon publishes intermediate frames
-    // to substrate/_derived/chat/<conv>/stream; the RPC response is the
-    // final AgentChatResult. Panel polls stream path via substrate.read.
-    "agent.chat_stream",
-    // Terminal service: PTY-backed shell sessions hosted in the
-    // daemon, surfaced as an Explorer panel. Output is published
-    // to substrate (via the existing `substrate.read` proxy);
-    // these four verbs cover spawn / write / resize / close. The
-    // daemon's own per-session ownership check is the real gate —
-    // this allowlist just keeps the webview from reaching arbitrary
-    // RPC surface.
-    "terminal.spawn",
-    "terminal.write",
-    "terminal.resize",
-    "terminal.close",
-]);
+//
+// Per-method notes that used to live next to each Set entry:
+//   - service.* — Services panel lifecycle buttons → SystemService.
+//   - cron.* — Scheduler panel list/add/remove.
+//   - substrate.read/subscribe/list — Ontology Explorer + Live Snapshot.
+//   - control.* — control-intent toggles; daemon authority is the gate.
+//   - agent.chat / agent.chat_stream — Concierge; stream frames land on
+//     substrate/_derived/chat/<conv>/stream (daemon publish_gated).
+//   - terminal.* — PTY sessions; output published by the daemon.
+const STATIC_ALLOWED_METHODS = new Set<string>(STATIC_SEED);
 
 /// Mutable runtime allowlist. Starts as a copy of `STATIC_ALLOWED_METHODS`
-/// and is refreshed on connect via `refreshAllowlist`.
-const ALLOWED_METHODS = new Set<string>(STATIC_ALLOWED_METHODS);
+/// and is refreshed on connect via `refreshAllowlist` (union + denylist).
+let ALLOWED_METHODS = new Set<string>(STATIC_ALLOWED_METHODS);
 
 /// Names the daemon might publish for its method-list introspection
 /// RPC. Tried in order on connect; the first one to return a list of
@@ -140,9 +97,10 @@ const INTROSPECTION_RPCS: readonly string[] = [
 ];
 
 /// Refresh `ALLOWED_METHODS` against the daemon. Idempotent: every
-/// call rebuilds the runtime set from `STATIC_ALLOWED_METHODS` plus
-/// whatever the daemon advertises. Failures are logged + swallowed;
-/// the static fallback keeps the panel usable against an old daemon.
+/// call rebuilds the runtime set from `STATIC_ALLOWED_METHODS` ∪
+/// daemon-advertised methods, minus `WEBVIEW_DENIED_METHODS`
+/// (WEFT-496). Failures are logged + swallowed; the static fallback
+/// keeps the panel usable against an old daemon.
 async function refreshAllowlist(socketPath: string): Promise<void> {
     for (const method of INTROSPECTION_RPCS) {
         try {
@@ -153,15 +111,16 @@ async function refreshAllowlist(socketPath: string): Promise<void> {
             );
             const list = extractMethodList(resp.result);
             if (list && list.length > 0) {
-                ALLOWED_METHODS.clear();
-                for (const m of STATIC_ALLOWED_METHODS) ALLOWED_METHODS.add(m);
-                for (const m of list) {
-                    if (typeof m === "string") ALLOWED_METHODS.add(m);
-                }
+                ALLOWED_METHODS = mergeAllowlist(
+                    STATIC_ALLOWED_METHODS,
+                    list,
+                    WEBVIEW_DENIED_METHODS,
+                );
                 console.log(
                     `weft: refreshed allowlist via ${method} — ` +
                         `${ALLOWED_METHODS.size} methods (` +
-                        `${list.length} from daemon, ${STATIC_ALLOWED_METHODS.size} static)`,
+                        `${list.length} from daemon, ${STATIC_ALLOWED_METHODS.size} static, ` +
+                        `${WEBVIEW_DENIED_METHODS.size} denied)`,
                 );
                 return;
             }
@@ -171,9 +130,15 @@ async function refreshAllowlist(socketPath: string): Promise<void> {
             void err;
         }
     }
+    // Even the offline fallback must respect the denylist.
+    ALLOWED_METHODS = mergeAllowlist(
+        STATIC_ALLOWED_METHODS,
+        [],
+        WEBVIEW_DENIED_METHODS,
+    );
     console.log(
         "weft: daemon did not answer any introspection RPC; " +
-            `using static allowlist (${STATIC_ALLOWED_METHODS.size} methods)`,
+            `using static allowlist (${ALLOWED_METHODS.size} methods)`,
     );
 }
 
@@ -432,12 +397,15 @@ async function handleRpc(
     panelSession?: PanelSession,
     multiUser = false,
 ): Promise<void> {
-    if (!ALLOWED_METHODS.has(req.method)) {
+    // WEFT-496: denylist wins over allowlist (and over WEFT-250 union).
+    if (!isMethodAllowed(req.method, ALLOWED_METHODS, WEBVIEW_DENIED_METHODS)) {
         void panel.webview.postMessage({
             type: "rpc-response",
             id: req.id,
             ok: false,
-            error: `method not allowed: ${req.method}`,
+            error: WEBVIEW_DENIED_METHODS.has(req.method)
+                ? `method denied for webview: ${req.method}`
+                : `method not allowed: ${req.method}`,
         });
         return;
     }
