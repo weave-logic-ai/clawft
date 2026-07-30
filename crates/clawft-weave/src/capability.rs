@@ -137,6 +137,8 @@ pub fn required_capability(method: &str) -> Capability {
         | "substrate.list"
         | "substrate.subscribe"
         | "ipc.subscribe_stream"
+        // WEFT-256: model/provider enumeration (read-only; no state change).
+        | "llm.models"
         // WEFT-494: live MCP registry inspection (alias tools.mcp = mcp.list).
         | "mcp.list"
         | "tools.mcp" => Capability::Read,
@@ -266,6 +268,9 @@ mod tests {
             required_capability("agent.chat_stream"),
             Capability::Chat
         );
+        // WEFT-256: model enumeration is Read (anonymous-safe).
+        assert!(caps.allows_method("llm.models"));
+        assert_eq!(required_capability("llm.models"), Capability::Read);
         // gated:
         assert!(!caps.allows_method("agent.spawn"));
         assert!(!caps.allows_method("memory.delete"));

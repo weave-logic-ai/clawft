@@ -55,6 +55,8 @@ export const STATIC_ALLOWED_METHODS: ReadonlySet<string> = new Set([
     "control.set_enabled",
     "control.list",
     "llm.prompt",
+    // WEFT-256: model/provider enumeration for the chat chip strip.
+    "llm.models",
     "agent.chat",
     "agent.chat_stream",
     "terminal.spawn",

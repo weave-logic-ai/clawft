@@ -53,10 +53,9 @@ pub fn show(
         rect.max,
     );
 
-    // Synthesised sentinel — `chat::paint` only reads `model` for the
-    // small chip above the heading and ignores everything else. Kept
-    // here (not on `ChatView`) so it's obvious at the call site that
-    // this is a cosmetic stand-in, not real substrate data.
+    // Synthesised sentinel — seeds the WEFT-256 model chip strip until
+    // `llm.models` lands. Cosmetic path only; RPC selection is owned
+    // by `ChatView` once the catalog arrives.
     let sentinel = json!({ "kind": "chat", "model": "local" });
 
     ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {

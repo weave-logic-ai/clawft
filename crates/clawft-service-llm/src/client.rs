@@ -483,6 +483,19 @@ impl serde::Serialize for ToolChoice {
     }
 }
 
+/// Wire shape for `GET /v1/models` response (WEFT-256).
+#[derive(Debug, Clone, Deserialize)]
+struct ModelsListResponse {
+    #[serde(default)]
+    data: Vec<ModelsListEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ModelsListEntry {
+    #[serde(default)]
+    id: String,
+}
+
 /// Wire shape for `POST /v1/chat/completions` request body.
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatRequest {
@@ -725,7 +738,7 @@ impl LlmClient {
         temperature: Option<f32>,
         max_tokens: Option<u32>,
     ) -> Result<ChatResponse, LlmError> {
-        self.complete_with_tools(messages, Vec::new(), None, temperature, max_tokens)
+        self.complete_with_tools(messages, Vec::new(), None, temperature, max_tokens, None)
             .await
     }
 
@@ -737,6 +750,11 @@ impl LlmClient {
     /// allowed to choose ([`ToolChoice::Auto`] — the server default,
     /// equivalent to passing `None`), or forbidden from calling
     /// ([`ToolChoice::None`]).
+    ///
+    /// `model` (WEFT-256): optional per-call model override. When
+    /// `Some` and non-empty, it replaces the configured default in the
+    /// request body so a panel chip-strip selection actually reaches
+    /// the upstream. `None` keeps [`LlmConfig::model`].
     pub async fn complete_with_tools(
         &self,
         messages: Vec<ChatMessage>,
@@ -744,13 +762,14 @@ impl LlmClient {
         tool_choice: Option<ToolChoice>,
         temperature: Option<f32>,
         max_tokens: Option<u32>,
+        model: Option<&str>,
     ) -> Result<ChatResponse, LlmError> {
         let _permit = self
             .in_flight
             .acquire()
             .await
             .map_err(|_| LlmError::Transport("llm in-flight semaphore closed".into()))?;
-        self.complete_unchecked(messages, tools, tool_choice, temperature, max_tokens)
+        self.complete_unchecked(messages, tools, tool_choice, temperature, max_tokens, model)
             .await
     }
 
@@ -771,9 +790,65 @@ impl LlmClient {
         }
     }
 
+    /// Build the OpenAI-compat `/v1/models` URL (WEFT-256 enumeration).
+    fn models_url(&self) -> String {
+        let base = self.config.base_url.trim_end_matches('/');
+        if let Some(stripped) = base.strip_suffix("/v1") {
+            format!("{stripped}/v1/models")
+        } else {
+            format!("{base}/v1/models")
+        }
+    }
+
+    /// List model ids from the upstream `/v1/models` endpoint (WEFT-256).
+    ///
+    /// Returns ids only. On non-2xx or transport failure returns
+    /// [`LlmError`] so the daemon can fall back to the configured
+    /// default without failing the RPC.
+    pub async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+        let url = self.models_url();
+        let mut req = self.http.get(&url);
+        if let Some(key) = self.config.api_key.as_deref() {
+            req = req.bearer_auth(key);
+        }
+        if let Some(referer) = self.config.referer.as_deref() {
+            req = req.header("HTTP-Referer", referer);
+        }
+        if let Some(title) = self.config.app_title.as_deref() {
+            req = req.header("X-Title", title);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| LlmError::Transport(e.to_string()))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| LlmError::Transport(e.to_string()))?;
+        if !status.is_success() {
+            return Err(LlmError::Server {
+                status: status.as_u16(),
+                body: text,
+            });
+        }
+        let parsed: ModelsListResponse = serde_json::from_str(&text).map_err(|e| {
+            LlmError::Transport(format!("llm /v1/models parse failed: {e}; body={text}"))
+        })?;
+        Ok(parsed
+            .data
+            .into_iter()
+            .map(|m| m.id)
+            .filter(|id| !id.is_empty())
+            .collect())
+    }
+
     /// Send the request without acquiring the permit. Public for test
     /// harnesses that exercise the wire format without serialization;
     /// production code paths MUST use [`Self::complete`] or
+    /// [`Self::complete_with_tools`].
+    ///
+    /// `model` (WEFT-256): optional per-call override; see
     /// [`Self::complete_with_tools`].
     pub async fn complete_unchecked(
         &self,
@@ -782,11 +857,18 @@ impl LlmClient {
         tool_choice: Option<ToolChoice>,
         temperature: Option<f32>,
         max_tokens: Option<u32>,
+        model: Option<&str>,
     ) -> Result<ChatResponse, LlmError> {
         let url = self.chat_completions_url();
 
+        let model_name = model
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(self.config.model.as_str())
+            .to_string();
+
         let body = ChatRequest {
-            model: self.config.model.clone(),
+            model: model_name,
             messages,
             temperature: Some(temperature.unwrap_or(self.config.default_temperature)),
             max_tokens: Some(max_tokens.unwrap_or(self.config.default_max_tokens)),
@@ -1230,6 +1312,7 @@ mod tests {
                 Some(ToolChoice::Auto),
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -1290,6 +1373,7 @@ mod tests {
                 Some(ToolChoice::Auto),
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -1302,6 +1386,56 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "memory_read");
         assert_eq!(r.choices[0].finish_reason.as_deref(), Some("tool_calls"));
+    }
+
+    #[tokio::test]
+    async fn list_models_parses_openai_shape() {
+        // WEFT-256: daemon enumeration probes /v1/models.
+        let server = MockServer::start().await;
+        let body = r#"{
+            "object": "list",
+            "data": [
+                {"id": "hermes-4.3-36b", "object": "model"},
+                {"id": "other-model", "object": "model"}
+            ]
+        }"#;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+        let client = LlmClient::new(test_config(server.uri())).unwrap();
+        let ids = client.list_models().await.unwrap();
+        assert_eq!(ids, vec!["hermes-4.3-36b", "other-model"]);
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_honors_model_override() {
+        // WEFT-256: panel chip-strip selection must reach the wire body.
+        use wiremock::matchers::{body_partial_json, method, path};
+        let server = MockServer::start().await;
+        let body = r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_partial_json(serde_json::json!({
+                "model": "panel-selected-model"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+        let client = LlmClient::new(test_config(server.uri())).unwrap();
+        let r = client
+            .complete_with_tools(
+                vec![ChatMessage::user("hi")],
+                Vec::new(),
+                None,
+                None,
+                None,
+                Some("panel-selected-model"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.choices[0].message.content, "ok");
     }
 
     #[tokio::test]
