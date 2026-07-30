@@ -30,6 +30,10 @@ describe("STATIC_ALLOWED_METHODS", () => {
         assert.equal(STATIC_ALLOWED_METHODS.has("agent.chat_stream"), true);
     });
 
+    it("includes llm.models for WEFT-256 chip strip", () => {
+        assert.equal(STATIC_ALLOWED_METHODS.has("llm.models"), true);
+    });
+
     it("never seeds substrate.publish", () => {
         assert.equal(STATIC_ALLOWED_METHODS.has("substrate.publish"), false);
     });

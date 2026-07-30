@@ -1571,11 +1571,24 @@ impl<P: Platform> AgentLoop<P> {
         //    putting an OpenAI `tool_choice` under the inbound metadata key
         //    `tool_choice` (mirrors the `allowed_tools` / `model` precedent);
         //    absent metadata leaves selection to the model — today's behavior.
+        //
+        //    WEFT-256: `metadata.model` from the panel chip strip (or any
+        //    caller) overrides `agents.defaults.model` when non-empty. With
+        //    principal `model_override: true` the tiered router honors it
+        //    via the existing WEFT-31 bypass path.
         let tool_choice = msg.metadata.get(TOOL_CHOICE_META_KEY).cloned();
+        let model = msg
+            .metadata
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.config.defaults.model.clone());
         let request = ChatRequest {
             messages,
             tools: tool_schemas,
-            model: Some(self.config.defaults.model.clone()),
+            model: Some(model),
             max_tokens: Some(self.config.defaults.max_tokens),
             temperature: Some(self.config.defaults.temperature),
             auth_context: Some(auth_context),

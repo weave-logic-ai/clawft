@@ -712,6 +712,53 @@ pub struct LlmPromptResult {
     pub model: Option<String>,
 }
 
+// ── llm.models (WEFT-256) ───────────────────────────────────
+//
+// Enumeration surface for the chat panel's model/provider chip strip.
+// The daemon always returns at least the configured default so the UI
+// has a stable selection even when upstream `/v1/models` is unreachable.
+
+/// One selectable model/provider entry from `llm.models`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LlmModelEntry {
+    /// Wire model id (e.g. `hermes-4.3-36b`, `local/hermes-4.3-36b`,
+    /// `openrouter/…`). Carried through `agent.chat` metadata as
+    /// `metadata.model` when the user selects it.
+    pub id: String,
+    /// Logical provider bucket (`local`, `openrouter`, `openai`, …).
+    pub provider: String,
+    /// Human-facing label for the chip strip (often equals `id`).
+    pub label: String,
+    /// True when this entry is the daemon's configured default.
+    #[serde(default)]
+    pub is_default: bool,
+    /// True when the id came from a live `/v1/models` probe (vs
+    /// config-only fallback). Informational for the UI.
+    #[serde(default)]
+    pub live: bool,
+}
+
+/// Result of `llm.models` — WEFT-256 model/provider enumeration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmModelsResult {
+    /// Configured default model (always present when the LLM client
+    /// is wired).
+    pub default_model: String,
+    /// Provider label for the default endpoint (`local` for
+    /// llama-server, gateway name when base_url looks hosted).
+    pub default_provider: String,
+    /// Upstream base URL (informational; may be empty when LLM is
+    /// not initialized).
+    pub base_url: String,
+    /// Selectable models. Always includes at least `default_model`
+    /// when the client is available.
+    pub models: Vec<LlmModelEntry>,
+    /// Optional diagnostic when the live `/v1/models` probe failed
+    /// (config-only fallback was used).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_error: Option<String>,
+}
+
 // ── Agent chat (Concierge) ─────────────────────────────────
 //
 // `agent.chat` runs through `clawft-service-agent::AgentService`

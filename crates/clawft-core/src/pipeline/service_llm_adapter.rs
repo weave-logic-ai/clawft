@@ -146,9 +146,21 @@ impl LlmProvider for ServiceLlmAdapter {
         let temp = temperature.map(|t| t as f32);
         let max_tok = max_tokens.and_then(|n| u32::try_from(n).ok());
 
+        // WEFT-256: forward the routed model id as a per-call override
+        // so a panel chip-strip selection (or tiered-router decision)
+        // reaches the upstream body instead of only the daemon default.
+        let model_override = if model.is_empty() { None } else { Some(model) };
+
         let resp = self
             .client
-            .complete_with_tools(chat_messages, parsed_tools, choice, temp, max_tok)
+            .complete_with_tools(
+                chat_messages,
+                parsed_tools,
+                choice,
+                temp,
+                max_tok,
+                model_override,
+            )
             .await
             .map_err(|e| e.to_string())?;
 

@@ -4520,6 +4520,109 @@ async fn handle_llm_prompt(
     }
 }
 
+/// Infer a short provider label from the LLM base URL (WEFT-256).
+fn llm_provider_label(base_url: &str) -> &'static str {
+    let lower = base_url.to_ascii_lowercase();
+    if lower.contains("openrouter") {
+        "openrouter"
+    } else if lower.contains("openai.com") {
+        "openai"
+    } else if lower.contains("anthropic") {
+        "anthropic"
+    } else if lower.contains("127.0.0.1")
+        || lower.contains("localhost")
+        || lower.contains("0.0.0.0")
+    {
+        "local"
+    } else {
+        "custom"
+    }
+}
+
+/// `llm.models` — enumerate models available to the chat panel chip
+/// strip (WEFT-256). Always returns at least the configured default
+/// when the client is wired; live `/v1/models` results are merged in
+/// when the probe succeeds.
+async fn handle_llm_models(
+    _params: serde_json::Value,
+    _kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
+) -> Response {
+    let client = match daemon_llm() {
+        Some(c) => c,
+        None => {
+            return Response::error(
+                "llm service not initialized (check daemon boot log for 'llm client init failed')",
+            );
+        }
+    };
+
+    let default_model = client.config().model.clone();
+    let base_url = client.config().base_url.clone();
+    let default_provider = llm_provider_label(&base_url).to_string();
+
+    let (live_ids, probe_error) = match client.list_models().await {
+        Ok(ids) => (ids, None),
+        Err(e) => (Vec::new(), Some(e.to_string())),
+    };
+
+    // Build a de-duplicated ordered list: default first, then live ids.
+    let mut seen = std::collections::HashSet::new();
+    let mut models = Vec::new();
+
+    let push = |models: &mut Vec<crate::protocol::LlmModelEntry>,
+                seen: &mut std::collections::HashSet<String>,
+                id: String,
+                provider: &str,
+                is_default: bool,
+                live: bool| {
+        if id.is_empty() || !seen.insert(id.clone()) {
+            return;
+        }
+        models.push(crate::protocol::LlmModelEntry {
+            label: id.clone(),
+            id,
+            provider: provider.to_string(),
+            is_default,
+            live,
+        });
+    };
+
+    push(
+        &mut models,
+        &mut seen,
+        default_model.clone(),
+        &default_provider,
+        true,
+        false,
+    );
+    for id in live_ids {
+        if id == default_model {
+            // Already present as the default entry — just mark it live.
+            if let Some(entry) = models.iter_mut().find(|m| m.id == default_model) {
+                entry.live = true;
+            }
+            continue;
+        }
+        push(
+            &mut models,
+            &mut seen,
+            id,
+            &default_provider,
+            false,
+            true,
+        );
+    }
+
+    let result = crate::protocol::LlmModelsResult {
+        default_model,
+        default_provider,
+        base_url,
+        models,
+        probe_error,
+    };
+    Response::success(serde_json::to_value(result).unwrap())
+}
+
 // ── Terminal (PTY) RPC handlers ─────────────────────────────────────
 //
 // All four handlers share two preconditions:
@@ -5823,6 +5926,8 @@ async fn dispatch(
         "control.set_enabled" => handle_control_set_enabled(params, kernel).await,
         "control.list" => handle_control_list(params, kernel).await,
         "llm.prompt" => handle_llm_prompt(params, kernel).await,
+        // WEFT-256: model/provider enumeration for the chat chip strip.
+        "llm.models" => handle_llm_models(params, kernel).await,
         "agent.chat" => {
             // agent-core-v1 Phase D3 (the cutover): every request goes
             // through `clawft-service-agent::AgentService::dispatch`.

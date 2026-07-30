@@ -30,10 +30,10 @@
 //!   (close / Explorer re-select resets). On-disk rehydrate via
 //!   `substrate.list` is a follow-up; WEFT-254 ships the multi-session
 //!   sidebar with in-memory slots.
-//! - No model picker. The daemon decides which `llama-server` it talks
-//!   to; the model name in the sentinel is informational. WEFT-256
-//!   tracks the chip-strip selector and is blocked on a daemon-side
-//!   enumeration RPC.
+//! - **Model / provider chip strip** (WEFT-256): selectable chips
+//!   populated from `llm.models`. Selection rides on
+//!   `agent.chat` / `agent.chat_stream` as `metadata.model` and
+//!   persists across panel re-paints via egui memory.
 //!
 //! ## Shipped UX (this file)
 //!
@@ -53,6 +53,8 @@
 //! - **Identity-drift warning**: when the response's `identity_source`
 //!   isn't a recognised stable source (e.g. `"docs-fallback"`),
 //!   surface a non-dismissable warning chip above the input. WEFT-259.
+//! - **Model / provider switcher** in a chip strip above the history
+//!   (WEFT-256).
 
 use std::sync::Arc;
 
@@ -89,6 +91,17 @@ const CONV_SIDEBAR_WIDTH: f32 = 196.0;
 
 /// Max characters shown for the first-message snippet in the sidebar.
 const SNIPPET_MAX_CHARS: usize = 48;
+
+/// egui memory key for the WEFT-256 model selection. Shared across the
+/// sidebar Chat app and the Explorer sentinel panel so picking a model
+/// in either surface survives re-select / panel reopen within the
+/// session (and across egui persistence when the host enables it).
+const MODEL_SELECTION_MEM_ID: &str = "weft.chat.selected_model";
+
+/// How often (ms) we re-issue `llm.models` when the previous fetch
+/// failed or returned empty. Successes cache for the panel lifetime
+/// (until Clear / selection reset).
+const MODELS_RETRY_INTERVAL_MS: f64 = 5_000.0;
 
 /// Shape predicate. Returns [`PRIORITY`] when `value` looks like a
 /// chat sentinel:
@@ -209,6 +222,38 @@ pub struct ChatView {
     /// `live::now_ms()` of the last stream-poll submit. Throttles the
     /// poll cadence to [`STREAM_POLL_INTERVAL_MS`].
     last_stream_poll_ms: f64,
+    /// Currently selected model id (WEFT-256). When set, rides on
+    /// `agent.chat` / `agent.chat_stream` as `metadata.model`. Seeded
+    /// from the sentinel, `llm.models` default, or egui memory.
+    selected_model: Option<String>,
+    /// Catalog from the last successful `llm.models` response (or a
+    /// sentinel fallback). Empty only on a brand-new view.
+    available_models: Vec<ModelChip>,
+    /// True once a live `llm.models` response has been applied. Keeps
+    /// the sentinel-seeded fallback from suppressing the real catalog
+    /// fetch on subsequent paints.
+    models_catalog_live: bool,
+    /// Pending `llm.models` reply. At most one outstanding.
+    models_poll: Option<ReplyRx>,
+    /// `live::now_ms()` of the last models-fetch submit (success or
+    /// failure). Used to throttle retries after a failed probe.
+    last_models_poll_ms: f64,
+    /// Last models-fetch error (if any). Surfaced as a muted hint on
+    /// the chip strip; not a chat error bubble.
+    models_error: Option<String>,
+}
+
+/// One chip in the WEFT-256 model/provider strip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelChip {
+    /// Wire model id (sent as `metadata.model`).
+    pub id: String,
+    /// Provider bucket (`local`, `openrouter`, …).
+    pub provider: String,
+    /// Human label (usually equals `id`).
+    pub label: String,
+    /// Daemon's configured default.
+    pub is_default: bool,
 }
 
 impl ChatView {
@@ -232,6 +277,10 @@ impl ChatView {
     /// and Phase C (panel-supplied) call sites keep working.
     ///
     /// Filters UI-only `error` pseudo-roles out of the wire payload.
+    ///
+    /// WEFT-256: when [`Self::selected_model`] is set, it rides under
+    /// `metadata.model` so the daemon agent loop / tiered router can
+    /// honor the panel chip-strip selection (see WEFT-31 model_override).
     pub fn build_request_params(&self, next_user: &str) -> Value {
         let mut messages: Vec<Value> = Vec::new();
         if let Some(system) = self.system.as_deref()
@@ -259,7 +308,127 @@ impl ChatView {
         if let Some(id) = self.conv_id.as_deref() {
             obj.insert("conv_id".into(), serde_json::json!(id));
         }
+        if let Some(model) = self.selected_model.as_deref()
+            && !model.trim().is_empty()
+        {
+            let mut meta = serde_json::Map::new();
+            meta.insert("model".into(), Value::String(model.to_owned()));
+            obj.insert("metadata".into(), Value::Object(meta));
+        }
         Value::Object(obj)
+    }
+
+    /// Currently selected model id (WEFT-256), if any.
+    pub fn selected_model(&self) -> Option<&str> {
+        self.selected_model.as_deref()
+    }
+
+    /// Available model chips (WEFT-256), after `llm.models` lands.
+    pub fn available_models(&self) -> &[ModelChip] {
+        &self.available_models
+    }
+
+    /// Select a model by id. Persists into egui memory when a `Ui` is
+    /// later painted (see [`paint_model_chip_strip`]); pure state
+    /// update here so unit tests can drive it without egui.
+    pub fn select_model(&mut self, model_id: impl Into<String>) {
+        let id = model_id.into();
+        if id.trim().is_empty() {
+            return;
+        }
+        self.selected_model = Some(id);
+    }
+
+    /// Apply an `llm.models` success payload (WEFT-256). Pure over the
+    /// value so tests can drive it without RPC plumbing.
+    ///
+    /// - Parses `models[]` into [`ModelChip`]s (falls back to a single
+    ///   chip from `default_model` when the array is empty/missing).
+    /// - Seeds [`Self::selected_model`] from the catalog default when
+    ///   the panel has no selection yet.
+    pub fn on_models_ok(&mut self, response: &Value) {
+        self.models_error = None;
+        self.models_catalog_live = true;
+        let mut chips: Vec<ModelChip> = response
+            .get("models")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| {
+                        let id = v.get("id").and_then(Value::as_str)?.to_owned();
+                        if id.is_empty() {
+                            return None;
+                        }
+                        let provider = v
+                            .get("provider")
+                            .and_then(Value::as_str)
+                            .unwrap_or("local")
+                            .to_owned();
+                        let label = v
+                            .get("label")
+                            .and_then(Value::as_str)
+                            .unwrap_or(id.as_str())
+                            .to_owned();
+                        let is_default = v
+                            .get("is_default")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        Some(ModelChip {
+                            id,
+                            provider,
+                            label,
+                            is_default,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if chips.is_empty() {
+            if let Some(def) = response
+                .get("default_model")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                let provider = response
+                    .get("default_provider")
+                    .and_then(Value::as_str)
+                    .unwrap_or("local")
+                    .to_owned();
+                chips.push(ModelChip {
+                    id: def.to_owned(),
+                    provider,
+                    label: def.to_owned(),
+                    is_default: true,
+                });
+            }
+        }
+
+        self.available_models = chips;
+
+        // Seed selection: keep an already-chosen id when still present;
+        // otherwise pick the default chip (or the first entry).
+        let still_valid = self
+            .selected_model
+            .as_deref()
+            .is_some_and(|sel| self.available_models.iter().any(|c| c.id == sel));
+        if !still_valid {
+            let pick = self
+                .available_models
+                .iter()
+                .find(|c| c.is_default)
+                .or_else(|| self.available_models.first())
+                .map(|c| c.id.clone());
+            if let Some(id) = pick {
+                self.selected_model = Some(id);
+            }
+        }
+    }
+
+    /// Record an `llm.models` failure. Does not clear a previous
+    /// catalog so a transient probe blip keeps the last known chips.
+    pub fn on_models_err(&mut self, err: &str) {
+        self.models_error = Some(err.to_owned());
     }
 
     /// State-machine entry: a successful `agent.chat` /
@@ -394,6 +563,23 @@ impl ChatView {
                 live::TryReply::Empty => { /* still in flight */ }
             }
         }
+        // Drain a completed llm.models fetch (WEFT-256).
+        let models_result = self.models_poll.as_mut().map(live::try_recv_reply);
+        match models_result {
+            Some(live::TryReply::Done(Ok(value))) => {
+                self.models_poll = None;
+                self.on_models_ok(&value);
+            }
+            Some(live::TryReply::Done(Err(err))) => {
+                self.models_poll = None;
+                self.on_models_err(&err);
+            }
+            Some(live::TryReply::Closed) => {
+                self.models_poll = None;
+                self.on_models_err("transport closed before models reply");
+            }
+            Some(live::TryReply::Empty) | None => {}
+        }
         // Drain a completed stream-path substrate.read without holding
         // `self.stream_poll` across the `on_stream_frame` borrow.
         let stream_result = self.stream_poll.as_mut().map(live::try_recv_reply);
@@ -413,6 +599,33 @@ impl ChatView {
             }
             Some(live::TryReply::Empty) | None => {}
         }
+    }
+
+    /// Fire `llm.models` once (or retry after failure) so the chip
+    /// strip has a catalog (WEFT-256). Idempotent while a poll is
+    /// outstanding or a successful live catalog is already cached.
+    fn poll_models_if_needed(&mut self, live: &Arc<Live>) {
+        if self.models_poll.is_some() {
+            return;
+        }
+        // Live catalog cache hit — do not re-fetch every paint.
+        if self.models_catalog_live && self.models_error.is_none() {
+            return;
+        }
+        let now = live::now_ms();
+        if self.last_models_poll_ms > 0.0
+            && (now - self.last_models_poll_ms) < MODELS_RETRY_INTERVAL_MS
+        {
+            return;
+        }
+        let (tx, rx) = live::reply_channel();
+        self.models_poll = Some(rx);
+        self.last_models_poll_ms = now;
+        live.submit(Command::Raw {
+            method: "llm.models".into(),
+            params: serde_json::json!({}),
+            reply: Some(tx),
+        });
     }
 
     /// While a turn is in flight, keep the progressive stream path
@@ -922,16 +1135,29 @@ fn paint_active_conversation(
     panel: &mut ChatPanel,
     live: &Arc<Live>,
 ) {
-    let model = value
-        .as_object()
-        .and_then(|o| o.get("model"))
-        .and_then(Value::as_str)
-        .unwrap_or("local");
-
     // Pull session-local bits we need for labels before mutably
     // borrowing the view for the rest of the body.
     let session_id_label = panel.sessions[panel.active].display_id().to_owned();
     let system_salt = panel.sessions[panel.active].local_id.clone();
+
+    // Scoped mut borrow of the active ChatView for the remainder.
+    let session = &mut panel.sessions[panel.active];
+    let view = &mut session.view;
+
+    // WEFT-256: restore / seed model selection and refresh catalog.
+    restore_model_selection(ui, view);
+    seed_model_from_sentinel(view, value);
+    view.poll_models_if_needed(live);
+
+    let model = view
+        .selected_model()
+        .or_else(|| {
+            value
+                .as_object()
+                .and_then(|o| o.get("model"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("local");
 
     ui.label(
         egui::RichText::new(format!("chat · {model}"))
@@ -948,11 +1174,11 @@ fn paint_active_conversation(
                 .color(egui::Color32::from_rgb(130, 140, 155)),
         );
     });
-    ui.add_space(6.0);
-
-    // Scoped mut borrow of the active ChatView for the remainder.
-    let session = &mut panel.sessions[panel.active];
-    let view = &mut session.view;
+    ui.add_space(4.0);
+    // WEFT-256: model / provider chip strip.
+    paint_model_chip_strip(ui, view);
+    persist_model_selection(ui, view);
+    ui.add_space(2.0);
 
     // WEFT-259: identity-drift / binding-thread mismatch warning. Lives
     // above the input so the user always sees it before composing the
@@ -1078,6 +1304,159 @@ fn paint_history(ui: &mut egui::Ui, view: &mut ChatView) {
                 .color(egui::Color32::from_rgb(120, 180, 200)),
         );
     }
+}
+
+/// Restore [`ChatView::selected_model`] from egui memory when the
+/// panel state was reset (WEFT-256 persistence across panel reload /
+/// re-select within the host session).
+fn restore_model_selection(ui: &mut egui::Ui, view: &mut ChatView) {
+    if view.selected_model.is_some() {
+        return;
+    }
+    let id = egui::Id::new(MODEL_SELECTION_MEM_ID);
+    if let Some(stored) = ui.ctx().data_mut(|d| d.get_persisted::<String>(id))
+        && !stored.trim().is_empty()
+    {
+        view.selected_model = Some(stored);
+    }
+}
+
+/// Persist the current selection into egui memory so a panel reload
+/// (or a second Chat surface in the same process) reuses it.
+fn persist_model_selection(ui: &mut egui::Ui, view: &ChatView) {
+    if let Some(model) = view.selected_model.as_ref() {
+        let id = egui::Id::new(MODEL_SELECTION_MEM_ID);
+        ui.ctx()
+            .data_mut(|d| d.insert_persisted(id, model.clone()));
+    }
+}
+
+/// Seed selection + a single fallback chip from the substrate
+/// sentinel's `model` field when the catalog hasn't arrived yet.
+fn seed_model_from_sentinel(view: &mut ChatView, value: &Value) {
+    let sentinel_model = value
+        .as_object()
+        .and_then(|o| o.get("model"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    let Some(model) = sentinel_model else {
+        return;
+    };
+    if view.selected_model.is_none() {
+        view.selected_model = Some(model.to_owned());
+    }
+    if view.available_models.is_empty() {
+        view.available_models.push(ModelChip {
+            id: model.to_owned(),
+            provider: "local".into(),
+            label: model.to_owned(),
+            is_default: true,
+        });
+    }
+}
+
+/// Paint the WEFT-256 model / provider chip strip.
+///
+/// Chips are selectable; the active chip is filled. A muted hint shows
+/// when `llm.models` is still loading or failed (catalog may still
+/// show the sentinel fallback).
+fn paint_model_chip_strip(ui: &mut egui::Ui, view: &mut ChatView) {
+    let chips: Vec<ModelChip> = if view.available_models.is_empty() {
+        // Extremely early paint before seed/fetch — show a placeholder
+        // chip so the strip always occupies space.
+        vec![ModelChip {
+            id: view
+                .selected_model
+                .clone()
+                .unwrap_or_else(|| "local".into()),
+            provider: "local".into(),
+            label: view
+                .selected_model
+                .clone()
+                .unwrap_or_else(|| "local".into()),
+            is_default: true,
+        }]
+    } else {
+        view.available_models.clone()
+    };
+
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            egui::RichText::new("model")
+                .small()
+                .color(egui::Color32::from_rgb(140, 140, 150)),
+        );
+        for chip in &chips {
+            let selected = view.selected_model.as_deref() == Some(chip.id.as_str());
+            let label = if chip.provider.is_empty() || chip.provider == "local" {
+                chip.label.clone()
+            } else {
+                format!("{} · {}", chip.provider, chip.label)
+            };
+            let fill = if selected {
+                egui::Color32::from_rgb(55, 90, 130)
+            } else {
+                egui::Color32::from_rgb(40, 42, 50)
+            };
+            let stroke = if selected {
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 170, 220))
+            } else {
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 72, 80))
+            };
+            let text_color = if selected {
+                egui::Color32::from_rgb(230, 235, 245)
+            } else {
+                egui::Color32::from_rgb(180, 185, 195)
+            };
+            // Allocate a clickable chip rect, then paint into it.
+            let font = egui::FontId::proportional(11.0);
+            let text_size = ui.fonts_mut(|f| {
+                let galley = f.layout_no_wrap(label.clone(), font.clone(), text_color);
+                galley.size()
+            });
+            let pad = egui::vec2(16.0, 6.0);
+            let desired = text_size + pad;
+            let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::click());
+            if ui.is_rect_visible(rect) {
+                let painter = ui.painter();
+                painter.rect(rect, 10.0, fill, stroke, egui::StrokeKind::Inside);
+                painter.text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    &label,
+                    font,
+                    text_color,
+                );
+            }
+            let response = response.on_hover_text(format!(
+                "provider: {}{}\nclick to select for the next turn",
+                chip.provider,
+                if chip.is_default { " (default)" } else { "" }
+            ));
+            if response.clicked() && !view.is_in_flight() {
+                view.select_model(chip.id.clone());
+                persist_model_selection(ui, view);
+            }
+        }
+        if view.models_poll.is_some() {
+            ui.label(
+                egui::RichText::new("loading…")
+                    .small()
+                    .italics()
+                    .color(egui::Color32::from_rgb(140, 150, 160)),
+            );
+        } else if let Some(err) = view.models_error.as_deref() {
+            ui.label(
+                egui::RichText::new(format!("catalog: {err}"))
+                    .small()
+                    .color(egui::Color32::from_rgb(180, 140, 120)),
+            )
+            .on_hover_text("llm.models probe failed; using last known / sentinel catalog");
+        }
+    });
+    // Keep memory warm even when selection came from restore/seed.
+    persist_model_selection(ui, view);
+    ui.add_space(4.0);
 }
 
 /// Paint the WEFT-255 system-prompt editor. Collapsible so it doesn't
@@ -1830,5 +2209,100 @@ mod tests {
         panel.sessions[0].touch();
         assert!(panel.sessions()[0].last_active_ms() >= t0);
         assert_eq!(panel.active_index(), 1);
+    // ── WEFT-256 model / provider chip strip ─────────────────
+
+    #[test]
+    fn models_ok_builds_chips_and_seeds_default() {
+        let mut view = ChatView::default();
+        view.on_models_ok(&json!({
+            "default_model": "hermes-4.3-36b",
+            "default_provider": "local",
+            "base_url": "http://127.0.0.1:8090",
+            "models": [
+                {
+                    "id": "hermes-4.3-36b",
+                    "provider": "local",
+                    "label": "hermes-4.3-36b",
+                    "is_default": true,
+                    "live": true
+                },
+                {
+                    "id": "other-model",
+                    "provider": "local",
+                    "label": "other-model",
+                    "is_default": false,
+                    "live": true
+                }
+            ]
+        }));
+        assert_eq!(view.available_models().len(), 2);
+        assert_eq!(view.selected_model(), Some("hermes-4.3-36b"));
+        assert!(view.available_models()[0].is_default);
+    }
+
+    #[test]
+    fn models_ok_keeps_existing_selection_when_still_valid() {
+        let mut view = ChatView::default();
+        view.select_model("other-model");
+        view.on_models_ok(&json!({
+            "default_model": "hermes-4.3-36b",
+            "default_provider": "local",
+            "base_url": "http://127.0.0.1:8090",
+            "models": [
+                {"id": "hermes-4.3-36b", "provider": "local", "label": "h", "is_default": true},
+                {"id": "other-model", "provider": "local", "label": "o", "is_default": false}
+            ]
+        }));
+        assert_eq!(view.selected_model(), Some("other-model"));
+    }
+
+    #[test]
+    fn models_ok_falls_back_to_default_model_when_array_empty() {
+        let mut view = ChatView::default();
+        view.on_models_ok(&json!({
+            "default_model": "hermes-4.3-36b",
+            "default_provider": "local",
+            "base_url": "http://127.0.0.1:8090",
+            "models": []
+        }));
+        assert_eq!(view.available_models().len(), 1);
+        assert_eq!(view.selected_model(), Some("hermes-4.3-36b"));
+    }
+
+    #[test]
+    fn build_params_includes_metadata_model_when_selected() {
+        let mut view = ChatView::default();
+        view.select_model("hermes-4.3-36b");
+        let params = view.build_request_params("hi");
+        assert_eq!(
+            params
+                .get("metadata")
+                .and_then(|m| m.get("model"))
+                .and_then(Value::as_str),
+            Some("hermes-4.3-36b")
+        );
+    }
+
+    #[test]
+    fn build_params_omits_metadata_when_no_model_selected() {
+        let view = ChatView::default();
+        let params = view.build_request_params("hi");
+        assert!(params.get("metadata").is_none());
+    }
+
+    #[test]
+    fn models_err_does_not_clear_catalog() {
+        let mut view = ChatView::default();
+        view.on_models_ok(&json!({
+            "default_model": "hermes-4.3-36b",
+            "default_provider": "local",
+            "base_url": "http://127.0.0.1:8090",
+            "models": [
+                {"id": "hermes-4.3-36b", "provider": "local", "label": "h", "is_default": true}
+            ]
+        }));
+        view.on_models_err("timeout");
+        assert_eq!(view.available_models().len(), 1);
+        assert!(view.models_error.as_deref().unwrap().contains("timeout"));
     }
 }

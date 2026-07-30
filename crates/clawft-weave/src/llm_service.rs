@@ -55,10 +55,15 @@ use clawft_service_llm::LlmClient;
 /// the same identifier surface.
 const LLM_SERVICE_NAME: &str = "llm";
 
-/// Methods this service contract exposes. Single entry today —
-/// `llm.prompt` is the only public RPC. When `agent.chat` graduates
-/// off `daemon_llm()` and onto a routed dispatch, this list grows.
-pub const LLM_CONTRACT_METHODS: &[&str] = &["llm.prompt"];
+/// Methods this service contract exposes.
+///
+/// - `llm.prompt` — single-shot completion (no tools)
+/// - `llm.models` — WEFT-256 enumeration for the chat panel chip strip
+///
+/// `agent.chat` / `agent.chat_stream` remain separate Chat-class verbs
+/// (not on this service contract) until the agent path is fully
+/// mediated through the registry.
+pub const LLM_CONTRACT_METHODS: &[&str] = &["llm.prompt", "llm.models"];
 
 /// SystemService adapter wrapping the daemon's [`LlmClient`].
 ///
@@ -190,5 +195,11 @@ mod tests {
     #[test]
     fn contract_methods_lists_llm_prompt() {
         assert!(LLM_CONTRACT_METHODS.contains(&"llm.prompt"));
+    }
+
+    #[test]
+    fn contract_methods_lists_llm_models() {
+        // WEFT-256: chip-strip enumeration is a first-class LLM verb.
+        assert!(LLM_CONTRACT_METHODS.contains(&"llm.models"));
     }
 }
