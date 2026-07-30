@@ -147,3 +147,88 @@ async fn mock_adapter_unknown_topic_errors() {
         other => panic!("expected UnknownTopic, got {other:?}"),
     }
 }
+
+// ── WEFT-429: ADR-012 gate allow / deny through subscribe_adapter ────
+
+const CAPTURE_TOPICS: &[TopicDecl] = &[TopicDecl {
+    path: "substrate/sensor/mic",
+    shape: "ontology://audio-level",
+    refresh_hint: RefreshHint::Periodic { ms: 100 },
+    sensitivity: Sensitivity::Capture,
+    buffer_policy: BufferPolicy::Refuse,
+    max_len: None,
+}];
+
+struct GatedCaptureAdapter;
+
+#[async_trait]
+impl OntologyAdapter for GatedCaptureAdapter {
+    fn id(&self) -> &'static str {
+        "mic"
+    }
+    fn topics(&self) -> &'static [TopicDecl] {
+        CAPTURE_TOPICS
+    }
+    fn permissions(&self) -> &'static [PermissionReq] {
+        &[PermissionReq::Mic]
+    }
+    async fn open(&self, topic: &str, _args: Value) -> Result<Subscription, AdapterError> {
+        if topic != "substrate/sensor/mic" {
+            return Err(AdapterError::UnknownTopic(topic.into()));
+        }
+        let (tx, rx) = mpsc::channel(1);
+        // Keep the sender alive for the duration of the test task.
+        tokio::spawn(async move {
+            let _ = tx;
+            // park forever until aborted / dropped
+            std::future::pending::<()>().await;
+        });
+        Ok(Subscription { id: SubId(7), rx })
+    }
+    async fn close(&self, _sub_id: SubId) -> Result<(), AdapterError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn subscribe_adapter_permission_denied_without_mic_grant() {
+    use clawft_substrate::{CapturePrivacyGate, Permission};
+
+    let adapter = Arc::new(GatedCaptureAdapter);
+    let substrate = Arc::new(Substrate::new().with_gate(Arc::new(CapturePrivacyGate)));
+    let err = substrate
+        .subscribe_adapter(
+            adapter as Arc<dyn OntologyAdapter>,
+            "substrate/sensor/mic",
+            Value::Null,
+        )
+        .await
+        .expect_err("capture without grant must deny");
+    match err {
+        AdapterError::PermissionDenied(missing) => {
+            assert_eq!(missing, vec![Permission::Mic]);
+        }
+        other => panic!("expected PermissionDenied, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn subscribe_adapter_allows_when_mic_granted() {
+    use clawft_substrate::{CapturePrivacyGate, Permission};
+
+    let adapter = Arc::new(GatedCaptureAdapter);
+    let substrate = Arc::new(
+        Substrate::new()
+            .with_gate(Arc::new(CapturePrivacyGate))
+            .with_grants(vec![Permission::Mic]),
+    );
+    let id = substrate
+        .subscribe_adapter(
+            adapter as Arc<dyn OntologyAdapter>,
+            "substrate/sensor/mic",
+            Value::Null,
+        )
+        .await
+        .expect("Mic grant must allow capture subscribe");
+    assert_eq!(id, SubId(7));
+}

@@ -12,7 +12,6 @@
 //! entries plus a handful of paths.
 
 use std::collections::BTreeMap;
-#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -22,9 +21,11 @@ use serde_json::Value;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::task::JoinHandle;
 
+use clawft_app::{AdapterOpenResult, Gate, Permission, infer_capture_permission};
+
 use crate::acl::{AclDenied, AclTable, CallerIdentity, plan_publish_public};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::adapter::{AdapterError, OntologyAdapter, SubId};
+use crate::adapter::{AdapterError, OntologyAdapter, Sensitivity, SubId};
 use crate::delta::StateDelta;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::health::{AdapterHealthEvent, build_event_delta};
@@ -123,6 +124,40 @@ fn walk_json<'a>(v: &'a Value, path: &[&str]) -> Option<&'a Value> {
     Some(cur)
 }
 
+/// Build the effective permission list for an adapter open.
+///
+/// Starts from the adapter's declared `permissions()`. When the topic is
+/// `Sensitivity::Capture` and no capture channel is declared, infers one
+/// from the adapter id / topic path so ADR-012 cannot be bypassed by an
+/// empty declaration. If inference fails, still injects `Mic` as a
+/// conservative stand-in — capture data must never open without a grant.
+#[cfg(not(target_arch = "wasm32"))]
+fn effective_required_permissions(
+    adapter_id: &str,
+    topic: &str,
+    declared: &[Permission],
+    sensitivity: Option<Sensitivity>,
+) -> Vec<Permission> {
+    let mut required: Vec<Permission> = declared.to_vec();
+    let capture_sensitive = matches!(sensitivity, Some(Sensitivity::Capture));
+    if !capture_sensitive {
+        return required;
+    }
+    let has_capture = required.iter().any(clawft_app::is_capture);
+    if has_capture {
+        return required;
+    }
+    if let Some(inferred) = infer_capture_permission(adapter_id, topic) {
+        required.push(inferred);
+    } else {
+        // Unknown capture source — still require an explicit grant of
+        // some capture channel by demanding Mic (strictest common case
+        // for ambient sensors). Hosts can grant Mic/Camera/Screen.
+        required.push(Permission::Mic);
+    }
+    required
+}
+
 /// An in-flight subscription tracked by the [`Substrate`].
 ///
 /// Owns the adapter handle + the drain task's join handle so
@@ -148,6 +183,14 @@ struct TrackedSub {
 /// [`Substrate::apply`] so producers are not subject to their own
 /// read ACLs. Callers that surface values to remote subscribers MUST
 /// use the `*_for` variants.
+///
+/// # ADR-012 governance gate (WEFT-429)
+///
+/// An optional [`Gate`] installed via [`Substrate::set_gate`] is
+/// consulted by [`Substrate::subscribe_adapter`] **before**
+/// [`OntologyAdapter::open`]. Capture topics without a matching
+/// session grant return [`AdapterError::PermissionDenied`]. No gate
+/// means legacy open mode (tests / early boot).
 pub struct Substrate {
     state: RwLock<BTreeMap<String, Value>>,
     /// `path → max_len` overrides applied on every `Append`. Seeded
@@ -157,6 +200,11 @@ pub struct Substrate {
     /// Per-path read ACL table (ADR-057). `None` until
     /// [`Substrate::set_acl`] / [`Substrate::with_acl`] installs one.
     acl: RwLock<Option<AclTable>>,
+    /// ADR-012 governance gate for adapter open. `None` = ungated.
+    gate: RwLock<Option<Arc<dyn Gate>>>,
+    /// Capability grants for this substrate session (manifest install
+    /// + runtime `CapabilityGrant`s).
+    grants: RwLock<Vec<Permission>>,
     #[cfg(not(target_arch = "wasm32"))]
     subscriptions: Mutex<Vec<TrackedSub>>,
 }
@@ -169,12 +217,15 @@ impl Default for Substrate {
 
 impl Substrate {
     /// Construct an empty substrate (no ACL table — open reads until
-    /// [`Substrate::set_acl`] is called).
+    /// [`Substrate::set_acl`] is called; no governance gate until
+    /// [`Substrate::set_gate`]).
     pub fn new() -> Self {
         Self {
             state: RwLock::new(BTreeMap::new()),
             max_lens: RwLock::new(BTreeMap::new()),
             acl: RwLock::new(None),
+            gate: RwLock::new(None),
+            grants: RwLock::new(Vec::new()),
             #[cfg(not(target_arch = "wasm32"))]
             subscriptions: Mutex::new(Vec::new()),
         }
@@ -186,6 +237,52 @@ impl Substrate {
         let s = Self::new();
         s.set_acl(AclTable::with_boot_defaults(mesh_id));
         s
+    }
+
+    /// Install (or replace) the ADR-012 governance gate used by
+    /// [`Substrate::subscribe_adapter`].
+    pub fn set_gate(&self, gate: Arc<dyn Gate>) {
+        *self.gate.write() = Some(gate);
+    }
+
+    /// Clear the governance gate (return to legacy ungated open).
+    pub fn clear_gate(&self) {
+        *self.gate.write() = None;
+    }
+
+    /// Whether a governance gate is installed.
+    pub fn has_gate(&self) -> bool {
+        self.gate.read().is_some()
+    }
+
+    /// Builder-style gate install.
+    pub fn with_gate(self, gate: Arc<dyn Gate>) -> Self {
+        self.set_gate(gate);
+        self
+    }
+
+    /// Replace the session capability-grant set.
+    pub fn set_grants(&self, grants: Vec<Permission>) {
+        *self.grants.write() = grants;
+    }
+
+    /// Append one grant (idempotent for equal permissions).
+    pub fn grant(&self, perm: Permission) {
+        let mut g = self.grants.write();
+        if !g.contains(&perm) {
+            g.push(perm);
+        }
+    }
+
+    /// Current session grants (clone for inspection / tests).
+    pub fn grants(&self) -> Vec<Permission> {
+        self.grants.read().clone()
+    }
+
+    /// Builder-style grant install.
+    pub fn with_grants(self, grants: Vec<Permission>) -> Self {
+        self.set_grants(grants);
+        self
     }
 
     /// Install (or replace) the read ACL table.
@@ -412,6 +509,17 @@ impl Substrate {
     /// cap is registered so [`Substrate::apply`] auto-trims list-typed
     /// deltas for that path.
     ///
+    /// # ADR-012 governance (WEFT-429)
+    ///
+    /// When a [`Gate`] is installed via [`Substrate::set_gate`], this
+    /// method authorises the open **before** calling
+    /// [`OntologyAdapter::open`]. Required permissions come from
+    /// [`OntologyAdapter::permissions`]; capture-sensitive topics
+    /// (`Sensitivity::Capture`) with an empty declaration get an
+    /// inferred capture channel so omit-to-bypass is impossible.
+    /// Denial returns [`AdapterError::PermissionDenied`] and emits an
+    /// adapter-health `error` event.
+    ///
     /// **Runtime**: the caller must be inside a tokio runtime when this
     /// is called (the background task spawns via `tokio::spawn`). Not
     /// available on `wasm32` — the adapter trait compiles there but the
@@ -423,15 +531,41 @@ impl Substrate {
         topic: &str,
         args: Value,
     ) -> Result<SubId, AdapterError> {
+        let adapter_id = adapter.id();
+        let topic_decl = adapter.topics().iter().find(|t| t.path == topic);
+
         // Register max_len from the topic declaration (if any). Done
         // before `open` so the first deltas are trimmed.
-        if let Some(decl) = adapter.topics().iter().find(|t| t.path == topic)
+        if let Some(decl) = topic_decl
             && let Some(n) = decl.max_len
         {
             self.set_max_len(topic, n);
         }
 
-        let adapter_id = adapter.id();
+        // ADR-012 gate — deny-closed for missing grants when a gate is
+        // installed. No gate ⇒ legacy open (tests / early desktop boot).
+        if let Some(gate) = self.gate.read().clone() {
+            let required = effective_required_permissions(
+                adapter_id,
+                topic,
+                adapter.permissions(),
+                topic_decl.map(|d| d.sensitivity),
+            );
+            let granted = self.grants.read().clone();
+            match gate.authorize_adapter_open(adapter_id, topic, &required, &granted) {
+                AdapterOpenResult::Granted => {}
+                AdapterOpenResult::Denied { missing, reason } => {
+                    self.apply(build_event_delta(
+                        adapter_id,
+                        AdapterHealthEvent::Error,
+                        topic,
+                        None,
+                        Some(&reason),
+                    ));
+                    return Err(AdapterError::PermissionDenied(missing));
+                }
+            }
+        }
 
         let sub = match adapter.open(topic, args).await {
             Ok(sub) => sub,
@@ -935,5 +1069,216 @@ mod tests {
         substrate.close_all().await;
         substrate.close_all().await; // second call is a no-op
         assert_eq!(substrate.active_subscription_count(), 0);
+    }
+
+    // ── ADR-012 / WEFT-429 governance gate on subscribe_adapter ───────
+
+    const CAPTURE_MOCK_TOPICS: &[TopicDecl] = &[TopicDecl {
+        path: "substrate/sensor/mic",
+        shape: "ontology://audio-level",
+        refresh_hint: RefreshHint::Periodic { ms: 100 },
+        sensitivity: Sensitivity::Capture,
+        buffer_policy: BufferPolicy::Refuse,
+        max_len: None,
+    }];
+
+    /// Declares `Permission::Mic` explicitly.
+    struct CaptureMicMock;
+
+    #[async_trait]
+    impl OntologyAdapter for CaptureMicMock {
+        fn id(&self) -> &'static str {
+            "mic"
+        }
+        fn topics(&self) -> &'static [TopicDecl] {
+            CAPTURE_MOCK_TOPICS
+        }
+        fn permissions(&self) -> &'static [PermissionReq] {
+            &[PermissionReq::Mic]
+        }
+        async fn open(
+            &self,
+            _topic: &str,
+            _args: Value,
+        ) -> Result<Subscription, crate::adapter::AdapterError> {
+            let (_tx, rx) = mpsc::channel(1);
+            // Keep sender alive so open itself is not the failure path.
+            Box::leak(Box::new(_tx));
+            Ok(Subscription { id: SubId(1), rx })
+        }
+        async fn close(&self, _sub_id: SubId) -> Result<(), crate::adapter::AdapterError> {
+            Ok(())
+        }
+    }
+
+    /// Capture-sensitive topic but empty `permissions()` — gate must
+    /// still infer Mic and deny without a grant (omit-to-bypass).
+    struct CaptureUndeclaredMock;
+
+    #[async_trait]
+    impl OntologyAdapter for CaptureUndeclaredMock {
+        fn id(&self) -> &'static str {
+            "mic-undeclared"
+        }
+        fn topics(&self) -> &'static [TopicDecl] {
+            CAPTURE_MOCK_TOPICS
+        }
+        fn permissions(&self) -> &'static [PermissionReq] {
+            &[]
+        }
+        async fn open(
+            &self,
+            _topic: &str,
+            _args: Value,
+        ) -> Result<Subscription, crate::adapter::AdapterError> {
+            let (_tx, rx) = mpsc::channel(1);
+            Box::leak(Box::new(_tx));
+            Ok(Subscription { id: SubId(2), rx })
+        }
+        async fn close(&self, _sub_id: SubId) -> Result<(), crate::adapter::AdapterError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn gate_denies_capture_subscribe_without_grant() {
+        use clawft_app::CapturePrivacyGate;
+
+        let adapter = Arc::new(CaptureMicMock);
+        let substrate = Arc::new(Substrate::new().with_gate(Arc::new(CapturePrivacyGate)));
+        // No grants installed.
+        let r = substrate
+            .subscribe_adapter(
+                adapter as Arc<dyn OntologyAdapter>,
+                "substrate/sensor/mic",
+                Value::Null,
+            )
+            .await;
+        match r {
+            Err(crate::adapter::AdapterError::PermissionDenied(missing)) => {
+                assert_eq!(missing, vec![PermissionReq::Mic]);
+            }
+            other => panic!("expected PermissionDenied, got {other:?}"),
+        }
+
+        let health = substrate
+            .get("substrate/meta/adapter/mic/health")
+            .expect("denial must surface on adapter-health");
+        assert_eq!(health["event"], "error");
+        assert!(
+            health["reason"]
+                .as_str()
+                .map(|s| s.contains("ADR-012"))
+                .unwrap_or(false),
+            "health reason: {health:?}"
+        );
+        assert_eq!(substrate.active_subscription_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn gate_allows_capture_subscribe_with_grant() {
+        use clawft_app::CapturePrivacyGate;
+
+        let adapter = Arc::new(CaptureMicMock);
+        let substrate = Arc::new(
+            Substrate::new()
+                .with_gate(Arc::new(CapturePrivacyGate))
+                .with_grants(vec![PermissionReq::Mic]),
+        );
+        let id = substrate
+            .subscribe_adapter(
+                adapter as Arc<dyn OntologyAdapter>,
+                "substrate/sensor/mic",
+                Value::Null,
+            )
+            .await
+            .expect("granted Mic must allow open");
+        assert_eq!(id, SubId(1));
+        assert_eq!(substrate.active_subscription_count(), 1);
+
+        let health = substrate
+            .get("substrate/meta/adapter/mic/health")
+            .expect("opened health event");
+        assert_eq!(health["event"], "subscription-opened");
+    }
+
+    #[tokio::test]
+    async fn gate_denies_capture_even_when_permissions_empty() {
+        use clawft_app::CapturePrivacyGate;
+
+        // Sensitivity::Capture + empty permissions() must not bypass
+        // ADR-012 — inference injects Mic from adapter id / topic.
+        let adapter = Arc::new(CaptureUndeclaredMock);
+        let substrate = Arc::new(Substrate::new().with_gate(Arc::new(CapturePrivacyGate)));
+        let r = substrate
+            .subscribe_adapter(
+                adapter as Arc<dyn OntologyAdapter>,
+                "substrate/sensor/mic",
+                Value::Null,
+            )
+            .await;
+        assert!(
+            matches!(r, Err(crate::adapter::AdapterError::PermissionDenied(_))),
+            "expected PermissionDenied, got {r:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn public_adapter_allowed_under_gate_without_grants() {
+        use clawft_app::CapturePrivacyGate;
+
+        // ForeverMock has Public sensitivity + empty permissions — must
+        // still open under CapturePrivacyGate with no grants.
+        let adapter = Arc::new(ForeverMock {
+            closed: parking_lot::Mutex::new(false),
+        });
+        let substrate = Arc::new(Substrate::new().with_gate(Arc::new(CapturePrivacyGate)));
+        substrate
+            .subscribe_adapter(
+                adapter as Arc<dyn OntologyAdapter>,
+                "substrate/mock/items",
+                Value::Null,
+            )
+            .await
+            .expect("public adapter open must not require capture grants");
+    }
+
+    #[tokio::test]
+    async fn no_gate_keeps_legacy_open_without_grants() {
+        // Ungated substrate (default) — capture open succeeds even
+        // without grants (legacy / test mode).
+        let adapter = Arc::new(CaptureMicMock);
+        let substrate = Arc::new(Substrate::new());
+        assert!(!substrate.has_gate());
+        substrate
+            .subscribe_adapter(
+                adapter as Arc<dyn OntologyAdapter>,
+                "substrate/sensor/mic",
+                Value::Null,
+            )
+            .await
+            .expect("ungated subscribe must remain open");
+    }
+
+    #[test]
+    fn effective_required_infers_mic_for_capture_topic() {
+        let reqs = effective_required_permissions(
+            "mic",
+            "substrate/sensor/mic",
+            &[],
+            Some(Sensitivity::Capture),
+        );
+        assert_eq!(reqs, vec![Permission::Mic]);
+    }
+
+    #[test]
+    fn effective_required_public_empty_stays_empty() {
+        let reqs = effective_required_permissions(
+            "kernel",
+            "substrate/kernel/processes",
+            &[],
+            Some(Sensitivity::Public),
+        );
+        assert!(reqs.is_empty());
     }
 }

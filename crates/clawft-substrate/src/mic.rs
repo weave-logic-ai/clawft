@@ -103,10 +103,10 @@ pub const TOPICS: &[TopicDecl] = &[
     },
 ];
 
-/// Permissions — capture requires a dedicated grant; M1.5.2+ will
-/// wire that through governance. For the preview, `open` still
-/// proceeds but the sensitivity label on the topic alerts downstream.
-pub const PERMISSIONS: &[PermissionReq] = &[];
+/// Permissions — ADR-012 capture channel. `Substrate::subscribe_adapter`
+/// with a [`clawft_app::CapturePrivacyGate`] requires a matching
+/// `Permission::Mic` session grant (WEFT-429).
+pub const PERMISSIONS: &[PermissionReq] = &[PermissionReq::Mic];
 
 type CancelTx = oneshot::Sender<()>;
 

@@ -13,11 +13,17 @@
 //! adapters (`git`, `gh`, `workspace`, `fs`, `lsp`, `deployment`) are
 //! scheduled for M1.6–M1.9 per Session 10 §7.
 //!
+//! # Governance (ADR-012 / WEFT-429)
+//!
+//! [`Substrate::subscribe_adapter`] consults an optional
+//! [`clawft_app::Gate`] before calling [`OntologyAdapter::open`]. When a
+//! [`clawft_app::CapturePrivacyGate`] is installed, capture-channel
+//! permissions that are not covered by the session grant set fail
+//! closed with [`AdapterError::PermissionDenied`]. With no gate installed
+//! the path stays open (legacy / test mode) — production hosts must call
+//! [`Substrate::set_gate`].
+//!
 //! # What this crate does NOT do (yet)
-//! - No governance gating of [`OntologyAdapter::open`]. ADR-017 §3 calls
-//!   for install-time permission intersection; M1.5 treats `permissions()`
-//!   as advisory and expects the app-manifest layer (M1.5-A, TODO) to
-//!   enforce it before calling `open`.
 //! - No dynamic-lib adapter registration (ADR-017 §3 path 2 — deferred).
 //! - [`PermissionReq`] is a re-export of
 //!   [`clawft_app::manifest::Permission`] (unified in M1.5-D).
@@ -120,6 +126,12 @@ pub use acl::{
 pub use adapter::{
     AdapterError, BufferPolicy, OntologyAdapter, PermissionReq, RefreshHint, Sensitivity, SubId,
     Subscription, TopicDecl,
+};
+// Re-export ADR-012 gate surface so embedders need one crate for
+// subscribe-time governance wiring.
+pub use clawft_app::{
+    AdapterOpenResult, CapturePrivacyGate, Gate, NoopGate, Permission, StrictGate,
+    infer_capture_permission, is_capture, permission_covered,
 };
 pub use delta::StateDelta;
 pub use health::{AdapterHealthEvent, health_topic_path};
