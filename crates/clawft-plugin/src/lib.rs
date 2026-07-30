@@ -34,11 +34,16 @@
 //!
 //! - `voice` -- Voice umbrella. Pulls in `voice-vad`, `voice-wake`,
 //!   `voice-stt`, and `voice-tts` so `cargo build --features voice`
-//!   compiles the full in-process pipeline scaffold (WEFT-212).
-//! - `voice-vad` -- Voice Activity Detection (Silero VAD stub).
-//! - `voice-stt` -- Speech-to-Text (sherpa-rs stub).
-//! - `voice-tts` -- Text-to-Speech (sherpa-rs stub).
-//! - `voice-wake` -- Wake-word detection (reserved).
+//!   compiles the full in-process **legacy scaffold** (WEFT-212).
+//!   **Disposition (WEFT-671):** product Talk Mode / STT / TTS / AEC live in
+//!   `clawft-channels::voice` + `clawft-voice-{talk,tts,onnx,aec}` and
+//!   substrate `clawft-service-whisper` (ADR-053). Under `voice/`, only
+//!   wake (`WakeDaemon` / `WakeWordConfig`) has a live CLI caller; the rest
+//!   is deprecated scaffold. See `docs/plans/wave-0a-WEFT-671-decision.md`.
+//! - `voice-vad` -- Voice Activity Detection (legacy Silero stub).
+//! - `voice-stt` -- Speech-to-Text (legacy sherpa-rs stub).
+//! - `voice-tts` -- Text-to-Speech (legacy sherpa-rs stub).
+//! - `voice-wake` -- Wake-word detection (transitional CLI home; still stub).
 //!
 //! ## Crate Ecosystem
 //!

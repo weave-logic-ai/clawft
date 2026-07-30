@@ -1,7 +1,8 @@
-//! Noise suppression for voice pipeline.
+//! Noise suppression for voice pipeline (legacy scaffold — WEFT-671).
 //!
-//! Reduces background noise from mic input to improve STT accuracy.
-//! Current implementation: stub (passthrough).
+//! **Deprecated surface.** Live NS/AEC is `clawft-voice-aec`. This file is a
+//! passthrough stub kept only for `--features voice` compile coverage.
+//! WEFT-217 is superseded; do not implement real DSP here.
 
 use serde::{Deserialize, Serialize};
 
