@@ -62,8 +62,15 @@ pub struct Turn {
 ///
 /// Implementations:
 /// - [`InMemorySink`] (default; HashMap-backed, test-only).
+/// - [`LocalFileSink`](super::local_file_sink::LocalFileSink) (in-process JSONL).
 /// - Substrate sink (Phase C3, in `clawft-service-agent`).
-#[async_trait]
+///
+/// The `async_trait` `?Send` relaxation is applied for the `browser`
+/// feature so WASM-resident sinks that await platform FS (browser
+/// `FileSystem` futures are `!Send`) satisfy the trait. Native impls
+/// keep the strict `Send` bound for tokio multi-threaded runtimes.
+#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
 pub trait ConversationSink: Send + Sync + 'static {
     /// Acquire the conversation lock. The substrate impl awaits the
     /// per-conv `Mutex<()>` from the `AgentService` DashMap so two
@@ -177,7 +184,8 @@ impl InMemorySink {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
 impl ConversationSink for InMemorySink {
     async fn lock_conversation(&self, _conv_id: &str) {
         // No-op for the in-memory impl. The real per-conv mutex
