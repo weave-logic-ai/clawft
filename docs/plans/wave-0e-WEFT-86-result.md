@@ -2,7 +2,7 @@
 
 **Ticket:** WEFT-86  
 **Branch:** `wave0e/weft-86-workspace-delete`  
-**SHA:** `c3abf1ada654895e14f42ff8c1b1d45dd979ca5e`  
+**SHA:** `b0342581501f24fce66584a34afc28894b51cb7f` (branch tip may include docs polish commits)
 **Worktree:** `/Users/mathewbeane/.grok/worktrees/mathewbeane-weftos/subagent-019fb46e-5ef4-7621-9495-d5d59245e889`  
 **Base:** `release/0.8-staging`  
 **Date:** 2026-07-30  
