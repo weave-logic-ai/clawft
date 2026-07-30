@@ -8,9 +8,10 @@
 //! ```
 //!
 //! It drains the [`ImpulseQueue`] for new events, embeds them via the
-//! configured [`EmbeddingProvider`], queries HNSW for nearest neighbors,
-//! updates the [`CausalGraph`] with inferred edges, registers cross-refs
-//! in the [`CrossRefStore`], and logs the result.
+//! configured [`EmbeddingProvider`], queries the pluggable [`VectorBackend`]
+//! for nearest neighbors (default: HNSW), updates the [`CausalGraph`] with
+//! inferred edges, registers cross-refs in the [`CrossRefStore`], and logs
+//! the result.
 //!
 //! This module is compiled only when the `ecc` feature is enabled.
 
@@ -24,8 +25,8 @@ use tracing::{debug, warn};
 use crate::causal::{CausalEdgeType, CausalGraph};
 use crate::crossref::{CrossRef, CrossRefStore, CrossRefType, StructureTag, UniversalNodeId};
 use crate::embedding::EmbeddingProvider;
-use crate::hnsw_service::HnswService;
 use crate::impulse::{Impulse, ImpulseQueue, ImpulseType};
+use crate::vector_backend::VectorBackend;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -66,7 +67,7 @@ pub struct DemocritusTickResult {
     pub impulses_sensed: usize,
     /// Number of embeddings produced in the EMBED phase.
     pub embeddings_produced: usize,
-    /// Number of HNSW searches performed in the SEARCH phase.
+    /// Number of vector searches performed in the SEARCH phase.
     pub searches_performed: usize,
     /// Number of causal edges added in the UPDATE phase.
     pub edges_added: usize,
@@ -85,10 +86,15 @@ pub struct DemocritusTickResult {
 /// The DEMOCRITUS continuous cognitive loop.
 ///
 /// Runs every CognitiveTick cycle: Sense -> Embed -> Search -> Update -> Commit.
+///
+/// Vector recall is pluggable via [`VectorBackend`]. Production default is
+/// [`HnswBackend`](crate::vector_hnsw::HnswBackend); DiskANN / Hybrid can be
+/// swapped in without changing this loop (WEFT-124).
 pub struct DemocritusLoop {
     // ECC subsystem references
     causal_graph: Arc<CausalGraph>,
-    hnsw: Arc<HnswService>,
+    /// Pluggable vector index (default: HNSW backend).
+    vector: Arc<dyn VectorBackend>,
     impulse_queue: Arc<ImpulseQueue>,
     crossref_store: Arc<CrossRefStore>,
     embedding_provider: Arc<dyn EmbeddingProvider>,
@@ -102,9 +108,12 @@ pub struct DemocritusLoop {
 
 impl DemocritusLoop {
     /// Create a new DEMOCRITUS loop wired to the given ECC subsystems.
+    ///
+    /// `vector` is typically `Arc::new(HnswBackend::new(...))` for the
+    /// production default; any [`VectorBackend`] implementor works.
     pub fn new(
         causal_graph: Arc<CausalGraph>,
-        hnsw: Arc<HnswService>,
+        vector: Arc<dyn VectorBackend>,
         impulse_queue: Arc<ImpulseQueue>,
         crossref_store: Arc<CrossRefStore>,
         embedding_provider: Arc<dyn EmbeddingProvider>,
@@ -112,7 +121,7 @@ impl DemocritusLoop {
     ) -> Self {
         Self {
             causal_graph,
-            hnsw,
+            vector,
             impulse_queue,
             crossref_store,
             embedding_provider,
@@ -121,6 +130,11 @@ impl DemocritusLoop {
             total_nodes_added: AtomicU64::new(0),
             total_edges_added: AtomicU64::new(0),
         }
+    }
+
+    /// Borrow the active vector backend (for diagnostics / tests).
+    pub fn vector_backend(&self) -> &dyn VectorBackend {
+        self.vector.as_ref()
     }
 
     /// Execute one full tick cycle: Sense -> Embed -> Search -> Update -> Commit.
@@ -161,8 +175,10 @@ impl DemocritusLoop {
         }
 
         // ── SEARCH ───────────────────────────────────────────────────
-        // Batch all HNSW searches under a single mutex acquisition
-        // instead of locking per-impulse (Task 3: batch Mutex).
+        // Query the pluggable VectorBackend per non-empty embedding.
+        // Neighbor keys are causal node id strings (see update()); scores
+        // are cosine similarity recovered from backend distance so that
+        // correlation_threshold stays calibrated for the HNSW default.
         let non_empty_queries: Vec<(usize, &[f32])> = embedded
             .iter()
             .enumerate()
@@ -170,20 +186,9 @@ impl DemocritusLoop {
             .map(|(i, emb)| (i, emb.as_slice()))
             .collect();
 
-        let query_slices: Vec<&[f32]> = non_empty_queries.iter().map(|(_, s)| *s).collect();
-        let batch_results = if !query_slices.is_empty() {
-            self.hnsw.search_batch(&query_slices, self.config.search_k)
-        } else {
-            Vec::new()
-        };
-
-        // Reassemble: map batch results back to their impulse indices.
         let mut search_results_by_index: Vec<Vec<(String, f32)>> = vec![Vec::new(); embedded.len()];
-        for (batch_idx, &(orig_idx, _)) in non_empty_queries.iter().enumerate() {
-            search_results_by_index[orig_idx] = batch_results
-                .get(batch_idx)
-                .map(|results| results.iter().map(|r| (r.id.clone(), r.score)).collect())
-                .unwrap_or_default();
+        for &(orig_idx, query) in &non_empty_queries {
+            search_results_by_index[orig_idx] = self.search(query);
         }
         result.searches_performed = non_empty_queries.len();
 
@@ -251,25 +256,35 @@ impl DemocritusLoop {
         }
     }
 
-    /// SEARCH: query HNSW for k nearest neighbors of the given embedding.
+    /// SEARCH: query the vector backend for k nearest neighbors.
     ///
-    /// Note: The tick loop now uses `search_batch` for batched mutex
-    /// acquisition. This method is retained for single-query callers.
-    #[allow(dead_code)]
+    /// Returns `(neighbor_key, cosine_similarity)` pairs. Backends that
+    /// report distance (HNSW: `distance = 1 - cosine_sim`) are converted
+    /// so `correlation_threshold` keeps its original similarity semantics.
     fn search(&self, embedding: &[f32]) -> Vec<(String, f32)> {
         if embedding.is_empty() {
             return Vec::new();
         }
-        self.hnsw
+        self.vector
             .search(embedding, self.config.search_k)
             .into_iter()
-            .map(|r| (r.id, r.score))
+            .map(|r| {
+                // Prefer the string key (causal node id) so neighbor → link
+                // parsing stays identical to the pre-VectorBackend path.
+                let key = if r.key.is_empty() {
+                    r.id.to_string()
+                } else {
+                    r.key
+                };
+                let score = 1.0 - r.distance;
+                (key, score)
+            })
             .collect()
     }
 
-    /// UPDATE: add a causal node for the impulse, insert into HNSW,
-    /// create causal edges based on neighbor similarity, and register
-    /// cross-references.
+    /// UPDATE: add a causal node for the impulse, insert into the vector
+    /// backend, create causal edges based on neighbor similarity, and
+    /// register cross-references.
     ///
     /// Returns (edges_added, crossrefs_added).
     fn update(
@@ -297,21 +312,28 @@ impl DemocritusLoop {
         let node_id = self.causal_graph.add_node(label.clone(), node_metadata);
         self.total_nodes_added.fetch_add(1, Ordering::Relaxed);
 
-        // Insert embedding into HNSW (keyed by causal node ID so neighbor
-        // hits can re-link by NodeId). `chain_seq` in metadata is the
-        // join key back to the atom spine — never hardcode 0 here.
+        // Insert embedding into the vector backend. Numeric id + string key
+        // are both the causal node ID so neighbor hits can re-link by
+        // NodeId. `chain_seq` in metadata is the join key back to the atom
+        // spine — never hardcode 0 here.
         if !embedding.is_empty() {
-            self.hnsw.insert(
-                node_id.to_string(),
-                embedding.to_vec(),
-                serde_json::json!({
-                    "impulse_id": impulse.id,
-                    "impulse_type": impulse.impulse_type.to_string(),
-                    "hlc": impulse.hlc_timestamp,
-                    "chain_seq": chain_seq,
-                    "causal_node_id": node_id,
-                }),
-            );
+            let meta = serde_json::json!({
+                "impulse_id": impulse.id,
+                "impulse_type": impulse.impulse_type.to_string(),
+                "hlc": impulse.hlc_timestamp,
+                "chain_seq": chain_seq,
+                "causal_node_id": node_id,
+            });
+            if let Err(e) = self.vector.insert(
+                node_id,
+                &node_id.to_string(),
+                embedding,
+                meta,
+            ) {
+                warn!(
+                    "DEMOCRITUS vector insert failed for node {node_id}: {e}"
+                );
+            }
         }
 
         // Create causal edges based on neighbor similarity.
@@ -488,11 +510,15 @@ mod tests {
     use super::*;
     use crate::embedding::MockEmbeddingProvider;
     use crate::hnsw_service::HnswServiceConfig;
+    use crate::vector_backend::{SearchResult, VectorResult};
+    use crate::vector_hnsw::HnswBackend;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
 
-    /// Helper: build a fully wired DemocritusLoop with default config.
+    /// Helper: build a fully wired DemocritusLoop with default HNSW backend.
     fn make_loop() -> (
         Arc<CausalGraph>,
-        Arc<HnswService>,
+        Arc<dyn VectorBackend>,
         Arc<ImpulseQueue>,
         Arc<CrossRefStore>,
         DemocritusLoop,
@@ -504,13 +530,13 @@ mod tests {
         config: DemocritusConfig,
     ) -> (
         Arc<CausalGraph>,
-        Arc<HnswService>,
+        Arc<dyn VectorBackend>,
         Arc<ImpulseQueue>,
         Arc<CrossRefStore>,
         DemocritusLoop,
     ) {
         let cg = Arc::new(CausalGraph::new());
-        let hnsw = Arc::new(HnswService::new(HnswServiceConfig {
+        let vector: Arc<dyn VectorBackend> = Arc::new(HnswBackend::new(HnswServiceConfig {
             default_dimensions: 8,
             ..HnswServiceConfig::default()
         }));
@@ -520,13 +546,123 @@ mod tests {
 
         let democritus = DemocritusLoop::new(
             Arc::clone(&cg),
-            Arc::clone(&hnsw),
+            Arc::clone(&vector),
             Arc::clone(&iq),
             Arc::clone(&crs),
             emb,
             config,
         );
-        (cg, hnsw, iq, crs, democritus)
+        (cg, vector, iq, crs, democritus)
+    }
+
+    /// In-memory counting backend used to prove DemocritusLoop is
+    /// wiring-only over `VectorBackend` (no HNSW-specific path).
+    struct CountingBackend {
+        name: &'static str,
+        entries: Mutex<Vec<(u64, String, Vec<f32>, serde_json::Value)>>,
+        inserts: AtomicUsize,
+        searches: AtomicUsize,
+    }
+
+    impl CountingBackend {
+        fn new(name: &'static str) -> Self {
+            Self {
+                name,
+                entries: Mutex::new(Vec::new()),
+                inserts: AtomicUsize::new(0),
+                searches: AtomicUsize::new(0),
+            }
+        }
+
+        fn insert_count(&self) -> usize {
+            self.inserts.load(Ordering::Relaxed)
+        }
+
+        fn search_count(&self) -> usize {
+            self.searches.load(Ordering::Relaxed)
+        }
+    }
+
+    impl VectorBackend for CountingBackend {
+        fn insert(
+            &self,
+            id: u64,
+            key: &str,
+            vector: &[f32],
+            metadata: serde_json::Value,
+        ) -> VectorResult<()> {
+            self.inserts.fetch_add(1, Ordering::Relaxed);
+            let mut entries = self.entries.lock().expect("entries lock");
+            entries.retain(|(eid, _, _, _)| *eid != id);
+            entries.push((id, key.to_owned(), vector.to_vec(), metadata));
+            Ok(())
+        }
+
+        fn search(&self, query: &[f32], k: usize) -> Vec<SearchResult> {
+            self.searches.fetch_add(1, Ordering::Relaxed);
+            let entries = self.entries.lock().expect("entries lock");
+            let mut scored: Vec<(f32, & (u64, String, Vec<f32>, serde_json::Value))> = entries
+                .iter()
+                .map(|e| {
+                    // Cosine similarity → distance = 1 - sim (match HnswBackend).
+                    let sim = cosine_sim(query, &e.2);
+                    (1.0 - sim, e)
+                })
+                .collect();
+            scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            scored
+                .into_iter()
+                .take(k)
+                .map(|(dist, e)| SearchResult::new(e.0, e.1.clone(), dist, e.3.clone()))
+                .collect()
+        }
+
+        fn len(&self) -> usize {
+            self.entries.lock().expect("entries lock").len()
+        }
+
+        fn contains(&self, id: u64) -> bool {
+            self.entries
+                .lock()
+                .expect("entries lock")
+                .iter()
+                .any(|(eid, _, _, _)| *eid == id)
+        }
+
+        fn remove(&self, id: u64) -> bool {
+            let mut entries = self.entries.lock().expect("entries lock");
+            let before = entries.len();
+            entries.retain(|(eid, _, _, _)| *eid != id);
+            before != entries.len()
+        }
+
+        fn flush(&self) -> VectorResult<()> {
+            Ok(())
+        }
+
+        fn backend_name(&self) -> &str {
+            self.name
+        }
+    }
+
+    fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
+        if a.is_empty() || b.is_empty() || a.len() != b.len() {
+            return 0.0;
+        }
+        let mut dot = 0.0f32;
+        let mut na = 0.0f32;
+        let mut nb = 0.0f32;
+        for i in 0..a.len() {
+            dot += a[i] * b[i];
+            na += a[i] * a[i];
+            nb += b[i] * b[i];
+        }
+        let denom = na.sqrt() * nb.sqrt();
+        if denom == 0.0 {
+            0.0
+        } else {
+            dot / denom
+        }
     }
 
     fn emit_test_impulse(iq: &ImpulseQueue, impulse_type: ImpulseType, ts: u64) -> u64 {
@@ -544,7 +680,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_queue_produces_no_work() {
-        let (_cg, _hnsw, _iq, _crs, demo) = make_loop();
+        let (_cg, _vector, _iq, _crs, demo) = make_loop();
         let result = demo.tick().await;
 
         assert_eq!(result.impulses_sensed, 0);
@@ -561,7 +697,7 @@ mod tests {
 
     #[tokio::test]
     async fn single_impulse_full_pipeline() {
-        let (cg, hnsw, iq, crs, demo) = make_loop();
+        let (cg, vector, iq, crs, demo) = make_loop();
 
         emit_test_impulse(&iq, ImpulseType::BeliefUpdate, 100);
 
@@ -576,18 +712,20 @@ mod tests {
         assert_eq!(result.crossrefs_added, 1);
         // Causal graph should have one node.
         assert_eq!(cg.node_count(), 1);
-        // HNSW should have one entry.
-        assert_eq!(hnsw.len(), 1);
+        // Vector backend should have one entry.
+        assert_eq!(vector.len(), 1);
         // CrossRefStore should have one entry.
         assert_eq!(crs.count(), 1);
         assert_eq!(demo.total_nodes_added(), 1);
+        // Default binding is HNSW.
+        assert_eq!(demo.vector_backend().backend_name(), "hnsw");
     }
 
     // ── Test 3: Multiple impulses in one tick — batch processing ──
 
     #[tokio::test]
     async fn multiple_impulses_batch_processing() {
-        let (cg, _hnsw, iq, crs, demo) = make_loop();
+        let (cg, _vector, iq, crs, demo) = make_loop();
 
         emit_test_impulse(&iq, ImpulseType::BeliefUpdate, 100);
         emit_test_impulse(&iq, ImpulseType::CoherenceAlert, 200);
@@ -612,7 +750,7 @@ mod tests {
             tick_budget_us: 0,
             ..DemocritusConfig::default()
         };
-        let (_cg, _hnsw, iq, _crs, demo) = make_loop_with_config(config);
+        let (_cg, _vector, iq, _crs, demo) = make_loop_with_config(config);
 
         // Emit several impulses.
         for i in 0..10 {
@@ -631,7 +769,7 @@ mod tests {
 
     #[tokio::test]
     async fn crossref_links_node_to_source() {
-        let (_cg, _hnsw, iq, crs, demo) = make_loop();
+        let (_cg, _vector, iq, crs, demo) = make_loop();
 
         let source_node = [42u8; 32];
         iq.emit(
@@ -657,7 +795,7 @@ mod tests {
 
     #[tokio::test]
     async fn tick_statistics_increment() {
-        let (_cg, _hnsw, iq, _crs, demo) = make_loop();
+        let (_cg, _vector, iq, _crs, demo) = make_loop();
 
         assert_eq!(demo.total_ticks(), 0);
         assert_eq!(demo.total_nodes_added(), 0);
@@ -677,26 +815,36 @@ mod tests {
         assert_eq!(demo.total_nodes_added(), 3);
     }
 
-    // ── Test 7: HNSW search returns relevant neighbors ──
+    // ── Test 7: Vector search returns relevant neighbors ──
 
     #[tokio::test]
-    async fn hnsw_returns_neighbors_on_second_tick() {
-        let (_cg, hnsw, iq, _crs, demo) = make_loop();
+    async fn vector_returns_neighbors_on_second_tick() {
+        let (_cg, vector, iq, _crs, demo) = make_loop();
 
         // First tick: insert a node.
         emit_test_impulse(&iq, ImpulseType::BeliefUpdate, 100);
         demo.tick().await;
-        assert_eq!(hnsw.len(), 1);
+        assert_eq!(vector.len(), 1);
 
         // Second tick: same impulse type/payload should find the first as neighbor.
         emit_test_impulse(&iq, ImpulseType::BeliefUpdate, 200);
         let result = demo.tick().await;
 
         assert_eq!(result.searches_performed, 1);
-        // The search should have found the node from tick 1.
-        // Whether an edge is added depends on the score vs threshold,
-        // but the search itself was performed.
-        assert_eq!(hnsw.search_count(), 2);
+        // Two inserts: one per tick.
+        assert_eq!(vector.len(), 2);
+        // Search finds the prior entry (wiring exercised).
+        let emb: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbeddingProvider::new(8));
+        let query = emb
+            .embed(&format!(
+                "{}:{}",
+                ImpulseType::BeliefUpdate,
+                serde_json::json!({"test": true})
+            ))
+            .await
+            .expect("mock embed");
+        let hits = vector.search(&query, 5);
+        assert!(!hits.is_empty(), "vector backend must return prior entries");
     }
 
     // ── Test 8: Causal edge type selection ──
@@ -799,14 +947,15 @@ mod tests {
         }
 
         let cg = Arc::new(CausalGraph::new());
-        let hnsw = Arc::new(HnswService::new(HnswServiceConfig::default()));
+        let vector: Arc<dyn VectorBackend> =
+            Arc::new(HnswBackend::new(HnswServiceConfig::default()));
         let iq = Arc::new(ImpulseQueue::new());
         let crs = Arc::new(CrossRefStore::new());
         let emb: Arc<dyn EmbeddingProvider> = Arc::new(FailingProvider);
 
         let demo = DemocritusLoop::new(
             Arc::clone(&cg),
-            Arc::clone(&hnsw),
+            Arc::clone(&vector),
             Arc::clone(&iq),
             Arc::clone(&crs),
             emb,
@@ -824,8 +973,8 @@ mod tests {
         assert_eq!(result.searches_performed, 0);
         // Node still added to causal graph.
         assert_eq!(cg.node_count(), 1);
-        // But no HNSW insertion (empty embedding skipped).
-        assert_eq!(hnsw.len(), 0);
+        // But no vector insertion (empty embedding skipped).
+        assert_eq!(vector.len(), 0);
         // Cross-ref still created.
         assert_eq!(result.crossrefs_added, 1);
     }
@@ -838,7 +987,7 @@ mod tests {
             max_impulses_per_tick: 2,
             ..DemocritusConfig::default()
         };
-        let (_cg, _hnsw, iq, _crs, demo) = make_loop_with_config(config);
+        let (_cg, _vector, iq, _crs, demo) = make_loop_with_config(config);
 
         // Emit 5 impulses.
         for i in 0..5 {
@@ -874,7 +1023,7 @@ mod tests {
             max_impulses_per_tick: 100,
             ..DemocritusConfig::default()
         };
-        let (cg, _hnsw, iq, _crs, demo) = make_loop_with_config(config);
+        let (cg, _vector, iq, _crs, demo) = make_loop_with_config(config);
 
         for i in 0..50 {
             emit_test_impulse(&iq, ImpulseType::BeliefUpdate, i);
@@ -975,14 +1124,15 @@ mod tests {
         }
 
         let cg = Arc::new(CausalGraph::new());
-        let hnsw = Arc::new(HnswService::new(HnswServiceConfig::default()));
+        let vector: Arc<dyn VectorBackend> =
+            Arc::new(HnswBackend::new(HnswServiceConfig::default()));
         let iq = Arc::new(ImpulseQueue::new());
         let crs = Arc::new(CrossRefStore::new());
         let emb: Arc<dyn EmbeddingProvider> = Arc::new(FailingProvider);
 
         let demo = DemocritusLoop::new(
             Arc::clone(&cg),
-            Arc::clone(&hnsw),
+            Arc::clone(&vector),
             Arc::clone(&iq),
             Arc::clone(&crs),
             emb,
@@ -1003,8 +1153,8 @@ mod tests {
         // Cross-refs still created.
         assert_eq!(result.crossrefs_added, 5);
         assert_eq!(crs.count(), 5);
-        // No HNSW insertions (empty embeddings skipped).
-        assert_eq!(hnsw.len(), 0);
+        // No vector insertions (empty embeddings skipped).
+        assert_eq!(vector.len(), 0);
     }
 
     #[tokio::test]
@@ -1030,14 +1180,15 @@ mod tests {
         }
 
         let cg = Arc::new(CausalGraph::new());
-        let hnsw = Arc::new(HnswService::new(HnswServiceConfig::default()));
+        let vector: Arc<dyn VectorBackend> =
+            Arc::new(HnswBackend::new(HnswServiceConfig::default()));
         let iq = Arc::new(ImpulseQueue::new());
         let crs = Arc::new(CrossRefStore::new());
         let emb: Arc<dyn EmbeddingProvider> = Arc::new(FailingProvider);
 
         let demo = DemocritusLoop::new(
             Arc::clone(&cg),
-            Arc::clone(&hnsw),
+            Arc::clone(&vector),
             Arc::clone(&iq),
             Arc::clone(&crs),
             emb,
@@ -1055,14 +1206,14 @@ mod tests {
 
     #[tokio::test]
     async fn multiple_sequential_ticks_accumulate_state() {
-        let (cg, hnsw, iq, crs, demo) = make_loop();
+        let (cg, vector, iq, crs, demo) = make_loop();
 
         // Tick 1: single impulse.
         emit_test_impulse(&iq, ImpulseType::BeliefUpdate, 100);
         let r1 = demo.tick().await;
         assert_eq!(r1.impulses_sensed, 1);
         let nodes_after_1 = cg.node_count();
-        let hnsw_after_1 = hnsw.len();
+        let vector_after_1 = vector.len();
 
         // Tick 2: two more impulses.
         emit_test_impulse(&iq, ImpulseType::CoherenceAlert, 200);
@@ -1070,7 +1221,7 @@ mod tests {
         let r2 = demo.tick().await;
         assert_eq!(r2.impulses_sensed, 2);
         assert_eq!(cg.node_count(), nodes_after_1 + 2);
-        assert_eq!(hnsw.len(), hnsw_after_1 + 2);
+        assert_eq!(vector.len(), vector_after_1 + 2);
 
         // Tick 3: three more.
         emit_test_impulse(&iq, ImpulseType::EdgeConfirmed, 400);
@@ -1093,12 +1244,12 @@ mod tests {
             correlation_threshold: 0.0, // accept all as correlated
             ..DemocritusConfig::default()
         };
-        let (cg, hnsw, iq, _, demo) = make_loop_with_config(config);
+        let (cg, vector, iq, _, demo) = make_loop_with_config(config);
 
         // Tick 1: insert a node.
         emit_test_impulse(&iq, ImpulseType::BeliefUpdate, 100);
         demo.tick().await;
-        assert_eq!(hnsw.len(), 1);
+        assert_eq!(vector.len(), 1);
 
         // Tick 2: same type should find tick-1's node as neighbor.
         emit_test_impulse(&iq, ImpulseType::BeliefUpdate, 200);
@@ -1217,7 +1368,7 @@ mod tests {
     /// "looks alive but does not join back" class.
     #[tokio::test]
     async fn chain_seq_joinable_on_hnsw_node_and_crossref() {
-        let (cg, hnsw, iq, crs, demo) = make_loop();
+        let (cg, vector, iq, crs, demo) = make_loop();
         const SEQ: u64 = 42_001;
 
         emit_impulse_with_chain_seq(&iq, ImpulseType::BeliefUpdate, SEQ, "conv-weft-642");
@@ -1226,7 +1377,7 @@ mod tests {
         assert_eq!(result.impulses_sensed, 1);
         assert_eq!(result.crossrefs_added, 1);
         assert_eq!(cg.node_count(), 1);
-        assert_eq!(hnsw.len(), 1);
+        assert_eq!(vector.len(), 1);
 
         // Causal node metadata carries chain_seq.
         let node_ids = cg.node_ids();
@@ -1238,10 +1389,8 @@ mod tests {
             "causal node must join to atom spine via chain_seq"
         );
 
-        // HNSW entry metadata carries the same chain_seq (join key).
-        // Search with a zero vector still returns the sole entry under mock
-        // embeddings when we query after insert; use a real embed of the
-        // same shape as the loop (type:payload).
+        // Vector backend entry metadata carries the same chain_seq (join key).
+        // Use a real embed of the same shape as the loop (type:payload).
         let emb: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbeddingProvider::new(8));
         let query = emb
             .embed(&format!(
@@ -1251,21 +1400,21 @@ mod tests {
             ))
             .await
             .expect("mock embed");
-        let hits = hnsw.search(&query, 5);
+        let hits = vector.search(&query, 5);
         assert!(
             !hits.is_empty(),
-            "HNSW must return the inserted brain entry"
+            "vector backend must return the inserted brain entry"
         );
         let meta = &hits[0].metadata;
         assert_eq!(
             meta.get("chain_seq").and_then(|v| v.as_u64()),
             Some(SEQ),
-            "HNSW metadata must carry real chain_seq (not hardcoded 0)"
+            "vector metadata must carry real chain_seq (not hardcoded 0)"
         );
         assert_eq!(
             meta.get("causal_node_id").and_then(|v| v.as_u64()),
             Some(node_ids[0]),
-            "HNSW metadata should point back at the causal node id"
+            "vector metadata should point back at the causal node id"
         );
 
         // CrossRef chain_seq must match.
@@ -1285,12 +1434,12 @@ mod tests {
             correlation_threshold: 0.0, // force edges on any neighbor hit
             ..DemocritusConfig::default()
         };
-        let (cg, hnsw, iq, _, demo) = make_loop_with_config(config);
+        let (cg, vector, iq, _, demo) = make_loop_with_config(config);
 
         // Seed a neighbor with a known sequence.
         emit_impulse_with_chain_seq(&iq, ImpulseType::BeliefUpdate, 100, "conv-edge");
         demo.tick().await;
-        assert_eq!(hnsw.len(), 1);
+        assert_eq!(vector.len(), 1);
 
         // Second tick: same impulse type → same mock embedding → neighbor hit.
         const SEQ2: u64 = 101;
@@ -1324,5 +1473,64 @@ mod tests {
                 "causal edge must carry the impulse chain_seq (not hardcoded 0)"
             );
         }
+    }
+
+    // ── WEFT-124: VectorBackend wiring ───────────────────────────────
+
+    /// Backend swap is wiring-only: DemocritusLoop talks exclusively to
+    /// `Arc<dyn VectorBackend>`. A non-HNSW counting backend still runs
+    /// the full Sense→Embed→Search→Update→Commit path.
+    #[tokio::test]
+    async fn backend_swap_is_wiring_only() {
+        let cg = Arc::new(CausalGraph::new());
+        let counter = Arc::new(CountingBackend::new("counting-mock"));
+        let vector: Arc<dyn VectorBackend> = counter.clone();
+        let iq = Arc::new(ImpulseQueue::new());
+        let crs = Arc::new(CrossRefStore::new());
+        let emb: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbeddingProvider::new(8));
+
+        let demo = DemocritusLoop::new(
+            Arc::clone(&cg),
+            Arc::clone(&vector),
+            Arc::clone(&iq),
+            Arc::clone(&crs),
+            emb,
+            DemocritusConfig {
+                correlation_threshold: 0.0,
+                ..DemocritusConfig::default()
+            },
+        );
+
+        assert_eq!(demo.vector_backend().backend_name(), "counting-mock");
+
+        // Tick 1: insert via the swapped backend.
+        emit_test_impulse(&iq, ImpulseType::BeliefUpdate, 100);
+        let r1 = demo.tick().await;
+        assert_eq!(r1.impulses_sensed, 1);
+        assert_eq!(r1.searches_performed, 1);
+        assert_eq!(counter.insert_count(), 1);
+        assert_eq!(counter.search_count(), 1);
+        assert_eq!(vector.len(), 1);
+        assert_eq!(cg.node_count(), 1);
+
+        // Tick 2: search should hit the prior entry through the same backend.
+        emit_test_impulse(&iq, ImpulseType::BeliefUpdate, 200);
+        let r2 = demo.tick().await;
+        assert_eq!(r2.searches_performed, 1);
+        assert_eq!(counter.insert_count(), 2);
+        assert_eq!(counter.search_count(), 2);
+        assert_eq!(vector.len(), 2);
+        // With threshold=0 and a prior neighbor, an edge should form.
+        assert!(
+            r2.edges_added >= 1 || demo.total_edges_added() >= 1,
+            "swapped backend neighbor hit should produce causal edges"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_binding_is_hnsw_backend() {
+        let (_cg, vector, _iq, _crs, demo) = make_loop();
+        assert_eq!(vector.backend_name(), "hnsw");
+        assert_eq!(demo.vector_backend().backend_name(), "hnsw");
     }
 }
