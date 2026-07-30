@@ -35,8 +35,11 @@ Recorded so agents say "I don't know" instead of improvising.
 - **esp-hal MSRV** and a per-chip **architecture/status matrix** — neither the
   book nor the fetched README published them. Read `rust-version` in the crate
   manifest.
-- **`esp-radio` 0.17 → 1.0.0-beta migration** — changelog unread. The one bump
-  in the drift table that is not routine.
+- **`esp-radio` 0.17 → 1.0.0-beta migration** — **READ (WEFT-668)**. Guides
+  `MIGRATING-0.17.0.md` + `MIGRATING-0.18.0.md` + CHANGELOG summarised in
+  `docs/plans/wave-0c-WEFT-668-result.md`. Decision: NO-GO on beta this wave;
+  phase-2 must rewrite `net.rs` (init/Controller/Interfaces removed). Gap
+  closed for *reading*; gap remains for *applying* the migration.
 - **`esp-bootloader-esp-idf` OTA API surface** (confirm/rollback calls) —
   unread. Do not infer from ESP-IDF C by analogy.
 - **Per-subcommand `espflash` flags** (`--chip`, `--port`, `--bootloader`,
@@ -44,8 +47,8 @@ Recorded so agents say "I don't know" instead of improvising.
   captured, exact flag spellings not. Use `espflash <subcmd> --help`.
 - **`esp-generate` full option list** — README's list is not guaranteed
   exhaustive. `esp-generate list-options` is the authority.
-- **Embassy and esp-idf-* upstream currency** — not published on the Espressif
-  index, so not version-checked. Embassy/std-side drift is unknown, not zero.
+- **Embassy and esp-idf-* upstream currency** — first-checked 2026-07-30
+  (WEFT-668) via crates.io; see anchors §2.1. Not on Espressif docs index.
 - **`embedded-hal` 1.0.0 release date** — the docs.rs render's date looked like a
   build artifact; deliberately not recorded.
 - **Peripherals we have never touched**: ADC/I²S capture depth,

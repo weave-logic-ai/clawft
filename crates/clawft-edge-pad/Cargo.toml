@@ -24,6 +24,16 @@ publish = false
 # breaking changes to `unstable` APIs in MINOR releases; caret ^1.0.0
 # would permit those minors. Upstream recommends ~ for unstable users.
 # Do not revert to caret while the `unstable` feature is enabled.
+#
+# WEFT-668 (2026-07-30): set-wise currency.
+#   BUMPED: esp-println 0.17.0, esp-backtrace 0.19.0, esp-bootloader 0.5
+#   HELD:   esp-hal ~1.0, esp-rtos 0.2, esp-alloc 0.9, esp-radio ~0.17
+# Blockers for the remaining one-minors (all require co-moving radio):
+#   - esp-hal 1.1 pulls xtensa-lx-rt 0.22; esp-radio 0.17 pins 0.21
+#     (`links = "xtensa-lx-rt"` forbids dual versions)
+#   - esp-rtos 0.3 needs esp-radio-rtos-driver ^0.3; radio 0.17 needs ^0.2
+#   - esp-alloc 0.10 is outside radio 0.17's `^0.9.0` (default feature)
+# Phase 2 = esp-radio 0.18 / 1.0.0-beta + full stack; see wave-0c result.
 esp-hal = { version = "~1.0", default-features = true, features = [
     "esp32s3",
     "unstable",
@@ -31,9 +41,9 @@ esp-hal = { version = "~1.0", default-features = true, features = [
 ] }
 esp-rtos = { version = "0.2.0", features = ["esp32s3", "embassy", "esp-radio"] }
 esp-alloc = "0.9.0"
-esp-println = { version = "0.16.1", features = ["esp32s3", "log-04"] }
-esp-backtrace = { version = "0.18.1", features = ["esp32s3", "panic-handler", "println"] }
-esp-bootloader-esp-idf = { version = "0.4", features = ["esp32s3"] }
+esp-println = { version = "0.17.0", features = ["esp32s3", "log-04"] }
+esp-backtrace = { version = "0.19.0", features = ["esp32s3", "panic-handler", "println"] }
+esp-bootloader-esp-idf = { version = "0.5", features = ["esp32s3"] }
 log = "0.4"
 
 # ── Embassy async runtime ────────────────────────────────────────────
@@ -56,6 +66,9 @@ embedded-hal-bus = "0.3"
 # Needed for substrate.publish over JSON-RPC.
 # WEFT-667: same tilde pin as esp-hal — `unstable` feature enabled;
 # minor bumps may break unstable radio APIs. Keep ~ while unstable.
+# WEFT-668: NO-GO on 1.0.0-beta.0 (and on 0.18) this wave — major API
+# migration (init()/Controller removed, Interfaces → singletons, async-
+# only control plane). Stay on ~0.17 until phase-2 migration + HW flash.
 esp-radio = { version = "~0.17", features = [
     "esp32s3",
     "wifi",

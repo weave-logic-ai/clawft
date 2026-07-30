@@ -34,66 +34,73 @@ Minor note: those header comments reference a stale absolute path
 (`/home/aepod/dev/clawft/Cargo.toml`) from a different machine. Harmless, but
 don't trust paths in comments.
 
-## 2. Drift table — our pins vs upstream current (2026-07-29)
+## 2. Drift table — our pins vs upstream current (2026-07-30, WEFT-668)
 
-Upstream column read from `https://docs.espressif.com/projects/rust/`.
-`[src: esp-rust-docs-index | upstream-official]`
+Upstream column re-confirmed from `https://docs.espressif.com/projects/rust/`
+plus crates.io max_version where the index lags (esp-hal docs index = 1.1.0;
+crates.io max = **1.1.1**).
+`[src: esp-rust-docs-index | crates.io | upstream-official]`
 
 | Crate | `clawft-edge-pad` pin | Upstream current | Delta |
 |---|---|---|---|
-| `esp-hal` | `1.0.0` | **1.1.0** | one minor |
-| `esp-rtos` | `0.2.0` | **0.3.0** | one minor |
-| `esp-alloc` | `0.9.0` | **0.10.0** | one minor |
-| `esp-println` | `0.16.1` | **0.17.0** | one minor |
-| `esp-backtrace` | `0.18.1` | **0.19.0** | one minor |
-| `esp-bootloader-esp-idf` | `0.4` | **0.5.0** | one minor |
-| `esp-radio` | `0.17.0` | **1.0.0-beta.0** | ⚠ **major line** |
-| `esp-config` | not pinned | 0.7.0 | unused |
+| `esp-hal` | `~1.0` (lock 1.0.0) | **1.1.1** (docs 1.1.0) | one minor — **held** |
+| `esp-rtos` | `0.2.0` | **0.3.0** | one minor — **held** |
+| `esp-alloc` | `0.9.0` | **0.10.0** | one minor — **held** |
+| `esp-println` | **0.17.0** | **0.17.0** | current ✅ (WEFT-668) |
+| `esp-backtrace` | **0.19.0** | **0.19.0** | current ✅ (WEFT-668) |
+| `esp-bootloader-esp-idf` | **0.5** | **0.5.0** | current ✅ (WEFT-668) |
+| `esp-radio` | `~0.17` (lock 0.17.0) | **1.0.0-beta.0** (+ 0.18.0) | ⚠ **major line — NO-GO** |
+| `esp-config` | transitive (0.6.1 + 0.7.0) | 0.7.0 | dual after peripheral bump |
 | `esp-storage` | not used | 0.9.0 | unused |
-| `esp-sync` | not used | 0.2.1 | unused |
+| `esp-sync` | transitive (0.1.1 + 0.2.1) | 0.2.1 | dual after peripheral bump |
 
-**Reading**: every `esp-*` pin is *exactly* one minor behind. That is the
-signature of a coherent set-wise pin taken at one upstream moment — a good
-practice — and it means the upgrade should be evaluated as **one atomic set**,
-not crate by crate.
+**Reading (post WEFT-668)**: the "all one minor behind" uniformity is broken
+intentionally. Three peripheral crates (`esp-println` / `esp-backtrace` /
+`esp-bootloader-esp-idf`) were bumped to upstream. The remaining four
+(`esp-hal`, `esp-rtos`, `esp-alloc`, `esp-radio`) form a **radio-coupled set**
+that cannot move without co-moving `esp-radio` past 0.17:
 
-**⚠ The `esp-radio` exception**: 0.17.0 → 1.0.0-beta.0 is a major-line move,
-not a routine bump. Its changelog was **not read** during this corpus build.
-Anyone advising "just bump them all" must read the esp-radio migration notes
-first. Also note that jumping *to a beta* is a deliberate risk decision, not a
-neutral update.
+| Blocker | Why phase-1 cannot take them |
+|---|---|
+| `esp-hal` 1.1 | pulls `xtensa-lx-rt ^0.22`; radio 0.17 needs `^0.21` — `links` conflict |
+| `esp-rtos` 0.3 | needs `esp-radio-rtos-driver ^0.3`; radio 0.17 needs `^0.2` |
+| `esp-alloc` 0.10 | outside radio 0.17 default-feature `esp-alloc ^0.9.0` (`<0.10`) |
+| `esp-radio` 1.0-beta | major API rewrite; beta risk — see §2.1 |
 
-Embassy side (not published on the Espressif index, so **not** version-checked
-during this build — treat as unknown-drift): embassy-executor `0.9.0`,
-embassy-time `0.5.1`, embassy-sync `0.8`, embassy-net `0.9.0`.
+**⚠ The `esp-radio` exception (resolved as NO-GO for this wave)**:
+0.17.0 → 0.18.0 → 1.0.0-beta.0. Migration guides read 2026-07-30
+(`MIGRATING-0.17.0.md`, `MIGRATING-0.18.0.md`, CHANGELOG). Decision: **do not
+adopt the beta** (or even 0.18) without a dedicated phase-2 ticket that
+rewrites `net.rs` and flashes CrowPanel. Summary in
+`docs/plans/wave-0c-WEFT-668-result.md`.
 
-std side: esp-idf-svc `0.52` / esp-idf-hal `0.46` / esp-idf-sys `0.37` /
-embedded-svc `0.29`, with the coherent matrix documented in the manifest
-(`svc 0.52 ⇒ hal ^0.46 ⇒ sys ^0.37`). Also not version-checked upstream.
+### 2.1 Embassy + esp-idf currency (first check, 2026-07-30)
 
-## 3. Open finding: caret-pinned `unstable` dependencies
+| Crate | Our pin | crates.io max | Delta |
+|---|---|---|---|
+| `embassy-executor` | `0.9.0` | **0.10.0** | one minor (rtos 0.3 wants `^0.10`) |
+| `embassy-time` | `0.5.1` | **0.5.1** | current |
+| `embassy-sync` | `0.8` | **0.8.0** | current |
+| `embassy-net` | `0.9.0` | **0.9.1** | patch behind |
+| `esp-idf-svc` | `0.52` | **0.52.1** | patch behind |
+| `esp-idf-hal` | `0.46` | **0.46.2** | patch behind |
+| `esp-idf-sys` | `0.37` | **0.37.2** | patch behind |
+| `embedded-svc` | `0.29` | **0.29.0** | current |
 
-`clawft-edge-pad` enables the `unstable` feature on both `esp-hal` and
-`esp-radio` while caret-pinning them (`"1.0.0"`, `"0.17.0"`). esp-hal's own
-policy is that **unstable changes ship in minor releases**, and upstream
-therefore recommends tilde pinning (`~1.0`) for `unstable` consumers.
+std-side matrix in `clawft-edge-pad-idf` remains coherent
+(`svc 0.52 ⇒ hal ^0.46 ⇒ sys ^0.37`). Not bumped in WEFT-668.
 
-Since esp-hal 1.1.0 exists, a `cargo update` is currently permitted to pull a
-minor bump that may break the unstable API this firmware relies on.
+## 3. Caret-pinned `unstable` — **resolved (WEFT-667)**
 
-`[src: esp-hal-repo | upstream-official]` + `[src: in-repo-edge-pad]`
-
-**Recommended remediation** (one-character-class change, no behaviour change):
+WEFT-667 applied tilde pins:
 
 ```toml
 esp-hal  = { version = "~1.0", ... }
 esp-radio = { version = "~0.17", ... }
 ```
 
-This has **not** been applied — it is a finding, and it belongs in a Plane work
-item per the repo's tracker rule. Note also that a `Cargo.lock` is what actually
-protects the build today; the tilde pin protects it from a careless `cargo
-update`.
+(same for `lgfx-bus-rgb-rs` esp-hal). Keep `~` while `unstable` is enabled.
+Do **not** flip to `~1.1` until the radio-coupled set moves (see §2).
 
 ## 4. Hard-won hardware facts (do not re-derive these)
 
