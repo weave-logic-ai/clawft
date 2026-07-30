@@ -47,8 +47,8 @@
 //! After that cut, dual-emit flags default to off and the legacy open
 //! path is rejected. See `.planning/ontology/ADOPTION.md` §16.
 //!
-//! Recorded by WEFT-438. Full mic adapter cutover (pcm topic + drop
-//! legacy-only open) is WEFT-418.
+//! Recorded by WEFT-438. Full mic adapter cutover (pcm windowed-Append
+//! topic under the same node-scoped tree) is WEFT-418.
 
 use std::fmt;
 
@@ -321,6 +321,38 @@ pub fn mic_level_emit_plan(node_id: &str, dual_emit_legacy: bool) -> MicLevelEmi
     }
 }
 
+/// Paths a mic PCM window emitter should write (WEFT-418).
+///
+/// Canonical `pcm_chunk` is always present and is consumed as a
+/// windowed-Append topic. Legacy flat dual-emit mirrors the level plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MicPcmEmitPlan {
+    /// Canonical pcm_chunk path (always present).
+    pub pcm: String,
+    /// Legacy flat pcm_chunk path when dual-emit is enabled.
+    pub legacy: Option<String>,
+}
+
+/// Build the dual-emit plan for a mic PCM window under `node_id`.
+///
+/// When `dual_emit_legacy` is true, the plan includes
+/// [`LEGACY_MIC_PCM_PATH`]. After [`LEGACY_FLAT_REMOVAL_VERSION`],
+/// callers should pass `false`.
+pub fn mic_pcm_emit_plan(node_id: &str, dual_emit_legacy: bool) -> MicPcmEmitPlan {
+    MicPcmEmitPlan {
+        pcm: mic_pcm_chunk_path(node_id),
+        legacy: dual_emit_legacy.then(|| LEGACY_MIC_PCM_PATH.to_string()),
+    }
+}
+
+/// Retained window length for the mic `pcm_chunk` Append topic.
+///
+/// At 2 Hz (500 ms windows) this is ~4 s of recent audio — enough for
+/// a short barge-in buffer without unbounded growth. Substrate trims
+/// the front of the array on each Append when this is registered via
+/// [`crate::adapter::TopicDecl::max_len`].
+pub const MIC_PCM_WINDOW_MAX_LEN: usize = 8;
+
 /// Default dual-emit flag for new adapters: `true` until the removal
 /// version ships. Flip this constant (and re-release) to turn dual-emit
 /// off repo-wide without chasing call sites.
@@ -345,6 +377,32 @@ pub fn is_mic_level_open_topic(topic: &str, node_id: &str) -> bool {
         } => sensor == SENSOR_MIC && (leaf == LEAF_SUMMARY || leaf == LEAF_RMS),
         _ => false,
     }
+}
+
+/// True when `topic` is an accepted open-target for the mic PCM stream
+/// (legacy flat **or** any node-scoped `…/sensor/mic/pcm_chunk`).
+pub fn is_mic_pcm_open_topic(topic: &str, node_id: &str) -> bool {
+    if topic == LEGACY_MIC_PCM_PATH {
+        return true;
+    }
+    if topic == mic_pcm_chunk_path(node_id) {
+        return true;
+    }
+    match classify_sensor_path(topic) {
+        SensorPathKind::Canonical {
+            sensor,
+            leaf,
+            ..
+        } => sensor == SENSOR_MIC && leaf == LEAF_PCM_CHUNK,
+        _ => false,
+    }
+}
+
+/// True when `topic` is any accepted mic open target (level, pcm, or
+/// the shared producer surface). Healthcheck is checked separately by
+/// the adapter.
+pub fn is_mic_open_topic(topic: &str, node_id: &str) -> bool {
+    is_mic_level_open_topic(topic, node_id) || is_mic_pcm_open_topic(topic, node_id)
 }
 
 #[cfg(test)]
@@ -484,10 +542,46 @@ mod tests {
     }
 
     #[test]
+    fn mic_pcm_emit_plan_dual_and_single() {
+        let dual = mic_pcm_emit_plan("host-local", true);
+        assert_eq!(dual.pcm, HOST_LOCAL_MIC_PCM_CHUNK);
+        assert_eq!(dual.legacy.as_deref(), Some(LEGACY_MIC_PCM_PATH));
+
+        let single = mic_pcm_emit_plan("n-abc", false);
+        assert_eq!(single.pcm, "substrate/n-abc/sensor/mic/pcm_chunk");
+        assert!(single.legacy.is_none());
+    }
+
+    #[test]
+    fn is_mic_pcm_open_topic_accepts_legacy_and_canonical() {
+        assert!(is_mic_pcm_open_topic(LEGACY_MIC_PCM_PATH, "host-local"));
+        assert!(is_mic_pcm_open_topic(HOST_LOCAL_MIC_PCM_CHUNK, "host-local"));
+        assert!(is_mic_pcm_open_topic(
+            "substrate/n-other/sensor/mic/pcm_chunk",
+            "host-local"
+        ));
+        assert!(!is_mic_pcm_open_topic(HOST_LOCAL_MIC_SUMMARY, "host-local"));
+        assert!(!is_mic_pcm_open_topic(LEGACY_MIC_PATH, "host-local"));
+    }
+
+    #[test]
+    fn is_mic_open_topic_covers_level_and_pcm() {
+        assert!(is_mic_open_topic(HOST_LOCAL_MIC_SUMMARY, "host-local"));
+        assert!(is_mic_open_topic(HOST_LOCAL_MIC_PCM_CHUNK, "host-local"));
+        assert!(is_mic_open_topic(LEGACY_MIC_PATH, "host-local"));
+        assert!(is_mic_open_topic(LEGACY_MIC_PCM_PATH, "host-local"));
+        assert!(!is_mic_open_topic(
+            "substrate/meta/adapter/mic/healthcheck",
+            "host-local"
+        ));
+    }
+
+    #[test]
     fn removal_constants_are_documented() {
         // Pin so a silent edit of the removal target shows up in review.
         assert_eq!(LEGACY_FLAT_REMOVAL_VERSION, "0.9.0");
         assert_eq!(LEGACY_FLAT_REMOVAL_DATE, "2026-10-01");
         assert!(DEFAULT_DUAL_EMIT_LEGACY);
+        assert_eq!(MIC_PCM_WINDOW_MAX_LEN, 8);
     }
 }

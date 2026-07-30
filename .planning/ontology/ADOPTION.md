@@ -327,29 +327,45 @@ Examples: `substrate/sensor/mic`, `substrate/sensor/mic/pcm_chunk`.
 
 | Mechanism | Behaviour | Removal |
 |---|---|---|
-| Dual-emit from `MicrophoneAdapter` | Writes summary + rms always; also writes legacy flat when `DEFAULT_DUAL_EMIT_LEGACY` is true | Flip default / ship 0.9.0 |
-| Legacy open topic | `open("substrate/sensor/mic")` still accepted | Reject after 0.9.0 |
+| Dual-emit from `MicrophoneAdapter` | Writes summary + rms + **pcm_chunk** always; also writes legacy flat level + legacy pcm when `DEFAULT_DUAL_EMIT_LEGACY` is true | Flip default / ship 0.9.0 |
+| Legacy open topic | `open("substrate/sensor/mic")` and `open("substrate/sensor/mic/pcm_chunk")` still accepted | Reject after 0.9.0 |
 | `legacy_to_canonical` helper | Maps flat → node-scoped under a chosen node id | Kept as utility |
 | Whisper `SUBSTRATE_PCM_INPUT_PATH` | Marked `#[deprecated]`; prefer `pcm_chunk_input_path(node)` | Remove constant at 0.9.0 |
 
 **Why not a hard cut with zero shim?** JOURNALED-NODE-ESP32 §7 preferred a
 hard cut on the ESP32 write path. Host-local adapters and fixtures still
-bind the flat path; a one-minor dual-emit window lets WEFT-418 (mic pcm
-topic) and task 24 (per-node write gate) land without breaking in-tree
-surfaces mid-0.8.x. ESP32 firmware continues to publish node-scoped only
-(no flat dual-emit on-device).
+bind the flat path; a one-minor dual-emit window lets task 24 (per-node
+write gate) and remaining surface migrations land without breaking
+in-tree consumers mid-0.8.x. ESP32 firmware continues to publish
+node-scoped only (no flat dual-emit on-device).
+
+### WEFT-418 cutover (2026-07-30) — mic pcm windowed-Append
+
+`MicrophoneAdapter` now fully owns the node-scoped mic tree:
+
+| Path | Verb | Notes |
+|---|---|---|
+| `substrate/<node>/sensor/mic/summary` | Replace | Level object (`rms_db`, `peak_db`, …) |
+| `substrate/<node>/sensor/mic/rms` | Replace | Scalar for tray-chip discovery |
+| `substrate/<node>/sensor/mic/pcm_chunk` | **Append** (windowed) | Ring of length `MIC_PCM_WINDOW_MAX_LEN` (8 ≈ 4 s at 2 Hz); `BufferPolicy::DropOldest` |
+
+PCM chunk shape matches `JOURNALED-SENSOR-MIC.md` §2.2 and the whisper
+`PcmChunk` wire form (`data`/`pcm_b64` base64 s16le, `sample_rate`,
+`channels`, `seq`, `chunk_ms`). Legacy dual-emit also Appends to
+`substrate/sensor/mic/pcm_chunk` while the shim is on.
 
 ### Code owners
 
 - Path builders / classify / dual-emit plan:
   `crates/clawft-substrate/src/sensor_paths.rs`
-- First migrated emitter: `crates/clawft-substrate/src/mic.rs`
+- First fully-migrated emitter (summary + pcm):
+  `crates/clawft-substrate/src/mic.rs` (WEFT-418)
 - Whisper consumer helper: `clawft_service_whisper::pcm_chunk_input_path`
 - Planning sources: `.planning/sensors/JOURNALED-SENSOR-MIC.md`,
   `JOURNALED-NODE-ESP32.md` §7
 
 ### Unblocks
 
-- WEFT-418 — mic adapter pcm topic under node-scoped paths
+- ~~WEFT-418 — mic adapter pcm topic under node-scoped paths~~ **done**
 - Task 24 / per-node write gate on `substrate.publish`
 - Consistent ACL (ADR-057) + signed-envelope (ADR-063) assumptions
