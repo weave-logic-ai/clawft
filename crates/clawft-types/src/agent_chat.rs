@@ -283,6 +283,119 @@ pub struct AgentTurnRecordResult {
     pub recorded: usize,
 }
 
+// ── agent.chat_stream (WEFT-253) ─────────────────────────────────
+//
+// Progressive companion to `agent.chat`. Same request params; the
+// daemon publishes incremental frames at
+// `substrate/_derived/chat/<conv_id>/stream` while the turn runs, and
+// the RPC response is the final [`AgentChatResult`] (identical shape
+// to `agent.chat`). Panels poll the stream path (or relay it via
+// substrate snapshot) to render tokens as they land, then apply the
+// final response when the oneshot reply arrives.
+//
+// Native + WASM both work because the progressive channel is the
+// substrate (already polled on both transports); the RPC itself stays
+// request/response — no connection-takeover required on the panel
+// wire. True per-token LLM streaming lands later as a daemon-side
+// enhancement that writes the same frame shape mid-generation.
+
+/// Substrate path for the progressive stream frame of a conversation.
+///
+/// Sibling of `status` / `meta` under the same `_derived/chat/<conv>/`
+/// parent so the daemon's existing `chat` `DerivedWriteGrant` covers
+/// it. Heartbeat's 2s `Replace` at `status` never clobbers stream
+/// text.
+pub fn chat_stream_path(conv_id: &str) -> String {
+    format!("substrate/_derived/chat/{conv_id}/stream")
+}
+
+/// One progressive frame written to [`chat_stream_path`].
+///
+/// The panel treats `text` as the **accumulated** assistant draft
+/// (not a delta), so a missed frame is self-healing — the next frame
+/// carries the full string so far. `seq` is a monotonic counter the
+/// panel can use to ignore stale out-of-order reads.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentChatStreamFrame {
+    /// Accumulated assistant text so far (empty while thinking /
+    /// tool-running before the first token).
+    #[serde(default)]
+    pub text: String,
+    /// Coarse phase for the heartbeat-style status label:
+    /// `"thinking"` / `"generating"` / `"done"` / `"error"`.
+    pub phase: String,
+    /// Monotonic frame counter within this turn.
+    pub seq: u64,
+    /// True once the turn has terminated (success or error). The
+    /// panel freezes the draft and waits for the RPC reply (or
+    /// surfaces `error` when set).
+    #[serde(default)]
+    pub done: bool,
+    /// Optional tool name when `phase == "tool"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    /// Set when `done && phase == "error"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Wall-clock ms the frame was published (panel age label).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts_ms: Option<u64>,
+}
+
+impl AgentChatStreamFrame {
+    /// Build a "thinking / waiting for model" frame.
+    pub fn thinking(seq: u64) -> Self {
+        Self {
+            text: String::new(),
+            phase: "thinking".into(),
+            seq,
+            done: false,
+            tool_name: None,
+            error: None,
+            ts_ms: None,
+        }
+    }
+
+    /// Build a progressive draft frame (`phase = "generating"`).
+    pub fn generating(seq: u64, text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            phase: "generating".into(),
+            seq,
+            done: false,
+            tool_name: None,
+            error: None,
+            ts_ms: None,
+        }
+    }
+
+    /// Build the terminal success frame (full text, `done = true`).
+    pub fn done_ok(seq: u64, text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            phase: "done".into(),
+            seq,
+            done: true,
+            tool_name: None,
+            error: None,
+            ts_ms: None,
+        }
+    }
+
+    /// Build the terminal error frame.
+    pub fn done_err(seq: u64, error: impl Into<String>) -> Self {
+        Self {
+            text: String::new(),
+            phase: "error".into(),
+            seq,
+            done: true,
+            tool_name: None,
+            error: Some(error.into()),
+            ts_ms: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,6 +447,34 @@ mod tests {
         assert!(json.contains("\"tool_calls\":[]"));
         // Empty spawned_tasks must not appear on the wire (backward-compat).
         assert!(!json.contains("\"spawned_tasks\""));
+    }
+
+    #[test]
+    fn chat_stream_path_is_sibling_of_status() {
+        let p = chat_stream_path("panel-1");
+        assert_eq!(p, "substrate/_derived/chat/panel-1/stream");
+        assert!(p.starts_with("substrate/_derived/chat/"));
+        assert!(p.ends_with("/stream"));
+    }
+
+    #[test]
+    fn stream_frame_round_trips_and_helpers() {
+        let f = AgentChatStreamFrame::generating(3, "hel");
+        let v = serde_json::to_value(&f).unwrap();
+        assert_eq!(v["phase"], "generating");
+        assert_eq!(v["text"], "hel");
+        assert_eq!(v["seq"], 3);
+        assert_eq!(v["done"], false);
+        let back: AgentChatStreamFrame = serde_json::from_value(v).unwrap();
+        assert_eq!(back, f);
+
+        let done = AgentChatStreamFrame::done_ok(4, "hello");
+        assert!(done.done);
+        assert_eq!(done.phase, "done");
+
+        let err = AgentChatStreamFrame::done_err(5, "boom");
+        assert!(err.done);
+        assert_eq!(err.error.as_deref(), Some("boom"));
     }
 
     #[test]

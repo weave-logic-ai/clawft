@@ -20,9 +20,12 @@
 //!
 //! ## Scope cuts (deliberate)
 //!
-//! - No streaming. The daemon ships V1 sync-only; the future
-//!   `agent.chat_stream` RPC (WEFT-253, deferred to chat-agent v1.1)
-//!   will land as a sibling verb, not a breaking change here.
+//! - Streaming lands via `agent.chat_stream` (WEFT-253): the panel fires
+//!   that verb and polls `substrate/_derived/chat/<conv>/stream` for
+//!   progressive frames while the RPC is in flight. Mid-generation
+//!   LLM token callbacks are a daemon-side follow-up; today the daemon
+//!   cascades the final assistant text as typewriter frames before
+//!   returning, and the panel renders the draft bubble live.
 //! - No on-disk persistence. Conversation lives only as long as the
 //!   panel does (close → cleared on next selection).
 //! - No model picker. The daemon decides which `llama-server` it talks
@@ -69,6 +72,12 @@ const DEFAULT_TEMPERATURE: f32 = 0.4;
 /// (512); explicit here so a daemon-side bump doesn't silently change
 /// chat-window behaviour.
 const DEFAULT_MAX_TOKENS: u32 = 512;
+
+/// How often (ms) the panel re-polls `substrate.read` for the
+/// progressive stream frame while a turn is in flight. Lower = snappier
+/// typewriter, higher = fewer RPCs. 120 ms is well under the daemon's
+/// 4 ms cascade step × chunk size without flooding the socket.
+const STREAM_POLL_INTERVAL_MS: f64 = 120.0;
 
 /// Shape predicate. Returns [`PRIORITY`] when `value` looks like a
 /// chat sentinel:
@@ -164,12 +173,31 @@ pub struct ChatView {
     /// frame. Cleared implicitly when the panel state is reset on
     /// selection change (the cache is rebuilt on demand).
     cache: CommonMarkCache,
-    /// Pending `llm.prompt` reply channel. `Some` while a request is
-    /// in flight; the input + Send button disable in that window so the
-    /// user can't fire a second request against `llama-server`'s single
-    /// in-flight slot (the service crate's semaphore would serialize
-    /// them anyway, but UI feedback is clearer).
+    /// Pending `agent.chat_stream` reply channel. `Some` while a request
+    /// is in flight; the input + Send button disable in that window so
+    /// the user can't fire a second request against `llama-server`'s
+    /// single in-flight slot (the service crate's semaphore would
+    /// serialize them anyway, but UI feedback is clearer).
     pending: Option<ReplyRx>,
+    /// Accumulated assistant draft from progressive stream frames
+    /// (WEFT-253). `Some` while a turn is in flight and at least one
+    /// non-empty frame has landed; rendered as a live assistant bubble
+    /// that grows as tokens arrive. Cleared when the final RPC reply
+    /// lands (the bubble is committed into `history`).
+    streaming_draft: Option<String>,
+    /// Last stream-frame `phase` (`thinking` / `generating` / `done` /
+    /// `error`). Drives the in-flight heartbeat label so the user sees
+    /// more than a static "waiting for completion…".
+    stream_phase: Option<String>,
+    /// Highest stream `seq` applied. Frames with a lower-or-equal seq
+    /// are ignored so a late substrate.read can't rewind the draft.
+    stream_seq: u64,
+    /// In-flight `substrate.read` for the stream path. At most one poll
+    /// is outstanding so we don't queue a flood of reads.
+    stream_poll: Option<ReplyRx>,
+    /// `live::now_ms()` of the last stream-poll submit. Throttles the
+    /// poll cadence to [`STREAM_POLL_INTERVAL_MS`].
+    last_stream_poll_ms: f64,
 }
 
 impl ChatView {
@@ -223,10 +251,11 @@ impl ChatView {
         Value::Object(obj)
     }
 
-    /// State-machine entry: a successful `agent.chat` response landed.
-    /// Appends the assistant text to history and clears the in-flight
-    /// flag. Pure function over [`Value`] so tests can drive it without
-    /// any RPC plumbing.
+    /// State-machine entry: a successful `agent.chat` /
+    /// `agent.chat_stream` response landed. Appends the assistant text
+    /// to history and clears the in-flight + streaming state. Pure
+    /// function over [`Value`] so tests can drive it without any RPC
+    /// plumbing.
     ///
     /// Tool-call rendering as collapsible bubbles lands in commit 9
     /// (plan §11.4); the spike just shows the final assistant text.
@@ -248,7 +277,71 @@ impl ChatView {
             .get("identity_source")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        self.clear_stream_state();
+    }
+
+    /// Apply a progressive stream frame (WEFT-253). Ignores frames with
+    /// `seq <= self.stream_seq` so a late poll can't rewind the draft.
+    /// Pure over the frame value so unit tests can drive it without
+    /// substrate plumbing.
+    pub fn on_stream_frame(&mut self, frame: &Value) {
+        let seq = frame.get("seq").and_then(Value::as_u64).unwrap_or(0);
+        if seq < self.stream_seq {
+            return;
+        }
+        // Equal seq still applies phase/text updates (idempotent
+        // Replace of the same frame); only strictly-older are dropped.
+        if seq > self.stream_seq {
+            self.stream_seq = seq;
+        }
+        if let Some(phase) = frame.get("phase").and_then(Value::as_str) {
+            self.stream_phase = Some(phase.to_owned());
+        }
+        if let Some(text) = frame.get("text").and_then(Value::as_str)
+            && !text.is_empty()
+        {
+            // Empty text leaves a prior draft alone (thinking frames
+            // carry `text: ""` and must not flash a blank bubble or
+            // rewind a growing draft on a late re-read).
+            self.streaming_draft = Some(text.to_owned());
+        }
+        if frame.get("done").and_then(Value::as_bool).unwrap_or(false)
+            && let Some(err) = frame.get("error").and_then(Value::as_str)
+        {
+            // Error frames surface via the final RPC reply too; stash
+            // the message so the heartbeat label can show it until the
+            // oneshot lands.
+            self.stream_phase = Some(format!("error: {err}"));
+        }
+    }
+
+    /// Clear every WEFT-253 streaming field. Called when the final RPC
+    /// reply lands (ok or err) so the next turn starts clean.
+    fn clear_stream_state(&mut self) {
         self.pending = None;
+        self.streaming_draft = None;
+        self.stream_phase = None;
+        self.stream_seq = 0;
+        self.stream_poll = None;
+        self.last_stream_poll_ms = 0.0;
+    }
+
+    /// Substrate path for the progressive stream frame, or `None` if
+    /// no conv_id has been minted yet. Sibling of [`Self::heartbeat_path`].
+    pub fn stream_path(&self) -> Option<String> {
+        self.conv_id
+            .as_deref()
+            .map(|id| format!("substrate/_derived/chat/{id}/stream"))
+    }
+
+    /// Current streaming draft text (accumulated assistant tokens).
+    pub fn streaming_draft(&self) -> Option<&str> {
+        self.streaming_draft.as_deref()
+    }
+
+    /// Last stream phase label, if any.
+    pub fn stream_phase(&self) -> Option<&str> {
+        self.stream_phase.as_deref()
     }
 
     /// Whether the most recent response indicates a suspicious
@@ -268,27 +361,83 @@ impl ChatView {
         }
     }
 
-    /// State-machine entry: an `llm.prompt` request failed. Appends
-    /// a UI-only `error` bubble and clears the in-flight flag.
+    /// State-machine entry: an `agent.chat_stream` / `agent.chat`
+    /// request failed. Appends a UI-only `error` bubble and clears the
+    /// in-flight + streaming state.
     pub fn on_response_err(&mut self, err: &str) {
         self.history.push(ChatMessage::error(err.to_string()));
-        self.pending = None;
+        self.clear_stream_state();
     }
 
-    /// Drain the pending reply channel. Called once per paint before
-    /// rendering so the UI always reflects the freshest server state.
+    /// Drain the pending reply channel and any in-flight stream poll.
+    /// Called once per paint before rendering so the UI always reflects
+    /// the freshest server state.
     fn drain_reply(&mut self) {
-        let Some(rx) = self.pending.as_mut() else {
+        if let Some(rx) = self.pending.as_mut() {
+            match live::try_recv_reply(rx) {
+                live::TryReply::Done(Ok(value)) => self.on_response_ok(&value),
+                live::TryReply::Done(Err(err)) => self.on_response_err(&err),
+                live::TryReply::Closed => {
+                    self.on_response_err("transport closed before reply");
+                }
+                live::TryReply::Empty => { /* still in flight */ }
+            }
+        }
+        // Drain a completed stream-path substrate.read without holding
+        // `self.stream_poll` across the `on_stream_frame` borrow.
+        let stream_result = self.stream_poll.as_mut().map(live::try_recv_reply);
+        match stream_result {
+            Some(live::TryReply::Done(Ok(value))) => {
+                self.stream_poll = None;
+                // substrate.read returns `{ value, tick, sensitivity }`.
+                // The progressive frame lives under `value`.
+                if let Some(frame) = value.get("value").filter(|v| !v.is_null()) {
+                    self.on_stream_frame(frame);
+                }
+            }
+            Some(live::TryReply::Done(Err(_))) | Some(live::TryReply::Closed) => {
+                // Transient read failure — drop the slot so the next
+                // paint re-submits. Don't surface as a chat error.
+                self.stream_poll = None;
+            }
+            Some(live::TryReply::Empty) | None => {}
+        }
+    }
+
+    /// While a turn is in flight, keep the progressive stream path
+    /// warm via `substrate.read`. Throttled and at-most-one outstanding
+    /// so we don't starve the raw-RPC slot during long turns.
+    fn poll_stream_if_needed(&mut self, live: &Arc<Live>) {
+        if !self.is_in_flight() {
+            return;
+        }
+        if self.stream_poll.is_some() {
+            return;
+        }
+        let Some(path) = self.stream_path() else {
             return;
         };
-        match live::try_recv_reply(rx) {
-            live::TryReply::Done(Ok(value)) => self.on_response_ok(&value),
-            live::TryReply::Done(Err(err)) => self.on_response_err(&err),
-            live::TryReply::Closed => {
-                self.on_response_err("transport closed before reply");
-            }
-            live::TryReply::Empty => { /* still in flight */ }
+        let now = live::now_ms();
+        if self.last_stream_poll_ms > 0.0
+            && (now - self.last_stream_poll_ms) < STREAM_POLL_INTERVAL_MS
+        {
+            return;
         }
+        // Prefer any frame already mirrored into the local substrate
+        // snapshot (native adapter path / prior relay) before spending
+        // an RPC. Cheap and keeps the typewriter smooth at 60 fps when
+        // the path is already warm.
+        if let Some(frame) = live.substrate_snapshot().get(&path).cloned() {
+            self.on_stream_frame(&frame);
+        }
+        let (tx, rx) = live::reply_channel();
+        self.stream_poll = Some(rx);
+        self.last_stream_poll_ms = now;
+        live.submit(Command::Raw {
+            method: "substrate.read".into(),
+            params: serde_json::json!({ "path": path }),
+            reply: Some(tx),
+        });
     }
 
     /// Mint a stable conversation id for this panel session. Idempotent
@@ -346,10 +495,22 @@ impl ChatView {
         self.history.push(ChatMessage::user(text));
         self.draft.clear();
 
+        // Reset streaming draft so a previous turn's partial text
+        // never bleeds into this one.
+        self.streaming_draft = None;
+        self.stream_phase = Some("thinking".into());
+        self.stream_seq = 0;
+        self.stream_poll = None;
+        self.last_stream_poll_ms = 0.0;
+
         let (tx, rx) = live::reply_channel();
         self.pending = Some(rx);
+        // WEFT-253: prefer agent.chat_stream so progressive frames land
+        // on the substrate stream path while the turn runs. Final
+        // response shape is identical to agent.chat (plus optional
+        // stream_path / streamed echo fields the panel ignores).
         live.submit(Command::Raw {
-            method: "agent.chat".into(),
+            method: "agent.chat_stream".into(),
             params,
             reply: Some(tx),
         });
@@ -361,6 +522,7 @@ impl ChatView {
 /// (used only to surface the model name).
 pub fn paint(ui: &mut egui::Ui, path: &str, value: &Value, view: &mut ChatView, live: &Arc<Live>) {
     view.drain_reply();
+    view.poll_stream_if_needed(live);
 
     let model = value
         .as_object()
@@ -480,6 +642,20 @@ fn paint_history(ui: &mut egui::Ui, view: &mut ChatView) {
         let msg = ChatMessage { role, content };
         paint_bubble(ui, &msg, &mut view.cache);
     }
+    // WEFT-253: live streaming draft bubble. Grows as stream frames
+    // arrive; replaced by the committed assistant history entry when
+    // the final RPC reply lands (`on_response_ok` clears the draft).
+    if let Some(draft) = view.streaming_draft.clone() {
+        let msg = ChatMessage::assistant(draft);
+        paint_bubble(ui, &msg, &mut view.cache);
+        // Subtle caret so the user can tell this bubble is still
+        // growing (vs a finished assistant turn above).
+        ui.label(
+            egui::RichText::new("▍")
+                .small()
+                .color(egui::Color32::from_rgb(120, 180, 200)),
+        );
+    }
 }
 
 /// Paint the WEFT-255 system-prompt editor. Collapsible so it doesn't
@@ -568,13 +744,19 @@ fn paint_heartbeat(ui: &mut egui::Ui, view: &ChatView, live: &Arc<Live>) {
         .as_deref()
         .and_then(|p| snap.get(p).cloned());
 
+    // Prefer the progressive stream phase (WEFT-253) when present —
+    // "generating" / "thinking" is more informative than a generic
+    // heartbeat "alive". Fall back to the status-frame word, then to
+    // "waiting".
+    let stream_phase = view.stream_phase().map(str::to_owned);
     let (status_word, age_label) = match frame.as_ref() {
         Some(v) => {
-            let status = v
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("alive")
-                .to_owned();
+            let status = stream_phase.clone().unwrap_or_else(|| {
+                v.get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("alive")
+                    .to_owned()
+            });
             let age = v
                 .get("ts_ms")
                 .and_then(Value::as_f64)
@@ -583,7 +765,16 @@ fn paint_heartbeat(ui: &mut egui::Ui, view: &ChatView, live: &Arc<Live>) {
                 .unwrap_or_default();
             (status, age)
         }
-        None => ("waiting".into(), String::new()),
+        None => (
+            stream_phase.unwrap_or_else(|| "waiting".into()),
+            String::new(),
+        ),
+    };
+
+    let progress_hint = if view.streaming_draft().is_some() {
+        "streaming…"
+    } else {
+        "waiting for completion…"
     };
 
     ui.horizontal(|ui| {
@@ -611,17 +802,18 @@ fn paint_heartbeat(ui: &mut egui::Ui, view: &ChatView, live: &Arc<Live>) {
             );
         }
         ui.label(
-            egui::RichText::new("waiting for completion…")
+            egui::RichText::new(progress_hint)
                 .small()
                 .italics()
                 .color(egui::Color32::from_rgb(150, 160, 170)),
         );
     });
-    // Request a repaint at the heartbeat cadence so the age counter
-    // ticks even when the user isn't moving the mouse. egui only
-    // repaints on input by default — without this, the label stalls.
+    // Request a repaint at the stream-poll cadence so the typewriter
+    // draft and age counter tick even when the user isn't moving the
+    // mouse. egui only repaints on input by default — without this,
+    // the label stalls and tokens freeze on screen.
     ui.ctx()
-        .request_repaint_after(std::time::Duration::from_millis(500));
+        .request_repaint_after(std::time::Duration::from_millis(100));
     ui.add_space(2.0);
 }
 
@@ -981,6 +1173,97 @@ mod tests {
         assert_eq!(view.history.len(), 2);
         assert_eq!(view.history[1].role, "error");
         assert!(view.history[1].content.contains("llm service is disabled"));
+        assert!(!view.is_in_flight());
+    }
+
+    // ── WEFT-253 stream frame state machine ──────────────────────
+
+    #[test]
+    fn stream_path_mirrors_heartbeat_layout() {
+        let mut view = ChatView::default();
+        assert!(view.stream_path().is_none());
+        view.ensure_conv_id();
+        let p = view.stream_path().expect("path after mint");
+        assert!(p.starts_with("substrate/_derived/chat/"));
+        assert!(p.ends_with("/stream"));
+        // Sibling of the status heartbeat path (same conv id).
+        let status = view.heartbeat_path().expect("status");
+        assert_eq!(
+            p.trim_end_matches("/stream"),
+            status.trim_end_matches("/status")
+        );
+    }
+
+    #[test]
+    fn stream_frame_grows_draft_and_ignores_stale_seq() {
+        let mut view = ChatView::default();
+        view.on_stream_frame(&json!({
+            "phase": "thinking",
+            "text": "",
+            "seq": 0,
+            "done": false,
+        }));
+        assert_eq!(view.stream_phase(), Some("thinking"));
+        assert_eq!(view.streaming_draft(), None, "empty thinking keeps draft None");
+
+        view.on_stream_frame(&json!({
+            "phase": "generating",
+            "text": "hel",
+            "seq": 1,
+            "done": false,
+        }));
+        assert_eq!(view.streaming_draft(), Some("hel"));
+        assert_eq!(view.stream_phase(), Some("generating"));
+
+        view.on_stream_frame(&json!({
+            "phase": "generating",
+            "text": "hello",
+            "seq": 2,
+            "done": false,
+        }));
+        assert_eq!(view.streaming_draft(), Some("hello"));
+
+        // Stale lower seq must not rewind the draft.
+        view.on_stream_frame(&json!({
+            "phase": "generating",
+            "text": "he",
+            "seq": 1,
+            "done": false,
+        }));
+        assert_eq!(view.streaming_draft(), Some("hello"));
+    }
+
+    #[test]
+    fn stream_state_clears_on_final_ok() {
+        let mut view = ChatView::default();
+        view.on_stream_frame(&json!({
+            "phase": "generating",
+            "text": "partial",
+            "seq": 3,
+            "done": false,
+        }));
+        assert!(view.streaming_draft().is_some());
+        view.on_response_ok(&json!({
+            "assistant_text": "partial final",
+            "identity_source": "clawft",
+        }));
+        assert_eq!(view.streaming_draft(), None);
+        assert_eq!(view.stream_phase(), None);
+        assert_eq!(view.stream_seq, 0);
+        assert_eq!(view.history.last().map(|m| m.content.as_str()), Some("partial final"));
+    }
+
+    #[test]
+    fn stream_state_clears_on_err() {
+        let mut view = ChatView::default();
+        view.on_stream_frame(&json!({
+            "phase": "generating",
+            "text": "x",
+            "seq": 1,
+            "done": false,
+        }));
+        view.on_response_err("agent.chat_stream: cancelled");
+        assert_eq!(view.streaming_draft(), None);
         assert!(!view.is_in_flight());
     }
 }

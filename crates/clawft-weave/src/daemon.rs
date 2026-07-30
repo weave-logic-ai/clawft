@@ -823,10 +823,12 @@ pub async fn run(config: Config, kernel_config: KernelConfig) -> anyhow::Result<
         // - `transcript`    — whisper STT output (this branch)
         // - `classify`      — speech/silence/keyword classifier (parallel)
         // - `terminal`      — terminal-output capture pipeline (parallel)
-        // - `chat`          — agent.chat per-turn JSONL + heartbeat
+        // - `chat`          — agent.chat / agent.chat_stream per-turn
+        //                     JSONL + heartbeat + progressive stream
         //                     (`derived/chat/<conv>/turns/<ulid>`,
-        //                      `derived/chat/<conv>/status`); plan
-        //                     `agent-core-v1.md` Phase A2.
+        //                      `derived/chat/<conv>/status`,
+        //                      `derived/chat/<conv>/stream` WEFT-253);
+        //                     plan `agent-core-v1.md` Phase A2.
         // - `soul_journal`  — per-agent identity-drift observations
         //                     destined for `.clawft/SOUL.journal.md`.
         //                     The agent writes through the substrate,
@@ -3987,6 +3989,177 @@ async fn handle_node_identity(
     )
 }
 
+/// Publish an [`AgentChatStreamFrame`] to
+/// `substrate/_derived/chat/<conv>/stream` under the daemon's chat
+/// DerivedWriteGrant (WEFT-253). Best-effort: publish failures are
+/// logged and swallowed so a substrate hiccup never fails the chat
+/// turn itself.
+async fn publish_chat_stream_frame(
+    kernel: &Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
+    conv_id: &str,
+    mut frame: crate::protocol::AgentChatStreamFrame,
+) {
+    // Stamp wall-clock if the caller left it unset.
+    if frame.ts_ms.is_none() {
+        frame.ts_ms = Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+        );
+    }
+    let path = crate::protocol::chat_stream_path(conv_id);
+    let value = match serde_json::to_value(&frame) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = %e, conv_id, "agent.chat_stream: frame serialize failed");
+            return;
+        }
+    };
+    let Some(ctrl) = daemon_control() else {
+        warn!(conv_id, "agent.chat_stream: daemon control not wired; skip frame");
+        return;
+    };
+    let k = kernel.read().await;
+    if let Err(e) = k.substrate_service().publish_gated_with_grants(
+        Some(&ctrl.daemon_node_id),
+        &path,
+        value,
+        k.node_registry(),
+    ) {
+        warn!(
+            error = %e,
+            conv_id,
+            path = %path,
+            "agent.chat_stream: stream-frame publish failed"
+        );
+    }
+}
+
+/// Handle `agent.chat_stream` (WEFT-253).
+///
+/// Same request / final-response shape as `agent.chat`, plus progressive
+/// frames on `substrate/_derived/chat/<conv>/stream` so the chat panel
+/// can render tokens as they arrive (and show a phase label while the
+/// model is still thinking). The progressive channel is substrate — not
+/// a connection-takeover RPC — so native and WASM panel transports both
+/// consume it via the existing substrate poll / `substrate.read` path.
+///
+/// Until the agent loop exposes mid-generation token callbacks, the
+/// daemon:
+/// 1. Publishes a `thinking` frame at turn start.
+/// 2. Runs the ordinary `AgentService::dispatch`.
+/// 3. Cascades the final assistant text as successive `generating`
+///    frames (word-ish chunks) so the panel paints a typewriter effect
+///    while this RPC is still open — concurrent `substrate.read`
+///    polls see the growth.
+/// 4. Publishes a terminal `done` frame, then returns the full
+///    [`AgentChatResult`] (identical to `agent.chat`).
+async fn handle_agent_chat_stream(
+    params: serde_json::Value,
+    kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
+) -> Response {
+    let Some(agent) = daemon_agent() else {
+        return Response::error(
+            "agent.chat_stream: agent service not wired \
+             (LLM client init failed at boot — \
+             check daemon log for 'llm client init failed')",
+        );
+    };
+    let params: AgentChatParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(e) => {
+            return Response::error(format!("agent.chat_stream: invalid params: {e}"));
+        }
+    };
+    let conv_id = params.conv_id.clone();
+    let stream_path = crate::protocol::chat_stream_path(&conv_id);
+
+    // Frame 0: thinking — panel heartbeat / stream bubble can light up
+    // before the first model token (or the first cascade chunk).
+    publish_chat_stream_frame(
+        &kernel,
+        &conv_id,
+        crate::protocol::AgentChatStreamFrame::thinking(0),
+    )
+    .await;
+
+    match agent.dispatch(params).await {
+        Ok(result) => {
+            if let Some(activity) = DAEMON_CONV_ACTIVITY.get() {
+                activity.insert(conv_id.clone(), std::time::Instant::now());
+            }
+
+            // Cascade the final assistant text as progressive frames so
+            // the panel can paint tokens while this RPC is still open.
+            // Word-ish chunks (whitespace boundaries, max ~12 chars of
+            // run-on) keep frame count bounded without looking robotic.
+            let full = result.assistant_text.clone();
+            let mut seq: u64 = 1;
+            let mut emitted = 0usize;
+            let chars: Vec<char> = full.chars().collect();
+            while emitted < chars.len() {
+                // Grow by up to 8 chars, but always break on whitespace
+                // once we've taken at least 2 so words land cleanly.
+                let mut take = 0usize;
+                while emitted + take < chars.len() && take < 8 {
+                    take += 1;
+                    if take >= 2 && chars[emitted + take - 1].is_whitespace() {
+                        break;
+                    }
+                }
+                emitted += take;
+                let prefix: String = chars[..emitted].iter().collect();
+                publish_chat_stream_frame(
+                    &kernel,
+                    &conv_id,
+                    crate::protocol::AgentChatStreamFrame::generating(seq, prefix),
+                )
+                .await;
+                seq = seq.saturating_add(1);
+                // Yield so concurrent substrate.read polls (panel) can
+                // observe intermediate frames. 4ms × ~N/8 chunks keeps
+                // a 400-char reply under ~200ms of cascade.
+                tokio::time::sleep(std::time::Duration::from_millis(4)).await;
+            }
+
+            publish_chat_stream_frame(
+                &kernel,
+                &conv_id,
+                crate::protocol::AgentChatStreamFrame::done_ok(seq, full),
+            )
+            .await;
+
+            match serde_json::to_value(&result) {
+                Ok(mut v) => {
+                    // Echo stream_path so panels don't have to re-derive
+                    // it (and so older panels can detect stream support
+                    // from the response shape alone).
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert(
+                            "stream_path".into(),
+                            serde_json::Value::String(stream_path),
+                        );
+                        obj.insert("streamed".into(), serde_json::Value::Bool(true));
+                    }
+                    Response::success(v)
+                }
+                Err(e) => Response::error(format!("agent.chat_stream: {e}")),
+            }
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            publish_chat_stream_frame(
+                &kernel,
+                &conv_id,
+                crate::protocol::AgentChatStreamFrame::done_err(1, msg.clone()),
+            )
+            .await;
+            Response::error(format!("agent.chat_stream: {msg}"))
+        }
+    }
+}
+
 /// Handle `llm.prompt`: synchronous chat completion against the local
 /// LLM service.
 ///
@@ -5383,6 +5556,14 @@ async fn dispatch(
                 Err(e) => Response::error(format!("agent.chat: {e}")),
             }
         }
+        // WEFT-253: progressive companion to agent.chat. Same request /
+        // response shape as agent.chat, but while the turn runs the
+        // daemon publishes [`AgentChatStreamFrame`]s to
+        // `substrate/_derived/chat/<conv>/stream` so panels can render
+        // tokens as they arrive (and a phase label for the heartbeat).
+        // Native + WASM both consume the stream path via substrate
+        // polling; the RPC itself stays request/response.
+        "agent.chat_stream" => handle_agent_chat_stream(params, kernel).await,
         "agent.chat.cancel" => {
             // agent-core-v1 Phase C2: trip the per-conv cancel token
             // in `AgentService`. Available unconditionally — when the

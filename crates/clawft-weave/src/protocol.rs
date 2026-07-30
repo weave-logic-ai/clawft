@@ -630,8 +630,9 @@ pub struct LlmPromptResult {
 // paths (`clawft_weave::protocol::AgentChatParams`, etc.).
 
 pub use clawft_types::agent_chat::{
-    AgentChatMessage, AgentChatParams, AgentChatResult, AgentChatToolCall, AgentTurnRecordParams,
-    AgentTurnRecordResult, RecordedTurn, SpawnedTaskSummary,
+    AgentChatMessage, AgentChatParams, AgentChatResult, AgentChatStreamFrame, AgentChatToolCall,
+    AgentTurnRecordParams, AgentTurnRecordResult, RecordedTurn, SpawnedTaskSummary,
+    chat_stream_path,
 };
 
 // ── Agent proposal (WEFT-654 review gate, D9-D11) ──────────
