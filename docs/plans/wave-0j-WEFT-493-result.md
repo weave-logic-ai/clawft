@@ -2,7 +2,7 @@
 
 **Ticket:** WEFT-493  
 **Branch:** `wave0j/weft-493-mcp-watcher-wire`  
-**SHA:** `1703c8a6`  
+**SHA:** `7c3de142` (implementation commit; tip may advance with doc-only fixes)  
 **Worktree:** `/Users/mathewbeane/.grok/worktrees/mathewbeane-weftos/subagent-019fb4cf-e145-7911-8cfa-11f78347a35f`  
 **Base:** `release/0.8-staging`  
 **Date:** 2026-07-30  
