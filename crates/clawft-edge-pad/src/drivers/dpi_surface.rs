@@ -30,9 +30,9 @@
 //! touched by Phase D / E work — only `Cargo.toml` and the renderer
 //! API are stable downstream contracts.
 //!
-//! ## v0.2.1 synchronous double-buffer plumbing
+//! ## v0.2.1+ synchronous double-buffer plumbing (v0.2.2 WEFT-595)
 //!
-//! With `lgfx-bus-rgb-rs` 0.2.1, `bus.framebuffer_addr()` returns the
+//! With `lgfx-bus-rgb-rs` 0.2.1+, `bus.framebuffer_addr()` returns the
 //! **offscreen** buffer's address — i.e. the one the GDMA is NOT
 //! currently scanning. The address changes across `present()` calls
 //! (after the synchronous swap), so every `draw_primitive` /
@@ -44,6 +44,13 @@
 //! scanning. This is the fix for the v0.2.0 race in which rapid push
 //! events overwrote freshly-drawn buffers before they were ever
 //! displayed.
+//!
+//! **v0.2.2:** when damage is partial and the bus is double-buffered,
+//! `begin_frame` calls `bus.copy_scanning_to_offscreen()` first so
+//! undamaged regions match the on-panel frame (dirty-rect coherence).
+//! Production `clawft-edge-pad` still builds with
+//! `default-features = false` (single-buffer) until CrowPanel HW
+//! confirms the double-buffer path.
 //!
 //! The PCA9557 reset dance, GPIO holds, backlight sequencing,
 //! two-region heap (Internal first, External second), and
@@ -399,6 +406,21 @@ impl SceneSurface for DpiSurface {
     }
 
     fn begin_frame(&mut self, damage: &DamageSet, viewport: Rect) -> Result<(), Self::Error> {
+        // WEFT-595 / BUG-1: in double-buffer mode the offscreen FB
+        // holds frame N−1 after a page flip. Dirty-rect clear+redraw
+        // alone then presents a hybrid of N−1 undamaged pixels + N
+        // damage (tearing / "gutter never moves" on panel while wire
+        // coords are correct). Seed the offscreen from the scanning
+        // buffer before partial damage so undamaged regions match
+        // what the panel is showing. Full damage skips the blit
+        // (viewport/FB is cleared entirely below).
+        //
+        // Single-buffer (`default-features = false` on the bus dep)
+        // makes this a no-op — scan target == draw target.
+        if self.bus.is_double_buffered() && !damage.is_full() {
+            self.bus.copy_scanning_to_offscreen();
+        }
+
         // Clear damage to opaque black using Phase B's canonical
         // byte-swapped RGB565 encoder. This is the *whole point* of
         // the damage-driven pipeline — we DO NOT touch unaffected

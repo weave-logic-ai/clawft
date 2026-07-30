@@ -473,6 +473,63 @@ impl BusRgb {
         }
     }
 
+    /// Copy the currently-scanning framebuffer into the offscreen
+    /// buffer (double-buffer mode only).
+    ///
+    /// ## Why this exists (WEFT-595 / BUG-1)
+    ///
+    /// Dirty-rect renderers only clear/redraw damaged regions. After
+    /// a page flip the offscreen buffer still holds frame N−1, so a
+    /// partial `begin_frame` produces a hybrid of N−1 undamaged
+    /// pixels + N damage — visible as tearing and "stuck" layout
+    /// even when wire coords are correct.
+    ///
+    /// Call this **before** applying partial damage when
+    /// [`is_double_buffered`](Self::is_double_buffered) is true.
+    /// Full-repaint frames can skip it (the whole buffer is cleared).
+    ///
+    /// In single-buffer mode this is a no-op (scan target == draw
+    /// target; undamaged regions are already coherent).
+    ///
+    /// ## Cost
+    ///
+    /// One full-framebuffer `memcpy` (768 KB at 800×480 RGB565) plus
+    /// a dcache writeback of the destination. Prefer full damage /
+    /// single-buffer when this bandwidth is unacceptable.
+    pub fn copy_scanning_to_offscreen(&mut self) {
+        #[cfg(not(feature = "double-buffer"))]
+        {
+            let _ = self;
+        }
+        #[cfg(feature = "double-buffer")]
+        {
+            let src = self.scanning_framebuffer_addr();
+            let dst = self.framebuffer_addr();
+            if src == dst || src.is_null() || dst.is_null() {
+                return;
+            }
+            // SAFETY: both pointers are bases of `fb_len`-byte PSRAM
+            // regions allocated in `BusRgb::new`; they do not alias
+            // (distinct buffers when double-buffered).
+            unsafe {
+                ptr::copy_nonoverlapping(src, dst, self.fb_len);
+            }
+            // Destination must be visible to subsequent CPU writes
+            // that may only touch partial cache lines, and to a later
+            // `present()` writeback. Flush now so the copy is in PSRAM.
+            unsafe extern "C" {
+                fn rom_Cache_WriteBack_Addr(addr: u32, size: u32);
+                fn Cache_Suspend_DCache_Autoload() -> u32;
+                fn Cache_Resume_DCache_Autoload(value: u32);
+            }
+            unsafe {
+                let autoload = Cache_Suspend_DCache_Autoload();
+                rom_Cache_WriteBack_Addr(dst as u32, self.fb_len as u32);
+                Cache_Resume_DCache_Autoload(autoload);
+            }
+        }
+    }
+
     /// The immutable [`BusConfig`] this bus was built with.
     #[inline]
     pub fn config(&self) -> &BusConfig {

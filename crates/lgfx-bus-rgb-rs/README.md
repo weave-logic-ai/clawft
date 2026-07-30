@@ -44,10 +44,12 @@ a fine pixel-phase shift on most panels.
 
 ## Status
 
-`v0.2.0`. Builds cleanly against esp-hal 1.0.0 + esp-alloc 0.9.0 on
+`v0.2.2`. Builds cleanly against esp-hal 1.0.0 + esp-alloc 0.9.0 on
 the `esp` Rust toolchain (Espressif's Xtensa fork). Hardware-verified
-on the Elecrow CrowPanel DIS08070H (7" Basic, 800×480 RGB TFT, GT911
-touch — same panel class as Makerfabs MaTouch 7", Sunton 7" boards)
+(single-buffer path) on the Elecrow CrowPanel DIS08070H (7" Basic,
+800×480 RGB TFT, GT911 touch — same panel class as Makerfabs MaTouch
+7", Sunton 7" boards). v0.2.2 adds `copy_scanning_to_offscreen` +
+host-runnable `page_flip` unit tests for WEFT-595 dirty-rect coherence.
 on 2026-05-15. Double-buffering builds clean; field testing on the
 swap path is in progress.
 

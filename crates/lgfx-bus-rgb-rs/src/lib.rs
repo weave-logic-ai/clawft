@@ -109,6 +109,13 @@
 //! - [`BusRgb::is_double_buffered`] returns `true`. Consumers that
 //!   need different draw strategies for the two modes can branch on
 //!   this.
+//! - **v0.2.2 (WEFT-595):** dirty-rect renderers MUST call
+//!   [`BusRgb::copy_scanning_to_offscreen`] before applying partial
+//!   damage (or full-clear every frame). Without that, undamaged
+//!   regions on the offscreen buffer are frame N−1 and the panel
+//!   shows hybrid/stale layout after the swap. Page-flip index
+//!   invariants are covered by [`page_flip`] unit tests (host-runnable
+//!   via `rustc --test src/page_flip.rs`).
 //!
 //! The synchronous semantics (v0.2.1) fix a race in v0.2.0 where
 //! rapid back-to-back `present()` calls could overwrite a freshly-
@@ -162,6 +169,8 @@ pub mod bus;
 pub mod config;
 pub mod descriptor;
 pub mod isr;
+pub mod page_flip;
 
 pub use bus::{BusError, BusRgb};
 pub use config::{BusConfig, PixelFormat};
+pub use page_flip::PageFlipState;
