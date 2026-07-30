@@ -2209,6 +2209,8 @@ mod tests {
         panel.sessions[0].touch();
         assert!(panel.sessions()[0].last_active_ms() >= t0);
         assert_eq!(panel.active_index(), 1);
+    }
+
     // ── WEFT-256 model / provider chip strip ─────────────────
 
     #[test]
