@@ -12,10 +12,9 @@
 //! 2. Per-conv cancellation. `cancel(conv_id)` flips a
 //!    [`CancellationToken`] in the cancel `DashMap`; an in-flight
 //!    dispatch observes it via `tokio::select!` against the agent
-//!    loop future. Phase D2 will additionally observe the token at
-//!    per-iteration boundaries inside `loop_core::run_tool_loop`;
-//!    today only the dispatch-as-a-whole is interruptible (TODO
-//!    flagged in source).
+//!    loop future **and** threads the same token into
+//!    `AgentLoop::handle_turn` so `loop_core::run_tool_loop` checks
+//!    it at each iteration boundary (WEFT-323 / Phase D2).
 //! 3. Drainable shutdown. `shutdown(deadline)` flips a "shutting
 //!    down" flag (so new dispatches return [`AgentServiceError::ShuttingDown`])
 //!    and waits up to the deadline for the in-flight count to hit
@@ -91,7 +90,16 @@ pub enum AgentServiceError {
 pub trait AgentLoopHandle: Send + Sync + 'static {
     /// Process one turn end-to-end. See
     /// [`AgentLoop::handle_turn`].
-    async fn handle_turn(&self, msg: InboundMessage) -> Result<OutboundMessage, String>;
+    ///
+    /// `cancel` is the per-conversation token (WEFT-323): the loop
+    /// observes it at each tool-iteration boundary. Taken by value so
+    /// `async_trait` does not need a non-`'static` lifetime (the token
+    /// is Arc-backed and cheap to clone).
+    async fn handle_turn(
+        &self,
+        msg: InboundMessage,
+        cancel: CancellationToken,
+    ) -> Result<OutboundMessage, String>;
 }
 
 #[async_trait]
@@ -99,8 +107,12 @@ impl<P> AgentLoopHandle for AgentLoop<P>
 where
     P: Platform + Send + Sync + 'static,
 {
-    async fn handle_turn(&self, msg: InboundMessage) -> Result<OutboundMessage, String> {
-        AgentLoop::handle_turn(self, msg)
+    async fn handle_turn(
+        &self,
+        msg: InboundMessage,
+        cancel: CancellationToken,
+    ) -> Result<OutboundMessage, String> {
+        AgentLoop::handle_turn(self, msg, &cancel)
             .await
             .map_err(|e| e.to_string())
     }
@@ -341,20 +353,25 @@ impl<H: AgentLoopHandle> AgentService<H> {
 
         let inbound = inbound_from_params(&params, &conv_id);
 
-        // Drive the loop. The select! lets `cancel()` short-circuit
-        // even though `handle_turn` itself doesn't yet observe the
-        // token at per-iteration boundaries — that's a Phase D2
-        // follow-up. For C1 the token still aborts the dispatch as
-        // a whole, which is the strongest guarantee a single-future
-        // wrapper can give.
-        //
-        // TODO(Phase D2): wire `CancellationToken` through to
-        // `loop_core::run_tool_loop` so cancel takes effect at the
-        // next tool-call boundary instead of waiting for the whole
-        // turn to finish.
+        // Drive the loop. WEFT-323 / Phase D2: thread the per-conv
+        // token into `handle_turn` so `run_tool_loop` observes it at
+        // each iteration boundary. The outer `select!` remains as the
+        // mid-await abort path (e.g. cancel during a long LLM call):
+        // when the future is dropped the COW bracket's Drop guard
+        // rolls back any checkpoint (WEFT-655). When the loop itself
+        // returns a cancel error, map it to the same Cancelled
+        // service error and re-arm a fresh token.
         let outbound = tokio::select! {
-            res = self.agent_loop.handle_turn(inbound) => {
-                res.map_err(AgentServiceError::Loop)?
+            res = self.agent_loop.handle_turn(inbound, cancel.clone()) => {
+                match res {
+                    Ok(out) => out,
+                    Err(e) if is_cancelled_loop_error(&e) => {
+                        self.cancel_tokens
+                            .insert(conv_id.clone(), CancellationToken::new());
+                        return Err(AgentServiceError::Cancelled(conv_id));
+                    }
+                    Err(e) => return Err(AgentServiceError::Loop(e)),
+                }
             }
             _ = cancel.cancelled() => {
                 // Drop the token — a future dispatch on this
@@ -536,6 +553,17 @@ impl<H: AgentLoopHandle> AgentService<H> {
             }
         }
     }
+}
+
+/// Match the string form of [`clawft_types::ClawftError::Cancelled`]
+/// produced by `AgentLoop::handle_turn` when the per-conv token is
+/// observed at an iteration boundary (WEFT-323). The trait boundary
+/// uses `String` so we match on the Display text rather than the
+/// typed error.
+fn is_cancelled_loop_error(err: &str) -> bool {
+    // ClawftError::Cancelled displays as:
+    //   "conversation `<id>` was cancelled"
+    err.contains("was cancelled")
 }
 
 /// RAII guard that increments the in-flight counter on construction

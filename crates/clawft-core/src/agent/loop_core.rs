@@ -637,6 +637,15 @@ impl<P: Platform> AgentLoop<P> {
         self
     }
 
+    /// Mint a fresh, never-cancelled [`CancellationToken`] for callers
+    /// that have no per-conversation cancel signal (CLI, browser, tests).
+    /// WEFT-323: [`Self::handle_turn`] requires a token reference; this is
+    /// the no-op stand-in.
+    pub fn fresh_cancel_token(&self) -> CancellationToken {
+        let _ = self;
+        CancellationToken::new()
+    }
+
     /// Attach an auto-delegation router for pre-LLM routing.
     ///
     /// When set, messages matching delegation rules are routed to the
@@ -964,7 +973,18 @@ impl<P: Platform> AgentLoop<P> {
                         "processing inbound message"
                     );
                     let (channel, chat_id) = (msg.channel.clone(), msg.chat_id.clone());
-                    match self.handle_turn(msg).await {
+                    // WEFT-323: thread the loop-level cancel token into the
+                    // turn so tool iterations observe it. When none is
+                    // attached, mint a never-cancelled token for this turn.
+                    let never;
+                    let cancel = match self.cancel.as_ref() {
+                        Some(t) => t,
+                        None => {
+                            never = CancellationToken::new();
+                            &never
+                        }
+                    };
+                    match self.handle_turn(msg, cancel).await {
                         Ok(outbound) => {
                             if let Err(e) = self.bus.dispatch_outbound(outbound) {
                                 error!("failed to dispatch outbound message: {}", e);
@@ -1017,12 +1037,22 @@ impl<P: Platform> AgentLoop<P> {
     /// short-circuits the local LLM pipeline and returns the delegate's
     /// response as the reply.
     ///
+    /// `cancel` is observed at each tool-loop iteration boundary
+    /// (WEFT-323). When tripped, the turn returns
+    /// [`ClawftError::Cancelled`] without starting another LLM call.
+    /// Callers that have no cancel signal should pass a fresh,
+    /// never-cancelled [`CancellationToken`].
+    ///
     /// When a [`Self::with_cow_memory`] handle is attached, this brackets
     /// [`Self::handle_turn_inner`] with a checkpoint/promote/rollback cycle
     /// (WEFT-616 Phase 2, [`super::turn_checkpoint::with_turn_checkpoint`]).
     /// Without one attached (default), this calls straight through with no
     /// added behavior -- byte-identical to the pre-Phase-2 `handle_turn`.
-    pub async fn handle_turn(&self, msg: InboundMessage) -> clawft_types::Result<OutboundMessage> {
+    pub async fn handle_turn(
+        &self,
+        msg: InboundMessage,
+        cancel: &CancellationToken,
+    ) -> clawft_types::Result<OutboundMessage> {
         #[cfg(feature = "rvf")]
         if let Some(att) = self.cow_memory.get().cloned() {
             // WEFT-654: one undecided proposal fails new dispatches closed.
@@ -1051,11 +1081,20 @@ impl<P: Platform> AgentLoop<P> {
                 )
             };
             let mut held = None;
+            // Clone the token so the checkpoint bracket's async future can
+            // own a copy; CancellationToken is Arc-backed and cheap to clone.
+            // Must be `async move` (not `move || method(&cancel)`) so the
+            // future owns `cancel` instead of borrowing the closure's env
+            // (E0515).
+            let cancel = cancel.clone();
             let out = super::turn_checkpoint::with_turn_checkpoint(
                 &mem,
                 self.turn_ledger.get(),
                 label,
-                move || self.handle_turn_inner(msg),
+                move || {
+                    let cancel = cancel;
+                    async move { self.handle_turn_inner(msg, &cancel).await }
+                },
                 items_on_ok,
                 review,
                 &mut held,
@@ -1067,7 +1106,7 @@ impl<P: Platform> AgentLoop<P> {
             }
             return out;
         }
-        self.handle_turn_inner(msg).await
+        self.handle_turn_inner(msg, cancel).await
     }
 
     /// The actual per-turn pipeline: session lookup, context building,
@@ -1079,6 +1118,7 @@ impl<P: Platform> AgentLoop<P> {
     async fn handle_turn_inner(
         &self,
         msg: InboundMessage,
+        cancel: &CancellationToken,
     ) -> clawft_types::Result<OutboundMessage> {
         // WEFT-178: Resolve the routed agent_id BEFORE building the
         // session key / context so the rest of the turn observes the
@@ -1404,7 +1444,10 @@ impl<P: Platform> AgentLoop<P> {
         // unreachable, not the intended target (M4 #31). Native-only: the
         // seam is a tokio task-local (a daemon capability); the
         // browser/wasm build runs the loop unscoped.
-        let loop_fut = self.run_tool_loop(request, &conv_id, &agent_id);
+        // WEFT-323: thread the per-turn cancel token into the tool loop so
+        // cancel is observed at each iteration boundary (not only when the
+        // outer dispatch `select!` drops the future mid-LLM-call).
+        let loop_fut = self.run_tool_loop(request, &conv_id, &agent_id, cancel);
         #[cfg(feature = "native")]
         let tool_result = crate::agent::spawn_context::SpawnContext {
             conv_id: Some(conv_id.clone()),
@@ -1867,6 +1910,11 @@ impl<P: Platform> AgentLoop<P> {
     /// Continues until the LLM returns a text response or the maximum
     /// iteration limit is reached.
     ///
+    /// `cancel` is checked at the top of every iteration (WEFT-323). When
+    /// tripped, the loop returns [`ClawftError::Cancelled`] without starting
+    /// another LLM call — so cancel takes effect at the next tool-call
+    /// boundary rather than waiting for the whole turn to drain.
+    ///
     /// Post-write verification checks whether files claimed by write/edit
     /// tools actually exist on disk. Hallucinated results are replaced with
     /// error messages so the LLM can retry.
@@ -1875,6 +1923,7 @@ impl<P: Platform> AgentLoop<P> {
         mut request: ChatRequest,
         conv_id: &str,
         agent_id: &str,
+        cancel: &CancellationToken,
     ) -> clawft_types::Result<ToolLoopResult> {
         let max_iterations = self.config.defaults.max_tool_iterations.max(1) as usize;
         let mut total_hallucinations: usize = 0;
@@ -1893,6 +1942,21 @@ impl<P: Platform> AgentLoop<P> {
         let mut identical_failure_count: u32 = 0;
 
         for iteration in 0..max_iterations {
+            // WEFT-323: observe the per-conv cancel token at the iteration
+            // boundary — before the next LLM call or tool dispatch. This is
+            // the per-iteration guarantee AC-10 required beyond the outer
+            // dispatch `select!` (which only aborts when the future is
+            // dropped mid-await).
+            if cancel.is_cancelled() {
+                info!(
+                    conv_id,
+                    iteration, "tool loop cancelled via token at iteration boundary"
+                );
+                return Err(ClawftError::Cancelled {
+                    conv_id: conv_id.to_string(),
+                });
+            }
+
             // WEFT-652 (cubecow event-level snapshots): under tool cadence,
             // checkpoint at each tool-call boundary — iteration 0 is covered
             // by the turn bracket's own checkpoint, so this fires from the
@@ -2715,7 +2779,7 @@ mod tests {
 
         // Process it
         let msg = agent.bus.consume_inbound().await.unwrap();
-        let outbound = agent.handle_turn(msg).await.unwrap();
+        let outbound = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
 
         // Check outbound
         assert_eq!(outbound.channel, "test");
@@ -2742,7 +2806,7 @@ mod tests {
         agent.bus.publish_inbound(inbound).unwrap();
 
         let msg = agent.bus.consume_inbound().await.unwrap();
-        let outbound = agent.handle_turn(msg).await.unwrap();
+        let outbound = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
 
         assert_eq!(outbound.content, "tool result processed");
 
@@ -2802,7 +2866,7 @@ mod tests {
         };
         agent.bus.publish_inbound(inbound).unwrap();
         let msg = agent.bus.consume_inbound().await.unwrap();
-        let outbound = agent.handle_turn(msg).await.unwrap();
+        let outbound = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
         assert_eq!(outbound.content, "tool result processed");
 
         let events = rec.0.lock().unwrap().clone();
@@ -2855,13 +2919,13 @@ mod tests {
         };
 
         // Turn 1 succeeds and is HELD.
-        let out1 = agent.handle_turn(msg("first")).await;
+        let out1 = agent.handle_turn(msg("first"), &CancellationToken::new()).await;
         assert!(out1.is_ok());
         let (label, _age) = agent.pending_hold_info().expect("turn 1 held");
         assert_eq!(label, "turn:test:chat1");
 
         // Turn 2 fails closed while the proposal is pending.
-        let out2 = agent.handle_turn(msg("second")).await;
+        let out2 = agent.handle_turn(msg("second"), &CancellationToken::new()).await;
         assert!(
             matches!(out2, Err(clawft_types::ClawftError::ProposalPending { .. })),
             "pending proposal must fail new dispatches closed: {out2:?}"
@@ -2871,7 +2935,7 @@ mod tests {
         let accepted = agent.accept_pending().expect("accept");
         assert_eq!(accepted, "turn:test:chat1");
         assert!(agent.pending_hold_info().is_none());
-        let out3 = agent.handle_turn(msg("third")).await;
+        let out3 = agent.handle_turn(msg("third"), &CancellationToken::new()).await;
         assert!(out3.is_ok(), "accepted loop takes turns again: {out3:?}");
         // turn 3 is itself held now (review stays on) — discard it to end clean.
         let _ = agent.discard_pending("test teardown");
@@ -2901,7 +2965,7 @@ mod tests {
         };
 
         let result = agent
-            .run_tool_loop(request, "test-conv", "test:agent")
+            .run_tool_loop(request, "test-conv", "test:agent", &CancellationToken::new())
             .await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -2910,6 +2974,127 @@ mod tests {
             "error should mention max iterations: {}",
             err_msg
         );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// WEFT-323: cancel token tripped before the first iteration returns
+    /// [`ClawftError::Cancelled`] without burning an LLM call.
+    #[tokio::test]
+    async fn run_tool_loop_breaks_on_cancel_at_iteration_boundary() {
+        let transport = Arc::new(InfiniteToolTransport);
+        let (agent, dir) = make_agent_loop(transport, "cancel_iter").await;
+
+        let request = ChatRequest {
+            messages: vec![LlmMessage {
+                role: "user".into(),
+                content: "loop until cancelled".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            tools: vec![],
+            model: Some("test-model".into()),
+            max_tokens: Some(4096),
+            temperature: Some(0.5),
+            auth_context: None,
+            complexity_boost: 0.0,
+            tool_choice: None,
+        };
+
+        // Pre-cancelled: iteration 0 must fail-fast before the LLM call.
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let result = agent
+            .run_tool_loop(request, "conv-cancel", "test:agent", &cancel)
+            .await;
+        match result {
+            Err(ClawftError::Cancelled { conv_id }) => {
+                assert_eq!(conv_id, "conv-cancel");
+            }
+            other => panic!("expected Cancelled at iteration boundary, got {other:?}"),
+        }
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// WEFT-323: cancel mid multi-iteration loop breaks on the next
+    /// boundary (after the current iteration drains).
+    #[tokio::test]
+    async fn run_tool_loop_breaks_mid_turn_on_next_boundary() {
+        /// Transport that cancels the shared token after the first
+        /// successful complete, so iteration 1 hits the boundary check.
+        struct CancelAfterFirstTransport {
+            cancel: CancellationToken,
+            calls: std::sync::atomic::AtomicU32,
+        }
+
+        #[async_trait]
+        impl LlmTransport for CancelAfterFirstTransport {
+            async fn complete(
+                &self,
+                _request: &TransportRequest,
+            ) -> clawft_types::Result<LlmResponse> {
+                let n = self
+                    .calls
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                if n >= 1 {
+                    // Should never be reached: iteration 1 must abort
+                    // at the boundary before this call.
+                    panic!("LLM called after cancel at iteration boundary");
+                }
+                // Trip cancel so the next iteration's boundary check fires.
+                self.cancel.cancel();
+                Ok(LlmResponse {
+                    id: "cancel-after-first".into(),
+                    content: vec![ContentBlock::ToolUse {
+                        id: "call-1".into(),
+                        name: "echo".into(),
+                        input: serde_json::json!({"text": "once"}),
+                    }],
+                    stop_reason: StopReason::ToolUse,
+                    usage: Usage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        total_tokens: 0,
+                    },
+                    metadata: HashMap::new(),
+                })
+            }
+        }
+
+        let cancel = CancellationToken::new();
+        let transport = Arc::new(CancelAfterFirstTransport {
+            cancel: cancel.clone(),
+            calls: std::sync::atomic::AtomicU32::new(0),
+        });
+        let (agent, dir) = make_agent_loop(transport, "cancel_mid").await;
+
+        let request = ChatRequest {
+            messages: vec![LlmMessage {
+                role: "user".into(),
+                content: "start multi-iter".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            tools: vec![],
+            model: Some("test-model".into()),
+            max_tokens: Some(4096),
+            temperature: Some(0.5),
+            auth_context: None,
+            complexity_boost: 0.0,
+            tool_choice: None,
+        };
+
+        let result = agent
+            .run_tool_loop(request, "conv-mid", "test:agent", &cancel)
+            .await;
+        match result {
+            Err(ClawftError::Cancelled { conv_id }) => {
+                assert_eq!(conv_id, "conv-mid");
+            }
+            other => panic!("expected mid-turn Cancelled, got {other:?}"),
+        }
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
@@ -3034,7 +3219,7 @@ mod tests {
         };
 
         let result = agent
-            .run_tool_loop(request, "w21-smoke2", "test:agent")
+            .run_tool_loop(request, "w21-smoke2", "test:agent", &CancellationToken::new())
             .await;
         assert!(result.is_err(), "breaker must fail-fast: {result:?}");
         let err_msg = result.unwrap_err().to_string();
@@ -3138,7 +3323,7 @@ mod tests {
         agent = agent.with_cost_budget(Arc::clone(&budget));
 
         let result = agent
-            .run_tool_loop(budget_request("hi"), "conv-tok", "test:agent")
+            .run_tool_loop(budget_request("hi"), "conv-tok", "test:agent", &CancellationToken::new())
             .await;
         let err = result.expect_err("token cap should trip");
         match err {
@@ -3163,7 +3348,7 @@ mod tests {
 
         // Second call: fails fast WITHOUT invoking the LLM (count stays).
         let result2 = agent
-            .run_tool_loop(budget_request("hi again"), "conv-tok", "test:agent")
+            .run_tool_loop(budget_request("hi again"), "conv-tok", "test:agent", &CancellationToken::new())
             .await;
         assert!(matches!(
             result2,
@@ -3196,7 +3381,7 @@ mod tests {
         agent = agent.with_cost_budget(Arc::clone(&budget));
 
         let err = agent
-            .run_tool_loop(budget_request("loop"), "conv-iter", "test:agent")
+            .run_tool_loop(budget_request("loop"), "conv-iter", "test:agent", &CancellationToken::new())
             .await
             .expect_err("iteration cap should trip");
         match err {
@@ -3297,7 +3482,7 @@ mod tests {
         agent = agent.with_cost_budget(Arc::clone(&budget));
 
         let err = agent
-            .run_tool_loop(budget_request("hi"), "conv-usd", "test:agent")
+            .run_tool_loop(budget_request("hi"), "conv-usd", "test:agent", &CancellationToken::new())
             .await
             .expect_err("usd cap should trip");
         match err {
@@ -3344,7 +3529,7 @@ mod tests {
 
         // First call trips (10+5=15 tokens > 12 cap).
         let err = agent
-            .run_tool_loop(budget_request("hi"), "conv-reset", "test:agent")
+            .run_tool_loop(budget_request("hi"), "conv-reset", "test:agent", &CancellationToken::new())
             .await
             .expect_err("must trip");
         assert!(matches!(
@@ -3371,7 +3556,7 @@ mod tests {
         // it succeeded. We cover the "attempted and succeeded" case
         // by also verifying the post-reset usage carries the new call.
         let _ = agent
-            .run_tool_loop(budget_request("hi"), "conv-reset", "test:agent")
+            .run_tool_loop(budget_request("hi"), "conv-reset", "test:agent", &CancellationToken::new())
             .await;
         let post_usage = budget.usage("conv-reset");
         assert_eq!(
@@ -3404,7 +3589,7 @@ mod tests {
             let budget = Arc::new(ConversationBudget::new(cfg.clone(), Arc::clone(&store)));
             agent = agent.with_cost_budget(budget);
             let err = agent
-                .run_tool_loop(budget_request("hi"), "conv-persist", "test:agent")
+                .run_tool_loop(budget_request("hi"), "conv-persist", "test:agent", &CancellationToken::new())
                 .await
                 .expect_err("must trip");
             assert!(matches!(
@@ -3422,7 +3607,7 @@ mod tests {
             let budget = Arc::new(ConversationBudget::new(cfg, Arc::clone(&store)));
             agent = agent.with_cost_budget(budget);
             let err = agent
-                .run_tool_loop(budget_request("hi"), "conv-persist", "test:agent")
+                .run_tool_loop(budget_request("hi"), "conv-persist", "test:agent", &CancellationToken::new())
                 .await
                 .expect_err("must still be tripped after restart");
             match err {
@@ -3489,7 +3674,7 @@ mod tests {
         agent.bus.publish_inbound(inbound).unwrap();
 
         let msg = agent.bus.consume_inbound().await.unwrap();
-        let _outbound = agent.handle_turn(msg).await.unwrap();
+        let _outbound = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
 
         // M3 store collapse: durability moved from SessionManager to the
         // ConversationSink. Hydrate from the sink (the single store) and
@@ -3534,7 +3719,7 @@ mod tests {
         };
         agent.bus.publish_inbound(inbound).unwrap();
         let msg = agent.bus.consume_inbound().await.unwrap();
-        let _ = agent.handle_turn(msg).await.unwrap();
+        let _ = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
 
         // The turn hydrated the score into `session.metadata` and wrote it
         // back through `set_meta`; hydrating again must still see it.
@@ -3694,7 +3879,7 @@ mod tests {
         };
 
         let tool_result = agent
-            .run_tool_loop(request, "test-conv", "test:agent")
+            .run_tool_loop(request, "test-conv", "test:agent", &CancellationToken::new())
             .await
             .unwrap();
         let result = &tool_result.text;
@@ -3886,7 +4071,7 @@ mod tests {
         };
         agent.bus.publish_inbound(inbound).unwrap();
         let msg = agent.bus.consume_inbound().await.unwrap();
-        let outbound = agent.handle_turn(msg).await.unwrap();
+        let outbound = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
 
         // Verify outbound message is the final text response
         assert_eq!(outbound.content, "I received the tool output successfully");
@@ -3962,7 +4147,7 @@ mod tests {
         };
         agent.bus.publish_inbound(inbound).unwrap();
         let msg = agent.bus.consume_inbound().await.unwrap();
-        let outbound = agent.handle_turn(msg).await.unwrap();
+        let outbound = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
 
         assert_eq!(outbound.content, "processed both tools");
 
@@ -4036,7 +4221,7 @@ mod tests {
         };
         agent.bus.publish_inbound(inbound).unwrap();
         let msg = agent.bus.consume_inbound().await.unwrap();
-        let outbound = agent.handle_turn(msg).await.unwrap();
+        let outbound = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
 
         assert_eq!(outbound.content, "Direct answer from LLM");
         assert_eq!(outbound.channel, "direct");
@@ -4146,7 +4331,7 @@ mod tests {
         };
         agent.bus.publish_inbound(inbound).unwrap();
         let msg = agent.bus.consume_inbound().await.unwrap();
-        let outbound = agent.handle_turn(msg).await.unwrap();
+        let outbound = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
 
         assert_eq!(
             outbound.content,
@@ -4296,7 +4481,7 @@ mod tests {
         agent.bus.publish_inbound(inbound).unwrap();
 
         let msg = agent.bus.consume_inbound().await.unwrap();
-        let outbound = agent.handle_turn(msg).await.unwrap();
+        let outbound = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
 
         // Verify response came through (proves pipeline executed successfully
         // with auth_context attached).
@@ -4360,7 +4545,7 @@ mod tests {
         agent.bus.publish_inbound(inbound).unwrap();
 
         let msg = agent.bus.consume_inbound().await.unwrap();
-        let outbound = agent.handle_turn(msg).await.unwrap();
+        let outbound = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
 
         assert_eq!(outbound.content, "zero-trust-ok");
         assert_eq!(outbound.channel, "telegram");
@@ -4476,7 +4661,7 @@ mod tests {
         };
         agent.bus.publish_inbound(inbound).unwrap();
         let msg = agent.bus.consume_inbound().await.unwrap();
-        let outbound = agent.handle_turn(msg).await.unwrap();
+        let outbound = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
 
         assert!(
             outbound.content.contains("Delegated:"),
@@ -4509,7 +4694,7 @@ mod tests {
         };
         agent.bus.publish_inbound(inbound).unwrap();
         let msg = agent.bus.consume_inbound().await.unwrap();
-        let outbound = agent.handle_turn(msg).await.unwrap();
+        let outbound = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
 
         assert_eq!(
             outbound.content, "LLM response",
@@ -4537,7 +4722,7 @@ mod tests {
         };
         agent.bus.publish_inbound(inbound).unwrap();
         let msg = agent.bus.consume_inbound().await.unwrap();
-        let outbound = agent.handle_turn(msg).await.unwrap();
+        let outbound = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
 
         assert_eq!(outbound.content, "normal LLM");
 
@@ -4714,7 +4899,7 @@ mod tests {
         };
         agent.bus.publish_inbound(inbound).unwrap();
         let msg = agent.bus.consume_inbound().await.unwrap();
-        let _ = agent.handle_turn(msg).await.unwrap();
+        let _ = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
 
         let snapshots = transport.snapshots();
         assert!(!snapshots.is_empty(), "transport must record ≥1 call");
@@ -4753,7 +4938,7 @@ mod tests {
         };
         agent.bus.publish_inbound(inbound).unwrap();
         let msg = agent.bus.consume_inbound().await.unwrap();
-        let _ = agent.handle_turn(msg).await.unwrap();
+        let _ = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
 
         let snapshots = transport.snapshots();
         assert!(!snapshots.is_empty());
@@ -4783,7 +4968,7 @@ mod tests {
         };
         agent.bus.publish_inbound(inbound).unwrap();
         let msg = agent.bus.consume_inbound().await.unwrap();
-        let outbound = agent.handle_turn(msg).await.unwrap();
+        let outbound = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
 
         let parsed: serde_json::Value =
             serde_json::from_str(&outbound.content).expect("gate result is JSON");
@@ -4816,7 +5001,7 @@ mod tests {
         };
         agent.bus.publish_inbound(inbound).unwrap();
         let msg = agent.bus.consume_inbound().await.unwrap();
-        let outbound = agent.handle_turn(msg).await.unwrap();
+        let outbound = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
 
         let parsed: serde_json::Value =
             serde_json::from_str(&outbound.content).expect("gate result is JSON");
@@ -4849,7 +5034,7 @@ mod tests {
         };
         agent.bus.publish_inbound(inbound).unwrap();
         let msg = agent.bus.consume_inbound().await.unwrap();
-        let _outbound = agent.handle_turn(msg).await.unwrap();
+        let _outbound = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
 
         let ids = gate.agent_ids();
         assert!(!ids.is_empty(), "gate must have been invoked");
@@ -4878,7 +5063,7 @@ mod tests {
         };
         agent.bus.publish_inbound(inbound).unwrap();
         let msg = agent.bus.consume_inbound().await.unwrap();
-        let _outbound = agent.handle_turn(msg).await.unwrap();
+        let _outbound = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
 
         let ids = gate.agent_ids();
         assert!(!ids.is_empty(), "gate must have been invoked");
@@ -4924,7 +5109,7 @@ mod tests {
         let inbound = make_inbound("cli", "local");
         agent.bus.publish_inbound(inbound).unwrap();
         let msg = agent.bus.consume_inbound().await.unwrap();
-        let _ = agent.handle_turn(msg).await.unwrap();
+        let _ = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
 
         let ids = gate.agent_ids();
         assert!(!ids.is_empty(), "gate must record at least one check");
@@ -4966,7 +5151,7 @@ mod tests {
         let inbound = make_inbound("cli", "local");
         agent.bus.publish_inbound(inbound).unwrap();
         let msg = agent.bus.consume_inbound().await.unwrap();
-        let _ = agent.handle_turn(msg).await.unwrap();
+        let _ = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
 
         let ids = gate.agent_ids();
         assert!(!ids.is_empty(), "gate must record at least one check");
@@ -5006,7 +5191,7 @@ mod tests {
         };
         agent.bus.publish_inbound(inbound).unwrap();
         let msg = agent.bus.consume_inbound().await.unwrap();
-        let outbound = agent.handle_turn(msg).await.unwrap();
+        let outbound = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
 
         assert!(
             outbound.content.contains("Delegation refused"),
@@ -5044,7 +5229,7 @@ mod tests {
         };
         agent.bus.publish_inbound(inbound).unwrap();
         let msg = agent.bus.consume_inbound().await.unwrap();
-        let outbound = agent.handle_turn(msg).await.unwrap();
+        let outbound = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
 
         assert!(
             outbound.content.contains("Delegated:"),
@@ -5077,7 +5262,7 @@ mod tests {
         };
         agent.bus.publish_inbound(inbound).unwrap();
         let msg = agent.bus.consume_inbound().await.unwrap();
-        let outbound = agent.handle_turn(msg).await.unwrap();
+        let outbound = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
 
         assert!(
             outbound.content.contains("Delegation refused"),
@@ -5303,7 +5488,7 @@ mod tests {
             media: vec![],
             metadata: HashMap::new(),
         };
-        let outbound = agent.handle_turn(inbound).await.unwrap();
+        let outbound = agent.handle_turn(inbound, &CancellationToken::new()).await.unwrap();
 
         let meta_value = outbound
             .metadata
@@ -5440,7 +5625,7 @@ mod tests {
             media: vec![],
             metadata: HashMap::new(),
         };
-        let outbound = agent.handle_turn(inbound).await.unwrap();
+        let outbound = agent.handle_turn(inbound, &CancellationToken::new()).await.unwrap();
 
         let meta: AgentLoopResultMeta = serde_json::from_value(
             outbound
@@ -5579,7 +5764,7 @@ mod tests {
             media: vec![],
             metadata,
         };
-        agent.handle_turn(inbound).await.unwrap();
+        agent.handle_turn(inbound, &CancellationToken::new()).await.unwrap();
 
         let ctx = seen
             .lock()
@@ -5645,7 +5830,7 @@ mod tests {
             media: vec![],
             metadata: HashMap::new(),
         };
-        let result = agent.handle_turn(inbound).await;
+        let result = agent.handle_turn(inbound, &CancellationToken::new()).await;
         assert!(result.is_ok(), "turn without cow_memory attached: {result:?}");
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
@@ -5675,7 +5860,7 @@ mod tests {
             media: vec![],
             metadata: HashMap::new(),
         };
-        let result = agent.handle_turn(inbound).await;
+        let result = agent.handle_turn(inbound, &CancellationToken::new()).await;
         assert!(result.is_ok(), "turn with cow_memory attached: {result:?}");
 
         let status = mem.lock().unwrap().status();
@@ -5722,7 +5907,7 @@ mod tests {
             media: vec![],
             metadata: HashMap::new(),
         };
-        let result = agent.handle_turn(inbound).await;
+        let result = agent.handle_turn(inbound, &CancellationToken::new()).await;
         assert!(
             result.is_err(),
             "a provider failure must still surface as the turn's error"
