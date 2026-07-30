@@ -3,7 +3,7 @@
 **Ticket**: ws03: routing — scaffold fuzz targets for 8 attack surfaces  
 **Branch**: `wave0f/weft-33-fuzz-targets`  
 **Base**: `release/0.8-staging`  
-**Commit**: `3debc60498c7de5b048e9e93364d437a6c2a5de9`  
+**Commit**: `958295b6a139b498dffef15616551312b9ea360b` (branch tip; `git rev-parse wave0f/weft-33-fuzz-targets`)  
 **Status**: implemented; all 8 targets compile and ran ~5s each without findings  
 **Pushed**: no (lead merge)
 
