@@ -11,7 +11,11 @@
 //!   defer is a v1.1 follow-up needing panel UI (see `chat-agent-v1.md`
 //!   risk register).
 //! - [`GateDecision::Deny`]  — same handling as defer; the reason
-//!   becomes the tool result and the loop continues.
+//!   becomes the tool result and the loop continues. After
+//!   [`GATE_DENIAL_ESCALATION_LIMIT`] consecutive Denys in one turn
+//!   the loop emits [`EscalateToHumanEvent`](clawft_types::agent_chat::EscalateToHumanEvent)
+//!   instead of silently burning the remaining tool-iteration budget
+//!   (WEFT-345).
 //!
 //! Phase D2 wires a kernel-backed implementation that calls
 //! [`clawft_kernel::gate::GateBackend::check`](../../../../clawft-kernel/src/gate.rs)
@@ -24,8 +28,73 @@
 //! the Phase D2 mapping is a one-liner per variant.
 
 use async_trait::async_trait;
+use clawft_types::agent_chat::GateDenialRecord;
 
 use super::effects::EffectVector;
+
+/// After this many consecutive gate [`GateDecision::Deny`] results
+/// within one [`AgentLoop::run_tool_loop`](super::loop_core::AgentLoop)
+/// turn, the loop surfaces `EscalateToHuman` (WEFT-345) rather than
+/// continuing until max tool iterations.
+///
+/// Matches the planning circuit-breaker default of 3 (same as the
+/// WEFT-651 identical-failure breaker).
+pub const GATE_DENIAL_ESCALATION_LIMIT: u32 = 3;
+
+/// Extract the deny reason from a tool-result body produced by
+/// [`AgentLoop::execute_tool_with_guards`](super::loop_core::AgentLoop)
+/// when the gate returned [`GateDecision::Deny`].
+///
+/// Returns `Some(reason)` only for the structured
+/// `{"denied": true, "reason": ...}` shape — sandbox denials and
+/// runtime errors use `"error"` and do **not** count toward the
+/// WEFT-345 streak.
+pub fn gate_denial_reason(result_json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(result_json).ok()?;
+    let obj = value.as_object()?;
+    if !obj.get("denied").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return None;
+    }
+    let reason = obj
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("policy")
+        .to_string();
+    Some(reason)
+}
+
+/// Record one tool-result outcome against the consecutive gate-denial
+/// streak (WEFT-345).
+///
+/// - Gate deny → push a [`GateDenialRecord`], increment `count`.
+/// - Anything else (permit success, defer, sandbox/runtime error) →
+///   reset the streak.
+///
+/// Returns `true` when `count >= limit` after this observation (the
+/// caller should emit `EscalateToHuman` and halt the turn).
+pub fn record_gate_denial_streak(
+    count: &mut u32,
+    denials: &mut Vec<GateDenialRecord>,
+    tool: &str,
+    result_json: &str,
+    limit: u32,
+) -> bool {
+    match gate_denial_reason(result_json) {
+        Some(reason) => {
+            denials.push(GateDenialRecord {
+                tool: tool.to_string(),
+                reason,
+            });
+            *count = count.saturating_add(1);
+            *count >= limit
+        }
+        None => {
+            *count = 0;
+            denials.clear();
+            false
+        }
+    }
+}
 
 /// Outcome of an [`EffectGate::check`] call.
 ///
@@ -128,5 +197,78 @@ mod tests {
         assert!(GateDecision::Permit { token: "x".into() }.is_permit());
         assert!(!GateDecision::Defer { reason: "x".into() }.is_permit());
         assert!(!GateDecision::Deny { reason: "x".into() }.is_permit());
+    }
+
+    #[test]
+    fn gate_denial_reason_parses_structured_denied() {
+        let body = r#"{"denied":true,"reason":"write blocked"}"#;
+        assert_eq!(
+            gate_denial_reason(body).as_deref(),
+            Some("write blocked")
+        );
+    }
+
+    #[test]
+    fn gate_denial_reason_ignores_error_and_deferred() {
+        assert!(gate_denial_reason(r#"{"error":"sandbox denied: x"}"#).is_none());
+        assert!(gate_denial_reason(r#"{"deferred":true,"reason":"review"}"#).is_none());
+        assert!(gate_denial_reason(r#"{"ok":true}"#).is_none());
+        assert!(gate_denial_reason("not-json").is_none());
+    }
+
+    #[test]
+    fn record_gate_denial_streak_trips_at_limit() {
+        let mut count = 0;
+        let mut denials = Vec::new();
+        let deny = r#"{"denied":true,"reason":"no"}"#;
+        assert!(!record_gate_denial_streak(
+            &mut count,
+            &mut denials,
+            "a",
+            deny,
+            GATE_DENIAL_ESCALATION_LIMIT
+        ));
+        assert_eq!(count, 1);
+        assert!(!record_gate_denial_streak(
+            &mut count,
+            &mut denials,
+            "b",
+            deny,
+            GATE_DENIAL_ESCALATION_LIMIT
+        ));
+        assert_eq!(count, 2);
+        assert!(record_gate_denial_streak(
+            &mut count,
+            &mut denials,
+            "c",
+            deny,
+            GATE_DENIAL_ESCALATION_LIMIT
+        ));
+        assert_eq!(count, 3);
+        assert_eq!(denials.len(), 3);
+        assert_eq!(denials[2].tool, "c");
+    }
+
+    #[test]
+    fn record_gate_denial_streak_resets_on_non_deny() {
+        let mut count = 0;
+        let mut denials = Vec::new();
+        let deny = r#"{"denied":true,"reason":"no"}"#;
+        assert!(!record_gate_denial_streak(
+            &mut count,
+            &mut denials,
+            "a",
+            deny,
+            GATE_DENIAL_ESCALATION_LIMIT
+        ));
+        assert!(!record_gate_denial_streak(
+            &mut count,
+            &mut denials,
+            "a",
+            r#"{"ok":true}"#,
+            GATE_DENIAL_ESCALATION_LIMIT
+        ));
+        assert_eq!(count, 0);
+        assert!(denials.is_empty());
     }
 }

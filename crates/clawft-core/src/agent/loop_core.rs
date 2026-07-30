@@ -33,7 +33,8 @@ use tracing::{debug, error, info, warn};
 
 use clawft_platform::Platform;
 use clawft_types::agent_chat::{
-    AGENT_LOOP_RESULT_META_KEY, AgentChatToolCall, AgentLoopResultMeta, SpawnedTaskSummary,
+    AGENT_LOOP_RESULT_META_KEY, AgentChatToolCall, AgentLoopResultMeta, EscalateToHumanEvent,
+    FINISH_REASON_ESCALATE_TO_HUMAN, GateDenialRecord, SpawnedTaskSummary,
 };
 use clawft_types::config::AgentsConfig;
 use clawft_types::error::ClawftError;
@@ -50,7 +51,9 @@ use super::context::ContextBuilder;
 use super::context_router::{ContextDecision, ContextRequest, ContextRouter, NullRouter};
 use super::cost_budget::ConversationBudget;
 use super::effects::effect_for_tool;
-use super::gate::{EffectGate, GateDecision, NoopGate};
+use super::gate::{
+    EffectGate, GATE_DENIAL_ESCALATION_LIMIT, GateDecision, NoopGate, record_gate_denial_streak,
+};
 use super::graft::{ContextGraftProvider, splice_graft_block};
 use super::sink::{ConversationSink, InMemorySink, Turn};
 use super::system_prompt::SystemPromptBuilder;
@@ -90,6 +93,9 @@ const MAX_TOOL_RESULT_BYTES: usize = 65_536;
 /// for the model to see schema-echo + escalated errors before we
 /// fail-fast — matching the planning circuit-breaker default of 3.
 const IDENTICAL_TOOL_FAILURE_LIMIT: u32 = 3;
+
+// WEFT-345: consecutive gate Deny limit is `GATE_DENIAL_ESCALATION_LIMIT`
+// in `gate.rs` (re-exported constant used by `run_tool_loop`).
 
 /// Default maximum delegation depth (WEFT-180).
 ///
@@ -227,6 +233,9 @@ struct ToolLoopResult {
     /// stripped Hermes `<think>` / llama.cpp `reasoning_content`), joined
     /// in order. Observability only; never fed back into the prompt.
     reasoning: Option<String>,
+    /// WEFT-345: set when the loop halted after consecutive gate denials
+    /// and emitted `EscalateToHuman`.
+    escalation: Option<EscalateToHumanEvent>,
 }
 
 /// Truncate a string to at most `TOOL_PREVIEW_MAX_BYTES` bytes on a
@@ -1696,6 +1705,7 @@ impl<P: Platform> AgentLoop<P> {
             completion_tokens: tool_result.completion_tokens,
             reasoning: tool_result.reasoning,
             identity_source,
+            escalation: tool_result.escalation,
         };
         match serde_json::to_value(&result_meta) {
             Ok(v) => {
@@ -2205,6 +2215,9 @@ impl<P: Platform> AgentLoop<P> {
         // WEFT-651: consecutive identical (tool, args, error) failures.
         let mut last_identical_failure: Option<IdenticalFailureKey> = None;
         let mut identical_failure_count: u32 = 0;
+        // WEFT-345: consecutive gate Deny results → EscalateToHuman.
+        let mut consecutive_gate_denials: u32 = 0;
+        let mut gate_denial_records: Vec<GateDenialRecord> = Vec::new();
 
         for iteration in 0..max_iterations {
             // WEFT-323: observe the per-conv cancel token at the iteration
@@ -2380,6 +2393,7 @@ impl<P: Platform> AgentLoop<P> {
                     } else {
                         Some(reasoning_parts.join("\n\n"))
                     },
+                    escalation: None,
                 });
             }
 
@@ -2579,6 +2593,85 @@ impl<P: Platform> AgentLoop<P> {
                     .find(|(cid, _, _)| cid == id)
                     .map(|(_, _, input)| input.clone())
                     .unwrap_or(serde_json::Value::Null);
+
+                // WEFT-345: consecutive gate Deny → EscalateToHuman.
+                // Count only structured gate denials (`{"denied":true}`);
+                // sandbox / runtime errors and Defer do not contribute.
+                // Trip *before* the WEFT-651 identical-failure breaker so
+                // policy denials surface as governance escalation rather
+                // than a generic provider error when both would fire.
+                let escalate = record_gate_denial_streak(
+                    &mut consecutive_gate_denials,
+                    &mut gate_denial_records,
+                    name,
+                    &content,
+                    GATE_DENIAL_ESCALATION_LIMIT,
+                );
+                if escalate {
+                    let event =
+                        EscalateToHumanEvent::from_denials(conv_id, gate_denial_records.clone());
+                    warn!(
+                        conv_id,
+                        denial_count = event.denial_count,
+                        last_tool = %name,
+                        "WEFT-345 gate denial streak — EscalateToHuman"
+                    );
+
+                    let arguments_preview =
+                        preview_truncate(&serde_json::to_string(&input).unwrap_or_default());
+                    tool_call_summaries.push(AgentChatToolCall {
+                        name: name.clone(),
+                        arguments_preview,
+                        result_preview: preview_truncate(&content),
+                        success: false,
+                    });
+                    request.messages.push(LlmMessage {
+                        role: "tool".into(),
+                        content: content.clone(),
+                        tool_call_id: Some(id.clone()),
+                        tool_calls: None,
+                    });
+                    if let Err(e) = self
+                        .sink
+                        .append_turn(
+                            conv_id,
+                            Turn {
+                                turn_id: Self::next_turn_id(),
+                                role: "tool".into(),
+                                content: content.clone(),
+                                tool_calls: None,
+                                tool_call_id: Some(id.clone()),
+                                ts_ms: Self::now_ms(),
+                                voice_analysis: None,
+                            },
+                        )
+                        .await
+                    {
+                        warn!(error = %e, "sink: failed to append tool turn");
+                    }
+
+                    // Halt the turn with a first-class escalation event
+                    // (not a silent Provider error). Panel UX for the
+                    // interactive allow/abort/refine RPC is W-UI/15.
+                    return Ok(ToolLoopResult {
+                        text: event.summary.clone(),
+                        hallucinations: total_hallucinations,
+                        verified_successes: total_verified,
+                        tool_calls: tool_call_summaries,
+                        finish_reason: FINISH_REASON_ESCALATE_TO_HUMAN.into(),
+                        iterations: (iteration as u32).saturating_add(1),
+                        spawned_tasks,
+                        model,
+                        prompt_tokens,
+                        completion_tokens,
+                        reasoning: if reasoning_parts.is_empty() {
+                            None
+                        } else {
+                            Some(reasoning_parts.join("\n\n"))
+                        },
+                        escalation: Some(event),
+                    });
+                }
 
                 // WEFT-651: consecutive identical-failure circuit breaker.
                 let failure_key = identical_failure_key(name, &input, &content);
@@ -5652,6 +5745,187 @@ mod tests {
             parsed["reason"],
             serde_json::json!("write blocked by policy")
         );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// Transport that always requests the same tool — drives multi-deny
+    /// escalation without ever returning a final text turn (WEFT-345).
+    struct InfiniteToolUseTransport;
+
+    #[async_trait]
+    impl LlmTransport for InfiniteToolUseTransport {
+        async fn complete(&self, _request: &TransportRequest) -> clawft_types::Result<LlmResponse> {
+            Ok(LlmResponse {
+                id: "infinite-tool".into(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "call-deny".into(),
+                    name: "echo".into(),
+                    input: serde_json::json!({"text": "blocked"}),
+                }],
+                stop_reason: StopReason::ToolUse,
+                usage: Usage {
+                    input_tokens: 5,
+                    output_tokens: 3,
+                    total_tokens: 0,
+                },
+                metadata: HashMap::new(),
+            })
+        }
+    }
+
+    /// WEFT-345: after 3 consecutive gate Denys the loop emits
+    /// EscalateToHuman (finish_reason + escalation meta) instead of
+    /// silently burning the remaining tool-iteration budget.
+    #[tokio::test]
+    async fn three_gate_denials_emit_escalate_to_human() {
+        let transport = Arc::new(InfiniteToolUseTransport);
+        let (mut agent, dir) = make_agent_loop(transport, "weft345_escal").await;
+        let gate = Arc::new(StubGate::deny("policy blocks echo"));
+        agent = agent.with_gate(gate);
+
+        let inbound = InboundMessage {
+            channel: "test".into(),
+            sender_id: "u".into(),
+            chat_id: "conv-escal".into(),
+            content: "do a blocked thing".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        agent.bus.publish_inbound(inbound).unwrap();
+        let msg = agent.bus.consume_inbound().await.unwrap();
+        let outbound = agent
+            .handle_turn(msg, &CancellationToken::new())
+            .await
+            .expect("escalation is Ok with event, not Err");
+
+        assert!(
+            outbound.content.contains("EscalateToHuman"),
+            "assistant text should name EscalateToHuman, got: {}",
+            outbound.content
+        );
+        assert!(
+            outbound.content.contains("3x") || outbound.content.contains("3"),
+            "summary should mention denial count: {}",
+            outbound.content
+        );
+
+        let meta: AgentLoopResultMeta = serde_json::from_value(
+            outbound
+                .metadata
+                .get(AGENT_LOOP_RESULT_META_KEY)
+                .expect("loop meta present")
+                .clone(),
+        )
+        .expect("meta deserializes");
+        assert_eq!(meta.finish_reason, FINISH_REASON_ESCALATE_TO_HUMAN);
+        let esc = meta
+            .escalation
+            .expect("escalation event present on meta");
+        assert_eq!(
+            esc.decision,
+            clawft_types::agent_chat::GOVERNANCE_DECISION_ESCALATE_TO_HUMAN
+        );
+        assert_eq!(esc.denial_count, 3);
+        assert_eq!(esc.denials.len(), 3);
+        // Default conv_id is the session key (`channel:chat_id`).
+        assert_eq!(esc.conv_id, "test:conv-escal");
+        for d in &esc.denials {
+            assert_eq!(d.tool, "echo");
+            assert_eq!(d.reason, "policy blocks echo");
+        }
+        // Loop should stop at the third denial (≤ 3 LLM rounds).
+        assert!(
+            meta.iterations <= 3,
+            "should halt at escalation, iterations={}",
+            meta.iterations
+        );
+        assert_eq!(meta.tool_calls.len(), 3);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// Two denials then a clean final text turn must NOT escalate
+    /// (streak < limit).
+    #[tokio::test]
+    async fn two_gate_denials_do_not_escalate() {
+        /// First two LLM calls request tools; third returns text.
+        struct TwoToolsThenText {
+            n: std::sync::atomic::AtomicUsize,
+        }
+
+        #[async_trait]
+        impl LlmTransport for TwoToolsThenText {
+            async fn complete(
+                &self,
+                _request: &TransportRequest,
+            ) -> clawft_types::Result<LlmResponse> {
+                let i = self.n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if i < 2 {
+                    Ok(LlmResponse {
+                        id: format!("tool-{i}"),
+                        content: vec![ContentBlock::ToolUse {
+                            id: format!("call-{i}"),
+                            name: "echo".into(),
+                            input: serde_json::json!({"text": "x"}),
+                        }],
+                        stop_reason: StopReason::ToolUse,
+                        usage: Usage {
+                            input_tokens: 5,
+                            output_tokens: 3,
+                            total_tokens: 0,
+                        },
+                        metadata: HashMap::new(),
+                    })
+                } else {
+                    Ok(LlmResponse {
+                        id: "final".into(),
+                        content: vec![ContentBlock::Text {
+                            text: "gave up on tools".into(),
+                        }],
+                        stop_reason: StopReason::EndTurn,
+                        usage: Usage {
+                            input_tokens: 5,
+                            output_tokens: 3,
+                            total_tokens: 0,
+                        },
+                        metadata: HashMap::new(),
+                    })
+                }
+            }
+        }
+
+        let transport = Arc::new(TwoToolsThenText {
+            n: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let (mut agent, dir) = make_agent_loop(transport, "weft345_two").await;
+        agent = agent.with_gate(Arc::new(StubGate::deny("nope")));
+
+        let inbound = InboundMessage {
+            channel: "test".into(),
+            sender_id: "u".into(),
+            chat_id: "conv-two".into(),
+            content: "try".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        agent.bus.publish_inbound(inbound).unwrap();
+        let msg = agent.bus.consume_inbound().await.unwrap();
+        let outbound = agent.handle_turn(msg, &CancellationToken::new()).await.unwrap();
+
+        assert_eq!(outbound.content, "gave up on tools");
+        let meta: AgentLoopResultMeta = serde_json::from_value(
+            outbound
+                .metadata
+                .get(AGENT_LOOP_RESULT_META_KEY)
+                .expect("meta")
+                .clone(),
+        )
+        .unwrap();
+        assert_eq!(meta.finish_reason, "stop");
+        assert!(meta.escalation.is_none());
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

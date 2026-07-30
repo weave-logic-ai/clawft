@@ -140,6 +140,74 @@ pub struct SpawnedTaskSummary {
     pub status: String,
 }
 
+/// One gate denial that contributed to a WEFT-345 escalation streak.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GateDenialRecord {
+    /// Tool name that the gate refused (e.g. `"write_file"`).
+    pub tool: String,
+    /// Human-readable deny reason from the effect gate.
+    pub reason: String,
+}
+
+/// Well-known `finish_reason` when the tool loop escalates after
+/// consecutive gate denials (WEFT-345).
+///
+/// Matches the wire string panels / RPC clients should switch on.
+pub const FINISH_REASON_ESCALATE_TO_HUMAN: &str = "escalate_to_human";
+
+/// Canonical governance decision name for the WEFT-345 path — same
+/// spelling as `clawft_kernel::governance::GovernanceDecision::EscalateToHuman`.
+pub const GOVERNANCE_DECISION_ESCALATE_TO_HUMAN: &str = "EscalateToHuman";
+
+/// Governance escalation event when the agent loop hits the consecutive
+/// gate-denial threshold (WEFT-345).
+///
+/// Surfaced on [`AgentLoopResultMeta::escalation`] / [`AgentChatResult::escalation`]
+/// so panels can render an escalation prompt (W-UI/15) and a future
+/// allow/abort/refine RPC can resume the turn. Until that RPC lands,
+/// the loop still **halts** the turn after emitting this event — it
+/// no longer fails silently with only a log line.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EscalateToHumanEvent {
+    /// Always [`GOVERNANCE_DECISION_ESCALATE_TO_HUMAN`].
+    pub decision: String,
+    /// Number of consecutive gate denials that triggered escalation.
+    pub denial_count: u32,
+    /// Conversation the loop was processing.
+    pub conv_id: String,
+    /// Ordered denials (oldest first) that formed the streak.
+    pub denials: Vec<GateDenialRecord>,
+    /// Human-readable summary for logs / panel fallback text.
+    pub summary: String,
+}
+
+impl EscalateToHumanEvent {
+    /// Build a WEFT-345 escalation event from a denial streak.
+    pub fn from_denials(conv_id: impl Into<String>, denials: Vec<GateDenialRecord>) -> Self {
+        let conv_id = conv_id.into();
+        let denial_count = denials.len() as u32;
+        let last = denials.last();
+        let summary = match last {
+            Some(d) => format!(
+                "agent: gate denied tool calls {denial_count}x; escalating to human \
+                 (EscalateToHuman). Last: `{}`: {}",
+                d.tool, d.reason
+            ),
+            None => format!(
+                "agent: gate denied tool calls {denial_count}x; escalating to human \
+                 (EscalateToHuman)."
+            ),
+        };
+        Self {
+            decision: GOVERNANCE_DECISION_ESCALATE_TO_HUMAN.to_string(),
+            denial_count,
+            conv_id,
+            denials,
+            summary,
+        }
+    }
+}
+
 /// Result of `agent.chat`.
 ///
 /// Since WEFT-328 the loop threads a real [`AgentLoopResultMeta`] through
@@ -183,6 +251,11 @@ pub struct AgentChatResult {
     /// vec, so the field is fully backward-compatible.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spawned_tasks: Vec<SpawnedTaskSummary>,
+    /// WEFT-345: present when the tool loop stopped after consecutive
+    /// gate denials and emitted `EscalateToHuman`. Absent on the wire
+    /// when `None` so older panels ignore the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation: Option<EscalateToHumanEvent>,
 }
 
 /// Well-known `OutboundMessage.metadata` key under which the daemon
@@ -237,6 +310,10 @@ pub struct AgentLoopResultMeta {
     /// when no builder is attached or the load failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_source: Option<String>,
+    /// WEFT-345: consecutive gate-denial → `EscalateToHuman` event.
+    /// Absent when the turn ended normally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation: Option<EscalateToHumanEvent>,
 }
 
 /// One externally-produced turn for the `agent.turn.record` RPC.
@@ -442,6 +519,7 @@ mod tests {
             identity_source: None,
             reasoning: None,
             spawned_tasks: Vec::new(),
+            escalation: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(!json.contains("\"model\""));
@@ -450,6 +528,7 @@ mod tests {
         assert!(json.contains("\"tool_calls\":[]"));
         // Empty spawned_tasks must not appear on the wire (backward-compat).
         assert!(!json.contains("\"spawned_tasks\""));
+        assert!(!json.contains("\"escalation\""));
     }
 
     #[test]
@@ -497,6 +576,7 @@ mod tests {
                 child_conv_id: "sub:P:01HQ".into(),
                 status: "completed".into(),
             }],
+            escalation: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("\"spawned_tasks\""));
@@ -546,6 +626,7 @@ mod tests {
             completion_tokens: 96,
             reasoning: Some("the user asked for a sum".into()),
             identity_source: Some("clawft".into()),
+            escalation: None,
         };
         let value = serde_json::to_value(&meta).unwrap();
         let back: AgentLoopResultMeta = serde_json::from_value(value).unwrap();
@@ -558,6 +639,7 @@ mod tests {
         assert_eq!(back.completion_tokens, 96);
         assert_eq!(back.reasoning.as_deref(), Some("the user asked for a sum"));
         assert_eq!(back.identity_source.as_deref(), Some("clawft"));
+        assert!(back.escalation.is_none());
     }
 
     #[test]
@@ -573,6 +655,62 @@ mod tests {
         assert_eq!(back.completion_tokens, 0);
         assert!(back.model.is_none());
         assert!(back.identity_source.is_none());
+        assert!(back.escalation.is_none());
+    }
+
+    #[test]
+    fn escalate_to_human_event_from_denials() {
+        let event = EscalateToHumanEvent::from_denials(
+            "conv-1",
+            vec![
+                GateDenialRecord {
+                    tool: "write_file".into(),
+                    reason: "policy".into(),
+                },
+                GateDenialRecord {
+                    tool: "exec_shell".into(),
+                    reason: "high risk".into(),
+                },
+                GateDenialRecord {
+                    tool: "write_file".into(),
+                    reason: "policy".into(),
+                },
+            ],
+        );
+        assert_eq!(event.decision, GOVERNANCE_DECISION_ESCALATE_TO_HUMAN);
+        assert_eq!(event.denial_count, 3);
+        assert_eq!(event.conv_id, "conv-1");
+        assert_eq!(event.denials.len(), 3);
+        assert!(event.summary.contains("EscalateToHuman"));
+        assert!(event.summary.contains("3x"));
+    }
+
+    #[test]
+    fn agent_chat_result_escalation_round_trips() {
+        let r = AgentChatResult {
+            assistant_text: "escalated".into(),
+            tool_calls: vec![],
+            finish_reason: FINISH_REASON_ESCALATE_TO_HUMAN.into(),
+            iterations: 3,
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            model: None,
+            identity_source: None,
+            reasoning: None,
+            spawned_tasks: vec![],
+            escalation: Some(EscalateToHumanEvent::from_denials(
+                "c",
+                vec![GateDenialRecord {
+                    tool: "echo".into(),
+                    reason: "blocked".into(),
+                }],
+            )),
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("EscalateToHuman"));
+        let back: AgentChatResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.finish_reason, FINISH_REASON_ESCALATE_TO_HUMAN);
+        assert_eq!(back.escalation.as_ref().unwrap().decision, "EscalateToHuman");
     }
 
     #[test]
