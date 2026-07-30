@@ -582,6 +582,7 @@ mod tests {
             active: true,
             reference_url: None,
             sop_category: None,
+            rule_type: Default::default(),
         });
 
         let ctx = serde_json::json!({
@@ -601,6 +602,7 @@ mod tests {
             active: true,
             reference_url: None,
             sop_category: None,
+            rule_type: Default::default(),
         });
 
         let ctx = serde_json::json!({
@@ -620,6 +622,7 @@ mod tests {
             active: true,
             reference_url: None,
             sop_category: None,
+            rule_type: Default::default(),
         });
 
         let ctx = serde_json::json!({
@@ -639,6 +642,7 @@ mod tests {
             active: true,
             reference_url: None,
             sop_category: None,
+            rule_type: Default::default(),
         });
 
         let ctx = serde_json::json!({
@@ -664,6 +668,7 @@ mod tests {
                 active: true,
                 reference_url: None,
                 sop_category: None,
+                rule_type: Default::default(),
             });
 
         // Low risk → governance.permit
@@ -707,6 +712,7 @@ mod tests {
             active: true,
             reference_url: None,
             sop_category: None,
+            rule_type: Default::default(),
         });
 
         // Context with effect embedded
@@ -748,6 +754,7 @@ mod tests {
                 active: true,
                 reference_url: None,
                 sop_category: None,
+                rule_type: Default::default(),
             });
 
         let ctx = serde_json::json!({"effect": {"risk": 0.1}});
@@ -777,6 +784,7 @@ mod tests {
                 active: true,
                 reference_url: None,
                 sop_category: None,
+                rule_type: Default::default(),
             });
 
         let ctx = serde_json::json!({"effect": {"risk": 0.9}});
@@ -883,6 +891,7 @@ mod tests {
                     active: true,
                     reference_url: None,
                     sop_category: None,
+                    rule_type: Default::default(),
                 }),
         );
 
@@ -913,6 +922,7 @@ mod tests {
             active: true,
             reference_url: None,
             sop_category: None,
+            rule_type: Default::default(),
         });
 
         // Risk exactly at 0.5 — the magnitude of (0.5,0,0,0,0) = 0.5
@@ -937,6 +947,7 @@ mod tests {
             active: true,
             reference_url: None,
             sop_category: None,
+            rule_type: Default::default(),
         });
 
         let ctx = serde_json::json!({"effect": {"risk": 0.9}});
@@ -959,6 +970,7 @@ mod tests {
             active: true,
             reference_url: None,
             sop_category: None,
+            rule_type: Default::default(),
         });
 
         let ctx = serde_json::json!({"effect": {"risk": 0.9}});
@@ -981,6 +993,7 @@ mod tests {
             active: false,
             reference_url: None,
             sop_category: None,
+            rule_type: Default::default(),
         });
 
         let ctx = serde_json::json!({"effect": {"risk": 0.9}});
@@ -1001,6 +1014,7 @@ mod tests {
                 active: true,
                 reference_url: None,
                 sop_category: None,
+                rule_type: Default::default(),
             })
             .add_rule(GovernanceRule {
                 id: "rule-2".into(),
@@ -1010,6 +1024,7 @@ mod tests {
                 active: true,
                 reference_url: None,
                 sop_category: None,
+                rule_type: Default::default(),
             });
 
         let ctx = serde_json::json!({"effect": {"risk": 0.9}});
@@ -1146,6 +1161,7 @@ mod tilezero_tests {
             active: true,
             reference_url: None,
             sop_category: None,
+            rule_type: Default::default(),
         })
     }
 

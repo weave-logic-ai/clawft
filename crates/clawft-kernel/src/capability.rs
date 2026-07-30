@@ -76,6 +76,15 @@ impl Default for ResourceLimits {
     }
 }
 
+/// Topics browser / [`IpcScope::Restricted`] agents may access without elevation.
+///
+/// A topic is public when it is exactly `"public"` or has the `public.` prefix
+/// (e.g. `public.events`, `public.health`). All other topics require a broader
+/// IPC scope (typically granted via governance-gated capability elevation).
+pub fn is_public_topic(topic: &str) -> bool {
+    topic == "public" || topic.starts_with("public.")
+}
+
 /// IPC scope defining which message targets an agent may communicate with.
 #[non_exhaustive]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -86,6 +95,9 @@ pub enum IpcScope {
     /// Agent may only communicate with its parent.
     ParentOnly,
     /// Agent may communicate with a specified set of PIDs.
+    ///
+    /// Topic pub/sub is limited to [public topics](is_public_topic) only
+    /// (S7 / WEFT-108 browser sandbox default).
     Restricted(Vec<u64>),
     /// Agent may only publish/subscribe to specified topics (no direct PID messaging).
     Topic(Vec<String>),
@@ -179,6 +191,9 @@ impl AgentCapabilities {
     }
 
     /// Check whether the agent is allowed to publish/subscribe to a topic.
+    ///
+    /// [`IpcScope::Restricted`] (browser default) only permits
+    /// [public topics](is_public_topic). Other scopes are unchanged.
     pub fn can_topic(&self, topic: &str) -> bool {
         if !self.can_ipc {
             return false;
@@ -186,7 +201,8 @@ impl AgentCapabilities {
         match &self.ipc_scope {
             IpcScope::All => true,
             IpcScope::Topic(topics) => topics.iter().any(|t| t == topic),
-            IpcScope::ParentOnly | IpcScope::Restricted(_) => true, // topic access not restricted
+            IpcScope::ParentOnly => true, // topic access not restricted for parent-only
+            IpcScope::Restricted(_) => is_public_topic(topic),
             IpcScope::None => false,
         }
     }
@@ -1149,6 +1165,58 @@ mod tests {
         // Empty restricted list means no PIDs are reachable
         assert!(!caps.can_message(1));
         assert!(!caps.can_message(999));
+    }
+
+    #[test]
+    fn is_public_topic_prefix_rules() {
+        assert!(is_public_topic("public"));
+        assert!(is_public_topic("public.events"));
+        assert!(is_public_topic("public.health.status"));
+        assert!(!is_public_topic("publicx"));
+        assert!(!is_public_topic("admin.secrets"));
+        assert!(!is_public_topic("mesh.internal"));
+        assert!(!is_public_topic(""));
+    }
+
+    /// WEFT-108 / S7: browser nodes with Restricted IPC cannot subscribe
+    /// to non-public topics.
+    #[test]
+    fn browser_node_cannot_subscribe_to_non_public_topics() {
+        let caps = AgentCapabilities::browser_default();
+        assert!(
+            matches!(caps.ipc_scope, IpcScope::Restricted(ref pids) if pids.is_empty()),
+            "browser default must be IpcScope::Restricted([])"
+        );
+
+        // Public topics are allowed
+        assert!(caps.can_topic("public"));
+        assert!(caps.can_topic("public.events"));
+        assert!(caps.can_topic("public.health"));
+
+        // Non-public topics are denied
+        assert!(!caps.can_topic("admin.secrets"));
+        assert!(!caps.can_topic("mesh.internal"));
+        assert!(!caps.can_topic("chain.append"));
+        assert!(!caps.can_topic("governance.root"));
+
+        // Enforced via CapabilityChecker as well
+        let (checker, pid) = make_checker_with_entry(caps);
+        assert!(checker.check_ipc_topic(pid, "public.status").is_ok());
+        assert!(checker.check_ipc_topic(pid, "admin.secrets").is_err());
+        assert!(checker.check_ipc_topic(pid, "mesh.peer.join").is_err());
+    }
+
+    #[test]
+    fn restricted_scope_limits_topics_to_public() {
+        let caps = AgentCapabilities {
+            ipc_scope: IpcScope::Restricted(vec![1, 2]),
+            ..Default::default()
+        };
+        assert!(caps.can_topic("public.feed"));
+        assert!(!caps.can_topic("private.feed"));
+        // Direct PID messaging still uses the allowlist
+        assert!(caps.can_message(1));
+        assert!(!caps.can_message(99));
     }
 
     #[test]
