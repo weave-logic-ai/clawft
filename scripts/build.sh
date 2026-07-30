@@ -552,6 +552,9 @@ cmd_all() {
 workspace_test() {
     local extra=()
     [ "$NO_FAIL_FAST" = true ] && extra+=(--no-fail-fast)
+    # Honor `--features <f>` so feature-gated adapters (matrix, email, …)
+    # are compiled and tested (WEFT-159).
+    [ -n "$FEATURES" ] && extra+=(--features "$FEATURES")
     # `scripts/build.sh test <pkg>…` scopes to the named packages; no
     # packages means the whole workspace (the historical behavior).
     local scope=(--workspace)
@@ -727,9 +730,11 @@ cmd_wasm_panel() {
 }
 
 cmd_check() {
-    header "Running cargo check --workspace"
+    header "Running cargo check --workspace${FEATURES:+ --features $FEATURES}"
     timer_start
-    run_cmd cargo check --workspace
+    local args=(cargo check --workspace)
+    [ -n "$FEATURES" ] && args+=(--features "$FEATURES")
+    run_cmd "${args[@]}"
     timer_end
 }
 
