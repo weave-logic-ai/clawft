@@ -1,21 +1,43 @@
 //! Dynamic MCP server management.
 //!
-//! [`McpServerManager`] provides runtime management of MCP server
+//! [`McpServerManager`] provides **runtime** management of MCP server
 //! connections, including add/remove/list operations and hot-reload
 //! via drain-and-swap protocol.
 //!
-//! # CLI commands
+//! # Ownership (ADR-070 / WEFT-494)
+//!
+//! | Layer | Role |
+//! |-------|------|
+//! | **CLI** `weft mcp add\|list\|remove` (WEFT-188) | Durable config writes under `tools.mcp_servers` / `tools.mcpServers`. Works offline. |
+//! | **Daemon RPC** `mcp.add` / `mcp.list` / `mcp.remove` / `mcp.reload` | Live shared registry inside the kernel process. |
+//!
+//! Preferred operator path: CLI mutates config → `mcp.reload` (or the
+//! WEFT-187 file watcher) applies the diff into this manager. Direct
+//! `mcp.add` / `mcp.remove` affect **runtime only** and do not rewrite
+//! the config file.
+//!
+//! # CLI commands (durable config)
 //!
 //! ```text
-//! weft mcp add <name> <command|url>
+//! weft mcp add <name> --command <cmd> | --url <endpoint>
 //! weft mcp list
 //! weft mcp remove <name>
 //! ```
 //!
+//! # Daemon RPC (live registry)
+//!
+//! ```text
+//! mcp.add    { name, command?, args?, env?, url? }
+//! mcp.list   {}
+//! mcp.remove { name, drain? }
+//! mcp.reload { path? }
+//! tools.mcp  {}   # alias of mcp.list (CLI compatibility)
+//! ```
+//!
 //! # Hot-reload protocol
 //!
-//! When `clawft.toml` changes:
-//! 1. File watcher detects change (debounce 500ms).
+//! When `clawft.toml` / config changes:
+//! 1. File watcher detects change (debounce 500ms) **or** `mcp.reload` is called.
 //! 2. Diff old and new server lists.
 //! 3. New servers: connect immediately.
 //! 4. Removed servers: drain in-flight calls (30s), then disconnect.
@@ -177,8 +199,9 @@ pub struct ManagedMcpServer {
 
 /// Manager for dynamically adding, removing, and listing MCP servers.
 ///
-/// Provides the runtime layer for `weft mcp add/list/remove` commands
-/// and hot-reload on config changes.
+/// Runtime layer behind daemon RPCs `mcp.add` / `mcp.list` / `mcp.remove`
+/// / `mcp.reload` (WEFT-494). Durable config edits remain the CLI's job
+/// (`weft mcp …`, WEFT-188); see ADR-070.
 pub struct McpServerManager {
     /// Active servers keyed by name.
     servers: HashMap<String, ManagedMcpServer>,

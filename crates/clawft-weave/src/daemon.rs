@@ -800,10 +800,21 @@ pub async fn run(
     // configured root rather than process CWD (systemd / multi-workspace).
     let agent_workspace_root = config.agents.workspace_root.clone();
 
+    // WEFT-494 / ADR-070: snapshot MCP server configs before boot so the
+    // live McpServerManager registry can be seeded after Kernel::boot.
+    let mcp_servers_seed = config.tools.mcp_servers.clone();
+
     // Boot kernel
     let platform = NativePlatform::new();
     let kernel = Kernel::boot(config, kernel_config, Arc::new(platform)).await?;
     let kernel = Arc::new(tokio::sync::RwLock::new(kernel));
+
+    // WEFT-494: seed live MCP registry + remember best-effort config path
+    // for path-less mcp.reload (CLI after weft mcp add).
+    crate::mcp_rpc::seed_from_config_servers(&mcp_servers_seed).await;
+    if let Some(path) = crate::mcp_rpc::resolve_reload_path(None) {
+        crate::mcp_rpc::set_mcp_config_path(path);
+    }
 
     // Bootstrap daemon node identity. Loads `<runtime>/node.key`
     // (generates on first run, persists with 0600). Registers the
@@ -6303,6 +6314,12 @@ async fn dispatch(
                 Err(e) => Response::error(format!("cron remove denied: {e}")),
             }
         }
+        // WEFT-494 / ADR-070: live MCP registry (shared McpServerManager).
+        // Durable config remains CLI-owned (weft mcp … / WEFT-188).
+        "mcp.add" => crate::mcp_rpc::handle_mcp_add(params).await,
+        "mcp.list" | "tools.mcp" => crate::mcp_rpc::handle_mcp_list(params).await,
+        "mcp.remove" => crate::mcp_rpc::handle_mcp_remove(params).await,
+        "mcp.reload" => crate::mcp_rpc::handle_mcp_reload(params).await,
         "ipc.topics" => {
             let k = kernel.read().await;
             let a2a = k.a2a_router();
@@ -8414,6 +8431,7 @@ mod tests {
             checkpoint_interval: 1000,
             chain_id: 0,
             checkpoint_path: None,
+            external_anchor: None,
         });
         let kernel = Kernel::boot(Config::default(), kcfg, platform)
             .await
@@ -8500,6 +8518,7 @@ mod tests {
             checkpoint_interval: 1000,
             chain_id: 0,
             checkpoint_path: None,
+            external_anchor: None,
         });
         let kernel = Kernel::boot(Config::default(), kcfg, platform)
             .await

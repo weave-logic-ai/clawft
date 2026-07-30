@@ -204,12 +204,11 @@ inline markers.
   `weft mcp add claude-flow npx -y @claude-flow/cli@latest` per
   `mcp/discovery.rs:11`? If yes, the install path is a CLI command without
   a discovery shortcut. If no, what is the integration shape?
-- **`McpServerManager` integration with the daemon.** `McpServerManager` is
-  defined in `clawft-services/src/mcp/discovery.rs` and exposes add/remove
-  and a planned drain-and-swap protocol. The daemon dispatch does not appear
-  to host `mcp.add` / `mcp.list` / `mcp.remove` verbs — the doc comment says
-  "CLI commands `weft mcp add/list/remove`" but the verbs route to a CLI
-  helper, not RPC. Are MCP servers managed per-process or through the daemon?
+- **`McpServerManager` integration with the daemon.** **Closed by WEFT-494 /
+  ADR-070 (2026-07-30).** Hybrid ownership: CLI (`weft mcp …`, WEFT-188) owns
+  durable config; daemon RPCs `mcp.add` / `mcp.list` / `mcp.remove` /
+  `mcp.reload` (+ `tools.mcp` alias) own the live shared registry. Preferred
+  path: CLI writes config → `mcp.reload`.
 - **WASM panel auth.** The webview connects to the same UDS the local user
   owns; there is no token, capability, or per-panel identity on the proxy
   layer. Multi-user kernels (per ADR-042 modes) would need to add this.

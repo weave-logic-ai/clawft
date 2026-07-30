@@ -18,6 +18,9 @@ pub mod conv_postmortem;
 pub mod daemon;
 #[cfg(unix)]
 pub mod llm_service;
+/// Live MCP registry RPC handlers (WEFT-494 / ADR-070). Available on all
+/// platforms so unit tests can exercise add/list/remove without UDS.
+pub mod mcp_rpc;
 pub mod node_identity;
 pub mod protocol;
 #[cfg(feature = "rvf-rpc")]
