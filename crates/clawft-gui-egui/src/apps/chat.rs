@@ -2,18 +2,18 @@
 //! stream graduated from `crates/clawft-gui-egui/src/explorer/chat.rs`.
 //! DESIGN.md §9 sidebar 10.
 //!
-//! All the real work — markdown rendering, system-prompt editor,
-//! heartbeat label, identity-drift warning, `agent.chat_stream` RPC
-//! plumbing (WEFT-253 progressive frames) — lives in `explorer::chat`.
-//! This module is a thin host: it owns nothing, paints the canonical
-//! heading, and delegates the body to the standalone
-//! [`ChatView`](crate::explorer::chat::ChatView) instance on
-//! [`Desktop`].
+//! All the real work — multi-conversation sidebar (WEFT-254), markdown
+//! rendering, system-prompt editor, heartbeat label, identity-drift
+//! warning, `agent.chat_stream` RPC plumbing (WEFT-253 progressive
+//! frames) — lives in `explorer::chat`. This module is a thin host: it
+//! owns nothing, paints the canonical heading, and delegates the body
+//! to the standalone [`ChatPanel`](crate::explorer::chat::ChatPanel)
+//! instance on [`Desktop`].
 //!
 //! State-lifting note: `desk.chat` is independent from
 //! `desk.explorer.chat_view` (which backs the substrate-sentinel
-//! dispatch path inside the Explorer detail pane). Two conversations
-//! by design — the sidebar app is the user's persistent
+//! dispatch path inside the Explorer detail pane). Two multi-session
+//! panels by design — the sidebar app is the user's persistent
 //! concierge-bot surface; the substrate-sentinel chat is whatever the
 //! substrate topology surfaces under a `{kind:"chat"}` value.
 //!
