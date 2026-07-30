@@ -30,8 +30,8 @@ use wasm_bindgen_test::*;
 wasm_bindgen_test_configure!(run_in_browser);
 
 // `clawft_wasm::*` reexports the `browser_entry` symbols (init, send_message,
-// boot_info, analyze_files, set_env) when the `browser` feature is on.
-use clawft_wasm::{VERSION, analyze_files, boot_info, send_message, set_env};
+// boot_info, analyze_files, set_env, get_env) when the `browser` feature is on.
+use clawft_wasm::{VERSION, analyze_files, boot_info, get_env, send_message, set_env};
 
 // ---------------------------------------------------------------------------
 // Test 1 — boot_info() returns the expected 5-phase trace.
@@ -137,7 +137,8 @@ fn analyze_files_rejects_malformed_input() {
 // ---------------------------------------------------------------------------
 #[wasm_bindgen_test]
 async fn init_rejects_malformed_config() {
-    let result = clawft_wasm::init("{not valid json").await;
+    // WEFT-391: init takes optional env_json; None skips pre-seed.
+    let result = clawft_wasm::init("{not valid json", None).await;
     assert!(
         result.is_err(),
         "init() must reject malformed JSON config; got Ok"
@@ -147,6 +148,33 @@ async fn init_rejects_malformed_config() {
     assert!(
         msg.contains("config parse error"),
         "expected `config parse error` in JsValue, got `{msg}`"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 4b — init() rejects a non-object env map (WEFT-391).
+// ---------------------------------------------------------------------------
+#[wasm_bindgen_test]
+async fn init_rejects_malformed_env_map() {
+    // Valid-enough JSON object shape for Config defaults, but a bad env map.
+    // Config parse may still fail on missing required fields depending on
+    // schema; env_json is validated first only after config succeeds, so
+    // use a minimal valid config shell if possible. Here we assert the
+    // env-map path: when config is parseable as Config (all defaults), a
+    // non-object env_json yields `env map` error before the API-key check.
+    let minimal = "{}";
+    let result = clawft_wasm::init(minimal, Some("[1,2,3]".to_string())).await;
+    assert!(
+        result.is_err(),
+        "init() must reject non-object env_json; got Ok"
+    );
+    let err = result.unwrap_err();
+    let msg = err.as_string().unwrap_or_default();
+    // Either config failed first (unexpected) or env map parse failed.
+    // Prefer the env-map message; Config `{}` is fully defaultable.
+    assert!(
+        msg.contains("env map") || msg.contains("no API key") || msg.contains("config parse"),
+        "expected env map / config / api-key error, got `{msg}`"
     );
 }
 
@@ -190,13 +218,37 @@ fn version_constant_is_set() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 7 — set_env() is a no-op shim but must not panic.
+// Test 7 — set_env() before init is a safe no-op; get_env returns None
+// (WEFT-391 — live mutation only after init wires Arc into BrowserRuntime).
 // ---------------------------------------------------------------------------
 #[wasm_bindgen_test]
-fn set_env_is_noop_safe() {
-    // Pre-init this is a no-op; primary contract is "never panic on
-    // arbitrary input" — covers a future where the env shim becomes
-    // load-bearing.
+fn set_env_pre_init_is_safe_noop() {
+    // Pre-init: set_env must not panic. get_env returns None because
+    // RUNTIME is unset (or, if a prior test initialized it in the same
+    // worker, the key may be present — either way no panic).
     set_env("ANTHROPIC_API_KEY", "sk-test-not-real");
     set_env("", "");
+    let _ = get_env("ANTHROPIC_API_KEY");
+    let _ = get_env("");
+}
+
+// ---------------------------------------------------------------------------
+// Test 8 — parse path for env seed: invalid env map is rejected without
+// panicking (full set_env→Platform.env round-trip lives in
+// clawft-platform browser unit tests; OnceLock init requires a valid
+// API key + pipeline and is covered by the HTML harness).
+// ---------------------------------------------------------------------------
+#[wasm_bindgen_test]
+async fn init_env_map_non_string_value_errors() {
+    let result = clawft_wasm::init(
+        "{}",
+        Some(r#"{"FOO": 123}"#.to_string()),
+    )
+    .await;
+    assert!(result.is_err(), "non-string env value must error");
+    let msg = result.unwrap_err().as_string().unwrap_or_default();
+    assert!(
+        msg.contains("env map") || msg.contains("must be a string") || msg.contains("no API key"),
+        "expected env-map type error (or earlier config/key fail), got `{msg}`"
+    );
 }

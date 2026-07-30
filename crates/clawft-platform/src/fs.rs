@@ -103,7 +103,7 @@ impl FileSystem for NativeFileSystem {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};

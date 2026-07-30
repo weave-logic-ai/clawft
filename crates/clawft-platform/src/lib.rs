@@ -146,7 +146,7 @@ impl Platform for NativePlatform {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
 
