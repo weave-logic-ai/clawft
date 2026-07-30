@@ -1296,18 +1296,76 @@ impl<P: Platform> AgentLoop<P> {
         //     leading entry in the message list, ahead of any
         //     ContextBuilder-emitted content. The builder pulls from
         //     `Arc<dyn IdentityProvider>` so this is filesystem-free
-        //     in tests. A provider failure is logged and swallowed —
-        //     we keep the turn alive on a degraded prompt rather than
-        //     failing the user-visible chat path. Phase D3's cutover
-        //     replaces the spike's `build_concierge_system_prompt`
-        //     with this exact path.
+        //     in tests.
         //
         //     WEFT-328: also capture `identity_source` so the wire
         //     `AgentChatResult` can surface it to the panel drift chip.
+        //
+        //     WEFT-342: binding-thread integrity is re-evaluated every
+        //     turn via `gate.check("soul.binding_thread_intact", …)`.
+        //     Default policy hard-refuses on mismatch
+        //     (`agents.binding_thread_mode = "deny"`); `warn_only`
+        //     keeps the legacy annotate + continue path. Missing
+        //     identity files (NotFound) still degrade to
+        //     ContextBuilder-only so uninitialised workspaces remain
+        //     chat-able for CLI/dev.
+        //
+        //     Agent id precedence matches the tool-loop gate path
+        //     below (routed > daemon concierge > channel:sender).
+        let gate_agent_id = if let Some(ref id) = routed_agent_id {
+            id.clone()
+        } else if let Some(id) = self.daemon_agent_id.as_deref() {
+            id.to_owned()
+        } else {
+            format!("{}:{}", msg.channel, msg.sender_id)
+        };
         let mut identity_source: Option<String> = None;
         if let Some(ref builder) = self.system_prompt_builder {
             match builder.build_with_meta().await {
                 Ok(built) => {
+                    // Evaluate governance rule every turn (even when ok)
+                    // so the witness trail records the check.
+                    let status_ok = built.binding_thread_status.is_ok();
+                    let bt_effect =
+                        crate::agent::effects::effect_for_binding_thread(status_ok);
+                    let decision = self
+                        .gate
+                        .check(
+                            &gate_agent_id,
+                            crate::agent::identity::BINDING_THREAD_GATE_ACTION,
+                            &bt_effect,
+                        )
+                        .await;
+                    // Policy mode is authoritative (WEFT-342). Gate is
+                    // always consulted for the audit/witness trail; under
+                    // deny mode a mismatch hard-refuses regardless of
+                    // whether the attached gate is NoopGate or kernel.
+                    // Under warn_only the degraded prompt continues even
+                    // if the kernel rule would Deny.
+                    if !status_ok && builder.binding_thread_mode().is_deny() {
+                        let reason = match &decision {
+                            GateDecision::Deny { reason } => reason.as_str(),
+                            _ => crate::agent::identity::BINDING_THREAD_MISMATCH_REASON,
+                        };
+                        warn!(
+                            agent_id = %gate_agent_id,
+                            reason = %reason,
+                            decision = ?decision,
+                            "binding-thread mismatch — hard refusing turn \
+                             (agents.binding_thread_mode=deny)"
+                        );
+                        return Err(ClawftError::SecurityViolation {
+                            reason: crate::agent::identity::BINDING_THREAD_MISMATCH_REASON
+                                .to_string(),
+                        });
+                    }
+                    if !status_ok {
+                        debug!(
+                            agent_id = %gate_agent_id,
+                            decision = ?decision,
+                            "binding-thread mismatch under warn_only — continuing degraded"
+                        );
+                    }
                     identity_source = Some(built.identity_source);
                     messages.insert(
                         0,
@@ -1318,6 +1376,29 @@ impl<P: Platform> AgentLoop<P> {
                             tool_calls: None,
                         },
                     );
+                }
+                Err(crate::agent::identity::IdentityError::BindingThreadMismatch) => {
+                    // WEFT-342 deny path: re-run gate for audit then refuse.
+                    let decision = self
+                        .gate
+                        .check(
+                            &gate_agent_id,
+                            crate::agent::identity::BINDING_THREAD_GATE_ACTION,
+                            &crate::agent::effects::effect_for_binding_thread(false),
+                        )
+                        .await;
+                    let reason = match decision {
+                        GateDecision::Deny { reason } => reason,
+                        _ => crate::agent::identity::BINDING_THREAD_MISMATCH_REASON.to_string(),
+                    };
+                    warn!(
+                        agent_id = %gate_agent_id,
+                        reason = %reason,
+                        "binding-thread mismatch — hard refusing turn"
+                    );
+                    return Err(ClawftError::SecurityViolation {
+                        reason: crate::agent::identity::BINDING_THREAD_MISMATCH_REASON.to_string(),
+                    });
                 }
                 Err(e) => {
                     warn!(
@@ -5133,6 +5214,102 @@ mod tests {
         assert_eq!(meta.prompt_tokens, 40);
         assert_eq!(meta.completion_tokens, 22);
         assert_eq!(meta.model.as_deref(), Some("e2e-test-model"));
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// WEFT-342: deny mode (default) hard-refuses when SOUL.md lacks the
+    /// binding-thread excerpt — no LLM call is made.
+    #[tokio::test]
+    async fn handle_turn_hard_refuses_on_binding_thread_mismatch_deny_mode() {
+        use crate::agent::identity::IdentityProvider;
+        use crate::agent::system_prompt::SystemPromptBuilder;
+        use clawft_types::config::BindingThreadMode;
+
+        let transport = Arc::new(E2eRecordingTransport::new());
+        let (mut agent, dir) =
+            make_agent_loop(transport.clone() as Arc<dyn LlmTransport>, "d1_bt_deny").await;
+
+        let provider: Arc<dyn IdentityProvider> = Arc::new(StubIdentityProvider {
+            soul: "# SOUL.md\n\nNo binding thread here.\n".into(),
+            identity: "# IDENTITY.md\n\nclawft.\n".into(),
+        });
+        let builder = Arc::new(
+            SystemPromptBuilder::new(provider, std::path::PathBuf::from("/tmp/bt-deny"))
+                .with_binding_thread_mode(BindingThreadMode::Deny),
+        );
+        agent = agent.with_system_prompt_builder(builder);
+
+        let inbound = InboundMessage {
+            channel: "test".into(),
+            sender_id: "user1".into(),
+            chat_id: "chat-bt-deny".into(),
+            content: "ping".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        agent.bus.publish_inbound(inbound).unwrap();
+        let msg = agent.bus.consume_inbound().await.unwrap();
+        let err = agent
+            .handle_turn(msg, &CancellationToken::new())
+            .await
+            .expect_err("must hard-refuse");
+        match err {
+            ClawftError::SecurityViolation { reason } => {
+                assert_eq!(reason, "binding-thread mismatch");
+            }
+            other => panic!("expected SecurityViolation, got {other:?}"),
+        }
+        assert!(
+            transport.snapshots().is_empty(),
+            "LLM must not be called after binding-thread refuse"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// WEFT-342: warn_only continues with a degraded annotated prompt.
+    #[tokio::test]
+    async fn handle_turn_continues_on_binding_thread_mismatch_warn_only() {
+        use crate::agent::identity::IdentityProvider;
+        use crate::agent::system_prompt::SystemPromptBuilder;
+        use clawft_types::config::BindingThreadMode;
+
+        let transport = Arc::new(E2eRecordingTransport::new());
+        let (mut agent, dir) =
+            make_agent_loop(transport.clone() as Arc<dyn LlmTransport>, "d1_bt_warn").await;
+
+        let provider: Arc<dyn IdentityProvider> = Arc::new(StubIdentityProvider {
+            soul: "# SOUL.md\n\nNo binding thread here.\n".into(),
+            identity: "# IDENTITY.md\n\nclawft.\n".into(),
+        });
+        let builder = Arc::new(
+            SystemPromptBuilder::new(provider, std::path::PathBuf::from("/tmp/bt-warn"))
+                .with_binding_thread_mode(BindingThreadMode::WarnOnly),
+        );
+        agent = agent.with_system_prompt_builder(builder);
+
+        let inbound = InboundMessage {
+            channel: "test".into(),
+            sender_id: "user1".into(),
+            chat_id: "chat-bt-warn".into(),
+            content: "ping".into(),
+            timestamp: chrono::Utc::now(),
+            media: vec![],
+            metadata: HashMap::new(),
+        };
+        agent.bus.publish_inbound(inbound).unwrap();
+        let msg = agent.bus.consume_inbound().await.unwrap();
+        let _outbound = agent
+            .handle_turn(msg, &CancellationToken::new())
+            .await
+            .expect("warn_only must continue");
+
+        let snapshots = transport.snapshots();
+        assert!(!snapshots.is_empty(), "LLM must still be called under warn_only");
+        let prompt = &snapshots[0][0].content;
+        assert!(prompt.contains("[binding-thread-status]\nmismatch"));
+        assert!(prompt.contains("degraded mode"));
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

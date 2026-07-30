@@ -829,6 +829,8 @@ pub async fn build_daemon_agent_loop(
         &config.routing,
         workspace_routing,
     );
+    // WEFT-342: capture before moving `config.agents` into AgentLoop.
+    let binding_thread_mode = config.agents.binding_thread_mode;
     let mut agent = crate::agent::loop_core::AgentLoop::new(
         config.agents,
         platform,
@@ -855,10 +857,14 @@ pub async fn build_daemon_agent_loop(
     // provider (and its cache, in the FileIdentityProvider case)
     // without per-turn re-construction cost.
     if let Some(provider) = identity_provider {
-        let builder = Arc::new(crate::agent::system_prompt::SystemPromptBuilder::new(
-            provider,
-            workspace.to_path_buf(),
-        ));
+        // WEFT-342: honour agents.binding_thread_mode (default deny).
+        let builder = Arc::new(
+            crate::agent::system_prompt::SystemPromptBuilder::new(
+                provider,
+                workspace.to_path_buf(),
+            )
+            .with_binding_thread_mode(binding_thread_mode),
+        );
         agent = agent.with_system_prompt_builder(builder);
     }
     // D2 attaches the kernel-backed gate. When `None`, AgentLoop's

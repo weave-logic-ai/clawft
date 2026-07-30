@@ -26,32 +26,47 @@
 //! lines so they're observable in logs without crowding the persona
 //! content the LLM actually consumes for its voice.
 //!
-//! Plan reference: `docs/plans/agent-core-v1.md` Phase D1.
+//! ## Binding-thread policy (WEFT-342)
+//!
+//! By default (`agents.binding_thread_mode = "deny"`) a missing
+//! [`BINDING_THREAD_EXCERPT`] hard-refuses the turn
+//! ([`IdentityError::BindingThreadMismatch`]). Set
+//! `binding_thread_mode = "warn_only"` to restore the legacy annotate
+//! + `warn!` degraded path. The agent loop also evaluates governance
+//! rule `soul.binding_thread_intact` via `gate.check` every turn.
+//!
+//! Plan reference: `docs/plans/agent-core-v1.md` Phase D1; WEFT-342.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use tracing::warn;
 
-use crate::agent::identity::{BINDING_THREAD_EXCERPT, Identity, IdentityError, IdentityProvider};
+use clawft_types::config::BindingThreadMode;
+
+use crate::agent::identity::{
+    BINDING_THREAD_MISMATCH_REASON, Identity, IdentityError, IdentityProvider,
+    soul_contains_binding_thread,
+};
 
 /// Status of the binding-thread integrity check.
 ///
-/// The check is non-blocking: a `Mismatch` does not abort the turn;
-/// it just annotates the prompt and emits a `warn!` log so an operator
-/// can decide whether to roll back the SOUL.md edit.
+/// When the operator policy is [`BindingThreadMode::Deny`] (default),
+/// a [`Mismatch`](Self::Mismatch) aborts prompt construction via
+/// [`IdentityError::BindingThreadMismatch`]. Under
+/// [`BindingThreadMode::WarnOnly`] the mismatch only annotates the
+/// prompt and emits a `warn!` log so an operator can roll back the
+/// SOUL.md edit without blocking chat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindingThreadStatus {
     /// Loaded SOUL.md contains [`BINDING_THREAD_EXCERPT`] verbatim.
     Ok,
     /// Loaded SOUL.md does NOT contain [`BINDING_THREAD_EXCERPT`].
-    /// The agent still runs but the system prompt is annotated and
-    /// a `warn!` is logged.
     Mismatch,
 }
 
 impl BindingThreadStatus {
-    /// Stable string label for embedding in the system prompt.
+    /// Stable string label for embedding in the system prompt and gate context.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Ok => "ok",
@@ -64,16 +79,22 @@ impl BindingThreadStatus {
     /// deterministically testable without going through the full
     /// `build()` path.
     pub fn from_soul(soul: &str) -> Self {
-        if soul.contains(BINDING_THREAD_EXCERPT) {
+        if soul_contains_binding_thread(soul) {
             Self::Ok
         } else {
             Self::Mismatch
         }
     }
+
+    /// `true` when the binding thread is intact.
+    pub const fn is_ok(self) -> bool {
+        matches!(self, Self::Ok)
+    }
 }
 
 /// Result of [`SystemPromptBuilder::build_with_meta`]: the rendered
-/// system-prompt body plus the identity-loader source label (WEFT-328).
+/// system-prompt body plus the identity-loader source label (WEFT-328)
+/// and the binding-thread status observed this turn (WEFT-342).
 #[derive(Debug, Clone)]
 pub struct BuiltSystemPrompt {
     /// Rendered system message body (same text as [`SystemPromptBuilder::build`]).
@@ -81,6 +102,8 @@ pub struct BuiltSystemPrompt {
     /// Identity loader source (e.g. `"clawft"`) for
     /// [`AgentChatResult::identity_source`](clawft_types::agent_chat::AgentChatResult).
     pub identity_source: String,
+    /// Binding-thread integrity status for this turn (WEFT-342).
+    pub binding_thread_status: BindingThreadStatus,
 }
 
 /// Builds an identity-aware system message body for a turn.
@@ -94,16 +117,35 @@ pub struct BuiltSystemPrompt {
 pub struct SystemPromptBuilder {
     identity_provider: Arc<dyn IdentityProvider>,
     workspace: PathBuf,
+    /// WEFT-342: deny (default) hard-refuses on mismatch; warn_only
+    /// annotates the prompt and continues.
+    binding_thread_mode: BindingThreadMode,
 }
 
 impl SystemPromptBuilder {
     /// Wire the builder against an [`IdentityProvider`] and the
     /// workspace path used in the `[workspace]` section.
+    ///
+    /// Binding-thread policy defaults to [`BindingThreadMode::Deny`]
+    /// (WEFT-342). Use [`Self::with_binding_thread_mode`] to opt into
+    /// legacy warn-only behaviour.
     pub fn new(identity_provider: Arc<dyn IdentityProvider>, workspace: PathBuf) -> Self {
         Self {
             identity_provider,
             workspace,
+            binding_thread_mode: BindingThreadMode::Deny,
         }
+    }
+
+    /// Set the binding-thread integrity policy (WEFT-342).
+    pub fn with_binding_thread_mode(mut self, mode: BindingThreadMode) -> Self {
+        self.binding_thread_mode = mode;
+        self
+    }
+
+    /// Borrow the configured binding-thread policy.
+    pub fn binding_thread_mode(&self) -> BindingThreadMode {
+        self.binding_thread_mode
     }
 
     /// Borrow the workspace path the builder advertises in prompts.
@@ -114,23 +156,36 @@ impl SystemPromptBuilder {
     /// Build the system message body plus the identity-source label
     /// (WEFT-328). Callers that only need the text can use [`Self::build`].
     ///
-    /// Returns an [`IdentityError::NotFound`] when the underlying
-    /// provider cannot resolve identity content (callers should
-    /// surface this as `agent: identity load failed: ...`).
+    /// Returns:
+    /// - [`IdentityError::NotFound`] when the underlying provider
+    ///   cannot resolve identity content.
+    /// - [`IdentityError::BindingThreadMismatch`] when SOUL.md lacks
+    ///   the binding-thread excerpt and policy is
+    ///   [`BindingThreadMode::Deny`] (WEFT-342).
     pub async fn build_with_meta(&self) -> Result<BuiltSystemPrompt, IdentityError> {
         let identity = self.identity_provider.current().await?;
+        let status = BindingThreadStatus::from_soul(&identity.soul);
+        if status == BindingThreadStatus::Mismatch && self.binding_thread_mode.is_deny() {
+            warn!(
+                hash = %identity.hash,
+                source = identity.source,
+                reason = BINDING_THREAD_MISMATCH_REASON,
+                "binding-thread mismatch: SOUL.md does not contain the \
+                 compile-time BINDING_THREAD_EXCERPT — hard refusing turn \
+                 (agents.binding_thread_mode=deny)"
+            );
+            return Err(IdentityError::BindingThreadMismatch);
+        }
         Ok(BuiltSystemPrompt {
-            body: self.render(&identity),
+            body: self.render_with_status(&identity, status),
             identity_source: identity.source.to_string(),
+            binding_thread_status: status,
         })
     }
 
     /// Build the system message body.
     ///
-    /// Returns the rendered prompt on success; an
-    /// [`IdentityError::NotFound`] when the underlying provider
-    /// cannot resolve identity content (callers should surface this
-    /// to the chat client as `agent: identity load failed: ...`).
+    /// See [`Self::build_with_meta`] for error semantics.
     pub async fn build(&self) -> Result<String, IdentityError> {
         Ok(self.build_with_meta().await?.body)
     }
@@ -138,15 +193,24 @@ impl SystemPromptBuilder {
     /// Render an in-memory [`Identity`] into the prompt body. Split
     /// out so unit tests can exercise the formatting deterministically
     /// without going through an [`IdentityProvider`].
+    ///
+    /// Callers that need the deny-mode refuse must use
+    /// [`Self::build_with_meta`] (or check
+    /// [`BindingThreadStatus::from_soul`] themselves) — this method
+    /// always renders, including mismatch annotations for warn-only.
     pub fn render(&self, identity: &Identity) -> String {
         let status = BindingThreadStatus::from_soul(&identity.soul);
+        self.render_with_status(identity, status)
+    }
+
+    fn render_with_status(&self, identity: &Identity, status: BindingThreadStatus) -> String {
         if status == BindingThreadStatus::Mismatch {
             warn!(
                 hash = %identity.hash,
                 source = identity.source,
                 "binding-thread mismatch: SOUL.md does not contain the \
                  compile-time BINDING_THREAD_EXCERPT — running in \
-                 degraded mode"
+                 degraded mode (agents.binding_thread_mode=warn_only)"
             );
         }
 
@@ -193,7 +257,9 @@ impl SystemPromptBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::identity::{FileIdentityProvider, sha256_identity_hash};
+    use crate::agent::identity::{
+        BINDING_THREAD_EXCERPT, FileIdentityProvider, sha256_identity_hash,
+    };
     use async_trait::async_trait;
 
     /// In-memory identity provider for tests.
@@ -231,6 +297,17 @@ mod tests {
         }
     }
 
+    fn mismatch_identity() -> Identity {
+        let soul = "# SOUL.md\n\nNothing distinctive in here.\n".to_string();
+        let identity = "# IDENTITY.md\n\nI am clawft.".to_string();
+        Identity {
+            hash: sha256_identity_hash(&soul, &identity),
+            soul,
+            identity,
+            source: "test",
+        }
+    }
+
     #[tokio::test]
     async fn build_includes_soul_identity_workspace_and_hash() {
         let id = ok_identity();
@@ -252,8 +329,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_with_meta_exposes_identity_source() {
+    async fn build_with_meta_exposes_identity_source_and_status() {
         // WEFT-328: loop needs the source label for AgentChatResult.
+        // WEFT-342: also surfaces binding_thread_status.
         let id = ok_identity();
         assert_eq!(id.source, "test");
         let provider = Arc::new(StubProvider(id));
@@ -261,24 +339,31 @@ mod tests {
         let built = builder.build_with_meta().await.expect("build ok");
         assert_eq!(built.identity_source, "test");
         assert!(built.body.contains("[identity]"));
+        assert_eq!(built.binding_thread_status, BindingThreadStatus::Ok);
     }
 
     #[tokio::test]
-    async fn build_marks_mismatch_when_excerpt_absent() {
-        let soul = "# SOUL.md\n\nNothing distinctive in here.\n".to_string();
-        let identity = "# IDENTITY.md\n\nI am clawft.".to_string();
-        let id = Identity {
-            hash: sha256_identity_hash(&soul, &identity),
-            soul,
-            identity,
-            source: "test",
-        };
-        let provider = Arc::new(StubProvider(id));
+    async fn deny_mode_hard_refuses_on_mismatch() {
+        // WEFT-342 default: mismatch → BindingThreadMismatch (hard refuse).
+        let provider = Arc::new(StubProvider(mismatch_identity()));
         let builder = SystemPromptBuilder::new(provider, PathBuf::from("/tmp/ws"));
+        assert!(builder.binding_thread_mode().is_deny());
+        let err = builder.build().await.unwrap_err();
+        assert!(matches!(err, IdentityError::BindingThreadMismatch));
+        assert!(err.to_string().contains("binding-thread mismatch"));
+    }
 
-        let prompt = builder.build().await.unwrap();
-        assert!(prompt.contains("[binding-thread-status]\nmismatch"));
-        assert!(prompt.contains("degraded mode"));
+    #[tokio::test]
+    async fn warn_only_mode_annotates_mismatch() {
+        // WEFT-342 legacy path: annotate + continue.
+        let provider = Arc::new(StubProvider(mismatch_identity()));
+        let builder = SystemPromptBuilder::new(provider, PathBuf::from("/tmp/ws"))
+            .with_binding_thread_mode(BindingThreadMode::WarnOnly);
+
+        let built = builder.build_with_meta().await.expect("warn_only continues");
+        assert_eq!(built.binding_thread_status, BindingThreadStatus::Mismatch);
+        assert!(built.body.contains("[binding-thread-status]\nmismatch"));
+        assert!(built.body.contains("degraded mode"));
     }
 
     #[tokio::test]

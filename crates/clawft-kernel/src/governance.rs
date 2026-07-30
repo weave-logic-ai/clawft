@@ -36,6 +36,13 @@ pub enum GovernanceRuleType {
     General,
     /// Browser-platform sandbox policy (topic scope, elevation, spawn/network).
     BrowserPolicy,
+    /// Binding-thread integrity on SOUL.md (WEFT-342 / soul.binding_thread_intact).
+    ///
+    /// Evaluated independent of effect magnitude when the action is
+    /// `soul.binding_thread_intact` and the request signals a mismatch
+    /// (elevated security effect and/or `binding_thread_status=mismatch`
+    /// in context).
+    BindingThread,
 }
 
 impl std::fmt::Display for GovernanceRuleType {
@@ -43,6 +50,7 @@ impl std::fmt::Display for GovernanceRuleType {
         match self {
             GovernanceRuleType::General => write!(f, "general"),
             GovernanceRuleType::BrowserPolicy => write!(f, "browser_policy"),
+            GovernanceRuleType::BindingThread => write!(f, "binding_thread"),
         }
     }
 }
@@ -117,7 +125,30 @@ impl GovernanceRule {
             rule_type: GovernanceRuleType::BrowserPolicy,
         }
     }
+
+    /// Build the binding-thread integrity rule (WEFT-342).
+    ///
+    /// Rule id is the governance action name
+    /// [`BINDING_THREAD_RULE_ID`] (`soul.binding_thread_intact`).
+    pub fn binding_thread(description: impl Into<String>) -> Self {
+        Self {
+            id: BINDING_THREAD_RULE_ID.into(),
+            description: description.into(),
+            branch: GovernanceBranch::Legislative,
+            severity: RuleSeverity::Blocking,
+            active: true,
+            reference_url: None,
+            sop_category: Some("ethics".into()),
+            rule_type: GovernanceRuleType::BindingThread,
+        }
+    }
 }
+
+/// Governance rule / gate action id for binding-thread integrity (WEFT-342).
+pub const BINDING_THREAD_RULE_ID: &str = "soul.binding_thread_intact";
+
+/// Canonical deny reason for binding-thread mismatch (WEFT-342).
+pub const BINDING_THREAD_MISMATCH_REASON: &str = "binding-thread mismatch";
 
 /// Default browser_policy rules anchored at governance genesis (S7).
 ///
@@ -139,6 +170,18 @@ pub fn browser_policy_default_rules() -> Vec<GovernanceRule> {
             "Browser nodes cannot enable network access without capability elevation",
         ),
     ]
+}
+
+/// Default binding-thread integrity rule (WEFT-342), anchored at genesis.
+///
+/// Evaluated on every `soul.binding_thread_intact` gate.check when the
+/// request signals a SOUL.md mismatch. Hard-refuses with
+/// [`BINDING_THREAD_MISMATCH_REASON`].
+pub fn binding_thread_default_rules() -> Vec<GovernanceRule> {
+    vec![GovernanceRule::binding_thread(
+        "SOUL.md must contain the compile-time binding-thread excerpt; \
+         mismatch hard-refuses agent turns",
+    )]
 }
 
 fn default_true() -> bool {
@@ -398,6 +441,37 @@ impl GovernanceRequest {
     }
 }
 
+/// Evaluate a binding-thread integrity rule (WEFT-342).
+///
+/// Returns `Some(reason)` when the request is a
+/// `soul.binding_thread_intact` check that signals mismatch.
+/// Independent of effect-magnitude thresholds (like browser_policy).
+fn apply_binding_thread_rule(
+    rule: &GovernanceRule,
+    request: &GovernanceRequest,
+) -> Option<String> {
+    if request.action != BINDING_THREAD_RULE_ID && request.action != rule.id {
+        return None;
+    }
+
+    let status = request
+        .context
+        .get("binding_thread_status")
+        .map(|s| s.as_str())
+        .unwrap_or("");
+    let mismatch = status == "mismatch"
+        // Agent loop / KernelEffectGate signal mismatch via elevated
+        // security effect from `effect_for_binding_thread(false)`.
+        || request.effect.security >= 0.99
+        || (status.is_empty() && request.effect.magnitude() > 0.8);
+
+    if mismatch {
+        Some(BINDING_THREAD_MISMATCH_REASON.to_string())
+    } else {
+        None
+    }
+}
+
 /// Evaluate a single browser_policy rule against a request.
 ///
 /// Returns `Some(reason)` when the rule fires a denial, `None` when the rule
@@ -641,6 +715,9 @@ impl GovernanceEngine {
     ///    without scoring rules.
     /// 1. If any active [`GovernanceRuleType::BrowserPolicy`] rule denies the
     ///    action (platform-aware; independent of effect magnitude), deny.
+    /// 1b. If any active [`GovernanceRuleType::BindingThread`] rule denies
+    ///     the action (WEFT-342; independent of magnitude), deny with
+    ///     `binding-thread mismatch`.
     /// 2. If any blocking/critical rule applies and magnitude exceeds threshold,
     ///    deny (or escalate when human approval is required).
     /// 3. If any warning rule applies and magnitude exceeds threshold, permit
@@ -705,6 +782,26 @@ impl GovernanceEngine {
                 continue;
             }
 
+            // Binding-thread integrity (WEFT-342): independent of magnitude.
+            if rule.rule_type == GovernanceRuleType::BindingThread {
+                if let Some(reason) = apply_binding_thread_rule(rule, request) {
+                    match rule.severity {
+                        RuleSeverity::Blocking | RuleSeverity::Critical => {
+                            has_blocking = true;
+                            // Canonical reason wins for the deny path AC
+                            // (`Deny { reason: "binding-thread mismatch" }`),
+                            // even if a later magnitude rule would overwrite.
+                            blocking_reason = reason;
+                        }
+                        RuleSeverity::Warning => {
+                            has_warning = true;
+                        }
+                        RuleSeverity::Advisory => {}
+                    }
+                }
+                continue;
+            }
+
             match rule.severity {
                 RuleSeverity::Blocking | RuleSeverity::Critical => {
                     if threshold_exceeded {
@@ -752,6 +849,14 @@ impl GovernanceEngine {
         self.rules
             .iter()
             .filter(|r| r.active && r.rule_type == GovernanceRuleType::BrowserPolicy)
+            .collect()
+    }
+
+    /// Active binding-thread integrity rules only (WEFT-342).
+    pub fn binding_thread_rules(&self) -> Vec<&GovernanceRule> {
+        self.rules
+            .iter()
+            .filter(|r| r.active && r.rule_type == GovernanceRuleType::BindingThread)
             .collect()
     }
 
@@ -1818,7 +1923,7 @@ mod tests {
     }
 
     /// Build a GovernanceEngine with all genesis rules matching boot.rs
-    /// (22 constitutional/SOP + 3 browser_policy = 25).
+    /// (22 constitutional/SOP + 3 browser_policy + 1 binding_thread = 26).
     fn genesis_engine() -> GovernanceEngine {
         let mut engine = GovernanceEngine::new(0.7, false);
 
@@ -1973,14 +2078,82 @@ mod tests {
             engine.add_rule(rule);
         }
 
+        // ── Binding-thread integrity (WEFT-342) ─────────────────
+        for rule in binding_thread_default_rules() {
+            engine.add_rule(rule);
+        }
+
         engine
     }
 
     #[test]
-    fn genesis_has_25_rules() {
+    fn genesis_has_26_rules() {
         let engine = genesis_engine();
-        // 22 constitutional/SOP + 3 browser_policy (BP-001..003)
-        assert_eq!(engine.rule_count(), 25);
+        // 22 constitutional/SOP + 3 browser_policy + 1 binding_thread
+        assert_eq!(engine.rule_count(), 26);
+    }
+
+    #[test]
+    fn binding_thread_rule_denies_mismatch() {
+        let engine = genesis_engine();
+        let request = GovernanceRequest {
+            agent_id: "concierge".into(),
+            action: BINDING_THREAD_RULE_ID.into(),
+            effect: EffectVector {
+                security: 1.0,
+                risk: 0.9,
+                ..Default::default()
+            },
+            context: std::collections::HashMap::from([(
+                "binding_thread_status".into(),
+                "mismatch".into(),
+            )]),
+            node_id: None,
+        };
+        let result = engine.evaluate(&request);
+        match result.decision {
+            GovernanceDecision::Deny(reason) => {
+                assert_eq!(reason, BINDING_THREAD_MISMATCH_REASON);
+            }
+            other => panic!("expected Deny(binding-thread mismatch), got {other:?}"),
+        }
+        assert!(
+            result
+                .evaluated_rules
+                .iter()
+                .any(|id| id == BINDING_THREAD_RULE_ID)
+        );
+    }
+
+    #[test]
+    fn binding_thread_rule_permits_ok() {
+        let engine = genesis_engine();
+        let request = GovernanceRequest {
+            agent_id: "concierge".into(),
+            action: BINDING_THREAD_RULE_ID.into(),
+            effect: EffectVector::default(),
+            context: std::collections::HashMap::from([(
+                "binding_thread_status".into(),
+                "ok".into(),
+            )]),
+            node_id: None,
+        };
+        let result = engine.evaluate(&request);
+        assert!(
+            matches!(result.decision, GovernanceDecision::Permit),
+            "intact binding thread must Permit, got {:?}",
+            result.decision
+        );
+    }
+
+    #[test]
+    fn binding_thread_default_rules_shape() {
+        let rules = binding_thread_default_rules();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].id, BINDING_THREAD_RULE_ID);
+        assert_eq!(rules[0].rule_type, GovernanceRuleType::BindingThread);
+        assert_eq!(rules[0].severity, RuleSeverity::Blocking);
+        assert!(rules[0].active);
     }
 
     #[test]
@@ -2185,11 +2358,12 @@ mod tests {
         let executive = engine.rules_by_branch(&GovernanceBranch::Executive);
         let judicial = engine.rules_by_branch(&GovernanceBranch::Judicial);
 
-        // Legislative: GOV-003, GOV-005, SOP-L001..L006, BP-001..003 = 11
+        // Legislative: GOV-003, GOV-005, SOP-L001..L006, BP-001..003,
+        // soul.binding_thread_intact = 12
         assert_eq!(
             legislative.len(),
-            11,
-            "legislative should have 11 rules, got {}",
+            12,
+            "legislative should have 12 rules, got {}",
             legislative.len()
         );
         // Executive: GOV-004, GOV-006, SOP-E001..E005 = 7
@@ -2217,8 +2391,8 @@ mod tests {
             .filter(|r| matches!(r.severity, RuleSeverity::Blocking | RuleSeverity::Critical))
             .count();
         // GOV-001, GOV-002, GOV-006, SOP-L001, SOP-L005, SOP-E002, SOP-J001,
-        // BP-001, BP-002, BP-003 = 10
-        assert_eq!(blocking_count, 10, "should have exactly 10 blocking rules");
+        // BP-001, BP-002, BP-003, soul.binding_thread_intact = 11
+        assert_eq!(blocking_count, 11, "should have exactly 11 blocking rules");
     }
 
     #[test]
@@ -2321,7 +2495,7 @@ mod tests {
     }
 
     #[test]
-    fn genesis_evaluates_all_25_rules() {
+    fn genesis_evaluates_all_26_rules() {
         let engine = genesis_engine();
         let request = GovernanceRequest {
             agent_id: "agent-1".into(),
@@ -2336,8 +2510,8 @@ mod tests {
         let result = engine.evaluate(&request);
         assert_eq!(
             result.evaluated_rules.len(),
-            25,
-            "all 25 rules should be evaluated, got {}",
+            26,
+            "all 26 rules should be evaluated, got {}",
             result.evaluated_rules.len(),
         );
     }
@@ -2350,11 +2524,11 @@ mod tests {
             .iter()
             .filter(|r| r.sop_category.is_some())
             .collect();
-        // 15 SOP + 3 browser_policy have categories; 7 GOV rules do not
+        // 15 SOP + 3 browser_policy + 1 binding_thread have categories; 7 GOV rules do not
         assert_eq!(
             categorized.len(),
-            18,
-            "15 SOP + 3 browser_policy rules should have categories"
+            19,
+            "15 SOP + 3 browser_policy + 1 binding_thread rules should have categories"
         );
 
         let categories: std::collections::HashSet<_> = categorized

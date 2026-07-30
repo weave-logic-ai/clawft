@@ -88,6 +88,24 @@ impl EffectVector {
 /// Default for unknown tools is the all-zero vector — a Permit under
 /// any sane policy. Adding a tool to this table is the cheapest form
 /// of policy authoring.
+/// Effect vector for the binding-thread integrity gate check (WEFT-342).
+///
+/// Mismatch scores high on `security` so magnitude-based Blocking rules
+/// also fire; the dedicated `BindingThread` governance rule path
+/// evaluates independent of magnitude when context carries
+/// `binding_thread_status=mismatch`.
+pub fn effect_for_binding_thread(status_ok: bool) -> EffectVector {
+    if status_ok {
+        EffectVector::default()
+    } else {
+        EffectVector {
+            security: 1.0,
+            risk: 0.9,
+            ..Default::default()
+        }
+    }
+}
+
 pub fn effect_for_tool(name: &str, _args: &serde_json::Value) -> EffectVector {
     match name {
         // ── Reads ──────────────────────────────────────────────────
@@ -218,6 +236,16 @@ mod tests {
         let u = effect_for_tool("definitely_not_a_real_tool", &json!({}));
         assert_eq!(u, EffectVector::default());
         assert_eq!(u.magnitude(), 0.0);
+    }
+
+    #[test]
+    fn binding_thread_effect_scores_high_on_mismatch() {
+        // WEFT-342: mismatch must clear typical governance thresholds.
+        let ok = effect_for_binding_thread(true);
+        assert_eq!(ok.magnitude(), 0.0);
+        let bad = effect_for_binding_thread(false);
+        assert!((bad.security - 1.0).abs() < f64::EPSILON);
+        assert!(bad.magnitude() > 0.8);
     }
 
     #[test]

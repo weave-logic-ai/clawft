@@ -23,9 +23,11 @@
 //!   without filesystem IO. [`FileIdentityProvider`] caches the most
 //!   recent successful load.
 //! - [`BINDING_THREAD_EXCERPT`] compile-time constant that the
-//!   `SystemPromptBuilder` checks against the loaded SOUL.md content.
-//!   Mismatch downgrades the prompt to a "binding-thread mismatch"
-//!   annotation but does not refuse to run.
+//!   `SystemPromptBuilder` / gate path checks against loaded SOUL.md.
+//!   **WEFT-342 (v1.1 default):** mismatch hard-refuses the turn via
+//!   governance rule `soul.binding_thread_intact` (`GateDecision::Deny`).
+//!   Operators can set `agents.binding_thread_mode = "warn_only"` to
+//!   restore the legacy annotate + `warn!` degraded path.
 //!
 //! ## What this is NOT (yet)
 //!
@@ -57,17 +59,31 @@ use tracing::{debug, warn};
 /// Distinctive paragraph from the canonical `SOUL.md` used as the
 /// compile-time witness for the binding-thread integrity check.
 ///
-/// The check is operated by
-/// [`SystemPromptBuilder`](crate::agent::system_prompt::SystemPromptBuilder):
-/// if the loaded `SOUL.md` does not contain this excerpt, the prompt
-/// is annotated `binding-thread-status: mismatch` and a `warn!` log is
-/// emitted, but the agent still runs. Hard refusal is a v1.1 follow-up.
+/// The check is operated every turn by
+/// [`SystemPromptBuilder`](crate::agent::system_prompt::SystemPromptBuilder)
+/// and by `gate.check("soul.binding_thread_intact", …)` (WEFT-342):
+///
+/// - **Default (`agents.binding_thread_mode = "deny"`):** if loaded
+///   `SOUL.md` does not contain this excerpt, the turn hard-refuses
+///   with [`IdentityError::BindingThreadMismatch`] /
+///   `GateDecision::Deny { reason: "binding-thread mismatch" }`.
+/// - **Legacy (`warn_only`):** annotate the prompt
+///   `binding-thread-status: mismatch` and emit a `warn!` log; the
+///   agent continues in degraded mode.
 ///
 /// Source: `docs/skills/clawft/SOUL.md` §"Core Personality Traits" /
 /// "The Binding Thread" — quoted verbatim so the substring search is
 /// stable across whitespace-only edits to the surrounding paragraph.
 pub const BINDING_THREAD_EXCERPT: &str =
     "an agent must not diminish human capability, or by inaction allow it to be diminished";
+
+/// Governance / gate action name for the binding-thread integrity rule
+/// (WEFT-342). Evaluated by `EffectGate::check` on every chat turn.
+pub const BINDING_THREAD_GATE_ACTION: &str = "soul.binding_thread_intact";
+
+/// Canonical hard-refusal reason returned by the gate / identity path
+/// when SOUL.md is missing the binding-thread excerpt (WEFT-342).
+pub const BINDING_THREAD_MISMATCH_REASON: &str = "binding-thread mismatch";
 
 /// Loaded identity content.
 #[derive(Debug, Clone)]
@@ -90,10 +106,10 @@ pub struct Identity {
 
 /// Errors emitted by the identity load path.
 ///
-/// Today only signals the "files missing" case; in future a
-/// substrate-backed loader will need to distinguish IO from
-/// deserialization errors. Variants stay shaped for forward
-/// compatibility.
+/// Distinguishes missing seed files from binding-thread integrity
+/// failures so the chat path can surface distinct RPC messages.
+/// Variants stay shaped for forward compatibility (substrate-backed
+/// loaders may add IO / deserialization variants later).
 #[derive(Debug, Error)]
 pub enum IdentityError {
     /// `<workspace>/.clawft/SOUL.md` or `IDENTITY.md` (or both) are
@@ -103,6 +119,25 @@ pub enum IdentityError {
         "identity load failed: <workspace>/.clawft/{{SOUL.md,IDENTITY.md}} missing — run `weaver init`"
     )]
     NotFound,
+
+    /// Loaded `SOUL.md` does not contain [`BINDING_THREAD_EXCERPT`] and
+    /// the operator policy is hard-refuse (WEFT-342 default).
+    ///
+    /// Surfaced by `SystemPromptBuilder` when
+    /// `agents.binding_thread_mode = "deny"`. The agent loop maps this
+    /// to a turn-level error after `gate.check("soul.binding_thread_intact")`
+    /// returns `Deny { reason: "binding-thread mismatch" }`.
+    #[error("identity load failed: binding-thread mismatch")]
+    BindingThreadMismatch,
+}
+
+/// Return `true` when `soul` contains the compile-time
+/// [`BINDING_THREAD_EXCERPT`] substring (case-sensitive).
+///
+/// Shared by the system-prompt builder, gate evaluation helpers, and
+/// unit tests so the check stays a single source of truth.
+pub fn soul_contains_binding_thread(soul: &str) -> bool {
+    soul.contains(BINDING_THREAD_EXCERPT)
 }
 
 /// Async interface for retrieving the agent's current identity.
@@ -272,6 +307,16 @@ mod tests {
     fn binding_thread_excerpt_is_non_empty() {
         assert!(!BINDING_THREAD_EXCERPT.is_empty());
         assert!(BINDING_THREAD_EXCERPT.len() > 16);
+        assert_eq!(BINDING_THREAD_GATE_ACTION, "soul.binding_thread_intact");
+        assert_eq!(BINDING_THREAD_MISMATCH_REASON, "binding-thread mismatch");
+    }
+
+    #[test]
+    fn soul_contains_binding_thread_helper() {
+        assert!(soul_contains_binding_thread(&format!(
+            "prefix {BINDING_THREAD_EXCERPT} suffix"
+        )));
+        assert!(!soul_contains_binding_thread("nothing relevant here"));
     }
 
     #[test]

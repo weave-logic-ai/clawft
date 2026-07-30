@@ -1569,6 +1569,8 @@ impl<P: Platform> Kernel<P> {
                 ]
                 .into_iter()
                 .chain(crate::governance::browser_policy_default_rules())
+                // WEFT-342: soul.binding_thread_intact (binding-thread integrity)
+                .chain(crate::governance::binding_thread_default_rules())
                 .collect::<Vec<_>>();
 
                 // Anchor genesis rules to chain
@@ -2892,8 +2894,8 @@ mod tests {
             .expect("should find v2.0.0 governance genesis on chain");
         assert_eq!(
             genesis_payload["rule_count"].as_u64().unwrap(),
-            25,
-            "genesis should contain 25 rules (22 constitutional/SOP + 3 browser_policy)"
+            26,
+            "genesis should contain 26 rules (22 constitutional/SOP + 3 browser_policy + 1 binding_thread)"
         );
         assert_eq!(
             genesis_payload["version"].as_str().unwrap(),
@@ -2901,18 +2903,18 @@ mod tests {
             "genesis version should be 2.0.0"
         );
 
-        // Each rule should be individually anchored (at least 25)
+        // Each rule should be individually anchored (at least 26)
         let rule_events: Vec<_> = all_events
             .iter()
             .filter(|e| e.kind == "governance.rule")
             .collect();
         assert!(
-            rule_events.len() >= 25,
-            "at least 25 genesis rules should be individually anchored, got {}",
+            rule_events.len() >= 26,
+            "at least 26 genesis rules should be individually anchored, got {}",
             rule_events.len(),
         );
 
-        // Verify all rule IDs are present (GOV + SOP + BP browser_policy)
+        // Verify all rule IDs are present (GOV + SOP + BP + binding_thread)
         let rule_ids: Vec<&str> = rule_events
             .iter()
             .filter_map(|e| e.payload.as_ref()?.get("rule_id")?.as_str())
@@ -2921,7 +2923,7 @@ mod tests {
             "GOV-001", "GOV-002", "GOV-003", "GOV-004", "GOV-005", "GOV-006", "GOV-007",
             "SOP-L001", "SOP-L002", "SOP-L003", "SOP-L004", "SOP-L005", "SOP-L006", "SOP-E001",
             "SOP-E002", "SOP-E003", "SOP-E004", "SOP-E005", "SOP-J001", "SOP-J002", "SOP-J003",
-            "SOP-J004", "BP-001", "BP-002", "BP-003",
+            "SOP-J004", "BP-001", "BP-002", "BP-003", "soul.binding_thread_intact",
         ] {
             assert!(
                 rule_ids.contains(expected_id),
