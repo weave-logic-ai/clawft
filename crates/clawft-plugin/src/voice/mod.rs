@@ -33,9 +33,12 @@
 //! Everything else under this directory (capture, playback, stt, tts,
 //! channel, talk_mode, echo, noise, cloud_*, fallback, commands, …) is
 //! **feature-gated legacy scaffold** retained for compile coverage under
-//! `--features voice` (WEFT-212 umbrella) and for historical tests. Do
-//! **not** implement the 0.7 audit-era tickets against these files unless
-//! the work is re-homed onto the live stack above.
+//! `--features voice` (WEFT-212 umbrella) and for historical tests.
+//! Product Talk Mode / STT / TTS work stays on the live stack above.
+//!
+//! **WEFT-217 exception:** `echo` and `noise` implement real pure-Rust DSP
+//! (NLMS AEC + spectral subtraction) so they are not deceptive passthroughs.
+//! Production full-duplex still prefers `clawft-voice-aec` (WebRTC AEC3/NS).
 //!
 //! Follow-up (see decision note): migrate wake into a canonical crate,
 //! then delete or archive the remaining scaffold.
