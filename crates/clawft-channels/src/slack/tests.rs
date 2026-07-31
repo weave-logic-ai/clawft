@@ -4,51 +4,61 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
 
+use clawft_plugin::error::PluginError;
+use clawft_plugin::message::MessagePayload;
+use clawft_plugin::traits::{ChannelAdapter, ChannelAdapterHost};
 use clawft_types::config::{SlackConfig, SlackDMConfig};
-use clawft_types::error::ChannelError;
-use clawft_types::event::InboundMessage;
 
-use crate::traits::{Channel, ChannelHost, ChannelMetadata, ChannelStatus, Command};
+use crate::traits::{Channel, ChannelMetadata, ChannelStatus};
 
 use super::channel::SlackChannel;
 use super::events::{SlackEnvelope, SlackEvent, SlackEventPayload};
 
-// ── Mock host ────────────────────────────────────────────────────────────
+// ── Mock adapter host ────────────────────────────────────────────────────
 
-/// Mock host that collects delivered inbound messages.
-struct MockHost {
-    messages: tokio::sync::Mutex<Vec<InboundMessage>>,
+struct MockAdapterHost {
+    deliveries: tokio::sync::Mutex<Vec<RecordedDelivery>>,
 }
 
-impl MockHost {
+struct RecordedDelivery {
+    channel: String,
+    sender_id: String,
+    chat_id: String,
+    content: String,
+    metadata: HashMap<String, serde_json::Value>,
+}
+
+impl MockAdapterHost {
     fn new() -> Self {
         Self {
-            messages: tokio::sync::Mutex::new(vec![]),
+            deliveries: tokio::sync::Mutex::new(vec![]),
         }
     }
 }
 
 #[async_trait]
-impl ChannelHost for MockHost {
-    async fn deliver_inbound(&self, msg: InboundMessage) -> Result<(), ChannelError> {
-        self.messages.lock().await.push(msg);
-        Ok(())
-    }
-
-    async fn register_command(&self, _cmd: Command) -> Result<(), ChannelError> {
-        Ok(())
-    }
-
-    async fn publish_inbound(
+impl ChannelAdapterHost for MockAdapterHost {
+    async fn deliver_inbound(
         &self,
-        _channel: &str,
-        _sender_id: &str,
-        _chat_id: &str,
-        _content: &str,
-        _media: Vec<String>,
-        _metadata: HashMap<String, serde_json::Value>,
-    ) -> Result<(), ChannelError> {
+        channel: &str,
+        sender_id: &str,
+        chat_id: &str,
+        payload: MessagePayload,
+        metadata: HashMap<String, serde_json::Value>,
+    ) -> Result<(), PluginError> {
+        let content = match payload {
+            MessagePayload::Text { content } => content,
+            other => format!("{other:?}"),
+        };
+        self.deliveries.lock().await.push(RecordedDelivery {
+            channel: channel.to_owned(),
+            sender_id: sender_id.to_owned(),
+            chat_id: chat_id.to_owned(),
+            content,
+            metadata,
+        });
         Ok(())
     }
 }
@@ -112,7 +122,7 @@ fn make_message_event(
 #[test]
 fn name_is_slack() {
     let ch = SlackChannel::new(make_config());
-    assert_eq!(ch.name(), "slack");
+    assert_eq!(Channel::name(&ch), "slack");
 }
 
 // ── metadata ─────────────────────────────────────────────────────────────
@@ -120,7 +130,7 @@ fn name_is_slack() {
 #[test]
 fn metadata_values() {
     let ch = SlackChannel::new(make_config());
-    let meta: ChannelMetadata = ch.metadata();
+    let meta: ChannelMetadata = Channel::metadata(&ch);
     assert_eq!(meta.name, "slack");
     assert_eq!(meta.display_name, "Slack");
     assert!(meta.supports_threads);
@@ -218,15 +228,15 @@ fn is_allowed_delegates_to_check_allowed() {
 #[tokio::test]
 async fn process_envelope_delivers_message() {
     let ch = SlackChannel::new(make_config());
-    let mock_host = Arc::new(MockHost::new());
-    let host: Arc<dyn ChannelHost> = mock_host.clone();
+    let mock_host = Arc::new(MockAdapterHost::new());
+    let host: Arc<dyn ChannelAdapterHost> = mock_host.clone();
 
     let event = make_message_event("U99999", "C01234", "hello bot", None);
     let envelope = make_envelope(event);
 
     ch.process_envelope(&envelope, &host).await.unwrap();
 
-    let msgs = mock_host.messages.lock().await;
+    let msgs = mock_host.deliveries.lock().await;
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].channel, "slack");
     assert_eq!(msgs[0].sender_id, "U99999");
@@ -241,8 +251,8 @@ async fn process_envelope_delivers_message() {
 #[tokio::test]
 async fn process_envelope_delivers_app_mention() {
     let ch = SlackChannel::new(make_config());
-    let mock_host = Arc::new(MockHost::new());
-    let host: Arc<dyn ChannelHost> = mock_host.clone();
+    let mock_host = Arc::new(MockAdapterHost::new());
+    let host: Arc<dyn ChannelAdapterHost> = mock_host.clone();
 
     let event = SlackEvent {
         event_type: "app_mention".into(),
@@ -258,7 +268,7 @@ async fn process_envelope_delivers_app_mention() {
 
     ch.process_envelope(&envelope, &host).await.unwrap();
 
-    let msgs = mock_host.messages.lock().await;
+    let msgs = mock_host.deliveries.lock().await;
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].content, "<@U00BOT> help");
     assert_eq!(
@@ -270,8 +280,8 @@ async fn process_envelope_delivers_app_mention() {
 #[tokio::test]
 async fn process_envelope_skips_bot_messages() {
     let ch = SlackChannel::new(make_config());
-    let mock_host = Arc::new(MockHost::new());
-    let host: Arc<dyn ChannelHost> = mock_host.clone();
+    let mock_host = Arc::new(MockAdapterHost::new());
+    let host: Arc<dyn ChannelAdapterHost> = mock_host.clone();
 
     let event = SlackEvent {
         event_type: "message".into(),
@@ -286,14 +296,14 @@ async fn process_envelope_skips_bot_messages() {
     let envelope = make_envelope(event);
 
     ch.process_envelope(&envelope, &host).await.unwrap();
-    assert!(mock_host.messages.lock().await.is_empty());
+    assert!(mock_host.deliveries.lock().await.is_empty());
 }
 
 #[tokio::test]
 async fn process_envelope_skips_non_events_api() {
     let ch = SlackChannel::new(make_config());
-    let mock_host = Arc::new(MockHost::new());
-    let host: Arc<dyn ChannelHost> = mock_host.clone();
+    let mock_host = Arc::new(MockAdapterHost::new());
+    let host: Arc<dyn ChannelAdapterHost> = mock_host.clone();
 
     let envelope = SlackEnvelope {
         envelope_type: "interactive".into(),
@@ -303,14 +313,14 @@ async fn process_envelope_skips_non_events_api() {
     };
 
     ch.process_envelope(&envelope, &host).await.unwrap();
-    assert!(mock_host.messages.lock().await.is_empty());
+    assert!(mock_host.deliveries.lock().await.is_empty());
 }
 
 #[tokio::test]
 async fn process_envelope_skips_no_text() {
     let ch = SlackChannel::new(make_config());
-    let mock_host = Arc::new(MockHost::new());
-    let host: Arc<dyn ChannelHost> = mock_host.clone();
+    let mock_host = Arc::new(MockAdapterHost::new());
+    let host: Arc<dyn ChannelAdapterHost> = mock_host.clone();
 
     let event = SlackEvent {
         event_type: "message".into(),
@@ -325,14 +335,14 @@ async fn process_envelope_skips_no_text() {
     let envelope = make_envelope(event);
 
     ch.process_envelope(&envelope, &host).await.unwrap();
-    assert!(mock_host.messages.lock().await.is_empty());
+    assert!(mock_host.deliveries.lock().await.is_empty());
 }
 
 #[tokio::test]
 async fn process_envelope_skips_unknown_event_type() {
     let ch = SlackChannel::new(make_config());
-    let mock_host = Arc::new(MockHost::new());
-    let host: Arc<dyn ChannelHost> = mock_host.clone();
+    let mock_host = Arc::new(MockAdapterHost::new());
+    let host: Arc<dyn ChannelAdapterHost> = mock_host.clone();
 
     let event = SlackEvent {
         event_type: "reaction_added".into(),
@@ -347,7 +357,7 @@ async fn process_envelope_skips_unknown_event_type() {
     let envelope = make_envelope(event);
 
     ch.process_envelope(&envelope, &host).await.unwrap();
-    assert!(mock_host.messages.lock().await.is_empty());
+    assert!(mock_host.deliveries.lock().await.is_empty());
 }
 
 #[tokio::test]
@@ -356,21 +366,21 @@ async fn process_envelope_rejects_disallowed_dm() {
     config.dm.policy = "allowlist".into();
     config.dm.allow_from = vec!["U100".into()];
     let ch = SlackChannel::new(config);
-    let mock_host = Arc::new(MockHost::new());
-    let host: Arc<dyn ChannelHost> = mock_host.clone();
+    let mock_host = Arc::new(MockAdapterHost::new());
+    let host: Arc<dyn ChannelAdapterHost> = mock_host.clone();
 
     let event = make_message_event("U999", "D01234", "sneaky dm", Some("im"));
     let envelope = make_envelope(event);
 
     ch.process_envelope(&envelope, &host).await.unwrap();
-    assert!(mock_host.messages.lock().await.is_empty());
+    assert!(mock_host.deliveries.lock().await.is_empty());
 }
 
 #[tokio::test]
 async fn process_envelope_includes_thread_ts_in_metadata() {
     let ch = SlackChannel::new(make_config());
-    let mock_host = Arc::new(MockHost::new());
-    let host: Arc<dyn ChannelHost> = mock_host.clone();
+    let mock_host = Arc::new(MockAdapterHost::new());
+    let host: Arc<dyn ChannelAdapterHost> = mock_host.clone();
 
     let event = SlackEvent {
         event_type: "message".into(),
@@ -386,7 +396,7 @@ async fn process_envelope_includes_thread_ts_in_metadata() {
 
     ch.process_envelope(&envelope, &host).await.unwrap();
 
-    let msgs = mock_host.messages.lock().await;
+    let msgs = mock_host.deliveries.lock().await;
     assert_eq!(msgs.len(), 1);
     assert_eq!(
         msgs[0].metadata.get("thread_ts"),
@@ -397,8 +407,8 @@ async fn process_envelope_includes_thread_ts_in_metadata() {
 #[tokio::test]
 async fn process_envelope_no_payload() {
     let ch = SlackChannel::new(make_config());
-    let mock_host = Arc::new(MockHost::new());
-    let host: Arc<dyn ChannelHost> = mock_host.clone();
+    let mock_host = Arc::new(MockAdapterHost::new());
+    let host: Arc<dyn ChannelAdapterHost> = mock_host.clone();
 
     let envelope = SlackEnvelope {
         envelope_type: "events_api".into(),
@@ -408,14 +418,14 @@ async fn process_envelope_no_payload() {
     };
 
     ch.process_envelope(&envelope, &host).await.unwrap();
-    assert!(mock_host.messages.lock().await.is_empty());
+    assert!(mock_host.deliveries.lock().await.is_empty());
 }
 
 #[tokio::test]
 async fn process_envelope_no_event_in_payload() {
     let ch = SlackChannel::new(make_config());
-    let mock_host = Arc::new(MockHost::new());
-    let host: Arc<dyn ChannelHost> = mock_host.clone();
+    let mock_host = Arc::new(MockAdapterHost::new());
+    let host: Arc<dyn ChannelAdapterHost> = mock_host.clone();
 
     let envelope = SlackEnvelope {
         envelope_type: "events_api".into(),
@@ -430,7 +440,7 @@ async fn process_envelope_no_event_in_payload() {
     };
 
     ch.process_envelope(&envelope, &host).await.unwrap();
-    assert!(mock_host.messages.lock().await.is_empty());
+    assert!(mock_host.deliveries.lock().await.is_empty());
 }
 
 // ── allow_from_match metadata (WEFT-162) ────────────────────────────────
@@ -443,15 +453,15 @@ async fn process_envelope_emits_allow_from_match_for_dm_match() {
     config.dm.policy = "allowlist".into();
     config.dm.allow_from = vec!["U100".into(), "U200".into()];
     let ch = SlackChannel::new(config);
-    let mock_host = Arc::new(MockHost::new());
-    let host: Arc<dyn ChannelHost> = mock_host.clone();
+    let mock_host = Arc::new(MockAdapterHost::new());
+    let host: Arc<dyn ChannelAdapterHost> = mock_host.clone();
 
     let event = make_message_event("U100", "D01234", "hello", Some("im"));
     let envelope = make_envelope(event);
 
     ch.process_envelope(&envelope, &host).await.unwrap();
 
-    let msgs = mock_host.messages.lock().await;
+    let msgs = mock_host.deliveries.lock().await;
     assert_eq!(msgs.len(), 1);
     assert_eq!(
         msgs[0].metadata.get("allow_from_match"),
@@ -465,15 +475,15 @@ async fn process_envelope_emits_allow_from_match_for_dm_match() {
 #[tokio::test]
 async fn process_envelope_no_allow_from_match_when_dm_open() {
     let ch = SlackChannel::new(make_config()); // dm.policy == "open"
-    let mock_host = Arc::new(MockHost::new());
-    let host: Arc<dyn ChannelHost> = mock_host.clone();
+    let mock_host = Arc::new(MockAdapterHost::new());
+    let host: Arc<dyn ChannelAdapterHost> = mock_host.clone();
 
     let event = make_message_event("U999", "D01234", "hi", Some("im"));
     let envelope = make_envelope(event);
 
     ch.process_envelope(&envelope, &host).await.unwrap();
 
-    let msgs = mock_host.messages.lock().await;
+    let msgs = mock_host.deliveries.lock().await;
     assert_eq!(msgs.len(), 1);
     assert!(
         !msgs[0].metadata.contains_key("allow_from_match"),
@@ -489,15 +499,15 @@ async fn process_envelope_emits_allow_from_match_for_group_match() {
     config.group_policy = "allowlist".into();
     config.group_allow_from = vec!["U100".into()];
     let ch = SlackChannel::new(config);
-    let mock_host = Arc::new(MockHost::new());
-    let host: Arc<dyn ChannelHost> = mock_host.clone();
+    let mock_host = Arc::new(MockAdapterHost::new());
+    let host: Arc<dyn ChannelAdapterHost> = mock_host.clone();
 
     let event = make_message_event("U100", "C01234", "hello team", None);
     let envelope = make_envelope(event);
 
     ch.process_envelope(&envelope, &host).await.unwrap();
 
-    let msgs = mock_host.messages.lock().await;
+    let msgs = mock_host.deliveries.lock().await;
     assert_eq!(msgs.len(), 1);
     assert_eq!(
         msgs[0].metadata.get("allow_from_match"),
@@ -511,18 +521,51 @@ async fn process_envelope_emits_allow_from_match_for_group_match() {
 #[tokio::test]
 async fn process_envelope_no_allow_from_match_when_group_mention_policy() {
     let ch = SlackChannel::new(make_config()); // group_policy == "mention"
-    let mock_host = Arc::new(MockHost::new());
-    let host: Arc<dyn ChannelHost> = mock_host.clone();
+    let mock_host = Arc::new(MockAdapterHost::new());
+    let host: Arc<dyn ChannelAdapterHost> = mock_host.clone();
 
     let event = make_message_event("U999", "C01234", "hello", None);
     let envelope = make_envelope(event);
 
     ch.process_envelope(&envelope, &host).await.unwrap();
 
-    let msgs = mock_host.messages.lock().await;
+    let msgs = mock_host.deliveries.lock().await;
     assert_eq!(msgs.len(), 1);
     assert!(
         !msgs[0].metadata.contains_key("allow_from_match"),
         "mention policy with empty allowlist must not emit allow_from_match"
     );
+}
+
+// ── ChannelAdapter (WEFT-170) ────────────────────────────────────────────
+
+#[test]
+fn adapter_capabilities() {
+    let ch = SlackChannel::new(make_config());
+    assert_eq!(ChannelAdapter::name(&ch), "slack");
+    assert_eq!(ChannelAdapter::display_name(&ch), "Slack");
+    assert!(ChannelAdapter::supports_threads(&ch));
+    assert!(ChannelAdapter::supports_media(&ch));
+}
+
+#[tokio::test]
+async fn adapter_send_rejects_non_text_payload() {
+    let ch = SlackChannel::new(make_config());
+    let payload = MessagePayload::binary("audio/wav", vec![0u8; 2]);
+    let err = ChannelAdapter::send(&ch, "C01234", &payload)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("text"));
+}
+
+#[tokio::test]
+async fn adapter_cancellation_token_is_tokio_util() {
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    tokio::select! {
+        _ = cancel.cancelled() => {}
+        _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+            panic!("pre-cancelled token did not resolve");
+        }
+    }
 }

@@ -1,8 +1,9 @@
-//! [`SlackChannel`] -- `Channel` trait implementation for Slack.
+//! [`SlackChannel`] -- dual [`Channel`] + [`ChannelAdapter`] for Slack.
 //!
-//! Uses Slack Socket Mode to receive events over a WebSocket connection
-//! and delivers them to the pipeline through
-//! [`ChannelHost::deliver_inbound`](crate::traits::ChannelHost::deliver_inbound).
+//! Uses Slack Socket Mode to receive events over a WebSocket connection.
+//! Primary surface is [`ChannelAdapter`] (WEFT-170 / C7); the legacy
+//! [`Channel`] trait remains for `PluginHost` / gateway via
+//! [`ChannelAdapterHostBridge`](crate::plugin_host::ChannelAdapterHostBridge).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,10 +15,14 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+use clawft_plugin::error::PluginError;
+use clawft_plugin::message::MessagePayload;
+use clawft_plugin::traits::{ChannelAdapter, ChannelAdapterHost};
 use clawft_types::config::SlackConfig;
 use clawft_types::error::ChannelError;
-use clawft_types::event::{InboundMessage, OutboundMessage};
+use clawft_types::event::OutboundMessage;
 
+use crate::plugin_host::ChannelAdapterHostBridge;
 use crate::traits::{Channel, ChannelHost, ChannelMetadata, ChannelStatus, MessageId};
 
 use super::api::SlackApiClient;
@@ -27,6 +32,8 @@ use super::events::{SlackAcknowledge, SlackEnvelope};
 const RECONNECT_DELAY_SECS: u64 = 5;
 
 /// Slack channel implementation using Socket Mode.
+///
+/// Implements both [`ChannelAdapter`] (C7 / WEFT-170) and legacy [`Channel`].
 ///
 /// # Configuration
 ///
@@ -110,13 +117,21 @@ impl SlackChannel {
         }
     }
 
+    /// Current lifecycle status (non-blocking read).
+    pub fn status(&self) -> ChannelStatus {
+        self.status
+            .try_read()
+            .map(|s| s.clone())
+            .unwrap_or(ChannelStatus::Stopped)
+    }
+
     /// Process a single Socket Mode envelope, delivering any relevant
-    /// event to the host.
+    /// event via [`ChannelAdapterHost`].
     pub(crate) async fn process_envelope(
         &self,
         envelope: &SlackEnvelope,
-        host: &Arc<dyn ChannelHost>,
-    ) -> Result<(), ChannelError> {
+        host: &Arc<dyn ChannelAdapterHost>,
+    ) -> Result<(), PluginError> {
         // Only process events_api envelopes.
         if envelope.envelope_type != "events_api" {
             debug!(
@@ -205,52 +220,22 @@ impl SlackChannel {
             metadata.insert("allow_from_match".into(), serde_json::Value::Bool(true));
         }
 
-        let inbound = InboundMessage {
-            channel: "slack".into(),
-            sender_id: sender_id.to_owned(),
-            chat_id: channel_id.to_owned(),
-            content: text.clone(),
-            timestamp: chrono::Utc::now(),
-            media: vec![],
+        host.deliver_inbound(
+            "slack",
+            sender_id,
+            channel_id,
+            MessagePayload::text(text.clone()),
             metadata,
-        };
-
-        host.deliver_inbound(inbound).await
-    }
-}
-
-#[async_trait]
-impl Channel for SlackChannel {
-    fn name(&self) -> &str {
-        "slack"
+        )
+        .await
     }
 
-    fn metadata(&self) -> ChannelMetadata {
-        ChannelMetadata {
-            name: "slack".into(),
-            display_name: "Slack".into(),
-            supports_threads: true,
-            supports_media: true,
-        }
-    }
-
-    fn status(&self) -> ChannelStatus {
-        self.status
-            .try_read()
-            .map(|s| s.clone())
-            .unwrap_or(ChannelStatus::Stopped)
-    }
-
-    fn is_allowed(&self, sender_id: &str) -> bool {
-        // Default check: if no specific policy is set, use DM open policy.
-        self.check_allowed(sender_id, None)
-    }
-
-    async fn start(
+    /// Shared Socket Mode loop used by both trait surfaces.
+    async fn run_socket_loop(
         &self,
-        host: Arc<dyn ChannelHost>,
+        host: Arc<dyn ChannelAdapterHost>,
         cancel: CancellationToken,
-    ) -> Result<(), ChannelError> {
+    ) -> Result<(), PluginError> {
         self.set_status(ChannelStatus::Starting).await;
 
         info!("Slack channel starting in Socket Mode");
@@ -383,14 +368,104 @@ impl Channel for SlackChannel {
         Ok(())
     }
 
+    /// Post a text message (optional thread_ts) via chat.postMessage.
+    async fn post_message(
+        &self,
+        chat_id: &str,
+        content: &str,
+        thread_ts: Option<&str>,
+    ) -> Result<String, ChannelError> {
+        self.api
+            .chat_post_message(chat_id, content, thread_ts)
+            .await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ChannelAdapter (primary C7 surface)
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl ChannelAdapter for SlackChannel {
+    fn name(&self) -> &str {
+        "slack"
+    }
+
+    fn display_name(&self) -> &str {
+        "Slack"
+    }
+
+    fn supports_threads(&self) -> bool {
+        true
+    }
+
+    fn supports_media(&self) -> bool {
+        true
+    }
+
+    async fn start(
+        &self,
+        host: Arc<dyn ChannelAdapterHost>,
+        cancel: CancellationToken,
+    ) -> Result<(), PluginError> {
+        self.run_socket_loop(host, cancel).await
+    }
+
+    async fn send(&self, target: &str, payload: &MessagePayload) -> Result<String, PluginError> {
+        let content = payload.as_text().ok_or_else(|| {
+            PluginError::ExecutionFailed("slack: only text payloads supported".into())
+        })?;
+        self.post_message(target, content, None)
+            .await
+            .map_err(|e| PluginError::ExecutionFailed(e.to_string()))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Channel (legacy PluginHost / gateway surface)
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl Channel for SlackChannel {
+    fn name(&self) -> &str {
+        "slack"
+    }
+
+    fn metadata(&self) -> ChannelMetadata {
+        ChannelMetadata {
+            name: "slack".into(),
+            display_name: "Slack".into(),
+            supports_threads: true,
+            supports_media: true,
+        }
+    }
+
+    fn status(&self) -> ChannelStatus {
+        SlackChannel::status(self)
+    }
+
+    fn is_allowed(&self, sender_id: &str) -> bool {
+        // Default check: if no specific policy is set, use DM open policy.
+        self.check_allowed(sender_id, None)
+    }
+
+    async fn start(
+        &self,
+        host: Arc<dyn ChannelHost>,
+        cancel: CancellationToken,
+    ) -> Result<(), ChannelError> {
+        let adapter_host: Arc<dyn ChannelAdapterHost> =
+            Arc::new(ChannelAdapterHostBridge::new(host));
+        self.run_socket_loop(adapter_host, cancel)
+            .await
+            .map_err(|e| ChannelError::Other(e.to_string()))
+    }
+
     async fn send(&self, msg: &OutboundMessage) -> Result<MessageId, ChannelError> {
         let thread_ts = msg.metadata.get("thread_ts").and_then(|v| v.as_str());
-
         let ts = self
-            .api
-            .chat_post_message(&msg.chat_id, &msg.content, thread_ts)
+            .post_message(&msg.chat_id, &msg.content, thread_ts)
             .await?;
-
         Ok(MessageId(ts))
     }
 }

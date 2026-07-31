@@ -1,8 +1,10 @@
-//! [`TelegramChannel`] -- `Channel` trait implementation for Telegram.
+//! [`TelegramChannel`] -- dual [`Channel`] + [`ChannelAdapter`] for Telegram.
 //!
 //! Uses long polling via [`TelegramClient`](super::client::TelegramClient)
-//! to receive updates and delivers them to the pipeline through
-//! [`ChannelHost::deliver_inbound`](crate::traits::ChannelHost::deliver_inbound).
+//! to receive updates. Primary surface is [`ChannelAdapter`] (WEFT-170 / C7);
+//! the legacy [`Channel`] trait remains implemented for `PluginHost` /
+//! gateway compatibility by bridging through
+//! [`ChannelAdapterHostBridge`](crate::plugin_host::ChannelAdapterHostBridge).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,9 +15,13 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+use clawft_plugin::error::PluginError;
+use clawft_plugin::message::MessagePayload;
+use clawft_plugin::traits::{ChannelAdapter, ChannelAdapterHost};
 use clawft_types::error::ChannelError;
-use clawft_types::event::{InboundMessage, OutboundMessage};
+use clawft_types::event::OutboundMessage;
 
+use crate::plugin_host::ChannelAdapterHostBridge;
 use crate::traits::{
     Channel, ChannelFactory, ChannelHost, ChannelMetadata, ChannelStatus, MessageId,
 };
@@ -45,6 +51,10 @@ const ERROR_RETRY_DELAY_SECS: u64 = 5;
 /// Connects to the Telegram Bot API using long polling. Inbound text
 /// messages are forwarded to the host pipeline; outbound messages are
 /// sent via the `sendMessage` API.
+///
+/// Implements both:
+/// - [`ChannelAdapter`] -- unified plugin path (C7 / WEFT-170)
+/// - [`Channel`] -- legacy path used by [`crate::host::PluginHost`]
 ///
 /// # Configuration
 ///
@@ -100,12 +110,26 @@ impl TelegramChannel {
         *self.status.write().await = status;
     }
 
-    /// Process a single update, delivering any text message to the host.
+    /// Whether `sender_id` is permitted (empty allow-list = everyone).
+    pub fn is_allowed(&self, sender_id: &str) -> bool {
+        self.allowed_users.is_empty() || self.allowed_users.iter().any(|id| id == sender_id)
+    }
+
+    /// Current lifecycle status (non-blocking read).
+    pub fn status(&self) -> ChannelStatus {
+        self.status
+            .try_read()
+            .map(|s| s.clone())
+            .unwrap_or(ChannelStatus::Stopped)
+    }
+
+    /// Process a single update, delivering any text message via
+    /// [`ChannelAdapterHost`].
     pub(crate) async fn process_update(
         &self,
         update: &super::types::Update,
-        host: &Arc<dyn ChannelHost>,
-    ) -> Result<(), ChannelError> {
+        host: &Arc<dyn ChannelAdapterHost>,
+    ) -> Result<(), PluginError> {
         let Some(ref msg) = update.message else {
             debug!(update_id = update.update_id, "skipping non-message update");
             return Ok(());
@@ -159,60 +183,28 @@ impl TelegramChannel {
             metadata.insert("allow_from_match".into(), serde_json::Value::Bool(true));
         }
 
-        let inbound = InboundMessage {
-            channel: "telegram".into(),
-            sender_id,
-            chat_id,
-            content: text.clone(),
-            timestamp: chrono::Utc::now(),
-            media: vec![],
+        host.deliver_inbound(
+            "telegram",
+            &sender_id,
+            &chat_id,
+            MessagePayload::text(text.clone()),
             metadata,
-        };
-
-        host.deliver_inbound(inbound).await
-    }
-}
-
-#[async_trait]
-impl Channel for TelegramChannel {
-    fn name(&self) -> &str {
-        "telegram"
+        )
+        .await
     }
 
-    fn metadata(&self) -> ChannelMetadata {
-        ChannelMetadata {
-            name: "telegram".into(),
-            display_name: "Telegram Bot".into(),
-            supports_threads: false,
-            supports_media: true,
-        }
-    }
-
-    fn status(&self) -> ChannelStatus {
-        // Use try_read to avoid blocking; fall back to Stopped.
-        self.status
-            .try_read()
-            .map(|s| s.clone())
-            .unwrap_or(ChannelStatus::Stopped)
-    }
-
-    fn is_allowed(&self, sender_id: &str) -> bool {
-        self.allowed_users.is_empty() || self.allowed_users.iter().any(|id| id == sender_id)
-    }
-
-    async fn start(
+    /// Shared long-poll loop used by both trait surfaces.
+    async fn run_poll_loop(
         &self,
-        host: Arc<dyn ChannelHost>,
+        host: Arc<dyn ChannelAdapterHost>,
         cancel: CancellationToken,
-    ) -> Result<(), ChannelError> {
+    ) -> Result<(), PluginError> {
         self.set_status(ChannelStatus::Starting).await;
 
         // Verify the bot token.
         let me = self.client.get_me().await.map_err(|e| {
-            // Don't block on async set_status in a sync map_err, so we
-            // rely on the caller observing the error return instead.
             error!(error = %e, "failed to verify Telegram bot token");
-            e
+            channel_err_to_plugin(e)
         })?;
 
         info!(
@@ -289,29 +281,139 @@ impl Channel for TelegramChannel {
         Ok(())
     }
 
-    async fn send(&self, msg: &OutboundMessage) -> Result<MessageId, ChannelError> {
-        let chat_id: i64 = msg.chat_id.parse().map_err(|_| {
-            ChannelError::SendFailed(format!("invalid chat_id '{}': expected i64", msg.chat_id))
+    /// Send text (and optional reply_to) via the Bot API.
+    async fn send_text(
+        &self,
+        chat_id: &str,
+        content: &str,
+        reply_to: Option<&str>,
+    ) -> Result<String, ChannelError> {
+        let chat_id_i64: i64 = chat_id.parse().map_err(|_| {
+            ChannelError::SendFailed(format!("invalid chat_id '{chat_id}': expected i64"))
         })?;
 
-        let reply_to: Option<i64> = msg
-            .reply_to
-            .as_ref()
+        let reply_to_i64: Option<i64> = reply_to
             .map(|id| {
                 id.parse::<i64>().map_err(|_| {
-                    ChannelError::SendFailed(format!("invalid reply_to '{}': expected i64", id))
+                    ChannelError::SendFailed(format!("invalid reply_to '{id}': expected i64"))
                 })
             })
             .transpose()?;
 
         let sent = self
             .client
-            .send_message(chat_id, &msg.content, reply_to)
+            .send_message(chat_id_i64, content, reply_to_i64)
             .await?;
 
-        Ok(MessageId(sent.message_id.to_string()))
+        Ok(sent.message_id.to_string())
     }
 }
+
+// ---------------------------------------------------------------------------
+// ChannelAdapter (primary C7 surface)
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl ChannelAdapter for TelegramChannel {
+    fn name(&self) -> &str {
+        "telegram"
+    }
+
+    fn display_name(&self) -> &str {
+        "Telegram Bot"
+    }
+
+    fn supports_threads(&self) -> bool {
+        false
+    }
+
+    fn supports_media(&self) -> bool {
+        true
+    }
+
+    async fn start(
+        &self,
+        host: Arc<dyn ChannelAdapterHost>,
+        cancel: CancellationToken,
+    ) -> Result<(), PluginError> {
+        self.run_poll_loop(host, cancel).await
+    }
+
+    async fn send(&self, target: &str, payload: &MessagePayload) -> Result<String, PluginError> {
+        let content = payload.as_text().ok_or_else(|| {
+            PluginError::ExecutionFailed("telegram: only text payloads supported".into())
+        })?;
+        self.send_text(target, content, None)
+            .await
+            .map_err(channel_err_to_plugin)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Channel (legacy PluginHost / gateway surface)
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl Channel for TelegramChannel {
+    fn name(&self) -> &str {
+        "telegram"
+    }
+
+    fn metadata(&self) -> ChannelMetadata {
+        ChannelMetadata {
+            name: "telegram".into(),
+            display_name: "Telegram Bot".into(),
+            supports_threads: false,
+            supports_media: true,
+        }
+    }
+
+    fn status(&self) -> ChannelStatus {
+        TelegramChannel::status(self)
+    }
+
+    fn is_allowed(&self, sender_id: &str) -> bool {
+        TelegramChannel::is_allowed(self, sender_id)
+    }
+
+    async fn start(
+        &self,
+        host: Arc<dyn ChannelHost>,
+        cancel: CancellationToken,
+    ) -> Result<(), ChannelError> {
+        // Bridge legacy ChannelHost → ChannelAdapterHost so the shared
+        // poll loop (and MessagePayload inbound path) is the single source
+        // of truth.
+        let adapter_host: Arc<dyn ChannelAdapterHost> =
+            Arc::new(ChannelAdapterHostBridge::new(host));
+        self.run_poll_loop(adapter_host, cancel)
+            .await
+            .map_err(plugin_err_to_channel)
+    }
+
+    async fn send(&self, msg: &OutboundMessage) -> Result<MessageId, ChannelError> {
+        let id = self
+            .send_text(&msg.chat_id, &msg.content, msg.reply_to.as_deref())
+            .await?;
+        Ok(MessageId(id))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Error mapping
+// ---------------------------------------------------------------------------
+
+fn channel_err_to_plugin(e: ChannelError) -> PluginError {
+    PluginError::ExecutionFailed(e.to_string())
+}
+
+fn plugin_err_to_channel(e: PluginError) -> ChannelError {
+    ChannelError::Other(e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Factory
+// ---------------------------------------------------------------------------
 
 /// Factory for creating [`TelegramChannel`] instances from JSON config.
 ///
