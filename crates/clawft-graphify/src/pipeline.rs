@@ -7,6 +7,7 @@ use crate::analyze;
 use crate::build::MergeStats;
 use crate::cluster;
 use crate::entity::EntityId;
+use crate::hyperedge::{self, HyperedgeDiscoveryConfig};
 use crate::model::{
     DetectionResult, Entity, ExtractionResult, ExtractionStats, Hyperedge, KnowledgeGraph,
 };
@@ -26,6 +27,10 @@ pub struct PipelineConfig {
     pub cluster: bool,
     /// Whether to run analysis (god nodes, surprises, questions).
     pub analyze: bool,
+    /// Whether to run WEFT-377 hyperedge discovery after graph build.
+    pub discover_hyperedges: bool,
+    /// Hyperedge discovery knobs (used when `discover_hyperedges` is true).
+    pub hyperedge_discovery: HyperedgeDiscoveryConfig,
     /// Export formats to generate.
     pub exports: Vec<String>,
     /// Maximum number of god nodes to report.
@@ -45,6 +50,8 @@ impl Default for PipelineConfig {
         Self {
             cluster: true,
             analyze: true,
+            discover_hyperedges: true,
+            hyperedge_discovery: HyperedgeDiscoveryConfig::default(),
             exports: vec!["json".to_owned()],
             god_nodes_top_n: 10,
             surprises_top_n: 5,
@@ -135,7 +142,18 @@ impl Pipeline {
         }
 
         // Build the graph
-        let graph = KnowledgeGraph::from_parts(all_entities, all_relationships, all_hyperedges);
+        let mut graph = KnowledgeGraph::from_parts(all_entities, all_relationships, all_hyperedges);
+
+        // WEFT-377: discover multi-node hyperedges (shared context, co-occurrence, schema)
+        if self.config.discover_hyperedges {
+            let added =
+                hyperedge::apply_discovered_hyperedges(&mut graph, &self.config.hyperedge_discovery);
+            tracing::debug!(
+                hyperedges_discovered = added,
+                hyperedges_total = graph.hyperedges.len(),
+                "Hyperedge discovery complete"
+            );
+        }
 
         // Cluster + analyze
         let analysis = if self.config.cluster || self.config.analyze {
@@ -189,6 +207,7 @@ impl Pipeline {
             entity_count = stats.entities_extracted,
             relationship_count = stats.relationships_extracted,
             files_processed = stats.files_processed,
+            hyperedge_count = graph.hyperedges.len(),
             has_analysis = analysis.is_some(),
             "chain"
         );
@@ -237,6 +256,31 @@ impl Pipeline {
             relationships_removed = merge_stats.relationships_removed,
             "Incremental merge complete"
         );
+
+        // WEFT-377: re-discover hyperedges on the merged graph.
+        // Extraction hyperedges already merged by build::merge; discovery
+        // re-runs from scratch and merges (existing extraction edges win on
+        // entity-set collision via merge_hyperedges).
+        if self.config.discover_hyperedges {
+            // Drop previously discovered hyperedges so re-run is clean; keep
+            // extraction-origin ones (no detector metadata / kind tags).
+            existing_graph.hyperedges.retain(|h| {
+                h.metadata
+                    .get("detector")
+                    .and_then(|v| v.as_str())
+                    .map(|d| d != "weft-377")
+                    .unwrap_or(true)
+            });
+            let added = hyperedge::apply_discovered_hyperedges(
+                &mut existing_graph,
+                &self.config.hyperedge_discovery,
+            );
+            tracing::debug!(
+                hyperedges_discovered = added,
+                hyperedges_total = existing_graph.hyperedges.len(),
+                "Incremental hyperedge discovery complete"
+            );
+        }
 
         // Re-cluster + re-analyze on the merged graph.
         let analysis = if self.config.cluster || self.config.analyze {
@@ -408,5 +452,54 @@ mod tests {
         let detection = DetectionResult::default();
         let result = pipeline.run_from_extractions(vec![], detection).unwrap();
         assert_eq!(result.graph.node_count(), 0);
+    }
+
+    /// WEFT-377: pipeline invokes discover_hyperedges on a canonical multi-node graph.
+    #[test]
+    fn pipeline_discovers_hyperedges() {
+        // Three co-located functions + a dispatcher that calls all three.
+        let f1 = entity("alpha", "mod.rs");
+        let f2 = entity("beta", "mod.rs");
+        let f3 = entity("gamma", "mod.rs");
+        let dispatch = entity("dispatch", "dispatch.rs");
+        let ext = extraction(
+            vec![f1, f2, f3, dispatch],
+            vec![
+                rel("dispatch", "dispatch.rs", "alpha", "mod.rs"),
+                rel("dispatch", "dispatch.rs", "beta", "mod.rs"),
+                rel("dispatch", "dispatch.rs", "gamma", "mod.rs"),
+            ],
+        );
+        let pipeline = Pipeline::new(PipelineConfig::default());
+        let result = pipeline
+            .run_from_extractions(vec![ext], DetectionResult::default())
+            .unwrap();
+        assert!(
+            !result.graph.hyperedges.is_empty(),
+            "expected pipeline to discover hyperedges"
+        );
+        // Shared context for mod.rs (3 functions) and/or co-occurrence star.
+        assert!(result.graph.hyperedges.iter().any(|h| h.entity_ids.len() >= 3));
+        assert!(result.graph.hyperedges.iter().any(|h| {
+            h.metadata
+                .get("detector")
+                .and_then(|v| v.as_str())
+                == Some("weft-377")
+        }));
+    }
+
+    #[test]
+    fn pipeline_can_disable_hyperedge_discovery() {
+        let f1 = entity("alpha", "mod.rs");
+        let f2 = entity("beta", "mod.rs");
+        let f3 = entity("gamma", "mod.rs");
+        let ext = extraction(vec![f1, f2, f3], vec![]);
+        let mut config = PipelineConfig::default();
+        config.discover_hyperedges = false;
+        let pipeline = Pipeline::new(config);
+        let result = pipeline
+            .run_from_extractions(vec![ext], DetectionResult::default())
+            .unwrap();
+        assert!(result.graph.hyperedges.is_empty());
     }
 }

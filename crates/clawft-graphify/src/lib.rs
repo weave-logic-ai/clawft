@@ -27,6 +27,8 @@ pub mod entity;
 pub mod export;
 pub mod extract;
 pub mod hooks;
+/// WEFT-377: motif-based multi-node hyperedge discovery.
+pub mod hyperedge;
 pub mod ingest;
 #[cfg(feature = "rdf-ingest")]
 pub use ingest::rdf;
@@ -62,6 +64,10 @@ pub use alignment::{
 };
 pub use build::MergeStats;
 pub use entity::{DomainTag, EntityId, EntityType, FileType};
+pub use hyperedge::{
+    HyperedgeDiscoveryConfig, apply_discovered_hyperedges, discover_hyperedges,
+    discover_hyperedges_with_config, merge_hyperedges,
+};
 pub use model::{
     DetectionResult, Entity, ExtractionResult, ExtractionStats, GodNode, GraphDiff, Hyperedge,
     KnowledgeGraph, SuggestedQuestion, SurprisingConnection,
