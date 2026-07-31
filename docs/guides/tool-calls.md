@@ -501,9 +501,16 @@ Register clawft as an MCP server in Claude Code:
 claude mcp add clawft -- weft mcp-server
 ```
 
-Once registered, Claude Code can discover and invoke all of clawft's tools.
-Tools are namespaced as `clawft__<tool_name>` within Claude Code (for example,
-`clawft__read_file`, `clawft__web_search`).
+**Grok Build** uses the same outbound server (product name `weftos` preferred):
+
+```bash
+grok mcp add weftos -- weft mcp-server
+# or project .grok/config.toml — see docs/guides/grok-weftos-mcp.md and ADR-075
+```
+
+Once registered, Claude Code / Grok can discover and invoke clawft's tools.
+Tools are namespaced as `{server}__<tool_name>` (for example,
+`clawft__read_file`, `weftos__read_file`, `clawft__web_search`).
 
 ### Inbound Bridge (Claude Code -> clawft)
 

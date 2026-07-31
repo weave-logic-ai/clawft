@@ -7,6 +7,15 @@
 //! Thread-safe via `RwLock<HashMap>` for per-sender windows and `AtomicU64`
 //! for the global counter. Designed for concurrent access from `tokio` tasks.
 //!
+//! # Concurrency map choice (WEFT-34 / CONS-002)
+//!
+//! Kept `RwLock<HashMap>` (not DashMap). Rate-style microbenches show DashMap
+//! can win ~2–3× at 8 threads / 8 keys, but each `check()` is still µs-scale
+//! against network/LLM-bound traffic, and clawft targets 1–10 concurrent
+//! users. Avoiding a production `dashmap` dep in `clawft-core` is the
+//! preferred tradeoff until a measured multi-tenant hotspot appears.
+//! Bench: `cargo bench -p clawft-core --bench map_contention_bench`.
+//!
 //! # Algorithm
 //!
 //! Uses a sliding window counter: each request's `Instant` is recorded in a

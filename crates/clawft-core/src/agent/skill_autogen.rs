@@ -4,6 +4,11 @@
 //! Generated skills are installed in `~/.clawft/skills/` in a "pending"
 //! state and require user approval before activation.
 //!
+//! **Review timing (WEFT-74 / ADR-080):** the canonical approval path is
+//! CLI (`weft skills pending|approve|reject`). Interactive agent start may
+//! print a non-blocking notice via [`pending_review_start_notice`]; a
+//! blocking TTY prompt at loop start is **not** used.
+//!
 //! **Disabled by default** -- must be opted into via configuration.
 //!
 //! # Security
@@ -626,7 +631,9 @@ pub fn install_pending_skill(
 
     // Write a .pending marker file -- the skill watcher should
     // skip loading skills with this marker until approved.
-    let marker_path = skill_dir.join(".pending");
+    // Review path: CLI (`weft skills pending|approve|reject`) + optional
+    // non-blocking start notice (WEFT-74 / ADR-080) — never a blocking prompt.
+    let marker_path = skill_dir.join(PENDING_MARKER);
     std::fs::write(&marker_path, "awaiting user approval")
         .map_err(|e| format!("write .pending marker: {e}"))?;
 
@@ -641,7 +648,7 @@ pub fn install_pending_skill(
 
 /// Approve a pending skill by removing the `.pending` marker.
 pub fn approve_skill(skill_dir: &Path) -> Result<(), String> {
-    let marker = skill_dir.join(".pending");
+    let marker = skill_dir.join(PENDING_MARKER);
     if marker.exists() {
         std::fs::remove_file(&marker).map_err(|e| format!("remove .pending: {e}"))?;
         info!(skill_dir = %skill_dir.display(), "approved pending skill");
@@ -662,9 +669,157 @@ pub fn reject_skill(skill_dir: &Path) -> Result<(), String> {
     }
 }
 
+/// Marker filename signaling a skill awaits human review (autogen / staged).
+pub const PENDING_MARKER: &str = ".pending";
+
 /// Check if a skill directory is in pending state.
 pub fn is_pending(skill_dir: &Path) -> bool {
-    skill_dir.join(".pending").exists()
+    skill_dir.join(PENDING_MARKER).exists()
+}
+
+// ---------------------------------------------------------------------------
+// Pending-skill review timing (WEFT-74 / ADR-080)
+// ---------------------------------------------------------------------------
+
+/// How operators are notified of `.pending` autogen skills.
+///
+/// Product default is [`PendingReviewTiming::CliWithStartNotice`]: the
+/// canonical review path is the CLI (`weft skills pending|approve|reject`),
+/// with an optional **non-blocking** one-line notice at interactive agent
+/// start so pending candidates do not accumulate unseen. A **blocking**
+/// interactive prompt at agent-loop start is intentionally **not** offered
+/// (breaks headless/CI, daemon, non-TTY, and mid-session focus).
+///
+/// See `docs/adr/adr-080-pending-skill-review-timing.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PendingReviewTiming {
+    /// Review only via CLI (`weft skills pending|approve|reject`).
+    /// No automatic surface at agent start.
+    CliOnly,
+    /// CLI review plus a non-blocking notice at interactive agent start.
+    ///
+    /// **Default.** Does not block the agent loop or require stdin.
+    #[default]
+    CliWithStartNotice,
+}
+
+impl PendingReviewTiming {
+    /// Canonical product policy (ADR-080).
+    pub const DEFAULT_POLICY: Self = Self::CliWithStartNotice;
+
+    /// Whether this policy emits a start-of-session notice when pending
+    /// skills exist.
+    pub fn emits_start_notice(self) -> bool {
+        matches!(self, Self::CliWithStartNotice)
+    }
+}
+
+/// Summary of one skill directory marked `.pending`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingSkillInfo {
+    /// Directory basename (skill name).
+    pub name: String,
+    /// Absolute or install-dir-relative path to the skill directory.
+    pub path: PathBuf,
+}
+
+/// List skill directories under `install_dir` that carry a `.pending` marker.
+///
+/// Returns an empty vec when the directory does not exist. Entries are
+/// sorted by name. Does not read SKILL.md contents (see CLI
+/// `weft skills pending` for previews).
+pub fn list_pending_skills(install_dir: &Path) -> Result<Vec<PendingSkillInfo>, String> {
+    if !install_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::new();
+    let entries =
+        std::fs::read_dir(install_dir).map_err(|e| format!("read skills dir: {e}"))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("read dir entry: {e}"))?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if !is_pending(&path) {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        out.push(PendingSkillInfo { name, path });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+/// Build a non-blocking start notice for pending skills.
+///
+/// Returns [`None`] when there is nothing to review, or when `timing`
+/// does not emit start notices. **Never** prompts for input — callers
+/// print the string and continue.
+pub fn format_pending_review_notice(
+    pending: &[PendingSkillInfo],
+    timing: PendingReviewTiming,
+) -> Option<String> {
+    if !timing.emits_start_notice() || pending.is_empty() {
+        return None;
+    }
+
+    let count = pending.len();
+    let names: Vec<&str> = pending.iter().map(|p| p.name.as_str()).collect();
+    let preview = match names.len() {
+        0 => return None,
+        1 => names[0].to_string(),
+        2 => format!("{}, {}", names[0], names[1]),
+        3 => format!("{}, {}, {}", names[0], names[1], names[2]),
+        n => format!("{}, {} (+{} more)", names[0], names[1], n - 2),
+    };
+
+    Some(format!(
+        "Pending skills ({count}): {preview}. \
+         Review: weft skills pending | approve <name> | reject <name>"
+    ))
+}
+
+/// Resolve the default user skills install dir (`~/.clawft/skills/`).
+///
+/// Shared by CLI start-notice and autogen install so paths stay consistent.
+pub fn default_user_skills_dir() -> Option<PathBuf> {
+    #[cfg(feature = "native")]
+    {
+        dirs::home_dir().map(|h| h.join(".clawft").join("skills"))
+    }
+    #[cfg(not(feature = "native"))]
+    {
+        Some(PathBuf::from(".clawft").join("skills"))
+    }
+}
+
+/// Scan the default (or provided) skills dir and format a start notice.
+///
+/// Convenience for interactive REPL boot. Failures to read the directory
+/// yield `None` (notice is best-effort; never blocks session start).
+pub fn pending_review_start_notice(
+    install_dir: Option<&Path>,
+    timing: PendingReviewTiming,
+) -> Option<String> {
+    if !timing.emits_start_notice() {
+        return None;
+    }
+    let owned;
+    let dir = match install_dir {
+        Some(p) => p,
+        None => {
+            owned = default_user_skills_dir()?;
+            &owned
+        }
+    };
+    let pending = list_pending_skills(dir).ok()?;
+    format_pending_review_notice(&pending, timing)
 }
 
 // ---------------------------------------------------------------------------
@@ -1026,6 +1181,148 @@ mod tests {
         let result = approve_skill(&dir);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not in pending state"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- Pending review timing (WEFT-74 / ADR-080) --
+
+    #[test]
+    fn pending_review_timing_default_is_cli_with_start_notice() {
+        assert_eq!(
+            PendingReviewTiming::default(),
+            PendingReviewTiming::CliWithStartNotice
+        );
+        assert_eq!(
+            PendingReviewTiming::DEFAULT_POLICY,
+            PendingReviewTiming::CliWithStartNotice
+        );
+        assert!(PendingReviewTiming::CliWithStartNotice.emits_start_notice());
+        assert!(!PendingReviewTiming::CliOnly.emits_start_notice());
+    }
+
+    #[test]
+    fn list_pending_skills_empty_when_dir_missing() {
+        let dir = std::env::temp_dir().join("clawft_autogen_list_missing_weft74");
+        let _ = std::fs::remove_dir_all(&dir);
+        let pending = list_pending_skills(&dir).unwrap();
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn list_pending_skills_empty_one_many() {
+        let dir = std::env::temp_dir().join("clawft_autogen_list_pending_weft74");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+
+        // Empty install dir.
+        assert!(list_pending_skills(&dir).unwrap().is_empty());
+
+        // Approved skill (no marker) is ignored.
+        let approved = dir.join("approved-skill");
+        std::fs::create_dir_all(&approved).unwrap();
+        std::fs::write(approved.join("SKILL.md"), "---\nname: approved\n---\n").unwrap();
+        assert!(list_pending_skills(&dir).unwrap().is_empty());
+
+        // One pending.
+        let p1 = ToolCallPattern::new(vec!["read_file".into(), "edit_file".into()]);
+        let c1 = generate_skill_md(&p1);
+        install_pending_skill(&c1, &dir).unwrap();
+        let one = list_pending_skills(&dir).unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].name, c1.name);
+
+        // Many pending (sorted by name).
+        let p2 = ToolCallPattern::new(vec!["a".into(), "b".into()]);
+        let mut c2 = generate_skill_md(&p2);
+        c2.name = "aaa-pending".into();
+        install_pending_skill(&c2, &dir).unwrap();
+        let many = list_pending_skills(&dir).unwrap();
+        assert_eq!(many.len(), 2);
+        assert_eq!(many[0].name, "aaa-pending");
+        assert!(many.iter().any(|p| p.name == c1.name));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn format_pending_review_notice_respects_timing_and_count() {
+        let empty: Vec<PendingSkillInfo> = Vec::new();
+        assert!(format_pending_review_notice(
+            &empty,
+            PendingReviewTiming::CliWithStartNotice
+        )
+        .is_none());
+
+        let pending = vec![
+            PendingSkillInfo {
+                name: "alpha-auto".into(),
+                path: PathBuf::from("/tmp/alpha-auto"),
+            },
+            PendingSkillInfo {
+                name: "beta-auto".into(),
+                path: PathBuf::from("/tmp/beta-auto"),
+            },
+            PendingSkillInfo {
+                name: "gamma-auto".into(),
+                path: PathBuf::from("/tmp/gamma-auto"),
+            },
+            PendingSkillInfo {
+                name: "delta-auto".into(),
+                path: PathBuf::from("/tmp/delta-auto"),
+            },
+        ];
+
+        // CliOnly never notices.
+        assert!(
+            format_pending_review_notice(&pending, PendingReviewTiming::CliOnly).is_none()
+        );
+
+        let notice =
+            format_pending_review_notice(&pending, PendingReviewTiming::CliWithStartNotice)
+                .expect("notice when pending + CliWithStartNotice");
+        assert!(notice.contains("Pending skills (4)"));
+        assert!(notice.contains("alpha-auto"));
+        assert!(notice.contains("+2 more"));
+        assert!(notice.contains("weft skills pending"));
+        assert!(notice.contains("approve"));
+        assert!(notice.contains("reject"));
+
+        // Single name, no "+N more".
+        let one = format_pending_review_notice(
+            &pending[..1],
+            PendingReviewTiming::CliWithStartNotice,
+        )
+        .unwrap();
+        assert!(one.contains("Pending skills (1): alpha-auto"));
+        assert!(!one.contains("more"));
+    }
+
+    #[test]
+    fn pending_review_start_notice_best_effort() {
+        let dir = std::env::temp_dir().join("clawft_autogen_start_notice_weft74");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+
+        assert!(
+            pending_review_start_notice(Some(&dir), PendingReviewTiming::CliWithStartNotice)
+                .is_none()
+        );
+
+        let pattern = ToolCallPattern::new(vec!["x".into(), "y".into()]);
+        let candidate = generate_skill_md(&pattern);
+        install_pending_skill(&candidate, &dir).unwrap();
+
+        let notice =
+            pending_review_start_notice(Some(&dir), PendingReviewTiming::CliWithStartNotice)
+                .expect("pending skill should produce start notice");
+        assert!(notice.contains(&candidate.name));
+        assert!(notice.contains("weft skills pending"));
+
+        // CliOnly suppresses notice even when pending exists.
+        assert!(
+            pending_review_start_notice(Some(&dir), PendingReviewTiming::CliOnly).is_none()
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

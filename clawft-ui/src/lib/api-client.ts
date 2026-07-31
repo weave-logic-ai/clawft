@@ -218,6 +218,22 @@ export const api = {
       apiFetch<VoiceStatusData & { settings: VoiceSettingsData }>(
         "/api/voice/status",
       ),
+    /** Push runtime pipeline state; backend broadcasts on WS `voice:status` (WEFT-218). */
+    updatePipeline: (update: {
+      state?: VoiceStatusData["state"];
+      talkModeActive?: boolean;
+      transcript?: string | null;
+      response?: string | null;
+    }) =>
+      apiFetch<{
+        success: boolean;
+        state: string;
+        talkModeActive: boolean;
+        wakeWordEnabled: boolean;
+      }>("/api/voice/status", {
+        method: "POST",
+        body: JSON.stringify(update),
+      }),
     updateSettings: (settings: Partial<VoiceSettingsData>) =>
       apiFetch<{ success: boolean }>("/api/voice/settings", {
         method: "PUT",

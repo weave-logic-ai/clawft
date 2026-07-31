@@ -1,12 +1,57 @@
 //! Routing configuration validation.
 //!
-//! Post-deserialization validation for [`RoutingConfig`] and its nested types.
-//! Serde handles structural correctness (JSON types, field names), but cannot
-//! enforce semantic constraints like "tier names must be unique" or "complexity
-//! min must be less than max." This module fills that gap.
+//! # CONS-006 / WEFT-36 — validation boundary (serde-time vs post-load)
+//!
+//! **Decision (resolved):** keep a **single post-load pass** in this module for
+//! all semantic / security checks. Serde in `clawft-types::routing` only enforces
+//! *structural* integrity (JSON types, required shapes, typed enums). Do **not**
+//! re-check the same rule with `deserialize_with` *and* post-load — that duplicates
+//! diagnostics and can diverge. Callers construct or load config, then run
+//! [`validate_routing_config`] (and [`validate_workspace_ceiling`] for overlays)
+//! before any router use.
+//!
+//! | Path | Lives in | What it may reject |
+//! |------|----------|--------------------|
+//! | **Serde-time** | `clawft-types` derive / enums | Wrong JSON types; unknown `TierSelectionStrategy` variants; missing required fields (`ModelTierConfig.name`) |
+//! | **Post-load** | this module | Ranges, uniqueness, cross-field / cross-list rules, free-form string allowlists (`mode`, rate strategy), workspace ceilings |
+//!
+//! ## Catalog — every check on the routing config path
+//!
+//! | # | Check | Severity | Boundary | Rationale |
+//! |---|-------|----------|----------|-----------|
+//! | S1 | JSON field types match Rust types | serde error | **serde-time** | Structural; cannot represent invalid type |
+//! | S2 | `TierSelectionStrategy` known variant | serde error | **serde-time** | Typed enum (FIX-01); unknown string fails deserialize |
+//! | S3 | Required fields present (`tiers[].name`) | serde error | **serde-time** | Non-`Option` fields without `default` |
+//! | S4 | Unknown object keys | ignored | **serde-time** | Forward compatibility (`deny_unknown_fields` not set) |
+//! | 1 | `mode` ∈ {`static`,`tiered`} | ERROR | **post-load** | Free-form string for back-compat; collect with other diagnostics |
+//! | 2 | tiered ⇒ ≥1 tier | ERROR | **post-load** | Cross-field with `mode` |
+//! | 3 | unique tier `name`s | ERROR | **post-load** | Set membership across list |
+//! | 4 | tier `models` non-empty | WARN | **post-load** | Soft usability |
+//! | 5 | `complexity_range[0] ≤ [1]` | ERROR | **post-load** | Cross-element range (not type-level) |
+//! | 6 | `complexity_range` ∈ [0,1] | ERROR | **post-load** | Domain range; multi-error collection preferred over fail-first serde |
+//! | 7 | `cost_per_1k_tokens ≥ 0` | ERROR | **post-load** | Domain range |
+//! | 8 | `max_context_tokens > 0` | ERROR | **post-load** | Domain range |
+//! | 8b | model string contains `/` | WARN | **post-load** | Soft format |
+//! | 8c | overlapping complexity ranges | WARN | **post-load** | Cross-tier |
+//! | 9 | permission `level` ∈ {0,1,2} | WARN | **post-load** | Soft known-set (extensible) |
+//! | 10 | `escalation_threshold` ∈ [0,1] | ERROR | **post-load** | Domain range |
+//! | 11–12 | cost budgets ≥ 0 | ERROR | **post-load** | Domain range |
+//! | 13 | `max_tier` ∈ defined tier names | WARN | **post-load** | Cross-list reference |
+//! | 14 | glob-like `tool_access` | WARN | **post-load** | Soft pattern notice |
+//! | 15 | escalation enabled ⇒ `max_escalation_tiers > 0` | ERROR | **post-load** | Cross-field |
+//! | 16 | escalation `threshold` ∈ [0,1] | ERROR | **post-load** | Domain range |
+//! | 16b | `max_escalation_tiers` vs tier count | WARN | **post-load** | Cross-field |
+//! | 17 | fallback_model contains `/` | WARN | **post-load** | Soft format |
+//! | C1–C3 | global cost budgets / `reset_hour_utc` 0–23 | ERROR | **post-load** | Domain range |
+//! | R1–R2 | `window_seconds > 0`; strategy allowlist | ERROR | **post-load** | Domain + string allowlist (not enum: multi-error UX) |
+//! | W1–W7 | workspace ceiling (level, escalation, tools, rates, budgets) | ERROR | **post-load** | Needs *two* configs; never serde-time |
+//!
+//! **Duplicates removed (WEFT-36):** the partial
+//! `PermissionResolver::validate_workspace_ceiling` reimplementation was collapsed
+//! into [`validate_workspace_ceiling`] (this module is the sole authority).
 //!
 //! Validation runs after deserialization, before `TieredRouter` construction.
-//! When `routing.mode` is `"static"`, validation is skipped entirely.
+//! When `routing.mode` is `"static"`, [`validate_routing_config`] is a no-op.
 
 use std::collections::HashSet;
 
@@ -1752,6 +1797,114 @@ mod tests {
                 ValidationSeverity::Error
             ),
             "missing max_grantable_level must keep historical ceiling of 1"
+        );
+    }
+
+    // ── WEFT-36 / CONS-006: pin serde-time vs post-load boundaries ───
+
+    /// Serde-time (S2): unknown `selection_strategy` never becomes a value —
+    /// deserialize fails; post-load validation is not reached.
+    #[test]
+    fn weft36_serde_time_rejects_unknown_selection_strategy() {
+        let json = r#"{
+            "mode": "tiered",
+            "selection_strategy": "not_a_real_strategy",
+            "tiers": [{
+                "name": "free",
+                "models": ["groq/llama-3.1-8b"],
+                "complexity_range": [0.0, 1.0]
+            }]
+        }"#;
+        let result = serde_json::from_str::<RoutingConfig>(json);
+        assert!(
+            result.is_err(),
+            "unknown TierSelectionStrategy must fail at serde-time, got Ok({:?})",
+            result.ok()
+        );
+    }
+
+    /// Post-load (rules 5–6): out-of-range complexity deserializes (f32 is
+    /// structurally fine) then fails in `validate_routing_config`.
+    #[test]
+    fn weft36_post_load_rejects_complexity_range_after_successful_deserialize() {
+        let json = r#"{
+            "mode": "tiered",
+            "tiers": [{
+                "name": "free",
+                "models": ["groq/llama-3.1-8b"],
+                "complexity_range": [1.5, 2.0]
+            }]
+        }"#;
+        let config: RoutingConfig = serde_json::from_str(json)
+            .expect("domain-invalid complexity_range must still deserialize (post-load path)");
+        assert_eq!(config.tiers[0].complexity_range, [1.5, 2.0]);
+
+        let errors = validate_routing_config(&config);
+        assert!(
+            has_error(
+                &errors,
+                "routing.tiers[0].complexity_range",
+                ValidationSeverity::Error
+            ),
+            "post-load must flag complexity_range outside [0,1], got: {:?}",
+            errors
+        );
+    }
+
+    /// Post-load (R2): free-form rate strategy string deserializes; unknown
+    /// value is collected as ValidationError (not a serde hard-fail).
+    #[test]
+    fn weft36_post_load_rejects_unknown_rate_strategy_after_deserialize() {
+        let json = r#"{
+            "mode": "tiered",
+            "tiers": [{
+                "name": "free",
+                "models": ["groq/llama-3.1-8b"],
+                "complexity_range": [0.0, 1.0]
+            }],
+            "rate_limiting": { "strategy": "token_bucket", "window_seconds": 60 }
+        }"#;
+        let config: RoutingConfig = serde_json::from_str(json)
+            .expect("unknown rate strategy string must deserialize for multi-error post-load");
+        assert_eq!(config.rate_limiting.strategy, "token_bucket");
+
+        let errors = validate_routing_config(&config);
+        assert!(
+            has_error(
+                &errors,
+                "routing.rate_limiting.strategy",
+                ValidationSeverity::Error
+            ),
+            "post-load must reject unknown rate strategy, got: {:?}",
+            errors
+        );
+    }
+
+    /// Workspace ceiling is always post-load (needs two configs); serde cannot
+    /// express cross-config constraints.
+    #[test]
+    fn weft36_workspace_ceiling_is_post_load_only() {
+        let global_json = r#"{ "mode": "static", "max_grantable_level": 1 }"#;
+        let workspace_json = r#"{
+            "mode": "static",
+            "permissions": { "user": { "level": 2 } }
+        }"#;
+        let global: RoutingConfig =
+            serde_json::from_str(global_json).expect("global must deserialize alone");
+        let workspace: RoutingConfig =
+            serde_json::from_str(workspace_json).expect("workspace must deserialize alone");
+        // Each layer is structurally fine; only the pair violates the ceiling.
+        assert!(validate_routing_config(&global).is_empty());
+        assert!(validate_routing_config(&workspace).is_empty()); // static skips
+        let errors = validate_workspace_ceiling(&global, &workspace);
+        assert!(
+            has_error(
+                &errors,
+                "routing.permissions.user.level",
+                ValidationSeverity::Error
+            ),
+            "ceiling check must catch level 2 under max_grantable_level=1, got: {:?}",
+            errors
         );
     }
 }

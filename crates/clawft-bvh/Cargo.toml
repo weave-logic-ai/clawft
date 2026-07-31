@@ -1,0 +1,16 @@
+[package]
+name = "clawft-bvh"
+version.workspace = true
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "BVH broad-phase spatial index (ADR-056 Phase A). No kernel/chain deps — pure geometry + registry."
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }

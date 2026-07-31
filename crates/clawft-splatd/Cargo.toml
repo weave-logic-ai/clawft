@@ -1,0 +1,33 @@
+[package]
+name = "clawft-splatd"
+version.workspace = true
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Standalone HTTP job server for the Gaussian splat pipeline (SPLAT_RUNNER). Metal via Brush on macOS; same binary for Linux GPU later."
+
+[[bin]]
+name = "splatd"
+path = "src/main.rs"
+
+[dependencies]
+clawft-splat-pipeline = { path = "../clawft-splat-pipeline" }
+
+anyhow = { workspace = true }
+# Multipart upload for POST /v1/jobs -F video=@… or -F session=@session.zip
+axum = { version = "0.8", features = ["multipart", "json", "macros", "tokio", "http1"] }
+multer = "3"
+futures-util = { workspace = true }
+reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true, features = ["io"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+# Unzip weft.capture.v1 session packages (multipart field `session`).
+zip = { version = "2", default-features = false, features = ["deflate"] }

@@ -1,0 +1,244 @@
+# Grok Build ↔ WeftOS MCP bridge
+
+**Decision records:** [ADR-075](../adr/adr-075-grok-weftos-mcp-client-bridge.md) (attach), [ADR-076](../adr/adr-076-mcp-tool-surface-capability-catalog.md) (tool surface + profiles)  
+**Catalog:** [mcp-capability-catalog.md](../weftos/mcp-capability-catalog.md)  
+**Related:** [MCP integration](./mcp-integration.md), [tool calls / Claude bridge](./tool-calls.md), [ADR-073 Agent Workspace](../adr/adr-073-agent-workspace-cnvs-principles.md), [ADR-074 xAI voice](../adr/adr-074-interim-xai-grok-voice.md)
+
+This guide is the operator write-up for attaching **Grok Build** (`grok`) to a **WeftOS / clawft** instance so Grok can use WeftOS as a tool surface (and later as a control plane for agents and windows).
+
+---
+
+## 1. Mental model
+
+| Role | Component |
+|------|-----------|
+| **MCP client** | Grok Build (TUI / headless / ACP) |
+| **MCP server** | `weft mcp-server` (stdio JSON-RPC today) |
+| **Governance** | Middleware on the server (security, permissions, audit) |
+| **Intent bus (later)** | `WindowIntent` + agent runtime — same path as voice/GUI (ADR-073) |
+
+```
+Grok Build
+   │  tools/list, tools/call
+   ▼
+weft mcp-server  ──► ToolRegistry / skills / (future) WindowIntent
+```
+
+**Not the same as ADR-074:** Grok *Voice* (speech-to-speech) is Talk-Mode. This guide is Grok *CLI* as a coding/ops agent.
+
+**Not the same as Ruflo MCP:** Project Ruflo/claude-flow MCP is swarm orchestration. WeftOS MCP is the **OS/agent tool surface**. Both can be enabled in Grok at once.
+
+---
+
+## 2. Prerequisites
+
+1. `weft` on `PATH` (e.g. `cargo install --path crates/clawft-cli` or workspace build → `~/.cargo/bin/weft`).
+2. Grok Build installed and authenticated (`grok --version`).
+3. Optional: WeftOS config (`~/.clawft/config.json` or project config) for workspace roots and MCP-inbound servers.
+
+Verify serve path:
+
+```bash
+weft mcp-server --help
+# Leave it running only when spawned by Grok; normally Grok starts it.
+```
+
+---
+
+## 3. Attach Grok (Level 1 — ready today)
+
+### Option A — CLI
+
+```bash
+grok mcp add weftos -- weft mcp-server
+# explicit profile (default is already product-safe):
+# grok mcp add weftos -- weft mcp-server --profile default
+# pin config:
+# grok mcp add weftos -- weft mcp-server --config /path/to/config.json
+
+grok mcp list
+grok mcp doctor weftos
+```
+
+### Option B — config.toml
+
+User (`~/.grok/config.toml`) or **project** (`.grok/config.toml` when the folder is trusted):
+
+```toml
+[mcp_servers.weftos]
+command = "weft"
+args = ["mcp-server"]
+enabled = true
+startup_timeout_sec = 60
+tool_timeout_sec = 600
+```
+
+With explicit config file:
+
+```toml
+[mcp_servers.weftos]
+command = "weft"
+args = ["mcp-server", "--config", "/path/to/config.json"]
+enabled = true
+```
+
+Restart Grok or reload MCPs, then:
+
+```bash
+grok mcp doctor weftos
+```
+
+Tools appear namespaced as `weftos__<tool_name>` (server name + tool).
+
+### Claude parity (same server)
+
+```bash
+claude mcp add clawft -- weft mcp-server
+# or weftos as the server name — either is fine
+```
+
+---
+
+## 4. Levels of integration (roadmap)
+
+| Level | What you get | Status |
+|-------|----------------|--------|
+| **L1 Tool client** | Call WeftOS tools from Grok | **Now** (stdio; catalog still evolving) |
+| **L2 Control plane** | Profiles + weave façade tools | Phased (ADR-076 C1–C3, ADR-075 G1–G2) |
+| **L3 Remote instance** | Grok laptop → remote WeftOS HTTP MCP | Phased (G4) |
+
+### Profiles (ADR-076 / WEFT-699–700) — live defaults
+
+| Profile | Contents |
+|---------|----------|
+| **`default`** | `control` ∪ `workspace` — **product default** when flag omitted |
+| `control` | status, agents, windows, **`skill_list` + `skill_get`** façades |
+| `workspace` | sandboxed FS, shell, file memory, web (policy), **`process_spawn`** |
+| `media` | voice / audio / render_ui — **opt-in** (session-bound) |
+| `full` | entire registry + per-skill tool expansion — **explicit only** |
+
+```bash
+weft mcp-server                         # same as --profile default
+weft mcp-server --profile default
+weft mcp-server --profile full          # skill expansion; still no peer re-export
+weft mcp-server --profile full --reexport-mcp  # re-export inbound MCP peers (dangerous)
+weft mcp-server --profile control,media # compose
+# weft mcp-server --attach              # live kernel façade (WEFT-701)
+```
+
+**Public wire (WEFT-700):**
+
+- Client-visible tool names are **flat product names** — no `builtin__` (or `skill__`) prefix. Grok still namespaces by server key as `weftos__read_file`, never `weftos__builtin__read_file`.
+- OS subprocess tool is **`process_spawn`** (not bare `spawn`). Agent lifecycle uses `agent_*` when present — different names.
+- Default/control skills: **`skill_list` + `skill_get` only** — not one MCP tool per skill. Per-skill expansion only on `full`.
+- Proxied external MCP re-export requires **`--profile full` and `--reexport-mcp`**. `full` alone does not re-export peers.
+
+**Important:** empty `tools.allowed_tools` is **not** a full dump. Profile filters first; a non-empty allowlist is an *additional* filter. Media tools (`voice_*`, `audio_*`, `render_ui`) are excluded from `default`.
+
+### Level 2 tools (control plane — WEFT-694 / WEFT-701)
+
+Grok conductor basics over MCP (no freeform WM required):
+
+| MCP tool | Mode | Backend |
+|----------|------|---------|
+| `status` | `--attach` | weave `kernel.status` (version / mode / reachability) |
+| `agent_list` | `--attach` | weave `agent.list` (long-running sessions; aligns substrate inventory WEFT-685) |
+| `agent_spawn` | `--attach` | weave `agent.spawn` — default policy is runtime-visible when UI exists; CLI-only path: same tool without panes |
+| `agent_stop` | `--attach` | weave `agent.stop` (governed cancel) |
+
+```bash
+# Live instance (daemon must be running)
+weaver kernel start
+weft mcp-server --attach --profile control
+# tools/list → status, agent_list, agent_spawn, agent_stop (+ skill façades if allowed)
+
+# Grok project config
+# args = ["mcp-server", "--attach", "--profile", "control"]
+```
+
+Standalone `weft mcp-server` (no `--attach`) remains offline/dev coding tools only — control tools are **not** silent empties; use attach for live agents.
+
+Prefer public names: `status`, `agent_list`, `agent_spawn`, `agent_stop`, `window_*`, `read_file`, `process_spawn`, `skill_list`, `skill_get`, …  
+Full rows: [capability catalog](../weftos/mcp-capability-catalog.md).
+
+### Level 3 (remote)
+
+Grok already supports:
+
+```toml
+[mcp_servers.weftos-remote]
+url = "https://your-host/mcp"
+headers = { Authorization = "Bearer …" }
+```
+
+WeftOS must ship a **listen** mode for MCP HTTP/SSE (or streamable HTTP) with auth — not default open bind. Until then, use SSH + local stdio or a tunnel.
+
+---
+
+## 5. Bidirectional use (optional)
+
+| Direction | Config |
+|-----------|--------|
+| **Grok → WeftOS** | This guide (`weft mcp-server` in Grok) — **primary** |
+| **WeftOS → external MCP** | `weft mcp add` / `tools.mcp_servers` — WeftOS agent calls other servers |
+
+Running both at once can create **delegation loops**. Prefer one primary driver per session. See recursive-delegation notes in [tool-calls.md](./tool-calls.md).
+
+---
+
+## 6. Security notes
+
+- All MCP calls through `weft mcp-server` pass the middleware pipeline (validation, permission, result guard, audit).  
+- Workspace file tools stay sandboxed to configured workspace roots.  
+- Shell tools still hit denylist / policy.  
+- Remote serve (when shipped) **must** use auth; never expose unauthenticated MCP on a public interface.  
+- Do not commit API keys in `.grok/config.toml`; use env expansion / local overrides.
+
+---
+
+## 7. Relationship to Agent Workspace and voice
+
+```
+Grok MCP ──┐
+Keys/GUI ──┼──► WindowIntent / agent runtime ──► Agent Workspace panes
+Voice ─────┘     (ADR-073 / ADR-074)
+```
+
+Product bar (CNVS-like conductor): Grok or voice can spawn visible agents and drive layout **only** through shared intents — not a Grok-only UI fork.
+
+---
+
+## 8. Troubleshooting
+
+| Symptom | Check |
+|---------|--------|
+| `grok mcp doctor weftos` fails spawn | `which weft`; build CLI; increase `startup_timeout_sec` |
+| Zero tools | Server crashed on init — run `weft mcp-server` manually and watch stderr |
+| Tools huge / noisy | Use `--profile default` (product default); avoid `--profile full --reexport-mcp` unless debugging |
+| Permission denied on tools | WeftOS config policies / workspace root |
+| Ruflo tools present, WeftOS not | Separate MCP entries — both can coexist |
+
+---
+
+## 9. Plane work (tracking)
+
+| WEFT | Phase | Cycle |
+|------|-------|-------|
+| **WEFT-692** | G0 docs + config + doctor | 0.8.x |
+| **WEFT-693** | G1 curated serve profile *(dup intent with WEFT-699)* | 0.8.x |
+| **WEFT-694** | G2 status / agents MCP tools | 0.8.x |
+| **WEFT-695** | G3 MCP → WindowIntent | 0.9.x |
+| **WEFT-696** | G4 HTTP/SSE listen + auth | 0.9.x |
+| **WEFT-697** | G5 session capability tokens | 0.9.x |
+| **WEFT-698…703** | ADR-076 C0–C5 catalog / profiles / attach / CI | 0.8–0.9 |
+
+Related workspace/voice: WEFT-685…691 (ADR-073/074).
+
+---
+
+## 10. See also
+
+- [ADR-075](../adr/adr-075-grok-weftos-mcp-client-bridge.md)  
+- [ADR-070](../adr/adr-070-mcp-registry-ownership.md) — config vs daemon registry  
+- [mcp-integration.md](./mcp-integration.md) — WeftOS as client + `internal_only`  
+- [docs/grok/README.md](../grok/README.md) — Ruflo-on-Grok host setup  

@@ -501,6 +501,16 @@ impl<P: Platform> AppContext<P> {
         self.pipeline.trajectory_learner().cloned()
     }
 
+    /// Shared last-N pipeline routing decision history (WEFT-40).
+    ///
+    /// Pass the same `Arc` into the admin API state so
+    /// `GET /api/admin/routing/decisions` reflects live gateway traffic.
+    pub fn decision_history(
+        &self,
+    ) -> Arc<crate::pipeline::decision_history::RoutingDecisionHistory> {
+        self.pipeline.decision_history().clone()
+    }
+
     /// Replace the pipeline with a live LLM-backed pipeline.
     ///
     /// Convenience method that calls [`build_live_pipeline`] and sets it

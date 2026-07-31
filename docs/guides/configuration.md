@@ -355,7 +355,7 @@ Top-level tool configuration.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | boolean | `true` | Enable text-to-speech. |
-| `provider` | string | `"browser"` | TTS provider: `"browser"`, `"openai"`, or `"elevenlabs"`. |
+| `provider` | string | `"local"` | TTS provider: `"local"` (default, offline), `"local-stub"`, `"browser"` (UI Web Speech), `"openai"`, or `"elevenlabs"`. See WEFT-238 / voice guide. |
 | `model` | string | (varies) | TTS model. Defaults: `tts-1` (OpenAI), `eleven_multilingual_v2` (ElevenLabs). |
 | `voice` | string | (varies) | Voice ID. Defaults: `alloy` (OpenAI), `Rachel` (ElevenLabs). |
 | `speed` | float | `1.0` | Speaking speed multiplier (0.25 - 4.0). |
@@ -763,7 +763,7 @@ Or with an inline token:
 | `token_env` | string or null | `null` | Environment variable holding the bot token. Used when `token` is empty. |
 | `allow_from` | string[] | `[]` | Restrict to these user IDs. Empty allows all users. |
 | `gateway_url` | string | `"wss://gateway.discord.gg/?v=10&encoding=json"` | WebSocket gateway URL. Override only for testing. |
-| `intents` | integer | `37377` | Gateway intents bitmask. Default enables GUILDS, GUILD_MESSAGES, DIRECT_MESSAGES, and MESSAGE_CONTENT. |
+| `intents` | integer | `37377` | Gateway intents bitmask. Default = GUILDS (1) \| GUILD_MESSAGES (512) \| DIRECT_MESSAGES (4096) \| MESSAGE_CONTENT (32768, **privileged** — enable in Developer Portal or Discord closes with 4014). `0` is rejected at startup. See [channels.md § Gateway Intents](channels.md#56-gateway-intents). |
 
 ### Additional Channels
 

@@ -645,6 +645,19 @@ export const handlers = [
       } satisfies VoiceSettingsData,
     }),
   ),
+  // WEFT-218: pipeline state push (real daemon broadcasts; MSW acks only)
+  http.post("/api/voice/status", async ({ request }) => {
+    const body = (await request.json().catch(() => ({}))) as {
+      state?: string;
+      talkModeActive?: boolean;
+    };
+    return HttpResponse.json({
+      success: true,
+      state: body.state ?? "idle",
+      talkModeActive: body.talkModeActive ?? false,
+      wakeWordEnabled: false,
+    });
+  }),
   http.put("/api/voice/settings", () =>
     HttpResponse.json({ success: true }),
   ),

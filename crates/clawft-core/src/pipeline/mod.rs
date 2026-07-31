@@ -7,6 +7,7 @@ pub mod assembler;
 pub mod browser_llm_adapter;
 pub mod classifier;
 pub mod cost_tracker;
+pub mod decision_history;
 pub mod learner;
 #[cfg(feature = "native")]
 pub mod llm_adapter;
@@ -221,3 +222,5 @@ mod factory_tests {
         let _learner = build_learner(&config);
     }
 }
+
+pub use llm_adapter::{persist_shared_retry_model, resolve_retry_model_path, shared_retry_model};

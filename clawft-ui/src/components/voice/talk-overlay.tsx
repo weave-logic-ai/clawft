@@ -1,6 +1,7 @@
 import { useEffect, useRef, useCallback } from "react";
 import { Mic, MicOff, Loader, Volume2 } from "lucide-react";
 import { useVoiceStore, type VoiceState } from "../../stores/voice-store";
+import { api } from "../../lib/api-client";
 import { sendVoiceMessage } from "../../lib/voice-chat";
 import {
   cancelSpeech,
@@ -13,6 +14,18 @@ import {
 } from "../../lib/audio";
 import { Button } from "../ui/button";
 import { cn } from "../../lib/utils";
+
+/** Best-effort push of talk-mode pipeline state to the daemon (WEFT-218). */
+function pushPipeline(update: {
+  state?: VoiceState;
+  talkModeActive?: boolean;
+  transcript?: string | null;
+  response?: string | null;
+}) {
+  void api.voice.updatePipeline(update).catch(() => {
+    /* local-only / offline — UI store remains authoritative for this tab */
+  });
+}
 
 const overlayIcons: Record<VoiceState, typeof Mic> = {
   idle: MicOff,
@@ -95,10 +108,16 @@ export function TalkModeOverlay() {
       }
 
       setState("processing");
+      pushPipeline({ state: "processing", talkModeActive: true, transcript: text.trim() });
       try {
         const responseText = await sendVoiceMessage(text.trim());
         setResponse(responseText);
         setState("speaking");
+        pushPipeline({
+          state: "speaking",
+          talkModeActive: true,
+          response: responseText,
+        });
 
         // Speak the response (mic is off, no feedback loop)
         try {
@@ -115,6 +134,12 @@ export function TalkModeOverlay() {
       if (activeRef.current) {
         setState("listening");
         setTranscript("");
+        pushPipeline({
+          state: "listening",
+          talkModeActive: true,
+          transcript: null,
+          response: null,
+        });
         const rec = createSpeechRecognition({
           lang: settings.language || "en-US",
           continuous: true,
@@ -127,6 +152,7 @@ export function TalkModeOverlay() {
         }
       } else {
         setState("idle");
+        pushPipeline({ state: "idle", talkModeActive: false });
       }
     },
     [setState, setResponse, setTranscript, settings.language],

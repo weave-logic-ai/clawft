@@ -87,6 +87,98 @@ impl VoicePersonality {
     }
 }
 
+/// Resolved TTS parameters for a single agent speak request (WEFT-222).
+///
+/// Produced by [`super::VoiceConfig::resolve_tts_for_agent`]. TTS dispatch
+/// applies `voice_id` / `speed` / `pitch` (and optional provider / language)
+/// when synthesizing; `greeting_prefix` is consumed once at session start.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedTtsVoice {
+    /// Agent id used for the lookup (may be empty for global default).
+    pub agent_id: String,
+    /// Resolved voice model / provider voice id.
+    pub voice_id: String,
+    /// Preferred TTS provider string.
+    pub provider: String,
+    /// Speech rate multiplier.
+    pub speed: f32,
+    /// Pitch adjustment in `[-1.0, 1.0]`.
+    pub pitch: f32,
+    /// BCP-47 language code.
+    pub language: String,
+    /// Optional greeting to speak once at session start (not every turn).
+    pub greeting_prefix: Option<String>,
+    /// `true` when `agent_id` was present in `VoiceConfig.personalities`.
+    pub matched_agent: bool,
+}
+
+impl ResolvedTtsVoice {
+    /// Build from a map entry (matched agent).
+    pub fn from_personality(agent_id: &str, personality: &VoicePersonality) -> Self {
+        Self {
+            agent_id: agent_id.to_string(),
+            voice_id: personality.voice_id.clone(),
+            provider: personality.provider.clone(),
+            speed: personality.speed,
+            pitch: personality.pitch,
+            language: personality.language.clone(),
+            greeting_prefix: personality.greeting_prefix.clone(),
+            matched_agent: true,
+        }
+    }
+
+    /// Default fallback personality (no map entry).
+    pub fn default_for_agent(agent_id: &str) -> Self {
+        let p = VoicePersonality::default();
+        Self {
+            agent_id: agent_id.to_string(),
+            voice_id: p.voice_id,
+            provider: p.provider,
+            speed: p.speed,
+            pitch: p.pitch,
+            language: p.language,
+            greeting_prefix: p.greeting_prefix,
+            matched_agent: false,
+        }
+    }
+
+    /// Non-empty trimmed greeting, if configured.
+    pub fn greeting(&self) -> Option<&str> {
+        self.greeting_prefix
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
+
+    /// JSON object fields suitable for a substrate/cloud TTS POST body
+    /// (excluding `text`). Keys: `voice_id`, `speed`, `pitch`, `provider`,
+    /// `language` when non-default-ish values are present.
+    pub fn tts_request_fields(&self) -> serde_json::Map<String, serde_json::Value> {
+        let mut m = serde_json::Map::new();
+        if !self.voice_id.is_empty() {
+            m.insert(
+                "voice_id".into(),
+                serde_json::Value::String(self.voice_id.clone()),
+            );
+        }
+        m.insert("speed".into(), serde_json::json!(self.speed));
+        m.insert("pitch".into(), serde_json::json!(self.pitch));
+        if !self.provider.is_empty() {
+            m.insert(
+                "provider".into(),
+                serde_json::Value::String(self.provider.clone()),
+            );
+        }
+        if !self.language.is_empty() {
+            m.insert(
+                "language".into(),
+                serde_json::Value::String(self.language.clone()),
+            );
+        }
+        m
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,5 +269,41 @@ mod tests {
         };
         assert!(p.validate().is_err());
         assert!(p.validate().unwrap_err().contains("voice_id"));
+    }
+
+    #[test]
+    fn resolved_from_personality_copies_fields() {
+        let p = VoicePersonality {
+            voice_id: "nova".into(),
+            provider: "openai".into(),
+            speed: 1.15,
+            pitch: 0.25,
+            greeting_prefix: Some("Hello from Alpha.".into()),
+            language: "en-US".into(),
+        };
+        let r = ResolvedTtsVoice::from_personality("agent-alpha", &p);
+        assert!(r.matched_agent);
+        assert_eq!(r.agent_id, "agent-alpha");
+        assert_eq!(r.voice_id, "nova");
+        assert!((r.speed - 1.15).abs() < f32::EPSILON);
+        assert!((r.pitch - 0.25).abs() < f32::EPSILON);
+        assert_eq!(r.greeting(), Some("Hello from Alpha."));
+        let fields = r.tts_request_fields();
+        assert_eq!(
+            fields.get("voice_id").and_then(|v| v.as_str()),
+            Some("nova")
+        );
+        assert!(fields.contains_key("speed"));
+        assert!(fields.contains_key("pitch"));
+    }
+
+    #[test]
+    fn greeting_filters_blank() {
+        let mut r = ResolvedTtsVoice::default_for_agent("x");
+        assert!(r.greeting().is_none());
+        r.greeting_prefix = Some("   ".into());
+        assert!(r.greeting().is_none());
+        r.greeting_prefix = Some("Hi".into());
+        assert_eq!(r.greeting(), Some("Hi"));
     }
 }

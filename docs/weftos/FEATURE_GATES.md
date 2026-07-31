@@ -126,3 +126,16 @@ Shared helpers live in `crates/clawft-substrate/src/sysfs.rs`.
 **Concrete alternative (documented, not wired):** OpenWakeWord-style keyword spotting via ONNX through `clawft-voice-onnx` (`ort`), once a trained model and capture loop exist. Do **not** add `dep:rustpotter` until upstream builds on current deps or a compatible pin is proven.
 
 Full decision + revisit triggers: `docs/plans/wave-0k-WEFT-216-result.md`.
+
+## Gaussian splat pipeline (clawft-splatd)
+
+External **runtime** tools (not Cargo features). Crates always compile.
+
+| Tool | Install (macOS) | Stage |
+|------|-----------------|-------|
+| ffmpeg / ffprobe | `brew install ffmpeg` | probe, frames |
+| colmap | `brew install colmap` | sfm |
+| brush-cli | Brush 0.3.0 release binary on PATH | train |
+| splat-transform | `npm i -g @playcanvas/splat-transform` | compress (optional) |
+
+See `docs/weftos/splat-harness.md` and `config/splatd.toml`.

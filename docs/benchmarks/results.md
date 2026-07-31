@@ -43,6 +43,27 @@ Key crate test counts (approximate):
 | clawft-cli | ~25 |
 | clawft-wasm | ~10 |
 
+## CONS-002 / WEFT-34 — Map contention (CostTracker / RateLimiter)
+
+**Decision (2026-07-30): keep `RwLock<HashMap>`; do not switch to DashMap.**
+
+Criterion microbench models cost-reserve and rate-check hot paths:
+
+```bash
+cargo bench -p clawft-core --bench map_contention_bench
+```
+
+| Scenario (representative) | Result |
+|---------------------------|--------|
+| cost-style, 4 threads, 8 keys (small team) | **RwLock ~1.6× DashMap** |
+| rate-style, 4–8 threads, 8 keys | DashMap ~1.8–3.3× (still µs/op) |
+| wide fan-out 100 keys × 16 threads | DashMap 5–12× |
+
+At the design envelope (1–10 concurrent users) absolute map cost is
+negligible vs LLM latency, so a production `dashmap` dependency is not
+justified. Full table and rationale:
+`.planning/development_notes/01-tiered-router/consensus-log.md` (CONS-002).
+
 ## Running Benchmarks
 
 All scripts live in `scripts/bench/`.  They require a release build of `weft`:

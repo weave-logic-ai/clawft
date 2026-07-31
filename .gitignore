@@ -93,3 +93,7 @@ ui/
 # (timestamps + byte counts). Machine-local, regenerated on every session,
 # no project value. The brain's DURABLE content lives in .planning/ruv/brain/.
 .ruvnet-brain/
+
+# splat harness / splatd job workspaces
+data/splat/
+examples/splat-viewer/.harness/

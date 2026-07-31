@@ -128,7 +128,9 @@ importing from the new module. This matches the Phase A SPARC plan
 **Phase**: D, E
 **Raised by**: sparc-implementer
 **Initial confidence**: 80%
-**Status**: OPEN
+**Status**: RESOLVED
+**Resolved**: 2026-07-30 (WEFT-34)
+**Resolved by**: grok-build developer (contention bench)
 
 #### Question
 
@@ -142,23 +144,73 @@ per-user tracking, or `std::sync::RwLock<HashMap>`?
 - `RwLock<HashMap>` is stdlib-only (no new dependency)
 - Binary size impact of `dashmap` is ~20-40 KB
 - Current concurrency model uses `tokio::sync::mpsc` channels (not lock-heavy)
-- `CostTracker` is read-heavy (budget checks on every request) with occasional
-  writes (cost recording after response)
-- `RateLimiter` is read-write on every request (check + update window)
+- `CostTracker` hot path is write-heavy (`reserve_budget` / `reconcile` take
+  write locks; only `get_spend` is a pure read)
+- `RateLimiter` is write-on-every-request (check + update window)
+
+#### Benchmark evidence (WEFT-34)
+
+Criterion bench: `crates/clawft-core/benches/map_contention_bench.rs`
+
+```text
+cargo bench -p clawft-core --bench map_contention_bench
+```
+
+Host: macOS (release, criterion sample-size 15). Throughput = total map ops
+across threads (higher is better). Median thrpt from criterion:
+
+| Workload | threads | keys | RwLock thrpt | DashMap thrpt | Winner |
+|----------|---------|------|--------------|---------------|--------|
+| cost-style | 1 | 1 | 39.3 Melem/s | 38.4 Melem/s | ≈ tie (RwLock) |
+| cost-style | 4 | 1 | 19.5 Melem/s | 25.1 Melem/s | DashMap ~1.3× |
+| cost-style | 4 | 8 | **18.3 Melem/s** | 11.7 Melem/s | **RwLock ~1.6×** |
+| cost-style | 8 | 8 | 11.7 Melem/s | 12.3 Melem/s | ≈ tie |
+| cost-style | 8 | 100 | 7.3 Melem/s | 22.9 Melem/s | DashMap ~3.1× |
+| cost-style | 16 | 100 | 5.6 Melem/s | 28.3 Melem/s | DashMap ~5× |
+| rate-style | 1 | 1 | 4.17 Melem/s | 4.18 Melem/s | ≈ tie |
+| rate-style | 4 | 1 | 1.75 Melem/s | 2.42 Melem/s | DashMap ~1.4× |
+| rate-style | 4 | 8 | 2.57 Melem/s | 4.73 Melem/s | DashMap ~1.8× |
+| rate-style | 8 | 8 | 1.00 Melem/s | 3.35 Melem/s | DashMap ~3.3× |
+| rate-style | 8 | 100 | 2.79 Melem/s | 15.2 Melem/s | DashMap ~5.5× |
+| rate-style | 16 | 100 | 1.47 Melem/s | 18.0 Melem/s | DashMap ~12× |
+
+Notes on interpretation:
+
+1. **Design envelope is 1–10 concurrent users.** At 4 threads / 8 keys
+   (small-team), cost-style favors **RwLock**; rate-style favors DashMap by
+   ~1.8× but absolute times are still ~ms for 8k ops (~µs per op).
+2. **Request path is LLM/network-bound**, not map-bound. Even the slowest
+   RwLock cell above is millions of ops/s — orders of magnitude above
+   realistic request rates (tens–hundreds req/s).
+3. DashMap’s clear wins appear only at **wide fan-out** (100 keys × 8–16
+   threads), outside the current product envelope.
+4. Switching would pull `dashmap` into `clawft-core` production deps for no
+   user-visible latency gain, and would re-touch FIX-07 atomic reservation
+   semantics without necessity.
 
 #### Positions
 
 | Agent | Position | Rationale |
 |-------|----------|-----------|
 | sparc-implementer | Leaning RwLock | Stdlib-only; contention negligible at <10 users; simpler |
-| | | |
-| | | |
+| grok-build developer | Keep RwLock | Bench: no clear product-relevant win; absolute lock cost ≪ request latency; avoid core dep |
+| (policy) | Prefer keep RwLock unless numbers clearly win | Explicit WEFT-34 acceptance criterion |
 
 #### Resolution
 
-**Decision**: Pending review
-**Confidence after**: --
-**Action items**: --
+**Decision**: **Keep `std::sync::RwLock<HashMap>`** for both `CostTracker` and
+`RateLimiter`. Do **not** switch to DashMap.
+
+**Confidence after**: 95%
+
+**Action items**:
+- [x] Ship criterion contention bench (`map_contention_bench`) as a
+      re-runnable decision record
+- [x] Document decision here + short note in `docs/benchmarks/results.md`
+- [x] Module-level comments on `cost_tracker.rs` / `rate_limiter.rs`
+- [ ] Revisit only if a multi-tenant deployment measures map lock time as a
+      real hotspot (e.g. p99 under concurrent HTTP load), or if concurrent
+      user target rises well above ~50
 
 ---
 

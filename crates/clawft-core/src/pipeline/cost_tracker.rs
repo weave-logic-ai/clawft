@@ -7,6 +7,17 @@
 //! Thread safety: all public methods take `&self` and use interior mutability
 //! via [`std::sync::RwLock`]. The struct is `Send + Sync` by construction.
 //!
+//! # Concurrency map choice (WEFT-34 / CONS-002)
+//!
+//! Per-user state stays in `RwLock<HashMap>` rather than `dashmap::DashMap`.
+//! Criterion contention benches (`benches/map_contention_bench.rs`) show
+//! DashMap only pulls ahead under high fan-out (many keys × many threads);
+//! at the design envelope (1–10 concurrent users) `RwLock` matches or beats
+//! it for cost-style access, and absolute lock hold times remain microsecond-
+//! scale vs LLM-bound request latency. Keep stdlib-only until a real
+//! multi-tenant load profile forces a revisit — see CONS-002 in the
+//! tiered-router consensus log.
+//!
 //! # Atomic Budget Reservation (FIX-07)
 //!
 //! The [`CostTracker::reserve_budget`] method atomically checks all budget

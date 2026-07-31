@@ -35,6 +35,10 @@
 //!   without alsa / CoreAudio / WASAPI dev headers; CI runs tests on it.
 //! - `voice-real-audio`   — also pulls in `cpal` for real I/O.
 //! - `real-audio-test`    — turns on cpal-touching tests (skipped on CI).
+//! - `voice-xai`          — ADR-074 xAI Realtime WebSocket client
+//!   ([`xai_realtime`]): connect + `session.update` hello + V1 tool bridge
+//!   ([`xai_tool_bridge`] → WindowIntent spawn/focus/summarize; WEFT-690)
+//!   + V2 hybrid/metrics/health ([`xai_health`]; WEFT-691).
 
 pub mod analysis;
 pub mod capture;
@@ -42,6 +46,7 @@ pub mod channel;
 pub mod cue;
 pub mod edge_reflex;
 pub mod paralinguistics;
+pub mod personality;
 pub mod policy;
 pub mod prosody;
 pub mod ser;
@@ -54,6 +59,13 @@ pub mod types;
 pub mod vad;
 pub mod voiceness;
 pub mod wav;
+// ADR-074 / WEFT-689 + WEFT-690 + WEFT-691: xAI Realtime + tools + health/fallback.
+#[cfg(feature = "voice-xai")]
+pub mod xai_health;
+#[cfg(feature = "voice-xai")]
+pub mod xai_realtime;
+#[cfg(feature = "voice-xai")]
+pub mod xai_tool_bridge;
 
 pub use analysis::{
     AudioAnalysis, Confidence, EmotionAnalysis, EmotionSource, EndpointAnalysis,
@@ -83,10 +95,36 @@ pub use talkmode::{
     AudioControl, ConversationEvent, ConversationObserver, NoopAudioControl, NoopObserver,
     TalkModeConfig, TalkModeController, contextual_ack,
 };
+pub use personality::PersonalityTtsDispatch;
 pub use tts::{
-    DualLayerTts, SubstrateTts, TtsChunk, TtsEngine, TtsSink, TtsTier, scrub_tags, split_sentences,
+    DualLayerTts, SubstrateTts, TtsChunk, TtsEngine, TtsSink, TtsTier, TtsVoiceParams, scrub_tags,
+    split_sentences,
 };
 pub use turn::{EndpointModel, HeuristicEndpoint, SemanticEndpointer, TurnDecision};
 pub use types::{VoiceAdapterConfig, VoiceError};
 pub use vad::{EnergyVad, VadEvent};
 pub use voiceness::{SpectralVoiceness, Voiceness};
+
+#[cfg(feature = "voice-xai")]
+pub use xai_health::{
+    graceful_local_fallback_after_failure, health_probe_endpoint_label, probe_xai_voice_health,
+    select_voice_transport, XaiHealthProbeMode,
+};
+#[cfg(feature = "voice-xai")]
+pub use xai_realtime::{
+    build_realtime_request, connect_hello, connect_hello_or_fallback, default_conductor_instructions,
+    default_endpoint, default_model, load_api_key_from_env, session_update_payload,
+    session_update_payload_with_tools, session_update_with_weftos_tools, XaiRealtimeConnectParams,
+    XaiRealtimeError, XaiRealtimeHelloResult, XaiSessionStart, DEFAULT_CONNECT_TIMEOUT,
+    DEFAULT_HELLO_EVENT_TIMEOUT,
+};
+#[cfg(feature = "voice-xai")]
+pub use xai_tool_bridge::{
+    aec_in_front_of_mic_required, aec_pipeline_ready, default_weftos_tools,
+    function_call_output_event, handle_function_call_event, map_function_call_to_intent,
+    map_to_window_intent, parse_function_call_event, response_create_event, summarize_spoken_safe,
+    weftos_realtime_tools, DemoIntentHandler, FunctionCallEvent, IntentHandler, ToolBridgeError,
+    ToolCallResult, ToolCatalogOptions, WindowIntent, AEC_IN_FRONT_OF_MIC_NOTE,
+    DEFAULT_SUMMARIZE_MAX_CHARS, MAX_SPAWN_COUNT, TOOL_FOCUS_PANE, TOOL_SHELL_INTENT,
+    TOOL_SPAWN_AGENT, TOOL_SUMMARIZE,
+};

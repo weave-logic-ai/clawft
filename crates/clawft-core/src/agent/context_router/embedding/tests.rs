@@ -3,7 +3,15 @@
 //! Tests use a deterministic in-process [`StubEmbedder`] so we never
 //! touch the network. The diskann backend is always exercised when the
 //! `embedding-router` feature is on (default); the brute-force backend
-//! is exercised inside `embedding/index.rs` tests.
+//! is exercised inside `embedding/index.rs` tests **and** (WEFT-51) via
+//! the `#[cfg(not(feature = "embedding-router"))]` module at the bottom
+//! of this file — run with:
+//!
+//! ```bash
+//! cargo test -p clawft-core --no-default-features \
+//!   --features native,vector-memory \
+//!   --lib agent::context_router::embedding
+//! ```
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,7 +20,7 @@ use async_trait::async_trait;
 use clawft_types::skill::SkillDefinition;
 
 use super::super::{COMPLEXITY_HINT_LIMIT, ContextRequest, ContextRouter};
-use super::{EmbeddingRouter, EmbeddingRouterError};
+use super::{EmbeddingRouter, EmbeddingRouterError, INDEX_BACKEND};
 use crate::agent::skills_v2::SkillRegistry;
 use crate::embeddings::{Embedder, EmbeddingError};
 
@@ -264,4 +272,168 @@ fn extract_category_handles_aliases() {
         serde_json::Value::String("Reasoning".into()),
     );
     assert_eq!(super::extract_category(&s2), Some("Reasoning".into()));
+}
+
+// ── WEFT-51: compile-time index backend identity ─────────────────────────
+
+/// `INDEX_BACKEND` must match the cargo feature matrix:
+/// `embedding-router` on → diskann; off → brute-force.
+#[test]
+fn index_backend_matches_feature_gate() {
+    #[cfg(feature = "embedding-router")]
+    assert_eq!(INDEX_BACKEND, "diskann");
+    #[cfg(not(feature = "embedding-router"))]
+    assert_eq!(INDEX_BACKEND, "brute-force");
+}
+
+#[tokio::test]
+async fn router_reports_same_backend_as_constant() {
+    let skills = vec![skill("a", "alpha beta")];
+    let reg = registry_from(skills).await;
+    let router = EmbeddingRouter::new(Arc::new(StubEmbedder::new(8)), &reg)
+        .await
+        .expect("router build");
+    assert_eq!(router.index_backend(), INDEX_BACKEND);
+    assert!(
+        router.index_backend() == "diskann" || router.index_backend() == "brute-force",
+        "unexpected backend {}",
+        router.index_backend()
+    );
+}
+
+// ── WEFT-51: feature-off path (brute-force index) ────────────────────────
+//
+// These tests only compile when `embedding-router` is **not** enabled, so
+// they prove `build_index` wired the O(n) floor rather than diskann. They
+// also exercise every decision branch on that path so a silent panic or
+// empty-default regression is caught by the feature-off matrix:
+//
+//   cargo test -p clawft-core --no-default-features \
+//     --features native,vector-memory --lib agent::context_router::embedding
+
+#[cfg(not(feature = "embedding-router"))]
+mod feature_off {
+    use super::*;
+
+    /// Compile-time proof: this module is only present when the feature
+    /// is off, and `INDEX_BACKEND` must name the brute-force floor.
+    #[test]
+    fn feature_off_backend_is_brute_force() {
+        assert_eq!(INDEX_BACKEND, "brute-force");
+        assert_eq!(super::super::INDEX_BACKEND, "brute-force");
+    }
+
+    #[tokio::test]
+    async fn feature_off_router_constructs_and_routes() {
+        // Full EmbeddingRouter::new → build_index(BruteForce) → route.
+        // This is the Config.routing.context_router = "embedding" path
+        // when the daemon was built without --features embedding-router
+        // (vector-memory still on). Must succeed — not error, not panic.
+        let skills = vec![
+            skill("rust-debug", "rust compile error fix"),
+            skill("python-debug", "python traceback investigation"),
+            skill("write-poem", "compose a creative short poem"),
+        ];
+        let reg = registry_from(skills).await;
+        let router = EmbeddingRouter::new(Arc::new(StubEmbedder::new(8)), &reg)
+            .await
+            .expect("feature-off EmbeddingRouter must construct via BruteForceIndex");
+        assert_eq!(router.index_backend(), "brute-force");
+
+        let d = router
+            .with_top_k(2)
+            .with_confidence_threshold(-1.0)
+            .route(&req("rust compile error fix"))
+            .await;
+        assert_eq!(d.skills.len(), 2);
+        assert_eq!(d.skills[0], "rust-debug");
+        assert!(!d.fallback_used);
+    }
+
+    #[tokio::test]
+    async fn feature_off_empty_registry_is_clear_error() {
+        // AC: clear error (not panic) when construction cannot proceed.
+        let reg = registry_from(Vec::new()).await;
+        let result = EmbeddingRouter::new(Arc::new(StubEmbedder::new(8)), &reg).await;
+        match result {
+            Err(EmbeddingRouterError::EmptyRegistry) => {}
+            Err(e) => panic!("expected EmptyRegistry, got error: {e}"),
+            Ok(_) => panic!("expected EmptyRegistry, got Ok router"),
+        }
+    }
+
+    #[tokio::test]
+    async fn feature_off_low_confidence_falls_back_to_empty_decision() {
+        let skills = vec![
+            skill("rust-debug", "rust compile error fix"),
+            skill("python-debug", "python traceback investigation"),
+        ];
+        let reg = registry_from(skills).await;
+        let router = EmbeddingRouter::new(Arc::new(StubEmbedder::new(8)), &reg)
+            .await
+            .unwrap()
+            .with_confidence_threshold(0.99);
+        let d = router.route(&req("totally unrelated weather query")).await;
+        assert!(d.skills.is_empty(), "low-confidence must empty skills");
+        assert!(d.archetype.is_none());
+        assert_eq!(d.complexity_hint, 0.0);
+    }
+
+    #[tokio::test]
+    async fn feature_off_embed_error_falls_back_gracefully() {
+        let skills = vec![skill("rust-debug", "rust compile error fix")];
+        let reg = registry_from(skills).await;
+        let mut router = EmbeddingRouter::new(Arc::new(StubEmbedder::new(8)), &reg)
+            .await
+            .unwrap();
+        router.embedder = Arc::new(StubEmbedder::failing());
+        let d = router.route(&req("anything")).await;
+        assert!(d.skills.is_empty());
+        assert_eq!(d.complexity_hint, 0.0);
+    }
+
+    #[tokio::test]
+    async fn feature_off_top_k_and_archetype_match_on_backend() {
+        let skills = vec![
+            skill_with_category("rust-debug", "rust compile error fix", "CodeGen"),
+            skill_with_category("python-debug", "python traceback investigation", "Analysis"),
+            skill_with_category("write-poem", "compose a creative short poem", "Creative"),
+        ];
+        let reg = registry_from(skills).await;
+        let router = EmbeddingRouter::new(Arc::new(StubEmbedder::new(8)), &reg)
+            .await
+            .unwrap()
+            .with_top_k(3)
+            .with_confidence_threshold(-1.0);
+
+        let d = router.route(&req("rust compile error fix")).await;
+        assert_eq!(d.skills.len(), 3);
+        assert_eq!(d.skills[0], "rust-debug");
+        assert_eq!(d.archetype.as_deref(), Some("CodeGen"));
+        assert!(
+            d.complexity_hint >= -COMPLEXITY_HINT_LIMIT
+                && d.complexity_hint <= COMPLEXITY_HINT_LIMIT
+        );
+    }
+
+    #[tokio::test]
+    async fn feature_off_rank_order_is_deterministic() {
+        // Identical stub embeddings → identical ranking across runs.
+        let skills = vec![
+            skill("aaa-skill", "unique alpha tokens zebra"),
+            skill("bbb-skill", "unique beta tokens yak"),
+            skill("ccc-skill", "unique gamma tokens xray"),
+        ];
+        let reg = registry_from(skills).await;
+        let router = EmbeddingRouter::new(Arc::new(StubEmbedder::new(8)), &reg)
+            .await
+            .unwrap()
+            .with_top_k(3)
+            .with_confidence_threshold(-1.0);
+
+        let d1 = router.route(&req("unique alpha tokens zebra")).await;
+        let d2 = router.route(&req("unique alpha tokens zebra")).await;
+        assert_eq!(d1.skills, d2.skills);
+        assert_eq!(d1.skills[0], "aaa-skill");
+    }
 }

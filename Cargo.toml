@@ -72,6 +72,13 @@ members = [
     # .planning/ruv/integration/agenticow-integration-plan.md). Standalone;
     # no hermes-loop or exochain wiring yet (Phases 2-3).
     "crates/clawft-cow-memory",
+    # Gaussian splat pipeline (phone video → COLMAP → Brush → SOG).
+    # External tools (ffmpeg/colmap/brush) are runtime-only; crates always build.
+    # Standalone: `cargo run -p clawft-splatd --release` (binary name: splatd).
+    "crates/clawft-splat-pipeline",
+    "crates/clawft-splatd",
+    # ADR-056 BVH-on-RVF spatial-temporal index (broad-phase; no chain yet).
+    "crates/clawft-bvh",
 ]
 exclude = [
     "gui/src-tauri",

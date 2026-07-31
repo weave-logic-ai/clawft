@@ -163,6 +163,10 @@ The `weave` CLI binary for kernel management.
 | `google-chat` | Google Chat channel integration |
 | `irc` | IRC channel integration |
 | `teams` | Microsoft Teams channel integration |
+| `voice` | Voice channel (VAD, STT/TTS substrate client, Talk-Mode controller) |
+| `voice-real-audio` | Real cpal capture/playback (implies `voice`) |
+| `real-audio-test` | cpal-touching tests (implies `voice-real-audio`) |
+| `voice-xai` | ADR-074 V0 xAI Realtime WebSocket client (implies `voice`; WEFT-689) |
 
 ---
 

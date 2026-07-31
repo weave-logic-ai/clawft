@@ -39,6 +39,9 @@ teams = ["dep:axum", "dep:jsonwebtoken"]
 voice = ["dep:rustfft"]
 voice-real-audio = ["voice", "dep:cpal"]
 real-audio-test = ["voice-real-audio"]
+# ADR-074 / WEFT-689+690: xAI Realtime WebSocket client (connect +
+# session.update hello) and V1 tool bridge → WindowIntent. Requires `voice`.
+voice-xai = ["voice"]
 
 [dependencies]
 clawft-types = { workspace = true }

@@ -13,6 +13,7 @@
 //! | `substrate/kernel/processes` | `ontology://process-list` | periodic 1s | block-capped | list-by-id; per-row `Replace`/`Remove` at `…/by-id/{row_id}` + root list when membership/content changes (WEFT-416) |
 //! | `substrate/kernel/services` | `ontology://service-list` | periodic 2s | block-capped | list-by-name; per-row `Replace`/`Remove` at `…/by-name/{row_id}` + root list when membership/content changes (WEFT-416) |
 //! | `substrate/kernel/logs` | `ontology://log-ring` | event-driven (`kernel.logs_stream`) | drop-oldest | append-only ring; live Append per entry |
+//! | `substrate/agents/sessions` | `ontology://agent-session-list` | periodic 1s | block-capped | active long-running agent inventory (WEFT-685); per-row at `…/by-id/{session_id}` via `agent.list` |
 //!
 //! All topics are [`Sensitivity::Workspace`]; none require
 //! [`PermissionReq`].
@@ -94,6 +95,16 @@ pub const TOPICS: &[TopicDecl] = &[
         buffer_policy: BufferPolicy::DropOldest,
         max_len: Some(LOG_RING),
     },
+    // WEFT-685 / ADR-073 Phase A — agent session inventory for later
+    // Agent Workspace UI binding. Independent of freeform multi-window.
+    TopicDecl {
+        path: crate::agents_inventory::SESSIONS_ROOT,
+        shape: crate::agents_inventory::SESSIONS_SHAPE,
+        refresh_hint: RefreshHint::Periodic { ms: 1000 },
+        sensitivity: Sensitivity::Workspace,
+        buffer_policy: BufferPolicy::BlockCapped,
+        max_len: None,
+    },
 ];
 
 /// Permissions — kernel adapter requires nothing beyond daemon reach.
@@ -168,7 +179,9 @@ impl OntologyAdapter for KernelAdapter {
         let depth = match topic {
             "substrate/kernel/status" => CHAN_SINGLETON,
             "substrate/kernel/logs" => CHAN_LOG,
-            "substrate/kernel/processes" | "substrate/kernel/services" => CHAN_LIST,
+            "substrate/kernel/processes"
+            | "substrate/kernel/services"
+            | crate::agents_inventory::SESSIONS_ROOT => CHAN_LIST,
             other => return Err(AdapterError::UnknownTopic(other.into())),
         };
         let id = {
@@ -207,6 +220,7 @@ fn spawn_poller(
             "substrate/kernel/processes" => poll_processes(tx, cancel_rx).await,
             "substrate/kernel/services" => poll_services(tx, cancel_rx).await,
             "substrate/kernel/logs" => stream_logs(args, tx, cancel_rx).await,
+            crate::agents_inventory::SESSIONS_ROOT => poll_agent_sessions(tx, cancel_rx).await,
             _ => { /* open() validated; unreachable */ }
         }
     });
@@ -462,6 +476,26 @@ async fn poll_services(tx: mpsc::Sender<StateDelta>, cancel_rx: oneshot::Receive
         service_row_id,
         SERVICES_BY_NAME,
         SERVICES_ROOT,
+        tx,
+        cancel_rx,
+    )
+    .await;
+}
+
+/// Agent session inventory poller (WEFT-685 / ADR-073 Phase A).
+///
+/// Polls weave RPC `agent.list` and projects into
+/// [`crate::agents_inventory`] rows at:
+/// - `Replace` / `Remove` at `substrate/agents/sessions/by-id/{session_id}`
+/// - root list `Replace` at `substrate/agents/sessions` when membership changes
+async fn poll_agent_sessions(tx: mpsc::Sender<StateDelta>, cancel_rx: oneshot::Receiver<()>) {
+    poll_keyed_list_loop(
+        "agent.list",
+        Duration::from_millis(1000),
+        crate::agents_inventory::project_agent_session_rows,
+        crate::agents_inventory::agent_session_row_id,
+        crate::agents_inventory::SESSIONS_BY_ID,
+        crate::agents_inventory::SESSIONS_ROOT,
         tx,
         cancel_rx,
     )
@@ -733,7 +767,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn topics_declares_all_four_kernel_entries() {
+    fn topics_declares_kernel_entries_and_agent_sessions() {
         let paths: Vec<&str> = TOPICS.iter().map(|t| t.path).collect();
         assert_eq!(
             paths,
@@ -742,7 +776,22 @@ mod tests {
                 "substrate/kernel/processes",
                 "substrate/kernel/services",
                 "substrate/kernel/logs",
+                crate::agents_inventory::SESSIONS_ROOT,
             ]
+        );
+    }
+
+    #[test]
+    fn agents_sessions_topic_is_block_capped_periodic() {
+        let sessions = TOPICS
+            .iter()
+            .find(|t| t.path == crate::agents_inventory::SESSIONS_ROOT)
+            .expect("WEFT-685 agents/sessions topic");
+        assert_eq!(sessions.shape, crate::agents_inventory::SESSIONS_SHAPE);
+        assert_eq!(sessions.buffer_policy, BufferPolicy::BlockCapped);
+        assert_eq!(
+            sessions.refresh_hint,
+            RefreshHint::Periodic { ms: 1000 }
         );
     }
 

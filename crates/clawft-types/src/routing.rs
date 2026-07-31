@@ -7,6 +7,16 @@
 //!
 //! When the `routing` section is absent from config, `RoutingConfig::default()`
 //! produces settings equivalent to the existing `StaticRouter` (Level 0).
+//!
+//! # Validation boundary (CONS-006 / WEFT-36)
+//!
+//! **Serde-time (this crate):** structural only — field types, `#[serde(default)]`,
+//! and typed enums such as [`TierSelectionStrategy`]. Do not add
+//! `deserialize_with` range / uniqueness / cross-field checks here.
+//!
+//! **Post-load (`clawft_core::routing_validation`):** single-pass semantic and
+//! security validation (`validate_routing_config`, `validate_workspace_ceiling`).
+//! Call after deserialize / merge and before `TieredRouter` construction.
 
 use std::collections::HashMap;
 
@@ -749,6 +759,16 @@ mod tests {
 
         let result = serde_json::from_str::<TierSelectionStrategy>("\"invalid_strategy\"");
         assert!(result.is_err());
+
+        // WEFT-36 / CONS-006: nested on RoutingConfig — serde-time path only;
+        // post-load validation is never reached for unknown strategies.
+        let nested = serde_json::from_str::<RoutingConfig>(
+            r#"{ "mode": "tiered", "selection_strategy": "invalid_strategy" }"#,
+        );
+        assert!(
+            nested.is_err(),
+            "unknown selection_strategy must fail RoutingConfig deserialize"
+        );
     }
 
     #[test]

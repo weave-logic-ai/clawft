@@ -15,12 +15,20 @@ use crate::mesh::{MeshError, MeshStream};
 /// After a Noise handshake completes, all traffic flows through
 /// this interface. Each `send_encrypted` / `recv_encrypted` call
 /// handles framing, encryption, and authentication transparently.
+///
+/// # Cancel-safety (ADR-010 / WEFT-18)
+///
+/// `recv_encrypted` is raced in `tokio::select!` (mesh peer loop). It
+/// must be cancel-safe: implementors delegate to [`MeshStream::recv`],
+/// which itself must retain partial frame progress across cancellation.
 #[async_trait]
 pub trait EncryptedChannel: Send + Sync + 'static {
     /// Send encrypted data (plaintext in, ciphertext on the wire).
     async fn send_encrypted(&mut self, plaintext: &[u8]) -> Result<(), MeshError>;
 
     /// Receive and decrypt data (ciphertext from wire, plaintext out).
+    ///
+    /// Cancel-safe: may be dropped while pending inside `tokio::select!`.
     async fn recv_encrypted(&mut self) -> Result<Vec<u8>, MeshError>;
 
     /// Get the remote peer's static public key (after handshake).

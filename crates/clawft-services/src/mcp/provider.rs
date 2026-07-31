@@ -119,9 +119,14 @@ type DispatchFn = dyn Fn(&str, Value) -> Pin<Box<dyn Future<Output = Result<Stri
 /// different crate), this provider accepts a list of tool definitions
 /// and a closure that dispatches execution requests. This keeps the
 /// dependency graph clean and makes testing straightforward.
+///
+/// Default namespace is `"builtin"`. For public MCP product names (ADR-076
+/// C2 / WEFT-700), call [`Self::with_namespace`] with `""` so
+/// [`CompositeToolProvider`] lists tools without a `builtin__` prefix.
 pub struct BuiltinToolProvider {
     tools: Vec<ToolDefinition>,
     dispatcher: Arc<DispatchFn>,
+    namespace: String,
 }
 
 impl BuiltinToolProvider {
@@ -143,7 +148,17 @@ impl BuiltinToolProvider {
         Self {
             tools,
             dispatcher: Arc::new(dispatcher),
+            namespace: "builtin".into(),
         }
+    }
+
+    /// Override the provider namespace used by [`CompositeToolProvider`].
+    ///
+    /// Pass an empty string for flat public MCP names (no `namespace__`
+    /// prefix on `tools/list`).
+    pub fn with_namespace(mut self, namespace: impl Into<String>) -> Self {
+        self.namespace = namespace.into();
+        self
     }
 }
 
@@ -151,6 +166,7 @@ impl std::fmt::Debug for BuiltinToolProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BuiltinToolProvider")
             .field("tool_count", &self.tools.len())
+            .field("namespace", &self.namespace)
             .finish_non_exhaustive()
     }
 }
@@ -158,7 +174,7 @@ impl std::fmt::Debug for BuiltinToolProvider {
 #[async_trait]
 impl ToolProvider for BuiltinToolProvider {
     fn namespace(&self) -> &str {
-        "builtin"
+        &self.namespace
     }
 
     fn list_tools(&self) -> Vec<ToolDefinition> {
@@ -206,6 +222,7 @@ type SkillDispatchFn = dyn Fn(&str, Value) -> Pin<Box<dyn Future<Output = Result
 pub struct SkillToolProvider {
     tools: Arc<std::sync::RwLock<Vec<ToolDefinition>>>,
     dispatcher: Arc<SkillDispatchFn>,
+    namespace: String,
 }
 
 impl SkillToolProvider {
@@ -225,7 +242,14 @@ impl SkillToolProvider {
         Self {
             tools: Arc::new(std::sync::RwLock::new(tools)),
             dispatcher: Arc::new(dispatcher),
+            namespace: "skill".into(),
         }
+    }
+
+    /// Override the provider namespace (use `""` for flat public MCP names).
+    pub fn with_namespace(mut self, namespace: impl Into<String>) -> Self {
+        self.namespace = namespace.into();
+        self
     }
 
     /// Replace the tool list with an updated set of skill tools.
@@ -258,6 +282,7 @@ impl std::fmt::Debug for SkillToolProvider {
         let count = self.tools.read().map(|t| t.len()).unwrap_or(0);
         f.debug_struct("SkillToolProvider")
             .field("tool_count", &count)
+            .field("namespace", &self.namespace)
             .finish_non_exhaustive()
     }
 }
@@ -265,7 +290,7 @@ impl std::fmt::Debug for SkillToolProvider {
 #[async_trait]
 impl ToolProvider for SkillToolProvider {
     fn namespace(&self) -> &str {
-        "skill"
+        &self.namespace
     }
 
     fn list_tools(&self) -> Vec<ToolDefinition> {
@@ -449,6 +474,12 @@ mod tests {
     fn namespace_returns_builtin() {
         let provider = make_provider();
         assert_eq!(provider.namespace(), "builtin");
+    }
+
+    #[test]
+    fn with_namespace_overrides_for_public_wire() {
+        let provider = make_provider().with_namespace("");
+        assert_eq!(provider.namespace(), "");
     }
 
     #[test]

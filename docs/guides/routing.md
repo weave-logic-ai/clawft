@@ -888,6 +888,51 @@ The `IntelligentRouter` activates automatically when `vector-memory` is
 enabled. No additional configuration is required -- it uses the same
 `agents.defaults.model` as the Tier 3 fallback.
 
+### ContextRouter (`Config.routing.context_router`) — feature gates (WEFT-51)
+
+`ContextRouter` runs **before** the LLM call inside the agent loop. It
+selects skills / tool subsets and may emit a clamped `complexity_hint`;
+it **never** picks a model (that remains `TieredRouter` / `StaticRouter`).
+
+| Config value | Implementation | Notes |
+|--------------|----------------|-------|
+| `"null"` (default) | `NullRouter` | Empty decision; historical behaviour. |
+| `"llm-classifier"` | `LlmClassifierRouter` | v1; needs a live `LlmClient`. |
+| `"embedding"` | `EmbeddingRouter` | v2; needs `vector-memory` (+ optional `embedding-router`). |
+| `"hybrid"` | `HybridRouter` | v2.5; embedding primary + classifier fallback. |
+| other | warn + `NullRouter` | Unknown strings degrade gracefully at boot. |
+
+#### `embedding-router` cargo feature
+
+| Build | Index backend (`INDEX_BACKEND`) | Behaviour |
+|-------|----------------------------------|-----------|
+| `--features embedding-router` (default via `full`) | `"diskann"` | Production Vamana index (`ruvector-diskann@2.1`). |
+| `embedding-router` **off**, `vector-memory` **on** | `"brute-force"` | In-memory O(n) cosine over ~35 skills. **Graceful fallback** — `context_router = "embedding"` still constructs and routes. |
+| `vector-memory` off | module not compiled | Daemon/weave must not select embedding without the module; slim builds keep `"null"`. |
+
+Compile-time constant: `clawft_core::agent::context_router::INDEX_BACKEND`
+(`"diskann"` | `"brute-force"`). Construction logs
+`EmbeddingRouter: index built` with `backend=…`.
+
+Construction failures (empty skill registry, embed error at build time)
+return `EmbeddingRouterError` / `None` from the daemon helper — boot
+falls back to `NullRouter` with a `warn!`, never panics.
+
+**Feature-off test matrix** (must both compile + pass):
+
+```bash
+# default (diskann)
+scripts/build.sh test clawft-core
+
+# embedding-router off → brute-force floor (WEFT-51)
+cargo test -p clawft-core --no-default-features \
+  --features native,vector-memory \
+  --lib agent::context_router::embedding
+```
+
+Source: `crates/clawft-core/src/agent/context_router/embedding/`,
+`crates/clawft-weave/src/daemon.rs` (`build_embedding_router_or_warn`).
+
 ---
 
 ## 10. Phase 3 TODO: Unimplemented Features

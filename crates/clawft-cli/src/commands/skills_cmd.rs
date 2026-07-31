@@ -20,16 +20,23 @@
 //! - `weft skills autogen enable|disable|status` -- toggle autonomous skill
 //!   creation and show threshold / max_pending (WEFT-67). Persists to
 //!   user-level `~/.clawft/config.json` (`skills.autogen`).
+//! - `weft skills refresh` -- manually reload the skill registry for
+//!   headless / CI when the notify watcher is disabled (WEFT-76).
 //! - `weft skills search <query>` -- search ClawHub for skills.
 //! - `weft skills publish <path>` -- publish a skill to ClawHub.
 //! - `weft skills remote-install <name>` -- install a skill from ClawHub.
 //! - `weft skills keygen` -- generate a signing key pair.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use clap::{Args, Subcommand};
 use comfy_table::{Table, presets};
+use tokio::sync::RwLock;
 
+use clawft_core::agent::skill_watcher::{
+    SkillRefreshOutcome, SkillWatcherConfig, refresh_registry,
+};
 use clawft_core::agent::skills_v2::SkillRegistry;
 use clawft_rpc::{DaemonClient, Request};
 use clawft_types::skill::{SkillDefinition, SkillFormat};
@@ -99,6 +106,19 @@ pub enum SkillsAction {
         #[command(subcommand)]
         action: AutogenAction,
     },
+
+    /// Manually reload the skill registry from disk (headless / CI).
+    ///
+    /// Use when the notify file watcher is disabled (containers, CI, or
+    /// deliberate opt-out). Re-discovers workspace and user skills and
+    /// rebuilds the in-process registry.
+    ///
+    /// On hosts where the skill watcher is already running, this is a
+    /// no-op (the watcher hot-reloads on filesystem changes).
+    ///
+    /// Examples:
+    ///   weft skills refresh
+    Refresh,
 
     /// Search ClawHub for skills.
     Search {
@@ -324,9 +344,81 @@ pub async fn run(args: SkillsArgs) -> anyhow::Result<()> {
             eprintln!("{DAEMON_FALLBACK_WARNING}");
             skills_remote_install(&name, allow_unsigned, user_dir.as_deref()).await
         }
+        SkillsAction::Refresh => {
+            // Prefer daemon when available (may report watcher-active no-op).
+            if let Some(result) = try_daemon_rpc("skills.refresh", serde_json::json!({})).await {
+                if let Some(output) = result.get("output").and_then(|v| v.as_str()) {
+                    print!("{output}");
+                } else {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                }
+                return Ok(());
+            }
+            // CLI process never starts the notify watcher — always rebuild.
+            eprintln!("{DAEMON_FALLBACK_WARNING}");
+            skills_refresh(ws_dir.as_deref(), user_dir.as_deref(), false).await
+        }
         SkillsAction::Autogen { .. } => unreachable!("handled before skill discovery"),
         SkillsAction::Keygen => unreachable!(),
     }
+}
+
+// ── Refresh (WEFT-76) ────────────────────────────────────────────────
+
+/// Manually reload the skill registry from disk.
+///
+/// When `watcher_active` is true, prints a no-op message (watcher already
+/// hot-reloads). When false (typical CLI / CI path), rebuilds via
+/// [`refresh_registry`].
+async fn skills_refresh(
+    ws_dir: Option<&Path>,
+    user_dir: Option<&Path>,
+    watcher_active: bool,
+) -> anyhow::Result<()> {
+    // Seed an empty registry so rebuild is the sole load path under test
+    // and matches headless hosts that hold a stale SharedSkillRegistry.
+    let registry = Arc::new(RwLock::new(
+        SkillRegistry::discover(None, None, Vec::new())
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to init skill registry: {e}"))?,
+    ));
+
+    let config = SkillWatcherConfig {
+        workspace_dir: ws_dir.map(|p| p.to_path_buf()),
+        user_dir: user_dir.map(|p| p.to_path_buf()),
+        trust_workspace: true,
+        ..Default::default()
+    };
+
+    let outcome = refresh_registry(&registry, &config, watcher_active)
+        .await
+        .map_err(|e| anyhow::anyhow!("skill registry refresh failed: {e}"))?;
+
+    match outcome {
+        SkillRefreshOutcome::NoOpWatcherEnabled { count } => {
+            println!("Skill registry refresh skipped (watcher active).");
+            println!("  skills: {count}");
+            println!("  The notify watcher already reloads on filesystem changes.");
+        }
+        SkillRefreshOutcome::Reloaded { count, names } => {
+            println!("Skill registry reloaded ({count} skill(s)).");
+            if let Some(dir) = user_dir {
+                println!("  user:      {}", dir.display());
+            } else {
+                println!("  user:      (none)");
+            }
+            if let Some(dir) = ws_dir {
+                println!("  workspace: {}", dir.display());
+            } else {
+                println!("  workspace: (none)");
+            }
+            if !names.is_empty() {
+                println!("  names:     {}", names.join(", "));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // ── Autogen (WEFT-67) ────────────────────────────────────────────────
@@ -1850,6 +1942,73 @@ mod tests {
         assert_eq!(registry.len(), 2);
         assert!(registry.get("alpha").is_some());
         assert!(registry.get("beta").is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── WEFT-76: skills refresh (watcher disabled path) ───────────
+
+    #[tokio::test]
+    async fn skills_refresh_reloads_when_watcher_disabled() {
+        let dir = temp_dir("refresh_disabled");
+        create_skill_md(&dir, "gamma", "Gamma skill");
+
+        // watcher_active=false → rebuild from disk (CI / headless path).
+        let result = skills_refresh(Some(&dir), None, false).await;
+        assert!(result.is_ok(), "refresh failed: {:?}", result.err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn skills_refresh_noop_when_watcher_active() {
+        let dir = temp_dir("refresh_active");
+        create_skill_md(&dir, "delta", "Delta skill");
+
+        // watcher_active=true → no-op (watcher hosts already hot-reload).
+        let result = skills_refresh(Some(&dir), None, true).await;
+        assert!(result.is_ok(), "refresh no-op failed: {:?}", result.err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn skills_refresh_picks_up_new_skill_watcher_disabled() {
+        let dir = temp_dir("refresh_pick");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Empty dir first — refresh yields 0 skills.
+        let registry = Arc::new(RwLock::new(
+            SkillRegistry::discover(None, None, Vec::new())
+                .await
+                .unwrap(),
+        ));
+        let config = SkillWatcherConfig {
+            workspace_dir: Some(dir.clone()),
+            trust_workspace: true,
+            ..Default::default()
+        };
+        let outcome = refresh_registry(&registry, &config, false)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            SkillRefreshOutcome::Reloaded { count: 0, .. }
+        ));
+
+        create_skill_md(&dir, "epsilon", "Epsilon skill");
+        let outcome = refresh_registry(&registry, &config, false)
+            .await
+            .unwrap();
+        match outcome {
+            SkillRefreshOutcome::Reloaded { count, names } => {
+                assert_eq!(count, 1);
+                assert_eq!(names, vec!["epsilon".to_string()]);
+            }
+            SkillRefreshOutcome::NoOpWatcherEnabled { .. } => {
+                panic!("expected Reloaded with watcher disabled");
+            }
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

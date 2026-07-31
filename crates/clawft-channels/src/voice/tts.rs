@@ -25,8 +25,67 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use clawft_types::config::ResolvedTtsVoice;
+
 use super::types::VoiceError;
 use super::wav::wav_to_pcm_s16le;
+
+/// Optional per-request voice overrides for substrate/cloud TTS (WEFT-222).
+///
+/// When set, POST bodies include `voice_id` / `speed` / `pitch` so a multi-agent
+/// deployment can route each agent to a distinct voice.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TtsVoiceParams {
+    pub voice_id: Option<String>,
+    pub speed: Option<f32>,
+    pub pitch: Option<f32>,
+    pub provider: Option<String>,
+    pub language: Option<String>,
+}
+
+impl TtsVoiceParams {
+    /// Build from a resolved personality (always fills voice_id/speed/pitch).
+    pub fn from_resolved(r: &ResolvedTtsVoice) -> Self {
+        Self {
+            voice_id: Some(r.voice_id.clone()).filter(|s| !s.is_empty()),
+            speed: Some(r.speed),
+            pitch: Some(r.pitch),
+            provider: Some(r.provider.clone()).filter(|s| !s.is_empty()),
+            language: Some(r.language.clone()).filter(|s| !s.is_empty()),
+        }
+    }
+
+    /// Merge personality fields into a `{"text": …}` substrate body.
+    pub fn apply_to_json(&self, text: &str) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        map.insert("text".into(), serde_json::Value::String(text.to_string()));
+        if let Some(ref v) = self.voice_id {
+            map.insert("voice_id".into(), serde_json::Value::String(v.clone()));
+        }
+        if let Some(s) = self.speed {
+            map.insert("speed".into(), serde_json::json!(s));
+        }
+        if let Some(p) = self.pitch {
+            map.insert("pitch".into(), serde_json::json!(p));
+        }
+        if let Some(ref p) = self.provider {
+            map.insert("provider".into(), serde_json::Value::String(p.clone()));
+        }
+        if let Some(ref l) = self.language {
+            map.insert("language".into(), serde_json::Value::String(l.clone()));
+        }
+        serde_json::Value::Object(map)
+    }
+
+    /// True when any override field is set.
+    pub fn is_empty(&self) -> bool {
+        self.voice_id.is_none()
+            && self.speed.is_none()
+            && self.pitch.is_none()
+            && self.provider.is_none()
+            && self.language.is_none()
+    }
+}
 
 /// Which perceptual layer an engine serves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +214,8 @@ pub struct SubstrateTts {
     url: String,
     tier: TtsTier,
     strip_tags: bool,
+    /// Per-agent voice overrides (WEFT-222). Empty = text-only body.
+    voice_params: TtsVoiceParams,
 }
 
 impl SubstrateTts {
@@ -174,19 +235,46 @@ impl SubstrateTts {
             url: url.into(),
             tier,
             strip_tags,
+            voice_params: TtsVoiceParams::default(),
         })
     }
 
-    async fn render_one(&self, sentence: &str) -> Result<TtsChunk, VoiceError> {
+    /// Attach per-agent voice parameters (from [`ResolvedTtsVoice`]).
+    pub fn with_voice_params(mut self, params: TtsVoiceParams) -> Self {
+        self.voice_params = params;
+        self
+    }
+
+    /// Replace voice parameters after construction (agent switch).
+    pub fn set_voice_params(&mut self, params: TtsVoiceParams) {
+        self.voice_params = params;
+    }
+
+    /// Current voice parameters.
+    pub fn voice_params(&self) -> &TtsVoiceParams {
+        &self.voice_params
+    }
+
+    /// Build the JSON body for one synthesis request (testable without HTTP).
+    pub fn request_body(&self, sentence: &str) -> serde_json::Value {
         let text = if self.strip_tags {
             scrub_tags(sentence)
         } else {
             sentence.to_string()
         };
+        if self.voice_params.is_empty() {
+            serde_json::json!({ "text": text })
+        } else {
+            self.voice_params.apply_to_json(&text)
+        }
+    }
+
+    async fn render_one(&self, sentence: &str) -> Result<TtsChunk, VoiceError> {
+        let body = self.request_body(sentence);
         let resp = self
             .http
             .post(&self.url)
-            .json(&serde_json::json!({ "text": text }))
+            .json(&body)
             .send()
             .await
             .map_err(|e| VoiceError::Transport(e.to_string()))?;
@@ -738,5 +826,94 @@ mod tests {
             marker: 0,
         });
         assert!(DualLayerTts::new(a, b).is_err());
+    }
+
+    /// WEFT-222: SubstrateTts request body carries per-agent voice params.
+    #[test]
+    fn substrate_tts_request_body_two_personalities() {
+        use clawft_types::config::{VoiceConfig, VoicePersonality};
+        use super::super::personality::PersonalityTtsDispatch;
+
+        let mut cfg = VoiceConfig::default();
+        cfg.personalities.insert(
+            "alpha".into(),
+            VoicePersonality {
+                voice_id: "nova".into(),
+                provider: "openai".into(),
+                speed: 1.1,
+                pitch: 0.2,
+                greeting_prefix: Some("Alpha greets.".into()),
+                language: "en".into(),
+            },
+        );
+        cfg.personalities.insert(
+            "beta".into(),
+            VoicePersonality {
+                voice_id: "onyx".into(),
+                provider: "openai".into(),
+                speed: 0.95,
+                pitch: -0.15,
+                greeting_prefix: Some("Beta greets.".into()),
+                language: "en".into(),
+            },
+        );
+
+        let mut dispatch = PersonalityTtsDispatch::new(cfg, "alpha");
+        let alpha_res = dispatch.resolve();
+        let alpha_engine = SubstrateTts::new("http://localhost/synthesize", TtsTier::Fast, true, 5)
+            .unwrap()
+            .with_voice_params(TtsVoiceParams::from_resolved(&alpha_res));
+        let alpha_body = alpha_engine.request_body("hello");
+        assert_eq!(alpha_body["text"], "hello");
+        assert_eq!(alpha_body["voice_id"], "nova");
+        assert!((alpha_body["speed"].as_f64().unwrap() - 1.1).abs() < 1e-5);
+        assert!((alpha_body["pitch"].as_f64().unwrap() - 0.2).abs() < 1e-5);
+
+        dispatch.set_agent("beta");
+        let beta_res = dispatch.resolve();
+        let beta_engine = SubstrateTts::new("http://localhost/synthesize", TtsTier::Slow, false, 5)
+            .unwrap()
+            .with_voice_params(TtsVoiceParams::from_resolved(&beta_res));
+        let beta_body = beta_engine.request_body("hello");
+        assert_eq!(beta_body["voice_id"], "onyx");
+        assert!((beta_body["speed"].as_f64().unwrap() - 0.95).abs() < 1e-5);
+        assert!((beta_body["pitch"].as_f64().unwrap() - (-0.15)).abs() < 1e-5);
+        assert_ne!(alpha_body["voice_id"], beta_body["voice_id"]);
+
+        // Greeting consumption at session start via dispatch.
+        let mut session = PersonalityTtsDispatch::new(
+            {
+                let mut c = VoiceConfig::default();
+                c.personalities.insert(
+                    "alpha".into(),
+                    VoicePersonality {
+                        voice_id: "nova".into(),
+                        greeting_prefix: Some("Alpha greets.".into()),
+                        ..Default::default()
+                    },
+                );
+                c
+            },
+            "alpha",
+        );
+        let (r, spoken) = session.prepare_utterance("Standing by.", true);
+        assert_eq!(r.voice_id, "nova");
+        assert_eq!(spoken, "Alpha greets. Standing by.");
+        let (_, spoken2) = session.prepare_utterance("Standing by.", true);
+        assert_eq!(spoken2, "Standing by.");
+    }
+
+    #[test]
+    fn tts_voice_params_apply_to_json() {
+        let p = TtsVoiceParams {
+            voice_id: Some("alloy".into()),
+            speed: Some(1.0),
+            pitch: Some(0.0),
+            provider: Some("local".into()),
+            language: Some("en".into()),
+        };
+        let j = p.apply_to_json("hi");
+        assert_eq!(j["text"], "hi");
+        assert_eq!(j["voice_id"], "alloy");
     }
 }

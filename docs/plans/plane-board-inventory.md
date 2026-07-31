@@ -1,6 +1,6 @@
 # Plane Board Inventory — WeftOS
 
-> Generated: 2026-07-30 21:23 UTC
+> Generated: 2026-07-31 03:28 UTC
 > Source: Plane workspace `weftos`
 > Machine-readable DAG: [`plane-dag.json`](./plane-dag.json)
 > Wave plan: [`plane-wave-plan.md`](./plane-wave-plan.md)
@@ -9,46 +9,45 @@
 
 | Metric | Count |
 |--------|------:|
-| Total tickets | 677 |
-| Open | 264 |
-| In Progress | 1 |
-| Done | 394 |
-| Cancelled | 19 |
-| Dependency edges | 52 |
+| Total tickets | 706 |
+| Open | 251 |
+| In Progress | 2 |
+| Done | 435 |
+| Cancelled | 20 |
+| Dependency edges | 56 |
 | Inferred domain edges | 23 |
 | Parallel waves | 7 |
 
 ### Open by cycle
 
-- **0.8.x**: 173
-- **0.9.x**: 70
+- **0.8.x**: 144
+- **0.9.x**: 86
 - **1.0.x**: 21
 
 ### Open by workstream
 
-- **ws17-research**: 31
-- **ws10-voice**: 30
-- **ws02-kernel**: 25
+- **ws17-research**: 35
+- **ws02-kernel**: 26
 - **ws12-knowledge-graph**: 25
-- **ws14-deployment**: 20
-- **ws11-agent-core-v1**: 17
-- **ws16-browser-wasm**: 17
+- **ws10-voice**: 23
+- **ws14-deployment**: 22
 - **ws09-clawft-dashboard**: 17
-- **ws03-pipeline**: 16
+- **ws16-browser-wasm**: 16
+- **ws11-agent-core-v1**: 15
 - **ws08-weftos-gui**: 14
 - **ws07-multi-agent**: 12
+- **ws03-pipeline**: 10
+- **ws15-mcp**: 9
 - **ws06-memory**: 8
 - **ws13-app-substrate**: 8
-- **ws15-mcp**: 7
-- **ws05-channels**: 7
-- **ws01-core**: 7
-- **ws04-plugin-skills**: 3
+- **ws05-channels**: 6
+- **ws01-core**: 5
 
 ### Open by priority
 
-- **high**: 29
-- **medium**: 48
-- **low**: 172
+- **high**: 35
+- **medium**: 41
+- **low**: 160
 - **none**: 15
 
 ---
@@ -64,10 +63,10 @@
 | WEFT-12 | Done | low | 0.8.x | ws01-core | B | strong | — | — | ws01: rpc — replace version_check curl shell-out with reqwest |
 | WEFT-13 | Todo | medium | 0.8.x | ws01-core | G | strong | — | — | ws01: platform — implement OPFS-backed BrowserFileSystem persistence |
 | WEFT-14 | Todo | low | 0.8.x | ws01-core | G | strong | — | — | ws01: platform — land OPFS-or-equivalent BrowserEnvironment persistence |
-| WEFT-15 | Todo | low | 0.8.x | ws01-core | B | strong | — | — | ws01: kernel-config — wire LogQuantizedStubConfig + SimdDistanceStubConfig runtime |
+| WEFT-15 | In Progress | low | 0.9.x | ws01-core | B | strong | — | — | ws01: kernel-config — wire LogQuantizedStubConfig + SimdDistanceStubConfig runtime |
 | WEFT-16 | Done | medium | 0.7.x | ws01-core | B | strong | — | — | ws01: security — rationalize lenient validate_mcp_tool_name vs strict variant |
 | WEFT-17 | Cancelled | medium | 0.8.x | ws01-core | B | strong | — | — | ws01: rpc — add chain.append RPC for weaver soul promote |
-| WEFT-18 | Todo | low | 0.8.x | ws01-core | B | strong | — | — | ws01: foundation — run ADR-010 v0.3 cancel-correctness audit on mesh select! branches |
+| WEFT-18 | Done | low | 0.8.x | ws01-core | B | strong | — | — | ws01: foundation — run ADR-010 v0.3 cancel-correctness audit on mesh select! branches |
 | WEFT-19 | Done | low | 0.7.x | ws01-core | B | strong | WEFT-8 | — | ws01,ws14: publish-policy audit — flip 16 publish=false flags or document |
 | WEFT-20 | Todo | low | 0.9.x | ws01-core | B | strong | — | — | ws01: types — decide deny_unknown_fields lint mode for Config |
 | WEFT-21 | Done | low | 0.7.x | ws01-core | B | strong | — | — | ws01: platform — document config_loader Layer 2 sync vs Layer 3 async asymmetry |
@@ -75,7 +74,7 @@
 | WEFT-23 | Done | medium | 0.7.x | ws01-core | B | strong | — | — | ws01: cli — replace skills_cmd derived-on-first-sign placeholder pubkey with real Ed25519 |
 | WEFT-24 | Done | low | 0.7.x | ws01-core | B | strong | — | — | ws01: planning — close out improvements.md Phase-5 sprint-tracker |
 | WEFT-25 | Done | low | 0.7.x | ws01-core | B | strong | — | — | ws01: planning — archive stale 00-initial-sprint codebase-map / planning-summary |
-| WEFT-26 | Todo | low | 0.8.x | ws01-core | B | strong | — | — | ws01: types — clean up panic! macros in test-only canvas/provider/agent_bus arms |
+| WEFT-26 | Done | low | 0.8.x | ws01-core | B | strong | — | — | ws01: types — clean up panic! macros in test-only canvas/provider/agent_bus arms |
 | WEFT-27 | Done | high | 0.7.x | ws03-pipeline | B | strong | — | — | ws03: routing — apply tier check to fallback model selection |
 | WEFT-28 | Done | medium | 0.7.x | ws03-pipeline | B | strong | — | — | ws03: routing — HMAC the cost-tracker persistence file |
 | WEFT-29 | Done | low | 0.7.x | ws03-pipeline | B | strong | — | — | ws03: routing — reject window_seconds=0 in Phase H validation |
@@ -83,13 +82,13 @@
 | WEFT-31 | Done | medium | 0.7.x | ws03-pipeline | B | strong | — | — | ws03: routing — audit-log model_override bypasses (escalation already logs) |
 | WEFT-32 | Done | high | 0.7.x | ws03-pipeline | B | strong | — | — | ws03: routing — add MCP tool-name namespace validation against wildcard ['*'] |
 | WEFT-33 | Done | medium | 0.8.x | ws03-pipeline | B | strong | — | — | ws03: routing — scaffold fuzz targets for 8 attack surfaces |
-| WEFT-34 | Todo | low | 0.8.x | ws03-pipeline | B | strong | — | — | ws03: routing — resolve CONS-002 (DashMap vs RwLock<HashMap> benchmark) |
+| WEFT-34 | Done | low | 0.8.x | ws03-pipeline | B | strong | — | — | ws03: routing — resolve CONS-002 (DashMap vs RwLock<HashMap> benchmark) |
 | WEFT-35 | Done | medium | 0.7.x | ws03-pipeline | B | strong | — | — | ws03: routing — resolve CONS-003 final review (escalation security) |
-| WEFT-36 | Todo | low | 0.8.x | ws03-pipeline | B | strong | — | — | ws03: routing — resolve CONS-006 (config validation boundary) |
+| WEFT-36 | Done | low | 0.8.x | ws03-pipeline | B | strong | — | — | ws03: routing — resolve CONS-006 (config validation boundary) |
 | WEFT-37 | Done | medium | 0.7.x | ws03-pipeline | B | strong | — | — | ws03: pipeline — wire D1 per-path advisory locks for parallel tool execution |
 | WEFT-38 | Done | medium | 0.8.x | ws03-pipeline | B | strong | — | — | ws03: pipeline — wire evolution_ready flag → mutation.rs GA loop (ADR-017 flywheel) |
-| WEFT-39 | Todo | low | 0.8.x | ws03-pipeline | B | strong | — | — | ws03: pipeline — persist RetryModel learned weights across daemon restarts |
-| WEFT-40 | Todo | low | 0.8.x | ws03-pipeline | B | strong | — | — | ws03: pipeline — surface routing-decision history via admin endpoint |
+| WEFT-39 | Done | low | 0.8.x | ws03-pipeline | B | strong | — | — | ws03: pipeline — persist RetryModel learned weights across daemon restarts |
+| WEFT-40 | Done | low | 0.8.x | ws03-pipeline | B | strong | — | — | ws03: pipeline — surface routing-decision history via admin endpoint |
 | WEFT-41 | Todo | low | 1.0.x | ws03-pipeline | B | strong | — | — | ws03: research — Iteration 3 EML attention multi-param coordinated perturbation |
 | WEFT-42 | Done | low | 0.9.x | ws03-pipeline | B | strong | — | — | ws03: kernel — wire sprint-16 two-tier EML coherence cadence |
 | WEFT-43 | Todo | low | 0.9.x | ws03-pipeline | B | strong | — | — | ws03: pipeline — decide consolidation of clawft-service-llm vs clawft-llm |
@@ -100,12 +99,12 @@
 | WEFT-48 | Todo | low | 0.8.x | ws03-pipeline | B | strong | — | — | ws03: rate-limiter — expose rate-limiter metrics via admin endpoint (Element-09) |
 | WEFT-49 | Todo | low | 0.8.x | ws03-pipeline | B | strong | — | — | ws03: rate-limiter — expose rate-limiter LRU maintenance via admin endpoint (Element-09) |
 | WEFT-50 | Done | low | 0.7.x | ws03-pipeline | B | strong | — | — | ws03: context-router — document Some(vec![]) tool_subset contract for plugin authors |
-| WEFT-51 | Todo | low | 0.8.x | ws03-pipeline | B | strong | — | — | ws03: context-router — exhaustively test embedding-router cargo-feature-off path |
+| WEFT-51 | Done | low | 0.8.x | ws03-pipeline | B | strong | — | — | ws03: context-router — exhaustively test embedding-router cargo-feature-off path |
 | WEFT-52 | Done | medium | 0.7.x | ws03-pipeline | B | strong | — | — | ws03: routing — verify admin user x restricted channel interaction |
 | WEFT-53 | Todo | low | 0.9.x | ws03-pipeline | B | strong | — | — | ws03: pipeline — decide EML score-fusion in scope for 0.7.0 (FitnessScorer weights) |
 | WEFT-54 | Todo | low | 0.8.x | ws03-pipeline | B | strong | — | — | ws03: pipeline — review FitnessScorer.error_indicators allowlist (localization, jailbreak) |
 | WEFT-55 | Todo | low | 0.8.x | ws03-pipeline | B | strong | — | — | ws03: pipeline — verify experimental-attention CI build/test wiring |
-| WEFT-56 | Todo | low | 0.8.x | ws03-pipeline | B | strong | — | — | ws03: pipeline — define explicit pipeline-pass step in scripts/build.sh gate |
+| WEFT-56 | Done | low | 0.8.x | ws03-pipeline | B | strong | — | — | ws03: pipeline — define explicit pipeline-pass step in scripts/build.sh gate |
 | WEFT-57 | Todo | low | 1.0.x | ws03-pipeline | B | strong | — | — | ws03: research — track 80+ heuristics from eml-synergy-scan |
 | WEFT-58 | Todo | low | 1.0.x | ws03-pipeline | C | strong | — | — | ws03: research — track HNSW EML opportunities (adaptive ef, learned distance) |
 | WEFT-59 | Done | high | 0.7.x | ws04-plugin-skills | B | strong | — | — | ws04: cli — add weft skills approve / reject CLI for autogen .pending markers |
@@ -119,13 +118,13 @@
 | WEFT-67 | Done | medium | 0.8.x | ws04-plugin-skills | B | strong | — | — | ws04: cli — add weft skills autogen {enable,disable,status} CLI |
 | WEFT-68 | Done | medium | 0.8.x | ws04-plugin-skills | G | strong | — | — | ws04: observability — add WASM per-plugin fuel/memory observability |
 | WEFT-69 | Done | high | 0.7.x | ws04-plugin-skills | B | strong | — | — | ws04: docs — document skill signing trust root location and rotation |
-| WEFT-70 | Todo | low | 0.8.x | ws04-plugin-skills | B | strong | — | — | ws04: ux — add macOS-sandbox-downgrade warning to startup banner |
+| WEFT-70 | Done | low | 0.8.x | ws04-plugin-skills | B | strong | — | — | ws04: ux — add macOS-sandbox-downgrade warning to startup banner |
 | WEFT-71 | Done | medium | 0.8.x | ws04-plugin-skills | B | strong | — | — | ws04: tests — add clawft.plugin.json schema roundtrip + version-compat test |
 | WEFT-72 | Done | medium | 0.8.x | ws04-plugin-skills | B | strong | — | — | ws04: skills — verify (or close) SkillContext::Fork status post-3F review M2 |
 | WEFT-73 | Done | medium | 0.8.x | ws04-plugin-skills | B | strong | — | — | ws04: tests — land T39 plugin-lifecycle tests |
-| WEFT-74 | Todo | low | 0.8.x | ws04-plugin-skills | B | strong | — | — | ws04: skills — define pending-skill review timing (interactive prompt vs CLI) |
+| WEFT-74 | Done | low | 0.8.x | ws04-plugin-skills | B | strong | — | — | ws04: skills — define pending-skill review timing (interactive prompt vs CLI) |
 | WEFT-75 | Done | medium | 0.8.x | ws04-plugin-skills | B | strong | — | — | ws04: autogen — define filesystem allowlist semantics for autogenerated skills |
-| WEFT-76 | Todo | low | 0.8.x | ws04-plugin-skills | B | strong | — | — | ws04: skills — add weft skills refresh CLI for headless/CI scenarios |
+| WEFT-76 | Done | low | 0.8.x | ws04-plugin-skills | B | strong | — | — | ws04: skills — add weft skills refresh CLI for headless/CI scenarios |
 | WEFT-77 | Done | low | 0.8.x | ws04-plugin-skills | E | strong | — | — | ws04: voice — drop or stub VoiceHandler trait placeholder for 0.7.0 |
 | WEFT-78 | Done | medium | 0.8.x | ws04-plugin-skills | B | strong | — | — | ws04: scaffold — add Rust struct/parser for .weftos-plugin.toml or remove it |
 | WEFT-79 | Done | high | 0.7.x | ws06-memory | C | strong | — | — | ws06: memory — route MemoryStore + SkillsLoader through WorkspaceContext |
@@ -222,7 +221,7 @@
 | WEFT-170 | Todo | medium | 0.8.x | ws05-channels | H | strong | — | — | ws05: PluginHost C7 unification — migrate Telegram/Discord/Slack to ChannelAdapter |
 | WEFT-171 | Todo | medium | 0.9.x | ws05-channels | H | strong | — | — | ws05: Slash-command surface — decide consumer for ChannelHost::register_command |
 | WEFT-172 | Done | low | 0.8.x | ws05-channels | H | strong | — | — | ws05: Telegram — document or remove redundant 1s poll-interval sleep |
-| WEFT-173 | Todo | low | 0.8.x | ws05-channels | H | strong | — | — | ws05: Discord — document intents bitmask default and cover privileged-intent rejection |
+| WEFT-173 | Done | low | 0.8.x | ws05-channels | H | strong | — | — | ws05: Discord — document intents bitmask default and cover privileged-intent rejection |
 | WEFT-174 | Todo | low | 0.8.x | ws05-channels | H | strong | — | — | ws05: Slack — add unknown_envelope counter for API drift detection |
 | WEFT-175 | Todo | low | 0.8.x | ws05-channels | H | strong | — | — | ws05: iMessage scope — implement AppleScript bridge or formally drop from tracker |
 | WEFT-176 | Todo | low | 0.8.x | ws05-channels | H | strong | — | — | ws05: WeftOS white-label — add brand() accessor and remove hard-coded clawft strings |
@@ -263,15 +262,15 @@
 | WEFT-211 | Done | high | 0.7.x | ws10-voice | E | strong | — | — | ws10: SC-10 plugin voice capability — gate WASM plugins on voice capability + sub-perms |
 | WEFT-212 | Done | high | 0.7.x | ws10-voice | E | strong | — | — | ws10: voice umbrella feature — include voice-stt and voice-tts or rename to voice-stubs |
 | WEFT-213 | Done | medium | 0.7.x | ws10-voice | E | strong | — | — | ws10: AudioConfig / CaptureConfig / PlaybackConfig — collapse into one canonical type |
-| WEFT-214 | Todo | medium | 0.8.x | ws10-voice | E | strong | WEFT-671 | — | ws10: voice_listen / voice_speak tools — wire to real STT/TTS with cloud fallback |
-| WEFT-215 | Todo | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: weft voice setup — real model download with SHA-256 verify and progress UI |
+| WEFT-214 | Done | medium | 0.8.x | ws10-voice | E | strong | WEFT-671 | — | ws10: voice_listen / voice_speak tools — wire to real STT/TTS with cloud fallback |
+| WEFT-215 | Done | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: weft voice setup — real model download with SHA-256 verify and progress UI |
 | WEFT-216 | Done | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: WakeWordDetector — wire rustpotter or document an alternative |
 | WEFT-217 | Todo | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: EchoCanceller and NoiseSuppressor — replace deceptive passthroughs with real DSP |
-| WEFT-218 | Todo | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: WS voice:status — connect a real backend broadcaster |
-| WEFT-219 | Todo | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: /api/voice/* — replace MSW-only mocks with real handlers in clawft-services |
+| WEFT-218 | Done | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: WS voice:status — connect a real backend broadcaster |
+| WEFT-219 | Done | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: /api/voice/* — replace MSW-only mocks with real handlers in clawft-services |
 | WEFT-220 | Todo | low | 0.8.x | ws10-voice | E | strong | — | — | ws10: Windows install-service — automate schtasks or document manual route as final |
-| WEFT-221 | Todo | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: Talk Mode interruption — abort TTS when VAD trips during playback |
-| WEFT-222 | Todo | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: VoicePersonality — wire per-agent lookup in TTS dispatch |
+| WEFT-221 | Done | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: Talk Mode interruption — abort TTS when VAD trips during playback |
+| WEFT-222 | Done | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: VoicePersonality — wire per-agent lookup in TTS dispatch |
 | WEFT-223 | Done | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: SC-2 audio buffer zeroization and voice.audio_retention config |
 | WEFT-224 | Todo | low | 0.8.x | ws10-voice | E | strong | — | — | ws10: SC-3 cloud-fallback transparency log line |
 | WEFT-225 | Todo | low | 0.8.x | ws10-voice | E | strong | — | — | ws10: SC-6 anti-replay nonce and transcription-echo confirmation |
@@ -287,7 +286,7 @@
 | WEFT-235 | Done | low | 0.9.x | ws10-voice | E | strong | — | — | ws10: clawft-service-classify — decide adoption (connect to W-VOICE, Explorer-only, or del |
 | WEFT-236 | Todo | low | 0.8.x | ws10-voice | E | strong | — | — | ws10: clawft-service-whisper — drop legacy dual-publish path post Phase-4 migration |
 | WEFT-237 | Done | low | 0.8.x | ws10-voice | E | strong | — | — | ws10: clawft-service-whisper publish_wav example — keep or delete |
-| WEFT-238 | Todo | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: VoiceConfig.tts.provider="browser" — implement Web Speech dispatch or change default |
+| WEFT-238 | Done | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: VoiceConfig.tts.provider="browser" — implement Web Speech dispatch or change default |
 | WEFT-239 | Todo | low | 0.8.x | ws10-voice | E | strong | — | — | ws10: CloudFallbackConfig — config-string to provider router |
 | WEFT-240 | Todo | low | 0.8.x | ws10-voice | E | strong | — | — | ws10: WakeConfig.sensitivity vs WakeWordConfig.threshold — unify the knob |
 | WEFT-241 | Done | low | 0.8.x | ws10-voice | E | strong | — | — | ws10: Define join key between TranscriptLogger session_key and substrate source-node-id |
@@ -303,9 +302,9 @@
 | WEFT-251 | Done | medium | 0.7.x | ws08-weftos-gui | F | strong | — | WEFT-8 | ws08: wasm — image PNG feature pin documentation |
 | WEFT-252 | Done | medium | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: chat panel — markdown rendering in chat bubbles |
 | WEFT-253 | Done | high | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: chat panel — inline streaming via agent.chat_stream |
-| WEFT-254 | Todo | medium | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: chat panel — multi-conversation sidebar UI |
+| WEFT-254 | Done | medium | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: chat panel — multi-conversation sidebar UI |
 | WEFT-255 | Done | medium | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: chat panel — system-prompt UI affordance |
-| WEFT-256 | Todo | medium | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: chat panel — model / provider switcher in chip strip |
+| WEFT-256 | Done | medium | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: chat panel — model / provider switcher in chip strip |
 | WEFT-257 | Done | low | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: chat panel — heartbeat label replaces spinner occlusion |
 | WEFT-258 | Done | medium | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: chat panel — real interactive defer (resume on { deferred: true }) |
 | WEFT-259 | Done | low | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: chat panel — identity-drift / binding-thread mismatch warning |
@@ -326,7 +325,7 @@
 | WEFT-274 | Done | medium | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: explorer — Workshop parameterization schema sign-off + impl |
 | WEFT-275 | Todo | low | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: explorer — Lineage Object Type + viewer (metadata convention sign-off) |
 | WEFT-276 | Done | medium | 0.8.x | ws08-weftos-gui | B | strong | — | — | ws08: explorer — ObjectType::applicable_actions populated for Mesh/Sensor/Node |
-| WEFT-277 | Todo | medium | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: composer — honest_affordances real GEPA / governance intersection |
+| WEFT-277 | Done | medium | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: composer — honest_affordances real GEPA / governance intersection |
 | WEFT-278 | Done | medium | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: workshop — implement Grid layout (degrades to Rows today) |
 | WEFT-279 | Done | medium | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: workshop — implement Tabs layout (degrades to Rows today) |
 | WEFT-280 | Done | low | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: workshop — wire viewer_hint overrides (today: "auto" only) |
@@ -380,7 +379,7 @@
 | WEFT-328 | Done | medium | 0.8.x | ws11-agent-core-v1 | D | strong | — | — | ws11: agent-core-v1.1 — plumb tool_calls / token / model fields through OutboundMessage |
 | WEFT-329 | Todo | low | 0.8.x | ws11-agent-core-v1 | D | strong | — | — | ws11: agent-core-v1.1 — notify-driven hot-reload watcher for identity files |
 | WEFT-330 | Done | medium | 0.8.x | ws11-agent-core-v1 | D | strong | — | — | ws11: agent-core-v1.1 — agent-side SOUL.journal.md write path during chat turns |
-| WEFT-331 | Todo | medium | 0.8.x | ws11-agent-core-v1 | D | strong | — | — | ws11: agent-core-v1.1 — interactive Defer UX prompt-and-resume in panel |
+| WEFT-331 | Done | medium | 0.8.x | ws11-agent-core-v1 | D | strong | — | — | ws11: agent-core-v1.1 — interactive Defer UX prompt-and-resume in panel |
 | WEFT-332 | Todo | low | 0.8.x | ws11-agent-core-v1 | D | strong | — | — | ws11: agent-core-v1.1 — per-user agent_ids for multi-tenant chat |
 | WEFT-333 | Todo | low | 0.8.x | ws11-agent-core-v1 | D | strong | — | — | ws11: agent-core-v1.1 — register agent.chat SystemService for weft status |
 | WEFT-334 | Todo | low | 0.8.x | ws11-agent-core-v1 | D | strong | — | — | ws11: agent-core-v1.1 — typed error variants for agent.chat |
@@ -439,7 +438,7 @@
 | WEFT-387 | Todo | low | 0.8.x | ws12-knowledge-graph | C | strong | — | — | ws12: graphify — verify+restore standalone export/cypher.rs and export/svg.rs |
 | WEFT-388 | Done | high | 0.7.x | ws16-browser-wasm | G | strong | — | — | ws16: browser — wasm-bindgen-test regression suite for init() + send_message() pipeline |
 | WEFT-389 | Done | high | 0.7.x | ws16-browser-wasm | G | strong | — | — | ws16: browser — binary size budget audit (1.32 MB → wasm-opt -Oz CI gate) |
-| WEFT-390 | Todo | medium | 0.8.x | ws16-browser-wasm | G | strong | — | — | ws16: browser — streaming chat via ReadableStream / wasm-streams |
+| WEFT-390 | Done | medium | 0.8.x | ws16-browser-wasm | G | strong | — | — | ws16: browser — streaming chat via ReadableStream / wasm-streams |
 | WEFT-391 | Done | medium | 0.8.x | ws16-browser-wasm | G | strong | — | — | ws16: browser — wire set_env to BrowserEnvironment via OnceLock<BrowserRuntime> |
 | WEFT-392 | Done | medium | 0.8.x | ws16-browser-wasm | G | strong | — | — | ws16: browser — implement OPFS-backed BrowserFileSystem behind browser-opfs feature |
 | WEFT-393 | Todo | low | 0.8.x | ws16-browser-wasm | G | strong | — | — | ws16: browser — write ADR-027 Browser WASM Support |
@@ -626,7 +625,7 @@
 | WEFT-574 | Backlog | medium | 1.0.x | ws09-clawft-dashboard | F | strong | — | — | ws09: tauri — desktop shell functional features (tray, hotkey, side-car, Spotlight, notifi |
 | WEFT-575 | Backlog | low | 1.0.x | ws09-clawft-dashboard | F | strong | WEFT-561 | — | ws09: ui — axe-core runtime a11y scan still missing (WEFT-315 AC unmet, follow-up to WEFT- |
 | WEFT-576 | Done | high | 1.0.x | ws09-clawft-dashboard | A | strong | — | — | ws09: deploy — Dockerfile must run as non-root user (security hardening) |
-| WEFT-577 | Todo | medium | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: vscode panel wasm bundle — trim back toward 4500/1500 KB ceiling |
+| WEFT-577 | Done | medium | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws08: vscode panel wasm bundle — trim back toward 4500/1500 KB ceiling |
 | WEFT-578 | Done | high | 0.8.x | ws08-weftos-gui | F | weak | — | — | ws08: 0.8.0 sidebar — canonical block per DESIGN.md §5 |
 | WEFT-579 | Done | high | 0.8.x | ws08-weftos-gui | F | weak | — | — | ws08: 0.8.0 Files app — list-detail |
 | WEFT-580 | Done | high | 0.8.x | ws08-weftos-gui | F | weak | — | — | ws08: 0.8.0 Processes app — table |
@@ -722,7 +721,7 @@
 | WEFT-670 | Todo | low | 0.8.x | ws06-memory | C | strong | — | — | ws06: memory — memory_import drops the tags column (128 legacy entries migrated without th |
 | WEFT-671 | Done | medium | 0.8.x | ws10-voice | E | strong | — | WEFT-214 | ws10: voice — decide the disposition of clawft-plugin/src/voice (blocks 12 audit-era items |
 | WEFT-672 | Done | high | 0.8.x | ws16-browser-wasm | D | strong | WEFT-663 | — | ws16: browser target — clawft_llm::hermes::strip_think called ungated from pipeline/transp |
-| WEFT-673 | Todo | medium | 0.8.x | ws11-agent-core-v1 | D | strong | WEFT-655 | — | ws11: hermes loop — voice-review-gate residual gaps self-documented by WEFT-655 (forest-co |
+| WEFT-673 | Done | medium | 0.8.x | ws11-agent-core-v1 | D | strong | WEFT-655 | — | ws11: hermes loop — voice-review-gate residual gaps self-documented by WEFT-655 (forest-co |
 | WEFT-674 | Done | high | 0.8.x | ws14-deployment | A | strong | — | — | ws14: CI — pr-gates.yml is PR-triggered only, so hard gates never run on feature branches  |
 | WEFT-675 | Done | medium | 0.8.x | ws08-weftos-gui | C | strong | — | — | ws08/ws18: leaf display + ESP32-S3 firmware rewrite — vector-first scene pipeline, 7 new c |
 | WEFT-676 | Done | medium | 0.8.x | ws06-memory | C | strong | — | — | ws06/ws11: ADR-058/059 memory + context tier — Qwen3 ONNX embedder, L2 SessionTier, graft/ |
@@ -734,12 +733,41 @@
 | WEFT-682 | Todo | low | 0.8.x | ws15-mcp | J | strong | — | — | ws15: tracker — enforce the two-label rule at item creation (36 items unlabeled, all post- |
 | WEFT-683 | Done | medium | 0.8.x | ws02-kernel | B | strong | — | — | ws02: mesh — ADR-031 drift: RVF encoding declared the production default but only JSON was |
 | WEFT-684 | Done | high | 0.8.x | ws06-memory | C | strong | — | — | ws06: memory — MCP server runs 'npx ruflo@latest', so a schema-bearing dep is unpinned (ro |
+| WEFT-685 | Done | medium | 0.8.x | ws08-weftos-gui | F | strong | — | WEFT-694 | ws08: ADR-073 Phase A — stock desktop + agents inventory (Agent Workspace foundation) |
+| WEFT-686 | Todo | high | 0.9.x | ws08-weftos-gui | F | strong | — | WEFT-695 | ws08: ADR-073 Phase B — freeform window manager v1 (multi-pane stage) |
+| WEFT-687 | Todo | high | 0.9.x | ws08-weftos-gui | F | strong | — | — | ws08: ADR-073 Phase C — Agent Workspace mode (spawn-opens-pane + attention bus) |
+| WEFT-688 | Todo | high | 0.9.x | ws08-weftos-gui | E | strong | — | WEFT-695,WEFT-702 | ws08: ADR-073 Phase D — WindowIntent bus (voice/keys/MCP conductor demo) |
+| WEFT-689 | Done | high | 0.8.x | ws10-voice | E | strong | — | — | ws10: ADR-074 V0 — xAI Realtime client + VoiceConfig (interim primary when key) |
+| WEFT-690 | Done | high | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws10: ADR-074 V1 — xAI S2S tool bridge → WindowIntent (spawn/focus/summarize) |
+| WEFT-691 | Done | medium | 0.8.x | ws10-voice | E | strong | — | — | ws10: ADR-074 V2 — hybrid modes + metrics + graceful local fallback |
+| WEFT-692 | Done | high | 0.8.x | ws15-mcp | J | strong | — | — | ws15: ADR-075 G0 — Grok↔WeftOS MCP docs + project config + doctor path |
+| WEFT-693 | Cancelled | high | 0.8.x | ws15-mcp | J | strong | — | — | ws15: ADR-075 G1 — curated MCP serve profile (control vs full) |
+| WEFT-694 | Done | high | 0.8.x | ws08-weftos-gui | F | strong | WEFT-685 | — | ws15: ADR-075 G2 — control tools (status, agents list/spawn) over MCP |
+| WEFT-695 | Todo | high | 0.9.x | ws08-weftos-gui | F | strong | WEFT-686,WEFT-688 | — | ws15: ADR-075 G3 — MCP tools → WindowIntent (Grok conductor) |
+| WEFT-696 | Todo | medium | 0.9.x | ws15-mcp | J | strong | — | — | ws15: ADR-075 G4 — HTTP/SSE mcp-server listen + auth (remote Grok) |
+| WEFT-697 | Todo | medium | 0.9.x | ws15-mcp | J | strong | — | — | ws15: ADR-075 G5 — MCP session capability tokens + audit client label |
+| WEFT-698 | Done | high | 0.8.x | ws15-mcp | J | strong | — | — | ws15: ADR-076 C0 — capability catalog doc + surface principles lock-in |
+| WEFT-699 | Done | high | 0.8.x | ws15-mcp | J | strong | — | — | ws15: ADR-076 C1 — weft mcp-server --profile (default ≠ full) |
+| WEFT-700 | Done | high | 0.8.x | ws15-mcp | J | strong | — | — | ws15: ADR-076 C2 — public names, skill_list/get, process_spawn, reexport guard |
+| WEFT-701 | Done | high | 0.8.x | ws02-kernel | B | strong | — | — | ws15: ADR-076 C3 — mcp-server --attach weave façade (live agents/status) |
+| WEFT-702 | Todo | medium | 0.9.x | ws08-weftos-gui | F | strong | WEFT-688 | — | ws15: ADR-076 C4 — window_* MCP + media profile gating |
+| WEFT-703 | Todo | medium | 0.9.x | ws15-mcp | J | strong | — | — | ws15: ADR-076 C5 — catalog↔code drift CI |
+| WEFT-704 | Done | high | 0.8.x | ws14-deployment | A | strong | — | — | ws14: ADR-077 A0 — capture protocol v1 + splatd image-set ingest |
+| WEFT-705 | Todo | high | 0.9.x | ws14-deployment | A | strong | — | — | ws14: ADR-077 A1 — Android capture MVP (CameraX + IMU coverage + ZIP) |
+| WEFT-706 | Todo | high | 0.9.x | ws14-deployment | A | strong | — | — | ws14: ADR-077 A2 — pair + upload to Mac/cloud splatd + SOG review |
+| WEFT-707 | Todo | medium | 0.9.x | ws02-kernel | B | strong | — | — | ws14: ADR-077 A3 — WeftOS edge core in Android (identity UniFFI) |
+| WEFT-708 | Done | high | 0.8.x | ws08-weftos-gui | F | strong | — | — | ws17: ADR-078 W0 — publish SPLAT_SCENE + world_model stub on job done |
+| WEFT-709 | Todo | medium | 0.9.x | ws17-research | I | strong | — | — | ws17: ADR-078 W1 — geometric partition (surfaces, object AABBs, free space) |
+| WEFT-710 | Todo | medium | 0.9.x | ws17-research | I | strong | — | — | ws17: free-form quilt Q0 — region/contribution + camera-stats schema |
+| WEFT-711 | Todo | medium | 0.9.x | ws17-research | I | strong | — | — | ws17: multi-cam rig M0 — multi-camera session ingest (known poses) |
+| WEFT-712 | Done | medium | 0.8.x | ws17-research | I | strong | — | — | ws17: splat train backends T0 — registry + docs (Brush/NuRec/collection) |
+| WEFT-713 | Todo | medium | 0.9.x | ws17-research | I | strong | — | — | ws17: ADR-079 E0 — Earth digital twin doctrine + world-builder expert |
 
 ---
 
 ## Open tickets by workstream
 
-### ws01-core (7 open)
+### ws01-core (5 open)
 
 #### WEFT-11 — ws01: rpc — implement Windows daemon transport (named pipes) for DaemonClient
 
@@ -770,20 +798,11 @@
 
 #### WEFT-15 — ws01: kernel-config — wire LogQuantizedStubConfig + SimdDistanceStubConfig runtime
 
-- **State**: Todo · **Priority**: low · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: B · **AC**: strong
+- **State**: In Progress · **Priority**: low · **Cycle**: 0.9.x · **Wave**: W0 · **Lane**: B · **AC**: strong
 - **Labels**: ws01-core, audit-finding, audit-0.7.0, stub, gap
 - **Blocked by**: none
 - **Blocks**: none
 - **Gap**: Two *StubConfig types are serializable stubs in clawft-types; their runtime backends sit in clawft-kernel and require ruvector-core PR #352. Foundation surface ready; runtime missing.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-18 — ws01: foundation — run ADR-010 v0.3 cancel-correctness audit on mesh select! branches
-
-- **State**: Todo · **Priority**: low · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: B · **AC**: strong
-- **Labels**: ws01-core, audit-finding, audit-0.7.0, tech-debt, tests
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: ADR-010 calls for a v0.3 audit of select! branches in mesh networking code (foundation runtime decision). We are at 0.6.19 with no audit completed. Mesh code lives in stream 04 (mesh) but the ADR governs the foundation runtime.
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
 #### WEFT-20 — ws01: types — decide deny_unknown_fields lint mode for Config
@@ -795,16 +814,7 @@
 - **Gap**: Config accepts both camelCase and snake_case via #[serde(alias)] and silently ignores unknown fields. Forward-compat is good; typo-resistance is bad. No off-by-default lint mode for typo detection.
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
-#### WEFT-26 — ws01: types — clean up panic! macros in test-only canvas/provider/agent_bus arms
-
-- **State**: Todo · **Priority**: low · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: B · **AC**: strong
-- **Labels**: ws01-core, audit-finding, audit-0.7.0, tech-debt, tests
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: panic! macros live inside #[cfg(test)] match arms. Harmless (cfg-gated) but stylistically loud. Prefer unreachable! with rationale or proper assert! macros.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-### ws02-kernel (25 open)
+### ws02-kernel (26 open)
 
 #### WEFT-105 — ws02: mesh — implement K6.4 chain replay (LocalChain::tail_from + append_signed)
 
@@ -959,6 +969,15 @@
 - **Gap**: scripts/build.sh check is green but scripts/build.sh clippy is red on ~150 pre-existing errors across clawft-types/src/goal.rs, clawft-rpc, eml-core, and older kernel/weave code. Blocks any clippy-as-gate aspiration.
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
+#### WEFT-707 — ws14: ADR-077 A3 — WeftOS edge core in Android (identity UniFFI)
+
+- **State**: Todo · **Priority**: medium · **Cycle**: 0.9.x · **Wave**: W0 · **Lane**: B · **AC**: strong
+- **Labels**: ws02-kernel, ws14-deployment, gap
+- **Blocked by**: none
+- **Blocks**: none
+- **Gap**: App should be a WeftOS edge peer with durable node identity, not only a REST uploader.
+- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
+
 #### WEFT-123 — ws02: services-api — add HTTP facade integration tests once profile/pairing types land
 
 - **State**: Todo · **Priority**: low · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: B · **AC**: strong
@@ -1031,7 +1050,7 @@
 - **Gap**: Governance control holds today, but gate verdicts are not attributed to a per-child / per-user principal. Add principals so verdicts carry attribution (who spawned, on whose authority).
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
-### ws03-pipeline (16 open)
+### ws03-pipeline (10 open)
 
 #### WEFT-45 — ws03: routing — wire MicroLoraRouter (v3) once ruvllm-wasm lifts 11-pattern HNSW cap
 
@@ -1040,42 +1059,6 @@
 - **Blocked by**: none
 - **Blocks**: none
 - **Gap**: v3 MicroLoraRouter is deferred until ruvllm-wasm lifts the documented 11-pattern HNSW cap. Plumbing in HybridRouter is there; the v3 implementation isn't.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-34 — ws03: routing — resolve CONS-002 (DashMap vs RwLock<HashMap> benchmark)
-
-- **State**: Todo · **Priority**: low · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: B · **AC**: strong
-- **Labels**: ws03-pipeline, audit-finding, audit-0.7.0, tech-debt, performance
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: CostTracker and RateLimiter implemented as RwLock<HashMap> (no new dep). Performance trade-off vs DashMap was never benchmarked under contention. Entry remains OPEN pending real production data.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-36 — ws03: routing — resolve CONS-006 (config validation boundary)
-
-- **State**: Todo · **Priority**: low · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: B · **AC**: strong
-- **Labels**: ws03-pipeline, audit-finding, audit-0.7.0, tech-debt
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: Validation lives in routing_validation.rs but the boundary between deserialization-time rejection (serde) and post-load validation was never finalized. Some checks are duplicated; some are only in one place.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-39 — ws03: pipeline — persist RetryModel learned weights across daemon restarts
-
-- **State**: Todo · **Priority**: low · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: B · **AC**: strong
-- **Labels**: ws03-pipeline, audit-finding, audit-0.7.0, gap
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: RetryModel trains from observed retry outcomes but the Default impl resets to untrained. Daemon restarts lose all learned retry curves. Persistence path unclear.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-40 — ws03: pipeline — surface routing-decision history via admin endpoint
-
-- **State**: Todo · **Priority**: low · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: B · **AC**: strong
-- **Labels**: ws03-pipeline, audit-finding, audit-0.7.0, gap, tooling
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: The panel surfaces current tier / budget remaining via weft status, but historical routing decision logs (per the security-review §2.3 audit recommendation) are not exposed. Operators have no way to retroactively review per-tier dispatch counts, fallback rates, or budget exhaustion events.
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
 #### WEFT-41 — ws03: research — Iteration 3 EML attention multi-param coordinated perturbation
@@ -1114,15 +1097,6 @@
 - **Gap**: The maintenance method (manual LRU flush) is wired but not exposed.
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
-#### WEFT-51 — ws03: context-router — exhaustively test embedding-router cargo-feature-off path
-
-- **State**: Todo · **Priority**: low · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: B · **AC**: strong
-- **Labels**: ws03-pipeline, audit-finding, audit-0.7.0, release-gate-blocker, bug, tests
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: When Config.routing.context_router is set to "embedding" but the embedding-router feature is not compiled in, the daemon's behavior is not exhaustively tested. index.rs already handles EmbeddingRouterError::EmptyRegistry, but other branches may panic or silently fall back.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
 #### WEFT-53 — ws03: pipeline — decide EML score-fusion in scope for 0.7.0 (FitnessScorer weights)
 
 - **State**: Todo · **Priority**: low · **Cycle**: 0.9.x · **Wave**: W0 · **Lane**: B · **AC**: strong
@@ -1150,15 +1124,6 @@
 - **Gap**: The experimental-attention feature gate exists in eml-core and the benchmark example exists, but no GH actions step references it. CI may not catch regressions.
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
-#### WEFT-56 — ws03: pipeline — define explicit pipeline-pass step in scripts/build.sh gate
-
-- **State**: Todo · **Priority**: low · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: B · **AC**: strong
-- **Labels**: ws03-pipeline, audit-finding, audit-0.7.0, tests, tooling
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: The 11-check phase gate doesn't have an explicit pipeline-pass step. Pipeline-specific regression coverage relies on the workspace test suite generally.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
 #### WEFT-57 — ws03: research — track 80+ heuristics from eml-synergy-scan
 
 - **State**: Todo · **Priority**: low · **Cycle**: 1.0.x · **Wave**: W0 · **Lane**: B · **AC**: strong
@@ -1177,36 +1142,7 @@
 - **Gap**: 10 EML opportunities for HNSW (adaptive ef, learned distance, cosine decomposition, search-path prediction, etc.). Items 3-10 are research; items 1-2 (adaptive beam, learned distance) are not yet implemented.
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
-### ws04-plugin-skills (3 open)
-
-#### WEFT-70 — ws04: ux — add macOS-sandbox-downgrade warning to startup banner
-
-- **State**: Todo · **Priority**: low · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: B · **AC**: strong
-- **Labels**: ws04-plugin-skills, audit-finding, audit-0.7.0, release-gate-blocker, docs, security
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: effective_sandbox_type silently downgrades OsSandbox/Combined to Wasm on macOS, emitting tracing::warn!. Downstream operators on macOS may not know they're running in a weaker sandbox — no error, no opt-in confirmation.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-74 — ws04: skills — define pending-skill review timing (interactive prompt vs CLI)
-
-- **State**: Todo · **Priority**: low · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: B · **AC**: strong
-- **Labels**: ws04-plugin-skills, audit-finding, audit-0.7.0, gap
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: Should the .pending marker also trigger an interactive prompt at next agent-loop start, or only on demand via CLI? Today neither happens automatically. Without a defined trigger, pending skills accumulate unseen.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-76 — ws04: skills — add weft skills refresh CLI for headless/CI scenarios
-
-- **State**: Todo · **Priority**: low · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: B · **AC**: strong
-- **Labels**: ws04-plugin-skills, audit-finding, audit-0.7.0, gap, tooling
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: Hot-reload covers FS changes via notify, but in-process discovery state has no manual invalidation surface. Headless / CI scenarios where the watcher is disabled have no fallback.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-### ws05-channels (7 open)
+### ws05-channels (6 open)
 
 #### WEFT-170 — ws05: PluginHost C7 unification — migrate Telegram/Discord/Slack to ChannelAdapter
 
@@ -1224,15 +1160,6 @@
 - **Blocked by**: none
 - **Blocks**: none
 - **Gap**: ChannelHost::register_command is part of the trait surface and is exercised by mock hosts in tests, but no in-tree channel actually calls it. Discord slash-commands, Telegram BotFather commands, and Slack slash commands are all unimplemented despite the trait surface. No tracker entry covers this.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-173 — ws05: Discord — document intents bitmask default and cover privileged-intent rejection
-
-- **State**: Todo · **Priority**: low · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: H · **AC**: strong
-- **Labels**: ws05-channels, audit-finding, audit-0.7.0, docs, tests
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: Factory default intents is 37377 (GUILDS \| GUILD_MESSAGES \| DIRECT_MESSAGES + a few). No doc points at the chosen bits, no test covers intents = 0 or privileged-intent rejection (MESSAGE_CONTENT, GUILD_MEMBERS).
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
 #### WEFT-174 — ws05: Slack — add unknown_envelope counter for API drift detection
@@ -1457,50 +1384,50 @@
 
 ### ws08-weftos-gui (14 open)
 
-#### WEFT-254 — ws08: chat panel — multi-conversation sidebar UI
+#### WEFT-686 — ws08: ADR-073 Phase B — freeform window manager v1 (multi-pane stage)
 
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: F · **AC**: strong
-- **Labels**: ws08-weftos-gui, audit-finding, audit-0.7.0, gap
+- **State**: Todo · **Priority**: high · **Cycle**: 0.9.x · **Wave**: W0 · **Lane**: F · **AC**: strong
+- **Labels**: ws08-weftos-gui, gap
 - **Blocked by**: none
-- **Blocks**: none
-- **Gap**: Panel currently shows one conversation. No way to switch between concurrent threads or revisit history. Multi-tab terminal also foreshadowed only.
+- **Blocks**: WEFT-695
+- **Gap**: WeftOS ships sidebar + single active app. CNVS-like multi-agent walls need a freeform window manager: multiple concurrent panes, z-order, drag/resize, edge snap, layout persistence.
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
-#### WEFT-256 — ws08: chat panel — model / provider switcher in chip strip
+#### WEFT-687 — ws08: ADR-073 Phase C — Agent Workspace mode (spawn-opens-pane + attention bus)
 
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: F · **AC**: strong
-- **Labels**: ws08-weftos-gui, audit-finding, audit-0.7.0, gap
+- **State**: Todo · **Priority**: high · **Cycle**: 0.9.x · **Wave**: W0 · **Lane**: F · **AC**: strong
+- **Labels**: ws08-weftos-gui, gap
 - **Blocked by**: none
 - **Blocks**: none
-- **Gap**: No runtime way to choose model/provider from the panel. Users must edit configs out-of-band.
+- **Gap**: Visible-agent rule: long-running agent sessions must open a UI surface by default. Need Agent Workspace mode (optional shell mode), spawn-opens-pane, arrange verbs, and visual attention bus (glow/chip) without requiring voice yet.
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
-#### WEFT-258 — ws08: chat panel — real interactive defer (resume on { deferred: true })
+#### WEFT-688 — ws08: ADR-073 Phase D — WindowIntent bus (voice/keys/MCP conductor demo)
 
-- **State**: Done · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: F · **AC**: strong
-- **Labels**: ws08-weftos-gui, audit-finding, audit-0.7.0, gap
+- **State**: Todo · **Priority**: high · **Cycle**: 0.9.x · **Wave**: W0 · **Lane**: E · **AC**: strong
+- **Labels**: ws08-weftos-gui, ws10-voice, gap
 - **Blocked by**: none
-- **Blocks**: none
-- **Gap**: When agent returns { deferred: true, reason } the panel should prompt the user and resume on response. Today it doesn't differentiate this control case.
-- **Shipped**: Gate Defer halts the tool loop with `finish_reason=deferred` + `DeferredActionEvent`; chat panel detects deferred wire shapes, renders Approve/Deny/guide affordance, resumes via structured user turn. See `docs/plans/wave-0l-WEFT-258-result.md`.
-
-#### WEFT-277 — ws08: composer — honest_affordances real GEPA / governance intersection
-
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: F · **AC**: strong
-- **Labels**: ws08-weftos-gui, audit-finding, audit-0.7.0, stub, governance
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: honest_affordances is identity passthrough — "ADR-006 rule 2 TODO". GEPA-gated governance intersection deferred to M2 active-radar loop. The hook exists; the policy doesn't.
+- **Blocks**: WEFT-695, WEFT-702
+- **Gap**: CNVS effortlessness comes from one intent bus: voice/keys/MCP all drive spawn/focus/arrange/summarize. WeftOS needs typed WindowIntent shared by all sources so voice is not a special-case egui hack.
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
-#### WEFT-577 — ws08: vscode panel wasm bundle — trim back toward 4500/1500 KB ceiling
+#### WEFT-695 — ws15: ADR-075 G3 — MCP tools → WindowIntent (Grok conductor)
 
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: F · **AC**: strong
-- **Labels**: ws08-weftos-gui, audit-finding, tech-debt
-- **Blocked by**: none
+- **State**: Todo · **Priority**: high · **Cycle**: 0.9.x · **Wave**: W1 · **Lane**: F · **AC**: strong
+- **Labels**: ws08-weftos-gui, ws15-mcp, gap
+- **Blocked by**: WEFT-686, WEFT-688
 - **Blocks**: none
-- **Gap**: : After the M7+M7b feature wave (chat panel markdown via egui_commonmark, terminal scrollback + glyph styling, canon Field::Date with jiff + Field::Code, Workshop Grid/Tabs layouts, three new viewers — HealthViewer/SensorViewer/sparkline — tree filters, breadcrumb navigation, ObjectType registrations for Mesh/Sensor/No
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
+- **Gap**: MCP tools must emit WindowIntent so Grok (and Claude) can spawn panes, focus, arrange, summarize — same as voice/GUI.
+- **Plan**: Wait for WEFT-686, WEFT-688
+
+#### WEFT-702 — ws15: ADR-076 C4 — window_* MCP + media profile gating
+
+- **State**: Todo · **Priority**: medium · **Cycle**: 0.9.x · **Wave**: W1 · **Lane**: F · **AC**: strong
+- **Labels**: ws08-weftos-gui, ws15-mcp, gap
+- **Blocked by**: WEFT-688
+- **Blocks**: none
+- **Gap**: window_* MCP tools and media profile gating must land with Workspace.
+- **Plan**: Wait for WEFT-688
 
 #### WEFT-263 — ws08: terminal panel — multi-tab terminal (HashMap<SessionId, Terminal>)
 
@@ -1738,25 +1665,7 @@
 - **Gap**: WEFT-315 shipped the bundle-size budget gate (scripts/bench/check-ui-bundle-size.sh) and an eslint-plugin-jsx-a11y static lint pass. The original AC explicitly required "axe-core integrated into the Playwright suite or run as a standalone script across all 14 routes" — that runtime axe-core scan is not in the tree. The
 - **Plan**: Wait for WEFT-561
 
-### ws10-voice (30 open)
-
-#### WEFT-214 — ws10: voice_listen / voice_speak tools — wire to real STT/TTS with cloud fallback
-
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: E · **AC**: strong
-- **Labels**: ws10-voice, audit-finding, audit-0.7.0, stub, gap
-- **Blocked by**: WEFT-671
-- **Blocks**: none
-- **Gap**: voice_listen and voice_speak tools are stubs returning a fixed status string. Without these wired, no agent-callable voice path exists.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-215 — ws10: weft voice setup — real model download with SHA-256 verify and progress UI
-
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: E · **AC**: strong
-- **Labels**: ws10-voice, audit-finding, audit-0.7.0, stub
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: weft voice setup prints a stub message; no real model fetch happens.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
+### ws10-voice (23 open)
 
 #### WEFT-217 — ws10: EchoCanceller and NoiseSuppressor — replace deceptive passthroughs with real DSP
 
@@ -1765,51 +1674,6 @@
 - **Blocked by**: none
 - **Blocks**: none
 - **Gap**: Both modules are passthroughs. EchoCanceller has a circular reference buffer that process() ignores; NoiseSuppressor tracks RMS noise floor via EMA but does not filter. The presence of computed-but-unused state is misleading.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-218 — ws10: WS voice:status — connect a real backend broadcaster
-
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: E · **AC**: strong
-- **Labels**: ws10-voice, audit-finding, audit-0.7.0, gap, orphan
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: VoiceWsEvent and the voice:status topic are defined; the UI subscribes; nothing emits. Half-orphan API.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-219 — ws10: /api/voice/* — replace MSW-only mocks with real handlers in clawft-services
-
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: E · **AC**: strong
-- **Labels**: ws10-voice, audit-finding, audit-0.7.0, stub, gap
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: /api/voice/{status,settings,test-mic,test-speaker} are MSW-mocked only. UI works only against mocks; the daemon does not serve them.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-221 — ws10: Talk Mode interruption — abort TTS when VAD trips during playback
-
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: E · **AC**: strong
-- **Labels**: ws10-voice, audit-finding, audit-0.7.0, gap
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: TtsAbortHandle is defined but synthesize() never checks it. TalkModeController::run() is a thin pass-through. There is no interruption detection (mic VAD trips while TTS speaking → abort handle).
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-222 — ws10: VoicePersonality — wire per-agent lookup in TTS dispatch
-
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: E · **AC**: strong
-- **Labels**: ws10-voice, audit-finding, audit-0.7.0, gap
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: VoiceConfig.personalities (HashMap<String, VoicePersonality>) is configured and validated but no TTS path consults it. VoicePersonality.greeting_prefix is never consumed.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-238 — ws10: VoiceConfig.tts.provider="browser" — implement Web Speech dispatch or change default
-
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: E · **AC**: strong
-- **Labels**: ws10-voice, audit-finding, audit-0.7.0, bug, docs
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: The default TTS provider is "browser" (Web Speech API) but tts.rs has no browser dispatch. The only TTS providers wired are local-stub, OpenAI, and ElevenLabs. Default points at an unimplemented path.
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
 #### WEFT-613 — Voicelab parity: Chatterbox cloned-voice fast tier (native port)
@@ -2010,25 +1874,7 @@
 - **Gap**: Once the desktop thin edge (ADR-068 Phase 1) is proven, the standalone in-memory TalkForest path is redundant and should be retired so voice runs on one engine.
 - **Plan**: Wait for WEFT-615
 
-### ws11-agent-core-v1 (17 open)
-
-#### WEFT-331 — ws11: agent-core-v1.1 — interactive Defer UX prompt-and-resume in panel
-
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: D · **AC**: strong
-- **Labels**: ws11-agent-core-v1, audit-finding, audit-0.7.0, gap
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: D2 surfaces GateDecision::Defer { reason } as a structured tool-result the LLM can re-plan against. Real interactive defer (panel-side prompt with human-in-the-loop hook) is v1.1 — needs panel UI work.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
-
-#### WEFT-673 — ws11: hermes loop — voice-review-gate residual gaps self-documented by WEFT-655 (forest-commit asymmetry + hold-drain seam)
-
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: D · **AC**: strong
-- **Labels**: ws11-agent-core-v1, gap
-- **Blocked by**: WEFT-655
-- **Blocks**: none
-- **Gap**: WEFT-655 shipped and is correctly Done, but its own commit message explicitly records two edges it did not close. Neither has a tracking item — a search of all 659 work items for their exact terms returned nothing, so they would have been lost with the closing ticket. 1. Voice forest-commit asymmetry. Voice-originated 
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
+### ws11-agent-core-v1 (15 open)
 
 #### WEFT-326 — ws11: agent-core-v1.1 — stabilize append_turns_are_monotonic flake via injectable clock
 
@@ -2466,7 +2312,25 @@
 - **Gap**: The AgentBBS ADR work (ADR-063..066) used patterns only. Any source reuse from AgentBBS / late.sh is FSL-licensed and must clear a licensing question before code is copied or linked. This blocks any future "reuse the AgentBBS implementation" path.
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
-### ws14-deployment (20 open)
+### ws14-deployment (22 open)
+
+#### WEFT-705 — ws14: ADR-077 A1 — Android capture MVP (CameraX + IMU coverage + ZIP)
+
+- **State**: Todo · **Priority**: high · **Cycle**: 0.9.x · **Wave**: W0 · **Lane**: A · **AC**: strong
+- **Labels**: ws14-deployment, gap
+- **Blocked by**: none
+- **Blocks**: none
+- **Gap**: Native capture with coverage guidance offline (no host required).
+- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
+
+#### WEFT-706 — ws14: ADR-077 A2 — pair + upload to Mac/cloud splatd + SOG review
+
+- **State**: Todo · **Priority**: high · **Cycle**: 0.9.x · **Wave**: W0 · **Lane**: A · **AC**: strong
+- **Labels**: ws14-deployment, gap
+- **Blocked by**: none
+- **Blocks**: none
+- **Gap**: Phone → Mac/cloud splatd without USB.
+- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
 #### WEFT-453 — ws14: ci — soft-check docs-site MDX builds locally via scripts/build.sh ui
 
@@ -2648,7 +2512,7 @@
 - **Gap**: Closure-sdk is currently 'defer / conceptual-only' due to AGPL-3.0. If weftos-closure-bridge work is ever proposed it would force a separate AGPL crate behind an IPC boundary — meaning a separate release-artifact lifecycle (separate crate, separate license bundle, possibly separate Docker image).
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
-### ws15-mcp (7 open)
+### ws15-mcp (9 open)
 
 #### WEFT-559 — ws15: Windows named-pipe transport — implement DaemonClient + daemon listener for x86_64-pc-windows-msvc
 
@@ -2659,14 +2523,32 @@
 - **Gap**: Re-enable Windows in cargo-dist target list once the named-pipe transport ships. See docs/guides/weftos-deferred-requirements.md (Windows transport section). Tracks the followup from WEFT-483 (deferred from 0.7.0). Implementation outline lives in the deferred-requirements doc; ve
 - **Plan**: Strengthen AC before coding
 
-#### WEFT-558 — ws15: VSCode panel E2E — chip-icon DOM assertion (followup to WEFT-486)
+#### WEFT-696 — ws15: ADR-075 G4 — HTTP/SSE mcp-server listen + auth (remote Grok)
 
-- **State**: Done · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: J · **AC**: ok
-- **Labels**: tests, ws15-mcp
-- **Blocked by**: WEFT-486
-- **Blocks**: WEFT-486
-- **Gap**: Closed — mock chip a11y overlay + `weft._test.chipStripSnapshot`; E2E asserts `data-chip-id="kernel"`. See `docs/plans/wave-0l-WEFT-558-result.md`.
-- **Plan**: Shipped on `wave0l/weft-558-chip-e2e`
+- **State**: Todo · **Priority**: medium · **Cycle**: 0.9.x · **Wave**: W0 · **Lane**: J · **AC**: strong
+- **Labels**: ws15-mcp, gap, governance
+- **Blocked by**: none
+- **Blocks**: none
+- **Gap**: Remote “Grok on laptop, WeftOS on server” needs WeftOS to serve MCP over HTTP/SSE (or streamable HTTP) with auth. Today only stdio.
+- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
+
+#### WEFT-697 — ws15: ADR-075 G5 — MCP session capability tokens + audit client label
+
+- **State**: Todo · **Priority**: medium · **Cycle**: 0.9.x · **Wave**: W0 · **Lane**: J · **AC**: strong
+- **Labels**: ws15-mcp, gap, governance
+- **Blocked by**: none
+- **Blocks**: none
+- **Gap**: MCP sessions need identity: which client (grok/claude), which workspace roots, which tools (spawn agents? shell?). Anonymous stdio is OK for single-user local; remote and multi-tenant need tokens.
+- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
+
+#### WEFT-703 — ws15: ADR-076 C5 — catalog↔code drift CI
+
+- **State**: Todo · **Priority**: medium · **Cycle**: 0.9.x · **Wave**: W0 · **Lane**: J · **AC**: strong
+- **Labels**: ws15-mcp, gap, tests
+- **Blocked by**: none
+- **Blocks**: none
+- **Gap**: Catalog drifts from code without CI.
+- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
 #### WEFT-497 — ws15: agent-core-chat feature flag — schedule removal post-D3 soak
 
@@ -2713,16 +2595,7 @@
 - **Gap**: Three operational defects in the plane.sh wrapper, each hit and worked around during the 2026-07-05 sync (scripts/plane.py was NOT modified in that run): transition / close / comment take an issue UUID, not the WEFT-N sequence id. These subcommands PATCH/POST /issues/{arg}/ directly, so passing WEFT-603 hits /issues/WE
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
-### ws16-browser-wasm (17 open)
-
-#### WEFT-390 — ws16: browser — streaming chat via ReadableStream / wasm-streams
-
-- **State**: Todo · **Priority**: medium · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: G · **AC**: strong
-- **Labels**: ws16-browser-wasm, audit-finding, audit-0.7.0, gap
-- **Blocked by**: none
-- **Blocks**: none
-- **Gap**: StreamCallback = Box<dyn FnMut(&str) -> bool + Send> is incompatible with the browser's single-threaded !Send model. PipelineRegistry::complete_stream and LlmTransport::complete_stream default impl are gated #[cfg(not(feature = "browser"))]. A browser streaming entry needs a ?Send callback type or migration to wasm-str
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
+### ws16-browser-wasm (16 open)
 
 #### WEFT-393 — ws16: browser — write ADR-027 Browser WASM Support
 
@@ -2868,7 +2741,7 @@
 - **Gap**: A transitive dependency hard-pins wasm-bindgen = "=0.2.108", so the browser pkg build (scripts/build.sh browser) requires wasm-bindgen-cli 0.2.108 EXACTLY — the current latest (0.2.126) fails. Friction for any contributor on a newer CLI.
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
-### ws17-research (31 open)
+### ws17-research (35 open)
 
 #### WEFT-519 — ws17: LeWM — codify ADR-058 decoupling-invariant runtime checks
 
@@ -3075,6 +2948,42 @@
 - **Blocked by**: none
 - **Blocks**: none
 - **Gap**: The 8-agent / 48-task exochain-fix-plan.md is partially consumed. Remaining medium-severity rows in the cap matrix carry over.
+- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
+
+#### WEFT-709 — ws17: ADR-078 W1 — geometric partition (surfaces, object AABBs, free space)
+
+- **State**: Todo · **Priority**: medium · **Cycle**: 0.9.x · **Wave**: W0 · **Lane**: I · **AC**: strong
+- **Labels**: ws17-research, gap
+- **Blocked by**: none
+- **Blocks**: none
+- **Gap**: Need object AABBs and free-space volumes without full semantic ML.
+- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
+
+#### WEFT-710 — ws17: free-form quilt Q0 — region/contribution + camera-stats schema
+
+- **State**: Todo · **Priority**: medium · **Cycle**: 0.9.x · **Wave**: W0 · **Lane**: I · **AC**: strong
+- **Labels**: ws17-research, gap, docs
+- **Blocked by**: none
+- **Blocks**: none
+- **Gap**: Need region + contribution schemas and camera-stats contract for free-form quilt accumulation.
+- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
+
+#### WEFT-711 — ws17: multi-cam rig M0 — multi-camera session ingest (known poses)
+
+- **State**: Todo · **Priority**: medium · **Cycle**: 0.9.x · **Wave**: W0 · **Lane**: I · **AC**: strong
+- **Labels**: ws17-research, gap
+- **Blocked by**: none
+- **Blocks**: none
+- **Gap**: splatd needs multi-folder / multi-cam session ingest with known extrinsics.
+- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
+
+#### WEFT-713 — ws17: ADR-079 E0 — Earth digital twin doctrine + world-builder expert
+
+- **State**: Todo · **Priority**: medium · **Cycle**: 0.9.x · **Wave**: W0 · **Lane**: I · **AC**: strong
+- **Labels**: ws17-research, gap, docs
+- **Blocked by**: none
+- **Blocks**: none
+- **Gap**: Need doctrine for Earth-scale digital twin: sparse-first, LOD, open feeds, local densification — Snow Crash north star without fake full-planet GS.
 - **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
 
 #### WEFT-509 — ws17: ECC — resolve 5 pre-existing clippy warnings in agent_loop, chain, gate

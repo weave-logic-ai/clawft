@@ -256,7 +256,7 @@ mod tests {
                 assert_eq!(content, "hi");
                 assert_eq!(format, "plain");
             }
-            other => panic!("expected Text, got: {other:?}"),
+            other => unreachable!("expected Text, got: {other:?}"),
         }
     }
 
@@ -284,7 +284,7 @@ mod tests {
         let elem: CanvasElement = serde_json::from_value(json).unwrap();
         match elem {
             CanvasElement::Button { disabled, .. } => assert!(!disabled),
-            other => panic!("expected Button, got: {other:?}"),
+            other => unreachable!("expected Button, got: {other:?}"),
         }
     }
 
@@ -315,7 +315,7 @@ mod tests {
                 assert_eq!(placeholder, "");
                 assert_eq!(value, "");
             }
-            other => panic!("expected Input, got: {other:?}"),
+            other => unreachable!("expected Input, got: {other:?}"),
         }
     }
 
@@ -337,7 +337,7 @@ mod tests {
         let elem: CanvasElement = serde_json::from_value(json).unwrap();
         match elem {
             CanvasElement::Image { alt, .. } => assert_eq!(alt, ""),
-            other => panic!("expected Image, got: {other:?}"),
+            other => unreachable!("expected Image, got: {other:?}"),
         }
     }
 
@@ -359,7 +359,7 @@ mod tests {
         let elem: CanvasElement = serde_json::from_value(json).unwrap();
         match elem {
             CanvasElement::Code { language, .. } => assert_eq!(language, ""),
-            other => panic!("expected Code, got: {other:?}"),
+            other => unreachable!("expected Code, got: {other:?}"),
         }
     }
 
@@ -473,7 +473,7 @@ mod tests {
                 assert!(title.is_none());
                 assert!(colors.is_none());
             }
-            other => panic!("expected Chart, got: {other:?}"),
+            other => unreachable!("expected Chart, got: {other:?}"),
         }
     }
 
@@ -549,7 +549,7 @@ mod tests {
                 assert!(!editable);
                 assert!(line_numbers); // defaults to true
             }
-            other => panic!("expected CodeEditor, got: {other:?}"),
+            other => unreachable!("expected CodeEditor, got: {other:?}"),
         }
     }
 
@@ -687,7 +687,7 @@ mod tests {
                 assert_eq!(code, "x = 1");
                 assert_eq!(language, "python");
             }
-            other => panic!("expected CodeSubmit, got: {other:?}"),
+            other => unreachable!("expected CodeSubmit, got: {other:?}"),
         }
     }
 
@@ -723,7 +723,7 @@ mod tests {
                 assert_eq!(id, "el-2");
                 assert!(position.is_none());
             }
-            other => panic!("expected Render, got: {other:?}"),
+            other => unreachable!("expected Render, got: {other:?}"),
         }
     }
 
@@ -839,7 +839,7 @@ mod tests {
                 assert_eq!(element_id, "btn-x");
                 assert_eq!(action, "delete");
             }
-            other => panic!("expected Click, got: {other:?}"),
+            other => unreachable!("expected Click, got: {other:?}"),
         }
     }
 
@@ -856,7 +856,7 @@ mod tests {
                 assert_eq!(element_id, "form-2");
                 assert_eq!(values.get("name").unwrap(), "Bob");
             }
-            other => panic!("expected FormSubmit, got: {other:?}"),
+            other => unreachable!("expected FormSubmit, got: {other:?}"),
         }
     }
 

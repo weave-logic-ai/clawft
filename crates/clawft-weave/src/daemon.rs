@@ -160,20 +160,13 @@ fn take_parked_voice_attempt(label: &str) -> Option<(String, u64)> {
         .map(|(_, v)| v)
 }
 
-/// WEFT-655 Gap A: after a held proposal resolves as ACCEPTED
+/// WEFT-655 Gap A / WEFT-673: after a held proposal resolves as ACCEPTED
 /// (`agent.proposal.accept`), resolve any voice reply parked behind it —
-/// commits the forest attempt `dispatch_reply`'s Ok arm deferred, and clears
-/// the voice loop's busy axis for it. No-op when nothing was parked under
-/// `label` (the ordinary text-chat / no-voice case).
-///
-/// KNOWN GAP: this does NOT drain the conversation's queued voice utterances
-/// (WEFT-650's `VoiceQueues`) the way `dispatch_reply`'s ordinary finalize
-/// does. That drain lives behind `DaemonReplySubmitter`/`VoiceShared`,
-/// private to `voice_loop.rs`, with no seam an RPC arm can reach cleanly —
-/// widening it would mean exposing the drain (and the `Arc<AgentService>` it
-/// resubmits through) crate-wide for one caller. Anything queued during the
-/// hold stays parked and drains on the conversation's next ordinary turn
-/// instead of immediately on accept.
+/// commits the forest attempt `dispatch_reply`'s Ok arm deferred, clears
+/// the voice loop's busy axis, and drains one queued utterance (WEFT-673
+/// hold-drain seam — same order as ordinary finalize: commit/clear, then
+/// `drain_next`). No-op when nothing was parked under `label` (the ordinary
+/// text-chat / no-voice case).
 fn resolve_parked_attempt_on_accept(label: &str) {
     let Some((conv, seq)) = take_parked_voice_attempt(label) else {
         return;
@@ -182,22 +175,31 @@ fn resolve_parked_attempt_on_accept(label: &str) {
         tier.commit_reply_frontier(&conv, seq);
     }
     if let Some(voice_loop) = DAEMON_VOICE_LOOP.get() {
+        // Busy axis first, then drain — the drained resubmit must not see
+        // the parked attempt as still in flight (WEFT-673).
         voice_loop.clear_parked_in_flight(&conv, seq);
+        voice_loop.drain_after_hold_resolve(&conv);
     }
     info!(
         conv_id = %conv,
         seq,
         label = %label,
-        "WEFT-655: parked voice attempt resolved on proposal accept (forest committed)"
+        "WEFT-655/673: parked voice attempt resolved on proposal accept \
+         (forest committed + queue drain)"
     );
 }
 
-/// WEFT-655 Gap A: after a held proposal resolves as DISCARDED (operator
-/// `agent.proposal.discard` RPC arm, or the fail-closed timeout sweep —
-/// [`run_proposal_timeout_sweep_tick`]), clear any voice reply parked behind
-/// it the SAME way a bare STOP interrupt does: prune tombstone + witnessed
-/// cancel (`SessionTier::emit_cancel_prune` / `witness_cancel`), then clear
-/// the voice busy axis. No-op when nothing was parked under `label`.
+/// WEFT-655 Gap A / WEFT-673: after a held proposal resolves as DISCARDED
+/// (operator `agent.proposal.discard` RPC arm, or the fail-closed timeout
+/// sweep — [`run_proposal_timeout_sweep_tick`]), clear any voice reply
+/// parked behind it the SAME way a bare STOP interrupt does: prune
+/// tombstone + witnessed cancel (`SessionTier::emit_cancel_prune` /
+/// `witness_cancel`), then clear the voice busy axis and drain one queued
+/// utterance (WEFT-673). Unlike a STOP-driven `Cancelled` finalize — which
+/// deliberately does **not** drain because the Refine resubmit that caused
+/// the cancel drains on *its* finalize — a proposal discard has no
+/// replacement attempt, so the queue would stall without an explicit drain.
+/// No-op when nothing was parked under `label`.
 fn cleanup_parked_attempt_on_discard(label: &str) {
     let Some((conv, seq)) = take_parked_voice_attempt(label) else {
         return;
@@ -208,12 +210,16 @@ fn cleanup_parked_attempt_on_discard(label: &str) {
     }
     if let Some(voice_loop) = DAEMON_VOICE_LOOP.get() {
         voice_loop.clear_parked_in_flight(&conv, seq);
+        // WEFT-673: discard has no Refine replacement — drain so queued
+        // utterances do not wait for the next ordinary turn.
+        voice_loop.drain_after_hold_resolve(&conv);
     }
     info!(
         conv_id = %conv,
         seq,
         label = %label,
-        "WEFT-655: parked voice attempt cleaned up on proposal discard (pruned + witnessed)"
+        "WEFT-655/673: parked voice attempt cleaned up on proposal discard \
+         (pruned + witnessed + queue drain)"
     );
 }
 
@@ -754,6 +760,10 @@ pub async fn run(
     let socket_path = protocol::socket_path();
 
     // Clean up stale socket file
+    // WEFT-39: persist shared LLM RetryModel learned weights so the next
+    // daemon start restores the curve instead of resetting to untrained.
+    clawft_core::pipeline::persist_shared_retry_model();
+
     if socket_path.exists() {
         // Try connecting to see if a daemon is already running
         if tokio::net::UnixStream::connect(&socket_path).await.is_ok() {
@@ -8615,7 +8625,8 @@ mod tests {
     fn resolve_parked_attempt_on_accept_clears_the_park() {
         // No `daemon_agent()`/`DAEMON_VOICE_LOOP` wired in this test binary
         // (no daemon boot happened) — the tier/voice-loop side-effects
-        // degrade to no-ops, but the park itself must still clear.
+        // (forest commit, clear_parked, WEFT-673 drain) degrade to no-ops,
+        // but the park itself must still clear.
         let label = "turn:agent.chat:conv-accept";
         park_voice_attempt(label, "conv-accept", 3);
         resolve_parked_attempt_on_accept(label);
@@ -8638,9 +8649,38 @@ mod tests {
 
     #[test]
     fn resolve_and_cleanup_are_noop_when_nothing_parked() {
-        // Must not panic when there's nothing under the label.
+        // Must not panic when there's nothing under the label — including
+        // the WEFT-673 drain call (no voice loop wired ⇒ no drain).
         resolve_parked_attempt_on_accept("turn:agent.chat:never-parked");
         cleanup_parked_attempt_on_discard("turn:agent.chat:never-parked");
+    }
+
+    /// WEFT-673: restate the two residual edges WEFT-655 self-documented,
+    /// in code terms. Pins the call sites a future reader must keep
+    /// aligned; the hold-drain is closed (drain_after_hold_resolve), the
+    /// forest-path shape remains deliberately voice-specific (see
+    /// `voice_loop` module doc).
+    #[test]
+    fn weft_673_residual_gaps_restated_in_code_terms() {
+        // Gap 1 — voice forest-commit path (deliberate asymmetry):
+        //   park:     voice_loop::dispatch_reply Ok arm → park_voice_attempt
+        //   accept:   resolve_parked_attempt_on_accept → commit_reply_frontier
+        //   discard:  cleanup_parked_attempt_on_discard → emit_cancel_prune
+        //             + witness_cancel (same pair as Stop interrupt)
+        //   text chat has no reply Frontier; voice needs one for barge-in.
+        // Gap 2 — hold-drain seam (CLOSED by WEFT-673):
+        //   accept/discard → clear_parked_in_flight THEN
+        //                    VoiceLoop::drain_after_hold_resolve
+        //   (was: queue waited for next ordinary turn; RPC arm had no seam)
+        let accept_label = turn_hold_label("weft-673-accept");
+        let discard_label = turn_hold_label("weft-673-discard");
+        assert_eq!(accept_label, "turn:agent.chat:weft-673-accept");
+        park_voice_attempt(&accept_label, "weft-673-accept", 1);
+        park_voice_attempt(&discard_label, "weft-673-discard", 2);
+        resolve_parked_attempt_on_accept(&accept_label);
+        cleanup_parked_attempt_on_discard(&discard_label);
+        assert!(take_parked_voice_attempt(&accept_label).is_none());
+        assert!(take_parked_voice_attempt(&discard_label).is_none());
     }
 
     #[test]

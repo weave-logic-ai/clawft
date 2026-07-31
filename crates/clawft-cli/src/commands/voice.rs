@@ -79,8 +79,7 @@ pub enum VoiceCommand {
 pub async fn handle_voice(args: VoiceArgs) -> anyhow::Result<()> {
     match args.command {
         VoiceCommand::Setup => {
-            println!("Voice setup not yet implemented (requires VP validation)");
-            println!("This will download STT/TTS/VAD models to ~/.clawft/models/voice/");
+            handle_setup().await?;
         }
         VoiceCommand::TestMic { duration } => {
             handle_test_mic(duration).await?;
@@ -109,6 +108,91 @@ pub async fn handle_voice(args: VoiceArgs) -> anyhow::Result<()> {
             handle_install_service(manager).await?;
         }
     }
+    Ok(())
+}
+
+/// `weft voice setup` — download canonical STT/TTS/VAD models with SHA-256
+/// verify and stderr progress (WEFT-215).
+///
+/// Cache directory: `~/.clawft/models/voice/`. Models without a real (non-
+/// placeholder) SHA-256 pin are **refused** rather than fetched blindly.
+/// Verified cache hits are reused with no network.
+async fn handle_setup() -> anyhow::Result<()> {
+    use clawft_plugin::voice::{
+        EnsureOutcome, ModelDownloadManager, finish_stderr_progress, is_placeholder_hash,
+        stderr_progress_line,
+    };
+
+    println!("=== ClawFT Voice Setup ===\n");
+
+    let cache_dir = ModelDownloadManager::default_cache_dir();
+    println!("Model cache: {}\n", cache_dir.display());
+    let mgr = ModelDownloadManager::new(cache_dir);
+
+    let models = ModelDownloadManager::all_canonical_models();
+    if models.is_empty() {
+        anyhow::bail!("no canonical voice models registered");
+    }
+
+    let mut ready = 0u32;
+    let mut skipped = 0u32;
+    let mut failed = 0u32;
+
+    for model in &models {
+        if is_placeholder_hash(model.sha256_hint.as_deref()) {
+            eprintln!(
+                "  SKIP {}: missing or placeholder SHA-256 — refusing download \
+                 (pin a real 64-hex digest in ModelInfo::sha256_hint)",
+                model.id
+            );
+            skipped += 1;
+            continue;
+        }
+
+        if mgr.is_cached(model) {
+            println!(
+                "  CACHED {}: {}",
+                model.id,
+                mgr.model_path(&model.id).display()
+            );
+            ready += 1;
+            continue;
+        }
+
+        let mut line = stderr_progress_line(&model.id);
+        let progress: &mut dyn FnMut(u64, u64) = &mut line;
+        match mgr.ensure_model(model, Some(progress)).await {
+            Ok(EnsureOutcome::Downloaded(path)) => {
+                finish_stderr_progress();
+                println!("  DOWNLOADED {}: {}", model.id, path.display());
+                ready += 1;
+            }
+            Ok(EnsureOutcome::Cached(path)) => {
+                finish_stderr_progress();
+                println!("  CACHED {}: {}", model.id, path.display());
+                ready += 1;
+            }
+            Err(e) => {
+                finish_stderr_progress();
+                eprintln!("  FAIL {}: {e}", model.id);
+                failed += 1;
+            }
+        }
+    }
+
+    println!();
+    println!("Summary: {ready} ready, {skipped} skipped (no hash), {failed} failed");
+    if skipped > 0 && ready == 0 {
+        println!(
+            "Note: catalog entries still need real SHA-256 pins before production \
+             downloads (WEFT-215; SC-7 signed manifests cover runtime bundle verify)."
+        );
+    }
+    if failed > 0 {
+        anyhow::bail!("voice setup failed for {failed} model(s)");
+    }
+
+    println!("\n=== Voice setup complete ===");
     Ok(())
 }
 

@@ -1,0 +1,38 @@
+# splatd configuration — macOS (M-series) defaults.
+# Every tool is swappable here; see docs/weftos/splat-pipeline-design.md.
+# data_dir is absolutized at startup (relative paths resolve from cwd).
+
+data_dir = "./data/splat"
+
+[tools]
+ffmpeg = "ffmpeg"            # brew install ffmpeg
+ffprobe = "ffprobe"
+colmap = "colmap"            # brew install colmap
+# glomap = "glomap"          # optional: much faster mapper (brew install glomap)
+brush = "brush-cli"          # https://github.com/ArthurBrussee/brush (Metal via wgpu)
+splat_transform = "splat-transform"  # npm i -g @playcanvas/splat-transform
+
+[frames]
+fps = 2.0                    # sampled frames/sec from the walkaround video
+max_frames = 300             # hard cap; long videos get thinned uniformly
+max_edge = 1600              # downscale longest edge (0 = keep original)
+jpeg_q = 2                   # ffmpeg -q:v (2 best … 31 worst)
+
+[sfm]
+camera_model = "SIMPLE_RADIAL"
+single_camera = true         # one phone, one camera
+sequential = true            # video ⇒ sequential matching
+# closed-loop walkarounds: enable if you have a COLMAP vocab tree installed
+loop_detection = false
+# Pipeline always keeps only the *largest* COLMAP model (see stages.rs).
+# Multiple sparse/N models trained together explode the splat.
+
+[train]
+total_iters = 30000
+max_resolution = 1600
+max_splats = 2000000         # lower default — 3M floaters make clouds look broken
+sh_degree = 3
+extra_args = []
+
+[compress]
+format = "sog"               # web-streamable; ~1-10% of raw ply size

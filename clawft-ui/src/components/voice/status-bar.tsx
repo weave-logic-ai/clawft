@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { Mic, MicOff, Loader, Volume2 } from "lucide-react";
 import { useVoiceStore, type VoiceState } from "../../stores/voice-store";
+import { api } from "../../lib/api-client";
 import { wsClient } from "../../lib/ws-client";
 import { cn } from "../../lib/utils";
 
@@ -14,24 +15,50 @@ const stateConfig: Record<
   speaking: { icon: Volume2, color: "text-blue-500", pulse: true, label: "Speaking" },
 };
 
+type VoiceStatusPayload = {
+  state?: VoiceState;
+  status?: VoiceState;
+  transcript?: string | null;
+  response?: string | null;
+  talkModeActive?: boolean;
+};
+
+function applyVoiceStatusPayload(
+  payload: VoiceStatusPayload,
+  setState: (s: VoiceState) => void,
+  setTranscript: (t: string) => void,
+  setResponse: (t: string) => void,
+  setTalkMode: (a: boolean) => void,
+) {
+  const next = payload.state ?? payload.status;
+  if (next) setState(next);
+  if (payload.transcript !== undefined) setTranscript(payload.transcript ?? "");
+  if (payload.response !== undefined) setResponse(payload.response ?? "");
+  if (payload.talkModeActive !== undefined) setTalkMode(payload.talkModeActive);
+}
+
 export function VoiceStatusBar() {
   const { state, talkModeActive, setTalkMode, setState, setTranscript, setResponse } =
     useVoiceStore();
 
   useEffect(() => {
+    // Real backend path: TopicBroadcaster topic "voice:status" is enveloped
+    // by the WS handler as { type: "event", topic, data } (same as canvas).
     wsClient.subscribe("voice:status");
 
-    const off = wsClient.on("voice:status", (data) => {
-      const payload = data as {
-        state?: VoiceState;
-        transcript?: string;
-        response?: string;
-        talkModeActive?: boolean;
+    const off = wsClient.on("event", (raw: unknown) => {
+      const msg = raw as {
+        topic?: string;
+        data?: VoiceStatusPayload;
       };
-      if (payload.state) setState(payload.state);
-      if (payload.transcript !== undefined) setTranscript(payload.transcript);
-      if (payload.response !== undefined) setResponse(payload.response);
-      if (payload.talkModeActive !== undefined) setTalkMode(payload.talkModeActive);
+      if (msg.topic !== "voice:status" || !msg.data) return;
+      applyVoiceStatusPayload(
+        msg.data,
+        setState,
+        setTranscript,
+        setResponse,
+        setTalkMode,
+      );
     });
 
     return () => {
@@ -43,9 +70,25 @@ export function VoiceStatusBar() {
   const config = stateConfig[state];
   const Icon = config.icon;
 
+  const toggleTalkMode = () => {
+    const next = !talkModeActive;
+    setTalkMode(next);
+    setState(next ? "listening" : "idle");
+    // Push to daemon so GET /api/voice/status and WS subscribers stay in sync
+    // (WEFT-218 real broadcaster — not MSW-only).
+    void api.voice
+      .updatePipeline({
+        talkModeActive: next,
+        state: next ? "listening" : "idle",
+      })
+      .catch(() => {
+        /* offline / MSW: local store still drives the overlay */
+      });
+  };
+
   return (
     <button
-      onClick={() => setTalkMode(!talkModeActive)}
+      onClick={toggleTalkMode}
       className={cn(
         "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium transition-colors",
         "border border-gray-200 dark:border-gray-600",

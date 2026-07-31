@@ -155,6 +155,9 @@ fn make_state() -> (ApiState, Arc<TokenStore>) {
         voice: Arc::new(StubVoice),
         broadcaster: Arc::new(TopicBroadcaster::new()),
         kernel_facade: Arc::new(InMemoryKernelFacade::new()),
+        routing_history: Arc::new(
+            clawft_core::pipeline::decision_history::RoutingDecisionHistory::new(),
+        ),
     };
     (state, auth)
 }
@@ -456,4 +459,163 @@ async fn csp_header_present_on_unauthorized() {
         resp.headers().get("content-security-policy").is_some(),
         "CSP header must accompany 401 responses too"
     );
+}
+
+// ── WEFT-40: admin routing decision history ─────────────────────────────
+
+#[tokio::test]
+async fn admin_routing_decisions_requires_auth() {
+    let (state, _auth) = make_state();
+    let app = build_router(state, &[], None);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/admin/routing/decisions")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn admin_routing_decisions_returns_seeded_history() {
+    use clawft_core::pipeline::traits::RoutingDecision;
+    use http_body_util::BodyExt;
+
+    let (state, auth) = make_state();
+    // Seed the shared ring buffer.
+    for i in 0..5 {
+        let d = RoutingDecision {
+            provider: "openai".into(),
+            model: format!("m-{i}"),
+            reason: format!("tiered routing: complexity=0.5, tier=free, level=1, user=alice"),
+            tier: Some("free".into()),
+            cost_estimate_usd: Some(0.01),
+            escalated: false,
+            budget_constrained: i == 2,
+            sender_id: Some("alice".into()),
+        };
+        state.routing_history.record(&d);
+    }
+    // One bob/premium decision for filter tests.
+    state.routing_history.record(&RoutingDecision {
+        provider: "anthropic".into(),
+        model: "claude".into(),
+        reason: "fallback: primary unavailable".into(),
+        tier: Some("premium".into()),
+        cost_estimate_usd: Some(0.05),
+        escalated: true,
+        budget_constrained: false,
+        sender_id: Some("bob".into()),
+    });
+
+    let token = auth.generate_token(3600).unwrap();
+    let app = build_router(state, &[], None);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/admin/routing/decisions?limit=10")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["returned"], 6);
+    assert_eq!(body["stats"]["count"], 6);
+    assert!(body["stats"]["fallback"].as_u64().unwrap() >= 1);
+    // Newest first; free-text reason must not appear.
+    let decisions = body["decisions"].as_array().unwrap();
+    assert_eq!(decisions.len(), 6);
+    let first = &decisions[0];
+    assert_eq!(first["principal"], "bob");
+    assert_eq!(first["reason_category"], "fallback_chosen");
+    assert!(first.get("reason").is_none());
+
+}
+
+#[tokio::test]
+async fn admin_routing_decisions_filter_by_user_and_tier() {
+    use clawft_core::pipeline::traits::RoutingDecision;
+    use http_body_util::BodyExt;
+
+    let (state, auth) = make_state();
+    state.routing_history.record(&RoutingDecision {
+        provider: "openai".into(),
+        model: "m".into(),
+        reason: "tiered routing: complexity=0.1, tier=free, level=0, user=alice".into(),
+        tier: Some("free".into()),
+        sender_id: Some("alice".into()),
+        ..Default::default()
+    });
+    state.routing_history.record(&RoutingDecision {
+        provider: "openai".into(),
+        model: "m2".into(),
+        reason: "tiered routing: complexity=0.9, tier=premium, level=2, user=bob".into(),
+        tier: Some("premium".into()),
+        sender_id: Some("bob".into()),
+        ..Default::default()
+    });
+    let token = auth.generate_token(3600).unwrap();
+    let app = build_router(state, &[], None);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/admin/routing/decisions?user=alice&tier=free")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["returned"], 1);
+    assert_eq!(body["decisions"][0]["principal"], "alice");
+    assert_eq!(body["decisions"][0]["tier"], "free");
+    // reason category is redacted, not free-text with user=
+    let cat = body["decisions"][0]["reason_category"].as_str().unwrap();
+    assert!(!cat.contains("alice"));
+    assert_eq!(cat, "tiered_routing");
+}
+
+#[tokio::test]
+async fn admin_routing_stats_endpoint() {
+    use clawft_core::pipeline::traits::RoutingDecision;
+    use http_body_util::BodyExt;
+
+    let (state, auth) = make_state();
+    state.routing_history.record(&RoutingDecision {
+        provider: "openai".into(),
+        model: "m".into(),
+        reason: "rate limited: using free tier".into(),
+        tier: Some("free".into()),
+        sender_id: Some("u".into()),
+        ..Default::default()
+    });
+    let token = auth.generate_token(3600).unwrap();
+    let app = build_router(state, &[], None);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/admin/routing/stats")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["count"], 1);
+    assert_eq!(body["by_reason"]["rate_limited"], 1);
 }

@@ -479,8 +479,22 @@ impl Channel for DiscordChannel {
                                     }
                                 }
                             }
-                            Some(Ok(WsMessage::Close(_))) => {
-                                info!("Discord Gateway closed by server");
+                            Some(Ok(WsMessage::Close(frame))) => {
+                                let code = frame.as_ref().map(|f| u16::from(f.code));
+                                if let Some(code) = code
+                                    && let Some(msg) =
+                                        super::events::disallowed_intents_close_message(code)
+                                {
+                                    // Privileged intents not enabled in Developer Portal.
+                                    warn!(close_code = code, "{msg}");
+                                    self.set_status(ChannelStatus::Error(msg.to_owned()))
+                                        .await;
+                                } else {
+                                    info!(
+                                        close_code = ?code,
+                                        "Discord Gateway closed by server"
+                                    );
+                                }
                                 break;
                             }
                             Some(Ok(WsMessage::Ping(data))) => {

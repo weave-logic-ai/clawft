@@ -578,15 +578,27 @@ pub struct PipelineRegistry {
     /// from the same trajectories the pipeline records. `None` when the
     /// active learner is `NoopLearner` or a test double.
     trajectory_learner: Option<Arc<crate::pipeline::learner::TrajectoryLearner>>,
+    /// WEFT-40: last-N ring of pipeline routing decisions, shared with
+    /// the admin HTTP endpoint. Always present so callers can attach the
+    /// same `Arc` to `ApiState` without racing construction.
+    decision_history: Arc<crate::pipeline::decision_history::RoutingDecisionHistory>,
 }
 
 impl PipelineRegistry {
     /// Create a new registry with the given default pipeline.
+    ///
+    /// Allocates a default-capacity
+    /// [`RoutingDecisionHistory`](crate::pipeline::decision_history::RoutingDecisionHistory)
+    /// (WEFT-40). Use [`Self::with_decision_history`] to share an existing
+    /// ring with the admin API.
     pub fn new(default: Pipeline) -> Self {
         Self {
             pipelines: HashMap::new(),
             default,
             trajectory_learner: None,
+            decision_history: Arc::new(
+                crate::pipeline::decision_history::RoutingDecisionHistory::new(),
+            ),
         }
     }
 
@@ -605,6 +617,35 @@ impl PipelineRegistry {
         &self,
     ) -> Option<&Arc<crate::pipeline::learner::TrajectoryLearner>> {
         self.trajectory_learner.as_ref()
+    }
+
+    /// Attach a shared routing-decision history ring (WEFT-40).
+    ///
+    /// Gateway / daemon builds pass the same `Arc` into the admin API
+    /// state so `GET /api/admin/routing/decisions` reads live traffic.
+    pub fn with_decision_history(
+        mut self,
+        history: Arc<crate::pipeline::decision_history::RoutingDecisionHistory>,
+    ) -> Self {
+        self.decision_history = history;
+        self
+    }
+
+    /// Shared last-N routing decision history (WEFT-40).
+    pub fn decision_history(
+        &self,
+    ) -> &Arc<crate::pipeline::decision_history::RoutingDecisionHistory> {
+        &self.decision_history
+    }
+
+    /// Record a routing decision into the history ring (best-effort).
+    fn record_decision(&self, request: &ChatRequest, routing: &RoutingDecision) {
+        let channel = request
+            .auth_context
+            .as_ref()
+            .map(|a| a.channel.as_str());
+        self.decision_history
+            .record_with_channel(routing, channel);
     }
 
     /// Register a specialized pipeline for a specific task type.
@@ -627,6 +668,8 @@ impl PipelineRegistry {
 
         // Stage 2: route
         let routing = pipeline.router.route(request, &profile).await;
+        // WEFT-40: persist into last-N ring for admin history.
+        self.record_decision(request, &routing);
 
         // Stage 3: assemble context
         let context = pipeline.assembler.assemble(request, &profile).await;
@@ -693,6 +736,8 @@ impl PipelineRegistry {
         let profile = self.default.classifier.classify(request);
         let pipeline = self.get(&profile.task_type);
         let routing = pipeline.router.route(request, &profile).await;
+        // WEFT-40: persist into last-N ring for admin history.
+        self.record_decision(request, &routing);
         let context = pipeline.assembler.assemble(request, &profile).await;
 
         // Stage 3.5: same feedback loop as the non-streaming path.
@@ -1241,6 +1286,42 @@ mod tests {
             }
             _ => panic!("expected text block"),
         }
+    }
+
+    /// WEFT-40: every `complete` call appends one redacted decision to
+    /// the shared history ring.
+    #[tokio::test]
+    async fn pipeline_registry_complete_records_decision_history() {
+        let registry =
+            PipelineRegistry::new(make_test_pipeline(TaskType::Chat, "openai", "gpt-4o"));
+
+        for i in 0..3 {
+            let request = ChatRequest {
+                messages: vec![LlmMessage {
+                    role: "user".into(),
+                    content: format!("hello-{i}"),
+                    tool_call_id: None,
+                    tool_calls: None,
+                }],
+                tools: vec![],
+                model: None,
+                max_tokens: None,
+                temperature: None,
+                auth_context: None,
+                complexity_boost: 0.0,
+                tool_choice: None,
+            };
+            registry.complete(&request).await.unwrap();
+        }
+
+        let hist = registry.decision_history();
+        assert_eq!(hist.len(), 3);
+        let entries = hist.recent(10);
+        assert_eq!(entries[0].provider, "openai");
+        assert_eq!(entries[0].model, "gpt-4o");
+        // Free-text reason must not leak; TestRouter uses reason "test"
+        // which redacts to the default tiered_routing category.
+        assert_eq!(entries[0].reason_category, "tiered_routing");
     }
 
     #[tokio::test]

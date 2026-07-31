@@ -31,7 +31,10 @@ struct TtsRequest {
 /// Build voice API routes.
 pub fn voice_routes() -> Router<ApiState> {
     Router::new()
-        .route("/voice/status", get(voice_status))
+        .route(
+            "/voice/status",
+            get(voice_status).post(update_voice_pipeline),
+        )
         .route("/voice/settings", put(update_voice_settings))
         .route("/voice/test-mic", post(test_mic))
         .route("/voice/test-speaker", post(test_speaker))
@@ -50,6 +53,26 @@ async fn voice_status(State(state): State<ApiState>) -> Json<serde_json::Value> 
         "wakeWordEnabled": status.wake_word_enabled,
         "settings": settings,
     }))
+}
+
+/// Update runtime pipeline state and broadcast on the `voice:status` WS topic
+/// (WEFT-218). Body: `{ state?, talkModeActive?, transcript?, response? }`.
+async fn update_voice_pipeline(
+    State(state): State<ApiState>,
+    Json(payload): Json<super::VoicePipelineUpdate>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    match state.voice.update_pipeline_state(payload) {
+        Ok(status) => Ok(Json(serde_json::json!({
+            "success": true,
+            "state": status.state,
+            "talkModeActive": status.talk_mode_active,
+            "wakeWordEnabled": status.wake_word_enabled,
+        }))),
+        Err(e) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "success": false, "error": e })),
+        )),
+    }
 }
 
 async fn update_voice_settings(
@@ -90,7 +113,11 @@ async fn tts_config(State(state): State<ApiState>) -> Json<serde_json::Value> {
 /// an `audio/mpeg` stream from the cloud TTS API. This keeps the API key
 /// server-side so the browser never sees it.
 ///
-/// Returns 400 if the provider is "browser" (client should use Web Speech API).
+/// Non-cloud defaults (WEFT-238):
+/// - `"local"` / `"local-stub"` → 400 (not a cloud proxy; use native talk
+///   pipeline or set `voice.tts.provider` to `openai` / `elevenlabs`)
+/// - `"browser"` → 400 (client should use Web Speech API; UI already does)
+///
 /// Returns 500 if the upstream TTS API call fails.
 async fn synthesize_tts(
     State(state): State<ApiState>,
@@ -98,11 +125,25 @@ async fn synthesize_tts(
 ) -> Result<Response, Response> {
     let cfg = state.voice.get_tts_config();
 
-    if cfg.provider == "browser" {
+    // Clear errors for non-cloud providers (default is "local" after WEFT-238).
+    if clawft_types::config::voice::is_local_tts_provider(&cfg.provider) {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
-                "error": "TTS provider is set to 'browser'. Use the Web Speech API directly."
+                "error": format!(
+                    "TTS provider is set to '{}'. Local TTS is not served by this cloud proxy; \
+                     use the native talk pipeline, or set voice.tts.provider to 'openai' or 'elevenlabs'.",
+                    cfg.provider
+                )
+            })),
+        )
+            .into_response());
+    }
+    if clawft_types::config::voice::is_browser_tts_provider(&cfg.provider) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "TTS provider is set to 'browser'. Use the Web Speech API directly (clawft-ui speak())."
             })),
         )
             .into_response());

@@ -20,6 +20,9 @@ pub mod gateway;
 pub mod help_cmd;
 pub mod mcp_cmd;
 #[cfg(feature = "services")]
+pub mod mcp_attach;
+pub mod mcp_profile;
+#[cfg(feature = "services")]
 pub mod mcp_server;
 pub mod memory_cmd;
 pub mod onboard;
@@ -185,6 +188,28 @@ pub fn discover_config_path<P: Platform>(platform: &P) -> Option<PathBuf> {
     clawft_platform::config_loader::discover_config_path(platform.env(), home)
 }
 
+/// Options for [`register_core_tools_with`].
+///
+/// Defaults match historical agent/gateway behaviour (MCP re-export +
+/// delegation when configured). `weft mcp-server` narrows these via
+/// serve profiles (ADR-076 / WEFT-699).
+#[derive(Debug, Clone, Copy)]
+pub struct CoreToolRegisterOpts {
+    /// Register proxied tools from configured non-`internal_only` MCP servers.
+    pub register_mcp: bool,
+    /// Register `delegate_task` when an Anthropic key is available.
+    pub register_delegation: bool,
+}
+
+impl Default for CoreToolRegisterOpts {
+    fn default() -> Self {
+        Self {
+            register_mcp: true,
+            register_delegation: true,
+        }
+    }
+}
+
 /// Register the core set of tools into a [`ToolRegistry`].
 ///
 /// This is the shared tool setup used by `weft agent`, `weft gateway`, and
@@ -202,6 +227,16 @@ pub async fn register_core_tools<P: Platform + 'static>(
     config: &Config,
     platform: Arc<P>,
 ) {
+    register_core_tools_with(registry, config, platform, CoreToolRegisterOpts::default()).await;
+}
+
+/// Like [`register_core_tools`], with toggles for MCP re-export and delegation.
+pub async fn register_core_tools_with<P: Platform + 'static>(
+    registry: &mut ToolRegistry,
+    config: &Config,
+    platform: Arc<P>,
+    opts: CoreToolRegisterOpts,
+) {
     let command_policy = agent::build_command_policy(&config.tools.command_policy);
     let url_policy = agent::build_url_policy(&config.tools.url_policy);
     let workspace = expand_workspace(&config.agents.defaults.workspace);
@@ -218,16 +253,20 @@ pub async fn register_core_tools<P: Platform + 'static>(
         None,
     );
 
-    let _mcp_sessions = crate::mcp_tools::register_mcp_tools(config, registry).await;
+    if opts.register_mcp {
+        let _mcp_sessions = crate::mcp_tools::register_mcp_tools(config, registry).await;
+    }
 
-    // Pass the Anthropic provider API key from config as a fallback for delegation.
-    let anthropic_key = config.providers.anthropic.api_key.expose();
-    let config_api_key = if anthropic_key.is_empty() {
-        None
-    } else {
-        Some(anthropic_key)
-    };
-    crate::mcp_tools::register_delegation(&config.delegation, registry, config_api_key);
+    if opts.register_delegation {
+        // Pass the Anthropic provider API key from config as a fallback for delegation.
+        let anthropic_key = config.providers.anthropic.api_key.expose();
+        let config_api_key = if anthropic_key.is_empty() {
+            None
+        } else {
+            Some(anthropic_key)
+        };
+        crate::mcp_tools::register_delegation(&config.delegation, registry, config_api_key);
+    }
 }
 
 /// Build an `Arc<ChannelHost>` implementation that bridges the channel

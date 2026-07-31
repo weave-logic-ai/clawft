@@ -20,6 +20,7 @@
 //!   frequency.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -81,11 +82,23 @@ impl SkillWatcherConfig {
 pub struct SkillWatcherHandle {
     /// Sends a shutdown signal to the watcher task.
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    /// `true` while the watcher task is considered active (WEFT-76).
+    ///
+    /// [`refresh_registry`] no-ops when this is true — the notify path
+    /// already reloads the registry on filesystem changes.
+    active: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl SkillWatcherHandle {
+    /// Whether the watcher is still active (not stopped / dropped).
+    pub fn is_active(&self) -> bool {
+        self.active.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Stop the watcher gracefully.
     pub fn stop(mut self) {
+        self.active
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
@@ -94,10 +107,73 @@ impl SkillWatcherHandle {
 
 impl Drop for SkillWatcherHandle {
     fn drop(&mut self) {
+        self.active
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
     }
+}
+
+/// Outcome of a manual skill-registry refresh (WEFT-76).
+///
+/// Headless / CI hosts often skip [`start_watching`]. Call
+/// [`refresh_registry`] after installing or editing skills so the
+/// in-process registry matches disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillRefreshOutcome {
+    /// File watcher is active; FS events already drive reloads — no rebuild.
+    NoOpWatcherEnabled {
+        /// Skills currently held in the registry.
+        count: usize,
+    },
+    /// Registry was rebuilt from disk.
+    Reloaded {
+        /// Number of skills after rebuild.
+        count: usize,
+        /// Sorted skill names after rebuild.
+        names: Vec<String>,
+    },
+}
+
+/// Manually reload the skill registry when the notify watcher is disabled.
+///
+/// # Behaviour
+///
+/// - When `watcher_active` is `true` (or a live [`SkillWatcherHandle`]
+///   reports [`SkillWatcherHandle::is_active`]), returns
+///   [`SkillRefreshOutcome::NoOpWatcherEnabled`] without rebuilding.
+///   Watcher-enabled hosts already hot-reload on FS changes.
+/// - When `watcher_active` is `false`, acquires a write lock, rebuilds
+///   via [`SkillRegistry::rebuild`](super::skills_v2::SkillRegistry::rebuild),
+///   and returns [`SkillRefreshOutcome::Reloaded`].
+///
+/// # Errors
+///
+/// Propagates discovery / I/O errors from the rebuild pass.
+pub async fn refresh_registry(
+    registry: &SharedSkillRegistry,
+    config: &SkillWatcherConfig,
+    watcher_active: bool,
+) -> clawft_types::Result<SkillRefreshOutcome> {
+    if watcher_active {
+        let reg = registry.read().await;
+        return Ok(SkillRefreshOutcome::NoOpWatcherEnabled { count: reg.len() });
+    }
+
+    let mut reg = registry.write().await;
+    reg.rebuild(
+        config.workspace_dir.as_deref(),
+        config.user_dir.as_deref(),
+        config.builtin_skills.clone(),
+        config.trust_workspace,
+    )
+    .await?;
+
+    let names: Vec<String> = reg.names().into_iter().map(|s| s.to_string()).collect();
+    let count = reg.len();
+    info!(count, "skill registry manually refreshed (watcher disabled)");
+    Ok(SkillRefreshOutcome::Reloaded { count, names })
 }
 
 /// Start watching skill directories for changes.
@@ -115,6 +191,8 @@ pub fn start_watching(
 ) -> Result<SkillWatcherHandle, notify::Error> {
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
     let (event_tx, mut event_rx) = mpsc::channel::<Event>(100);
+    let active = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let active_for_task = Arc::clone(&active);
 
     // Create OS file watcher.
     let mut watcher = RecommendedWatcher::new(
@@ -211,15 +289,18 @@ pub fn start_watching(
                 }
                 // Shutdown signal.
                 _ = &mut shutdown_rx => {
+                    active_for_task.store(false, std::sync::atomic::Ordering::SeqCst);
                     info!("skill watcher shutting down");
                     break;
                 }
             }
         }
+        active_for_task.store(false, std::sync::atomic::Ordering::SeqCst);
     });
 
     Ok(SkillWatcherHandle {
         shutdown_tx: Some(shutdown_tx),
+        active,
     })
 }
 
@@ -514,6 +595,127 @@ mod tests {
         assert_eq!(registry.len(), 2);
         assert!(registry.get("first").is_some());
         assert!(registry.get("second").is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── WEFT-76: manual refresh (watcher disabled path) ────────────
+
+    #[tokio::test]
+    async fn test_refresh_registry_reloads_when_watcher_disabled() {
+        let dir = temp_dir("refresh_disabled");
+        std::fs::create_dir_all(&dir).unwrap();
+        create_skill_md(&dir, "alpha", "Alpha skill");
+
+        // Start with an empty registry (stale / pre-discover state).
+        let registry = Arc::new(RwLock::new(
+            SkillRegistry::discover(None, None, vec![]).await.unwrap(),
+        ));
+        assert_eq!(registry.read().await.len(), 0);
+
+        let config = SkillWatcherConfig {
+            workspace_dir: Some(dir.clone()),
+            trust_workspace: true,
+            ..Default::default()
+        };
+
+        // watcher_active = false → full rebuild from disk.
+        let outcome = refresh_registry(&registry, &config, false)
+            .await
+            .unwrap();
+        match outcome {
+            SkillRefreshOutcome::Reloaded { count, names } => {
+                assert_eq!(count, 1);
+                assert_eq!(names, vec!["alpha".to_string()]);
+            }
+            SkillRefreshOutcome::NoOpWatcherEnabled { .. } => {
+                panic!("expected Reloaded when watcher disabled");
+            }
+        }
+        assert!(registry.read().await.get("alpha").is_some());
+
+        // Add a second skill and refresh again.
+        create_skill_md(&dir, "beta", "Beta skill");
+        let outcome = refresh_registry(&registry, &config, false)
+            .await
+            .unwrap();
+        match outcome {
+            SkillRefreshOutcome::Reloaded { count, names } => {
+                assert_eq!(count, 2);
+                assert!(names.contains(&"alpha".to_string()));
+                assert!(names.contains(&"beta".to_string()));
+            }
+            SkillRefreshOutcome::NoOpWatcherEnabled { .. } => {
+                panic!("expected Reloaded when watcher disabled");
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_refresh_registry_noop_when_watcher_active() {
+        let dir = temp_dir("refresh_noop");
+        std::fs::create_dir_all(&dir).unwrap();
+        create_skill_md(&dir, "only", "Only skill");
+
+        let registry = Arc::new(RwLock::new(
+            SkillRegistry::discover(Some(&dir), None, vec![])
+                .await
+                .unwrap(),
+        ));
+        assert_eq!(registry.read().await.len(), 1);
+
+        // Disk gains a new skill, but watcher_active=true must not rebuild.
+        create_skill_md(&dir, "extra", "Extra skill");
+
+        let config = SkillWatcherConfig {
+            workspace_dir: Some(dir.clone()),
+            trust_workspace: true,
+            ..Default::default()
+        };
+
+        let outcome = refresh_registry(&registry, &config, true)
+            .await
+            .unwrap();
+        match outcome {
+            SkillRefreshOutcome::NoOpWatcherEnabled { count } => {
+                assert_eq!(count, 1, "registry must stay at pre-refresh size");
+            }
+            SkillRefreshOutcome::Reloaded { .. } => {
+                panic!("expected NoOpWatcherEnabled when watcher active");
+            }
+        }
+        // Still only the original skill — manual refresh was a no-op.
+        assert!(registry.read().await.get("only").is_some());
+        assert!(registry.read().await.get("extra").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_watcher_handle_is_active() {
+        let dir = temp_dir("handle_active");
+        std::fs::create_dir_all(&dir).unwrap();
+        create_skill_md(&dir, "alive", "Alive skill");
+
+        let registry = Arc::new(RwLock::new(
+            SkillRegistry::discover(Some(&dir), None, vec![])
+                .await
+                .unwrap(),
+        ));
+
+        let config = SkillWatcherConfig {
+            workspace_dir: Some(dir.clone()),
+            trust_workspace: true,
+            debounce: Duration::from_millis(50),
+            ..Default::default()
+        };
+
+        let handle = start_watching(config, registry).unwrap();
+        assert!(handle.is_active());
+        handle.stop();
+        // After stop, active flag is cleared (handle moved into stop).
 
         let _ = std::fs::remove_dir_all(&dir);
     }

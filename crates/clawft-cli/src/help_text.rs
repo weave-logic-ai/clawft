@@ -17,7 +17,7 @@ pub fn general_help() -> String {
     output.push_str("  sessions       Manage agent sessions\n");
     output.push_str("  memory         Read and search agent memory\n");
     output.push_str("  config         Show resolved configuration\n");
-    output.push_str("  skills         Manage skills (list, show, install)\n");
+    output.push_str("  skills (incl. refresh)         Manage skills (list, show, install)\n");
     output.push_str("  tools          Manage tools (list, show, search, deny/allow)\n");
     output.push_str("  agents         Manage agents (list, show, use)\n");
     output.push_str("  swarm          Multi-agent swarm demo (AgentBus + workers)\n");
@@ -135,7 +135,10 @@ pub fn topic_help(topic: &str) -> String {
              weft mcp add <name> -- npx -y @example/mcp-server\n\
              weft mcp list\n\
              weft mcp remove <name>\n\
-             weft mcp-server              Serve clawft tools over stdio\n\
+             weft mcp-server [--profile default|control|workspace|media|full]\n\
+                             [--reexport-mcp / --attach]\n\
+                                     Serve profiled tools over stdio (default ≠ full;\n\
+                                     re-export peers only with full + --reexport-mcp)\n\
              weft tools mcp               List servers with live tool counts\n\
              \n\
              Writes go to CLAWFT_CONFIG, clawft.toml / weave.toml (if present),\n\

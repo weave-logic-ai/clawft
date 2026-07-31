@@ -149,6 +149,10 @@ async fn poll_rpc(
     let mut ticker = tokio::time::interval(Duration::from_secs(3));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    // Cancel-safety (ADR-010 / WEFT-18): both arms are cancel-safe
+    // (`oneshot::Receiver` and `Interval::tick`). RPC work runs only after
+    // a tick wins, so mid-call cancel is delayed to the next loop iteration
+    // (acceptable for a 3s ontology poller; not a framing desync risk).
     loop {
         tokio::select! {
             _ = &mut cancel_rx => return,

@@ -985,9 +985,45 @@ check_kernel_diskann_and_bench_matrix() {
 }
 
 # ── Gate: full phase-gate checks ────────────────────────────────────
+# WEFT-56 — fast pipeline regression pass (clawft-core pipeline::* +
+# related integration tests). Faster than full workspace test; used as
+# gate step 15 and as a standalone subcommand for local iteration.
+#
+# Filter: nextest expression `test(pipeline)` matches ~350 unit tests under
+# pipeline:: plus related integration names (e.g. compress_pipeline).
+# Typical runtime: <5s after compile; AC target <60s.
+cmd_pipeline_pass_impl() {
+    if cargo nextest --version >/dev/null 2>&1; then
+        cargo nextest run -p clawft-core -E 'test(pipeline)'
+    else
+        # Fallback when nextest is missing: cargo test path filter (slower,
+        # less precise than nextest, but still package-scoped).
+        cargo test -p clawft-core --lib pipeline
+    fi
+}
+
+cmd_pipeline_pass() {
+    header "Pipeline pass (clawft-core)"
+    timer_start
+    if [ "$DRY_RUN" = true ]; then
+        printf "  ${YELLOW}DRY${NC}   cargo nextest run -p clawft-core -E 'test(pipeline)'\n"
+        timer_end
+        return 0
+    fi
+    if cmd_pipeline_pass_impl; then
+        pass "pipeline pass"
+        timer_end
+        return 0
+    else
+        fail "pipeline pass"
+        timer_end
+        return 1
+    fi
+}
+
 cmd_gate() {
-    header "Phase Gate — 14 checks"
-    local total=14 passed=0 failed=0 skipped=0
+    header "Phase Gate — 15 checks"
+    local total=15 passed=0 failed=0 skipped=0
 
     run_gate_check() {
         local num="$1" label="$2"
@@ -1125,6 +1161,12 @@ cmd_gate() {
         skipped=$((skipped + 1))
     fi
 
+    # 15. WEFT-56 — explicit pipeline-pass: focused clawft-core pipeline
+    # regression (router/rate_limiter/transport/… unit + related). Runs in
+    # a few seconds vs full workspace; does not replace check 1.
+    run_gate_check 15 "pipeline pass (clawft-core test(pipeline))" \
+        cmd_pipeline_pass_impl
+
     # Summary
     echo ""
     printf "${BOLD}═══════════════════════════════════════${NC}\n"
@@ -1195,8 +1237,10 @@ ${BOLD}Commands:${NC}
                   Requires: cargo install --locked cargo-audit
                   Followups: WEFT-551/552 DONE; WEFT-553 residual paste+bincode
                   (see docs/plans/wave-0i-WEFT-553-result.md).
-  gate            Run full phase gate (14 checks, includes cargo audit +
-                  kernel WASM no-mesh / WEFT-114)
+  gate            Run full phase gate (15 checks, includes cargo audit +
+                  kernel WASM no-mesh / WEFT-114 + pipeline pass / WEFT-56)
+  pipeline-pass   Fast clawft-core pipeline regression
+                  (nextest -E 'test(pipeline)'; typically <5s). Also gate #15.
   bench <crate> <name>
                   Run a `[[bench]] harness = false` target (e.g.
                   scripts/build.sh bench clawft-kernel vector_backend_bench
@@ -1369,6 +1413,7 @@ main() {
         clippy)       cmd_clippy ;;
         audit)        cmd_audit ;;
         gate)         cmd_gate ;;
+        pipeline-pass) cmd_pipeline_pass ;;
         bench)        cmd_bench "$BENCH_CRATE" "$BENCH_NAME" ;;
         serve)        cmd_serve "$SERVE_PORT" ;;
         clean)        cmd_clean ;;

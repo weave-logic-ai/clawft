@@ -411,6 +411,10 @@ impl std::fmt::Debug for KernelEventLog {
 }
 
 /// Format the boot banner header.
+///
+/// On platforms without OS sandbox support (macOS, etc.), appends a clear
+/// WARN line so operators know `OsSandbox`/`Combined` policies are reduced
+/// to WASM-only isolation (WEFT-70).
 pub fn boot_banner() -> String {
     let mut output = String::new();
     output.push_str("\n  WeftOS v");
@@ -419,6 +423,11 @@ pub fn boot_banner() -> String {
     output.push_str("  ");
     output.push_str(&"-".repeat(45));
     output.push('\n');
+    if let Some(msg) = clawft_plugin::sandbox::sandbox_platform_banner_warning() {
+        output.push_str("  WARN  ");
+        output.push_str(msg);
+        output.push('\n');
+    }
     output
 }
 
@@ -499,6 +508,38 @@ mod tests {
         assert!(banner.contains("WeftOS v"));
         assert!(banner.contains(env!("CARGO_PKG_VERSION")));
         assert!(banner.contains("---"));
+    }
+
+    /// WEFT-70: non-Linux hosts surface an OS-sandbox downgrade WARN in the
+    /// startup banner; Linux keeps the banner clean.
+    #[test]
+    fn boot_banner_includes_macos_sandbox_downgrade_warning() {
+        let banner = boot_banner();
+        if cfg!(target_os = "linux") {
+            assert!(
+                !banner.contains("WARN"),
+                "Linux OS sandbox is available; banner must not warn"
+            );
+        } else {
+            assert!(
+                banner.contains("WARN"),
+                "non-Linux banner must include WARN: {banner}"
+            );
+            assert!(
+                banner.contains("OS sandbox unavailable"),
+                "banner must name the sandbox restriction: {banner}"
+            );
+            assert!(
+                banner.contains("WASM"),
+                "banner must name the WASM fallback: {banner}"
+            );
+            if cfg!(target_os = "macos") {
+                assert!(
+                    banner.contains("macOS"),
+                    "macOS banner should call out the platform: {banner}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -4,10 +4,12 @@ use std::sync::Arc;
 
 use clawft_types::config::DiscordConfig;
 use clawft_types::error::ChannelError;
+use tracing::warn;
 
 use crate::traits::{Channel, ChannelFactory};
 
 use super::channel::DiscordChannel;
+use super::events::{privileged_intent_warnings, validate_gateway_intents};
 
 /// Factory for creating [`DiscordChannel`] instances from JSON configuration.
 ///
@@ -22,6 +24,19 @@ use super::channel::DiscordChannel;
 ///   "intents": 37377
 /// }
 /// ```
+///
+/// # Gateway intents (default `37377`)
+///
+/// | Intent | Bit | Value | Notes |
+/// |--------|-----|-------|-------|
+/// | GUILDS | 0 | 1 | Guild lifecycle |
+/// | GUILD_MESSAGES | 9 | 512 | Guild channel messages |
+/// | DIRECT_MESSAGES | 12 | 4096 | DM messages |
+/// | MESSAGE_CONTENT | 15 | 32768 | **Privileged** — enable in Developer Portal |
+/// | **Total** | | **37377** | |
+///
+/// `intents: 0` is rejected at build time. Privileged bits emit a warning so
+/// operators know Discord will close with 4014 if the portal flag is off.
 pub struct DiscordChannelFactory;
 
 impl ChannelFactory for DiscordChannelFactory {
@@ -49,6 +64,13 @@ impl ChannelFactory for DiscordChannelFactory {
                     "missing 'token' (or 'token_env') in discord config".into(),
                 ));
             }
+        }
+
+        validate_gateway_intents(discord_config.intents)
+            .map_err(ChannelError::Other)?;
+
+        for warning in privileged_intent_warnings(discord_config.intents) {
+            warn!(intents = discord_config.intents, "{warning}");
         }
 
         Ok(Arc::new(DiscordChannel::new(discord_config)))
@@ -157,6 +179,44 @@ mod tests {
         });
         let channel = factory.build(&config);
         assert!(channel.is_ok());
+    }
+
+    #[test]
+    fn factory_build_intents_zero_errors() {
+        let factory = DiscordChannelFactory;
+        let config = serde_json::json!({
+            "token": "my-bot-token",
+            "intents": 0
+        });
+        let result = factory.build(&config);
+        match result {
+            Err(ChannelError::Other(msg)) => {
+                assert!(
+                    msg.contains("intents bitmask is 0"),
+                    "expected clear startup error for intents=0, got: {msg}"
+                );
+            }
+            Err(other) => panic!("expected ChannelError::Other, got: {other:?}"),
+            Ok(_) => panic!("expected error for intents=0"),
+        }
+    }
+
+    #[test]
+    fn factory_build_privileged_intents_ok_with_warning_path() {
+        // Privileged GUILD_MEMBERS is not rejected at build — Discord rejects
+        // later (4014) if the portal flag is off. Factory still builds.
+        let factory = DiscordChannelFactory;
+        let config = serde_json::json!({
+            "token": "my-bot-token",
+            "intents": 3 // GUILDS | GUILD_MEMBERS
+        });
+        assert!(factory.build(&config).is_ok());
+        // MESSAGE_CONTENT-only privileged default also builds.
+        let config = serde_json::json!({
+            "token": "my-bot-token",
+            "intents": 37377
+        });
+        assert!(factory.build(&config).is_ok());
     }
 
     #[test]

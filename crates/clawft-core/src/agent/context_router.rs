@@ -217,7 +217,7 @@ pub mod embedding;
 #[cfg(feature = "vector-memory")]
 pub use embedding::{
     DEFAULT_CONFIDENCE_THRESHOLD, DEFAULT_TOP_K, EmbeddingRouter, EmbeddingRouterError,
-    FALLBACK_TRACING_TARGET,
+    FALLBACK_TRACING_TARGET, INDEX_BACKEND,
 };
 
 // ── v2.5: HybridRouter + skill rerank (WEFT-46) ──────────────────────────

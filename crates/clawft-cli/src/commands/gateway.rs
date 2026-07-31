@@ -794,7 +794,14 @@ fn build_api_state(
         }
     };
 
-    let voice_bridge = VoiceBridge::new(config.voice.clone(), config.providers.clone());
+    // WEFT-218: wire runtime voice pipeline state to TopicBroadcaster so
+    // dashboard clients subscribed to `voice:status` receive live updates
+    // (not MSW-only). POST /api/voice/status and native producers both fan out.
+    let voice_bridge = VoiceBridge::with_broadcaster(
+        config.voice.clone(),
+        config.providers.clone(),
+        broadcaster.clone(),
+    );
 
     ApiState {
         tools: Arc::new(tool_bridge),
@@ -811,6 +818,10 @@ fn build_api_state(
         // WEFT-122: stub kernel facade until daemon RPC is wired through.
         // SSE + route table work; call_rpc returns stub envelopes.
         kernel_facade: Arc::new(clawft_services::api::InMemoryKernelFacade::new()),
+        // WEFT-40: empty ring unless wired to PipelineRegistry::decision_history.
+        routing_history: Arc::new(
+            clawft_core::pipeline::decision_history::RoutingDecisionHistory::new(),
+        ),
     }
 }
 

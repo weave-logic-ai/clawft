@@ -15,9 +15,10 @@ use tracing::warn;
 use super::{
     AgentAccess, AgentInfo, BusAccess, ChannelAccess, ChannelStatusInfo, ConfigAccess,
     MemoryAccess, MemoryEntryInfo, SessionAccess, SessionDetail, SessionInfo, SkillAccess,
-    SkillInfo, ToolInfo, ToolRegistryAccess, TtsProviderInfo, VoiceAccess, VoiceSettingsInfo,
-    VoiceSettingsUpdate, VoiceStatusInfo,
+    SkillInfo, ToolInfo, ToolRegistryAccess, TtsProviderInfo, VoiceAccess, VoicePipelineUpdate,
+    VoiceSettingsInfo, VoiceSettingsUpdate, VoiceStatusEvent, VoiceStatusHub, VoiceStatusInfo,
 };
+use super::voice_status::{normalize_state, OptionalField};
 
 // ---------------------------------------------------------------------------
 // ToolBridge
@@ -706,7 +707,9 @@ impl ChannelAccess for ChannelBridge {
 /// Holds voice configuration and runtime state, implements [`VoiceAccess`].
 ///
 /// Voice settings are read from `VoiceConfig` at startup and can be updated
-/// via the API. Runtime state (idle/listening/speaking) is tracked separately.
+/// via the API. Runtime pipeline state (idle/listening/processing/speaking)
+/// is tracked separately and broadcast on `voice:status` when a
+/// [`VoiceStatusHub`] is wired (WEFT-218).
 /// Uses `std::sync::RwLock` since the lock is held very briefly.
 pub struct VoiceBridge {
     config: std::sync::RwLock<clawft_types::config::voice::VoiceConfig>,
@@ -714,6 +717,10 @@ pub struct VoiceBridge {
     ui_settings: std::sync::RwLock<UiVoiceSettings>,
     /// Provider credentials for cloud TTS.
     providers: clawft_types::config::ProvidersConfig,
+    /// Live pipeline runtime (talk mode + state machine).
+    runtime: std::sync::RwLock<VoiceRuntime>,
+    /// Optional WS broadcaster hub for `voice:status` fan-out.
+    status_hub: Option<VoiceStatusHub>,
 }
 
 /// Extra voice settings the UI tracks that aren't in VoiceConfig.
@@ -723,8 +730,30 @@ struct UiVoiceSettings {
     push_to_talk: bool,
 }
 
+/// Mutable pipeline state shared with GET /api/voice/status and WS.
+struct VoiceRuntime {
+    state: String,
+    talk_mode_active: bool,
+    transcript: Option<String>,
+    response: Option<String>,
+}
+
+impl Default for VoiceRuntime {
+    fn default() -> Self {
+        Self {
+            state: "idle".into(),
+            talk_mode_active: false,
+            transcript: None,
+            response: None,
+        }
+    }
+}
+
 impl VoiceBridge {
     /// Create a new bridge from the voice config and provider credentials.
+    ///
+    /// Without a status hub, `update_pipeline_state` still mutates runtime
+    /// state for GET /api/voice/status but does not broadcast.
     pub fn new(
         config: clawft_types::config::voice::VoiceConfig,
         providers: clawft_types::config::ProvidersConfig,
@@ -737,25 +766,118 @@ impl VoiceBridge {
                 push_to_talk: false,
             }),
             providers,
+            runtime: std::sync::RwLock::new(VoiceRuntime::default()),
+            status_hub: None,
         }
+    }
+
+    /// Create a bridge that publishes pipeline transitions on `voice:status`.
+    pub fn with_status_hub(
+        config: clawft_types::config::voice::VoiceConfig,
+        providers: clawft_types::config::ProvidersConfig,
+        status_hub: VoiceStatusHub,
+    ) -> Self {
+        let mut bridge = Self::new(config, providers);
+        bridge.status_hub = Some(status_hub);
+        bridge
+    }
+
+    /// Create a bridge wired to a [`TopicBroadcaster`] (gateway path).
+    pub fn with_broadcaster(
+        config: clawft_types::config::voice::VoiceConfig,
+        providers: clawft_types::config::ProvidersConfig,
+        broadcaster: Arc<super::broadcaster::TopicBroadcaster>,
+    ) -> Self {
+        Self::with_status_hub(config, providers, VoiceStatusHub::new(broadcaster))
+    }
+
+    /// Shared status hub (for talk-mode observers / tests).
+    pub fn status_hub(&self) -> Option<&VoiceStatusHub> {
+        self.status_hub.as_ref()
+    }
+
+    fn broadcast_current(&self, runtime: &VoiceRuntime, wake_word_enabled: bool) {
+        let Some(hub) = &self.status_hub else {
+            return;
+        };
+        let event = VoiceStatusEvent::new(
+            runtime.state.clone(),
+            runtime.talk_mode_active,
+            runtime.transcript.clone(),
+            runtime.response.clone(),
+            Some(wake_word_enabled),
+        );
+        hub.publish_spawn(event);
     }
 }
 
 impl VoiceAccess for VoiceBridge {
     fn get_status(&self) -> VoiceStatusInfo {
         let cfg = self.config.read().unwrap();
+        let runtime = self.runtime.read().unwrap();
         VoiceStatusInfo {
-            state: "idle".into(),
-            talk_mode_active: false,
+            state: runtime.state.clone(),
+            talk_mode_active: runtime.talk_mode_active,
             wake_word_enabled: cfg.wake.enabled,
         }
+    }
+
+    fn update_pipeline_state(
+        &self,
+        update: VoicePipelineUpdate,
+    ) -> Result<VoiceStatusInfo, String> {
+        let wake_word_enabled = self
+            .config
+            .read()
+            .map_err(|e| e.to_string())?
+            .wake
+            .enabled;
+        let mut runtime = self.runtime.write().map_err(|e| e.to_string())?;
+
+        if let Some(ref state) = update.state {
+            runtime.state = normalize_state(state)?.to_string();
+        }
+        if let Some(active) = update.talk_mode_active {
+            runtime.talk_mode_active = active;
+            // Entering talk mode defaults to listening; leaving → idle.
+            if update.state.is_none() {
+                runtime.state = if active {
+                    "listening".into()
+                } else {
+                    "idle".into()
+                };
+            }
+            if !active {
+                runtime.transcript = None;
+                runtime.response = None;
+            }
+        }
+        match update.transcript {
+            OptionalField::Absent => {}
+            OptionalField::Clear => runtime.transcript = None,
+            OptionalField::Set(s) => runtime.transcript = Some(s),
+        }
+        match update.response {
+            OptionalField::Absent => {}
+            OptionalField::Clear => runtime.response = None,
+            OptionalField::Set(s) => runtime.response = Some(s),
+        }
+
+        self.broadcast_current(&runtime, wake_word_enabled);
+
+        Ok(VoiceStatusInfo {
+            state: runtime.state.clone(),
+            talk_mode_active: runtime.talk_mode_active,
+            wake_word_enabled,
+        })
     }
 
     fn get_settings(&self) -> VoiceSettingsInfo {
         let cfg = self.config.read().unwrap();
         let ui = self.ui_settings.read().unwrap();
+        // UI select / MSW default is bare "en" (WEFT-219).
         let language = if cfg.stt.language.is_empty() {
-            "en-US".to_string()
+            "en".to_string()
         } else {
             cfg.stt.language.clone()
         };
@@ -1033,5 +1155,72 @@ mod bridge_weft_168_tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// WEFT-218: VoiceBridge runtime state updates and status hub fan-out.
+    #[tokio::test]
+    async fn voice_bridge_pipeline_state_broadcasts_on_voice_status_topic() {
+        use crate::api::voice_status::VOICE_STATUS_TOPIC;
+        use crate::api::{VoiceAccess, VoicePipelineUpdate, VoiceStatusEvent};
+        use crate::api::broadcaster::TopicBroadcaster;
+        use crate::api::voice_status::OptionalField;
+
+        let bc = Arc::new(TopicBroadcaster::new());
+        let mut rx = bc.subscribe(VOICE_STATUS_TOPIC).await;
+        let bridge = VoiceBridge::with_broadcaster(
+            clawft_types::config::voice::VoiceConfig::default(),
+            clawft_types::config::ProvidersConfig::default(),
+            bc,
+        );
+
+        let status = bridge
+            .update_pipeline_state(VoicePipelineUpdate {
+                state: Some("listening".into()),
+                talk_mode_active: Some(true),
+                transcript: OptionalField::Set("hello".into()),
+                response: OptionalField::Absent,
+            })
+            .expect("update ok");
+        assert_eq!(status.state, "listening");
+        assert!(status.talk_mode_active);
+
+        // Allow spawn publish to run.
+        tokio::task::yield_now().await;
+        // Drain with a short timeout in case the spawn is slightly delayed.
+        let received = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out waiting for voice:status")
+            .expect("channel closed");
+        let event: VoiceStatusEvent = serde_json::from_str(&received).unwrap();
+        assert_eq!(event.event, "voice:status");
+        assert_eq!(event.state, "listening");
+        assert_eq!(event.status, "listening");
+        assert!(event.talk_mode_active);
+        assert_eq!(event.transcript.as_deref(), Some("hello"));
+
+        // GET status mirrors runtime.
+        let snap = bridge.get_status();
+        assert_eq!(snap.state, "listening");
+        assert!(snap.talk_mode_active);
+    }
+
+    #[test]
+    fn voice_bridge_rejects_invalid_state() {
+        use crate::api::{VoiceAccess, VoicePipelineUpdate};
+        use crate::api::voice_status::OptionalField;
+
+        let bridge = VoiceBridge::new(
+            clawft_types::config::voice::VoiceConfig::default(),
+            clawft_types::config::ProvidersConfig::default(),
+        );
+        let err = bridge
+            .update_pipeline_state(VoicePipelineUpdate {
+                state: Some("screaming".into()),
+                talk_mode_active: None,
+                transcript: OptionalField::Absent,
+                response: OptionalField::Absent,
+            })
+            .expect_err("invalid state");
+        assert!(err.contains("invalid voice state"), "got: {err}");
     }
 }

@@ -33,14 +33,16 @@ browser-opfs = ["browser", "clawft-platform/browser-opfs"]
 canvas = []
 vector-memory = ["clawft-core/vector-memory"]
 delegate = ["clawft-services/delegate"]
-voice = ["clawft-plugin/voice"]
+# WEFT-214 / WEFT-671: live stack (clawft-channels STT/TTS), not plugin scaffold.
+voice = ["dep:clawft-channels", "dep:reqwest", "dep:tokio", "dep:tokio-util"]
 
 [dependencies]
 clawft-types = { workspace = true, default-features = false }
 clawft-platform = { workspace = true, default-features = false }
 clawft-core = { workspace = true, default-features = false }
 clawft-services = { workspace = true, optional = true }
-clawft-plugin = { workspace = true, optional = true }
+# Live voice stack for voice_listen / voice_speak (WEFT-214).
+clawft-channels = { workspace = true, optional = true, features = ["voice"] }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
@@ -51,6 +53,9 @@ ipnet = "2"
 
 # Native only
 tokio = { workspace = true, optional = true }
+# Voice STT/TTS HTTP (substrate + OpenAI cloud fallback).
+reqwest = { workspace = true, optional = true, features = ["json", "multipart", "rustls-tls"] }
+tokio-util = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

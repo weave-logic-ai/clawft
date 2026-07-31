@@ -13,9 +13,14 @@ pipeline splits work between the browser and the server:
 
 - **Speech-to-text (STT)** runs entirely in the browser via the Web Speech
   API. No server-side transcription service is required.
-- **Text-to-speech (TTS)** supports three providers: browser-native Web
-  Speech API (default), OpenAI TTS, and ElevenLabs. Cloud providers are
-  proxied through the server to keep API keys off the client.
+- **Text-to-speech (TTS)** providers (WEFT-238):
+  - **`local`** (default) — offline-first; matches the local Piper model
+    default and `VoicePersonality.provider`. Not synthesized by the cloud
+    HTTP proxy.
+  - **`browser`** — UI-only Web Speech API (`speechSynthesis` in
+    `clawft-ui`); not a server-side synthesizer.
+  - **`openai`** / **`elevenlabs`** — cloud neural voices, proxied through
+    `/api/voice/tts` so API keys stay server-side.
 - **Talk mode** provides a full-screen overlay with waveform visualization,
   continuous listening, and tap-to-interrupt, enabling hands-free
   conversation with the agent.
@@ -46,6 +51,93 @@ The voice pipeline is browser-side for STT and server-side for cloud TTS
 proxying. When both flags are enabled, the web dashboard exposes the voice
 panel and talk mode controls.
 
+### 2.1 Transport mode (ADR-074 / WEFT-689)
+
+Talk-Mode and agent conductor demos can use **xAI Grok Voice** as the interim
+primary cloud speech-to-speech path, with the local ADR-061 stack as offline
+fallback.
+
+```toml
+[voice]
+enabled = true
+# local | xai_s2s | xai_hybrid
+# Product default: xai_s2s (fails open to local without key / on health fail)
+mode = "xai_s2s"
+
+[voice.xai]
+# empty → inherit XAI_API_KEY / providers.xai
+api_key_env = "XAI_API_KEY"
+realtime_model = "grok-voice-latest"
+endpoint = "wss://api.x.ai/v1/realtime"
+```
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `voice.mode` | `xai_s2s` | Transport: `local` always local; `xai_s2s` full Realtime S2S; `xai_hybrid` hybrid STT/TTS |
+| `voice.xai.api_key_env` | `XAI_API_KEY` | Env var name holding the key (key never stored in config / never logged) |
+| `voice.xai.realtime_model` | `grok-voice-latest` | Realtime model alias |
+| `voice.xai.endpoint` | `wss://api.x.ai/v1/realtime` | WebSocket base URL |
+
+**Selection rule** (`resolve_voice_transport` in `clawft-types`):
+
+1. `mode = local` → local only.
+2. Else if no API key / health check fails → **fail open to local** with a
+   single user-visible notice (not silent forever).
+3. Else use the xAI path.
+4. **Runtime** (connect/session error) → fail open to local via
+   `resolve_voice_transport_runtime_fallback` /
+   `connect_hello_or_fallback` (never leave Talk-Mode without a path).
+
+**Hybrid composition** (`mode = xai_hybrid`, when key + healthy):
+
+| Leg | Backend |
+|-----|---------|
+| STT | Local (ADR-061) |
+| Agent | Local Hermes / configured LLM |
+| TTS | xAI |
+
+When hybrid fails open (no key / unhealthy / runtime), **all three legs** become local.
+
+**Health probe (V2 stub):** `probe_xai_voice_health` / `XaiHealthProbeMode` in
+`clawft-channels` (`voice-xai`). Default is a pure stub (no network) so CI stays
+deterministic; inject `Stub { healthy: false }` to force failover in tests.
+Wire a real pre-dial probe later without changing the selection rule.
+
+**Metrics (V2):** `VoiceTransportMetrics` in `clawft-types` — atomic counters for
+transport selection (`select_local` / `select_xai_s2s` / `select_xai_hybrid`),
+fallback reasons (`fallback_no_key` / `fallback_unhealthy` / `fallback_runtime`),
+connect ok/fail, disconnects, and TTFA samples. Use
+`resolve_voice_transport_with_metrics` or `select_voice_transport(..., Some(&metrics))`.
+
+**Feature flag:** compile the Realtime client with
+`clawft-channels` feature `voice-xai` (implies `voice`).
+
+| Phase | Scope |
+|-------|--------|
+| **V0** (WEFT-689) | Connect + `session.update` hello |
+| **V1** (WEFT-690) | Tool bridge: `spawn_agent` / `focus_pane` / `summarize` → `WindowIntent`; optional governed `shell_intent` (not registered by default) |
+| **V2** (WEFT-691) | Hybrid composition; health probe stub; metrics; graceful local fallback on connect failure |
+
+**AEC requirement (cloud S2S):** keep native AEC (`clawft-voice-aec`) **in front of the mic** before uplink to Realtime — otherwise the model hears itself. V1 documents this (`AEC_IN_FRONT_OF_MIC_NOTE`); live capture wiring may still be passthrough until device/AEC features are on.
+
+```bash
+# Unit tests (no network) — prefer scripts/build.sh in this repo
+scripts/build.sh test -p clawft-types voice_
+# or focused:
+cargo test -p clawft-types voice_
+cargo test -p clawft-types voice_metrics
+cargo test -p clawft-channels --features voice-xai xai_realtime
+cargo test -p clawft-channels --features voice-xai xai_tool_bridge
+cargo test -p clawft-channels --features voice-xai xai_health
+
+# Manual live hello (requires network + key)
+XAI_API_KEY=... cargo test -p clawft-channels --features voice-xai \
+  xai_realtime_live_hello -- --ignored --nocapture
+```
+
+Privacy: in `xai_s2s` / hybrid modes audio leaves the machine. Enterprise
+profiles may force `mode = "local"`. Never log API keys or raw audio.
+
 ---
 
 ## 3. TTS Provider Configuration
@@ -53,9 +145,49 @@ panel and talk mode controls.
 The `voice.tts` section selects which text-to-speech engine produces audio.
 Only one provider is active at a time.
 
-### 3.1 Browser (Default)
+| Provider | Default? | Where it runs | Cloud proxy `/api/voice/tts` |
+|----------|----------|---------------|------------------------------|
+| `local` | **yes** | Offline / native talk pipeline | **400** clear error (not cloud) |
+| `local-stub` | no | Alias for local / stub engines | **400** (same as local) |
+| `browser` | no | Browser Web Speech (`clawft-ui`) | **400** — use Web Speech directly |
+| `openai` | no | Server → OpenAI | audio/mpeg when key present |
+| `elevenlabs` | no | Server → ElevenLabs | audio/mpeg when key present |
+
+**WEFT-238 decision:** the product default is **`local`**, not `browser`.
+The old default pointed at a server path that never implemented Web Speech
+dispatch. Browser synthesis is **client-side only** and already wired in
+`clawft-ui` `speak()` when the provider is `local`, `local-stub`, or
+`browser` (cloud proxy is only called for `openai` / `elevenlabs`).
+
+### 3.1 Local (Default)
+
+Offline-first provider. Aligns with the default Piper model name
+(`vits-piper-en_US-amy-medium`) and with `VoicePersonality.provider =
+"local"`. No cloud API key is required.
+
+```json
+{
+  "voice": {
+    "tts": {
+      "provider": "local",
+      "model": "vits-piper-en_US-amy-medium"
+    }
+  }
+}
+```
+
+In the web dashboard, `local` falls through to the browser Web Speech API
+for playback (zero-config UX). Native talk mode uses the local ADR-061 /
+`clawft-voice-tts` path when models are installed. The HTTP cloud proxy
+does **not** synthesize `local` — it returns HTTP 400 with guidance to use
+native talk or switch to a cloud provider.
+
+Alias: `"local-stub"` is accepted as local (stub / empty-audio engines).
+
+### 3.2 Browser (UI Web Speech opt-in)
 
 Uses the Web Speech API built into the browser. No API key is needed.
+Opt in only when you want to force the client path explicitly.
 
 ```json
 {
@@ -67,10 +199,12 @@ Uses the Web Speech API built into the browser. No API key is needed.
 }
 ```
 
-Quality is functional but robotic. This is the zero-configuration fallback
-that works in all modern browsers supporting the `SpeechSynthesis` interface.
+Quality is functional but robotic. Works in browsers that implement
+`SpeechSynthesis` (Chromium, Safari; Firefox support varies). There is
+**no** server-side browser dispatch — `POST /api/voice/tts` returns 400
+if this provider is selected.
 
-### 3.2 OpenAI TTS
+### 3.3 OpenAI TTS
 
 High-quality neural voices from OpenAI.
 
@@ -111,7 +245,7 @@ High-quality neural voices from OpenAI.
 `OPENAI_API_KEY` environment variable. The config value takes precedence
 when both are present.
 
-### 3.3 ElevenLabs TTS
+### 3.4 ElevenLabs TTS
 
 Highest quality and most natural sounding voices.
 
@@ -203,9 +337,10 @@ A complete `config.json` snippet with voice, provider keys, and gateway:
 }
 ```
 
-To switch providers, change `voice.tts.provider` to `"elevenlabs"` or
-`"browser"`. The provider-specific fields (`model`, `voice`, `speed`) are
-only read for the active provider.
+To switch providers, set `voice.tts.provider` to `"openai"`,
+`"elevenlabs"`, `"browser"`, or keep the default `"local"`. The
+provider-specific fields (`model`, `voice`, `speed`) are only read for
+the active provider.
 
 ---
 
@@ -328,9 +463,9 @@ key to the `providers` section of your config file.
 
 ### TTS sounds robotic
 
-The browser TTS provider uses the operating system's built-in speech
-synthesis, which varies in quality. Switch to `"openai"` or `"elevenlabs"`
-for neural-quality voices:
+Default `local` / `browser` playback in the dashboard uses the operating
+system's built-in speech synthesis (Web Speech), which varies in quality.
+Switch to `"openai"` or `"elevenlabs"` for neural-quality voices:
 
 ```json
 {

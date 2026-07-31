@@ -58,12 +58,26 @@ pub enum MeshError {
 pub const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 
 /// A bidirectional byte stream over any transport.
+///
+/// # Cancel-safety (ADR-010 / WEFT-18)
+///
+/// `recv` **must** be cancel-safe: it is raced inside `tokio::select!` in
+/// the mesh peer loop (`boot.rs` bidirectional accept path). If a future is
+/// dropped mid-frame, the next `recv` on the same stream must resume cleanly
+/// without length-prefix desync. Implementations that stage multi-step reads
+/// (`read_exact` of length then body) **must** keep partial progress on `self`.
+///
+/// `send` is typically invoked only after a `select!` arm wins (not as a
+/// racing future). Prefer making multi-write sends resilient to task drop, but
+/// cancel-safety of `recv` is the load-bearing contract for mesh correctness.
 #[async_trait]
 pub trait MeshStream: Send + Sync + 'static {
     /// Send raw bytes over the stream.
     async fn send(&mut self, data: &[u8]) -> Result<(), MeshError>;
 
     /// Receive raw bytes from the stream.
+    ///
+    /// Cancel-safe: may be dropped while pending inside `tokio::select!`.
     async fn recv(&mut self) -> Result<Vec<u8>, MeshError>;
 
     /// Close the stream gracefully.

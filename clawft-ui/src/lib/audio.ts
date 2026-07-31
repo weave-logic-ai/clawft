@@ -285,9 +285,13 @@ async function playAudioBlob(blob: Blob): Promise<void> {
 let _ttsProvider: string | null = null;
 let _ttsProviderChecked = false;
 
+/** Providers that the server `/api/voice/tts` cloud proxy can synthesize. */
+const CLOUD_TTS_PROVIDERS = new Set(["openai", "elevenlabs"]);
+
 /** Fetch the TTS provider setting from the backend (cached). */
 async function getTtsProvider(): Promise<string> {
-  if (_ttsProviderChecked) return _ttsProvider || "browser";
+  // Default matches VoiceConfig.tts.provider (WEFT-238: "local").
+  if (_ttsProviderChecked) return _ttsProvider || "local";
   try {
     const cfg = await api.voice.ttsConfig();
     _ttsProvider = cfg.provider;
@@ -295,7 +299,7 @@ async function getTtsProvider(): Promise<string> {
     return cfg.provider;
   } catch {
     _ttsProviderChecked = true;
-    return "browser";
+    return "local";
   }
 }
 
@@ -308,10 +312,9 @@ export function resetTtsProviderCache(): void {
 /**
  * Speak text using the best available TTS engine.
  *
- * If a cloud TTS provider is configured (e.g. "openai"), the text is sent
- * to the backend `/api/voice/tts` proxy which returns high-quality audio.
- * Falls back to the browser's built-in Web Speech API if cloud is
- * unavailable or not configured.
+ * Cloud providers (`openai`, `elevenlabs`) go through `/api/voice/tts`.
+ * Default `local` / `local-stub` / `browser` use the browser Web Speech
+ * API (WEFT-238 — no server browser dispatch; UI path is intentional).
  */
 export async function speak(
   text: string,
@@ -322,18 +325,18 @@ export async function speak(
 
   const provider = await getTtsProvider();
 
-  // Try cloud TTS first when configured
-  if (provider !== "browser") {
+  // Only hit the cloud proxy for providers it can synthesize.
+  if (CLOUD_TTS_PROVIDERS.has(provider)) {
     try {
       const blob = await api.voice.tts(clean, { speed: opts?.rate });
       await playAudioBlob(blob);
       return;
     } catch {
-      // Cloud TTS failed — fall through to browser TTS
+      // Cloud TTS failed — fall through to browser Web Speech
     }
   }
 
-  // Fallback: browser Web Speech API
+  // local / browser / unknown: Web Speech API (always available in Chromium UI)
   return speakBrowser(clean, opts);
 }
 

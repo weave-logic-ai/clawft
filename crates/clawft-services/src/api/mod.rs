@@ -18,6 +18,7 @@ pub mod middleware;
 pub mod monitoring;
 pub mod skills;
 pub mod voice_api;
+pub mod voice_status;
 pub mod ws;
 
 use std::sync::Arc;
@@ -26,6 +27,9 @@ use axum::Router;
 use tower_http::trace::TraceLayer;
 
 pub use http_facade_api::{InMemoryKernelFacade, KernelFacadeBackend};
+pub use voice_status::{
+    VoicePipelineUpdate, VoiceStatusEvent, VoiceStatusHub, VOICE_STATUS_TOPIC,
+};
 
 /// Shared state accessible by all API handlers.
 #[derive(Clone)]
@@ -57,6 +61,12 @@ pub struct ApiState {
     /// Drives `/api/status`, chain/vectors/ecc RPC routes, `/events` SSE
     /// (`poll_events`), and `/custody/witness`.
     pub kernel_facade: Arc<dyn KernelFacadeBackend>,
+    /// WEFT-40: shared last-N pipeline routing decision history.
+    ///
+    /// Same `Arc` as `PipelineRegistry::decision_history` so
+    /// `GET /api/admin/routing/decisions` reflects live traffic.
+    /// Empty ring when the API runs without a pipeline (tests/stubs).
+    pub routing_history: Arc<clawft_core::pipeline::decision_history::RoutingDecisionHistory>,
 }
 
 /// Trait for tool registry access (decouples API from Platform generics).
@@ -211,12 +221,24 @@ pub trait VoiceAccess: Send + Sync {
     fn update_settings(&self, update: VoiceSettingsUpdate) -> Result<(), String>;
     /// Get TTS configuration for the cloud TTS proxy.
     fn get_tts_config(&self) -> TtsProviderInfo;
+    /// Update runtime pipeline state and publish on [`VOICE_STATUS_TOPIC`] (WEFT-218).
+    ///
+    /// Default is a no-op that returns the current status — stubs/tests that
+    /// do not wire a broadcaster can leave this unimplemented.
+    fn update_pipeline_state(
+        &self,
+        update: VoicePipelineUpdate,
+    ) -> Result<VoiceStatusInfo, String> {
+        let _ = update;
+        Ok(self.get_status())
+    }
 }
 
 /// TTS provider configuration exposed to the API layer.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TtsProviderInfo {
-    /// Provider name: "browser", "openai", or "elevenlabs".
+    /// Provider name: `"local"` (default), `"local-stub"`, `"browser"`,
+    /// `"openai"`, or `"elevenlabs"` (WEFT-238).
     pub provider: String,
     /// Model identifier (e.g. "tts-1", "tts-1-hd").
     pub model: String,
@@ -224,7 +246,7 @@ pub struct TtsProviderInfo {
     pub voice: String,
     /// Speaking speed (0.25 - 4.0).
     pub speed: f32,
-    /// API key for the TTS provider (empty if browser-only).
+    /// API key for the TTS provider (empty for local / browser).
     #[serde(skip_serializing)]
     pub api_key: String,
     /// Optional base URL override.

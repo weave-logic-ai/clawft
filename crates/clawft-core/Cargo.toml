@@ -135,6 +135,7 @@ reqwest = { workspace = true, optional = true }
 ed25519-dalek = { workspace = true, optional = true }
 
 [dev-dependencies]
+dashmap = "6"
 tokio = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
@@ -159,3 +160,9 @@ required-features = ["browser"]
 [[bench]]
 name = "pipeline_bench"
 harness = false
+
+[[bench]]
+name = "map_contention_bench"
+harness = false
+
+

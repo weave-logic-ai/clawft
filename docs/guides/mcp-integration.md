@@ -14,6 +14,11 @@ external AI systems. Rather than spawning subprocesses (the previous
 Claude Code and claude-flow v3 are connected as MCP servers over stdio or
 HTTP transport.
 
+**Peer CLIs as clients of WeftOS** (Grok Build, Claude Code calling *into*
+`weft mcp-server`) are documented in [grok-weftos-mcp.md](./grok-weftos-mcp.md)
+and [ADR-075](../adr/adr-075-grok-weftos-mcp-client-bridge.md). That is the
+outbound bridge: WeftOS *serves* tools; Grok/Claude *consume* them.
+
 ### Why the shift
 
 The subprocess delegation model had several limitations:

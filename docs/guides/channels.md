@@ -440,10 +440,30 @@ The default intents value of `37377` enables:
 | GUILDS           | 0      | 1      | Guild create/update/delete     |
 | GUILD_MESSAGES   | 9      | 512    | Messages in guild channels     |
 | DIRECT_MESSAGES  | 12     | 4096   | Messages in DM channels        |
-| MESSAGE_CONTENT  | 15     | 32768  | Access to message text content |
+| MESSAGE_CONTENT  | 15     | 32768  | Access to message text content (**privileged**) |
 | **Total**        |        | **37377** |                             |
 
-To compute a custom intents value, bitwise-OR the flags you need.
+To compute a custom intents value, bitwise-OR the flags you need. Named
+constants live in `clawft-channels` (`discord::events`: `INTENT_GUILDS`,
+`INTENT_GUILD_MESSAGES`, `INTENT_DIRECT_MESSAGES`, `INTENT_MESSAGE_CONTENT`,
+`DEFAULT_GATEWAY_INTENTS`).
+
+**Privileged intents** (must be enabled under **Bot → Privileged Gateway
+Intents** in the Developer Portal; otherwise Discord closes the gateway with
+**close code 4014** Disallowed Intents):
+
+| Intent | Bit | Value | Portal toggle |
+|--------|-----|-------|---------------|
+| GUILD_MEMBERS | 1 | 2 | Server Members Intent |
+| GUILD_PRESENCES | 8 | 256 | Presence Intent |
+| MESSAGE_CONTENT | 15 | 32768 | Message Content Intent |
+
+The factory logs a warning for each privileged bit present in config so you
+know the portal flag must match. On close `4014`, the channel surfaces a clear
+error (enable the portal toggle or remove the bit from `intents`).
+
+**Validation:** `intents: 0` is rejected at channel build time with an explicit
+error — a zero mask receives no Gateway events and is almost always a misconfig.
 
 ### 5.7 How It Works
 

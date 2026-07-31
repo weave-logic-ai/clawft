@@ -1,9 +1,115 @@
 //! Discord Gateway event types and opcodes.
 //!
 //! These types model the Discord Gateway v10 WebSocket protocol.
+//!
+//! # Gateway intents (WEFT-173)
+//!
+//! Identify sends an `intents` bitmask. The clawft default is
+//! [`DEFAULT_GATEWAY_INTENTS`] (`37377` =
+//! [`INTENT_GUILDS`] | [`INTENT_GUILD_MESSAGES`] | [`INTENT_DIRECT_MESSAGES`] |
+//! [`INTENT_MESSAGE_CONTENT`]).
+//!
+//! Privileged intents ([`INTENT_GUILD_MEMBERS`], [`INTENT_GUILD_PRESENCES`],
+//! [`INTENT_MESSAGE_CONTENT`]) must also be enabled in the Discord Developer
+//! Portal. If they are requested but not enabled, Discord closes the gateway
+//! with code [`CLOSE_CODE_DISALLOWED_INTENTS`] (4014).
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+// ── Gateway intents (v10) ────────────────────────────────────────────────
+
+/// Guild create/update/delete and basic guild lifecycle.
+pub const INTENT_GUILDS: u32 = 1 << 0;
+/// Member join/update/leave — **privileged** (Developer Portal + bot approval).
+pub const INTENT_GUILD_MEMBERS: u32 = 1 << 1;
+/// Presence updates — **privileged**.
+pub const INTENT_GUILD_PRESENCES: u32 = 1 << 8;
+/// Message create/update/delete in guild channels.
+pub const INTENT_GUILD_MESSAGES: u32 = 1 << 9;
+/// Message create/update/delete in DM channels.
+pub const INTENT_DIRECT_MESSAGES: u32 = 1 << 12;
+/// Access to message text/embeds/attachments content — **privileged**.
+pub const INTENT_MESSAGE_CONTENT: u32 = 1 << 15;
+
+/// Privileged intent bits that Discord rejects (close 4014) unless enabled
+/// for the application in the Developer Portal.
+pub const PRIVILEGED_INTENTS: u32 =
+    INTENT_GUILD_MEMBERS | INTENT_GUILD_PRESENCES | INTENT_MESSAGE_CONTENT;
+
+/// Default Identify intents for clawft Discord bots.
+///
+/// `37377` = GUILDS (1) | GUILD_MESSAGES (512) | DIRECT_MESSAGES (4096) |
+/// MESSAGE_CONTENT (32768). MESSAGE_CONTENT is privileged and must be toggled
+/// on under Bot → Privileged Gateway Intents.
+pub const DEFAULT_GATEWAY_INTENTS: u32 =
+    INTENT_GUILDS | INTENT_GUILD_MESSAGES | INTENT_DIRECT_MESSAGES | INTENT_MESSAGE_CONTENT;
+
+/// Discord gateway close code: Disallowed Intents (privileged intent not
+/// enabled for the application).
+pub const CLOSE_CODE_DISALLOWED_INTENTS: u16 = 4014;
+
+/// Validate gateway intents before Identify.
+///
+/// Returns `Err` when `intents == 0` (no events would ever be received).
+/// Does **not** reject privileged intents: those are allowed when the bot
+/// has them enabled in the Developer Portal (default config includes
+/// MESSAGE_CONTENT).
+pub fn validate_gateway_intents(intents: u32) -> Result<(), String> {
+    if intents == 0 {
+        return Err(
+            "discord intents bitmask is 0: no Gateway events will be received. \
+             Use the default 37377 (GUILDS | GUILD_MESSAGES | DIRECT_MESSAGES | \
+             MESSAGE_CONTENT) or OR the intent bits you need"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// Human-readable warnings for privileged intent bits that are set.
+///
+/// Callers should log these at factory/build or Identify time so operators
+/// know the Developer Portal must match. If Discord has not negotiated the
+/// privileged intent, the gateway closes with
+/// [`CLOSE_CODE_DISALLOWED_INTENTS`].
+pub fn privileged_intent_warnings(intents: u32) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if intents & INTENT_GUILD_MEMBERS != 0 {
+        out.push(
+            "privileged intent GUILD_MEMBERS (bit 1) is set: enable Server Members Intent \
+             in the Discord Developer Portal, or Discord will reject Identify (close 4014)",
+        );
+    }
+    if intents & INTENT_GUILD_PRESENCES != 0 {
+        out.push(
+            "privileged intent GUILD_PRESENCES (bit 8) is set: enable Presence Intent \
+             in the Discord Developer Portal, or Discord will reject Identify (close 4014)",
+        );
+    }
+    if intents & INTENT_MESSAGE_CONTENT != 0 {
+        out.push(
+            "privileged intent MESSAGE_CONTENT (bit 15) is set: enable Message Content Intent \
+             in the Discord Developer Portal, or Discord will reject Identify (close 4014)",
+        );
+    }
+    out
+}
+
+/// Message for gateway close code 4014 (privileged intents not negotiated).
+///
+/// Returns `None` for other close codes.
+pub fn disallowed_intents_close_message(close_code: u16) -> Option<&'static str> {
+    if close_code == CLOSE_CODE_DISALLOWED_INTENTS {
+        Some(
+            "Discord rejected privileged intents (close 4014 Disallowed Intents): \
+             enable Message Content / Server Members / Presence under Bot → Privileged \
+             Gateway Intents, or remove those bits from channels.discord.intents",
+        )
+    } else {
+        None
+    }
+}
 
 // ── Gateway opcodes ─────────────────────────────────────────────────────
 
@@ -66,7 +172,8 @@ pub struct IdentifyPayload {
     /// Authentication token.
     pub token: String,
 
-    /// Gateway intents bitmask.
+    /// Gateway intents bitmask (see module-level intent constants; default
+    /// [`DEFAULT_GATEWAY_INTENTS`] = 37377).
     pub intents: u32,
 
     /// Connection properties (OS, browser, device).
@@ -320,7 +427,7 @@ mod tests {
     fn serialize_identify() {
         let identify = IdentifyPayload {
             token: "my-token".into(),
-            intents: 37377,
+            intents: DEFAULT_GATEWAY_INTENTS,
             properties: ConnectionProperties {
                 os: "linux".into(),
                 browser: "clawft".into(),
@@ -337,7 +444,65 @@ mod tests {
         assert_eq!(json["op"], 2);
         assert_eq!(json["d"]["token"], "my-token");
         assert_eq!(json["d"]["intents"], 37377);
+        assert_eq!(json["d"]["intents"], DEFAULT_GATEWAY_INTENTS);
         assert_eq!(json["d"]["properties"]["os"], "linux");
+    }
+
+    #[test]
+    fn default_gateway_intents_bitmask() {
+        assert_eq!(DEFAULT_GATEWAY_INTENTS, 37377);
+        assert_eq!(
+            DEFAULT_GATEWAY_INTENTS,
+            INTENT_GUILDS | INTENT_GUILD_MESSAGES | INTENT_DIRECT_MESSAGES | INTENT_MESSAGE_CONTENT
+        );
+        // Default includes privileged MESSAGE_CONTENT only (not members/presences).
+        assert_eq!(
+            DEFAULT_GATEWAY_INTENTS & PRIVILEGED_INTENTS,
+            INTENT_MESSAGE_CONTENT
+        );
+    }
+
+    #[test]
+    fn validate_gateway_intents_rejects_zero() {
+        let err = validate_gateway_intents(0).unwrap_err();
+        assert!(
+            err.contains("intents bitmask is 0"),
+            "expected clear zero-intents error, got: {err}"
+        );
+        assert!(validate_gateway_intents(DEFAULT_GATEWAY_INTENTS).is_ok());
+        assert!(validate_gateway_intents(INTENT_GUILDS).is_ok());
+    }
+
+    #[test]
+    fn privileged_intent_warnings_for_each_flag() {
+        assert!(privileged_intent_warnings(INTENT_GUILDS).is_empty());
+        assert!(privileged_intent_warnings(INTENT_GUILD_MESSAGES | INTENT_DIRECT_MESSAGES).is_empty());
+
+        let msg_content = privileged_intent_warnings(INTENT_MESSAGE_CONTENT);
+        assert_eq!(msg_content.len(), 1);
+        assert!(msg_content[0].contains("MESSAGE_CONTENT"));
+        assert!(msg_content[0].contains("4014"));
+
+        let members = privileged_intent_warnings(INTENT_GUILD_MEMBERS);
+        assert_eq!(members.len(), 1);
+        assert!(members[0].contains("GUILD_MEMBERS"));
+
+        let all = privileged_intent_warnings(PRIVILEGED_INTENTS);
+        assert_eq!(all.len(), 3);
+
+        // Default config includes MESSAGE_CONTENT → one warning.
+        let default_warns = privileged_intent_warnings(DEFAULT_GATEWAY_INTENTS);
+        assert_eq!(default_warns.len(), 1);
+        assert!(default_warns[0].contains("MESSAGE_CONTENT"));
+    }
+
+    #[test]
+    fn disallowed_intents_close_message_only_for_4014() {
+        let msg = disallowed_intents_close_message(CLOSE_CODE_DISALLOWED_INTENTS).unwrap();
+        assert!(msg.contains("4014"));
+        assert!(msg.contains("privileged"));
+        assert!(disallowed_intents_close_message(1000).is_none());
+        assert!(disallowed_intents_close_message(4000).is_none());
     }
 
     #[test]

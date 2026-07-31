@@ -334,6 +334,14 @@ async fn run_interactive(
     if skill_count > 0 {
         println!("Skills: {skill_count} registered");
     }
+    // WEFT-74 / ADR-080: non-blocking notice so pending autogen skills do
+    // not accumulate unseen. Review remains CLI (`weft skills pending|…`).
+    if let Some(notice) = clawft_core::agent::skill_autogen::pending_review_start_notice(
+        None,
+        clawft_core::agent::skill_autogen::PendingReviewTiming::DEFAULT_POLICY,
+    ) {
+        println!("{notice}");
+    }
     println!();
 
     // Initialize interactive context.

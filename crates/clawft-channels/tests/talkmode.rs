@@ -468,6 +468,10 @@ async fn full_pipeline_speculative_then_committed() {
     assert!(!observer.has(|e| matches!(e, ConversationEvent::Interrupted)));
 }
 
+// ── WEFT-221: continuous barge-in during TTS playback ───────────────────
+// Live surface is clawft-channels talkmode (`speak_answer_with_barge_in`),
+// not plugin `TtsAbortHandle` (WEFT-671 cancel-superseded that scaffold).
+
 #[tokio::test]
 async fn barge_in_flushes_and_emits_interrupted() {
     let observer = Arc::new(RecordingObserver::default());
@@ -494,11 +498,13 @@ async fn barge_in_flushes_and_emits_interrupted() {
         observer.clone() as Arc<dyn ConversationObserver>,
         TalkModeConfig {
             barge_in_frames: 3,
-            // Barge-in is opt-in (default off until AEC residual is tuned);
-            // this test IS the barge-in path, so enable it and disable the
-            // AEC-convergence grace (scripted frames land instantly).
+            // Continuous barge-in is opt-in (default off until AEC residual
+            // is tuned — headphones-only; speakers use sentence windows).
+            // This test IS the continuous path: enable it, zero grace, and
+            // disable windows so only VAD-during-playback can fire.
             barge_in_enabled: true,
             barge_in_grace_ms: 0,
+            sentence_window_ms: 0,
             ..Default::default()
         },
     );
@@ -541,6 +547,158 @@ async fn barge_in_flushes_and_emits_interrupted() {
         sink.flushes.load(Ordering::SeqCst) >= 1,
         "barge-in must flush the TTS sink"
     );
+}
+
+/// WEFT-221 honest default: when continuous barge-in is OFF (AEC residual
+/// not yet trusted on open speakers), mic energy during TTS playback must
+/// NOT abort the answer — otherwise self-echo loops cancel every reply.
+#[tokio::test]
+async fn barge_in_disabled_ignores_mid_playback_vad() {
+    let observer = Arc::new(RecordingObserver::default());
+    let sink = Arc::new(RecordingSink::default());
+    let audio = Arc::new(CountingAudio::default());
+
+    let tts = DualLayerTts::new(
+        Arc::new(ImmediateEngine(TtsTier::Fast)),
+        Arc::new(DripEngine),
+    )
+    .unwrap();
+
+    let mut ctrl = TalkModeController::new(
+        endpointer(),
+        Arc::new(MockStt("read me the whole document please")),
+        None,
+        SpeakerRegistry::new(0.45),
+        VoiceAnswerPolicy::default(),
+        Arc::new(MockLlm("Here is a long answer that must finish despite echo.")),
+        tts,
+        sink.clone(),
+        audio.clone(),
+        observer.clone() as Arc<dyn ConversationObserver>,
+        TalkModeConfig {
+            barge_in_frames: 3,
+            // Product default: continuous barge-in OFF; no windows either so
+            // this isolates "VAD while speaking must not self-abort".
+            barge_in_enabled: false,
+            barge_in_grace_ms: 0,
+            sentence_window_ms: 0,
+            ..Default::default()
+        },
+    );
+
+    let (tx, rx) = mpsc::channel::<Vec<i16>>(64);
+    let cancel = CancellationToken::new();
+    let run_cancel = cancel.clone();
+    let handle = tokio::spawn(async move { ctrl.run(rx, run_cancel).await });
+
+    calibrate(&tx).await;
+    for _ in 0..3 {
+        tx.send(voiced_frame()).await.unwrap();
+    }
+    for _ in 0..9 {
+        tx.send(silent_frame()).await.unwrap();
+    }
+
+    wait_until(|| observer.has(|e| matches!(e, ConversationEvent::CommittedReply { .. }))).await;
+    // Simulate loud self-echo / imperfect AEC residual during playback.
+    for _ in 0..12 {
+        tx.send(voiced_frame()).await.unwrap();
+    }
+    // Give the speak loop time to observe those frames without interrupting.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    assert!(
+        !observer.has(|e| matches!(e, ConversationEvent::Interrupted)),
+        "disabled continuous barge-in must not emit Interrupted on mid-playback energy"
+    );
+    assert_eq!(
+        audio.0.load(Ordering::SeqCst),
+        0,
+        "disabled continuous barge-in must not flush AEC on mid-playback energy"
+    );
+    assert_eq!(
+        sink.flushes.load(Ordering::SeqCst),
+        0,
+        "disabled continuous barge-in must not flush the TTS sink"
+    );
+
+    cancel.cancel();
+    drop(tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+}
+
+/// WEFT-221: even with continuous barge-in ON, the AEC-convergence grace
+/// window must suppress self-barge at playback start (bot's own voice).
+#[tokio::test]
+async fn barge_in_grace_suppresses_early_self_echo() {
+    let observer = Arc::new(RecordingObserver::default());
+    let sink = Arc::new(RecordingSink::default());
+    let audio = Arc::new(CountingAudio::default());
+
+    let tts = DualLayerTts::new(
+        Arc::new(ImmediateEngine(TtsTier::Fast)),
+        Arc::new(DripEngine),
+    )
+    .unwrap();
+
+    let mut ctrl = TalkModeController::new(
+        endpointer(),
+        Arc::new(MockStt("read me the whole document please")),
+        None,
+        SpeakerRegistry::new(0.45),
+        VoiceAnswerPolicy::default(),
+        Arc::new(MockLlm("Here is a long answer under grace protection.")),
+        tts,
+        sink.clone(),
+        audio.clone(),
+        observer.clone() as Arc<dyn ConversationObserver>,
+        TalkModeConfig {
+            barge_in_frames: 3,
+            barge_in_enabled: true,
+            // Long grace so all scripted "echo" frames land inside it.
+            barge_in_grace_ms: 5_000,
+            sentence_window_ms: 0,
+            ..Default::default()
+        },
+    );
+
+    let (tx, rx) = mpsc::channel::<Vec<i16>>(64);
+    let cancel = CancellationToken::new();
+    let run_cancel = cancel.clone();
+    let handle = tokio::spawn(async move { ctrl.run(rx, run_cancel).await });
+
+    calibrate(&tx).await;
+    for _ in 0..3 {
+        tx.send(voiced_frame()).await.unwrap();
+    }
+    for _ in 0..9 {
+        tx.send(silent_frame()).await.unwrap();
+    }
+
+    wait_until(|| observer.has(|e| matches!(e, ConversationEvent::CommittedReply { .. }))).await;
+    for _ in 0..8 {
+        tx.send(voiced_frame()).await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    assert!(
+        !observer.has(|e| matches!(e, ConversationEvent::Interrupted)),
+        "voiced energy inside barge_in_grace_ms must not fire continuous barge-in"
+    );
+    assert_eq!(
+        audio.0.load(Ordering::SeqCst),
+        0,
+        "grace-suppressed energy must not flush AEC"
+    );
+    assert_eq!(
+        sink.flushes.load(Ordering::SeqCst),
+        0,
+        "grace-suppressed energy must not flush TTS"
+    );
+
+    cancel.cancel();
+    drop(tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
 }
 
 #[tokio::test]

@@ -245,7 +245,7 @@ mod tests {
         let restored: MessagePayload = serde_json::from_str(&json).unwrap();
         match restored {
             MessagePayload::Text { content } => assert_eq!(content, "hello"),
-            _ => panic!("expected Text variant"),
+            _ => unreachable!("expected Text variant"),
         }
     }
 
@@ -260,7 +260,7 @@ mod tests {
             MessagePayload::Structured { content } => {
                 assert_eq!(content["key"], "value");
             }
-            _ => panic!("expected Structured variant"),
+            _ => unreachable!("expected Structured variant"),
         }
     }
 
@@ -277,7 +277,7 @@ mod tests {
                 assert_eq!(mime_type, "image/png");
                 assert_eq!(data, vec![0x89, 0x50, 0x4e, 0x47]);
             }
-            _ => panic!("expected Binary variant"),
+            _ => unreachable!("expected Binary variant"),
         }
     }
 

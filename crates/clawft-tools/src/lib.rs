@@ -32,6 +32,8 @@ pub mod spawn_tool;
 pub mod subagent_tools;
 pub mod url_safety;
 #[cfg(feature = "voice")]
+pub mod voice_backend;
+#[cfg(feature = "voice")]
 pub mod voice_listen;
 #[cfg(feature = "voice")]
 pub mod voice_speak;

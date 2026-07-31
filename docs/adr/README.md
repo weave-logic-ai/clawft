@@ -68,17 +68,24 @@ This directory contains Architecture Decision Records (ADRs) for the WeftOS + cl
 | [ADR-070](adr-070-mcp-registry-ownership.md) | MCP server registry ownership — CLI durable config vs daemon runtime | Accepted | Architecture | WEFT-494 (ws15 MCP audit open question) |
 | [ADR-071](adr-071-wasm-panel-auth.md) | WASM panel auth — per-panel token / capability model for webview proxy | Accepted | Security | WEFT-495 (ws15 MCP audit open question) |
 | [ADR-072](adr-072-webview-substrate-publish-gate.md) | Webview vs daemon substrate write boundary (`substrate.publish` denylist) | Accepted | Security | WEFT-496 (ws15 MCP audit open question) |
+| [ADR-073](adr-073-agent-workspace-cnvs-principles.md) | Agent Workspace interaction principles (CNVS-informed visible agents + WindowIntent) | Accepted | GUI | cnvs.dev / MaxBlade demos 2026-07-30 |
+| [ADR-074](adr-074-interim-xai-grok-voice.md) | Interim primary voice — xAI Grok Voice; local remains offline/fallback | Accepted | Architecture | Owner: local sub-par for realtime; xAI until replacement |
+| [ADR-075](adr-075-grok-weftos-mcp-client-bridge.md) | Grok Build (and peer CLIs) as WeftOS MCP clients; L1–L3 bridge ladder | Accepted | Integration | Owner: Grok drives WeftOS via `weft mcp-server` |
+| [ADR-076](adr-076-mcp-tool-surface-capability-catalog.md) | MCP tool surface principles + unified capability catalog (profiles, façade) | Accepted | Integration | Audit: engine strong, outbound catalog weak |
+| [ADR-077](adr-077-android-splat-capture-edge-node.md) | Android native splat capture as WeftOS edge node (phone → Mac/cloud) | Accepted (plan) | Integration | Native > web; Kernel AndroidPlatform |
+| [ADR-078](adr-078-splat-feeds-world-model.md) | Splat pipeline feeds structured world model (objects/volumes → BVH) | Accepted | Architecture | Appearance SOG + structure leaves |
+| [ADR-079](adr-079-urth-digital-twin.md) | **Urth** — multi-scale sparse-first planetary twin (Snow Crash north star) | Accepted (vision) | Architecture | LOD + open feeds + local densify; not “Earth” product branding |
 
 ## Categories
 
 | Category | ADRs | Description |
 |----------|------|-------------|
 | **Release** | 001, 002, 012, 029, 037, 044 | Versioning, distribution, and build decisions |
-| **GUI** | 003, 004, 005, 006, 007, 013, 016, 038, 055 | UI/UX technology and architecture decisions |
-| **Architecture** | 010, 017, 019, 020, 021, 022, 023, 026, 027, 030, 031, 033, 034, 035, 036, 039, 040, 041, 042, 045, 046, 047, 048, 049, 053, 056, 070 | Core system design decisions |
+| **GUI** | 003, 004, 005, 006, 007, 013, 016, 038, 055, 073 | UI/UX technology and architecture decisions |
+| **Architecture** | 010, 017, 019, 020, 021, 022, 023, 026, 027, 030, 031, 033, 034, 035, 036, 039, 040, 041, 042, 045, 046, 047, 048, 049, 053, 056, 061, 068, 070, 074, 078, 079 | Core system design decisions |
 | **Security** | 024, 025, 028, 043, 057, 071, 072 | Cryptography, identity, and chain-integrity decisions |
 | **Performance** | 009, 011, 032 | Algorithmic and optimization decisions |
-| **Integration** | 008, 018, 054 | External system integration decisions |
+| **Integration** | 008, 018, 054, 075, 076, 077 | External system integration decisions |
 | **Documentation** | 014, 015 | Documentation and web presence decisions |
 
 ## Decision Sources

@@ -1,0 +1,33 @@
+//! `clawft-splat-pipeline` — phone video **or** image-set session → Gaussian splat.
+//!
+//! ```text
+//!  video ─ probe ─ frames ─ sfm ─ train ─ compress ─ package ─▶ artifacts/
+//!  image-set ──┘ (skip ffmpeg; copy frames) colmap brush splat-transform
+//!                                                          + world_model.json
+//! ```
+//!
+//! Package (ADR-078 W0 / WEFT-708) also writes a `world_model.json` stub with
+//! `SPLAT_SCENE` metadata and optional scene AABB from COLMAP sparse points.
+//! Image-set sessions follow `docs/weftos/capture-protocol-v1.md` (WEFT-704).
+//!
+//! Library only — no HTTP here. `clawft-splatd` (binary `splatd`) composes
+//! this behind the v1 job API. See `docs/weftos/splat-pipeline-design.md`.
+
+#![deny(rust_2018_idioms)]
+
+pub mod config;
+pub mod job;
+pub mod pipeline;
+pub mod run;
+pub mod session;
+pub mod stages;
+pub mod world_model;
+
+pub use config::PipelineConfig;
+pub use job::{JobDirs, JobRecord, JobStatus, Metrics, Stage};
+pub use pipeline::{now_ms, run_job};
+pub use session::{
+    CAPTURE_PROTOCOL_V1, InputKind, JobInput, PoseLine, SESSION_DIR_NAME, SessionLayout,
+    detect_job_input, is_session_dir, normalize_session_root, parse_session,
+};
+pub use world_model::{SceneAabb, build_world_model_stub, compute_scene_aabb, write_world_model};

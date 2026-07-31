@@ -1,9 +1,16 @@
 //! Monitoring API routes.
 //!
 //! Provides endpoints for token usage tracking, cost breakdowns,
-//! and pipeline run telemetry.
+//! pipeline run telemetry, and (WEFT-40) admin routing-decision history.
 
-use axum::{Json, Router, extract::State, routing::get};
+use axum::{
+    Json, Router,
+    extract::{Query, State},
+    routing::get,
+};
+use clawft_core::pipeline::decision_history::{
+    DecisionHistoryFilter, RoutingAggregateStats, RoutingDecisionEntry,
+};
 use serde::{Deserialize, Serialize};
 
 use super::ApiState;
@@ -14,6 +21,9 @@ pub fn monitoring_routes() -> Router<ApiState> {
         .route("/monitoring/token-usage", get(token_usage))
         .route("/monitoring/costs", get(cost_breakdown))
         .route("/monitoring/pipeline-runs", get(pipeline_runs))
+        // WEFT-40: admin surface for recent routing decisions.
+        .route("/admin/routing/decisions", get(routing_decisions))
+        .route("/admin/routing/stats", get(routing_stats))
 }
 
 // ── Types ──────────────────────────────────────────────────────
@@ -241,4 +251,69 @@ async fn pipeline_runs(State(_state): State<ApiState>) -> Json<Vec<PipelineRun>>
         },
     ];
     Json(runs)
+}
+
+// ── WEFT-40: routing decision history ─────────────────────────────────
+
+/// Query params for `GET /api/admin/routing/decisions`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RoutingDecisionsQuery {
+    /// Max entries (newest first). Default 100, capped at ring capacity.
+    pub limit: Option<usize>,
+    /// Filter by principal / sender_id.
+    pub user: Option<String>,
+    /// Filter by tier name.
+    pub tier: Option<String>,
+    /// Inclusive lower bound on entry `ts` (RFC3339).
+    pub since: Option<String>,
+}
+
+/// Response body for `GET /api/admin/routing/decisions`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutingDecisionsResponse {
+    /// Matching decisions, newest first.
+    pub decisions: Vec<RoutingDecisionEntry>,
+    /// Aggregate stats over the *entire* ring (not just the filtered page).
+    pub stats: RoutingAggregateStats,
+    /// Number of entries returned in `decisions`.
+    pub returned: usize,
+}
+
+/// Default page size when `limit` is omitted.
+const DEFAULT_DECISIONS_PAGE: usize = 100;
+
+/// `GET /api/admin/routing/decisions` — last N routing decisions with
+/// optional filters (WEFT-40). Auth-gated via the `/api` nest.
+///
+/// Privacy: entries use redacted reason categories only (no free-text
+/// `RoutingDecision.reason`). See `decision_history` module docs.
+async fn routing_decisions(
+    State(state): State<ApiState>,
+    Query(q): Query<RoutingDecisionsQuery>,
+) -> Json<RoutingDecisionsResponse> {
+    let capacity = state.routing_history.capacity();
+    let limit = q
+        .limit
+        .unwrap_or(DEFAULT_DECISIONS_PAGE)
+        .min(if capacity == 0 { DEFAULT_DECISIONS_PAGE } else { capacity })
+        .max(1);
+    let filter = DecisionHistoryFilter {
+        limit: Some(limit),
+        principal: q.user,
+        tier: q.tier,
+        since: q.since,
+    };
+    let decisions = state.routing_history.query(filter);
+    let returned = decisions.len();
+    let stats = state.routing_history.aggregate_stats();
+    Json(RoutingDecisionsResponse {
+        decisions,
+        stats,
+        returned,
+    })
+}
+
+/// `GET /api/admin/routing/stats` — aggregate counters only (WEFT-40).
+async fn routing_stats(State(state): State<ApiState>) -> Json<RoutingAggregateStats> {
+    Json(state.routing_history.aggregate_stats())
 }

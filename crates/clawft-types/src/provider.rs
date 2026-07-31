@@ -766,7 +766,7 @@ mod tests {
                 assert_eq!(name, "web_search");
                 assert_eq!(input["query"], "rust");
             }
-            _ => panic!("expected ToolUse"),
+            _ => unreachable!("expected ToolUse"),
         }
     }
 

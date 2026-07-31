@@ -689,6 +689,20 @@ mod tests {
     // ── Tools subcommand parsing ───────────────────────────────────
 
     #[test]
+    fn cli_skills_refresh_parses() {
+        let result = Cli::try_parse_from(["weft", "skills", "refresh"]);
+        assert!(result.is_ok());
+        if let Commands::Skills(args) = result.unwrap().command {
+            assert!(matches!(
+                args.action,
+                commands::skills_cmd::SkillsAction::Refresh
+            ));
+        } else {
+            panic!("expected Skills command");
+        }
+    }
+
+    #[test]
     fn cli_tools_list_parses() {
         let result = Cli::try_parse_from(["weft", "tools", "list"]);
         assert!(result.is_ok());
@@ -866,8 +880,6 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[cfg(feature = "services")]
-    #[test]
     // ── MCP manage subcommand parsing (WEFT-188) ───────────────────
 
     #[test]
@@ -927,10 +939,20 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[cfg(feature = "services")]
     #[test]
     fn cli_mcp_server_parses() {
         let result = Cli::try_parse_from(["weft", "mcp-server"]);
         assert!(result.is_ok());
+        match result.unwrap().command {
+            Commands::McpServer(args) => {
+                assert_eq!(args.profile, "default");
+                assert!(args.config.is_none());
+                assert!(!args.reexport_mcp);
+                assert!(!args.attach, "standalone is the default");
+            }
+            _ => panic!("expected McpServer"),
+        }
     }
 
     #[cfg(feature = "services")]
@@ -941,6 +963,81 @@ mod tests {
     }
 
     #[cfg(feature = "services")]
+    #[test]
+    fn cli_mcp_server_with_profile() {
+        let result = Cli::try_parse_from(["weft", "mcp-server", "--profile", "control,media"]);
+        assert!(result.is_ok(), "parse error: {:?}", result.err());
+        match result.unwrap().command {
+            Commands::McpServer(args) => {
+                assert_eq!(args.profile, "control,media");
+                assert!(!args.reexport_mcp);
+            }
+            _ => panic!("expected McpServer"),
+        }
+    }
+
+    #[cfg(feature = "services")]
+    #[test]
+    fn cli_mcp_server_profile_full() {
+        let result = Cli::try_parse_from(["weft", "mcp-server", "--profile", "full"]);
+        assert!(result.is_ok());
+        match result.unwrap().command {
+            Commands::McpServer(args) => {
+                assert_eq!(args.profile, "full");
+                assert!(!args.reexport_mcp, "reexport off unless flag");
+            }
+            _ => panic!("expected McpServer"),
+        }
+    }
+
+    #[cfg(feature = "services")]
+    #[test]
+    fn cli_mcp_server_reexport_mcp_flag() {
+        let result = Cli::try_parse_from([
+            "weft",
+            "mcp-server",
+            "--profile",
+            "full",
+            "--reexport-mcp",
+        ]);
+        assert!(result.is_ok(), "parse error: {:?}", result.err());
+        match result.unwrap().command {
+            Commands::McpServer(args) => {
+                assert_eq!(args.profile, "full");
+                assert!(args.reexport_mcp);
+            }
+            _ => panic!("expected McpServer"),
+        }
+    }
+
+    #[cfg(feature = "services")]
+    #[test]
+    fn cli_mcp_server_attach_parses() {
+        let result = Cli::try_parse_from(["weft", "mcp-server", "--attach"]);
+        assert!(result.is_ok());
+        match result.unwrap().command {
+            Commands::McpServer(args) => {
+                assert!(args.attach);
+                assert!(!args.reexport_mcp);
+            }
+            _ => panic!("expected McpServer"),
+        }
+    }
+
+    #[test]
+    fn cli_mcp_server_attach_with_profile() {
+        let result =
+            Cli::try_parse_from(["weft", "mcp-server", "--attach", "--profile", "control"]);
+        assert!(result.is_ok());
+        match result.unwrap().command {
+            Commands::McpServer(args) => {
+                assert!(args.attach);
+                assert_eq!(args.profile, "control");
+            }
+            _ => panic!("expected McpServer"),
+        }
+    }
+
     #[test]
     fn cli_mcp_server_verbose() {
         let result = Cli::try_parse_from(["weft", "--verbose", "mcp-server"]);

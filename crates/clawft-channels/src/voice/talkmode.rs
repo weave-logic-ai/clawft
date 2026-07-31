@@ -1513,10 +1513,12 @@ impl<M: EndpointModel> TalkModeController<M> {
 
     /// Stream one sentence (or, when windows are disabled/inapplicable, the
     /// whole answer text) of the grounded answer, monitoring for CONTINUOUS
-    /// barge-in: a sustained voiced run during playback is a barge-in →
-    /// cancel TTS (flushes the sink) + flush the AEC render reference + emit
-    /// `Interrupted`. Gated behind [`TalkModeConfig::barge_in_enabled`]
-    /// (headphones only — see [`TalkModeConfig::sentence_window_ms`] for the
+    /// barge-in (WEFT-221): a sustained voiced run during playback is a
+    /// barge-in → cancel TTS (flushes the sink) + flush the AEC render
+    /// reference + emit `Interrupted`. Gated behind
+    /// [`TalkModeConfig::barge_in_enabled`] (OFF by default — honest no
+    /// self-barge-in when AEC residual is imperfect; headphones only once
+    /// enabled — see [`TalkModeConfig::sentence_window_ms`] for the
     /// speaker-safe default). See [`speak_while_draining`] and WEFT-658's
     /// "no new interrupt machinery" constraint.
     ///

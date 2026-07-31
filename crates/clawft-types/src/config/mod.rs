@@ -17,6 +17,7 @@ pub mod plugins;
 pub mod policies;
 pub mod skills;
 pub mod voice;
+pub mod voice_metrics;
 
 // Re-export channel types at the config level for backward compatibility.
 pub use channels::*;
@@ -27,6 +28,7 @@ pub use plugins::*;
 pub use policies::*;
 pub use skills::*;
 pub use voice::*;
+pub use voice_metrics::*;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -1197,6 +1199,11 @@ mod tests {
     fn voice_config_defaults() {
         let cfg: VoiceConfig = serde_json::from_str("{}").unwrap();
         assert!(!cfg.enabled);
+        // ADR-074 / WEFT-689: product default mode is xai_s2s (fails open to local).
+        assert_eq!(cfg.mode, VoiceMode::XaiS2s);
+        assert_eq!(cfg.xai.api_key_env, DEFAULT_XAI_API_KEY_ENV);
+        assert_eq!(cfg.xai.realtime_model, DEFAULT_XAI_REALTIME_MODEL);
+        assert_eq!(cfg.xai.endpoint, DEFAULT_XAI_REALTIME_ENDPOINT);
         assert_eq!(cfg.audio.sample_rate, 16000);
         assert_eq!(cfg.audio.chunk_size, 512);
         assert_eq!(cfg.audio.channels, 1);

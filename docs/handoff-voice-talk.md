@@ -87,7 +87,8 @@ weft voice watch weft-talk # graph surface alongside
 | WEFT-660/661 | vector: real-DiskANN search id=0; Hybrid cross-metric merge (recall 0.11) — DiskANN itself deferred "come back to it" (docs/brain/vector-backend-bench-2026-07.md) |
 | WEFT-662 | upstream rvf-runtime 0.2 report list: macOS __errno_location; open() resets metric AND witness hash; permanent delete bitmap; no vector-by-id read |
 | WEFT-663 | pre-existing wasm break: local_file_sink Send futures |
-| unfiled | default CI skips clawft-cli `voice` feature (watch module untested); review-mode voice queue drains next-turn not on-accept; system messages DROPPED by inbound_from_params (voice policy rides skill_instructions) |
+| unfiled | default CI skips clawft-cli `voice` feature (watch module untested); system messages DROPPED by inbound_from_params (voice policy rides skill_instructions) |
+| WEFT-673 | review-mode hold-drain closed (`VoiceLoop::drain_after_hold_resolve` on accept/discard); forest-path voice≠text asymmetry documented as deliberate |
 
 ## Gotchas earned this session (the expensive ones)
 

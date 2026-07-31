@@ -547,39 +547,20 @@ impl PermissionResolver {
     }
 
     /// Static validation: check if workspace expands beyond global ceiling.
+    ///
+    /// **CONS-006 / WEFT-36:** thin wrapper over
+    /// [`crate::routing_validation::validate_workspace_ceiling`] — the single
+    /// post-load authority for ceiling rules (level / tools / rates / budgets).
+    /// Returns display strings for bootstrap warn logs; prefer the typed
+    /// `ValidationError` list when diagnosing programmatically.
     pub fn validate_workspace_ceiling(
         global: &RoutingConfig,
         workspace: &RoutingConfig,
     ) -> Vec<String> {
-        let mut violations = Vec::new();
-        for ln in &["zero_trust", "user", "admin"] {
-            let g = match *ln {
-                "zero_trust" => &global.permissions.zero_trust,
-                "user" => &global.permissions.user,
-                _ => &global.permissions.admin,
-            };
-            let w = match *ln {
-                "zero_trust" => &workspace.permissions.zero_trust,
-                "user" => &workspace.permissions.user,
-                _ => &workspace.permissions.admin,
-            };
-            if let Some(wl) = w.level {
-                let gl = g.level.unwrap_or(level_from_name(ln).unwrap_or(0));
-                if wl > gl {
-                    violations.push(format!(
-                        "Workspace {ln}: level {wl} exceeds global ceiling {gl}"
-                    ));
-                }
-            }
-            if let Some(true) = w.escalation_allowed
-                && let Some(false) = g.escalation_allowed
-            {
-                violations.push(format!(
-                    "Workspace {ln}: escalation_allowed=true exceeds global ceiling (false)"
-                ));
-            }
-        }
-        violations
+        crate::routing_validation::validate_workspace_ceiling(global, workspace)
+            .into_iter()
+            .map(|e| e.to_string())
+            .collect()
     }
 }
 

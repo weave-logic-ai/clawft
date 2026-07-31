@@ -71,7 +71,7 @@ pub mod router;
 #[cfg(feature = "native")]
 pub mod eml_retry;
 #[cfg(feature = "native")]
-pub use eml_retry::RetryModel;
+pub use eml_retry::{retry_model_path, RetryModel, RETRY_MODEL_FILENAME};
 
 #[cfg(feature = "browser")]
 pub mod browser_transport;

@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>weft-splat harness viewer</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0e12; color: #dbe2ea;
+               font: 14px/1.4 system-ui, sans-serif; overflow: hidden; }
+  #app { position: fixed; inset: 0; }
+  #hud {
+    position: fixed; top: 10px; left: 12px; padding: 10px 14px;
+    background: rgba(10, 14, 20, .78); border: 1px solid #26303c;
+    border-radius: 10px; max-width: 380px; backdrop-filter: blur(6px);
+  }
+  #hud b { color: #7fd1c7; }
+  #hud code { color: #9db4c8; font-size: 12px; word-break: break-all; }
+  #err { color: #e58c8a; white-space: pre-wrap; margin-top: 6px; }
+  #tools {
+    position: fixed; bottom: 12px; left: 12px; display: flex; gap: 8px;
+    flex-wrap: wrap;
+  }
+  #tools button, #tools label {
+    background: #1a2330; color: #dbe2ea; border: 1px solid #334155;
+    border-radius: 8px; padding: 8px 12px; cursor: pointer; font: inherit;
+  }
+  #tools button.active { border-color: #7fd1c7; color: #7fd1c7; }
+  #tools button:hover { border-color: #64748b; }
+  #readout {
+    position: fixed; bottom: 12px; right: 12px; padding: 8px 12px;
+    background: rgba(10, 14, 20, .78); border: 1px solid #26303c;
+    border-radius: 8px; font: 12px/1.35 ui-monospace, monospace; min-width: 200px;
+  }
+  .hint { color: #6b7c8f; font-size: 12px; margin-top: 4px; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="hud">
+  <div><b>weft-splat</b> · <span id="status">loading…</span></div>
+  <div><code id="src"></code></div>
+  <div class="hint">Orbit: drag · Zoom: scroll · Pan: right-drag</div>
+  <div class="hint">Overlays / measure land next — axes + coords first.</div>
+  <div id="err"></div>
+</div>
+<div id="tools">
+  <button type="button" id="btn-axes" class="active" title="World axes overlay">Axes</button>
+  <button type="button" id="btn-grid" class="active" title="Ground grid">Grid</button>
+  <button type="button" id="btn-reset" title="Reset camera">Reset cam</button>
+  <label title="Load a local .ply / .sog / .splat">
+    Open file
+    <input type="file" id="file" accept=".ply,.sog,.spz,.splat,.ksplat" hidden />
+  </label>
+</div>
+<div id="readout">
+  <div>cam <span id="cam-pos">—</span></div>
+  <div>target <span id="cam-tgt">—</span></div>
+  <div class="hint">measure: soon</div>
+</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.178.0/build/three.module.js",
+    "@sparkjsdev/spark": "https://cdn.jsdelivr.net/npm/@sparkjsdev/spark@0.1/dist/spark.module.js"
+} }
+</script>
+<script type="module">
+/**
+ * Harness viewer for clawft-splatd.
+ *
+ * Sources (priority):
+ *   ?url=<direct splat url>
+ *   ?job=<id>&splatd=<base>     (default splatd http://127.0.0.1:7860)
+ *   local file via Open file
+ *
+ * Overlay hooks (extensible):
+ *   window.WeftSplatHarness.overlays  — register custom THREE objects
+ *   window.WeftSplatHarness.scene / camera / controls
+ */
+import * as THREE from "three";
+import { SplatMesh } from "@sparkjsdev/spark";
+import { OrbitControls } from "https://cdn.jsdelivr.net/npm/three@0.178.0/examples/jsm/controls/OrbitControls.js";
+
+const $ = (id) => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+
+const state = {
+  showAxes: true,
+  showGrid: true,
+  splat: null,
+};
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+$("app").appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b0e12);
+
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.01, 1000);
+camera.position.set(2.2, 1.4, 2.8);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 0.3, 0);
+
+// Overlay group — axes, grid, future BVH boxes / measure rays live here.
+const overlays = new THREE.Group();
+overlays.name = "weft-overlays";
+scene.add(overlays);
+
+const axes = new THREE.AxesHelper(1.5);
+overlays.add(axes);
+
+const grid = new THREE.GridHelper(8, 16, 0x3a4a5c, 0x1e2834);
+grid.position.y = 0;
+overlays.add(grid);
+
+/** Public harness API for future overlay / measure plugins. */
+window.WeftSplatHarness = {
+  scene,
+  camera,
+  controls,
+  overlays,
+  renderer,
+  THREE,
+  /** Add a named overlay Object3D under the overlays group. */
+  addOverlay(name, obj) {
+    obj.name = name;
+    overlays.add(obj);
+    return obj;
+  },
+  removeOverlay(name) {
+    const o = overlays.getObjectByName(name);
+    if (o) overlays.remove(o);
+  },
+  getSplat() {
+    return state.splat;
+  },
+};
+
+async function resolveUrl() {
+  if (params.get("url")) return params.get("url");
+  const job = params.get("job");
+  if (job) {
+    const base = (params.get("splatd") || "http://127.0.0.1:7860").replace(/\/$/, "");
+    let res;
+    try {
+      res = await fetch(`${base}/v1/jobs/${job}`);
+    } catch (e) {
+      throw new Error(
+        `Failed to fetch job ${job} from ${base} (${e.message}). ` +
+          `Is splatd up? Prefer: scripts/splat-harness.sh --view-only path/to/splat.sog ` +
+          `(same-origin; avoids CORS).`
+      );
+    }
+    if (!res.ok) {
+      throw new Error(`job ${job}: HTTP ${res.status} from ${base}/v1/jobs/${job}`);
+    }
+    const rec = await res.json();
+    const name = rec.artifacts?.sog || rec.artifacts?.ply;
+    if (!name) {
+      throw new Error(
+        `job ${job}: no splat artifact yet (status=${rec.status}, stage=${rec.stage ?? "?"})`
+      );
+    }
+    return `${base}/v1/jobs/${job}/artifacts/${name}`;
+  }
+  return null;
+}
+
+async function loadSplatFromUrl(url) {
+  $("src").textContent = url;
+  $("status").textContent = "loading splat…";
+  if (state.splat) {
+    scene.remove(state.splat);
+    state.splat = null;
+  }
+  const splat = new SplatMesh({ url });
+  // Optional Y-flip for COLMAP/OpenCV vs three.js. Default identity —
+  // forced 180° X-rot made some scenes look wrong; toggle via ?flipY=1.
+  if (params.get("flipY") === "1") {
+    splat.quaternion.set(1, 0, 0, 0);
+  }
+  scene.add(splat);
+  await splat.initialized;
+  state.splat = splat;
+  $("status").textContent = "ready";
+  // Frame roughly around origin; user can reset.
+  controls.target.set(0, 0.3, 0);
+  controls.update();
+}
+
+function fmt(v) {
+  return v.toFixed(3);
+}
+
+function tickReadout() {
+  const p = camera.position;
+  const t = controls.target;
+  $("cam-pos").textContent = `${fmt(p.x)} ${fmt(p.y)} ${fmt(p.z)}`;
+  $("cam-tgt").textContent = `${fmt(t.x)} ${fmt(t.y)} ${fmt(t.z)}`;
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  tickReadout();
+  renderer.render(scene, camera);
+}
+animate();
+
+addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+$("btn-axes").onclick = () => {
+  state.showAxes = !state.showAxes;
+  axes.visible = state.showAxes;
+  $("btn-axes").classList.toggle("active", state.showAxes);
+};
+$("btn-grid").onclick = () => {
+  state.showGrid = !state.showGrid;
+  grid.visible = state.showGrid;
+  $("btn-grid").classList.toggle("active", state.showGrid);
+};
+$("btn-reset").onclick = () => {
+  camera.position.set(2.2, 1.4, 2.8);
+  controls.target.set(0, 0.3, 0);
+  controls.update();
+};
+$("file").onchange = async (ev) => {
+  const f = ev.target.files?.[0];
+  if (!f) return;
+  const blobUrl = URL.createObjectURL(f);
+  try {
+    await loadSplatFromUrl(blobUrl);
+  } catch (e) {
+    $("err").textContent = String(e.message || e);
+  }
+};
+
+try {
+  const url = await resolveUrl();
+  if (url) {
+    await loadSplatFromUrl(url);
+  } else {
+    $("status").textContent = "idle — open a file or pass ?job= / ?url=";
+    $("src").textContent = "no source";
+  }
+} catch (e) {
+  $("status").textContent = "error";
+  $("err").textContent = String(e.message || e);
+}
+</script>
+</body>
+</html>

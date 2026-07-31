@@ -1,0 +1,22 @@
+# WeftOS project — Grok Build MCP (ADR-075)
+# Folder must be trusted in Grok for project config to apply.
+# Docs: docs/guides/grok-weftos-mcp.md
+
+# WeftOS control / tool surface (requires `weft` on PATH)
+[mcp_servers.weftos]
+command = "weft"
+args = ["mcp-server"]
+enabled = true
+startup_timeout_sec = 60
+tool_timeout_sec = 600
+
+# Optional: pin a config file
+# args = ["mcp-server", "--config", "/path/to/config.json"]
+
+# Ruflo / claude-flow orchestration (complementary — not a substitute for weftos)
+# Prefer project pin from package.json / .mcp.json (WEFT-684). Example:
+# [mcp_servers.ruflo]
+# command = "npx"
+# args = ["--no-install", "@claude-flow/cli", "mcp", "start"]
+# enabled = true
+# startup_timeout_sec = 90

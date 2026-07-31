@@ -43,6 +43,8 @@
 
 pub mod acl;
 pub mod adapter;
+/// Active long-running agent session inventory (WEFT-685 / ADR-073 Phase A).
+pub mod agents_inventory;
 pub mod delta;
 pub mod health;
 pub mod healthcheck;
@@ -138,6 +140,11 @@ pub mod rfkill;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod presence;
 
+pub use agents_inventory::{
+    AgentSessionRow, SESSIONS_BY_ID, SESSIONS_ROOT, SESSIONS_SHAPE, agent_session_row_id,
+    explode_sessions_by_id, inventory_from_agent_list, parse_agent_list_row,
+    project_agent_session_rows, sanitize_session_id, session_id_from_agent_list_row,
+};
 pub use acl::{
     AclDenied, AclRule, AclTable, CallerIdentity, PublishPublicPlan, READ_DENIED_EVENT,
     plan_publish_public,

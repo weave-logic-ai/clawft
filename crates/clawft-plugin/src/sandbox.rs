@@ -290,24 +290,74 @@ impl SandboxPolicy {
 
     /// Return the platform-appropriate sandbox type.
     ///
-    /// On macOS, downgrades `OsSandbox` and `Combined` to `Wasm` with a
-    /// warning, since seccomp/landlock are Linux-only.
+    /// On non-Linux platforms (including macOS), downgrades `OsSandbox` and
+    /// `Combined` to `Wasm` with a one-time tracing warning, since
+    /// seccomp/landlock are Linux-only. Operators also see a startup-banner
+    /// warning via [`sandbox_platform_banner_warning`] (WEFT-70).
     pub fn effective_sandbox_type(&self) -> SandboxType {
-        if cfg!(target_os = "linux") {
+        if os_sandbox_supported() {
             return self.sandbox_type.clone();
         }
         // Non-Linux: WASM-only fallback.
         match &self.sandbox_type {
             SandboxType::OsSandbox | SandboxType::Combined => {
-                tracing::warn!(
-                    agent = %self.agent_id,
-                    "OS sandbox unavailable on this platform; \
-                     falling back to WASM-only sandbox"
-                );
+                // One-time platform warn — per-agent spam is unhelpful; the
+                // startup banner already surfaces the restriction (WEFT-70).
+                static WARNED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    tracing::warn!(
+                        agent = %self.agent_id,
+                        configured = ?self.sandbox_type,
+                        "OS sandbox unavailable on this platform; \
+                         OsSandbox/Combined downgraded to WASM-only sandbox"
+                    );
+                }
                 SandboxType::Wasm
             }
             other => other.clone(),
         }
+    }
+
+    /// True when this policy requests OS sandbox isolation that the host
+    /// cannot enforce (will be reduced to WASM by [`Self::effective_sandbox_type`]).
+    pub fn is_os_sandbox_downgraded(&self) -> bool {
+        !os_sandbox_supported()
+            && matches!(
+                self.sandbox_type,
+                SandboxType::OsSandbox | SandboxType::Combined
+            )
+    }
+}
+
+/// Whether this platform can enforce OS-level sandboxing (seccomp + landlock).
+///
+/// Only Linux currently supports `OsSandbox` / `Combined`. macOS and other
+/// hosts fall back to WASM-only isolation.
+#[inline]
+pub fn os_sandbox_supported() -> bool {
+    cfg!(target_os = "linux")
+}
+
+/// Operator-facing one-liner for the startup banner when OS sandbox is
+/// unavailable and `OsSandbox`/`Combined` configs will be silently reduced
+/// to WASM (WEFT-70).
+///
+/// Returns `None` on Linux (full OS sandbox available).
+pub fn sandbox_platform_banner_warning() -> Option<&'static str> {
+    if os_sandbox_supported() {
+        return None;
+    }
+    if cfg!(target_os = "macos") {
+        Some(
+            "macOS: OS sandbox unavailable (seccomp/landlock are Linux-only); \
+             OsSandbox/Combined policies are downgraded to WASM-only isolation",
+        )
+    } else {
+        Some(
+            "OS sandbox unavailable on this platform (seccomp/landlock are Linux-only); \
+             OsSandbox/Combined policies are downgraded to WASM-only isolation",
+        )
     }
 }
 
@@ -937,5 +987,55 @@ mod tests {
         assert!(is_protected_identity_path(std::path::Path::new(
             ".clawft/SOUL.md"
         )));
+    }
+
+    // ── WEFT-70: platform OS-sandbox downgrade surface ──────────────
+
+    #[test]
+    fn os_sandbox_supported_matches_target_os() {
+        assert_eq!(os_sandbox_supported(), cfg!(target_os = "linux"));
+    }
+
+    #[test]
+    fn sandbox_platform_banner_warning_linux_vs_other() {
+        if cfg!(target_os = "linux") {
+            assert!(sandbox_platform_banner_warning().is_none());
+        } else {
+            let msg = sandbox_platform_banner_warning().expect("warning on non-Linux");
+            assert!(msg.contains("OS sandbox unavailable"));
+            assert!(msg.contains("WASM"));
+            if cfg!(target_os = "macos") {
+                assert!(msg.contains("macOS"));
+            }
+        }
+    }
+
+    #[test]
+    fn os_sandbox_and_combined_downgrade_to_wasm_off_linux() {
+        for st in [SandboxType::OsSandbox, SandboxType::Combined] {
+            let policy = SandboxPolicy {
+                agent_id: "weft-70".into(),
+                sandbox_type: st,
+                ..Default::default()
+            };
+            if cfg!(target_os = "linux") {
+                assert!(!policy.is_os_sandbox_downgraded());
+                assert_eq!(policy.effective_sandbox_type(), policy.sandbox_type);
+            } else {
+                assert!(policy.is_os_sandbox_downgraded());
+                assert_eq!(policy.effective_sandbox_type(), SandboxType::Wasm);
+            }
+        }
+    }
+
+    #[test]
+    fn wasm_policy_is_never_reported_as_downgraded() {
+        let policy = SandboxPolicy {
+            agent_id: "weft-70".into(),
+            sandbox_type: SandboxType::Wasm,
+            ..Default::default()
+        };
+        assert!(!policy.is_os_sandbox_downgraded());
+        assert_eq!(policy.effective_sandbox_type(), SandboxType::Wasm);
     }
 }

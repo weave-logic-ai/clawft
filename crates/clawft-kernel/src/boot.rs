@@ -8,9 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "exochain")]
-use tracing::warn;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use clawft_core::bootstrap::AppContext;
 use clawft_core::bus::MessageBus;
@@ -199,6 +197,12 @@ impl<P: Platform> Kernel<P> {
             format!("WeftOS v{} booting...", env!("CARGO_PKG_VERSION")),
         ));
         boot_log.push(BootEvent::info(BootPhase::Init, "PID 0 (kernel)"));
+        // WEFT-70: surface macOS / non-Linux OS-sandbox downgrade in boot
+        // log (banner also prints this via console::boot_banner).
+        if let Some(msg) = clawft_plugin::sandbox::sandbox_platform_banner_warning() {
+            warn!(%msg, "sandbox platform restriction");
+            boot_log.push(BootEvent::warn(BootPhase::Init, msg));
+        }
 
         // 1. Create subsystems
         let process_table = Arc::new(ProcessTable::new(kernel_config.max_processes));
@@ -551,6 +555,16 @@ impl<P: Platform> Kernel<P> {
                                             // Bidirectional loop. `handle_incoming_from` auto-
                                             // registers the peer by `envelope.source_node` on first
                                             // arrival so the kernel can route back.
+                                            //
+                                            // Cancel-safety (ADR-010 / WEFT-18): both racing
+                                            // futures must be cancel-safe.
+                                            // - `out_rx.recv()` — tokio mpsc, cancel-safe.
+                                            // - `channel.recv_encrypted()` → `MeshStream::recv` —
+                                            //   contract on `MeshStream` requires cancel-safe
+                                            //   framing (`TcpMeshStream` keeps partial progress).
+                                            // Losing either race must not drop a complete message
+                                            // already removed from its source, and must not desync
+                                            // the TCP length-prefix stream.
                                             loop {
                                                 tokio::select! {
                                                     inbound = channel.recv_encrypted() => match inbound {

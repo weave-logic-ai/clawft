@@ -204,4 +204,74 @@ mod tests {
         assert!((l2_squared(&[1.0, 0.0], &[0.0, 0.0]) - 1.0).abs() < 1e-6);
         assert!((l2_squared(&[1.0, 1.0], &[2.0, 2.0]) - 2.0).abs() < 1e-6);
     }
+
+    // ── WEFT-51: exhaustive BruteForceIndex behaviour (feature-off floor) ─
+
+    #[test]
+    fn brute_force_k_zero_returns_empty() {
+        let mut idx = BruteForceIndex::new();
+        idx.insert("a".into(), vec![1.0, 0.0]);
+        assert!(idx.search(&[1.0, 0.0], 0).is_empty());
+    }
+
+    #[test]
+    fn brute_force_top_k_orders_by_ascending_distance() {
+        // Unit vectors along axes: query near +x should rank x before y before -x.
+        let mut idx = BruteForceIndex::new();
+        idx.insert("plus_x".into(), vec![1.0, 0.0]);
+        idx.insert("plus_y".into(), vec![0.0, 1.0]);
+        idx.insert("minus_x".into(), vec![-1.0, 0.0]);
+        let q = normalise(vec![1.0, 0.1]);
+        let hits = idx.search(&q, 3);
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].key, "plus_x");
+        assert_eq!(hits[1].key, "plus_y");
+        assert_eq!(hits[2].key, "minus_x");
+        assert!(hits[0].distance <= hits[1].distance);
+        assert!(hits[1].distance <= hits[2].distance);
+    }
+
+    #[test]
+    fn brute_force_k_larger_than_len_returns_all() {
+        let mut idx = BruteForceIndex::new();
+        idx.insert("a".into(), vec![1.0, 0.0]);
+        idx.insert("b".into(), vec![0.0, 1.0]);
+        let hits = idx.search(&normalise(vec![1.0, 0.0]), 50);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(idx.len(), 2);
+    }
+
+    #[test]
+    fn brute_force_insert_normalises_non_unit_vectors() {
+        // Unnormalised [3,4] must behave as unit [0.6, 0.8] under L2².
+        let mut idx = BruteForceIndex::new();
+        idx.insert("scaled".into(), vec![3.0, 4.0]);
+        let unit = normalise(vec![3.0, 4.0]);
+        let hits = idx.search(&unit, 1);
+        assert_eq!(hits.len(), 1);
+        assert!(
+            hits[0].distance < 1e-5,
+            "self-match after normalise must be ~0, got {}",
+            hits[0].distance
+        );
+    }
+
+    #[test]
+    fn brute_force_cosine_from_l2_squared_is_one_for_identical() {
+        // Router contract: cos = 1 - dist/2 on unit vectors.
+        let mut idx = BruteForceIndex::new();
+        idx.insert("s".into(), vec![1.0, 0.0, 0.0]);
+        let hits = idx.search(&normalise(vec![1.0, 0.0, 0.0]), 1);
+        let cos = 1.0 - hits[0].distance / 2.0;
+        assert!((cos - 1.0).abs() < 1e-5, "cos={cos}");
+    }
+
+    #[test]
+    fn brute_force_orthogonal_cosine_near_zero() {
+        let mut idx = BruteForceIndex::new();
+        idx.insert("x".into(), vec![1.0, 0.0]);
+        let hits = idx.search(&normalise(vec![0.0, 1.0]), 1);
+        let cos = 1.0 - hits[0].distance / 2.0;
+        assert!(cos.abs() < 1e-4, "orthogonal cos should be ~0, got {cos}");
+    }
 }

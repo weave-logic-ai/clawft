@@ -75,6 +75,24 @@ pub const DEFAULT_CONFIDENCE_THRESHOLD: f32 = 0.6;
 /// decision (low confidence, embed error, empty index, etc.).
 pub const FALLBACK_TRACING_TARGET: &str = "context_router.fallback";
 
+/// Which vector-index backend this build compiled into
+/// [`EmbeddingRouter`].
+///
+/// - `"diskann"` when the `embedding-router` cargo feature is enabled
+///   (default via `full`): production Vamana + PQ via `ruvector-diskann`.
+/// - `"brute-force"` when the feature is **off**: in-memory O(n) cosine
+///   scan (see [`index::BruteForceIndex`]). Still correct for the ~35
+///   skill catalog; chosen so offline / slim builds never silently
+///   panic or refuse `Config.routing.context_router = "embedding"`.
+///
+/// WEFT-51: operators and tests assert this constant (not a runtime
+/// probe) so a mis-linked feature matrix cannot claim diskann while
+/// shipping the linear floor.
+#[cfg(feature = "embedding-router")]
+pub const INDEX_BACKEND: &str = "diskann";
+#[cfg(not(feature = "embedding-router"))]
+pub const INDEX_BACKEND: &str = "brute-force";
+
 // ── Errors ────────────────────────────────────────────────────────────────
 
 /// Failures from constructing an [`EmbeddingRouter`].
@@ -166,6 +184,14 @@ impl EmbeddingRouter {
         }
 
         let index: Arc<dyn Index> = build_index(dim, entries)?;
+        let n = index.len();
+
+        info!(
+            backend = INDEX_BACKEND,
+            skills = n,
+            dim,
+            "EmbeddingRouter: index built"
+        );
 
         Ok(Self {
             embedder,
@@ -175,6 +201,13 @@ impl EmbeddingRouter {
             confidence_threshold: DEFAULT_CONFIDENCE_THRESHOLD,
             dim,
         })
+    }
+
+    /// Compile-time index backend for this build (`"diskann"` or
+    /// `"brute-force"`). See [`INDEX_BACKEND`].
+    #[must_use]
+    pub fn index_backend(&self) -> &'static str {
+        INDEX_BACKEND
     }
 
     /// Override the top-K retrieval count.

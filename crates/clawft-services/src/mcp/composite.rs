@@ -33,14 +33,21 @@ impl CompositeToolProvider {
         self.providers.len()
     }
 
-    /// List tools from all providers, with names prefixed as
-    /// `"{namespace}__{tool_name}"`.
+    /// List tools from all providers.
+    ///
+    /// Names are prefixed as `"{namespace}__{tool_name}"` when the
+    /// provider namespace is non-empty. An empty namespace (ADR-076
+    /// product surface / attach façade) keeps the public tool name
+    /// unprefixed so clients see `status` / `agent_list` rather than
+    /// `__status` or `builtin__status`.
     pub fn list_tools_all(&self) -> Vec<ToolDefinition> {
         let mut all = Vec::new();
         for provider in &self.providers {
             let ns = provider.namespace();
             for mut tool in provider.list_tools() {
-                tool.name = format!("{ns}__{}", tool.name);
+                if !ns.is_empty() {
+                    tool.name = format!("{ns}__{}", tool.name);
+                }
                 all.push(tool);
             }
         }
@@ -156,6 +163,36 @@ mod tests {
         assert!(names.contains(&"alpha__foo"));
         assert!(names.contains(&"alpha__bar"));
         assert!(names.contains(&"beta__baz"));
+    }
+
+    #[test]
+    fn list_tools_all_empty_namespace_keeps_public_names() {
+        let mut c = CompositeToolProvider::new();
+        c.register(Box::new(MockProvider::new("", &["status", "agent_list"])));
+        c.register(Box::new(MockProvider::new("builtin", &["read_file"])));
+
+        let tools = c.list_tools_all();
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"status"));
+        assert!(names.contains(&"agent_list"));
+        assert!(names.contains(&"builtin__read_file"));
+        assert!(!names.iter().any(|n| n.starts_with("__")));
+    }
+
+    #[tokio::test]
+    async fn call_tool_routes_empty_namespace_by_local_name() {
+        let mut c = CompositeToolProvider::new();
+        c.register(Box::new(MockProvider::new("", &["status"])));
+        c.register(Box::new(MockProvider::new("builtin", &["read_file"])));
+
+        let result = c.call_tool("status", json!({})).await.unwrap();
+        assert!(!result.is_error);
+        assert_eq!(
+            result.content[0],
+            super::super::provider::ContentBlock::Text {
+                text: ":status called".into()
+            }
+        );
     }
 
     #[test]

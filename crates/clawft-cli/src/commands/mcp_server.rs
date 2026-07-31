@@ -1,26 +1,40 @@
 //! `weft mcp-server` -- run clawft as an MCP server over stdio.
 //!
-//! Exposes all registered tools (builtin + MCP-proxied) as an MCP tool
-//! server, reading JSON-RPC requests from stdin and writing responses to
-//! stdout. This allows MCP clients (like Claude Desktop, Cursor, etc.) to
-//! use clawft tools natively.
+//! Exposes a **profiled** tool surface (ADR-076) as an MCP tool server over
+//! stdin/stdout. Product default is `--profile default` (`control` ∪
+//! `workspace`), not a full agent-tool dump.
+//!
+//! # Public wire (ADR-076 C2 / WEFT-700)
+//!
+//! - Flat product names — no `builtin__` / `skill__` namespace leak
+//! - OS subprocess tool is `process_spawn` (not bare `spawn`)
+//! - Default profiles expose `skill_list` + `skill_get` façades only
+//! - Proxied MCP re-export requires `--profile full` **and** `--reexport-mcp`
+//! - `--attach` (ADR-076 C3) binds control tools to live kernel/weave
 //!
 //! # Lifecycle
 //!
 //! ```text
-//! 1. Load config & build tool registry (same as `weft agent`)
-//! 2. Create BuiltinToolProvider wrapping tool registry
-//! 3. Build middleware pipeline (security, permissions, audit)
-//! 4. Create McpServerShell and run on stdin/stdout
+//! 1. Optional: connect attach façade (fails clear if daemon down)
+//! 2. Load config & build tool registry (profile + reexport flag)
+//! 3. Filter tool defs by serve profile; public wire renames
+//! 4. skill_list/get façades (control/default); per-skill only on full
+//! 5. Build middleware pipeline (security, allowed_tools, audit)
+//! 6. Create McpServerShell and run on stdin/stdout
 //! ```
 //!
 //! # Example
 //!
 //! ```text
 //! weft mcp-server
-//! weft mcp-server --config /path/to/config.json
+//! weft mcp-server --profile default
+//! weft mcp-server --profile full
+//! weft mcp-server --profile full --reexport-mcp
+//! weft mcp-server --attach --profile control
+//! weft mcp-server --profile control,media --config /path/to/config.json
 //! ```
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -37,10 +51,12 @@ use clawft_services::mcp::composite::CompositeToolProvider;
 use clawft_services::mcp::middleware::{
     AuditLog, Middleware, PermissionFilter, ResultGuard, SecurityGuard,
 };
-use clawft_services::mcp::provider::skills_to_tool_definitions;
+use clawft_services::mcp::provider::ToolProvider;
 use clawft_services::mcp::server::McpServerShell;
 
-use super::load_config;
+use super::mcp_attach::{AttachToolProvider, DaemonAttachFacade};
+use super::mcp_profile::{filter_tools_by_profile, ProfileSet};
+use super::{load_config, CoreToolRegisterOpts};
 
 /// Arguments for the `weft mcp-server` subcommand.
 #[derive(Args)]
@@ -48,109 +64,180 @@ pub struct McpServerArgs {
     /// Config file path (overrides auto-discovery).
     #[arg(short, long)]
     pub config: Option<String>,
+
+    /// Serve profile: `default` | `control` | `workspace` | `media` | `full`
+    /// (comma-compose, e.g. `control,media`). Default = `default`
+    /// (`control` ∪ `workspace`) — not full dump. See ADR-076.
+    #[arg(long, default_value = "default")]
+    pub profile: String,
+
+    /// Re-export inbound/proxied external MCP tools onto this server.
+    /// Requires `--profile full` (ADR-076 §8). Off by default even for
+    /// `full` — prevents recursion / tool floods through peer clients.
+    #[arg(long, default_value_t = false)]
+    pub reexport_mcp: bool,
+
+    /// Attach control tools to a live kernel/weave daemon (ADR-076 C3).
+    ///
+    /// Dispatches `status` / `agent_list` / `agent_spawn` / `agent_stop`
+    /// via weave RPC. Fails at startup if no daemon is running.
+    /// Standalone (this flag omitted) remains the offline/dev default.
+    #[arg(long, default_value_t = false)]
+    pub attach: bool,
+}
+
+/// Whether proxied external MCP tools should be registered on the serve
+/// path (ADR-076 §8 / WEFT-700).
+///
+/// Requires **both** the `full` profile and the explicit `--reexport-mcp`
+/// flag. `full` alone is not enough.
+pub fn should_reexport_mcp(profiles: &ProfileSet, reexport_flag: bool) -> bool {
+    profiles.allows_mcp_reexport() && reexport_flag
 }
 
 /// Run the MCP server command.
 ///
-/// Loads configuration, builds the tool registry (identical to `weft agent`),
-/// wraps it in a [`BuiltinToolProvider`], and serves tools over stdio using
+/// Loads configuration, builds the tool registry, filters by serve profile
+/// (ADR-076 / WEFT-699 / WEFT-700), and serves tools over stdio using
 /// [`McpServerShell`] with the full middleware pipeline.
 pub async fn run(args: McpServerArgs) -> anyhow::Result<()> {
-    info!("starting weft mcp-server");
+    let profiles = ProfileSet::parse(&args.profile).map_err(|e| anyhow::anyhow!(e))?;
+    let reexport = should_reexport_mcp(&profiles, args.reexport_mcp);
+    info!(
+        profile = %profiles.label(),
+        full = profiles.includes_full(),
+        reexport_mcp = reexport,
+        attach = args.attach,
+        "starting weft mcp-server"
+    );
+
+    // ── Attach façade (fail clear before building the rest) ──────────
+    let attach_provider = if args.attach {
+        let facade = DaemonAttachFacade::connect()
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let provider = AttachToolProvider::with_profile(Arc::new(facade), |name| {
+            profiles.allows_tool(name)
+        });
+        let attach_names: Vec<String> =
+            provider.list_tools().iter().map(|t| t.name.clone()).collect();
+        if attach_names.is_empty() {
+            info!(
+                profile = %profiles.label(),
+                "attach connected but profile excludes control tools"
+            );
+        } else {
+            info!(
+                tools = ?attach_names,
+                "attach façade registered (live kernel control tools)"
+            );
+        }
+        Some(provider)
+    } else {
+        info!("standalone mode (no --attach); control tools not bound to kernel");
+        None
+    };
 
     let platform = Arc::new(NativePlatform::new());
     let config = load_config(&*platform, args.config.as_deref()).await?;
 
-    // ── Build tool registry (shared core tools) ────────────────────
+    // ── Build tool registry (profile + flag gates MCP re-export) ─────
     let mut registry = ToolRegistry::new();
-    super::register_core_tools(&mut registry, &config, platform.clone()).await;
+    super::register_core_tools_with(
+        &mut registry,
+        &config,
+        platform.clone(),
+        CoreToolRegisterOpts {
+            // Proxied external MCP: full **and** --reexport-mcp (ADR-076 §8).
+            register_mcp: reexport,
+            // `delegate_task` is catalog `full` only.
+            register_delegation: profiles.includes_full(),
+        },
+    )
+    .await;
 
-    let tool_count = registry.len();
-    let tool_names = registry.list();
     info!(
-        tools = tool_count,
+        registry_tools = registry.len(),
+        reexport_mcp = reexport,
         "tool registry initialized for MCP server"
     );
 
-    // ── Convert registry to ToolProvider ─────────────────────────────
-    let tool_defs = build_tool_definitions(&registry);
-    let provider = build_builtin_provider(tool_defs, registry);
+    // ── Convert registry → defs, profile-filter, public wire renames ─
+    let mut tool_defs = filter_tools_by_profile(build_tool_definitions(&registry), &profiles);
+    apply_public_wire_renames(&mut tool_defs);
+    if attach_provider.is_some() {
+        tool_defs = strip_attach_owned_names(tool_defs);
+    }
 
-    // ── Build CompositeToolProvider ──────────────────────────────────
+    // ── Skills discovery (façades always when control; expand on full) ─
+    let skill_state = Arc::new(load_skill_facade_state().await);
+
+    if profiles.allows_tool("skill_list") {
+        // skill_list / skill_get façades — not one tool per skill (ADR-076 §7).
+        for facade in skill_facade_definitions() {
+            if !tool_defs.iter().any(|t| t.name == facade.name) {
+                tool_defs.push(facade);
+            }
+        }
+        info!(
+            skills = skill_state.entries.len(),
+            "skill_list/skill_get façades registered"
+        );
+    }
+
+    let served_names: Vec<String> = tool_defs.iter().map(|t| t.name.clone()).collect();
+    let served_count = tool_defs.len();
+    debug_assert!(
+        served_names.iter().all(|n| !n.contains("builtin__")),
+        "public wire must not leak builtin__ prefix"
+    );
+    info!(
+        profile = %profiles.label(),
+        tools = served_count,
+        names = ?served_names,
+        "MCP serve profile applied (public wire)"
+    );
+
+    let provider = build_public_provider(tool_defs, registry, skill_state.clone());
+
+    // ── Build CompositeToolProvider (empty ns → flat product names) ──
     let mut composite = CompositeToolProvider::new();
+    if let Some(ap) = attach_provider {
+        composite.register(Box::new(ap));
+    }
     composite.register(Box::new(provider));
 
-    // ── Load skills and register SkillToolProvider ───────────────────
-    let (ws_skills_dir, user_skills_dir) = discover_skill_dirs();
-    let skill_registry = match SkillRegistry::discover(
-        ws_skills_dir.as_deref(),
-        user_skills_dir.as_deref(),
-        Vec::new(),
-    )
-    .await
-    {
-        Ok(reg) => reg,
-        Err(e) => {
-            info!(error = %e, "skill discovery failed, continuing without skill tools");
-            SkillRegistry::discover(None, None, Vec::new())
-                .await
-                .expect("empty skill discovery should never fail")
-        }
-    };
-
-    let skill_count = skill_registry.len();
-    if skill_count > 0 {
-        let skill_defs = skills_to_tool_definitions(
-            &skill_registry
-                .list()
-                .into_iter()
-                .cloned()
-                .collect::<Vec<_>>(),
-        );
-
-        // Build a lookup from skill name -> instructions for the dispatcher.
-        let instructions_map: std::collections::HashMap<String, String> = skill_registry
-            .list()
-            .into_iter()
-            .map(|s| (s.name.clone(), s.instructions.clone()))
-            .collect();
-        let instructions_map = Arc::new(instructions_map);
-
-        let skill_provider = SkillToolProvider::new(skill_defs, move |name, _args| {
-            let map = instructions_map.clone();
-            let name = name.to_string();
-            Box::pin(async move {
-                match map.get(&name) {
-                    Some(instructions) => Ok(instructions.clone()),
-                    None => Err(format!("skill '{name}' not found")),
-                }
-            })
-        });
-
-        info!(
-            skills = skill_count,
-            names = ?skill_registry.names(),
-            "skill tools registered for MCP server"
-        );
-        composite.register(Box::new(skill_provider));
+    // ── Skills: expand one-tool-per-skill only on `full` (ADR-076 §7) ─
+    if profiles.allows_skill_tools() {
+        register_skill_tools_expanded(&mut composite, &skill_state);
     } else {
-        info!("no skills found, skipping skill tool registration");
+        info!(
+            profile = %profiles.label(),
+            "skipping per-skill MCP tools (not full); skill_list/get façades only"
+        );
     }
+
+    // Final list-tools surface (what clients see after composite).
+    let listed = composite.list_tools_all();
+    let listed_names: Vec<String> = listed.iter().map(|t| t.name.clone()).collect();
+    assert_public_wire_names(&listed_names);
 
     // ── Build middleware pipeline ────────────────────────────────────
     let security_guard = build_security_guard(&config.tools);
 
-    // WEFT-189: gate tools/list and tools/call by `tools.allowed_tools`.
-    // Empty list = back-compat permissive behavior; populated list =
-    // glob-matched allowlist enforced both at filter_tools() and
-    // before_call().
+    // Profile filter is primary. Empty `tools.allowed_tools` is NOT a
+    // full dump — it only means "no extra allowlist on top of profile".
+    // Non-empty allowed_tools further restricts the already-filtered set.
     let permission_filter = if config.tools.allowed_tools.is_empty() {
-        info!("tools.allowed_tools is empty; exposing all tools (back-compat)");
+        info!(
+            profile = %profiles.label(),
+            "tools.allowed_tools empty; profile filter is authoritative"
+        );
         PermissionFilter::new(None)
     } else {
         info!(
             patterns = ?config.tools.allowed_tools,
-            "tools.allowed_tools is configured; restricting MCP server surface",
+            "tools.allowed_tools is configured; additional allowlist on profile surface",
         );
         PermissionFilter::from_patterns(config.tools.allowed_tools.clone())
     };
@@ -169,8 +256,9 @@ pub async fn run(args: McpServerArgs) -> anyhow::Result<()> {
     }
 
     info!(
-        tools = tool_count,
-        names = ?tool_names,
+        profile = %profiles.label(),
+        tools = listed_names.len(),
+        names = ?listed_names,
         "MCP server ready, reading from stdin"
     );
 
@@ -180,6 +268,206 @@ pub async fn run(args: McpServerArgs) -> anyhow::Result<()> {
 
     info!("stdin closed, MCP server shutting down");
     Ok(())
+}
+
+/// Metadata for skill_list / skill_get façades.
+#[derive(Debug, Clone)]
+struct SkillEntry {
+    name: String,
+    description: String,
+    instructions: String,
+}
+
+#[derive(Debug, Default)]
+struct SkillFacadeState {
+    entries: Vec<SkillEntry>,
+}
+
+impl SkillFacadeState {
+    fn list_json(&self) -> String {
+        let items: Vec<serde_json::Value> = self
+            .entries
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "name": e.name,
+                    "description": e.description,
+                })
+            })
+            .collect();
+        serde_json::to_string(&serde_json::json!({ "skills": items })).unwrap_or_else(|_| {
+            "{\"skills\":[]}".into()
+        })
+    }
+
+    fn get_body(&self, name: &str) -> Result<String, String> {
+        self.entries
+            .iter()
+            .find(|e| e.name == name)
+            .map(|e| e.instructions.clone())
+            .ok_or_else(|| format!("skill '{name}' not found"))
+    }
+
+    fn instructions_map(&self) -> HashMap<String, String> {
+        self.entries
+            .iter()
+            .map(|e| (e.name.clone(), e.instructions.clone()))
+            .collect()
+    }
+}
+
+async fn load_skill_facade_state() -> SkillFacadeState {
+    let (ws_skills_dir, user_skills_dir) = discover_skill_dirs();
+    let skill_registry = match SkillRegistry::discover(
+        ws_skills_dir.as_deref(),
+        user_skills_dir.as_deref(),
+        Vec::new(),
+    )
+    .await
+    {
+        Ok(reg) => reg,
+        Err(e) => {
+            info!(error = %e, "skill discovery failed, continuing without skills");
+            match SkillRegistry::discover(None, None, Vec::new()).await {
+                Ok(reg) => reg,
+                Err(_) => return SkillFacadeState::default(),
+            }
+        }
+    };
+
+    let entries = skill_registry
+        .list()
+        .into_iter()
+        .map(|s| SkillEntry {
+            name: s.name.clone(),
+            description: s.description.clone(),
+            instructions: s.instructions.clone(),
+        })
+        .collect();
+    SkillFacadeState { entries }
+}
+
+/// Public MCP façades for skills (ADR-076 §7) — list + get only.
+fn skill_facade_definitions() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition {
+            name: "skill_list".into(),
+            description: "List available WeftOS/clawft skills (name + description). \
+                 Prefer this over one MCP tool per skill. Agent lifecycle tools \
+                 (when present) use agent_* names, not skill tools."
+                .into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+            }),
+        },
+        ToolDefinition {
+            name: "skill_get".into(),
+            description: "Get the SKILL.md body for a named skill. Returns instructional \
+                 prompt text (not an executed agent run)."
+                .into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Skill name as returned by skill_list"
+                    }
+                },
+                "required": ["name"]
+            }),
+        },
+    ]
+}
+
+/// Rename ambiguous internal tool names to public product names (ADR-076 §4).
+///
+/// - `spawn` (OS subprocess) → `process_spawn`
+///
+/// Bare `spawn` is removed from the public list so it cannot be confused with
+/// agent lifecycle (`agent_spawn`, etc.).
+pub fn apply_public_wire_renames(tools: &mut Vec<ToolDefinition>) {
+    tools.retain_mut(|t| {
+        if t.name == "spawn" {
+            t.name = "process_spawn".into();
+            if !t.description.to_ascii_lowercase().contains("process") {
+                t.description = format!(
+                    "OS subprocess spawn (public name process_spawn). Not an agent spawn — \
+                     use agent_spawn for WeftOS agents when available. {}",
+                    t.description
+                );
+            }
+        }
+        // Drop any accidental bare spawn duplicates after rename.
+        true
+    });
+    // If both spawn and process_spawn somehow exist, keep one process_spawn.
+    let mut seen_ps = false;
+    tools.retain(|t| {
+        if t.name == "process_spawn" {
+            if seen_ps {
+                return false;
+            }
+            seen_ps = true;
+        }
+        true
+    });
+}
+
+/// Assert client-visible names have no internal namespace leak.
+fn assert_public_wire_names(names: &[String]) {
+    for n in names {
+        debug_assert!(
+            !n.starts_with("builtin__") && !n.contains("builtin__"),
+            "public MCP name leaked builtin__ prefix: {n}"
+        );
+    }
+}
+
+/// Register one MCP tool per skill (`full` only), flat names (no `skill__`).
+fn register_skill_tools_expanded(
+    composite: &mut CompositeToolProvider,
+    skill_state: &SkillFacadeState,
+) {
+    if skill_state.entries.is_empty() {
+        info!("no skills found, skipping per-skill tool registration");
+        return;
+    }
+
+    // One ToolDefinition per skill name (full profile expansion only).
+    let skill_defs: Vec<ToolDefinition> = skill_state
+        .entries
+        .iter()
+        .map(|e| ToolDefinition {
+            name: e.name.clone(),
+            description: e.description.clone(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+            }),
+        })
+        .collect();
+
+    let instructions_map = Arc::new(skill_state.instructions_map());
+
+    let skill_provider = SkillToolProvider::new(skill_defs, move |name, _args| {
+        let map = instructions_map.clone();
+        let name = name.to_string();
+        Box::pin(async move {
+            match map.get(&name) {
+                Some(instructions) => Ok(instructions.clone()),
+                None => Err(format!("skill '{name}' not found")),
+            }
+        })
+    })
+    // Flat product names on public wire (no skill__ prefix).
+    .with_namespace("");
+
+    info!(
+        skills = skill_state.entries.len(),
+        "skill tools expanded for MCP server (full profile, flat names)"
+    );
+    composite.register(Box::new(skill_provider));
 }
 
 /// Build [`ToolDefinition`] list from a populated [`ToolRegistry`].
@@ -205,27 +493,64 @@ fn build_tool_definitions(registry: &ToolRegistry) -> Vec<ToolDefinition> {
         .collect()
 }
 
-/// Build a [`BuiltinToolProvider`] backed by a [`ToolRegistry`].
+/// Build a flat public [`BuiltinToolProvider`] (empty namespace).
 ///
-/// The registry is moved into an `Arc` and shared between the provider's
-/// dispatcher closure and the outer scope.
+/// Maps public wire names to registry execution:
+/// - `process_spawn` → registry tool `spawn`
+/// - `skill_list` / `skill_get` → skill façades
+fn build_public_provider(
+    tool_defs: Vec<ToolDefinition>,
+    registry: ToolRegistry,
+    skills: Arc<SkillFacadeState>,
+) -> BuiltinToolProvider {
+    let registry = Arc::new(registry);
+
+    BuiltinToolProvider::new(tool_defs, move |name, args| {
+        let reg = registry.clone();
+        let skills = skills.clone();
+        let name = name.to_string();
+        Box::pin(async move {
+            match name.as_str() {
+                "process_spawn" => match reg.execute("spawn", args, None).await {
+                    Ok(value) => Ok(serde_json::to_string(&value).unwrap_or_default()),
+                    Err(e) => Err(e.to_string()),
+                },
+                "skill_list" => Ok(skills.list_json()),
+                "skill_get" => {
+                    let skill_name = args
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| "missing required field: name".to_string())?;
+                    skills.get_body(skill_name)
+                }
+                other => match reg.execute(other, args, None).await {
+                    Ok(value) => Ok(serde_json::to_string(&value).unwrap_or_default()),
+                    Err(e) => Err(e.to_string()),
+                },
+            }
+        })
+    })
+    // ADR-076 / WEFT-700: no `builtin__` prefix on client-visible names.
+    .with_namespace("")
+}
+
+/// Legacy helper retained for unit tests that only need registry dispatch.
+/// Remove registry tool defs whose names are owned by the attach façade.
+fn strip_attach_owned_names(tools: Vec<ToolDefinition>) -> Vec<ToolDefinition> {
+    use super::mcp_attach::ATTACH_TOOL_NAMES;
+    tools
+        .into_iter()
+        .filter(|t| !ATTACH_TOOL_NAMES.contains(&t.name.as_str()))
+        .collect()
+}
+
+
+#[cfg(test)]
 fn build_builtin_provider(
     tool_defs: Vec<ToolDefinition>,
     registry: ToolRegistry,
 ) -> BuiltinToolProvider {
-    let registry = Arc::new(registry);
-    let reg_clone = registry.clone();
-
-    BuiltinToolProvider::new(tool_defs, move |name, args| {
-        let reg = reg_clone.clone();
-        let name = name.to_string();
-        Box::pin(async move {
-            match reg.execute(&name, args, None).await {
-                Ok(value) => Ok(serde_json::to_string(&value).unwrap_or_default()),
-                Err(e) => Err(e.to_string()),
-            }
-        })
-    })
+    build_public_provider(tool_defs, registry, Arc::new(SkillFacadeState::default()))
 }
 
 /// Build a [`SecurityGuard`] middleware from the tools configuration.
@@ -293,17 +618,271 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mcp_server_args_attach() {
+        let args = McpServerArgs {
+            config: None,
+            profile: "control".into(),
+            reexport_mcp: false,
+            attach: true,
+        };
+        assert!(args.attach);
+        assert_eq!(args.profile, "control");
+    }
+
+    #[test]
+    fn strip_attach_owned_names_drops_control_wires() {
+        let tools = vec![
+            ToolDefinition {
+                name: "status".into(),
+                description: "x".into(),
+                input_schema: serde_json::json!({}),
+            },
+            ToolDefinition {
+                name: "read_file".into(),
+                description: "x".into(),
+                input_schema: serde_json::json!({}),
+            },
+        ];
+        let kept = strip_attach_owned_names(tools);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].name, "read_file");
+    }
+
+    #[test]
     fn mcp_server_args_defaults() {
-        let args = McpServerArgs { config: None };
+        let args = McpServerArgs {
+            config: None,
+            profile: "default".into(),
+            reexport_mcp: false,
+                    attach: false,
+        };
         assert!(args.config.is_none());
+        assert_eq!(args.profile, "default");
+        assert!(!args.reexport_mcp);
     }
 
     #[test]
     fn mcp_server_args_with_config() {
         let args = McpServerArgs {
             config: Some("/tmp/config.json".into()),
+            profile: "full".into(),
+            reexport_mcp: false,
+                    attach: false,
         };
         assert_eq!(args.config.as_deref(), Some("/tmp/config.json"));
+        assert_eq!(args.profile, "full");
+        assert!(!args.reexport_mcp);
+    }
+
+    // ── WEFT-700 public wire ─────────────────────────────────────────
+
+    #[test]
+    fn reexport_requires_full_and_flag() {
+        let default = ProfileSet::product_default();
+        let full = ProfileSet::parse("full").unwrap();
+
+        assert!(!should_reexport_mcp(&default, false));
+        assert!(!should_reexport_mcp(&default, true));
+        assert!(
+            !should_reexport_mcp(&full, false),
+            "full without --reexport-mcp must not re-export"
+        );
+        assert!(should_reexport_mcp(&full, true));
+    }
+
+    #[test]
+    fn public_wire_renames_spawn_to_process_spawn() {
+        let mut tools = vec![
+            ToolDefinition {
+                name: "spawn".into(),
+                description: "Run a subprocess".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            ToolDefinition {
+                name: "read_file".into(),
+                description: "Read".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+        ];
+        apply_public_wire_renames(&mut tools);
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"process_spawn"));
+        assert!(!names.contains(&"spawn"));
+        assert!(names.contains(&"read_file"));
+    }
+
+    #[test]
+    fn public_wire_dedupes_process_spawn() {
+        let mut tools = vec![
+            ToolDefinition {
+                name: "spawn".into(),
+                description: "OS".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            ToolDefinition {
+                name: "process_spawn".into(),
+                description: "Already public".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+        ];
+        apply_public_wire_renames(&mut tools);
+        let count = tools.iter().filter(|t| t.name == "process_spawn").count();
+        assert_eq!(count, 1);
+        assert!(!tools.iter().any(|t| t.name == "spawn"));
+    }
+
+    #[test]
+    fn skill_facade_definitions_are_list_and_get_only() {
+        let defs = skill_facade_definitions();
+        let names: Vec<&str> = defs.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["skill_list", "skill_get"]);
+    }
+
+    #[test]
+    fn default_profile_surface_has_no_builtin_prefix_and_has_process_spawn() {
+        use clawft_services::mcp::composite::CompositeToolProvider;
+
+        let p = ProfileSet::product_default();
+        let sample = vec![
+            "read_file",
+            "write_file",
+            "exec_shell",
+            "spawn",
+            "web_search",
+            "voice_listen",
+            "delegate_task",
+            "status",
+            "claude-flow__swarm_init",
+        ]
+        .into_iter()
+        .map(|name| ToolDefinition {
+            name: name.into(),
+            description: String::new(),
+            input_schema: serde_json::json!({"type": "object"}),
+        })
+        .collect::<Vec<_>>();
+
+        let mut filtered = filter_tools_by_profile(sample, &p);
+        apply_public_wire_renames(&mut filtered);
+
+        // skill façades for control ∪ workspace default
+        if p.allows_tool("skill_list") {
+            filtered.extend(skill_facade_definitions());
+        }
+
+        let provider = BuiltinToolProvider::new(filtered.clone(), |_n, _a| {
+            Box::pin(async { Ok(String::new()) })
+        })
+        .with_namespace("");
+
+        let mut composite = CompositeToolProvider::new();
+        composite.register(Box::new(provider));
+        let listed = composite.list_tools_all();
+        let names: Vec<&str> = listed.iter().map(|t| t.name.as_str()).collect();
+
+        assert!(
+            names.iter().all(|n| !n.contains("builtin__")),
+            "no builtin__ leak: {names:?}"
+        );
+        assert!(names.contains(&"process_spawn"));
+        assert!(!names.contains(&"spawn"));
+        assert!(names.contains(&"skill_list"));
+        assert!(names.contains(&"skill_get"));
+        assert!(!names.contains(&"voice_listen"));
+        assert!(!names.contains(&"delegate_task"));
+        assert!(!names.contains(&"claude-flow__swarm_init"));
+        // No one-tool-per-skill flood: only façades for skills.
+        assert_eq!(
+            names.iter().filter(|n| n.starts_with("skill_")).count(),
+            2,
+            "only skill_list + skill_get"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_spawn_dispatches_to_registry_spawn() {
+        use clawft_core::tools::registry::{Tool, ToolError as CoreToolError, ToolRegistry};
+        use clawft_services::mcp::ToolProvider;
+
+        struct SpawnToolStub;
+
+        #[async_trait::async_trait]
+        impl Tool for SpawnToolStub {
+            fn name(&self) -> &str {
+                "spawn"
+            }
+            fn description(&self) -> &str {
+                "OS spawn"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                args: serde_json::Value,
+            ) -> Result<serde_json::Value, CoreToolError> {
+                Ok(serde_json::json!({"ran": args.get("command")}))
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(SpawnToolStub));
+
+        let mut defs = build_tool_definitions(&registry);
+        apply_public_wire_renames(&mut defs);
+        assert_eq!(defs[0].name, "process_spawn");
+
+        let provider = build_public_provider(defs, registry, Arc::new(SkillFacadeState::default()));
+        let result = provider
+            .call_tool(
+                "process_spawn",
+                serde_json::json!({"command": "echo"}),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        match &result.content[0] {
+            clawft_services::mcp::ContentBlock::Text { text } => {
+                let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+                assert_eq!(parsed["ran"], "echo");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn skill_facades_list_and_get() {
+        use clawft_services::mcp::ToolProvider;
+
+        let skills = Arc::new(SkillFacadeState {
+            entries: vec![SkillEntry {
+                name: "demo".into(),
+                description: "Demo skill".into(),
+                instructions: "Do the demo.".into(),
+            }],
+        });
+        let defs = skill_facade_definitions();
+        let provider = build_public_provider(defs, ToolRegistry::new(), skills);
+
+        let list = provider
+            .call_tool("skill_list", serde_json::json!({}))
+            .await
+            .unwrap();
+        match &list.content[0] {
+            clawft_services::mcp::ContentBlock::Text { text } => {
+                let v: serde_json::Value = serde_json::from_str(text).unwrap();
+                assert_eq!(v["skills"][0]["name"], "demo");
+            }
+        }
+
+        let get = provider
+            .call_tool("skill_get", serde_json::json!({"name": "demo"}))
+            .await
+            .unwrap();
+        match &get.content[0] {
+            clawft_services::mcp::ContentBlock::Text { text } => {
+                assert_eq!(text, "Do the demo.");
+            }
+        }
     }
 
     #[test]
@@ -411,25 +990,15 @@ mod tests {
         }
     }
 
-    // ── PermissionFilter wiring (WEFT-480) ─────────────────────────
+    // ── PermissionFilter wiring (WEFT-480 / WEFT-699) ──────────────
     //
-    // The `weft mcp-server` REPL/server invocation path used to call
-    // `PermissionFilter::new(None)` unconditionally, which exposed
-    // every registered tool. `run()` now selects the filter based on
-    // `config.tools.allowed_tools`:
-    //
-    //   - empty list → `PermissionFilter::new(None)` (back-compat
-    //     permissive — the server exposes all tools)
-    //   - non-empty list → `PermissionFilter::from_patterns(...)`
-    //     (the configured allowlist gates `tools/list` and
-    //     `tools/call`)
-    //
-    // These tests assert that the right filter shape comes out for
-    // each branch by exercising the middleware against a fixed list
-    // of tool names.
+    // Empty `tools.allowed_tools` is no longer a "full dump" for the
+    // serve path: the profile already limited `tool_defs`. Empty
+    // allowlist means PermissionFilter is permissive *over the
+    // profile surface*. Non-empty allowlist further restricts.
 
     #[tokio::test]
-    async fn permission_filter_empty_allowed_tools_is_permissive() {
+    async fn permission_filter_empty_allowed_tools_is_permissive_over_surface() {
         use clawft_services::mcp::ToolDefinition;
         use clawft_services::mcp::middleware::{Middleware, PermissionFilter};
 
@@ -454,7 +1023,11 @@ mod tests {
             },
         ];
         let filtered = filter.filter_tools(tools).await;
-        assert_eq!(filtered.len(), 2, "empty allowlist must expose all tools");
+        assert_eq!(
+            filtered.len(),
+            2,
+            "empty allowlist must pass through the (already profile-filtered) surface"
+        );
     }
 
     #[tokio::test]

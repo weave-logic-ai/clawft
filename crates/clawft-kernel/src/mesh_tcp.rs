@@ -4,6 +4,13 @@
 //! would be replaced by QUIC (quinn) + Noise (snow), but plain TCP
 //! validates the full mesh stack end-to-end and passes the K6 gate
 //! tests with real networking.
+//!
+//! # Cancel-safety (ADR-010 / WEFT-18)
+//!
+//! [`TcpMeshStream::recv`] keeps partial length/body progress on `self` so
+//! it is safe to race inside `tokio::select!` (mesh peer loop in `boot.rs`).
+//! A naive `read_exact(len)` then `read_exact(body)` pair is **not**
+//! cancel-safe: dropping mid-body desyncs the next length prefix.
 
 use std::net::SocketAddr;
 
@@ -19,9 +26,42 @@ use crate::mesh::{MAX_MESSAGE_SIZE, MeshError, MeshStream, MeshTransport, Transp
 ///
 /// Messages are length-prefixed on the wire (4-byte big-endian length
 /// followed by that many bytes of payload).
+///
+/// `recv` is **cancel-safe** (WEFT-18): partial prefix/body progress is
+/// retained on `self` across cancellations so `tokio::select!` peer loops
+/// do not desync the frame stream.
 pub struct TcpMeshStream {
     stream: TcpStream,
     remote: SocketAddr,
+    /// Staging for the 4-byte length prefix (always partially or fully filled).
+    len_buf: [u8; 4],
+    /// How many of `len_buf` bytes are valid.
+    len_filled: usize,
+    /// In-progress body once the length prefix is complete (`None` = still
+    /// reading the length).
+    body: Option<Vec<u8>>,
+    /// Bytes of `body` filled so far.
+    body_filled: usize,
+}
+
+impl TcpMeshStream {
+    fn new(stream: TcpStream, remote: SocketAddr) -> Self {
+        Self {
+            stream,
+            remote,
+            len_buf: [0u8; 4],
+            len_filled: 0,
+            body: None,
+            body_filled: 0,
+        }
+    }
+
+    /// Reset framing state after a complete message (or hard error).
+    fn reset_frame(&mut self) {
+        self.len_filled = 0;
+        self.body = None;
+        self.body_filled = 0;
+    }
 }
 
 #[async_trait]
@@ -44,24 +84,74 @@ impl MeshStream for TcpMeshStream {
     }
 
     async fn recv(&mut self) -> Result<Vec<u8>, MeshError> {
-        let mut len_buf = [0u8; 4];
-        self.stream
-            .read_exact(&mut len_buf)
-            .await
-            .map_err(|e| MeshError::Io(e.to_string()))?;
-        let len = u32::from_be_bytes(len_buf) as usize;
-        if len > MAX_MESSAGE_SIZE {
-            return Err(MeshError::MessageTooLarge {
-                size: len,
-                max: MAX_MESSAGE_SIZE,
-            });
+        // Cancel-safe framed read (ADR-010 / WEFT-18).
+        //
+        // Progress counters and buffers live on `self`. Each successful
+        // `read` updates those fields before the next `.await`. Dropping
+        // this future while Pending does not discard already-consumed
+        // bytes, so a later `recv` resumes the same frame.
+        //
+        // Field destructuring lets us mutably borrow the socket and the
+        // staging buffers together without fighting the borrow checker
+        // across await points.
+
+        // ── length prefix ──────────────────────────────────────────
+        while self.len_filled < 4 {
+            let Self {
+                stream,
+                len_buf,
+                len_filled,
+                ..
+            } = self;
+            let n = stream
+                .read(&mut len_buf[*len_filled..])
+                .await
+                .map_err(|e| MeshError::Io(e.to_string()))?;
+            if n == 0 {
+                return Err(MeshError::ConnectionClosed);
+            }
+            *len_filled += n;
         }
-        let mut buf = vec![0u8; len];
-        self.stream
-            .read_exact(&mut buf)
-            .await
-            .map_err(|e| MeshError::Io(e.to_string()))?;
-        Ok(buf)
+
+        // ── allocate body once length is known ─────────────────────
+        if self.body.is_none() {
+            let len = u32::from_be_bytes(self.len_buf) as usize;
+            if len > MAX_MESSAGE_SIZE {
+                self.reset_frame();
+                return Err(MeshError::MessageTooLarge {
+                    size: len,
+                    max: MAX_MESSAGE_SIZE,
+                });
+            }
+            self.body = Some(vec![0u8; len]);
+            self.body_filled = 0;
+        }
+
+        // ── body ───────────────────────────────────────────────────
+        let expected = self.body.as_ref().map(|b| b.len()).unwrap_or(0);
+        while self.body_filled < expected {
+            let Self {
+                stream,
+                body,
+                body_filled,
+                ..
+            } = self;
+            let buf = body
+                .as_mut()
+                .expect("body allocated before body-fill loop");
+            let n = stream
+                .read(&mut buf[*body_filled..])
+                .await
+                .map_err(|e| MeshError::Io(e.to_string()))?;
+            if n == 0 {
+                return Err(MeshError::ConnectionClosed);
+            }
+            *body_filled += n;
+        }
+
+        let out = self.body.take().expect("body complete");
+        self.reset_frame();
+        Ok(out)
     }
 
     async fn close(&mut self) -> Result<(), MeshError> {
@@ -91,13 +181,7 @@ impl TransportListener for TcpTransportListener {
             .accept()
             .await
             .map_err(|e| MeshError::Io(e.to_string()))?;
-        Ok((
-            Box::new(TcpMeshStream {
-                stream,
-                remote: addr,
-            }),
-            addr,
-        ))
+        Ok((Box::new(TcpMeshStream::new(stream, addr)), addr))
     }
 
     fn local_addr(&self) -> Result<SocketAddr, MeshError> {
@@ -137,7 +221,7 @@ impl MeshTransport for TcpTransport {
         let remote = stream
             .peer_addr()
             .map_err(|e| MeshError::Io(e.to_string()))?;
-        Ok(Box::new(TcpMeshStream { stream, remote }))
+        Ok(Box::new(TcpMeshStream::new(stream, remote)))
     }
 
     fn supports(&self, addr: &str) -> bool {
@@ -300,5 +384,88 @@ mod tests {
         assert!(t.supports("127.0.0.1:9470"));
         assert!(t.supports("tcp://127.0.0.1:9470"));
         assert!(!t.supports("quic://127.0.0.1:9470"));
+    }
+
+    /// WEFT-18: race `recv` against another arm; the peer must still decode
+    /// subsequent frames after many mid-frame cancellations (simulates the
+    /// mesh bidirectional `select!` in `boot.rs`).
+    #[tokio::test]
+    async fn recv_survives_select_cancellation() {
+        use std::time::Duration;
+
+        let transport = TcpTransport;
+        let mut listener = transport.listen("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let payload_a = vec![0xAAu8; 64];
+        let payload_b = vec![0xBBu8; 128];
+        let payload_a2 = payload_a.clone();
+        let payload_b2 = payload_b.clone();
+
+        let writer = tokio::spawn(async move {
+            let mut stream = TcpTransport.connect(&addr.to_string()).await.unwrap();
+            // Pace writes so the reader often parks mid-frame.
+            stream.send(&payload_a2).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            stream.send(&payload_b2).await.unwrap();
+            stream.close().await.unwrap();
+        });
+
+        let (mut server, _) = listener.accept().await.unwrap();
+
+        // Hammer select! cancellations while the first frame arrives.
+        let mut got_first = None;
+        for _ in 0..200 {
+            tokio::select! {
+                biased;
+                result = server.recv() => {
+                    got_first = Some(result.expect("recv after cancel must succeed"));
+                    break;
+                }
+                _ = tokio::time::sleep(Duration::from_micros(50)) => {
+                    // Cancel recv mid-frame; framing state must survive.
+                }
+            }
+        }
+        let first = got_first.expect("should eventually complete first frame");
+        assert_eq!(first, payload_a);
+
+        // Second frame must still align (no length-prefix desync).
+        let second = server.recv().await.expect("second frame");
+        assert_eq!(second, payload_b);
+
+        writer.await.unwrap();
+    }
+
+    /// WEFT-18: length-prefix progress stored on self after partial fill.
+    #[tokio::test]
+    async fn recv_resumes_after_manual_partial_len_state() {
+        let transport = TcpTransport;
+        let mut listener = transport.listen("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let writer = tokio::spawn(async move {
+            let mut stream = TcpTransport.connect(&addr.to_string()).await.unwrap();
+            stream.send(b"resume-ok").await.unwrap();
+            stream.close().await.unwrap();
+        });
+
+        let (mut server, _) = listener.accept().await.unwrap();
+
+        // Force a cancel race a few times, then a clean recv.
+        for _ in 0..20 {
+            tokio::select! {
+                biased;
+                r = server.recv() => {
+                    assert_eq!(r.unwrap(), b"resume-ok");
+                    writer.await.unwrap();
+                    return;
+                }
+                _ = std::future::ready(()) => {}
+            }
+        }
+        let msg = server.recv().await.unwrap();
+        assert_eq!(msg, b"resume-ok");
+        writer.await.unwrap();
     }
 }

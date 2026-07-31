@@ -4,7 +4,8 @@ Host integration so Ruflo runs **at least as well as Claude Code**, with stronge
 
 | Artifact | Purpose |
 |----------|---------|
-| [`.grok/config.toml`](../../.grok/config.toml) | Project MCP (`ruflo`) + permissions |
+| [`.grok/config.toml`](../../.grok/config.toml) | Project MCP (`weftos` tool surface + optional ruflo) |
+| [Grok ↔ WeftOS MCP guide](../guides/grok-weftos-mcp.md) | Attach Grok Build to `weft mcp-server` (ADR-075) |
 | [`.grok/rules/ruflo-grok.md`](../../.grok/rules/ruflo-grok.md) | Host doctrine + tool map |
 | [`.grok/agents/`](../../.grok/agents/) | Pipeline roles (architect/coder/tester/reviewer) |
 | [`.grok/skills/agent-teams-grok/`](../../.grok/skills/agent-teams-grok/) | Named teams skill |

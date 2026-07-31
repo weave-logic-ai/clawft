@@ -94,7 +94,10 @@ pub use channel::{VoiceChannel, VoiceStatus};
 pub use config::{VoiceAudioConfig, VoiceCaptureSpec, VoicePipelineConfig, VoicePlaybackSpec};
 pub use echo::{EchoCanceller, EchoCancellerConfig};
 pub use events::VoiceWsEvent;
-pub use models::ModelDownloadManager;
+pub use models::{
+    EnsureOutcome, ModelDownloadManager, ModelInfo, finish_stderr_progress, is_placeholder_hash,
+    sha256_hex_bytes, sha256_hex_file, stderr_progress_line,
+};
 pub use noise::{NoiseSuppressor, NoiseSuppressorConfig};
 pub use quality::{AudioMetrics, analyze_frame};
 pub use talk_mode::TalkModeController;

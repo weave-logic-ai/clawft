@@ -33,7 +33,7 @@
 //! interrupt executor's prune; on any other failure it prunes + witnesses so
 //! no attempt dangles.
 //!
-//! ## WEFT-655: review-gate / voice-attempt parity (closes the WEFT-654 gap)
+//! ## WEFT-655 / WEFT-673: review-gate / voice-attempt parity
 //!
 //! `dispatch_reply`'s `Ok` arm below (`agent.dispatch(...)` finalize) used to
 //! call `tier.commit_reply_frontier` unconditionally — the forest commit
@@ -46,11 +46,12 @@
 //! (chain/causal-graph state vs. cow-memory state) disagreed about whether
 //! the turn was "done" until the reviewer decided.
 //!
-//! Closed by reaching `daemon::DAEMON_AGENT_LOOP` directly (the same way
-//! `AgentService`'s `AgentLoopHandle` trait sidesteps this everywhere else —
-//! it doesn't expose `pending_hold_info`/`accept_pending`/`discard_pending`,
-//! only the concrete `AgentLoop` does): after dispatch returns `Ok`, the Ok
-//! arm checks `daemon::daemon_agent_loop().pending_hold_info()` against this
+//! Closed (WEFT-655) by reaching `daemon::DAEMON_AGENT_LOOP` directly (the
+//! same way `AgentService`'s `AgentLoopHandle` trait sidesteps this
+//! everywhere else — it doesn't expose `pending_hold_info` /
+//! `accept_pending` / `discard_pending`, only the concrete `AgentLoop`
+//! does): after dispatch returns `Ok`, the Ok arm checks
+//! `daemon::daemon_agent_loop().pending_hold_info()` against this
 //! dispatch's own hold label (`daemon::turn_hold_label`, pinned to
 //! `AgentLoop::handle_turn`'s format string). A match means THIS turn is the
 //! one parked pending review — the arm skips `commit_reply_frontier` and the
@@ -63,15 +64,37 @@
 //! `daemon::{turn_hold_label, park_voice_attempt, take_parked_voice_attempt,
 //! resolve_parked_attempt_on_accept, cleanup_parked_attempt_on_discard}`.
 //!
-//! KNOWN GAP (documented, not reached for): the accept/discard resolution
-//! runs from an RPC arm in `daemon.rs`, which has no clean seam into
-//! `VoiceShared`'s queue drain (`drain_next`, below) — that lives behind
-//! `DaemonReplySubmitter`, private to this module, and draining means
-//! resubmitting through the `Arc<AgentService>` the RPC arm doesn't hold.
-//! A queued utterance parked during a review hold stays queued until the
-//! conversation's next ordinary turn drains it, rather than draining the
-//! instant the hold resolves. Auto mode (the default, no review gate) is
-//! completely unaffected either way.
+//! ### Hold-drain seam (WEFT-673)
+//!
+//! WEFT-655 left a residual: accept/discard ran from the RPC arm and could
+//! only clear the busy axis — `drain_next` lived behind
+//! `DaemonReplySubmitter` / `VoiceShared` with no seam the RPC arm could
+//! reach, so utterances queued during a hold drained on the conversation's
+//! next ordinary turn, not the instant the hold resolved. Closed by
+//! [`VoiceLoop::drain_after_hold_resolve`]: the loop already holds the
+//! `Weak<AgentService>` + `Arc<VoiceShared>` the drain needs; the RPC
+//! resolution paths call it after `clear_parked_in_flight`. Auto mode
+//! (default, no review gate) is completely unaffected either way.
+//!
+//! ### Deliberate remaining forest-path shape (voice ≠ text)
+//!
+//! Voice and text do **not** share a single forest-commit call site, and
+//! that is intentional:
+//! - **Voice** uses the §W2.1 register-early / commit-late attempt Frontier
+//!   (`SessionTier::register_reply_frontier` → `commit_reply_frontier`, or
+//!   park → resolve/cleanup under review) so the interrupt router has a
+//!   durable busy axis + prune/Contradicts target while generation is
+//!   off-path.
+//! - **Text** `agent.chat` lands turns via the loop sink → `index_turn`
+//!   path with no reply Frontier — there is no barge-in busy axis to
+//!   maintain for typed chat.
+//!
+//! What *is* uniform across modalities (WEFT-655): cow-memory cancel /
+//! error / discard converge on one `BracketGuard` closure inside
+//! `handle_turn`. Voice forest cancel/discard reuses the same Stop-
+//! interrupt primitives (`emit_cancel_prune` + `witness_cancel`) that the
+//! interrupt executor uses — one forest closure, two entry points
+//! (STOP vs proposal discard/timeout).
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Weak};
@@ -537,6 +560,37 @@ impl<H: AgentLoopHandle> VoiceLoop<H> {
     /// finalize/prune (which this attempt skipped while parked).
     pub(crate) fn clear_parked_in_flight(&self, conv_id: &str, seq: u64) {
         self.shared.clear_in_flight(conv_id, seq);
+    }
+
+    /// WEFT-673: after a review-mode hold resolves (accept **or** discard /
+    /// timeout), drain one queued utterance for `conv_id` — the same
+    /// WEFT-650 `drain_next` ordinary finalize uses. The RPC arms hold no
+    /// `Arc<AgentService>` of their own; this method is the seam (the loop
+    /// already owns the `Weak` + `VoiceShared`). No-op when the service is
+    /// gone or the conversation has nothing queued. Callers must clear the
+    /// busy axis first (`clear_parked_in_flight`) so the drained resubmit
+    /// does not see a stale in-flight seq from the parked attempt.
+    pub(crate) fn drain_after_hold_resolve(&self, conv_id: &str) {
+        let Some(agent) = self.agent.upgrade() else {
+            return;
+        };
+        drain_next(agent, self.shared.clone(), conv_id.to_string());
+    }
+
+    /// Test/observability seam: depth of `conv_id`'s utterance queue.
+    #[cfg(test)]
+    pub(crate) fn queued_len(&self, conv_id: &str) -> usize {
+        self.shared
+            .queues
+            .get(conv_id)
+            .map(|q| q.len())
+            .unwrap_or(0)
+    }
+
+    /// Test seam: the shared state (queues + busy axis) this loop holds.
+    #[cfg(test)]
+    pub(crate) fn shared_for_test(&self) -> &Arc<VoiceShared> {
+        &self.shared
     }
 
     /// Route one just-recorded `user` utterance. `in_flight_before` is the

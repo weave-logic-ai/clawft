@@ -18,15 +18,16 @@
 //!   with a real LLM transport.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use clawft_llm::{
-    ChatMessage, ChatRequest as LlmChatRequest, ChatResponse, LlmProviderConfig,
-    OpenAiCompatProvider, ProviderRouter,
+    retry_model_path, ChatMessage, ChatRequest as LlmChatRequest, ChatResponse, LlmProviderConfig,
+    OpenAiCompatProvider, ProviderRouter, RetryModel,
 };
 #[cfg(feature = "native")]
 use clawft_llm::LocalProvider;
@@ -40,6 +41,101 @@ use super::router::StaticRouter;
 use super::tiered_router::TieredRouter;
 use super::traits::{ModelRouter, Pipeline, PipelineRegistry};
 use super::transport::{LlmProvider, OpenAiCompatTransport};
+
+// ---------------------------------------------------------------------------
+// Shared RetryModel persistence (WEFT-39)
+// ---------------------------------------------------------------------------
+
+/// Process-wide learned retry model, restored from disk on first use.
+static SHARED_RETRY_MODEL: OnceLock<Arc<Mutex<RetryModel>>> = OnceLock::new();
+
+/// Resolve the on-disk path for [`RetryModel`] weights.
+///
+/// Priority:
+/// 1. `CLAWFT_RETRY_MODEL_PATH` (explicit file path)
+/// 2. `$WEFTOS_RUNTIME_DIR/eml-models/retry_model.json`
+/// 3. `~/.clawft/state/retry_model.json` (WEFT-39 acceptance default)
+pub fn resolve_retry_model_path() -> PathBuf {
+    if let Ok(p) = std::env::var("CLAWFT_RETRY_MODEL_PATH") {
+        let path = PathBuf::from(p);
+        if !path.as_os_str().is_empty() {
+            return path;
+        }
+    }
+    if let Ok(dir) = std::env::var("WEFTOS_RUNTIME_DIR") {
+        let dir = PathBuf::from(dir);
+        if !dir.as_os_str().is_empty() {
+            return dir.join("eml-models").join(clawft_llm::RETRY_MODEL_FILENAME);
+        }
+    }
+    let state_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".clawft")
+        .join("state");
+    retry_model_path(&state_dir)
+}
+
+/// Shared [`RetryModel`] handle used by every [`RetryPolicy`] wrapper.
+///
+/// First call loads weights from [`resolve_retry_model_path`] (or starts
+/// untrained) and attaches that path for auto-persist after train.
+pub fn shared_retry_model() -> Arc<Mutex<RetryModel>> {
+    SHARED_RETRY_MODEL
+        .get_or_init(|| {
+            let path = resolve_retry_model_path();
+            let model = match RetryModel::load_from_path(&path) {
+                Some(m) => {
+                    info!(
+                        path = %path.display(),
+                        trained = m.is_trained(),
+                        "restored RetryModel learned weights"
+                    );
+                    m.with_persist_path(path)
+                }
+                None => {
+                    debug!(
+                        path = %path.display(),
+                        "no RetryModel on disk; starting untrained"
+                    );
+                    RetryModel::new().with_persist_path(path)
+                }
+            };
+            Arc::new(Mutex::new(model))
+        })
+        .clone()
+}
+
+/// Persist the shared [`RetryModel`] to its configured path.
+///
+/// Best-effort: missing init, poisoned lock, or I/O errors are logged and
+/// ignored so shutdown never fails solely because of model persistence.
+/// Call from daemon clean-shutdown paths (WEFT-39).
+pub fn persist_shared_retry_model() {
+    let Some(handle) = SHARED_RETRY_MODEL.get() else {
+        debug!("RetryModel never initialized; skip persist");
+        return;
+    };
+    match handle.lock() {
+        Ok(model) => {
+            if let Err(e) = model.save() {
+                warn!(error = %e, "failed to persist RetryModel on shutdown");
+            } else if let Some(path) = model.persist_path() {
+                info!(
+                    path = %path.display(),
+                    trained = model.is_trained(),
+                    "persisted RetryModel learned weights"
+                );
+            }
+        }
+        Err(poisoned) => {
+            // Still try to save the inner value after a panic elsewhere.
+            let model = poisoned.into_inner();
+            if let Err(e) = model.save() {
+                warn!(error = %e, "failed to persist poisoned RetryModel");
+            }
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Adapter
@@ -362,9 +458,11 @@ pub fn create_adapter_from_config(config: &Config) -> Arc<dyn LlmProvider> {
             // Match LocalProvider::hermes_serving() window for ADR-060.
             local = local.with_num_ctx(clawft_llm::local_provider::HERMES_DEFAULT_NUM_CTX);
         }
-        let retrying = clawft_llm::retry::RetryPolicy::new(
+        // WEFT-39: shared EML RetryModel, restored from disk on first use.
+        let retrying = clawft_llm::retry::RetryPolicy::with_model(
             local,
             clawft_llm::retry::RetryConfig::default(),
+            shared_retry_model(),
         );
         return Arc::new(ClawftLlmAdapter::new(Arc::new(retrying)));
     }
@@ -380,9 +478,13 @@ pub fn create_adapter_from_config(config: &Config) -> Arc<dyn LlmProvider> {
         OpenAiCompatProvider::new(provider_config)
     };
     // Wrap in RetryPolicy so transient errors (5xx, rate-limit, timeout)
-    // are retried with exponential backoff at the provider level.
-    let retrying =
-        clawft_llm::retry::RetryPolicy::new(provider, clawft_llm::retry::RetryConfig::default());
+    // are retried with exponential backoff; WEFT-39 wires the shared
+    // learned RetryModel (disk-restored on first use).
+    let retrying = clawft_llm::retry::RetryPolicy::with_model(
+        provider,
+        clawft_llm::retry::RetryConfig::default(),
+        shared_retry_model(),
+    );
     Arc::new(ClawftLlmAdapter::new(Arc::new(retrying)))
 }
 
@@ -480,7 +582,12 @@ fn create_adapter_for_provider(provider_name: &str, config: &Config) -> Arc<dyn 
         if matches!(provider_name, "local" | "hermes") {
             local = local.with_num_ctx(clawft_llm::local_provider::HERMES_DEFAULT_NUM_CTX);
         }
-        return Arc::new(ClawftLlmAdapter::new(Arc::new(local)));
+        let retrying = clawft_llm::retry::RetryPolicy::with_model(
+            local,
+            clawft_llm::retry::RetryConfig::default(),
+            shared_retry_model(),
+        );
+        return Arc::new(ClawftLlmAdapter::new(Arc::new(retrying)));
     }
 
     let provider = if let Some(key) = app_api_key {
@@ -489,7 +596,12 @@ fn create_adapter_for_provider(provider_name: &str, config: &Config) -> Arc<dyn 
         OpenAiCompatProvider::new(provider_config)
     };
 
-    Arc::new(ClawftLlmAdapter::new(Arc::new(provider)))
+    let retrying = clawft_llm::retry::RetryPolicy::with_model(
+        provider,
+        clawft_llm::retry::RetryConfig::default(),
+        shared_retry_model(),
+    );
+    Arc::new(ClawftLlmAdapter::new(Arc::new(retrying)))
 }
 
 /// Resolve an explicit API key from the application config for a provider.
@@ -1239,5 +1351,57 @@ mod tests {
             }
             other => panic!("expected ToolUse block, got: {other:?}"),
         }
+    }
+
+    // -- WEFT-39: RetryModel path resolution --------------------------------
+
+    #[test]
+    fn resolve_retry_model_path_honors_explicit_env() {
+        let custom = std::env::temp_dir().join(format!(
+            "weft39_explicit_{}/retry_model.json",
+            std::process::id()
+        ));
+        temp_env::with_vars(
+            [
+                (
+                    "CLAWFT_RETRY_MODEL_PATH",
+                    Some(custom.to_str().expect("utf8 path")),
+                ),
+                ("WEFTOS_RUNTIME_DIR", None::<&str>),
+            ],
+            || {
+                assert_eq!(resolve_retry_model_path(), custom);
+            },
+        );
+    }
+
+    #[test]
+    fn resolve_retry_model_path_uses_runtime_dir() {
+        let runtime = std::env::temp_dir().join(format!("weft39_runtime_{}", std::process::id()));
+        temp_env::with_vars(
+            [
+                ("CLAWFT_RETRY_MODEL_PATH", None::<&str>),
+                (
+                    "WEFTOS_RUNTIME_DIR",
+                    Some(runtime.to_str().expect("utf8 path")),
+                ),
+            ],
+            || {
+                let p = resolve_retry_model_path();
+                assert_eq!(
+                    p,
+                    runtime
+                        .join("eml-models")
+                        .join(clawft_llm::RETRY_MODEL_FILENAME)
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn shared_retry_model_persist_is_best_effort() {
+        // Safe to call even when the OnceLock was never initialized, or
+        // when it was (create_adapter tests may have already primed it).
+        persist_shared_retry_model();
     }
 }
