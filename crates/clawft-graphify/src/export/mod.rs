@@ -2,6 +2,7 @@
 
 pub mod json;
 pub mod obsidian;
+pub mod svg;
 pub mod vowl;
 pub mod wiki;
 
@@ -23,7 +24,7 @@ pub enum ExportFormat {
     Html,
     /// Obsidian vault + canvas.
     Obsidian,
-    /// SVG graph rendering.
+    /// Positioned SVG (Barnes–Hut / tree layout → static SVG).
     Svg,
     /// Wikipedia-style markdown wiki.
     Wiki,
@@ -63,9 +64,6 @@ impl ExportFormat {
 }
 
 /// Export a knowledge graph to the given format and output path.
-///
-/// Currently only JSON is implemented; other formats will be added in
-/// later phases.
 pub fn export(
     kg: &KnowledgeGraph,
     format: ExportFormat,
@@ -81,6 +79,7 @@ pub fn export(
             wiki::to_wiki(kg, output, &[], None)?;
             Ok(())
         }
+        ExportFormat::Svg => svg::to_svg(kg, output),
         _ => Err(GraphifyError::ExportError(format!(
             "Export format {:?} not yet implemented",
             format,
