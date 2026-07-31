@@ -7,12 +7,11 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "BVH broad-phase spatial index (ADR-056). Phase A geometry + Phase D COW/determinism store; no kernel deps."
+description = "BVH broad-phase spatial index (ADR-056 Phase A). No kernel/chain deps — pure geometry + registry."
 
 [dependencies]
 serde = { workspace = true }
-# Canonical spatial tags (WEFT-717 / ADR-056 Phase B). no_std default.
-weftos-leaf-types = { path = "../weftos-leaf-types" }
 
 [dev-dependencies]
 rand = { workspace = true }
+weftos-leaf-types = { path = "../weftos-leaf-types" }

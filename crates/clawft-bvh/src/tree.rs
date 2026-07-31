@@ -5,7 +5,6 @@ use crate::leaf::{Leaf, LeafId};
 
 #[derive(Debug, Clone)]
 enum Node {
-    // (clone required for BvhTree::clone / branch derive)
     Internal {
         bound: Aabb,
         left: usize,
@@ -17,7 +16,7 @@ enum Node {
     },
 }
 
-/// In-memory BVH store (no chain / COW yet).
+/// In-memory BVH tree (no chain / COW yet).
 #[derive(Debug, Default, Clone)]
 pub struct BvhTree {
     leaves: Vec<(LeafId, Leaf)>,
@@ -42,23 +41,36 @@ impl BvhTree {
         self.leaves.is_empty()
     }
 
+    /// Drop all leaves and nodes; resets id counter.
+    pub fn clear(&mut self) {
+        self.leaves.clear();
+        self.nodes.clear();
+        self.root = None;
+        self.next_id = 0;
+    }
+
     /// Insert a leaf; rebuilds the tree (fine for Phase A sizes).
     pub fn insert(&mut self, leaf: Leaf) -> LeafId {
         let id = LeafId(self.next_id);
         self.next_id += 1;
-        self.insert_with_id(id, leaf)
-    }
-
-    /// Insert with a pre-assigned id (multi-branch store / chain replay).
-    ///
-    /// Bumps `next_id` past `id` so subsequent [`Self::insert`] calls stay unique.
-    pub fn insert_with_id(&mut self, id: LeafId, leaf: Leaf) -> LeafId {
-        if id.0 >= self.next_id {
-            self.next_id = id.0 + 1;
-        }
         self.leaves.push((id, leaf));
         self.rebuild();
         id
+    }
+
+    /// Insert with a caller-chosen id (restore / replay). Advances
+    /// `next_id` past `id` so subsequent auto-ids do not collide.
+    pub fn insert_with_id(&mut self, id: LeafId, leaf: Leaf) {
+        // Replace if present.
+        if let Some((_, existing)) = self.leaves.iter_mut().find(|(lid, _)| *lid == id) {
+            *existing = leaf;
+        } else {
+            self.leaves.push((id, leaf));
+        }
+        if id.0 >= self.next_id {
+            self.next_id = id.0.saturating_add(1);
+        }
+        self.rebuild();
     }
 
     /// Remove by id; rebuilds.
@@ -87,6 +99,11 @@ impl BvhTree {
     /// Iterate all leaves.
     pub fn iter_leaves(&self) -> impl Iterator<Item = (LeafId, &Leaf)> {
         self.leaves.iter().map(|(id, l)| (*id, l))
+    }
+
+    /// Collect leaf indices intersecting a predicate on AABB.
+    pub fn collect_where(&self, pred: impl FnMut(Aabb) -> bool) -> Vec<LeafId> {
+        self.collect_where_impl(pred)
     }
 
     fn rebuild(&mut self) {
@@ -133,6 +150,7 @@ impl BvhTree {
             };
             va.partial_cmp(&vb).unwrap_or(std::cmp::Ordering::Equal)
         });
+        // NaN centers sort as Equal.
         let mid = indices.len() / 2;
         let (left_slice, right_slice) = indices.split_at_mut(mid);
         // Recurse into owned buffers to avoid aliasing issues with self.nodes.
@@ -154,8 +172,7 @@ impl BvhTree {
         i
     }
 
-    /// Collect leaf indices intersecting a predicate on AABB.
-    pub(crate) fn collect_where(&self, mut pred: impl FnMut(Aabb) -> bool) -> Vec<LeafId> {
+    fn collect_where_impl(&self, mut pred: impl FnMut(Aabb) -> bool) -> Vec<LeafId> {
         let mut out = Vec::new();
         let Some(root) = self.root else {
             return out;
