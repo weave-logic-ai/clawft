@@ -183,7 +183,7 @@ cd .claude/skills/plane-workflow && ./scripts/plane.sh list-cycle 0.8.x
 - `~/.claude.json` → `projects['/Users/mathewbeane/weftos'].mcpServers['claude-flow']`
   — machine-local override pointing at the grok build
 - `~/.claude/backups/` — pre-migration store backups +
-  `legacy-fidelity-manifest.json` (the 306 tags `memory_import` dropped)
+  `legacy-fidelity-manifest.json` (306 tags; restored via WEFT-670 — see `docs/memory/weft-670-memory-import-tags.md`)
 - `.claude/skills/plane-workflow/SKILL.md` — now documents the 0.7.x lock
 - `~/.claude/agents/embedded-rust-*` — the 4 new agents
 
