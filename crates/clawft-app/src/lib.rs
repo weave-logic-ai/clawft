@@ -41,5 +41,7 @@ pub use lifecycle::{
     },
 };
 pub use manifest::{AppManifest, EntryPoint, Input, Mode, Permission, SurfaceRef};
-pub use registry::{AppRegistry, InstalledApp, RegistryError, UninstallResult};
+pub use registry::{
+    AppRegistry, InstalledApp, QuarantineEvent, RegistryError, UninstallResult,
+};
 pub use validation::{ValidationError, validate, validate_with_catalog};

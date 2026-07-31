@@ -66,6 +66,21 @@ struct RegistryFile {
     apps: Vec<InstalledApp>,
 }
 
+/// Details of a successful corruption quarantine (WEFT-411).
+///
+/// When [`AppRegistry::load`] finds unparseable JSON it renames the
+/// damaged file aside and starts empty. Callers / telemetry can inspect
+/// this via [`AppRegistry::last_quarantine`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuarantineEvent {
+    /// Path the corrupt file was moved to (`apps.json.corrupt-<ts>`).
+    pub quarantine_path: PathBuf,
+    /// Unix epoch seconds stamped into the quarantine filename.
+    pub quarantined_at: u64,
+    /// `serde_json` error message that triggered quarantine.
+    pub parse_error: String,
+}
+
 /// JSON-backed persistent app registry.
 ///
 /// Single-process, single-writer. Thread-safety is the caller's
@@ -76,12 +91,19 @@ struct RegistryFile {
 /// Lifecycle teardown tombstones (WEFT-412) are held on an in-process
 /// [`TeardownTombstoneBus`] shared across clones of this registry.
 /// The bus is **not** persisted to `apps.json`.
+///
+/// **Corruption recovery (WEFT-411):** on JSON parse failure, `load`
+/// renames the damaged file to `<path>.corrupt-<unix_ts>`, clears the
+/// in-memory list, emits a `tracing` warning, and returns `Ok` so the
+/// daemon can self-heal instead of erroring out.
 #[derive(Debug, Clone)]
 pub struct AppRegistry {
     path: PathBuf,
     apps: Vec<InstalledApp>,
     /// In-process bus for uninstall-while-enabled tombstones.
     teardown_bus: TeardownTombstoneBus,
+    /// Set when the most recent [`Self::load`] quarantined a corrupt file.
+    last_quarantine: Option<QuarantineEvent>,
 }
 
 impl AppRegistry {
@@ -93,6 +115,7 @@ impl AppRegistry {
             path: path.into(),
             apps: Vec::new(),
             teardown_bus: TeardownTombstoneBus::new(),
+            last_quarantine: None,
         }
     }
 
@@ -115,19 +138,64 @@ impl AppRegistry {
 
     /// Load the registry contents from disk. Missing file is treated
     /// as an empty registry (first-run is not an error).
+    ///
+    /// **Corruption (WEFT-411):** if the file exists but is not valid
+    /// JSON (or fails schema deserialize), the damaged file is renamed
+    /// to `<path>.corrupt-<unix_ts>`, the in-memory registry starts
+    /// empty, a `tracing::warn!` is emitted, and this returns `Ok(())`
+    /// so callers self-heal. See [`Self::last_quarantine`].
+    ///
+    /// I/O failures other than `NotFound` (including a failed rename
+    /// during quarantine) still surface as [`RegistryError::Io`].
     pub fn load(&mut self) -> Result<(), RegistryError> {
+        self.last_quarantine = None;
         match fs::read_to_string(&self.path) {
-            Ok(text) => {
-                let parsed: RegistryFile = serde_json::from_str(&text)?;
-                self.apps = parsed.apps;
-                Ok(())
-            }
+            Ok(text) => match serde_json::from_str::<RegistryFile>(&text) {
+                Ok(parsed) => {
+                    self.apps = parsed.apps;
+                    Ok(())
+                }
+                Err(err) => self.quarantine_and_recover(err),
+            },
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
                 self.apps.clear();
                 Ok(())
             }
             Err(err) => Err(RegistryError::Io(err)),
         }
+    }
+
+    /// Quarantine a corrupt on-disk registry and start empty (WEFT-411).
+    fn quarantine_and_recover(&mut self, err: serde_json::Error) -> Result<(), RegistryError> {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let quarantine_path = unique_corrupt_sibling(&self.path, ts);
+        fs::rename(&self.path, &quarantine_path)?;
+
+        let parse_error = err.to_string();
+        tracing::warn!(
+            path = %self.path.display(),
+            quarantine = %quarantine_path.display(),
+            error = %parse_error,
+            "app registry JSON corrupt; quarantined and starting empty (WEFT-411)"
+        );
+
+        self.apps.clear();
+        self.last_quarantine = Some(QuarantineEvent {
+            quarantine_path,
+            quarantined_at: ts,
+            parse_error,
+        });
+        Ok(())
+    }
+
+    /// If the most recent [`Self::load`] quarantined a corrupt file,
+    /// returns that event (path + timestamp + parse error). Cleared on
+    /// the next successful non-quarantine load.
+    pub fn last_quarantine(&self) -> Option<&QuarantineEvent> {
+        self.last_quarantine.as_ref()
     }
 
     /// Persist to disk, creating parent directories as needed. Writes
@@ -252,6 +320,29 @@ fn tmp_sibling(path: &Path) -> PathBuf {
     let mut tmp = path.as_os_str().to_os_string();
     tmp.push(".tmp");
     PathBuf::from(tmp)
+}
+
+/// Build `<path>.corrupt-<ts>`, bumping with `-<n>` if that name already
+/// exists so a second corruption in the same second never clobbers the
+/// first quarantine artifact.
+fn unique_corrupt_sibling(path: &Path, ts: u64) -> PathBuf {
+    let candidate = |suffix: String| {
+        let mut s = path.as_os_str().to_os_string();
+        s.push(suffix);
+        PathBuf::from(s)
+    };
+    let primary = candidate(format!(".corrupt-{ts}"));
+    if !primary.exists() {
+        return primary;
+    }
+    for n in 1..1000 {
+        let alt = candidate(format!(".corrupt-{ts}-{n}"));
+        if !alt.exists() {
+            return alt;
+        }
+    }
+    // Last resort: still use the primary name (rename may overwrite).
+    primary
 }
 
 /// Errors surfaced by [`AppRegistry`] operations.
@@ -469,5 +560,94 @@ mod tests {
         assert!(result.teardown_tombstone.is_none());
         assert!(reg.teardown_bus().is_empty());
         assert!(rx.try_recv().is_err());
+    }
+
+    /// WEFT-411: corrupt JSON is renamed to `apps.json.corrupt-<ts>`
+    /// and load recovers with an empty registry (self-heal).
+    #[test]
+    fn load_quarantines_corrupt_json_and_starts_empty() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        fs::write(&path, "{ this is not valid json [[[").expect("seed corrupt file");
+
+        let mut reg = AppRegistry::new(&path);
+        reg.load().expect("corrupt registry must self-heal, not error");
+
+        assert!(reg.list().is_empty(), "recovered registry starts empty");
+        assert!(
+            !path.exists(),
+            "original apps.json must be gone after quarantine rename"
+        );
+
+        let event = reg
+            .last_quarantine()
+            .expect("telemetry must surface the quarantine event");
+        assert!(
+            event
+                .quarantine_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("apps.json.corrupt-")),
+            "quarantine name must match apps.json.corrupt-<ts>, got {:?}",
+            event.quarantine_path
+        );
+        assert!(
+            event.quarantine_path.exists(),
+            "quarantined file must remain on disk for forensics"
+        );
+        assert!(
+            !event.parse_error.is_empty(),
+            "parse error string must be recorded for telemetry"
+        );
+        assert!(event.quarantined_at > 0);
+
+        // Recovered registry is usable: install + persist works.
+        reg.install(mk_manifest("app://after.recovery")).unwrap();
+        assert_eq!(reg.list().len(), 1);
+        assert!(path.exists(), "save after recovery recreates apps.json");
+
+        let mut reg2 = AppRegistry::new(&path);
+        reg2.load().expect("fresh load of repaired registry");
+        assert_eq!(reg2.list().len(), 1);
+        assert!(
+            reg2.last_quarantine().is_none(),
+            "clean load must not report a quarantine"
+        );
+    }
+
+    /// WEFT-411: wrong-shape JSON (valid JSON, wrong schema) also
+    /// quarantines — serde deserialize failure is the trigger, not
+    /// only lexer-level garbage.
+    #[test]
+    fn load_quarantines_wrong_schema_json() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        // Valid JSON, but `apps` is a string instead of an array.
+        fs::write(&path, r#"{"apps":"not-an-array"}"#).unwrap();
+
+        let mut reg = AppRegistry::new(&path);
+        reg.load().expect("schema mismatch must quarantine");
+        assert!(reg.list().is_empty());
+        let event = reg.last_quarantine().expect("quarantine event");
+        assert!(event.quarantine_path.exists());
+        assert!(!path.exists());
+    }
+
+    /// WEFT-411: a second quarantine in the same second does not
+    /// clobber the first artifact (`unique_corrupt_sibling`).
+    #[test]
+    fn quarantine_collision_gets_unique_suffix() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        let first = path.with_file_name("apps.json.corrupt-42");
+        fs::write(&first, "old-quarantine").unwrap();
+        fs::write(&path, "not-json").unwrap();
+
+        let q = unique_corrupt_sibling(&path, 42);
+        assert_eq!(
+            q.file_name().and_then(|n| n.to_str()),
+            Some("apps.json.corrupt-42-1")
+        );
+        assert!(!q.exists());
     }
 }

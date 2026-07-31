@@ -26,6 +26,8 @@ semver = { version = "1", features = ["serde"] }
 # wasm32-unknown-unknown ("time not implemented on this platform")
 # when the admin app seeds itself during desktop boot.
 web-time = "1"
+# Quarantine-path telemetry (WEFT-411): warn when apps.json is corrupt.
+tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
