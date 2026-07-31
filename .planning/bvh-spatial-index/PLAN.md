@@ -272,9 +272,12 @@ Defaults: `enabled = false` (opt-in), `max_leaves = 1_000_000`,
   no trait emerged from the spike.
 - **OQ4 — multi-tenant membership filters**: ADR-056 §1 names
   membership filters as a v1 capability, but the trait surface
-  in §8 doesn't include them. **Resolve before Phase E** — add a
-  `filter: &MembershipFilter` arg to query methods or a wrapper
-  layer.
+  in §8 doesn't include them. **Resolved in WEFT-720 (Phase E)**:
+  keep query methods filter-free; apply
+  `clawft_bvh::apply_membership_filter` (and CLI `--filter-tags`)
+  as a post-query wrapper. Rationale: freeze tenancy into the
+  broad-phase trait before product tenancy is defined would force
+  a later break; wrapper keeps `SpatialBackend` stable.
 - **OQ5 — BVH × HNSW fingerprinting**: deferred per ADR-056 and
   concept paper §12.3. Do not start until Phase E ships.
 

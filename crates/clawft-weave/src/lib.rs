@@ -23,6 +23,9 @@ pub mod llm_service;
 pub mod mcp_rpc;
 pub mod node_identity;
 pub mod protocol;
+/// WEFT-720: `ecc.spatial.*` RPC + process-local BvhStore scaffold.
+#[cfg(unix)]
+pub mod spatial_rpc;
 #[cfg(feature = "rvf-rpc")]
 pub mod rvf_codec;
 #[cfg(feature = "rvf-rpc")]

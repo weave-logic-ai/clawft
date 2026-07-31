@@ -1,4 +1,7 @@
 //! `weaver ecc` — ECC cognitive substrate commands.
+//!
+//! Includes Phase E spatial BVH CLI (WEFT-720 / ADR-056):
+//! `weaver ecc spatial insert|query|branch|diff|status`.
 
 use clap::{Args, Subcommand};
 
@@ -46,6 +49,147 @@ pub enum EccCommand {
     /// Show active vector backend config (WEFT-364).
     #[command(name = "vector-config")]
     VectorConfig,
+    /// BVH spatial index (ADR-056 / WEFT-720).
+    Spatial {
+        #[command(subcommand)]
+        command: SpatialCommand,
+    },
+}
+
+/// `weaver ecc spatial …` subcommands.
+#[derive(Subcommand)]
+pub enum SpatialCommand {
+    /// Insert a leaf: `--tag` + `--aabb minx,miny,minz,maxx,maxy,maxz`.
+    Insert {
+        /// Registry tag name (`wm_object`, `sphere`, …) or numeric / `0x…`.
+        #[arg(long)]
+        tag: String,
+        /// Axis-aligned bound: minx,miny,minz,maxx,maxy,maxz.
+        #[arg(long)]
+        aabb: String,
+        /// Optional hex payload bytes.
+        #[arg(long)]
+        payload: Option<String>,
+        /// Identity kind: `object` (default) or `event`.
+        #[arg(long, default_value = "object")]
+        identity: String,
+        /// Branch id (default main = 0).
+        #[arg(long, default_value_t = 0)]
+        branch: u64,
+    },
+    /// Broad-phase query.
+    Query {
+        #[command(subcommand)]
+        kind: SpatialQueryKind,
+    },
+    /// Branch lifecycle.
+    Branch {
+        #[command(subcommand)]
+        op: SpatialBranchOp,
+    },
+    /// Diff two branches inside a region AABB.
+    Diff {
+        /// Branch A id.
+        #[arg(long)]
+        a: u64,
+        /// Branch B id.
+        #[arg(long)]
+        b: u64,
+        /// Region AABB: minx,miny,minz,maxx,maxy,maxz.
+        #[arg(long)]
+        region: String,
+    },
+    /// Service health, leaf counts, epoch, chain event count.
+    Status,
+    /// Dump recorded chain events (scaffold replay source).
+    Events {
+        /// Limit number of events printed (0 = all).
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
+    },
+    /// Replay chain events into a fresh store and report status (E2E helper).
+    Replay,
+}
+
+#[derive(Subcommand)]
+pub enum SpatialQueryKind {
+    /// Leaves whose AABB contains the point.
+    Point {
+        /// Point x,y,z.
+        #[arg(long)]
+        at: String,
+        #[arg(long, default_value_t = 0)]
+        branch: u64,
+        /// Optional tag allow-list (comma-separated) — OQ4 membership wrapper.
+        #[arg(long)]
+        filter_tags: Option<String>,
+    },
+    /// Leaves intersecting an AABB.
+    Aabb {
+        /// AABB minx,miny,minz,maxx,maxy,maxz.
+        #[arg(long)]
+        region: String,
+        #[arg(long, default_value_t = 0)]
+        branch: u64,
+        #[arg(long)]
+        filter_tags: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
+    },
+    /// Leaves intersecting a sphere.
+    Sphere {
+        /// Center x,y,z.
+        #[arg(long)]
+        center: String,
+        /// Radius.
+        #[arg(long)]
+        radius: f32,
+        #[arg(long, default_value_t = 0)]
+        branch: u64,
+        #[arg(long)]
+        filter_tags: Option<String>,
+    },
+    /// Ray cast (broad-phase).
+    Ray {
+        /// Origin x,y,z.
+        #[arg(long)]
+        origin: String,
+        /// Direction x,y,z.
+        #[arg(long)]
+        dir: String,
+        #[arg(long, default_value_t = 1.0e6)]
+        max_t: f32,
+        #[arg(long, default_value_t = 0)]
+        branch: u64,
+    },
+    /// k nearest by AABB center distance.
+    Knn {
+        /// Point x,y,z.
+        #[arg(long)]
+        at: String,
+        #[arg(short, long, default_value_t = 5)]
+        k: usize,
+        #[arg(long, default_value_t = 0)]
+        branch: u64,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SpatialBranchOp {
+    /// Derive a COW child branch from parent.
+    Derive {
+        /// Parent branch id.
+        #[arg(long, default_value_t = 0)]
+        parent: u64,
+        /// Child branch name.
+        #[arg(long)]
+        name: String,
+        /// Optional note.
+        #[arg(long, default_value = "")]
+        note: String,
+    },
+    /// List branches.
+    List,
 }
 
 pub async fn run(args: EccArgs) -> anyhow::Result<()> {
@@ -161,6 +305,31 @@ pub async fn run(args: EccArgs) -> anyhow::Result<()> {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0)
             );
+            if let Some(spatial) = result.get("spatial") {
+                println!("  Spatial (BVH):");
+                println!(
+                    "    Backend:         {}",
+                    spatial
+                        .get("backend")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?")
+                );
+                println!(
+                    "    Leaves:          {}",
+                    spatial.get("len").and_then(|v| v.as_u64()).unwrap_or(0)
+                );
+                println!(
+                    "    Epoch:           {}",
+                    spatial.get("epoch").and_then(|v| v.as_u64()).unwrap_or(0)
+                );
+                println!(
+                    "    Chain events:    {}",
+                    spatial
+                        .get("chain_events")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
+                );
+            }
         }
         EccCommand::Calibrate => {
             let resp = client.simple_call("ecc.calibrate").await?;
@@ -350,7 +519,285 @@ pub async fn run(args: EccArgs) -> anyhow::Result<()> {
                 println!("{}", serde_json::to_string_pretty(params)?);
             }
         }
+        EccCommand::Spatial { command } => {
+            run_spatial(&mut client, command).await?;
+        }
     }
 
+    Ok(())
+}
+
+async fn run_spatial(client: &mut DaemonClient, command: SpatialCommand) -> anyhow::Result<()> {
+    match command {
+        SpatialCommand::Insert {
+            tag,
+            aabb,
+            payload,
+            identity,
+            branch,
+        } => {
+            let params = serde_json::json!({
+                "tag": tag,
+                "aabb": aabb,
+                "payload": payload,
+                "identity": identity,
+                "branch": branch,
+            });
+            let resp = client
+                .call(Request::with_params("ecc.spatial.insert", params))
+                .await?;
+            if !resp.ok {
+                anyhow::bail!("{}", resp.error.unwrap_or_default());
+            }
+            let r = resp.result.unwrap_or_default();
+            println!(
+                "inserted leaf_id={} branch={} epoch={}",
+                r.get("leaf_id").and_then(|v| v.as_u64()).unwrap_or(0),
+                r.get("branch").and_then(|v| v.as_u64()).unwrap_or(0),
+                r.get("epoch").and_then(|v| v.as_u64()).unwrap_or(0),
+            );
+        }
+        SpatialCommand::Query { kind } => {
+            let (method, params) = match kind {
+                SpatialQueryKind::Point {
+                    at,
+                    branch,
+                    filter_tags,
+                } => (
+                    "ecc.spatial.query",
+                    serde_json::json!({
+                        "kind": "point",
+                        "at": at,
+                        "branch": branch,
+                        "filter_tags": filter_tags,
+                    }),
+                ),
+                SpatialQueryKind::Aabb {
+                    region,
+                    branch,
+                    filter_tags,
+                    limit,
+                } => (
+                    "ecc.spatial.query",
+                    serde_json::json!({
+                        "kind": "aabb",
+                        "region": region,
+                        "branch": branch,
+                        "filter_tags": filter_tags,
+                        "limit": limit,
+                    }),
+                ),
+                SpatialQueryKind::Sphere {
+                    center,
+                    radius,
+                    branch,
+                    filter_tags,
+                } => (
+                    "ecc.spatial.query",
+                    serde_json::json!({
+                        "kind": "sphere",
+                        "center": center,
+                        "radius": radius,
+                        "branch": branch,
+                        "filter_tags": filter_tags,
+                    }),
+                ),
+                SpatialQueryKind::Ray {
+                    origin,
+                    dir,
+                    max_t,
+                    branch,
+                } => (
+                    "ecc.spatial.query",
+                    serde_json::json!({
+                        "kind": "ray",
+                        "origin": origin,
+                        "dir": dir,
+                        "max_t": max_t,
+                        "branch": branch,
+                    }),
+                ),
+                SpatialQueryKind::Knn { at, k, branch } => (
+                    "ecc.spatial.query",
+                    serde_json::json!({
+                        "kind": "knn",
+                        "at": at,
+                        "k": k,
+                        "branch": branch,
+                    }),
+                ),
+            };
+            let resp = client
+                .call(Request::with_params(method, params))
+                .await?;
+            if !resp.ok {
+                anyhow::bail!("{}", resp.error.unwrap_or_default());
+            }
+            let r = resp.result.unwrap_or_default();
+            if let Some(hits) = r.get("hits").and_then(|v| v.as_array()) {
+                if hits.is_empty() {
+                    println!("No hits");
+                } else {
+                    for h in hits {
+                        if let Some(obj) = h.as_object() {
+                            if obj.contains_key("t") {
+                                println!(
+                                    "  leaf_id={} t={}",
+                                    obj.get("leaf_id")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0),
+                                    obj.get("t").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                                );
+                            } else {
+                                println!(
+                                    "  leaf_id={}",
+                                    obj.get("leaf_id")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0)
+                                );
+                            }
+                        } else if let Some(id) = h.as_u64() {
+                            println!("  leaf_id={id}");
+                        }
+                    }
+                }
+            } else {
+                println!("{}", serde_json::to_string_pretty(&r)?);
+            }
+        }
+        SpatialCommand::Branch { op } => match op {
+            SpatialBranchOp::Derive { parent, name, note } => {
+                let params = serde_json::json!({
+                    "parent": parent,
+                    "name": name,
+                    "note": note,
+                });
+                let resp = client
+                    .call(Request::with_params("ecc.spatial.branch.derive", params))
+                    .await?;
+                if !resp.ok {
+                    anyhow::bail!("{}", resp.error.unwrap_or_default());
+                }
+                let r = resp.result.unwrap_or_default();
+                println!(
+                    "derived branch_id={} parent={} name={}",
+                    r.get("branch_id").and_then(|v| v.as_u64()).unwrap_or(0),
+                    r.get("parent").and_then(|v| v.as_u64()).unwrap_or(0),
+                    r.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                );
+            }
+            SpatialBranchOp::List => {
+                let resp = client.simple_call("ecc.spatial.branch.list").await?;
+                if !resp.ok {
+                    anyhow::bail!("{}", resp.error.unwrap_or_default());
+                }
+                let r = resp.result.unwrap_or_default();
+                if let Some(branches) = r.get("branches").and_then(|v| v.as_array()) {
+                    for b in branches {
+                        println!(
+                            "  branch_id={} name={} leaves={}",
+                            b.get("id").and_then(|v| v.as_u64()).unwrap_or(0),
+                            b.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
+                            b.get("leaves").and_then(|v| v.as_u64()).unwrap_or(0),
+                        );
+                    }
+                } else {
+                    println!("{}", serde_json::to_string_pretty(&r)?);
+                }
+            }
+        },
+        SpatialCommand::Diff { a, b, region } => {
+            let params = serde_json::json!({"a": a, "b": b, "region": region});
+            let resp = client
+                .call(Request::with_params("ecc.spatial.diff", params))
+                .await?;
+            if !resp.ok {
+                anyhow::bail!("{}", resp.error.unwrap_or_default());
+            }
+            let r = resp.result.unwrap_or_default();
+            if let Some(entries) = r.get("entries").and_then(|v| v.as_array()) {
+                if entries.is_empty() {
+                    println!("No differences in region");
+                } else {
+                    for e in entries {
+                        println!(
+                            "  leaf_id={} kind={}",
+                            e.get("leaf_id").and_then(|v| v.as_u64()).unwrap_or(0),
+                            e.get("kind").and_then(|v| v.as_str()).unwrap_or("?"),
+                        );
+                    }
+                }
+            } else {
+                println!("{}", serde_json::to_string_pretty(&r)?);
+            }
+        }
+        SpatialCommand::Status => {
+            let resp = client.simple_call("ecc.spatial.status").await?;
+            if !resp.ok {
+                anyhow::bail!("{}", resp.error.unwrap_or_default());
+            }
+            let r = resp.result.unwrap_or_default();
+            println!("ECC Spatial (BVH) Status");
+            println!(
+                "  Backend:        {}",
+                r.get("backend").and_then(|v| v.as_str()).unwrap_or("?")
+            );
+            println!(
+                "  Epoch:          {}",
+                r.get("epoch").and_then(|v| v.as_u64()).unwrap_or(0)
+            );
+            println!(
+                "  Total leaves:   {}",
+                r.get("len").and_then(|v| v.as_u64()).unwrap_or(0)
+            );
+            println!(
+                "  Chain events:   {}",
+                r.get("chain_events")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+            );
+            if let Some(branches) = r.get("branches").and_then(|v| v.as_array()) {
+                println!("  Branches:");
+                for b in branches {
+                    println!(
+                        "    id={} name={} leaves={}",
+                        b.get("id").and_then(|v| v.as_u64()).unwrap_or(0),
+                        b.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
+                        b.get("leaves").and_then(|v| v.as_u64()).unwrap_or(0),
+                    );
+                }
+            }
+            println!(
+                "  OQ4 filter:     post-query wrapper (MembershipFilter); see ADR-056 / PLAN.md"
+            );
+        }
+        SpatialCommand::Events { limit } => {
+            let params = serde_json::json!({"limit": limit});
+            let resp = client
+                .call(Request::with_params("ecc.spatial.events", params))
+                .await?;
+            if !resp.ok {
+                anyhow::bail!("{}", resp.error.unwrap_or_default());
+            }
+            let r = resp.result.unwrap_or_default();
+            println!("{}", serde_json::to_string_pretty(&r)?);
+        }
+        SpatialCommand::Replay => {
+            let resp = client.simple_call("ecc.spatial.replay").await?;
+            if !resp.ok {
+                anyhow::bail!("{}", resp.error.unwrap_or_default());
+            }
+            let r = resp.result.unwrap_or_default();
+            println!(
+                "replay ok={} events={} epoch={} leaves={}",
+                r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+                r.get("events_replayed")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                r.get("epoch").and_then(|v| v.as_u64()).unwrap_or(0),
+                r.get("len").and_then(|v| v.as_u64()).unwrap_or(0),
+            );
+        }
+    }
     Ok(())
 }

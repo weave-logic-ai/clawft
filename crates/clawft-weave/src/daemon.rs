@@ -7378,6 +7378,18 @@ async fn dispatch(
                     "running": t.is_running(),
                 })
             });
+            let spatial = {
+                let store = crate::spatial_rpc::spatial_store();
+                let g = store.lock().ok();
+                g.map(|s| {
+                    serde_json::json!({
+                        "backend": s.backend_name(),
+                        "len": s.len(),
+                        "epoch": s.epoch(),
+                        "chain_events": s.events().len(),
+                    })
+                })
+            };
             Response::success(serde_json::json!({
                 "enabled": k.ecc_hnsw().is_some(),
                 "calibration": calibration,
@@ -7387,6 +7399,7 @@ async fn dispatch(
                 "causal_edges": causal_edges,
                 "crossref_count": crossref_count,
                 "impulse_pending": impulse_pending,
+                "spatial": spatial,
             }))
         }
         #[cfg(feature = "ecc")]
@@ -7501,6 +7514,9 @@ async fn dispatch(
                 },
             }))
         }
+        // WEFT-720 / ADR-056 Phase E: BVH spatial CLI RPCs (process-local store).
+        #[cfg(feature = "ecc")]
+        m if m.starts_with("ecc.spatial.") => crate::spatial_rpc::handle_spatial(m, &params),
         // ── ADR-067 P0: conversation graph export ──────────────────────
         //
         // `conversation.graph { conv_id, since?: u64, window?: {from_ts, to_ts} }`

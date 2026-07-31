@@ -1,31 +1,32 @@
 //! `clawft-bvh` — BVH broad-phase spatial index (ADR-056).
 //!
-//! Standalone, no `clawft-kernel` dependency. Ships:
-//! - AABB / Vec3 / Ray / Frustum primitives
-//! - Leaf + LeafId + IdentityKind + BranchId
-//! - Top-down median-split tree with point/AABB/sphere/ray/knn queries
-//! - Tagged-union narrow-phase registry (stub interpreters)
-//! - [`BvhStore`] with [`ChainSink`] hook for kernel audit (Phase C)
+//! Phase A: AABB / Vec3 / Ray, Leaf, median-split tree, point/AABB/sphere/ray.
+//! Phase E scaffold (WEFT-720): multi-branch [`store::BvhStore`], chain event
+//! log + replay, membership-filter wrapper (OQ4).
 //!
-//! COW branch node-sharing and determinism-phase seal deepen in Phase D.
-//! Splat integration registers `splat.*` leaf tags via `weftos-leaf-types`.
+//! Kernel `SpatialBackend` / ExoChain dual-sign land in Phases C–D.
 
 #![warn(missing_docs)]
 
 mod aabb;
 mod chain;
+mod filter;
 mod leaf;
 mod query;
 mod registry;
 mod store;
 mod tree;
 
-pub use aabb::{Aabb, Frustum, Ray, Vec3};
-pub use chain::{BvhChainKind, ChainSink, NullChainSink, RecordingChainSink};
-pub use leaf::{BranchId, BranchMeta, DiffEntry, IdentityKind, Leaf, LeafId};
-pub use query::{RayHit, query_aabb, query_knn, query_point, query_ray, query_sphere};
+pub use aabb::{Aabb, Ray, Vec3};
+pub use chain::{BvhChainEvent, ChainSink, MemoryChainSink};
+pub use filter::{MembershipFilter, apply_membership_filter};
+pub use leaf::{BranchId, BranchMeta, IdentityKind, Leaf, LeafId};
+pub use query::{RayHit, query_aabb, query_point, query_ray, query_sphere};
 pub use registry::{NarrowPhaseFn, SpatialRegistry};
-pub use store::{BvhError, BvhResult, BvhStore, BvhStoreConfig};
+pub use store::{
+    BvhError, BvhResult, BvhStore, DiffEntry, DiffKind, parse_aabb6, parse_identity, parse_tag,
+    parse_vec3,
+};
 pub use tree::BvhTree;
 
 /// Crate version string for diagnostics.

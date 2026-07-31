@@ -1,44 +1,54 @@
-//! Integrated [`BvhStore`] — multi-branch shell over [`BvhTree`] + [`ChainSink`].
+//! Multi-branch `BvhStore` with chain event log (Phase E scaffold).
 //!
-//! Phase C ships full insert/remove/query + chain emission. Phase D deepens
-//! COW node sharing and determinism-phase seal; Phase C `derive` clones the
-//! parent tree wholesale (correct, not yet share-efficient).
+//! Full COW node sharing + determinism-phase seal land in Phase D; this
+//! store clones trees on [`BvhStore::derive_branch`] and records every
+//! mutation so CLI E2E can prove insert → query → branch → diff + replay.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::aabb::{Aabb, Frustum, Ray, Vec3};
-use crate::chain::{BvhChainKind, ChainSink, NullChainSink};
-use crate::leaf::{BranchId, BranchMeta, DiffEntry, Leaf, LeafId};
-use crate::query::{RayHit, query_aabb, query_knn, query_point, query_ray, query_sphere};
+use crate::aabb::{Aabb, Ray, Vec3};
+use crate::chain::{BvhChainEvent, ChainSink, MemoryChainSink};
+use crate::leaf::{BranchId, BranchMeta, IdentityKind, Leaf, LeafId};
+use crate::query::{self, RayHit};
 use crate::tree::BvhTree;
+
+/// How a leaf differs between two branches inside a region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffKind {
+    /// Present in `b` but not `a`.
+    Added,
+    /// Present in `a` but not `b`.
+    Removed,
+    /// Same id in both but bound/tag/payload differ.
+    Changed,
+}
+
+/// One leaf-level difference from [`BvhStore::branch_diff`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffEntry {
+    /// Leaf id (stable across object branches when identity is Object).
+    pub leaf_id: LeafId,
+    /// Diff classification.
+    pub kind: DiffKind,
+}
 
 /// Errors from store operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BvhError {
-    /// Configured max leaf capacity exceeded.
-    CapacityExceeded {
-        /// Configured max.
-        max: usize,
-        /// Current leaf count on the target branch.
-        current: usize,
-    },
     /// Unknown branch id.
     UnknownBranch(BranchId),
-    /// Generic message (kept small; no alloc-heavy variants for no_std path).
-    Other(&'static str),
+    /// Leaf not found on the branch.
+    UnknownLeaf(LeafId),
 }
 
 impl std::fmt::Display for BvhError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BvhError::CapacityExceeded { max, current } => {
-                write!(f, "capacity exceeded: {current}/{max} leaves")
-            }
-            BvhError::UnknownBranch(id) => write!(f, "unknown branch {}", id.0),
-            BvhError::Other(msg) => write!(f, "{msg}"),
+            Self::UnknownBranch(id) => write!(f, "unknown branch {}", id.0),
+            Self::UnknownLeaf(id) => write!(f, "unknown leaf {}", id.0),
         }
     }
 }
@@ -48,295 +58,232 @@ impl std::error::Error for BvhError {}
 /// Result alias for store ops.
 pub type BvhResult<T> = Result<T, BvhError>;
 
-/// Store configuration (mirrors `SpatialConfig` defaults at the type layer).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BvhStoreConfig {
-    /// Soft max leaves per branch (store-full guard). `0` = unbounded.
-    pub max_leaves: usize,
-    /// Pending mutations before a forced phase seal (Phase D; recorded only).
-    pub phase_commit_threshold: usize,
-}
-
-impl Default for BvhStoreConfig {
-    fn default() -> Self {
-        Self {
-            max_leaves: 1_000_000,
-            phase_commit_threshold: 4096,
-        }
-    }
-}
-
-/// Per-branch tree handle.
 struct BranchState {
     tree: BvhTree,
-    /// Branch metadata (name, priority) — used by Phase D seal sort.
-    #[allow(dead_code)]
     meta: BranchMeta,
-    /// Parent branch for lineage (COW depth in Phase D).
-    #[allow(dead_code)]
+    /// Parent branch when derived; `None` for main.
+    #[allow(dead_code)] // exposed via future status / COW Phase D
     parent: Option<BranchId>,
 }
 
-/// Integrated BVH store with optional chain sink.
-///
-/// Mutations always bump `epoch` and notify the sink. Queries read the
-/// active (or specified) branch without chain traffic.
+/// In-memory multi-branch BVH with append-only chain log.
 pub struct BvhStore {
-    config: BvhStoreConfig,
     branches: HashMap<BranchId, BranchState>,
-    active: BranchId,
     next_branch: u64,
+    /// Shared leaf-id allocator so object ids stay unique across derives.
+    next_leaf: u64,
     epoch: u64,
-    sink: Arc<dyn ChainSink>,
+    sink: MemoryChainSink,
 }
 
 impl Default for BvhStore {
     fn default() -> Self {
-        Self::new(BvhStoreConfig::default())
+        Self::new()
     }
 }
 
 impl BvhStore {
-    /// New store with null chain sink and a single main branch.
-    pub fn new(config: BvhStoreConfig) -> Self {
-        Self::with_sink(config, Arc::new(NullChainSink))
-    }
-
-    /// New store with an explicit chain sink.
-    pub fn with_sink(config: BvhStoreConfig, sink: Arc<dyn ChainSink>) -> Self {
+    /// Empty store with main branch `0`.
+    pub fn new() -> Self {
         let mut branches = HashMap::new();
         branches.insert(
             BranchId::MAIN,
             BranchState {
                 tree: BvhTree::new(),
-                meta: BranchMeta {
-                    name: "main".into(),
-                    priority_tier: 0,
-                },
+                meta: BranchMeta::named("main"),
                 parent: None,
             },
         );
         Self {
-            config,
             branches,
-            active: BranchId::MAIN,
             next_branch: 1,
+            next_leaf: 0,
             epoch: 0,
-            sink,
+            sink: MemoryChainSink::new(),
         }
     }
 
-    /// Replace the chain sink (e.g. after kernel attaches `ChainManager`).
-    pub fn set_sink(&mut self, sink: Arc<dyn ChainSink>) {
-        self.sink = sink;
+    /// Backend name for status surfaces.
+    pub fn backend_name(&self) -> &'static str {
+        "bvh-memory"
     }
 
-    /// Borrow config.
-    pub fn config(&self) -> &BvhStoreConfig {
-        &self.config
-    }
-
-    /// Monotonic epoch (bumped on every mutation).
+    /// Monotonic epoch (bumped on seal / mutate).
     pub fn epoch(&self) -> u64 {
         self.epoch
     }
 
-    /// Active branch id.
-    pub fn active_branch(&self) -> BranchId {
-        self.active
-    }
-
-    /// Switch the default branch for insert/query when branch is omitted.
-    pub fn set_active_branch(&mut self, id: BranchId) -> BvhResult<()> {
-        if !self.branches.contains_key(&id) {
-            return Err(BvhError::UnknownBranch(id));
-        }
-        self.active = id;
-        Ok(())
-    }
-
-    /// Leaf count on the active branch.
+    /// Total leaves across all branches (not unique objects).
     pub fn len(&self) -> usize {
-        self.branches
-            .get(&self.active)
-            .map(|b| b.tree.len())
-            .unwrap_or(0)
+        self.branches.values().map(|b| b.tree.len()).sum()
     }
 
-    /// Empty active branch?
+    /// True when every branch is empty.
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.branches.values().all(|b| b.tree.is_empty())
     }
 
-    /// Number of branches.
-    pub fn branch_count(&self) -> usize {
-        self.branches.len()
+    /// Recorded chain events (Phase E scaffold; ExoChain later).
+    pub fn events(&self) -> &[BvhChainEvent] {
+        self.sink.events()
     }
 
-    /// Insert on the active branch.
-    pub fn insert(&mut self, leaf: Leaf) -> BvhResult<LeafId> {
-        self.insert_on(self.active, leaf)
+    /// Leaf count on one branch.
+    pub fn branch_len(&self, branch: BranchId) -> BvhResult<usize> {
+        self.branches
+            .get(&branch)
+            .map(|b| b.tree.len())
+            .ok_or(BvhError::UnknownBranch(branch))
     }
 
-    /// Insert on a specific branch.
-    pub fn insert_on(&mut self, branch: BranchId, leaf: Leaf) -> BvhResult<LeafId> {
-        let state = self
+    /// List known branches with metadata.
+    pub fn list_branches(&self) -> Vec<(BranchId, &BranchMeta, usize)> {
+        let mut out: Vec<_> = self
             .branches
-            .get_mut(&branch)
-            .ok_or(BvhError::UnknownBranch(branch))?;
-        if self.config.max_leaves > 0 && state.tree.len() >= self.config.max_leaves {
-            return Err(BvhError::CapacityExceeded {
-                max: self.config.max_leaves,
-                current: state.tree.len(),
-            });
+            .iter()
+            .map(|(id, st)| (*id, &st.meta, st.tree.len()))
+            .collect();
+        out.sort_by_key(|(id, _, _)| id.0);
+        out
+    }
+
+    /// Insert on `branch`; emits `Insert` chain event.
+    pub fn insert(&mut self, branch: BranchId, leaf: Leaf) -> BvhResult<LeafId> {
+        let id = LeafId(self.next_leaf);
+        self.next_leaf += 1;
+        {
+            let st = self
+                .branches
+                .get_mut(&branch)
+                .ok_or(BvhError::UnknownBranch(branch))?;
+            // Use tree's insert but we need stable id — push via public API
+            // by temporarily using tree.insert then rewriting id is messy;
+            // rebuild path: remove default insert and use internal assign.
+            let assigned = st.tree.insert_with_id(id, leaf.clone());
+            debug_assert_eq!(assigned, id);
         }
-        let id = state.tree.insert(leaf.clone());
-        self.epoch = self.epoch.saturating_add(1);
-        self.sink.on_event(&BvhChainKind::Insert {
+        self.epoch += 1;
+        self.sink.append(BvhChainEvent::Insert {
+            branch,
             leaf_id: id,
             leaf,
-            branch,
         });
         Ok(id)
     }
 
-    /// Remove from the active branch.
-    pub fn remove(&mut self, id: LeafId) -> bool {
-        self.remove_on(self.active, id)
-    }
-
-    /// Remove from a specific branch.
-    pub fn remove_on(&mut self, branch: BranchId, id: LeafId) -> bool {
-        let Some(state) = self.branches.get_mut(&branch) else {
-            return false;
-        };
-        if !state.tree.remove(id) {
-            return false;
+    /// Remove leaf from branch; emits `Remove`.
+    pub fn remove(&mut self, branch: BranchId, id: LeafId) -> BvhResult<bool> {
+        let st = self
+            .branches
+            .get_mut(&branch)
+            .ok_or(BvhError::UnknownBranch(branch))?;
+        let removed = st.tree.remove(id);
+        if removed {
+            self.epoch += 1;
+            self.sink.append(BvhChainEvent::Remove {
+                branch,
+                leaf_id: id,
+            });
         }
-        self.epoch = self.epoch.saturating_add(1);
-        self.sink.on_event(&BvhChainKind::Remove {
-            leaf_id: id,
-            branch,
-        });
-        true
+        Ok(removed)
     }
 
-    /// Fetch leaf on active branch.
-    pub fn get(&self, id: LeafId) -> Option<&Leaf> {
-        self.get_on(self.active, id)
-    }
-
-    /// Fetch leaf on a branch.
-    pub fn get_on(&self, branch: BranchId, id: LeafId) -> Option<&Leaf> {
+    /// Fetch leaf on branch.
+    pub fn get(&self, branch: BranchId, id: LeafId) -> Option<&Leaf> {
         self.branches.get(&branch)?.tree.get(id)
     }
 
-    /// Query point on active branch.
-    pub fn query_point(&self, p: Vec3) -> Vec<LeafId> {
-        self.query_point_on(self.active, p)
-    }
-
-    /// Query point on a branch.
-    pub fn query_point_on(&self, branch: BranchId, p: Vec3) -> Vec<LeafId> {
-        self.branches
-            .get(&branch)
-            .map(|b| query_point(&b.tree, p))
-            .unwrap_or_default()
-    }
-
-    /// Query AABB on active branch.
-    pub fn query_aabb(&self, bb: Aabb) -> Vec<LeafId> {
-        self.query_aabb_on(self.active, bb)
-    }
-
-    /// Query AABB on a branch.
-    pub fn query_aabb_on(&self, branch: BranchId, bb: Aabb) -> Vec<LeafId> {
-        self.branches
-            .get(&branch)
-            .map(|b| query_aabb(&b.tree, bb))
-            .unwrap_or_default()
-    }
-
-    /// Query sphere on active branch.
-    pub fn query_sphere(&self, center: Vec3, radius: f32) -> Vec<LeafId> {
-        self.query_sphere_on(self.active, center, radius)
-    }
-
-    /// Query sphere on a branch.
-    pub fn query_sphere_on(&self, branch: BranchId, center: Vec3, radius: f32) -> Vec<LeafId> {
-        self.branches
-            .get(&branch)
-            .map(|b| query_sphere(&b.tree, center, radius))
-            .unwrap_or_default()
-    }
-
-    /// Query ray on active branch.
-    pub fn query_ray(&self, ray: Ray, max_t: f32) -> Vec<RayHit> {
-        self.query_ray_on(self.active, ray, max_t)
-    }
-
-    /// Query ray on a branch.
-    pub fn query_ray_on(&self, branch: BranchId, ray: Ray, max_t: f32) -> Vec<RayHit> {
-        self.branches
-            .get(&branch)
-            .map(|b| query_ray(&b.tree, ray, max_t))
-            .unwrap_or_default()
-    }
-
-    /// Query frustum on active branch.
-    pub fn query_frustum(&self, frustum: &Frustum) -> Vec<LeafId> {
-        self.query_frustum_on(self.active, frustum)
-    }
-
-    /// Query frustum on a branch.
-    pub fn query_frustum_on(&self, branch: BranchId, frustum: &Frustum) -> Vec<LeafId> {
-        self.branches
-            .get(&branch)
-            .map(|b| {
-                b.tree
-                    .collect_where(|bb| frustum.intersects_aabb(bb))
-            })
-            .unwrap_or_default()
-    }
-
-    /// k-NN by AABB-center distance on active branch.
-    pub fn query_knn(&self, p: Vec3, k: usize) -> Vec<LeafId> {
-        self.query_knn_on(self.active, p, k)
-    }
-
-    /// k-NN on a branch.
-    pub fn query_knn_on(&self, branch: BranchId, p: Vec3, k: usize) -> Vec<LeafId> {
-        self.branches
-            .get(&branch)
-            .map(|b| query_knn(&b.tree, p, k))
-            .unwrap_or_default()
-    }
-
-    /// Derive a child branch (Phase C: full tree clone; Phase D: COW).
-    pub fn derive(&mut self, meta: BranchMeta) -> BvhResult<BranchId> {
-        self.derive_from(self.active, meta)
-    }
-
-    /// Derive from a specific parent branch.
-    pub fn derive_from(&mut self, parent: BranchId, meta: BranchMeta) -> BvhResult<BranchId> {
-        let parent_state = self
+    /// Point query.
+    pub fn query_point(&self, branch: BranchId, p: Vec3) -> BvhResult<Vec<LeafId>> {
+        let st = self
             .branches
-            .get(&parent)
-            .ok_or(BvhError::UnknownBranch(parent))?;
-        // Phase C: wholesale clone. Phase D replaces with COW node sharing.
-        let tree = parent_state.tree.clone();
+            .get(&branch)
+            .ok_or(BvhError::UnknownBranch(branch))?;
+        Ok(query::query_point(&st.tree, p))
+    }
+
+    /// AABB overlap query.
+    pub fn query_aabb(&self, branch: BranchId, bb: Aabb) -> BvhResult<Vec<LeafId>> {
+        let st = self
+            .branches
+            .get(&branch)
+            .ok_or(BvhError::UnknownBranch(branch))?;
+        Ok(query::query_aabb(&st.tree, bb))
+    }
+
+    /// Sphere overlap query.
+    pub fn query_sphere(
+        &self,
+        branch: BranchId,
+        center: Vec3,
+        radius: f32,
+    ) -> BvhResult<Vec<LeafId>> {
+        let st = self
+            .branches
+            .get(&branch)
+            .ok_or(BvhError::UnknownBranch(branch))?;
+        Ok(query::query_sphere(&st.tree, center, radius))
+    }
+
+    /// Ray cast (sorted by enter distance).
+    pub fn query_ray(
+        &self,
+        branch: BranchId,
+        ray: Ray,
+        max_t: f32,
+    ) -> BvhResult<Vec<RayHit>> {
+        let st = self
+            .branches
+            .get(&branch)
+            .ok_or(BvhError::UnknownBranch(branch))?;
+        Ok(query::query_ray(&st.tree, ray, max_t))
+    }
+
+    /// k nearest leaves by AABB center distance (scaffold; Phase A knn later).
+    pub fn query_knn(
+        &self,
+        branch: BranchId,
+        p: Vec3,
+        k: usize,
+    ) -> BvhResult<Vec<LeafId>> {
+        let st = self
+            .branches
+            .get(&branch)
+            .ok_or(BvhError::UnknownBranch(branch))?;
+        let mut scored: Vec<(f32, LeafId)> = st
+            .tree
+            .iter_leaves()
+            .map(|(id, leaf)| {
+                let c = leaf.bound.center();
+                let d = (c - p).length_sq();
+                (d, id)
+            })
+            .collect();
+        scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(scored.into_iter().take(k).map(|(_, id)| id).collect())
+    }
+
+    /// Derive a child branch (tree clone; true COW in Phase D).
+    pub fn derive_branch(&mut self, parent: BranchId, meta: BranchMeta) -> BvhResult<BranchId> {
+        let parent_tree = {
+            let st = self
+                .branches
+                .get(&parent)
+                .ok_or(BvhError::UnknownBranch(parent))?;
+            st.tree.clone()
+        };
         let child = BranchId(self.next_branch);
-        self.next_branch = self.next_branch.saturating_add(1);
+        self.next_branch += 1;
         self.branches.insert(
             child,
             BranchState {
-                tree,
+                tree: parent_tree,
                 meta: meta.clone(),
                 parent: Some(parent),
             },
         );
-        self.epoch = self.epoch.saturating_add(1);
-        self.sink.on_event(&BvhChainKind::Derive {
+        self.epoch += 1;
+        self.sink.append(BvhChainEvent::Derive {
             parent,
             child,
             meta,
@@ -344,8 +291,13 @@ impl BvhStore {
         Ok(child)
     }
 
-    /// Diff two branches inside `region` (presence-only).
-    pub fn branch_diff(&self, a: BranchId, b: BranchId, region: Aabb) -> BvhResult<Vec<DiffEntry>> {
+    /// Leaves that differ in `region` between branches `a` and `b`.
+    pub fn branch_diff(
+        &self,
+        a: BranchId,
+        b: BranchId,
+        region: Aabb,
+    ) -> BvhResult<Vec<DiffEntry>> {
         let ta = self
             .branches
             .get(&a)
@@ -355,221 +307,249 @@ impl BvhStore {
             .get(&b)
             .ok_or(BvhError::UnknownBranch(b))?;
 
-        let mut in_a: HashMap<LeafId, &Leaf> = HashMap::new();
-        for (id, leaf) in ta.tree.iter_leaves() {
-            if leaf.bound.intersects_aabb(region) {
-                in_a.insert(id, leaf);
-            }
-        }
-        let mut in_b: HashMap<LeafId, &Leaf> = HashMap::new();
-        for (id, leaf) in tb.tree.iter_leaves() {
-            if leaf.bound.intersects_aabb(region) {
-                in_b.insert(id, leaf);
-            }
-        }
+        let ids_a: Vec<LeafId> = query::query_aabb(&ta.tree, region);
+        let ids_b: Vec<LeafId> = query::query_aabb(&tb.tree, region);
+
+        let set_a: std::collections::HashSet<LeafId> = ids_a.iter().copied().collect();
+        let set_b: std::collections::HashSet<LeafId> = ids_b.iter().copied().collect();
 
         let mut out = Vec::new();
-        for (id, leaf) in &in_a {
-            if !in_b.contains_key(id) {
+        for id in &ids_a {
+            if !set_b.contains(id) {
                 out.push(DiffEntry {
                     leaf_id: *id,
-                    only_in: a,
-                    bound: leaf.bound,
+                    kind: DiffKind::Removed,
+                });
+            } else {
+                let la = ta.tree.get(*id);
+                let lb = tb.tree.get(*id);
+                if la.map(|l| (l.tag, l.identity_kind, &l.bound, &l.payload))
+                    != lb.map(|l| (l.tag, l.identity_kind, &l.bound, &l.payload))
+                {
+                    out.push(DiffEntry {
+                        leaf_id: *id,
+                        kind: DiffKind::Changed,
+                    });
+                }
+            }
+        }
+        for id in &ids_b {
+            if !set_a.contains(id) {
+                out.push(DiffEntry {
+                    leaf_id: *id,
+                    kind: DiffKind::Added,
                 });
             }
         }
-        for (id, leaf) in &in_b {
-            if !in_a.contains_key(id) {
-                out.push(DiffEntry {
-                    leaf_id: *id,
-                    only_in: b,
-                    bound: leaf.bound,
-                });
-            }
-        }
-        out.sort_by_key(|d| (d.leaf_id.0, d.only_in.0));
+        out.sort_by_key(|e| e.leaf_id.0);
         Ok(out)
     }
 
-    /// Emit a rebalance/seal chain event (Phase D will sort + rebalance).
-    pub fn rebalance_seal(&mut self, branch: BranchId) -> BvhResult<()> {
-        let count = self
-            .branches
-            .get(&branch)
-            .ok_or(BvhError::UnknownBranch(branch))?
-            .tree
-            .len();
-        // Rebuild is already done on every insert/remove in Phase A tree;
-        // seal just witnesses the epoch boundary.
-        self.epoch = self.epoch.saturating_add(1);
-        self.sink.on_event(&BvhChainKind::RebalanceSeal {
-            branch,
-            leaf_count: count,
-            epoch: self.epoch,
-        });
+    /// Record a phase seal event (scaffold).
+    pub fn seal_phase(&mut self, branch: BranchId) -> BvhResult<()> {
+        if !self.branches.contains_key(&branch) {
+            return Err(BvhError::UnknownBranch(branch));
+        }
+        self.epoch += 1;
+        let epoch = self.epoch;
+        self.sink.append(BvhChainEvent::RebalanceSeal { branch, epoch });
         Ok(())
     }
 
-    /// Snapshot all leaves on a branch (for equality / restart tests).
-    pub fn snapshot_leaves(&self, branch: BranchId) -> BvhResult<Vec<(LeafId, Leaf)>> {
-        let state = self
-            .branches
-            .get(&branch)
-            .ok_or(BvhError::UnknownBranch(branch))?;
-        let mut v: Vec<(LeafId, Leaf)> = state
-            .tree
-            .iter_leaves()
-            .map(|(id, l)| (id, l.clone()))
-            .collect();
-        v.sort_by_key(|(id, _)| id.0);
-        Ok(v)
-    }
-
-    /// Replay a recorded chain event onto this store (restart path).
-    ///
-    /// Leaf ids from the event are **not** re-used by `BvhTree::insert`
-    /// (which assigns its own sequence). For byte-identical replay tests,
-    /// prefer [`Self::restore_leaves`] after collecting a snapshot, or
-    /// compare by bound/tag/payload rather than LeafId.
-    pub fn apply_chain_event(&mut self, event: &BvhChainKind) -> BvhResult<()> {
-        match event {
-            BvhChainKind::Insert {
-                leaf_id: _,
-                leaf,
-                branch,
-            } => {
-                // Ensure branch exists (derive events create branches first).
-                if !self.branches.contains_key(branch) {
-                    return Err(BvhError::UnknownBranch(*branch));
+    /// Rebuild a store by replaying recorded events (deterministic).
+    pub fn replay(events: &[BvhChainEvent]) -> Self {
+        let mut store = Self::new();
+        // Drop the empty main events from construction; replay applies all.
+        store.sink.clear();
+        store.epoch = 0;
+        for ev in events {
+            match ev {
+                BvhChainEvent::Insert {
+                    branch,
+                    leaf_id,
+                    leaf,
+                } => {
+                    // Ensure branch exists (derive may not have run if log is partial).
+                    if !store.branches.contains_key(branch) {
+                        store.branches.insert(
+                            *branch,
+                            BranchState {
+                                tree: BvhTree::new(),
+                                meta: BranchMeta::named(format!("branch-{}", branch.0)),
+                                parent: None,
+                            },
+                        );
+                        store.next_branch = store.next_branch.max(branch.0 + 1);
+                    }
+                    let st = store.branches.get_mut(branch).expect("branch just ensured");
+                    st.tree.insert_with_id(*leaf_id, leaf.clone());
+                    store.next_leaf = store.next_leaf.max(leaf_id.0 + 1);
+                    store.epoch += 1;
+                    store.sink.append(ev.clone());
                 }
-                let _ = self.insert_on(*branch, leaf.clone())?;
-                Ok(())
+                BvhChainEvent::Remove { branch, leaf_id } => {
+                    if let Some(st) = store.branches.get_mut(branch) {
+                        st.tree.remove(*leaf_id);
+                        store.epoch += 1;
+                        store.sink.append(ev.clone());
+                    }
+                }
+                BvhChainEvent::Derive {
+                    parent,
+                    child,
+                    meta,
+                } => {
+                    let parent_tree = store
+                        .branches
+                        .get(parent)
+                        .map(|s| s.tree.clone())
+                        .unwrap_or_default();
+                    store.branches.insert(
+                        *child,
+                        BranchState {
+                            tree: parent_tree,
+                            meta: meta.clone(),
+                            parent: Some(*parent),
+                        },
+                    );
+                    store.next_branch = store.next_branch.max(child.0 + 1);
+                    store.epoch += 1;
+                    store.sink.append(ev.clone());
+                }
+                BvhChainEvent::RebalanceSeal { branch: _, epoch } => {
+                    store.epoch = (*epoch).max(store.epoch);
+                    store.sink.append(ev.clone());
+                }
             }
-            BvhChainKind::Remove { leaf_id, branch } => {
-                let _ = self.remove_on(*branch, *leaf_id);
-                Ok(())
+        }
+        store
+    }
+}
+
+/// Parse CLI tag names / numeric literals into registry tags.
+pub fn parse_tag(s: &str) -> Result<u32, String> {
+    let lower = s.to_ascii_lowercase();
+    match lower.as_str() {
+        "sphere" | "aabb" | "object" | "wm_object" => Ok(crate::leaf::tags::WM_OBJECT),
+        "surface" | "wm_surface" => Ok(crate::leaf::tags::WM_SURFACE),
+        "volume" | "wm_volume" => Ok(crate::leaf::tags::WM_VOLUME),
+        "segment" | "wm_segment" => Ok(crate::leaf::tags::WM_SEGMENT),
+        "sensor" | "wm_sensor_fov" => Ok(crate::leaf::tags::WM_SENSOR_FOV),
+        "affordance" | "wm_affordance" => Ok(crate::leaf::tags::WM_AFFORDANCE),
+        "splat_scene" => Ok(crate::leaf::tags::SPLAT_SCENE),
+        "splat_camera" => Ok(crate::leaf::tags::SPLAT_CAMERA),
+        "splat_yardstick" => Ok(crate::leaf::tags::SPLAT_YARDSTICK),
+        _ => {
+            if let Some(hex) = lower.strip_prefix("0x") {
+                u32::from_str_radix(hex, 16).map_err(|e| e.to_string())
+            } else {
+                s.parse::<u32>().map_err(|e| e.to_string())
             }
-            BvhChainKind::Derive {
-                parent,
-                child: _,
-                meta,
-            } => {
-                let _ = self.derive_from(*parent, meta.clone())?;
-                Ok(())
-            }
-            BvhChainKind::RebalanceSeal { branch, .. } => self.rebalance_seal(*branch),
         }
     }
+}
 
-    /// Replace active-branch leaves with an exact snapshot (restart helper).
-    ///
-    /// Clears the branch tree and re-inserts leaves in id order, preserving
-    /// the original `LeafId` assignment via [`BvhTree::insert_with_id`].
-    pub fn restore_leaves(
-        &mut self,
-        branch: BranchId,
-        leaves: &[(LeafId, Leaf)],
-    ) -> BvhResult<()> {
-        let state = self
-            .branches
-            .get_mut(&branch)
-            .ok_or(BvhError::UnknownBranch(branch))?;
-        state.tree.clear();
-        for (id, leaf) in leaves {
-            state.tree.insert_with_id(*id, leaf.clone());
-        }
-        self.epoch = self.epoch.saturating_add(1);
-        Ok(())
+/// Parse `x,y,z` into [`Vec3`].
+pub fn parse_vec3(s: &str) -> Result<Vec3, String> {
+    let parts: Vec<_> = s.split(',').map(str::trim).collect();
+    if parts.len() != 3 {
+        return Err(format!("expected x,y,z got {s:?}"));
     }
+    let x: f32 = parts[0].parse().map_err(|e| format!("x: {e}"))?;
+    let y: f32 = parts[1].parse().map_err(|e| format!("y: {e}"))?;
+    let z: f32 = parts[2].parse().map_err(|e| format!("z: {e}"))?;
+    Ok(Vec3::new(x, y, z))
+}
 
-    /// Iterate leaf ids on active branch (debug / status).
-    pub fn leaf_ids(&self) -> Vec<LeafId> {
-        self.branches
-            .get(&self.active)
-            .map(|b| b.tree.iter_leaves().map(|(id, _)| id).collect())
-            .unwrap_or_default()
+/// Parse `minx,miny,minz,maxx,maxy,maxz` into [`Aabb`].
+pub fn parse_aabb6(s: &str) -> Result<Aabb, String> {
+    let parts: Vec<_> = s.split(',').map(str::trim).collect();
+    if parts.len() != 6 {
+        return Err(format!("expected minx,miny,minz,maxx,maxy,maxz got {s:?}"));
+    }
+    let vals: Result<Vec<f32>, _> = parts.iter().map(|p| p.parse()).collect();
+    let vals = vals.map_err(|e| e.to_string())?;
+    Ok(Aabb::from_min_max(
+        Vec3::new(vals[0], vals[1], vals[2]),
+        Vec3::new(vals[3], vals[4], vals[5]),
+    ))
+}
+
+/// Parse identity kind from CLI string.
+pub fn parse_identity(s: &str) -> Result<IdentityKind, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "object" | "obj" => Ok(IdentityKind::Object),
+        "event" | "evt" => Ok(IdentityKind::Event),
+        other => Err(format!("unknown identity kind {other:?} (object|event)")),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chain::RecordingChainSink;
-    use crate::leaf::IdentityKind;
 
     fn unit_leaf(tag: u32) -> Leaf {
-        Leaf::empty_payload(Aabb::unit(), IdentityKind::Object, tag)
+        Leaf::empty_payload(
+            Aabb::from_min_max(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)),
+            IdentityKind::Object,
+            tag,
+        )
     }
 
     #[test]
-    fn insert_query_and_chain() {
-        let sink = Arc::new(RecordingChainSink::new());
-        let mut store = BvhStore::with_sink(BvhStoreConfig::default(), sink.clone());
-        let id = store.insert(unit_leaf(7)).unwrap();
-        assert_eq!(store.len(), 1);
-        assert!(store.query_point(Vec3::ZERO).contains(&id));
-        assert_eq!(sink.len(), 1);
-        assert_eq!(store.epoch(), 1);
-    }
+    fn insert_query_branch_diff_replay() {
+        let mut s = BvhStore::new();
+        let id = s.insert(BranchId::MAIN, unit_leaf(1)).unwrap();
+        let hits = s
+            .query_point(BranchId::MAIN, Vec3::new(0.5, 0.5, 0.5))
+            .unwrap();
+        assert_eq!(hits, vec![id]);
 
-    #[test]
-    fn derive_and_diff() {
-        let mut store = BvhStore::new(BvhStoreConfig::default());
-        let a = store
-            .insert(Leaf::empty_payload(
-                Aabb::from_min_max(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 1.0)),
-                IdentityKind::Object,
-                1,
-            ))
+        let child = s
+            .derive_branch(BranchId::MAIN, BranchMeta::named("exp"))
             .unwrap();
-        let child = store
-            .derive(BranchMeta {
-                name: "b".into(),
-                priority_tier: 1,
-            })
-            .unwrap();
-        store
-            .insert_on(
+        let id2 = s
+            .insert(
                 child,
                 Leaf::empty_payload(
                     Aabb::from_min_max(Vec3::new(5.0, 0.0, 0.0), Vec3::new(6.0, 1.0, 1.0)),
-                    IdentityKind::Event,
+                    IdentityKind::Object,
                     2,
                 ),
             )
             .unwrap();
-        store.remove_on(child, a);
-        let region = Aabb::from_min_max(Vec3::new(-10.0, -10.0, -10.0), Vec3::new(10.0, 10.0, 10.0));
-        let diff = store
-            .branch_diff(BranchId::MAIN, child, region)
-            .unwrap();
-        assert!(diff.len() >= 2);
-    }
+        s.remove(child, id).unwrap();
 
-    #[test]
-    fn restore_leaves_roundtrip() {
-        let mut store = BvhStore::new(BvhStoreConfig::default());
-        let id = store.insert(unit_leaf(3)).unwrap();
-        let snap = store.snapshot_leaves(BranchId::MAIN).unwrap();
-        let mut store2 = BvhStore::new(BvhStoreConfig::default());
-        store2.restore_leaves(BranchId::MAIN, &snap).unwrap();
-        assert_eq!(store2.get(id).map(|l| l.tag), Some(3));
+        let region = Aabb::from_min_max(Vec3::new(-10.0, -10.0, -10.0), Vec3::new(10.0, 10.0, 10.0));
+        let diff = s.branch_diff(BranchId::MAIN, child, region).unwrap();
+        assert!(diff.iter().any(|d| d.leaf_id == id && d.kind == DiffKind::Removed));
+        assert!(diff.iter().any(|d| d.leaf_id == id2 && d.kind == DiffKind::Added));
+
+        let events = s.events().to_vec();
+        let s2 = BvhStore::replay(&events);
+        assert_eq!(s2.branch_len(BranchId::MAIN).unwrap(), 1);
+        assert_eq!(s2.branch_len(child).unwrap(), 1);
         assert_eq!(
-            store.snapshot_leaves(BranchId::MAIN).unwrap(),
-            store2.snapshot_leaves(BranchId::MAIN).unwrap()
+            s2.query_point(BranchId::MAIN, Vec3::new(0.5, 0.5, 0.5))
+                .unwrap(),
+            vec![id]
+        );
+        assert!(
+            s2.query_point(child, Vec3::new(0.5, 0.5, 0.5))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            s2.query_point(child, Vec3::new(5.5, 0.5, 0.5)).unwrap(),
+            vec![id2]
         );
     }
 
     #[test]
-    fn capacity_guard() {
-        let mut store = BvhStore::new(BvhStoreConfig {
-            max_leaves: 1,
-            ..Default::default()
-        });
-        store.insert(unit_leaf(1)).unwrap();
-        assert!(matches!(
-            store.insert(unit_leaf(2)),
-            Err(BvhError::CapacityExceeded { .. })
-        ));
+    fn parse_helpers() {
+        assert_eq!(parse_tag("wm_object").unwrap(), crate::leaf::tags::WM_OBJECT);
+        assert_eq!(parse_tag("0x10").unwrap(), 16);
+        let bb = parse_aabb6("0,0,0,1,1,1").unwrap();
+        assert!(bb.contains_point(Vec3::new(0.5, 0.5, 0.5)));
     }
 }

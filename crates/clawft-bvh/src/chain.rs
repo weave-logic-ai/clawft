@@ -1,107 +1,87 @@
-//! ChainSink — plug-in audit hook for BVH mutations (ADR-056 §6).
+//! Chain event surface for BVH mutations (ADR-056 §6).
 //!
-//! `clawft-bvh` has no kernel / tokio dependency. The kernel implements
-//! [`ChainSink`] over `ChainManager` (CBOR/JSON payloads, dual-sign when
-//! the chain path is live) and passes it into [`crate::store::BvhStore`].
+//! Phase E scaffold: in-memory event log + replay. Kernel `ChainSink`
+//! wiring (ExoChain dual-sign) lands with Phase C (`SpatialService`).
+
+use serde::{Deserialize, Serialize};
 
 use crate::leaf::{BranchId, BranchMeta, Leaf, LeafId};
 
-/// Kind of mutation that must be witnessed on the chain (ADR-022).
-#[derive(Debug, Clone, PartialEq)]
-pub enum BvhChainKind {
-    /// Leaf inserted (payload includes full leaf for replay).
+/// One BVH mutation or branch lifecycle event.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BvhChainEvent {
+    /// Leaf inserted on a branch.
     Insert {
+        /// Target branch.
+        branch: BranchId,
         /// Assigned leaf id.
         leaf_id: LeafId,
-        /// Leaf body (bound, tag, payload, identity).
+        /// Leaf payload + bound.
         leaf: Leaf,
-        /// Branch the insert landed on.
-        branch: BranchId,
     },
-    /// Leaf removed.
+    /// Leaf removed from a branch.
     Remove {
+        /// Target branch.
+        branch: BranchId,
         /// Removed leaf id.
         leaf_id: LeafId,
-        /// Branch the remove applied to.
-        branch: BranchId,
     },
-    /// COW / clone branch derivation.
+    /// COW-style branch derivation.
     Derive {
-        /// Parent branch.
+        /// Parent branch id.
         parent: BranchId,
-        /// Newly created child.
+        /// New child branch id.
         child: BranchId,
-        /// Caller metadata.
+        /// Operator metadata.
         meta: BranchMeta,
     },
-    /// Determinism-phase seal after rebalance (Phase D fills details).
+    /// Determinism-phase seal (Phase D full; scaffold records epoch only).
     RebalanceSeal {
-        /// Sealed branch.
+        /// Branch sealed.
         branch: BranchId,
-        /// Leaf count at seal.
-        leaf_count: usize,
         /// Epoch after seal.
         epoch: u64,
     },
 }
 
-/// Sink for BVH chain events. Implemented by the kernel; unit tests use
-/// [`RecordingChainSink`].
-pub trait ChainSink: Send + Sync {
-    /// Observe a mutation. Implementations must not panic; failures are
-    /// logged at the sink side (chain append is best-effort for liveness,
-    /// but ADR-022 expects every write path to attempt append).
-    fn on_event(&self, event: &BvhChainKind);
+/// Consumer of BVH chain events (kernel plugs ExoChain here in Phase C).
+pub trait ChainSink: Send {
+    /// Append one event (order is authoritative for replay).
+    fn append(&mut self, event: BvhChainEvent);
 }
 
-/// No-op sink (offline tooling / pure geometry benches).
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NullChainSink;
-
-impl ChainSink for NullChainSink {
-    fn on_event(&self, _event: &BvhChainKind) {}
+/// In-memory sink used by the Phase E CLI / E2E scaffold.
+#[derive(Debug, Default, Clone)]
+pub struct MemoryChainSink {
+    events: Vec<BvhChainEvent>,
 }
 
-/// In-memory recorder for tests and offline replay drivers.
-#[derive(Debug, Default)]
-pub struct RecordingChainSink {
-    events: std::sync::Mutex<Vec<BvhChainKind>>,
-}
-
-impl RecordingChainSink {
-    /// Empty recorder.
+impl MemoryChainSink {
+    /// Empty log.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Snapshot of recorded events (clone).
-    pub fn events(&self) -> Vec<BvhChainKind> {
-        self.events
-            .lock()
-            .expect("RecordingChainSink lock poisoned")
-            .clone()
+    /// Recorded events in append order.
+    pub fn events(&self) -> &[BvhChainEvent] {
+        &self.events
     }
 
-    /// Number of recorded events.
-    pub fn len(&self) -> usize {
+    /// Drain events (e.g. for export).
+    pub fn into_events(self) -> Vec<BvhChainEvent> {
         self.events
-            .lock()
-            .expect("RecordingChainSink lock poisoned")
-            .len()
     }
 
-    /// True when no events recorded.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+    /// Clear without dropping capacity.
+    pub fn clear(&mut self) {
+        self.events.clear();
     }
 }
 
-impl ChainSink for RecordingChainSink {
-    fn on_event(&self, event: &BvhChainKind) {
-        self.events
-            .lock()
-            .expect("RecordingChainSink lock poisoned")
-            .push(event.clone());
+impl ChainSink for MemoryChainSink {
+    fn append(&mut self, event: BvhChainEvent) {
+        self.events.push(event);
     }
 }
 
@@ -112,19 +92,18 @@ mod tests {
     use crate::leaf::IdentityKind;
 
     #[test]
-    fn recording_sink_collects() {
-        let sink = RecordingChainSink::new();
-        let leaf = Leaf::empty_payload(Aabb::unit(), IdentityKind::Object, 1);
-        sink.on_event(&BvhChainKind::Insert {
+    fn memory_sink_records() {
+        let mut sink = MemoryChainSink::new();
+        let leaf = Leaf::empty_payload(
+            Aabb::from_min_max(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)),
+            IdentityKind::Object,
+            1,
+        );
+        sink.append(BvhChainEvent::Insert {
+            branch: BranchId::MAIN,
             leaf_id: LeafId(0),
             leaf,
-            branch: BranchId::MAIN,
         });
-        sink.on_event(&BvhChainKind::Remove {
-            leaf_id: LeafId(0),
-            branch: BranchId::MAIN,
-        });
-        assert_eq!(sink.len(), 2);
-        let _ = Vec3::ZERO;
+        assert_eq!(sink.events().len(), 1);
     }
 }

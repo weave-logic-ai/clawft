@@ -432,6 +432,33 @@ The Ephemeral Causal Cognition (ECC) system provides:
 - HNSW semantic search across knowledge
 - DEMOCRITUS tick loop for periodic cognitive processing
 - Spectral analysis of causal graph structure
+- BVH spatial-temporal index (ADR-056 / WEFT-720) for geometric overlap
+
+#### ECC CLI (operator)
+
+```bash
+# Similarity (HNSW)
+weaver ecc search "authentication refactor" -k 10
+weaver ecc vector-config
+
+# Causal walk
+weaver ecc causal --node 42 --direction forward -D 3
+
+# Spatial BVH (ADR-056 Phase E)
+weaver ecc spatial status
+weaver ecc spatial insert --tag wm_object --aabb 0,0,0,1,1,1
+weaver ecc spatial query point --at 0.5,0.5,0.5
+weaver ecc spatial query aabb --region -1,-1,-1,2,2,2 --filter-tags wm_object
+weaver ecc spatial branch derive --parent 0 --name experiment
+weaver ecc spatial diff --a 0 --b 1 --region -10,-10,-10,10,10,10
+weaver ecc spatial events
+weaver ecc spatial replay
+```
+
+**OQ4 (membership filters):** query APIs stay filter-free; pass
+`--filter-tags` (comma-separated names or numeric tags) to apply a
+post-query `MembershipFilter` wrapper. Full tenancy models stay out of
+the `SpatialBackend` trait until product tenancy is defined.
 
 ### WASM Sandboxing
 Tools can be executed in Wasmtime WASM sandboxes with deterministic, capability-constrained execution. The sandbox provides isolation and resource limits.

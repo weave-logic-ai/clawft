@@ -7,6 +7,35 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LeafId(pub u64);
 
+/// Branch handle for COW multi-branch stores (ADR-056 §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BranchId(pub u64);
+
+impl BranchId {
+    /// Default / main branch id (always present after [`crate::store::BvhStore::new`]).
+    pub const MAIN: Self = Self(0);
+}
+
+/// Metadata recorded when deriving a branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchMeta {
+    /// Human-readable name (CLI / agent label).
+    pub name: String,
+    /// Optional free-form note.
+    #[serde(default)]
+    pub note: String,
+}
+
+impl BranchMeta {
+    /// Name-only metadata.
+    pub fn named(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            note: String::new(),
+        }
+    }
+}
+
 /// Object leaves keep stable IDs across branches; event leaves are one-shot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IdentityKind {

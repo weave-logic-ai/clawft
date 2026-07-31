@@ -52,6 +52,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 weftos-leaf-types = { path = "../weftos-leaf-types", features = ["std"] }
+# WEFT-720 / ADR-056 Phase E: BVH spatial CLI + E2E scaffold.
+clawft-bvh = { path = "../clawft-bvh" }
+hex = "0.4"
 # Phase E: vector scene producer pipeline.
 #
 # `weftos-leaf-scene` (Phase A) supplies the wire types (`SceneEnvelope`,
