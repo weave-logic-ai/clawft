@@ -1,18 +1,16 @@
-//! Graph-based sensor fusion for distributed buoy arrays.
+//! Sensor array graph: buoys as nodes, acoustic links as edges.
 //!
-//! Inspired by K-STEMIT (arXiv:2604.09922). Models a sonobuoy array as a
-//! graph where buoys are nodes (with physics features) and inter-buoy
-//! connections are edges (weighted by distance and propagation delay).
-//!
-//! The architecture provides:
-//! - **GraphSAGE-style neighborhood aggregation**: learned beamforming for
-//!   irregular spatial arrays.
-//! - **Temporal convolution**: feature extraction from acoustic time-series
-//!   buffers per node.
-//! - **Spatio-temporal fusion**: combined feature vector for detection and
-//!   classification tasks.
+//! Nodes carry physics priors + static acoustic features. Edges store
+//! Euclidean distance and approximate acoustic propagation delay. Temporal
+//! ring buffers hold per-node acoustic energy (or other scalar series).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+/// Default number of ocean-physics prior channels (K-STEMIT → sonobuoy map).
+///
+/// Order: sound_speed (m/s, normalized), thermocline_depth_m (norm), sea_state,
+/// current_velocity (norm), bottom_type (0–1 categorical proxy).
+pub const PHYSICS_DIM: usize = 5;
 
 /// A buoy node in the sensor graph.
 #[derive(Debug, Clone)]
@@ -21,8 +19,21 @@ pub struct SensorNode {
     pub id: String,
     /// Position as (latitude, longitude, depth_m).
     pub position: (f64, f64, f64),
-    /// Physics features: e.g. sound_speed, temperature, salinity.
+    /// Node features: physics priors first ([`PHYSICS_DIM`]), then optional
+    /// extra static channels. Spatial GraphSAGE consumes the full vector;
+    /// the temporal branch never sees position or static GPS identity.
     pub features: Vec<f32>,
+}
+
+impl SensorNode {
+    /// Physics prior slice (first [`PHYSICS_DIM`] entries, zero-padded if short).
+    pub fn physics(&self) -> [f32; PHYSICS_DIM] {
+        let mut out = [0.0f32; PHYSICS_DIM];
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = self.features.get(i).copied().unwrap_or(0.0);
+        }
+        out
+    }
 }
 
 /// An edge connecting two buoys.
@@ -32,25 +43,22 @@ pub struct SensorEdge {
     pub from: usize,
     /// Index of the target node.
     pub to: usize,
-    /// Euclidean distance between buoys in meters.
+    /// Euclidean distance between buoys in meters (fixture units may be
+    /// synthetic lat/lon deltas treated as metres for unit tests).
     pub distance_m: f64,
     /// Estimated acoustic propagation delay in milliseconds.
     pub propagation_delay_ms: f64,
 }
 
-/// Graph-based sensor fusion for distributed buoy arrays.
-///
-/// Nodes represent buoys with physics features; edges represent
-/// inter-buoy connections weighted by distance and propagation delay.
-/// Temporal buffers store time-series data per node for temporal
-/// convolution.
+/// Graph-based sensor fusion substrate for distributed buoy arrays.
 #[derive(Debug, Clone)]
 pub struct SensorGraph {
-    /// Buoy positions (node features).
+    /// Buoy positions and node features.
     pub nodes: Vec<SensorNode>,
-    /// Inter-buoy distances/connections (edges).
+    /// Inter-buoy connections.
     pub edges: Vec<SensorEdge>,
-    /// Temporal feature buffer per node (ring buffer of feature snapshots).
+    /// Temporal feature buffer per node (ring of scalar samples; typically
+    /// short-time acoustic energy or a spectral band).
     pub temporal_buffers: Vec<Vec<f32>>,
 }
 
@@ -70,10 +78,7 @@ impl SensorGraph {
         }
     }
 
-    /// Add a buoy node to the graph.
-    ///
-    /// Returns the index of the newly added node. A corresponding empty
-    /// temporal buffer is allocated automatically.
+    /// Add a buoy node. Returns its index.
     pub fn add_buoy(&mut self, node: SensorNode) -> usize {
         let idx = self.nodes.len();
         self.nodes.push(node);
@@ -81,38 +86,83 @@ impl SensorGraph {
         idx
     }
 
-    /// Connect two buoys with an edge.
+    /// Connect two buoys; distance and delay derived from positions.
     ///
-    /// Distance and propagation delay are computed from positions using
-    /// a simple Euclidean distance model. For real deployments, replace
-    /// with proper geodesic + Bellhop propagation models.
+    /// Uses Euclidean distance in (lat, lon, depth) space and a constant
+    /// 1500 m/s sound speed. Production deployments should swap in geodesic
+    /// + SSP / BELLHOP-style propagation.
     ///
     /// # Panics
     /// Panics if `from` or `to` are out of bounds.
     pub fn connect(&mut self, from: usize, to: usize) {
         assert!(from < self.nodes.len(), "from index out of bounds");
         assert!(to < self.nodes.len(), "to index out of bounds");
-
-        let (lat1, lon1, d1) = self.nodes[from].position;
-        let (lat2, lon2, d2) = self.nodes[to].position;
-
-        // Simple Euclidean distance in the (lat, lon, depth) space.
-        // In production, use proper geodesic distance.
-        let dlat = lat2 - lat1;
-        let dlon = lon2 - lon1;
-        let ddep = d2 - d1;
-        let distance_m = (dlat * dlat + dlon * dlon + ddep * ddep).sqrt();
-
-        // Approximate propagation delay: ~1500 m/s speed of sound in water.
-        let speed_of_sound = 1500.0; // m/s
-        let propagation_delay_ms = (distance_m / speed_of_sound) * 1000.0;
-
+        let (distance_m, propagation_delay_ms) = Self::link_metrics(
+            self.nodes[from].position,
+            self.nodes[to].position,
+        );
         self.edges.push(SensorEdge {
             from,
             to,
             distance_m,
             propagation_delay_ms,
         });
+    }
+
+    /// Connect with caller-supplied metrics (tests / offline graph builders).
+    pub fn connect_with(
+        &mut self,
+        from: usize,
+        to: usize,
+        distance_m: f64,
+        propagation_delay_ms: f64,
+    ) {
+        assert!(from < self.nodes.len(), "from index out of bounds");
+        assert!(to < self.nodes.len(), "to index out of bounds");
+        self.edges.push(SensorEdge {
+            from,
+            to,
+            distance_m,
+            propagation_delay_ms,
+        });
+    }
+
+    /// Build a radius graph: undirected edges when distance ≤ `radius`.
+    pub fn connect_within_radius(&mut self, radius: f64) {
+        let n = self.nodes.len();
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let (d, delay) = Self::link_metrics(self.nodes[i].position, self.nodes[j].position);
+                if d <= radius {
+                    self.edges.push(SensorEdge {
+                        from: i,
+                        to: j,
+                        distance_m: d,
+                        propagation_delay_ms: delay,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Fully connected undirected graph (K-STEMIT-style small arrays).
+    pub fn connect_fully(&mut self) {
+        let n = self.nodes.len();
+        for i in 0..n {
+            for j in (i + 1)..n {
+                self.connect(i, j);
+            }
+        }
+    }
+
+    fn link_metrics(a: (f64, f64, f64), b: (f64, f64, f64)) -> (f64, f64) {
+        let dlat = b.0 - a.0;
+        let dlon = b.1 - a.1;
+        let ddep = b.2 - a.2;
+        let distance_m = (dlat * dlat + dlon * dlon + ddep * ddep).sqrt();
+        let speed_of_sound = 1500.0_f64;
+        let propagation_delay_ms = (distance_m / speed_of_sound) * 1000.0;
+        (distance_m, propagation_delay_ms)
     }
 
     /// Append a feature snapshot to a node's temporal buffer.
@@ -127,8 +177,18 @@ impl SensorGraph {
         self.temporal_buffers[node_idx].extend_from_slice(values);
     }
 
-    /// Return indices of neighbors for a given node (undirected).
-    fn neighbor_indices(&self, node_idx: usize) -> Vec<usize> {
+    /// Cap each temporal buffer to the last `max_len` samples.
+    pub fn trim_temporal(&mut self, max_len: usize) {
+        for buf in &mut self.temporal_buffers {
+            if buf.len() > max_len {
+                let start = buf.len() - max_len;
+                *buf = buf[start..].to_vec();
+            }
+        }
+    }
+
+    /// Neighbor indices for a node (undirected).
+    pub fn neighbor_indices(&self, node_idx: usize) -> Vec<usize> {
         let mut neighbors = HashSet::new();
         for edge in &self.edges {
             if edge.from == node_idx {
@@ -139,18 +199,28 @@ impl SensorGraph {
             }
         }
         let mut v: Vec<usize> = neighbors.into_iter().collect();
-        v.sort();
+        v.sort_unstable();
         v
     }
 
-    /// GraphSAGE-style neighborhood aggregation.
+    /// Direct-edge distance map from `node_idx` to each neighbor.
+    pub fn neighbor_distances(&self, node_idx: usize) -> HashMap<usize, f64> {
+        let mut m = HashMap::new();
+        for e in &self.edges {
+            if e.from == node_idx {
+                m.insert(e.to, e.distance_m);
+            } else if e.to == node_idx {
+                m.insert(e.from, e.distance_m);
+            }
+        }
+        m
+    }
+
+    /// GraphSAGE-style mean aggregation (unlearned baseline, hop-BFs).
     ///
-    /// For each node, aggregates features from neighbors within `hop` hops,
-    /// weighted by inverse distance. Returns a feature vector that is the
-    /// distance-weighted mean of neighbor features.
-    ///
-    /// For hop > 1, recursively expands the neighborhood. This is a simplified
-    /// mean-aggregator; a full GNN would learn the aggregation weights.
+    /// Weighted by inverse distance on direct edges; multi-hop nodes without
+    /// a direct edge use weight `1.0`. Prefer [`crate::sensor_graph::GraphSageLayer`]
+    /// for the learned path.
     pub fn aggregate_neighbors(&self, node_idx: usize, hop: usize) -> Vec<f32> {
         if node_idx >= self.nodes.len() || hop == 0 {
             return self
@@ -160,7 +230,6 @@ impl SensorGraph {
                 .unwrap_or_default();
         }
 
-        // Collect k-hop neighborhood via BFS.
         let mut visited = HashSet::new();
         let mut frontier = vec![node_idx];
         visited.insert(node_idx);
@@ -177,28 +246,12 @@ impl SensorGraph {
             frontier = next_frontier;
         }
 
-        // Collect all neighbors (exclude self).
         let neighbors: Vec<usize> = visited.into_iter().filter(|&n| n != node_idx).collect();
         if neighbors.is_empty() {
             return self.nodes[node_idx].features.clone();
         }
 
-        // Build distance lookup for direct edges from node_idx.
-        let edge_distances: std::collections::HashMap<usize, f64> = self
-            .edges
-            .iter()
-            .filter_map(|e| {
-                if e.from == node_idx {
-                    Some((e.to, e.distance_m))
-                } else if e.to == node_idx {
-                    Some((e.from, e.distance_m))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // Weighted aggregation: inverse-distance weighting.
+        let edge_distances = self.neighbor_distances(node_idx);
         let feat_dim = self.nodes[node_idx].features.len();
         let mut agg = vec![0.0f32; feat_dim];
         let mut total_weight = 0.0f32;
@@ -218,23 +271,14 @@ impl SensorGraph {
                 *v /= total_weight;
             }
         }
-
         agg
     }
 
-    /// Temporal convolution: extract features from the time-series buffer.
-    ///
-    /// Returns the last `window` values from the temporal buffer. If the
-    /// buffer has fewer values, it is zero-padded on the left.
-    ///
-    /// In a full implementation, this would apply 1-D convolution kernels
-    /// (learned filters) over the time series. This stub returns the raw
-    /// windowed signal as features.
+    /// Last `window` temporal samples (left zero-padded).
     pub fn temporal_features(&self, node_idx: usize, window: usize) -> Vec<f32> {
         if node_idx >= self.temporal_buffers.len() {
             return vec![0.0; window];
         }
-
         let buf = &self.temporal_buffers[node_idx];
         if buf.len() >= window {
             buf[buf.len() - window..].to_vec()
@@ -245,15 +289,7 @@ impl SensorGraph {
         }
     }
 
-    /// Combined spatio-temporal feature for detection/classification.
-    ///
-    /// Concatenates:
-    /// 1. The node's own features.
-    /// 2. 1-hop aggregated neighbor features.
-    /// 3. Temporal features (last 16 samples from the buffer).
-    ///
-    /// The resulting vector can feed into a classification head for
-    /// species ID, vessel detection, etc.
+    /// Baseline fused feature: own + 1-hop mean-agg + last-16 temporal.
     pub fn fused_features(&self, node_idx: usize) -> Vec<f32> {
         let own = self
             .nodes
@@ -262,7 +298,6 @@ impl SensorGraph {
             .unwrap_or_default();
         let spatial = self.aggregate_neighbors(node_idx, 1);
         let temporal = self.temporal_features(node_idx, 16);
-
         let mut fused = Vec::with_capacity(own.len() + spatial.len() + temporal.len());
         fused.extend_from_slice(&own);
         fused.extend_from_slice(&spatial);
@@ -270,14 +305,19 @@ impl SensorGraph {
         fused
     }
 
-    /// Number of nodes in the graph.
+    /// Number of nodes.
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }
 
-    /// Number of edges in the graph.
+    /// Number of edges.
     pub fn edge_count(&self) -> usize {
         self.edges.len()
+    }
+
+    /// Feature dimension of node 0 (0 if empty). Assumes homogeneous features.
+    pub fn feature_dim(&self) -> usize {
+        self.nodes.first().map(|n| n.features.len()).unwrap_or(0)
     }
 }
 
@@ -323,6 +363,29 @@ mod tests {
     }
 
     #[test]
+    fn connect_within_radius_filters() {
+        let mut g = SensorGraph::new();
+        g.add_buoy(make_buoy("A", 0.0, 0.0, 0.0, vec![0.0; 5]));
+        g.add_buoy(make_buoy("B", 1.0, 0.0, 0.0, vec![0.0; 5]));
+        g.add_buoy(make_buoy("C", 10.0, 0.0, 0.0, vec![0.0; 5]));
+        g.connect_within_radius(2.0);
+        assert_eq!(g.edge_count(), 1);
+        assert_eq!(g.edges[0].from, 0);
+        assert_eq!(g.edges[0].to, 1);
+    }
+
+    #[test]
+    fn connect_fully_complete() {
+        let mut g = SensorGraph::new();
+        for i in 0..4 {
+            g.add_buoy(make_buoy(&format!("B{i}"), i as f64, 0.0, 0.0, vec![0.0; 5]));
+        }
+        g.connect_fully();
+        // C(4,2) = 6
+        assert_eq!(g.edge_count(), 6);
+    }
+
+    #[test]
     fn aggregate_neighbors_single_hop() {
         let mut g = SensorGraph::new();
         g.add_buoy(make_buoy("B1", 0.0, 0.0, 0.0, vec![1.0, 0.0]));
@@ -333,7 +396,6 @@ mod tests {
 
         let agg = g.aggregate_neighbors(0, 1);
         assert_eq!(agg.len(), 2);
-        // Both neighbors equidistant, so aggregation should be mean.
         assert!((agg[0] - 0.0).abs() < 0.01);
         assert!((agg[1] - 1.0).abs() < 0.01);
     }
@@ -342,7 +404,6 @@ mod tests {
     fn aggregate_neighbors_no_neighbors_returns_self() {
         let mut g = SensorGraph::new();
         g.add_buoy(make_buoy("B1", 0.0, 0.0, 0.0, vec![5.0, 3.0]));
-
         let agg = g.aggregate_neighbors(0, 1);
         assert_eq!(agg, vec![5.0, 3.0]);
     }
@@ -353,7 +414,6 @@ mod tests {
         g.add_buoy(make_buoy("B1", 0.0, 0.0, 0.0, vec![5.0]));
         g.add_buoy(make_buoy("B2", 1.0, 0.0, 0.0, vec![9.0]));
         g.connect(0, 1);
-
         let agg = g.aggregate_neighbors(0, 0);
         assert_eq!(agg, vec![5.0]);
     }
@@ -363,9 +423,7 @@ mod tests {
         let mut g = SensorGraph::new();
         g.add_buoy(make_buoy("B1", 0.0, 0.0, 0.0, vec![1.0]));
         g.push_temporal(0, &[0.5, 0.6, 0.7]);
-
         let tf = g.temporal_features(0, 5);
-        assert_eq!(tf.len(), 5);
         assert_eq!(tf, vec![0.0, 0.0, 0.5, 0.6, 0.7]);
     }
 
@@ -374,9 +432,7 @@ mod tests {
         let mut g = SensorGraph::new();
         g.add_buoy(make_buoy("B1", 0.0, 0.0, 0.0, vec![1.0]));
         g.push_temporal(0, &[1.0, 2.0, 3.0]);
-
-        let tf = g.temporal_features(0, 3);
-        assert_eq!(tf, vec![1.0, 2.0, 3.0]);
+        assert_eq!(g.temporal_features(0, 3), vec![1.0, 2.0, 3.0]);
     }
 
     #[test]
@@ -384,9 +440,7 @@ mod tests {
         let mut g = SensorGraph::new();
         g.add_buoy(make_buoy("B1", 0.0, 0.0, 0.0, vec![1.0]));
         g.push_temporal(0, &[1.0, 2.0, 3.0, 4.0, 5.0]);
-
-        let tf = g.temporal_features(0, 3);
-        assert_eq!(tf, vec![3.0, 4.0, 5.0]);
+        assert_eq!(g.temporal_features(0, 3), vec![3.0, 4.0, 5.0]);
     }
 
     #[test]
@@ -396,9 +450,7 @@ mod tests {
         g.add_buoy(make_buoy("B2", 1.0, 0.0, 0.0, vec![4.0, 5.0, 6.0]));
         g.connect(0, 1);
         g.push_temporal(0, &[0.1; 20]);
-
         let fused = g.fused_features(0);
-        // own(3) + spatial(3) + temporal(16) = 22
         assert_eq!(fused.len(), 22);
     }
 
@@ -406,9 +458,7 @@ mod tests {
     fn fused_features_isolated_node() {
         let mut g = SensorGraph::new();
         g.add_buoy(make_buoy("B1", 0.0, 0.0, 0.0, vec![1.0, 2.0]));
-
         let fused = g.fused_features(0);
-        // own(2) + spatial(2, same as self) + temporal(16, all zeros) = 20
         assert_eq!(fused.len(), 20);
     }
 
@@ -426,17 +476,22 @@ mod tests {
         g.add_buoy(make_buoy("A", 0.0, 0.0, 0.0, vec![1.0]));
         g.add_buoy(make_buoy("B", 1.0, 0.0, 0.0, vec![2.0]));
         g.add_buoy(make_buoy("C", 2.0, 0.0, 0.0, vec![3.0]));
-        g.connect(0, 1); // A -- B
-        g.connect(1, 2); // B -- C
+        g.connect(0, 1);
+        g.connect(1, 2);
 
-        // 1-hop from A should only include B.
         let agg1 = g.aggregate_neighbors(0, 1);
         assert!((agg1[0] - 2.0).abs() < 0.01);
 
-        // 2-hop from A should include B and C.
         let agg2 = g.aggregate_neighbors(0, 2);
-        // B at distance 1.0, C at distance ~2.0 (no direct edge, falls back to 1.0).
-        // Both are included, so result is a weighted mean.
         assert!(agg2[0] > 1.0 && agg2[0] < 3.0);
+    }
+
+    #[test]
+    fn physics_slice_padded() {
+        let n = make_buoy("x", 0.0, 0.0, 0.0, vec![1.0, 2.0]);
+        let p = n.physics();
+        assert_eq!(p[0], 1.0);
+        assert_eq!(p[1], 2.0);
+        assert_eq!(p[2], 0.0);
     }
 }
