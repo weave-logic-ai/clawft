@@ -78,6 +78,7 @@ This directory contains Architecture Decision Records (ADRs) for the WeftOS + cl
 | [ADR-080](adr-080-pending-skill-review-timing.md) | Pending-skill review timing — CLI + non-blocking start notice | Accepted | Architecture | WEFT-74 |
 | [ADR-081](adr-081-no-imessage-applescript-bridge.md) | No first-party iMessage AppleScript channel (formal drop) | Accepted | Integration | WEFT-175 |
 | [ADR-082](adr-082-graphify-port.md) | Graphify Rust port — `clawft-graphify` knowledge-graph crate | Accepted | Architecture | WEFT-371 (planned as ADR-049; 049 taken by kernel overview / WEFT-140) |
+| [ADR-083](adr-083-browser-wasm-support.md) | Browser WASM Support | Accepted |
 
 ## Categories
 
