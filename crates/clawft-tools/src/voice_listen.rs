@@ -168,6 +168,7 @@ mod tests {
                 language: language.into(),
                 duration_ms: pcm.duration_ms(),
                 source: self.source.into(),
+                speakers: Vec::new(),
             })
         }
     }

@@ -177,6 +177,7 @@ mod tests {
                 },
                 duration_ms: pcm.duration_ms(),
                 source: "local".into(),
+                speakers: Vec::new(),
             })
         }
     }

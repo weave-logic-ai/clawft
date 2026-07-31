@@ -42,6 +42,11 @@ real-audio-test = ["voice-real-audio"]
 # ADR-074 / WEFT-689+690: xAI Realtime WebSocket client (connect +
 # session.update hello) and V1 tool bridge → WindowIntent. Requires `voice`.
 voice-xai = ["voice"]
+# WEFT-227: reserved for future sherpa-onnx / pyannote neural diarization
+# native deps. Default builds use Fixture/EnergyGap/Embedding diarizers
+# (see voice::diarization); enabling this flag today only documents intent
+# — SherpaDiarizer still returns a clear "not staged" error until models land.
+diarization-sherpa = ["voice"]
 
 [dependencies]
 clawft-types = { workspace = true }

@@ -18,7 +18,8 @@ use clawft_channels::voice::types::{
 };
 use clawft_channels::voice::wav::{pcm_s16le_to_wav, wav_to_pcm_s16le};
 use clawft_channels::voice::{
-    SttBackend, SttModel, SubstrateStt, SubstrateTts, TtsChunk, TtsEngine, TtsTier, Utterance,
+    DiarizationResult, DiarizationSegment, SttBackend, SttModel, SubstrateStt, SubstrateTts,
+    TtsChunk, TtsEngine, TtsTier, Utterance,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -65,6 +66,18 @@ pub struct Transcript {
     pub duration_ms: u64,
     /// `"local"` or `"cloud:<provider>"`.
     pub source: String,
+    /// Multi-speaker diarization segments (WEFT-227). Empty when diarization
+    /// was not run; labels are `spk-0` / `spk-1` / … unless remapped to
+    /// enrolled speaker ids.
+    pub speakers: Vec<DiarizationSegment>,
+}
+
+impl Transcript {
+    /// Attach diarization segments (multi-speaker labels) to this transcript.
+    pub fn with_diarization(mut self, diarization: DiarizationResult) -> Self {
+        self.speakers = diarization.segments;
+        self
+    }
 }
 
 /// TTS synthesis result before/after playback.
@@ -261,6 +274,7 @@ impl SttService for LocalSubstrateStt {
             language: language.to_string(),
             duration_ms: pcm.duration_ms(),
             source: "local".into(),
+            speakers: Vec::new(),
         })
     }
 }
@@ -353,6 +367,7 @@ impl SttService for CloudWhisperStt {
             language: lang,
             duration_ms,
             source: "cloud:openai-whisper".into(),
+            speakers: Vec::new(),
         })
     }
 }
@@ -1008,6 +1023,7 @@ mod tests {
                 language: language.to_string(),
                 duration_ms: pcm.duration_ms(),
                 source: self.source.clone(),
+                speakers: Vec::new(),
             })
         }
     }

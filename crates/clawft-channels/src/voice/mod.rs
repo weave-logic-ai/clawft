@@ -50,6 +50,7 @@ pub mod personality;
 pub mod policy;
 pub mod prosody;
 pub mod ser;
+pub mod diarization;
 pub mod speaker;
 pub mod stt;
 pub mod talkmode;
@@ -88,6 +89,11 @@ pub use channel::{
     AudioSegment, AudioSource, PlaybackSink, VoiceChannelAdapter, VoiceChannelAdapterFactory,
 };
 pub use policy::{ReasoningHint, VoiceAnswerPolicy, VoiceLlm, VoiceTurnRequest, estimate_tokens};
+pub use diarization::{
+    default_diarizer, label_transcript, remap_labels, speaker_label, DiarizationBackend,
+    DiarizationLabel, DiarizationResult, DiarizationSegment, DiarizedTranscript,
+    EmbeddingDiarizer, EnergyGapDiarizer, FixtureDiarizer, SherpaDiarizer, SpeakerLabeledTurn,
+};
 pub use speaker::{SpeakerEmbedder, SpeakerId, SpeakerMatch, SpeakerNode, SpeakerRegistry, cosine};
 pub use stt::{SttBackend, SttModel, SubstrateStt, TranscriptResult, TranscriptToken, Utterance};
 pub use cue::{CueKind, cue_chunk};
