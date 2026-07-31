@@ -10,6 +10,7 @@ use std::path::Path;
 
 use crate::GraphifyError;
 use crate::model::KnowledgeGraph;
+use crate::topology_infer::infer_schema;
 
 /// Supported export formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,7 +25,7 @@ pub enum ExportFormat {
     Html,
     /// Obsidian vault + canvas.
     Obsidian,
-    /// Positioned SVG (Barnes–Hut / tree layout → static SVG).
+    /// SVG graph rendering with VOWL visual encoding (OG-4 / WEFT-360).
     Svg,
     /// Wikipedia-style markdown wiki.
     Wiki,
@@ -64,6 +65,9 @@ impl ExportFormat {
 }
 
 /// Export a knowledge graph to the given format and output path.
+///
+/// SVG uses an inferred topology schema so callers without a
+/// `.topology.yaml` still get VOWL-compliant positioned output.
 pub fn export(
     kg: &KnowledgeGraph,
     format: ExportFormat,
@@ -79,7 +83,21 @@ pub fn export(
             wiki::to_wiki(kg, output, &[], None)?;
             Ok(())
         }
-        ExportFormat::Svg => svg::to_svg(kg, output),
+        ExportFormat::Svg => {
+            let schema = infer_schema(kg, "graphify-svg");
+            svg::to_svg(kg, &schema, output)
+        }
+        ExportFormat::Vowl => {
+            let schema = infer_schema(kg, "graphify-vowl");
+            let value = vowl::to_vowl_json(kg, &schema)?;
+            let json_str = serde_json::to_string_pretty(&value).map_err(|e| {
+                GraphifyError::ExportError(format!("VOWL JSON serialization failed: {e}"))
+            })?;
+            std::fs::write(output, json_str).map_err(|e| {
+                GraphifyError::ExportError(format!("Failed to write {}: {e}", output.display()))
+            })?;
+            Ok(())
+        }
         _ => Err(GraphifyError::ExportError(format!(
             "Export format {:?} not yet implemented",
             format,
