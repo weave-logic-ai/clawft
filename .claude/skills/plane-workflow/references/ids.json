@@ -5,6 +5,8 @@
   "project_name": "WeftOS",
   "api_base": "https://api.plane.so/api",
   "auth_header": "X-API-Key",
+  "me_user_id": "0d63f76f-0231-49e8-b81a-b2471bb7b91a",
+  "_me_user_id_comment": "WEFT-639: --assignee me resolves here (or PLANE_ME_USER_ID env) before members list. Not a secret.",
   "cycles": {
     "1.0.x": "852ebfd6-ba10-4d82-b63c-676201d7e985",
     "0.9.x": "e5abd13f-9634-485a-a0c5-0d075ff3dc19",

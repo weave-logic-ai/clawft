@@ -24,17 +24,18 @@ Subcommands:
     add-to-cycle <cycle-name> <issue-id>...
                  Add one or more issue UUIDs to a cycle.
 
-    transition <issue-id> <state-name> [--assignee me|UUID]
+    transition <issue-id|WEFT-N> <state-name> [--assignee me|UUID]
                  PATCH the issue's state (and assignee, if --assignee given).
+                 Accepts UUID or WEFT-N (WEFT-639).
 
-    defer <issue-id> <new-cycle-name> --reason "..."
+    defer <issue-id|WEFT-N> <new-cycle-name> --reason "..."
                  Move issue between cycles + post a comment with the reason.
 
-    close <issue-id> --shipped TEXT --commits SHA[,SHA]
+    close <issue-id|WEFT-N> --shipped TEXT --commits SHA[,SHA]
                  [--tests TEXT] [--build TEXT] [--followups WEFT-N[,...]]
                  Transition to Done + post a structured close comment.
 
-    comment <issue-id> [--body-md PATH | --body STR]
+    comment <issue-id|WEFT-N> [--body-md PATH | --body STR]
                  Post a comment on a work item.
 
     check                           Validate label coverage + cycle assignment
@@ -329,8 +330,241 @@ def md_to_stripped(md: str) -> str:
     return s.strip()
 
 
+
 def split_csv(s: str) -> list[str]:
     return [x.strip() for x in s.split(",") if x.strip()]
+
+
+# ---------------------------------------------------------------------------
+# WEFT-639: issue id resolution, assignee "me", cycle membership via issue
+# ---------------------------------------------------------------------------
+
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+_WEFT_RE = re.compile(r"^(?:WEFT-)?(\d+)$", re.IGNORECASE)
+
+# Cache for WEFT-N → UUID within one process invocation.
+_ISSUE_ID_CACHE: dict[int, str] = {}
+
+
+def is_uuid(s: str) -> bool:
+    return bool(_UUID_RE.match(s.strip()))
+
+
+def parse_weft_sequence(s: str) -> int | None:
+    """Return sequence int for 'WEFT-630' / '630', else None."""
+    m = _WEFT_RE.match(s.strip())
+    if not m:
+        return None
+    return int(m.group(1))
+
+
+def resolve_issue_id(arg: str) -> str:
+    """Accept issue UUID or WEFT-N / bare sequence id; return issue UUID.
+
+    Subcommands historically PATCHed `/issues/{arg}/` so `WEFT-603` 404'd.
+    WEFT-639: resolve sequence ids via the issues listing.
+    """
+    raw = (arg or "").strip()
+    if not raw:
+        raise PlaneError("empty issue id")
+    if is_uuid(raw):
+        return raw
+    seq = parse_weft_sequence(raw)
+    if seq is None:
+        raise PlaneError(
+            f"not a UUID or WEFT-N sequence id: {arg!r} "
+            f"(examples: WEFT-630, 630, or a full issue UUID)"
+        )
+    if seq in _ISSUE_ID_CACHE:
+        return _ISSUE_ID_CACHE[seq]
+    for i in paginate("/issues/"):
+        try:
+            s = int(i.get("sequence_id"))
+        except (TypeError, ValueError):
+            continue
+        iid = i.get("id")
+        if iid:
+            _ISSUE_ID_CACHE[s] = iid
+        if s == seq:
+            if not iid:
+                raise PlaneError(f"WEFT-{seq} found but missing id field")
+            return iid
+    raise PlaneError(f"no issue with sequence_id={seq} (WEFT-{seq})")
+
+
+def issue_cycle_ids(issue: dict) -> set[str]:
+    """Authoritative cycle membership from the issue record (not cycle-issues/).
+
+    Plane's `/cycles/{{id}}/cycle-issues/` pagination has been flaky (count=1
+    while total_pages=2+). Prefer `cycle_id` / `cycle` / `cycles` on the issue.
+    """
+    out: set[str] = set()
+    cid = issue.get("cycle_id")
+    if isinstance(cid, str) and cid:
+        out.add(cid)
+    c = issue.get("cycle")
+    if isinstance(c, str) and c:
+        out.add(c)
+    elif isinstance(c, dict):
+        if c.get("id"):
+            out.add(c["id"])
+    for item in issue.get("cycles") or []:
+        if isinstance(item, str) and item:
+            # May be UUID or cycle name (0.8.x) depending on expand
+            out.add(item)
+        elif isinstance(item, dict) and item.get("id"):
+            out.add(item["id"])
+    return out
+
+
+def issue_in_cycle(issue: dict, cycle_id: str, cycle_name: str | None = None) -> bool:
+    ids = issue_cycle_ids(issue)
+    if cycle_id in ids:
+        return True
+    if cycle_name and cycle_name in ids:
+        return True
+    return False
+
+
+def list_issues_in_cycle(cycle_name: str) -> list[dict]:
+    """List issues in a named cycle via issue.cycle_id (not cycle-issues page)."""
+    ids = load_ids()
+    cid = get_cycle_id(ids, cycle_name)
+    matched: list[dict] = []
+    # Prefer expand so cycle fields are populated when the API supports it.
+    for path in (
+        "/issues/?expand=cycle,labels,state",
+        "/issues/",
+    ):
+        try:
+            batch = [
+                i for i in paginate(path)
+                if issue_in_cycle(i, cid, cycle_name)
+            ]
+        except PlaneError:
+            continue
+        if batch:
+            return batch
+        matched = batch
+    return matched
+
+
+def _looks_like_bot(member_row: dict) -> bool:
+    email = (member_row.get("email") or "").lower()
+    display = (member_row.get("display_name") or member_row.get("first_name") or "").lower()
+    hay = f"{email} {display}"
+    return any(
+        tok in hay
+        for tok in ("bot", "github-actions", "dependabot", "plane-bot", "[bot]")
+    )
+
+
+def _member_user_id(row: dict) -> str | None:
+    """Extract the user UUID from a workspace member row."""
+    # Plane variants: member is nested user object, or member is UUID string,
+    # or top-level id is the membership id (wrong for assignees).
+    m = row.get("member")
+    if isinstance(m, str) and is_uuid(m):
+        return m
+    if isinstance(m, dict):
+        for k in ("id", "user_id", "uuid"):
+            v = m.get(k)
+            if isinstance(v, str) and is_uuid(v):
+                return v
+    for k in ("user_id", "user"):
+        v = row.get(k)
+        if isinstance(v, str) and is_uuid(v):
+            return v
+        if isinstance(v, dict) and isinstance(v.get("id"), str) and is_uuid(v["id"]):
+            return v["id"]
+    return None
+
+
+def _resolve_user(ids: dict, who: str) -> str:
+    """Resolve --assignee me|UUID to a user UUID.
+
+    WEFT-639: never return members[0] (often the GitHub bot). Prefer:
+      1. explicit UUID / non-me string
+      2. env PLANE_ME_USER_ID
+      3. ids.json me_user_id
+      4. GET /users/me/ (when API supports it)
+      5. workspace members: active non-bot human (role owner/admin preferred)
+    """
+    if who != "me":
+        return who
+
+    env_me = os.environ.get("PLANE_ME_USER_ID", "").strip()
+    if env_me and is_uuid(env_me):
+        return env_me
+
+    cfg_me = (ids.get("me_user_id") or "").strip()
+    if cfg_me and is_uuid(cfg_me):
+        return cfg_me
+
+    # Real get-me style lookups (MCP get_me 404s; HTTP may work on some deploys).
+    for path in (
+        "/abs:/v1/users/me/",
+        "/abs:/api/v1/users/me/",
+        f"/abs:/v1/workspaces/{ids['workspace_slug']}/user-details/",
+    ):
+        try:
+            me = request("GET", path)
+        except PlaneError:
+            continue
+        if not isinstance(me, dict):
+            continue
+        for k in ("id", "user_id", "pk"):
+            v = me.get(k)
+            if isinstance(v, str) and is_uuid(v):
+                return v
+        user = me.get("user")
+        if isinstance(user, dict) and isinstance(user.get("id"), str) and is_uuid(user["id"]):
+            return user["id"]
+
+    ws = ids["workspace_slug"]
+    try:
+        members = request("GET", f"/abs:/v1/workspaces/{ws}/members/")
+    except PlaneError as e:
+        raise PlaneError(
+            f"--assignee me: could not resolve key owner ({e}); "
+            "set PLANE_ME_USER_ID or ids.json me_user_id"
+        ) from e
+    rows = members if isinstance(members, list) else (members or {}).get("results", [])
+    if not rows:
+        raise PlaneError(
+            "--assignee me: no workspace members visible; "
+            "set PLANE_ME_USER_ID or ids.json me_user_id"
+        )
+
+    humans: list[tuple[int, str]] = []  # (priority, user_id)
+    for row in rows:
+        if _looks_like_bot(row):
+            continue
+        uid = _member_user_id(row)
+        if not uid:
+            continue
+        role = (row.get("role") or row.get("role_name") or "").lower()
+        # Prefer owners/admins, then active humans.
+        pri = 50
+        if "owner" in str(role) or role == "20" or role == "15":
+            pri = 0
+        elif "admin" in str(role):
+            pri = 1
+        if row.get("is_active") is False:
+            pri += 20
+        humans.append((pri, uid))
+
+    if not humans:
+        raise PlaneError(
+            "--assignee me: only bot members visible; "
+            "set PLANE_ME_USER_ID to your user UUID "
+            "(e.g. 0d63f76f-0231-49e8-b81a-b2471bb7b91a for aepod23)"
+        )
+    humans.sort(key=lambda t: t[0])
+    return humans[0][1]
+
 
 
 # ---------------------------------------------------------------------------
@@ -389,15 +623,23 @@ def cmd_ensure_labels(_args) -> None:
 
 
 def cmd_me(_args) -> None:
+    """Print resolved --assignee me identity (WEFT-639)."""
     ids = load_ids()
+    uid = _resolve_user(ids, "me")
+    print(json.dumps({"me_user_id": uid, "source": "resolved"}, indent=2))
+    # Also dump members for debugging (bots included).
     ws = ids["workspace_slug"]
-    members = request("GET", f"/abs:/v1/workspaces/{ws}/members/")
+    try:
+        members = request("GET", f"/abs:/v1/workspaces/{ws}/members/")
+    except PlaneError as e:
+        print(f"(members list unavailable: {e})", file=sys.stderr)
+        return
     rows = members if isinstance(members, list) else members.get("results", [])
     for m in rows:
-        # owner of the API key shows up as `is_active=true` and matching
-        # display_name of the human; without get_me, return first match
-        # (in single-user workspaces this is fine).
-        print(json.dumps({k: m.get(k) for k in ("id", "member", "email", "display_name")}, indent=2))
+        print(json.dumps(
+            {k: m.get(k) for k in ("id", "member", "email", "display_name", "role", "is_active")},
+            indent=2,
+        ))
 
 
 def cmd_list_states(_args) -> None:
@@ -417,12 +659,8 @@ def cmd_list_labels(_args) -> None:
 
 def cmd_list_issues(args) -> None:
     if args.cycle:
-        ids = load_ids()
-        cid = get_cycle_id(ids, args.cycle)
-        rows = list(paginate(f"/cycles/{cid}/cycle-issues/"))
-        for r in rows:
-            iid = r.get("issue") or r.get("issue_detail", {}).get("id")
-            iss = request("GET", f"/issues/{iid}/")
+        # WEFT-639: membership via issue.cycle_id, not flaky cycle-issues/ pages.
+        for iss in list_issues_in_cycle(args.cycle):
             print(f"WEFT-{iss['sequence_id']:<5}  {iss['name']}")
         return
     for i in paginate("/issues/"):
@@ -488,44 +726,44 @@ def cmd_create_issue(args) -> None:
 def cmd_add_to_cycle(args) -> None:
     ids = load_ids()
     cid = get_cycle_id(ids, args.cycle_name)
+    resolved = [resolve_issue_id(x) for x in args.issue_ids]
     request(
         "POST",
         f"/cycles/{cid}/cycle-issues/",
-        {"issues": list(args.issue_ids)},
+        {"issues": resolved},
     )
-    print(f"added {len(args.issue_ids)} issue(s) to cycle {args.cycle_name}")
+    print(f"added {len(resolved)} issue(s) to cycle {args.cycle_name}")
 
 
 def cmd_transition(args) -> None:
     ids = load_ids()
+    issue_id = resolve_issue_id(args.issue_id)
     payload: dict[str, Any] = {"state": get_state_id(ids, args.state_name)}
     if args.assignee:
         payload["assignees"] = [_resolve_user(ids, args.assignee)]
-    request("PATCH", f"/issues/{args.issue_id}/", payload)
-    print(f"transitioned {args.issue_id} → {args.state_name}")
+    request("PATCH", f"/issues/{issue_id}/", payload)
+    print(f"transitioned {args.issue_id} ({issue_id}) → {args.state_name}")
 
 
 def cmd_defer(args) -> None:
     ids = load_ids()
+    issue_id = resolve_issue_id(args.issue_id)
     new_cid = get_cycle_id(ids, args.new_cycle)
-    issue = request("GET", f"/issues/{args.issue_id}/")
-    # Find current cycle (if any). Plane returns it under `cycle_id` or via
-    # /issues/<id>/cycle-issues; fall back to scanning each cycle.
-    cur_cid = issue.get("cycle_id")
-    if not cur_cid:
-        for cname, cid in ids["cycles"].items():
-            for r in paginate(f"/cycles/{cid}/cycle-issues/"):
-                iid = r.get("issue") or r.get("issue_detail", {}).get("id")
-                if iid == args.issue_id:
-                    cur_cid = cid
-                    break
-            if cur_cid:
-                break
+    issue = request("GET", f"/issues/{issue_id}/")
+    # WEFT-639: prefer issue.cycle_id / issue.cycles — do not paginate cycle-issues.
+    cur_ids = issue_cycle_ids(issue)
+    cur_cid = next(iter(cur_ids), None)
+    # If cycle names were returned, map name → uuid.
+    if cur_cid and cur_cid in ids["cycles"]:
+        cur_cid = ids["cycles"][cur_cid]
+    elif cur_cid and cur_cid not in set(ids["cycles"].values()):
+        # try match by name
+        cur_cid = ids["cycles"].get(cur_cid, cur_cid)
     if cur_cid and cur_cid != new_cid:
         try:
             request(
                 "DELETE",
-                f"/cycles/{cur_cid}/cycle-issues/{args.issue_id}/",
+                f"/cycles/{cur_cid}/cycle-issues/{issue_id}/",
                 expect_status=(200, 204, 404),
             )
         except PlaneError as e:
@@ -533,7 +771,7 @@ def cmd_defer(args) -> None:
     request(
         "POST",
         f"/cycles/{new_cid}/cycle-issues/",
-        {"issues": [args.issue_id]},
+        {"issues": [issue_id]},
     )
     body_md = (
         f"**Deferred to {args.new_cycle} on {time.strftime('%Y-%m-%d')}**\n\n"
@@ -541,14 +779,15 @@ def cmd_defer(args) -> None:
     )
     request(
         "POST",
-        f"/issues/{args.issue_id}/comments/",
+        f"/issues/{issue_id}/comments/",
         {"comment_html": md_to_html(body_md)},
     )
-    print(f"deferred {args.issue_id} → {args.new_cycle}")
+    print(f"deferred {args.issue_id} ({issue_id}) → {args.new_cycle}")
 
 
 def cmd_close(args) -> None:
     ids = load_ids()
+    issue_id = resolve_issue_id(args.issue_id)
     body_lines = [
         f"**Closed: {time.strftime('%Y-%m-%d')}**",
         "",
@@ -572,15 +811,15 @@ def cmd_close(args) -> None:
 
     request(
         "POST",
-        f"/issues/{args.issue_id}/comments/",
+        f"/issues/{issue_id}/comments/",
         {"comment_html": md_to_html(body_md)},
     )
     request(
         "PATCH",
-        f"/issues/{args.issue_id}/",
+        f"/issues/{issue_id}/",
         {"state": get_state_id(ids, "Done")},
     )
-    print(f"closed {args.issue_id}")
+    print(f"closed {args.issue_id} ({issue_id})")
 
 
 def cmd_comment(args) -> None:
@@ -591,12 +830,13 @@ def cmd_comment(args) -> None:
         body_md = args.body
     else:
         raise PlaneError("--body or --body-md required")
+    issue_id = resolve_issue_id(args.issue_id)
     request(
         "POST",
-        f"/issues/{args.issue_id}/comments/",
+        f"/issues/{issue_id}/comments/",
         {"comment_html": md_to_html(body_md)},
     )
-    print(f"commented on {args.issue_id}")
+    print(f"commented on {args.issue_id} ({issue_id})")
 
 
 def cmd_check(_args) -> None:
@@ -690,17 +930,6 @@ def cmd_batch_create(args) -> None:
         for n, e in failures[:5]:
             print(f"  FAIL: {n[:80]}\n        {e[:200]}", file=sys.stderr)
         sys.exit(1)
-
-
-def _resolve_user(ids: dict, who: str) -> str:
-    if who != "me":
-        return who
-    ws = ids["workspace_slug"]
-    members = request("GET", f"/abs:/v1/workspaces/{ws}/members/")
-    rows = members if isinstance(members, list) else members.get("results", [])
-    if not rows:
-        raise PlaneError("no workspace members visible to API key")
-    return rows[0].get("member") or rows[0].get("id")
 
 
 # ---------------------------------------------------------------------------

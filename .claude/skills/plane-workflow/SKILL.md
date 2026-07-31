@@ -221,21 +221,53 @@ Use `scripts/plane.sh add-to-cycle <cycle-name> <issue-id>...`.
 
 ### 5.3 Move state / claim / close
 
-`scripts/plane.sh transition <issue-id> <state-name> [--assignee me]`
+`scripts/plane.sh transition <issue-id|WEFT-N> <state-name> [--assignee me]`
 PATCHes the issue's `state` field (and `assignees` when `--assignee`
 is given). Always pair `Todo → In Progress` with `--assignee` so the
 who-is-working-on-this is visible.
 
+**WEFT-639:** `transition` / `close` / `comment` / `defer` / `add-to-cycle`
+accept either a full issue UUID **or** a sequence id (`WEFT-630` or
+`630`). The wrapper resolves `WEFT-N → UUID` via the issues listing
+before PATCHing. UUID still works.
+
+```bash
+# Both forms are valid after WEFT-639:
+scripts/plane.sh transition WEFT-630 "In Progress" --assignee me
+scripts/plane.sh transition 630 "In Progress" --assignee me
+scripts/plane.sh close WEFT-630 --shipped "…" --commits abc1234
+```
+
+**`--assignee me`** resolves the API-key owner — never `members[0]`
+(that was the GitHub bot). Resolution order:
+
+1. `PLANE_ME_USER_ID` env
+2. `references/ids.json` → `me_user_id`
+3. HTTP `GET /users/me/` (when available)
+4. Workspace members: first **non-bot** human (owner/admin preferred)
+
+```bash
+# Pin your identity once if auto-detect is wrong:
+export PLANE_ME_USER_ID=0d63f76f-0231-49e8-b81a-b2471bb7b91a
+# or set "me_user_id" in references/ids.json (not a secret)
+scripts/plane.sh me   # prints resolved UUID + member dump
+```
+
 ### 5.4 Defer (cycle bump)
 
-`scripts/plane.sh defer <issue-id> <new-cycle> --reason "..."` does
-three things atomically: removes the issue from its current cycle,
-adds it to the new cycle, and posts a comment with the reason.
+`scripts/plane.sh defer <issue-id|WEFT-N> <new-cycle> --reason "..."`
+does three things atomically: removes the issue from its current cycle
+(using **`issue.cycle_id` / `issue.cycles`**, not flaky
+`/cycle-issues/` pagination — WEFT-639), adds it to the new cycle, and
+posts a comment with the reason.
+
+`list-cycle` / `list-issues --cycle` likewise filter issues by the
+issue's own cycle fields rather than paginating `cycle-issues/`.
 
 ### 5.5 Comment on close
 
 ```bash
-scripts/plane.sh close <issue-id> \
+scripts/plane.sh close WEFT-42 \
   --shipped "Email IMAP poll loop landed; channel emits real inbound" \
   --commits abc1234,def5678 \
   --tests "scripts/build.sh test (1549/1549 lib pass)" \
@@ -244,7 +276,7 @@ scripts/plane.sh close <issue-id> \
 ```
 
 Builds the structured close comment, transitions to `Done`, and
-posts the comment in one call.
+posts the comment in one call. Issue id may be `WEFT-N` or UUID.
 
 See `references/api-cheatsheet.md` for raw curl recipes if the
 wrapper doesn't cover your case.
@@ -416,6 +448,11 @@ Before you call a triage pass "done":
   both `description_html` and `description_stripped`.
 - **State UUIDs vary per project.** Don't hard-code in agent code;
   always read from `references/ids.json`.
-- **Cycle membership is not a field on the issue.** It's a separate
-  endpoint. Forgetting this is the #1 way an item ends up "in" the
-  0.7.x cycle in your head but unfiled in Plane.
+- **Cycle membership writes still use `cycle-issues/` POST/DELETE.**
+  Reads for listing / defer should prefer `issue.cycle_id` (WEFT-639)
+  because `GET …/cycle-issues/` pagination has been flaky on large
+  cycles. Forgetting to **write** membership via `add-to-cycle` is
+  still the #1 way an item ends up unfiled in Plane.
+- **Pre-WEFT-639: `transition WEFT-N` 404'd** and `--assignee me`
+  assigned the bot. Both fixed in the wrapper; pin `PLANE_ME_USER_ID`
+  if your workspace has multiple humans.

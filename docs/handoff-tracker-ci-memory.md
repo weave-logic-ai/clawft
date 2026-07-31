@@ -199,9 +199,10 @@ cd .claude/skills/plane-workflow && ./scripts/plane.sh list-cycle 0.8.x
 - **PATH order decides which `ruflo` you get.** My own `ruflo --version` was
   3.14.1 early in the session and 3.32.38 after `source ~/.zshrc`. Any version
   claim is only true for the shell that made it.
-- **Plane wrapper subcommands take issue UUIDs, not `WEFT-N`** — passing the
-  sequence number 404s. `--assignee me` resolves to a bot; the human UUID is
-  `0d63f76f-0231-49e8-b81a-b2471bb7b91a`.
+- **Plane wrapper (WEFT-639 fixed):** `transition` / `close` / `comment` /
+  `defer` accept `WEFT-N` or UUID. `--assignee me` uses `PLANE_ME_USER_ID` /
+  `ids.json me_user_id` / get-me / non-bot member (not `members[0]`). Cycle
+  listing reads `issue.cycle_id`, not flaky `cycle-issues/` pages.
 - **Agent frontmatter: `: ` and ` #` in an unquoted `description:` silently
   truncate it.** ` #` starts a YAML comment. A truncated description under-routes
   with no error anywhere — `embedded-acoustic-firmware` had lost 390 of 760 chars

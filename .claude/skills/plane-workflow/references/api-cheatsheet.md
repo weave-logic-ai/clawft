@@ -90,9 +90,16 @@ curl -sf -H "$H_AUTH" -H "$H_JSON" -X PATCH "$BASE/issues/$ISSUE/" -d '{
 }' | jq
 ```
 
-To get your own user UUID, `curl -sf -H "$H_AUTH"
-"https://api.plane.so/api/v1/workspaces/$WS/members/" | jq` — your
-membership row contains it.
+To get your own user UUID, prefer the wrapper (WEFT-639):
+
+```bash
+scripts/plane.sh me   # prints resolved me_user_id (never members[0] bot)
+```
+
+Or raw: `curl -sf -H "$H_AUTH"
+"https://api.plane.so/api/v1/workspaces/$WS/members/" | jq` — pick the
+**human** membership row (not the GitHub bot). You can pin it as
+`PLANE_ME_USER_ID` or `references/ids.json` → `me_user_id`.
 
 ## Comment on a work item
 
