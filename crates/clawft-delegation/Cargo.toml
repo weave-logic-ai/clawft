@@ -1,0 +1,33 @@
+[package]
+name = "clawft-delegation"
+version.workspace = true
+publish = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Cognitive work delegation to peer world-model services (client/server + certs). WEFT-525."
+keywords = ["weftos", "lewm", "delegation", "world-model", "mesh"]
+categories = ["network-programming", "asynchronous"]
+
+[features]
+default = []
+# Optional blocking TCP transport for peer-to-peer topology smoke tests.
+tcp = []
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+ciborium = { workspace = true }
+ed25519-dalek = { workspace = true }
+thiserror = { workspace = true }
+weftos-worldmodel-core = { workspace = true, default-features = false, features = ["std"] }
+weftos-worldmodel = { workspace = true, default-features = false, features = ["std"] }
+
+[dev-dependencies]
+rand = { workspace = true }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
