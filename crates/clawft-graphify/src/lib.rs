@@ -55,6 +55,11 @@ pub mod semantic_extract;
 #[cfg(feature = "vision-extract")]
 pub mod vision_extract;
 
+pub use alignment::{
+    AlignmentConfig, AlignmentMethod, AlignmentRefiner, ApplyResult, EaAgent, EmbeddingLookup,
+    EntityAlignment, HeuristicRefiner, MapEmbeddingLookup, MergeProposal, PreferredSide,
+    ProposalStatus, ScoreBreakdown, align_entities, propose_merges,
+};
 pub use build::MergeStats;
 pub use entity::{DomainTag, EntityId, EntityType, FileType};
 pub use model::{
