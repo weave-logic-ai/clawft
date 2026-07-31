@@ -107,7 +107,7 @@ Lane  = parallel track inside a wave (A–J)
 - **WEFT-152** [LB/low/0.8.x] — ws02: tests — confirm cognitum-gate-tilezero Permit/Defer/Deny path is exercised
 - **WEFT-153** [LB/low/0.8.x] — ws02: chain — add EVENT_KIND_* constants for minor non-kernel chain gaps
 - **WEFT-174** [LH/low/0.8.x] — ws05: Slack — add unknown_envelope counter for API drift detection
-- **WEFT-175** [LH/low/0.8.x] — ws05: iMessage scope — implement AppleScript bridge or formally drop from tracker
+- **WEFT-175** [LH/low/0.8.x] — ~~ws05: iMessage scope~~ **Done (drop)** — ADR-081; no first-party AppleScript bridge
 - **WEFT-176** [LH/low/0.8.x] — ws05: WeftOS white-label — add brand() accessor and remove hard-coded clawft strings
 - **WEFT-193** [LD/low/0.8.x] — ws07: IDE provider — replace IdeToolProvider::stub() with real implementation
 - **WEFT-195** [LD/low/0.8.x] — ws07: delegate_tool — drop hardcoded claude_available=true, query the delegator for liveness

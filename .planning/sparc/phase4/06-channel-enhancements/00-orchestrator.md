@@ -10,7 +10,11 @@
 
 ## 1. Summary
 
-Improve existing channels and add new channel plugins for email, WhatsApp, Signal/iMessage, Matrix/IRC, Google Chat, and Microsoft Teams.
+Improve existing channels and add new channel plugins for email, WhatsApp, Signal, Matrix/IRC, Google Chat, and Microsoft Teams.
+
+> **Scope note (WEFT-175 / ADR-081, 2026-07-31):** early drafts paired
+> E4 as “Signal / iMessage”. **iMessage is not in scope** — no
+> `clawft-channels/src/imessage/` AppleScript bridge. E4 is Signal only.
 
 ### Channel Trait Migration Note
 
@@ -42,7 +46,7 @@ New channels implement the `ChannelAdapter` trait from `clawft-plugin`. Existing
 | Item | Description | Transport | Auth | Crate/File |
 |------|-------------|-----------|------|------------|
 | E3 | WhatsApp | Cloud API (REST) | App token | `clawft-channels/src/whatsapp/` (new, feature-gated) |
-| E4 | Signal / iMessage | `signal-cli` subprocess / macOS bridge | Local | `clawft-channels/src/signal/`, `clawft-channels/src/imessage/` (new, feature-gated) |
+| E4 | Signal | `signal-cli` subprocess | Local | `clawft-channels/src/signal/` (feature-gated; iMessage dropped — ADR-081) |
 | E5 | Matrix / IRC | Matrix SDK / IRC protocol | Various | `clawft-channels/src/matrix/`, `clawft-channels/src/irc/` (new, feature-gated) |
 
 ### Internal Dependencies

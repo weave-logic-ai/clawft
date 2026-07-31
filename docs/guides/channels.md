@@ -22,6 +22,14 @@ unimplemented -- `start()` waits for cancellation and `send()` returns
 a synthetic message ID without contacting the platform. Do **not**
 enable the corresponding feature in production until the runtime ships.
 
+**iMessage is intentionally not a first-party channel.** Early SPARC
+drafts paired it with Signal (Element 06 E4) via a macOS-only
+AppleScript / `Messages.app` bridge. That path was **formally dropped**
+(WEFT-175, [ADR-081](../adr/adr-081-no-imessage-applescript-bridge.md)):
+no `imessage` module, feature flag, or factory will ship under
+`clawft-channels` for 0.8.x. Use Signal (or another listed channel) for
+local/consumer messaging; reopen only with a new design ticket.
+
 | Channel        | Transport                         | Threading | Media | Feature Gate      | Status  |
 |----------------|-----------------------------------|-----------|-------|-------------------|---------|
 | Telegram       | HTTP long polling (Bot API)       | No        | Yes   | `telegram`        | Ships   |

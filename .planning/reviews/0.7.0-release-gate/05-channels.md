@@ -80,9 +80,9 @@ runtime gaps.
 `clawft-channels/Cargo.toml` defaults to **no feature flags on**:
 `email`, `whatsapp`, `signal`, `matrix`, `google-chat`, `irc`, `teams`
 are each behind their own feature, and `default = []`. Discord, Slack,
-Telegram, and `web` are always built. Element 06 also lists an
-`imessage` adapter under E4, but `crates/clawft-channels/src/imessage/`
-does not exist on disk; this is orphaned scope.
+Telegram, and `web` are always built. Element 06 E4 is **Signal only**.
+Early drafts mentioned an `imessage` adapter; it was never created and
+was **formally dropped** (WEFT-175 / ADR-081) — not orphaned.
 
 The companion gateway/API stream (Axum API layer) has its own decision
 record at `.planning/development_notes/05-axum-api-layer/decisions.md`,
@@ -221,13 +221,11 @@ deployment of any of these flips a foot-gun.
 
 ### Deferred / orphaned items
 
-- **`clawft-channels/src/imessage/`** -- listed in
-  `00-orchestrator.md` and `04-element-06-tracker.md` E4 description as
-  paired with Signal, but the directory does not exist. Iteration-1
-  review (`.planning/sparc/reviews/iteration-1-spec-05-06.md:259`)
-  flagged that it is "Not in orchestrator". Either the scope was
-  silently dropped or the macOS AppleScript bridge is intended for a
-  later release.
+- **`clawft-channels/src/imessage/`** -- **RESOLVED (drop)** via WEFT-175 /
+  [ADR-081](../../../docs/adr/adr-081-no-imessage-applescript-bridge.md)
+  (2026-07-31). No first-party AppleScript / Messages.app bridge; E4 is
+  Signal only. Historical SPARC drafts that still say “Signal / iMessage”
+  are superseded.
 - **PluginHost C7 unification** -- the trait shim (`ChannelAdapterShim`)
   exists, but Telegram / Discord / Slack still implement the legacy
   `Channel` trait directly. Migrating them to `ChannelAdapter` is the
@@ -261,8 +259,8 @@ deployment of any of these flips a foot-gun.
   Telegram instead" -- the PluginHost treats each channel as
   independent. Whether to keep it that way or to grow a fallback
   chain is an open product question; no design doc exists.
-- **iMessage and AppleScript bridge** -- listed under E4 in the SPARC
-  orchestrator but never created (see orphaned section above).
+- **iMessage and AppleScript bridge** -- **dropped** (WEFT-175 / ADR-081);
+  not deferred open work.
 - **WeftOS white-label feature** (`feature-request-whitelabel.md`) --
   P1 for Valtech, P2 generally. Hard-coded "WeftOS" / "clawft" strings
   appear in channel banners (Discord identify `browser: "clawft"`,
@@ -325,8 +323,8 @@ deployment of any of these flips a foot-gun.
 
 ### Orphaned work
 
-- `crates/clawft-channels/src/imessage/` (mentioned in tracker, no
-  files).
+- `crates/clawft-channels/src/imessage/` — **closed as drop** (WEFT-175 /
+  ADR-081); no longer an open orphan.
 - `clawft-twitter/` (deleted; ADR replaces with skills, see
   `social-media-integration.md`). Audit-relevant only as a sanity check
   that the deletion is final.
@@ -358,7 +356,7 @@ deployment of any of these flips a foot-gun.
 | 16 | Document or remove Telegram secondary 1 s poll-interval sleep | Low | XS | unassigned | open question 7 |
 | 17 | Document Discord intents default bitmask 37377 and add coverage for `intents = 0` and privileged-intent rejection | Low | S | unassigned | open question 8 |
 | 18 | Add a `slack.unknown_envelope` counter / metric so a Slack API drift is observable | Low | XS | unassigned | open question 9 |
-| 19 | Resolve iMessage scope: implement `clawft-channels/src/imessage/` AppleScript bridge or remove from tracker | Low | M (impl) / XS (drop) | unassigned | orphaned in 04-element-06-tracker.md |
+| 19 | Resolve iMessage scope: implement `clawft-channels/src/imessage/` AppleScript bridge or remove from tracker | Low | XS (drop) | **done (WEFT-175)** | Formal drop — ADR-081; no first-party bridge |
 | 20 | Implement WeftOS white-label `brand()` token in kernel config, replace hard-coded strings in Discord identify, CLI help, WebUI header | Low | S | unassigned | feature-request-whitelabel.md |
 | 21 | Voice channel: real STT capture in `start()`, real TTS playback in `send()`, agent pipeline `deliver_inbound` integration | High (for voice GA) | L | unassigned | step3-vs1.3-voice-channel.md "What's Still Stub" |
 | 22 | Decide channel failover chain semantics (per-message? per-session? cross-channel quorum?) and either implement or close as out-of-scope | Low | XS (decision) / L (impl) | unassigned | MEMORY.md mention; no design doc |

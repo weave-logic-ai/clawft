@@ -223,7 +223,7 @@
 | WEFT-172 | Done | low | 0.8.x | ws05-channels | H | strong | — | — | ws05: Telegram — document or remove redundant 1s poll-interval sleep |
 | WEFT-173 | Done | low | 0.8.x | ws05-channels | H | strong | — | — | ws05: Discord — document intents bitmask default and cover privileged-intent rejection |
 | WEFT-174 | Todo | low | 0.8.x | ws05-channels | H | strong | — | — | ws05: Slack — add unknown_envelope counter for API drift detection |
-| WEFT-175 | Todo | low | 0.8.x | ws05-channels | H | strong | — | — | ws05: iMessage scope — implement AppleScript bridge or formally drop from tracker |
+| WEFT-175 | Done | low | 0.8.x | ws05-channels | H | strong | — | — | ws05: iMessage scope — formal drop (ADR-081); no AppleScript bridge |
 | WEFT-176 | Todo | low | 0.8.x | ws05-channels | H | strong | — | — | ws05: WeftOS white-label — add brand() accessor and remove hard-coded clawft strings |
 | WEFT-177 | Todo | low | 0.9.x | ws05-channels | H | strong | — | — | ws05: Channel failover chain — decide semantics and either implement or close as out-of-sc |
 | WEFT-178 | Done | high | 0.7.x | ws07-multi-agent | D | strong | — | — | ws07: AgentRouter — wire routing into MessageBus inbound dispatch |
@@ -1137,12 +1137,12 @@
 
 #### WEFT-175 — ws05: iMessage scope — implement AppleScript bridge or formally drop from tracker
 
-- **State**: Todo · **Priority**: low · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: H · **AC**: strong
+- **State**: Done · **Priority**: low · **Cycle**: 0.8.x · **Wave**: W0 · **Lane**: H · **AC**: strong
 - **Labels**: ws05-channels, audit-finding, audit-0.7.0, orphan, governance
 - **Blocked by**: none
 - **Blocks**: none
 - **Gap**: crates/clawft-channels/src/imessage/ is referenced in 00-orchestrator.md and 04-element-06-tracker.md E4 description as paired with Signal, but the directory does not exist. iteration-1 review flagged it as "Not in orchestrator". Either silently dropped or deferred.
-- **Plan**: Ready when claimed; implement to AC; close with commit+tests+build
+- **Resolution**: **Formal drop** — [ADR-081](../adr/adr-081-no-imessage-applescript-bridge.md); E4 is Signal only; orphan callouts cleared in audit + guides. Result: `docs/plans/wave-ws05-WEFT-175-result.md`.
 
 #### WEFT-176 — ws05: WeftOS white-label — add brand() accessor and remove hard-coded clawft strings
 
