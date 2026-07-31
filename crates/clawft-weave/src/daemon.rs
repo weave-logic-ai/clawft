@@ -7328,9 +7328,9 @@ async fn dispatch(
                 Response::error("crossref store not available")
             }
         }
-        // WEFT-125: operator introspection for the active vector backend.
-        // Returns live backend name + configured parameters so operators
-        // do not have to dig through TOML or trust the build alone.
+        // WEFT-364 (was WEFT-125): operator introspection for the active
+        // vector backend. Returns live backend name + configured parameters
+        // so operators do not have to dig through TOML or trust the build alone.
         #[cfg(feature = "ecc")]
         "ecc.vector-config" => {
             let k = kernel.read().await;
@@ -8361,7 +8361,7 @@ mod tests {
         );
     }
 
-    /// WEFT-125: `ecc.vector-config` returns the live backend name plus the
+    /// WEFT-364: `ecc.vector-config` returns the live backend name plus the
     /// configured parameters from `[kernel.vector]`.
     #[cfg(feature = "ecc")]
     #[tokio::test]
@@ -8425,7 +8425,7 @@ mod tests {
         assert!(result["parameters"]["hybrid"].is_null());
     }
 
-    /// WEFT-125: default kernel still reports an active HNSW backend
+    /// WEFT-364: default kernel still reports an active HNSW backend
     /// (boot always constructs a vector backend when ecc is enabled).
     #[cfg(feature = "ecc")]
     #[tokio::test]

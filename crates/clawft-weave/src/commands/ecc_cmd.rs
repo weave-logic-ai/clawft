@@ -43,7 +43,7 @@ pub enum EccCommand {
     },
     /// Show current tick statistics.
     Tick,
-    /// Show active vector backend config (WEFT-125).
+    /// Show active vector backend config (WEFT-364).
     #[command(name = "vector-config")]
     VectorConfig,
 }
