@@ -309,6 +309,9 @@ pub mod mesh_test_support;
 pub mod mesh_tree;
 #[cfg(feature = "mesh")]
 pub mod mesh_ws;
+/// QUIC transport via quinn (WEFT-118 / ADR-026). Feature-gated `quic`.
+#[cfg(all(feature = "mesh", feature = "quic"))]
+pub mod mesh_quic;
 
 // Re-export key types at the crate level for convenience.
 #[cfg(feature = "native")]
@@ -569,6 +572,8 @@ pub use mesh_tree::{
 };
 #[cfg(feature = "mesh")]
 pub use mesh_ws::WsTransport;
+#[cfg(all(feature = "mesh", feature = "quic"))]
+pub use mesh_quic::QuicTransport;
 #[cfg(feature = "os-patterns")]
 pub use monitor::{ExitReason, MonitorRegistry, ProcessDown, ProcessLink, ProcessMonitor};
 #[cfg(feature = "native")]

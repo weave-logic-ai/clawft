@@ -491,6 +491,15 @@ impl<P: Platform> Kernel<P> {
 
                     let transport: Box<dyn MeshTransport> = match mesh_config.transport.as_str() {
                         "ws" | "websocket" => Box::new(crate::mesh_ws::WsTransport),
+                        #[cfg(feature = "quic")]
+                        "quic" => Box::new(crate::mesh_quic::QuicTransport),
+                        #[cfg(not(feature = "quic"))]
+                        "quic" => {
+                            tracing::error!(
+                                "mesh transport=quic requested but clawft-kernel built without `quic` feature; falling back to tcp"
+                            );
+                            Box::new(crate::mesh_tcp::TcpTransport)
+                        }
                         _ => Box::new(crate::mesh_tcp::TcpTransport),
                     };
 
@@ -620,6 +629,16 @@ impl<P: Platform> Kernel<P> {
 
                         let transport: Box<dyn MeshTransport> = match transport_name.as_str() {
                             "ws" | "websocket" => Box::new(crate::mesh_ws::WsTransport),
+                            #[cfg(feature = "quic")]
+                            "quic" => Box::new(crate::mesh_quic::QuicTransport),
+                            #[cfg(not(feature = "quic"))]
+                            "quic" => {
+                                tracing::error!(
+                                    peer = %addr,
+                                    "seed peer uses quic but binary built without `quic` feature; falling back to tcp"
+                                );
+                                Box::new(crate::mesh_tcp::TcpTransport)
+                            }
                             _ => Box::new(crate::mesh_tcp::TcpTransport),
                         };
 

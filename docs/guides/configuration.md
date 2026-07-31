@@ -1128,3 +1128,19 @@ cargo build --release --features vector-memory
 
 This flag is propagated from `clawft-cli` to `clawft-core`. It is off by
 default to keep the baseline binary small and avoid unnecessary dependencies.
+
+## Mesh networking (`kernel.mesh`)
+
+Cross-node mesh is configured under `kernel.mesh` (TOML `[kernel.mesh]` or
+JSON `kernel.mesh`). Transports: `tcp` (default), `ws`, `quic` (WEFT-118).
+
+```toml
+[kernel.mesh]
+enabled = true
+transport = "quic"
+listen_addr = "0.0.0.0:9470"
+noise = true
+seed_peers = ["quic://10.0.0.2:9470"]
+```
+
+Full guide: [mesh-quic.md](./mesh-quic.md). Kernel overview: [kernel.md](./kernel.md#mesh-k6).

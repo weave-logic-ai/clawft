@@ -1,9 +1,9 @@
 //! TCP transport backend for mesh networking (K6).
 //!
-//! Uses tokio TCP for node-to-node communication.  In production this
-//! would be replaced by QUIC (quinn) + Noise (snow), but plain TCP
-//! validates the full mesh stack end-to-end and passes the K6 gate
-//! tests with real networking.
+//! Uses tokio TCP for node-to-node communication. Production Cloud/Edge
+//! deployments prefer QUIC (`mesh_quic` / ADR-026) with optional Noise
+//! (`mesh_noise` / snow). Plain TCP remains the default and is useful
+//! when UDP is blocked.
 //!
 //! # Cancel-safety (ADR-010 / WEFT-18)
 //!

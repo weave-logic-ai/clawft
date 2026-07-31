@@ -36,7 +36,7 @@ clawft-service-llm = { workspace = true }
 # build of this crate without the same kernel features the daemon
 # enables. Mirror clawft-weave's set so feature unification across the
 # workspace is identical.
-clawft-kernel = { workspace = true, features = ["native", "ecc", "exochain", "cluster", "mesh"] }
+clawft-kernel = { workspace = true, features = ["native", "ecc", "exochain", "cluster", "mesh", "quic"] }
 
 # ULID generation for monotonic per-turn substrate keys
 # (`derived/chat/<conv>/turns/<ulid>`).

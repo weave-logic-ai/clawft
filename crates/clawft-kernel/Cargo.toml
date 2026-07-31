@@ -16,7 +16,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["native", "exochain", "cluster", "tilezero", "ecc", "mesh"]
+default = ["native", "exochain", "cluster", "tilezero", "ecc", "mesh", "quic"]
 native = [
     "dep:tokio",
     "dep:tokio-util",
@@ -55,6 +55,10 @@ mesh = [
     "dep:futures-util",
     "dep:snow",
 ]
+# WEFT-118 / ADR-026: QUIC (quinn) mesh transport. Heavy dep tree
+# (rustls/ring); opt-out with `--no-default-features --features mesh`
+# without `quic`. Default workspace builds enable both via `default`.
+quic = ["mesh", "dep:quinn", "dep:rcgen", "dep:rustls"]
 # WEFT-683 / ADR-031: experimental RVF KernelMessage IPC encoding surface.
 # Default builds ship JSON only (`MeshIpcEncoding::Json`). Enabling this
 # exposes `MeshIpcEncoding::Rvf`; encode/decode currently return
@@ -127,6 +131,9 @@ half = { workspace = true, optional = true }
 tokio-tungstenite = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 snow = { workspace = true, optional = true }
+quinn = { workspace = true, optional = true }
+rcgen = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 sha2 = { workspace = true }
 chrono = { workspace = true }

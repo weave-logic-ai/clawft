@@ -813,8 +813,10 @@ impl Default for AnchorConfig {
 /// ```toml
 /// [kernel.mesh]
 /// enabled = true
-/// transport = "tcp"
+/// transport = "quic"          # "tcp" | "ws" | "quic" (WEFT-118 / ADR-026)
 /// listen_addr = "0.0.0.0:9470"
+/// noise = true                # Noise XX over the transport (snow)
+/// seed_peers = ["quic://10.0.0.2:9470"]
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeshConfig {
@@ -822,8 +824,10 @@ pub struct MeshConfig {
     #[serde(default)]
     pub enabled: bool,
 
-    /// Transport backend: "tcp" (default) or "ws" (WebSocket).
-    /// QUIC planned for future.
+    /// Transport backend: `"tcp"` (default), `"ws"` / `"websocket"`, or
+    /// `"quic"` (quinn; WEFT-118 / ADR-026). QUIC requires the
+    /// `clawft-kernel` `quic` feature (enabled in default builds).
+    /// Addresses for QUIC peers use the `quic://host:port` scheme.
     #[serde(default = "default_mesh_transport")]
     pub transport: String,
 

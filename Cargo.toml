@@ -285,6 +285,18 @@ half = "2"
 # Noise Protocol (mesh transport encryption)
 snow = "0.10"
 
+# QUIC mesh transport (WEFT-118 / ADR-026). Application crypto is Noise
+# (snow); quinn still needs TLS for the QUIC handshake, so we use
+# self-signed certs + skip-verify on the client. Feature-gated via
+# clawft-kernel `quic` (enabled with default `mesh` builds).
+quinn = { version = "0.11", default-features = false, features = [
+    "runtime-tokio",
+    "rustls",
+    "ring",
+] }
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
+
 # BLAKE3 hashing (ECC cognitive substrate)
 blake3 = "1.5"
 

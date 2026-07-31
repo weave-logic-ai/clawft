@@ -43,7 +43,7 @@ clawft-voice-onnx = { path = "../clawft-voice-onnx" }
 # Local Hermes provider for the concrete VoiceLlm binding.
 clawft-llm = { workspace = true, features = ["native"] }
 # Kernel CausalGraph for the ECC ConversationObserver binding.
-clawft-kernel = { workspace = true, features = ["native", "ecc", "exochain", "cluster", "mesh"] }
+clawft-kernel = { workspace = true, features = ["native", "ecc", "exochain", "cluster", "mesh", "quic"] }
 
 async-trait = { workspace = true }
 serde_json = { workspace = true }

@@ -22,6 +22,7 @@ agent, a multi-channel gateway, and management commands.
 - [Workspaces](guides/workspaces.md) -- Project workspaces, CLAWFT.md, scoped configuration
 - [Voice](guides/voice.md) -- Voice pipeline, TTS providers (OpenAI, ElevenLabs), talk mode
 - [Build](guides/build.md) -- Build system, feature flags, native and WASM targets
+- [Mesh QUIC](guides/mesh-quic.md) -- QUIC mesh transport (quinn + Noise), `[kernel.mesh]` config
 
 ## Deployment
 

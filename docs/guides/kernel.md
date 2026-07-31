@@ -171,6 +171,17 @@ mesh transport for cross-node IPC, chain replication, and SWIM
 heartbeats (ADR-039). The mesh runs as a phase-5d boot step and is
 configured under `[kernel.mesh]` in `~/.clawft/config.json`.
 
+Transports (selectable via `transport`):
+
+| Value | Backend | Notes |
+|-------|---------|-------|
+| `tcp` (default) | `TcpTransport` | Dev / UDP-blocked nets |
+| `ws` / `websocket` | `WsTransport` | Browser / proxy-friendly |
+| `quic` | `QuicTransport` (quinn) | ADR-026 primary; needs `quic` feature + **UDP** |
+
+Application crypto is optional Noise (`noise = true`, snow XX). See
+[mesh-quic.md](./mesh-quic.md) for QUIC config, firewall, and tests.
+
 ```bash
 weaver mesh status                 # peer count, view, listener address
 weaver mesh peers                  # detailed peer table with last-heard timestamps
