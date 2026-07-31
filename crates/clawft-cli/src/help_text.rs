@@ -12,7 +12,7 @@ pub fn general_help() -> String {
     output.push_str("  agent          Start an interactive agent session or send a message\n");
     output.push_str("  gateway        Start channel gateway (Telegram, Slack, etc.)\n");
     output.push_str("  mcp            Manage MCP servers (add / list / remove)\n");
-    output.push_str("  mcp-server     Run as an MCP tool server over stdio\n");
+    output.push_str("  mcp-server     Run as an MCP tool server (stdio or --listen HTTP/SSE)\n");
     output.push_str("  status         Show configuration status and diagnostics\n");
     output.push_str("  doctor         Multi-agent readiness checks (claude PATH, delegation, routes)\n");
     output.push_str("  channels       Inspect channel configuration\n");
@@ -173,6 +173,7 @@ pub fn topic_help(topic: &str) -> String {
              weft mcp list\n\
              weft mcp remove <name>\n\
              weft mcp-server [--profile default|control|workspace|media|full]\n\
+             weft mcp-server --listen 127.0.0.1:8742 --token-env WEFT_MCP_TOKEN\n\
                              [--reexport-mcp / --attach]\n\
                                      Serve profiled tools over stdio (default ≠ full;\n\
                                      re-export peers only with full + --reexport-mcp)\n\

@@ -5,7 +5,7 @@
 //! - `weft agent` -- Start an interactive agent session or send a single message.
 //! - `weft gateway` -- Start channels + agent loop (Telegram, Slack, etc.).
 //! - `weft mcp` -- Manage MCP server connections (add / list / remove).
-//! - `weft mcp-server` -- Run as an MCP tool server over stdio.
+//! - `weft mcp-server` -- Run as an MCP tool server (stdio or --listen HTTP/SSE).
 //! - `weft status` -- Show configuration status and diagnostics.
 //! - `weft channels` -- Inspect channel configuration status.
 //! - `weft cron` -- Manage scheduled (cron) jobs.
@@ -1058,6 +1058,32 @@ mod tests {
         assert!(result.is_ok());
         let cli = result.unwrap();
         assert!(cli.verbose);
+    }
+
+    #[cfg(feature = "services")]
+    #[test]
+    fn cli_mcp_server_listen_parses() {
+        let result = Cli::try_parse_from([
+            "weft",
+            "mcp-server",
+            "--listen",
+            "127.0.0.1:8742",
+            "--token-env",
+            "WEFT_MCP_TOKEN",
+            "--enterprise",
+            "--dangerously-bind-public",
+        ]);
+        assert!(result.is_ok(), "parse error: {:?}", result.err());
+        match result.unwrap().command {
+            Commands::McpServer(args) => {
+                assert_eq!(args.listen.as_deref(), Some("127.0.0.1:8742"));
+                assert_eq!(args.token_env.as_deref(), Some("WEFT_MCP_TOKEN"));
+                assert!(args.enterprise);
+                assert!(args.dangerously_bind_public);
+                assert!(!args.allow_unauthenticated);
+            }
+            _ => panic!("expected McpServer"),
+        }
     }
 
     // ── Workspace subcommand parsing ────────────────────────────────

@@ -1,8 +1,9 @@
-//! `weft mcp-server` -- run clawft as an MCP server over stdio.
+//! `weft mcp-server` -- run clawft as an MCP server over stdio or HTTP/SSE.
 //!
 //! Exposes a **profiled** tool surface (ADR-076) as an MCP tool server over
-//! stdin/stdout. Product default is `--profile default` (`control` ∪
-//! `workspace`), not a full agent-tool dump.
+//! stdin/stdout (default) or `--listen` HTTP/SSE (ADR-075 G4 / WEFT-696).
+//! Product default is `--profile default` (`control` ∪ `workspace`), not a
+//! full agent-tool dump.
 //!
 //! # Public wire (ADR-076 C2 / WEFT-700)
 //!
@@ -12,6 +13,17 @@
 //! - Proxied MCP re-export requires `--profile full` **and** `--reexport-mcp`
 //! - `--attach` (ADR-076 C3) binds control tools to live kernel/weave
 //!
+//! # Remote listen (ADR-075 G4 / WEFT-696)
+//!
+//! ```text
+//! weft mcp-server --listen 127.0.0.1:8742 --token "$WEFT_MCP_TOKEN"
+//! weft mcp-server --listen 0.0.0.0:8742 --token-env WEFT_MCP_TOKEN --dangerously-bind-public
+//! ```
+//!
+//! Auth is **required** by default for listen mode. Non-loopback bind needs
+//! `--dangerously-bind-public`. Open (unauthenticated) public bind is refused.
+//! Session capability tokens + audit client labels: WEFT-697 / ADR-075 G5.
+//!
 //! # Lifecycle
 //!
 //! ```text
@@ -20,7 +32,7 @@
 //! 3. Filter tool defs by serve profile; public wire renames
 //! 4. skill_list/get façades (control/default); per-skill only on full
 //! 5. Build middleware pipeline (security, allowed_tools, audit)
-//! 6. Create McpServerShell and run on stdin/stdout
+//! 6. Create McpServerShell → stdio OR HTTP/SSE --listen
 //! ```
 //!
 //! # Example
@@ -32,6 +44,7 @@
 //! weft mcp-server --profile full --reexport-mcp
 //! weft mcp-server --attach --profile control
 //! weft mcp-server --profile control,media --config /path/to/config.json
+//! weft mcp-server --listen 127.0.0.1:8742 --token-env WEFT_MCP_TOKEN
 //! ```
 
 use std::collections::HashMap;
@@ -53,6 +66,9 @@ use clawft_services::mcp::middleware::{
 };
 use clawft_services::mcp::provider::ToolProvider;
 use clawft_services::mcp::server::McpServerShell;
+use clawft_services::mcp::session_cap::{
+    SessionScopes, SessionTokenStore, validate_listen_policy,
+};
 
 use super::mcp_attach::{AttachToolProvider, DaemonAttachFacade};
 use super::mcp_profile::{filter_tools_by_profile, ProfileSet};
@@ -84,6 +100,49 @@ pub struct McpServerArgs {
     /// Standalone (this flag omitted) remains the offline/dev default.
     #[arg(long, default_value_t = false)]
     pub attach: bool,
+
+    /// Listen for remote MCP over HTTP/SSE (ADR-075 G4). Format: `host:port`
+    /// (e.g. `127.0.0.1:8742`). When set, stdio is not used.
+    ///
+    /// Auth is required by default (`--token` / `--token-env` / `WEFT_MCP_TOKEN`).
+    /// Non-loopback bind requires `--dangerously-bind-public`.
+    #[arg(long, value_name = "HOST:PORT")]
+    pub listen: Option<String>,
+
+    /// Bearer capability token for `--listen` auth (WEFT-696 / WEFT-697).
+    /// Prefer `--token-env` so the secret does not appear in process listings.
+    #[arg(long, value_name = "TOKEN")]
+    pub token: Option<String>,
+
+    /// Read bearer token from this environment variable (default search:
+    /// `WEFT_MCP_TOKEN` when `--listen` is set and `--token` is omitted).
+    #[arg(long, value_name = "ENV_VAR")]
+    pub token_env: Option<String>,
+
+    /// Allow unauthenticated MCP (loopback only). Never permits open public bind.
+    #[arg(long, default_value_t = false)]
+    pub allow_unauthenticated: bool,
+
+    /// Explicit opt-in to bind a non-loopback address (`0.0.0.0`, LAN IP, …).
+    /// Still requires auth; open public bind is refused.
+    #[arg(long, default_value_t = false)]
+    pub dangerously_bind_public: bool,
+
+    /// Enterprise reduced scopes: force no `agent_spawn` and a restricted
+    /// tool pattern set on every session token (WEFT-697).
+    #[arg(long, default_value_t = false)]
+    pub enterprise: bool,
+
+    /// Issue a one-shot capability token to stdout and exit (JSON:
+    /// `{ "token", "scopes", "client_label" }`). Useful for minting remote
+    /// Grok headers without running the server. Does not print secrets of
+    /// other sessions.
+    #[arg(long, default_value_t = false)]
+    pub issue_token: bool,
+
+    /// Client label to stamp on `--issue-token` (`grok` | `claude` | `unknown`).
+    #[arg(long, default_value = "unknown")]
+    pub client_label: String,
 }
 
 /// Whether proxied external MCP tools should be registered on the serve
@@ -95,11 +154,32 @@ pub fn should_reexport_mcp(profiles: &ProfileSet, reexport_flag: bool) -> bool {
     profiles.allows_mcp_reexport() && reexport_flag
 }
 
+/// Resolve the bearer token for listen mode from CLI / env.
+fn resolve_listen_token(args: &McpServerArgs) -> anyhow::Result<Option<String>> {
+    if let Some(t) = args.token.as_ref().filter(|s| !s.is_empty()) {
+        return Ok(Some(t.clone()));
+    }
+    let env_name = args
+        .token_env
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("WEFT_MCP_TOKEN");
+    match std::env::var(env_name) {
+        Ok(v) if !v.is_empty() => Ok(Some(v)),
+        Ok(_) | Err(_) => {
+            if args.token_env.is_some() {
+                anyhow::bail!("environment variable '{env_name}' is unset or empty");
+            }
+            Ok(None)
+        }
+    }
+}
+
 /// Run the MCP server command.
 ///
 /// Loads configuration, builds the tool registry, filters by serve profile
-/// (ADR-076 / WEFT-699 / WEFT-700), and serves tools over stdio using
-/// [`McpServerShell`] with the full middleware pipeline.
+/// (ADR-076 / WEFT-699 / WEFT-700), and serves tools over stdio or HTTP/SSE
+/// (`--listen`) using [`McpServerShell`] with the full middleware pipeline.
 pub async fn run(args: McpServerArgs) -> anyhow::Result<()> {
     let profiles = ProfileSet::parse(&args.profile).map_err(|e| anyhow::anyhow!(e))?;
     let reexport = should_reexport_mcp(&profiles, args.reexport_mcp);
@@ -108,8 +188,15 @@ pub async fn run(args: McpServerArgs) -> anyhow::Result<()> {
         full = profiles.includes_full(),
         reexport_mcp = reexport,
         attach = args.attach,
+        listen = args.listen.as_deref().unwrap_or(""),
+        enterprise = args.enterprise,
         "starting weft mcp-server"
     );
+
+    // ── Issue token only (no serve) ──────────────────────────────────
+    if args.issue_token {
+        return run_issue_token(&args);
+    }
 
     // ── Attach façade (fail clear before building the rest) ──────────
     let attach_provider = if args.attach {
@@ -242,17 +329,29 @@ pub async fn run(args: McpServerArgs) -> anyhow::Result<()> {
         PermissionFilter::from_patterns(config.tools.allowed_tools.clone())
     };
 
+    let audit = AuditLog::new();
+    let audit_label = audit.label_handle();
+    // stdio local attach: label as unknown (or process can set later).
+    if args.listen.is_none() {
+        audit.set_client_label("unknown");
+    }
+
     let middlewares: Vec<Box<dyn Middleware>> = vec![
         Box::new(security_guard),
         Box::new(permission_filter),
         Box::new(ResultGuard::default()),
-        Box::new(AuditLog),
+        Box::new(audit),
     ];
 
-    // ── Create McpServerShell and run on stdin/stdout ────────────────
+    // ── Create McpServerShell ────────────────────────────────────────
     let mut shell = McpServerShell::new(composite);
     for mw in middlewares {
         shell.add_middleware(mw);
+    }
+
+    // ── HTTP/SSE listen mode (WEFT-696) ──────────────────────────────
+    if let Some(listen) = args.listen.as_deref() {
+        return run_listen_mode(&args, listen, shell, audit_label).await;
     }
 
     info!(
@@ -268,6 +367,115 @@ pub async fn run(args: McpServerArgs) -> anyhow::Result<()> {
 
     info!("stdin closed, MCP server shutting down");
     Ok(())
+}
+
+/// Mint a capability token and print JSON (no secrets of other sessions).
+fn run_issue_token(args: &McpServerArgs) -> anyhow::Result<()> {
+    use clawft_services::mcp::session_cap::ClientLabel;
+
+    let store = SessionTokenStore::new(true);
+    if args.enterprise {
+        store.enable_enterprise_reduced();
+    }
+    let label = ClientLabel::parse(&args.client_label);
+    let scopes = if args.enterprise {
+        SessionScopes::enterprise_reduced()
+    } else {
+        SessionScopes::owner()
+    };
+    let token = store
+        .issue(scopes.clone(), label, None)
+        .ok_or_else(|| anyhow::anyhow!("failed to issue token"))?;
+    // Note: store is dropped; token is for the caller to put into a live server's store.
+    // For production minting against a running server, use a control API later.
+    // Here we print the token + scope document so operators can also set --token.
+    let doc = serde_json::json!({
+        "token": token,
+        "client_label": label.as_str(),
+        "scopes": {
+            "tools": scopes.tools,
+            "workspace_roots": scopes.workspace_roots,
+            "agent_spawn": scopes.agent_spawn,
+        },
+        "note": "Pass token via --token / WEFT_MCP_TOKEN on the listen server; issued map is in-process only — for static bearer use the printed token as --token on the server."
+    });
+    println!("{}", serde_json::to_string_pretty(&doc)?);
+    Ok(())
+}
+
+/// HTTP/SSE remote serve path (requires clawft-services `api` feature via CLI `api`).
+#[cfg(feature = "api")]
+async fn run_listen_mode(
+    args: &McpServerArgs,
+    listen: &str,
+    shell: McpServerShell,
+    audit_label: Arc<std::sync::RwLock<String>>,
+) -> anyhow::Result<()> {
+    use clawft_services::mcp::{HttpMcpConfig, HttpMcpState, serve_mcp_http};
+
+    let (host, port) = HttpMcpConfig::parse_listen(listen).map_err(|e| anyhow::anyhow!(e))?;
+
+    let allow_unauth = args.allow_unauthenticated;
+    let auth_required = !allow_unauth;
+
+    validate_listen_policy(
+        &host,
+        auth_required,
+        allow_unauth,
+        args.dangerously_bind_public,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+
+    let token = resolve_listen_token(args)?;
+    if auth_required && token.is_none() {
+        anyhow::bail!(
+            "listen mode requires auth: pass --token, --token-env, or set WEFT_MCP_TOKEN \
+             (or use --allow-unauthenticated on loopback only)"
+        );
+    }
+
+    let store = Arc::new(SessionTokenStore::new(auth_required));
+    if let Some(t) = token {
+        store.add_static_token(t);
+        info!("MCP bearer token loaded (static capability)");
+    }
+    if args.enterprise {
+        store.enable_enterprise_reduced();
+        info!("enterprise reduced scopes enabled (no agent_spawn; restricted tools)");
+    }
+
+    let state = Arc::new(HttpMcpState::new(shell, store, audit_label));
+    let config = HttpMcpConfig {
+        host,
+        port,
+        allow_unauthenticated: allow_unauth,
+        dangerously_bind_public: args.dangerously_bind_public,
+    };
+
+    info!(
+        listen = %listen,
+        auth_required,
+        enterprise = args.enterprise,
+        "MCP HTTP/SSE listen mode (POST /mcp, GET /mcp/sse); TLS via reverse proxy"
+    );
+
+    serve_mcp_http(config, state)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+    Ok(())
+}
+
+#[cfg(not(feature = "api"))]
+async fn run_listen_mode(
+    _args: &McpServerArgs,
+    _listen: &str,
+    _shell: McpServerShell,
+    _audit_label: Arc<std::sync::RwLock<String>>,
+) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "--listen requires the CLI to be built with the `api` feature \
+         (default for weft). Rebuild: scripts/build.sh native"
+    );
 }
 
 /// Metadata for skill_list / skill_get façades.
@@ -617,14 +825,28 @@ fn discover_skill_dirs() -> (Option<PathBuf>, Option<PathBuf>) {
 mod tests {
     use super::*;
 
+    fn sample_args() -> McpServerArgs {
+        McpServerArgs {
+            config: None,
+            profile: "default".into(),
+            reexport_mcp: false,
+            attach: false,
+            listen: None,
+            token: None,
+            token_env: None,
+            allow_unauthenticated: false,
+            dangerously_bind_public: false,
+            enterprise: false,
+            issue_token: false,
+            client_label: "unknown".into(),
+        }
+    }
+
     #[test]
     fn mcp_server_args_attach() {
-        let args = McpServerArgs {
-            config: None,
-            profile: "control".into(),
-            reexport_mcp: false,
-            attach: true,
-        };
+        let mut args = sample_args();
+        args.profile = "control".into();
+        args.attach = true;
         assert!(args.attach);
         assert_eq!(args.profile, "control");
     }
@@ -650,28 +872,40 @@ mod tests {
 
     #[test]
     fn mcp_server_args_defaults() {
-        let args = McpServerArgs {
-            config: None,
-            profile: "default".into(),
-            reexport_mcp: false,
-                    attach: false,
-        };
+        let args = sample_args();
         assert!(args.config.is_none());
         assert_eq!(args.profile, "default");
         assert!(!args.reexport_mcp);
+        assert!(args.listen.is_none());
+        assert!(!args.enterprise);
+        assert!(!args.dangerously_bind_public);
     }
 
     #[test]
     fn mcp_server_args_with_config() {
-        let args = McpServerArgs {
-            config: Some("/tmp/config.json".into()),
-            profile: "full".into(),
-            reexport_mcp: false,
-                    attach: false,
-        };
+        let mut args = sample_args();
+        args.config = Some("/tmp/config.json".into());
+        args.profile = "full".into();
         assert_eq!(args.config.as_deref(), Some("/tmp/config.json"));
         assert_eq!(args.profile, "full");
         assert!(!args.reexport_mcp);
+    }
+
+    #[test]
+    fn mcp_server_args_listen_flags() {
+        let mut args = sample_args();
+        args.listen = Some("127.0.0.1:8742".into());
+        args.token = Some("sekret".into());
+        args.enterprise = true;
+        assert_eq!(args.listen.as_deref(), Some("127.0.0.1:8742"));
+        assert!(args.enterprise);
+        assert!(resolve_listen_token(&args).unwrap().as_deref() == Some("sekret"));
+    }
+
+    #[test]
+    fn validate_listen_policy_wired() {
+        assert!(validate_listen_policy("127.0.0.1", true, false, false).is_ok());
+        assert!(validate_listen_policy("0.0.0.0", true, false, false).is_err());
     }
 
     // ── WEFT-700 public wire ─────────────────────────────────────────

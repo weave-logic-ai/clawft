@@ -11,6 +11,11 @@ pub mod ide;
 pub mod middleware;
 pub mod provider;
 pub mod server;
+/// Session capability tokens + bind policy (ADR-075 G5 / WEFT-697).
+pub mod session_cap;
+/// HTTP/SSE MCP listen (ADR-075 G4 / WEFT-696). Requires `api` feature (axum).
+#[cfg(any(feature = "api", test))]
+pub mod http_serve;
 pub mod transport;
 pub mod types;
 
@@ -18,6 +23,12 @@ pub use provider::{
     BuiltinToolProvider, CallToolResult, ContentBlock, SkillToolProvider, ToolError, ToolProvider,
     skill_to_tool_definition, skills_to_tool_definitions,
 };
+pub use session_cap::{
+    BindKind, ClientLabel, SessionCapability, SessionScopes, SessionTokenStore, classify_bind_host,
+    extract_bearer, validate_listen_policy,
+};
+#[cfg(any(feature = "api", test))]
+pub use http_serve::{HttpMcpConfig, HttpMcpState, mcp_http_router, run_listen, serve_mcp_http};
 pub use transport::{
     DefaultTransportFactory, McpTransportFactory, SpecReconnect, TOOLS_LIST_CHANGED_METHOD,
     TransportFactoryConfig, TransportReconnect, TransportSpec, validate_command_path,

@@ -433,15 +433,58 @@ impl Middleware for ResultGuard {
 /// Middleware that logs tool invocations at `info!` level.
 ///
 /// Does not modify any tools or results -- purely observational.
+///
+/// When a [client label](super::session_cap::ClientLabel) is known
+/// (HTTP header / initialize `clientInfo`), it is included on every
+/// audit line (ADR-075 G5 / WEFT-697). Secrets must never appear in
+/// tool results; this middleware only logs a truncated args summary.
 #[derive(Debug, Clone, Default)]
-pub struct AuditLog;
+pub struct AuditLog {
+    /// Shared client label slot (e.g. `"grok"`, `"claude"`, `"unknown"`).
+    client_label: std::sync::Arc<std::sync::RwLock<String>>,
+}
+
+impl AuditLog {
+    /// Create an audit logger with an initial client label (`"unknown"`).
+    pub fn new() -> Self {
+        Self {
+            client_label: std::sync::Arc::new(std::sync::RwLock::new("unknown".into())),
+        }
+    }
+
+    /// Create with a shared label slot (HTTP handlers update per request).
+    pub fn with_shared_label(client_label: std::sync::Arc<std::sync::RwLock<String>>) -> Self {
+        Self { client_label }
+    }
+
+    /// Snapshot of the shared label handle for remote sessions.
+    pub fn label_handle(&self) -> std::sync::Arc<std::sync::RwLock<String>> {
+        std::sync::Arc::clone(&self.client_label)
+    }
+
+    /// Set the client label for subsequent audit lines.
+    pub fn set_client_label(&self, label: impl Into<String>) {
+        if let Ok(mut g) = self.client_label.write() {
+            *g = label.into();
+        }
+    }
+
+    fn current_label(&self) -> String {
+        self.client_label
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_else(|_| "unknown".into())
+    }
+}
 
 #[async_trait]
 impl Middleware for AuditLog {
     async fn before_call(&self, request: ToolCallRequest) -> Result<ToolCallRequest, ToolError> {
         let args_summary = summarize_json(&request.args, 200);
+        let client = self.current_label();
         info!(
             tool = %request.name,
+            client = %client,
             args = %args_summary,
             "tool call started"
         );
@@ -461,8 +504,10 @@ impl Middleware for AuditLog {
             })
             .sum();
 
+        let client = self.current_label();
         info!(
             tool = %request.name,
+            client = %client,
             is_error = result.is_error,
             content_bytes = content_len,
             "tool call completed"
@@ -779,7 +824,7 @@ mod tests {
 
     #[tokio::test]
     async fn audit_log_passthrough_before_call() {
-        let audit = AuditLog;
+        let audit = AuditLog::new();
         let req = make_request("echo", serde_json::json!({"text": "hello"}));
         let result = audit.before_call(req).await.unwrap();
         assert_eq!(result.name, "echo");
@@ -788,7 +833,7 @@ mod tests {
 
     #[tokio::test]
     async fn audit_log_passthrough_after_call() {
-        let audit = AuditLog;
+        let audit = AuditLog::new();
         let original = CallToolResult::text("output");
         let req = make_request("echo", serde_json::json!({}));
         let result = audit.after_call(&req, original.clone()).await.unwrap();
@@ -797,7 +842,7 @@ mod tests {
 
     #[tokio::test]
     async fn audit_log_does_not_modify_tools() {
-        let audit = AuditLog;
+        let audit = AuditLog::new();
         let tools = sample_tools();
         let filtered = audit.filter_tools(tools.clone()).await;
         assert_eq!(filtered.len(), tools.len());

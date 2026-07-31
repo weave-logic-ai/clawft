@@ -86,6 +86,200 @@ impl McpServerShell {
         write_response(writer, &tools_list_changed_notification()).await
     }
 
+    /// Whether the initialize handshake has completed.
+    pub fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+
+    /// Handle a single JSON-RPC message (request or notification).
+    ///
+    /// Returns `Some(response)` for requests, `None` for notifications.
+    /// Used by both the stdio loop and HTTP/SSE serve (WEFT-696).
+    ///
+    /// `session_scopes` optionally further restricts tools beyond the
+    /// shell middleware (session capability tokens — WEFT-697).
+    pub async fn handle_message(
+        &mut self,
+        msg: Value,
+        session_scopes: Option<&super::session_cap::SessionScopes>,
+    ) -> Option<Value> {
+        let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
+        let id = msg.get("id").cloned();
+        let params = msg
+            .get("params")
+            .cloned()
+            .unwrap_or_else(|| Value::Object(Default::default()));
+
+        // Notifications have no id -- never send a response.
+        let is_notification = id.is_none();
+
+        match method {
+            "initialize" => {
+                self.initialized = true;
+                let result = serde_json::json!({
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {
+                        "tools": { "listChanged": true }
+                    },
+                    "serverInfo": {
+                        "name": SERVER_NAME,
+                        "version": SERVER_VERSION
+                    }
+                });
+                id.map(|id| make_success_response(id, result))
+            }
+
+            "notifications/initialized" => None,
+
+            "ping" => {
+                // MCP keepalive (WEFT-191 / remote health).
+                if !self.initialized && !is_notification {
+                    return Some(make_error_response(
+                        id.unwrap_or(Value::Null),
+                        NOT_INITIALIZED,
+                        "Server not initialized",
+                    ));
+                }
+                id.map(|id| make_success_response(id, serde_json::json!({})))
+            }
+
+            _ if !self.initialized => {
+                if is_notification {
+                    None
+                } else {
+                    Some(make_error_response(
+                        id.unwrap_or(Value::Null),
+                        NOT_INITIALIZED,
+                        "Server not initialized",
+                    ))
+                }
+            }
+
+            "tools/list" => {
+                let mut tools = self.provider.list_tools_all();
+
+                // Apply middleware filter_tools in order.
+                for mw in &self.middlewares {
+                    tools = mw.filter_tools(tools).await;
+                }
+
+                // Session capability scopes (WEFT-697).
+                if let Some(scopes) = session_scopes {
+                    tools.retain(|t| scopes.allows_tool(&t.name));
+                }
+
+                let tools_json = serialize_tools(&tools);
+                let result = serde_json::json!({ "tools": tools_json });
+
+                id.map(|id| make_success_response(id, result))
+            }
+
+            "tools/call" => {
+                let name = params
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let args = params
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Object(Default::default()));
+
+                // Session capability gate before middleware (WEFT-697).
+                if let Some(scopes) = session_scopes
+                    && !scopes.allows_tool(&name)
+                {
+                    let err_result = CallToolResult::error(format!(
+                        "permission denied: session capability lacks tool '{name}'"
+                    ));
+                    let result_value = serde_json::to_value(&err_result).unwrap_or(Value::Null);
+                    return id.map(|id| make_success_response(id, result_value));
+                }
+
+                // Workspace root check for common path args (best-effort).
+                if let Some(scopes) = session_scopes {
+                    for key in ["path", "file", "file_path", "dir", "directory"] {
+                        if let Some(p) = args.get(key).and_then(|v| v.as_str()) {
+                            let path = std::path::Path::new(p);
+                            if !scopes.allows_workspace_path(path) {
+                                let err_result = CallToolResult::error(format!(
+                                    "permission denied: path '{p}' outside session workspace roots"
+                                ));
+                                let result_value =
+                                    serde_json::to_value(&err_result).unwrap_or(Value::Null);
+                                return id.map(|id| make_success_response(id, result_value));
+                            }
+                        }
+                    }
+                }
+
+                let mut request = ToolCallRequest {
+                    name: name.clone(),
+                    args,
+                };
+
+                // Apply middleware before_call hooks.
+                let mut mw_error = None;
+                for mw in &self.middlewares {
+                    match mw.before_call(request).await {
+                        Ok(r) => request = r,
+                        Err(e) => {
+                            mw_error = Some(e);
+                            // Reconstruct a minimal request for the error path.
+                            request = ToolCallRequest {
+                                name,
+                                args: Value::Object(Default::default()),
+                            };
+                            break;
+                        }
+                    }
+                }
+
+                let call_result = if let Some(err) = mw_error {
+                    Err(err)
+                } else {
+                    self.provider
+                        .call_tool(&request.name, request.args.clone())
+                        .await
+                };
+
+                let result_value = match call_result {
+                    Ok(mut result) => {
+                        // Apply middleware after_call hooks.
+                        for mw in &self.middlewares {
+                            match mw.after_call(&request, result).await {
+                                Ok(r) => result = r,
+                                Err(e) => {
+                                    result = CallToolResult::error(e.to_string());
+                                    break;
+                                }
+                            }
+                        }
+                        serde_json::to_value(&result).unwrap_or(Value::Null)
+                    }
+                    Err(e) => {
+                        let err_result = CallToolResult::error(e.to_string());
+                        serde_json::to_value(&err_result).unwrap_or(Value::Null)
+                    }
+                };
+
+                id.map(|id| make_success_response(id, result_value))
+            }
+
+            _ => {
+                if is_notification {
+                    None
+                } else {
+                    Some(make_error_response(
+                        id.unwrap_or(Value::Null),
+                        METHOD_NOT_FOUND,
+                        &format!("Method not found: {method}"),
+                    ))
+                }
+            }
+        }
+    }
+
     /// Run the server loop, reading lines from `reader` and writing
     /// responses to `writer` until EOF.
     pub async fn run<R, W>(&mut self, reader: R, mut writer: W) -> std::io::Result<()>
@@ -111,145 +305,9 @@ impl McpServerShell {
                 }
             };
 
-            let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
-            let id = msg.get("id").cloned();
-            let params = msg
-                .get("params")
-                .cloned()
-                .unwrap_or_else(|| Value::Object(Default::default()));
-
-            // Notifications have no id -- never send a response.
-            let is_notification = id.is_none();
-
-            match method {
-                "initialize" => {
-                    self.initialized = true;
-                    let result = serde_json::json!({
-                        "protocolVersion": PROTOCOL_VERSION,
-                        "capabilities": {
-                            "tools": { "listChanged": true }
-                        },
-                        "serverInfo": {
-                            "name": SERVER_NAME,
-                            "version": SERVER_VERSION
-                        }
-                    });
-                    if let Some(id) = id {
-                        let resp = make_success_response(id, result);
-                        write_response(&mut writer, &resp).await?;
-                    }
-                }
-
-                "notifications/initialized" => {
-                    // Notification acknowledgement -- no response.
-                }
-
-                _ if !self.initialized => {
-                    if !is_notification {
-                        let resp = make_error_response(
-                            id.unwrap_or(Value::Null),
-                            NOT_INITIALIZED,
-                            "Server not initialized",
-                        );
-                        write_response(&mut writer, &resp).await?;
-                    }
-                }
-
-                "tools/list" => {
-                    let mut tools = self.provider.list_tools_all();
-
-                    // Apply middleware filter_tools in order.
-                    for mw in &self.middlewares {
-                        tools = mw.filter_tools(tools).await;
-                    }
-
-                    let tools_json = serialize_tools(&tools);
-                    let result = serde_json::json!({ "tools": tools_json });
-
-                    if let Some(id) = id {
-                        let resp = make_success_response(id, result);
-                        write_response(&mut writer, &resp).await?;
-                    }
-                }
-
-                "tools/call" => {
-                    let name = params
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let args = params
-                        .get("arguments")
-                        .cloned()
-                        .unwrap_or_else(|| Value::Object(Default::default()));
-
-                    let mut request = ToolCallRequest {
-                        name: name.clone(),
-                        args,
-                    };
-
-                    // Apply middleware before_call hooks.
-                    let mut mw_error = None;
-                    for mw in &self.middlewares {
-                        match mw.before_call(request).await {
-                            Ok(r) => request = r,
-                            Err(e) => {
-                                mw_error = Some(e);
-                                // Reconstruct a minimal request for the error path.
-                                request = ToolCallRequest {
-                                    name,
-                                    args: Value::Object(Default::default()),
-                                };
-                                break;
-                            }
-                        }
-                    }
-
-                    let call_result = if let Some(err) = mw_error {
-                        Err(err)
-                    } else {
-                        self.provider
-                            .call_tool(&request.name, request.args.clone())
-                            .await
-                    };
-
-                    let result_value = match call_result {
-                        Ok(mut result) => {
-                            // Apply middleware after_call hooks.
-                            for mw in &self.middlewares {
-                                match mw.after_call(&request, result).await {
-                                    Ok(r) => result = r,
-                                    Err(e) => {
-                                        result = CallToolResult::error(e.to_string());
-                                        break;
-                                    }
-                                }
-                            }
-                            serde_json::to_value(&result).unwrap_or(Value::Null)
-                        }
-                        Err(e) => {
-                            let err_result = CallToolResult::error(e.to_string());
-                            serde_json::to_value(&err_result).unwrap_or(Value::Null)
-                        }
-                    };
-
-                    if let Some(id) = id {
-                        let resp = make_success_response(id, result_value);
-                        write_response(&mut writer, &resp).await?;
-                    }
-                }
-
-                _ => {
-                    // Unknown method.
-                    if !is_notification {
-                        let resp = make_error_response(
-                            id.unwrap_or(Value::Null),
-                            METHOD_NOT_FOUND,
-                            &format!("Method not found: {method}"),
-                        );
-                        write_response(&mut writer, &resp).await?;
-                    }
-                }
+            // stdio: implicit owner capability (no extra scope filter).
+            if let Some(resp) = self.handle_message(msg, None).await {
+                write_response(&mut writer, &resp).await?;
             }
         }
 

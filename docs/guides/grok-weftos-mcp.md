@@ -13,7 +13,7 @@ This guide is the operator write-up for attaching **Grok Build** (`grok`) to a *
 | Role | Component |
 |------|-----------|
 | **MCP client** | Grok Build (TUI / headless / ACP) |
-| **MCP server** | `weft mcp-server` (stdio JSON-RPC today) |
+| **MCP server** | `weft mcp-server` (stdio JSON-RPC; optional `--listen` HTTP/SSE) |
 | **Governance** | Middleware on the server (security, permissions, audit) |
 | **Intent bus (later)** | `WindowIntent` + agent runtime — same path as voice/GUI (ADR-073) |
 
@@ -105,7 +105,7 @@ claude mcp add clawft -- weft mcp-server
 |-------|----------------|--------|
 | **L1 Tool client** | Call WeftOS tools from Grok | **Now** (stdio; catalog still evolving) |
 | **L2 Control plane** | Profiles + weave façade tools | Phased (ADR-076 C1–C3, ADR-075 G1–G2) |
-| **L3 Remote instance** | Grok laptop → remote WeftOS HTTP MCP | Phased (G4) |
+| **L3 Remote instance** | Grok laptop → remote WeftOS HTTP MCP | **Now** (`--listen` + bearer; WEFT-696/697) |
 
 ### Profiles (ADR-076 / WEFT-699–700) — live defaults
 
@@ -161,17 +161,77 @@ Standalone `weft mcp-server` (no `--attach`) remains offline/dev coding tools on
 Prefer public names: `status`, `agent_list`, `agent_spawn`, `agent_stop`, `window_*`, `read_file`, `process_spawn`, `skill_list`, `skill_get`, …  
 Full rows: [capability catalog](../weftos/mcp-capability-catalog.md).
 
-### Level 3 (remote)
+### Level 3 (remote) — HTTP/SSE listen (WEFT-696 / WEFT-697)
 
-Grok already supports:
+On the **WeftOS host**:
+
+```bash
+# Generate a strong secret (do not commit it)
+export WEFT_MCP_TOKEN="$(openssl rand -hex 32)"
+
+# Loopback (default-safe): auth required
+weft mcp-server --listen 127.0.0.1:8742 --token-env WEFT_MCP_TOKEN
+
+# LAN / public interface: must opt in; auth still required
+weft mcp-server --listen 0.0.0.0:8742 --token-env WEFT_MCP_TOKEN --dangerously-bind-public
+
+# Enterprise: force reduced scopes (no agent_spawn; restricted tool globs)
+weft mcp-server --listen 127.0.0.1:8742 --token-env WEFT_MCP_TOKEN --enterprise
+
+# Optional: mint a token document (static bearer = put same value in WEFT_MCP_TOKEN)
+weft mcp-server --issue-token --client-label grok --enterprise
+```
+
+**Auth rules (refuse open public bind):**
+
+| Bind | Auth | Flag |
+|------|------|------|
+| `127.0.0.1` / `::1` | Bearer required by default | `--allow-unauthenticated` only for trusted loopback dev |
+| `0.0.0.0` / non-loopback | Bearer **always** required | also needs `--dangerously-bind-public` |
+| Open public (no token) | **Refused** | even with dangerous flag |
+
+Endpoints:
+
+| Method | Path | Notes |
+|--------|------|--------|
+| `POST` | `/mcp` | JSON-RPC (initialize, tools/list, tools/call, ping) |
+| `GET` | `/mcp` or `/mcp/sse` | SSE keepalive stream (auth required) |
+| `GET` | `/health` | Liveness (no auth) |
+
+**Session capability (WEFT-697):** bearer tokens map to scopes — tool globs, workspace roots, `agent_spawn` rights. Audit log lines include `client=` when known (`X-MCP-Client: grok` or `clientInfo.name` on initialize). Secrets never appear in tool results.
+
+**TLS:** terminate TLS at a reverse proxy (Caddy / nginx / cloud LB). The process speaks plain HTTP on the listen port by design.
+
+```nginx
+# Example reverse-proxy snippet (TLS at edge → loopback MCP)
+location /mcp {
+    proxy_pass http://127.0.0.1:8742;
+    proxy_http_version 1.1;
+    proxy_set_header Authorization $http_authorization;
+    proxy_set_header X-MCP-Client $http_x_mcp_client;
+}
+```
+
+**Grok remote stanza** (`~/.grok/config.toml` or project `.grok/config.toml`):
 
 ```toml
 [mcp_servers.weftos-remote]
 url = "https://your-host/mcp"
-headers = { Authorization = "Bearer …" }
+enabled = true
+# Prefer env expansion / local overrides — do not commit real tokens
+headers = { Authorization = "Bearer ${WEFT_MCP_TOKEN}", "X-MCP-Client" = "grok" }
 ```
 
-WeftOS must ship a **listen** mode for MCP HTTP/SSE (or streamable HTTP) with auth — not default open bind. Until then, use SSH + local stdio or a tunnel.
+Checklist (manual):
+
+1. `export WEFT_MCP_TOKEN=…` on server; start `weft mcp-server --listen 127.0.0.1:8742 --token-env WEFT_MCP_TOKEN`
+2. `curl -s http://127.0.0.1:8742/health` → `{"ok":true,…}`
+3. `curl -s -X POST http://127.0.0.1:8742/mcp -H "Authorization: Bearer $WEFT_MCP_TOKEN" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"grok","version":"1"}}}'` → serverInfo
+4. Without `Authorization` → HTTP 401
+5. `weft mcp-server --listen 0.0.0.0:8742 --token-env WEFT_MCP_TOKEN` (no dangerous flag) → refuse at startup
+6. Point Grok `url` + `headers` at the TLS edge; `grok mcp doctor weftos-remote`
+
+Local stdio remains the default for single-machine attach (`grok mcp add weftos -- weft mcp-server`).
 
 ---
 
@@ -191,7 +251,8 @@ Running both at once can create **delegation loops**. Prefer one primary driver 
 - All MCP calls through `weft mcp-server` pass the middleware pipeline (validation, permission, result guard, audit).  
 - Workspace file tools stay sandboxed to configured workspace roots.  
 - Shell tools still hit denylist / policy.  
-- Remote serve (when shipped) **must** use auth; never expose unauthenticated MCP on a public interface.  
+- Remote serve (`--listen`) **requires** auth by default; open public bind is refused.  
+- Prefer `--token-env` / `WEFT_MCP_TOKEN` over `--token` (avoids argv leakage).  
 - Do not commit API keys in `.grok/config.toml`; use env expansion / local overrides.
 
 ---
@@ -228,8 +289,8 @@ Product bar (CNVS-like conductor): Grok or voice can spawn visible agents and dr
 | **WEFT-693** | G1 curated serve profile *(dup intent with WEFT-699)* | 0.8.x |
 | **WEFT-694** | G2 status / agents MCP tools | 0.8.x |
 | **WEFT-695** | G3 MCP → WindowIntent | 0.9.x |
-| **WEFT-696** | G4 HTTP/SSE listen + auth | 0.9.x |
-| **WEFT-697** | G5 session capability tokens | 0.9.x |
+| **WEFT-696** | G4 HTTP/SSE listen + auth | 0.8.x (shipped) |
+| **WEFT-697** | G5 session capability tokens | 0.8.x (shipped) |
 | **WEFT-698…703** | ADR-076 C0–C5 catalog / profiles / attach / CI | 0.8–0.9 |
 
 Related workspace/voice: WEFT-685…691 (ADR-073/074).
