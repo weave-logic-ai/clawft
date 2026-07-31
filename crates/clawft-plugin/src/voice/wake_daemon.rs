@@ -22,6 +22,7 @@ use tracing::info;
 use crate::error::PluginError;
 use crate::traits::CancellationToken;
 
+use super::rate_limit::{VoiceRateDecision, VoiceRateLimiter};
 use super::wake::{WakeWordBackend, WakeWordConfig, WakeWordDetector};
 
 /// Daemon that runs wake word detection in the background.
@@ -31,9 +32,17 @@ use super::wake::{WakeWordBackend, WakeWordConfig, WakeWordDetector};
 ///
 /// Today both capture and detection are stubs — `run` does not open a
 /// microphone and never activates Talk Mode from a wake hit.
+///
+/// # SC-8 / WEFT-226
+///
+/// [`try_activate`] consults the optional [`VoiceRateLimiter`] wake
+/// bucket (5/min default) before reporting an activation. Wire a shared
+/// limiter from the command path so both surfaces share post-fail cooldown.
 pub struct WakeDaemon {
     detector: WakeWordDetector,
     active: bool,
+    /// Optional SC-8 rate limiter (wake bucket).
+    rate_limiter: Option<VoiceRateLimiter>,
 }
 
 impl WakeDaemon {
@@ -45,7 +54,36 @@ impl WakeDaemon {
         Ok(Self {
             detector,
             active: false,
+            rate_limiter: Some(VoiceRateLimiter::with_defaults()),
         })
+    }
+
+    /// Attach or replace the SC-8 rate limiter (shared with command path).
+    pub fn with_rate_limiter(mut self, limiter: VoiceRateLimiter) -> Self {
+        self.rate_limiter = Some(limiter);
+        self
+    }
+
+    /// Disable rate limiting (tests / explicit opt-out).
+    pub fn without_rate_limiter(mut self) -> Self {
+        self.rate_limiter = None;
+        self
+    }
+
+    /// Mutable access to the SC-8 limiter, if attached.
+    pub fn rate_limiter_mut(&mut self) -> Option<&mut VoiceRateLimiter> {
+        self.rate_limiter.as_mut()
+    }
+
+    /// Record a wake activation against the SC-8 wake bucket.
+    ///
+    /// Returns [`VoiceRateDecision::Allow`] when no limiter is attached.
+    /// Call this when a real detector would open Talk Mode.
+    pub fn try_activate(&mut self) -> VoiceRateDecision {
+        match self.rate_limiter.as_mut() {
+            Some(lim) => lim.check_wake(),
+            None => VoiceRateDecision::Allow,
+        }
     }
 
     /// Run the daemon until cancelled.
@@ -100,6 +138,32 @@ mod tests {
         assert!(!daemon.is_active());
         assert_eq!(daemon.backend(), WakeWordBackend::Stub);
         assert!(daemon.detector().is_stub());
+    }
+
+    #[test]
+    fn wake_daemon_sc8_rate_limits_activations() {
+        // WEFT-226: default limiter is 5 wake activations/min.
+        let mut daemon = WakeDaemon::new(WakeWordConfig::default()).unwrap();
+        for i in 0..5 {
+            assert!(
+                daemon.try_activate().is_allowed(),
+                "wake activation {i} should pass"
+            );
+        }
+        assert!(
+            !daemon.try_activate().is_allowed(),
+            "6th wake activation must be rate-limited"
+        );
+    }
+
+    #[test]
+    fn wake_daemon_without_limiter_always_allows() {
+        let mut daemon = WakeDaemon::new(WakeWordConfig::default())
+            .unwrap()
+            .without_rate_limiter();
+        for _ in 0..20 {
+            assert!(daemon.try_activate().is_allowed());
+        }
     }
 
     #[test]

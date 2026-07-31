@@ -79,6 +79,21 @@ pub struct VoiceConfig {
     /// Disabled by default; voice features must be opted into.
     #[serde(default)]
     pub consumer: VoiceConsumerConfig,
+
+    /// Destructive-action confirmation (SC-6 / WEFT-225).
+    ///
+    /// Anti-replay nonce + transcription-echo prompts for
+    /// `VoiceCommand.confirm` (and other destructive voice actions).
+    #[serde(default)]
+    pub confirmation: VoiceConfirmationConfig,
+
+    /// Voice rate limiting (SC-8 / WEFT-226).
+    ///
+    /// Token-bucket caps for commands and wake activations, plus a
+    /// post-fail cooldown after consecutive low-confidence / failed
+    /// command attempts.
+    #[serde(default, alias = "rateLimit")]
+    pub rate_limit: VoiceRateLimitConfig,
 }
 
 /// Voice transport mode — mouth/ears path (ADR-074).
@@ -982,6 +997,106 @@ pub struct CloudFallbackConfig {
     pub tts_provider: String,
 }
 
+/// Voice confirmation gate configuration (SC-6 / WEFT-225).
+///
+/// Controls the anti-replay nonce and transcription-echo pattern used
+/// when a voice command (or other destructive action) requires spoken
+/// confirmation before execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoiceConfirmationConfig {
+    /// Seconds to wait for a spoken confirmation before cancelling.
+    /// Spec default: 10.
+    #[serde(default = "default_confirmation_timeout_seconds", alias = "timeoutSeconds")]
+    pub timeout_seconds: u32,
+
+    /// Include a one-shot nonce word in the confirm prompt
+    /// ("Say 'confirm delta' to proceed."). Default true.
+    #[serde(default = "default_true", alias = "antiReplayNonce")]
+    pub anti_replay_nonce: bool,
+
+    /// Echo the heard transcription before asking for confirmation
+    /// ("I heard: '…'. Is that correct?"). Default true.
+    #[serde(default = "default_true", alias = "transcriptionEcho")]
+    pub transcription_echo: bool,
+}
+
+fn default_confirmation_timeout_seconds() -> u32 {
+    10
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for VoiceConfirmationConfig {
+    fn default() -> Self {
+        Self {
+            timeout_seconds: default_confirmation_timeout_seconds(),
+            anti_replay_nonce: true,
+            transcription_echo: true,
+        }
+    }
+}
+
+/// Voice rate-limit configuration (SC-8 / WEFT-226).
+///
+/// Token-bucket caps and the post-fail cooldown that protects against
+/// ambient-noise flooding and adversarial rapid-fire wake/command loops.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoiceRateLimitConfig {
+    /// Max voice commands accepted per minute (token bucket capacity +
+    /// refill rate). Spec default: 10.
+    #[serde(
+        default = "default_commands_per_minute",
+        alias = "commandsPerMinute"
+    )]
+    pub commands_per_minute: u32,
+
+    /// Max wake-word activations accepted per minute. Spec default: 5.
+    #[serde(
+        default = "default_wake_activations_per_minute",
+        alias = "wakeActivationsPerMinute"
+    )]
+    pub wake_activations_per_minute: u32,
+
+    /// Consecutive failed command attempts that trip the post-fail
+    /// cooldown. Spec default: 3.
+    #[serde(default = "default_fail_threshold", alias = "failThreshold")]
+    pub fail_threshold: u32,
+
+    /// Cooldown duration (seconds) after the fail threshold is reached.
+    /// Spec default: 30.
+    #[serde(
+        default = "default_post_fail_cooldown_seconds",
+        alias = "postFailCooldownSeconds"
+    )]
+    pub post_fail_cooldown_seconds: u32,
+}
+
+fn default_commands_per_minute() -> u32 {
+    10
+}
+fn default_wake_activations_per_minute() -> u32 {
+    5
+}
+fn default_fail_threshold() -> u32 {
+    3
+}
+fn default_post_fail_cooldown_seconds() -> u32 {
+    30
+}
+
+impl Default for VoiceRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            commands_per_minute: default_commands_per_minute(),
+            wake_activations_per_minute: default_wake_activations_per_minute(),
+            fail_threshold: default_fail_threshold(),
+            post_fail_cooldown_seconds: default_post_fail_cooldown_seconds(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1025,6 +1140,31 @@ mod tests {
             custom.realtime_url(),
             "wss://api.x.ai/v1/realtime?model=grok-voice-think-fast-2.0"
         );
+    }
+
+    #[test]
+    fn voice_confirmation_and_rate_limit_defaults() {
+        let cfg: VoiceConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.confirmation.timeout_seconds, 10);
+        assert!(cfg.confirmation.anti_replay_nonce);
+        assert!(cfg.confirmation.transcription_echo);
+        assert_eq!(cfg.rate_limit.commands_per_minute, 10);
+        assert_eq!(cfg.rate_limit.wake_activations_per_minute, 5);
+        assert_eq!(cfg.rate_limit.fail_threshold, 3);
+        assert_eq!(cfg.rate_limit.post_fail_cooldown_seconds, 30);
+
+        let custom: VoiceConfig = serde_json::from_str(
+            r#"{
+                "confirmation": {"timeoutSeconds": 15, "antiReplayNonce": false},
+                "rateLimit": {"commandsPerMinute": 20, "wakeActivationsPerMinute": 2}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(custom.confirmation.timeout_seconds, 15);
+        assert!(!custom.confirmation.anti_replay_nonce);
+        assert!(custom.confirmation.transcription_echo); // default
+        assert_eq!(custom.rate_limit.commands_per_minute, 20);
+        assert_eq!(custom.rate_limit.wake_activations_per_minute, 2);
     }
 
     #[test]

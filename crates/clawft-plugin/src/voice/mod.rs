@@ -80,7 +80,11 @@ pub mod talk_mode;
 pub mod cloud_stt;
 pub mod cloud_tts;
 pub mod commands;
+/// SC-6 / WEFT-225: anti-replay nonce + transcription-echo confirmation.
+pub mod confirm;
 pub mod fallback;
+/// SC-8 / WEFT-226: command/wake token buckets + post-fail cooldown.
+pub mod rate_limit;
 pub mod transcript_log;
 
 // Re-export key types.
@@ -94,9 +98,20 @@ pub use clawft_types::config::AudioRetention;
 pub use clawft_types::{SecureAudioBuffer, SecureAudioRing};
 
 pub use channel::{VoiceChannel, VoiceStatus};
+pub use commands::{
+    CommandDispatch, VoiceCommand, VoiceCommandRegistry, VoiceCommandSession, levenshtein_distance,
+};
 pub use config::{VoiceAudioConfig, VoiceCaptureSpec, VoicePipelineConfig, VoicePlaybackSpec};
+pub use confirm::{
+    CONFIRM_TARGET, ConfirmResult, ConfirmationGate, EntropyNonceSource, FixedNonceSource,
+    NonceSource, PendingConfirmation, build_confirm_prompt, command_requires_confirm,
+    matches_confirm_nonce,
+};
 pub use echo::{EchoCanceller, EchoCancellerConfig};
 pub use events::VoiceWsEvent;
+pub use rate_limit::{
+    RATE_LIMIT_TARGET, VoiceRateDecision, VoiceRateKind, VoiceRateLimiter,
+};
 pub use models::{
     EnsureOutcome, ModelDownloadManager, ModelInfo, finish_stderr_progress, is_placeholder_hash,
     sha256_hex_bytes, sha256_hex_file, stderr_progress_line,

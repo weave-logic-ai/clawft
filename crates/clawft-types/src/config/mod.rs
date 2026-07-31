@@ -1268,6 +1268,14 @@ mod tests {
         assert!(!cfg.cloud_fallback.enabled);
         assert!(cfg.cloud_fallback.stt_provider.is_empty());
         assert!(cfg.cloud_fallback.tts_provider.is_empty());
+        // SC-6 / WEFT-225 + SC-8 / WEFT-226 defaults
+        assert_eq!(cfg.confirmation.timeout_seconds, 10);
+        assert!(cfg.confirmation.anti_replay_nonce);
+        assert!(cfg.confirmation.transcription_echo);
+        assert_eq!(cfg.rate_limit.commands_per_minute, 10);
+        assert_eq!(cfg.rate_limit.wake_activations_per_minute, 5);
+        assert_eq!(cfg.rate_limit.fail_threshold, 3);
+        assert_eq!(cfg.rate_limit.post_fail_cooldown_seconds, 30);
     }
 
     #[test]
