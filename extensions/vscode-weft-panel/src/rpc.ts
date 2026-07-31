@@ -35,8 +35,28 @@ export interface RpcRequest {
 export interface RpcResponse {
     ok: boolean;
     result?: unknown;
+    /** Legacy free-form error string (always set on failure). */
     error?: string;
+    /**
+     * Structured error discriminator (WEFT-334). Present on typed
+     * failures such as `agent.chat` — e.g. `"timeout"`, `"gate_deny"`,
+     * `"llm_error"`. Older responses omit this field.
+     */
+    error_kind?: string;
     id?: string;
+}
+
+/**
+ * Branch helper for WEFT-334 typed `agent.chat` errors.
+ *
+ * Returns the canonical kind when present, otherwise `undefined`
+ * (legacy string-only error). Panel UI can switch on:
+ * - `"timeout"` — show retry / longer-wait affordance
+ * - `"gate_deny"` — surface permission / policy denial
+ * - `"llm_error"` — provider failure message
+ */
+export function chatErrorKind(resp: RpcResponse): string | undefined {
+    return resp.error_kind;
 }
 
 const SOCKET_NAME = "kernel.sock";

@@ -4412,6 +4412,19 @@ async fn publish_chat_stream_frame(
     }
 }
 
+/// Build a typed `agent.chat` / `agent.chat_stream` error response
+/// (WEFT-334).
+///
+/// Populates both the legacy string `error` field
+/// (`"{method}: {message}"`) and the structured `error_kind`
+/// discriminator so panels can branch without substring-matching.
+fn agent_chat_err_response(
+    method: &str,
+    err: crate::protocol::AgentChatError,
+) -> Response {
+    Response::error_with_kind(err.error_kind(), err.legacy_message(method))
+}
+
 /// Handle `agent.chat_stream` (WEFT-253).
 ///
 /// Same request / final-response shape as `agent.chat`, plus progressive
@@ -4436,16 +4449,24 @@ async fn handle_agent_chat_stream(
     kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
 ) -> Response {
     let Some(agent) = daemon_agent() else {
-        return Response::error(
-            "agent.chat_stream: agent service not wired \
-             (LLM client init failed at boot — \
-             check daemon log for 'llm client init failed')",
+        return agent_chat_err_response(
+            "agent.chat_stream",
+            crate::protocol::AgentChatError::not_wired(
+                "agent service not wired \
+                 (LLM client init failed at boot — \
+                 check daemon log for 'llm client init failed')",
+            ),
         );
     };
     let params: AgentChatParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(e) => {
-            return Response::error(format!("agent.chat_stream: invalid params: {e}"));
+            return agent_chat_err_response(
+                "agent.chat_stream",
+                crate::protocol::AgentChatError::invalid_params(format!(
+                    "invalid params: {e}"
+                )),
+            );
         }
     };
     let conv_id = params.conv_id.clone();
@@ -4520,18 +4541,22 @@ async fn handle_agent_chat_stream(
                     }
                     Response::success(v)
                 }
-                Err(e) => Response::error(format!("agent.chat_stream: {e}")),
+                Err(e) => agent_chat_err_response(
+                    "agent.chat_stream",
+                    crate::protocol::AgentChatError::internal(format!("{e}")),
+                ),
             }
         }
         Err(e) => {
-            let msg = e.to_string();
+            let chat_err = e.to_chat_error();
+            let msg = chat_err.legacy_message("agent.chat_stream");
             publish_chat_stream_frame(
                 &kernel,
                 &conv_id,
                 crate::protocol::AgentChatStreamFrame::done_err(1, msg.clone()),
             )
             .await;
-            Response::error(format!("agent.chat_stream: {msg}"))
+            agent_chat_err_response("agent.chat_stream", chat_err)
         }
     }
 }
@@ -6057,11 +6082,17 @@ async fn dispatch(
             // typed error rather than panic. The `agent-core-chat`
             // feature flag survives so a single-commit revert + flag
             // flip restores the spike if D3 ever needs to roll back.
+            //
+            // WEFT-334: failures carry `error_kind` + legacy string
+            // `error` so panels can branch without substring matching.
             let Some(agent) = daemon_agent() else {
-                return Response::error(
-                    "agent.chat: agent service not wired \
-                     (LLM client init failed at boot — \
-                     check daemon log for 'llm client init failed')",
+                return agent_chat_err_response(
+                    "agent.chat",
+                    crate::protocol::AgentChatError::not_wired(
+                        "agent service not wired \
+                         (LLM client init failed at boot — \
+                         check daemon log for 'llm client init failed')",
+                    ),
                 );
             };
             // Wire and service types are now both re-exports of
@@ -6069,7 +6100,14 @@ async fn dispatch(
             // a direct hand-off — no `.into()` translator needed.
             let params: AgentChatParams = match serde_json::from_value(params) {
                 Ok(p) => p,
-                Err(e) => return Response::error(format!("agent.chat: invalid params: {e}")),
+                Err(e) => {
+                    return agent_chat_err_response(
+                        "agent.chat",
+                        crate::protocol::AgentChatError::invalid_params(format!(
+                            "invalid params: {e}"
+                        )),
+                    );
+                }
             };
             // M2 D6: capture conv_id before `dispatch` consumes params so the
             // idle reaper can stamp last-activity on success.
@@ -6081,10 +6119,13 @@ async fn dispatch(
                     }
                     match serde_json::to_value(result) {
                         Ok(v) => Response::success(v),
-                        Err(e) => Response::error(format!("agent.chat: {e}")),
+                        Err(e) => agent_chat_err_response(
+                            "agent.chat",
+                            crate::protocol::AgentChatError::internal(format!("{e}")),
+                        ),
                     }
                 }
-                Err(e) => Response::error(format!("agent.chat: {e}")),
+                Err(e) => agent_chat_err_response("agent.chat", e.to_chat_error()),
             }
         }
         // WEFT-253: progressive companion to agent.chat. Same request /

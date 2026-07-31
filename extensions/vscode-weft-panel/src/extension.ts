@@ -477,6 +477,10 @@ async function handleRpc(
             ok: resp.ok,
             result: resp.result ?? null,
             error: resp.error,
+            // WEFT-334: forward structured error_kind so the webview can
+            // branch on timeout / gate_deny / llm_error without parsing
+            // the legacy string field.
+            error_kind: resp.error_kind,
         });
     } catch (err) {
         const message = err instanceof RpcError ? err.message : String(err);

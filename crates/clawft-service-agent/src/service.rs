@@ -77,6 +77,35 @@ pub enum AgentServiceError {
     BudgetReset(String),
 }
 
+impl AgentServiceError {
+    /// Map this service error into a panel-facing [`AgentChatError`]
+    /// (WEFT-334).
+    ///
+    /// Loop failures are classified from the Display text of the
+    /// underlying [`clawft_types::ClawftError`] (the handle trait
+    /// boundary is still `String`). Structured service variants map
+    /// 1:1 onto chat error kinds.
+    pub fn to_chat_error(&self) -> clawft_types::agent_chat::AgentChatError {
+        use clawft_types::agent_chat::AgentChatError;
+        match self {
+            Self::ShuttingDown => AgentChatError::shutting_down(self.to_string()),
+            Self::Cancelled(conv_id) => {
+                AgentChatError::cancelled(format!("conversation `{conv_id}` was cancelled"))
+            }
+            Self::Loop(inner) => {
+                // Display is "agent loop error: {inner}" — classify on
+                // the inner ClawftError text so prefixes like
+                // "provider error:" / "operation timed out:" match.
+                AgentChatError::classify_loop_error(inner)
+            }
+            Self::NoBudget => AgentChatError::budget_exceeded(self.to_string()),
+            Self::BudgetReset(msg) => {
+                AgentChatError::internal(format!("budget reset failed: {msg}"))
+            }
+        }
+    }
+}
+
 /// Test seam over `clawft_core::agent::AgentLoop`.
 ///
 /// The production impl is the blanket `impl<P: Platform>` below;
@@ -1051,5 +1080,47 @@ mod tests {
         assert_eq!(r.iterations, 0);
         assert!(r.tool_calls.is_empty());
         assert!(r.spawned_tasks.is_empty());
+    }
+
+    // ── WEFT-334: AgentServiceError → AgentChatError ──────────────
+
+    #[test]
+    fn service_error_to_chat_error_maps_each_variant() {
+        use clawft_types::agent_chat::AgentChatError;
+
+        assert_eq!(
+            AgentServiceError::ShuttingDown.to_chat_error().error_kind(),
+            "shutting_down"
+        );
+        assert_eq!(
+            AgentServiceError::Cancelled("c1".into())
+                .to_chat_error()
+                .error_kind(),
+            "cancelled"
+        );
+        assert_eq!(
+            AgentServiceError::NoBudget.to_chat_error().error_kind(),
+            "budget_exceeded"
+        );
+        assert_eq!(
+            AgentServiceError::BudgetReset("io".into())
+                .to_chat_error()
+                .error_kind(),
+            "internal"
+        );
+
+        // Loop classification — the three panel-branch kinds.
+        let timeout = AgentServiceError::Loop("operation timed out: llm_call".into()).to_chat_error();
+        assert_eq!(timeout.error_kind(), "timeout");
+        assert!(matches!(timeout, AgentChatError::Timeout { .. }));
+
+        let gate = AgentServiceError::Loop("security violation: path traversal".into())
+            .to_chat_error();
+        assert_eq!(gate.error_kind(), "gate_deny");
+        assert!(matches!(gate, AgentChatError::GateDeny { .. }));
+
+        let llm = AgentServiceError::Loop("provider error: 502 bad gateway".into()).to_chat_error();
+        assert_eq!(llm.error_kind(), "llm_error");
+        assert!(matches!(llm, AgentChatError::LlmError { .. }));
     }
 }

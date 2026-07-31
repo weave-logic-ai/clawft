@@ -193,8 +193,21 @@ pub struct Response {
     pub result: Option<serde_json::Value>,
 
     /// Error message (if not ok).
+    ///
+    /// Legacy string field — always populated on error for back-compat
+    /// with clients that only read a free-form message. Prefer
+    /// [`Self::error_kind`] when branching on failure class (WEFT-334).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+
+    /// Structured error discriminator (WEFT-334).
+    ///
+    /// When present, a snake_case kind such as `"timeout"`,
+    /// `"gate_deny"`, or `"llm_error"`. Omitted on success and on
+    /// untyped error paths so older responses deserialize cleanly.
+    /// Pair with the string [`Self::error`] field (legacy message).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
 
     /// Echoed request ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -208,16 +221,38 @@ impl Response {
             ok: true,
             result: Some(result),
             error: None,
+            error_kind: None,
             id: None,
         }
     }
 
-    /// Create an error response.
+    /// Create an error response (string-only, no kind discriminator).
+    ///
+    /// Prefer [`Self::error_with_kind`] for methods that expose a typed
+    /// error surface (`agent.chat`, …).
     pub fn error(msg: impl Into<String>) -> Self {
         Self {
             ok: false,
             result: None,
             error: Some(msg.into()),
+            error_kind: None,
+            id: None,
+        }
+    }
+
+    /// Create a typed error response (WEFT-334).
+    ///
+    /// `kind` is the wire discriminator (e.g. `"timeout"`,
+    /// `"gate_deny"`, `"llm_error"`). `msg` is the legacy human-readable
+    /// string (typically `"agent.chat: <detail>"`). Both fields are
+    /// populated so panels that understand `error_kind` can branch while
+    /// older clients keep reading `error` as a string.
+    pub fn error_with_kind(kind: impl Into<String>, msg: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            result: None,
+            error: Some(msg.into()),
+            error_kind: Some(kind.into()),
             id: None,
         }
     }
@@ -267,8 +302,36 @@ mod tests {
     fn response_error() {
         let resp = Response::error("something broke");
         assert!(!resp.ok);
+        assert!(resp.error_kind.is_none());
         let err = resp.into_result().unwrap_err();
         assert!(err.to_string().contains("something broke"));
+    }
+
+    #[test]
+    fn response_error_with_kind_serializes_discriminator() {
+        let resp = Response::error_with_kind("timeout", "agent.chat: operation timed out");
+        assert!(!resp.ok);
+        assert_eq!(resp.error_kind.as_deref(), Some("timeout"));
+        assert_eq!(
+            resp.error.as_deref(),
+            Some("agent.chat: operation timed out")
+        );
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["error_kind"], "timeout");
+        assert_eq!(v["error"], "agent.chat: operation timed out");
+        // Success responses omit error_kind.
+        let ok = Response::success(serde_json::json!({}));
+        let v_ok = serde_json::to_value(&ok).unwrap();
+        assert!(v_ok.get("error_kind").is_none());
+        // Legacy responses without error_kind still deserialize.
+        let legacy: Response = serde_json::from_str(
+            r#"{"ok":false,"error":"agent.chat: boom"}"#,
+        )
+        .unwrap();
+        assert!(!legacy.ok);
+        assert!(legacy.error_kind.is_none());
+        assert_eq!(legacy.error.as_deref(), Some("agent.chat: boom"));
     }
 
     #[test]

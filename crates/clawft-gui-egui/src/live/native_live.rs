@@ -504,10 +504,15 @@ async fn call(client: &mut DaemonClient, method: &str, params: Value) -> Result<
         .await
         .map_err(|e| format!("{method}: {e}"))?;
     if !resp.ok {
-        return Err(format!(
-            "{method}: {}",
-            resp.error.unwrap_or_else(|| "unknown error".into())
-        ));
+        // WEFT-334: when the daemon stamped `error_kind`, prefix it so
+        // the chat panel can branch on timeout / gate_deny / llm_error
+        // without re-fetching the envelope. Legacy string-only errors
+        // keep the pre-WEFT-334 shape.
+        let msg = resp.error.unwrap_or_else(|| "unknown error".into());
+        return Err(match resp.error_kind {
+            Some(kind) => format!("[{kind}] {method}: {msg}"),
+            None => format!("{method}: {msg}"),
+        });
     }
     Ok(resp.result.unwrap_or(Value::Null))
 }

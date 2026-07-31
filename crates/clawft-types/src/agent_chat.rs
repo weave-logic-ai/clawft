@@ -705,6 +705,244 @@ impl AgentChatStreamFrame {
     }
 }
 
+// ── Typed agent.chat errors (WEFT-334) ───────────────────────────
+//
+// v1 surfaced failures only as `Response::error("agent.chat: <inner>")`
+// strings. Panels had to substring-match to distinguish timeout from
+// LLM failure from gate denial. This enum is the v1.1 structured
+// surface: wire JSON carries an `error_kind` discriminator alongside
+// the legacy string `error` field so old clients keep working.
+
+/// Structured error variants for `agent.chat` / `agent.chat_stream`
+/// (WEFT-334).
+///
+/// # Wire format
+///
+/// Serializes as a JSON object with an `error_kind` tag and a
+/// human-readable `message`:
+///
+/// ```json
+/// { "error_kind": "timeout", "message": "operation timed out: llm_call" }
+/// ```
+///
+/// On the RPC envelope the daemon also mirrors `message` into the
+/// legacy string field `Response.error` (prefixed with the method
+/// name, e.g. `"agent.chat: operation timed out: llm_call"`) and
+/// places `error_kind` at the top level so panels can branch without
+/// parsing the body. Clients that only read `error` as a string remain
+/// wire-compatible.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(tag = "error_kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AgentChatError {
+    /// The turn exceeded a deadline (LLM call, dispatch select, etc.).
+    #[error("{message}")]
+    Timeout {
+        /// Human-readable detail.
+        message: String,
+    },
+    /// Effect / capability gate refused the action.
+    #[error("{message}")]
+    GateDeny {
+        /// Human-readable detail (reason / tool name when known).
+        message: String,
+    },
+    /// Upstream LLM / provider failure (5xx, bad request, rate limit).
+    #[error("{message}")]
+    LlmError {
+        /// Human-readable detail.
+        message: String,
+    },
+    /// Per-conversation cancel token tripped mid-turn.
+    #[error("{message}")]
+    Cancelled {
+        /// Human-readable detail.
+        message: String,
+    },
+    /// Cost circuit-breaker tripped (WEFT-322).
+    #[error("{message}")]
+    BudgetExceeded {
+        /// Human-readable detail.
+        message: String,
+    },
+    /// Agent service is draining and refused new work.
+    #[error("{message}")]
+    ShuttingDown {
+        /// Human-readable detail.
+        message: String,
+    },
+    /// LLM client failed to wire at daemon boot (`DAEMON_AGENT` unset).
+    #[error("{message}")]
+    NotWired {
+        /// Human-readable detail.
+        message: String,
+    },
+    /// Request params failed to deserialize / failed validation.
+    #[error("{message}")]
+    InvalidParams {
+        /// Human-readable detail.
+        message: String,
+    },
+    /// Catch-all for unclassified internal failures.
+    #[error("{message}")]
+    Internal {
+        /// Human-readable detail.
+        message: String,
+    },
+}
+
+impl AgentChatError {
+    /// Stable wire discriminator for this variant (`"timeout"`,
+    /// `"gate_deny"`, `"llm_error"`, …). Matches the serde
+    /// `rename_all = "snake_case"` tag value.
+    pub fn error_kind(&self) -> &'static str {
+        match self {
+            Self::Timeout { .. } => "timeout",
+            Self::GateDeny { .. } => "gate_deny",
+            Self::LlmError { .. } => "llm_error",
+            Self::Cancelled { .. } => "cancelled",
+            Self::BudgetExceeded { .. } => "budget_exceeded",
+            Self::ShuttingDown { .. } => "shutting_down",
+            Self::NotWired { .. } => "not_wired",
+            Self::InvalidParams { .. } => "invalid_params",
+            Self::Internal { .. } => "internal",
+        }
+    }
+
+    /// Borrow the human-readable message body.
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Timeout { message }
+            | Self::GateDeny { message }
+            | Self::LlmError { message }
+            | Self::Cancelled { message }
+            | Self::BudgetExceeded { message }
+            | Self::ShuttingDown { message }
+            | Self::NotWired { message }
+            | Self::InvalidParams { message }
+            | Self::Internal { message } => message.as_str(),
+        }
+    }
+
+    /// Legacy `Response.error` string: `"{method}: {message}"`.
+    ///
+    /// Mirrors the pre-WEFT-334 `Response::error(format!("agent.chat: {e}"))`
+    /// shape so older panels that only read the string field keep working.
+    pub fn legacy_message(&self, method: &str) -> String {
+        format!("{method}: {}", self.message())
+    }
+
+    /// Convenience constructors.
+    pub fn timeout(message: impl Into<String>) -> Self {
+        Self::Timeout {
+            message: message.into(),
+        }
+    }
+
+    /// Gate / capability denial.
+    pub fn gate_deny(message: impl Into<String>) -> Self {
+        Self::GateDeny {
+            message: message.into(),
+        }
+    }
+
+    /// LLM / provider failure.
+    pub fn llm_error(message: impl Into<String>) -> Self {
+        Self::LlmError {
+            message: message.into(),
+        }
+    }
+
+    /// Cancelled conversation.
+    pub fn cancelled(message: impl Into<String>) -> Self {
+        Self::Cancelled {
+            message: message.into(),
+        }
+    }
+
+    /// Cost budget circuit open.
+    pub fn budget_exceeded(message: impl Into<String>) -> Self {
+        Self::BudgetExceeded {
+            message: message.into(),
+        }
+    }
+
+    /// Service shutting down.
+    pub fn shutting_down(message: impl Into<String>) -> Self {
+        Self::ShuttingDown {
+            message: message.into(),
+        }
+    }
+
+    /// Agent service not wired.
+    pub fn not_wired(message: impl Into<String>) -> Self {
+        Self::NotWired {
+            message: message.into(),
+        }
+    }
+
+    /// Invalid request params.
+    pub fn invalid_params(message: impl Into<String>) -> Self {
+        Self::InvalidParams {
+            message: message.into(),
+        }
+    }
+
+    /// Unclassified internal error.
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::Internal {
+            message: message.into(),
+        }
+    }
+
+    /// Classify a free-form agent-loop / service error string into a
+    /// structured variant.
+    ///
+    /// The agent-loop trait boundary still returns `String`
+    /// (`AgentLoopHandle::handle_turn`); this maps well-known
+    /// [`crate::ClawftError`] display prefixes onto the panel-facing
+    /// kinds. Unrecognized text becomes [`Self::Internal`].
+    pub fn classify_loop_error(err: &str) -> Self {
+        let lower = err.to_ascii_lowercase();
+        // Order matters: more specific prefixes first.
+        if lower.contains("was cancelled") {
+            return Self::cancelled(err);
+        }
+        if lower.contains("timed out") || lower.contains("timeout") {
+            return Self::timeout(err);
+        }
+        if lower.contains("budget exceeded")
+            || lower.contains("circuit_open")
+            || lower.contains("conversation budget")
+        {
+            return Self::budget_exceeded(err);
+        }
+        if lower.contains("gate den")
+            || lower.contains("permission denied")
+            || lower.contains("security violation")
+            || lower.contains("not allowed")
+            || lower.contains("capability")
+        {
+            return Self::gate_deny(err);
+        }
+        if lower.contains("provider error")
+            || lower.contains("rate limited")
+            || lower.contains("llm")
+            || lower.contains("openrouter")
+            || lower.contains("llama")
+        {
+            return Self::llm_error(err);
+        }
+        if lower.contains("shutting down") {
+            return Self::shutting_down(err);
+        }
+        if lower.contains("not wired") {
+            return Self::not_wired(err);
+        }
+        Self::internal(err)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1060,5 +1298,147 @@ mod tests {
         let p2: AgentChatDeferDecideParams = serde_json::from_str(&json).unwrap();
         assert_eq!(p2.decision, "allow");
         assert_eq!(chat_defer_path("c-1"), "substrate/_derived/chat/c-1/defer");
+    }
+
+    // ── WEFT-334: AgentChatError ──────────────────────────────────
+
+    #[test]
+    fn agent_chat_error_timeout_wire_shape() {
+        let err = AgentChatError::timeout("operation timed out: llm_call");
+        let v = serde_json::to_value(&err).unwrap();
+        assert_eq!(v["error_kind"], "timeout");
+        assert_eq!(v["message"], "operation timed out: llm_call");
+        assert_eq!(err.error_kind(), "timeout");
+        let back: AgentChatError = serde_json::from_value(v).unwrap();
+        assert_eq!(back, err);
+    }
+
+    #[test]
+    fn agent_chat_error_gate_deny_wire_shape() {
+        let err = AgentChatError::gate_deny("permission denied: write_file");
+        let v = serde_json::to_value(&err).unwrap();
+        assert_eq!(v["error_kind"], "gate_deny");
+        assert_eq!(err.error_kind(), "gate_deny");
+        let back: AgentChatError = serde_json::from_value(v).unwrap();
+        assert_eq!(back, err);
+    }
+
+    #[test]
+    fn agent_chat_error_llm_error_wire_shape() {
+        let err = AgentChatError::llm_error("provider error: 502 bad gateway");
+        let v = serde_json::to_value(&err).unwrap();
+        assert_eq!(v["error_kind"], "llm_error");
+        assert_eq!(err.error_kind(), "llm_error");
+        let back: AgentChatError = serde_json::from_value(v).unwrap();
+        assert_eq!(back, err);
+    }
+
+    #[test]
+    fn agent_chat_error_cancelled_wire_shape() {
+        let err = AgentChatError::cancelled("conversation `c1` was cancelled");
+        let v = serde_json::to_value(&err).unwrap();
+        assert_eq!(v["error_kind"], "cancelled");
+        let back: AgentChatError = serde_json::from_value(v).unwrap();
+        assert_eq!(back, err);
+    }
+
+    #[test]
+    fn agent_chat_error_budget_exceeded_wire_shape() {
+        let err = AgentChatError::budget_exceeded(
+            "conversation budget exceeded for `c1`: tokens 100 >= limit 100 (circuit_open until reset_budget)",
+        );
+        let v = serde_json::to_value(&err).unwrap();
+        assert_eq!(v["error_kind"], "budget_exceeded");
+        let back: AgentChatError = serde_json::from_value(v).unwrap();
+        assert_eq!(back, err);
+    }
+
+    #[test]
+    fn agent_chat_error_shutting_down_wire_shape() {
+        let err = AgentChatError::shutting_down("agent service shutting down");
+        let v = serde_json::to_value(&err).unwrap();
+        assert_eq!(v["error_kind"], "shutting_down");
+        let back: AgentChatError = serde_json::from_value(v).unwrap();
+        assert_eq!(back, err);
+    }
+
+    #[test]
+    fn agent_chat_error_not_wired_wire_shape() {
+        let err = AgentChatError::not_wired(
+            "agent service not wired (LLM client init failed at boot)",
+        );
+        let v = serde_json::to_value(&err).unwrap();
+        assert_eq!(v["error_kind"], "not_wired");
+        let back: AgentChatError = serde_json::from_value(v).unwrap();
+        assert_eq!(back, err);
+    }
+
+    #[test]
+    fn agent_chat_error_invalid_params_wire_shape() {
+        let err = AgentChatError::invalid_params("missing field `messages`");
+        let v = serde_json::to_value(&err).unwrap();
+        assert_eq!(v["error_kind"], "invalid_params");
+        let back: AgentChatError = serde_json::from_value(v).unwrap();
+        assert_eq!(back, err);
+    }
+
+    #[test]
+    fn agent_chat_error_internal_wire_shape() {
+        let err = AgentChatError::internal("unexpected state");
+        let v = serde_json::to_value(&err).unwrap();
+        assert_eq!(v["error_kind"], "internal");
+        let back: AgentChatError = serde_json::from_value(v).unwrap();
+        assert_eq!(back, err);
+    }
+
+    #[test]
+    fn agent_chat_error_legacy_message_prefix() {
+        let err = AgentChatError::timeout("operation timed out: llm_call");
+        assert_eq!(
+            err.legacy_message("agent.chat"),
+            "agent.chat: operation timed out: llm_call"
+        );
+        assert_eq!(
+            err.legacy_message("agent.chat_stream"),
+            "agent.chat_stream: operation timed out: llm_call"
+        );
+    }
+
+    #[test]
+    fn agent_chat_error_classify_loop_error_variants() {
+        assert_eq!(
+            AgentChatError::classify_loop_error("operation timed out: llm_call").error_kind(),
+            "timeout"
+        );
+        assert_eq!(
+            AgentChatError::classify_loop_error("security violation: path traversal").error_kind(),
+            "gate_deny"
+        );
+        assert_eq!(
+            AgentChatError::classify_loop_error("provider error: 500").error_kind(),
+            "llm_error"
+        );
+        assert_eq!(
+            AgentChatError::classify_loop_error("conversation `x` was cancelled").error_kind(),
+            "cancelled"
+        );
+        assert_eq!(
+            AgentChatError::classify_loop_error(
+                "conversation budget exceeded for `c`: tokens 1 >= limit 1 (circuit_open until reset_budget)"
+            )
+            .error_kind(),
+            "budget_exceeded"
+        );
+        assert_eq!(
+            AgentChatError::classify_loop_error("something completely novel").error_kind(),
+            "internal"
+        );
+    }
+
+    #[test]
+    fn agent_chat_error_display_is_message_body() {
+        let err = AgentChatError::llm_error("provider error: boom");
+        assert_eq!(err.to_string(), "provider error: boom");
+        assert_eq!(err.message(), "provider error: boom");
     }
 }

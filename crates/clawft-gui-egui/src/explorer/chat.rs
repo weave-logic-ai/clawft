@@ -159,6 +159,21 @@ impl ChatMessage {
     }
 }
 
+/// Extract a WEFT-334 `error_kind` from a transport error string.
+///
+/// `native_live::call` prefixes typed failures as
+/// `"[<kind>] <method>: <message>"` so the panel can branch without
+/// holding the full RPC envelope. Returns `Some("timeout" |
+/// "gate_deny" | "llm_error" | …)` when present.
+pub fn chat_error_kind(err: &str) -> Option<&str> {
+    let rest = err.strip_prefix('[')?;
+    let (kind, _) = rest.split_once(']')?;
+    if kind.is_empty() || kind.chars().any(char::is_whitespace) {
+        return None;
+    }
+    Some(kind)
+}
+
 /// Panel state. Owned by the [`Explorer`](super::Explorer) and reset
 /// whenever the selection moves (via `Explorer::on_select`) so a stale
 /// conversation doesn't reappear when the user re-selects the chat
@@ -543,6 +558,12 @@ impl ChatView {
     /// State-machine entry: an `agent.chat_stream` / `agent.chat`
     /// request failed. Appends a UI-only `error` bubble and clears the
     /// in-flight + streaming state.
+    ///
+    /// WEFT-334: when the transport prefixes a structured kind
+    /// (`[timeout] …`, `[gate_deny] …`, `[llm_error] …` — see
+    /// [`chat_error_kind`]), the full string is still shown; callers
+    /// that want kind-specific UI (retry affordance, policy link, …)
+    /// should call [`chat_error_kind`] first.
     pub fn on_response_err(&mut self, err: &str) {
         self.history.push(ChatMessage::error(err.to_string()));
         self.clear_stream_state();
@@ -1986,6 +2007,28 @@ mod tests {
         assert_eq!(view.history[1].role, "error");
         assert!(view.history[1].content.contains("llm service is disabled"));
         assert!(!view.is_in_flight());
+    }
+
+    #[test]
+    fn chat_error_kind_branches_timeout_gate_llm() {
+        // WEFT-334: panel can branch on the three primary variants.
+        assert_eq!(
+            chat_error_kind("[timeout] agent.chat: operation timed out: llm_call"),
+            Some("timeout")
+        );
+        assert_eq!(
+            chat_error_kind("[gate_deny] agent.chat: security violation: path"),
+            Some("gate_deny")
+        );
+        assert_eq!(
+            chat_error_kind("[llm_error] agent.chat: provider error: 502"),
+            Some("llm_error")
+        );
+        // Legacy string-only errors have no kind.
+        assert_eq!(
+            chat_error_kind("agent.chat: agent service not wired"),
+            None
+        );
     }
 
     // ── WEFT-253 stream frame state machine ──────────────────────
