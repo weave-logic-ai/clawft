@@ -417,7 +417,7 @@ cargo install cross
 | `clawft-rpc` named-pipe **server helpers** | Implemented (`named_pipe` module) |
 | Weave daemon accept loop | Residual — WEFT-559 |
 | cargo-dist `x86_64-pc-windows-msvc` | Commented out in root `Cargo.toml` |
-| GitHub Actions Windows runner in pr-gates | Not yet — document-only; prefer a future matrix job that runs `cargo test -p clawft-rpc` on `windows-latest` |
+| GitHub Actions Windows/macOS runners in pr-gates | **WEFT-457**: `test` job matrix runs light package set on `macos-latest` + `windows-latest` (`clawft-rpc`, `clawft-platform`, `clawft-types`, `clawft-cow-memory`); full workspace stays on `ubuntu-latest` |
 
 See also [`weftos-deferred-requirements.md`](./weftos-deferred-requirements.md) (Windows transport section) and [`kernel.md`](./kernel.md) (Windows transport).
 

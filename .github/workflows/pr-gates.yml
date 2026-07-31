@@ -71,11 +71,28 @@ jobs:
         run: cargo clippy --workspace -- -D warnings
 
   # -------------------------------------------------------------------
-  # Test: full workspace test suite
+  # Test: workspace suite on Linux + lightweight cross-OS matrix
+  # (WEFT-457).
+  #
+  # Linux remains the primary shipping target and runs the full
+  # workspace. macOS + Windows run a scoped package set so platform-
+  # specific regressions (named pipes, path/FS, errno shims) fail the
+  # PR without tripling CI minutes on a full workspace compile.
+  # fail-fast: false so every OS reports its own status.
   # -------------------------------------------------------------------
   test:
-    name: Test suite
-    runs-on: ubuntu-latest
+    name: Test suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            suite: full
+          - os: macos-latest
+            suite: light
+          - os: windows-latest
+            suite: light
     steps:
       - uses: actions/checkout@v4
 
@@ -89,12 +106,32 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-test-${{ matrix.suite }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
+            ${{ runner.os }}-cargo-test-${{ matrix.suite }}-
             ${{ runner.os }}-cargo-test-
 
-      - name: Run tests
+      # bash is available on windows-latest (Git Bash) and keeps the
+      # matrix step identical across OSes.
+      - name: Run tests (full workspace)
+        if: matrix.suite == 'full'
+        shell: bash
         run: cargo test --workspace
+
+      - name: Run tests (cross-OS light)
+        if: matrix.suite == 'light'
+        shell: bash
+        run: |
+          # Platform-sensitive foundation crates only (WEFT-457 / build.md):
+          #   clawft-rpc      — Windows named-pipe client + UDS (WEFT-11)
+          #   clawft-platform — FS/path/env abstractions
+          #   clawft-types    — shared types, pure/portable
+          #   clawft-cow-memory — macOS __errno_location shim (rvf)
+          cargo test \
+            -p clawft-rpc \
+            -p clawft-platform \
+            -p clawft-types \
+            -p clawft-cow-memory
 
   # -------------------------------------------------------------------
   # WASM size gate: assert <300KB raw, <120KB gzipped

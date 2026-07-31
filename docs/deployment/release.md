@@ -414,7 +414,7 @@ blocks merge.
 | Job                              | Owner          | Notes                                                                 |
 |----------------------------------|----------------|-----------------------------------------------------------------------|
 | `Clippy lint`                    | clippy         | `-D warnings` workspace-wide.                                          |
-| `Test suite`                     | cargo test     | Full workspace.                                                        |
+| `Test suite (…)`                 | cargo test     | **WEFT-457** matrix: full workspace on `ubuntu-latest`; light package set (`clawft-rpc`, `clawft-platform`, `clawft-types`, `clawft-cow-memory`) on `macos-latest` + `windows-latest`. Any leg red fails the PR. |
 | `WASM size gate`                 | wasm-size      | Asserts wasip2 binary < 300 KB raw / 120 KB gzipped.                  |
 | `Binary size check`              | binary-size    | Asserts release `weft` < 10 MB.                                        |
 | `Browser WASM check`             | wasm-browser-check | **Hard gate (WEFT-447)**: `cargo check` for `wasm32-unknown-unknown`, no warning fallback. |
