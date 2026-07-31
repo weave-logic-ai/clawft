@@ -48,18 +48,28 @@
 //!   and routes paint/input to the active session while background
 //!   tabs keep polling PTY output.
 //!
-//! ## What's deferred
+//! ## WASM (WEFT-264)
 //!
-//! - **Browser (wasm32) target gets a stub** — alacritty_terminal
-//!   pulls in platform-specific tty + polling crates that don't
-//!   compile for wasm. Native-only renderer; wasm shows a placeholder.
+//! Browser (`wasm32`) builds use a pure-Rust [`vt100`] grid model
+//! (`terminal_vt100.rs`) instead of `alacritty_terminal` (which pulls
+//! platform tty/polling crates that don't compile for wasm). Same
+//! daemon RPC surface, multi-tab [`TerminalPanel`], ANSI colours,
+//! selection, scrollback, and keyboard input — real rendering, not a
+//! plain-text dump.
 
+// Shared imports for the sentinel matcher (cross-target) and the
+// native alacritty `imp` module. The WASM path lives in
+// `terminal_vt100.rs` and brings its own deps.
+#[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
 use eframe::egui;
 use serde_json::Value;
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::live::{self, Command, Live, ReplyRx};
 
 /// Shape-match priority for the terminal sentinel. Higher than the
@@ -67,11 +77,14 @@ use crate::live::{self, Command, Live, ReplyRx};
 pub const PRIORITY: u32 = 50;
 
 /// How often to poll the output substrate path for new chunks.
+#[cfg(not(target_arch = "wasm32"))]
 const OUTPUT_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Default terminal cell metrics for converting panel size → (rows, cols)
 /// when the egui font metrics aren't queryable yet (first paint).
+#[cfg(not(target_arch = "wasm32"))]
 const FALLBACK_CELL_W: f32 = 8.0;
+#[cfg(not(target_arch = "wasm32"))]
 const FALLBACK_CELL_H: f32 = 16.0;
 
 /// Shape-match for the top-level sentinel value.
@@ -1780,144 +1793,19 @@ mod imp {
     }
 }
 
+// WEFT-264: real WASM terminal renderer (vt100 grid + daemon RPC).
+// Also compiled under host `cfg(test)` so the path is unit-tested
+// without a wasm target — see `terminal_vt100.rs` module docs.
 #[cfg(target_arch = "wasm32")]
-mod imp {
-    use super::*;
+#[path = "terminal_vt100.rs"]
+mod imp;
 
-    /// Stub for browser builds — alacritty_terminal pulls in
-    /// platform-specific PTY/polling crates that don't compile to
-    /// wasm. We render a placeholder instead.
-    #[derive(Default)]
-    pub struct Terminal {}
-
-    impl Terminal {
-        pub fn session_id(&self) -> Option<&str> {
-            None
-        }
-
-        pub fn shell(&self) -> Option<&str> {
-            None
-        }
-
-        pub fn last_error(&self) -> Option<&str> {
-            None
-        }
-
-        pub fn tick(&mut self, _live: &Arc<Live>) {}
-
-        pub fn paint_ui(&mut self, ui: &mut egui::Ui, live: &Arc<Live>) {
-            self.paint(ui, live);
-        }
-
-        pub fn paint(&mut self, ui: &mut egui::Ui, _live: &Arc<Live>) {
-            ui.heading("Terminal");
-            ui.separator();
-            ui.colored_label(
-                egui::Color32::from_rgb(220, 180, 60),
-                "Terminal is not available in the browser build.",
-            );
-            ui.label("Run the native app to use the terminal panel.");
-        }
-
-        pub fn close(&mut self, _live: &Arc<Live>) {}
-    }
-
-    /// Wasm stub multi-tab host — same API surface as the native
-    /// [`super::imp::TerminalPanel`] so Explorer/Desktop compile, but
-    /// only paints the unavailable placeholder.
-    pub struct TerminalPanel {
-        sessions: HashMap<String, Terminal>,
-        order: Vec<String>,
-        active: String,
-    }
-
-    impl Default for TerminalPanel {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    impl TerminalPanel {
-        pub fn new() -> Self {
-            let key = "local-tab-0001".to_string();
-            let mut sessions = HashMap::new();
-            sessions.insert(key.clone(), Terminal::default());
-            Self {
-                sessions,
-                order: vec![key.clone()],
-                active: key,
-            }
-        }
-
-        pub fn len(&self) -> usize {
-            self.order.len()
-        }
-
-        pub fn is_empty(&self) -> bool {
-            self.order.is_empty()
-        }
-
-        pub fn active_key(&self) -> &str {
-            &self.active
-        }
-
-        pub fn order(&self) -> &[String] {
-            &self.order
-        }
-
-        pub fn sessions(&self) -> &HashMap<String, Terminal> {
-            &self.sessions
-        }
-
-        pub fn active_terminal(&self) -> &Terminal {
-            &self.sessions[&self.active]
-        }
-
-        pub fn active_terminal_mut(&mut self) -> &mut Terminal {
-            self.sessions.get_mut(&self.active).unwrap()
-        }
-
-        pub fn new_tab(&mut self) -> String {
-            let key = format!("local-tab-{:04}", self.order.len() + 1);
-            self.sessions.insert(key.clone(), Terminal::default());
-            self.order.push(key.clone());
-            self.active = key.clone();
-            key
-        }
-
-        pub fn select(&mut self, key: &str) {
-            if self.sessions.contains_key(key) {
-                self.active = key.to_string();
-            }
-        }
-
-        pub fn close_tab(&mut self, _live: &Arc<Live>, key: &str) {
-            if self.sessions.remove(key).is_none() {
-                return;
-            }
-            self.order.retain(|k| k != key);
-            if self.order.is_empty() {
-                let _ = self.new_tab();
-                return;
-            }
-            if self.active == key {
-                self.active = self.order.last().cloned().unwrap();
-            }
-        }
-
-        pub fn close(&mut self, _live: &Arc<Live>) {
-            self.sessions.clear();
-            self.order.clear();
-            let _ = self.new_tab();
-        }
-
-        pub fn paint(&mut self, ui: &mut egui::Ui, live: &Arc<Live>) {
-            self.active_terminal_mut().paint(ui, live);
-        }
-    }
-
-    pub type SessionKey = String;
-}
+/// Host-side unit tests for the WASM (vt100) terminal path (WEFT-264).
+/// Production native builds keep using the alacritty `imp` above;
+/// this re-includes the vt100 module only when running tests.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "terminal_vt100.rs"]
+mod terminal_vt100;
 
 pub use imp::{SessionKey, Terminal, TerminalPanel};
 

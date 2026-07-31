@@ -194,12 +194,20 @@ web-sys = { version = "0.3", features = [
 console_error_panic_hook = "0.1"
 # Minimal async + channels that work in single-threaded wasm.
 futures = { version = "0.3", default-features = false, features = ["std"] }
+# WEFT-264: pure-Rust VT/ANSI grid for the browser terminal panel.
+# `alacritty_terminal` does not compile for wasm32 (tty/polling crates);
+# vt100 is no-std-friendly parser + screen model (vte + unicode-width).
+vt100 = "0.16"
 
 # ── Dev dependencies (integration tests only) ───────────────────────
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "time", "sync"] }
+# WEFT-264: host unit tests for the wasm (vt100) terminal path re-include
+# `terminal_vt100.rs` under `cfg(test)` — keep the same crate version as
+# the wasm target dependency above.
+vt100 = "0.16"
 # Track 5 Workshop: TOML→substrate file-watcher example. These crates
 # stay in dev-dependencies so the release build of clawft-gui-egui
 # doesn't pull them; `cargo run --example workshop-watcher` compiles

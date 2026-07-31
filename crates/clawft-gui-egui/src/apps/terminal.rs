@@ -18,9 +18,9 @@
 //! affordance; the substrate-sentinel terminal is whatever the
 //! substrate topology decides to expose.
 //!
-//! Wasm builds get the existing
-//! `explorer::terminal::Terminal`'s "browser unavailable" placeholder
-//! for free — that branch lives in the lifted module, not here.
+//! Wasm builds get the real vt100-backed renderer (WEFT-264) from
+//! `explorer::terminal` / `terminal_vt100` — same multi-tab panel API,
+//! daemon RPC surface, and grid paint path as native (alacritty).
 
 use std::sync::Arc;
 
