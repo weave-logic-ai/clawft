@@ -405,19 +405,27 @@ cargo install cross
 | `aarch64-unknown-linux-musl` | Linux | ARM64 | Static, for ARM servers/Raspberry Pi |
 | `aarch64-apple-darwin` | macOS | ARM64 | Apple Silicon |
 | `x86_64-apple-darwin` | macOS | x86_64 | Intel Macs |
-| `x86_64-pc-windows-msvc` | Windows | x86_64 | Requires MSVC toolchain. **Daemon status (WEFT-11 / WEFT-559):** `DaemonClient` dials named pipes; weave daemon accept loop not wired yet — cargo-dist Windows target stays disabled until WEFT-559. Test client with `cargo test -p clawft-rpc --target x86_64-pc-windows-msvc` on a Windows host. |
+| `x86_64-pc-windows-msvc` | Windows | x86_64 | Requires MSVC toolchain. **Daemon (WEFT-11 + WEFT-559):** `DaemonClient` + weave named-pipe accept loop; cargo-dist target re-enabled. Soak-test on a Windows host: `cargo test -p clawft-rpc --target x86_64-pc-windows-msvc` and `weaver kernel start --foreground`. |
 | `wasm32-wasip1` | WASI | WASM | WASI Preview 1 |
 | `wasm32-wasip2` | WASI | WASM | WASI Preview 2 (Component Model) |
 
-### Windows / CI matrix note (WEFT-11)
+### Windows / CI matrix note (WEFT-11 + WEFT-559)
 
 | Surface | Status |
 |---------|--------|
 | `clawft-rpc` named-pipe **client** | Implemented (`cfg(windows)`) |
 | `clawft-rpc` named-pipe **server helpers** | Implemented (`named_pipe` module) |
-| Weave daemon accept loop | Residual — WEFT-559 |
-| cargo-dist `x86_64-pc-windows-msvc` | Commented out in root `Cargo.toml` |
+| Weave daemon accept loop | Wired under `cfg(windows)` (WEFT-559) |
+| cargo-dist `x86_64-pc-windows-msvc` | Re-enabled in root `Cargo.toml` |
 | GitHub Actions Windows/macOS runners in pr-gates | **WEFT-457**: `test` job matrix runs light package set on `macos-latest` + `windows-latest` (`clawft-rpc`, `clawft-platform`, `clawft-types`, `clawft-cow-memory`); full workspace stays on `ubuntu-latest` |
+
+**cargo-dist re-enable checklist** (already applied for WEFT-559):
+
+1. `"x86_64-pc-windows-msvc"` in `[workspace.metadata.dist].targets`
+2. Release pipeline produces zip + powershell installer
+3. Residual: optional dedicated job for
+   `cargo test -p clawft-rpc --target x86_64-pc-windows-msvc` so the
+   `cfg(windows)` named-pipe roundtrip runs in CI
 
 See also [`weftos-deferred-requirements.md`](./weftos-deferred-requirements.md) (Windows transport section) and [`kernel.md`](./kernel.md) (Windows transport).
 

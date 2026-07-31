@@ -1,14 +1,21 @@
-//! Kernel daemon — persistent kernel process with Unix socket RPC.
+//! Kernel daemon — persistent kernel process with local RPC transport.
 //!
-//! The daemon boots a [`Kernel`], then listens on a Unix domain socket
-//! for JSON-RPC requests. This is the native transport layer; the
-//! kernel itself is platform-agnostic and could be wrapped in
+//! The daemon boots a [`Kernel`], then listens for JSON-RPC requests on
+//! the platform-local transport (WEFT-559):
+//!
+//! - **Unix**: Unix domain socket (`kernel.sock` under the runtime dir)
+//! - **Windows**: named pipe `\\.\pipe\clawft-kernel-<hash>` derived from
+//!   the same logical path via [`clawft_rpc::pipe_name_for_path`]
+//!
+//! The kernel itself is platform-agnostic and could also be wrapped in
 //! WebSocket, TCP, or `postMessage` for other environments.
 
 use std::sync::{Arc, OnceLock};
 
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, UnixListener, UnixStream};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::net::TcpListener;
+#[cfg(unix)]
+use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
@@ -621,12 +628,14 @@ use crate::protocol::{
     ResourceStatsResult,
 };
 
-/// Fork the daemon into the background.
+/// Spawn the daemon into the background.
 ///
 /// Spawns `weaver kernel start --foreground` as a detached child process,
 /// redirecting stdout/stderr to the kernel log file. Writes the child PID
-/// to the PID file. The parent process exits immediately after confirming
-/// the daemon started.
+/// to the PID file. The parent returns after the child is launched.
+///
+/// Works on Unix and Windows (WEFT-559). On Windows the child is created
+/// detached so closing the parent console does not kill the daemon.
 pub fn daemonize(config_override: Option<&str>) -> anyhow::Result<()> {
     use std::process::Command;
 
@@ -641,9 +650,7 @@ pub fn daemonize(config_override: Option<&str>) -> anyhow::Result<()> {
         && let Ok(pid_str) = std::fs::read_to_string(&pid_path)
     {
         if let Ok(pid) = pid_str.trim().parse::<u32>() {
-            // Check if process is alive
-            let check = Command::new("kill").args(["-0", &pid.to_string()]).output();
-            if check.map(|o| o.status.success()).unwrap_or(false) {
+            if process_alive(pid) {
                 anyhow::bail!("kernel already running (pid {pid})");
             }
         }
@@ -663,6 +670,15 @@ pub fn daemonize(config_override: Option<&str>) -> anyhow::Result<()> {
         cmd.args(["--config", cfg]);
     }
 
+    // Windows: detach so the daemon outlives the spawning console.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        const FLAGS: u32 = 0x00000008 | 0x00000200;
+        cmd.creation_flags(FLAGS);
+    }
+
     let child = cmd
         .stdout(log_file)
         .stderr(log_err)
@@ -673,7 +689,13 @@ pub fn daemonize(config_override: Option<&str>) -> anyhow::Result<()> {
     std::fs::write(&pid_path, pid.to_string())?;
 
     println!("WeftOS kernel started (pid {pid})");
+    #[cfg(unix)]
     println!("  Socket: {}", protocol::socket_path().display());
+    #[cfg(windows)]
+    println!(
+        "  Pipe:   {}",
+        clawft_rpc::pipe_name_for_path(protocol::socket_path())
+    );
     println!("  Log:    {}", log_path.display());
     println!("  PID:    {}", pid_path.display());
     println!();
@@ -681,6 +703,39 @@ pub fn daemonize(config_override: Option<&str>) -> anyhow::Result<()> {
     println!("Use 'weaver kernel stop' to shut down.");
 
     Ok(())
+}
+
+/// Return true if a process with the given PID appears to be alive.
+fn process_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        use std::process::Command;
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+        // tasklist /FI "PID eq N" /NH prints a line when the process exists.
+        let output = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output();
+        match output {
+            Ok(o) => {
+                let s = String::from_utf8_lossy(&o.stdout);
+                s.contains(&pid.to_string())
+            }
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        false
+    }
 }
 
 /// Build the v2 [`EmbeddingRouter`](clawft_core::agent::context_router::EmbeddingRouter),
@@ -783,10 +838,6 @@ async fn build_embedding_router_or_warn(
     }
 }
 
-/// Run the kernel daemon in the foreground.
-///
-/// Boots the kernel, binds to a Unix socket, and serves requests
-/// until shutdown is requested (via `kernel.shutdown` RPC or signal).
 /// Open an existing `BranchableMemory` lineage at `dir`, or create a fresh
 /// one (WEFT-616 Phase 2). Open-then-create keeps restarts idempotent; the
 /// 384 dimension matches the brain's embedding width (rvf_real's default).
@@ -802,6 +853,10 @@ fn open_or_create_cow_memory(
 
 /// Run the kernel daemon.
 ///
+/// Boots the kernel, binds the platform-local RPC transport (Unix socket
+/// or Windows named pipe), and serves requests until shutdown is
+/// requested (via `kernel.shutdown` RPC or OS signal / Ctrl+C).
+///
 /// `global_routing` / `workspace_routing` (WEFT-10) are the split layers
 /// from the config loader. Global is the PermissionResolver ceiling;
 /// workspace is the optional overlay that will be clamped.
@@ -815,28 +870,48 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let socket_path = protocol::socket_path();
 
-    // Clean up stale socket file
     // WEFT-39: persist shared LLM RetryModel learned weights so the next
     // daemon start restores the curve instead of resetting to untrained.
     clawft_core::pipeline::persist_shared_retry_model();
 
-    if socket_path.exists() {
-        // Try connecting to see if a daemon is already running
-        if tokio::net::UnixStream::connect(&socket_path).await.is_ok() {
+    // Already-running / stale-endpoint probe (platform-specific).
+    #[cfg(unix)]
+    {
+        if socket_path.exists() {
+            // Try connecting to see if a daemon is already running
+            if UnixStream::connect(&socket_path).await.is_ok() {
+                anyhow::bail!(
+                    "daemon already running (socket exists and is accepting connections: {})",
+                    socket_path.display()
+                );
+            }
+            // Stale socket — remove it
+            std::fs::remove_file(&socket_path)?;
+            debug!("removed stale socket file");
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Named pipes have no filesystem node; dial the derived pipe name.
+        if clawft_rpc::DaemonClient::connect_path(&socket_path)
+            .await
+            .is_some()
+        {
             anyhow::bail!(
-                "daemon already running (socket exists and is accepting connections: {})",
-                socket_path.display()
+                "daemon already running (named pipe accepting: {})",
+                clawft_rpc::pipe_name_for_path(&socket_path)
             );
         }
-        // Stale socket — remove it
-        std::fs::remove_file(&socket_path)?;
-        debug!("removed stale socket file");
     }
 
-    // Ensure parent directory exists
+    // Ensure parent directory exists (UDS parent; also holds PID/log files).
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+
+    // Record this process as the live daemon (background daemonize also
+    // writes the child PID before spawn returns; overwriting here is fine).
+    let _ = std::fs::write(protocol::pid_path(), std::process::id().to_string());
 
     // agent-core-v1 Phase E1: snapshot the ContextRouter selector
     // before `config` moves into `Kernel::boot`. The agent-service
@@ -2531,17 +2606,34 @@ pub async fn run(
         print!("{}", k.boot_log().format_all());
     }
 
-    // Bind socket
-    let listener = UnixListener::bind(&socket_path)?;
-    info!(path = %socket_path.display(), "daemon listening");
-    println!("Daemon listening on {}", socket_path.display());
-
-    // Log daemon start to kernel event log
-    {
-        let k = kernel.read().await;
-        k.event_log()
-            .info("daemon", format!("listening on {}", socket_path.display()));
-    }
+    // Bind local transport (Unix UDS or Windows named pipe).
+    #[cfg(unix)]
+    let listener = {
+        let listener = UnixListener::bind(&socket_path)?;
+        info!(path = %socket_path.display(), "daemon listening");
+        println!("Daemon listening on {}", socket_path.display());
+        {
+            let k = kernel.read().await;
+            k.event_log()
+                .info("daemon", format!("listening on {}", socket_path.display()));
+        }
+        listener
+    };
+    #[cfg(windows)]
+    let mut pipe_server = {
+        let pipe = clawft_rpc::pipe_name_for_path(&socket_path);
+        let server = clawft_rpc::named_pipe::create_listener(&socket_path).map_err(|e| {
+            anyhow::anyhow!("failed to create named-pipe listener `{pipe}`: {e}")
+        })?;
+        info!(pipe = %pipe, "daemon listening");
+        println!("Daemon listening on {pipe}");
+        {
+            let k = kernel.read().await;
+            k.event_log()
+                .info("daemon", format!("listening on {pipe}"));
+        }
+        server
+    };
 
     // Stream-window anchor: start configured topic anchors so every
     // `window_secs` window emits a `stream.window_commit` chain event
@@ -3016,42 +3108,97 @@ pub async fn run(
     // Accept loop — clone shutdown_tx so the outer scope can still use it for Ctrl+C
     let accept_kernel = Arc::clone(&kernel);
     let rpc_shutdown_tx = shutdown_tx.clone();
-    let mut accept_handle = tokio::spawn(async move {
-        let mut shutdown_rx = shutdown_rx;
-        loop {
-            tokio::select! {
-                result = listener.accept() => {
-                    match result {
-                        Ok((stream, _addr)) => {
-                            let k = Arc::clone(&accept_kernel);
-                            let tx = rpc_shutdown_tx.clone();
-                            tokio::spawn(handle_connection(stream, k, tx));
-                        }
-                        Err(e) => {
-                            error!("accept error: {e}");
+    #[cfg(unix)]
+    let mut accept_handle = {
+        let mut shutdown_rx = shutdown_rx.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    result = listener.accept() => {
+                        match result {
+                            Ok((stream, _addr)) => {
+                                let k = Arc::clone(&accept_kernel);
+                                let tx = rpc_shutdown_tx.clone();
+                                tokio::spawn(handle_connection(stream, k, tx));
+                            }
+                            Err(e) => {
+                                error!("accept error: {e}");
+                            }
                         }
                     }
-                }
-                _ = shutdown_rx.changed() => {
-                    if *shutdown_rx.borrow() {
-                        info!("shutdown signal received, stopping accept loop");
-                        break;
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() {
+                            info!("shutdown signal received, stopping accept loop");
+                            break;
+                        }
                     }
                 }
             }
-        }
-    });
+        })
+    };
+    // Windows named-pipe accept loop (WEFT-559). After each client
+    // connects, re-create the next pipe instance so concurrent clients
+    // can dial while the previous connection is still being served.
+    #[cfg(windows)]
+    let mut accept_handle = {
+        let accept_socket_path = socket_path.clone();
+        let mut shutdown_rx = shutdown_rx.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    result = pipe_server.connect() => {
+                        match result {
+                            Ok(()) => {
+                                let connected = pipe_server;
+                                match clawft_rpc::named_pipe::create_listener_next(
+                                    &accept_socket_path,
+                                ) {
+                                    Ok(next) => {
+                                        pipe_server = next;
+                                    }
+                                    Err(e) => {
+                                        error!("named-pipe re-listen error: {e}");
+                                        // Still serve the connected client; next
+                                        // accept will fail until a later restart.
+                                        let k = Arc::clone(&accept_kernel);
+                                        let tx = rpc_shutdown_tx.clone();
+                                        tokio::spawn(handle_connection(connected, k, tx));
+                                        break;
+                                    }
+                                }
+                                let k = Arc::clone(&accept_kernel);
+                                let tx = rpc_shutdown_tx.clone();
+                                tokio::spawn(handle_connection(connected, k, tx));
+                            }
+                            Err(e) => {
+                                error!("named-pipe accept error: {e}");
+                            }
+                        }
+                    }
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() {
+                            info!("shutdown signal received, stopping accept loop");
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+    };
 
-    // Optional TCP relay. When `[kernel.ipc_tcp]` is enabled, every
-    // accepted TCP connection is transparently byte-copied to a fresh
-    // connection on the unix socket. All auth / JSON dispatch stays in
-    // the unix path — the TCP side is a dumb conduit so cross-boundary
+    // Optional TCP relay (Unix only). When `[kernel.ipc_tcp]` is enabled,
+    // every accepted TCP connection is transparently byte-copied to a
+    // fresh connection on the unix socket. All auth / JSON dispatch stays
+    // in the unix path — the TCP side is a dumb conduit so cross-boundary
     // callers (Windows side of WSL, remote bridges) can reach the RPC
-    // without speaking `AF_UNIX`.
+    // without speaking `AF_UNIX`. On Windows the daemon *is* the named
+    // pipe endpoint, so the relay is unnecessary.
+    #[cfg(unix)]
     let ipc_tcp_cfg = {
         let k = kernel.read().await;
         k.kernel_config().ipc_tcp.clone()
     };
+    #[cfg(unix)]
     if let Some(cfg) = ipc_tcp_cfg.filter(|c| c.enabled) {
         // WEFT-481: refuse to bind a non-loopback address without a
         // bearer token. Anonymous broadcast on a routable interface
@@ -3177,30 +3324,47 @@ pub async fn run(
         }
     }
 
-    // Wait for shutdown signal (SIGINT, SIGTERM, SIGHUP) or RPC shutdown.
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
-
-    let restart_requested = tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            info!("SIGINT received, shutting down daemon");
-            let _ = shutdown_tx.send(true);
-            false
+    // Wait for shutdown signal or RPC shutdown.
+    // Unix: SIGINT / SIGTERM / SIGHUP (restart). Windows: Ctrl+C only.
+    #[cfg(unix)]
+    let restart_requested = {
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("SIGINT received, shutting down daemon");
+                let _ = shutdown_tx.send(true);
+                false
+            }
+            _ = sigterm.recv() => {
+                info!("SIGTERM received, shutting down daemon");
+                let _ = shutdown_tx.send(true);
+                false
+            }
+            _ = sighup.recv() => {
+                info!("SIGHUP received — will restart after shutdown");
+                let _ = shutdown_tx.send(true);
+                true
+            }
+            _ = &mut accept_handle => {
+                info!("accept loop finished (RPC shutdown)");
+                false
+            }
         }
-        _ = sigterm.recv() => {
-            info!("SIGTERM received, shutting down daemon");
-            let _ = shutdown_tx.send(true);
-            false
-        }
-        _ = sighup.recv() => {
-            info!("SIGHUP received — will restart after shutdown");
-            let _ = shutdown_tx.send(true);
-            true
-        }
-        _ = &mut accept_handle => {
-            // Accept loop finished (shutdown requested via RPC)
-            info!("accept loop finished (RPC shutdown)");
-            false
+    };
+    #[cfg(windows)]
+    let restart_requested = {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("Ctrl+C received, shutting down daemon");
+                let _ = shutdown_tx.send(true);
+                false
+            }
+            _ = &mut accept_handle => {
+                info!("accept loop finished (RPC shutdown)");
+                false
+            }
         }
     };
 
@@ -3252,7 +3416,8 @@ pub async fn run(
         }
     }
 
-    // Clean up socket and PID file
+    // Clean up transport endpoint artefacts and PID file
+    #[cfg(unix)]
     if socket_path.exists() {
         let _ = std::fs::remove_file(&socket_path);
     }
@@ -3264,6 +3429,8 @@ pub async fn run(
     println!("Daemon stopped.");
 
     // If SIGHUP requested restart, re-exec the binary (keeps same PID for systemd).
+    // Windows has no SIGHUP path; restart is stop+start from the CLI.
+    #[cfg(unix)]
     if restart_requested {
         info!("re-exec for restart");
         use std::os::unix::process::CommandExt;
@@ -3273,6 +3440,8 @@ pub async fn run(
         eprintln!("re-exec failed: {err}");
         std::process::exit(1);
     }
+    #[cfg(windows)]
+    let _ = restart_requested;
 
     Ok(())
 }
@@ -3284,13 +3453,18 @@ pub async fn run(
 ///   - `RVFS` → RVF-framed protocol (content-hash verified segments)
 ///   - anything else → legacy line-delimited JSON (bytes prepended to first line)
 ///
+/// Transport-agnostic (WEFT-559): works over Unix domain sockets and
+/// Windows named pipes (`NamedPipeServer` after `connect()`).
+///
 /// Exposed `pub` so integration tests can drive a preassembled kernel
 /// directly without the signal-handler plumbing in [`run`].
-pub async fn handle_connection(
-    mut stream: tokio::net::UnixStream,
+pub async fn handle_connection<S>(
+    mut stream: S,
     kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
     shutdown_tx: watch::Sender<bool>,
-) {
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     // Read 4-byte header to detect protocol mode.
     let mut header = [0u8; 4];
     if stream.read_exact(&mut header).await.is_err() {
@@ -3383,12 +3557,15 @@ async fn resolve_caller_capabilities(
     crate::capability::CallerCapabilities::denied()
 }
 
-async fn dispatch_json_line(
+async fn dispatch_json_line<W>(
     line: &str,
     kernel: &Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
     shutdown_tx: &watch::Sender<bool>,
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
-) -> DispatchOutcome {
+    writer: &mut W,
+) -> DispatchOutcome
+where
+    W: AsyncWriteExt + Unpin,
+{
     let line = line.trim();
     if line.is_empty() {
         return DispatchOutcome::Continue;
@@ -3493,13 +3670,15 @@ async fn dispatch_json_line(
 ///
 /// The `prefix` bytes were consumed during protocol detection and form
 /// the beginning of the first JSON line on the wire.
-async fn handle_json_connection(
+async fn handle_json_connection<S>(
     prefix: [u8; 4],
-    stream: tokio::net::UnixStream,
+    stream: S,
     kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
     shutdown_tx: watch::Sender<bool>,
-) {
-    let (reader, mut writer) = stream.into_split();
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (reader, mut writer) = tokio::io::split(stream);
     let mut buf = BufReader::new(reader);
 
     // Reconstruct the first line: the 4-byte prefix + the rest until '\n'.
@@ -3550,12 +3729,14 @@ async fn handle_json_connection(
 /// writer returns an I/O error (client disconnected). On exit, runs
 /// the provided `on_disconnect` closure so the daemon can remove the
 /// external subscription from the router.
-async fn run_stream_subscribe(
-    mut writer: tokio::net::unix::OwnedWriteHalf,
+async fn run_stream_subscribe<W>(
+    mut writer: W,
     topic: String,
     mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     on_disconnect: Box<dyn FnOnce() + Send>,
-) {
+) where
+    W: AsyncWriteExt + Unpin,
+{
     debug!(topic, "ipc.subscribe_stream: forwarder started");
     while let Some(bytes) = rx.recv().await {
         if let Err(e) = writer.write_all(&bytes).await {
@@ -4085,15 +4266,17 @@ async fn handle_ipc_subscribe_stream(
 /// integrity. Responses carry the SEALED flag; requests do not.
 /// Uses the same `dispatch()` function as JSON mode.
 #[cfg(feature = "rvf-rpc")]
-async fn handle_rvf_connection(
-    stream: tokio::net::UnixStream,
+async fn handle_rvf_connection<S>(
+    stream: S,
     kernel: Arc<tokio::sync::RwLock<Kernel<NativePlatform>>>,
     shutdown_tx: watch::Sender<bool>,
-) {
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     use crate::rvf_codec::{RvfFrameReader, RvfFrameWriter};
     use crate::rvf_rpc;
 
-    let (reader, writer) = stream.into_split();
+    let (reader, writer) = tokio::io::split(stream);
     let mut frame_reader = RvfFrameReader::new(reader);
     let mut frame_writer = RvfFrameWriter::new(writer);
     let mut next_id: u64 = 1;

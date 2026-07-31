@@ -8,10 +8,10 @@
 //!
 //! - **Client**: implemented (`DaemonClient` under `cfg(windows)`).
 //! - **Server helpers**: implemented here; compile on Windows.
-//! - **Daemon accept-loop wiring** in `clawft-weave::daemon`: still
-//!   Unix-only. Remaining work is tracked under WEFT-11 residual /
-//!   WEFT-559 — plug `create_listener` + `create_listener_next` into
-//!   the existing `handle_json_connection` / `dispatch_json_line` path.
+//! - **Daemon accept-loop wiring** in `clawft-weave::daemon`: wired
+//!   under `cfg(windows)` (WEFT-559) via `create_listener` /
+//!   `create_listener_next` into the transport-agnostic
+//!   `handle_connection` / `handle_json_connection` path.
 //!
 //! # Accept-loop sketch
 //!

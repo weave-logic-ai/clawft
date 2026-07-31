@@ -7,9 +7,8 @@
 //! - **Unix**: Unix domain socket (`kernel.sock` under the runtime dir)
 //! - **Windows**: named pipe derived from the same logical path (WEFT-11)
 //!
-//! Server-side named-pipe helpers live in [`named_pipe`]. Full daemon
-//! accept-loop wiring on Windows remains residual work (see that
-//! module's docs and `docs/guides/weftos-deferred-requirements.md`).
+//! Server-side named-pipe helpers live in [`named_pipe`]. The weave
+//! daemon accept loop binds them under `cfg(windows)` (WEFT-559).
 //!
 //! # Usage
 //!
@@ -48,9 +47,8 @@ pub async fn connect_or_bail() -> anyhow::Result<DaemonClient> {
             anyhow::anyhow!(
                 "no kernel daemon running (Windows named-pipe transport).\n\
                  Start the daemon with: weaver kernel start\n\
-                 Or run: weaver console\n\
-                 Note: daemon accept-loop wiring on Windows is residual (WEFT-11/WEFT-559); \
-                 the client dials `{}`.",
+                 Or run: weaver kernel start --foreground\n\
+                 Client dials `{}`.",
                 default_pipe_name()
             )
         }

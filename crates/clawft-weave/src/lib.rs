@@ -14,9 +14,10 @@ pub mod client;
 pub mod commands;
 pub mod control;
 pub mod conv_postmortem;
-#[cfg(unix)]
+// Local RPC daemon: Unix UDS + Windows named pipes (WEFT-559).
+#[cfg(any(unix, windows))]
 pub mod daemon;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub mod llm_service;
 /// Live MCP registry RPC handlers (WEFT-494 / ADR-070). Available on all
 /// platforms so unit tests can exercise add/list/remove without UDS.

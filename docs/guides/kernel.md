@@ -139,25 +139,28 @@ weaver health                      # aggregated health across services
 weaver kernel logs                 # last N boot/runtime events
 ```
 
-### Windows transport (WEFT-11)
+### Windows transport (WEFT-11 + WEFT-559)
 
-Local RPC uses a platform transport in `clawft-rpc`:
+Local RPC uses a platform transport in `clawft-rpc` / `clawft-weave`:
 
 | Platform | Transport | `DaemonClient::connect` | Daemon accept loop |
 |----------|-----------|-------------------------|--------------------|
 | Unix     | UDS `kernel.sock` under the runtime dir | Connects or returns `None` | Wired (`clawft-weave::daemon`) |
-| Windows  | Named pipe `\\.\pipe\clawft-kernel-<hash>` derived from the logical socket path | Connects or returns `None` (WEFT-11) | **Not wired yet** (WEFT-559) |
+| Windows  | Named pipe `\\.\pipe\clawft-kernel-<hash>` derived from the logical socket path | Connects or returns `None` (WEFT-11) | Wired (WEFT-559) |
 | Other    | — | Always `None`; `call` errors clearly | N/A |
 
 - Path derivation: `pipe_name_for_path(socket_path())` — project-local
   runtimes stay isolated the same way UDS paths do.
-- Server helpers (`create_listener` / `create_listener_next`) compile on
-  Windows in `clawft_rpc::named_pipe` for residual daemon wiring.
-- Until WEFT-559, `weaver kernel start|stop|restart` on non-Unix bails
-  with an explicit message pointing here. cargo-dist does **not** ship
-  `x86_64-pc-windows-msvc` yet.
+- Server helpers: `create_listener` / `create_listener_next` in
+  `clawft_rpc::named_pipe`; the daemon accept loop re-creates the next
+  instance after each client connects.
+- `weaver kernel start` (background or `--foreground`), `stop` (RPC
+  `kernel.shutdown` then `taskkill`), and `restart` (stop+start) work
+  on Windows. cargo-dist includes `x86_64-pc-windows-msvc`.
+- Residual: soak-test the named-pipe roundtrip and release artefacts on
+  a Windows host / `windows-latest` CI (see build guide).
 
-Details and residual checklist:
+Details:
 [`weftos-deferred-requirements.md`](./weftos-deferred-requirements.md)
 (Windows transport section).
 

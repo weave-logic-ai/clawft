@@ -108,27 +108,23 @@ pub enum KernelAction {
 
 /// Run the kernel subcommand.
 pub async fn run(args: KernelArgs) -> anyhow::Result<()> {
-    #[cfg(not(unix))]
+    // Platforms without a local daemon transport (neither Unix UDS nor
+    // Windows named pipes) cannot host kernel start/stop/restart.
+    #[cfg(not(any(unix, windows)))]
     {
         match args.action {
             KernelAction::Start { .. } | KernelAction::Stop { .. } | KernelAction::Restart => {
-                // WEFT-11: DaemonClient dials Windows named pipes, but the
-                // weave daemon accept loop is still Unix-only. Residual
-                // server wiring is tracked under WEFT-559.
                 anyhow::bail!(
-                    "kernel daemon server is not yet wired on this platform.\n\
-                     Windows named-pipe *client* transport is available in clawft-rpc (WEFT-11);\n\
-                     the daemon accept-loop residual is WEFT-559.\n\
-                     On Unix: `weaver kernel start`. On Windows today: use remote/TCP relay \
-                     or a Unix host for the daemon."
+                    "kernel daemon server is not available on this platform.\n\
+                     Local transport requires Unix domain sockets or Windows named pipes (WEFT-559)."
                 );
             }
-            _ => {} // Status/Ps/Logs fall through to ephemeral kernel below
+            _ => {}
         }
     }
 
     match args.action {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         KernelAction::Start { foreground } => {
             if foreground {
                 // Run in foreground (blocking)
@@ -144,7 +140,7 @@ pub async fn run(args: KernelArgs) -> anyhow::Result<()> {
                 )
                 .await?;
             } else {
-                // Background (default) — fork and exit
+                // Background (default) — spawn detached child
                 crate::daemon::daemonize(args.config.as_deref())?;
             }
         }
@@ -172,6 +168,12 @@ pub async fn run(args: KernelArgs) -> anyhow::Result<()> {
             // Clean up stale files
             cleanup_runtime_files();
         }
+        // Windows: prefer RPC `kernel.shutdown` over named pipe; fall back
+        // to taskkill using the PID file (WEFT-559).
+        #[cfg(windows)]
+        KernelAction::Stop { force } => {
+            stop_windows(force).await?;
+        }
         #[cfg(unix)]
         KernelAction::Restart => {
             let pid = read_daemon_pid()?;
@@ -181,7 +183,14 @@ pub async fn run(args: KernelArgs) -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("failed to send SIGHUP to PID {pid}: {e}"))?;
             println!("SIGHUP sent to PID {pid} — daemon will restart.");
         }
-        #[cfg(not(unix))]
+        // Windows has no SIGHUP re-exec path — stop then start.
+        #[cfg(windows)]
+        KernelAction::Restart => {
+            println!("Restarting daemon (stop + start)...");
+            let _ = stop_windows(true).await;
+            crate::daemon::daemonize(args.config.as_deref())?;
+        }
+        #[cfg(not(any(unix, windows)))]
         KernelAction::Start { .. } | KernelAction::Stop { .. } | KernelAction::Restart => {
             unreachable!("handled above");
         }
@@ -737,7 +746,7 @@ fn print_event_log<P: clawft_platform::Platform>(
     println!("({} entries)", events.len());
 }
 
-// ── Signal / PID helpers (Unix only) ────────────────────────────
+// ── Signal / PID helpers ────────────────────────────────────────
 
 #[cfg(unix)]
 /// Read the daemon PID from `~/.clawft/kernel.pid` and validate the process exists.
@@ -786,6 +795,86 @@ fn cleanup_runtime_files() {
     if sock_path.exists() {
         let _ = std::fs::remove_file(&sock_path);
     }
+}
+
+/// Windows stop path (WEFT-559): RPC `kernel.shutdown` first, then taskkill.
+#[cfg(windows)]
+async fn stop_windows(force: bool) -> anyhow::Result<()> {
+    use std::process::Command;
+    use std::time::Duration;
+
+    // Prefer graceful RPC shutdown over the named pipe.
+    if let Some(mut client) = DaemonClient::connect().await {
+        match client.simple_call("kernel.shutdown").await {
+            Ok(resp) if resp.ok => {
+                println!("kernel.shutdown accepted — waiting for exit...");
+            }
+            Ok(resp) => {
+                let msg = resp.error.unwrap_or_else(|| "unknown error".into());
+                eprintln!("kernel.shutdown error: {msg}");
+            }
+            Err(e) => {
+                eprintln!("kernel.shutdown RPC failed: {e}");
+            }
+        }
+
+        // Wait for the pipe to disappear / client dials to fail.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if DaemonClient::connect().await.is_none() {
+                println!("Daemon stopped.");
+                cleanup_runtime_files_windows();
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        if !force {
+            anyhow::bail!("Daemon still running after 10s. Use --force to taskkill.");
+        }
+        println!("Graceful shutdown timed out — taskkill /F.");
+    } else {
+        println!("No live named-pipe daemon; trying PID file...");
+    }
+
+    // Force path: kill via PID file if present.
+    let pid_path = protocol::pid_path();
+    if pid_path.exists() {
+        if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+            if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                let mut cmd = Command::new("taskkill");
+                cmd.args(["/PID", &pid.to_string()]);
+                if force {
+                    cmd.arg("/F");
+                }
+                match cmd.status() {
+                    Ok(status) if status.success() => {
+                        println!("taskkill sent to PID {pid}.");
+                    }
+                    Ok(status) => {
+                        eprintln!("taskkill exited with {status}");
+                    }
+                    Err(e) => {
+                        eprintln!("taskkill failed: {e}");
+                    }
+                }
+            }
+        }
+    } else if DaemonClient::connect().await.is_none() {
+        anyhow::bail!("no PID file found and no daemon answering — is the daemon running?");
+    }
+
+    cleanup_runtime_files_windows();
+    Ok(())
+}
+
+#[cfg(windows)]
+fn cleanup_runtime_files_windows() {
+    let pid_path = protocol::pid_path();
+    if pid_path.exists() {
+        let _ = std::fs::remove_file(&pid_path);
+    }
+    // Named pipes have no filesystem node to remove.
 }
 
 // ── Shared helpers ────────────────────────────────────────────────

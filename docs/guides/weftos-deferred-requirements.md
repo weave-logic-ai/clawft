@@ -1506,74 +1506,79 @@ All deferred items MUST pass these checks before merge:
 ## Windows transport — named-pipe RPC (0.8.x)
 
 ### Status
-**Partially landed (WEFT-11)** — client + server *helpers* ship in
-`clawft-rpc`. The weave daemon accept loop is still Unix-only
-(residual: WEFT-559). `x86_64-pc-windows-msvc` remains excluded from
-the cargo-dist target list until the server side accepts clients.
+**Landed (WEFT-11 + WEFT-559)** — `DaemonClient` + named-pipe server
+helpers in `clawft-rpc`, weave daemon accept loop under
+`cfg(windows)`, and `kernel start|stop|restart` gated for Windows.
+`x86_64-pc-windows-msvc` is re-enabled in cargo-dist; CI Windows
+roundtrip remains a residual verification step.
 
 ### Priority
-**Medium** — required to ship a usable Windows binary; Linux (glibc +
-musl) and macOS (x86_64 + arm64) remain the supported deployment
-surface until WEFT-559 closes.
+**Medium** — required to ship a usable Windows binary. Linux (glibc +
+musl) and macOS (x86_64 + arm64) remain the primary deployment
+surface until Windows artefacts are soak-tested in release CI.
 
-### What shipped (WEFT-11)
+### What shipped
 
 | Piece | Location | Status |
 |-------|----------|--------|
-| Logical → pipe name mapping | `protocol::pipe_name_for_path` / `default_pipe_name` | Done |
-| `DaemonClient` over `NamedPipeClient` | `crates/clawft-rpc/src/client.rs` (`cfg(windows)`) | Done |
-| Server bind helpers | `crates/clawft-rpc/src/named_pipe.rs` (`create_listener`, `create_listener_next`) | Done |
+| Logical → pipe name mapping | `protocol::pipe_name_for_path` / `default_pipe_name` | Done (WEFT-11) |
+| `DaemonClient` over `NamedPipeClient` | `crates/clawft-rpc/src/client.rs` (`cfg(windows)`) | Done (WEFT-11) |
+| Server bind helpers | `crates/clawft-rpc/src/named_pipe.rs` (`create_listener`, `create_listener_next`) | Done (WEFT-11) |
 | Unit tests | `pipe_name_*` (all platforms); roundtrip under `cfg(windows)` | Done |
-| Daemon accept loop | `crates/clawft-weave/src/daemon.rs` | **Residual (WEFT-559)** |
-| cargo-dist Windows target | `Cargo.toml` `[workspace.metadata.dist]` | Still commented out |
-| CI Windows matrix job | `.github/workflows/` | Not yet (document-only note) |
+| Daemon accept loop | `crates/clawft-weave/src/daemon.rs` (`cfg(windows)`) | Done (WEFT-559) |
+| Transport-agnostic `handle_connection` | `daemon.rs` (`AsyncRead + AsyncWrite`) | Done (WEFT-559) |
+| `kernel start/stop/restart` on Windows | `kernel_cmd.rs` (RPC shutdown + taskkill) | Done (WEFT-559) |
+| cargo-dist Windows target | `Cargo.toml` `[workspace.metadata.dist]` | Re-enabled |
+| CI Windows matrix job | `.github/workflows/` | Residual (document-only) |
 
 ### Code references
 - `crates/clawft-rpc/src/client.rs` — Unix UDS + Windows named-pipe
   `DaemonClient`; other platforms return `None` with a clear error on
   `call`.
-- `crates/clawft-rpc/src/named_pipe.rs` — server listener stubs /
-  helpers for the residual daemon wiring.
+- `crates/clawft-rpc/src/named_pipe.rs` — server listener helpers.
 - `crates/clawft-rpc/src/protocol.rs` — `pipe_name_for_path` (stable
   hash of the logical `socket_path` under `\\.\pipe\clawft-kernel-…`).
-- `crates/clawft-weave/src/daemon.rs` — still binds `UnixListener` only.
-- `crates/clawft-weave/src/commands/kernel_cmd.rs` — non-Unix
-  `kernel start/stop/restart` bails with a pointer to WEFT-11/WEFT-559.
-- `Cargo.toml` `[workspace.metadata.dist]` — Windows target commented
-  out with status notes.
+- `crates/clawft-weave/src/daemon.rs` — Unix `UnixListener` or Windows
+  `create_listener` / `create_listener_next` accept loop; connection
+  handlers are stream-oriented (`tokio::io::split`).
+- `crates/clawft-weave/src/commands/kernel_cmd.rs` — Windows stop uses
+  `kernel.shutdown` RPC then `taskkill`; restart is stop+start.
+- `Cargo.toml` `[workspace.metadata.dist]` — `x86_64-pc-windows-msvc`
+  listed.
 
-### Remaining implementation steps (WEFT-559)
+### cargo-dist Windows re-enable steps (operator)
 
-1. In `clawft-weave::daemon`, behind `cfg(windows)`, bind via
-   `clawft_rpc::named_pipe::create_listener` and loop with
-   `create_listener_next` after each accept. Reuse
-   `dispatch_json_line` / `handle_json_connection` (they are
-   stream-oriented; adapt over `NamedPipeServer` the same way the
-   Unix path uses `UnixStream`).
-2. Gate `kernel start/stop/restart` on Windows once the accept loop
-   works (today they bail in `kernel_cmd.rs`).
-3. Re-enable `x86_64-pc-windows-msvc` in `Cargo.toml`
-   `[workspace.metadata.dist]`. Verify the powershell installer
-   produces a working binary.
-4. Add a CI matrix job (or self-hosted Windows runner) that runs
-   `cargo test -p clawft-rpc --target x86_64-pc-windows-msvc` so the
-   `cfg(windows)` roundtrip test executes in CI.
+1. Confirm `[workspace.metadata.dist].targets` includes
+   `"x86_64-pc-windows-msvc"` (done with WEFT-559).
+2. On a Windows host (or `windows-latest` CI):
+   ```powershell
+   cargo test -p clawft-rpc --target x86_64-pc-windows-msvc
+   cargo build -p clawft-weave --release --target x86_64-pc-windows-msvc
+   .\target\x86_64-pc-windows-msvc\release\weaver.exe kernel start --foreground
+   # other shell:
+   .\weaver.exe kernel status
+   ```
+3. Tag a release so cargo-dist produces the zip + powershell installer.
+4. Optional residual: add a `windows-latest` job that runs the
+   `cfg(windows)` named-pipe roundtrip test.
 
 ### Verification
 
 - [x] `scripts/build.sh check` / `cargo test -p clawft-rpc` on Unix
       (pipe-name tests + connect-none tests).
+- [x] Daemon accept loop + `kernel start|stop|restart` wired under
+      `cfg(windows)` (WEFT-559).
+- [x] `x86_64-pc-windows-msvc` re-enabled in cargo-dist targets.
 - [ ] `cargo test -p clawft-rpc --target x86_64-pc-windows-msvc` on a
       Windows host (named-pipe roundtrip).
-- [ ] `weft kernel start --foreground` on Windows accepts named-pipe
-      connections from `weft kernel status` (needs WEFT-559).
-- [ ] cargo-dist MSI/zip artefact installs and runs end-to-end.
+- [ ] `weaver kernel start --foreground` on Windows accepts named-pipe
+      connections from `weaver kernel status`.
+- [ ] cargo-dist zip/powershell artefact installs and runs end-to-end.
 
 ### Tracking
 
-- Plane: **WEFT-11** (client + helpers — this work), **WEFT-483**
-  (0.7.0 deferral, closed by stub), **WEFT-559** (daemon accept loop
-  + re-enable dist/CI).
+- Plane: **WEFT-11** (client + helpers), **WEFT-483** (0.7.0 deferral,
+  closed by stub), **WEFT-559** (daemon accept loop + dist re-enable).
 
 ---
 
