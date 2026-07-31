@@ -11,6 +11,8 @@ description = "BVH broad-phase spatial index (ADR-056 Phase A). No kernel/chain 
 
 [dependencies]
 serde = { workspace = true }
+# Canonical spatial tags (WEFT-717 / ADR-056 Phase B). no_std default.
+weftos-leaf-types = { path = "../weftos-leaf-types" }
 
 [dev-dependencies]
 rand = { workspace = true }

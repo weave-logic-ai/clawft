@@ -1119,6 +1119,7 @@ version = "0.6.20"
 dependencies = [
  "rand 0.8.7",
  "serde",
+ "weftos-leaf-types",
 ]
 
 [[package]]

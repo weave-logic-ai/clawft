@@ -23,7 +23,7 @@ pub struct Leaf {
     pub bound: Aabb,
     /// Object vs event semantics.
     pub identity_kind: IdentityKind,
-    /// Registry tag (`weftos-leaf-types` spatial tags later; free u32 for now).
+    /// Registry tag — use [`crate::tags`] / [`weftos_leaf_types::spatial::SpatialLeafTag`].
     pub tag: u32,
     /// Opaque payload (CBOR/JSON bytes; chain-safe refs only at higher layers).
     pub payload: Vec<u8>,
@@ -46,28 +46,27 @@ impl Leaf {
     }
 }
 
-/// Reserved tag band for splat + world-model leaves (formal registry later).
-/// Product contract: `docs/weftos/splat-to-world-model.md`, ADR-078.
+/// Canonical spatial tags re-exported from `weftos-leaf-types` (WEFT-717).
+///
+/// Prefer [`crate::SpatialLeafTag`] or these `u32` constants — do not
+/// redefine discriminants in other crates.
+///
+/// Product contract: `docs/weftos/splat-to-world-model.md`, ADR-056 §3, ADR-078.
 pub mod tags {
-    #![allow(dead_code)] // consumed when clawft-service-splat / BVH Phase B wire
+    pub use weftos_leaf_types::spatial::tag_consts::*;
+}
 
-    /// Whole reconstructed scene after a train job.
-    pub const SPLAT_SCENE: u32 = 0x5350_0001; // "SP" + 1
-    /// COLMAP / camera frustum observation.
-    pub const SPLAT_CAMERA: u32 = 0x5350_0002;
-    /// Yardstick / metric scale event.
-    pub const SPLAT_YARDSTICK: u32 = 0x5350_0003;
+#[cfg(test)]
+mod tests {
+    use super::tags;
+    use weftos_leaf_types::spatial::SpatialLeafTag;
 
-    /// Labeled or unlabeled object instance (furniture, prop, …).
-    pub const WM_OBJECT: u32 = 0x5350_0010;
-    /// Planar / thin surface (floor, wall, tabletop).
-    pub const WM_SURFACE: u32 = 0x5350_0011;
-    /// Free / occupied / no-go volume.
-    pub const WM_VOLUME: u32 = 0x5350_0012;
-    /// Segment / mask-backed region linkage.
-    pub const WM_SEGMENT: u32 = 0x5350_0013;
-    /// Sensor observation volume (ToF, radar, …).
-    pub const WM_SENSOR_FOV: u32 = 0x5350_0014;
-    /// Interaction / affordance volume (policy later).
-    pub const WM_AFFORDANCE: u32 = 0x5350_0015;
+    #[test]
+    fn reexported_tags_match_canonical_registry() {
+        assert_eq!(tags::SPLAT_SCENE, SpatialLeafTag::SplatScene as u32);
+        assert_eq!(tags::SPLAT_SCENE, 0x5350_0001);
+        assert_eq!(tags::WM_OBJECT, SpatialLeafTag::WmObject as u32);
+        assert_eq!(tags::SPHERE, SpatialLeafTag::Sphere as u32);
+        assert_eq!(tags::AABB, SpatialLeafTag::Aabb as u32);
+    }
 }

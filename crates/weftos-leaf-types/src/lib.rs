@@ -8,6 +8,9 @@
 //!
 //! Wire format: CBOR via `ciborium`. See `docs/leaf-push-protocol.md` for
 //! the full protocol specification.
+//!
+//! Spatial leaf tags (BVH registry) live in [`spatial`] (ADR-056 Phase B /
+//! WEFT-717).
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -17,6 +20,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
+
+/// BVH spatial tag registry + narrow-phase payload schemas (ADR-056 / WEFT-717).
+pub mod spatial;
 
 // ── Topic layout ──────────────────────────────────────────────────
 
