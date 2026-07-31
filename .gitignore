@@ -113,3 +113,9 @@ examples/splat-viewer/.harness/
 agentdb.rvf
 agentdb.rvf.lock
 scripts/__pycache__/
+
+# MetaHarness flywheel archives (keep README + score-latest tracked via force-add)
+.metaharness/archive.json
+.metaharness/lineage.json
+.metaharness/variants/
+.metaharness/runs/

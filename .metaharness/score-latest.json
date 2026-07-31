@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "repo": "weftos",
+  "harnessFit": 75,
+  "compileConfidence": 100,
+  "taskCoverage": 65,
+  "toolSafety": 90,
+  "memoryUsefulness": 51,
+  "estCostPerRunUsd": 0.024,
+  "recommendedMode": "CLI + MCP",
+  "archetype": "mcp-server-harness",
+  "template": "vertical:coding",
+  "scaffoldReady": true,
+  "hardConstraints": "6/6",
+  "generatedAt": "2026-07-31T21:34:10.685Z"
+}

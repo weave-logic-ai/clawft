@@ -4,7 +4,7 @@
 **Status**: Accepted  
 **Deciders**: product + ECC / spatial (owner: reconstruction is input to BVH entities—objects, surfaces, volumes—not only a SOG for viewing)  
 **Depends-On**: ADR-056 (BVH), splat pipeline design, multi-modal capture design  
-**Relates-To**: ADR-077 (capture edge), ADR-073 (workspace visualizes; BVH is truth), LeWM latent world-model track (compose later), **ADR-095** (batch graph analytics + Graph Views — multi-sensor identity / association; DiskANN for vector relief), **`docs/research/graph-views.md`** (Graph Views = **operational model for sensor fusion**)
+**Relates-To**: ADR-077 (capture edge), ADR-073 (workspace visualizes; BVH is truth), LeWM latent world-model track (compose later), **ADR-095** (batch graph analytics + Graph Views), **ADR-096** (MetaHarness flywheel for fusion policy under churn), **`docs/research/graph-views.md`**, **`docs/research/ruv-worldgraph-vs-weftos.md`**
 
 ## Context
 

@@ -5,9 +5,11 @@
 **Companions:** ADR-095 (hot vs batch planes), ADR-046 (forest of trees),  
 ADR-058 (`SessionView`), ADR-067 (conversation graph **UI** view), ADR-069  
 (atom primary index / panopticon), ADR-078 (splat → world model),  
-ADR-087 (spatio-temporal sensor dual-branch),  
+ADR-087 (spatio-temporal sensor dual-branch), ADR-096 (MetaHarness foundation),  
 `docs/research/batch-graph-analytics-disk-spill.md`,  
 `docs/research/diskann-and-large-scale-indexes.md`,  
+`docs/research/ruv-worldgraph-vs-weftos.md`,  
+`docs/research/metaharness-foundation.md`,  
 `docs/weftos/splat-to-world-model.md`, `docs/weftos/splat-multimodal-sensing.md`
 
 ---
@@ -298,12 +300,22 @@ caps:
 
 ---
 
+## 9b. Evolving Views under churn (MetaHarness)
+
+Fusion Views **churn** as sensors, structure extract, and soft-edges improve.
+Policy for attach windows, ANN thresholds, and promote gates should evolve with
+**MetaHarness flywheel discipline** (ADR-096): evaluate candidates → immutable
+receipts → explicit promote — not silent edits only. Freeze foundation models
+and ECC authority; mutate the **harness / ViewSpec**. See
+`docs/research/metaharness-foundation.md` §4.
+
 ## 10. What to do now vs later
 
 | Now (research hold) | Later (when product pulls) |
 |---------------------|----------------------------|
 | Treat **Graph Views as the operational model for sensor fusion** in planning | `view.*` RPCs / weave commands for F1–F10 |
 | Keep this doc + ADR-095 §1b | First shipping fusion View: room/region identity |
+| MetaHarness foundation (ADR-096) for policy flywheel | ViewSpec anchors + flywheel promote |
 | Use purpose-scoped exports for experiments | Live attach for multi-cam / sensor-head feeds |
 | Conversation UI continues ADR-067 path | Unify under Graph View id for data feed |
 | DiskANN cold tier for embeddings | Batch WCC/PageRank **per fusion View** edge table |
@@ -317,3 +329,4 @@ caps:
 |------|--------|
 | 2026-07-31 | Initial note — Graph Views as purpose-built multi-source live/snapshot graphs; ties to ADR-095 planes |
 | 2026-07-31 | **Sensor fusion operational thesis** + F1–F10 loop; primary product use of Views |
+| 2026-07-31 | §9b MetaHarness flywheel under View churn; rUv WorldGraph + ADR-096 links |

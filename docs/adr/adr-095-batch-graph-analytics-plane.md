@@ -20,6 +20,8 @@
   - ADR-058 (`SessionView` — session-scoped projection)
   - ADR-067 (conversation graph **UI** — renders a graph; not the same as a Graph View object)
   - ADR-069 (atom / panopticon locators across projections)
+  - ADR-096 (MetaHarness foundation — evolve View/fusion policy under churn)
+  - `docs/research/ruv-worldgraph-vs-weftos.md` (rUv WorldGraph / OccWorld crosswalk)
 - **Source**:
   - [Sinchenko 2026 — DataFusion billion-edge graphs on 10GB RAM](https://semyonsinchenko.github.io/ssinchenko/post/datafusion-graphs-cc-2/)
   - [graphframes-rs](https://github.com/SemyonSinchenko/graphframes-rs) (Pregel / WCC / PageRank as join+agg)
