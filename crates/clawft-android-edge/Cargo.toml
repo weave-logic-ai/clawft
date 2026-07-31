@@ -1,0 +1,44 @@
+[package]
+name = "clawft-android-edge"
+version.workspace = true
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = """
+WeftOS Android edge core (WEFT-707 / ADR-077 A3): Ed25519 node identity,
+host pair store, and splatd session upload client. UniFFI surface for the
+android-splat-capture app; also usable as a plain Rust library for tests.
+"""
+
+[lib]
+name = "clawft_android_edge"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[features]
+default = ["uniffi"]
+# UniFFI scaffolding + Kotlin bindgen path (see docs/guides/android-splat-capture-edge.md).
+uniffi = ["dep:uniffi"]
+
+[dependencies]
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+# Sync multipart client for UniFFI-friendly blocking upload.
+reqwest = { workspace = true, features = ["blocking", "multipart"] }
+uniffi = { version = "0.29", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+serde_json = { workspace = true }
+# Local httptest mock for upload tests.
+tiny_http = "0.12"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

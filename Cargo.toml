@@ -100,6 +100,8 @@ members = [
     "crates/clawft-sonobuoy-ranging",
     # WEFT-229: voice pipeline latency / WER / CPU harness (mock-friendly, no ort).
     "crates/clawft-bench-voice",
+    # WEFT-707 / ADR-077 A3: Android edge core (Ed25519 identity + pair store + splatd upload).
+    "crates/clawft-android-edge",
 ]
 exclude = [
     "gui/src-tauri",

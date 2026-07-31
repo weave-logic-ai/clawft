@@ -177,23 +177,23 @@ Do not put the Gradle tree under `crates/`. Keep Android tooling isolated.
 
 ### A1 — Offline capture MVP — **WEFT-705**
 
-- [ ] CameraX capture + IMU attach  
-- [ ] Coverage sphere UI + missing bins  
-- [ ] Local session package + share ZIP  
-- [ ] Manual: unzip → host train path  
+- [x] CameraX capture + IMU attach  
+- [x] Coverage sphere UI + missing bins  
+- [x] Local session package + share ZIP  
+- [x] Manual: unzip → host train path  
 
 ### A2 — Phone → Mac splatd — **WEFT-706**
 
-- [ ] Pairing UX (URL + token or QR)  
-- [ ] Upload session → job_id  
-- [ ] Progress UI  
-- [ ] Open result SOG in WebView  
+- [x] Pairing UX (URL + token or QR)  
+- [x] Upload session → job_id  
+- [x] Progress UI  
+- [x] Open result SOG in WebView  
 
 ### A3 — WeftOS edge core in-app — **WEFT-707**
 
-- [ ] Rust identity + config via UniFFI  
-- [ ] Same node id across restarts  
-- [ ] Capability-scoped host token  
+- [x] Rust identity + config via UniFFI  
+- [x] Same node id across restarts  
+- [x] Capability-scoped host token  
 
 ### A4 — Stream mode + resiliency *(later)*
 

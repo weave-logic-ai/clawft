@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Weft Splat Capture</string>
+    <string name="capture">Capture</string>
+    <string name="sessions">Sessions</string>
+    <string name="pair">Pair</string>
+    <string name="upload">Upload</string>
+    <string name="review">Review SOG</string>
+</resources>
