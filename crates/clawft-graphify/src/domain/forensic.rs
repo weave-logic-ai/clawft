@@ -126,41 +126,54 @@ pub enum Gap {
 /// - Timeline discontinuities (events without temporal edges)
 /// - Unverified claims (edges with confidence = AMBIGUOUS)
 /// - Missing connections (persons not linked to events)
+///
+/// # Complexity (WEFT-379)
+///
+/// Index-based single-pass implementation: **O(n + m)** where `n` is the
+/// entity count and `m` is the relationship count.
+///
+/// The previous implementation scanned all edges once per Event and once per
+/// Person (**O(n · m)**), which becomes a cliff above ~10K entities. This
+/// version builds membership indexes in one entity pass and one edge pass,
+/// then emits gaps with O(1) membership tests.
 pub fn gap_analysis(kg: &KnowledgeGraph) -> Vec<Gap> {
+    use std::collections::HashSet;
+
     let mut gaps = Vec::new();
 
-    // 1. Unlinked evidence: evidence nodes with degree 0-1.
+    // --- Entity index pass: O(n) ---
+    // Partition forensic node types and collect Event IDs for O(1) membership.
+    let mut event_ids: HashSet<&EntityId> = HashSet::new();
+    let mut evidence_nodes = Vec::new();
+    let mut event_nodes = Vec::new();
+    let mut person_nodes = Vec::new();
+
     for entity in kg.entities() {
-        if entity.entity_type == EntityType::Evidence {
-            let deg = kg.degree(&entity.id);
-            if deg <= 1 {
-                gaps.push(Gap::UnlinkedEvidence {
-                    entity_id: entity.id.clone(),
-                    label: entity.label.clone(),
-                    degree: deg,
-                });
+        match entity.entity_type {
+            EntityType::Evidence => evidence_nodes.push(entity),
+            EntityType::Event => {
+                event_ids.insert(&entity.id);
+                event_nodes.push(entity);
             }
+            EntityType::Person => person_nodes.push(entity),
+            _ => {}
         }
     }
 
-    // 2. Timeline discontinuities: Event nodes without Precedes edges.
-    for entity in kg.entities() {
-        if entity.entity_type == EntityType::Event {
-            let has_temporal = kg.edges().any(|(src, _tgt, rel)| {
-                (src.id == entity.id || rel.target == entity.id)
-                    && rel.relation_type == RelationType::Precedes
-            });
-            if !has_temporal {
-                gaps.push(Gap::TimelineDiscontinuity {
-                    event_id: entity.id.clone(),
-                    label: entity.label.clone(),
-                });
-            }
-        }
-    }
+    // --- Edge index pass: O(m) ---
+    // Build:
+    //   * events that participate in any Precedes (temporal) edge
+    //   * entities adjacent to at least one Event (for person↔event links)
+    //   * UnverifiedClaim gaps (Ambiguous confidence)
+    let mut events_with_temporal: HashSet<&EntityId> = HashSet::new();
+    let mut linked_to_event: HashSet<&EntityId> = HashSet::new();
 
-    // 3. Unverified claims: edges with Ambiguous confidence.
-    for (_src, _tgt, rel) in kg.edges() {
+    for (src, tgt, rel) in kg.edges() {
+        if rel.relation_type == RelationType::Precedes {
+            events_with_temporal.insert(&src.id);
+            events_with_temporal.insert(&tgt.id);
+        }
+
         if rel.confidence == Confidence::Ambiguous {
             gaps.push(Gap::UnverifiedClaim {
                 source_id: rel.source.clone(),
@@ -168,27 +181,50 @@ pub fn gap_analysis(kg: &KnowledgeGraph) -> Vec<Gap> {
                 relation_type: rel.relation_type.clone(),
             });
         }
+
+        // Mark both endpoints when either side is an Event so person↔event
+        // membership is a single HashSet lookup later (O(1) per person).
+        if event_ids.contains(&src.id) {
+            linked_to_event.insert(&tgt.id);
+        }
+        if event_ids.contains(&tgt.id) {
+            linked_to_event.insert(&src.id);
+        }
     }
 
-    // 4. Missing connections: Person nodes not linked to any Event.
-    let event_ids: std::collections::HashSet<&EntityId> = kg
-        .entities()
-        .filter(|e| e.entity_type == EntityType::Event)
-        .map(|e| &e.id)
-        .collect();
+    // --- Emit structural gaps from indexes: O(n) ---
 
-    for entity in kg.entities() {
-        if entity.entity_type == EntityType::Person {
-            let linked_to_event = kg.edges().any(|(src, tgt, _rel)| {
-                (src.id == entity.id && event_ids.contains(&tgt.id))
-                    || (tgt.id == entity.id && event_ids.contains(&src.id))
+    // 1. Unlinked evidence: degree via petgraph adjacency (sum O(m_evidence)).
+    for entity in evidence_nodes {
+        let deg = kg.degree(&entity.id);
+        if deg <= 1 {
+            gaps.push(Gap::UnlinkedEvidence {
+                entity_id: entity.id.clone(),
+                label: entity.label.clone(),
+                degree: deg,
             });
-            if !linked_to_event {
-                gaps.push(Gap::MissingConnection {
-                    person_id: entity.id.clone(),
-                    label: entity.label.clone(),
-                });
-            }
+        }
+    }
+
+    // 2. Timeline discontinuities: Event nodes missing from temporal index.
+    for entity in event_nodes {
+        if !events_with_temporal.contains(&entity.id) {
+            gaps.push(Gap::TimelineDiscontinuity {
+                event_id: entity.id.clone(),
+                label: entity.label.clone(),
+            });
+        }
+    }
+
+    // 3. Unverified claims already emitted during the edge pass.
+
+    // 4. Missing connections: Persons not adjacent to any Event.
+    for entity in person_nodes {
+        if !linked_to_event.contains(&entity.id) {
+            gaps.push(Gap::MissingConnection {
+                person_id: entity.id.clone(),
+                label: entity.label.clone(),
+            });
         }
     }
 
@@ -476,6 +512,380 @@ mod tests {
         assert!(
             gaps.iter()
                 .any(|g| matches!(g, Gap::MissingConnection { .. }))
+        );
+    }
+
+    #[test]
+    fn gap_person_linked_to_event_not_missing() {
+        let mut kg = KnowledgeGraph::new();
+        let person = make_forensic_entity("Alice", EntityType::Person);
+        let event = make_forensic_entity("robbery", EntityType::Event);
+        kg.add_entity(person.clone());
+        kg.add_entity(event.clone());
+        kg.add_relationship(make_forensic_rel(
+            &person,
+            &event,
+            RelationType::WitnessedBy,
+            Confidence::Extracted,
+        ));
+        let gaps = gap_analysis(&kg);
+        assert!(
+            !gaps
+                .iter()
+                .any(|g| matches!(g, Gap::MissingConnection { .. })),
+            "person linked to an event must not be flagged MissingConnection"
+        );
+    }
+
+    #[test]
+    fn gap_event_with_precedes_not_discontinuous() {
+        let mut kg = KnowledgeGraph::new();
+        let e1 = make_forensic_entity("arrival", EntityType::Event);
+        let e2 = make_forensic_entity("departure", EntityType::Event);
+        kg.add_entity(e1.clone());
+        kg.add_entity(e2.clone());
+        kg.add_relationship(make_forensic_rel(
+            &e1,
+            &e2,
+            RelationType::Precedes,
+            Confidence::Extracted,
+        ));
+        let gaps = gap_analysis(&kg);
+        assert!(
+            !gaps
+                .iter()
+                .any(|g| matches!(g, Gap::TimelineDiscontinuity { .. })),
+            "events on a Precedes edge must not be flagged TimelineDiscontinuity"
+        );
+    }
+
+    /// Naive O(n·m) reference — the pre-WEFT-379 algorithm kept for
+    /// correctness equivalence tests only.
+    fn gap_analysis_naive(kg: &KnowledgeGraph) -> Vec<Gap> {
+        let mut gaps = Vec::new();
+
+        for entity in kg.entities() {
+            if entity.entity_type == EntityType::Evidence {
+                let deg = kg.degree(&entity.id);
+                if deg <= 1 {
+                    gaps.push(Gap::UnlinkedEvidence {
+                        entity_id: entity.id.clone(),
+                        label: entity.label.clone(),
+                        degree: deg,
+                    });
+                }
+            }
+        }
+
+        for entity in kg.entities() {
+            if entity.entity_type == EntityType::Event {
+                let has_temporal = kg.edges().any(|(src, _tgt, rel)| {
+                    (src.id == entity.id || rel.target == entity.id)
+                        && rel.relation_type == RelationType::Precedes
+                });
+                if !has_temporal {
+                    gaps.push(Gap::TimelineDiscontinuity {
+                        event_id: entity.id.clone(),
+                        label: entity.label.clone(),
+                    });
+                }
+            }
+        }
+
+        for (_src, _tgt, rel) in kg.edges() {
+            if rel.confidence == Confidence::Ambiguous {
+                gaps.push(Gap::UnverifiedClaim {
+                    source_id: rel.source.clone(),
+                    target_id: rel.target.clone(),
+                    relation_type: rel.relation_type.clone(),
+                });
+            }
+        }
+
+        let event_ids: std::collections::HashSet<&EntityId> = kg
+            .entities()
+            .filter(|e| e.entity_type == EntityType::Event)
+            .map(|e| &e.id)
+            .collect();
+
+        for entity in kg.entities() {
+            if entity.entity_type == EntityType::Person {
+                let linked_to_event = kg.edges().any(|(src, tgt, _rel)| {
+                    (src.id == entity.id && event_ids.contains(&tgt.id))
+                        || (tgt.id == entity.id && event_ids.contains(&src.id))
+                });
+                if !linked_to_event {
+                    gaps.push(Gap::MissingConnection {
+                        person_id: entity.id.clone(),
+                        label: entity.label.clone(),
+                    });
+                }
+            }
+        }
+
+        gaps
+    }
+
+    /// Canonical fingerprint so order-independent gap multiset comparison works.
+    fn gap_fingerprint(g: &Gap) -> String {
+        match g {
+            Gap::UnlinkedEvidence {
+                entity_id,
+                label,
+                degree,
+            } => format!("ue:{entity_id}:{label}:{degree}"),
+            Gap::TimelineDiscontinuity { event_id, label } => {
+                format!("td:{event_id}:{label}")
+            }
+            Gap::UnverifiedClaim {
+                source_id,
+                target_id,
+                relation_type,
+            } => format!("uc:{source_id}:{target_id}:{relation_type:?}"),
+            Gap::MissingConnection { person_id, label } => {
+                format!("mc:{person_id}:{label}")
+            }
+        }
+    }
+
+    fn assert_gaps_equivalent(a: &[Gap], b: &[Gap]) {
+        let mut fa: Vec<String> = a.iter().map(gap_fingerprint).collect();
+        let mut fb: Vec<String> = b.iter().map(gap_fingerprint).collect();
+        fa.sort();
+        fb.sort();
+        assert_eq!(
+            fa, fb,
+            "index-based gap_analysis must match naive O(n·m) reference"
+        );
+    }
+
+    /// Mixed forensic fixture covering all four gap kinds + non-gap cases.
+    fn mixed_forensic_fixture() -> KnowledgeGraph {
+        let mut kg = KnowledgeGraph::new();
+        let lone_evidence = make_forensic_entity("fingerprint", EntityType::Evidence);
+        let linked_evidence = make_forensic_entity("cctv", EntityType::Evidence);
+        let e1 = make_forensic_entity("entry", EntityType::Event);
+        let e2 = make_forensic_entity("exit", EntityType::Event);
+        let orphan_event = make_forensic_entity("unscheduled", EntityType::Event);
+        let linked_person = make_forensic_entity("witness", EntityType::Person);
+        let orphan_person = make_forensic_entity("bystander", EntityType::Person);
+        let place = make_forensic_entity("warehouse", EntityType::Location);
+
+        for e in [
+            &lone_evidence,
+            &linked_evidence,
+            &e1,
+            &e2,
+            &orphan_event,
+            &linked_person,
+            &orphan_person,
+            &place,
+        ] {
+            kg.add_entity(e.clone());
+        }
+
+        // Temporal chain: e1 → e2 (both should clear TimelineDiscontinuity).
+        kg.add_relationship(make_forensic_rel(
+            &e1,
+            &e2,
+            RelationType::Precedes,
+            Confidence::Extracted,
+        ));
+        // Person linked to event.
+        kg.add_relationship(make_forensic_rel(
+            &linked_person,
+            &e1,
+            RelationType::WitnessedBy,
+            Confidence::Extracted,
+        ));
+        // Evidence with degree ≥ 2 (not unlinked).
+        kg.add_relationship(make_forensic_rel(
+            &linked_evidence,
+            &e1,
+            RelationType::FoundAt,
+            Confidence::Extracted,
+        ));
+        kg.add_relationship(make_forensic_rel(
+            &linked_evidence,
+            &place,
+            RelationType::LocatedAt,
+            Confidence::Extracted,
+        ));
+        // Ambiguous claim.
+        kg.add_relationship(make_forensic_rel(
+            &orphan_person,
+            &place,
+            RelationType::LocatedAt,
+            Confidence::Ambiguous,
+        ));
+
+        kg
+    }
+
+    #[test]
+    fn gap_analysis_matches_naive_on_mixed_fixture() {
+        let kg = mixed_forensic_fixture();
+        let optimized = gap_analysis(&kg);
+        let naive = gap_analysis_naive(&kg);
+        assert_gaps_equivalent(&optimized, &naive);
+
+        // Spot-check expected gap kinds are present.
+        assert!(
+            optimized
+                .iter()
+                .any(|g| matches!(g, Gap::UnlinkedEvidence { .. }))
+        );
+        assert!(
+            optimized
+                .iter()
+                .any(|g| matches!(g, Gap::TimelineDiscontinuity { .. }))
+        );
+        assert!(
+            optimized
+                .iter()
+                .any(|g| matches!(g, Gap::UnverifiedClaim { .. }))
+        );
+        assert!(
+            optimized
+                .iter()
+                .any(|g| matches!(g, Gap::MissingConnection { .. }))
+        );
+    }
+
+    #[test]
+    fn gap_analysis_matches_naive_on_empty_and_sparse() {
+        let empty = KnowledgeGraph::new();
+        assert_gaps_equivalent(&gap_analysis(&empty), &gap_analysis_naive(&empty));
+
+        let mut sparse = KnowledgeGraph::new();
+        sparse.add_entity(make_forensic_entity("p", EntityType::Person));
+        sparse.add_entity(make_forensic_entity("e", EntityType::Event));
+        sparse.add_entity(make_forensic_entity("ev", EntityType::Evidence));
+        assert_gaps_equivalent(&gap_analysis(&sparse), &gap_analysis_naive(&sparse));
+    }
+
+    /// Large synthetic fixture: many persons + events + sparse edges.
+    ///
+    /// Under the old O(n·m) algorithm this requires ~n_events·m + n_persons·m
+    /// full edge scans. The index-based path does one O(m) edge pass.
+    ///
+    /// Correctness: optimized ≡ naive.
+    /// Complexity: optimized finishes well under a generous wall-clock bound
+    /// that the naive path routinely exceeds on the same fixture size.
+    #[test]
+    fn gap_analysis_index_scales_on_large_fixture() {
+        const N_PERSONS: usize = 1_500;
+        const N_EVENTS: usize = 1_500;
+        const N_EVIDENCE: usize = 500;
+        // Sparse: each of the first half of persons links to one event.
+        const N_LINKS: usize = 750;
+
+        let mut kg = KnowledgeGraph::new();
+        let mut persons = Vec::with_capacity(N_PERSONS);
+        let mut events = Vec::with_capacity(N_EVENTS);
+        let mut evidence = Vec::with_capacity(N_EVIDENCE);
+
+        for i in 0..N_PERSONS {
+            let e = make_forensic_entity(&format!("person_{i}"), EntityType::Person);
+            kg.add_entity(e.clone());
+            persons.push(e);
+        }
+        for i in 0..N_EVENTS {
+            let e = make_forensic_entity(&format!("event_{i}"), EntityType::Event);
+            kg.add_entity(e.clone());
+            events.push(e);
+        }
+        for i in 0..N_EVIDENCE {
+            let e = make_forensic_entity(&format!("evidence_{i}"), EntityType::Evidence);
+            kg.add_entity(e.clone());
+            evidence.push(e);
+        }
+
+        // Temporal chain across events so half of them have Precedes.
+        for i in 0..(N_EVENTS / 2) {
+            kg.add_relationship(make_forensic_rel(
+                &events[i],
+                &events[i + 1],
+                RelationType::Precedes,
+                Confidence::Extracted,
+            ));
+        }
+        // Person→Event links for the first N_LINKS persons.
+        for i in 0..N_LINKS {
+            kg.add_relationship(make_forensic_rel(
+                &persons[i],
+                &events[i % N_EVENTS],
+                RelationType::WitnessedBy,
+                if i % 17 == 0 {
+                    Confidence::Ambiguous
+                } else {
+                    Confidence::Extracted
+                },
+            ));
+        }
+        // Give half the evidence degree 2 so they are not unlinked.
+        for i in 0..(N_EVIDENCE / 2) {
+            kg.add_relationship(make_forensic_rel(
+                &evidence[i],
+                &events[i % N_EVENTS],
+                RelationType::FoundAt,
+                Confidence::Extracted,
+            ));
+            kg.add_relationship(make_forensic_rel(
+                &evidence[i],
+                &persons[i % N_PERSONS],
+                RelationType::RelatedTo,
+                Confidence::Extracted,
+            ));
+        }
+
+        let n = kg.entity_count();
+        let m = kg.relationship_count();
+        // Expected naive edge-scan work units: events·m + persons·m + m
+        let naive_edge_visits = (N_EVENTS + N_PERSONS + 1) * m;
+        // Optimized: single full edge pass (+ degree on evidence only).
+        let optimized_edge_passes = 1usize;
+        assert!(
+            naive_edge_visits > optimized_edge_passes * m * 100,
+            "fixture must exercise the O(n·m) cliff: naive_visits={naive_edge_visits}, m={m}, n={n}"
+        );
+
+        let t0 = std::time::Instant::now();
+        let optimized = gap_analysis(&kg);
+        let optimized_ms = t0.elapsed().as_millis();
+
+        // Correctness vs naive (still feasible at this size for the reference).
+        let naive = gap_analysis_naive(&kg);
+        assert_gaps_equivalent(&optimized, &naive);
+
+        // Wall-clock guard: index path should be well under 2s even in debug.
+        // (Naive path on the same fixture is typically multi-second in debug
+        // because of ~n·m edge iterator restarts.)
+        assert!(
+            optimized_ms < 2_000,
+            "index-based gap_analysis took {optimized_ms}ms on n={n} m={m}; expected <2000ms"
+        );
+
+        // Sanity: unlinked persons and discontinuous events exist in this fixture.
+        assert!(
+            optimized
+                .iter()
+                .any(|g| matches!(g, Gap::MissingConnection { .. }))
+        );
+        assert!(
+            optimized
+                .iter()
+                .any(|g| matches!(g, Gap::TimelineDiscontinuity { .. }))
+        );
+        assert!(
+            optimized
+                .iter()
+                .any(|g| matches!(g, Gap::UnlinkedEvidence { .. }))
+        );
+        assert!(
+            optimized
+                .iter()
+                .any(|g| matches!(g, Gap::UnverifiedClaim { .. }))
         );
     }
 
