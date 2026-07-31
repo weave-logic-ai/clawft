@@ -16,6 +16,8 @@ pub mod chain_tail;
 pub mod connection_badge;
 pub mod depth_map;
 pub mod graph;
+pub mod graph_adapter;
+pub mod graph_edit;
 pub mod health;
 pub mod lineage;
 pub mod mesh_nodes;

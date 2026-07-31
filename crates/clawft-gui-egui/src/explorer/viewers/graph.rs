@@ -1,9 +1,17 @@
 //! `GraphViewer` — the `ui://graph` primitive (Vertex analog).
 //!
 //! Renders a substrate value shaped as `{ nodes: [...], edges: [...] }`
-//! as a 2-D node-link diagram. Read-only MVP per ADOPTION §9: the
+//! as a 2-D node-link diagram. Read-only by default per ADOPTION §9: the
 //! same primitive must eventually serve the Explorer's graph-view
-//! toggle AND vector-synth's ⊃μBus patch UI. Editability is Phase 3+.
+//! toggle AND vector-synth's ⊃μBus patch UI.
+//!
+//! ## Phase 3+ edit (WEFT-281)
+//!
+//! Toggle **Edit** in the header (or set `"editable": true` on the
+//! value) to open the interactive patch UI in [`super::graph_edit`].
+//! Model + ops live in [`super::graph_adapter`] — the migration seam
+//! for a future `egui_node_graph` backend (not linked today: egui pin
+//! + wasm budget).
 //!
 //! ## Library choice
 //!
@@ -97,16 +105,51 @@ impl SubstrateViewer for GraphViewer {
             .map(|a| a.iter().filter_map(GraphEdge::from_value).collect())
             .unwrap_or_default();
 
-        ui.label(
-            egui::RichText::new(format!(
-                "graph · {path}  ({} nodes, {} edges)",
-                nodes.len(),
-                edges.len()
-            ))
-            .color(egui::Color32::from_rgb(160, 160, 170))
-            .small(),
-        );
+        // WEFT-281: Edit toggle (or substrate `"editable": true`) routes
+        // to the Phase 3+ patch UI. Default remains read-only so existing
+        // fixtures and Explorer detail panes are unchanged.
+        let force_edit = obj
+            .get("editable")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let edit_id = egui::Id::new(("weft-graph-edit-mode", path));
+        let mut edit_mode = force_edit
+            || ui
+                .ctx()
+                .data_mut(|d| d.get_temp::<bool>(edit_id).unwrap_or(false));
+
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!(
+                    "graph · {path}  ({} nodes, {} edges)",
+                    nodes.len(),
+                    edges.len()
+                ))
+                .color(egui::Color32::from_rgb(160, 160, 170))
+                .small(),
+            );
+            if !force_edit {
+                if ui
+                    .toggle_value(&mut edit_mode, "Edit")
+                    .on_hover_text("Phase 3+ patch UI — select, edit, connect nodes")
+                    .changed()
+                {
+                    ui.ctx().data_mut(|d| d.insert_temp(edit_id, edit_mode));
+                }
+            } else {
+                ui.label(
+                    egui::RichText::new("editable")
+                        .small()
+                        .color(egui::Color32::from_rgb(180, 200, 120)),
+                );
+            }
+        });
         ui.add_space(4.0);
+
+        if edit_mode {
+            super::graph_edit::paint(ui, path, value);
+            return;
+        }
 
         if nodes.is_empty() {
             ui.label(
@@ -751,5 +794,19 @@ mod tests {
         let t = truncate("superduperlongname", 10);
         assert!(t.ends_with('…'));
         assert!(t.chars().count() <= 10);
+    }
+
+    // ─ WEFT-281 edit flag (matches still succeeds) ───────────────
+
+    #[test]
+    fn matches_with_editable_flag() {
+        // `"editable": true` is advisory for paint routing; shape match
+        // still requires nodes + edges arrays.
+        let v = json!({
+            "nodes": ["a", "b"],
+            "edges": [["a", "b"]],
+            "editable": true
+        });
+        assert_eq!(GraphViewer::matches(&v), PRIORITY);
     }
 }

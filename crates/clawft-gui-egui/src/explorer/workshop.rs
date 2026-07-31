@@ -803,7 +803,7 @@ pub(crate) fn viewer_for_hint(name: &str) -> Option<fn(&mut egui::Ui, &str, &Val
         "chain_tail" => chain_tail::ChainTailViewer::paint,
         "connection_badge" => connection_badge::ConnectionBadgeViewer::paint,
         "depth_map" => depth_map::DepthMapViewer::paint,
-        "graph" => graph::GraphViewer::paint,
+        "graph" | "graph_edit" => graph::GraphViewer::paint,
         "health" => health::HealthViewer::paint,
         "json" | "json_fallback" => json_fallback::JsonFallbackViewer::paint,
         "lineage" => lineage::LineageViewer::paint,
