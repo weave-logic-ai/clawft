@@ -58,6 +58,7 @@ pub fn build_voice_chat_params(
         temperature: None,
         max_tokens: None,
         conv_id: conv_id.into(),
+        caller_id: None,
         metadata: Some(metadata),
     }
 }

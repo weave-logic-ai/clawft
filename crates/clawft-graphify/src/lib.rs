@@ -40,6 +40,10 @@ pub mod validation;
 pub mod vault;
 pub mod watch;
 
+// WEFT-369: MCP server exposing graphify query/ingest/export/diff tools.
+#[cfg(feature = "mcp")]
+pub mod mcp;
+
 #[cfg(feature = "kernel-bridge")]
 pub mod bridge;
 

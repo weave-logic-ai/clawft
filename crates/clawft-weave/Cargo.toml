@@ -45,7 +45,8 @@ agent-core-chat = []
 clawft-core = { workspace = true, features = ["native", "rvf", "embedding-router"] }
 eml-core = { workspace = true }
 # http-client: real reqwest-backed URL ingest (WEFT-368).
-clawft-graphify = { workspace = true, default-features = false, features = ["http-client"] }
+# mcp: WEFT-369 graphify MCP server (query/ingest/export/diff over stdio).
+clawft-graphify = { workspace = true, default-features = false, features = ["http-client", "mcp"] }
 clawft-kernel = { workspace = true, features = ["native"] }
 clawft-platform = { workspace = true }
 clawft-rpc = { workspace = true }

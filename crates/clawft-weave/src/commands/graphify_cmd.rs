@@ -8,6 +8,7 @@
 //! - `weaver graphify rebuild`            -- force full re-extraction
 //! - `weaver graphify watch`              -- start file watcher
 //! - `weaver graphify hooks install|uninstall|status` -- manage git hooks
+//! - `weaver graphify serve`              -- MCP stdio server (WEFT-369)
 
 use clap::{Parser, Subcommand};
 use std::collections::HashMap;
@@ -108,6 +109,20 @@ pub enum GraphifyAction {
         #[command(subcommand)]
         action: HooksAction,
     },
+
+    /// Run the graphify MCP server over stdio (WEFT-369 / Phase 6).
+    ///
+    /// Exposes `graphify_query`, `graphify_ingest`, `graphify_export`, and
+    /// `graphify_diff` to MCP clients (Claude Desktop, Cursor, etc.).
+    Serve {
+        /// Working directory for relative graph paths (default: cwd).
+        #[arg(long)]
+        work_dir: Option<PathBuf>,
+
+        /// Default graph JSON path relative to work-dir.
+        #[arg(long, default_value = "graphify-out/graph.json")]
+        graph: PathBuf,
+    },
 }
 
 /// Git hook management subcommands.
@@ -156,7 +171,28 @@ pub async fn run(args: GraphifyArgs) -> anyhow::Result<()> {
         GraphifyAction::Rebuild { root, clean } => run_rebuild(&root, clean).await,
         GraphifyAction::Watch { root, debounce } => run_watch(&root, debounce).await,
         GraphifyAction::Hooks { action } => run_hooks(action).await,
+        GraphifyAction::Serve { work_dir, graph } => run_serve(work_dir, graph).await,
     }
+}
+
+/// Start the graphify MCP stdio server (WEFT-369).
+async fn run_serve(work_dir: Option<PathBuf>, graph: PathBuf) -> anyhow::Result<()> {
+    let work = work_dir.unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    });
+    let config = clawft_graphify::mcp::McpConfig {
+        work_dir: work,
+        default_graph: graph,
+    };
+    // MCP is stdio protocol — do not print banners to stdout (it is the wire).
+    eprintln!(
+        "graphify MCP server starting (cwd={}, graph={})",
+        config.work_dir.display(),
+        config.default_graph.display()
+    );
+    clawft_graphify::mcp::serve_stdio(config)
+        .await
+        .map_err(|e| anyhow::anyhow!("MCP server I/O error: {e}"))
 }
 
 // ---------------------------------------------------------------------------

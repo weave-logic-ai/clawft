@@ -23,9 +23,11 @@ http-client = ["dep:reqwest"]
 # OWL/RDF ingest (Turtle, JSON-LD) via Oxigraph stack (WEFT-358 / OG-2).
 # Default-on so ontology pipelines work without extra feature flags.
 rdf-ingest = ["dep:oxrdfio", "dep:oxrdf"]
+# WEFT-369: stdio MCP server + graphify_query/ingest/export/diff tools.
+mcp = []
 full = ["ast-extract", "semantic-extract", "vision-extract", "code-domain",
         "forensic-domain", "html-export", "neo4j-export", "kernel-bridge",
-        "http-client", "lang-all", "rdf-ingest"]
+        "http-client", "lang-all", "rdf-ingest", "mcp"]
 
 lang-python = ["ast-extract", "dep:tree-sitter-python"]
 lang-javascript = ["ast-extract", "dep:tree-sitter-javascript"]
