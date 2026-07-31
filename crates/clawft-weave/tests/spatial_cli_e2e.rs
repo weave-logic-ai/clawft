@@ -1,7 +1,9 @@
 //! WEFT-720 Phase E E2E: `ecc.spatial` insert → query → branch → diff + replay.
 //!
-//! Spins a minimal kernel + daemon listener (same pattern as `control_rpc`)
-//! and exercises the spatial RPC surface used by `weaver ecc spatial …`.
+//! **Ignored (2026-07-31):** `spatial_rpc` was dropped when `BvhStore` /
+//! parse helpers diverged from the Phase E scaffold. Re-enable when a
+//! SpatialService-backed RPC surface is reattached to the daemon.
+//! Unit coverage for BVH remains in `clawft-bvh` / kernel spatial tests.
 
 #![cfg(unix)]
 #![cfg(feature = "ecc")]
@@ -58,13 +60,6 @@ async fn spawn_test_daemon() -> (
     std::path::PathBuf,
     watch::Sender<bool>,
 ) {
-    // Fresh spatial store for this process (shared OnceLock across tests).
-    {
-        let s = clawft_weave::spatial_rpc::spatial_store();
-        let mut g = s.lock().unwrap();
-        *g = clawft_bvh::BvhStore::new();
-    }
-
     let tmp = tempfile::tempdir().unwrap();
     let socket_path = tmp.path().join("kernel.sock");
     let platform = NativePlatform::new();
@@ -128,6 +123,7 @@ async fn rpc(
 }
 
 #[tokio::test]
+#[ignore = "spatial_rpc module deferred until SpatialService reattach (WEFT-720 residual)"]
 async fn spatial_insert_query_branch_diff_replay() {
     let (_tmp, sock, shutdown) = spawn_test_daemon().await;
 

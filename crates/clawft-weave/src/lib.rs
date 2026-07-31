@@ -24,8 +24,8 @@ pub mod llm_service;
 pub mod mcp_rpc;
 pub mod node_identity;
 pub mod protocol;
-/// WEFT-720: `ecc.spatial.*` RPC + process-local BvhStore scaffold.
-#[cfg(unix)]
+// WEFT-720 residual: `spatial_rpc` dropped when BvhStore/CLI helpers
+// diverged; reattach via SpatialService before re-enabling spatial_cli_e2e.
 #[cfg(feature = "rvf-rpc")]
 pub mod rvf_codec;
 #[cfg(feature = "rvf-rpc")]

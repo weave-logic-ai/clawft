@@ -107,3 +107,9 @@ ui/
 # splat harness / splatd job workspaces
 data/splat/
 examples/splat-viewer/.harness/
+.DS_Store
+
+# local agentdb
+agentdb.rvf
+agentdb.rvf.lock
+scripts/__pycache__/
