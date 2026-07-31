@@ -16,6 +16,10 @@
   - ADR-087 (spatio-temporal dual-branch sensors — K-STEMIT)
   - ADR-088 / ADR-093 (VectorRef + BVH×HNSW join)
   - ADR-091 (LightRAG dual-level retrieval)
+  - ADR-046 (forest of trees — durable **sources**)
+  - ADR-058 (`SessionView` — session-scoped projection)
+  - ADR-067 (conversation graph **UI** — renders a graph; not the same as a Graph View object)
+  - ADR-069 (atom / panopticon locators across projections)
 - **Source**:
   - [Sinchenko 2026 — DataFusion billion-edge graphs on 10GB RAM](https://semyonsinchenko.github.io/ssinchenko/post/datafusion-graphs-cc-2/)
   - [graphframes-rs](https://github.com/SemyonSinchenko/graphframes-rs) (Pregel / WCC / PageRank as join+agg)
@@ -23,6 +27,7 @@
   - DiskANN (Subramanya et al., NeurIPS 2019) + in-tree `ruvector-diskann` / Hybrid backend
   - `docs/research/batch-graph-analytics-disk-spill.md`
   - `docs/research/diskann-and-large-scale-indexes.md`
+  - `docs/research/graph-views.md` (**Graph Views** — purpose-built multi-source graphs)
   - `docs/brain/vector-backend-bench-2026-07.md` (WEFT-366 DiskANN verdict)
 
 ## Context
@@ -77,6 +82,37 @@ WeftOS **adopts** the following split as the long-horizon architecture for graph
 
 **Write-back contract:** batch jobs produce **node features** (e.g. `component_id`, `pagerank`, community label) that re-enter hot indexes as metadata / payload fields — never raw billion-edge dumps into LLM context or the cognitive tick.
 
+### 1b. Graph Views as the unit of composition (research stance)
+
+Product and sensor work will often need graphs that are **not** “the whole
+forest” and **not** a single source structure. **Graph Views** (capital V —
+see `docs/research/graph-views.md`) are the intended unit:
+
+| Property | Meaning |
+|----------|---------|
+| **Purpose-built** | Created for a job (conversation, room identity, monorepo assessment, mesh health) |
+| **Multi-source** | May attach forest trees, BVH regions, graphify KGs, sensor streams, peer Views, foreign edge lists |
+| **Live or snapshot** | May subscribe to impulses/events or freeze for audit/export |
+| **Plane-aware** | Small/live Views stay on the **hot** plane; large association Views export columnar edge tables to the **batch** plane |
+| **Feature write-back** | Batch WCC/PageRank/community labels land on the **View** (and optionally promote into source metadata) |
+
+**Normative research rules:**
+
+1. Prefer running global algorithms (**WCC, PageRank**) on a **named View’s**
+   edge table, not on an unbounded union of all forest edges.
+2. Live sensor feeds attach to a View with **caps + windowing**; overflow
+   spills to snapshot/batch rather than growing the cognitive hot set without bound.
+3. Soft edges from ANN (HNSW/DiskANN) may feed a View as *candidate* edges;
+   hard identity still needs structural/batch treatment when required.
+4. **Do not** conflate Graph Views with GUI “views” (ADR-067 is a renderer of
+   graph data). A Graph View is a **data object**; UI is a consumer.
+5. Graph Views are **usually projections** over ADR-046 forest sources — not a
+   replacement for durable domain trees — unless a View is later promoted to a
+   first-class `StructureTag` (open question in the research note).
+
+**0.8.x:** no mandatory `view.*` RPC surface. Capture the concept so sensor
+fusion, Urth, and multi-source agent context designs share vocabulary.
+
 ### 2. Keep batch analytics *in view*; do not ship DataFusion in 0.8.x
 
 - **Do not** add Apache DataFusion (or graphframes-rs) as a workspace dependency for the 0.8 publish track.
@@ -102,11 +138,12 @@ Details: `docs/research/diskann-and-large-scale-indexes.md`.
 
 Promote batch-plane work from research hold to a cycle ticket when **any** of:
 
-1. **Measured cliff:** a production or soak graph (graphify multi-repo, ExoChain event association, multi-camera identity, sonobuoy proximity, Urth LOD association) exceeds a documented RAM budget for in-memory WCC/PageRank/community detection, **or**
+1. **Measured cliff:** a production or soak **Graph View** (or raw graphify multi-repo, ExoChain association, multi-camera identity, sonobuoy proximity, Urth LOD association) exceeds a documented RAM budget for in-memory WCC/PageRank/community detection, **or**
 2. **Sensor fusion product need:** identity resolution / global influence labels are required for world-model publish (ADR-078) and cannot be approximated by HNSW + local k-hop, **or**
-3. **Ops request:** nightly / mesh-wide analytics job with hard memory caps on edge devices or CI agents.
+3. **Ops request:** nightly / mesh-wide analytics job with hard memory caps on edge devices or CI agents, **or**
+4. **Multi-source View product:** a shipping feature needs named, live, multi-source Graph Views with caps/export (implementation may start hot-only; batch activates when that View cliffs).
 
-Until then: hot plane only; export edge tables opportunistically if cheap (e.g. Parquet dump from graphify for experiments).
+Until then: hot plane only; export edge tables opportunistically if cheap (e.g. Parquet dump from graphify or a purpose-scoped View for experiments).
 
 ### 5. Algorithm ownership (when activated)
 
@@ -170,9 +207,11 @@ Until then: hot plane only; export edge tables opportunistically if cheap (e.g. 
 
 - [x] Research: `docs/research/batch-graph-analytics-disk-spill.md`
 - [x] Research: `docs/research/diskann-and-large-scale-indexes.md` (how DiskANN alleviates vector scale)
-- [ ] When activation fires: Plane ticket + cycle assignment; prototype WCC or PageRank on exported edges under `MemoryMax`
+- [x] Research: `docs/research/graph-views.md` (purpose-built multi-source / live Graph Views)
+- [ ] When activation fires: Plane ticket + cycle assignment; prototype WCC or PageRank on a **named View** edge export under `MemoryMax`
 - [ ] Keep WEFT-660/661 and DiskANN parallel-build watch as vector-side enablers (`docs/brain/vector-backend-bench-2026-07.md`)
 - [ ] Cross-link from sensor fusion / world-model docs when those next revise
+- [ ] If product commits to `view.*` APIs: promote Graph Views from research note to a dedicated ADR (or Accept §1b here)
 
 ## References
 

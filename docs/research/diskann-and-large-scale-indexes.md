@@ -161,6 +161,11 @@ DiskANN shrinks the **candidate generation** problem. Batch analytics (when
 activated) solves **global structure** over edges that ANN alone cannot invent
 (or should not invent without provenance).
 
+**Graph Views:** ANN soft-edges and `VectorRef` columns attach to a **named
+View** (purpose-built multi-source graph — `docs/research/graph-views.md`).
+The View’s hard association edges remain structural; DiskANN does not own
+View identity.
+
 ---
 
 ## 5. Sensor fusion relevance

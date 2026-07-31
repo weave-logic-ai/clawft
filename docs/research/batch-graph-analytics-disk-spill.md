@@ -106,6 +106,12 @@ across systems is a weakly connected components problem. For WeftOS that maps to
 **Write-back:** batch outputs become **features** on hot nodes/leaves
 (`component_id`, `rank`, community), not full edge dumps into prompts.
 
+**Preferred scope unit:** a named **Graph View** (see
+`docs/research/graph-views.md`) — purpose-built, multi-source, optionally
+live. Batch jobs should target **that View’s edge table**, not an unbounded
+union of every forest edge. Live sensor attachments feed the View with caps;
+overflow promotes the View toward columnar/batch materialization (ADR-095).
+
 ### 3.3 Sensor fusion scale path (why we keep this in view)
 
 Planned / accepted sensor-related work that **grows edges**:
@@ -183,3 +189,4 @@ Prototype gate when activated:
 | Date | Change |
 |------|--------|
 | 2026-07-31 | Initial note from multi-expert review of Sinchenko post + WeftOS graph/sensor map; ADR-095 drafted |
+| 2026-07-31 | Graph Views as preferred analytics scope; link `graph-views.md` |
