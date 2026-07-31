@@ -1,0 +1,27 @@
+[package]
+name = "weftos-sensor-pipeline"
+version.workspace = true
+publish = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "LeWM sensor pipeline: collect → aggregate → encode → signed wire frames (WEFT-523)."
+keywords = ["weftos", "lewm", "sensor", "pipeline", "jepa"]
+categories = ["science", "encoding"]
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+ed25519-dalek = { workspace = true }
+weftos-sensor-pipeline-wire = { workspace = true }
+weftos-worldmodel-core = { workspace = true, default-features = false, features = ["std"] }
+weftos-worldmodel = { workspace = true, default-features = false, features = ["std"] }
+
+[dev-dependencies]
+rand = { workspace = true }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

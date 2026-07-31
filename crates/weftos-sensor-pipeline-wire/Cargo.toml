@@ -1,0 +1,26 @@
+[package]
+name = "weftos-sensor-pipeline-wire"
+version.workspace = true
+publish = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "LeWM sensor observation wire: mesh.sensor.v1.{encoded,consensus,control} CBOR + Ed25519 framing (WEFT-523)."
+keywords = ["weftos", "lewm", "sensor", "cbor", "mesh"]
+categories = ["encoding", "network-programming"]
+
+[dependencies]
+serde = { workspace = true }
+ciborium = { workspace = true }
+ed25519-dalek = { workspace = true }
+thiserror = { workspace = true }
+weftos-worldmodel-core = { workspace = true, default-features = false, features = ["std"] }
+
+[dev-dependencies]
+rand = { workspace = true }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

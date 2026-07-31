@@ -36,8 +36,13 @@ members = [
     "crates/weftos-worldmodel-impls",
     # WEFT-522: LeWM facade — re-exports core traits + default impls (single entrypoint).
     "crates/weftos-worldmodel",
+    # WEFT-523: LeWM sensor pipeline + CBOR/Ed25519 wire (mesh.sensor.v1.*).
+    "crates/weftos-sensor-pipeline-wire",
+    "crates/weftos-sensor-pipeline",
     # WEFT-524 / WEFT-533: WorldModelService binary (3 topologies) + frame attestation host.
     "crates/clawft-worldmodel-service",
+    # WEFT-525: cognitive work delegation to peer world-model services.
+    "crates/clawft-delegation",
     # `weftos-leaf-display` removed from the workspace in Phase E
     # (2026-05-15) — superseded by `weftos-leaf-scene`,
     # `weftos-leaf-renderer`, and `weftos-scene-builder`. The directory
@@ -328,6 +333,9 @@ clawft-plugin-treesitter = { version = "0.6.20", path = "crates/clawft-plugin-tr
 weftos-worldmodel-core = { version = "0.6.20", path = "crates/weftos-worldmodel-core", default-features = false }
 weftos-worldmodel-impls = { version = "0.6.20", path = "crates/weftos-worldmodel-impls", default-features = false }
 weftos-worldmodel = { version = "0.6.20", path = "crates/weftos-worldmodel", default-features = false }
+weftos-sensor-pipeline-wire = { version = "0.6.20", path = "crates/weftos-sensor-pipeline-wire" }
+weftos-sensor-pipeline = { version = "0.6.20", path = "crates/weftos-sensor-pipeline" }
+clawft-delegation = { version = "0.6.20", path = "crates/clawft-delegation" }
 clawft-graphify = { version = "0.6.20", path = "crates/clawft-graphify", default-features = false }
 clawft-security = { version = "0.6.20", path = "crates/clawft-security" }
 clawft-kernel = { version = "0.6.20", path = "crates/clawft-kernel", default-features = false }
