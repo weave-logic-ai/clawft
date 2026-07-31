@@ -437,6 +437,7 @@ fn render_stack(
     let stack = Stack::new(&node.path)
         .axis(axis)
         .wrap(wrap)
+        .variant(resolve_variant_id(node, snap))
         .body(|ui: &mut egui::Ui| {
             let mut child_frame = Frame {
                 responses: &mut child.responses,
@@ -473,8 +474,11 @@ fn render_strip(
 
     let mut child = ComposeOutcome::default();
 
-    let strip = Strip::new(&node.path).axis(axis).cells(cells).body(
-        |strip: &mut egui_extras::Strip<'_, '_>| {
+    let strip = Strip::new(&node.path)
+        .axis(axis)
+        .cells(cells)
+        .variant(resolve_variant_id(node, snap))
+        .body(|strip: &mut egui_extras::Strip<'_, '_>| {
             let mut child_frame = Frame {
                 responses: &mut child.responses,
                 dispatches: &mut child.dispatches,
@@ -485,8 +489,7 @@ fn render_strip(
                     render_node(c, snap, ui, &mut child_frame);
                 });
             }
-        },
-    );
+        });
     let resp = strip.show(ui);
     frame.merge(child);
     frame.push_response(resp);
@@ -522,7 +525,8 @@ fn render_grid(
                 ui.end_row();
             }
         }
-    });
+    })
+    .variant(resolve_variant_id(node, snap));
     let resp = grid.show(ui);
     frame.merge(child);
     frame.push_response(resp);
@@ -542,7 +546,9 @@ fn render_chip(
         .unwrap_or(ChipTone::Neutral);
 
     let affs = frame.affordances(node);
-    let mut chip = Chip::new(&node.path, label).tone(tone).variant(0);
+    let mut chip = Chip::new(&node.path, label)
+        .tone(tone)
+        .variant(resolve_variant_id(node, snap));
     if !affs.is_empty() {
         chip = chip.activatable(true);
     }
@@ -578,7 +584,7 @@ fn render_pressable(
     let p = Pressable::new(&node.path, label)
         .style(style)
         .enabled(enabled)
-        .variant(0);
+        .variant(resolve_variant_id(node, snap));
     let resp = p.show(ui);
     if resp.inner.clicked()
         && let Some(aff) = affs.first()
@@ -602,7 +608,8 @@ fn render_gauge(
     let hi = attr_number(node, "max").unwrap_or(1.0);
     let label = bound_string(node, "label", snap);
 
-    let mut g = Gauge::new(&node.path, value, (lo, hi)).variant(0);
+    let mut g = Gauge::new(&node.path, value, (lo, hi))
+        .variant(resolve_variant_id(node, snap));
     if let Some(l) = label {
         g = g.label(l);
     }
@@ -651,7 +658,7 @@ fn render_stream_view(
     let sv = StreamView::new(&node.path)
         .lines(&lines)
         .desired_width(width)
-        .variant(0);
+        .variant(resolve_variant_id(node, snap));
     frame.push_response(sv.show(ui));
 }
 
@@ -696,7 +703,7 @@ fn render_table(
 
     let t = Table::new(&node.path, &columns)
         .rows(row_count)
-        .variant(0)
+        .variant(resolve_variant_id(node, snap))
         .render(|row, idx| {
             if let Some(val) = rows.get(idx) {
                 for (i, key) in col_keys.iter().enumerate() {
@@ -1080,7 +1087,7 @@ fn render_field(
     let enabled = attr_bool(node, "enabled").unwrap_or(true);
     let f = Field::new(&node.path, kind, &mut value)
         .enabled(enabled)
-        .variant(0);
+        .variant(resolve_variant_id(node, snap));
     let resp = f.show(ui);
     let changed = resp.inner.changed();
     // Persist the (possibly mutated) value back into egui memory.
@@ -1116,7 +1123,7 @@ fn render_toggle(
     let enabled = attr_bool(node, "enabled").unwrap_or(true);
     let t = Toggle::new(&node.path, label, &mut value)
         .enabled(enabled)
-        .variant(0);
+        .variant(resolve_variant_id(node, snap));
     let resp = t.show(ui);
     ui.ctx().memory_mut(|m| m.data.insert_temp(key, value));
     if resp.inner.changed()
@@ -1175,7 +1182,12 @@ fn render_select(
 
     let changed = current != prev;
     ui.ctx().memory_mut(|m| m.data.insert_temp(key, current));
-    let synth = CanonResponse::from_egui(resp, std::borrow::Cow::Borrowed("ui://select"), 0, None);
+    let synth = CanonResponse::from_egui(
+        resp,
+        std::borrow::Cow::Borrowed("ui://select"),
+        resolve_variant_id(node, snap),
+        None,
+    );
     if changed
         && let Some(aff) = frame.affordances(node).first().cloned()
         && let Some(dispatch) = build_dispatch(node, &aff)
@@ -1205,7 +1217,7 @@ fn render_slider(
     let enabled = attr_bool(node, "enabled").unwrap_or(true);
     let mut s = Slider::new(&node.path, label, &mut value, lo, hi)
         .enabled(enabled)
-        .variant(0);
+        .variant(resolve_variant_id(node, snap));
     if let Some(st) = step {
         s = s.step(st);
     }
@@ -1242,7 +1254,7 @@ fn render_sheet(
         }
     })
     .stick_to_bottom(stick)
-    .variant(0);
+    .variant(resolve_variant_id(node, snap));
     if let Some(h) = max_h {
         s = s.max_height(h);
     }
@@ -1320,14 +1332,14 @@ fn render_modal(
     frame.push_response(CanonResponse::from_egui(
         resp,
         std::borrow::Cow::Borrowed("ui://modal"),
-        0,
+        resolve_variant_id(node, snap),
         None,
     ));
 }
 
 fn render_dock(
     node: &SurfaceNode,
-    _snap: &OntologySnapshot,
+    snap: &OntologySnapshot,
     ui: &mut egui::Ui,
     frame: &mut Frame<'_>,
 ) {
@@ -1348,7 +1360,7 @@ fn render_dock(
     frame.push_response(CanonResponse::from_egui(
         resp,
         std::borrow::Cow::Borrowed("ui://dock"),
-        0,
+        resolve_variant_id(node, snap),
         None,
     ));
 }
@@ -1383,13 +1395,14 @@ fn render_tabs(
     }
 
     let mut child = ComposeOutcome::default();
+    let variant = resolve_variant_id(node, snap);
     let resp = if labels.is_empty() {
         let r = ui.label(
             egui::RichText::new("[tabs] (no children)")
                 .color(egui::Color32::from_rgb(160, 160, 170))
                 .italics(),
         );
-        CanonResponse::from_egui(r, std::borrow::Cow::Borrowed("ui://tabs"), 0, None)
+        CanonResponse::from_egui(r, std::borrow::Cow::Borrowed("ui://tabs"), variant, None)
     } else {
         let children = &node.children;
         let t = Tabs::new(
@@ -1407,7 +1420,7 @@ fn render_tabs(
                 }
             },
         )
-        .variant(0);
+        .variant(variant);
         t.show(ui)
     };
 
@@ -1453,7 +1466,7 @@ fn render_tree(
     frame.push_response(CanonResponse::from_egui(
         resp,
         std::borrow::Cow::Borrowed("ui://tree"),
-        0,
+        resolve_variant_id(node, snap),
         None,
     ));
 }
@@ -1475,7 +1488,7 @@ fn render_plot(
         .unwrap_or_default();
     let p = clawft_canon::Plot::new(&node.path)
         .points(&series)
-        .variant(0);
+        .variant(resolve_variant_id(node, snap));
     let resp = p.show(ui);
     frame.push_response(resp);
 }
@@ -1510,7 +1523,10 @@ fn render_media(
         Some(u) if !u.is_empty() => {
             // `Cow<'static, str>` requires an owned String — clone the
             // URI into the widget so the borrow checker is happy.
-            let mut media = Media::new(&node.path, u).fit(fit).clickable(clickable);
+            let mut media = Media::new(&node.path, u)
+                .fit(fit)
+                .clickable(clickable)
+                .variant(resolve_variant_id(node, snap));
             if let Some(a) = alt {
                 media = media.alt(a);
             }
@@ -1549,7 +1565,7 @@ fn render_media(
 /// downstream affordances (zoom/pan) can hang off.
 fn render_canvas(
     node: &SurfaceNode,
-    _snap: &OntologySnapshot,
+    snap: &OntologySnapshot,
     ui: &mut egui::Ui,
     frame: &mut Frame<'_>,
 ) {
@@ -1573,7 +1589,8 @@ fn render_canvas(
                 painter.rect_filled(cell_rect, 0.0, color);
             }
         }
-    });
+    })
+    .variant(resolve_variant_id(node, snap));
     let resp = canvas.show(ui);
     frame.push_response(resp);
 }
@@ -1671,6 +1688,53 @@ fn bound_value(node: &SurfaceNode, slot: &str, snap: &OntologySnapshot) -> Optio
 fn bound_string(node: &SurfaceNode, slot: &str, snap: &OntologySnapshot) -> Option<String> {
     let v = bound_value(node, slot, snap)?;
     Some(v.to_display_string())
+}
+
+/// Resolve the ADR-006 `variant` head field for a surface node (WEFT-431).
+///
+/// Composer-assigned at `surface.compose` time and stamped onto every
+/// [`CanonResponse`] so ECC can attribute active-radar echoes without
+/// shared state (ADR-007).
+///
+/// Priority:
+/// 1. Binding slot `variant_id` or `variant` (binding-driven; preferred)
+/// 2. Static attr `variant_id` or `variant` (literal authoring)
+/// 3. `0` — stable identity-mapped default for nodes without an explicit
+///    variant (non-GEPA / unrehearsed pulse). Previously every path
+///    hard-coded `0`; bindings now drive the stamp when present.
+fn resolve_variant_id(node: &SurfaceNode, snap: &OntologySnapshot) -> u64 {
+    for slot in ["variant_id", "variant"] {
+        if let Some(v) = bound_value(node, slot, snap)
+            && let Some(id) = value_as_variant_id(&v)
+        {
+            return id;
+        }
+    }
+    for key in ["variant_id", "variant"] {
+        if let Some(id) = attr_as_variant_id(node, key) {
+            return id;
+        }
+    }
+    0
+}
+
+fn value_as_variant_id(v: &Value) -> Option<u64> {
+    match v {
+        Value::Int(i) if *i >= 0 => Some(*i as u64),
+        Value::Num(n) if n.is_finite() && *n >= 0.0 => Some(*n as u64),
+        Value::Str(s) => s.trim().parse::<u64>().ok(),
+        _ => None,
+    }
+}
+
+fn attr_as_variant_id(node: &SurfaceNode, key: &str) -> Option<u64> {
+    let a = node.attrs.get(key)?;
+    match a {
+        AttrValue::Int(i) if *i >= 0 => Some(*i as u64),
+        AttrValue::Number(n) if n.is_finite() && *n >= 0.0 => Some(*n as u64),
+        AttrValue::Str(s) => s.trim().parse::<u64>().ok(),
+        _ => None,
+    }
 }
 
 fn tone_from_str(s: &str) -> Option<ChipTone> {

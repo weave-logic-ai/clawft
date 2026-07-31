@@ -7,8 +7,12 @@
 //! GEPA affordance intersection (WEFT-277 / ADR-006 rule 2 + ADR-008)
 //! ships as a compose-time policy snapshot ([`ComposeGovernance`]);
 //! full Goal aggregate + chain events remain kernel-side. Still out
-//! of scope here: ternary, nested lambdas, variant-id stamping,
-//! hot-path memoisation. Sibling milestones M1.6+ fill these in.
+//! of scope here: ternary, nested lambdas, hot-path memoisation.
+//! Sibling milestones M1.6+ fill these in.
+//!
+//! **WEFT-431**: variant-id stamping is driven from surface bindings
+//! (`variant_id` / `variant` slots or attrs) into every
+//! [`CanonResponse`] the composer emits (ADR-006 §4 / ADR-007).
 //!
 //! # M1.5 scope reductions vs ADR-016 §5
 //!
