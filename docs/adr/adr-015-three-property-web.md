@@ -34,3 +34,12 @@ Deploy three web properties with distinct purposes:
 ### Neutral
 - Phased deployment: marketing site (week 1-2), docs site (week 2-3), assessment MVP (week 3-6)
 - weavelogic.ai/technology page bridges buyers to the technical docs
+
+## Deploy origin (operational)
+
+Live vs planned deploy origins for each property are pinned in
+[`docs/deployment/web-properties.md`](../deployment/web-properties.md)
+(WEFT-474). Summary: `weavelogic.ai` and `weftos.weavelogic.ai` are live from
+sibling marketing repo and this repo respectively; `assess.weavelogic.ai` is
+**not deployed** (NXDOMAIN as of 2026-07-31) and originates from the sibling
+`agentic_ai_assessor` project — not from weftos CI.
