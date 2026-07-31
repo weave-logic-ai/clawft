@@ -30,6 +30,8 @@ members = [
     "crates/clawft-graphify",
     "crates/clawft-lsp-extract",
     "crates/weftos-leaf-types",
+    # WEFT-520: LeWM world-model core traits (no_std). First of the 7-crate batch.
+    "crates/weftos-worldmodel-core",
     # `weftos-leaf-display` removed from the workspace in Phase E
     # (2026-05-15) — superseded by `weftos-leaf-scene`,
     # `weftos-leaf-renderer`, and `weftos-scene-builder`. The directory
@@ -315,6 +317,7 @@ clawft-wasm-host = { version = "0.6.20", path = "crates/clawft-wasm-host" }
 # `clawft-plugin-*` crates live under `crates/archive/` and are not
 # referenced by the active workspace build.
 clawft-plugin-treesitter = { version = "0.6.20", path = "crates/clawft-plugin-treesitter" }
+weftos-worldmodel-core = { version = "0.6.20", path = "crates/weftos-worldmodel-core", default-features = false }
 clawft-graphify = { version = "0.6.20", path = "crates/clawft-graphify", default-features = false }
 clawft-security = { version = "0.6.20", path = "crates/clawft-security" }
 clawft-kernel = { version = "0.6.20", path = "crates/clawft-kernel", default-features = false }

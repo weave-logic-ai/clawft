@@ -1,0 +1,25 @@
+[package]
+name = "weftos-worldmodel-core"
+version.workspace = true
+publish = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "LeWM world-model core traits and latent contract (no_std). WEFT-520."
+keywords = ["weftos", "lewm", "world-model", "jepa", "no-std"]
+categories = ["no-std", "science", "embedded"]
+
+[features]
+default = []
+# Optional host-side marker (crate is no_std + alloc by default).
+std = []
+
+[dependencies]
+# Pure traits + fixed-size latent contract — zero deps.
+# Wire serde / candle live in weftos-worldmodel-impls and sensor-pipeline-wire.
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
