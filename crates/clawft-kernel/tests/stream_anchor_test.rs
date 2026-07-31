@@ -17,8 +17,7 @@ use clawft_kernel::boot::Kernel;
 use clawft_kernel::{KernelMessage, MessagePayload, MessageTarget, StreamWindowAnchor};
 use clawft_platform::NativePlatform;
 use clawft_types::config::{
-    AgentDefaults, AgentsConfig, ChainConfig, Config, KernelConfig, ResourceTreeConfig,
-};
+    AgentDefaults, AgentsConfig, ChainConfig, Config, KernelConfig, ResourceTreeConfig, DEFAULT_BRAND};
 
 fn base_config() -> Config {
     Config {
@@ -62,6 +61,7 @@ fn kernel_config_with_chain() -> KernelConfig {
         ipc_tcp: None,
         llm: None,
         agent: None,
+            brand: DEFAULT_BRAND.to_string(),
     }
 }
 

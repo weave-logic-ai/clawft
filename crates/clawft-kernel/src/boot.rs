@@ -2503,6 +2503,7 @@ mod tests {
             ipc_tcp: None,
             llm: None,
             agent: None,
+            brand: ::clawft_types::config::DEFAULT_BRAND.to_string(),
         }
     }
 
@@ -2701,6 +2702,7 @@ mod tests {
             ipc_tcp: None,
             llm: None,
             agent: None,
+            brand: ::clawft_types::config::DEFAULT_BRAND.to_string(),
         }
     }
 
@@ -3173,6 +3175,7 @@ mod tests {
             ipc_tcp: None,
             llm: None,
             agent: None,
+            brand: ::clawft_types::config::DEFAULT_BRAND.to_string(),
         }
     }
 

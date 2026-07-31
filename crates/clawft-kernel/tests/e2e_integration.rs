@@ -10,7 +10,7 @@ use clawft_kernel::health::OverallHealth;
 use clawft_kernel::ipc::{KernelMessage, MessagePayload, MessageTarget};
 use clawft_kernel::supervisor::SpawnRequest;
 use clawft_platform::NativePlatform;
-use clawft_types::config::{AgentDefaults, AgentsConfig, Config, KernelConfig};
+use clawft_types::config::{AgentDefaults, AgentsConfig, Config, KernelConfig, DEFAULT_BRAND};
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -47,6 +47,7 @@ fn minimal_kernel_config() -> KernelConfig {
         ipc_tcp: None,
         llm: None,
         agent: None,
+            brand: DEFAULT_BRAND.to_string(),
     }
 }
 
@@ -77,6 +78,7 @@ fn exochain_kernel_config() -> KernelConfig {
         ipc_tcp: None,
         llm: None,
         agent: None,
+            brand: DEFAULT_BRAND.to_string(),
     }
 }
 

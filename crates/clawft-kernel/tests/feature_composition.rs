@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use clawft_kernel::boot::{Kernel, KernelState};
 use clawft_platform::NativePlatform;
-use clawft_types::config::{AgentDefaults, AgentsConfig, Config, KernelConfig};
+use clawft_types::config::{AgentDefaults, AgentsConfig, Config, KernelConfig, DEFAULT_BRAND};
 
 fn base_config() -> Config {
     Config {
@@ -42,6 +42,7 @@ fn minimal_kernel_config() -> KernelConfig {
         ipc_tcp: None,
         llm: None,
         agent: None,
+            brand: DEFAULT_BRAND.to_string(),
     }
 }
 
@@ -72,6 +73,7 @@ fn exochain_kernel_config() -> KernelConfig {
         ipc_tcp: None,
         llm: None,
         agent: None,
+            brand: DEFAULT_BRAND.to_string(),
     }
 }
 

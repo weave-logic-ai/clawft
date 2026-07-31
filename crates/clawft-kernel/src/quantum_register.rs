@@ -5,10 +5,21 @@
 //! deterministic layout from an adjacency list so the same graph maps to the
 //! same register across backends and across runs.
 //!
-//! The initial layout is force-directed (Fruchterman–Reingold) for simplicity.
-//! Spectral embedding is a TODO — it gives better Laplacian-structure
-//! preservation but needs an eigensolver. Force-directed is good enough for
-//! the interface + stub-backend milestone.
+//! ## Layout backends (WEFT-129)
+//!
+//! - **Spectral embedding** (default): places atoms using the 2nd and 3rd
+//!   eigenvectors of the (combinatorial) graph Laplacian. Preserves
+//!   Laplacian structure, which is the same operator used as the quantum
+//!   Hamiltonian in [`crate::quantum_state`]. Dense Jacobi eigensolve is
+//!   O(n³) — fine for device limits (≤100 atoms). Pure Rust; no Wasmtime.
+//! - **Force-directed** (Fruchterman–Reingold): retained as an explicit
+//!   option and as an automatic fallback when spectral positions collapse
+//!   (e.g. highly symmetric or degenerate graphs).
+//!
+//! Note: the 0.7.0 audit row titled this "Wasmtime backend for
+//! spectral_embedding". That was a misnomer — spectral embedding is
+//! classical linear algebra on n≤100, not a WASM sandbox concern. The
+//! production surface is this pure-Rust path.
 
 use crate::quantum_backend::QuantumError;
 
@@ -34,16 +45,40 @@ impl RegisterConstraints {
     }
 }
 
+/// Algorithm used to map a graph adjacency list to 2D atom positions.
+///
+/// Default is [`LayoutMethod::Spectral`] (WEFT-129). Force-directed remains
+/// available for A/B and as spectral fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LayoutMethod {
+    /// Laplacian spectral embedding (eigenvectors 2 and 3). Default.
+    #[default]
+    Spectral,
+    /// Classical force-directed (Fruchterman–Reingold).
+    ForceDirected,
+}
+
 /// Build a named 2D register from a graph adjacency list.
+///
+/// Uses [`LayoutMethod::Spectral`] by default. See
+/// [`build_register_with`] to pick the algorithm explicitly.
 ///
 /// `adjacency[i]` is the list of `(neighbor_index, weight)` pairs for node i.
 /// Returned positions are in micrometers, scaled to fit within the constraints.
 ///
-/// The layout is deterministic for a given adjacency input (fixed seed for
-/// the force-directed iteration).
+/// The layout is deterministic for a given adjacency input.
 pub fn build_register(
     adjacency: &[Vec<(usize, f64)>],
     constraints: RegisterConstraints,
+) -> Result<Vec<(String, [f64; 2])>, QuantumError> {
+    build_register_with(adjacency, constraints, LayoutMethod::Spectral)
+}
+
+/// Build a named 2D register with an explicit [`LayoutMethod`].
+pub fn build_register_with(
+    adjacency: &[Vec<(usize, f64)>],
+    constraints: RegisterConstraints,
+    method: LayoutMethod,
 ) -> Result<Vec<(String, [f64; 2])>, QuantumError> {
     let n = adjacency.len();
     if n == 0 {
@@ -56,7 +91,17 @@ pub fn build_register(
         });
     }
 
-    let positions = force_directed_layout(adjacency, 200);
+    let positions = match method {
+        LayoutMethod::Spectral => {
+            match spectral_embedding_layout(adjacency) {
+                Some(pos) if layout_min_pairwise(&pos) > 1e-9 => pos,
+                // Degenerate / collapsed spectral layout → force-directed.
+                _ => force_directed_layout(adjacency, 200),
+            }
+        }
+        LayoutMethod::ForceDirected => force_directed_layout(adjacency, 200),
+    };
+
     let scaled = scale_to_constraints(&positions, constraints)?;
 
     Ok(scaled
@@ -65,6 +110,236 @@ pub fn build_register(
         .map(|(i, p)| (format!("q{}", i), p))
         .collect())
 }
+
+// ---------------------------------------------------------------------------
+// Spectral embedding (WEFT-129)
+// ---------------------------------------------------------------------------
+
+/// Place nodes using the 2nd and 3rd eigenvectors of the combinatorial
+/// graph Laplacian L = D − A (symmetric, undirected view of the input).
+///
+/// Returns `None` when the spectral coordinates are unusable (n < 2 after
+/// filtering, or eigensolve produced non-finite values).
+fn spectral_embedding_layout(adjacency: &[Vec<(usize, f64)>]) -> Option<Vec<[f64; 2]>> {
+    let n = adjacency.len();
+    if n == 0 {
+        return Some(Vec::new());
+    }
+    if n == 1 {
+        return Some(vec![[0.0, 0.0]]);
+    }
+
+    // Symmetric weighted adjacency (max of either direction keeps weights
+    // non-negative and deterministic).
+    let mut a = vec![vec![0.0f64; n]; n];
+    for (i, edges) in adjacency.iter().enumerate() {
+        for &(j, w) in edges {
+            if j >= n || i == j {
+                continue;
+            }
+            let ww = w.max(0.0);
+            if ww > a[i][j] {
+                a[i][j] = ww;
+                a[j][i] = ww;
+            }
+        }
+    }
+
+    // Combinatorial Laplacian L = D − A.
+    let mut l = vec![vec![0.0f64; n]; n];
+    for i in 0..n {
+        let mut deg = 0.0f64;
+        for j in 0..n {
+            if i != j {
+                deg += a[i][j];
+                l[i][j] = -a[i][j];
+            }
+        }
+        l[i][i] = deg;
+    }
+
+    let (evals, evecs) = dense_jacobi_eigen(&l, n, 200 * n.max(1));
+
+    // Sort eigenpairs by eigenvalue ascending (λ1 ≈ 0 for connected graphs).
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&i, &j| {
+        evals[i]
+            .partial_cmp(&evals[j])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Pick the first two eigenvectors with λ above the numerical null-space
+    // floor. For a connected graph these are the Fiedler vector (x) and the
+    // next mode (y). For disconnected graphs we still take the two smallest
+    // non-null modes so components separate spatially.
+    const NULL_FLOOR: f64 = 1e-8;
+    let mut axes: Vec<usize> = Vec::with_capacity(2);
+    for &idx in &order {
+        if evals[idx] > NULL_FLOOR {
+            axes.push(idx);
+            if axes.len() == 2 {
+                break;
+            }
+        }
+    }
+
+    // Pathological: only one non-null mode (e.g. n=2). Use it for x and a
+    // deterministic orthogonal for y.
+    if axes.is_empty() {
+        return None;
+    }
+
+    let mut pos = vec![[0.0f64; 2]; n];
+    let vx = &evecs[axes[0]];
+    for i in 0..n {
+        pos[i][0] = vx[i];
+    }
+
+    if axes.len() >= 2 {
+        let vy = &evecs[axes[1]];
+        for i in 0..n {
+            pos[i][1] = vy[i];
+        }
+    } else {
+        // Build a deterministic vector orthogonal to vx in R^n, project, use as y.
+        let mut y: Vec<f64> = (0..n)
+            .map(|i| ((i as f64) + 0.5) - (n as f64) / 2.0)
+            .collect();
+        let dot: f64 = y.iter().zip(vx.iter()).map(|(a, b)| a * b).sum();
+        let norm_x2: f64 = vx.iter().map(|x| x * x).sum::<f64>().max(1e-18);
+        for i in 0..n {
+            y[i] -= dot / norm_x2 * vx[i];
+        }
+        let norm_y: f64 = y.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-18);
+        for i in 0..n {
+            pos[i][1] = y[i] / norm_y;
+        }
+    }
+
+    // Sign-canonicalize each axis so the layout is stable across platforms
+    // (eigenvector sign is free). Make the first non-near-zero component positive.
+    for axis in 0..2 {
+        let mut flip = false;
+        for i in 0..n {
+            if pos[i][axis].abs() > 1e-12 {
+                flip = pos[i][axis] < 0.0;
+                break;
+            }
+        }
+        if flip {
+            for i in 0..n {
+                pos[i][axis] = -pos[i][axis];
+            }
+        }
+    }
+
+    // Reject non-finite coordinates.
+    if pos.iter().any(|p| !p[0].is_finite() || !p[1].is_finite()) {
+        return None;
+    }
+
+    Some(pos)
+}
+
+/// Dense Jacobi eigensolve for a symmetric matrix (local copy of the
+/// algorithm used in `causal.rs` so this module stays free of CausalGraph).
+///
+/// Returns `(eigenvalues, eigenvectors)` where `eigenvectors[j]` is the
+/// j-th eigenvector (length m).
+fn dense_jacobi_eigen(mat: &[Vec<f64>], m: usize, max_iter: usize) -> (Vec<f64>, Vec<Vec<f64>>) {
+    if m == 0 {
+        return (Vec::new(), Vec::new());
+    }
+    if m == 1 {
+        return (vec![mat[0][0]], vec![vec![1.0]]);
+    }
+
+    let mut a = mat.to_vec();
+    let mut v = vec![vec![0.0f64; m]; m];
+    for i in 0..m {
+        v[i][i] = 1.0;
+    }
+
+    for _ in 0..max_iter {
+        let mut max_off = 0.0f64;
+        let mut p = 0usize;
+        let mut q = 1usize;
+        for i in 0..m {
+            for j in (i + 1)..m {
+                if a[i][j].abs() > max_off {
+                    max_off = a[i][j].abs();
+                    p = i;
+                    q = j;
+                }
+            }
+        }
+
+        if max_off < 1e-15 {
+            break;
+        }
+
+        let theta = (a[q][q] - a[p][p]) / (2.0 * a[p][q]);
+        let t = if theta == 0.0 || !theta.is_finite() {
+            1.0
+        } else {
+            theta.signum() / (theta.abs() + (1.0 + theta * theta).sqrt())
+        };
+        let c = 1.0 / (1.0 + t * t).sqrt();
+        let s = t * c;
+
+        let app = a[p][p];
+        let aqq = a[q][q];
+        let apq = a[p][q];
+        a[p][p] = c * c * app - 2.0 * s * c * apq + s * s * aqq;
+        a[q][q] = s * s * app + 2.0 * s * c * apq + c * c * aqq;
+        a[p][q] = 0.0;
+        a[q][p] = 0.0;
+
+        for r in 0..m {
+            if r != p && r != q {
+                let arp = a[r][p];
+                let arq = a[r][q];
+                a[r][p] = c * arp - s * arq;
+                a[p][r] = a[r][p];
+                a[r][q] = s * arp + c * arq;
+                a[q][r] = a[r][q];
+            }
+        }
+
+        for r in 0..m {
+            let vp = v[r][p];
+            let vq = v[r][q];
+            v[r][p] = c * vp - s * vq;
+            v[r][q] = s * vp + c * vq;
+        }
+    }
+
+    let eigenvalues: Vec<f64> = (0..m).map(|i| a[i][i]).collect();
+    let eigenvectors: Vec<Vec<f64>> = (0..m).map(|j| (0..m).map(|i| v[i][j]).collect()).collect();
+    (eigenvalues, eigenvectors)
+}
+
+fn layout_min_pairwise(positions: &[[f64; 2]]) -> f64 {
+    if positions.len() < 2 {
+        return f64::INFINITY;
+    }
+    let mut min_d = f64::INFINITY;
+    for i in 0..positions.len() {
+        for j in (i + 1)..positions.len() {
+            let dx = positions[i][0] - positions[j][0];
+            let dy = positions[i][1] - positions[j][1];
+            let d = (dx * dx + dy * dy).sqrt();
+            if d < min_d {
+                min_d = d;
+            }
+        }
+    }
+    min_d
+}
+
+// ---------------------------------------------------------------------------
+// Force-directed (Fruchterman–Reingold)
+// ---------------------------------------------------------------------------
 
 fn force_directed_layout(adjacency: &[Vec<(usize, f64)>], iterations: u32) -> Vec<[f64; 2]> {
     let n = adjacency.len();
@@ -256,5 +531,84 @@ mod tests {
         let r1 = build_register(&adj, c).unwrap();
         let r2 = build_register(&adj, c).unwrap();
         assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn spectral_path_graph_places_endpoints_farther() {
+        // Path 0—1—2—3: spectral x-coordinate should order nodes along the path.
+        let adj = vec![
+            vec![(1, 1.0)],
+            vec![(0, 1.0), (2, 1.0)],
+            vec![(1, 1.0), (3, 1.0)],
+            vec![(2, 1.0)],
+        ];
+        let c = RegisterConstraints::neutral_atom_default();
+        let r = build_register_with(&adj, c, LayoutMethod::Spectral).unwrap();
+        assert_eq!(r.len(), 4);
+
+        // Endpoints (0,3) should be at least as far apart as any consecutive pair.
+        let dist = |i: usize, j: usize| {
+            let dx = r[i].1[0] - r[j].1[0];
+            let dy = r[i].1[1] - r[j].1[1];
+            (dx * dx + dy * dy).sqrt()
+        };
+        let end = dist(0, 3);
+        let mid = dist(1, 2);
+        assert!(
+            end + 1e-9 >= mid,
+            "path endpoints should not be closer than middle edge: end={end} mid={mid}"
+        );
+
+        // Min distance still holds.
+        for i in 0..4 {
+            for j in (i + 1)..4 {
+                assert!(dist(i, j) >= c.min_distance_um - 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn spectral_layout_raw_is_some_for_triangle() {
+        let adj = vec![
+            vec![(1, 1.0), (2, 1.0)],
+            vec![(0, 1.0), (2, 1.0)],
+            vec![(0, 1.0), (1, 1.0)],
+        ];
+        let pos = spectral_embedding_layout(&adj).expect("spectral layout");
+        assert_eq!(pos.len(), 3);
+        assert!(layout_min_pairwise(&pos) > 1e-9);
+    }
+
+    #[test]
+    fn force_directed_still_works_explicitly() {
+        let adj = vec![vec![(1, 1.0)], vec![(0, 1.0)]];
+        let c = RegisterConstraints::neutral_atom_default();
+        let r = build_register_with(&adj, c, LayoutMethod::ForceDirected).unwrap();
+        assert_eq!(r.len(), 2);
+        let dx = r[0].1[0] - r[1].1[0];
+        let dy = r[0].1[1] - r[1].1[1];
+        let d = (dx * dx + dy * dy).sqrt();
+        assert!(d >= c.min_distance_um - 1e-6);
+    }
+
+    #[test]
+    fn spectral_and_force_both_deterministic() {
+        let adj = vec![
+            vec![(1, 1.0), (3, 1.0)],
+            vec![(0, 1.0), (2, 1.0)],
+            vec![(1, 1.0), (3, 1.0)],
+            vec![(0, 1.0), (2, 1.0)],
+        ];
+        let c = RegisterConstraints::neutral_atom_default();
+        for method in [LayoutMethod::Spectral, LayoutMethod::ForceDirected] {
+            let a = build_register_with(&adj, c, method).unwrap();
+            let b = build_register_with(&adj, c, method).unwrap();
+            assert_eq!(a, b, "method {method:?} not deterministic");
+        }
+    }
+
+    #[test]
+    fn default_method_is_spectral() {
+        assert_eq!(LayoutMethod::default(), LayoutMethod::Spectral);
     }
 }

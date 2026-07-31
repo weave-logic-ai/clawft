@@ -505,7 +505,9 @@ pub use quantum_braket::{BraketBackend, BraketConfig, BraketDevice};
 #[cfg(all(feature = "ecc", feature = "quantum-pasqal"))]
 pub use quantum_pasqal::{PasqalBackend, PasqalConfig, PasqalDevice};
 #[cfg(feature = "ecc")]
-pub use quantum_register::{RegisterConstraints, build_register};
+pub use quantum_register::{
+    LayoutMethod, RegisterConstraints, build_register, build_register_with,
+};
 #[cfg(feature = "ecc")]
 pub use quantum_state::{
     Complex, Hypothesis, HypothesisSuperposition, QuantumCognitiveState, QuantumEvidenceRanking,
