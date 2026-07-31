@@ -16,6 +16,7 @@
 //! - [`lattice`] — composed [`StubLattice`] implementing [`LatticeApi`]
 //! - [`sigreg`] — Welford SIGReg monitor + auto-rollback (WEFT-528)
 //! - [`rollback_gate`] — four-condition AND promotion gate (WEFT-530)
+//! - [`training`] — offline edge + streaming-merge surfaces; RVF hot-swap (WEFT-531 / WEFT-532)
 //! - [`candle`] — optional ML skeleton (`feature = "candle"`)
 //!
 //! Designed for `no_std` + `alloc` on the default feature set. The `candle`
@@ -30,10 +31,12 @@ extern crate alloc;
 pub mod action_encoder;
 pub mod encoder;
 pub mod lattice;
+mod math_no_std;
 pub mod planner;
 pub mod predictor;
 pub mod rollback_gate;
 pub mod sigreg;
+pub mod training;
 
 #[cfg(feature = "candle")]
 #[cfg_attr(docsrs, doc(cfg(feature = "candle")))]
@@ -41,12 +44,16 @@ pub mod candle;
 
 // ── Re-exports from core (facade-friendly surface) ─────────────────────────
 pub use weftos_worldmodel_core::{
-    zero_latent, Action, ActionPlan, Encoder, GateCondition, GateVerdict, Latent, LatentPlanner,
-    LatticeApi, NodeId, ObservationFrame, PlanStep, PlannerKind, Predictor, RecallHit,
-    RollbackGate, RollbackGateMetrics, SigRegHealth, SigRegMonitor, SubscriptionId,
-    WorldModelError, WorldModelResult, EVENT_KIND_ROLLBACK_GATE, GATE_HELD_OUT_PROBE_MIN,
-    GATE_SIGREG_HEALTH_MIN, GATE_TEMPORAL_STRAIGHTEN_MIN, GATE_VOE_DIFF_MIN, LATENT_DIM,
-    LATENT_DIM_U16, SIGREG_HEALTH_ROLLBACK_THRESHOLD, SIGREG_HEALTH_WINDOW_SECS,
+    zero_latent, Action, ActionPlan, Encoder, GateCondition, GateVerdict, HotSwapOutcome, Latent,
+    LatentPlanner, LatticeApi, ModelCheckpoint, ModelHotSwap, NodeId, ObservationFrame,
+    OfflineEdgeTrainer, PlanStep, PlannerKind, Predictor, RecallHit, RollbackGate,
+    RollbackGateMetrics, SensorClass, SigRegHealth, SigRegMonitor, SmallModelKind,
+    StreamingMergeTrainer, StreamingTrainResult, SubscriptionId, TrainingSample,
+    TrainingSurfaceKind, WorldModelError, WorldModelResult, EVENT_KIND_MODEL_HOT_SWAP,
+    EVENT_KIND_ROLLBACK_GATE, EVENT_KIND_TRAINING_CYCLE, GATE_HELD_OUT_PROBE_MIN,
+    GATE_SIGREG_HEALTH_MIN, GATE_TEMPORAL_STRAIGHTEN_MIN, GATE_VOE_DIFF_MIN,
+    LEWM_MODEL_SEGMENT_DOMAIN_END, LEWM_MODEL_SEGMENT_DOMAIN_START, LATENT_DIM, LATENT_DIM_U16,
+    SIGREG_HEALTH_ROLLBACK_THRESHOLD, SIGREG_HEALTH_WINDOW_SECS,
 };
 
 // ── Crate-local stubs + production runtime monitors/planners ───────────────
@@ -64,6 +71,12 @@ pub use rollback_gate::{
 pub use sigreg::{
     NullSigRegMonitor, SigRegHealthEvent, SigRegHealthLog, WelfordSigRegMonitor,
     EVENT_KIND_SIGREG_HEALTH,
+};
+pub use training::{
+    decode_model_segment, encode_model_segment, model_segment_from_wire, model_segment_to_wire,
+    require_promoted, ImportanceReplayBuffer, LewmModelSegment, OfflineEdgePipeline,
+    SensorModelRegistry, SlotState, StreamingMergePipeline, DEFAULT_BOOT_VERSION,
+    DEFAULT_REPLAY_CAPACITY, SEGMENT_HEADER_LEN,
 };
 
 #[cfg(feature = "candle")]

@@ -323,7 +323,7 @@ fn l2(a: &Latent, b: &Latent) -> f32 {
         let d = a[i] - b[i];
         acc += d * d;
     }
-    acc.sqrt()
+    crate::math_no_std::sqrtf(acc)
 }
 
 #[cfg(test)]

@@ -38,6 +38,14 @@ pub enum WorldModelError {
         /// Last reported health score in `[0, 1]`.
         health: f32,
     },
+    /// Training surface could not run (empty buffer, insufficient samples).
+    TrainingFailed,
+    /// Streaming-merge checkpoint blocked by the four-condition AND gate.
+    CheckpointRejected,
+    /// Hot-swap staging / commit / rollback failed (unknown slot, empty).
+    HotSwapFailed,
+    /// RVF / model segment codec error (truncated, unknown type, bad digest).
+    SegmentCodec,
     /// Generic message for stub / host mapping (alloc string optional later).
     Other(&'static str),
 }
@@ -68,6 +76,10 @@ impl fmt::Display for WorldModelError {
             Self::SigRegUnhealthy { health } => {
                 write!(f, "sigreg unhealthy: health={health}")
             }
+            Self::TrainingFailed => write!(f, "training failed"),
+            Self::CheckpointRejected => write!(f, "checkpoint rejected by AND gate"),
+            Self::HotSwapFailed => write!(f, "model hot-swap failed"),
+            Self::SegmentCodec => write!(f, "model segment codec error"),
             Self::Other(msg) => write!(f, "{msg}"),
         }
     }

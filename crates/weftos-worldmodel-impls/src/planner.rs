@@ -5,6 +5,7 @@
 //! sequences and score them against an optional goal latent.
 
 use alloc::boxed::Box;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use weftos_worldmodel_core::{
@@ -12,6 +13,7 @@ use weftos_worldmodel_core::{
     WorldModelResult, LATENT_DIM,
 };
 
+use crate::math_no_std::{cosf, lnf, sqrtf};
 use crate::predictor::{IdentityPredictor, LinearPredPhi, NullPredictor};
 
 /// Stub planner: emits `horizon` null actions.
@@ -180,7 +182,7 @@ impl CemPlanner {
                         let dv = e.1[t].code[d] - m;
                         v += dv * dv;
                     }
-                    v = (v / elites as f32).sqrt().max(1e-3);
+                    v = sqrtf(v / elites as f32).max(1e-3);
                     mean[t][d] = m;
                     std[t][d] = v;
                 }
@@ -353,9 +355,9 @@ fn next_gaussian(state: &mut u64) -> f32 {
     // Two uniform (0,1) via xorshift64.
     let u1 = next_u01(state).max(1e-7);
     let u2 = next_u01(state);
-    let r = (-2.0 * u1.ln()).sqrt();
+    let r = sqrtf(-2.0 * lnf(u1));
     let theta = 6.283_185_5 * u2;
-    r * theta.cos()
+    r * cosf(theta)
 }
 
 fn next_u01(state: &mut u64) -> f32 {

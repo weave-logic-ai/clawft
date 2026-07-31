@@ -24,6 +24,7 @@
 //! - [`lattice`] — [`LatticeApi`] (7 methods)
 //! - [`sigreg`] — health thresholds and monitor trait
 //! - [`rollback_gate`] — four-condition AND promotion / rollback gate (WEFT-530)
+//! - [`training`] — two training surfaces + RVF small-model contracts (WEFT-531 / WEFT-532)
 //! - [`types`] — shared observation / action / plan types
 //! - [`error`] — portable error kinds
 //!
@@ -44,6 +45,7 @@ pub mod planner;
 pub mod predictor;
 pub mod rollback_gate;
 pub mod sigreg;
+pub mod training;
 pub mod types;
 
 pub use attestation::{
@@ -65,6 +67,13 @@ pub use rollback_gate::{
 };
 pub use sigreg::{
     SigRegHealth, SigRegMonitor, SIGREG_HEALTH_ROLLBACK_THRESHOLD, SIGREG_HEALTH_WINDOW_SECS,
+};
+pub use training::{
+    fnv1a64, HotSwapOutcome, ModelCheckpoint, ModelHotSwap, OfflineEdgeTrainer, SensorClass,
+    SmallModelKind, StreamingMergeTrainer, StreamingTrainResult, TrainingSample,
+    TrainingSurfaceKind, EVENT_KIND_MODEL_HOT_SWAP, EVENT_KIND_TRAINING_CYCLE,
+    LEWM_MODEL_SEGMENT_CODEC_JSON, LEWM_MODEL_SEGMENT_CODEC_RAW, LEWM_MODEL_SEGMENT_DOMAIN_END,
+    LEWM_MODEL_SEGMENT_DOMAIN_START,
 };
 pub use types::{Action, NodeId, ObservationFrame, RecallHit, SubscriptionId};
 

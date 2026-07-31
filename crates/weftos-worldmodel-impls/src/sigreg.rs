@@ -8,7 +8,7 @@
 
 use weftos_worldmodel_core::{
     zero_latent, Latent, SigRegHealth, SigRegMonitor, WorldModelResult, LATENT_DIM,
-    SIGREG_HEALTH_ROLLBACK_THRESHOLD, SIGREG_HEALTH_WINDOW_SECS,
+    SIGREG_HEALTH_ROLLBACK_THRESHOLD,
 };
 
 /// Stub monitor: always reports perfect health.
@@ -392,6 +392,7 @@ mod tests {
 
     #[test]
     fn should_rollback_gate_constants() {
+        use weftos_worldmodel_core::SIGREG_HEALTH_WINDOW_SECS;
         assert!((SIGREG_HEALTH_ROLLBACK_THRESHOLD - 0.85).abs() < f32::EPSILON);
         assert_eq!(SIGREG_HEALTH_WINDOW_SECS, 30);
     }
