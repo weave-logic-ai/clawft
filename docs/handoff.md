@@ -3312,22 +3312,27 @@ is dual-target:
 - `weft-demo-lab` and the `workshop-watcher` example use the same
   surface natively.
 
-Build it standalone:
+Build it standalone (or via the unified script — WEFT-499):
 
 ```bash
+# Preferred: first-class native artifact flag
+scripts/build.sh native --gui
+# or GUI only
+scripts/build.sh gui-egui --profile debug
+# raw cargo
 cargo build -p clawft-gui-egui --features native --bin weft-gui-egui
 ./target/debug/weft-gui-egui
 ```
 
-Note: `scripts/build.sh native` only builds `weft` + `weaver` today.
-If we want `weft-gui-egui` as a first-class artifact, it's a one-line
-addition to the script (deferred — user is staying with the Cursor
-panel for the chat demo).
+**WEFT-499 (closed):** `weft-gui-egui` is wired into
+`scripts/build.sh native --gui` and ships via cargo-dist as
+`clawft-gui-egui-<triple>.tar.gz` (plus shell installer / Homebrew
+formula) on the same GitHub Release channel as `weft` / `weaver`.
+See `docs/deployment/release.md`.
 
-User is keeping the **Cursor panel path** for now because that's
-where `LLM_TIMEOUT_MS`, hot-reload watcher, allowlist, and demo
-muscle memory already live. Native eframe path remains a fallback
-if webview indirection becomes the bottleneck again.
+The **Cursor / VSCode panel** remains a supported daily driver
+(webview WASM + allowlist / hot-reload). The native eframe binary is
+the first-class offline desktop shell and release artifact.
 
 ---
 

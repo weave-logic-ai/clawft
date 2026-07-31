@@ -8,6 +8,27 @@ license.workspace = true
 repository.workspace = true
 description = "egui/eframe native GUI spike for ClawFT — ports the 12 core UI blocks"
 
+# WEFT-499: first-class cargo-dist release artifact (weft-gui-egui binary).
+# Archives land on GitHub Releases as clawft-gui-egui-<triple>.tar.gz
+# alongside weft/weaver. Installers: shell + Homebrew formula.
+# Project uses tar.gz + shell/homebrew (not .deb/.dmg) for all dist apps.
+[package.metadata.dist]
+dist = true
+display-name = "weft-gui-egui"
+# default-features already includes `native` (required by [[bin]] weft-gui-egui).
+features = ["native"]
+
+# cargo-dist 0.31 still lists bins that have unmet required-features in the
+# package plan; pin the install/archive binary set per target so weft-demo-lab
+# never ships (demo-lab feature stays opt-in for local A/B theming).
+[package.metadata.dist.binaries]
+x86_64-unknown-linux-gnu = ["weft-gui-egui"]
+aarch64-unknown-linux-gnu = ["weft-gui-egui"]
+x86_64-unknown-linux-musl = ["weft-gui-egui"]
+aarch64-unknown-linux-musl = ["weft-gui-egui"]
+x86_64-apple-darwin = ["weft-gui-egui"]
+aarch64-apple-darwin = ["weft-gui-egui"]
+
 # wasm-pack settings: enable wasm-opt with `-Oz` (size-optimized)
 # for release builds.
 #
@@ -45,10 +66,12 @@ name = "weft-gui-egui"
 path = "src/main.rs"
 required-features = ["native"]
 
+# Theming A/B tool — opt-in via --features demo-lab so cargo-dist release
+# archives ship only weft-gui-egui (WEFT-499).
 [[bin]]
 name = "weft-demo-lab"
 path = "src/bin/demo_lab.rs"
-required-features = ["native"]
+required-features = ["native", "demo-lab"]
 
 # Standalone reproduction for the `CanonResponse::from_egui` Windows
 # RwLock-reentrancy deadlock (fixed in this commit). Native-only — the
@@ -245,6 +268,10 @@ clawft-kernel = { workspace = true, features = [
 default = ["native"]
 # Keep native bins/tests out of the wasm build.
 native = []
+# Opt-in theming A/B binary (`weft-demo-lab`). Off by default so cargo-dist
+# and `scripts/build.sh native --gui` ship only the production GUI (WEFT-499).
+#   cargo run -p clawft-gui-egui --features demo-lab --bin weft-demo-lab
+demo-lab = []
 # Optional procedural boot sounds (pulls in rodio → cpal → alsa).
 audio = ["dep:rodio"]
 # WEFT-287: vendored vs upstream egui_demo_lib decision.

@@ -142,11 +142,12 @@ inline markers.
   Memory `feedback_rebuild_webview_wasm.md` (referenced upstream) is the
   source of "rebuild after every gui-egui change" guidance; in practice
   developers run it under `cargo watch` per the comment block in `extension.ts:202`.
-- **`weft-gui-egui` is not in `scripts/build.sh native`.** Per
-  `docs/handoff.md:258`, building the native eframe binary requires
-  `cargo build -p clawft-gui-egui --features native --bin weft-gui-egui`
-  directly. The handoff explicitly defers promoting it to a first-class
-  artifact ("user is staying with the Cursor panel for the chat demo").
+- **`weft-gui-egui` is not in `scripts/build.sh native`.**
+  **Closed by WEFT-499 (2026-07-31).** `scripts/build.sh native --gui`
+  builds `weft-gui-egui`; `gui-egui` remains the GUI-only alias.
+  cargo-dist ships `clawft-gui-egui-<triple>.tar.gz` + shell installer
+  + Homebrew formula on the same release channel as weft/weaver
+  (project uses tar.gz/shell/homebrew, not `.deb`/`.dmg`).
 - **No daemon-side allowlist on RPC.** Anything that connects to the UDS can
   call any method. The VSCode extension's `ALLOWED_METHODS` is a *webview*
   containment fence — it stops a malicious webview script from reaching
@@ -232,9 +233,10 @@ inline markers.
 
 ### Orphaned work
 
-- **`weft-gui-egui` native bin.** Compiled and exists, but not wired into
-  `scripts/build.sh native`, not packaged for release. The Cursor panel is
-  the user's daily driver per `handoff.md:263-266`.
+- **`weft-gui-egui` native bin.** **Closed by WEFT-499 (2026-07-31).**
+  Wired into `scripts/build.sh native --gui`; cargo-dist release
+  archives + installers ship alongside weft/weaver. See
+  `docs/deployment/release.md` and `CHANGELOG.md` Unreleased.
 - **`McpServerManager` hot-reload protocol.** The drain-and-swap design is
   documented in `discovery.rs` but the audit did not find a callsite that
   invokes the full reload flow against a live config-file watcher. The
@@ -271,7 +273,7 @@ inline markers.
 | 14 | Audit `McpServerManager` -> live-reload integration; either land the file-watcher wire-up or remove the hot-reload affordances from the public API | feature gap | M | mcp/discovery |
 | 15 | Treat `[kernel.ipc_tcp]` relay as a security audit point: explicit auth + bind-address default of `127.0.0.1` only; document it in the security review | security | S | clawft-weave |
 | 16 | Add an end-to-end smoke for the VSCode extension (build wasm, compile ts, install in a headless VSCode test host, open `WeftOS: Open Panel`, assert chip icons go green) | testing | L | extensions |
-| 17 | Promote `weft-gui-egui` native bin to a `scripts/build.sh native --gui` flag; ship the `.deb`/`.dmg` artifact alongside `weft`/`weaver` | release | M | scripts/release |
+| 17 | Promote `weft-gui-egui` native bin to a `scripts/build.sh native --gui` flag; ship release artifact alongside `weft`/`weaver` — **Closed by WEFT-499** (tar.gz/shell/homebrew, not deb/dmg) | release | M | scripts/release |
 | 18 | Decide whether wire types (`AgentChatParams`/`AgentChatResult`) belong in `clawft-types` so `clawft-weave` does not have to import service crates for serde | refactor | S | types |
 
 ## Sources

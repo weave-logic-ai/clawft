@@ -106,12 +106,29 @@ matrix and produces:
 | `weft-cli-{version}-x86_64-pc-windows-msvc.zip`         | Windows x86_64                  |
 | `weft-cli-installer.sh`                                 | Universal POSIX shell installer |
 | `weft-cli-installer.ps1`                                | Windows PowerShell installer    |
+| `clawft-gui-egui-{version}-<triple>.tar.gz`             | Native egui shell (`weft-gui-egui`) per target (WEFT-499) |
+| `clawft-gui-egui-installer.sh`                          | Shell installer for the GUI binary |
+| `clawft-gui-egui.rb`                                    | Homebrew formula (tap publish) |
 | `dist-manifest.json`                                    | Machine-readable manifest       |
 
-Each archive contains the `weft` (and where applicable `weaver`,
-`weftos`) binaries plus `LICENSE` and `README.md`. `github-attestations
-= true` is set, so each archive ships with a sigstore provenance
-attestation that can be verified with `gh attestation verify`.
+Each CLI archive contains the `weft` (and where applicable `weaver`,
+`weftos`) binaries plus `LICENSE` and `README.md`. The GUI app ships
+as a **separate** cargo-dist package (`clawft-gui-egui`) whose archive
+contains `weft-gui-egui` (production shell only — `weft-demo-lab` is
+opt-in and not packaged). `github-attestations = true` is set, so each
+archive ships with a sigstore provenance attestation that can be
+verified with `gh attestation verify`.
+
+Local GUI build (not just release CI):
+
+```bash
+scripts/build.sh native --gui     # weft + weaver + weft-gui-egui
+scripts/build.sh gui-egui         # GUI binary only
+```
+
+This project does **not** emit `.deb` / `.dmg` installers; cargo-dist
+is configured for `tar.gz` archives plus shell / Homebrew installers
+for every dist app (CLI and GUI alike).
 
 The Homebrew tap (`weave-logic-ai/homebrew-tap`) is auto-updated by the
 `publish-jobs = ["homebrew"]` step in the same workflow.

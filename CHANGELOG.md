@@ -13,14 +13,17 @@ time, then add a matching `[X.Y.Z]: ...compare/...` link to the
 footnote block at the bottom of the file. The release runbook documents
 the cut-over (`docs/deployment/release.md`).
 
-### Changed
+### Added
 
-- **Scripts audit (WEFT-465)**: disposition for top-level “orphan”
-  scripts recorded in `docs/development/scripts-audit.md`. Wake unit
-  files and `dev_server.py` kept (live CLI / `build.sh serve`);
-  `weave-init.sh` kept (Claude agent install, distinct from
-  `weaver init`); one-shot `build_vp_deck.py` moved to
-  `scripts/dev/build_vp_deck.py`.
+- **Native GUI release artifact (WEFT-499)**: `weft-gui-egui` is a
+  first-class cargo-dist app. Release archives ship as
+  `clawft-gui-egui-<triple>.tar.gz` (and checksums / shell installer /
+  Homebrew formula) on the same GitHub Release as `weft` / `weaver`.
+  Local build: `scripts/build.sh native --gui` (or
+  `scripts/build.sh gui-egui`). The theming A/B binary `weft-demo-lab`
+  stays opt-in (`--features demo-lab`) and is not packaged. Note: this
+  workspace uses cargo-dist tar.gz + shell/homebrew installers, not
+  `.deb`/`.dmg` — same channel as the CLI binaries.
 
 ### Fixed
 

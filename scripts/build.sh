@@ -33,6 +33,8 @@ BENCH_NAME=""
 CLEAN_STALE_DAYS=""
 TEST_PACKAGES=()
 COMMAND=""
+# WEFT-499: optional native egui GUI binary alongside weft/weaver.
+WITH_GUI=false
 
 # ── Reporting helpers ────────────────────────────────────────────────
 pass()  { printf "  ${GREEN}PASS${NC}  %s\n" "$*"; }
@@ -137,6 +139,12 @@ cmd_native() {
         report_binary_size "target/debug/weft" "Native binary (weft)"
         report_binary_size "target/debug/weaver" "Native binary (weaver)"
     fi
+    # WEFT-499: promote weft-gui-egui to a first-class native artifact via --gui.
+    if [ "$WITH_GUI" = true ]; then
+        cmd_gui_egui
+    else
+        info "GUI binary not built (pass --gui for weft-gui-egui; or: scripts/build.sh gui-egui)"
+    fi
 }
 
 cmd_native_debug() {
@@ -149,6 +157,9 @@ cmd_native_debug() {
     timer_end
     report_binary_size "target/debug/weft" "Native binary (weft, debug)"
     report_binary_size "target/debug/weaver" "Native binary (weave, debug)"
+    if [ "$WITH_GUI" = true ]; then
+        PROFILE=debug cmd_gui_egui
+    fi
 }
 
 # ── Build stamp env ─────────────────────────────────────────────────
@@ -1598,8 +1609,9 @@ usage() {
 ${BOLD}Usage:${NC} scripts/build.sh <command> [options]
 
 ${BOLD}Commands:${NC}
-  native          Build native CLI binary (release)
-  native-debug    Build native CLI binary (debug, fast)
+  native          Build native CLI binary (release). Pass --gui to also build
+                  the native egui shell (weft-gui-egui). WEFT-499.
+  native-debug    Build native CLI binary (debug, fast). Honors --gui.
   install         Build weft + weaver and install both to ~/.cargo/bin
                   (atomic replace, ad-hoc re-sign on macOS, fresh git build
                   stamp, prints versions). Release by default; --debug for
@@ -1608,7 +1620,8 @@ ${BOLD}Commands:${NC}
                   Refuses to drop subcommands the installed binary has
                   (--force overrides). --prefix DIR installs elsewhere (for
                   verification). Restart the daemon afterward if running.
-  gui-egui        Build native egui GUI binary (weft-gui-egui, requires --features native)
+  gui-egui        Build native egui GUI binary alone (weft-gui-egui). Same as
+                  native --gui without the CLI binaries.
   wasi            Build WASM for WASI (wasm32-wasip2)
   browser         Build WASM for browser (wasm32-unknown-unknown)
   ui              Build React frontend (tsc + vite)
@@ -1687,6 +1700,10 @@ ${BOLD}Options:${NC}
                   diskann/hybrid vector config silently degrades to a brute-
                   force stub; the kernel warns at boot, vector.strict errors)
   --profile <p>   Cargo profile: debug, release, release-wasm (default varies)
+  --gui           With native / native-debug: also build weft-gui-egui
+                  (clawft-gui-egui --features native). Shipped via cargo-dist
+                  as clawft-gui-egui-<triple>.tar.gz alongside weft/weaver
+                  (WEFT-499). No effect on other commands (use gui-egui).
   --force, -f     Force rebuild even if artifacts are up-to-date; for
                   install, override the feature-downgrade guard
   --debug         Use the debug profile (install command)
@@ -1700,11 +1717,12 @@ ${BOLD}Options:${NC}
 
 ${BOLD}Examples:${NC}
   scripts/build.sh native                          # Release CLI binary
+  scripts/build.sh native --gui                    # CLI + weft-gui-egui (WEFT-499)
   scripts/build.sh install --features voice-onnx    # Install with voice (this machine)
   scripts/build.sh install --debug                  # Fast-iteration install
   scripts/build.sh install --prefix /tmp/wprefix    # Verify install off ~/.cargo/bin
   scripts/build.sh native --features voice          # CLI with voice
-  scripts/build.sh gui-egui                         # Native egui GUI (release)
+  scripts/build.sh gui-egui                         # Native egui GUI alone (release)
   scripts/build.sh gui-egui --profile debug         # Native egui GUI (debug)
   scripts/build.sh browser                          # Browser WASM
   scripts/build.sh gate                             # Full phase gate
@@ -1809,6 +1827,11 @@ parse_args() {
             --profile)
                 PROFILE="${2:?'--profile requires a value'}"
                 shift 2
+                ;;
+            --gui)
+                # WEFT-499: native egui shell (weft-gui-egui) alongside CLI.
+                WITH_GUI=true
+                shift
                 ;;
             --force|-f)
                 FORCE=true
