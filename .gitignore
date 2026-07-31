@@ -80,6 +80,11 @@ ruvector.db/
 # `ui/` holds only generated build output (node_modules/ + dist/); it has
 # no tracked source. Mirror the gui/ and clawft-ui/ convention.
 ui/
+# Exception: Compose UI sources under the Android splat-capture app (WEFT-705).
+!apps/android-splat-capture/
+!apps/android-splat-capture/**/
+!apps/android-splat-capture/**/ui/
+!apps/android-splat-capture/**/ui/**
 
 # Windows "downloaded from the internet" zone metadata sidecar files.
 *:Zone.Identifier
