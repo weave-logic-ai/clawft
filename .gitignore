@@ -22,6 +22,11 @@ crates/clawft-core/fuzz/coverage/
 !clawft-ui/.env.mock
 crates/clawft-wasm/www/pkg/
 
+# WEFT-408: local/CI duration artefact from scripts/build.sh test-browser
+# (committed baseline lives in scripts/bench/browser-test-duration-baseline.json).
+browser-test-duration.json
+bench-results.json
+
 # WeftOS runtime state
 weave.toml
 .weftos/

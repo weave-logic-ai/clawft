@@ -600,19 +600,17 @@ cmd_test() {
 #   - wasm-pack             (rustup component or cargo-installed)
 #   - chromedriver matching the installed Chrome
 #   - Chrome / Chromium     (linux: google-chrome; macOS: /Applications/.../Google Chrome)
-# CI installs all three via the `wasm-browser-test` job in
+# CI installs all three via the `browser-wasm-tests` job in
 # `.github/workflows/pr-gates.yml`.
+#
+# WEFT-408 / P6.7: wall-clock duration is written to
+# `browser-test-duration.json` (gitignored) for the ≤10% regression gate
+# (`browser-duration-gate` / `scripts/bench/check-browser-test-duration.sh`).
 #
 # Override the browser via `--features` if you want firefox: this
 # script defaults to chrome.
 cmd_test_browser() {
     header "Running browser WASM regression suite (wasm-pack --headless --chrome)"
-    if ! command -v wasm-pack >/dev/null 2>&1; then
-        fail "wasm-pack not found — install via: cargo install wasm-pack"
-        return 1
-    fi
-    if ! check_target_installed wasm32-unknown-unknown; then return 1; fi
-    timer_start
     # Default suite is browser (entry-point contracts). Pass FEATURES=browser-opfs
     # to also exercise OPFS FS (WEFT-13 / browser_opfs.rs), env
     # (WEFT-14 / browser_env_persist.rs), and conversation history
@@ -631,9 +629,17 @@ cmd_test_browser() {
             printf "  ${YELLOW}DRY${NC}   … --test browser_env_persist\n"
             printf "  ${YELLOW}DRY${NC}   … --test browser_history_persist\n"
         fi
-        timer_end
         return 0
     fi
+    if ! command -v wasm-pack >/dev/null 2>&1; then
+        fail "wasm-pack not found — install via: cargo install wasm-pack"
+        return 1
+    fi
+    if ! check_target_installed wasm32-unknown-unknown; then return 1; fi
+    timer_start
+    # High-resolution wall clock for WEFT-408 duration artefact.
+    local t0 t1 elapsed_sec
+    t0=$(date +%s)
     # Always show full output — tail -5 hides per-test results from the runner.
     "${args[@]}" 2>&1
     local rc=$?
@@ -658,8 +664,112 @@ cmd_test_browser() {
             rc=$?
         fi
     fi
+    t1=$(date +%s)
+    elapsed_sec=$((t1 - t0))
     timer_end
+
+    # Capture suite duration artefact for the ≤10% regression gate (WEFT-408).
+    local duration_out="${BROWSER_DURATION_OUT:-$ROOT/browser-test-duration.json}"
+    if [ "$rc" -eq 0 ]; then
+        BROWSER_TEST_PASS=true
+    else
+        BROWSER_TEST_PASS=false
+    fi
+    if BROWSER_TEST_FEATURES="$feat" \
+       BROWSER_TEST_SUITE="browser_pipeline" \
+       BROWSER_TEST_PASS="$BROWSER_TEST_PASS" \
+        bash "$ROOT/scripts/bench/check-browser-test-duration.sh" \
+            --from-sec "$elapsed_sec" \
+            --out "$duration_out" \
+            --write-only >/dev/null; then
+        info "Wrote test-duration artefact → $duration_out (${elapsed_sec}s)"
+    else
+        warn "Could not write test-duration artefact (gate script missing?)"
+    fi
+
     return "$rc"
+}
+
+# Browser test-duration regression gate (WEFT-408 / P6.7).
+#
+# Compares `browser-test-duration.json` (from the last test-browser run)
+# against `scripts/bench/browser-test-duration-baseline.json`. Fails when
+# the suite is >10% slower than the baseline. Soft mode / re-seed:
+#   BROWSER_DURATION_SOFT=1
+#   BROWSER_DURATION_UPDATE_BASELINE=1
+cmd_browser_duration_gate() {
+    header "Browser test-duration gate (≤10% regression)"
+    local results="${BROWSER_DURATION_OUT:-$ROOT/browser-test-duration.json}"
+    local baseline="${BROWSER_DURATION_BASELINE:-$ROOT/scripts/bench/browser-test-duration-baseline.json}"
+    if [ "$DRY_RUN" = true ]; then
+        printf "  ${YELLOW}DRY${NC}   scripts/bench/check-browser-test-duration.sh %s %s\n" \
+            "$results" "$baseline"
+        return 0
+    fi
+    if [ ! -f "$results" ]; then
+        fail "results not found: $results"
+        fail "Run scripts/build.sh test-browser first (writes the artefact)."
+        return 1
+    fi
+    bash "$ROOT/scripts/bench/check-browser-test-duration.sh" "$results" "$baseline"
+}
+
+# Docker smoke against the harness pkg (WEFT-408 / P6.7).
+#
+# Serves crates/clawft-wasm/www/ via nginx:alpine and probes index + pkg.
+# Soft-skip when docker is unavailable: BROWSER_SMOKE_SOFT=1
+cmd_browser_docker_smoke() {
+    header "Browser harness docker smoke"
+    local args=()
+    # Auto-build pkg when missing so the gate is self-contained in CI.
+    if [ ! -f "$ROOT/crates/clawft-wasm/www/pkg/clawft_wasm_bg.wasm" ]; then
+        args+=(--build)
+    fi
+    if [ "$DRY_RUN" = true ]; then
+        printf "  ${YELLOW}DRY${NC}   scripts/ci/browser-harness-docker-smoke.sh %s\n" "${args[*]:-}"
+        return 0
+    fi
+    bash "$ROOT/scripts/ci/browser-harness-docker-smoke.sh" "${args[@]+"${args[@]}"}"
+}
+
+# Final browser regression pack (WEFT-408 / P6.7):
+#   1. test-browser          — wasm-bindgen-test suite + duration artefact
+#   2. browser-duration-gate — ≤10% wall-clock regression
+#   3. browser-docker-smoke  — nginx smoke of harness pkg
+#
+# Duration gate is soft-skipped when the suite itself failed (artefact
+# still written with pass=false). Docker smoke builds pkg if needed.
+cmd_browser_regression() {
+    header "Browser final regression suite (WEFT-408 / P6.7)"
+    local failed=0
+    if [ "$DRY_RUN" = true ]; then
+        cmd_test_browser || true
+        cmd_browser_duration_gate || true
+        cmd_browser_docker_smoke || true
+        return 0
+    fi
+
+    if ! cmd_test_browser; then
+        fail "test-browser failed — duration gate still runs for the artefact"
+        failed=$((failed + 1))
+    fi
+
+    if ! cmd_browser_duration_gate; then
+        fail "browser-duration-gate failed"
+        failed=$((failed + 1))
+    fi
+
+    if ! cmd_browser_docker_smoke; then
+        fail "browser-docker-smoke failed"
+        failed=$((failed + 1))
+    fi
+
+    if [ "$failed" -gt 0 ]; then
+        fail "browser-regression: $failed step(s) failed"
+        return 1
+    fi
+    pass "browser final regression suite clean"
+    return 0
 }
 
 # Browser WASM bundle-size gate (WEFT-389 / M5-A).
@@ -1391,6 +1501,16 @@ ${BOLD}Commands:${NC}
   test [pkg…]     Run cargo test --workspace (or scoped: test clawft-channels …)
   test-browser    Run browser WASM regression suite under headless Chrome
                   (WEFT-388 / M5-A). Requires wasm-pack + chromedriver.
+                  Writes browser-test-duration.json for the duration gate.
+  browser-duration-gate
+                  ≤10% test-duration regression check vs committed baseline
+                  (WEFT-408 / P6.7). Needs a prior test-browser run.
+  browser-docker-smoke
+                  Docker/nginx smoke of crates/clawft-wasm/www harness pkg
+                  (WEFT-408 / P6.7). Soft-skip: BROWSER_SMOKE_SOFT=1
+  browser-regression
+                  Final pack: test-browser + duration gate + docker smoke
+                  (WEFT-408 / P6.7).
   bundle-size     Gate browser WASM bundle (raw + gzip) against the
                   documented budget (WEFT-389 / M5-A).
                   See docs/architecture/wasm-bundle-size.md
@@ -1622,6 +1742,9 @@ main() {
         all)          cmd_all ;;
         test)         cmd_test ;;
         test-browser) cmd_test_browser ;;
+        browser-duration-gate) cmd_browser_duration_gate ;;
+        browser-docker-smoke)  cmd_browser_docker_smoke ;;
+        browser-regression)    cmd_browser_regression ;;
         bundle-size)  cmd_bundle_size ;;
         browser-perf) cmd_browser_perf "${BROWSER_PERF_ARGS[@]+"${BROWSER_PERF_ARGS[@]}"}" ;;
         wasm-panel)   cmd_wasm_panel "${WASM_PANEL_MAX_RAW_KB:-}" "${WASM_PANEL_MAX_GZ_KB:-}" ;;

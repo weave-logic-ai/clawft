@@ -300,13 +300,20 @@ jobs:
         run: cargo check -p clawft-kernel --target wasm32-unknown-unknown --no-default-features
 
   # -------------------------------------------------------------------
-  # Browser WASM regression suite (WEFT-388 / M5-A).
+  # Browser WASM regression suite (WEFT-388 / M5-A) + duration gate
+  # and harness docker smoke (WEFT-408 / P6.7).
   #
   # Runs `crates/clawft-wasm/tests/browser_pipeline.rs` under headless
   # Chrome via wasm-pack. Pins chromedriver to the matching Chrome
   # version that ships on the Ubuntu runner image — `wasm-pack`'s own
   # downloader has shipped mismatched binaries in the past, so we
   # install chromedriver explicitly via Chrome-for-Testing.
+  #
+  # WEFT-408 / P6.7:
+  #   - Captures suite wall-clock as browser-test-duration.json artefact
+  #   - Compares against committed baseline (+ optional prior-run artefact)
+  #   - Fails when >10% slower (BROWSER_DURATION_SOFT=1 to warn only)
+  #   - Docker/nginx smoke of crates/clawft-wasm/www harness pkg
   # -------------------------------------------------------------------
   browser-wasm-tests:
     name: Browser WASM regression suite
@@ -343,8 +350,63 @@ jobs:
           chrome-version: stable
           install-chromedriver: true
 
+      - name: Restore prior browser-test-duration artefact (best-effort)
+        id: duration-cache
+        uses: actions/cache/restore@v4
+        with:
+          # Saved path must match restore path (see save step below).
+          path: prior-browser-test-duration.json
+          key: browser-test-duration-v1-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            browser-test-duration-v1-${{ runner.os }}-
+          fail-on-cache-miss: false
+
       - name: Run browser WASM regression suite
         run: scripts/build.sh test-browser
+
+      - name: Upload browser-test-duration artefact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-test-duration
+          path: browser-test-duration.json
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Browser test-duration gate (≤10% regression)
+        if: always() && hashFiles('browser-test-duration.json') != ''
+        run: |
+          if [ -f prior-browser-test-duration.json ]; then
+            echo "Using prior-run artefact for comparison"
+            export BROWSER_DURATION_PRIOR=prior-browser-test-duration.json
+            cat prior-browser-test-duration.json
+          else
+            echo "No prior-run cache hit — committed baseline only"
+          fi
+          scripts/build.sh browser-duration-gate
+
+      - name: Save browser-test-duration for next run comparison
+        if: always() && hashFiles('browser-test-duration.json') != ''
+        run: cp browser-test-duration.json prior-browser-test-duration.json
+
+      - name: Cache browser-test-duration for next run
+        if: always() && hashFiles('prior-browser-test-duration.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: prior-browser-test-duration.json
+          key: browser-test-duration-v1-${{ runner.os }}-${{ github.run_id }}
+
+      - name: Install wasm-bindgen-cli (for harness pkg smoke)
+        if: always()
+        run: |
+          if ! command -v wasm-bindgen >/dev/null 2>&1; then
+            cargo install --locked wasm-bindgen-cli --version 0.2.108
+          fi
+          wasm-bindgen --version
+
+      - name: Browser harness docker smoke
+        if: always()
+        run: scripts/build.sh browser-docker-smoke
 
   # -------------------------------------------------------------------
   # Browser WASM bundle size gate (WEFT-389 / M5-A).

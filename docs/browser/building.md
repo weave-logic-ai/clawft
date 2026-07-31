@@ -84,6 +84,32 @@ After a successful build, wasm-pack places output in `crates/clawft-wasm/pkg/`:
 | `clawft_wasm.d.ts` | TypeScript type declarations for the public JS API. |
 | `package.json` | npm package metadata for the generated module. |
 
+## Regression suite + duration gate (WEFT-408 / P6.7)
+
+```bash
+# Headless Chrome suite (writes browser-test-duration.json)
+scripts/build.sh test-browser
+
+# ≤10% wall-clock regression vs scripts/bench/browser-test-duration-baseline.json
+scripts/build.sh browser-duration-gate
+
+# Docker/nginx smoke of the harness pkg (index + pkg/*.wasm)
+scripts/build.sh browser-docker-smoke
+
+# All three
+scripts/build.sh browser-regression
+```
+
+CI (`.github/workflows/pr-gates.yml` job `browser-wasm-tests`) uploads the
+duration JSON as an artefact, compares against the previous run when a
+cache hit is available, and fails when the suite is more than 10% slower.
+Re-seed the committed baseline after intentional suite growth:
+
+```bash
+BROWSER_DURATION_UPDATE_BASELINE=1 \
+  scripts/bench/check-browser-test-duration.sh browser-test-duration.json
+```
+
 ## Development Workflow
 
 ### 1. Build

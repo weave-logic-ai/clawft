@@ -1,0 +1,10 @@
+{
+  "schema": "weftos.browser-test-duration.v1",
+  "suite": "browser_pipeline",
+  "duration_sec": 600,
+  "duration_ms": 600000,
+  "threshold_pct": 10,
+  "features": "browser",
+  "notes": "Seed baseline for WEFT-408 / P6.7. Wall-clock of `scripts/build.sh test-browser` (browser_pipeline under headless Chrome) on ubuntu-latest with a warm cargo cache. Generous seed (10 min) so cold first CI runs do not false-fail; re-seed from a green CI artefact after a few stable runs: BROWSER_DURATION_UPDATE_BASELINE=1 scripts/bench/check-browser-test-duration.sh browser-test-duration.json",
+  "timestamp": "2026-07-31T00:00:00Z"
+}
