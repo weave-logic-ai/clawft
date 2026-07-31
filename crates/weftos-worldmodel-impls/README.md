@@ -8,10 +8,13 @@ traits for the LeWM latent world model (WEFT-521).
 | Component | Status | Notes |
 |-----------|--------|--------|
 | `Null*` / stub `Encoder`, `Predictor`, `LatentPlanner`, `LatticeApi`, `SigRegMonitor` | **Done** | Default feature set; unit-tested; no ML weights |
+| `LinearPredPhi` (`pred_φ`) | **Done** | Weights-free linear residual action-conditioned dynamics (WEFT-529) |
+| `CemPlanner` / `MppiWarmPlanner` / `GradientPlanner` | **Done** | CEM default @ 10 Hz path; toy planning tests (WEFT-529) |
+| `WelfordSigRegMonitor` | **Done** | Online Welford + auto-rollback at 0.85 / 30 s (WEFT-528) |
 | `ActionEncoder` + `NullActionEncoder` / `HashActionEncoder` | **Done** | Maps control bytes → fixed-width `Action` code |
-| `StubLattice` composition | **Done** | Wires encoder + predictor + planner for service scaffolding |
+| `StubLattice` composition | **Done** | Wires encoder + `pred_φ` + CEM for service scaffolding |
 | `candle` feature skeleton (`VitTinyConfig`, `CandleVitEncoder`, `AdaLnPredictor`) | **Skeleton** | Module layout + `Unavailable` without weights; no trained checkpoint |
-| Full ViT-tiny weights / training loop / AdaLN bake-off | **Not in this crate yet** | Follow-ups: WEFT-529 (pred_φ + CEM), training pipeline TBD |
+| Full ViT-tiny weights / training loop / AdaLN bake-off | **Residual** | Needs training pipeline + checkpoint I/O (WEFT-531+) |
 
 Default builds **never** depend on `candle-core` / `candle-nn` (same idiom as
 `clawft-voice-onnx` and its empty default features). CI and
@@ -32,29 +35,33 @@ weftos-worldmodel-impls = { workspace = true, features = ["candle"] }  # experim
   **Do not enable in default CI** until a toolchain-compatible pin is proven
   (candle-core 0.2.x is blocked — see WEFT-216).
 
-## Remaining candle / training work
+## Residual training work (honest)
+
+Runtime monitors / planners ship without trained neural weights:
 
 1. Pin a workspace-compatible candle line (or switch to ONNX / another edge runtime).
 2. Implement ViT-tiny patch embed + transformer blocks under `src/candle/`.
 3. Train / export SIGReg-aligned weights (`LATENT_DIM = 192`, isotropic Gaussian prior).
-4. Implement AdaLN-modulated `pred_φ(z_t, a_t)` with action conditioning.
+4. Replace [`LinearPredPhi`] with AdaLN-modulated `pred_φ(z_t, a_t)` once weights exist.
 5. Wire weight loading (file path / CAS) and model version tags for ExoChain attestation.
-6. CEM planner real samples (WEFT-529) on the 10 Hz background path — not 1 ms servo.
+6. Optional: learn CEM cost / dynamics residuals from logged rollouts (WEFT-531+).
 
-## Usage (stubs)
+## Usage (runtime defaults)
 
 ```rust
 use weftos_worldmodel_core::{Encoder, Predictor, LatentPlanner, Action};
 use weftos_worldmodel_impls::{
-    NullEncoder, NullPredictor, NullPlanner, NullActionEncoder, ActionEncoder,
+    NullEncoder, LinearPredPhi, CemPlanner, WelfordSigRegMonitor, NullActionEncoder, ActionEncoder,
 };
 
 let enc = NullEncoder;
 let z = enc.encode(b"frame").unwrap();
 let a = NullActionEncoder.encode_bytes(b"noop").unwrap();
-let z_hat = NullPredictor.predict(&z, &a).unwrap();
-let plan = NullPlanner::default().plan(&z, 4).unwrap();
+let z_hat = LinearPredPhi::default().predict(&z, &a).unwrap();
+let plan = CemPlanner::default().plan(&z, 4).unwrap();
 assert_eq!(plan.steps.len(), 4);
+let mut mon = WelfordSigRegMonitor::new(1);
+let _ = mon.update(&z).unwrap();
 let _ = z_hat;
 ```
 
@@ -63,5 +70,6 @@ let _ = z_hat;
 - WEFT-520 — `weftos-worldmodel-core` traits (landed)
 - **WEFT-521** — this crate
 - WEFT-522 — facade re-export (`weftos-worldmodel`) — landed; prefer that for consumers
-- WEFT-529 — production pred_φ + CEM planner
+- WEFT-528 — Welford SIGReg + auto-rollback (landed)
+- WEFT-529 — pred_φ + CEM planner (landed; neural weights residual)
 - WEFT-543 — latent dim = 192 contract

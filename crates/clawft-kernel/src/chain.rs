@@ -394,6 +394,19 @@ pub const EVENT_KIND_EML_LOADED: &str = "eml.loaded";
 /// `weftos_worldmodel_core::EVENT_KIND_LEWM_FRAME_ATTESTATION`.
 pub const EVENT_KIND_LEWM_FRAME_ATTESTATION: &str = "lewm.frame.attestation";
 
+/// LeWM mesh sensor topic frame index (WEFT-526).
+///
+/// Emitted when a signed `mesh.sensor.v1.{encoded,consensus,control}` frame
+/// is published on the mesh bus. Payload includes topic, cluster, node_id,
+/// timestamp, and a blake3/hex digest of the CBOR frame for ExoChain index.
+pub const EVENT_KIND_MESH_SENSOR_FRAME: &str = "mesh.sensor.v1.frame";
+
+/// LeWM SIGReg health snapshot / rollback gate (WEFT-528).
+///
+/// Emitted by the Welford `sigreg_health` monitor when health is sampled or
+/// the auto-rollback gate fires (`score < 0.85` sustained for 30 s).
+pub const EVENT_KIND_SIGREG_HEALTH: &str = "lewm.sigreg.health";
+
 /// Auth credential registration event.
 ///
 /// Emitted when a new credential is registered with the AuthService.

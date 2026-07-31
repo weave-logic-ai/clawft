@@ -93,10 +93,12 @@ pub use attestation::{
     ATTESTATION_SCHEMA_MAJOR, ATTESTATION_SCHEMA_MINOR,
 };
 
-// ── Impls: default stubs + action encoder ──────────────────────────────────
+// ── Impls: runtime monitors/planners + stubs + action encoder ─────────────
 pub use weftos_worldmodel_impls::{
-    ActionEncoder, HashActionEncoder, HashEncoder, IdentityPredictor, NullActionEncoder,
-    NullEncoder, NullPlanner, NullPredictor, NullSigRegMonitor, StubLattice, ACTION_CODE_DIM,
+    planner_for_kind, ActionEncoder, CemPlanner, GradientPlanner, HashActionEncoder, HashEncoder,
+    IdentityPredictor, LinearPredPhi, MppiWarmPlanner, NullActionEncoder, NullEncoder, NullPlanner,
+    NullPredictor, NullSigRegMonitor, PredPhi, SigRegHealthEvent, SigRegHealthLog, StubLattice,
+    WelfordSigRegMonitor, ACTION_CODE_DIM, EVENT_KIND_SIGREG_HEALTH,
 };
 
 // ── Optional candle skeleton (no weights) ──────────────────────────────────
@@ -123,32 +125,33 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Build the default weight-free [`StubLattice`] for service scaffolding / tests.
 ///
-/// Composes null encoder, identity predictor, and null CEM planner. No ML
-/// weights and no candle dependency on the default feature set.
+/// Composes null encoder, linear `pred_φ`, and CEM planner. No ML weights and
+/// no candle dependency on the default feature set.
 #[inline]
 pub fn default_stub_lattice() -> StubLattice {
     StubLattice::default()
 }
 
-/// Default stub stack: encoder, action encoder, predictor, planner, lattice,
-/// and SIGReg monitor in one place for hosts that want a single entry object.
+/// Default runtime stack: encoder, action encoder, `pred_φ`, CEM planner,
+/// lattice, and Welford SIGReg monitor (WEFT-528 / WEFT-529).
 ///
-/// This is the recommended wiring for consumers until production weights and
-/// the sensor pipeline (WEFT-523) land. No training; all components are stubs.
+/// Weights-free but not a pure no-op: linear residual prediction, CEM planning,
+/// and online SIGReg health with auto-rollback. Trained AdaLN / ViT weights
+/// remain residual (see `weftos-worldmodel-impls` README).
 #[derive(Debug, Clone)]
 pub struct DefaultWorldModel {
     /// Sensor → latent encoder (null by default).
     pub encoder: NullEncoder,
     /// Control bytes → action code (null by default).
     pub action_encoder: NullActionEncoder,
-    /// `pred_φ` stub (null latent by default).
-    pub predictor: NullPredictor,
-    /// CEM-shaped planner stub.
-    pub planner: NullPlanner,
+    /// Action-conditioned `pred_φ` (linear residual).
+    pub predictor: LinearPredPhi,
+    /// CEM planner (default algorithm).
+    pub planner: CemPlanner,
     /// Composed lattice API (observe / predict / plan / recall / subscribe).
     pub lattice: StubLattice,
-    /// SIGReg health monitor stub (always healthy).
-    pub sigreg: NullSigRegMonitor,
+    /// Welford SIGReg health monitor (auto-rollback at 0.85 / 30s).
+    pub sigreg: WelfordSigRegMonitor,
 }
 
 impl Default for DefaultWorldModel {
@@ -158,16 +161,16 @@ impl Default for DefaultWorldModel {
 }
 
 impl DefaultWorldModel {
-    /// Construct the default stub stack.
+    /// Construct the default runtime stack.
     #[inline]
     pub fn new() -> Self {
         Self {
             encoder: NullEncoder,
             action_encoder: NullActionEncoder,
-            predictor: NullPredictor,
-            planner: NullPlanner::default(),
+            predictor: LinearPredPhi::default(),
+            planner: CemPlanner::default(),
             lattice: StubLattice::default(),
-            sigreg: NullSigRegMonitor::default(),
+            sigreg: WelfordSigRegMonitor::new(1),
         }
     }
 
@@ -177,7 +180,7 @@ impl DefaultWorldModel {
         frame: ObservationFrame<'_>,
     ) -> WorldModelResult<(Latent, SigRegHealth)> {
         let z = self.lattice.observe(frame)?;
-        let health = self.sigreg.update(&z)?;
+        let health = self.sigreg.update_at(&z, frame.timestamp_ms)?;
         Ok((z, health))
     }
 }
@@ -231,8 +234,8 @@ mod tests {
     #[test]
     fn stub_encoder_predictor_planner_via_facade() {
         let enc = NullEncoder;
-        let pred = NullPredictor;
-        let planner = NullPlanner::default();
+        let pred = LinearPredPhi::default();
+        let planner = CemPlanner::with_seed(7);
         let action_enc = NullActionEncoder;
 
         let z = enc.encode(b"sensor").expect("encode");

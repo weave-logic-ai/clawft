@@ -209,6 +209,20 @@ pub struct ChainEntry {
 pub trait ChainSink {
     /// Append a pre-encoded attestation payload; returns assigned sequence.
     fn append_attestation(&mut self, payload: &AttestationPayload) -> Result<u64, AttestationError>;
+
+    /// Append a raw event (SIGReg health, mesh sensor index, …).
+    ///
+    /// Default implementation returns an error so existing sinks stay
+    /// focused on frame attestation; [`MemoryChainSink`] overrides it.
+    fn append_event(
+        &mut self,
+        _kind: &str,
+        _payload: &[u8],
+    ) -> Result<u64, AttestationError> {
+        Err(AttestationError::Sink(
+            "append_event not supported by this sink".into(),
+        ))
+    }
 }
 
 /// In-memory ExoChain stand-in for service smoke tests and offline replay.
@@ -256,6 +270,18 @@ impl ChainSink for MemoryChainSink {
             kind: EVENT_KIND_LEWM_FRAME_ATTESTATION.to_string(),
             source: ATTESTATION_SOURCE.to_string(),
             payload: bytes,
+        });
+        Ok(seq)
+    }
+
+    fn append_event(&mut self, kind: &str, payload: &[u8]) -> Result<u64, AttestationError> {
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.saturating_add(1);
+        self.entries.push(ChainEntry {
+            seq,
+            kind: kind.to_string(),
+            source: ATTESTATION_SOURCE.to_string(),
+            payload: payload.to_vec(),
         });
         Ok(seq)
     }

@@ -1,19 +1,20 @@
 //! `weftos-worldmodel-impls` — concrete LeWM trait implementations (WEFT-521).
 //!
-//! Default path is **weights-free**: null/stub types that satisfy
-//! [`weftos_worldmodel_core`] traits and unit-test without candle or model
-//! files. Optional `candle` feature exposes a ViT-tiny / AdaLN **skeleton**
-//! (layout + `Unavailable` fallbacks); trained weights and full training
-//! loops remain follow-up work — see crate `README.md`.
+//! Default path is **weights-free**: null/stub types plus runtime
+//! [`LinearPredPhi`], [`CemPlanner`], and [`WelfordSigRegMonitor`] that satisfy
+//! [`weftos_worldmodel_core`] traits without candle or model files. Optional
+//! `candle` feature exposes a ViT-tiny / AdaLN **skeleton** (layout +
+//! `Unavailable` fallbacks); trained weights remain residual work — see crate
+//! `README.md`.
 //!
 //! # Modules
 //!
 //! - [`action_encoder`] — control intent → fixed-width [`Action`] code
 //! - [`encoder`] — sensor → latent (null / hash stubs; candle ViT skeleton)
-//! - [`predictor`] — `pred_φ` stubs + AdaLN skeleton under `candle`
-//! - [`planner`] — CEM-shaped stub planner
+//! - [`predictor`] — `pred_φ` ([`LinearPredPhi`]) + stubs + AdaLN skeleton
+//! - [`planner`] — CEM default / MPPI-warm / gradient planners (WEFT-529)
 //! - [`lattice`] — composed [`StubLattice`] implementing [`LatticeApi`]
-//! - [`sigreg`] — stub SIGReg monitor (Welford lands in WEFT-528)
+//! - [`sigreg`] — Welford SIGReg monitor + auto-rollback (WEFT-528)
 //! - [`candle`] — optional ML skeleton (`feature = "candle"`)
 //!
 //! Designed for `no_std` + `alloc` on the default feature set. The `candle`
@@ -41,15 +42,21 @@ pub use weftos_worldmodel_core::{
     zero_latent, Action, ActionPlan, Encoder, Latent, LatentPlanner, LatticeApi, NodeId,
     ObservationFrame, PlanStep, PlannerKind, Predictor, RecallHit, SigRegHealth, SigRegMonitor,
     SubscriptionId, WorldModelError, WorldModelResult, LATENT_DIM, LATENT_DIM_U16,
+    SIGREG_HEALTH_ROLLBACK_THRESHOLD, SIGREG_HEALTH_WINDOW_SECS,
 };
 
-// ── Crate-local stubs ──────────────────────────────────────────────────────
+// ── Crate-local stubs + production runtime monitors/planners ───────────────
 pub use action_encoder::{ActionEncoder, HashActionEncoder, NullActionEncoder, ACTION_CODE_DIM};
 pub use encoder::{HashEncoder, NullEncoder};
 pub use lattice::StubLattice;
-pub use planner::NullPlanner;
-pub use predictor::{IdentityPredictor, NullPredictor};
-pub use sigreg::NullSigRegMonitor;
+pub use planner::{
+    planner_for_kind, CemPlanner, GradientPlanner, MppiWarmPlanner, NullPlanner,
+};
+pub use predictor::{IdentityPredictor, LinearPredPhi, NullPredictor, PredPhi};
+pub use sigreg::{
+    NullSigRegMonitor, SigRegHealthEvent, SigRegHealthLog, WelfordSigRegMonitor,
+    EVENT_KIND_SIGREG_HEALTH,
+};
 
 #[cfg(feature = "candle")]
 pub use candle::{candle_cpu_device, AdaLnPredictor, CandleVitEncoder, VitTinyConfig};
@@ -131,11 +138,20 @@ mod tests {
     }
 
     #[test]
-    fn sigreg_stub_healthy() {
-        let mut mon = NullSigRegMonitor::default();
-        let h = mon.update(&zero_latent()).expect("update");
-        assert!(h.is_healthy());
-        assert!(!h.should_rollback());
+    fn welford_sigreg_healthy_on_unit_samples() {
+        let mut mon = WelfordSigRegMonitor::new(1);
+        mon.min_samples = 4;
+        for t in 0..20u64 {
+            let mut z = zero_latent();
+            for i in 0..LATENT_DIM {
+                z[i] = if (t as usize + i) % 2 == 0 { 1.0 } else { -1.0 };
+            }
+            let h = mon.update_at(&z, t * 1000).expect("update");
+            if t >= 4 {
+                assert!(h.is_healthy(), "score={}", h.score);
+            }
+        }
+        assert!(!mon.health().should_rollback());
     }
 
     #[test]
@@ -147,6 +163,20 @@ mod tests {
             .predict(&z, &Action::null())
             .expect("predict");
         assert_eq!(out, z);
+    }
+
+    #[test]
+    fn linear_pred_phi_and_cem_smoke() {
+        let pred = LinearPredPhi::default();
+        let mut a = Action::null();
+        a.code[0] = 0.25;
+        let z = zero_latent();
+        let z_hat = pred.predict(&z, &a).expect("predict");
+        assert!((z_hat[0] - 0.25).abs() < 1e-5);
+
+        let plan = CemPlanner::with_seed(1).plan(&z, 2).expect("plan");
+        assert_eq!(plan.steps.len(), 2);
+        assert_eq!(plan.kind, PlannerKind::Cem);
     }
 
     #[test]

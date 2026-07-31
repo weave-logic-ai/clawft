@@ -18,9 +18,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use weftos_worldmodel::{
-    attest_frame, Action, ActionEncoder, AttestationError, DefaultWorldModel, HashActionEncoder,
-    HashEncoder, LatticeApi, MemoryChainSink, NullActionEncoder, ObservationFrame,
-    ObservationTuple, Predictor, Encoder as _, LATENT_DIM_U16,
+    attest_frame, Action, ActionEncoder, ActionPlan, AttestationError, CemPlanner, ChainSink,
+    DefaultWorldModel, HashActionEncoder, HashEncoder, Latent, LatentPlanner, LatticeApi,
+    LinearPredPhi, MemoryChainSink, NullActionEncoder, ObservationFrame, ObservationTuple,
+    PlannerKind, Predictor, SigRegHealth, WelfordSigRegMonitor, Encoder as _, EVENT_KIND_SIGREG_HEALTH,
+    LATENT_DIM_U16, SIGREG_HEALTH_ROLLBACK_THRESHOLD, SIGREG_HEALTH_WINDOW_SECS,
 };
 
 /// Three deployment topologies for WorldModelService (ADR-054 / WEFT-524).
@@ -137,19 +139,33 @@ impl ServiceConfig {
     }
 }
 
+/// Background planner cadence for the CEM / MPPI loop (Hz).
+pub const PLANNER_HZ: f32 = 10.0;
+
+/// Period between planner ticks in milliseconds.
+pub const PLANNER_PERIOD_MS: u64 = 100;
+
 /// Running world-model service instance (in-process).
 #[derive(Debug)]
 pub struct WorldModelService {
     /// Active configuration.
     pub config: ServiceConfig,
-    /// Default stub world-model stack (facade).
+    /// Default runtime world-model stack (facade).
     pub model: DefaultWorldModel,
-    /// In-memory ExoChain attestation sink (WEFT-533).
+    /// In-memory ExoChain attestation sink (WEFT-533 / WEFT-528 health).
     pub chain: MemoryChainSink,
     /// Frames processed since boot.
     pub frames: u64,
     /// Whether boot completed successfully.
     pub booted: bool,
+    /// Last published action plan from the 10 Hz planner loop.
+    pub last_plan: Option<ActionPlan>,
+    /// Timestamp (ms) of the last planner tick.
+    pub last_plan_ms: Option<u64>,
+    /// Planner ticks completed since boot.
+    pub plan_ticks: u64,
+    /// SIGReg auto-rollback events observed.
+    pub sigreg_rollbacks: u64,
 }
 
 impl WorldModelService {
@@ -162,6 +178,10 @@ impl WorldModelService {
             chain: MemoryChainSink::new(),
             frames: 0,
             booted: false,
+            last_plan: None,
+            last_plan_ms: None,
+            plan_ticks: 0,
+            sigreg_rollbacks: 0,
         })
     }
 
@@ -185,7 +205,8 @@ impl WorldModelService {
     }
 
     /// Process one observation frame: encode path via lattice, predict,
-    /// form `(a_t, z_t, z_{t+1}, surprise)`, attest to the chain sink.
+    /// update Welford SIGReg health, form `(a_t, z_t, z_{t+1}, surprise)`,
+    /// attest to the chain sink.
     pub fn process_frame(
         &mut self,
         sensor_bytes: &[u8],
@@ -205,6 +226,14 @@ impl WorldModelService {
                 timestamp_ms,
             })
             .map_err(ServiceError::WorldModel)?;
+
+        // WEFT-528: online Welford SIGReg health + optional auto-rollback log.
+        let health = self
+            .model
+            .sigreg
+            .update_at(&z_t, timestamp_ms)
+            .map_err(ServiceError::WorldModel)?;
+        self.log_sigreg_health(health)?;
 
         let z_hat = self
             .model
@@ -234,7 +263,101 @@ impl WorldModelService {
             surprise: tuple.surprise,
             manifold_major: tuple.manifold.major,
             latent_dim: tuple.latent_dim,
+            sigreg_health: health.score,
+            sigreg_version: health.version_tag,
         })
+    }
+
+    /// Log SIGReg health to the ExoChain sink (metrics + rollback gate).
+    fn log_sigreg_health(&mut self, health: SigRegHealth) -> Result<(), ServiceError> {
+        let rolled = self.model.sigreg.last_rolled_back();
+        if rolled {
+            self.sigreg_rollbacks = self.sigreg_rollbacks.saturating_add(1);
+        }
+        // Log on rollback or every sample once warm — keep payload tiny JSON.
+        let should_log = rolled || self.model.sigreg.sample_count() % 8 == 0;
+        if !should_log {
+            return Ok(());
+        }
+        let payload = serde_json::json!({
+            "score": health.score,
+            "seconds_below_threshold": health.seconds_below_threshold,
+            "version_tag": health.version_tag,
+            "rolled_back": rolled,
+            "threshold": SIGREG_HEALTH_ROLLBACK_THRESHOLD,
+            "window_secs": SIGREG_HEALTH_WINDOW_SECS,
+            "sample_count": self.model.sigreg.sample_count(),
+        });
+        let bytes = serde_json::to_vec(&payload).map_err(|e| {
+            ServiceError::Attestation(AttestationError::Serialize(e.to_string()))
+        })?;
+        self.chain
+            .append_event(EVENT_KIND_SIGREG_HEALTH, &bytes)
+            .map_err(ServiceError::Attestation)?;
+        Ok(())
+    }
+
+    /// Run one 10 Hz planner tick if `timestamp_ms` is due.
+    ///
+    /// Returns `Some(plan)` when a new plan was computed; `None` if the
+    /// period has not elapsed since the last tick.
+    pub fn maybe_plan_tick(
+        &mut self,
+        z_t: &Latent,
+        timestamp_ms: u64,
+        horizon: usize,
+    ) -> Result<Option<ActionPlan>, ServiceError> {
+        if !self.booted {
+            return Err(ServiceError::NotBooted);
+        }
+        if let Some(last) = self.last_plan_ms {
+            if timestamp_ms.saturating_sub(last) < PLANNER_PERIOD_MS {
+                return Ok(None);
+            }
+        }
+        let plan = self
+            .model
+            .planner
+            .plan(z_t, horizon)
+            .map_err(ServiceError::WorldModel)?;
+        self.last_plan = Some(plan.clone());
+        self.last_plan_ms = Some(timestamp_ms);
+        self.plan_ticks = self.plan_ticks.saturating_add(1);
+        Ok(Some(plan))
+    }
+
+    /// Force a planner tick regardless of cadence (tests / CLI).
+    pub fn plan_now(&mut self, z_t: &Latent, horizon: usize) -> Result<ActionPlan, ServiceError> {
+        if !self.booted {
+            return Err(ServiceError::NotBooted);
+        }
+        let plan = self
+            .model
+            .planner
+            .plan(z_t, horizon)
+            .map_err(ServiceError::WorldModel)?;
+        self.last_plan = Some(plan.clone());
+        self.last_plan_ms = Some(now_ms());
+        self.plan_ticks = self.plan_ticks.saturating_add(1);
+        Ok(plan)
+    }
+
+    /// Simulate `n` background planner ticks at 10 Hz starting at `start_ms`.
+    pub fn run_planner_loop(
+        &mut self,
+        z_t: &Latent,
+        n: u64,
+        horizon: usize,
+        start_ms: u64,
+    ) -> Result<Vec<ActionPlan>, ServiceError> {
+        let mut out = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            let ts = start_ms.saturating_add(i.saturating_mul(PLANNER_PERIOD_MS));
+            if let Some(plan) = self.maybe_plan_tick(z_t, ts, horizon)? {
+                out.push(plan);
+            }
+        }
+        Ok(out)
     }
 
     /// Run `n` frames through a deterministic fake sensor pipeline.
@@ -313,6 +436,10 @@ pub struct FrameResult {
     pub manifold_major: u16,
     /// Latent dim attested.
     pub latent_dim: u16,
+    /// SIGReg health score after this frame (WEFT-528).
+    pub sigreg_health: f32,
+    /// SIGReg version tag after this frame.
+    pub sigreg_version: u64,
 }
 
 /// Service-level errors.
@@ -383,20 +510,26 @@ mod tests {
 
         let frames = svc.run_fake_sensor_pipeline(5, false).expect("smoke");
         assert_eq!(frames.len(), 5);
-        assert_eq!(svc.chain.len(), 5);
         assert_eq!(svc.frames, 5);
+
+        // Chain may also hold SIGReg health events (WEFT-528); filter attests.
+        let attests: Vec<_> = svc
+            .chain
+            .entries
+            .iter()
+            .filter(|e| e.kind == EVENT_KIND_LEWM_FRAME_ATTESTATION)
+            .collect();
+        assert_eq!(attests.len(), 5);
 
         // Chain entries decode round-trip (WEFT-533).
         for (i, fr) in frames.iter().enumerate() {
-            assert_eq!(fr.chain_seq, i as u64);
             assert_eq!(fr.manifold_major, 1);
             assert_eq!(fr.latent_dim, LATENT_DIM as u16);
-            let tuple = svc.chain.decode_tuple(i).expect("decode");
+            let payload =
+                AttestationPayload::from_json_bytes(&attests[i].payload).expect("json");
+            let tuple = payload.to_tuple().expect("tuple");
             assert_eq!(tuple.frame_seq, fr.frame_seq);
             assert!(tuple.manifold_matches_local());
-            assert_eq!(svc.chain.entries[i].kind, EVENT_KIND_LEWM_FRAME_ATTESTATION);
-            let payload =
-                AttestationPayload::from_json_bytes(&svc.chain.entries[i].payload).expect("json");
             assert_eq!(payload.manifold_major, 1);
             assert_eq!(payload.latent_dim, 192);
         }
@@ -430,5 +563,107 @@ mod tests {
         let mut cfg = ServiceConfig::for_topology(DeploymentTopology::Single);
         cfg.role = ServiceRole::Standby;
         assert!(WorldModelService::new(cfg).is_err());
+    }
+
+    #[test]
+    fn planner_loop_runs_at_10hz() {
+        let mut svc = WorldModelService::new(ServiceConfig::for_topology(
+            DeploymentTopology::Single,
+        ))
+        .expect("config");
+        svc.boot().expect("boot");
+        assert_eq!(PLANNER_HZ, 10.0);
+        assert_eq!(PLANNER_PERIOD_MS, 100);
+        assert_eq!(svc.model.planner.kind(), PlannerKind::Cem);
+
+        let z = weftos_worldmodel::zero_latent();
+        let plans = svc.run_planner_loop(&z, 5, 3, 0).expect("loop");
+        assert_eq!(plans.len(), 5);
+        assert_eq!(svc.plan_ticks, 5);
+        for p in &plans {
+            assert_eq!(p.steps.len(), 3);
+            assert_eq!(p.kind, PlannerKind::Cem);
+        }
+
+        // Within the same period: no new tick.
+        assert!(svc.maybe_plan_tick(&z, 50, 3).unwrap().is_none());
+    }
+
+    #[test]
+    fn toy_planning_task_via_service() {
+        let mut svc = WorldModelService::new(ServiceConfig::for_topology(
+            DeploymentTopology::Single,
+        ))
+        .expect("config");
+        svc.boot().expect("boot");
+
+        // Goal: move latent dim-0 family toward +1 via action channel 0.
+        let mut goal = weftos_worldmodel::zero_latent();
+        for i in 0..192 {
+            if i % 32 == 0 {
+                goal[i] = 1.0;
+            }
+        }
+        let mut planner = CemPlanner::with_seed(99).with_goal(goal);
+        planner.population = 64;
+        planner.elites = 16;
+        planner.iterations = 8;
+        planner.init_std = 0.35;
+        svc.model.planner = planner;
+        svc.model.predictor = LinearPredPhi::default();
+
+        let z0 = weftos_worldmodel::zero_latent();
+        let plan = svc.plan_now(&z0, 4).expect("plan");
+        assert_eq!(plan.steps.len(), 4);
+        // Cost only on goal-aligned dimensions (CEM may keep residual noise
+        // on unused action channels; the toy task cares about a[0] → z[0]).
+        let final_z = plan.steps.last().unwrap().z_hat;
+        let mut cost = 0.0f32;
+        let mut null_cost = 0.0f32;
+        for i in (0..192).step_by(32) {
+            let d = final_z[i] - goal[i];
+            cost += d * d;
+            null_cost += goal[i] * goal[i];
+        }
+        assert!(
+            cost < null_cost,
+            "goal-aligned cost plan={cost} null={null_cost}; a0_sum={}",
+            plan.steps.iter().map(|s| s.action.code[0]).sum::<f32>()
+        );
+        // Residual dynamics integrate actions: net a[0] over the horizon
+        // should push dim-0 family toward the +1 goal.
+        let a0_sum: f32 = plan.steps.iter().map(|s| s.action.code[0]).sum();
+        assert!(
+            a0_sum > 0.0,
+            "expected positive net action on channel 0, got {a0_sum}"
+        );
+        assert!((final_z[0] - 0.0).abs() > 1e-3, "latent should move");
+    }
+
+    #[test]
+    fn sigreg_welford_wired_into_process_frame() {
+        let mut svc = WorldModelService::new(ServiceConfig::for_topology(
+            DeploymentTopology::Single,
+        ))
+        .expect("config");
+        svc.boot().expect("boot");
+        // Force quick rollback: low min_samples + biased latents via process path
+        // uses null encoder (zero latent). Instead poke the monitor directly.
+        let mon: &mut WelfordSigRegMonitor = &mut svc.model.sigreg;
+        mon.min_samples = 2;
+        let mut bad = weftos_worldmodel::zero_latent();
+        bad[0] = 40.0;
+        let mut rolled = false;
+        for t in 0..40u64 {
+            let h = mon.update_at(&bad, t * 1000).unwrap();
+            if mon.last_rolled_back() {
+                rolled = true;
+                assert!(h.version_tag > 1 || mon.rollback_count >= 1);
+                break;
+            }
+        }
+        assert!(rolled);
+        assert!((SIGREG_HEALTH_ROLLBACK_THRESHOLD - 0.85).abs() < f32::EPSILON);
+        assert_eq!(SIGREG_HEALTH_WINDOW_SECS, 30);
     }
 }

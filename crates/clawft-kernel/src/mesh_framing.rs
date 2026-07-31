@@ -56,6 +56,10 @@ pub enum FrameType {
     LogAggregation = 0x0D,
     /// Assessment sync (K6.6 -- cross-project assessment mesh).
     AssessmentSync = 0x0E,
+    /// LeWM sensor observation frame (WEFT-526): CBOR `mesh.sensor.v1.*`
+    /// signed payload (encoded / consensus / control). Topic lives in the
+    /// IPC envelope or publisher metadata; payload is observational-only.
+    SensorObservation = 0x0F,
 }
 
 /// Wire protocol name for [`FrameType`] (WEFT-115).
@@ -81,6 +85,7 @@ impl FrameType {
         Self::ArtifactResponse,
         Self::LogAggregation,
         Self::AssessmentSync,
+        Self::SensorObservation,
     ];
 
     /// Parse a byte into a known frame type, returning `None` for
@@ -101,6 +106,7 @@ impl FrameType {
             0x0C => Some(Self::ArtifactResponse),
             0x0D => Some(Self::LogAggregation),
             0x0E => Some(Self::AssessmentSync),
+            0x0F => Some(Self::SensorObservation),
             _ => None,
         }
     }
@@ -200,6 +206,7 @@ mod tests {
             (0x0C, FrameType::ArtifactResponse),
             (0x0D, FrameType::LogAggregation),
             (0x0E, FrameType::AssessmentSync),
+            (0x0F, FrameType::SensorObservation),
         ];
         for (byte, variant) in expected {
             assert_eq!(FrameType::from_byte(byte), Some(variant));
@@ -209,7 +216,7 @@ mod tests {
     #[test]
     fn frame_type_from_byte_unknown() {
         assert!(FrameType::from_byte(0x00).is_none());
-        assert!(FrameType::from_byte(0x0F).is_none());
+        assert!(FrameType::from_byte(0x10).is_none());
         assert!(FrameType::from_byte(0xFF).is_none());
     }
 

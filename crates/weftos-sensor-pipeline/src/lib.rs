@@ -323,6 +323,166 @@ pub fn latent_from_slice(v: &[f32]) -> Option<Latent> {
     Some(z)
 }
 
+// ── Mesh topic publish path (WEFT-526) ──────────────────────────────────────
+
+/// Sink for publishing signed sensor frames onto the mesh topic bus.
+///
+/// Kernel hosts implement this over `clawft_kernel::mesh_sensor::SensorTopicBus`;
+/// tests use [`InMemorySensorBus`].
+pub trait SensorTopicSink {
+    /// Publish CBOR of a signed frame on the given topic string.
+    fn publish_sensor_frame(
+        &mut self,
+        topic: &str,
+        cluster: &str,
+        node_id: u64,
+        timestamp_ms: u64,
+        cbor: &[u8],
+    ) -> Result<u64, PipelineError>;
+}
+
+/// One indexed publish record (ExoChain stand-in for offline tests).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SensorBusRecord {
+    /// Assigned sequence.
+    pub seq: u64,
+    /// Full topic (with cluster).
+    pub topic: String,
+    /// Cluster name.
+    pub cluster: String,
+    /// Node id.
+    pub node_id: u64,
+    /// Timestamp ms.
+    pub timestamp_ms: u64,
+    /// CBOR payload bytes.
+    pub cbor: Vec<u8>,
+}
+
+/// In-memory mesh sensor bus: subscriber queues + ExoChain-like index.
+#[derive(Debug, Default)]
+pub struct InMemorySensorBus {
+    /// Indexed publishes in order.
+    pub records: Vec<SensorBusRecord>,
+    /// Local subscriber queues by full topic name.
+    subs: std::collections::HashMap<String, Vec<Vec<u8>>>,
+    next_seq: u64,
+}
+
+impl InMemorySensorBus {
+    /// Empty bus.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Subscribe to a full topic name (buffers publishes).
+    pub fn subscribe(&mut self, topic: &str) {
+        self.subs.entry(topic.to_string()).or_default();
+    }
+
+    /// Drain buffered frames for a topic.
+    pub fn drain(&mut self, topic: &str) -> Vec<Vec<u8>> {
+        self.subs
+            .get_mut(topic)
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
+
+    /// Number of indexed records.
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    /// True when no publishes have been indexed.
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+}
+
+impl SensorTopicSink for InMemorySensorBus {
+    fn publish_sensor_frame(
+        &mut self,
+        topic: &str,
+        cluster: &str,
+        node_id: u64,
+        timestamp_ms: u64,
+        cbor: &[u8],
+    ) -> Result<u64, PipelineError> {
+        let full = if cluster.is_empty() {
+            topic.to_string()
+        } else if topic.ends_with(cluster) {
+            topic.to_string()
+        } else {
+            format!("{topic}.{cluster}")
+        };
+        if let Some(q) = self.subs.get_mut(&full) {
+            q.push(cbor.to_vec());
+        }
+        // Also deliver on bare topic when cluster-suffixed.
+        if full != topic {
+            if let Some(q) = self.subs.get_mut(topic) {
+                q.push(cbor.to_vec());
+            }
+        }
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.saturating_add(1);
+        self.records.push(SensorBusRecord {
+            seq,
+            topic: full,
+            cluster: cluster.to_string(),
+            node_id,
+            timestamp_ms,
+            cbor: cbor.to_vec(),
+        });
+        Ok(seq)
+    }
+}
+
+impl<E: Encoder> SensorPipeline<E> {
+    /// Publish a signed frame onto a [`SensorTopicSink`] (mesh + ExoChain index).
+    pub fn publish_frame<S: SensorTopicSink>(
+        &self,
+        sink: &mut S,
+        frame: &SignedSensorFrame,
+    ) -> PipelineResult<u64> {
+        let cbor = frame.to_cbor()?;
+        sink.publish_sensor_frame(
+            frame.topic.as_str(),
+            &frame.cluster,
+            frame.node_id,
+            frame.timestamp_ms,
+            &cbor,
+        )
+    }
+
+    /// Produce and publish one frame on each of the three mesh.sensor.v1 topics.
+    ///
+    /// Wire-level integration helper for WEFT-526: encoded (from buffer),
+    /// consensus, and control — each signed, published, and indexed.
+    pub fn publish_all_topics<S: SensorTopicSink>(
+        &mut self,
+        sink: &mut S,
+        z_cluster: Latent,
+        z_hat_next: Latent,
+        health: f32,
+        control_kind: ControlKind,
+        control_magnitude: f32,
+        timestamp_ms: u64,
+    ) -> PipelineResult<[u64; 3]> {
+        if self.buffered() == 0 {
+            // Synthesize a minimal sample so encoded has content.
+            self.collect(RawSample::new("synthetic", b"mesh-wire", timestamp_ms))?;
+        }
+        let encoded = self.flush_encoded()?;
+        let cons = self.sign_consensus(z_cluster, z_hat_next, health, timestamp_ms)?;
+        let ctrl = self.sign_control(control_kind, control_magnitude, timestamp_ms, vec![])?;
+
+        let s0 = self.publish_frame(sink, &encoded)?;
+        let s1 = self.publish_frame(sink, &cons)?;
+        let s2 = self.publish_frame(sink, &ctrl)?;
+        Ok([s0, s1, s2])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,5 +596,51 @@ mod tests {
         let signed = p.flush_encoded().unwrap();
         let obs = signed.decode_encoded().unwrap();
         assert_eq!(obs.latent().unwrap(), vec![0.0; LATENT_DIM]);
+    }
+
+    #[test]
+    fn publish_all_three_topics_to_mesh_bus() {
+        use weftos_sensor_pipeline_wire::{TOPIC_CONSENSUS, TOPIC_CONTROL, TOPIC_ENCODED};
+
+        let mut p = pipeline();
+        p.collect(RawSample::new("rgb", b"frame", 50)).unwrap();
+
+        let mut bus = InMemorySensorBus::new();
+        for t in [TOPIC_ENCODED, TOPIC_CONSENSUS, TOPIC_CONTROL] {
+            bus.subscribe(&format!("{t}.test"));
+        }
+
+        let seqs = p
+            .publish_all_topics(
+                &mut bus,
+                zero_latent(),
+                zero_latent(),
+                0.92,
+                ControlKind::PlanResult,
+                0.5,
+                50,
+            )
+            .unwrap();
+        assert_eq!(seqs, [0, 1, 2]);
+        assert_eq!(bus.len(), 3);
+
+        // Subscriber path received one CBOR frame per topic; each verifies.
+        for (topic, _kind) in [
+            (TOPIC_ENCODED, SensorTopic::Encoded),
+            (TOPIC_CONSENSUS, SensorTopic::Consensus),
+            (TOPIC_CONTROL, SensorTopic::Control),
+        ] {
+            let full = format!("{topic}.test");
+            let frames = bus.drain(&full);
+            assert_eq!(frames.len(), 1, "{full}");
+            let signed = SignedSensorFrame::from_cbor(&frames[0]).unwrap();
+            assert_eq!(signed.topic.as_str(), topic);
+        }
+
+        // ExoChain index covers all three.
+        let topics: Vec<_> = bus.records.iter().map(|r| r.topic.clone()).collect();
+        assert!(topics.iter().any(|t| t.contains("encoded")));
+        assert!(topics.iter().any(|t| t.contains("consensus")));
+        assert!(topics.iter().any(|t| t.contains("control")));
     }
 }

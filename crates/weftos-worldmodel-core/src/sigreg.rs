@@ -1,4 +1,4 @@
-//! SIGReg health monitoring contract (Welford stats land in WEFT-528).
+//! SIGReg health monitoring contract (Welford stats in impls — WEFT-528).
 
 use crate::error::WorldModelResult;
 use crate::latent::Latent;
@@ -43,7 +43,7 @@ impl SigRegHealth {
 
 /// Running SIGReg monitor (Epps-Pulley / Welford in impls).
 ///
-/// Production: Welford online stats + auto-rollback (WEFT-528).
+/// Production: Welford online stats + auto-rollback (see `weftos-worldmodel-impls`).
 pub trait SigRegMonitor {
     /// Ingest a latent sample; return updated health.
     fn update(&mut self, z: &Latent) -> WorldModelResult<SigRegHealth>;

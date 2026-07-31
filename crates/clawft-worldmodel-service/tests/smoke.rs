@@ -20,10 +20,18 @@ fn single_node_boots_end_to_end_with_fake_sensor() {
         .run_fake_sensor_pipeline(8, true)
         .expect("fake sensor pipeline");
     assert_eq!(frames.len(), 8);
-    assert_eq!(svc.chain.len(), 8);
 
-    for (i, entry) in svc.chain.entries.iter().enumerate() {
-        assert_eq!(entry.kind, EVENT_KIND_LEWM_FRAME_ATTESTATION);
+    // Chain also carries periodic SIGReg health logs (WEFT-528); filter
+    // to frame attestations for the WEFT-533 contract.
+    let attests: Vec<_> = svc
+        .chain
+        .entries
+        .iter()
+        .filter(|e| e.kind == EVENT_KIND_LEWM_FRAME_ATTESTATION)
+        .collect();
+    assert_eq!(attests.len(), 8);
+
+    for (i, entry) in attests.iter().enumerate() {
         let payload = AttestationPayload::from_json_bytes(&entry.payload).expect("json");
         assert_eq!(payload.manifold_major, 1);
         assert_eq!(payload.latent_dim, LATENT_DIM_U16);

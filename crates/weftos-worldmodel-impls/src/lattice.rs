@@ -8,11 +8,11 @@ use weftos_worldmodel_core::{
 };
 
 use crate::encoder::NullEncoder;
-use crate::planner::NullPlanner;
-use crate::predictor::IdentityPredictor;
+use crate::planner::CemPlanner;
+use crate::predictor::LinearPredPhi;
 
-/// Weight-free lattice that composes null encoder / identity predictor /
-/// null CEM planner.
+/// Weight-free lattice that composes null encoder / linear `pred_φ` /
+/// CEM planner (WEFT-529 defaults).
 ///
 /// Holds last observed latent and subscription lists so service wiring can
 /// be tested without candle or a mesh backend.
@@ -20,10 +20,10 @@ use crate::predictor::IdentityPredictor;
 pub struct StubLattice {
     /// Encoder used by [`LatticeApi::observe`].
     pub encoder: NullEncoder,
-    /// Predictor used by [`LatticeApi::predict`].
-    pub predictor: IdentityPredictor,
-    /// Planner used by [`LatticeApi::plan`].
-    pub planner: NullPlanner,
+    /// Predictor used by [`LatticeApi::predict`] (`pred_φ`).
+    pub predictor: LinearPredPhi,
+    /// Planner used by [`LatticeApi::plan`] (CEM default).
+    pub planner: CemPlanner,
     /// Last observed latent.
     pub last: Latent,
     /// Surprise subscription handles.
@@ -36,8 +36,8 @@ impl Default for StubLattice {
     fn default() -> Self {
         Self {
             encoder: NullEncoder,
-            predictor: IdentityPredictor,
-            planner: NullPlanner::default(),
+            predictor: LinearPredPhi::default(),
+            planner: CemPlanner::default(),
             last: weftos_worldmodel_core::zero_latent(),
             surprise_subs: Vec::new(),
             drift_subs: Vec::new(),
